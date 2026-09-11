@@ -42,6 +42,7 @@ import * as mockVersions from './mock/mockVersions.js'
 import ProjectSwitcher from './components/ProjectSwitcher.jsx'
 import WorkspaceSummary from './components/WorkspaceSummary.jsx'
 import CampaignPanel from './campaigns/CampaignPanel.jsx'
+import ProjectWorkspaceControls, { useProjectWorkspaceLayout } from './components/ProjectWorkspaceControls.jsx'
 import OpsDrawer from './components/OpsDrawer.jsx'
 import CustomizePanel from './components/CustomizePanel.jsx'
 import CheckoutControls from './components/CheckoutControls.jsx'
@@ -61,6 +62,7 @@ import EngineRibbonClusters from './cadedit/EngineRibbonClusters.jsx'
 // proof finding this record fixes).
 import EngineDockProperties from './cadedit/EngineDockProperties.jsx'
 import CommandLineArmer from './cadedit/CommandLineArmer.jsx'
+import StatusModesBridge from './cadedit/StatusModesBridge.jsx'
 import EngineDocumentView from './cadedit/EngineDocumentView.jsx'
 import EngineHeadOpener from './cadedit/EngineHeadOpener.jsx'
 import CanvasPointPicker from './cadedit/CanvasPointPicker.jsx'
@@ -293,7 +295,12 @@ export default function App() {
   const [signedIn, setSignedIn] = useState(() => isSignedIn())
   const is401 = (e) => e?.status === 401 || / -> 401$/.test(String(e?.message || ''))
   const [toolsOpen, setToolsOpen] = useState(false)      // left catalog collapsed by default
-  const [authorOpen, setAuthorOpen] = useState(false)    // author flow (opens on build lane)
+  const [authorOpen, setAuthorOpenState] = useState(false)    // author flow (opens on build lane)
+  const revealProjectToolsRef = useRef(null)
+  const setAuthorOpen = useCallback((next) => {
+    if (next === true) revealProjectToolsRef.current?.()
+    setAuthorOpenState(next)
+  }, [])
   const [authorSeed, setAuthorSeed] = useState('')       // build-lane prefill text
   const [authorSignal, setAuthorSignal] = useState(0)    // bump to re-seed the author flow
   const [authorTargetTool, setAuthorTargetTool] = useState(null)
@@ -1064,8 +1071,8 @@ export default function App() {
   const authorAuthorityProvider = useCallback(async (description, { allowSecretOnce = false, forceFresh = false, projectId } = {}) => {
     // No entitlement pre-check here: entitlements load async, and a stage
     // click can beat them (proven by the e2e). A mint against a tenant that
-    // truly cannot converse just fails and falls through to null, which the
-    // server answers with its own fail-closed refusal.
+    // truly cannot converse returns no authority and the controller stops
+    // before submitting an authoring request.
     const requestedProjectId = projectId === undefined ? authorProjectRef.current : projectId || null
     if (requestedProjectId !== authorProjectRef.current) return null
     const cached = authorAuthorityRef.current
@@ -1079,7 +1086,7 @@ export default function App() {
       // AuthorPanel "Send anyway" re-stage with credential-shaped text would
       // otherwise have its authority mint refused here and silently fall
       // back to null-authority — a refusal the click never saw or overrode.
-      const response = await startAgentTurn(description, { source: 'author_panel', purpose: 'stage_authority' }, { allowSecretOnce })
+      const response = await startAgentTurn(description, { source: 'author_panel', purpose: 'stage_authority' }, { allowSecretOnce, requireImmediateTurn: true })
       if (requestedProjectId !== authorProjectRef.current) return null
       // The response's own session id, never the state-fed ref alone: the
       // first mint resolves before React has re-rendered the fresh sessionId.
@@ -2320,6 +2327,8 @@ export default function App() {
   const [activeSurface, setActiveSurface] = useState(() => {
     try { return productSurfaceFromSearch(window.location.search) } catch { return 'cad' }
   })
+  const projectLayout = useProjectWorkspaceLayout({ mock, projectId: openProjectId, surface: activeSurface })
+  revealProjectToolsRef.current = projectLayout.revealTools
   const onSelectSurface = useCallback((id) => {
     setActiveSurface(id)
     try {
@@ -2968,7 +2977,7 @@ export default function App() {
         onUnlink: mcpRegistry.unlink,
       }}
     >
-    <div className="app" data-surface={studioGround ? activeSurface : undefined} data-tour="shell">
+    <div className="app" ref={projectLayout.appRef} data-project-workspace={projectLayout.active ? 'results' : undefined} data-project-tools={projectLayout.toolsOpen ? 'open' : 'closed'} data-project-activity={projectLayout.activityOpen ? 'open' : 'closed'} data-surface={studioGround ? activeSurface : undefined} data-tour="shell">
       <header className="top">
         <div className="mark"><span className="diamond" aria-hidden="true" /> Leaf — build CAD tools with AI</div>
         {/* W4e: on the studio's drafting surfaces the header IS the
@@ -2999,6 +3008,7 @@ export default function App() {
           </span>
           {mock && <span className="tag amber">Demo</span>}
         </div>
+        <ProjectWorkspaceControls {...projectLayout} />
         <div className="spacer" />
         <div className="who">
           {/* Header metadata (org · tenant · tier · spend · API base) is demoted
@@ -3155,6 +3165,7 @@ export default function App() {
 
         </>}
 
+        <SurfaceFrame.Tabs />
         {!mock && openProjectId && (
           <CampaignPanel projectId={openProjectId} projectName={currentProjectName} signedIn={signedIn} authorityProvider={authorAuthorityProvider} />
         )}
@@ -3169,7 +3180,6 @@ export default function App() {
           />
         )}
 
-        <SurfaceFrame.Tabs />
         {/* W4a surface grounds (site/SurfaceGrounds.jsx): under the studio
             shell the ground IS each tab's workspace — the project board for
             Browser, the device stage for iOS; CAD and Solar CAD keep the
@@ -3258,6 +3268,7 @@ export default function App() {
               {/* W4f slice B: the command line's typed words (LINE, C, MOVE ...)
                   reach the engine through this consumer; renders nothing. */}
               {ENV_CAD_EDIT && <CommandLineArmer />}
+              {ENV_CAD_EDIT && <StatusModesBridge />}
               {/* W4f slice A0: while a DXF is open in the engine, the canvas
                   shows the ENGINE document through the viewer's own
                   applyVersion seam (the console drawing returns on close);
@@ -3926,7 +3937,7 @@ export default function App() {
         {studioGround && groundShowsDrawing(activeSurface) && (
           <CockpitStatus ground={studioGround} viewerRef={viewerRef} shown={shown} selectedHandle={selectedHandle} />
         )}
-        {/* W4e: the reference's drafting toggles (honestly off) and fullscreen. */}
+        {/* W4e: ORTHO and OSNAP real through StatusModesBridge; the rest honestly off, plus fullscreen. */}
         <SurfaceFrame.Cockpit />
         </FootRegion>
       </footer>

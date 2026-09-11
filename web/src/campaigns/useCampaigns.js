@@ -12,6 +12,27 @@ const pollRelease = completion => ['active', 'queued'].includes(completion?.rele
   || (completion?.release?.status === 'waiting'
     && ['authoring', 'job', 'capacity', 'publication', 'approval'].includes(completion.next_action?.wait_kind))
 
+export function releaseSource(completion) {
+  const release = completion?.release
+  const recipe = release?.contract?.cad_recipe
+  const source = recipe?.source_artifact
+  const checks = release?.contract?.required_checks
+  if (recipe?.recipe_id !== 'dxf-layer-summary' || recipe.recipe_version !== 1
+      || typeof source?.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(source.sha256)
+      || !Number.isSafeInteger(source.size_bytes) || source.size_bytes <= 0 || source.size_bytes > 1048576
+      || !Number.isSafeInteger(release.contract_version) || release.contract_version < 1
+      || release.status !== 'finished' || ['failed', 'unavailable'].includes(completion.current_verification?.status)
+      || !Array.isArray(checks) || !checks.length || !Array.isArray(completion.coverage)
+      || checks.some(check => !check.check_id || !completion.coverage.some(row => row.check_id === check.check_id
+        && row.status === 'passed' && (row.contract_version == null || row.contract_version === release.contract_version)))
+      || !['implementation', 'publication', 'deployment', 'user_verification', 'delivery'].every(stage => {
+        const rows = (completion.stages || []).filter(row => row.stage === stage
+          && (row.contract_version ?? row.evidence?.contract_version) === release.contract_version)
+        return rows[rows.length - 1]?.status === 'passed'
+      })) return null
+  return { name: 'source.dxf', sha256: source.sha256, byte_count: source.size_bytes, valid: true, retrieved: true }
+}
+
 export default function useCampaigns(projectId, { enabled = true, authorityProvider } = {}) {
   const scope = `${projectId || ''}:${enabled}`
   const [snapshot, setSnapshot] = useState(() => ({ scope, ...empty() }))
@@ -268,23 +289,27 @@ export default function useCampaigns(projectId, { enabled = true, authorityProvi
     const releaseId = context.completion?.release?.release_id
     return id && releaseId ? mutate('release', () => api.retryReleaseStage(projectId, id, releaseId, stage)) : Promise.resolve(null)
   }, [context, mutate, projectId])
-  const downloadReleaseArtifact = useCallback(async artifact => {
+  const retrieveReleaseArtifact = useCallback(async (artifact, source = false) => {
     const id = context.selectedId
     const releaseId = context.completion?.release?.release_id
+    const version = context.completion?.release?.contract_version
     if (!id || !releaseId || !enabled || !current() || context.locks.download) return null
     const view = context.view
     const generation = generationRef.current
     const locks = context.locks
     const live = () => current(view) && generationRef.current === generation && context.selectedId === id
       && context.completion?.release?.release_id === releaseId
+      && (!source || context.completion?.release?.contract_version === version)
     locks.download = true
     update({ pending: { ...locks } })
     try {
+      if (source && !releaseSource(context.completion)) throw new Error('Current source verification is unavailable. Reload the release.')
       // Recheck current delivery state before accessing previously accepted bytes.
       const latest = await api.getRelease(projectId, id, releaseId)
       if (!live()) return null
       const completion = latest?.completion
       if (!completion || completion.release?.release_id !== releaseId) throw new Error('Current release verification is unavailable. Reload the release.')
+      if (source && completion.release.contract_version !== version) throw new Error('This source contract changed. Reload the release before downloading.')
       context.completion = completion
       update({ completion })
       const checks = completion.release.contract?.required_checks || []
@@ -294,8 +319,11 @@ export default function useCampaigns(projectId, { enabled = true, authorityProvi
           || checks.some(check => !coverage.some(row => row.check_id === check.check_id && row.status === 'passed'))) {
         throw new Error('Current release verification does not permit this download. Reload the release.')
       }
-      const currentArtifact = completion.deliverables?.find(row => row.name === artifact.name
+      const currentArtifact = source ? releaseSource(completion) : completion.deliverables?.find(row => row.name === artifact.name
         && row.sha256 === artifact.sha256 && row.byte_count === artifact.byte_count)
+      if (source && (!currentArtifact || currentArtifact.sha256 !== artifact?.sha256 || currentArtifact.byte_count !== artifact?.byte_count)) {
+        throw new Error('Current source verification changed. Reload the release before downloading.')
+      }
       if (!currentArtifact) throw new Error('This output changed. Reload the release before downloading.')
       const result = await api.downloadReleaseArtifact(projectId, id, releaseId, currentArtifact)
       return live() ? result : null
@@ -307,6 +335,8 @@ export default function useCampaigns(projectId, { enabled = true, authorityProvi
       if (current(view)) update({ pending: { ...locks } })
     }
   }, [context, current, enabled, projectId, update])
+  const downloadReleaseArtifact = useCallback(artifact => retrieveReleaseArtifact(artifact), [retrieveReleaseArtifact])
+  const downloadReleaseSource = useCallback(() => retrieveReleaseArtifact(releaseSource(context.completion), true), [context, retrieveReleaseArtifact])
   const ask = useCallback(({ prompt }) => {
     const id = context.selectedId
     if (!id) return Promise.resolve(null)
@@ -400,5 +430,5 @@ export default function useCampaigns(projectId, { enabled = true, authorityProvi
   }, [context, current, enabled, load, mutate, projectId, readSubmission])
   return { ...(snapshot.scope === scope ? snapshot : empty()), select, submit, ask, answer, refetch,
     enroll, enableEnrollment, revokeEnrollment, bindPublication, invokeCapability,
-    createRelease, reviseRelease, transitionRelease, retryReleaseStage, downloadReleaseArtifact }
+    createRelease, reviseRelease, transitionRelease, retryReleaseStage, downloadReleaseArtifact, downloadReleaseSource }
 }

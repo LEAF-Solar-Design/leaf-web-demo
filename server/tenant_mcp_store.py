@@ -22,9 +22,11 @@ linked_at} and the token/secrets never leave this module's callers.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import secrets
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -32,6 +34,9 @@ from typing import Any, Dict, List, Optional
 from tenant_id_validator import validate_tenant_id
 
 SERVER_DIR = Path(__file__).resolve().parent
+_logger = logging.getLogger(__name__)
+_warned_stat_permission_paths: set[Path] = set()
+_warned_stat_paths_lock = threading.Lock()
 
 # Bounds (release blockers, not follow-ups — every number below is load-bearing).
 MAX_SERVERS_PER_TENANT = 25          # one tenant's registry page; matches the list cap
@@ -65,10 +70,12 @@ class TenantMcpStoreError(Exception):
 
 
 def _dir() -> Path:
+    """Resolve without writing into the container's read-only server tree; writes create the directory through _write_atomic."""
     override = os.environ.get("LEAF_TENANT_MCP_DIR")
-    path = Path(override) if override else (SERVER_DIR / "data" / "tenant_mcp")
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    if override:
+        return Path(override)
+    state_dir = os.environ.get("LEAF_AGENT_STATE_DIR")
+    return (Path(state_dir) if state_dir else SERVER_DIR / "data") / "tenant_mcp"
 
 
 def _tenant_file(tenant_id: str) -> Path:
@@ -87,12 +94,25 @@ def _tenant_file(tenant_id: str) -> Path:
 
 
 def _read_bounded(path: Path, cap: int) -> Optional[List[Dict[str, Any]]]:
-    """Read + parse a JSON array, capped at `cap` bytes. None iff the file is
-    absent (the safe, ordinary case). Raises TenantMcpStoreError for anything
-    present but untrustworthy (oversized, unreadable, not a JSON array)."""
+    """Read + parse a JSON array, capped at `cap` bytes. A store whose file
+    cannot even be stat'ed is absent (return None). Only a PRESENT file
+    that is oversized, unreadable at read time, or not a JSON array raises
+    TenantMcpStoreError."""
     try:
         size = path.stat().st_size
-    except FileNotFoundError:
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as exc:
+        warn = False
+        with _warned_stat_paths_lock:
+            if path not in _warned_stat_permission_paths and len(_warned_stat_permission_paths) < 64:
+                _warned_stat_permission_paths.add(path)
+                warn = True
+        if warn:
+            _logger.warning(
+                "MCP store path %s cannot be accessed (%s); treating as absent",
+                path, type(exc).__name__,
+            )
         return None
     if size > cap:
         raise TenantMcpStoreError(f"{path.name} exceeds the {cap}-byte bound ({size} bytes)")

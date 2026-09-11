@@ -69,12 +69,13 @@ USAGE
     python scripts/run-all-gates.py --only server-backbone --only harness-vitest
                                                  # repeatable: runs the UNION of both
     python scripts/run-all-gates.py --log-dir DIR # where per-suite logs land
+    python scripts/run-all-gates.py --jobs 6     # bounded pool; conflicts stay serial
 
 EXIT CODE
 ---------
     0  iff every gate passed and every test-level skip was explicitly allowlisted
     2  nothing ran, so this is never a gate verdict: an --only substring matched
-       no suite, or a suite id was registered more than once
+       no suite, a suite id was registered more than once, or --jobs is outside 1..16
     1  otherwise
 
 Full per-suite output goes to <log-dir>/<suite>.log; only the scoreboard is
@@ -94,7 +95,9 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
@@ -541,8 +544,14 @@ def build_suites() -> List[Suite]:
         # Windows operator boxes. Linux CI executes it. Keep the Windows run
         # honest with the exact measured floor for every portable test and an
         # allowlist for only that named deployment-contract skip.
+        # Floor 47, re-measured 2026-09-10 at origin/main 5bd6894f: Windows
+        # executes 47 with that one skip, Linux CI (native build 41042fda)
+        # executes 48. 47 is the minimum across both, so neither runner can red
+        # on it; at 36, eleven portable tests could have vanished green. The skip
+        # is a single unparametrized function, and the file's three `parametrize`
+        # decorators are each over a literal list.
         Suite("server-guest-fail-closed", "server tests/test_guest_fail_closed.py", "pytest",
-              SERVER, _py_pytest("tests/test_guest_fail_closed.py"), 36,
+              SERVER, _py_pytest("tests/test_guest_fail_closed.py"), 47,
               allowed_skip_reasons=(r"fcntl is a Linux deployment contract",)),
         Suite("server-guest-purge", "server tests/test_guest_purge.py", "pytest", SERVER,
               _py_pytest("tests/test_guest_purge.py"), 14),
@@ -703,15 +712,30 @@ def build_suites() -> List[Suite]:
         # ignored) — fixed and registered per the #29 fix-then-register rule.
         # The no-da-imports static invariant + §8 ledger-line schema freeze
         # gates ride the same lane.
-        # Floor 59, re-measured 2026-08-06, the third of the stale ones #490
-        # started on. It sat at 46 while the suite executed 59, so 13 could have
-        # vanished behind an "(executed-count drift: ...)" note and still reported
-        # green. 59 is safe on every runner for the same reason 41 is above: 39
-        # test functions plus three `parametrize` decorators over literal lists,
-        # and no skipif, pytest.skip, importorskip, or platform branching anywhere
-        # in the file, so no environment collects or executes fewer.
+        # Floor 86, re-measured 2026-09-10 at origin/main 5bd6894f. It sat at 59
+        # while the suite executed 86 on BOTH a Windows host and Linux CI (native
+        # leaf-ci-leaf-web-demo build 41042fda), so 27 could have vanished behind
+        # an "(executed-count drift: ...)" note and still reported green. 86 is
+        # safe on every runner: 48 test functions plus seven `parametrize`
+        # decorators, each over a literal list, and no skipif, pytest.skip,
+        # importorskip, xfail, or platform branching anywhere in the file. The
+        # one host-sensitive test, the live-dwg symlink guard, falls back to
+        # patching `Path.is_symlink` when the host refuses to create a link, so
+        # it EXECUTES there rather than skipping.
         Suite("server-broker-boundary", "server tests/test_broker_boundary.py", "pytest",
-              SERVER, _py_pytest("tests/test_broker_boundary.py"), 59),
+              SERVER, _py_pytest("tests/test_broker_boundary.py"), 86),
+        # The /broker/run-plan route, boundary's companion: it owns the live-write
+        # entry point's schema, identity, fail-closed and readiness-cache contracts.
+        # Registered per the #29 fix-then-register rule after it sat UNREGISTERED
+        # and drifted red on main (8 of 18 failing, unseen by CI, 2026-09-10): the
+        # stale bodies predated `_execute_plan` loading the APS client BEFORE the
+        # Activity read, and `readiness()` growing a `contract` kwarg.
+        # Floor 22, measured 2026-09-10 and safe on every runner: 10 test
+        # functions, five carrying a `parametrize` over a literal list (7+2+4+2+2),
+        # so 5 + 17 = 22, with no skipif, pytest.skip, importorskip, xfail, or
+        # platform/env branching anywhere in the file to collect or execute fewer.
+        Suite("server-broker-run-plan", "server tests/test_broker_run_plan.py", "pytest",
+              SERVER, _py_pytest("tests/test_broker_run_plan.py"), 22),
         Suite("server-live-mutation-plan",
               "server tests/test_live_mutation_plan.py", "pytest", SERVER,
               _py_pytest("tests/test_live_mutation_plan.py"), 34),
@@ -719,8 +743,8 @@ def build_suites() -> List[Suite]:
         # One process per file, same isolation convention as the waves above.
         # test_w4g7b_02s/03s/04s each carry one accoreconsole canary
         # (`@pytest.mark.skipif(not ACCORECONSOLE.exists(), ...)`), a visible
-        # skip on a runner with no local AutoCAD 2026 console; floors are the
-        # counts that execute WITHOUT it.
+        # skip when no console is found; the resolver picks the newest installed
+        # year. Floors are the counts that execute WITHOUT it.
         Suite("server-w4g7b-00s", "server tests/test_w4g7b_00s.py", "pytest", SERVER,
               _py_pytest("tests/test_w4g7b_00s.py"), 32),
         Suite("server-w4g7c-01s", "server tests/test_w4g7c_01s.py", "pytest", SERVER,
@@ -733,23 +757,22 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_w4g7b_01s.py"), 49),
         Suite("server-w4g7b-02s", "server tests/test_w4g7b_02s.py", "pytest", SERVER,
               _py_pytest("tests/test_w4g7b_02s.py"), 64,
-              allowed_skip_reasons=(r"local AutoCAD 2026 console is required",)),
+              allowed_skip_reasons=(r"no AutoCAD console found; .+",)),
         Suite("server-w4g7b-03s", "server tests/test_w4g7b_03s.py", "pytest", SERVER,
               _py_pytest("tests/test_w4g7b_03s.py"), 40,
-              allowed_skip_reasons=(r"local AutoCAD 2026 console is required",)),
+              allowed_skip_reasons=(r"no AutoCAD console found; .+",)),
         Suite("server-w4g7b-04s", "server tests/test_w4g7b_04s.py", "pytest", SERVER,
               _py_pytest("tests/test_w4g7b_04s.py"), 57,
-              allowed_skip_reasons=(r"local AutoCAD 2026 console is required",)),
+              allowed_skip_reasons=(r"no AutoCAD console found; .+",)),
         # W4g-7b-06i: the fixed-engine canary over the whole enabled v3 case
         # set (INSERT, styled LINE, both dimension types, a property setter
         # riding a created entity's A: ordinal). Floor 2 is the count WITHOUT
         # the canary (the mock round trip and the skip-visibility row); the
-        # canary's own skip reason names the exact binary path it looked for
-        # (the "skipped local engine suite is no proof" guard), so its
-        # allowlist pattern differs from the fixed-string siblings above.
+        # canary's skip reason names the console search it performed, using
+        # the same resolver reason as the siblings above.
         Suite("server-w4g7b-06i", "server tests/test_w4g7b_06i.py", "pytest", SERVER,
               _py_pytest("tests/test_w4g7b_06i.py"), 2,
-              allowed_skip_reasons=(r"local AutoCAD 2026 console is required \(.+\)",)),
+              allowed_skip_reasons=(r"no AutoCAD console found; .+",)),
         # W4g-3a: the contract v2 (the browser engine's saves through the same
         # closed plan), 42 rows over literal parametrize lists, no skip gates.
         Suite("server-mutation-contract-v2",
@@ -1064,8 +1087,15 @@ def build_suites() -> List[Suite]:
         Suite("da-mutation-apply-accoreconsole",
               "da test_mutation_apply_accoreconsole.py", "pytest", DA,
               _py_pytest("test_mutation_apply_accoreconsole.py"), 1,
+              # The canary no longer pins one AutoCAD year: it resolves whichever
+              # console is installed and names what it tried when none is. CI has
+              # none, so the skip is expected there and its reason now carries the
+              # search it performed.
               allowed_skip_reasons=(
-                  r"local AutoCAD 2026 console and tracked demo DWG are required",
+                  # These are matched with re.fullmatch, so the pattern must
+                  # cover the WHOLE reason, which now names the search it ran.
+                  r"no AutoCAD console found; .+",
+                  r"(?:LEAF_ACCORECONSOLE resolved|resolved) .+; tracked demo DWG required: .+",
               )),
         # --- executor/ (cwd=REPO ROOT; the instant-execution tree) --- #
         # These ~110 unit tests ran in NO CI workflow: this runner had no
@@ -1352,6 +1382,8 @@ def build_suites() -> List[Suite]:
         # pin, and mq.sh's accept path executed against a stub python3.
         Suite("mq-review-codebuild", "scripts test_mq_review_codebuild.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_mq_review_codebuild.py"), 40),
+        Suite("scripts-native-release-producer", "scripts test_native_release_producer.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("test_native_release_producer.py"), 32),
         # Registered per the #29 fix-then-register rule (shipped without a
         # gate entry; measured 1 passed on this tree 2026-07-23).
         # 1 -> 2 on 2026-08-07: the staging relay's convergence contract
@@ -1447,20 +1479,19 @@ def build_suites() -> List[Suite]:
               # PR path's step body; the receipt's group object replacing pr;
               # the mg-<sha12> receipt artifact name; and the descale job's
               # explicit pull_request_target-only if: with the reaper comment.
-              # STAGE_SERVICES is back to `web app`: the native release rail
-              # supplied app's missing 0058 migration. The historical pin
-              # (test_web_and_app_are_staged_again_because_the_merge_group_
-              # makes_the_stage_fresh) requires both services and the way back,
-              # 1-for-1, no count change from that row.
+              # The former both-service freshness pin now requires web only,
+              # measured non-adoption, the plan-live-leg blocker and the way back.
               # 39 -> 43 (slice B v2): replace event-trust pins with live-queue
               # validation (queued and superseded rows), and pin the secret-free
               # dispatcher, main-ref guard, and recorded-base step guards.
               # Queue-mode cutover: 50 base rows plus the notice-only PR pin.
               # Native CodeBuild prewarm: five response cases each execute web
-              # and app presence expectations, ten rows (69 -> 74).
-              # App restoration keeps 75: invert five app-absence cases to
-              # presence; rewrite the env/comment/receipt pins one-for-one.
-              _py_pytest("test_prewarm_staging_cutover_workflow.py"), 75),
+              # presence and app absence expectations, ten rows (69 -> 74).
+              # 2026-09-09 app pause: 72 executed rows without unzip; three readiness rows still run in CI.
+              # 72 to 74: group wait budget invariant and its smaller budget falsifying twin.
+              # Still 74: the timeout failure path extends the existing falsifying twin.
+              _py_pytest("test_prewarm_staging_cutover_workflow.py"), 75,
+              allowed_skip_reasons=(r"no unzip in this bash \(CI always has one\)",)),
         # Merge-queue group controller (slice C: mq-review, mq-supply,
         # mq-prewarm). 84 cases cover the executed matrix and structural pins.
         # The executed matrix includes mq-review's GraphQL
@@ -1482,9 +1513,27 @@ def build_suites() -> List[Suite]:
         Suite("merge-queue-workflow",
               "scripts test_merge_queue_workflow.py", "pytest",
               # Native receipts: seven field refusals, five statuses, six log streams.
-              # App restoration keeps 96: extend the existing configuration
-              # transition row with the next group's two-service receipt.
-              SCRIPTS_DIR, _py_pytest("test_merge_queue_workflow.py"), 96),
+              # 2026-09-09 app pause keeps 96 executed rows: next-group receipt becomes web only.
+              # 96 -> 106 on 2026-09-10 (mq-admission-gate v1): mq-review decides
+              # pull_request admission itself instead of an unconditional
+              # success. +4 kimi state cases, +1 newest-by-created_at proof,
+              # +2 unreadable-gate refusals, +1 status/event-guard structural
+              # pin, +1 no-open-PR no-op, +1 merge_group-path-unchanged pin.
+              # Still 106 on 2026-09-10 (mq-admission-gate v2, critic RED on
+              # v1's status trigger: a status-triggered run's GITHUB_SHA is
+              # always the default branch tip, never the PR head): the status
+              # trigger and its re-decision step are deleted, taking the
+              # status/event-guard structural pin and the no-open-PR no-op
+              # with them (-2), replaced by a no-status-trigger structural pin
+              # covering mq-supply and mq-prewarm's restored conditions (+1)
+              # and a same-second admission tie-break row (+1). Net unchanged.
+              # 106 -> 107 on 2026-09-10 (mq-admission-gate r3, critic RED on
+              # 58688301: the merge_group arm's tie-break didn't reverse
+              # before sort_by while the pull_request arm did, so the two
+              # picked opposite entries on a same-second tie): the
+              # merge_group arm now reverses too, and a row pins both arms'
+              # selection expressions byte-identical (+1).
+              SCRIPTS_DIR, _py_pytest("test_merge_queue_workflow.py"), 107),
         Suite("platform-release-manifest",
               "scripts test_platform_release_manifest.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_platform_release_manifest.py"), 88),
@@ -1660,7 +1709,8 @@ def build_suites() -> List[Suite]:
               # 94s, 140s and 356s, entirely tracking how many other lanes
               # were building at the time. The count is the contract; the
               # clock is not.
-              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 85),
+              # 2026-09-09 app pause verification reported 87 executed self-test rows, formerly 85.
+              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 87),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the
@@ -1681,7 +1731,7 @@ def build_suites() -> List[Suite]:
                   ("test/projectRepositorySourceExport.test.ts", 4),
                   ("test/tenantRepoLease.test.ts", 4),
                   ("test/harnessSchema.pg.test.ts", 1),
-                  ("test/pgSessionStore.contract.test.ts", 5),
+                  ("test/pgSessionStore.contract.test.ts", 6),
                   # B-C6 conversation e2e: Postgres-gated (needs a live
                   # DATABASE_URL / PG_SESSION_STORE_TEST_URL), one test.
                   ("test/conversation.test.ts", 1),
@@ -1804,8 +1854,9 @@ def build_suites() -> List[Suite]:
                   # same machine-local pkg-node build. Four describes (the W4g-6 batch,
                   # W4g-7b-01c blocks, W4g-7c-2c Create Block and MLEADER
                   # rows: eight tests) require the rebuilt engine;
-                  # numbers on PRs #1036, #1107 and #1140.
-                  ("src/cad/engineBatchAtomic.test.js", 9),
+                  # numbers on PRs #1036, #1107 and #1140; W4g-7c-2d adds the
+                  # handle-retention row (nine tests).
+                  ("src/cad/engineBatchAtomic.test.js", 10),
               )),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
@@ -2713,8 +2764,8 @@ def describe_selection(patterns: List[str]) -> str:
 # CI splits the catalog across N isolated runner checkouts (test-gate.yml
 # matrix). Isolation is the point: suites share on-disk state inside one
 # checkout (jobs.db, the versioned drawing store, authored_tools.json, broker
-# ledgers — see the module docstring), so the suites of one shard still run
-# STRICTLY SERIALLY, exactly as a full run does. Nothing about a suite's
+# ledgers — see the module docstring), so suites run serially by default.
+# With --jobs > 1, the shared-state group below still runs serially. Nothing about a suite's
 # environment, retry, floor, or log changes under sharding; only WHICH suites
 # a given invocation runs.
 #
@@ -2840,6 +2891,150 @@ def partition_suites(suites: List[Suite], shard_count: int) -> List[List[Suite]]
         bins[target].append(suite)
         loads[target] += suite_weight(suite)
     return [sorted(b, key=lambda s: index_of[s.id]) for b in bins]
+
+
+# Source inventory for suites whose conflicts are not expressed by Suite flags
+# or an npm/npx executable. Keep ALL conflicts in ONE group, in catalog order.
+# The server integration fixtures bind :0, not a fixed host port, but the older
+# catalog/author paths still read or write the shared authored store and bodies.
+# test_checkout_crossproc.py uses tmp_path stores and no listener: it belongs
+# in the weighted pool, not here. test_sessions_e2e.py also binds :0, but its
+# fixture runs npm build in the shared harness directory before starting Node.
+_SERIAL_SUITE_REASONS = {
+    **dict.fromkeys((
+        "server-backbone", "server-dynamic-loader", "server-write-loop",
+        "server-ui-wave", "server-wave2", "server-wave3", "server-wave4",
+        "server-wave5", "server-e2e-golden", "server-catalog-version-pin",
+        "server-hardening-3b", "server-sessions-routes",
+        "server-authored-tenant-isolation",
+    ), "shared authored catalog or tool bodies"),
+    # These have live DB cases even though the whole suite is not db_gated.
+    # Their fixtures migrate or inspect the same PostgreSQL schema as platform.
+    **dict.fromkeys((
+        "platform", "platform-static", "server-drawing-authority-postgres",
+        "server-agent-gate-postgres", "server-agent-ops-postgres",
+        "server-broker-pg-store", "server-guest-caps-postgres",
+        "server-jobs-callbacks-postgres", "server-session-store-postgres",
+        "server-reconcile-sessions-authority", "server-version-restore",
+        "server-operator-authority", "server-operator-credential-rotate",
+        "server-operator-external-write", "server-operator-overlay-runbook",
+        "server-operator-principals", "server-operator-runbooks",
+        "server-operator-stage-release",
+    ), "shared PostgreSQL schema"),
+    "server-sessions-e2e": "rebuilds shared harness/dist with npm",
+    "web-demo-gate": "nested runner rebuilds web/dist and may unpack node_modules",
+    "harness-container-smoke": "fixed compose project and container ports 8130/8150",
+}
+
+
+def serial_suite_reason(suite: Suite) -> str:
+    """A nonempty reason assigns a suite to the one shared-state worker."""
+    if suite.reset_authored:
+        return "resets shared authored_tools.json"
+    if suite.db_gated:
+        return "shared PostgreSQL through DATABASE_URL"
+    executable = str(suite.argv[0]).replace("\\", "/").rsplit("/", 1)[-1].lower()
+    if executable in ("npm", "npm.cmd", "npm.exe", "npx", "npx.cmd", "npx.exe"):
+        return "npm/npx shares node_modules and build outputs in its cwd"
+    return _SERIAL_SUITE_REASONS.get(suite.id, "")
+
+
+def parallel_suite_phases(suites: List[Suite], jobs: int) -> tuple[List[Suite], List[List[Suite]]]:
+    """Run shared state behind a barrier, then give independent suites all jobs.
+
+    Main build leaf-ci-leaf-web-demo:df5b47e4 (5bf9ca61) measured 259 suites
+    at 15.76 min: 69 serial suites / 6.88 min and 190 independent / 8.88 min,
+    with a longest suite of 72.2s. Concurrent scheduling floors at
+    max(6.88, 8.88 / (N - 1)) = 6.88 min for N >= 4; the barrier costs
+    6.88 + 8.88 / N = 8.36 min at N = 6, about 21% slower. Prefer that
+    sound barrier to assuming classification proves all 190 suites cannot
+    conflict with serial state. Re-measure before restoring concurrency.
+    """
+    serial = []
+    independent = []
+    for suite in suites:
+        (serial if serial_suite_reason(suite) else independent).append(suite)
+    return serial, partition_suites(independent, jobs)
+
+
+def _run_parallel_suite(suite: Suite, log_dir: Path, retry: int) -> tuple[Result, int]:
+    # Mirror the serial retry contract without changing the default code path.
+    def attempt(number: int) -> Result:
+        try:
+            return run_suite_guarded(suite, log_dir, attempt=number)
+        except Exception as exc:
+            return Result(suite, "FAIL", "err", 0.0,
+                          note=f"runner error: {type(exc).__name__}: {str(exc)[:160]}")
+
+    res = attempt(1)
+    attempts = 1
+    while res.status == "FAIL" and attempts <= retry:
+        attempts += 1
+        prev_secs = res.seconds
+        prev_note = res.note
+        res = attempt(attempts)
+        res.seconds += prev_secs
+        if res.status == "PASS":
+            res.note = (f"flaked; passed on attempt {attempts}/{retry + 1}"
+                        + (f" (prev: {prev_note})" if prev_note else "")
+                        + (f" ({res.note})" if res.note else ""))
+    if res.status == "FAIL" and attempts > 1:
+        res.note = (f"FAIL after {attempts} attempts"
+                    + (f" ({res.note})" if res.note else ""))
+    return res, attempts
+
+
+def run_suites_parallel(suites: List[Suite], log_dir: Path, jobs: int,
+                        retry: int, fail_fast: bool) -> tuple[List[Result], dict]:
+    completed = {}
+    dispatch_lock = threading.Lock()
+    stopped_after = None
+
+    def drain(group: List[Suite]) -> None:
+        nonlocal stopped_after
+        for suite in group:
+            # Admission and publication of the first red share a lock. Suites
+            # admitted before it are in flight and finish, including retries.
+            with dispatch_lock:
+                if stopped_after is not None:
+                    break
+            try:
+                res, attempts = _run_parallel_suite(suite, log_dir, retry)
+            except Exception as exc:
+                res = Result(suite, "FAIL", "err", 0.0,
+                             note=f"runner error: {type(exc).__name__}: {str(exc)[:160]}")
+                attempts = 1
+            with dispatch_lock:
+                completed[suite.id] = (res, attempts)
+                if fail_fast and res.status == "FAIL" and stopped_after is None:
+                    stopped_after = suite.id
+
+    serial, pool_groups = parallel_suite_phases(suites, jobs)
+    drain(serial)
+    # A fail-fast red in the serial phase must not start the pool at all.
+    if stopped_after is None:
+        with ThreadPoolExecutor(max_workers=jobs) as pool:
+            futures = [pool.submit(drain, group) for group in pool_groups if group]
+            for future in futures:
+                future.result()
+
+    # Only this thread prints. Completion order must never reorder the rows or
+    # their FLAKED/skip/audit callouts (or the machine-readable result file).
+    results = []
+    attempts_by_id = {}
+    for suite in suites:
+        if suite.id not in completed:
+            continue
+        res, attempts = completed[suite.id]
+        results.append(res)
+        attempts_by_id[suite.id] = attempts
+        tail = f"{res.got:>4}  {res.seconds:5.1f}s"
+        if res.note:
+            tail += f"  {res.note}"
+        print(f"  ... {suite.id:<22} {res.status:<11} {tail}")
+    if stopped_after is not None:
+        print(f"  --fail-fast: stopping after {stopped_after}; in-flight suites finished")
+    return results, attempts_by_id
 
 
 def _fingerprint_argv(argv: List[str]) -> List[str]:
@@ -3641,10 +3836,26 @@ def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
     print("=" * len(line))
 
 
+def _jobs_count(value: str) -> int:
+    try:
+        jobs = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("--jobs must be an integer in 1..16") from None
+    if not 1 <= jobs <= 16:
+        raise argparse.ArgumentTypeError("--jobs must be an integer in 1..16")
+    return jobs
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Leaf web demo full gate runner")
     ap.add_argument("--fail-fast", action="store_true",
-                    help="stop at the first failing gate (default: run all)")
+                    help="stop at the first failing gate (default: run all). With "
+                         "--jobs > 1, stop dispatching new suites and wait for "
+                         "in-flight suites; do not kill running children.")
+    ap.add_argument("--jobs", type=_jobs_count, default=1, metavar="N",
+                    help="run suites with N worker threads (1..16, default 1). "
+                         "Shared-state suites stay in one sequential group; "
+                         "1 uses the original serial path with no threads.")
     ap.add_argument("--continue", dest="cont", action="store_true",
                     help="run every gate even if one fails (this is the default)")
     ap.add_argument("--only", action="append", default=None, metavar="SUBSTR",
@@ -3662,7 +3873,7 @@ def main() -> int:
     ap.add_argument("--shard-count", type=int, default=1, metavar="N",
                     help="partition the catalog into N deterministic shards and run "
                          "only one of them (see --shard-index). Suites inside a shard "
-                         "still run strictly serially; sharding changes WHICH suites "
+                         "run serially unless --jobs > 1; sharding changes WHICH suites "
                          "this invocation runs, never how any suite runs.")
     ap.add_argument("--shard-index", type=int, default=None, metavar="I",
                     help="0-based shard to run; required when --shard-count > 1. "
@@ -3816,7 +4027,10 @@ def main() -> int:
     attempts_by_id: dict = {}
     wall0 = time.perf_counter()
     try:
-      for suite in suites:
+      if args.jobs > 1:
+        results, attempts_by_id = run_suites_parallel(
+            suites, log_dir, args.jobs, args.retry, args.fail_fast)
+      for suite in suites if args.jobs == 1 else ():
         print(f"  ... {suite.id:<22} ", end="", flush=True)
         res = run_suite_guarded(suite, log_dir, attempt=1)
         attempts = 1

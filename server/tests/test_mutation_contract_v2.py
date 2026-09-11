@@ -28,6 +28,25 @@ def _poly(handle, layer="Panels", closed=True, pts=None):
             "pts": pts or [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [2.0, 2.0, 0.0], [0.0, 2.0, 0.0]]}
 
 
+def test_mock_set_points_preserves_old_bulges_for_same_vertex_count():
+    poly = {**_poly("A"), "bulges": [1.0, 0.0, 0.0, 0.0]}
+    base = {"layers": ["Panels"], "polylines": [poly]}
+    result = write_loop.apply_mutations(base, {"set_points": [
+        {"handle": "A", "pts": [[0, 0], [4, 0], [4, 4], [0, 4]]}]})
+    assert result["polylines"][0]["bulges"] == [1.0, 0.0, 0.0, 0.0]
+    assert poly["bulges"] == [1.0, 0.0, 0.0, 0.0]
+
+
+def test_mock_rotation_and_translation_preserve_bulges_bytes():
+    poly = {**_poly("A"), "bulges": [1.0, -0.5, 0.0, 0.25]}
+    before = json.dumps(poly["bulges"]).encode()
+    base = {"layers": ["Panels"], "polylines": [poly]}
+    result = write_loop.apply_mutations(base, {"transforms": [
+        {"handle": "A", "dx": 3, "dy": 2, "rotation_deg": 90}]})
+    assert result["polylines"][0]["pts"] != poly["pts"]
+    assert json.dumps(result["polylines"][0]["bulges"]).encode() == before
+
+
 def _line(handle, layer="0"):
     return _poly(handle, layer, closed=False, pts=[[5.0, 5.0, 0.0], [9.0, 5.0, 0.0]])
 

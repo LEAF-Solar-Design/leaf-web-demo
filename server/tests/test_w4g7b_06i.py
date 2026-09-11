@@ -13,6 +13,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "da"))
 
+from console import resolve_accoreconsole
+
 import dxf_intake
 import intake_dxf
 import intake_parse
@@ -22,8 +24,8 @@ from mutation_plan import emit_plan, uses_v3, validate_mutations
 
 
 BASE_SHA = "1" * 64
-ACCORECONSOLE = Path(r"C:\Program Files\Autodesk\AutoCAD 2026\accoreconsole.exe")
-_CANARY_SKIP_REASON = f"local AutoCAD 2026 console is required ({ACCORECONSOLE})"
+ACCORECONSOLE, CONSOLE_DISCLOSURE = resolve_accoreconsole()
+_CANARY_SKIP_REASON = CONSOLE_DISCLOSURE
 
 
 def _fixture_block():
@@ -155,7 +157,7 @@ def _console(work, source, script_name, script, *, apply_failed=False):
     return text
 
 
-@pytest.mark.skipif(not ACCORECONSOLE.exists(), reason=_CANARY_SKIP_REASON)
+@pytest.mark.skipif(ACCORECONSOLE is None, reason=_CANARY_SKIP_REASON)
 def test_accoreconsole_full_v3_case_set_canary(tmp_path):
     # Same local binary and tracked seed as da/test_mutation_apply_accoreconsole.py.
     # "9462" (data/rooftop_demo.intake.json polylines[0], layer "Panels") stands
@@ -169,6 +171,7 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
     setup = "\r\n".join([
         '(setvar "CMDECHO" 0)',
         '(setvar "FILEDIA" 0)',
+        '(entmake (list (cons 0 "LWPOLYLINE") (cons 100 "AcDbEntity") (cons 8 "LEAF_BULGE_CANARY") (cons 100 "AcDbPolyline") (cons 90 4) (cons 70 1) (cons 10 (list 0.0 0.0)) (cons 42 1.0) (cons 10 (list 10.0 0.0)) (cons 42 0.0) (cons 10 (list 10.0 10.0)) (cons 42 0.0) (cons 10 (list 0.0 10.0)) (cons 42 0.0)))',
         '(entmake (list (cons 0 "BLOCK") (cons 2 "Fixture") (cons 70 0) (cons 10 (list 0.0 0.0 0.0))))',
         '(entmake (list (cons 0 "LINE") (cons 8 "0") (cons 10 (list 0.0 0.0 0.0)) (cons 11 (list 1.0 0.0 0.0))))',
         '(entmake (list (cons 0 "ENDBLK")))',
@@ -208,6 +211,8 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
     base = intake_parse.parse(tmp_path / "base-intake.txt", "canary")
     assert not base.get("parseErrors"), base.get("parseErrors")
     assert base["blocks"]["Fixture"]["complete"] is True
+    curved, = [p for p in base["polylines"] if p["layer"] == "LEAF_BULGE_CANARY"]
+    assert curved["bulges"] == pytest.approx([1.0, 0.0, 0.0, 0.0], rel=0, abs=1e-9)
     # Rows for the planner's own doubt (v63): the dimstyle catalogue on a
     # real DWG head is readable through the inspect variant before the
     # DIMENSION add (the DS block precedes the plan).
@@ -225,6 +230,8 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
     actual = intake_parse.parse(families, "canary")
     assert not actual.get("parseErrors"), actual.get("parseErrors")
     assert "Standard" in actual.get("dimstyles", [])
+    curved, = [p for p in actual["polylines"] if p["layer"] == "LEAF_BULGE_CANARY"]
+    assert curved["bulges"] == pytest.approx([1.0, 0.0, 0.0, 0.0], rel=0, abs=1e-9)
 
     added_insert, = [e for e in actual["inserts"] if e["name"] == "Fixture"]
     # The IN record at the legacy radians (rtos precision 5), like 02s.
@@ -286,20 +293,27 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
     assert not any(g["name"] == "CANARYRACK" for g in ungrouped.get("groups", []))
     write_loop.verify_live_mutation_effects(grouped, ungrouped, ungroup_plan)
 
-    # Atomic REPLACE copies a LINE, CIRCLE and open two-vertex LWPOLYLINE.
+    # Atomic REPLACE combines an inline LINE with edited committed members.
     polyline, = [p for p in ungrouped["polylines"]
                  if p["pts"] == [[12.0, 23.0, 0.0], [17.0, 23.0, 0.0]]]
     members = [new_lines[0]["handle"], circle_handle, polyline["handle"]]
     block_plan = validate_mutations(ungrouped, {
-        "block_defs": [{"name": "B", "base": [10, 20, 0], "members": members, "insert": 0}],
+        "block_defs": [{"name": "B", "base": [1, 1, 0], "members": members,
+                        "children": [{"kind": "LINE", "layer": "0", "pts": [[0, 0, 0], [3, 0, 0]]}],
+                        "order": ["C:0", *(f"H:{h}" for h in members)], "insert": 0}],
+        "set_circle": [{"handle": circle_handle, "c": [6, 1, 0], "r": 1}],
+        "set_layer": [{"handle": circle_handle, "layer": "SITE"}],
         "removed": members,
         "added": [{"handle": "block-insert", "kind": "INSERT", "name": "B", "layer": "0",
-                   "pt": [10, 20, 0], "rot": 0, "scale": [1, 1, 1]}],
+                   "pt": [1, 1, 0], "rot": 0, "scale": [1, 1, 1]}],
     })
     shutil.copyfile(output, group_host)
     output.unlink()
-    (tmp_path / "mutation-plan.txt").write_bytes(emit_plan(
-        block_plan, base_sha256=hashlib.sha256(group_host.read_bytes()).hexdigest()))
+    block_bytes = emit_plan(block_plan, base_sha256=hashlib.sha256(group_host.read_bytes()).hexdigest())
+    assert block_bytes.count(b"BLOCKCHILD|") == 1
+    assert block_bytes.index(f"RELAYER|{circle_handle}|SITE".encode()) < block_bytes.index(b"BLOCKCHILD|")
+    assert block_bytes.index(f"SETCIRCLE|{circle_handle}|6,1,0|1".encode()) < block_bytes.index(b"BLOCKCHILD|")
+    (tmp_path / "mutation-plan.txt").write_bytes(block_bytes)
     # Refuse the second child only after BLOCK and the first child exist.
     # Exercise the production nil handler and its UNDO mark, then save the
     # rolled-back state so the next console process can inspect the proof.
@@ -312,11 +326,12 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
         '(write-line "second child refused after BLOCK began" leaf-proof) (close leaf-proof))) nil) (entmake ed)))\r\n'
         '(setq leaf-ops (leaf-read-plan "mutation-plan.txt"))',
     ).replace(
-        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg"))',
-        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg") '
+        '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg"))',
+        '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg") '
         '(command "_.SAVEAS" "" "rolled-back.dwg"))',
     )
     _console(tmp_path, group_host, "block-failure.scr", failure_script, apply_failed=True)
+    assert not output.exists()
     assert (tmp_path / "partial-block.txt").read_text().strip() == "second child refused after BLOCK began"
     rolled_back = tmp_path / "rolled-back.dwg"
     assert rolled_back.exists() and rolled_back.stat().st_size > 0
@@ -335,11 +350,47 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
     for field in ("polylines", "circles", "arcs", "inserts", "dimensions"):
         assert rollback.get(field, []) == ungrouped.get(field, [])
     assert rollback.get("properties") == ungrouped.get("properties")
+
+    # Force the inline entmake seam to throw after BLOCK began. A caught
+    # LISP error must use the same UNDO path as the nil in the round above.
+    inline_failure_script = settings["script"]["value"].replace(
+        '(setq leaf-ops (leaf-read-plan "mutation-plan.txt"))',
+        '(setq leaf-canary-children 0)\r\n'
+        '(defun leaf-bd-create-child (ed) (setq leaf-canary-children (1+ leaf-canary-children)) '
+        '(if (= leaf-canary-children 1) (progn '
+        '(if begun (progn (setq leaf-proof (open "inline-child-failed.txt" "w")) '
+        '(write-line "inline child threw after BLOCK began" leaf-proof) (close leaf-proof))) '
+        '(car 1)) (entmake ed)))\r\n'
+        '(setq leaf-ops (leaf-read-plan "mutation-plan.txt"))',
+    ).replace(
+        '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg"))',
+        '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg") '
+        '(command "_.SAVEAS" "" "inline-rolled-back.dwg"))',
+    )
+    _console(tmp_path, group_host, "inline-child-failure.scr", inline_failure_script, apply_failed=True)
+    assert not output.exists()
+    assert (tmp_path / "inline-child-failed.txt").read_text().strip() == "inline child threw after BLOCK began"
+    inline_rollback = tmp_path / "inline-rolled-back.dwg"
+    assert inline_rollback.exists() and inline_rollback.stat().st_size > 0
+    _console(tmp_path, inline_rollback, "inline-rollback-inspect.scr",
+             rollback_inspect.replace("rollback-table.txt", "inline-rollback-table.txt"))
+    assert (tmp_path / "inline-rollback-table.txt").read_text().strip() == "no B table entry"
+    restored_inline = intake_parse.parse(families, "canary")
+    assert not restored_inline.get("parseErrors"), restored_inline.get("parseErrors")
+    assert "B" not in restored_inline.get("blocks", {})
+    for field in ("polylines", "circles", "arcs", "inserts", "dimensions", "properties"):
+        assert restored_inline.get(field) == ungrouped.get(field)
+
     _console(tmp_path, group_host, "block.scr", settings["script"]["value"])
     _console(tmp_path, output, "block-inspect.scr", inspect)
     blocked = intake_parse.parse(families, "canary")
     assert not blocked.get("parseErrors"), blocked.get("parseErrors")
-    assert [c["kind"] for c in blocked["blocks"]["B"]["children"]] == ["LINE", "CIRCLE", "LWPOLYLINE"]
+    assert [c["kind"] for c in blocked["blocks"]["B"]["children"]] == ["LINE", "LINE", "CIRCLE", "LWPOLYLINE"]
+    inline, _, moved_circle, _ = blocked["blocks"]["B"]["children"]
+    assert inline["pts"] == [[0, 0, 0], [3, 0, 0]]
+    assert inline["properties"] == {"aci": 256, "rgb": None, "linetype": "ByLayer", "lineweight": -1}
+    assert moved_circle["c"] == [6, 1, 0] and moved_circle["r"] == 1 and moved_circle["layer"] == "SITE"
+    assert len(blocked["created"]) == 1 and blocked["created"][0]["ordinal"] == 0
     assert len([e for e in blocked["inserts"] if e["name"] == "B"]) == 1
     assert not set(members) & {e["handle"] for field in ("polylines", "circles") for e in blocked.get(field, [])}
     assert all("properties" in c for c in blocked["blocks"]["B"]["children"])
@@ -365,11 +416,11 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
         '(setvar "MLEADERLAYER" "LEAF-ML-OVERRIDE")\r\n'
         '(setq leaf-ops (leaf-read-plan "mutation-plan.txt"))',
     ).replace(
-        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg"))',
+        '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg"))',
         '(setq leaf-proof (open "mleaderlayer-after.txt" "w"))\r\n'
         '(write-line (getvar "MLEADERLAYER") leaf-proof)\r\n'
         '(close leaf-proof)\r\n'
-        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg"))',
+        '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg"))',
     )
     _console(tmp_path, leader_host, "leader.scr", leader_script)
     assert (tmp_path / "mleaderlayer-after.txt").read_text().strip() == "LEAF-ML-OVERRIDE"
@@ -400,8 +451,8 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
         '(setq leaf-ops (list (car leaf-ops) '
         '(subst "NoSuchStyle" "Standard" (cadr leaf-ops))))',
     ).replace(
-        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg"))',
-        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg") '
+        '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg"))',
+        '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg") '
         '(command "_.SAVEAS" "" "leader-rolled-back.dwg"))',
     )
     _console(tmp_path, leader_host, "leader-failure.scr",
@@ -433,8 +484,8 @@ def test_accoreconsole_full_v3_case_set_canary(tmp_path):
         '(close leaf-proof)\r\n'
         '(setq leaf-ops (leaf-read-plan "mutation-plan.txt"))',
     ).replace(
-        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg"))',
-        '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg") '
+        '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg"))',
+        '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg") '
         '(command "_.SAVEAS" "" "frozen-rolled-back.dwg"))',
     )
     _console(tmp_path, leader_host, "frozen-leader.scr", frozen_script, apply_failed=True)
@@ -468,4 +519,8 @@ def test_accoreconsole_canary_skip_reason_names_the_binary_path():
         m for m in test_accoreconsole_full_v3_case_set_canary.pytestmark
         if m.name == "skipif")
     assert marker.kwargs["reason"] == _CANARY_SKIP_REASON
-    assert str(ACCORECONSOLE) in marker.kwargs["reason"]
+    if ACCORECONSOLE is None:
+        assert "LEAF_ACCORECONSOLE unset; tried " in marker.kwargs["reason"]
+        assert "years seen: " in marker.kwargs["reason"]
+    else:
+        assert str(ACCORECONSOLE) in marker.kwargs["reason"]

@@ -53,6 +53,28 @@ def auth(monkeypatch):
     )
 
 
+def test_v2_apply_failure_clears_flag_before_rollback_and_prevents_save():
+    lines = apply_lisp.build_apply_scr().splitlines()
+    begin = '(progn (setq leaf-apply-ok T) (command "_.UNDO" "_Begin"))'
+    failure = next(line for line in lines if line.startswith('(foreach leaf-op leaf-ops '))
+    assert ('(progn (setq leaf-apply-ok nil) (command "_.UNDO" "_End") '
+            '(command "_.UNDO" "_Back") (princ "LEAF-MUTATION-APPLY-FAILED") (quit))') in failure
+    assert lines.index(begin) < lines.index(failure)
+    assert [line for line in lines if '"_.SAVEAS"' in line] == [
+        '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg"))']
+
+
+def test_v3_apply_script_digest_includes_setpoints_preservation():
+    # w4g-setpoints-preserve-width: shared SETPOINTS preserves widths and bulges.
+    assert hashlib.sha256(apply_lisp.build_apply_scr_v3().encode("utf-8")).hexdigest() == (
+        "afd87dd5a5796962f5fcbc6e5388152ef3dbc145870227a2f5d9398e7b50cb83")
+
+
+def test_both_apply_scripts_include_setpoints_preserve_defun():
+    for script in (apply_lisp.build_apply_scr(), apply_lisp.build_apply_scr_v3()):
+        assert "(defun leaf-setpoints-preserve " in script
+
+
 def test_fixed_script_is_crlf_closed_format_and_never_evaluates_plan():
     script = apply_lisp.build_apply_scr()
     assert script.endswith("\r\n")
@@ -391,13 +413,13 @@ def test_v3_activity_adds_insert_and_preserves_v2_apply_script():
     assert '(/= (cdr (assoc 0 ed)) "POLYLINE")' in preflight
     assert '(member kind (list "LINE" "LWPOLYLINE" "CIRCLE" "ARC"))' in member_check
     parser = next(line for line in block_script.splitlines()
-                  if line.startswith("(defun leaf-blockdef-op "))
-    assert '(= (cdr (assoc 0 (entget (handent (substr h 3))))) "POLYLINE")' in parser
+                  if line.startswith("(defun leaf-bd-ref "))
+    assert '(= (cdr (assoc 0 (entget (handent h)))) "POLYLINE")' in parser
     assert block_script.index('(command "_.UNDO" "_Mark")') < block_script.index('(foreach leaf-op leaf-ops ')
     assert '(command "_.UNDO" "_Begin")' not in block_script
     assert '(command "_.UNDO" "_End")' not in block_script
     assert '(command "_.UNDO" "_Back") (princ "LEAF-MUTATION-APPLY-FAILED")' in block_script
-    assert '(if leaf-apply-ok (command "_.SAVEAS" "" "output.dwg"))' in block_script
+    assert '(if (and leaf-ops leaf-apply-ok) (command "_.SAVEAS" "" "output.dwg"))' in block_script
     assert 'leaf-bd-create-child' in block_script
     assert '"BKEP|"' in subject.activity_spec(3)["settings"]["inspectScript"]["value"]
     assert '"MEC|1"' in subject.activity_spec(3)["settings"]["inspectScript"]["value"]
@@ -418,16 +440,28 @@ def test_v3_activity_adds_insert_and_preserves_v2_apply_script():
     headers_v3 = '(list "LEAF_MUTATION_PLAN|1" "LEAF_MUTATION_PLAN|2" "LEAF_MUTATION_PLAN|3")'
     script_v2 = v2_settings["script"]["value"]
     script_v3 = v3["settings"]["script"]["value"]
-    # The v2 APPLY script is byte-identical to 81e5d234. The shared inspect
-    # script changed and must: the old one hangs the console.
+    # w4g-setpoints-preserve-width: v3 now shares positional width/bulge preservation.
+    assert hashlib.sha256(script_v3.encode("utf-8")).hexdigest() == (
+        "afd87dd5a5796962f5fcbc6e5388152ef3dbc145870227a2f5d9398e7b50cb83")
+    # w4g-setpoints-preserve-width: v2 preserves groups 40/41/42 positionally.
+    # Previous apply-failure flag pin: bcb64a969cc2df0dbd90d1100ad83daacdf8439708f35f7cad730231a8990d98
     assert hashlib.sha256(script_v2.encode("utf-8")).hexdigest() == (
-        "a7ed0bb7dbd8266404574b523550d8103318981c47a927a6ad4c9daab07f6c35")
+        "30c38a48b69b81412ce25466554503bf029892c0065b1c3dc2867e763d6eab33")
     # W4g-7b-3s added an EP block to the shared inspect script (colour /
     # linetype / lineweight), so its exact byte pin moved; assert the new
     # structural invariant directly instead of a hand-computed hash: exactly
     # one EP progn, positioned after every geometry sequence (LN/CI/AR) and
     # before the BK catalogue, as the spec requires.
     inspect_script = v2_settings["inspectScript"]["value"]
+    # W4g inspect bulges: old fe8b8eef8d59f55679b0a4dc9a6ed2272714d948beb69caee3f49e98dbb58bed
+    # New 73c4bb8a25e3506ba29cf9207abbcaae40e19494685b7d6b3e11d5c1b4fffde1
+    # W4g inspect width: new 79557a32522d6353e8f3da489573ddf09640555ee5d5789d552b0225a15ef508 (PW|/PWC| blocks added to MUTATION_INSPECT_BLOCKS)
+    assert hashlib.sha256(inspect_script.encode("utf-8")).hexdigest() == (
+        "79557a32522d6353e8f3da489573ddf09640555ee5d5789d552b0225a15ef508")
+    bm = next(line for line in inspect_script.splitlines() if '"BM|"' in line)
+    assert "(rtos (cdr pair) 2 9)" in bm
+    assert "(itoa bulged)" not in bm
+    assert len(bm) <= 1800
     assert inspect_script.count('"EP|"') == 1
     ar_index = inspect_script.index('(cons 0 "ARC")')
     ep_index = inspect_script.index('"EP|"')
@@ -463,6 +497,33 @@ def test_v3_activity_adds_insert_and_preserves_v2_apply_script():
     v3["settings"]["script"]["value"] = script_v2
     assert v3 == v2
     assert subject.MUTATION_INSPECT_BLOCKS_V3 == MUTATION_INSPECT_BLOCKS
+
+
+def test_v3_inline_declarations_resolve_without_model_space_adds():
+    script = apply_lisp.build_apply_scr_v3()
+    reader = next(line for line in script.splitlines() if line.startswith("(defun leaf-read-plan "))
+    assert '(if (/= (car op) "BLOCKCHILD") (setq ops (cons op ops)))' in reader
+    assert "leaf-bc-complete-p" in reader
+    declaration = next(line for line in script.splitlines() if line.startswith("(defun leaf-blockchild-op "))
+    assert "leaf-bc-index" in declaration and "leaf-bc-geometry" in declaration
+    assert "leaf-color-value" in declaration and "leaf-linetype-value" in declaration
+    assert "leaf-weight-value" in declaration and "leaf-pending-children" in declaration
+    assert "(not (assoc (setq key" in declaration
+    capture = next(line for line in script.splitlines() if line.startswith("(defun leaf-apply (op /"))
+    assert '"BLOCKCHILD"' not in capture and '"ADDBLOCKDEF"' not in capture
+    child = next(line for line in script.splitlines() if line.startswith("(defun leaf-bd-apply-child "))
+    assert "vl-catch-all-apply" in child and "vl-catch-all-error-p" in child
+    assert "leaf-ensure-layer" in child and "leaf-bd-create-child" in child
+    assert '(defun leaf-bd-create-child (ed) (entmake ed))' in script
+    for line in script.splitlines():
+        assert line.count("(") == line.count(")"), line[:80]
+
+
+def test_v3_apply_builder_rejects_overlong_lines(monkeypatch):
+    monkeypatch.setattr(apply_lisp, "_BLOCK_DEFINITION_LISP_LINES",
+                        apply_lisp._BLOCK_DEFINITION_LISP_LINES + ('(princ "' + "x" * 1800 + '")',))
+    with pytest.raises(ValueError, match="MAX_SCRIPT_LINE_CHARS"):
+        apply_lisp.build_apply_scr_v3()
 
 
 def test_v3_readiness_absent_alias_is_a_refusal(monkeypatch):

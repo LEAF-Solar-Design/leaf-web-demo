@@ -14,7 +14,7 @@ describe('Create Block replacement plan', () => {
     { id: '17', type: 'CIRCLE', layer: '0', vertices: [[11, 24, 0]], radius: 2 },
   ]
   const insert = { id: '32', type: 'INSERT', layer: '0', name: 'B', ip: [10, 20, 0], rotationDeg: 0, scale: [1, 1, 1] }
-  const block = { name: 'B', base: [10, 20, 0], complete: true, children: members.map((e, i) => ({ ...e, id: undefined, handle: String(48 + i), editable: false })) }
+  const block = { name: 'B', base: [10, 20, 0], complete: true, children: members.map((e) => ({ ...e, id: undefined, handle: e.id, editable: false })) }
   it('carries a definition, both removed committed handles and INSERT ordinal zero', () => {
     const result = diffPlan({ entities: members, blocks: [] }, { entities: [insert], blocks: [block] })
     expect(result.reason).toBeNull()
@@ -22,14 +22,103 @@ describe('Create Block replacement plan', () => {
     expect(result.mutations.removed).toEqual(['10', '11'])
     expect(result.mutations.added).toEqual([{ handle: '20', kind: 'INSERT', name: 'B', pt: [10, 20, 0], rot: 0, scale: [1, 1, 1], layer: '0' }])
   })
-  it('hard-refuses an unmatched child, including a property change', () => {
-    for (const change of [{ radius: 3 }, { aci: 3 }]) {
+  it('hard-refuses a committed child property change', () => {
+    for (const change of [{ linetype: 'DASHED' }, { aci: 3 }]) {
       const current = { entities: [insert], blocks: [{ ...block, children: [block.children[0], { ...block.children[1], ...change }] }] }
       expect(diffPlan({ entities: members, blocks: [] }, current)).toMatchObject({ mutations: null, cause: 'block-def-unmatched' })
     }
   })
   it('does not change a plan without a new definition', () => {
     expect(JSON.stringify(diffPlan(members, members))).toBe('{"mutations":{},"count":0,"reason":null}')
+  })
+})
+
+describe('Create Block with inline and modified children', () => {
+  // Browser handles are decimal: 17 becomes H:11 and 42 is the new line's 2A.
+  const circle = { id: '17', type: 'CIRCLE', layer: '0', vertices: [[4, 2, 0]], radius: 1 }
+  const line = { handle: '42', type: 'LINE', layer: '0', vertices: [[0, 0, 0], [3, 0, 0]] }
+  const childCircle = { ...circle, id: undefined, handle: circle.id }
+  const insert = { id: '64', type: 'INSERT', layer: '0', name: 'B', ip: [1, 1, 0], rotationDeg: 0, scale: [1, 1, 1] }
+  const block = { name: 'B', base: [1, 1, 0], complete: true, children: [line, childCircle] }
+  const inlineLine = { kind: 'LINE', layer: '0', pts: [[0, 0, 0], [3, 0, 0]] }
+  const inlineCircle = { kind: 'CIRCLE', layer: '0', c: [4, 2, 0], r: 1 }
+  const definition = { name: 'B', base: [1, 1, 0], members: ['11'], children: [inlineLine], order: ['C:0', 'H:11'], insert: 0 }
+  const addedInsert = { handle: '40', kind: 'INSERT', layer: '0', name: 'B', pt: [1, 1, 0], rot: 0, scale: [1, 1, 1] }
+  const diff = (definition = block, entities = [insert], committed = [circle]) =>
+    diffPlan({ entities: committed, blocks: [] }, { entities, blocks: [definition] })
+
+  it('lowers the mixed line and committed circle in catalogue order', () => {
+    const result = diff()
+    expect(result).toEqual({
+      mutations: { block_defs: [definition], removed: ['11'], added: [addedInsert] },
+      count: 3, reason: null,
+    })
+    expect(result.mutations.block_defs[0].children[0]).not.toHaveProperty('handle')
+  })
+  it('derives the consumed circle geometry and layer setters while retaining its removal', () => {
+    const moved = { ...childCircle, vertices: [[6, 1, 0]], layer: 'SITE' }
+    const result = diff({ ...block, children: [line, moved] })
+    expect(result).toEqual({
+      mutations: {
+        block_defs: [definition], removed: ['11'], added: [addedInsert],
+        set_circle: [{ handle: '11', c: [6, 1, 0], r: 1 }],
+        set_layer: [{ handle: '11', layer: 'SITE' }],
+      },
+      count: 5, reason: null,
+    })
+    expect(diff({ ...block, children: [moved] }).mutations.block_defs).toEqual([{
+      name: 'B', base: [1, 1, 0], members: ['11'], insert: 0, children: [], order: ['H:11'],
+    }])
+  })
+  it('lowers two unsaved children without members or model-space child additions', () => {
+    const result = diff(block, [insert], [])
+    expect(result.reason).toBeNull()
+    expect(result.mutations.block_defs).toEqual([{
+      name: 'B', base: [1, 1, 0], members: [], children: [inlineLine, inlineCircle], order: ['C:0', 'C:1'], insert: 0,
+    }])
+    expect(result.mutations.removed ?? []).toEqual([])
+    expect(result.mutations.added).toEqual([addedInsert])
+    expect(result.count).toBe(2)
+  })
+  it('keeps the legacy definition object byte-identical for unchanged committed members', () => {
+    const result = diff({ ...block, children: [childCircle] })
+    expect(result.mutations.block_defs).toEqual([{ name: 'B', base: [1, 1, 0], members: ['11'], insert: 0 }])
+    expect(JSON.stringify(result.mutations.block_defs)).toBe('[{"name":"B","base":[1,1,0],"members":["11"],"insert":0}]')
+  })
+  it('hard-refuses a committed child property change with the server sentence', () => {
+    for (const change of [{ aci: 1 }, { trueColor: [1, 2, 3] }, { linetype: 'DASHED' }, { lineweight: 25 }]) {
+      expect(diff({ ...block, children: [line, { ...childCircle, ...change }] })).toEqual({
+        mutations: null, count: 0, kind: null, cause: 'block-def-unmatched',
+        reason: 'block members keep their colour, linetype and lineweight; change them after the block exists',
+      })
+    }
+  })
+  it('hard-refuses curved or wide inline polylines and opaque child kinds', () => {
+    for (const change of [
+      { type: 'LWPOLYLINE', bulges: [1, 0] },
+      { type: 'LWPOLYLINE', constantWidth: 1e-12 },
+      { type: 'LWPOLYLINE', startWidths: [1, 0] },
+      { type: 'LWPOLYLINE', endWidths: [0, 1] },
+      { type: 'TEXT' },
+    ]) {
+      expect(diff({ ...block, children: [{ ...line, ...change }, childCircle] }))
+        .toMatchObject({ mutations: null, cause: 'block-def-unmatched' })
+    }
+  })
+  it('keeps an unrelated circle at A:0 and remaps only the INSERT to A:1', () => {
+    const other = { ...circle, id: '65', vertices: [[9, 9, 0]], radius: 2 }
+    const result = diff(block, [insert, other])
+    expect(result.reason).toBeNull()
+    expect(result.mutations.block_defs).toEqual([{ ...definition, insert: 1 }])
+    expect(result.mutations.added).toEqual([
+      { handle: '41', kind: 'CIRCLE', layer: '0', c: [9, 9, 0], r: 2 }, addedInsert,
+    ])
+    expect(result.mutations.removed).toEqual(['11'])
+  })
+  it('hard-refuses a hand-typed replacement name absent from the pending catalogue', () => {
+    expect(diff(block, [{ ...insert, name: 'HandTyped' }])).toMatchObject({
+      mutations: null, cause: 'block-def-unmatched',
+    })
   })
 })
 
@@ -51,7 +140,7 @@ describe('named group mutation plans', () => {
       { id: '17', type: 'CIRCLE', layer: '0', vertices: [[11, 24, 0]], radius: 2 },
     ]
     const insert = { id: '32', type: 'INSERT', layer: '0', name: 'B', ip: [10, 20, 0], rotationDeg: 0, scale: [1, 1, 1] }
-    const block = { name: 'B', base: [10, 20, 0], complete: true, children: members.map((e, i) => ({ ...e, id: String(48 + i) })) }
+    const block = { name: 'B', base: [10, 20, 0], complete: true, children: members.map((e) => ({ ...e, id: undefined, handle: e.id })) }
     const other = { ...insert, id: '33', name: 'A', aci: 3 }
     const blocks = [
       { ...block, children: [block.children[0]] },
@@ -70,18 +159,18 @@ describe('named group mutation plans', () => {
     expect(result.mutations.added_groups).toEqual([{ name: 'PAIR', members: [{ add: 0 }, { add: 1 }] }])
     expect(result.mutations.added[1].color).toBe(3)
   })
-  it('matches identical children to distinct removed members', () => {
+  it('identifies identical children by their distinct retained handles', () => {
     const member = { id: '16', type: 'LINE', layer: '0', vertices: [[12, 23, 0], [17, 23, 0]] }
     const twins = [member, { ...member, id: '17' }]
     const insert = { id: '32', type: 'INSERT', layer: '0', name: 'B', ip: [10, 20, 0], rotationDeg: 0, scale: [1, 1, 1] }
     const block = { name: 'B', base: [10, 20, 0], complete: true }
     const result = diffPlan({ entities: twins, blocks: [] }, {
-      entities: [insert], blocks: [{ ...block, children: twins.map((e, i) => ({ ...e, id: String(48 + i) })) }],
+      entities: [insert], blocks: [{ ...block, children: twins.map((e) => ({ ...e, id: undefined, handle: e.id })) }],
     })
     expect(result.reason).toBeNull()
     expect(result.mutations.block_defs[0].members).toEqual(['10', '11'])
     expect(diffPlan({ entities: [twins[0]], blocks: [] }, {
-      entities: [insert], blocks: [{ ...block, children: twins }],
+      entities: [insert], blocks: [{ ...block, children: [twins[0], twins[0]] }],
     }).cause).toBe('block-def-unmatched')
   })
   it.each([{ constantWidth: 2 }, { startWidths: [2, 0] }, { endWidths: [0, 2] }])('never matches a wide child to a deleted thin polyline: %j', (width) => {
@@ -90,7 +179,7 @@ describe('named group mutation plans', () => {
     const block = { name: 'B', base: [10, 20, 0], complete: true }
     const wide = { ...thin, id: '17', ...width }
     const result = diffPlan({ entities: [thin, wide], blocks: [] }, {
-      entities: [insert], blocks: [{ ...block, children: [{ ...wide, id: '48' }] }],
+      entities: [insert], blocks: [{ ...block, children: [{ ...wide, id: undefined, handle: wide.id }] }],
     })
     expect(result.reason).toBeNull()
     expect(result.mutations.block_defs[0].members).toEqual(['11'])
@@ -100,7 +189,7 @@ describe('named group mutation plans', () => {
     const wide = { ...thin, id: '16', ...width }
     const insert = { id: '32', type: 'INSERT', layer: '0', name: 'B', ip: [10, 20, 0], rotationDeg: 0, scale: [1, 1, 1] }
     const result = diffPlan({ entities: [wide, thin], blocks: [] }, {
-      entities: [insert], blocks: [{ name: 'B', base: [10, 20, 0], complete: true, children: [{ ...thin, id: '48' }] }],
+      entities: [insert], blocks: [{ name: 'B', base: [10, 20, 0], complete: true, children: [{ ...thin, id: undefined, handle: thin.id }] }],
     })
     expect(result.reason).toBeNull()
     expect(result.mutations.block_defs[0].members).toEqual(['11'])

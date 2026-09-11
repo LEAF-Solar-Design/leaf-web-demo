@@ -3,11 +3,13 @@ from copy import deepcopy
 
 import deps
 import catalog
+import campaign_acquisition_service as acquisition
 
 
 def resolve(tenant, delivery_profile, *, existing_artifact=False, transform_recipe=False, cad_recipe=False):
     tenant_id = str(getattr(tenant, 'tenant_id', tenant))
     candidates = []
+    compatible_names = set()
     for tool, provenance in deps.effective_tools_with_provenance(tenant_id):
         if not catalog.filter_internal([tool]):
             continue
@@ -23,6 +25,12 @@ def resolve(tenant, delivery_profile, *, existing_artifact=False, transform_reci
                            'budget_constraint': 'Existing entitlement and quota checks required',
                            'verification_method': 'Actual invocation and output readback',
                            'missing_capability': 'Verified invocation adapter'})
+        if provenance == deps.TOOL_SOURCE_TENANT_REPO and acquisition.compatible_tool(tool):
+            compatible_names.add(view['name'])
+            candidates[-1].update(
+                operation='transform JSON records into CSV',
+                permission_requirement='Current project actor, published tool, run entitlement and execution policy',
+                verification_method='Exact published source in sandbox, independent expected CSV byte comparison and saved file readback')
     candidates.sort(key=lambda row: str(row['name']))
     selected = ({'cad_file': 'project_file_delivery', 'web_tool': 'managed_json_records_to_csv'}
                 .get(delivery_profile) if existing_artifact else None)
@@ -36,7 +44,7 @@ def resolve(tenant, delivery_profile, *, existing_artifact=False, transform_reci
                'version': 1} if selected == 'managed_json_records_to_csv' else None)
     if transform_recipe:
         selected = 'published_json_records_to_csv'
-        native = {'name': 'campaign-records-to-csv', 'operation': 'transform JSON records into CSV',
+        native = {'name': selected, 'operation': 'transform JSON records into CSV',
                   'inputs': {'source_json': 'UTF-8 flat JSON records, at most 1 MiB'},
                   'outputs': {'csv': 'Actual authored CSV, independently compared and retrieved'},
                   'readiness': 'unproven', 'version': 1,
@@ -44,7 +52,10 @@ def resolve(tenant, delivery_profile, *, existing_artifact=False, transform_reci
                   'budget_constraint': 'Existing author quota and publication policy; at most three workspace jobs',
                   'verification_method': 'Exact published source in sandbox, actual job output and saved file readback'}
         return {'selected': selected, 'readiness': 'unproven', 'selected_capability': native,
-                'shortlist': [c for c in candidates if c['name'] == 'campaign-records-to-csv'],
+                'shortlist': sorted(
+                    [c for c in candidates if c['name'] == 'campaign-records-to-csv'
+                     or (c['provenance'] == deps.TOOL_SOURCE_TENANT_REPO and c['name'] in compatible_names)],
+                    key=lambda c: (c['name'] != 'campaign-records-to-csv', c['name']))[:8],
                 'connected_mcp_tools': [], 'missing_capability': 'Verified published CSV invocation',
                 'recommended_action': 'Reuse the published CSV tool or acquire it through existing author authority',
                 'blocks_dispatch': False}

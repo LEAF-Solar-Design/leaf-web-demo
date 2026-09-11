@@ -322,6 +322,77 @@ describe('completion state', () => {
   })
 })
 
+describe('frozen source downloads', () => {
+  const source = { sha256: 'b'.repeat(64), size_bytes: 4, path: 'https://untrusted.test/source' }
+  const metadata = { name: 'source.dxf', sha256: source.sha256, byte_count: 4, valid: true, retrieved: true }
+  let completion
+  beforeEach(() => {
+    completion = { release: { release_id: Q, contract_version: 1, status: 'finished', contract: {
+      required_checks: [{ check_id: 'workflow' }],
+      cad_recipe: { recipe_id: 'dxf-layer-summary', recipe_version: 1, source_artifact: { ...source } },
+    } }, coverage: [{ check_id: 'workflow', status: 'passed' }], deliverables: [],
+    stages: ['implementation', 'publication', 'deployment', 'user_verification', 'delivery']
+      .map(stage => ({ stage, status: 'passed', contract_version: 1 })) }
+    api.getCampaign.mockResolvedValue({ campaign: row, completion })
+    api.getRelease.mockImplementation(async () => ({ completion }))
+  })
+  it('refetches current source proof and shares the download lock before returning bytes', async () => {
+    const pending = deferred()
+    api.downloadReleaseArtifact.mockReturnValue(pending.promise)
+    const hook = await ready()
+    await waitFor(() => expect(hook.result.current.executionLoading).toBe(false))
+    let download
+    act(() => { download = hook.result.current.downloadReleaseSource() })
+    await waitFor(() => expect(api.downloadReleaseArtifact).toHaveBeenCalledExactlyOnceWith(P, C, Q, metadata))
+    expect(api.getRelease).toHaveBeenCalledExactlyOnceWith(P, C, Q)
+    expect(hook.result.current.pending.download).toBe(true)
+    await act(async () => {
+      expect(await hook.result.current.downloadReleaseSource()).toBeNull()
+      expect(await hook.result.current.downloadReleaseArtifact(metadata)).toBeNull()
+    })
+    const result = { name: 'source.dxf', mediaType: 'application/dxf', bytes: new Uint8Array([1, 2, 3, 4]).buffer }
+    await act(async () => { pending.resolve(result); expect(await download).toBe(result) })
+    expect(hook.result.current.pending.download).toBeFalsy()
+    expect(hook.result.current.completion.deliverables).toEqual([])
+  })
+  it.each(['version', 'hash', 'size', 'recipe', 'stage', 'coverage', 'verification'])('refuses current source %s drift before byte access', async kind => {
+    const latest = structuredClone(completion)
+    if (kind === 'version') latest.release.contract_version = 2
+    if (kind === 'hash') latest.release.contract.cad_recipe.source_artifact.sha256 = 'c'.repeat(64)
+    if (kind === 'size') latest.release.contract.cad_recipe.source_artifact.size_bytes = 5
+    if (kind === 'recipe') latest.release.contract.cad_recipe.recipe_version = 2
+    if (kind === 'stage') latest.stages[0].contract_version = 2
+    if (kind === 'coverage') latest.coverage = []
+    if (kind === 'verification') latest.current_verification = { status: 'unavailable' }
+    api.getRelease.mockResolvedValue({ completion: latest })
+    const hook = await ready()
+    await waitFor(() => expect(hook.result.current.executionLoading).toBe(false))
+    await act(async () => { await expect(hook.result.current.downloadReleaseSource()).rejects.toThrow(/changed|verification/) })
+    expect(api.downloadReleaseArtifact).not.toHaveBeenCalled()
+  })
+  it('propagates revoked API authority even when release proof still passes', async () => {
+    const failure = Object.assign(new Error('Source access revoked.'), { status: 403 })
+    api.downloadReleaseArtifact.mockRejectedValue(failure)
+    const hook = await ready()
+    await waitFor(() => expect(hook.result.current.executionLoading).toBe(false))
+    await act(async () => { await expect(hook.result.current.downloadReleaseSource()).rejects.toBe(failure) })
+    expect(api.downloadReleaseArtifact).toHaveBeenCalledExactlyOnceWith(P, C, Q, metadata)
+    expect(hook.result.current.pending.download).toBeFalsy()
+  })
+  it('suppresses source bytes after the campaign selection changes', async () => {
+    const pending = deferred()
+    api.downloadReleaseArtifact.mockReturnValue(pending.promise)
+    api.listCampaigns.mockResolvedValue({ campaigns: [row, { ...row, campaign_id: D }] })
+    const hook = await ready()
+    await waitFor(() => expect(hook.result.current.executionLoading).toBe(false))
+    let download
+    act(() => { download = hook.result.current.downloadReleaseSource() })
+    await waitFor(() => expect(api.downloadReleaseArtifact).toHaveBeenCalledOnce())
+    await act(async () => { await hook.result.current.select(D) })
+    await act(async () => { pending.resolve({ bytes: new ArrayBuffer(4) }); expect(await download).toBeNull() })
+  })
+})
+
 describe('current release downloads', () => {
   const artifact = { name: 'records.csv', byte_count: 4, sha256: 'a'.repeat(64), valid: true, retrieved: true }
   const completion = { release: { release_id: Q, status: 'finished', contract: { required_checks: [{ check_id: 'workflow' }] } },

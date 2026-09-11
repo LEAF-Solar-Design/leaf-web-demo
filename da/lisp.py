@@ -135,7 +135,7 @@ except ImportError:
 MUTATION_INSPECT_BLOCKS += _BLOCK_DEPENDENCY_LISP_LINES + (
     '(defun leaf-bkep (name ordinal ed / aci lt lw tc colour) (setq aci (cond ((cdr (assoc 62 ed))) (T 256)) lt (cond ((cdr (assoc 6 ed))) (T "ByLayer")) lw (cond ((cdr (assoc 370 ed))) (T -1)) tc (cdr (assoc 420 ed)) colour "~") (if tc (setq colour (strcat (itoa (lsh (logand tc 16711680) -16)) "," (itoa (lsh (logand tc 65280) -8)) "," (itoa (logand tc 255))))) (write-line (strcat "BKEP|" (leaf-bk-encode name) "|" (itoa ordinal) "|" (itoa aci) "|" (leaf-bk-encode lt) "|" (itoa lw) "|" colour) f))',
     '(progn (setq f (open "{OUT}" "a") bk (tblnext "BLOCK" T) bn-display 0) (write-line "BKEPC|1" f) (while bk (setq name (cdr (assoc 2 bk))) (if (and (/= (substr name 1 1) "*") (= 0 (logand 1 (cdr (assoc 70 bk))))) (progn (setq bn-display (1+ bn-display)) (if (<= bn-display 200) (progn (setq be (entnext (tblobjname "BLOCK" name)) ordinal 0) (while (and be (< ordinal 60) (/= (cdr (assoc 0 (entget be))) "ENDBLK")) (leaf-bkep name ordinal (entget be)) (setq ordinal (1+ ordinal) be (entnext be))))))) (setq bk (tblnext "BLOCK"))) (close f))',
-    '(progn (setq f (open "{OUT}" "a") ss (ssget "_X" (list (cons 0 "LINE,LWPOLYLINE,CIRCLE,ARC") (cons 410 "Model"))) i 0) (if ss (repeat (sslength ss) (setq ed (entget (ssname ss i)) i (1+ i) bulged 0 wide 0 normal (cond ((cdr (assoc 210 ed))) (T (list 0.0 0.0 1.0)))) (if (= (cdr (assoc 0 ed)) "LWPOLYLINE") (foreach pair ed (if (and (= (car pair) 42) (/= (cdr pair) 0.0)) (setq bulged 1)) (if (and (member (car pair) (list 40 41 43)) (/= (cdr pair) 0.0)) (setq wide 1)))) (write-line (strcat "BM|" (cdr (assoc 5 ed)) "|" (cdr (assoc 0 ed)) "|" (leaf-bk-point normal 6) "|" (itoa bulged) "|" (if (leaf-bd-dimension-p ed) "1" "0") "|" (itoa wide)) f))) (close f))',
+    '(progn (setq f (open "{OUT}" "a") ss (ssget "_X" (list (cons 0 "LINE,LWPOLYLINE,CIRCLE,ARC") (cons 410 "Model"))) i 0) (if ss (repeat (sslength ss) (setq ed (entget (ssname ss i)) i (1+ i) bl "" wide 0 normal (cond ((cdr (assoc 210 ed))) (T (list 0.0 0.0 1.0)))) (if (= (cdr (assoc 0 ed)) "LWPOLYLINE") (foreach pair ed (if (= (car pair) 42) (progn (setq v (rtos (cdr pair) 2 9)) (setq bl (if (= bl "") v (strcat bl ";" v))))) (if (and (member (car pair) (list 40 41 43)) (/= (cdr pair) 0.0)) (setq wide 1)))) (write-line (strcat "BM|" (cdr (assoc 5 ed)) "|" (cdr (assoc 0 ed)) "|" (leaf-bk-point normal 6) "|" (if (= bl "") "0" bl) "|" (if (leaf-bd-dimension-p ed) "1" "0") "|" (itoa wide)) f))) (close f))',
 )
 
 
@@ -146,6 +146,13 @@ MUTATION_INSPECT_BLOCKS += (
     '(defun leaf-gr-row (name e owner / data h item) (setq data (entget e) h (cdr (assoc 5 data))) (if (= (cdr (assoc 0 data)) "GROUP") (progn (write-line (strcat "GR|" h "|" (leaf-bk-encode name) "|" owner "|" (itoa (cdr (assoc 70 data))) "|" (itoa (cdr (assoc 71 data))) "|" (leaf-gr-members data)) f) (foreach item data (if (= (car item) 340) (leaf-gr-backlink (cdr item) h))))))',
     '(progn (setq f (open "{OUT}" "a") gr-dict (dictsearch (namedobjdict) "ACAD_GROUP")) (write-line "GRC|1" f) (write-line "MEC|1" f) (if gr-dict (progn (setq gr-e (cdr (assoc -1 gr-dict)) gr-owner (cdr (assoc 5 (entget gr-e))) gr-name nil) (foreach gr-pair (entget gr-e) (cond ((= (car gr-pair) 3) (setq gr-name (cdr gr-pair))) ((and gr-name (member (car gr-pair) (list 350 360))) (leaf-gr-row gr-name (cdr gr-pair) gr-owner) (setq gr-name nil)))))) (close f))',
     '(progn (setq f (open "{OUT}" "a") gr-ca (open "created-handles.txt" "r")) (if gr-ca (progn (while (setq gr-line (read-line gr-ca)) (write-line gr-line f)) (close gr-ca))) (close f))',
+)
+
+
+# Width evidence is mutation-only, with its own marker so an older inspection
+# cannot be mistaken for a drawing with no widthed polylines. Keep DS/DM last.
+MUTATION_INSPECT_BLOCKS += (
+    '(progn (setq f (open "{OUT}" "a") ss (ssget "_X" (list (cons 0 "LWPOLYLINE") (cons 410 "Model"))) i 0) (if ss (repeat (sslength ss) (setq ed (entget (ssname ss i)) i (1+ i) wide nil) (foreach pair ed (if (and (member (car pair) (list 40 41 43)) (/= (cdr pair) 0.0)) (setq wide T))) (if wide (write-line (strcat "PW|" (cdr (assoc 5 ed)) "|1") f)))) (write-line "PWC|1" f) (princ "PW-DONE") (close f))',
 )
 
 

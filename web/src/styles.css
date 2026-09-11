@@ -1189,6 +1189,94 @@ footer .warn-txt { color: var(--status-warning); }
 .ops-head .ops-x + .ops-x { margin-left: 8px; }
 .ops-note { font-size: 11.5px; color: var(--muted-2); padding: 8px 2px; line-height: 1.5; }
 .ops-note.ops-err { color: var(--status-danger); }
+
+/* Open Browser projects: results own the page; rails remain mounted. */
+.app[data-project-workspace="results"] {
+  --project-tools-width: 0px;
+  --project-activity-width: 0px;
+  display: grid;
+  grid-template-columns: var(--project-tools-width) minmax(0, 1fr) var(--project-activity-width);
+  grid-template-rows: auto 1fr auto;
+  height: auto;
+  min-height: 100vh;
+  background: var(--background);
+}
+.app[data-project-workspace="results"][data-project-tools="open"] { --project-tools-width: 280px; }
+.app[data-project-workspace="results"][data-project-activity="open"] { --project-activity-width: 280px; }
+.app[data-project-workspace="results"][data-project-tools="closed"] > aside.nav,
+.app[data-project-workspace="results"][data-project-activity="closed"] > .rail-stack { display: none; }
+.app[data-project-workspace="results"] > aside.nav { grid-row: 2; grid-column: 1; min-width: 0; }
+.app[data-project-workspace="results"] > .rail-stack { grid-row: 2; grid-column: 3; min-width: 0; }
+.app[data-project-workspace="results"] > .center-col {
+  grid-row: 2;
+  grid-column: 2;
+  min-width: 0;
+  width: 100%;
+  max-width: 1080px;
+  margin-inline: auto;
+}
+.app[data-project-workspace="results"] main.center-scroll {
+  min-width: 0;
+  overflow: visible;
+  padding: 24px;
+  background: var(--background);
+  overflow-wrap: anywhere;
+}
+.app[data-project-workspace="results"] .project-workspace-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-block: 12px;
+}
+.app[data-project-workspace="results"] .project-workspace-controls button {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 8px 16px;
+  border: 1px solid var(--border);
+}
+.app[data-project-workspace="results"] .project-workspace-controls button[aria-expanded="true"] {
+  color: var(--primary);
+  background: var(--accent-tint);
+  border-color: var(--primary);
+}
+.app[data-project-workspace="results"] .bar-dock {
+  position: static;
+  inset: auto;
+  width: auto;
+  max-width: none;
+  margin: 0 24px 24px;
+}
+.app[data-project-workspace="results"] .bar-dock > .resolver { position: static; margin-bottom: 8px; }
+.app[data-project-workspace="results"] :is(.who, .proj, .bar-controls) { flex-wrap: wrap; min-width: 0; }
+.app[data-project-workspace="results"] :is(.home-q, .proj-chip, .proj-chip .name) { overflow-wrap: anywhere; white-space: normal; min-width: 0; }
+.app[data-project-workspace="results"] .tc-product-tabs { flex-wrap: wrap; }
+.app[data-project-workspace="results"] .tc-product-tabs [role="tab"] { min-height: 44px; color: var(--foreground); }
+.app[data-project-workspace="results"] .tc-product-tabs [role="tab"] small,
+.app[data-project-workspace="results"] :is(.tc-product-shared, .tc-continuity, .tc-continuity-label) { color: var(--muted); }
+.app[data-project-workspace="results"] .tc-continuity-item strong { color: var(--foreground); }
+.app[data-project-workspace="results"] > .drawer-layer {
+  position: fixed;
+  inset: var(--drawer-top, 49px) 0 var(--drawer-bottom, 30px) auto;
+  width: min(340px, 100%);
+}
+@media (max-width: 899px) {
+  .app[data-project-workspace="results"] { display: flex; flex-direction: column; }
+  .app[data-project-workspace="results"] > header.top {
+    order: 0;
+    position: sticky;
+    top: 0;
+    z-index: 40;
+    background: var(--background);
+  }
+  .app[data-project-workspace="results"] > .center-col { order: 3; }
+  .app[data-project-workspace="results"] > aside.nav { order: 1; }
+  .app[data-project-workspace="results"] > .rail-stack { order: 2; }
+  .app[data-project-workspace="results"] > footer.foot-bar { order: 4; }
+  .app[data-project-workspace="results"] > :is(aside.nav, .rail-stack) { width: 100%; overflow-wrap: anywhere; }
+  .app[data-project-workspace="results"] main.center-scroll { padding: 16px; }
+  .app[data-project-workspace="results"] .bar-dock { margin: 0 16px 16px; }
+  .app[data-project-workspace="results"] :is(header.top, footer.foot-bar) { min-width: 0; flex-wrap: wrap; }
+}
 /* ledger/table spec (22g): mono micro-header, 32px rows on hairlines */
 .ops-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .ops-table th { text-align: left; font-family: var(--font-mono); font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em; color: var(--muted-2); border-bottom: 1px solid var(--rule-strong); padding: 4px 8px; }

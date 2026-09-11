@@ -57,7 +57,10 @@ export class ProjectRepositoryEditSettlementUnavailable extends ProjectRepositor
 
 export type ProjectRepositoryEditGit = Pick<TenantChangeRepo,
   "createOrResume" | "stageCommitWitness" | "publishToMainObserved" |
-  "observeGitMatrix" | "resolveCommitTree" | "cleanupWorktree" | "readRef">;
+  "observeGitMatrix" | "resolveCommitTree" | "cleanupWorktree" | "readRef"> & {
+  refreshMain?(): Promise<void>;
+  publishAuthoritatively?(change: TenantChangeSet, expectedMainSha: string): Promise<{ commit: string }>;
+};
 
 export interface ProjectRepositoryEditCoordinatorPorts {
   readonly leases: TenantRepoProvider;
@@ -253,6 +256,7 @@ export class ProjectRepositoryEditCoordinator {
       const stageGeneration = requireGeneration(witness.writerLeaseGeneration, "invalid_lease_witness");
       requireUuid(witness.writerLeaseId, "invalid_lease_witness");
       const repo = this.ports.changeRepo(authority);
+      if (repo.refreshMain) await runFenced(() => repo.refreshMain!());
       if (request.deriveChangeEvidence && await runFenced(() => repo.readRef("refs/heads/main")) !== expectedBaseCommit) {
         fail("source_base_conflict");
       }
@@ -365,6 +369,15 @@ export class ProjectRepositoryEditCoordinator {
         expectedBaseSha: matrix.expected_main_commit,
         stagedSha: matrix.staged_head_commit,
       };
+      if (repo.publishAuthoritatively) {
+        await runFenced(async () => {
+          if (repo.resolveCommitTree(matrix.staged_head_commit) !== matrix.staged_tree) {
+            fail("staged_tree_mismatch");
+          }
+          const accepted = await repo.publishAuthoritatively!(change, matrix.expected_main_commit);
+          if (accepted.commit !== matrix.staged_head_commit) fail("remote_publish_mismatch");
+        });
+      }
       const observation = await runFenced(() => {
         // Recheck the immutable staged witness inside the publish fence before
         // the one allowed compare-and-swap.
@@ -452,15 +465,24 @@ export class ProjectRepositoryEditCoordinator {
       let compareAndSwap = false;
       const alreadyPublished = matrix.main_commit === stagedHeadCommit &&
         matrix.private_ref_commit === stagedHeadCommit && matrix.main_tree === stagedTree;
+      const resumable = matrix.main_commit === expectedMainCommit &&
+        matrix.private_ref_commit === stagedHeadCommit &&
+        (await runFenced(() => repo.resolveCommitTree(stagedHeadCommit))) === stagedTree;
+      if ((alreadyPublished || resumable) && repo.publishAuthoritatively) {
+        await runFenced(async () => {
+          if (repo.resolveCommitTree(stagedHeadCommit) !== stagedTree) fail("staged_tree_mismatch");
+          const accepted = await repo.publishAuthoritatively!(change, expectedMainCommit);
+          if (accepted.commit !== stagedHeadCommit) fail("remote_publish_mismatch");
+        });
+      }
       if (!alreadyPublished) {
-        const resumable = matrix.main_commit === expectedMainCommit &&
-          matrix.private_ref_commit === stagedHeadCommit &&
-          (await runFenced(() => repo.resolveCommitTree(stagedHeadCommit))) === stagedTree;
         if (resumable) {
           // Resume only the failed compare-and-swap under the already consumed
           // transaction. Any other frozen matrix stays observation-only.
-          const observation = await runFenced(() =>
-            repo.publishToMainObserved(change, expectedMainCommit));
+          const observation = await runFenced(() => {
+            if (repo.resolveCommitTree(stagedHeadCommit) !== stagedTree) fail("staged_tree_mismatch");
+            return repo.publishToMainObserved(change, expectedMainCommit);
+          });
           compareAndSwap = observation.compare_and_swap;
           matrix = Object.freeze({
             private_ref_commit: observation.private_ref_commit,

@@ -106,6 +106,46 @@ function realWorkerTransport() {
 }
 
 describe.skipIf(!GLUE)('Create Block on the real engine', () => {
+  it('keeps a session-created line and committed circle handles through block creation and reparse', { timeout: 90_000 }, async () => {
+    const worker = realWorkerTransport()
+    const { result } = renderHook(() => useEngineSession({ createWorker: () => worker }))
+    const bytes = new TextEncoder().encode('0\nSECTION\n2\nENTITIES\n0\nCIRCLE\n5\n11\n8\n0\n10\n4\n20\n2\n40\n1\n0\nENDSEC\n0\nEOF\n')
+    await act(async () => { result.current.actions.openBytes(bytes, 'mixed-block.dxf', { committed: true }) })
+    const committed = result.current.committedEntities
+    expect(committed.map((e) => e.id)).toEqual(['17'])
+    await act(async () => { result.current.actions.create('createLine', { x: '0', y: '0', x2: '3', y2: '0', layer: '0' }) })
+    const line = result.current.entities.find((e) => e.type === 'LINE')
+    expect(line).toBeDefined()
+    expect(result.current.entities).toHaveLength(2)
+    act(() => { result.current.actions.select(line.id) })
+    await act(async () => { result.current.actions.create('createBlock', { name: 'B', x: '1', y: '1', members: '17' }) })
+    expect(result.current.errorKind).toBeNull()
+    expect(result.current.entities).toHaveLength(1)
+    expect(result.current.entities[0]).toMatchObject({ type: 'INSERT', name: 'B', ip: [1, 1, 0], layer: '0' })
+    const definition = result.current.entities.blocks.find((b) => b.name === 'B')
+    expect(definition.children.map((e) => e.handle)).toEqual([line.id, '17'])
+    expect(definition.children[0]).toMatchObject({ type: 'LINE', vertices: [[0, 0, 0], [3, 0, 0]] })
+    expect(definition.children[1]).toMatchObject({ type: 'CIRCLE', vertices: [[4, 2, 0]], radius: 1 })
+    expect(result.current.entities.some((e) => [line.id, '17'].includes(e.id))).toBe(false)
+    const plan = diffPlan(committed, result.current.entities)
+    expect(plan.reason).toBeNull()
+    expect(plan.mutations.block_defs).toEqual([{
+      name: 'B', base: [1, 1, 0], members: ['11'], insert: 0,
+      children: [{ kind: 'LINE', layer: '0', pts: [[0, 0, 0], [3, 0, 0]] }], order: ['C:0', 'H:11'],
+    }])
+    const source = [
+      'import { createRequire } from "node:module"',
+      'import { readFileSync } from "node:fs"',
+      'const engine = createRequire(import.meta.url)(process.argv[1])',
+      'const doc = engine.parseDxf(Uint8Array.from(JSON.parse(readFileSync(0, "utf8"))))',
+      'const projection = doc.editableEntities()',
+      'process.stdout.write(JSON.stringify({ entities: projection, blocks: projection.blocks }))',
+    ].join('\n')
+    const reopened = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', source, path.join(PKG_DIR, GLUE)], { input: JSON.stringify(worker.bytes), encoding: 'utf8', timeout: 90_000, maxBuffer: 16 * 1024 * 1024 }))
+    expect(reopened.blocks.find((b) => b.name === 'B').children.map((e) => e.handle)).toEqual([line.id, '17'])
+    expect(reopened.entities).toHaveLength(1)
+    expect(reopened.entities[0].type).toBe('INSERT')
+  })
   it('carries native polyline widths to the builder before posting a create', { timeout: 90_000 }, async () => {
     const worker = realWorkerTransport()
     const { result } = renderHook(() => useEngineSession({ createWorker: () => worker }))

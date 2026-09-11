@@ -10,6 +10,8 @@ cannot carry (xdata, faces, images) is not invented here; the DWG
 plan leg keeps those by handle on the real drawing.
 Complete bounded block catalogues and INSERTs also round-trip here. For an
 incomplete catalogue, only the supported children actually captured are emitted.
+Polylines may carry finite ``bulges``: per-vertex values emit nonzero groups
+only for planar polylines; other list lengths are inspection flags and emit none.
 
 Hardened and bounded, fail-closed: every field is validated BEFORE a byte is
 emitted; a malformed intake raises ``IntakeDxfError`` and nothing is returned.
@@ -247,20 +249,83 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         total_points += len(pts)
         if total_points > MAX_POINTS:
             _fail(f"more than {MAX_POINTS} points in total")
-        coords: List[tuple] = []
+        handle = poly.get("handle")
+        normal = None
+        if "normal" in poly:
+            values = poly["normal"]
+            message = f"{where} handle {handle!r}: normal must be a list of three finite numbers"
+            if not isinstance(values, list) or len(values) != 3:
+                _fail(message)
+            normal = []
+            for value in values:
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    _fail(message)
+                try:
+                    value = float(value)
+                except OverflowError:
+                    _fail(message)
+                if not math.isfinite(value):
+                    _fail(message)
+                normal.append(value)
+            if not any(normal):
+                _fail(f"{where} handle {handle!r}: normal must not be the zero vector")
+            if not any(abs(a - b) > 1e-6 for a, b in zip(normal, (0, 0, 1))):
+                normal = None
+        # An LWPOLYLINE is planar in its own OCS by construction: when `normal`
+        # is present, every vertex's recovered OCS z is taken from the FIRST
+        # vertex and shared, rather than trusting each vertex's own
+        # (floating-point-noisy) projection to agree exactly — the exact
+        # inverse of dxf_intake._parse_lwpolyline, which stores one shared
+        # elevation for every vertex the same way. A LINE or classic POLYLINE
+        # row can carry `normal` too (the member-evidence pass attaches it to
+        # every kind), and its points are genuinely WCS, not OCS relative to
+        # that normal, so the inverse only applies when every vertex's own
+        # recovered OCS z actually agrees (within 1e-9), which a real
+        # LWPOLYLINE's planar vertices always do. A row that disagrees is
+        # written back exactly as given, losing nothing.
+        raw_coords: List[tuple] = []
         for j, pt in enumerate(pts):
             if not isinstance(pt, (list, tuple)) or len(pt) not in (2, 3):
                 _fail(f"{where}.pts[{j}]: a point is [x, y] or [x, y, z]")
             x = _number(pt[0], f"{where}.pts[{j}]")
             y = _number(pt[1], f"{where}.pts[{j}]")
             z = _number(pt[2], f"{where}.pts[{j}]") if len(pt) == 3 else 0.0
-            coords.append((x, y, z))
-        handle = poly.get("handle")
+            raw_coords.append((x, y, z))
+        coords: List[tuple] = raw_coords
+        if normal is not None:
+            ocs_points = [_wcs_to_ocs(p, normal) for p in raw_coords]
+            oz_values = [oz for _, _, oz in ocs_points]
+            if max(oz_values) - min(oz_values) <= 1e-9:
+                elevation = oz_values[0]
+                coords = [(ox, oy, elevation) for ox, oy, _ in ocs_points]
+        bulges = None
+        if "bulges" in poly:
+            values = poly["bulges"]
+            if not isinstance(values, list):
+                _fail(f"{where}.bulges: must be a list of finite numbers")
+            bulges = []
+            for j, value in enumerate(values):
+                if (isinstance(value, bool) or not isinstance(value, (int, float))):
+                    _fail(f"{where}.bulges[{j}]: must be a finite number")
+                try:
+                    value = float(value)
+                except OverflowError:
+                    _fail(f"{where}.bulges[{j}]: must be a finite number")
+                if not math.isfinite(value):
+                    _fail(f"{where}.bulges[{j}]: must be a finite number")
+                bulges.append(value)
+            if len(bulges) != len(coords):
+                bulges = None
+            elif normal is not None and normal[2] < 0:
+                # The arbitrary-axis algorithm reflects XY for a negative
+                # normal z; dxf_intake.py flips bulge sign on the way in, so
+                # writing the raw DXF bulge undoes that flip here.
+                bulges = [-b for b in bulges]
         h = _real_handle(handle, where, real)
         if h is not None:
             highest = max(highest, int(h, 16))
         note_layer(layer)
-        kinds.append(("poly", layer, closed, coords, h))
+        kinds.append(("poly", layer, closed, coords, bulges, normal, h))
         kind_sources.append(poly)
         kind_properties.append(_entity_property_groups(properties, handle, where))
     for k, tx in enumerate(texts):
@@ -274,8 +339,33 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         pt = tx.get("pt")
         if not isinstance(pt, (list, tuple)) or len(pt) < 2:
             _fail(f"{where}: pt must be [x, y]")
+        if len(pt) > 3:
+            _fail(f"{where}: pt must be [x, y] or [x, y, z]")
         x = _number(pt[0], f"{where}.pt")
         y = _number(pt[1], f"{where}.pt")
+        z = _number(pt[2], f"{where}.pt") if len(pt) == 3 else 0.0
+        handle = tx.get("handle")
+        normal = None
+        if "normal" in tx:
+            values = tx["normal"]
+            message = f"{where} handle {handle!r}: normal must be a list of three finite numbers"
+            if not isinstance(values, list) or len(values) != 3:
+                _fail(message)
+            normal = []
+            for value in values:
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    _fail(message)
+                try:
+                    value = float(value)
+                except OverflowError:
+                    _fail(message)
+                if not math.isfinite(value):
+                    _fail(message)
+                normal.append(value)
+            if not any(normal):
+                _fail(f"{where} handle {handle!r}: normal must not be the zero vector")
+            if not any(abs(a - b) > 1e-6 for a, b in zip(normal, (0, 0, 1))):
+                normal = None
         value = _text_value(tx.get("text"), where)
         if not value:
             # The parser drops an empty text on the way in; dropping it on the
@@ -285,7 +375,7 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         if h is not None:
             highest = max(highest, int(h, 16))
         note_layer(layer)
-        kinds.append(("text", layer, kind, (x, y), value, h))
+        kinds.append(("text", layer, kind, (x, y, z), value, normal, h))
         kind_sources.append(tx)
         kind_properties.append([])  # TEXT carries no colour/linetype/lineweight round trip
     # W4g-3: circles and arcs (ADDITIVE fields, the browser engine's kinds).
@@ -518,21 +608,28 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         props = kind_properties[idx]
         entity_offset = len(out)
         if row[0] == "poly":
-            _, layer, closed, coords, _ = row
+            _, layer, closed, coords, bulges, normal, _ = row
             z0 = coords[0][2]
             planar = all(c[2] == z0 for c in coords)
             if planar:
                 out += ["0", "LWPOLYLINE", "5", h, "100", "AcDbEntity", "8", layer,
                         "100", "AcDbPolyline", "90", str(len(coords)),
                         "70", "1" if closed else "0", "38", _num(z0)]
-                for x, y, _z in coords:
+                if normal is not None:
+                    out += _point_groups(normal, 210)
+                for j, (x, y, _z) in enumerate(coords):
                     out += ["10", _num(x), "20", _num(y)]
+                    if bulges is not None and bulges[j] != 0:
+                        out += ["42", _num(bulges[j])]
             else:
                 # A polyline whose vertices differ in z is a classic 3D
                 # POLYLINE (flag 8) with per-vertex z; the parser keeps each z.
                 out += ["0", "POLYLINE", "5", h, "100", "AcDbEntity", "8", layer,
                         "100", "AcDb3dPolyline", "66", "1",
                         "70", str(8 | (1 if closed else 0))]
+                if normal is not None:
+                    out += _point_groups(normal, 210)
+                # 3D polylines cannot carry arcs.
                 for x, y, z in coords:
                     out += ["0", "VERTEX", "100", "AcDbEntity", "8", layer,
                             "100", "AcDbVertex", "100", "AcDb3dPolylineVertex",
@@ -583,15 +680,19 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
             if dimtype == "LINEAR":
                 out += ["50", _num(rotation), "100", "AcDbRotatedDimension"]
         else:
-            _, layer, kind, (x, y), value, _ = row
+            _, layer, kind, (x, y, z), value, normal, _ = row
+            if normal is not None:
+                x, y, z = _wcs_to_ocs([x, y, z], normal)
             if kind == "TEXT":
                 out += ["0", "TEXT", "5", h, "100", "AcDbEntity", "8", layer,
-                        "100", "AcDbText", "10", _num(x), "20", _num(y), "30", "0.0",
+                        "100", "AcDbText", "10", _num(x), "20", _num(y), "30", _num(z),
                         "40", TEXT_HEIGHT, "1", value, "100", "AcDbText"]
             else:
                 out += ["0", "MTEXT", "5", h, "100", "AcDbEntity", "8", layer,
-                        "100", "AcDbMText", "10", _num(x), "20", _num(y), "30", "0.0",
+                        "100", "AcDbMText", "10", _num(x), "20", _num(y), "30", _num(z),
                         "40", TEXT_HEIGHT, "1", value]
+            if normal is not None:
+                out += _point_groups(normal, 210)
         source = kind_sources[idx]
         if source.get("space") == "paper":
             space_pairs = ["67", "1"]

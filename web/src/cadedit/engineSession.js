@@ -42,7 +42,7 @@ import { SESSION_ERROR } from './engineSessionErrors.js'
 import { offsetEntity } from './offset.js'
 import { MAX_BATCH_STEPS, MAX_COORD, MAX_INTERSECT_POINTS, chamferLines, extendEntity, filletLines, trimEntity } from './intersect.js'
 import { clipboardRecord, describeRecord, pasteOp } from './clipboard.js'
-import { diffPlan, sameBlockMember } from './mutationDiff.js'
+import { diffPlan } from './mutationDiff.js'
 
 // Mirrors the worker's own bound. Checked against File.size BEFORE any read.
 export const MAX_DOCUMENT_BYTES = 16 * 1024 * 1024
@@ -327,8 +327,16 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
       if ((entities.groups || []).some((g) => (g.memberIds || []).map(String).includes(id))) return fail('ungroup members before creating a block')
       if (entity.dimensionDefined || entities.some((e) => e.type === 'DIMENSION' && (e.definingHandles || []).map(String).includes(id))) return fail('a dimension defining entity cannot become a block child')
       const original = committed.find((e) => String(e.id ?? e.handle) === id)
-      if (!original) return fail('same-plan additions must be saved before creating a block')
-      if (!sameBlockMember(original, entity)) return fail('members must have unchanged committed geometry and properties')
+      // Unsaved members become inline children. A hand import with null
+      // committedEntities has no head, so every otherwise eligible member is admitted.
+      if (!original) continue
+      const properties = (e) => [Number.isFinite(e.aci) ? e.aci : 256,
+        Array.isArray(e.trueColor) && e.trueColor.length === 3 && e.trueColor.every(Number.isFinite) ? e.trueColor : null,
+        (typeof e.linetype === 'string' && e.linetype ? e.linetype : 'ByLayer').toLowerCase(),
+        Number.isFinite(e.lineweight) ? e.lineweight : -1]
+      if (JSON.stringify(properties(original)) !== JSON.stringify(properties(entity))) {
+        return fail('block members keep their colour, linetype and lineweight; change them after the block exists')
+      }
     }
     return { payload: { name: blockName, x: bx, y: by, members: ids, layer: '0' } }
   }

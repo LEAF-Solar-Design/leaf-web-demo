@@ -126,6 +126,9 @@ const DECLARED_AND_USED = [
 
 describe('App.jsx wiring', () => {
   describe('W4g selection mirror back', () => {
+    it('mounts StatusModesBridge under the engine flag', () => {
+      assert.match(appSource, /\{ENV_CAD_EDIT && <StatusModesBridge \/>\}/)
+    })
     it('passes the console selection setter to EngineDocumentView', () => {
       assert.match(appSource, /<EngineDocumentView\b(?:(?!\/>)[\s\S])*?\bonSelectedHandleChange=\{setSelectedHandle\}/)
     })
@@ -281,11 +284,11 @@ describe('App.jsx wiring', () => {
   }
 
   it('fails when a setter declaration is deleted from under its callers', () => {
-    // Falsification: the exact 4a mutation, replayed.
+    // Falsification: remove the state setter used by the author-panel wrapper.
     const mutated = appSource.replace(
-      /const \[authorOpen, setAuthorOpen\] = useState\(false\)/, '')
+      /const \[authorOpen, setAuthorOpenState\] = useState\(false\)/, '')
     assert.notEqual(mutated, appSource, 'the falsification mutation must apply')
-    assert.deepEqual(orphanSetters(mutated), ['setAuthorOpen'])
+    assert.deepEqual(orphanSetters(mutated), ['setAuthorOpenState'])
   })
 
   it('refuses a live legacy write when version bootstrap did not produce a pin', () => {

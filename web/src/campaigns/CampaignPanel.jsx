@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
-import useCampaigns from './useCampaigns.js'
+import { useEffect, useId, useImperativeHandle, useRef, useState } from 'react'
+import useCampaigns, { releaseSource } from './useCampaigns.js'
 import { uploadProjectInput } from './api.js'
 import './campaigns.css'
 
@@ -54,7 +54,8 @@ function check(value, field, max) {
   }
 }
 
-function SubmitForm({ campaign, projectId }) {
+function SubmitForm({ campaign, projectId, navigationRef, onBusyChange }) {
+  const titleInput = useRef(null)
   const [title, setTitle] = useState('')
   const [prompt, setPrompt] = useState('')
   const [mode, setMode] = useState('ordinary')
@@ -66,6 +67,16 @@ function SubmitForm({ campaign, projectId }) {
   useEffect(() => { inputLive.current = true; return () => { inputLive.current = false } }, [])
   const action = useAction()
   const busy = action.busy || !!campaign.pending.submit || input.busy
+  useEffect(() => { onBusyChange(busy) }, [busy, onBusyChange])
+  useImperativeHandle(navigationRef, () => ({
+    finish() {
+      if (busy || inputLock.current) return
+      const disclosure = titleInput.current?.closest('details')
+      if (disclosure) disclosure.open = true
+      setMode('finish')
+      titleInput.current?.focus()
+    },
+  }))
   const field = action.error?.invalidField
   async function addInput() {
     if (inputLock.current || !input.file || input.ready || busy) return
@@ -80,6 +91,7 @@ function SubmitForm({ campaign, projectId }) {
   }
   return <form className="panel-sub" noValidate onSubmit={event => {
     event.preventDefault()
+    if (busy || inputLock.current) return
     action.run(() => {
       check(title, 'title', 200)
       check(prompt, 'prompt', mode === 'finish' ? 2000 : 32768)
@@ -111,12 +123,12 @@ function SubmitForm({ campaign, projectId }) {
     </div>}
     {mode === 'finish' && <label>Release deadline (optional)<input type="datetime-local" value={deadline} disabled={busy}
       onChange={event => setDeadline(event.target.value)} /></label>}
-    <label>Title<input value={title} maxLength={200} aria-invalid={field === 'title'} onChange={event => setTitle(event.target.value)} /></label>
+    <label>Title<input ref={titleInput} value={title} maxLength={200} aria-invalid={field === 'title'} onChange={event => setTitle(event.target.value)} /></label>
     {field === 'title' && <Alert error={action.error} />}
     <label>Prompt<textarea value={prompt} maxLength={mode === 'finish' ? 2000 : 32768} aria-invalid={field === 'prompt'} onChange={event => setPrompt(event.target.value)} /></label>
     <span className="dim" aria-live="polite">{(mode === 'finish' ? 2000 : 32768) - prompt.length} characters remaining</span>
     {field === 'prompt' && <Alert error={action.error} />}
-    <button type="submit" className="btn primary" disabled={busy || (mode === 'finish' && !!input.file && !input.ready)} aria-busy={busy}>{mode === 'finish' ? 'Finish this project' : 'Submit campaign'}</button>
+    <button type="submit" className="btn primary" disabled={busy || (mode === 'finish' && !!input.file && !input.ready)} aria-busy={busy}>{mode === 'finish' ? 'Request release' : 'Submit campaign'}</button>
     {field !== 'title' && field !== 'prompt' && <Alert error={action.error} onReload={campaign.refetch} />}
     <span role="status">{action.outcome}</span>
   </form>
@@ -161,7 +173,7 @@ function humanBytes(value) {
   return `${Number((value / unit).toFixed(1))} ${unit === 1024 ? 'KB' : 'MB'}`
 }
 
-function ReleaseOutputs({ campaign, completion, available, urlApi }) {
+function ReleaseOutputs({ campaign, completion, available, urlApi, sourceOnly = false }) {
   const [preview, setPreview] = useState(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
@@ -185,9 +197,9 @@ function ReleaseOutputs({ campaign, completion, available, urlApi }) {
     setBusy(true)
     setError(null)
     try {
-      const result = await campaign.downloadReleaseArtifact(artifact)
+      const result = await (sourceOnly ? campaign.downloadReleaseSource() : campaign.downloadReleaseArtifact(artifact))
       if (!result || !live.current || request !== sequence.current) return
-      if (/\.html$/i.test(result.name) && artifact.media_type === 'text/html' && result.mediaType === 'text/html') {
+      if (!sourceOnly && /\.html$/i.test(result.name) && artifact.media_type === 'text/html' && result.mediaType === 'text/html') {
         let html
         try { html = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(result.bytes) }
         catch { throw new Error('The verified tool could not be opened because its HTML is not valid UTF-8.') }
@@ -197,7 +209,7 @@ function ReleaseOutputs({ campaign, completion, available, urlApi }) {
         const link = document.createElement('a')
         try {
           link.href = url
-          link.download = result.name
+          link.download = sourceOnly ? 'source.dxf' : result.name
           document.body.append(link)
           link.click()
         } finally {
@@ -212,7 +224,10 @@ function ReleaseOutputs({ campaign, completion, available, urlApi }) {
       if (live.current && request === sequence.current) setBusy(false)
     }
   }
+  const source = sourceOnly && available ? releaseSource(completion) : null
   return <>
+    {sourceOnly ? source && <button type="button" className="btn primary" disabled={busy || !!campaign.pending.download}
+      aria-busy={busy} onClick={() => retrieve(source)}>Download source drawing</button> : <>
     {!(completion.deliverables || []).length && <p>Validated output evidence unavailable.</p>}
     <ul className="campaign-outputs">{(completion.deliverables || []).map((artifact, index) => {
       const bytes = artifact.byte_count ?? artifact.size_bytes ?? artifact.bytes
@@ -235,6 +250,7 @@ function ReleaseOutputs({ campaign, completion, available, urlApi }) {
           : <span>{name}: access evidence unavailable</span>}
       <span> ({humanBytes(bytes)})</span></li>
     })}</ul>
+    </>}
     <Alert error={error} onReload={campaign.refetch} />
     {preview && <div className="campaign-tool-preview">
       <button type="button" className="chip-act" onClick={close}>Close tool</button>
@@ -243,28 +259,36 @@ function ReleaseOutputs({ campaign, completion, available, urlApi }) {
   </>
 }
 
-function RevisionForm({ campaign, release }) {
+function RevisionForm({ campaign, release, action, busy }) {
   const [workflow, setWorkflow] = useState(release.contract?.workflow || '')
   const [reason, setReason] = useState('')
-  const action = useAction()
-  const busy = action.busy || !!campaign.pending.release
-  return <form noValidate onSubmit={event => {
+  const [expanded, setExpanded] = useState(false)
+  const id = useId()
+  const alwaysVisible = release.status === 'needs_approach'
+  const open = alwaysVisible || expanded
+  return <>
+    {!alwaysVisible && <button type="button" className="chip-act" disabled={busy}
+      aria-expanded={open} aria-controls={id} onClick={() => { if (!busy) setExpanded(value => !value) }}>Revise release</button>}
+    <div id={id} hidden={!open}>
+    {open && <form noValidate aria-labelledby={`${id}-heading`} onSubmit={event => {
     event.preventDefault()
+    if (busy) return
     action.run(() => {
       check(workflow, 'workflow', 16384)
       check(reason, 'reason', 4096)
       return campaign.reviseRelease({ workflow, reason })
     }, 'Revised approach recorded. Review it before continuing.')
   }}>
-    <p>Saved inputs, required checks and the original goal are retained.</p>
+    <h4 id={`${id}-heading`}>Revise release</h4>
+    <p>The original goal and prior evidence are retained. Required checks are updated for the revised workflow.</p>
     <label>Revised workflow<textarea maxLength={16384} value={workflow} disabled={busy}
       onChange={event => setWorkflow(event.target.value)} /></label>
     <label>Reason for changing approach<textarea maxLength={4096} value={reason} disabled={busy}
       onChange={event => setReason(event.target.value)} /></label>
     <button type="submit" className="chip-act" disabled={busy} aria-busy={busy}>Record revised approach</button>
-    <Alert error={action.error} onReload={campaign.refetch} />
-    <span role="status">{action.outcome}</span>
-  </form>
+    </form>}
+    </div>
+  </>
 }
 
 function CompletionPanel({ campaign, artifactUrlApi }) {
@@ -322,8 +346,8 @@ function CompletionPanel({ campaign, artifactUrlApi }) {
       <h4>What requires you</h4>
       <EvidenceList items={itemsOf(completion.next_action).map(nextActionText)} />
     </>}
-    {release.status === 'needs_approach' && <RevisionForm key={`${release.release_id}:${release.contract_version}`}
-      campaign={campaign} release={release} />}
+    {['active', 'queued', 'waiting', 'paused', 'needs_approach'].includes(release.status) && <RevisionForm key={`${release.release_id}:${release.contract_version}`}
+      campaign={campaign} release={release} action={action} busy={busy} />}
     {release.contract_version > 1 && <><h4>Current workflow</h4><p>{contract.workflow}</p></>}
     {currentFailure && <p role="alert">{currentFailure.reason || 'Current verification is unavailable. Reload the release.'}</p>}
     {itemsOf(completion.remaining).some(textOf) && <EvidenceList items={completion.remaining} />}
@@ -344,6 +368,8 @@ function CompletionPanel({ campaign, artifactUrlApi }) {
     </li>)}</ul>
     <h4>Proven replay recipe</h4>
     <EvidenceList items={replay?.steps ?? replay} fallback="Proven replay recipe unavailable." />
+    <ReleaseOutputs key={`source:${release.release_id}:${release.contract_version}:${finished}`} campaign={campaign}
+      completion={completion} available={finished} urlApi={artifactUrlApi} sourceOnly />
     <h4>Known limits</h4>
     <EvidenceList items={completion.known_limits ?? delivery?.evidence?.known_limits} fallback="Known limits unavailable." />
     <h4>Original goal</h4><p>{contract.original_goal || campaign.selected.prompt}</p>
@@ -504,12 +530,18 @@ function EnrollmentPanel({ campaign }) {
 
 function SignedInPanel({ projectId, projectName, artifactUrlApi, authorityProvider }) {
   const campaign = useCampaigns(projectId, { enabled: true, authorityProvider })
+  const formNavigation = useRef(null)
+  const [formBusy, setFormBusy] = useState(false)
   const selected = campaign.selected
   const completion = campaign.completion !== undefined ? campaign.completion
     : campaign.execution?.completion ?? selected?.completion
   const hasRelease = !!completion?.release
   return <>
-    <h2>Project results</h2>
+    <div className="campaign-results-header">
+      <h2>Project results</h2>
+      {(!selected || hasRelease) && <button type="button" className="btn primary" disabled={formBusy || !!campaign.pending.submit}
+        onClick={() => formNavigation.current?.finish()}>Finish this project</button>}
+    </div>
     {campaign.status === 'loading' && <div role="status" aria-label="Loading campaigns">
       <div className="skeleton-stack" aria-hidden="true"><div className="skeleton-row" /><div className="skeleton-row" /></div>
     </div>}
@@ -590,8 +622,8 @@ function SignedInPanel({ projectId, projectName, artifactUrlApi, authorityProvid
     </div>}
     {campaign.campaigns.length > 0 ? <details className="campaign-disclosure">
       <summary>Start a new request</summary>
-      <SubmitForm key={`form:${campaign.selectedId || 'new'}`} campaign={campaign} projectId={projectId} />
-    </details> : <SubmitForm key="form:new" campaign={campaign} projectId={projectId} />}
+      <SubmitForm key={`form:${campaign.selectedId || 'new'}`} campaign={campaign} projectId={projectId} navigationRef={formNavigation} onBusyChange={setFormBusy} />
+    </details> : <SubmitForm key="form:new" campaign={campaign} projectId={projectId} navigationRef={formNavigation} onBusyChange={setFormBusy} />}
   </>
 }
 

@@ -45,6 +45,7 @@ import hashlib
 import hmac
 import importlib.util
 import json
+import logging
 import os
 import re
 import secrets
@@ -66,6 +67,7 @@ from write_loop import GUEST_TENANT_PREFIX
 
 SERVER_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SERVER_DIR.parent
+LOGGER = logging.getLogger(__name__)
 
 ACCEPTED_EXTENSIONS = (".dwg", ".dxf")
 
@@ -1003,8 +1005,11 @@ def _safe_path_id(value: str, kind: str) -> str:
 def wipe_failed_attempt_residue(
     tenant_id: str, drawing_id: str, attempt: Optional[str] = None,
 ) -> bool:
-    with write_loop.upload_mutation_commit_guard() as commit_enabled:
-        if not commit_enabled:
+    with write_loop.upload_mutation_refusal_guard() as refusal:
+        if refusal is not None:
+            write_loop.log_mutation_refused(
+                LOGGER, refusal,
+                surface="guest_uploads.wipe_failed_attempt_residue")
             return False
         return _wipe_failed_attempt_residue(tenant_id, drawing_id, attempt)
 
@@ -1125,8 +1130,10 @@ def _wipe_failed_attempt_files(tenant_id: str, drawing_id: str) -> bool:
 def _mark_failed(backend, tenant_id: str, drawing_id: str, marker: Dict[str, Any],
                  error_code: str, message: str, retryable: bool,
                  *, extraction_owner: str = "", extraction_fence: int = 0) -> bool:
-    with write_loop.upload_mutation_commit_guard() as commit_enabled:
-        if not commit_enabled:
+    with write_loop.upload_mutation_refusal_guard() as refusal:
+        if refusal is not None:
+            write_loop.log_mutation_refused(
+                LOGGER, refusal, surface="guest_uploads.mark_failed")
             return False
         written = _mark_failed_committed(
             backend, tenant_id, drawing_id, marker, error_code, message,
@@ -1273,8 +1280,10 @@ def _verify_staged_source(
 
 
 def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
-    with write_loop.upload_mutation_commit_guard() as commit_enabled:
-        if not commit_enabled:
+    with write_loop.upload_mutation_refusal_guard() as refusal:
+        if refusal is not None:
+            write_loop.log_mutation_refused(
+                LOGGER, refusal, surface="guest_uploads.run_extraction")
             return
         _run_extraction(tenant_id, drawing_id, ext)
 
@@ -1317,7 +1326,11 @@ def _run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
 
     backend = write_loop.upload_backend_for_tenant(tenant_id)
     extraction_owner, extraction_fence = "", 0
-    if not write_loop.fence_open():
+    # Upload lane: the fence FILE only. ONE read decides and reports.
+    start_refusal = write_loop.fence_refusal()
+    if start_refusal is not None:
+        write_loop.log_mutation_refused(
+            LOGGER, start_refusal, surface="guest_uploads.extraction_start")
         return
     if upload_store_mode() == "postgres":
         claim = _claim_extraction(tenant_id, drawing_id)
@@ -1429,11 +1442,13 @@ def _run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
         contextlib.nullcontext() if upload_store_mode() == "postgres"
         else drawing_lock(tenant_id, drawing_id)
     )
-    with authority_lock, write_loop.upload_mutation_commit_guard() as commit_enabled:
-        if not commit_enabled:
+    with authority_lock, write_loop.upload_mutation_refusal_guard() as refusal:
+        if refusal is not None:
             # The cutover fence protects every canonical commit, including
             # marker transitions.  Leave the attempt unchanged so the
             # operator can recover or retry it after the drain.
+            write_loop.log_mutation_refused(
+                LOGGER, refusal, surface="guest_uploads.extraction_commit")
             return
         current = read_marker(backend, tenant_id, drawing_id)
         if current is None:
@@ -1953,8 +1968,10 @@ def _store_checkout_guard_for_purge(tenant_id: str, drawing_id: str):
 
 
 def purge_expired(now: Optional[datetime] = None) -> Dict[str, Any]:
-    with write_loop.upload_mutation_commit_guard() as commit_enabled:
-        if not commit_enabled:
+    with write_loop.upload_mutation_refusal_guard() as refusal:
+        if refusal is not None:
+            write_loop.log_mutation_refused(
+                LOGGER, refusal, surface="guest_uploads.purge_expired")
             return {"count": 0, "freed_bytes": 0, "purged": []}
         return _purge_expired(now)
 

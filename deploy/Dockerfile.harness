@@ -78,7 +78,10 @@ RUN npx tsc -p tsconfig.build.json \
 # the dedicated non-root harness identity.
 RUN useradd --system --uid 10002 --user-group --home /home/leaf --create-home leaf \
   && mkdir -p /data/tenants /data/grants /data/sessions \
-  && chown -R 10002:10002 /data /home/leaf
+  && chown -R 10002:10002 /data /home/leaf \
+  && mkdir -p /app/run/forge \
+  && chown 10002:10002 /app/run/forge \
+  && chmod 0700 /app/run/forge
 
 # --- Runtime proof that the shipped scripts survived the build. ---------------
 # Same guard, same reasoning, and the same EXACT spelling as deploy/Dockerfile.app
@@ -119,7 +122,9 @@ RUN useradd --system --uid 10002 --user-group --home /home/leaf --create-home le
 # read by node or tsc, so readable is the right bar for them.
 USER 10002:10002
 
-RUN ["/bin/sh", "-c", "test -f /app/scripts/drive.ts && test -s /app/scripts/drive.ts && test -r /app/scripts/drive.ts && test -f /app/scripts/e2b-tool-exec.mjs && test -s /app/scripts/e2b-tool-exec.mjs && test -r /app/scripts/e2b-tool-exec.mjs && test -f /app/scripts/e2b-vendor-eval.mjs && test -s /app/scripts/e2b-vendor-eval.mjs && test -r /app/scripts/e2b-vendor-eval.mjs && test -f /app/scripts/git-worker.cjs && test -s /app/scripts/git-worker.cjs && test -r /app/scripts/git-worker.cjs && test -f /app/scripts/serve.ts && test -s /app/scripts/serve.ts && test -r /app/scripts/serve.ts && test -f /app/scripts/start-harness.sh && test -s /app/scripts/start-harness.sh && test -r /app/scripts/start-harness.sh && test -x /app/scripts/start-harness.sh"]
+RUN ["/bin/sh", "-c", "test -f /app/dist/scripts/forgeMaterialize.js && test -s /app/dist/scripts/forgeMaterialize.js && test -r /app/dist/scripts/forgeMaterialize.js && test -d /app/run/forge && test -w /app/run/forge && test -x /app/run/forge"]
+
+RUN ["/bin/sh", "-c", "test -f /app/scripts/drive.ts && test -s /app/scripts/drive.ts && test -r /app/scripts/drive.ts && test -f /app/scripts/e2b-tool-exec.mjs && test -s /app/scripts/e2b-tool-exec.mjs && test -r /app/scripts/e2b-tool-exec.mjs && test -f /app/scripts/e2b-vendor-eval.mjs && test -s /app/scripts/e2b-vendor-eval.mjs && test -r /app/scripts/e2b-vendor-eval.mjs && test -f /app/scripts/forgeMaterialize.ts && test -s /app/scripts/forgeMaterialize.ts && test -r /app/scripts/forgeMaterialize.ts && test -f /app/scripts/git-worker.cjs && test -s /app/scripts/git-worker.cjs && test -r /app/scripts/git-worker.cjs && test -f /app/scripts/serve.ts && test -s /app/scripts/serve.ts && test -r /app/scripts/serve.ts && test -f /app/scripts/start-harness.sh && test -s /app/scripts/start-harness.sh && test -r /app/scripts/start-harness.sh && test -x /app/scripts/start-harness.sh"]
 
 # Declared below every non-consuming instruction, deliberately: this value is a
 # new commit sha on every build, and a changed in-scope ARG is a buildx cache

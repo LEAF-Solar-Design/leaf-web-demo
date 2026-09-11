@@ -297,6 +297,45 @@ def _op_list(mutations: Dict[str, Any], field: str) -> List[Any]:
     return raw
 
 
+def _validate_block_child(intake, raw):
+    if not isinstance(raw, dict):
+        raise ValueError("block child must be an object")
+    if "handle" in raw:
+        raise ValueError("block children carry no handle")
+    kind = raw.get("kind")
+    if kind not in _ADD_KINDS:
+        raise ValueError("block child kind must be LINE, LWPOLYLINE, CIRCLE or ARC")
+    if "bulges" in raw or raw.get("bulge", 0):
+        raise ValueError("block LWPOLYLINE must have straight segments, every bulge 0")
+    if raw.get("width"):
+        raise ValueError("block LWPOLYLINE must have zero constant and vertex width")
+    if "xdata" in raw:
+        raise ValueError("block children carry no xdata")
+    # Reuse the add validator without allocating a model-space add ordinal.
+    addition = dict(raw, handle="block-child")
+    if "aci" in addition:
+        if "color" in addition:
+            raise ValueError("block child has duplicate colour fields")
+        addition["color"] = addition.pop("aci")
+    child = validate_mutations(intake, {"added": [addition]})["added"][0]
+    child.pop("handle")
+    child.pop("xdata", None)
+    child["kind"] = kind
+    if "color" in child:
+        child["aci"] = child.pop("color")
+    if kind == "LINE" and child["pts"][0] == child["pts"][1]:
+        raise ValueError("block child has zero length")
+    if "r" in child and child["r"] <= 0:
+        raise ValueError("block child r must be positive")
+    if kind == "ARC" and abs(math.fmod(child["end_deg"] - child["start_deg"], 360.0)) < 1e-9:
+        raise ValueError("block child has no sweep")
+    if kind == "LWPOLYLINE":
+        lowered = (world_to_ocs if child["closed"] else world_to_ocs_any)(child["pts"])
+        if not _normal_is_up({"nrm": lowered["normal"]}):
+            raise ValueError("block members must be planar with normal +Z")
+    return dict(sorted(child.items()))
+
+
 def _validate_block_defs(intake, mutations, index):
     definitions = _op_list(mutations, "block_defs")
     if not definitions:
@@ -316,7 +355,8 @@ def _validate_block_defs(intake, mutations, index):
     used = set()
     result = []
     for raw in definitions:
-        if not isinstance(raw, dict) or set(raw) != {"name", "base", "members", "insert"}:
+        if (not isinstance(raw, dict) or not {"name", "base", "members", "insert"} <= set(raw)
+                or set(raw) - {"name", "base", "members", "insert", "children", "order"}):
             raise ValueError("block definition requires name, base, members and insert only")
         name = raw["name"]
         if (not isinstance(name, str) or not 1 <= len(name) <= 255 or name.startswith("*")
@@ -329,8 +369,12 @@ def _validate_block_defs(intake, mutations, index):
             raise ValueError("block definition base must have three components")
         base = [round(v, 3) for v in _point3(raw["base"], "block base")]
         members = raw["members"]
-        if not isinstance(members, list) or not 1 <= len(members) <= 60:
-            raise ValueError("block definition requires 1..60 committed members")
+        children_raw = raw.get("children", [])
+        if not isinstance(children_raw, list):
+            raise ValueError("block children must be a list")
+        if not isinstance(members, list) or not 1 <= len(members) + len(children_raw) <= 60:
+            raise ValueError("block definition requires 1..60 committed members and inline children")
+        children = [_validate_block_child(intake, child) for child in children_raw]
         seen = set()
         for h in members:
             _existing_handle(h, "block member")
@@ -383,12 +427,23 @@ def _validate_block_defs(intake, mutations, index):
                     dependencies = [dim.get("handle")]
             if dependencies or "dimensionRef" in entity:
                 raise ValueError("block member is referenced by a DIMENSION association or reactor")
-            for op in ("transforms", "set_layer", "set_points", "set_circle", "set_arc", *V3_SET_OPS):
+            if any(isinstance(e, dict) and e.get("handle") == h
+                   for e in _op_list(mutations, "transforms")):
+                raise ValueError("block members cannot be transformed; use set_points")
+            for op in V3_SET_OPS:
                 if any(isinstance(e, dict) and e.get("handle") == h for e in _op_list(mutations, op)):
-                    raise ValueError("block members must be UNCHANGED committed entities")
+                    raise ValueError("block members keep their colour, linetype and lineweight; change them after the block exists")
             if h not in removed:
                 raise ValueError("each block member must also be in removed for atomic REPLACE")
         used.update(seen)
+        if children and "order" not in raw:
+            raise ValueError("block order is required with inline children")
+        if "order" in raw:
+            order = raw["order"]
+            expected = {*(f"H:{h}" for h in members), *(f"C:{i}" for i in range(len(children)))}
+            if (not isinstance(order, list) or any(not isinstance(ref, str) for ref in order)
+                    or len(order) != len(expected) or set(order) != expected):
+                raise ValueError("block order must name each member and inline child exactly once")
         ordinal = raw["insert"]
         if type(ordinal) is not int or not 0 <= ordinal < len(added):
             raise ValueError("block insert ordinal must point at its matching INSERT")
@@ -400,7 +455,12 @@ def _validate_block_defs(intake, mutations, index):
                 or insert.get("pt") != raw["base"] or insert.get("rot") != 0
                 or insert.get("scale") != [1, 1, 1]):
             raise ValueError("block insert must match name and base on layer 0, rotation 0, scale 1,1,1")
-        result.append({"name": name, "base": base, "members": list(members), "insert": ordinal})
+        definition = {"name": name, "base": base, "members": list(members), "insert": ordinal}
+        if "children" in raw:
+            definition["children"] = children
+        if "order" in raw:
+            definition["order"] = list(order)
+        result.append(definition)
     return sorted(result, key=lambda b: b["name"])
 
 
@@ -420,6 +480,7 @@ def validate_mutations(
     _reject_raw_fields(mutations)
     index = _index_intake(intake)
     block_defs = _validate_block_defs(intake, mutations, index)
+    consumed = {h for definition in block_defs for h in definition["members"]}
     known_linetypes = _known_linetype_names(intake)
     removed_raw = _op_list(mutations, "removed")
     added_raw = _op_list(mutations, "added")
@@ -436,6 +497,7 @@ def validate_mutations(
         + len(set_layer_raw) + len(set_points_raw) + len(set_circle_raw)
         + len(set_arc_raw) + sum(len(style_raw[op]) for op in V3_SET_OPS)
         + len(added_groups_raw) + len(removed_groups_raw) + len(block_defs)
+        + sum(len(b.get("children", [])) for b in block_defs)
     )
     if op_count == 0 and reject_noop:
         raise ValueError("mutations must contain at least one operation")
@@ -491,7 +553,7 @@ def validate_mutations(
         })
 
     # v2 replacements: one geometry op per handle, one layer op per handle,
-    # nothing on a removed handle. Each op names an entity of the kind it
+    # only consumed block members may also be removed. Each op names the kind it
     # replaces, and a tilted circle or arc (a normal other than +z) is
     # refused, since the plan writes its centre in world coordinates.
     geometry_seen = set()
@@ -501,7 +563,7 @@ def validate_mutations(
         handle = _existing_handle(handle_raw, field)
         if handle not in index:
             raise ValueError(f"unknown {field.split('[')[0]} handle {handle!r}")
-        if handle in removed_seen:
+        if handle in removed_seen and handle not in consumed:
             raise ValueError(f"handle {handle!r} cannot be removed and replaced")
         kind, entity = index[handle]
         if kind == "MULTILEADER":
@@ -523,7 +585,9 @@ def validate_mutations(
         relayered_seen.add(handle)
         set_layer.append({"handle": handle, "layer": layer})
 
-    total_points = 0
+    total_points = sum(len(c.get("pts", [])) for b in block_defs for c in b.get("children", []))
+    if total_points > MAX_POINTS:
+        raise ValueError("mutation point bound exceeded")
     set_points: List[Dict[str, Any]] = []
     for position, raw in enumerate(set_points_raw):
         if not isinstance(raw, dict) or not {"handle", "pts"} <= set(raw) or set(raw) - _SET_POINTS_FIELDS:
@@ -535,6 +599,8 @@ def validate_mutations(
         if not isinstance(closed, bool):
             raise ValueError(f"set_points {handle!r} closed must be a boolean")
         points = _points(raw.get("pts"), f"set_points {handle!r}", minimum=3 if closed else 2)
+        if handle in consumed and not _normal_is_up({"nrm": world_to_ocs_any(points)["normal"]}):
+            raise ValueError("block members must be planar with normal +Z")
         total_points += len(points)
         if total_points > MAX_POINTS:
             raise ValueError("mutation point bound exceeded")
@@ -1190,6 +1256,23 @@ def _ocs_line(tag: str, head: str, lowered: Dict[str, Any]) -> str:
     return f"{tag}|{head}|{normal}|{_fmt(lowered['elevation'])}|{vertices}"
 
 
+def _block_child_line(name, ordinal, child):
+    kind = child["kind"]
+    head = f"{name}|{ordinal}|{kind}|{child['layer']}"
+    if kind == "LWPOLYLINE":
+        lowered = (world_to_ocs if child["closed"] else world_to_ocs_any)(child["pts"])
+        # The flag preserves open versus closed with the same four child kinds.
+        row = _ocs_line("BLOCKCHILD", f"{head}|{int(child['closed'])}", lowered)
+    elif kind == "LINE":
+        row = f"BLOCKCHILD|{head}|{_fmt3(child['pts'][0])}|{_fmt3(child['pts'][1])}"
+    else:
+        row = f"BLOCKCHILD|{head}|{_fmt3(child['c'])}|{_fmt(child['r'])}"
+        if kind == "ARC":
+            row += f"|{_fmt(child['start_deg'])}|{_fmt(child['end_deg'])}"
+    return (f"{row}|"
+            f"{child.get('aci', 256)}|{child.get('linetype', 'ByLayer')}|{child.get('lineweight', -1)}")
+
+
 def emit_plan(
     canonical: Dict[str, Any], *, base_sha256: str,
     base_intake: Optional[Dict[str, Any]] = None,
@@ -1205,8 +1288,33 @@ def emit_plan(
     if uses_v3(canonical) and version != 3:
         raise ValueError("contract v3 is required for property operations")
     lines = [f"LEAF_MUTATION_PLAN|{version}", f"BASE_SHA256|{base_sha256}"]
+    consumed = {h for definition in canonical.get("block_defs", []) for h in definition["members"]}
+    member_setters, remaining_setters = {}, {}
+    for op in ("set_layer", "set_points", "set_circle", "set_arc"):
+        member_setters[op], remaining_setters[op] = [], []
+        for item in canonical.get(op, []):
+            target = member_setters if item["handle"] in consumed else remaining_setters
+            target[op].append(item)
+
+    def append_setters(setters):
+        for item in setters["set_layer"]:
+            lines.append(f"RELAYER|{item['handle']}|{item['layer']}")
+        for item in setters["set_points"]:
+            lowered = world_to_ocs_any(item["pts"])
+            lines.append(_ocs_line("SETPOINTS", f"{item['handle']}|{1 if item['closed'] else 0}", lowered))
+        for item in setters["set_circle"]:
+            lines.append(f"SETCIRCLE|{item['handle']}|{_fmt3(item['c'])}|{_fmt(item['r'])}")
+        for item in setters["set_arc"]:
+            lines.append(
+                f"SETARC|{item['handle']}|{_fmt3(item['c'])}|{_fmt(item['r'])}|"
+                f"{_fmt(item['start_deg'])}|{_fmt(item['end_deg'])}")
+
+    append_setters(member_setters)
     for definition in canonical.get("block_defs", []):
-        members = ";".join(f"H:{h}" for h in definition["members"])
+        for ordinal, child in enumerate(definition.get("children", [])):
+            lines.append(_block_child_line(definition["name"], ordinal, child))
+        members = ";".join(definition["order"] if definition.get("children")
+                           else [f"H:{h}" for h in definition["members"]])
         base = ",".join(f"{v:.3f}" for v in definition["base"])
         lines.append(f"ADDBLOCKDEF|{definition['name']}|{base}|{members}")
     for name in canonical.get("removed_groups", []):
@@ -1228,17 +1336,7 @@ def emit_plan(
                     f"transform handle {handle!r} has invalid source geometry")
             target = transformed_points(points, transform)
             lines.append(_ocs_line("TRANSFORM", handle, world_to_ocs(target)))
-    for item in canonical.get("set_layer", []):
-        lines.append(f"RELAYER|{item['handle']}|{item['layer']}")
-    for item in canonical.get("set_points", []):
-        lowered = world_to_ocs_any(item["pts"])
-        lines.append(_ocs_line("SETPOINTS", f"{item['handle']}|{1 if item['closed'] else 0}", lowered))
-    for item in canonical.get("set_circle", []):
-        lines.append(f"SETCIRCLE|{item['handle']}|{_fmt3(item['c'])}|{_fmt(item['r'])}")
-    for item in canonical.get("set_arc", []):
-        lines.append(
-            f"SETARC|{item['handle']}|{_fmt3(item['c'])}|{_fmt(item['r'])}|"
-            f"{_fmt(item['start_deg'])}|{_fmt(item['end_deg'])}")
+    append_setters(remaining_setters)
     for entity in canonical.get("added", []):
         layer = entity["layer"]
         kind = entity.get("kind", "LWPOLYLINE")

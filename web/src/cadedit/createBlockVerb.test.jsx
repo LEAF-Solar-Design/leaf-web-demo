@@ -21,7 +21,7 @@ const inputs = { name: 'B', x: '10', y: '20', members: '17' }
 const context = (entities = [line, circle], committedEntities = [line, circle]) => ({ selectedId: '16', entities, committedEntities })
 const build = (ctx = context(), values = inputs, blocks = []) => buildCreatePayload('createBlock', values, blocks, [], ctx)
 
-describe('Create Block from committed cockpit entities', () => {
+describe('Create Block from cockpit entities', () => {
   it('keeps block replacement outside the closed Draw and creating-edit censuses', () => {
     expect(BLOCK_OPS).toEqual({ block: 'createBlock' })
     expect(Object.isFrozen(BLOCK_OPS)).toBe(true)
@@ -55,10 +55,23 @@ describe('Create Block from committed cockpit entities', () => {
     entities.groups = [{ name: 'RACK', memberIds: ['16', '17'] }]
     expect(build(context(entities)).refusal).toContain('ungroup')
   })
-  it('refuses unsaved and modified members', () => {
-    expect(build(context([line, circle], [])).refusal).toContain('same-plan')
-    expect(build(context([{ ...line, aci: 3 }, circle])).refusal).toContain('unchanged committed')
-    expect(build(context([{ ...line, vertices: [[2, 3, 0], [7, 3, 0]] }, circle])).refusal).toContain('unchanged committed')
+  it('admits an unsaved member beside a committed member', () => {
+    expect(build(context([line, circle], [circle]))).toEqual({
+      payload: { name: 'B', x: 10, y: 20, members: ['16', '17'], layer: '0' },
+    })
+  })
+  it('admits moved and relayered committed members', () => {
+    expect(build(context([{ ...line, layer: 'SITE', vertices: [[2, 3, 0], [7, 3, 0]], linetype: 'bylayer' }, circle])).payload.members)
+      .toEqual(['16', '17'])
+  })
+  it('refuses changed committed colour, linetype and lineweight with the property sentence', () => {
+    for (const change of [{ aci: 3 }, { trueColor: [1, 2, 3] }, { linetype: 'DASHED' }, { lineweight: 25 }]) {
+      expect(build(context([{ ...line, ...change }, circle])).refusal)
+        .toBe('Create block refused: block members keep their colour, linetype and lineweight; change them after the block exists.')
+    }
+  })
+  it('admits eligible hand-import members with null committedEntities', () => {
+    expect(build(context([line, circle], null)).payload.members).toEqual(['16', '17'])
   })
   it('refuses a collision and reserved name punctuation, deferring a truncated catalogue to the crate', () => {
     const blocks = [{ name: 'RACK' }]

@@ -4,7 +4,7 @@ import CampaignPanel from './CampaignPanel.jsx'
 import useCampaigns from './useCampaigns.js'
 import { uploadProjectInput } from './api.js'
 
-vi.mock('./useCampaigns.js', () => ({ default: vi.fn() }))
+vi.mock('./useCampaigns.js', async importOriginal => ({ ...await importOriginal(), default: vi.fn() }))
 vi.mock('./api.js', () => ({ uploadProjectInput: vi.fn() }))
 
 const P = '11111111-1111-1111-1111-111111111111'
@@ -27,6 +27,7 @@ beforeEach(() => {
     transitionRelease: vi.fn().mockResolvedValue({ ok: true }),
     retryReleaseStage: vi.fn().mockResolvedValue({ ok: true }),
     downloadReleaseArtifact: vi.fn(),
+    downloadReleaseSource: vi.fn(),
   }
   useCampaigns.mockImplementation(() => campaign)
 })
@@ -42,6 +43,123 @@ function render(ui) {
   return { ...view, rerender(next) { view.rerender(next); expand() } }
 }
 
+describe('finish request navigation', () => {
+  function freshProject() {
+    campaign.campaigns = []
+    campaign.selected = null
+    campaign.selectedId = null
+  }
+  function navigate() {
+    fireEvent.click(screen.getByRole('button', { name: 'Finish this project' }))
+  }
+  it.each(['fresh', 'release'])('opens finish fields without starting work for a %s project', kind => {
+    if (kind === 'fresh') freshProject()
+    else campaign.completion = { release: { release_id: Q, status: 'active', contract_version: 1, contract: {} } }
+    const { container } = renderCollapsed(panel())
+    const header = container.querySelector('.campaign-results-header')
+    expect(within(header).getByRole('heading', { name: 'Project results' })).toBeTruthy()
+    expect(within(header).getByRole('button', { name: 'Finish this project' })).toBeTruthy()
+    if (kind === 'release') expect(screen.getByText('Start a new request').closest('details').open).toBe(false)
+    navigate()
+    if (kind === 'release') expect(screen.getByText('Start a new request').closest('details').open).toBe(true)
+    expect(screen.getByLabelText('Campaign goal').value).toBe('finish')
+    expect(document.activeElement).toBe(screen.getByLabelText('Title'))
+    expect(screen.getByLabelText('Delivery profile')).toBeTruthy()
+    expect(screen.getByLabelText('Input file (optional)')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Request release' })).toBeTruthy()
+    expect(campaign.submit).not.toHaveBeenCalled()
+    expect(campaign.createRelease).not.toHaveBeenCalled()
+    expect(campaign.transitionRelease).not.toHaveBeenCalled()
+    expect(uploadProjectInput).not.toHaveBeenCalled()
+  })
+  it('preserves the same draft and selected input through repeated navigation and uses its ready reference', async () => {
+    freshProject()
+    const path = `inputs/${'a'.repeat(64)}/records.json`
+    uploadProjectInput.mockResolvedValue({ path, name: 'records.json' })
+    renderCollapsed(panel())
+    const title = screen.getByLabelText('Title')
+    const prompt = screen.getByLabelText('Prompt')
+    fireEvent.change(title, { target: { value: 'Records export' } })
+    fireEvent.change(prompt, { target: { value: 'Download CSV' } })
+    navigate()
+    const input = screen.getByLabelText('Input file (optional)')
+    const file = new File(['[]'], 'records.json', { type: 'application/json' })
+    fireEvent.change(input, { target: { files: [file] } })
+    navigate()
+    navigate()
+    expect(screen.getByLabelText('Title')).toBe(title)
+    expect(title.value).toBe('Records export')
+    expect(prompt.value).toBe('Download CSV')
+    expect(screen.getByLabelText('Input file (optional)')).toBe(input)
+    expect(input.files[0]).toBe(file)
+    expect(uploadProjectInput).not.toHaveBeenCalled()
+    expect(campaign.submit).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Add to project' }))
+    await screen.findByText('records.json added to this project. Ready for this release.')
+    navigate()
+    expect(screen.getByRole('button', { name: 'Add to project' }).disabled).toBe(true)
+    expect(campaign.submit).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Request release' }))
+    await waitFor(() => expect(campaign.submit).toHaveBeenCalledExactlyOnceWith({ title: 'Records export', prompt: 'Download CSV', mode: 'finish',
+      finish: { delivery_profile: 'web_tool', intended_user: 'Project owner', workflow: 'Download CSV', artifact_refs: [path] } }))
+    expect(uploadProjectInput).toHaveBeenCalledExactlyOnceWith(P, file)
+  })
+  it('keeps ordinary campaign creation available after finish navigation', async () => {
+    freshProject()
+    renderCollapsed(panel())
+    navigate()
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'New campaign' } })
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Build documents' } })
+    fireEvent.change(screen.getByLabelText('Campaign goal'), { target: { value: 'ordinary' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Submit campaign' }))
+    await waitFor(() => expect(campaign.submit).toHaveBeenCalledExactlyOnceWith({ title: 'New campaign', prompt: 'Build documents' }))
+    expect(campaign.createRelease).not.toHaveBeenCalled()
+  })
+  it('isolates finish drafts and ready inputs when the project changes', async () => {
+    freshProject()
+    uploadProjectInput.mockResolvedValue({ path: 'inputs/old/records.json', name: 'records.json' })
+    const { rerender } = renderCollapsed(panel())
+    navigate()
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Old title' } })
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Old prompt' } })
+    fireEvent.change(screen.getByLabelText('Delivery profile'), { target: { value: 'cad_file' } })
+    fireEvent.change(screen.getByLabelText('Input file (optional)'), { target: { files: [new File(['[]'], 'records.json')] } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add to project' }))
+    await screen.findByText('records.json added to this project. Ready for this release.')
+    rerender(panel({ projectId: Q }))
+    expect(screen.getByLabelText('Campaign goal').value).toBe('ordinary')
+    navigate()
+    expect(screen.getByLabelText('Title').value).toBe('')
+    expect(screen.getByLabelText('Prompt').value).toBe('')
+    expect(screen.getByLabelText('Delivery profile').value).toBe('web_tool')
+    expect(screen.getByLabelText('Input file (optional)').files).toHaveLength(0)
+    expect(screen.queryByText(/added to this project/)).toBeNull()
+    expect(campaign.submit).not.toHaveBeenCalled()
+  })
+  it.each(['upload', 'submit'])('disables navigation and duplicate submission during %s', async operation => {
+    freshProject()
+    let resolve
+    const pending = new Promise(done => { resolve = done })
+    if (operation === 'upload') uploadProjectInput.mockReturnValue(pending)
+    else campaign.submit.mockReturnValue(pending)
+    renderCollapsed(panel())
+    navigate()
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Export' } })
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Download CSV' } })
+    const form = screen.getByLabelText('Title').closest('form')
+    if (operation === 'upload') {
+      fireEvent.change(screen.getByLabelText('Input file (optional)'), { target: { files: [new File(['[]'], 'records.json')] } })
+      fireEvent.click(screen.getByRole('button', { name: 'Add to project' }))
+    } else fireEvent.submit(form)
+    expect(screen.getByRole('button', { name: 'Finish this project' }).disabled).toBe(true)
+    navigate()
+    fireEvent.submit(form)
+    expect(campaign.submit).toHaveBeenCalledTimes(operation === 'submit' ? 1 : 0)
+    await act(async () => { resolve(operation === 'upload' ? { path: 'inputs/records.json', name: 'records.json' } : { campaign: row }) })
+    expect(screen.getByRole('button', { name: 'Finish this project' }).disabled).toBe(false)
+  })
+})
+
 describe('stalled release revision', () => {
   beforeEach(() => {
     campaign.completion = { release: { release_id: Q, status: 'needs_approach', contract_version: 1,
@@ -54,7 +172,7 @@ describe('stalled release revision', () => {
     const workflow = screen.getByLabelText('Revised workflow')
     expect(workflow.value).toBe('Old workflow')
     expect(workflow.closest('details')).toBeNull()
-    expect(screen.getByText('Saved inputs, required checks and the original goal are retained.')).toBeTruthy()
+    expect(screen.getByText('The original goal and prior evidence are retained. Required checks are updated for the revised workflow.')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Record revised approach' }))
     await screen.findByRole('alert')
     expect(campaign.reviseRelease).not.toHaveBeenCalled()
@@ -84,6 +202,121 @@ describe('stalled release revision', () => {
     campaign.completion.release.status = status
     renderCollapsed(panel())
     expect(screen.queryByLabelText('Revised workflow')).toBeNull()
+    expect(campaign.reviseRelease).not.toHaveBeenCalled()
+  })
+  it.each(['active', 'queued', 'waiting', 'paused'])('offers deliberate revision for %s without acting on disclosure navigation', status => {
+    campaign.completion.release.status = status
+    renderCollapsed(panel())
+    const toggle = screen.getByRole('button', { name: 'Revise release' })
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    const content = document.getElementById(toggle.getAttribute('aria-controls'))
+    expect(content.hidden).toBe(true)
+    fireEvent.click(toggle)
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    expect(content.hidden).toBe(false)
+    expect(within(content).getByRole('heading', { name: 'Revise release' })).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('Revised workflow'), { target: { value: 'Keep my workflow draft' } })
+    fireEvent.change(screen.getByLabelText('Reason for changing approach'), { target: { value: 'Keep my reason draft' } })
+    fireEvent.click(toggle)
+    expect(screen.queryByLabelText('Revised workflow')).toBeNull()
+    fireEvent.click(toggle)
+    expect(screen.getByLabelText('Revised workflow').value).toBe('Keep my workflow draft')
+    expect(screen.getByLabelText('Reason for changing approach').value).toBe('Keep my reason draft')
+    for (const method of ['reviseRelease', 'retryReleaseStage', 'transitionRelease', 'createRelease', 'submit', 'refetch']) {
+      expect(campaign[method]).not.toHaveBeenCalled()
+    }
+  })
+  it.each(['waiting', 'paused'])('records one revision from %s and uses the paused hook result until explicit resume', async status => {
+    campaign.completion.release.status = status
+    campaign.completion.stages = [{ stage: 'implementation', contract_version: 1, status: 'failed' }]
+    let resolve
+    campaign.reviseRelease.mockImplementation(() => new Promise(done => { resolve = done }))
+    const { rerender } = renderCollapsed(panel())
+    fireEvent.click(screen.getByRole('button', { name: 'Revise release' }))
+    fireEvent.change(screen.getByLabelText('Revised workflow'), { target: { value: 'Use the published tool' } })
+    fireEvent.change(screen.getByLabelText('Reason for changing approach'), { target: { value: 'Reuse publication' } })
+    const submit = screen.getByRole('button', { name: 'Record revised approach' })
+    fireEvent.click(submit)
+    fireEvent.submit(submit.closest('form'))
+    expect(campaign.reviseRelease).toHaveBeenCalledExactlyOnceWith({ workflow: 'Use the published tool', reason: 'Reuse publication' })
+    for (const name of ['Revise release', 'Record revised approach', 'Resume release', 'Cancel release']) {
+      expect(screen.getByRole('button', { name }).disabled).toBe(true)
+    }
+    expect(screen.getByLabelText('Revised workflow').disabled).toBe(true)
+    expect(screen.getByLabelText('Reason for changing approach').disabled).toBe(true)
+    await act(async () => {
+      campaign.completion.release = { ...campaign.completion.release, status: 'paused', contract_version: 2,
+        contract: { ...campaign.completion.release.contract, workflow: 'Use the published tool' } }
+      resolve({ release: campaign.completion.release })
+    })
+    rerender(panel())
+    expect(screen.getByText('Release paused')).toBeTruthy()
+    expect(screen.getByText('Use the published tool')).toBeTruthy()
+    expect(screen.queryByLabelText('Revised workflow')).toBeNull()
+    expect(campaign.retryReleaseStage).not.toHaveBeenCalled()
+    expect(campaign.transitionRelease).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Resume release' }))
+    await screen.findByText('Release resumed.')
+    expect(campaign.transitionRelease).toHaveBeenCalledExactlyOnceWith('resume')
+  })
+  it.each(['finished', 'cancelled'])('has no revision entry for %s releases', status => {
+    campaign.completion.release.status = status
+    renderCollapsed(panel())
+    expect(screen.queryByRole('button', { name: 'Revise release' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Record revised approach' })).toBeNull()
+  })
+  it.each(['waiting', 'needs_approach'])('blocks revision submission while a %s release mutation is pending', status => {
+    campaign.completion.release.status = status
+    const { rerender } = renderCollapsed(panel())
+    if (status === 'waiting') fireEvent.click(screen.getByRole('button', { name: 'Revise release' }))
+    else expect(screen.queryByRole('button', { name: 'Revise release' })).toBeNull()
+    fireEvent.change(screen.getByLabelText('Reason for changing approach'), { target: { value: 'Reuse publication' } })
+    campaign.pending.release = true
+    rerender(panel())
+    const submit = screen.getByRole('button', { name: 'Record revised approach' })
+    expect(submit.disabled).toBe(true)
+    expect(screen.getByLabelText('Revised workflow').disabled).toBe(true)
+    expect(screen.getByLabelText('Reason for changing approach').disabled).toBe(true)
+    fireEvent.submit(submit.closest('form'))
+    if (status === 'waiting') {
+      const toggle = screen.getByRole('button', { name: 'Revise release' })
+      expect(toggle.disabled).toBe(true)
+      fireEvent.click(toggle)
+      expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    }
+    expect(campaign.reviseRelease).not.toHaveBeenCalled()
+  })
+  it('blocks opening and submitting revision while a local release transition is in flight', async () => {
+    campaign.completion.release.status = 'waiting'
+    let resolve
+    campaign.transitionRelease.mockReturnValue(new Promise(done => { resolve = done }))
+    renderCollapsed(panel())
+    fireEvent.click(screen.getByRole('button', { name: 'Revise release' }))
+    fireEvent.change(screen.getByLabelText('Reason for changing approach'), { target: { value: 'Reuse publication' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Pause release' }))
+    expect(screen.getByRole('button', { name: 'Revise release' }).disabled).toBe(true)
+    const submit = screen.getByRole('button', { name: 'Record revised approach' })
+    expect(submit.disabled).toBe(true)
+    fireEvent.submit(submit.closest('form'))
+    expect(campaign.reviseRelease).not.toHaveBeenCalled()
+    await act(async () => { resolve({ ok: true }) })
+    expect(submit.disabled).toBe(false)
+  })
+  it.each(['project', 'release', 'contract'])('resets revision drafts when the %s changes', kind => {
+    campaign.completion.release.status = 'waiting'
+    const { rerender } = renderCollapsed(panel())
+    fireEvent.click(screen.getByRole('button', { name: 'Revise release' }))
+    fireEvent.change(screen.getByLabelText('Revised workflow'), { target: { value: 'Old draft' } })
+    fireEvent.change(screen.getByLabelText('Reason for changing approach'), { target: { value: 'Old reason' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Revise release' }))
+    campaign.completion.release = { ...campaign.completion.release,
+      ...(kind === 'release' ? { release_id: C } : kind === 'contract' ? { contract_version: 2 } : {}),
+      contract: { ...campaign.completion.release.contract, workflow: 'Current saved workflow' } }
+    rerender(panel(kind === 'project' ? { projectId: Q } : {}))
+    expect(screen.getByRole('button', { name: 'Revise release' }).getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(screen.getByRole('button', { name: 'Revise release' }))
+    expect(screen.getByLabelText('Revised workflow').value).toBe('Current saved workflow')
+    expect(screen.getByLabelText('Reason for changing approach').value).toBe('')
     expect(campaign.reviseRelease).not.toHaveBeenCalled()
   })
 })
@@ -131,7 +364,7 @@ describe('finish input controls', () => {
     const selected = file()
     fireEvent.change(screen.getByLabelText('Input file (optional)'), { target: { files: [selected] } })
     expect(uploadProjectInput).not.toHaveBeenCalled()
-    expect(within(form).getByRole('button', { name: 'Finish this project' }).disabled).toBe(true)
+    expect(within(form).getByRole('button', { name: 'Request release' }).disabled).toBe(true)
     fireEvent.click(screen.getByRole('button', { name: 'Add to project' }))
     fireEvent.click(screen.getByRole('button', { name: 'Add to project' }))
     expect(uploadProjectInput).toHaveBeenCalledExactlyOnceWith(P, selected)
@@ -184,7 +417,7 @@ describe('finish input controls', () => {
     await screen.findByText('records.json added to this project. Ready for this release.')
     fireEvent.change(screen.getByLabelText('Input file (optional)'), { target: { files: [new File(['0'], 'drawing.dxf')] } })
     expect(screen.queryByText(/added to this project/)).toBeNull()
-    expect(within(form).getByRole('button', { name: 'Finish this project' }).disabled).toBe(true)
+    expect(within(form).getByRole('button', { name: 'Request release' }).disabled).toBe(true)
     fireEvent.change(screen.getByLabelText('Campaign goal'), { target: { value: 'ordinary' } })
     fireEvent.submit(form)
     await waitFor(() => expect(campaign.submit).toHaveBeenCalledWith({ title: 'Records export', prompt: 'Download CSV' }))
@@ -213,7 +446,7 @@ describe('release evidence panel', () => {
     fireEvent.change(screen.getByLabelText('Release deadline (optional)'), { target: { value: '2026-09-08T09:30' } })
     fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Export' } })
     fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Download CSV' } })
-    fireEvent.click(within(screen.getByLabelText('Title').closest('form')).getByRole('button', { name: 'Finish this project' }))
+    fireEvent.click(within(screen.getByLabelText('Title').closest('form')).getByRole('button', { name: 'Request release' }))
     await waitFor(() => expect(campaign.submit).toHaveBeenCalledWith(expect.objectContaining({ finish: expect.objectContaining({ deadline_at: '2026-09-08T09:30' }) })))
   })
   const stages = ['implementation', 'publication', 'deployment', 'user_verification', 'delivery']
@@ -318,6 +551,65 @@ describe('release evidence panel', () => {
     campaign.downloadReleaseArtifact.mockResolvedValue({ name, mediaType, bytes })
     return artifact
   }
+  function readySource() {
+    readyOutput('summary.csv', 'text/csv')
+    campaign.completion.stages.forEach(stage => { stage.contract_version = 1 })
+    campaign.completion.release.contract.cad_recipe = { recipe_id: 'dxf-layer-summary', recipe_version: 1,
+      source_artifact: { sha256: 'b'.repeat(64), size_bytes: 4, path: 'https://untrusted.test/source' } }
+  }
+  it('downloads verified source bytes as source.dxf and revokes the URL', async () => {
+    readySource()
+    campaign.downloadReleaseSource.mockResolvedValue({ name: 'source.dxf', mediaType: 'application/dxf', bytes: new Uint8Array([1, 2, 3, 4]).buffer })
+    const urlApi = { createObjectURL: vi.fn().mockReturnValue('blob:source'), revokeObjectURL: vi.fn() }
+    const clicked = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function () {
+      expect(this.download).toBe('source.dxf')
+      expect(this.href).toBe('blob:source')
+    })
+    try {
+      render(panel({ artifactUrlApi: urlApi }))
+      fireEvent.click(screen.getByRole('button', { name: 'Download source drawing' }))
+      await waitFor(() => expect(clicked).toHaveBeenCalledOnce())
+      expect(campaign.downloadReleaseSource).toHaveBeenCalledExactlyOnceWith()
+      expect(campaign.downloadReleaseArtifact).not.toHaveBeenCalled()
+      const saved = await new Promise((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(reader.result)
+        reader.onerror = reject
+        reader.readAsArrayBuffer(urlApi.createObjectURL.mock.calls[0][0])
+      })
+      expect([...new Uint8Array(saved)]).toEqual([1, 2, 3, 4])
+      await waitFor(() => expect(urlApi.revokeObjectURL).toHaveBeenCalledWith('blob:source'), { timeout: 2000 })
+      expect(screen.queryByTitle('Release tool: source.dxf')).toBeNull()
+    } finally { clicked.mockRestore() }
+  })
+  it('withholds source without current supported recipe proof', () => {
+    readySource()
+    const original = structuredClone(campaign.completion)
+    const view = render(panel())
+    for (const change of [
+      c => { c.current_verification = { status: 'unavailable' } },
+      c => { c.release.contract.cad_recipe.recipe_id = 'other' },
+      c => { c.release.contract.cad_recipe.recipe_version = 2 },
+      c => { delete c.release.contract.cad_recipe.source_artifact },
+      c => { c.stages[0].contract_version = 2 },
+    ]) {
+      campaign.completion = structuredClone(original)
+      change(campaign.completion)
+      view.rerender(panel())
+      expect(screen.queryByRole('button', { name: 'Download source drawing' })).toBeNull()
+    }
+  })
+  it('disables pending source downloads and shows retrieval failure', async () => {
+    readySource()
+    campaign.pending.download = true
+    const view = render(panel())
+    expect(screen.getByRole('button', { name: 'Download source drawing' }).disabled).toBe(true)
+    campaign.pending = {}
+    campaign.downloadReleaseSource.mockRejectedValue(new Error('Source access revoked.'))
+    view.rerender(panel())
+    fireEvent.click(screen.getByRole('button', { name: 'Download source drawing' }))
+    expect(await screen.findByText('Source access revoked.')).toBeTruthy()
+  })
   it('places verified output controls before scope, release details and the collapsed request', () => {
     readyOutput()
     campaign.campaigns = [row, { ...row, campaign_id: 'other', title: 'Another release' }]

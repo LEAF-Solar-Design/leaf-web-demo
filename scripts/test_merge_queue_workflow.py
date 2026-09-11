@@ -2,7 +2,7 @@
 
 mq-review's pagination and per-member status gate are EXECUTED here against
 the real step bodies with a fake `gh`, because a two-member fixture where one
-lacks a passing `kimi-critic-review` status is exactly the case a text
+lacks a passing `critic-review` status is exactly the case a text
 assertion would never catch, and neither is a queue read that only resolves
 correctly once two GraphQL pages are combined. mq-supply's docs-only recompute
 is likewise executed against a real git repository, the same pattern
@@ -189,7 +189,9 @@ def _install_fake_gh(workdir: Path) -> Path:
     # counter file persists across separate run_step() invocations sharing
     # this workdir, so a "read" step followed by a "re-read" step can be
     # driven with two different queue snapshots). Statuses calls are served
-    # from statuses-<sha>.json, keyed by the sha embedded in the URL.
+    # from statuses-<sha>.json, keyed by the sha embedded in the URL. Pulls
+    # lookups (a status event resolving its PR) are served from
+    # pulls-<sha>.json, same keying, defaulting to no open pull requests.
     script.write_text(
         textwrap.dedent(
             """\
@@ -221,6 +223,12 @@ def _install_fake_gh(workdir: Path) -> Path:
                 */commits/*/statuses*)
                   SHA=$(printf '%s' "$arg" | sed -E 's#.*/commits/([0-9a-f]+)/statuses.*#\\1#')
                   RESP="$DIR/statuses-$SHA.json"
+                  if [ -f "$RESP" ]; then cat "$RESP"; else echo "[]"; fi
+                  exit 0
+                  ;;
+                */commits/*/pulls*)
+                  SHA=$(printf '%s' "$arg" | sed -E 's#.*/commits/([0-9a-f]+)/pulls.*#\\1#')
+                  RESP="$DIR/pulls-$SHA.json"
                   if [ -f "$RESP" ]; then cat "$RESP"; else echo "[]"; fi
                   exit 0
                   ;;
@@ -260,7 +268,7 @@ def member_node(position: int, number: int, head_sha: str) -> dict:
     }
 
 
-def status(state: str, created_at: str, context: str = "kimi-critic-review") -> dict:
+def status(state: str, created_at: str, context: str = "critic-review") -> dict:
     return {"context": context, "state": state, "created_at": created_at}
 
 
@@ -317,7 +325,7 @@ def test_mq_review_fails_closed_when_group_head_is_not_in_the_queue(tmp_path):
             {"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [status("success", "2026-09-01T00:00:00Z")],
              "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": []},
             False,
-            "one of the two members has no kimi-critic-review status at all",
+            "one of the two members has no critic-review status at all",
         ),
         (
             {"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": [status("success", "2026-09-01T00:00:00Z")],
@@ -348,7 +356,7 @@ def test_every_member_of_a_two_member_group_needs_a_success_status(
     for sha, statuses in member_statuses.items():
         (tmp_path / f"statuses-{sha}.json").write_text(json.dumps(statuses), encoding="utf-8")
     result = run_step(
-        step_body("mq-review", "Require the newest kimi-critic-review status"),
+        step_body("mq-review", "Require the newest critic-review status"),
         tmp_path,
         {},
     )
@@ -401,6 +409,150 @@ def test_post_check_reread_rejects_changed_pr_head_with_same_group_head(tmp_path
     result = run_step(step_body("mq-review", "Re-read the queue"), tmp_path, {"HEAD_SHA": head})
     assert result["__returncode__"] != 0
     assert "membership drifted" in result["__stdout__"]
+
+
+# --------------------------------------------------------------------------- #
+# mq-review: pull_request admission and its status-triggered re-decision,
+# executed against the real step bodies with a fake `gh`. This is the same
+# newest-by-created_at critic-review rule the merge_group path proves
+# above, so a PR and its group can never disagree about admission.
+# --------------------------------------------------------------------------- #
+
+PR_HEAD_SHA = "d" * 40
+
+
+def _write_statuses(tmp_path: Path, sha: str, statuses: list) -> None:
+    (tmp_path / f"statuses-{sha}.json").write_text(json.dumps(statuses), encoding="utf-8")
+
+
+@needs_shell
+@pytest.mark.parametrize(
+    "state,expect_pass,because",
+    [
+        ("success", True, "the newest critic-review status is success"),
+        ("failure", False, "the newest critic-review status is failure"),
+        ("pending", False, "the newest critic-review status is pending"),
+        (None, False, "the PR carries no critic-review status at all"),
+    ],
+)
+def test_pull_request_admission_requires_a_kimi_success(tmp_path, state, expect_pass, because):
+    _install_fake_gh(tmp_path)
+    statuses = [] if state is None else [status(state, "2026-09-01T00:00:00Z")]
+    _write_statuses(tmp_path, PR_HEAD_SHA, statuses)
+    result = run_step(
+        step_body("mq-review", "Decide admission from the newest critic-review status (pull_request)"),
+        tmp_path,
+        {"HEAD_SHA": PR_HEAD_SHA},
+    )
+    assert (result["__returncode__"] == 0) == expect_pass, "%s: %s" % (because, result["__stderr__"])
+    if not expect_pass:
+        assert PR_HEAD_SHA in (result["__stdout__"] + result["__stderr__"])
+
+
+@needs_shell
+def test_pull_request_admission_uses_the_newest_status_by_created_at(tmp_path):
+    _install_fake_gh(tmp_path)
+    _write_statuses(tmp_path, PR_HEAD_SHA, [
+        status("failure", "2026-09-01T00:05:00Z"),
+        status("success", "2026-09-01T00:00:00Z"),
+    ])
+    result = run_step(
+        step_body("mq-review", "Decide admission from the newest critic-review status (pull_request)"),
+        tmp_path,
+        {"HEAD_SHA": PR_HEAD_SHA},
+    )
+    assert result["__returncode__"] != 0, "an older success must not beat a newer failure"
+
+
+@needs_shell
+@pytest.mark.parametrize("failure_mode", ["gh-exit-nonzero", "empty-body"])
+def test_pull_request_admission_fails_closed_on_an_unreadable_gate(tmp_path, failure_mode):
+    binary = tmp_path / "bin"
+    binary.mkdir(exist_ok=True)
+    fake = binary / "gh"
+    fake.write_text(
+        "#!/usr/bin/env bash\nexit %s\n" % ("1" if failure_mode == "gh-exit-nonzero" else "0"),
+        encoding="utf-8", newline="\n",
+    )
+    fake.chmod(0o755)
+    result = run_step(
+        step_body("mq-review", "Decide admission from the newest critic-review status (pull_request)"),
+        tmp_path,
+        {"HEAD_SHA": PR_HEAD_SHA},
+    )
+    message = result["__stdout__"] + result["__stderr__"]
+    assert result["__returncode__"] != 0, message
+    assert "unreadable gate" in message
+    assert "post a critic-review success on this head and re-run this check" not in message
+
+
+@needs_shell
+def test_pull_request_admission_same_second_tie_resolves_to_the_newer_success(tmp_path):
+    """The statuses API returns newest first and jq's sort_by is stable, so a
+    plain sort_by(.created_at) | last would pick the OLDER entry when two
+    statuses share a created_at second. A failure corrected by a success in
+    the same second must still admit."""
+    _install_fake_gh(tmp_path)
+    _write_statuses(tmp_path, PR_HEAD_SHA, [
+        status("success", "2026-09-01T00:00:00Z"),
+        status("failure", "2026-09-01T00:00:00Z"),
+    ])
+    result = run_step(
+        step_body("mq-review", "Decide admission from the newest critic-review status (pull_request)"),
+        tmp_path,
+        {"HEAD_SHA": PR_HEAD_SHA},
+    )
+    assert result["__returncode__"] == 0, (
+        "a same-second success listed after a same-second failure must still admit: %s"
+        % (result["__stdout__"] + result["__stderr__"])
+    )
+
+
+def test_both_arms_resolve_a_same_second_tie_identically():
+    """R1 from the read of head 58688301: the pull_request arm and the
+    merge_group arm are ONE rule. While only the pull_request arm reversed, a
+    failure corrected by a success inside one second admitted the PR and then
+    ejected the group, which is the exact failure this change exists to end.
+    Both arms must pick the newer of a tie, so the selection expression must
+    be byte-identical in both."""
+    text = workflow_text()
+    marker = 'select(.context == "critic-review")'
+    selections = []
+    cursor = 0
+    while True:
+        found = text.find(marker, cursor)
+        if found < 0:
+            break
+        tail = text.find(".state", found)
+        assert tail > found, "a critic-review selection has no .state read"
+        selections.append(" ".join(text[found:tail].split()))
+        cursor = tail
+    assert len(selections) == 2, (
+        "expected exactly two critic-review selections, found %d" % len(selections)
+    )
+    assert selections[0] == selections[1], (
+        "the two arms must be one rule; they differ: %s vs %s"
+        % (selections[0], selections[1])
+    )
+    assert "reverse" in selections[0], (
+        "both arms must reverse before sort_by so the newer of a tie wins: %s" % selections[0]
+    )
+
+
+def test_the_merge_group_path_is_unchanged():
+    # Embeds main's list so a future edit to a merge_group step must update
+    # this pin deliberately rather than drift underneath it.
+    expected = [
+        ("Read the live merge queue and resolve this group's members", "github.event_name == 'merge_group'"),
+        ("Require the newest critic-review status on every member", "github.event_name == 'merge_group'"),
+        ("Re-read the queue and require the same membership", "github.event_name == 'merge_group'"),
+    ]
+    merge_group_steps = [
+        (step["name"], step["if"])
+        for step in job_steps("mq-review")
+        if step["if"] == "github.event_name == 'merge_group'"
+    ]
+    assert merge_group_steps == expected
 
 
 # --------------------------------------------------------------------------- #
@@ -524,13 +676,33 @@ def test_every_network_command_has_a_timeout():
 # Structural / falsifying pins with no local executable surface
 # --------------------------------------------------------------------------- #
 
-def test_it_fires_on_merge_group_checks_requested_and_pull_request_to_main():
+def test_it_fires_on_merge_group_and_pull_request_only():
+    # pull_request_target was tried for R2 (a pull_request run executes the
+    # workflow FILE from the PR's own head, so a PR could weaken its own
+    # admission decision) and reverted: GitHub resolves a pull_request_target
+    # trigger from the DEFAULT BRANCH's copy of the workflow, so introducing
+    # it in the same PR that removes `pull_request:` left mq-review and
+    # mq-prewarm never firing on that PR at all. Trigger stays pull_request;
+    # R2 is acknowledged, not fixed, in the header comment.
     triggers = workflow_document()["on"]
     assert triggers["merge_group"]["types"] == ["checks_requested"]
     assert set(triggers["pull_request"]["types"]) == {
         "opened", "synchronize", "reopened", "ready_for_review",
     }
     assert triggers["pull_request"]["branches"] == ["main"]
+    assert "status" not in triggers, "the refuted status trigger must never come back"
+
+
+def test_no_status_trigger_and_supply_prewarm_match_mains_conditions():
+    # Pins the shape a future edit could quietly regress into: reintroducing
+    # `status:` in `on:`, or re-adding `github.event_name != 'status'` to
+    # mq-supply's or mq-prewarm's `if:`.
+    document = workflow_document()
+    assert "status" not in document["on"]
+    assert document["jobs"]["mq-supply"]["if"] == "github.event_name == 'merge_group'"
+    assert document["jobs"]["mq-prewarm"]["if"] == "always()"
+    for job in ("mq-supply", "mq-prewarm"):
+        assert "status" not in document["jobs"][job]["if"]
 
 
 def test_both_required_contexts_are_named_exactly():
@@ -551,13 +723,15 @@ def test_every_step_in_the_required_jobs_is_conditioned_on_the_event():
             )
 
 
-def test_pull_request_arm_publishes_a_deferred_success_and_calls_nothing():
-    for job in ("mq-review", "mq-prewarm"):
-        step = step_by_name(job, "Publish the deferred queue-preparation success")
-        assert step["if"] == "github.event_name == 'pull_request'"
-        body = step["run"]
-        for forbidden in ("gh ", "curl", "git "):
-            assert forbidden not in body, "%s: pull_request arm must do nothing but notice" % job
+def test_prewarm_pull_request_arm_publishes_a_deferred_success_and_calls_nothing():
+    # mq-prewarm still defers unconditionally: it gates staging, not review.
+    # mq-review's pull_request arm now decides admission instead; that
+    # behavior is executed in the admission tests below, not pinned here.
+    step = step_by_name("mq-prewarm", "Publish the deferred queue-preparation success")
+    assert step["if"] == "github.event_name == 'pull_request'"
+    body = step["run"]
+    for forbidden in ("gh ", "curl", "git "):
+        assert forbidden not in body, "mq-prewarm: pull_request arm must do nothing but notice"
 
 
 def test_mq_prewarm_always_runs_and_fails_explicitly_on_a_dependency_failure():
@@ -728,9 +902,10 @@ def test_no_service_mirror_falsification():
         _assert_no_service_mirror(workflow_text().replace("env:\n", 'env:\n  STAGE_SERVICES: "web"\n', 1))
 
 
-def _prewarm_evidence(tmp_path, entries, relay_source='env:\n  STAGE_SERVICES: "web app"\n',
+def _prewarm_evidence(tmp_path, entries, relay_source='env:\n  STAGE_SERVICES: "web"\n',
                       empty_arn=False, receipt_change=None, status="SUCCEEDED", log_case=None,
-                      configured_services=("app", "web")):
+                      configured_services=("web",)):
+    # Group-env fixtures previously configured app and web; now they configure web.
     binary = tmp_path / "bin"
     binary.mkdir(exist_ok=True)
     fake = binary / "gh"
@@ -868,12 +1043,12 @@ def _dispatch(service, run_id, disposition="dispatched"):
 
 @needs_shell
 @pytest.mark.parametrize("entries,configured,error", [
-    ([], ["app", "web"], "relay dispatched nothing"),
+    ([], ["web"], "relay dispatched nothing"),
     ([_dispatch("web", 101, "dispatch-failed")], ["web"], "web"),
     ([_dispatch("app", 102, "unresolved")], ["app"], "app"),
     ([_dispatch("app", None)], ["app"], "app"),
     ([_dispatch("web", 101)], ["app", "web"], "relay dispatched services differ from configured services"),
-    ([_dispatch("web", 101), _dispatch("app", 102)], ["app", "web"], None),
+    ([_dispatch("web", 101)], ["web"], None),
     ([_dispatch("web", 101)], [], "relay configured service list absent or unparsable"),
     ([_dispatch("web", 101)], "web", "relay configured service list absent or unparsable"),
     ([_dispatch("web", 101)], "absent", "relay configured service list absent or unparsable"),
@@ -890,46 +1065,46 @@ def test_relay_dispatched_set_executed(tmp_path, entries, configured, error):
         assert error in result["__stdout__"] + result["__stderr__"]
     else:
         assert result["__returncode__"] == 0, result
-        assert json.loads(result["dispatched_json"]) == {"web": _build_id(101), "app": _build_id(102)}
+        assert json.loads(result["dispatched_json"]) == {"web": _build_id(101)}
         assert result["relay_run_id"] == "77"
-        assert "configured services: app web" in result["__stdout__"]
-        assert "dispatched services: app web" in result["__stdout__"]
+        assert "configured services: web" in result["__stdout__"]
+        assert "dispatched services: web" in result["__stdout__"]
         assert "contents/" not in (tmp_path / "gh-calls.txt").read_text()
         waited = run_step(step_body("mq-prewarm", "Wait for every dispatched"), tmp_path,
                           {"GROUP_HEAD_SHA": "a" * 40, "TREE": "b" * 40,
                            "DISPATCHED_JSON": result["dispatched_json"],
                            "RELAY_RUN_ID": result["relay_run_id"]})
         assert waited["__returncode__"] == 0, waited
-        assert _staged_arn("app") + " " + _staged_arn("web") in waited["__stdout__"]
+        assert "staged task definitions: " + _staged_arn("web") in waited["__stdout__"]
 
 
 @needs_shell
 def test_relay_configuration_change_takes_effect_on_the_next_group(tmp_path):
     # The relay runs main's text. A group changing the list must still merge;
     # its new configuration takes effect when the next group relay runs.
-    _prewarm_evidence(tmp_path, [_dispatch("web", 101)],
-                      relay_source='env:\n  STAGE_SERVICES: "web app"\n',
-                      configured_services=["web"])
+    _prewarm_evidence(tmp_path, [_dispatch("web", 101), _dispatch("app", 102)],
+                      relay_source='env:\n  STAGE_SERVICES: "web"\n',
+                      configured_services=["app", "web"])
     result = run_step(step_body("mq-prewarm", "Wait for the relay's"), tmp_path,
                       {"GROUP_HEAD_SHA": "a" * 40})
     assert result["__returncode__"] == 0, result
-    assert json.loads(result["dispatched_json"]) == {"web": _build_id(101)}
-    assert "configured services: web" in result["__stdout__"]
+    assert json.loads(result["dispatched_json"]) == {"web": _build_id(101), "app": _build_id(102)}
+    assert "configured services: app web" in result["__stdout__"]
     assert "contents/" not in (tmp_path / "gh-calls.txt").read_text()
 
-    # After restoration lands, the next relay stages both services from its
-    # own env. Keep the prior web-only receipt above as the transition case.
+    # Previously restoration added app on the next group; this pause removes it.
+    # The landing group's prior two-service receipt remains the transition case.
     next_group = tmp_path / "next-group"
     next_group.mkdir()
-    _prewarm_evidence(next_group, [_dispatch("web", 101), _dispatch("app", 102)],
-                      configured_services=["app", "web"])
+    _prewarm_evidence(next_group, [_dispatch("web", 101)],
+                      configured_services=["web"])
     result = run_step(step_body("mq-prewarm", "Wait for the relay's"), next_group,
                       {"GROUP_HEAD_SHA": "a" * 40})
     assert result["__returncode__"] == 0, result
     assert json.loads(result["dispatched_json"]) == {
-        "web": _build_id(101), "app": _build_id(102),
+        "web": _build_id(101),
     }
-    assert "configured services: app web" in result["__stdout__"]
+    assert "configured services: web" in result["__stdout__"]
     assert "contents/" not in (next_group / "gh-calls.txt").read_text()
 
 
@@ -1146,7 +1321,7 @@ def test_mq_relay_s3_newest_wins_with_key_tie_break_executed(tmp_path):
     for scenario in ("timestamp", "tie"):
         work = tmp_path / scenario
         work.mkdir()
-        _prewarm_evidence(work, [_dispatch("web", 101), _dispatch("app", 102)])
+        _prewarm_evidence(work, [_dispatch("web", 101)])
         objects = json.loads((work / "s3-objects.json").read_text())
         key, item = next(iter(objects.items()))
         old = json.loads(json.dumps(item))
@@ -1181,7 +1356,7 @@ def test_mq_s3_access_errors_fail_from_own_code(tmp_path):
                     objects, _, _ = _s3_supply_fixture(work)
                     fragment = "Wait for the provider"
                 else:
-                    _prewarm_evidence(work, [_dispatch("web", 101), _dispatch("app", 102)])
+                    _prewarm_evidence(work, [_dispatch("web", 101)])
                     objects = json.loads((work / "s3-objects.json").read_text())
                     fragment = "Wait for the relay's"
                 _s3_transport_fixture(work, objects, {operation: error})
@@ -1198,7 +1373,7 @@ def test_mq_relay_s3_checksum_and_metadata_refuse_executed(tmp_path):
     for scenario in ("checksum", "metadata", "attempt"):
         work = tmp_path / scenario
         work.mkdir()
-        _prewarm_evidence(work, [_dispatch("web", 101), _dispatch("app", 102)])
+        _prewarm_evidence(work, [_dispatch("web", 101)])
         objects = json.loads((work / "s3-objects.json").read_text())
         item = next(iter(objects.values()))
         if scenario == "checksum":
@@ -1218,7 +1393,7 @@ def test_mq_relay_s3_checksum_and_metadata_refuse_executed(tmp_path):
 @needs_shell
 def test_mq_relay_s3_invalid_newest_never_falls_back_executed(tmp_path):
     from test_prewarm_staging_cutover_workflow import _s3_transport_fixture
-    _prewarm_evidence(tmp_path, [_dispatch("web", 101), _dispatch("app", 102)])
+    _prewarm_evidence(tmp_path, [_dispatch("web", 101)])
     objects = json.loads((tmp_path / "s3-objects.json").read_text())
     old_key, old = next(iter(objects.items()))
     newest = json.loads(json.dumps(old))
