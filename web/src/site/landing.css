@@ -1671,3 +1671,31 @@
   flex: 0 0 auto; padding: 0 8px 0 0; gap: 6px;
 }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-command-line .converse-note { flex-basis: 100%; order: 3; }
+
+/* Browser board world space, gated at the mount. */
+.ground-world {
+  position: relative; min-height: 0; overflow: hidden; touch-action: none;
+  pointer-events: auto; outline-offset: -2px;
+}
+.ground-world-card {
+  position: absolute; top: 0; left: 0; transform-origin: 0 0;
+  transition: transform 180ms cubic-bezier(.22,1,.36,1);
+  touch-action: none; cursor: grab; outline-offset: 3px;
+}
+.ground-world-card > .ground-tile { box-sizing: border-box; width: 100%; height: 100%; }
+.ground-world-minimap {
+  position: absolute; right: 12px; bottom: 12px; overflow: hidden;
+  border: 1px solid var(--border); background: var(--background); cursor: crosshair;
+}
+.ground-world-marker, .ground-world-viewport {
+  position: absolute; box-sizing: border-box; pointer-events: none;
+  border: 1px solid currentColor;
+  transition: all 180ms cubic-bezier(.22,1,.36,1);
+}
+.ground-world-marker { opacity: .45; }
+.ground-world-viewport { border-color: var(--foreground); }
+@media (prefers-reduced-motion: reduce) {
+  .ground-world, .ground-world-card, .ground-world-marker, .ground-world-viewport {
+    transition-duration: 0ms;
+  }
+}
