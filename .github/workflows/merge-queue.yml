@@ -18,9 +18,10 @@ name: merge-queue
 # and a merge_group run, or a PR can never satisfy its required checks well
 # enough to enter the queue. On pull_request events mq-review decides
 # admission from the newest critic-review status on the PR's own head,
-# using the same reverse-then-sort_by(.created_at) tie-break the merge_group
-# path proves at ~:146-170 (both arms are pinned byte-identical below, so
-# they can never disagree), and mq-prewarm publishes a neutral "queue
+# using the same reverse-then-sort_by(.created_at) tie-break as the
+# merge_group path's 'Require the newest critic-review status on every
+# member' step (both arms are pinned byte-identical below, so they can never
+# disagree), and mq-prewarm publishes a neutral "queue
 # preparation deferred" success and does nothing else.
 #
 # R2 from the read of 58688301, ACKNOWLEDGED, NOT FIXED HERE: a pull_request
@@ -38,12 +39,16 @@ name: merge-queue
 # for this class, the stable loader in scripts/ci/mq-codebuild-project.sh
 # that pulls its script from origin/main: move the decision into the
 # CodeBuild mq-review project, which no PR can edit. That is a separate
-# change with its own spec and review. There is no status trigger: a
-# status-triggered run's GITHUB_SHA is always the default branch tip, never
-# the PR head, so it cannot correct a PR's own check run. A red mq-review
-# clears the same way any other check does, by a re-run once the
-# critic-review success is posted; the real staging work only ever runs
-# for merge_group's checks_requested.
+# change with its own spec and review. There is no status trigger IN THIS
+# FILE: a status-triggered run's GITHUB_SHA is always the default branch tip,
+# never the PR head, so it cannot correct a PR's own check run. A red
+# mq-review clears by a re-run of the job once the critic-review success is
+# posted, and since #1220 (6c386e84) that re-run is automatic:
+# .github/workflows/mq-admission-rerun.yml (its own file, so main's text runs
+# with no checkout) fires on the critic-review success status, waits for
+# this workflow's pull_request run to complete, and re-runs the failed
+# mq-review job by id. The real staging work only ever runs for
+# merge_group's checks_requested.
 # ---------------------------------------------------------------------------
 
 on:
