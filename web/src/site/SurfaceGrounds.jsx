@@ -16,7 +16,8 @@
 //     an unmount): the drawing ground survives tab switches with its WebGL
 //     context, lock, and job state, exactly as the workspace card always
 //     did (`display: none`, not unmount).
-import { useLayoutEffect, useState } from 'react'
+import { Children, useLayoutEffect, useState } from 'react'
+import WorldSpaceBoard from './WorldSpaceBoard.jsx'
 import { formatElementId } from '../lib/elementIdentity.js'
 import { PRODUCT_SURFACES, SHARED_WORKSPACE_CAPABILITIES, surfaceGround } from './productSurfaces.js'
 import { EMPTY_WORKSPACE_PROJECT } from './workspaceProjectState.js'
@@ -135,28 +136,13 @@ function shortId(value, n = 8) {
 // same GET /api/projects/:id/workspace payload WorkspaceSummary renders;
 // null (no project open, or the offline demo) renders the honest empties.
 // ---------------------------------------------------------------------------
-export function ProjectBoardGround({
-  active = false, workspaceProject = null, workspace = null, drawing = null, catalog = null, mock = false,
-}) {
-  const state = workspaceProject || EMPTY_WORKSPACE_PROJECT
+function BoardTiles({ workspace, drawing, catalog, renderTile }) {
   const versions = workspace?.drawing_versions || []
   const jobs = [...(workspace?.jobs || [])].reverse().slice(0, 5) // newest first
   const tools = workspace?.built_tools || []
   const families = catalog?.families || []
-  const win = useGroundWindow(active)
-  // No header of its own: the frame's chrome above the window already
-  // carries the eyebrow, title, and the project line (with its action).
-  return (
-    <div
-      className="studio-ground-board"
-      data-ground="browser"
-      data-project-state={state.kind}
-      hidden={!active}
-      role="region"
-      aria-label="Project workspace"
-    >
-      <div className="ground-desk" style={windowStyle(win)} data-measured={win ? 'true' : 'false'}>
-        <div className="ground-tiles">
+  const tiles = (
+    <>
           <section className="ground-tile" data-tile="drawing" aria-label="Drawing">
             <h3>Drawing</h3>
             {drawing ? (
@@ -219,7 +205,38 @@ export function ProjectBoardGround({
             <h3>Shared everywhere</h3>
             <ul>{SHARED_WORKSPACE_CAPABILITIES.map((capability) => <li key={capability}>{capability}</li>)}</ul>
           </section>
-        </div>
+    </>
+  )
+  return renderTile ? Children.toArray(tiles.props.children).map((tile) => renderTile(tile.props['data-tile'], tile)) : tiles
+}
+
+export function ProjectBoardGround({
+  active = false, workspaceProject = null, workspace = null, drawing = null, catalog = null, mock = false,
+  worldSpace = import.meta.env.VITE_WORLD_SPACE_BOARD === '1', store,
+}) {
+  const state = workspaceProject || EMPTY_WORKSPACE_PROJECT
+  const win = useGroundWindow(active)
+  // No header of its own: the frame's chrome above the window already
+  // carries the eyebrow, title, and the project line (with its action).
+  return (
+    <div
+      className="studio-ground-board"
+      data-ground="browser"
+      data-project-state={state.kind}
+      hidden={!active}
+      role="region"
+      aria-label="Project workspace"
+    >
+      <div className="ground-desk" style={windowStyle(win)} data-measured={win ? 'true' : 'false'}>
+        {worldSpace ? (
+          <WorldSpaceBoard key={workspaceProject?.project_id || 'anonymous'} scopeId={workspaceProject?.project_id || 'anonymous'} viewport={win} store={store}>
+            {(renderTile) => <BoardTiles workspace={workspace} drawing={drawing} catalog={catalog} renderTile={renderTile} />}
+          </WorldSpaceBoard>
+        ) : (
+          <div className="ground-tiles">
+            <BoardTiles workspace={workspace} drawing={drawing} catalog={catalog} />
+          </div>
+        )}
         {mock && <p className="ground-note">Offline demo build: no workspace service stands behind this board.</p>}
       </div>
     </div>
