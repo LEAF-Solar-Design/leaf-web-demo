@@ -34,6 +34,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "merge-queue.yml"
+RERUN_WORKFLOW = ROOT / ".github" / "workflows" / "mq-admission-rerun.yml"
 
 
 def _usable_bash() -> str:
@@ -227,9 +228,55 @@ def _install_fake_gh(workdir: Path) -> Path:
                   exit 0
                   ;;
                 */commits/*/pulls*)
+                  [ -f "$DIR/fail-pulls" ] && exit 1
                   SHA=$(printf '%s' "$arg" | sed -E 's#.*/commits/([0-9a-f]+)/pulls.*#\\1#')
                   RESP="$DIR/pulls-$SHA.json"
                   if [ -f "$RESP" ]; then cat "$RESP"; else echo "[]"; fi
+                  exit 0
+                  ;;
+                */commits/*/check-runs*)
+                  [ -f "$DIR/fail-check-runs" ] && exit 1
+                  SHA=$(printf '%s' "$arg" | sed -E 's#.*/commits/([0-9a-f]+)/check-runs.*#\\1#')
+                  COUNTER_FILE="$DIR/check-runs-call-count"
+                  N=0
+                  [ -f "$COUNTER_FILE" ] && N=$(cat "$COUNTER_FILE")
+                  N=$((N + 1))
+                  echo "$N" > "$COUNTER_FILE"
+                  RESP="$DIR/check-runs-$SHA-$N.json"
+                  [ -f "$RESP" ] || RESP="$DIR/check-runs-$SHA.json"
+                  if [ -f "$RESP" ]; then cat "$RESP"; else echo '{"check_runs":[]}'; fi
+                  exit 0
+                  ;;
+                */actions/jobs/*/rerun)
+                  [[ "$ARGS" == *"POST"* ]] || exit 1
+                  # The fake accepts every POST and cannot model in-progress-run refusal; the run-status wait keeps the live call legal.
+                  ID=$(printf '%s' "$arg" | sed -E 's#.*/actions/jobs/([0-9]+)/rerun#\\1#')
+                  echo "$ID" >> "$DIR/rerun-calls.txt"
+                  [ -f "$DIR/fail-rerun" ] && exit 1
+                  echo "{}"
+                  exit 0
+                  ;;
+                */actions/jobs/*)
+                  [[ "$ARGS" != *"POST"* ]] || exit 1
+                  [ -f "$DIR/fail-job" ] && exit 1
+                  ID=${arg##*/}
+                  RESP="$DIR/job-$ID.json"
+                  if [ -f "$RESP" ]; then jq -er .run_id "$RESP"; else echo 900; fi
+                  exit 0
+                  ;;
+                */actions/runs/*)
+                  [[ "$ARGS" != *"POST"* ]] || exit 1
+                  ID=${arg#*/actions/runs/}
+                  [[ "$ID" =~ ^[0-9]+$ ]] || exit 1
+                  [ -f "$DIR/fail-run" ] && exit 1
+                  COUNTER_FILE="$DIR/run-call-count"
+                  N=0
+                  [ -f "$COUNTER_FILE" ] && N=$(cat "$COUNTER_FILE")
+                  N=$((N + 1))
+                  echo "$N" > "$COUNTER_FILE"
+                  RESP="$DIR/run-$ID-$N.json"
+                  [ -f "$RESP" ] || RESP="$DIR/run-$ID.json"
+                  if [ -f "$RESP" ]; then jq -er .status "$RESP"; else echo completed; fi
                   exit 0
                   ;;
               esac
@@ -242,6 +289,190 @@ def _install_fake_gh(workdir: Path) -> Path:
     )
     script.chmod(0o755)
     return binary
+
+
+def rerun_document() -> dict:
+    return yaml.load(RERUN_WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+
+
+def rerun_step_body() -> str:
+    return rerun_document()["jobs"]["rerun"]["steps"][0]["run"]
+
+
+def test_admission_rerun_structure():
+    document = rerun_document()
+    assert document["on"] == {"status": {}}
+    assert set(document["jobs"]) == {"rerun"}
+    job = document["jobs"]["rerun"]
+    assert job["if"] == "github.event.context == 'critic-review' && github.event.state == 'success'"
+    assert document["permissions"] == {
+        "actions": "write", "checks": "read", "pull-requests": "read", "statuses": "read",
+    }
+    assert len(job["steps"]) == 1
+    assert all("uses" not in step for step in job["steps"])
+    assert document["concurrency"] == {
+        "group": "mq-admission-rerun-${{ github.event.sha }}", "cancel-in-progress": "false",
+    }
+    assert int(job["timeout-minutes"]) > 0
+    body = rerun_step_body()
+    assert "gh api" in body
+    assert all(body[max(0, match.start() - 11):match.start()] == "timeout 60 "
+               for match in re.finditer(r"gh api", body))
+
+
+def test_admission_rerun_poll_budget_fits_job_timeout():
+    job = rerun_document()["jobs"]["rerun"]
+    env = job["steps"][0]["env"]
+    assert int(env["CHECK_POLLS"]) * int(env["CHECK_INTERVAL"]) + 60 <= int(job["timeout-minutes"]) * 60
+
+
+def _rerun_check(job_id=2, conclusion="failure", status="completed",
+                 started_at="2026-09-12T00:05:00Z", app="github-actions"):
+    return {"id": job_id, "name": "mq-review", "status": status,
+            "conclusion": conclusion, "started_at": started_at, "app": {"slug": app}}
+
+
+def _rerun_fixture(tmp_path, checks):
+    _install_fake_gh(tmp_path)
+    (tmp_path / f"pulls-{PR_HEAD_SHA}.json").write_text(json.dumps([
+        {"number": 34, "state": "open", "base": {"ref": "main"},
+         "head": {"sha": PR_HEAD_SHA}},
+    ]), encoding="utf-8")
+    (tmp_path / f"check-runs-{PR_HEAD_SHA}.json").write_text(
+        json.dumps({"check_runs": checks}), encoding="utf-8")
+
+
+def _run_rerun(tmp_path, expected_calls="", expected_code=0):
+    result = run_step(rerun_step_body(), tmp_path, {
+        "HEAD_SHA": PR_HEAD_SHA, "CHECK_POLLS": "3", "CHECK_INTERVAL": "0",
+    })
+    calls = tmp_path / "rerun-calls.txt"
+    assert (calls.read_text(encoding="utf-8") if calls.exists() else "") == expected_calls
+    assert result["__returncode__"] == expected_code, result
+    return result
+
+
+@needs_shell
+def test_admission_rerun_completed_failure(tmp_path):
+    _rerun_fixture(tmp_path, [_rerun_check()])
+    _run_rerun(tmp_path, "2\n")
+
+
+@needs_shell
+@pytest.mark.parametrize("case", ["empty", "closed", "other-base"])
+def test_admission_rerun_no_open_pr(tmp_path, case):
+    _rerun_fixture(tmp_path, [_rerun_check()])
+    pulls = [] if case == "empty" else [{
+        "number": 34, "state": "closed" if case == "closed" else "open",
+        "base": {"ref": "other" if case == "other-base" else "main"},
+        "head": {"sha": PR_HEAD_SHA},
+    }]
+    (tmp_path / f"pulls-{PR_HEAD_SHA}.json").write_text(json.dumps(pulls), encoding="utf-8")
+    _run_rerun(tmp_path)
+
+
+@needs_shell
+def test_admission_rerun_completed_success(tmp_path):
+    _rerun_fixture(tmp_path, [_rerun_check(conclusion="success")])
+    _run_rerun(tmp_path)
+
+
+@needs_shell
+def test_admission_rerun_waits_for_completion(tmp_path):
+    _rerun_fixture(tmp_path, [_rerun_check()])
+    (tmp_path / f"check-runs-{PR_HEAD_SHA}-1.json").write_text(
+        json.dumps({"check_runs": [_rerun_check(status="in_progress", conclusion=None)]}),
+        encoding="utf-8")
+    _run_rerun(tmp_path, "2\n")
+    assert (tmp_path / "check-runs-call-count").read_text().strip() == "2"
+
+
+@needs_shell
+def test_admission_rerun_still_running(tmp_path):
+    _rerun_fixture(tmp_path, [_rerun_check(status="in_progress", conclusion=None)])
+    _run_rerun(tmp_path)
+    assert (tmp_path / "check-runs-call-count").read_text().strip() == "3"
+
+
+@needs_shell
+def test_admission_rerun_no_check(tmp_path):
+    _rerun_fixture(tmp_path, [])
+    _run_rerun(tmp_path)
+
+
+@needs_shell
+@pytest.mark.parametrize("newest_conclusion,expected_calls", [
+    ("failure", "2\n"), ("success", ""),
+])
+def test_admission_rerun_newest_wins(tmp_path, newest_conclusion, expected_calls):
+    older = "success" if newest_conclusion == "failure" else "failure"
+    _rerun_fixture(tmp_path, [
+        _rerun_check(conclusion=newest_conclusion),
+        _rerun_check(job_id=1, conclusion=older, started_at="2026-09-12T00:00:00Z"),
+    ])
+    _run_rerun(tmp_path, expected_calls)
+
+
+@needs_shell
+def test_admission_rerun_ignores_other_app(tmp_path):
+    _rerun_fixture(tmp_path, [_rerun_check(app="other-app")])
+    _run_rerun(tmp_path)
+
+
+@needs_shell
+@pytest.mark.parametrize("marker,expected_calls", [
+    ("fail-pulls", ""), ("fail-check-runs", ""), ("fail-rerun", "2\n"),
+])
+def test_admission_rerun_api_failure(tmp_path, marker, expected_calls):
+    _rerun_fixture(tmp_path, [_rerun_check()])
+    (tmp_path / marker).touch()
+    result = _run_rerun(tmp_path, expected_calls, expected_code=1)
+    assert "::error::" in result["__stdout__"]
+
+
+@needs_shell
+def test_admission_rerun_waits_for_run_completion(tmp_path):
+    _rerun_fixture(tmp_path, [_rerun_check()])
+    (tmp_path / "run-900-1.json").write_text(
+        json.dumps({"status": "in_progress"}), encoding="utf-8")
+    (tmp_path / "run-900-2.json").write_text(
+        json.dumps({"status": "completed"}), encoding="utf-8")
+    _run_rerun(tmp_path, "2\n")
+    assert (tmp_path / "run-call-count").read_text().strip() == "2"
+
+
+@needs_shell
+def test_admission_rerun_run_still_in_progress(tmp_path):
+    _rerun_fixture(tmp_path, [_rerun_check()])
+    (tmp_path / "run-900.json").write_text(
+        json.dumps({"status": "in_progress"}), encoding="utf-8")
+    result = _run_rerun(tmp_path, expected_code=1)
+    assert (tmp_path / "run-call-count").read_text().strip() == "3"
+    assert "::error::" in result["__stdout__"]
+    assert "run 900 still in progress after the poll budget" in result["__stdout__"]
+
+
+@needs_shell
+@pytest.mark.parametrize("marker", ["fail-job", "fail-run"])
+def test_admission_rerun_run_api_failure(tmp_path, marker):
+    _rerun_fixture(tmp_path, [_rerun_check()])
+    (tmp_path / marker).touch()
+    result = _run_rerun(tmp_path, expected_code=1)
+    assert "::error::" in result["__stdout__"]
+
+
+def test_task_34_relay_receipt_wait_covers_group_readiness():
+    # The controller's relay-receipt wait starts after mq-supply passed, so it
+    # races only the group stage's readiness leg plus dispatch, never the whole
+    # stage job. The 2026-09-10 "30 vs 42" reading compared the wrong pair.
+    controller = workflow_document()["env"]
+    stage = yaml.load(
+        (ROOT / ".github" / "workflows" / "prewarm-staging-group.yml").read_text(
+            encoding="utf-8"), Loader=yaml.BaseLoader,
+    )["env"]
+    assert (int(controller["RELAY_RECEIPT_POLLS"]) *
+            int(controller["RELAY_RECEIPT_INTERVAL"])) >= (
+                int(stage["SUPPLY_SET_POLLS"]) * int(stage["SUPPLY_SET_INTERVAL"]) + 300)
 
 
 def graphql_page(nodes: list, has_next: bool = False, end_cursor: str = "") -> dict:

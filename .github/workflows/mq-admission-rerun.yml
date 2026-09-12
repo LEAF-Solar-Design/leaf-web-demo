@@ -1,0 +1,95 @@
+# status is a repository event: this job runs main's text with no checkout,
+# so a PR cannot edit it. Its check cannot attach to the PR head, so it
+# re-runs an existing job. The status trigger belongs in this separate file,
+# never in merge-queue.yml.
+name: mq-admission-rerun
+on:
+  # Only statuses posted with a credential other than GITHUB_TOKEN trigger runs (review-pr.ps1 does this).
+  status: {}
+permissions:
+  actions: write        # POST /actions/jobs/{id}/rerun
+  checks: read
+  pull-requests: read
+  statuses: read
+concurrency:
+  group: mq-admission-rerun-${{ github.event.sha }}
+  cancel-in-progress: false
+jobs:
+  rerun:
+    name: mq-admission-rerun
+    # Ignore every other status before allocating a runner.
+    if: github.event.context == 'critic-review' && github.event.state == 'success'
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 8
+    steps:
+      - name: Re-run the newest failed mq-review check on this head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.sha }}
+          CHECK_POLLS: "20"
+          CHECK_INTERVAL: "15"
+        run: |
+          set -euo pipefail
+          if [[ ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::mq-admission-rerun: invalid head sha"
+            exit 1
+          fi
+          if ! PULLS=$(timeout 60 gh api --paginate "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/pulls?per_page=100") ||
+             [[ -z "$PULLS" ]] ||
+             ! OPEN=$(jq -es --arg sha "$HEAD_SHA" 'add // [] | map(select(.state == "open" and .base.ref == "main" and .head.sha == $sha))' <<< "$PULLS"); then
+            echo "::error::mq-admission-rerun: unreadable pulls"
+            exit 1
+          fi
+          if [[ $(jq 'length' <<< "$OPEN") == 0 ]]; then
+            echo "::notice::mq-admission-rerun: no open PR on main for this head"
+            exit 0
+          fi
+          for ((POLL=1; POLL<=CHECK_POLLS; POLL++)); do
+            if ! CHECKS=$(timeout 60 gh api --paginate "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/check-runs?check_name=mq-review&per_page=100") ||
+               [[ -z "$CHECKS" ]] ||
+               ! NEWEST=$(jq -cs ' [.[].check_runs[]] | map(select(.name == "mq-review" and .app.slug == "github-actions")) | max_by([.started_at, .id])' <<< "$CHECKS"); then
+              echo "::error::mq-admission-rerun: unreadable check-runs"
+              exit 1
+            fi
+            if [[ "$NEWEST" == null ]]; then
+              echo "::notice::mq-admission-rerun: no mq-review check yet"
+              exit 0
+            fi
+            if [[ $(jq -r '.status' <<< "$NEWEST") == completed ]]; then
+              if [[ $(jq -r '.conclusion' <<< "$NEWEST") == success ]]; then
+                echo "::notice::mq-admission-rerun: mq-review already passed"
+                exit 0
+              fi
+              ID=$(jq -r '.id' <<< "$NEWEST")
+              if ! RUN_ID=$(timeout 60 gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$ID" --jq .run_id) ||
+                 [[ ! "$RUN_ID" =~ ^[0-9]+$ ]]; then
+                echo "::error::mq-admission-rerun: unreadable run id for job $ID"
+                exit 1
+              fi
+              for ((; POLL<=CHECK_POLLS; POLL++)); do
+                if ! RUN_STATUS=$(timeout 60 gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" --jq .status) ||
+                   [[ -z "$RUN_STATUS" || "$RUN_STATUS" == null ]]; then
+                  echo "::error::mq-admission-rerun: unreadable run $RUN_ID"
+                  exit 1
+                fi
+                if [[ "$RUN_STATUS" == completed ]]; then
+                  if ! timeout 60 gh api -X POST "repos/$GITHUB_REPOSITORY/actions/jobs/$ID/rerun"; then
+                    echo "::error::mq-admission-rerun: could not re-run job $ID"
+                    exit 1
+                  fi
+                  echo "::notice::mq-admission-rerun: re-ran mq-review job $ID for $HEAD_SHA"
+                  exit 0
+                fi
+                if ((POLL < CHECK_POLLS)); then
+                  sleep "$CHECK_INTERVAL"
+                fi
+              done
+              echo "::error::mq-admission-rerun: run $RUN_ID still in progress after the poll budget; re-run mq-review by hand"
+              exit 1
+            fi
+            if ((POLL < CHECK_POLLS)); then
+              sleep "$CHECK_INTERVAL"
+            fi
+          done
+          echo "::notice::mq-admission-rerun: mq-review is still running"
+          exit 0
