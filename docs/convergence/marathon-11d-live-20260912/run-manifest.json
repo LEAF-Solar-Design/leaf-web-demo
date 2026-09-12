@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "run_id": "marathon-11d-live-20260912",
+  "kind": "marathon",
+  "created_at": "2026-09-12T18:29:57.615071+00:00",
+  "safety_mode": "unattended_strict",
+  "mission": {
+    "path": "C:\\tmp\\11d-live\\workspace\\card_live_proof.mission.yaml",
+    "content_sha256": "7764434d11fd2735b0727a65e965de8ae62d2307854dd72984dc907e26f4aa0d"
+  },
+  "workspace": {
+    "canonical_path": "C:\\tmp\\11d-live\\workspace",
+    "repo_identity": null,
+    "base_sha": "f6b7744e368e5eff232b8a9d1d8a75b238caadfd"
+  },
+  "pipeline": {
+    "config_sha256": "50b43449d9aa6313f433b1855e7af0bec2e95406f89af30d62a204adb2035400",
+    "executor": {
+      "model": "claude-sonnet-5",
+      "effort": null
+    },
+    "verifier": {
+      "model": "claude-sonnet-5",
+      "effort": null
+    }
+  },
+  "budget": {
+    "max_rounds": 2,
+    "max_usd": 10.0,
+    "deadline_at": null
+  },
+  "oracle_hashes": {
+    "__success__": "f5eb358476d34c9edc0ded338a6039df47b3bbf2d2b1170a0c007ef0df896aa5",
+    "card_live_proof": "f5eb358476d34c9edc0ded338a6039df47b3bbf2d2b1170a0c007ef0df896aa5"
+  }
+}
