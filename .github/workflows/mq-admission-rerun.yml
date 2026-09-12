@@ -4,6 +4,7 @@
 # never in merge-queue.yml.
 name: mq-admission-rerun
 on:
+  # Only statuses posted with a credential other than GITHUB_TOKEN trigger runs (review-pr.ps1 does this).
   status: {}
 permissions:
   actions: write        # POST /actions/jobs/{id}/rerun
@@ -60,12 +61,31 @@ jobs:
                 exit 0
               fi
               ID=$(jq -r '.id' <<< "$NEWEST")
-              if ! timeout 60 gh api -X POST "repos/$GITHUB_REPOSITORY/actions/jobs/$ID/rerun"; then
-                echo "::error::mq-admission-rerun: could not re-run job $ID"
+              if ! RUN_ID=$(timeout 60 gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$ID" --jq .run_id) ||
+                 [[ ! "$RUN_ID" =~ ^[0-9]+$ ]]; then
+                echo "::error::mq-admission-rerun: unreadable run id for job $ID"
                 exit 1
               fi
-              echo "::notice::mq-admission-rerun: re-ran mq-review job $ID for $HEAD_SHA"
-              exit 0
+              for ((; POLL<=CHECK_POLLS; POLL++)); do
+                if ! RUN_STATUS=$(timeout 60 gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" --jq .status) ||
+                   [[ -z "$RUN_STATUS" || "$RUN_STATUS" == null ]]; then
+                  echo "::error::mq-admission-rerun: unreadable run $RUN_ID"
+                  exit 1
+                fi
+                if [[ "$RUN_STATUS" == completed ]]; then
+                  if ! timeout 60 gh api -X POST "repos/$GITHUB_REPOSITORY/actions/jobs/$ID/rerun"; then
+                    echo "::error::mq-admission-rerun: could not re-run job $ID"
+                    exit 1
+                  fi
+                  echo "::notice::mq-admission-rerun: re-ran mq-review job $ID for $HEAD_SHA"
+                  exit 0
+                fi
+                if ((POLL < CHECK_POLLS)); then
+                  sleep "$CHECK_INTERVAL"
+                fi
+              done
+              echo "::error::mq-admission-rerun: run $RUN_ID still in progress after the poll budget; re-run mq-review by hand"
+              exit 1
             fi
             if ((POLL < CHECK_POLLS)); then
               sleep "$CHECK_INTERVAL"

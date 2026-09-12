@@ -249,10 +249,34 @@ def _install_fake_gh(workdir: Path) -> Path:
                   ;;
                 */actions/jobs/*/rerun)
                   [[ "$ARGS" == *"POST"* ]] || exit 1
+                  # The fake accepts every POST and cannot model in-progress-run refusal; the run-status wait keeps the live call legal.
                   ID=$(printf '%s' "$arg" | sed -E 's#.*/actions/jobs/([0-9]+)/rerun#\\1#')
                   echo "$ID" >> "$DIR/rerun-calls.txt"
                   [ -f "$DIR/fail-rerun" ] && exit 1
                   echo "{}"
+                  exit 0
+                  ;;
+                */actions/jobs/*)
+                  [[ "$ARGS" != *"POST"* ]] || exit 1
+                  [ -f "$DIR/fail-job" ] && exit 1
+                  ID=${arg##*/}
+                  RESP="$DIR/job-$ID.json"
+                  if [ -f "$RESP" ]; then jq -er .run_id "$RESP"; else echo 900; fi
+                  exit 0
+                  ;;
+                */actions/runs/*)
+                  [[ "$ARGS" != *"POST"* ]] || exit 1
+                  ID=${arg#*/actions/runs/}
+                  [[ "$ID" =~ ^[0-9]+$ ]] || exit 1
+                  [ -f "$DIR/fail-run" ] && exit 1
+                  COUNTER_FILE="$DIR/run-call-count"
+                  N=0
+                  [ -f "$COUNTER_FILE" ] && N=$(cat "$COUNTER_FILE")
+                  N=$((N + 1))
+                  echo "$N" > "$COUNTER_FILE"
+                  RESP="$DIR/run-$ID-$N.json"
+                  [ -f "$RESP" ] || RESP="$DIR/run-$ID.json"
+                  if [ -f "$RESP" ]; then jq -er .status "$RESP"; else echo completed; fi
                   exit 0
                   ;;
               esac
@@ -294,6 +318,12 @@ def test_admission_rerun_structure():
     assert "gh api" in body
     assert all(body[max(0, match.start() - 11):match.start()] == "timeout 60 "
                for match in re.finditer(r"gh api", body))
+
+
+def test_admission_rerun_poll_budget_fits_job_timeout():
+    job = rerun_document()["jobs"]["rerun"]
+    env = job["steps"][0]["env"]
+    assert int(env["CHECK_POLLS"]) * int(env["CHECK_INTERVAL"]) + 60 <= int(job["timeout-minutes"]) * 60
 
 
 def _rerun_check(job_id=2, conclusion="failure", status="completed",
@@ -397,6 +427,37 @@ def test_admission_rerun_api_failure(tmp_path, marker, expected_calls):
     _rerun_fixture(tmp_path, [_rerun_check()])
     (tmp_path / marker).touch()
     result = _run_rerun(tmp_path, expected_calls, expected_code=1)
+    assert "::error::" in result["__stdout__"]
+
+
+@needs_shell
+def test_admission_rerun_waits_for_run_completion(tmp_path):
+    _rerun_fixture(tmp_path, [_rerun_check()])
+    (tmp_path / "run-900-1.json").write_text(
+        json.dumps({"status": "in_progress"}), encoding="utf-8")
+    (tmp_path / "run-900-2.json").write_text(
+        json.dumps({"status": "completed"}), encoding="utf-8")
+    _run_rerun(tmp_path, "2\n")
+    assert (tmp_path / "run-call-count").read_text().strip() == "2"
+
+
+@needs_shell
+def test_admission_rerun_run_still_in_progress(tmp_path):
+    _rerun_fixture(tmp_path, [_rerun_check()])
+    (tmp_path / "run-900.json").write_text(
+        json.dumps({"status": "in_progress"}), encoding="utf-8")
+    result = _run_rerun(tmp_path, expected_code=1)
+    assert (tmp_path / "run-call-count").read_text().strip() == "3"
+    assert "::error::" in result["__stdout__"]
+    assert "run 900 still in progress after the poll budget" in result["__stdout__"]
+
+
+@needs_shell
+@pytest.mark.parametrize("marker", ["fail-job", "fail-run"])
+def test_admission_rerun_run_api_failure(tmp_path, marker):
+    _rerun_fixture(tmp_path, [_rerun_check()])
+    (tmp_path / marker).touch()
+    result = _run_rerun(tmp_path, expected_code=1)
     assert "::error::" in result["__stdout__"]
 
 

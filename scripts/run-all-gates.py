@@ -1534,7 +1534,8 @@ def build_suites() -> List[Suite]:
               # merge_group arm now reverses too, and a row pins both arms'
               # selection expressions byte-identical (+1).
               # 107 -> 123 on 2026-09-12 (mq-admission-rerun): rerun decisions and task #34 wait pin.
-              SCRIPTS_DIR, _py_pytest("test_merge_queue_workflow.py"), 123),
+              # 123 -> 128 on 2026-09-12 (mq-admission-rerun r2): the POST waits for the run to complete, with read-failure and budget pins.
+              SCRIPTS_DIR, _py_pytest("test_merge_queue_workflow.py"), 128),
         Suite("platform-release-manifest",
               "scripts test_platform_release_manifest.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_platform_release_manifest.py"), 88),
