@@ -1,6 +1,10 @@
 {
   "contract": "leaf.vendor-pin.v1",
   "downstream_overlays": {
+    "agent/authorLoop.ts": {
+      "reason": "selective tenant Forge publication hook from mushy-code 07bd526468cb0e27f342559a88632356e8a2ffa2 over retained base 52e8a367d8ca322856e9cd3a7455a6f399a34b2a",
+      "sha256": "c354b73dead5c4583d851fb74b834237b839f317629b18dfbe1ebb4f49de14bf"
+    },
     "ports/fakes/fakeConverseRunner.ts": {
       "reason": "leaf-web-demo downstream patch not present at the pinned upstream commit",
       "sha256": "8a7b076759ad4f7fea0c6ec4de078c32f3cc556252a9328668c41881b7f75f41"
@@ -17,6 +21,10 @@
       "reason": "leaf-web-demo downstream patch not present at the pinned upstream commit",
       "sha256": "fc776378a88e913b658e57473a1694007ce5078ccdcfaaf1ceb9779af1b89181"
     },
+    "ports/impl/forgeRemoteAuthority.ts": {
+      "reason": "selective tenant Forge publication hook from mushy-code 07bd526468cb0e27f342559a88632356e8a2ffa2 over retained base 52e8a367d8ca322856e9cd3a7455a6f399a34b2a",
+      "sha256": "7391d1f42e7697e560084d8dfff8f245f1a2d6bdd172450c8bec34a5e869c76b"
+    },
     "ports/impl/pgSessionStore.ts": {
       "reason": "Isolate SDK transcript bindings by authenticated app conversation in leaf-web-demo",
       "sha256": "bf933056361301fe7f83ef2506ca8b6446b2e7c586898da520f3d063cfffb2a2"
@@ -29,13 +37,17 @@
       "reason": "leaf-web-demo downstream patch not present at the pinned upstream commit",
       "sha256": "58b125b5c4c4b7aecab3351031c951cbde849a38f5b263c674e9c41ef6b1d87f"
     },
+    "ports/impl/tenantRepoProvider.ts": {
+      "reason": "selective tenant Forge hook from mushy-code 07bd526468cb0e27f342559a88632356e8a2ffa2 over retained base 52e8a367d8ca322856e9cd3a7455a6f399a34b2a; downstream per-tenant fail-closed authority selection and separate trusted remoteRef for bare publication; local checkout locator retained",
+      "sha256": "22f6e4fd847e1b8a1711ea09443a28fad8a2a01d0c8396bbd43e0c7c02329203"
+    },
     "ports/index.ts": {
-      "reason": "leaf-web-demo downstream patch not present at the pinned upstream commit",
-      "sha256": "2d0dc6d5b05e14e9743f8a6bfcc97e226f288eb898065291f4bb73c814bc5a1b"
+      "reason": "leaf-web-demo downstream patch not present at the pinned upstream commit; selective tenant Forge publication hook from mushy-code 07bd526468cb0e27f342559a88632356e8a2ffa2 over retained base 52e8a367d8ca322856e9cd3a7455a6f399a34b2a",
+      "sha256": "5da95920576e4093c896c470072f0b59749c200257864d893f36c4339ad70102"
     }
   },
   "files": {
-    "agent/authorLoop.ts": "926febe83eb4b61b5052de22982f297face605721a4d56168b34fe5e291ec033",
+    "agent/authorLoop.ts": "c354b73dead5c4583d851fb74b834237b839f317629b18dfbe1ebb4f49de14bf",
     "agent/captureGuards.ts": "ae3e2e735196115235678411a942a5a99eeec0d6f8769b920e034b9d1a73e911",
     "agent/systemPrompt.ts": "48a671cc826db22ae1a4d539cd2c2fc11b70f584218caf113e5564d919bbc732",
     "agent/tools/apsTestRun.ts": "4e4794a8ac035cff1a4237de827f3f6eee4d2540689a6ee9585fc24bd5031667",
@@ -64,6 +76,7 @@
     "ports/impl/converseSdkRunner.ts": "fc776378a88e913b658e57473a1694007ce5078ccdcfaaf1ceb9779af1b89181",
     "ports/impl/e2bAgentRunner.ts": "d03029ee3598e2d9d64e0f34b43f8bb6610fdcf1560e7c9a2af209df5c8ceb15",
     "ports/impl/envScrub.ts": "d3620e14d92f1aa8b7623236de7993b53b58806f12d641bea89c70d733bf29ad",
+    "ports/impl/forgeRemoteAuthority.ts": "7391d1f42e7697e560084d8dfff8f245f1a2d6bdd172450c8bec34a5e869c76b",
     "ports/impl/gitWorker.ts": "efc5cdd3e199857fa6f40673091f6b56d1c398259c39f48270f03955867893e0",
     "ports/impl/harnessSchema.ts": "3c42381eee5aaee016ceb8c5d3d0f74d164dd2022e32610dc2fd5aea35c9cfb4",
     "ports/impl/httpUpstreamSink.ts": "ec12e8d499bbe9968f8df4cab181d752dad220e4f0e7a78c87c70dade4e5624e",
@@ -83,8 +96,8 @@
     "ports/impl/standardServicesRuntime.ts": "74925259f354b874d5ad5318701f4bc727d4a043939dfe8c995711daa7300e95",
     "ports/impl/tenantBrokerStandardServiceProvider.ts": "35226b73731b2f31df0d7ff6da133b8bf327ea2896c2975fbd22729e78f08266",
     "ports/impl/tenantChangeRepo.ts": "58b125b5c4c4b7aecab3351031c951cbde849a38f5b263c674e9c41ef6b1d87f",
-    "ports/impl/tenantRepoProvider.ts": "081a5b0ac578ae14f1cc11b9363810f734e2f06e91aa07b5b266ae0826ff43bc",
-    "ports/index.ts": "2d0dc6d5b05e14e9743f8a6bfcc97e226f288eb898065291f4bb73c814bc5a1b",
+    "ports/impl/tenantRepoProvider.ts": "22f6e4fd847e1b8a1711ea09443a28fad8a2a01d0c8396bbd43e0c7c02329203",
+    "ports/index.ts": "5da95920576e4093c896c470072f0b59749c200257864d893f36c4339ad70102",
     "ports/modelAllowlist.ts": "1e994732e3750e8e8fef4eb9a66d3b7223cdcc155cc93d5de0b4ef9832118684",
     "ports/surfaceAnnotations.ts": "8fba9c1d4373c2e9600e29a68ee78c801dd75bc56411baf9a33570b65cd52e5b",
     "ports/wireGrant.ts": "ac9619a708b426ff3920c796497727497bc7e707d70a5a5503c759324e379904",

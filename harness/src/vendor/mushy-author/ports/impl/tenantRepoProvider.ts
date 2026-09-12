@@ -21,6 +21,7 @@ import { join, resolve } from "node:path";
 import { Pool } from "pg";
 import type { PoolClient, PoolConfig } from "pg";
 import { HARNESS_IDENTITY } from "../../registry/registerTool.js";
+import type { ForgeRemoteAuthority } from "./forgeRemoteAuthority.js";
 import type {
   HarnessIdentity,
   TenantBareRepo,
@@ -37,6 +38,10 @@ export interface TenantRepoLocator {
 
 export interface TenantRepoProviderOptions {
   locator: TenantRepoLocator;
+  /** Optional canonical Forgejo truth for staged artifact publication. */
+  remoteAuthority?: ForgeRemoteAuthority | ((tenantId: string) => ForgeRemoteAuthority | undefined);
+  /** Trusted canonical origin used only by the remote bare authority path. */
+  remoteRef?: (tenantId: string) => Promise<string>;
   /** Base dir for per-session checkouts (default: OS temp). */
   workBase?: string;
   /** Durable base directory for canonical bare tenant repositories. */
@@ -637,6 +642,8 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
   }
 
   async checkout(tenantId: string): Promise<TenantRepo> {
+    // Resolve selection for its fail-closed tenant guard, never as a checkout URL.
+    if (typeof this.opts.remoteAuthority === "function") this.opts.remoteAuthority(tenantId);
     const lease = this.leaseContext.getStore();
     if (lease && lease.tenantId !== tenantId) {
       throw new TenantRepoLeaseLostError(tenantId);
@@ -693,6 +700,53 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
    * the source of a staged change or publish.
    */
   async bare(tenantId: string): Promise<TenantBareRepo> {
+    const authority = typeof this.opts.remoteAuthority === "function"
+      ? this.opts.remoteAuthority(tenantId) : this.opts.remoteAuthority;
+    if (authority) {
+      const lease = this.leaseContext.getStore();
+      if (!this.lease || !lease || lease.tenantId !== tenantId || lease.lost) {
+        throw new TenantRepoLeaseLostError(tenantId);
+      }
+      if (!this.opts.remoteRef) throw new Error("canonical Forge remote resolver required");
+      const sourceRef = await this.opts.remoteRef(tenantId);
+      await authority.canonicalRemote(tenantId, sourceRef);
+      const existing = this.bareRepos.get(tenantId);
+      if (existing) {
+        if (existing.sourceRef !== sourceRef) {
+          throw new Error("canonical Forge tenant origin changed");
+        }
+        return existing;
+      }
+      const base = this.opts.bareBase ?? this.opts.workBase ?? tmpdir();
+      mkdirSync(base, { recursive: true });
+      const dir = this.opts.bareBase
+        ? join(base, `${tenantId}.git`)
+        : mkdtempSync(join(base, `mushy-bare-${tenantId}-`));
+      trustSharedRepo(dir);
+      if (!existsSync(join(dir, "HEAD"))) {
+        await authority.initialize(tenantId, dir, sourceRef);
+      }
+      const bound = authority.bind(tenantId, dir, sourceRef);
+      const requireLease = () => {
+        const current = this.leaseContext.getStore();
+        if (!current || current.tenantId !== tenantId || current.lost) {
+          throw new TenantRepoLeaseLostError(tenantId);
+        }
+      };
+      const repo: TenantBareRepo & { sourceRef: string } = {
+        dir, sourceRef,
+        publishAuthoritatively: async (request) => {
+          requireLease();
+          return bound.publishAuthoritatively!(request);
+        },
+        refreshMain: async () => {
+          requireLease();
+          await bound.refreshMain!();
+        },
+      };
+      this.bareRepos.set(tenantId, repo);
+      return repo;
+    }
     const ref = await this.opts.locator.repoRef(tenantId);
     if (existsSync(ref)) trustSharedRepo(ref);
     // Refuse a stale or cross-tenant durable origin before auto-provisioning can

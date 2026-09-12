@@ -74,6 +74,7 @@ import { upstreamSinkFromEnv } from "../src/ports/impl/httpUpstreamSink.js";
 import { startGitWorker, stopGitWorker } from "../src/ports/impl/gitWorker.js";
 import { TenantRepoProviderImpl } from "../src/ports/impl/tenantRepoProvider.js";
 import { createProjectForgeAuthorityFromEnv, createProjectRepositoryEditsForService } from "../src/ports/impl/projectForgeAuthority.js";
+import { createTenantForgeAuthorityFromEnv } from "../src/ports/impl/tenantForgeAuthority.js";
 import {
   AuthorStandardServicesRunner,
   LeafStandardServicesHumanApprovalHost,
@@ -220,9 +221,12 @@ function buildPorts(standardServicesResolver: StandardServicesResolver | undefin
   const oauth = new StandardServicesOAuthGrantProvider(
     new OAuthGrantProviderImpl({ store: grantStore }),
   );
+  const tenantForge = createTenantForgeAuthorityFromEnv(tenantRepoDir);
   const tenantRepo = new TenantRepoProviderImpl({
+    remoteAuthority: tenantForge.remoteAuthority,
+    remoteRef: tenantForge.remoteRef,
     projectRemoteAuthority: createProjectForgeAuthorityFromEnv(),
-    locator: { async repoRef(tenantId: string) { return tenantRepoDir(tenantId); } },
+    locator: { async repoRef(tenantId: string) { return tenantForge.repoRef(tenantId); } },
     inPlace: true,
     bareBase: TENANT_GIT_DIR,
     autoProvisionFrom: TENANT_FIXTURE,

@@ -418,7 +418,7 @@ def runtime_identity(mode: str, source: str, env: dict, codebuild) -> dict:
     return identity
 
 
-def resolve_freshness(root: Path) -> dict[str, dict[str, str]]:
+def resolve_freshness(root: Path, *, harness_only=False) -> dict[str, dict[str, str]]:
     """Fetch the same signed package-channel inputs as the image workflow."""
     def digest(url):
         with urllib.request.urlopen(url, timeout=30) as response:
@@ -427,9 +427,12 @@ def resolve_freshness(root: Path) -> dict[str, dict[str, str]]:
             raise ValueError("package channel document exceeds bound")
         return hashlib.sha256(payload).hexdigest()
     hashes = {}
-    for distribution, names in (("bookworm", FRESHNESS["harness"]), ("trixie", TRIXIE)):
+    channels = (("bookworm", FRESHNESS["harness"]),) if harness_only else (("bookworm", FRESHNESS["harness"]), ("trixie", TRIXIE))
+    for distribution, names in channels:
         hashes[names[0]] = digest(f"https://deb.debian.org/debian-security/dists/{distribution}-security/InRelease")
         hashes[names[1]] = digest(f"https://deb.debian.org/debian/dists/{distribution}-updates/InRelease")
+    if harness_only:
+        return {"harness": hashes}
     repositories = subprocess.run(
         ["docker", "run", "--rm", "--pull=always", "--platform", "linux/amd64", "--entrypoint", "cat",
          f"{REGISTRY}/public-ecr/docker/library/nginx:alpine", "/etc/apk/repositories"],
@@ -455,14 +458,55 @@ def load_evidence_contract(root: Path, revision: str):
     return module
 
 
+def stage_harness_release(output: Path, *, source, tree, identity, harness, gate,
+                          predecessor, previous, web_bytes):
+    """Compose verified v1 bytes without changing the retained members' origin."""
+    _hex(source, 40, "source")
+    _hex(tree, 40, "tree")
+    identity = _build_identity(identity)
+    if (previous.get("schema") != "leaf.native-release.v1"
+            or set(previous["services"]) != set(SERVICES)):
+        raise ValueError("harness composition requires verified v1 predecessor")
+    if (not isinstance(harness, dict)
+            or set(harness) != {"repository", "image_digest", "source_revision", "native_build_number"}
+            or harness["repository"] != "leaf-platform-harness"
+            or harness["source_revision"] != source
+            or type(harness["native_build_number"]) is not int
+            or harness["native_build_number"] != identity["build_number"]
+            or not isinstance(harness["image_digest"], str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", harness["image_digest"])):
+        raise ValueError("harness differs from admitted producer/source")
+    if (gate["source_revision"] != source or gate["source_tree"] != tree
+            or _build_identity(gate["producer"])["project_arn"] == identity["project_arn"]):
+        raise ValueError("gate differs from harness source/tree")
+    if hashlib.sha256(web_bytes).hexdigest() != previous["web"]["archive_sha256"]:
+        raise ValueError("verified predecessor web bytes changed")
+    manifest = json.loads(json.dumps(previous))
+    manifest.update(schema="leaf.native-release.harness.v1", selection="harness",
+                    source_revision=source, source_tree=tree, producer=identity,
+                    gate=gate, predecessor=predecessor)
+    manifest["services"]["harness"] = harness
+    raw = (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    output.mkdir(parents=True, exist_ok=False)
+    data = {"staging-supply-set.json": raw, "web-dist.zip": web_bytes}
+    for name, value in data.items():
+        (output / name).write_bytes(value)
+    return {name: {"size": len(value), "sha256": hashlib.sha256(value).hexdigest()}
+            for name, value in data.items()}
+
+
 def produce_release(root: Path, output: Path, request: dict, env: dict, codebuild, s3) -> dict:
     """Execute the complete admitted producer, without provisioning or deployment."""
-    if set(request) != {"source_revision", "source_tree", "gate", "contract_revision"}:
+    fields = {"source_revision", "source_tree", "gate", "contract_revision"}
+    if (not isinstance(request, dict) or set(request) not in (fields, fields | {"selection", "predecessor"})
+            or ("selection" in request and request["selection"] != "harness")):
         raise ValueError("release request fields differ")
     source, tree = request["source_revision"], request["source_tree"]
     admit_checkout(root, source, tree)
     identity = runtime_identity("release", source, env, codebuild)
     contract = load_evidence_contract(Path(env["CODEBUILD_SRC_DIR_provider_contract"]), request["contract_revision"])
+    if "selection" in request and getattr(contract, "HARNESS_SUPPLY_SCHEMA", None) != "leaf.native-release.harness.v1":
+        raise ValueError("pinned evidence contract does not support harness supply")
     gate_request = contract.NativeRelease(**request["gate"])
     if (gate_request.project_arn != "arn:aws:codebuild:us-east-1:807034087062:project/leaf-studio-native-gate"
             or gate_request.service_role != "arn:aws:iam::807034087062:role/leaf-studio-native-gate-role"
@@ -477,6 +521,20 @@ def produce_release(root: Path, output: Path, request: dict, env: dict, codebuil
     proof_path.write_bytes(proof)
     subprocess.run([sys.executable, "scripts/run-all-gates.py", "--verify-gate-proof", str(proof_path), "--expect-tree", tree],
                    cwd=root, check=True, timeout=120)
+    if "selection" in request:
+        contract.fixed_native_lane(gate_request, "gate")
+        previous, _, web_bytes = contract.read_native_predecessor(request["predecessor"], codebuild, s3)
+        freshness = resolve_freshness(root, harness_only=True)
+        harness = build_image(root, "harness", source, identity["build_number"],
+                              freshness["harness"], work / "harness.json")
+        gate = {"producer": {"project_arn": gate_request.project_arn, "build_arn": gate_request.build_arn,
+                             "build_number": gate_request.build_number},
+                "source_revision": source, "source_tree": tree, "proof_sha256": hashlib.sha256(proof).hexdigest(),
+                "archive": {"bucket": gate_request.bucket, "key": gate_request.key,
+                            "version_id": gate_request.version_id, "sha256": gate_request.sha256}}
+        return stage_harness_release(output, source=source, tree=tree, identity=identity,
+                                     harness=harness, gate=gate, predecessor=request["predecessor"],
+                                     previous=previous, web_bytes=web_bytes)
     pins = json.loads((root / "deploy/autofill-solver-sources.json").read_text())
     if not isinstance(pins, dict) or len(pins) != 1:
         raise ValueError("release requires one reviewed solver pin")
