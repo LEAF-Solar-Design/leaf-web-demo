@@ -45,9 +45,17 @@ jobs:
           fetch-depth: 2
           persist-credentials: false
 
-      - name: Dispatch the merge-group build on the main ref
+      # The skip decision must surface as the DISPATCH STEP'S OWN conclusion:
+      # mq-supply's docs-only shortcut (merge-queue.yml) accepts a docs-only
+      # group only when the step named "Dispatch the merge-group build on the
+      # main ref" concluded "skipped". Deciding inside that step and exiting 0
+      # reads as "success" there, so every docs-only group fell through to a
+      # 20-minute supply-set wait for a set this job correctly never dispatched,
+      # and was ejected. The decision therefore lives here, and the dispatch
+      # step below skips at the step level.
+      - name: Decide whether this group needs a speculative build
+        id: decide
         env:
-          GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.merge_group.head_sha }}
         run: |
           set -euo pipefail
@@ -70,9 +78,15 @@ jobs:
               fi
             fi
           fi
-          if [ "$DISPATCH" != "true" ]; then
-            exit 0
-          fi
+          echo "dispatch=$DISPATCH" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch the merge-group build on the main ref
+        if: steps.decide.outputs.dispatch == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        run: |
+          set -euo pipefail
           if gh workflow run build-platform-images.yml \
             --repo "$GITHUB_REPOSITORY" \
             --ref main \
