@@ -7634,7 +7634,9 @@ def test_merge_group_dispatches_exact_head_on_main_without_pr_input() -> None:
             "ref": "${{ github.event.merge_group.head_sha }}",
             "fetch-depth": 2, "persist-credentials": False,
         }
-        step = job["steps"][1]
+        step = job["steps"][2]
+        assert step["name"] == "Dispatch the merge-group build on the main ref"
+        assert step["if"] == "steps.decide.outputs.dispatch == 'true'"
         assert step["env"]["HEAD_SHA"] == "${{ github.event.merge_group.head_sha }}"
         code = _executable_bash(step["run"])
         for token in ('if gh workflow run build-platform-images.yml', '--ref main',
@@ -7650,19 +7652,36 @@ def test_merge_group_dispatches_exact_head_on_main_without_pr_input() -> None:
 
 def test_merge_group_docs_noop_uses_trusted_parent_and_fails_open() -> None:
     def check(doc):
-        code = _executable_bash(doc["jobs"]["dispatch-group"]["steps"][1]["run"])
+        job = doc["jobs"]["dispatch-group"]
+        decide = job["steps"][1]
+        assert decide.get("id") == "decide"
+        code = _executable_bash(decide["run"])
         for token in ('DISPATCH=true', "git show 'HEAD^1:scripts/docs_noop_filter.py'",
                       'git diff --no-renames --name-only HEAD^1 HEAD',
                       'python3 "$RUNNER_TEMP/docs_noop_filter.py"',
                       'if [ "$VERDICT" = "skip" ]; then', 'DISPATCH=false'):
             assert token in code
-        assert re.search(r'if \[ "\$DISPATCH" != "true" \]; then\s*exit 0\s*fi', code)
-        assert code.index('DISPATCH=true') < code.index('DISPATCH=false') < code.index('gh workflow run')
+        # The verdict must surface as the DISPATCH STEP'S OWN conclusion:
+        # mq-supply's docs-only shortcut (merge-queue.yml) accepts a docs-only
+        # group only when the step named "Dispatch the merge-group build on
+        # the main ref" concluded "skipped". An in-step decision that exits 0
+        # concludes "success" and ejects every docs-only group after the
+        # 20-minute supply-set wait (measured three times on PR #1219's
+        # groups, 2026-09-13), so the skip is a step-level if, never an
+        # in-step exit 0.
+        assert 'echo "dispatch=$DISPATCH" >> "$GITHUB_OUTPUT"' in code
+        assert 'exit 0' not in code
+        assert 'gh workflow run' not in code
+        assert code.index('DISPATCH=true') < code.index('DISPATCH=false') < code.index('echo "dispatch=$DISPATCH"')
         assert 'python3 scripts/' not in code
+        dispatch = job["steps"][2]
+        assert dispatch["name"] == "Dispatch the merge-group build on the main ref"
+        assert dispatch["if"] == "steps.decide.outputs.dispatch == 'true'"
     _mq_falsify(check, [
         ("HEAD^1:scripts/docs_noop_filter.py", "HEAD:scripts/docs_noop_filter.py"),
         ('git diff --no-renames --name-only HEAD^1 HEAD', 'git diff --name-only HEAD^1 HEAD'),
         ('DISPATCH=false', 'DISPATCH=true'),
+        ("if: steps.decide.outputs.dispatch == 'true'", "if: always()"),
     ], dispatcher=True)
 
 
