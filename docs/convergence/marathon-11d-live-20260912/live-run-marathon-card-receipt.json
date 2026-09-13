@@ -1,0 +1,174 @@
+{
+ "schema": "leaf.marathon-card-proof.v1",
+ "evidence_tier": "live-run",
+ "run_id": "marathon-11d-live-20260912",
+ "source_sha": "2e50668fba80588929c5dcfa9260ac6b0293da8c",
+ "tenant_binding": "demo-tenant",
+ "source_artifacts": [
+  {
+   "filename": "state.json",
+   "sha256": "08874546d6daab1c7dc85b09c3bfe4488df5e5c8fe5bc9b6bad5334bbab07a1d",
+   "kind": "producer",
+   "synthetic": false,
+   "reconstructed": false
+  },
+  {
+   "filename": "run-manifest.json",
+   "sha256": "b9a553e541544f942b2146371125430d9a349aa51904c5b678d8b755c7636b36",
+   "kind": "producer",
+   "synthetic": false,
+   "reconstructed": false
+  },
+  {
+   "filename": "oracle-card_live_proof.log",
+   "sha256": "78035cfef81afda21242109f95f81e5282d3b65e15ef179d4f44a8920b5d41fc",
+   "kind": "oracle",
+   "synthetic": false,
+   "reconstructed": false
+  }
+ ],
+ "observed_records": [
+  {
+   "observation_id": "obs-nonterminal",
+   "run_id": "marathon-11d-live-20260912",
+   "tenant_binding": "demo-tenant",
+   "observed_at": 1789237802528,
+   "synthetic": false,
+   "reconstructed": false,
+   "capture_mode": "live",
+   "api_result": {
+    "builds": [
+     {
+      "id": "marathon-11d-live-20260912",
+      "lane": "fold",
+      "state": "running",
+      "title": "marathon-11d-live-20260912",
+      "requested_by": null,
+      "started": null,
+      "elapsed_ms": null,
+      "estimate_ms": null,
+      "cost_usd": 0,
+      "receipts": [],
+      "terminal": {
+       "verified": false,
+       "promoted": false
+      },
+      "actions": [
+       "cancel"
+      ],
+      "status": {
+       "word": "round 1",
+       "tint": "ok",
+       "detail": "0/1 milestones"
+      }
+     }
+    ],
+    "warnings": [],
+    "sources": {
+     "broker": "jobs-store",
+     "fleet": "unconfigured",
+     "fold": "runs-dir"
+    },
+    "dropped": {
+     "broker": 0,
+     "fleet": 0,
+     "fold": 0
+    },
+    "limit": 200,
+    "error": null,
+    "degraded_mode": false
+   },
+   "source_artifacts": [
+    "state.json",
+    "run-manifest.json",
+    "oracle-card_live_proof.log"
+   ]
+  },
+  {
+   "observation_id": "obs-terminal",
+   "run_id": "marathon-11d-live-20260912",
+   "tenant_binding": "demo-tenant",
+   "observed_at": 1789237867798,
+   "synthetic": false,
+   "reconstructed": false,
+   "capture_mode": "live",
+   "api_result": {
+    "builds": [
+     {
+      "id": "marathon-11d-live-20260912",
+      "lane": "fold",
+      "state": "done",
+      "title": "marathon-11d-live-20260912",
+      "requested_by": null,
+      "started": null,
+      "elapsed_ms": null,
+      "estimate_ms": null,
+      "cost_usd": 0.30663320000000005,
+      "receipts": [
+       {
+        "kind": "verification",
+        "ref": "marathon-11d-live-20260912#verified_at",
+        "at": 1789237861373
+       }
+      ],
+      "terminal": {
+       "verified": true,
+       "promoted": false
+      },
+      "actions": [
+       "promote"
+      ],
+      "status": {
+       "word": "verified",
+       "tint": "ok",
+       "detail": "1/1 milestones"
+      }
+     }
+    ],
+    "warnings": [],
+    "sources": {
+     "broker": "jobs-store",
+     "fleet": "unconfigured",
+     "fold": "runs-dir"
+    },
+    "dropped": {
+     "broker": 0,
+     "fleet": 0,
+     "fold": 0
+    },
+    "limit": 200,
+    "error": null,
+    "degraded_mode": false
+   },
+   "source_artifacts": [
+    "state.json",
+    "run-manifest.json",
+    "oracle-card_live_proof.log"
+   ]
+  }
+ ],
+ "screenshots": [
+  {
+   "filename": "nonterminal-marathon-11d-live-20260912.png",
+   "sha256": "9a0e4f8f71f12e686cbc059c6eb6108593222c08d7b3e0e4b12c4249a2d6effd",
+   "observation_id": "obs-nonterminal",
+   "run_id": "marathon-11d-live-20260912",
+   "tenant_binding": "demo-tenant",
+   "card_visible": true,
+   "card_state": "running"
+  },
+  {
+   "filename": "terminal-marathon-11d-live-20260912.png",
+   "sha256": "ce9ef94e3dd9e363426ff1777522ee98a7945fafb33e3a79e4acb205c69e155f",
+   "observation_id": "obs-terminal",
+   "run_id": "marathon-11d-live-20260912",
+   "tenant_binding": "demo-tenant",
+   "card_visible": true,
+   "card_state": "done"
+  }
+ ],
+ "assertions": [
+  "The card rendered the run as running and then done on the real Browser/CAD board at 127.0.0.1:5275, fed by the real /api/builds with sources.fold=runs-dir",
+  "The producer was claudewalk run_leaf_marathon.py writing state.json under LEAF_MARATHON_RUNS_DIR/demo-tenant; the oracle printed CARD_ORACLE_PASS; spent_usd 0.3066 of the authorized 50"
+ ]
+}

@@ -1,0 +1,36 @@
+[
+ {
+  "observation_id": "obs-nonterminal",
+  "kind": "nonterminal",
+  "observed_at": 1789237802528,
+  "run_id": "marathon-11d-live-20260912",
+  "tenant_binding": "demo-tenant",
+  "api_state": "running",
+  "api_result_file": "nonterminal-api-builds.json",
+  "api_result_sha256": "1f1e26e16f840b5498e67ce357462f9ffc6f6522afdc2e5d5c9ec1275073dd3b",
+  "screenshot": {
+   "filename": "nonterminal-marathon-11d-live-20260912.png",
+   "sha256": "9a0e4f8f71f12e686cbc059c6eb6108593222c08d7b3e0e4b12c4249a2d6effd"
+  },
+  "capture_mode": "live",
+  "synthetic": false,
+  "reconstructed": false
+ },
+ {
+  "observation_id": "obs-terminal",
+  "kind": "terminal",
+  "observed_at": 1789237867798,
+  "run_id": "marathon-11d-live-20260912",
+  "tenant_binding": "demo-tenant",
+  "api_state": "done",
+  "api_result_file": "terminal-api-builds.json",
+  "api_result_sha256": "da8488a39a76db7d7dc1a075a003c53520f286214d9ba29df32bfcf9400c8d4c",
+  "screenshot": {
+   "filename": "terminal-marathon-11d-live-20260912.png",
+   "sha256": "ce9ef94e3dd9e363426ff1777522ee98a7945fafb33e3a79e4acb205c69e155f"
+  },
+  "capture_mode": "live",
+  "synthetic": false,
+  "reconstructed": false
+ }
+]

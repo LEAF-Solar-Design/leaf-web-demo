@@ -1,0 +1,42 @@
+{
+ "builds": [
+  {
+   "id": "marathon-11d-live-20260912",
+   "lane": "fold",
+   "state": "running",
+   "title": "marathon-11d-live-20260912",
+   "requested_by": null,
+   "started": null,
+   "elapsed_ms": null,
+   "estimate_ms": null,
+   "cost_usd": 0,
+   "receipts": [],
+   "terminal": {
+    "verified": false,
+    "promoted": false
+   },
+   "actions": [
+    "cancel"
+   ],
+   "status": {
+    "word": "round 1",
+    "tint": "ok",
+    "detail": "0/1 milestones"
+   }
+  }
+ ],
+ "warnings": [],
+ "sources": {
+  "broker": "jobs-store",
+  "fleet": "unconfigured",
+  "fold": "runs-dir"
+ },
+ "dropped": {
+  "broker": 0,
+  "fleet": 0,
+  "fold": 0
+ },
+ "limit": 200,
+ "error": null,
+ "degraded_mode": false
+}
