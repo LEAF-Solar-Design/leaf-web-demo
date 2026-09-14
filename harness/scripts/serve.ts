@@ -73,6 +73,7 @@ import { createTenantGrantStore, OAuthGrantProviderImpl } from "../src/ports/imp
 import { upstreamSinkFromEnv } from "../src/ports/impl/httpUpstreamSink.js";
 import { startGitWorker, stopGitWorker } from "../src/ports/impl/gitWorker.js";
 import { TenantRepoProviderImpl } from "../src/ports/impl/tenantRepoProvider.js";
+import { createTenantForgeConfigurationFromEnv } from "../src/ports/impl/tenantForgeAuthority.js";
 import { createProjectForgeAuthorityFromEnv, createProjectRepositoryEditsForService } from "../src/ports/impl/projectForgeAuthority.js";
 import {
   AuthorStandardServicesRunner,
@@ -220,12 +221,26 @@ function buildPorts(standardServicesResolver: StandardServicesResolver | undefin
   const oauth = new StandardServicesOAuthGrantProvider(
     new OAuthGrantProviderImpl({ store: grantStore }),
   );
+  const tenantForge = createTenantForgeConfigurationFromEnv(process.env, tenantRepoDir);
+  const appUrl = (process.env.LEAF_APP_URL ?? "").trim();
+  const dispatchSecret = (process.env.LEAF_APP_DISPATCH_SECRET ?? "").trim();
+  const customizationCoordination = appUrl && dispatchSecret
+    ? new CustomizationCoordinationClient({ baseUrl: appUrl, dispatchSecret })
+    : undefined;
+  if (tenantForge && !customizationCoordination) {
+    throw new Error("Forge tenant authority requires effective catalog coordination");
+  }
   const tenantRepo = new TenantRepoProviderImpl({
     projectRemoteAuthority: createProjectForgeAuthorityFromEnv(),
-    locator: { async repoRef(tenantId: string) { return tenantRepoDir(tenantId); } },
+    locator: tenantForge?.locator ?? { async repoRef(tenantId: string) { return tenantRepoDir(tenantId); } },
+    ...(tenantForge ? {
+      remoteAuthority: tenantForge.remoteAuthority,
+      isRemoteTenant: tenantForge.isRemoteTenant,
+      effectiveCatalog: (tenantId: string) => customizationCoordination!.effectiveCatalog(tenantId),
+    } : {}),
     inPlace: true,
     bareBase: TENANT_GIT_DIR,
-    autoProvisionFrom: TENANT_FIXTURE,
+    ...(tenantForge ? {} : { autoProvisionFrom: TENANT_FIXTURE }),
   });
   const broker = new BrokerApsClientHttp({ brokerUrl: BROKER_URL });
   // OPTIONAL platform-improvement capture. Constructed only when
@@ -266,14 +281,7 @@ function buildPorts(standardServicesResolver: StandardServicesResolver | undefin
           const spine = spineTurnRunner(oauth, standardServicesResolver);
           return spine ? { converseRunner: spine } : {};
         })()),
-    ...((process.env.LEAF_APP_URL ?? "").trim() && (process.env.LEAF_APP_DISPATCH_SECRET ?? "").trim()
-      ? {
-          customizationCoordination: new CustomizationCoordinationClient({
-            baseUrl: (process.env.LEAF_APP_URL ?? "").trim(),
-            dispatchSecret: (process.env.LEAF_APP_DISPATCH_SECRET ?? "").trim(),
-          }),
-        }
-      : {}),
+    ...(customizationCoordination ? { customizationCoordination } : {}),
   };
   // Branched, not spread: HarnessPorts is a discriminated union, so opting into
   // the sink must supply it AND both posture flags together. Both stay FALSE --

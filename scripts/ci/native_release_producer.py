@@ -418,7 +418,7 @@ def runtime_identity(mode: str, source: str, env: dict, codebuild) -> dict:
     return identity
 
 
-def resolve_freshness(root: Path) -> dict[str, dict[str, str]]:
+def resolve_freshness(root: Path, *, harness_only=False, app_harness=False) -> dict[str, dict[str, str]]:
     """Fetch the same signed package-channel inputs as the image workflow."""
     def digest(url):
         with urllib.request.urlopen(url, timeout=30) as response:
@@ -426,10 +426,18 @@ def resolve_freshness(root: Path) -> dict[str, dict[str, str]]:
         if not payload or len(payload) > 8 * 1024 * 1024:
             raise ValueError("package channel document exceeds bound")
         return hashlib.sha256(payload).hexdigest()
+    if harness_only and app_harness:
+        raise ValueError("conflicting freshness selection")
     hashes = {}
-    for distribution, names in (("bookworm", FRESHNESS["harness"]), ("trixie", TRIXIE)):
+    channels = (("bookworm", FRESHNESS["harness"]),) if harness_only else (("bookworm", FRESHNESS["harness"]), ("trixie", TRIXIE))
+    for distribution, names in channels:
         hashes[names[0]] = digest(f"https://deb.debian.org/debian-security/dists/{distribution}-security/InRelease")
         hashes[names[1]] = digest(f"https://deb.debian.org/debian/dists/{distribution}-updates/InRelease")
+    if harness_only:
+        return {"harness": hashes}
+    if app_harness:
+        return {service: {name: hashes[name] for name in FRESHNESS.get(service, TRIXIE)}
+                for service in ("app", "harness")}
     repositories = subprocess.run(
         ["docker", "run", "--rm", "--pull=always", "--platform", "linux/amd64", "--entrypoint", "cat",
          f"{REGISTRY}/public-ecr/docker/library/nginx:alpine", "/etc/apk/repositories"],
@@ -455,14 +463,98 @@ def load_evidence_contract(root: Path, revision: str):
     return module
 
 
+def stage_selective_release(output: Path, *, selection, source, tree, identity, images, gate,
+                            predecessor, previous, web_bytes, retained_web=None, retained_manifest=None):
+    """Compose verified v1 bytes without changing the retained members' origin."""
+    _hex(source, 40, "source")
+    _hex(tree, 40, "tree")
+    identity = _build_identity(identity)
+    if (previous.get("schema") != "leaf.native-release.v1"
+            or set(previous["services"]) != set(SERVICES)):
+        raise ValueError("harness composition requires verified v1 predecessor")
+    selected = {"harness": ("harness",), "app-harness": ("app", "harness")}.get(selection)
+    if selected is None or set(images) != set(selected):
+        raise ValueError("invalid selective image set")
+    for service in selected:
+        item = images[service]
+        if (not isinstance(item, dict)
+                or set(item) != {"repository", "image_digest", "source_revision", "native_build_number"}
+                or item["repository"] != f"leaf-platform-{service}"
+                or item["source_revision"] != source
+                or type(item["native_build_number"]) is not int
+                or item["native_build_number"] != identity["build_number"]
+                or not isinstance(item["image_digest"], str)
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", item["image_digest"])):
+            raise ValueError(f"{service} differs from admitted producer/source")
+    if (gate["source_revision"] != source or gate["source_tree"] != tree
+            or _build_identity(gate["producer"])["project_arn"] == identity["project_arn"]):
+        raise ValueError("gate differs from harness source/tree")
+    if (retained_web is None) != (retained_manifest is None) or (retained_web is not None and selection != "app-harness"):
+        raise ValueError("retained web requires app-harness and authenticated supply")
+    web_origin = previous
+    if retained_web is not None:
+        web_origin = retained_manifest
+        image, web = web_origin["services"]["web"], web_origin["web"]
+        if (web_origin.get("schema") != "leaf.native-release.web.v1"
+                or web_origin.get("selection") != "web"
+                or web_origin["pins"] != retained_web["pins"]
+                or web_origin["producer"]["build_id"] != retained_web["build_id"]
+                or set(web_origin["services"]) != {"web"}
+                or image["repository"] != "leaf-platform-web"
+                or image["source_revision"] != web_origin["source_revision"]
+                or web["source_revision"] != web_origin["source_revision"]
+                or web["image_digest"] != image["image_digest"]
+                or web["path"] != "web-dist.zip"):
+            raise ValueError("retained web differs from authenticated origin")
+        _hex(web_origin["source_revision"], 40, "web source")
+        _hex(web_origin["source_tree"], 40, "web tree")
+    if hashlib.sha256(web_bytes).hexdigest() != web_origin["web"]["archive_sha256"]:
+        raise ValueError("verified predecessor web bytes changed")
+    manifest = json.loads(json.dumps(previous))
+    manifest.update(schema=f"leaf.native-release.{selection}.v1", selection=selection,
+                    source_revision=source, source_tree=tree, producer=identity,
+                    gate=gate, predecessor=predecessor)
+    if retained_web is not None:
+        manifest["retained_web"] = json.loads(json.dumps(retained_web))
+        manifest["web"] = {"member": web_origin["web"]["path"],
+                           "artifact_sha256": web_origin["web"]["artifact_sha256"],
+                           "archive_sha256": web_origin["web"]["archive_sha256"]}
+        manifest["services"]["web"] = json.loads(json.dumps(web_origin["services"]["web"]))
+    manifest["services"].update(json.loads(json.dumps(images)))
+    raw = (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    output.mkdir(parents=True, exist_ok=False)
+    data = {"staging-supply-set.json": raw, "web-dist.zip": web_bytes}
+    for name, value in data.items():
+        (output / name).write_bytes(value)
+    return {name: {"size": len(value), "sha256": hashlib.sha256(value).hexdigest()}
+            for name, value in data.items()}
+
+
+def stage_harness_release(output: Path, *, source, tree, identity, harness, gate,
+                          predecessor, previous, web_bytes):
+    """Preserve the harness-only composition interface."""
+    return stage_selective_release(output, selection="harness", source=source, tree=tree,
+        identity=identity, images={"harness": harness}, gate=gate, predecessor=predecessor,
+        previous=previous, web_bytes=web_bytes)
+
+
 def produce_release(root: Path, output: Path, request: dict, env: dict, codebuild, s3) -> dict:
     """Execute the complete admitted producer, without provisioning or deployment."""
-    if set(request) != {"source_revision", "source_tree", "gate", "contract_revision"}:
+    fields = {"source_revision", "source_tree", "gate", "contract_revision"}
+    if (not isinstance(request, dict) or set(request) not in (fields, fields | {"selection", "predecessor"},
+            fields | {"selection", "predecessor", "retained_web"})
+            or ("selection" in request and request["selection"] not in ("harness", "app-harness"))
+            or ("retained_web" in request and (request.get("selection") != "app-harness"
+                or not isinstance(request["retained_web"], dict)))):
         raise ValueError("release request fields differ")
     source, tree = request["source_revision"], request["source_tree"]
     admit_checkout(root, source, tree)
     identity = runtime_identity("release", source, env, codebuild)
     contract = load_evidence_contract(Path(env["CODEBUILD_SRC_DIR_provider_contract"]), request["contract_revision"])
+    if "selection" in request:
+        schema_name = "HARNESS_SUPPLY_SCHEMA" if request["selection"] == "harness" else "APP_HARNESS_SUPPLY_SCHEMA"
+        if getattr(contract, schema_name, None) != f"leaf.native-release.{request['selection']}.v1":
+            raise ValueError("pinned evidence contract does not support selected supply")
     gate_request = contract.NativeRelease(**request["gate"])
     if (gate_request.project_arn != "arn:aws:codebuild:us-east-1:807034087062:project/leaf-studio-native-gate"
             or gate_request.service_role != "arn:aws:iam::807034087062:role/leaf-studio-native-gate-role"
@@ -477,6 +569,31 @@ def produce_release(root: Path, output: Path, request: dict, env: dict, codebuil
     proof_path.write_bytes(proof)
     subprocess.run([sys.executable, "scripts/run-all-gates.py", "--verify-gate-proof", str(proof_path), "--expect-tree", tree],
                    cwd=root, check=True, timeout=120)
+    if "selection" in request:
+        contract.fixed_native_lane(gate_request, "gate")
+        previous, _, web_bytes = contract.read_native_predecessor(request["predecessor"], codebuild, s3)
+        retained_manifest = None
+        if "retained_web" in request:
+            reader = getattr(contract, "read_web_supply", None)
+            if not callable(reader):
+                raise ValueError("pinned evidence contract lacks retained web verifier")
+            retained_manifest, _, web_bytes = reader(request["retained_web"], codebuild, s3)
+        selection = request["selection"]
+        selected = ("harness",) if selection == "harness" else ("app", "harness")
+        freshness = (resolve_freshness(root, harness_only=True) if selection == "harness"
+                     else resolve_freshness(root, app_harness=True))
+        images = {service: build_image(root, service, source, identity["build_number"],
+                                       freshness[service], work / f"{service}.json")
+                  for service in selected}
+        gate = {"producer": {"project_arn": gate_request.project_arn, "build_arn": gate_request.build_arn,
+                             "build_number": gate_request.build_number},
+                "source_revision": source, "source_tree": tree, "proof_sha256": hashlib.sha256(proof).hexdigest(),
+                "archive": {"bucket": gate_request.bucket, "key": gate_request.key,
+                            "version_id": gate_request.version_id, "sha256": gate_request.sha256}}
+        return stage_selective_release(output, selection=selection, source=source, tree=tree, identity=identity,
+                                     images=images, gate=gate, predecessor=request["predecessor"],
+                                     previous=previous, web_bytes=web_bytes,
+                                     retained_web=request.get("retained_web"), retained_manifest=retained_manifest)
     pins = json.loads((root / "deploy/autofill-solver-sources.json").read_text())
     if not isinstance(pins, dict) or len(pins) != 1:
         raise ValueError("release requires one reviewed solver pin")

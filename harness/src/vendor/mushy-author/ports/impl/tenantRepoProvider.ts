@@ -11,16 +11,17 @@
 import { execFileSync } from "node:child_process";
 import { withFailureCategory } from "../../agent/captureGuards.js";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { scrubSecrets } from "./envScrub.js";
 import { gitWorkerAvailable, workerCommit } from "./gitWorker.js";
 import { redactTokens } from "../../redact.js";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Pool } from "pg";
 import type { PoolClient, PoolConfig } from "pg";
 import { HARNESS_IDENTITY } from "../../registry/registerTool.js";
+import type { ForgeRemoteAuthority } from "./forgeRemoteAuthority.js";
 import type {
   HarnessIdentity,
   TenantBareRepo,
@@ -37,6 +38,12 @@ export interface TenantRepoLocator {
 
 export interface TenantRepoProviderOptions {
   locator: TenantRepoLocator;
+  /** Optional canonical Forgejo truth for staged artifact publication. */
+  remoteAuthority?: ForgeRemoteAuthority;
+  /** Trusted configuration may retain explicitly local tenants during migration. */
+  isRemoteTenant?: (tenantId: string) => boolean;
+  /** Authenticated durable app pointer, never remote main or a request-supplied SHA. */
+  effectiveCatalog?: (tenantId: string) => Promise<{ catalogCommit: string; catalogDigest: string }>;
   /** Base dir for per-session checkouts (default: OS temp). */
   workBase?: string;
   /** Durable base directory for canonical bare tenant repositories. */
@@ -469,10 +476,31 @@ function resetWorkingTree(dir: string): void {
   git(dir, ["clean", "-fd"]);
 }
 
+/** Local object/worktree operations only: no transport or ambient credentials. */
+function catalogGit(dir: string, args: string[]): Buffer {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (/^(PATH|SYSTEMROOT|WINDIR|TEMP|TMP)$/i.test(key)) env[key] = value;
+  }
+  Object.assign(env, {
+    GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
+    GIT_TERMINAL_PROMPT: "0", GIT_ALLOW_PROTOCOL: "", GIT_NO_REPLACE_OBJECTS: "1",
+  });
+  try {
+    return execFileSync("git", ["-c", "safe.directory=", "-c", `safe.directory=${realpathSync(dir).replaceAll("\\", "/")}`,
+      "-c", "core.hooksPath=" + (process.platform === "win32" ? "NUL" : "/dev/null"),
+      "-c", "core.fsmonitor=false", "-c", "core.autocrlf=false", ...args],
+      { cwd: dir, env, timeout: 30_000, maxBuffer: 16 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  } catch {
+    throw new Error("effective catalog local Git verification failed");
+  }
+}
+
 export class TenantRepoProviderImpl implements TenantRepoProvider {
   private readonly bareRepos = new Map<string, TenantBareRepo & { sourceRef?: string }>();
   private readonly lease?: PgTenantRepoLeaseCoordinator;
   private readonly leaseContext = new AsyncLocalStorage<RepoLease>();
+  private readonly catalogWorktrees = new WeakMap<RepoLease, Map<string, { bare: string; parent: string }>>();
   private readonly authoringMode: "disabled" | "singleton" | "fleet";
 
   constructor(private readonly opts: TenantRepoProviderOptions) {
@@ -530,6 +558,8 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
           throw error;
         } finally {
           const cleanupErrors: unknown[] = [];
+          try { await this.cleanupCatalogWorktrees(lease); }
+          catch (error) { cleanupErrors.push(error); }
           for (const dir of lease.repoDirs) {
             try {
               await this.lease!.runFenced(lease, async () => resetWorkingTree(dir));
@@ -561,8 +591,27 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
       );
     }
     return this.lease.withLease(tenantId, (lease) =>
-      this.leaseContext.run(lease, action),
+      this.leaseContext.run(lease, async () => {
+        try { return await action(); }
+        finally { await this.cleanupCatalogWorktrees(lease); }
+      }),
     );
+  }
+
+  private async cleanupCatalogWorktrees(lease: RepoLease): Promise<void> {
+    const owned = this.catalogWorktrees.get(lease);
+    if (!owned) return;
+    for (const [dir, { bare, parent }] of owned) {
+      await this.lease!.runFenced(lease, async () => {
+        if (existsSync(join(dir, ".git"))) {
+          catalogGit(bare, ["worktree", "remove", "--force", dir]);
+        }
+        // parent is an exclusive mkdtemp directory, never the accepted app tree.
+        rmSync(parent, { recursive: true, force: true });
+        owned.delete(dir);
+      });
+    }
+    this.catalogWorktrees.delete(lease);
   }
 
   /**
@@ -637,6 +686,58 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
   }
 
   async checkout(tenantId: string): Promise<TenantRepo> {
+    if (this.opts.remoteAuthority && (this.opts.isRemoteTenant?.(tenantId) ?? true)) {
+      if (!this.opts.effectiveCatalog || !this.opts.bareBase) {
+        throw new Error("Forge checkout requires a durable effective catalog resolver and shared bareBase");
+      }
+      const lease = this.leaseContext.getStore();
+      if (!this.lease || !lease || lease.tenantId !== tenantId || lease.lost) {
+        throw new TenantRepoLeaseLostError(tenantId);
+      }
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(tenantId)) {
+        throw new Error("effective catalog tenant refused");
+      }
+      const sourceRef = await this.opts.locator.repoRef(tenantId);
+      await this.opts.remoteAuthority.canonicalRemote(tenantId, sourceRef);
+      let pin: { catalogCommit: string; catalogDigest: string };
+      try { pin = await this.opts.effectiveCatalog(tenantId); }
+      catch { throw new Error("effective catalog unavailable"); }
+      if (!pin || !/^[0-9a-f]{40}$/.test(pin.catalogCommit)
+        || !/^[0-9a-f]{64}$/.test(pin.catalogDigest)) {
+        throw new Error("effective catalog pin refused");
+      }
+      return this.lease.runFenced(lease, async () => {
+        // Do not call bare(): initialization/refresh could fetch or select HEAD.
+        const bare = join(realpathSync(this.opts.bareBase!), `${tenantId}.git`);
+        if (!existsSync(bare) || realpathSync(bare) !== bare) {
+          throw new Error("effective catalog tenant bare repository unavailable");
+        }
+        const local = (args: string[]) => catalogGit(bare, args);
+        if (local(["rev-parse", "--is-bare-repository"]).toString().trim() !== "true"
+          || local(["config", "--local", "--no-includes", "--get-all", "remote.origin.url"]).toString().trim() !== sourceRef
+          || local(["cat-file", "-t", pin.catalogCommit]).toString().trim() !== "commit") {
+          throw new Error("effective catalog bare binding refused");
+        }
+        const registry = local(["cat-file", "blob", `${pin.catalogCommit}:registry.json`]);
+        if (createHash("sha256").update(registry).digest("hex") !== pin.catalogDigest) {
+          throw new Error("effective catalog registry digest mismatch");
+        }
+        const base = this.opts.workBase ?? tmpdir();
+        mkdirSync(base, { recursive: true });
+        const parent = mkdtempSync(join(base, `leaf-effective-${tenantId}-`));
+        const dir = join(parent, "checkout");
+        const owned = this.catalogWorktrees.get(lease) ?? new Map<string, { bare: string; parent: string }>();
+        this.catalogWorktrees.set(lease, owned);
+        owned.set(dir, { bare, parent }); // Retain cleanup ownership on partial add.
+        local(["worktree", "add", "--detach", dir, pin.catalogCommit]);
+        if (catalogGit(dir, ["rev-parse", "HEAD"]).toString().trim() !== pin.catalogCommit
+          || createHash("sha256").update(readFileSync(join(dir, "registry.json"))).digest("hex") !== pin.catalogDigest) {
+          throw new Error("effective catalog worktree verification failed");
+        }
+        trustSharedRepo(dir);
+        return new GitTenantRepo(dir, <T>(action: () => Promise<T>) => this.lease!.runFenced(lease, action));
+      });
+    }
     const lease = this.leaseContext.getStore();
     if (lease && lease.tenantId !== tenantId) {
       throw new TenantRepoLeaseLostError(tenantId);
@@ -693,6 +794,51 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
    * the source of a staged change or publish.
    */
   async bare(tenantId: string): Promise<TenantBareRepo> {
+    if (this.opts.remoteAuthority && (this.opts.isRemoteTenant?.(tenantId) ?? true)) {
+      const authority = this.opts.remoteAuthority;
+      const lease = this.leaseContext.getStore();
+      if (!this.lease || !lease || lease.tenantId !== tenantId || lease.lost) {
+        throw new TenantRepoLeaseLostError(tenantId);
+      }
+      const sourceRef = await this.opts.locator.repoRef(tenantId);
+      await authority.canonicalRemote(tenantId, sourceRef);
+      const existing = this.bareRepos.get(tenantId);
+      if (existing) {
+        if (existing.sourceRef !== sourceRef) {
+          throw new Error("canonical Forge tenant origin changed");
+        }
+        return existing;
+      }
+      const base = this.opts.bareBase ?? this.opts.workBase ?? tmpdir();
+      mkdirSync(base, { recursive: true });
+      const dir = this.opts.bareBase
+        ? join(base, `${tenantId}.git`)
+        : mkdtempSync(join(base, `mushy-bare-${tenantId}-`));
+      trustSharedRepo(dir);
+      if (!existsSync(join(dir, "HEAD"))) {
+        await authority.initialize(tenantId, dir, sourceRef);
+      }
+      const bound = authority.bind(tenantId, dir, sourceRef);
+      const requireLease = () => {
+        const current = this.leaseContext.getStore();
+        if (!current || current.tenantId !== tenantId || current.lost) {
+          throw new TenantRepoLeaseLostError(tenantId);
+        }
+      };
+      const repo: TenantBareRepo & { sourceRef: string } = {
+        dir, sourceRef,
+        publishAuthoritatively: async (request) => {
+          requireLease();
+          return bound.publishAuthoritatively!(request);
+        },
+        refreshMain: async () => {
+          requireLease();
+          await bound.refreshMain!();
+        },
+      };
+      this.bareRepos.set(tenantId, repo);
+      return repo;
+    }
     const ref = await this.opts.locator.repoRef(tenantId);
     if (existsSync(ref)) trustSharedRepo(ref);
     // Refuse a stale or cross-tenant durable origin before auto-provisioning can

@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import traceback
 from pathlib import Path
 from typing import Any, Dict, Literal
@@ -24,6 +25,7 @@ from pydantic import BaseModel, Field
 
 import author_quota
 import catalog
+import customization_service
 import deps
 import entitlements
 from customization_authority import AuthorityError, PublishRequest
@@ -1130,6 +1132,56 @@ def _require_dispatch(tenant_id: str | None, secret: str | None) -> str:
     if not tenant_id or not deps._dispatch_secret_ok(secret):
         raise CustomizationServiceError("dispatch_authority_denied", 403)
     return tenant_id
+
+
+@router.get("/internal/customization/effective-catalog")
+def customization_effective_catalog(
+    x_tenant_id: str | None = Header(default=None),
+    x_dispatch_secret: str | None = Header(default=None),
+) -> Dict[str, Any]:
+    """Resolve an already effective catalog, never activate Git main or a seed."""
+    try:
+        tenant_id = _require_dispatch(x_tenant_id, x_dispatch_secret)
+        if not is_valid_tenant_id(tenant_id):
+            raise CustomizationServiceError("tenant_identity_invalid", 403)
+        if not deps.auth_live():
+            raise CustomizationServiceError("customization_auth_required", 503)
+        # Mutation rollout flags do not revoke an already published catalog.
+        # The authority and materializer each read the pointer. Check the actual
+        # materialized generation and re-read authority to bound a publish race.
+        for _ in range(2):
+            pin = customization_service.effective_catalog_pin(tenant_id)
+            if pin is None:
+                raise CustomizationServiceError("effective_catalog_authority_unavailable", 503)
+            commit, digest = pin.get("catalog_commit"), pin.get("effective_catalog_digest")
+            if (not isinstance(commit, str) or not re.fullmatch(r"[a-f0-9]{40}", commit)
+                    or not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest)):
+                raise CustomizationServiceError("effective_catalog_unavailable", 503)
+            directory = customization_service.effective_catalog_dir(tenant_id)
+            if directory is None:
+                raise CustomizationServiceError("effective_catalog_unavailable", 503)
+            if directory.parent.name != tenant_id or directory.name != commit:
+                continue
+            observed = subprocess.run(
+                ["git", *customization_service._git_trust(directory), "-C", str(directory),
+                 "rev-parse", "HEAD"],
+                check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
+            ).stdout.strip()
+            with (directory / "registry.json").open("rb") as stream:
+                actual_digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            if (observed == commit and actual_digest == digest
+                    and customization_service.effective_catalog_pin(tenant_id) == pin):
+                return JSONResponse(
+                    content={"tenant_id": tenant_id, "catalog_commit": commit, "catalog_digest": digest},
+                    headers={"Cache-Control": "no-store"},
+                )
+        raise CustomizationServiceError("effective_catalog_unavailable", 503)
+    except CustomizationServiceError as exc:
+        return _customization_error(exc)
+    except Exception as exc:
+        return _customization_error(
+            CustomizationServiceError("effective_catalog_unavailable", 503), cause=exc
+        )
 
 
 @router.post("/internal/customization/staged")
