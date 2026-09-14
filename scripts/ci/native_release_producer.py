@@ -464,7 +464,7 @@ def load_evidence_contract(root: Path, revision: str):
 
 
 def stage_selective_release(output: Path, *, selection, source, tree, identity, images, gate,
-                            predecessor, previous, web_bytes):
+                            predecessor, previous, web_bytes, retained_web=None, retained_manifest=None):
     """Compose verified v1 bytes without changing the retained members' origin."""
     _hex(source, 40, "source")
     _hex(tree, 40, "tree")
@@ -489,12 +489,37 @@ def stage_selective_release(output: Path, *, selection, source, tree, identity, 
     if (gate["source_revision"] != source or gate["source_tree"] != tree
             or _build_identity(gate["producer"])["project_arn"] == identity["project_arn"]):
         raise ValueError("gate differs from harness source/tree")
-    if hashlib.sha256(web_bytes).hexdigest() != previous["web"]["archive_sha256"]:
+    if (retained_web is None) != (retained_manifest is None) or (retained_web is not None and selection != "app-harness"):
+        raise ValueError("retained web requires app-harness and authenticated supply")
+    web_origin = previous
+    if retained_web is not None:
+        web_origin = retained_manifest
+        image, web = web_origin["services"]["web"], web_origin["web"]
+        if (web_origin.get("schema") != "leaf.native-release.web.v1"
+                or web_origin.get("selection") != "web"
+                or web_origin["pins"] != retained_web["pins"]
+                or web_origin["producer"]["build_id"] != retained_web["build_id"]
+                or set(web_origin["services"]) != {"web"}
+                or image["repository"] != "leaf-platform-web"
+                or image["source_revision"] != web_origin["source_revision"]
+                or web["source_revision"] != web_origin["source_revision"]
+                or web["image_digest"] != image["image_digest"]
+                or web["path"] != "web-dist.zip"):
+            raise ValueError("retained web differs from authenticated origin")
+        _hex(web_origin["source_revision"], 40, "web source")
+        _hex(web_origin["source_tree"], 40, "web tree")
+    if hashlib.sha256(web_bytes).hexdigest() != web_origin["web"]["archive_sha256"]:
         raise ValueError("verified predecessor web bytes changed")
     manifest = json.loads(json.dumps(previous))
     manifest.update(schema=f"leaf.native-release.{selection}.v1", selection=selection,
                     source_revision=source, source_tree=tree, producer=identity,
                     gate=gate, predecessor=predecessor)
+    if retained_web is not None:
+        manifest["retained_web"] = json.loads(json.dumps(retained_web))
+        manifest["web"] = {"member": web_origin["web"]["path"],
+                           "artifact_sha256": web_origin["web"]["artifact_sha256"],
+                           "archive_sha256": web_origin["web"]["archive_sha256"]}
+        manifest["services"]["web"] = json.loads(json.dumps(web_origin["services"]["web"]))
     manifest["services"].update(json.loads(json.dumps(images)))
     raw = (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode()
     output.mkdir(parents=True, exist_ok=False)
@@ -516,8 +541,11 @@ def stage_harness_release(output: Path, *, source, tree, identity, harness, gate
 def produce_release(root: Path, output: Path, request: dict, env: dict, codebuild, s3) -> dict:
     """Execute the complete admitted producer, without provisioning or deployment."""
     fields = {"source_revision", "source_tree", "gate", "contract_revision"}
-    if (not isinstance(request, dict) or set(request) not in (fields, fields | {"selection", "predecessor"})
-            or ("selection" in request and request["selection"] not in ("harness", "app-harness"))):
+    if (not isinstance(request, dict) or set(request) not in (fields, fields | {"selection", "predecessor"},
+            fields | {"selection", "predecessor", "retained_web"})
+            or ("selection" in request and request["selection"] not in ("harness", "app-harness"))
+            or ("retained_web" in request and (request.get("selection") != "app-harness"
+                or not isinstance(request["retained_web"], dict)))):
         raise ValueError("release request fields differ")
     source, tree = request["source_revision"], request["source_tree"]
     admit_checkout(root, source, tree)
@@ -544,6 +572,12 @@ def produce_release(root: Path, output: Path, request: dict, env: dict, codebuil
     if "selection" in request:
         contract.fixed_native_lane(gate_request, "gate")
         previous, _, web_bytes = contract.read_native_predecessor(request["predecessor"], codebuild, s3)
+        retained_manifest = None
+        if "retained_web" in request:
+            reader = getattr(contract, "read_web_supply", None)
+            if not callable(reader):
+                raise ValueError("pinned evidence contract lacks retained web verifier")
+            retained_manifest, _, web_bytes = reader(request["retained_web"], codebuild, s3)
         selection = request["selection"]
         selected = ("harness",) if selection == "harness" else ("app", "harness")
         freshness = (resolve_freshness(root, harness_only=True) if selection == "harness"
@@ -558,7 +592,8 @@ def produce_release(root: Path, output: Path, request: dict, env: dict, codebuil
                             "version_id": gate_request.version_id, "sha256": gate_request.sha256}}
         return stage_selective_release(output, selection=selection, source=source, tree=tree, identity=identity,
                                      images=images, gate=gate, predecessor=request["predecessor"],
-                                     previous=previous, web_bytes=web_bytes)
+                                     previous=previous, web_bytes=web_bytes,
+                                     retained_web=request.get("retained_web"), retained_manifest=retained_manifest)
     pins = json.loads((root / "deploy/autofill-solver-sources.json").read_text())
     if not isinstance(pins, dict) or len(pins) != 1:
         raise ValueError("release requires one reviewed solver pin")

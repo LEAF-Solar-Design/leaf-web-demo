@@ -713,3 +713,89 @@ def test_selective_composition_rejects_substitutions(tmp_path, fault):
             source=inputs["source"], tree=inputs["tree"], identity=inputs["producer"],
             images=images, gate=gate, predecessor={}, previous=previous, web_bytes=web)
     assert not (tmp_path / "output").exists()
+
+
+def retained_web_case(tmp_path, monkeypatch):
+    inputs, previous, original, request, events = selective_case(tmp_path, monkeypatch, selection="app-harness")
+    contract = producer.load_evidence_contract(None, None)
+    pins = {"source": {"manifest": {"sha256": "a" * 64}}}
+    request["retained_web"] = {"pins": pins, "build_id": "independent-web:build2",
+        "archive": {"bucket": "release", "key": "web.zip", "version_id": "v2", "sha256": "b" * 64}}
+    payload = b"independently authenticated newer web ZIP"
+    image = dict(repository="leaf-platform-web", image_digest="sha256:" + "5" * 64,
+                 source_revision="4" * 40, native_build_number=2)
+    web = dict(path="web-dist.zip", artifact_sha256="6" * 64,
+               archive_sha256=hashlib.sha256(payload).hexdigest(),
+               image_digest=image["image_digest"], source_revision=image["source_revision"])
+    manifest = dict(schema="leaf.native-release.web.v1", selection="web", pins=pins,
+        producer={"build_id": "independent-web:build2", "build_number": 2},
+        source_revision="4" * 40, source_tree="7" * 40, services={"web": image}, web=web)
+    admitted = copy.deepcopy(request["retained_web"])
+    def read(actual, cb, s3):
+        events.append("retained-web")
+        assert actual == admitted and cb == "cb" and s3 == "s3"
+        return manifest, {"provider": "aws.codebuild"}, payload
+    contract.read_web_supply = read
+    return previous, original, request, events, contract, manifest, payload
+
+
+def test_app_harness_retains_independent_web_without_relabel_or_rebuild(tmp_path, monkeypatch):
+    previous, original, request, events, _, web, payload = retained_web_case(tmp_path, monkeypatch)
+    output = tmp_path / "output"
+    producer.produce_release(tmp_path, output, request, {"CODEBUILD_SRC_DIR_provider_contract": "contract"}, "cb", "s3")
+    actual = json.loads((output / "staging-supply-set.json").read_bytes())
+    assert events == ["checkout", "canonical-gate", "fixed-gate", "predecessor", "retained-web", "freshness", "app", "harness"]
+    assert actual["retained_web"] == request["retained_web"]
+    assert actual["web"] == {"member": web["web"]["path"],
+                             "artifact_sha256": web["web"]["artifact_sha256"],
+                             "archive_sha256": web["web"]["archive_sha256"]}
+    assert actual["services"]["web"] == web["services"]["web"]
+    assert actual["services"]["web"]["source_revision"] != actual["source_revision"]
+    assert (output / "web-dist.zip").read_bytes() == payload
+    for name in ("broker", "canonical-worker"):
+        assert actual["services"][name] == original["services"][name]
+    assert actual["solver"] == original["solver"] and previous == original
+
+
+@pytest.mark.parametrize("fault", ["missing-verifier", "provider-refusal"])
+def test_retained_web_verifier_failure_precedes_build(tmp_path, monkeypatch, fault):
+    _, _, request, events, contract, _, _ = retained_web_case(tmp_path, monkeypatch)
+    if fault == "missing-verifier":
+        del contract.read_web_supply
+    else:
+        def refuse(*args):
+            raise ValueError("independent web verifier refused " + fault)
+        contract.read_web_supply = refuse
+    with pytest.raises(ValueError, match="verifier"):
+        producer.produce_release(tmp_path, tmp_path / "output", request,
+            {"CODEBUILD_SRC_DIR_provider_contract": "contract"}, "cb", "s3")
+    assert "freshness" not in events and "app" not in events
+    assert not (tmp_path / "output").exists()
+
+
+@pytest.mark.parametrize("selection", [None, "harness", "other"])
+def test_retained_web_rejects_unsupported_selection(tmp_path, monkeypatch, selection):
+    _, _, request, events, _, _, _ = retained_web_case(tmp_path, monkeypatch)
+    if selection is None:
+        del request["selection"]
+        del request["predecessor"]
+    else:
+        request["selection"] = selection
+    with pytest.raises(ValueError, match="fields"):
+        producer.produce_release(tmp_path, tmp_path / "output", request, {}, "cb", "s3")
+    assert events == []
+
+
+@pytest.mark.parametrize("fault", ["pins", "build", "repository", "source", "image", "bytes"])
+def test_retained_web_composition_refuses_substituted_admitted_output(tmp_path, monkeypatch, fault):
+    _, _, request, _, _, manifest, _ = retained_web_case(tmp_path, monkeypatch)
+    if fault == "pins": manifest["pins"] = {}
+    if fault == "build": manifest["producer"]["build_id"] = "substitute"
+    if fault == "repository": manifest["services"]["web"]["repository"] = "other"
+    if fault == "source": manifest["web"]["source_revision"] = "9" * 40
+    if fault == "image": manifest["web"]["image_digest"] = "sha256:" + "9" * 64
+    if fault == "bytes": manifest["web"]["archive_sha256"] = "9" * 64
+    with pytest.raises(ValueError, match="web"):
+        producer.produce_release(tmp_path, tmp_path / "output", request,
+            {"CODEBUILD_SRC_DIR_provider_contract": "contract"}, "cb", "s3")
+    assert not (tmp_path / "output").exists()
