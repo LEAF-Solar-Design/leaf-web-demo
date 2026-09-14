@@ -1,3 +1,4 @@
+import copy
 """Recipe unit tests. No Docker builds or provider operations occur here."""
 from pathlib import Path
 from types import SimpleNamespace
@@ -546,3 +547,169 @@ def test_composed_release_verifies_gate_before_all_five_builds(tmp_path, monkeyp
         manifest = json.loads((output / "staging-supply-set.json").read_bytes())
         assert manifest["gate"]["producer"] == gate_identity
         assert manifest["producer"]["project_arn"].endswith("/leaf-studio-native-release")
+
+
+@pytest.mark.parametrize("extra", [{"selection": "app", "predecessor": {}}, {"selection": "harness"},
+    {"predecessor": {}}, {"selection": "harness", "predecessor": {}, "command": "echo invalid"}])
+def test_selective_request_is_closed_before_any_work(tmp_path, extra):
+    request = dict(source_revision="a" * 40, source_tree="b" * 40, gate={}, contract_revision="c" * 40, **extra)
+    with pytest.raises(ValueError, match="fields"):
+        producer.produce_release(tmp_path, tmp_path / "output", request, {}, None, None)
+
+
+def selective_case(tmp_path, monkeypatch, *, predecessor_ok=True, supports=True, selection="harness"):
+    inputs = assembly_inputs(tmp_path)
+    previous = producer.assemble_release(**inputs)
+    original = copy.deepcopy(previous)
+    pins = {"release": {"unit": "independent release pins"}, "gate": {"unit": "independent gate pins"}, "source_tree": "b" * 40}
+    identity = native_identity("leaf-studio-native-release")
+    identity["build_number"] = 8
+    gate_identity = native_identity("leaf-studio-native-gate")
+    gate = dict(gate_identity, source_revision="f" * 40,
+        service_role="arn:aws:iam::807034087062:role/leaf-studio-native-gate-role",
+        repository_url="https://github.com/LEAF-Solar-Design/leaf-web-demo.git", buildspec=".codebuild/release.yml",
+        bucket="leaf-studio-release-artifacts-807034087062-us-east-1", key="gate/new.zip",
+        version_id="immutable-version", sha256="e" * 64)
+    request = dict(source_revision="f" * 40, source_tree="1" * 40, gate=gate,
+                   contract_revision="c" * 40, selection=selection, predecessor=pins)
+    events = []
+    def prior(actual, cb, s3):
+        events.append("predecessor")
+        assert actual == pins and cb == "cb" and s3 == "s3"
+        if not predecessor_ok:
+            raise ValueError("predecessor refused")
+        return previous, {}, Path(inputs["web"]["path"]).read_bytes()
+    contract = SimpleNamespace(NativeRelease=SimpleNamespace,
+        HARNESS_SUPPLY_SCHEMA="leaf.native-release.harness.v1" if supports else None,
+        APP_HARNESS_SUPPLY_SCHEMA="leaf.native-release.app-harness.v1" if supports else None,
+        read_native_predecessor=prior, fixed_native_lane=lambda *a: events.append("fixed-gate"),
+        read_native_release=lambda *a, **k: ({}, b"gate"),
+        _members=lambda *a, **k: {"gate-proof.json": b"proof"})
+    monkeypatch.setattr(producer, "admit_checkout", lambda *a: events.append("checkout"))
+    monkeypatch.setattr(producer, "runtime_identity", lambda *a: identity)
+    monkeypatch.setattr(producer, "load_evidence_contract", lambda *a: contract)
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.setattr(producer.tempfile, "mkdtemp", lambda **k: str(work))
+    monkeypatch.setattr(producer.subprocess, "run", lambda *a, **k: events.append("canonical-gate"))
+    def freshness(root, *, harness_only=False, app_harness=False):
+        assert harness_only == (selection == "harness")
+        assert app_harness == (selection == "app-harness")
+        events.append("freshness")
+        return {"app": {}, "harness": {}}
+    monkeypatch.setattr(producer, "resolve_freshness", freshness)
+    def build(root, service, source, number, freshness, metadata, **kwargs):
+        events.append(service)
+        assert service in (("harness",) if selection == "harness" else ("app", "harness")) and not kwargs
+        return dict(repository=f"leaf-platform-{service}", image_digest="sha256:" + "0" * 64,
+                    source_revision=source, native_build_number=number)
+    monkeypatch.setattr(producer, "build_image", build)
+    monkeypatch.setattr(producer, "package_web_image", lambda *a: pytest.fail("web must not rebuild"))
+    return inputs, previous, original, request, events
+
+
+def test_harness_build_preserves_complete_verified_members_and_web(tmp_path, monkeypatch):
+    inputs, previous, original, request, events = selective_case(tmp_path, monkeypatch)
+    output = tmp_path / "output"
+    producer.produce_release(tmp_path, output, request, {"CODEBUILD_SRC_DIR_provider_contract": "contract"}, "cb", "s3")
+    manifest = json.loads((output / "staging-supply-set.json").read_bytes())
+    assert events == ["checkout", "canonical-gate", "fixed-gate", "predecessor", "freshness", "harness"]
+    assert previous == original
+    assert manifest["schema"] == "leaf.native-release.harness.v1"
+    assert manifest["predecessor"] == request["predecessor"]
+    assert manifest["services"]["harness"]["source_revision"] == request["source_revision"]
+    assert manifest["services"]["harness"]["native_build_number"] == 8
+    for name in SERVICES:
+        if name != "harness":
+            assert manifest["services"][name] == previous["services"][name]
+    assert manifest["web"] == previous["web"] and manifest["solver"] == previous["solver"]
+    assert (output / "web-dist.zip").read_bytes() == Path(inputs["web"]["path"]).read_bytes()
+    assert set(p.name for p in output.iterdir()) == {"web-dist.zip", "staging-supply-set.json"}
+
+
+@pytest.mark.parametrize("supports", [False, True])
+def test_harness_rejects_old_contract_or_failed_predecessor_before_build(tmp_path, monkeypatch, supports):
+    _, _, _, request, events = selective_case(tmp_path, monkeypatch, supports=supports, predecessor_ok=False)
+    with pytest.raises(ValueError, match="predecessor|contract"):
+        producer.produce_release(tmp_path, tmp_path / "output", request,
+                                 {"CODEBUILD_SRC_DIR_provider_contract": "contract"}, "cb", "s3")
+    assert "freshness" not in events and "harness" not in events
+    assert not (tmp_path / "output").exists()
+
+
+def test_harness_freshness_does_not_resolve_other_image_channels(tmp_path, monkeypatch):
+    import io
+    urls = []
+    def read(url, timeout):
+        urls.append(url)
+        return io.BytesIO(b"signed channel fixture")
+    monkeypatch.setattr(producer.urllib.request, "urlopen", read)
+    monkeypatch.setattr(producer.subprocess, "run", lambda *a, **k: pytest.fail("no nginx Docker run"))
+    result = producer.resolve_freshness(tmp_path, harness_only=True)
+    assert set(result) == {"harness"}
+    assert set(result["harness"]) == set(FRESHNESS["harness"])
+    assert len(urls) == 2 and all("bookworm" in url for url in urls)
+
+
+@pytest.mark.parametrize("selection", ["harness", "app-harness"])
+def test_selective_builds_only_changed_services_and_preserves_origins(tmp_path, monkeypatch, selection):
+    inputs, previous, original, request, events = selective_case(tmp_path, monkeypatch, selection=selection)
+    output = tmp_path / "selective-output"
+    producer.produce_release(tmp_path, output, request, {"CODEBUILD_SRC_DIR_provider_contract": "contract"}, "cb", "s3")
+    manifest = json.loads((output / "staging-supply-set.json").read_bytes())
+    selected = ["harness"] if selection == "harness" else ["app", "harness"]
+    assert events == ["checkout", "canonical-gate", "fixed-gate", "predecessor", "freshness", *selected]
+    assert manifest["schema"] == f"leaf.native-release.{selection}.v1"
+    assert manifest["selection"] == selection and manifest["source_tree"] == request["source_tree"]
+    assert manifest["predecessor"] == request["predecessor"]
+    for name in SERVICES:
+        if name in selected:
+            assert manifest["services"][name]["source_revision"] == request["source_revision"]
+            assert manifest["services"][name]["native_build_number"] == 8
+        else:
+            assert manifest["services"][name] == original["services"][name]
+    assert previous == original
+    assert manifest["solver"] == previous["solver"] and manifest["web"] == previous["web"]
+    assert (output / "web-dist.zip").read_bytes() == Path(inputs["web"]["path"]).read_bytes()
+
+
+@pytest.mark.parametrize("supports", [True, False])
+def test_app_harness_refuses_unverified_predecessor_before_build(tmp_path, monkeypatch, supports):
+    _, _, _, request, events = selective_case(tmp_path, monkeypatch,
+        selection="app-harness", supports=supports, predecessor_ok=False)
+    with pytest.raises(ValueError, match="predecessor|contract"):
+        producer.produce_release(tmp_path, tmp_path / "output", request,
+            {"CODEBUILD_SRC_DIR_provider_contract": "contract"}, "cb", "s3")
+    assert not any(service in events for service in SERVICES)
+
+
+def test_app_harness_freshness_uses_only_existing_debian_channels(tmp_path, monkeypatch):
+    import io
+    urls = []
+    def read(url, **kwargs):
+        urls.append(url); return io.BytesIO(b"signed-channel-fixture")
+    monkeypatch.setattr(producer.urllib.request, "urlopen", read)
+    monkeypatch.setattr(producer.subprocess, "run", lambda *a, **k: pytest.fail("no Docker allowed"))
+    result = producer.resolve_freshness(tmp_path, app_harness=True)
+    assert set(result) == {"app", "harness"}
+    assert set(result["app"]) == set(TRIXIE)
+    assert set(result["harness"]) == set(FRESHNESS["harness"])
+    assert len(urls) == 4 and all("debian" in url for url in urls)
+
+
+@pytest.mark.parametrize("fault", ["source", "tree", "retained", "web"])
+def test_selective_composition_rejects_substitutions(tmp_path, fault):
+    inputs = assembly_inputs(tmp_path)
+    previous = producer.assemble_release(**inputs)
+    images = {name: copy.deepcopy(inputs["images"][name]) for name in ("app", "harness")}
+    web = Path(inputs["web"]["path"]).read_bytes()
+    gate = copy.deepcopy(inputs["gate"])
+    if fault == "source": images["app"]["source_revision"] = "f" * 40
+    if fault == "tree": gate["source_tree"] = "f" * 40
+    if fault == "retained": images["broker"] = inputs["images"]["broker"]
+    if fault == "web": web += b"substituted"
+    with pytest.raises(ValueError):
+        producer.stage_selective_release(tmp_path / "output", selection="app-harness",
+            source=inputs["source"], tree=inputs["tree"], identity=inputs["producer"],
+            images=images, gate=gate, predecessor={}, previous=previous, web_bytes=web)
+    assert not (tmp_path / "output").exists()
