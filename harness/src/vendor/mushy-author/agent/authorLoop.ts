@@ -959,6 +959,7 @@ export class AuthorLoop {
     return this.withTenantRepoLease(tenantId, async (runFenced) => {
       const { bare } = this.lifecyclePorts();
       const bareRepo = await runFenced(() => bare.call(this.ports.tenantRepo, tenantId));
+      if (bareRepo.refreshMain) await runFenced(() => bareRepo.refreshMain!());
       const changes = new TenantChangeRepo({ repoDir: bareRepo.dir, identity: HARNESS_IDENTITY });
       const baseCommit = changes.readRef("refs/heads/main");
       if (!baseCommit || !/^[0-9a-f]{40}$/i.test(baseCommit)) {
@@ -1054,6 +1055,7 @@ export class AuthorLoop {
     return this.withTenantRepoLease(tenantId, async (runFenced) => {
       const { bare, coordination } = this.lifecyclePorts();
       const bareRepo = await runFenced(() => bare.call(this.ports.tenantRepo, tenantId));
+      if (bareRepo.refreshMain) await runFenced(() => bareRepo.refreshMain!());
       const changes = new TenantChangeRepo({ repoDir: bareRepo.dir, identity: HARNESS_IDENTITY });
       const { observedMainSha, existingChangeSha } = await runFenced(() => ({
         observedMainSha: changes.readRef("refs/heads/main"),
@@ -1168,6 +1170,7 @@ export class AuthorLoop {
     return this.withTenantRepoLease(tenantId, async (runFenced) => {
       const { bare, coordination } = this.lifecyclePorts();
       const bareRepo = await runFenced(() => bare.call(this.ports.tenantRepo, tenantId));
+      if (bareRepo.refreshMain) await runFenced(() => bareRepo.refreshMain!());
       const changes = new TenantChangeRepo({ repoDir: bareRepo.dir, identity: HARNESS_IDENTITY });
       const observedMainSha = await runFenced(() => changes.readRef("refs/heads/main"));
       if (observedMainSha !== request.expectedBaseSha) {
@@ -1235,6 +1238,27 @@ export class AuthorLoop {
       const changes = new TenantChangeRepo({ repoDir: bareRepo.dir, identity: HARNESS_IDENTITY });
       const ref = `refs/leaf/changes/${receipt.change_set_id.toLowerCase()}`;
       await coordination.authorizePublish(receipt, expectedMainSha);
+      if (bareRepo.publishAuthoritatively) {
+        await runFenced(async () => {
+          const observedRef = changes.readRef(ref);
+          if (observedRef !== receipt.staged_commit) {
+            throw new GitRefConflictError(ref, receipt.staged_commit, observedRef);
+          }
+          const observedMain = changes.readRef("refs/heads/main");
+          if (observedMain !== expectedMainSha && observedMain !== receipt.staged_commit) {
+            throw new GitRefConflictError("refs/heads/main", expectedMainSha, observedMain);
+          }
+          const accepted = await bareRepo.publishAuthoritatively!({
+            tenantId: receipt.tenant_id, receipt, expectedMainSha,
+            changeRef: ref, stagedCommit: receipt.staged_commit,
+          });
+          if (accepted.commit !== receipt.staged_commit) {
+            throw new AuthorLoopError("remote publication did not prove the staged commit", 503);
+          }
+        });
+      }
+      // A separate fence detects lease loss after remote acceptance. Retry must
+      // repeat authorization and remote proof before reconciling this cache.
       return runFenced(() => {
         const observedRef = changes.readRef(ref);
         if (observedRef !== receipt.staged_commit) {
