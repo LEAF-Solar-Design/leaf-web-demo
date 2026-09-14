@@ -40,6 +40,8 @@ export interface TenantRepoProviderOptions {
   locator: TenantRepoLocator;
   /** Optional canonical Forgejo truth for staged artifact publication. */
   remoteAuthority?: ForgeRemoteAuthority;
+  /** Trusted configuration may retain explicitly local tenants during migration. */
+  isRemoteTenant?: (tenantId: string) => boolean;
   /** Authenticated durable app pointer, never remote main or a request-supplied SHA. */
   effectiveCatalog?: (tenantId: string) => Promise<{ catalogCommit: string; catalogDigest: string }>;
   /** Base dir for per-session checkouts (default: OS temp). */
@@ -684,7 +686,7 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
   }
 
   async checkout(tenantId: string): Promise<TenantRepo> {
-    if (this.opts.remoteAuthority) {
+    if (this.opts.remoteAuthority && (this.opts.isRemoteTenant?.(tenantId) ?? true)) {
       if (!this.opts.effectiveCatalog || !this.opts.bareBase) {
         throw new Error("Forge checkout requires a durable effective catalog resolver and shared bareBase");
       }
@@ -792,7 +794,7 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
    * the source of a staged change or publish.
    */
   async bare(tenantId: string): Promise<TenantBareRepo> {
-    if (this.opts.remoteAuthority) {
+    if (this.opts.remoteAuthority && (this.opts.isRemoteTenant?.(tenantId) ?? true)) {
       const authority = this.opts.remoteAuthority;
       const lease = this.leaseContext.getStore();
       if (!this.lease || !lease || lease.tenantId !== tenantId || lease.lost) {

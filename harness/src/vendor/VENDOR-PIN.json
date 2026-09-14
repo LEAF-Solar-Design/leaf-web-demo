@@ -39,7 +39,7 @@
     },
     "ports/impl/tenantRepoProvider.ts": {
       "reason": "Selective upstream PR93 Forge publication integration with existing consumer leases and durable effective catalog checkout; upstream merge 1619e956c3960cf2da044b78da2f455437e8529b",
-      "sha256": "f36bad69de1259500070befca5a12822a92f0b26c77cc4d297536f1a99801900"
+      "sha256": "bc8ea33c0e915479ba0edfcefd4fb3679a8b88acba4f0839faf3be95a9cbc46c"
     },
     "ports/index.ts": {
       "reason": "Selective upstream PR93 Forge publication integration with existing consumer leases and durable effective catalog checkout; upstream merge 1619e956c3960cf2da044b78da2f455437e8529b",
@@ -96,7 +96,7 @@
     "ports/impl/standardServicesRuntime.ts": "74925259f354b874d5ad5318701f4bc727d4a043939dfe8c995711daa7300e95",
     "ports/impl/tenantBrokerStandardServiceProvider.ts": "35226b73731b2f31df0d7ff6da133b8bf327ea2896c2975fbd22729e78f08266",
     "ports/impl/tenantChangeRepo.ts": "58b125b5c4c4b7aecab3351031c951cbde849a38f5b263c674e9c41ef6b1d87f",
-    "ports/impl/tenantRepoProvider.ts": "f36bad69de1259500070befca5a12822a92f0b26c77cc4d297536f1a99801900",
+    "ports/impl/tenantRepoProvider.ts": "bc8ea33c0e915479ba0edfcefd4fb3679a8b88acba4f0839faf3be95a9cbc46c",
     "ports/index.ts": "5da95920576e4093c896c470072f0b59749c200257864d893f36c4339ad70102",
     "ports/modelAllowlist.ts": "1e994732e3750e8e8fef4eb9a66d3b7223cdcc155cc93d5de0b4ef9832118684",
     "ports/surfaceAnnotations.ts": "8fba9c1d4373c2e9600e29a68ee78c801dd75bc56411baf9a33570b65cd52e5b",

@@ -221,7 +221,7 @@ function buildPorts(standardServicesResolver: StandardServicesResolver | undefin
   const oauth = new StandardServicesOAuthGrantProvider(
     new OAuthGrantProviderImpl({ store: grantStore }),
   );
-  const tenantForge = createTenantForgeConfigurationFromEnv();
+  const tenantForge = createTenantForgeConfigurationFromEnv(process.env, tenantRepoDir);
   const appUrl = (process.env.LEAF_APP_URL ?? "").trim();
   const dispatchSecret = (process.env.LEAF_APP_DISPATCH_SECRET ?? "").trim();
   const customizationCoordination = appUrl && dispatchSecret
@@ -235,9 +235,10 @@ function buildPorts(standardServicesResolver: StandardServicesResolver | undefin
     locator: tenantForge?.locator ?? { async repoRef(tenantId: string) { return tenantRepoDir(tenantId); } },
     ...(tenantForge ? {
       remoteAuthority: tenantForge.remoteAuthority,
+      isRemoteTenant: tenantForge.isRemoteTenant,
       effectiveCatalog: (tenantId: string) => customizationCoordination!.effectiveCatalog(tenantId),
     } : {}),
-    inPlace: !tenantForge,
+    inPlace: true,
     bareBase: TENANT_GIT_DIR,
     ...(tenantForge ? {} : { autoProvisionFrom: TENANT_FIXTURE }),
   });

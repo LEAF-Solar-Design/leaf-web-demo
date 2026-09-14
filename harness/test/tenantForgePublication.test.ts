@@ -286,6 +286,21 @@ describe("Forge remote artifact authority", () => {
 });
 
 
+it("retains only explicitly local tenant checkout during migration", async () => {
+  const f = fixture();
+  const provider = new TenantRepoProviderImpl({
+    locator: { repoRef: async () => f.seed }, remoteAuthority: f.authority,
+    isRemoteTenant: tenant => {
+      if (tenant !== TENANT) throw new Error("unknown tenant refused");
+      return false;
+    },
+    inPlace: true, lease: false, authoringMode: "singleton",
+  });
+  expect((await provider.checkout(TENANT)).dir).toBe(f.seed);
+  await expect(provider.checkout("unknown")).rejects.toThrow("unknown tenant refused");
+  await expect(provider.bare("unknown")).rejects.toThrow("unknown tenant refused");
+});
+
 it("refuses remote checkout without a durable catalog pin before legacy clone", async () => {
   let locatorCalls = 0;
   let credentialCalls = 0;
