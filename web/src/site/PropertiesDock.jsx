@@ -83,6 +83,7 @@ export function DrawingRows({ drawing, offscreenResult = null, onShowResult = nu
   const n = (v) => (Number.isFinite(v) ? v.toLocaleString() : '—')
   const u = (v) => (Number.isFinite(v) ? `${formatUnits(v)} u` : '—')
   return (
+    <>
     <dl className="dock-drawing" data-testid="dock-drawing">
       <dt>Name</dt><dd title={drawing.name || ''}>{drawing.name || '—'}</dd>
       <dt>Entities</dt><dd>{n(drawing.entities)}</dd>
@@ -99,10 +100,11 @@ export function DrawingRows({ drawing, offscreenResult = null, onShowResult = nu
       {drawing.undoDepth != null && (<>
         <dt>Browser edits</dt><dd>{n(drawing.undoDepth)} to undo · {n(drawing.redoDepth)} to redo</dd>
       </>)}
-      {offscreenResult && (<>
-        <dt>New result</dt><dd role="status">New {offscreenResult.kind} is off-screen. <button type="button" onClick={onShowResult}>Show result</button></dd>
-      </>)}
     </dl>
+    {offscreenResult && (
+      <p className="dock-result" role="status">New {offscreenResult.kind} is off-screen. <button type="button" onClick={onShowResult}>Show result</button></p>
+    )}
+    </>
   )
 }
 

@@ -40,6 +40,16 @@ describe('DrawingRows', () => {
     expect(screen.queryByRole('button', { name: 'Show result' })).toBeNull()
   })
 
+  it('renders Show result outside the clipped drawing fields', () => {
+    const onShowResult = vi.fn()
+    const drawing = { name: 'engine.dxf', entities: 2, undoDepth: 3, redoDepth: 1 }
+    render(<PropertiesDock drawing={drawing} offscreenResult={{ handle: '2A', kind: 'LINE' }} onShowResult={onShowResult} />)
+    const button = screen.getByRole('button', { name: 'Show result', exact: true })
+    expect(button.closest('dd')).toBeNull()
+    expect(screen.getByTestId('dock-drawing').contains(button)).toBe(false)
+    expect(button.closest('[role="status"]')).toHaveTextContent('New LINE is off-screen.')
+  })
+
   it('renders every fact as a label | field row and dashes for what is absent', () => {
     render(<DrawingRows drawing={{ name: 'roof.dwg', entities: 2345, polylines: 2345, inserts: 0, faces: 0, layers: 4, layersShown: 3, extents: null, source: 'sample data' }} />)
     const rows = screen.getByTestId('dock-drawing')
