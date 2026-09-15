@@ -185,6 +185,9 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
       if (runLine) machine.current = { ...m, barPoint: state.barPoint }
       const nextStep = currentStep(machine.current)
       window.requestAnimationFrame(() => {
+        const focus = { handled: false }
+        window.dispatchEvent(new CustomEvent('cockpit:focus-step', { detail: focus }))
+        if (focus.handled) return
         if (nextStep) focusField(nextStep.keys ? nextStep.keys[0] : nextStep.key)
         else if (state.op === 'createBlock') document.querySelector('#cockpit-prompt [aria-label="ribbon block name"]')?.focus()
         else focusRun()
@@ -195,10 +198,20 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
     const onPoint = (event) => {
       const m = machine.current
       const detail = event.detail
-      const step = currentStep(m)
-      if (!detail || step?.kind !== 'point' || step.keys[0] !== detail.key) return
+      if (!detail || !m?.sequence) return
       if (!Array.isArray(detail.point) || detail.point.length !== 2) return
-      detail.handled = acceptPoint(m, detail.point[0], detail.point[1], null, true)
+      const index = m.sequence.findIndex((step) => step.kind === 'point' && step.keys[0] === detail.key)
+      if (index < 0) return
+      if (index > m.step) {
+        detail.handled = true
+        detail.refusal = 'Start a drawing command before entering a point.'
+        return
+      }
+      // Replacing an earlier point discards its dependent picks and anchor.
+      const rewound = index < m.step
+        ? { ...m, step: index, picked: m.picked.slice(0, index), base: index === 0 ? null : m.base }
+        : m
+      detail.handled = acceptPoint(rewound, detail.point[0], detail.point[1], null, true)
     }
     const onUp = (event) => {
       if (!down) return

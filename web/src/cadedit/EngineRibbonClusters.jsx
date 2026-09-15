@@ -301,13 +301,19 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     }
   }
   const promptRef = useRef(null)
+  const focusPrompt = (fallback) => {
+    const detail = { handled: false }
+    window.dispatchEvent(new CustomEvent('cockpit:focus-step', { detail }))
+    // Standalone ribbon consumers have no command-bar cursor.
+    if (!detail.handled) promptRef.current?.querySelector(fallback)?.focus()
+  }
   const blockArm = armedOp === 'createBlock' ? armed : null
   useEffect(() => {
     // Arming puts the caret in the first field the way the reference's
     // command line takes typing the moment a command starts.
     chainRef.current = null
     if (!armedOp) return undefined
-    promptRef.current?.querySelector(armedOp === 'group' || armedOp === 'createBlock' ? '[aria-label="ribbon members"]' : 'input:not([disabled])')?.focus()
+    focusPrompt(armedOp === 'group' || armedOp === 'createBlock' ? '[aria-label="ribbon members"]' : 'input:not([disabled])')
     return undefined
   }, [armedOp, blockArm])
   useEffect(() => {
@@ -342,7 +348,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     }
     const active = document.activeElement
     if (active && active !== document.body && !promptRef.current?.contains(active)) return undefined
-    promptRef.current?.querySelector(nextField)?.focus()
+    focusPrompt(nextField)
     return undefined
   }, [armedOp, session.busy])
   const cancelRef = useRef(cancel)

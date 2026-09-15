@@ -52,6 +52,8 @@ export default function CommandLineArmer() {
   const { session, inputs, setInput, armed, setArmed, refuse } = useEngineSessionContext()
   const [cursor, setCursor] = useState({ armed: null, index: 0 })
   const [runRequest, setRunRequest] = useState(null)
+  const [focusRequest, setFocusRequest] = useState(0)
+  const refocusing = useRef(false)
   useEffect(() => {
     if (runRequest) window.dispatchEvent(new CustomEvent('cockpit:run', { detail: runRequest }))
   }, [runRequest])
@@ -62,6 +64,18 @@ export default function CommandLineArmer() {
   const live = useRef(null)
   live.current = { armed, prompt, index, step, inputs, session }
   useEffect(() => {
+    if (!focusRequest) return
+    const current = live.current
+    if (!current.prompt || current.session.busy) return
+    const label = current.step?.fields[0]?.[1]
+    const field = label
+      ? document.querySelector(`#cockpit-prompt [aria-label="ribbon ${label}"]:not([disabled])`)
+      : document.querySelector('#cockpit-prompt [data-testid="cockpit-prompt-run"]:not([disabled])')
+    // Programmatic focus follows the cursor; it never chooses a new step.
+    refocusing.current = true
+    try { field?.focus() } finally { refocusing.current = false }
+  }, [focusRequest])
+  useEffect(() => {
     const publish = () => window.dispatchEvent(new CustomEvent('cockpit:armed', {
       detail: armed ? { op: armed.op, ask, step: index } : null,
     }))
@@ -71,9 +85,14 @@ export default function CommandLineArmer() {
   }, [armed, ask, index])
   useEffect(() => () => window.dispatchEvent(new CustomEvent('cockpit:armed', { detail: null })), [])
   useEffect(() => {
+    const onRefocus = (event) => {
+      if (!live.current.prompt || !event.detail) return
+      event.detail.handled = true
+      setFocusRequest((request) => request + 1)
+    }
     const onFocus = (event) => {
       const current = live.current
-      if (!current.prompt || !event.target.closest?.('#cockpit-prompt')) return
+      if (refocusing.current || !current.prompt || !event.target.closest?.('#cockpit-prompt')) return
       const label = event.target.getAttribute('aria-label')
       const next = current.prompt.steps.findIndex((candidate) => candidate.fields.some(([, name]) => label === `ribbon ${name}`))
       if (next >= 0) setCursor({ armed: current.armed, index: next })
@@ -97,17 +116,16 @@ export default function CommandLineArmer() {
         }
         if (key === 'dx') anchor = [0, 0]
         // Command-bar polar distances, like relative pairs, measure from the last point.
-        const expression = raw.includes('<') && !raw.startsWith('@') ? `@${raw}` : raw
-        const point = resolvePointExpression(expression, anchor)
+        const point = resolvePointExpression(raw, anchor, { relative: true })
         if (!point) {
           setInput(key, raw)
-          refuse(`${current.prompt.verb} refused: ${label}: ${pointExpressionRefusal(expression, anchor) || 'enter a point using x,y.'}`)
+          refuse(`${current.prompt.verb} refused: ${label}: ${pointExpressionRefusal(raw, anchor, { relative: true }) || 'enter a point using x,y.'}`)
           return
         }
         // A live picker owns the point sequence for both input surfaces.
         const pick = { point, key, handled: false }
         window.dispatchEvent(new CustomEvent('cockpit:pick-point', { detail: pick }))
-        if (pick.handled) { refuse(''); return }
+        if (pick.handled) { refuse(pick.refusal || ''); return }
         fields.forEach(([name], offset) => setInput(name, String(point[offset])))
       } else {
         setInput(key, raw)
@@ -132,10 +150,12 @@ export default function CommandLineArmer() {
       setCursor({ armed: current.armed, index: runLine ? index : index + 1 })
       if (runLine && detail.run) setRunRequest({ armed: current.armed })
     }
+    window.addEventListener('cockpit:focus-step', onRefocus)
     window.addEventListener('focusin', onFocus)
     window.addEventListener('cockpit:picked', onPicked)
     window.addEventListener('cockpit:point', onPoint)
     return () => {
+      window.removeEventListener('cockpit:focus-step', onRefocus)
       window.removeEventListener('focusin', onFocus)
       window.removeEventListener('cockpit:picked', onPicked)
       window.removeEventListener('cockpit:point', onPoint)

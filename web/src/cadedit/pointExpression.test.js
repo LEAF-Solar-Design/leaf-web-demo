@@ -48,6 +48,16 @@ describe('pointExpression (W4f-8): the command line\'s point grammar', () => {
     expect(resolvePointExpression('10')).toBeNull()
   })
 
+  it('can resolve bare polar text relative to an anchor without extending its length', () => {
+    const raw = `${'0'.repeat(60)}1<90`
+    expect(resolvePointExpression(raw, [10, 5], { relative: true })).toEqual([10, 6])
+    expect(resolvePointExpression('10,5', [100, 100], { relative: true })).toEqual([10, 5])
+    expect(resolvePointExpression(raw, null, { relative: true })).toBeNull()
+    expect(pointExpressionRefusal(raw, null, { relative: true })).toBe('"@" needs a previous point to measure from.')
+    expect(resolvePointExpression(`0${raw}`, [0, 0], { relative: true })).toBeNull()
+    expect(pointExpressionRefusal(`0${raw}`, [0, 0], { relative: true })).toContain('is not a point: use x,y')
+  })
+
   it('names the refusal in the drafter\'s words', () => {
     expect(pointExpressionRefusal('10')).toBe('')
     expect(pointExpressionRefusal('10,5')).toBe('')
