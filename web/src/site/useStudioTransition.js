@@ -38,7 +38,10 @@ export function useStudioTransition({ committed, onCommit, isDrafting, reducedMo
     cancel()
     const target = pending.current
     pending.current = null
-    if (target !== null) latest.current.onCommit(target)
+    if (target !== null) {
+      latest.current.onCommit(target)
+      latest.current.committed = target
+    }
     setPhase('idle')
   }, [cancel])
 
@@ -51,12 +54,14 @@ export function useStudioTransition({ committed, onCommit, isDrafting, reducedMo
     const reduced = current.reducedMotion ?? prefersReducedMotion()
     if (reduced || current.isDrafting(current.committed) === current.isDrafting(target)) {
       current.onCommit(target)
+      latest.current.committed = target
     } else if (current.isDrafting(current.committed)) {
       pending.current = target
       setPhase('out')
       timer.current = setTimeout(settle, STUDIO_MOTION.chromeOutMs)
     } else {
       current.onCommit(target)
+      latest.current.committed = target
       setPhase('in')
       timer.current = setTimeout(() => { timer.current = null; setPhase('idle') }, STUDIO_MOTION.chromeInMs)
     }

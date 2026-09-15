@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { act, cleanup, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { STUDIO_MOTION, useLeavingGround, useStudioTransition } from './useStudioTransition.js'
@@ -16,6 +17,59 @@ beforeEach(() => vi.useFakeTimers())
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals() })
 
 describe('studio chrome transitions', () => {
+  it('keeps Browser as the latest batched request after the CAD exit', () => {
+    const onCommit = vi.fn()
+    const { result } = renderHook(() => {
+      const [committed, setCommitted] = useState('browser')
+      const transition = useStudioTransition({
+        committed,
+        onCommit: (target) => { onCommit(target); setCommitted(target) },
+        isDrafting,
+        reducedMotion: false,
+      })
+      return { ...transition, committed }
+    })
+    act(() => {
+      result.current.request('cad')
+      result.current.request('browser')
+    })
+    expect(result.current.committed).toBe('cad')
+    expect(onCommit.mock.calls).toEqual([['cad']])
+    expect(result.current.phase).toBe('out')
+    expect(vi.getTimerCount()).toBe(1)
+
+    act(() => vi.advanceTimersByTime(STUDIO_MOTION.chromeOutMs))
+    expect(result.current.committed).toBe('browser')
+    expect(onCommit.mock.calls).toEqual([['cad'], ['browser']])
+    expect(result.current.phase).toBe('idle')
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it.each([
+    ['cad', 'solar', false],
+    ['cad', 'browser', true],
+  ])('keeps the latest request in one batch from %s through %s (reduced motion: %s)', (initial, intermediate, reducedMotion) => {
+    const onCommit = vi.fn()
+    const { result } = renderHook(() => {
+      const [committed, setCommitted] = useState(initial)
+      const transition = useStudioTransition({
+        committed,
+        onCommit: (target) => { onCommit(target); setCommitted(target) },
+        isDrafting,
+        reducedMotion,
+      })
+      return { ...transition, committed }
+    })
+    act(() => {
+      result.current.request(intermediate)
+      result.current.request(initial)
+    })
+    expect(result.current.committed).toBe(initial)
+    expect(onCommit.mock.calls).toEqual([[intermediate], [initial]])
+    expect(result.current.phase).toBe('idle')
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
   it('exports the frozen motion contract', () => {
     expect(STUDIO_MOTION).toEqual({ chromeOutMs: 80, chromeInMs: 140, groundMs: 180, easing: 'cubic-bezier(.2,0,0,1)' })
     expect(Object.isFrozen(STUDIO_MOTION)).toBe(true)

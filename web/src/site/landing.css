@@ -210,6 +210,7 @@
 }
 .studio-shell .app[data-studio-transition="out"] :is(header.top, #drafting-ribbon, .viewer-toolbar, [data-testid="cockpit-view"], .properties-dock, .bar.bar-command-line, footer.foot-bar, .rail-stack) {
   animation: studioGroundOut 80ms cubic-bezier(.2,0,0,1) both;
+  pointer-events: none;
 }
 .studio-shell .app[data-studio-transition="in"] :is(header.top, #drafting-ribbon, .viewer-toolbar, [data-testid="cockpit-view"], .properties-dock, .bar.bar-command-line, footer.foot-bar, .rail-stack) {
   animation: studioGroundIn 140ms cubic-bezier(.2,0,0,1) both;

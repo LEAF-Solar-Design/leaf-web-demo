@@ -94,7 +94,7 @@ function Cockpit({ onToggleImport = () => {} }) {
   )
 }
 
-function mount({ saveTarget = null, onSaved = null, onBeforeEdit, withIdentity = false } = {}) {
+function mount({ saveTarget = null, onSaved = null, onBeforeEdit, onBeforeArm, withIdentity = false } = {}) {
   const workers = []
   const createWorker = vi.fn(() => {
     const worker = new ScriptedWorker()
@@ -110,7 +110,7 @@ function mount({ saveTarget = null, onSaved = null, onBeforeEdit, withIdentity =
   }
 
   const tree = (
-    <EngineSessionProvider createWorker={createWorker} saveTarget={saveTarget} onSaved={onSaved} onBeforeEdit={onBeforeEdit}>
+    <EngineSessionProvider createWorker={createWorker} saveTarget={saveTarget} onSaved={onSaved} onBeforeEdit={onBeforeEdit} onBeforeArm={onBeforeArm}>
       <Probe />
       <Cockpit />
     </EngineSessionProvider>
@@ -953,6 +953,21 @@ describe('the command prompt (W4e slice H): a tool arms, the command line asks i
 })
 
 describe('Start returns to the drawing at the engine edit sink', () => {
+  it('settles presentation once before a valid arm, but never for disarming or a refused shape', () => {
+    const onBeforeArm = vi.fn()
+    const studio = mount({ onBeforeArm })
+    onBeforeArm.mockImplementation(() => expect(studio.context.armed).toBeNull())
+    act(() => studio.context.setArmed({ group: 'draw', op: 'createLine' }))
+    expect(onBeforeArm).toHaveBeenCalledTimes(1)
+    expect(studio.context.armed).toEqual({ group: 'draw', op: 'createLine' })
+    act(() => studio.context.setArmed(null))
+    expect(studio.context.armed).toBeNull()
+    expect(onBeforeArm).toHaveBeenCalledTimes(1)
+    act(() => studio.context.setArmed({ group: 'nope', op: 'x' }))
+    expect(studio.context.armed).toBeNull()
+    expect(onBeforeArm).toHaveBeenCalledTimes(1)
+  })
+
   it('closes Start once before cut posts its internal delete', async () => {
     const onBeforeEdit = vi.fn()
     const studio = mount({ onBeforeEdit })
