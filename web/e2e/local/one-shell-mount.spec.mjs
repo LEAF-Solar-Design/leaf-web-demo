@@ -1820,7 +1820,11 @@ test.describe('route matrix, rail ON', () => {
       }
     }
     expect(pointRoutes).toHaveLength(0)
-    await page.locator('body').press('Escape')
+    // End the LINE chain through the prompt's own Cancel: focus is still in the Command bar here, and Escape
+    // pressed there belongs to the bar, so a body Escape would leave LINE armed and the sentence below would
+    // land in its next-point field instead of routing.
+    await page.getByTestId('cockpit-prompt').getByRole('button', { name: 'Cancel', exact: true }).click()
+    await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
     page.off('request', onPointRoute)
 
     // A sentence is still a sentence: it routes, it never arms. LAST in the
