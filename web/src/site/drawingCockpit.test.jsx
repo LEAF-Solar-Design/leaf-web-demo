@@ -208,6 +208,38 @@ describe('FootRegion', () => {
 })
 
 describe('CockpitStatus', () => {
+  it('clears board moves and resumes coordinates on the canvas', async () => {
+    const ground = document.createElement('div')
+    ground.innerHTML = '<div class="viewer-canvas"><canvas></canvas></div><div class="studio-ground-board"></div>'
+    document.body.appendChild(ground)
+    const viewer = { unproject: vi.fn((x, y) => ({ x: x / 10, y: -y / 10 })) }
+    const { unmount } = render(<CockpitStatus ground={ground} viewerRef={{ current: viewer }} canvasSelector=".viewer-canvas" />)
+    try {
+      const [x, y] = screen.getByTestId('cockpit-status').querySelectorAll('.cockpit-coord b')
+      const canvas = ground.querySelector('canvas')
+      const board = ground.querySelector('.studio-ground-board')
+      move(board, 100, 50)
+      await nextFrame()
+      expect(x.textContent).toBe('—')
+      expect(y.textContent).toBe('—')
+      expect(viewer.unproject).not.toHaveBeenCalled()
+      move(canvas, 200, 80)
+      await nextFrame()
+      expect(x.textContent).toBe('20.00')
+      expect(y.textContent).toBe('-8.00')
+      expect(viewer.unproject).toHaveBeenCalledTimes(1)
+      move(board, 100, 50)
+      move(board, 110, 60)
+      await nextFrame()
+      expect(x.textContent).toBe('—')
+      expect(y.textContent).toBe('—')
+      expect(viewer.unproject).toHaveBeenCalledTimes(1)
+    } finally {
+      unmount()
+      ground.remove()
+    }
+  })
+
   it('writes unprojected cursor coordinates and scale at frame rate, clears on leave, tears down', async () => {
     const ground = document.createElement('div')
     document.body.appendChild(ground)

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react'
-import { applyViewPose, cameraPose, pickLineThreshold, unprojectClientToPlane } from './viewerMath.js'
+import { applyViewPose, cameraPose, nextFitState, pickLineThreshold, safeFitFrustum, safeCenterShift, safeRectCameraAction, unprojectClientToPlane } from './viewerMath.js'
 import { expandBulgedPolylines, intakeRoundPolylines } from '../cadedit/engineIntake.js'
 import { formatElementId } from '../lib/elementIdentity.js'
 import * as THREE from 'three'
@@ -121,12 +121,17 @@ const Viewer = forwardRef(function Viewer(
     highlightHandles, markers, overlayPolylines,
     selectedHandle, onSelectEntity, pendingEdit,
     background, controlsEnabled = true, rotateEnabled = false,
-    panelSculpture = false, stringRoutes, onGlError,
+    panelSculpture = false, stringRoutes, onGlError, safeRect = null,
   },
   ref,
 ) {
   const mountRef = useRef(null)
   const stateRef = useRef(null)
+  const safeRectRef = useRef(safeRect)
+  safeRectRef.current = safeRect
+  const previousSafeRef = useRef(safeRect)
+  const fittedRef = useRef(false)
+  const interactingRef = useRef(false)
   // Latest onSelectEntity kept in a ref so the (one-time) pointer handler never
   // fires a stale closure.
   const onSelectRef = useRef(onSelectEntity)
@@ -459,6 +464,14 @@ const Viewer = forwardRef(function Viewer(
 
     function applyFrustum() {
       const w = mount.clientWidth, h = mount.clientHeight
+      if (!sculpture && safeRectRef.current) {
+        const fit = safeFitFrustum({ width: w, height: h, safe: safeRectRef.current, bounds: { cx, cy, w: dataW, h: dataH } })
+        if (!fit) return null
+        camera.left = -fit.halfW; camera.right = fit.halfW
+        camera.top = fit.halfH; camera.bottom = -fit.halfH
+        camera.updateProjectionMatrix()
+        return fit
+      }
       const viewAspect = w / h
       const dataAspect = dataW / dataH
       const margin = sculpture ? 1.28 : 1.08
@@ -476,7 +489,8 @@ const Viewer = forwardRef(function Viewer(
     }
 
     function fitToBounds() {
-      applyFrustum()
+      const fit = applyFrustum()
+      const centerX = fit?.centerX ?? cx, centerY = fit?.centerY ?? cy
       const targetZ = isFinite(minDisplayZ) && isFinite(maxDisplayZ)
         ? (minDisplayZ + maxDisplayZ) / 2
         : 0
@@ -487,14 +501,27 @@ const Viewer = forwardRef(function Viewer(
           targetZ + dataSpan * 1.15,
         )
       } else {
-        camera.position.set(cx, cy, 100)
+        camera.position.set(centerX, centerY, 100)
       }
       camera.zoom = 1
       camera.updateProjectionMatrix()
-      controls.target.set(cx, cy, targetZ)
+      controls.target.set(centerX, centerY, targetZ)
       controls.update()
+      updateFitState('fit')
     }
+    previousSafeRef.current = safeRectRef.current
     fitToBounds()
+    function updateFitState(event) {
+      const next = nextFitState({ fitted: fittedRef.current, interacting: interactingRef.current }, event)
+      fittedRef.current = next.fitted
+      interactingRef.current = next.interacting
+    }
+    const onControlsStart = () => updateFitState('start')
+    const onControlsChange = () => updateFitState('change')
+    const onControlsEnd = () => updateFitState('end')
+    controls.addEventListener('start', onControlsStart)
+    controls.addEventListener('change', onControlsChange)
+    controls.addEventListener('end', onControlsEnd)
     const recordCameraPose = () => {
       mount.dataset.cameraPosition = camera.position
         .toArray()
@@ -555,7 +582,8 @@ const Viewer = forwardRef(function Viewer(
     function onResize() {
       const w = mount.clientWidth, h = mount.clientHeight
       renderer.setSize(w, h)
-      applyFrustum()
+      if (!sculpture && safeRectRef.current && fittedRef.current) fitToBounds()
+      else applyFrustum()
     }
     const ro = new ResizeObserver(onResize)
     ro.observe(mount)
@@ -564,7 +592,7 @@ const Viewer = forwardRef(function Viewer(
       scene, camera, renderer, controls, layerGroups, pickIndex,
       highlightGroup, markerGroup, overlayGroup, selectionGroup, pendingGroup,
       stringGroup, rubberGroup, snapGroup, stringAnim: null,
-      fitToBounds, dataSpan, tokens,
+      fitToBounds, dataSpan, tokens, sculpture,
     }
 
     const depthSpan = isFinite(minDisplayZ) && isFinite(maxDisplayZ)
@@ -602,6 +630,7 @@ const Viewer = forwardRef(function Viewer(
         },
         setView(pose) {
           if (pose === 'home') { fitToBounds(); return true }
+          if (pose && typeof pose === 'object') fittedRef.current = false
           const changed = applyViewPose(camera, controls.target, pose)
           if (changed) controls.update()
           return changed
@@ -622,6 +651,10 @@ const Viewer = forwardRef(function Viewer(
       dom.removeEventListener('pointerdown', onPointerDown)
       dom.removeEventListener('pointerup', onPointerUp)
       controls.removeEventListener('change', recordCameraPose)
+      controls.removeEventListener('start', onControlsStart)
+      controls.removeEventListener('change', onControlsChange)
+      controls.removeEventListener('end', onControlsEnd)
+      interactingRef.current = false
       controls.dispose()
       renderer.dispose()
       if (renderer.domElement.parentNode) renderer.domElement.parentNode.removeChild(renderer.domElement)
@@ -635,8 +668,40 @@ const Viewer = forwardRef(function Viewer(
     }
   }, [activeIntake, colorForLayer, background, panelSculpture])
 
+  useEffect(() => {
+    const from = previousSafeRef.current
+    previousSafeRef.current = safeRect
+    const s = stateRef.current
+    if (!s || s.sculpture) return
+    const action = safeRectCameraAction({ fitted: fittedRef.current, from, to: safeRect })
+    if (action === 'refit') { s.fitToBounds(); return }
+    if (action !== 'shift') return
+    const width = s.renderer.domElement.clientWidth
+    const { dx, dy } = safeCenterShift({
+      unitsPerPixel: (s.camera.right - s.camera.left) / (s.camera.zoom * width),
+      from, to: safeRect,
+    })
+    s.camera.position.x += dx; s.camera.position.y += dy
+    s.controls.target.x += dx; s.controls.target.y += dy
+    s.controls.update()
+  }, [safeRect])
+
   useImperativeHandle(ref, () => ({
     fit: () => stateRef.current?.fitToBounds(),
+    frame: (bounds, share = 0.4) => {
+      const s = stateRef.current
+      if (!s || s.sculpture || !bounds || !Number.isFinite(share) || share <= 0) return false
+      const width = s.renderer.domElement.clientWidth, height = s.renderer.domElement.clientHeight
+      const fit = safeFitFrustum({ width, height, safe: safeRectRef.current, margin: 1 / share,
+        bounds: { cx: (bounds.minX + bounds.maxX) / 2, cy: (bounds.minY + bounds.maxY) / 2,
+          w: bounds.maxX - bounds.minX, h: bounds.maxY - bounds.minY } })
+      if (!fit || !(fit.unitsPerPixel > 0)) return false
+      applyViewPose(s.camera, s.controls.target, { center: { x: fit.centerX, y: fit.centerY },
+        zoom: (s.camera.right - s.camera.left) / (width * fit.unitsPerPixel) })
+      s.controls.update()
+      fittedRef.current = false
+      return true
+    },
     // Rebuild scene geometry from a new intake version (e.g. a backend push of
     // the next drawing version). Disposes old geometry and clears the pending
     // ghost as part of the rebuild.
@@ -670,6 +735,7 @@ const Viewer = forwardRef(function Viewer(
       const s = stateRef.current
       if (!s) return false
       if (pose === 'home') { s.fitToBounds(); return true }
+      if (pose && typeof pose === 'object') fittedRef.current = false
       const changed = applyViewPose(s.camera, s.controls.target, pose)
       if (changed) s.controls.update()
       return changed
@@ -1082,6 +1148,7 @@ const Viewer = forwardRef(function Viewer(
       ref={mountRef}
       className="viewer-canvas"
       data-tour="viewer"
+      data-safe-rect={!panelSculpture && safeRect ? [safeRect.left, safeRect.top, safeRect.width, safeRect.height].join(',') : undefined}
       data-group-highlight={groupHighlight.length ? groupHighlight.join(' ') : undefined}
       // The ONE element identity a WebGL entity gets, since it has no DOM
       // node of its own: the current selection, reflected through the same

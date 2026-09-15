@@ -9,6 +9,53 @@
 // controls target, and calls controls.update() after a mutation.
 import * as THREE from 'three'
 
+export function nextFitState(state, event) {
+  switch (event) {
+    case 'fit': return { fitted: true, interacting: state.interacting }
+    case 'start': return { fitted: state.fitted, interacting: true }
+    case 'change': return state.interacting ? { fitted: false, interacting: true } : state
+    case 'end': return { fitted: state.fitted, interacting: false }
+    default: return state
+  }
+}
+
+export function safeRectCameraAction({ fitted, from, to }) {
+  const keys = ['left', 'top', 'width', 'height']
+  const valid = (rect) => !!rect && keys.every((key) => Number.isFinite(rect[key]))
+  if (!valid(to)) return 'none'
+  const hasFrom = valid(from)
+  if (hasFrom && keys.every((key) => from[key] === to[key])) return 'none'
+  if (fitted) return 'refit'
+  return hasFrom ? 'shift' : 'none'
+}
+
+/** Fit world bounds into a canvas-local drawing rectangle. */
+export function safeFitFrustum({ width, height, safe, bounds, margin = 1.08 }) {
+  const rect = safe ?? { left: 0, top: 0, width, height }
+  if (!bounds) return null
+  const { cx, cy, w, h } = bounds
+  if (![width, height, rect.left, rect.top, rect.width, rect.height, cx, cy, w, h, margin].every(Number.isFinite)
+    || width <= 0 || height <= 0 || rect.width <= 0 || rect.height <= 0 || (w <= 0 && h <= 0)) return null
+  const unitsPerPixel = Math.max(margin * w / rect.width, margin * h / rect.height)
+  return {
+    halfW: width * unitsPerPixel / 2,
+    halfH: height * unitsPerPixel / 2,
+    centerX: cx + (width / 2 - rect.left - rect.width / 2) * unitsPerPixel,
+    centerY: cy + (rect.top + rect.height / 2 - height / 2) * unitsPerPixel,
+    unitsPerPixel,
+  }
+}
+
+/** Preserve the world point under a moving safe centre at the current scale. */
+export function safeCenterShift({ unitsPerPixel, from, to }) {
+  if (!from || !to || ![unitsPerPixel, from.left, from.top, from.width, from.height,
+    to.left, to.top, to.width, to.height].every(Number.isFinite)) return { dx: 0, dy: 0 }
+  return {
+    dx: (from.left + from.width / 2 - to.left - to.width / 2) * unitsPerPixel,
+    dy: (to.top + to.height / 2 - from.top - from.height / 2) * unitsPerPixel,
+  }
+}
+
 /** Pixel click aperture in world units, or the default line threshold. */
 export function pickLineThreshold(worldPerPixel, px = 6) {
   return Number.isFinite(worldPerPixel) && worldPerPixel > 0 ? worldPerPixel * px : 1

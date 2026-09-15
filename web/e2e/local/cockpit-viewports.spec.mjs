@@ -39,6 +39,11 @@ for (const condition of conditions) {
       test.setTimeout(180_000)
       await boot(page, request)
       await expectSeparateTabs(page)
+      if (condition.viewport.width === 1366) {
+        await expect.poll(() => page.locator('.studio-ground .viewer-canvas canvas').boundingBox()).toEqual({
+          x: 0, y: 0, width: condition.viewport.width, height: condition.viewport.height,
+        })
+      }
       const ribbon = page.locator('#drafting-ribbon')
       const draw = page.getByRole('tab', { name: 'Draw', exact: true })
       await draw.click()
@@ -86,10 +91,16 @@ for (const condition of conditions) {
       const canvas = page.locator('.studio-ground .viewer-canvas canvas')
       if (condition.viewport.width < 981) {
         const activity = await page.locator('.studio-shell .rail-stack').boundingBox()
-        const drawing = await canvas.boundingBox()
+        await expect(page.locator('.studio-ground .viewer-canvas')).toHaveAttribute('data-safe-rect', /^\d+,\d+,\d+,\d+$/)
+        const safeBottom = await canvas.evaluate((element) => {
+          const safe = element.closest('.viewer-canvas').getAttribute('data-safe-rect')?.split(',').map(Number)
+          if (safe?.length !== 4 || !safe.every(Number.isFinite)) throw new Error('Invalid safe rectangle')
+          const [left, top, width, height] = safe
+          return element.getBoundingClientRect().top + top + height
+        })
         const band = await ribbon.boundingBox()
         expect(activity).not.toBeNull()
-        expect(activity.y).toBeGreaterThanOrEqual(drawing.y + drawing.height)
+        expect(activity.y).toBeGreaterThanOrEqual(safeBottom)
         expect(activity.y).toBeGreaterThanOrEqual(band.y + band.height)
       }
       // On narrow screens the readout overlays the drawing. On wide screens
@@ -160,5 +171,8 @@ for (const hasTouch of [false, true]) test.describe(`reference frame hasTouch=${
       return [rect('header.top'), rect('#drafting-ribbon'), rect('.viewer-toolbar'), rect('footer.foot-bar')]
     })
     expect(edges).toEqual([[0, 28], [28, 95], [123, 32], [909, 31]])
+    await expect.poll(() => page.locator('.studio-ground .viewer-canvas canvas').boundingBox()).toEqual({
+      x: 0, y: 0, width: 1920, height: 940,
+    })
   })
 })

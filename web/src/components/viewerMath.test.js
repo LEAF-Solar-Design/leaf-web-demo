@@ -9,12 +9,88 @@ import * as THREE from 'three'
 import {
   applyViewPose,
   cameraPose,
+  nextFitState,
   ndcFromClient,
   pickLineThreshold,
+  safeFitFrustum,
+  safeCenterShift,
+  safeRectCameraAction,
   unprojectClientToPlane,
 } from './viewerMath.js'
 
 const RECT = { left: 10, top: 20, width: 800, height: 600 }
+
+describe('nextFitState', () => {
+  const fitted = Object.freeze({ fitted: true, interacting: false })
+  it('keeps the fit after a stationary interaction', () => {
+    const started = nextFitState(fitted, 'start')
+    expect(started).toEqual({ fitted: true, interacting: true })
+    expect(nextFitState(started, 'end')).toEqual(fitted)
+  })
+  it('clears the fit only for a camera change during interaction', () => {
+    const changed = nextFitState(nextFitState(fitted, 'start'), 'change')
+    expect(changed).toEqual({ fitted: false, interacting: true })
+    expect(nextFitState(changed, 'end')).toEqual({ fitted: false, interacting: false })
+    expect(nextFitState(changed, 'fit')).toEqual({ fitted: true, interacting: true })
+    expect(changed).toEqual({ fitted: false, interacting: true })
+  })
+  it('preserves state identity for programmatic changes and unknown events', () => {
+    expect(nextFitState(fitted, 'change')).toBe(fitted)
+    expect(nextFitState(fitted, 'unknown')).toBe(fitted)
+    expect(nextFitState({ fitted: false, interacting: false }, 'fit')).toEqual(fitted)
+  })
+})
+
+describe('safeRectCameraAction', () => {
+  const from = { left: 16, top: 42, width: 1318, height: 702 }
+  const to = { left: 16, top: 42, width: 1318, height: 684 }
+  it.each([
+    [true, null, from, 'refit'],
+    [false, null, from, 'none'],
+    [true, from, { ...from }, 'none'],
+    [true, from, null, 'none'],
+    [true, from, to, 'refit'],
+    [false, from, to, 'shift'],
+    [false, from, { ...to, left: NaN }, 'none'],
+    [true, from, { ...to, height: Infinity }, 'none'],
+    [true, from, { left: 16, top: 42, width: 1318 }, 'none'],
+    [false, { ...from, top: NaN }, to, 'none'],
+  ])('chooses %s, %j, %j as %s', (fitted, previous, next, expected) => {
+    expect(safeRectCameraAction({ fitted, from: previous, to: next })).toBe(expected)
+  })
+})
+
+describe('safeFitFrustum', () => {
+  const input = { width: 1920, height: 940, bounds: { cx: 0, cy: 0, w: 1000, h: 500 } }
+  it('fits and offsets the drawing inside the unobstructed rectangle', () => {
+    const fit = safeFitFrustum({ ...input, safe: { left: 266, top: 197, width: 1638, height: 667 } })
+    for (const [key, value] of Object.entries({ unitsPerPixel: 540 / 667, halfW: 777.2113943,
+      halfH: 380.5097451, centerX: -101.1994003, centerY: 48.98050975 })) expect(fit[key]).toBeCloseTo(value, 6)
+  })
+  it('preserves the full-canvas fit without a safe rectangle', () => {
+    const fit = safeFitFrustum(input)
+    expect(fit.unitsPerPixel).toBeCloseTo(540 / 940, 9)
+    expect(fit.halfW).toBeCloseTo(551.4893617, 6)
+    expect(fit.halfH).toBe(270)
+    expect(fit.centerX).toBe(0)
+    expect(fit.centerY).toBe(0)
+  })
+  it('rejects non-finite inputs, missing layout and empty bounds', () => {
+    for (const change of [{ width: 0 }, { height: Infinity }, { margin: NaN },
+      { bounds: { cx: 0, cy: 0, w: 0, h: 0 } }, { bounds: { cx: NaN, cy: 0, w: 1, h: 1 } },
+      { safe: { left: 0, top: 0, width: 0, height: 100 } }]) expect(safeFitFrustum({ ...input, ...change })).toBeNull()
+  })
+})
+
+describe('safeCenterShift', () => {
+  it('moves the camera at fixed scale to follow the safe centre', () => {
+    const from = { left: 0, top: 0, width: 100, height: 100 }
+    const to = { left: 20, top: 10, width: 100, height: 100 }
+    expect(safeCenterShift({ unitsPerPixel: 0.5, from, to })).toEqual({ dx: -10, dy: 5 })
+    expect(safeCenterShift({ unitsPerPixel: 0.5, to })).toEqual({ dx: 0, dy: 0 })
+    expect(safeCenterShift({ unitsPerPixel: NaN, from, to })).toEqual({ dx: 0, dy: 0 })
+  })
+})
 
 function flatCamera({ halfW = 400, halfH = 300, cx = 0, cy = 0, zoom = 1 } = {}) {
   const camera = new THREE.OrthographicCamera(-halfW, halfW, halfH, -halfH, -1000, 1000)

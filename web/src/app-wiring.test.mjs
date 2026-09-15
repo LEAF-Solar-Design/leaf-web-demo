@@ -20,6 +20,37 @@ import esbuild from 'esbuild'
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
 const appNoComments = decomment(appSource)
 const stripped = esbuild.transformSync(appSource, { loader: 'jsx' }).code
+describe('studio unobstructed drawing viewport', () => {
+  it('passes the measured safe rectangle only in the studio', () => {
+    assert.match(appNoComments, new RegExp('safeRect=\\{studioGround \\? drawingViewport : null\\}'))
+    assert.ok(appNoComments.includes('useDrawingViewport(studioGround && groundShowsDrawing(activeSurface) ? studioGround : null, STUDIO_DRAWING_OCCLUDERS)'))
+    assert.ok(appNoComments.includes('drawingViewportRef.current = drawingViewport'))
+  })
+  it('uses safe bounds for result visibility and Show result framing', () => {
+    const start = appNoComments.indexOf('const maxInvalidFrames =')
+    const show = appNoComments.indexOf('const showCreatedResult =', start)
+    const end = appNoComments.indexOf('const seatVersion =', show)
+    const visibility = appNoComments.slice(start, show)
+    const framing = appNoComments.slice(show, end)
+    assert.ok(visibility.includes('drawingViewportRef.current'))
+    assert.ok(visibility.includes('canvasRect.left + safe.left'))
+    assert.ok(visibility.includes('< 8'))
+    assert.ok(framing.includes('drawingViewportRef.current'))
+    assert.ok(framing.includes('viewer.frame('))
+    assert.ok(framing.includes('viewer.setView('))
+  })
+  it('names all eight occluders and excludes growing command chrome and the view cube', () => {
+    const start = appNoComments.indexOf('const STUDIO_DRAWING_OCCLUDERS = Object.freeze(')
+    assert.ok(start >= 0)
+    const list = appNoComments.slice(start, appNoComments.indexOf('])', start))
+    for (const selector of ['header.top', '#drafting-ribbon', '.viewer-toolbar', '[data-testid="cockpit-view"]',
+      '.properties-dock', '.bar.bar-command-line', 'footer.foot-bar', '.rail-stack']) assert.ok(list.includes(selector), selector)
+    assert.ok(list.includes('reserve: 50'))
+    assert.ok(!list.includes("'.bar-dock'"))
+    assert.ok(!list.includes('cockpit-prompt'))
+    assert.ok(!list.includes('cockpit-cube'))
+  })
+})
 describe('Start is a view inside the current workspace profile', () => {
   it('wires all three Start controls to one memory-only handler', () => {
     assert.match(appSource, new RegExp('className="doc-tab-start"\\s+onClick=\\{onOpenStart\\}'))
@@ -643,7 +674,19 @@ describe('App.jsx wiring', () => {
     assert.doesNotMatch(mutated, binding)
   })
 
+  it('limits studio point picking and cursor readout to the viewer canvas', () => {
+    for (const component of ['CanvasPointPicker', 'CockpitStatus']) {
+      const mount = appNoComments.match(new RegExp('<' + component + '\\s[\\s\\S]*?/>'))?.[0]
+      assert.ok(mount, component + ' mount exists')
+      assert.match(mount, /canvasSelector="\.viewer-canvas"/)
+      assert.match(mount, new RegExp('ground=\\{studioGround\\}'))
+    }
+  })
+
   it('opts studio frame and grounds into customer copy with explicit mock state', () => {
+    const grounds = appNoComments.match(/<SurfaceGrounds\s[\s\S]*?\/>/)?.[0]
+    assert.ok(grounds, 'SurfaceGrounds mount exists')
+    assert.match(grounds, new RegExp('occluders=\\{STUDIO_DRAWING_OCCLUDERS\\}'))
     for (const component of ['SurfaceFrame', 'SurfaceGrounds']) {
       const mount = new RegExp('<' + component + '\\s[\\s\\S]*?/>|<' + component + '\\s[\\s\\S]*?>')
       const source = appNoComments.match(mount)?.[0]

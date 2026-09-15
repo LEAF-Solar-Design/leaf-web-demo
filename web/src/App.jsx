@@ -3,6 +3,7 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallba
 import { createPortal, flushSync } from 'react-dom'
 import { track, setTourStep } from './telemetry.js'
 import { useStudioGround } from './site/studioGround.js'
+import useDrawingViewport from './site/useDrawingViewport.js'
 import SurfaceGrounds, { groundShowsDrawing } from './site/SurfaceGrounds.jsx'
 import { START_BOARD_COPY } from './site/startBoardCopy.js'
 import { CockpitStatus, FootRegion, StatusTabs, ViewCluster } from './site/DrawingCockpit.jsx'
@@ -25,6 +26,13 @@ import { loadDemoSolve } from './site/intakeCache.js'
 // The 3D viewer drags in `three`; loading it lazily (mirroring the auth.js
 // dynamic-import pattern) keeps first paint off the critical path.
 const Viewer = React.lazy(() => import('./components/Viewer.jsx'))
+// The bottom occluder is the command line's fixed-height well plus a constant 50 px reserve for the prompt's two rows, so an armed prompt never covers fitted geometry and arming or disarming a command still never moves the drawing.
+const STUDIO_DRAWING_OCCLUDERS = Object.freeze([
+  ['header.top', 'top'], ['#drafting-ribbon', 'top'], ['.viewer-toolbar', 'top'],
+  ['[data-testid="cockpit-view"]', 'top'], ['.properties-dock', 'left'],
+  ['.bar.bar-command-line', 'bottom', Object.freeze({ reserve: 50 })],
+  ['footer.foot-bar', 'bottom'], ['.rail-stack', 'nearest'],
+])
 import Legend from './components/Legend.jsx'
 import ResultPanel from './components/ResultPanel.jsx'
 import SelectionReadout from './components/SelectionReadout.jsx'
@@ -253,6 +261,7 @@ export default function App() {
   // consumer is the Viewer render site, which portals into it; null renders
   // the old shell byte-for-byte (the rollback contract, studioGround.js).
   const studioGround = useStudioGround()
+  const drawingViewportRef = useRef(null)
   const [startOpen, setStartOpen] = useState(false)
   const [startFocusRequest, setStartFocusRequest] = useState(0)
   const startOpenRef = useRef(false)
@@ -1293,7 +1302,13 @@ export default function App() {
     // then watch the candidate until a pan, zoom or Show result reveals it.
     const measure = () => {
       const viewer = viewerRef.current
-      const rect = studioGround.querySelector('.viewer-canvas canvas')?.getBoundingClientRect()
+      const canvasRect = studioGround.querySelector('.viewer-canvas canvas')?.getBoundingClientRect()
+      const safe = drawingViewportRef.current
+      const rect = canvasRect && safe ? {
+        left: canvasRect.left + safe.left, top: canvasRect.top + safe.top,
+        right: canvasRect.left + safe.left + safe.width, bottom: canvasRect.top + safe.top + safe.height,
+        width: safe.width, height: safe.height,
+      } : canvasRect
       const points = [
         viewer?.project?.(resultBounds.minX, resultBounds.minY),
         viewer?.project?.(resultBounds.minX, resultBounds.maxY),
@@ -1323,6 +1338,10 @@ export default function App() {
   const showCreatedResult = useCallback(() => {
     if (!resultBounds) return
     const viewer = viewerRef.current
+    if (drawingViewportRef.current && typeof viewer?.frame === 'function') {
+      viewer.frame({ minX: resultBounds.minX, minY: resultBounds.minY, maxX: resultBounds.maxX, maxY: resultBounds.maxY }, 0.4)
+      return
+    }
     const rect = studioGround?.querySelector('.viewer-canvas canvas')?.getBoundingClientRect()
     const pose = viewer?.getPose?.()
     const points = [
@@ -2484,6 +2503,8 @@ export default function App() {
     try { return productSurfaceFromSearch(window.location.search) } catch { return 'cad' }
   })
   const projectLayout = useProjectWorkspaceLayout({ mock, projectId: openProjectId, surface: activeSurface })
+  const drawingViewport = useDrawingViewport(studioGround && groundShowsDrawing(activeSurface) ? studioGround : null, STUDIO_DRAWING_OCCLUDERS)
+  drawingViewportRef.current = drawingViewport
   revealProjectToolsRef.current = projectLayout.revealTools
   const onSelectSurface = useCallback((id) => {
     returnToDrawing()
@@ -3357,6 +3378,7 @@ export default function App() {
             old shell has no ground, so rail OFF renders none of this. */}
         {studioGround && createPortal(
           <SurfaceGrounds
+            occluders={STUDIO_DRAWING_OCCLUDERS}
             studioPresentation={Boolean(studioGround)}
             surface={activeSurface}
             boardVisible={boardVisible}
@@ -3503,6 +3525,7 @@ export default function App() {
                 <CanvasPointPicker
                   viewerRef={viewerRef}
                   ground={studioGround}
+                  canvasSelector=".viewer-canvas"
                   onPicking={(live) => {
                     const el = workspaceCardRef.current
                     if (!el) return
@@ -3744,6 +3767,7 @@ export default function App() {
                   }}
                   pendingEdit={pendingEdit || writeGhost}
                   background={studioGround ? 'transparent' : undefined}
+                  safeRect={studioGround ? drawingViewport : null}
                 />
                 </Suspense>
               )
@@ -4131,7 +4155,7 @@ export default function App() {
         {/* W4b cockpit: live cursor coordinates, scale, counts, selection
             (studio only; DOM-written at rAF rate, never React state). */}
         {studioGround && groundShowsDrawing(activeSurface) && (
-          <CockpitStatus ground={studioGround} viewerRef={viewerRef} shown={drawingIntake} selectedHandle={selectedHandle} />
+          <CockpitStatus ground={studioGround} viewerRef={viewerRef} shown={drawingIntake} selectedHandle={selectedHandle} canvasSelector=".viewer-canvas" />
         )}
         {/* W4e: ORTHO and OSNAP real through StatusModesBridge; the rest honestly off, plus fullscreen. */}
         <SurfaceFrame.Cockpit />

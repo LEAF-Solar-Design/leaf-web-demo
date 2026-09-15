@@ -83,6 +83,53 @@ async function interact(page) {
   await expect(page).toHaveURL(/\/app$/)
 }
 
+test('option A: translucent chrome owns clicks and wheel over the full-bleed drawing', async ({ page, request }) => {
+  test.setTimeout(120_000)
+  await page.setViewportSize({ width: 1920, height: 940 })
+  await requireLocalReady(request, test, API_BASE)
+  await setRail(page, '1')
+  await page.goto('/app?surface=cad&drawing=cat-panels')
+  await expectOneCanvasIn(page, '.studio-ground')
+  const canvas = page.locator('.studio-ground .viewer-canvas')
+  await expect.poll(() => canvas.evaluate((el) => !!el.__cadviewer?.cameraPose())).toBe(true)
+  await expect(canvas).toHaveAttribute('data-safe-rect', /^\d+,\d+,\d+,\d+$/)
+  await expect(page.locator('[data-tool="draw:createLine"]')).toBeEnabled({ timeout: 30_000 })
+  const readState = () => page.evaluate(() => ({
+    pose: document.querySelector('.studio-ground .viewer-canvas').__cadviewer.cameraPose(),
+    selection: document.querySelector('.selection-readout')?.textContent,
+  }))
+  await expect(page.locator('.selection-readout')).toBeVisible()
+  const before = await readState()
+  for (const [selector, horizontal, vertical] of [
+    ['#drafting-ribbon', -6, -6],
+    ['.properties-dock', 8, -8],
+    ['[data-testid="cockpit-view"]', -6, null],
+    ['.bar.bar-command-line', 3, null],
+    ['footer.foot-bar', null, null],
+  ]) {
+    const point = await page.locator(selector).evaluate((element, [horizontal, vertical]) => {
+      const button = horizontal === null ? element.querySelector('.cockpit-status-toggles button') : null
+      if (horizontal === null && !button) throw new Error('footer status button is absent')
+      const box = (button || element).getBoundingClientRect()
+      const x = horizontal === null ? box.left + box.width / 2 : horizontal < 0 ? box.right + horizontal : box.left + horizontal
+      const y = vertical === null ? box.top + box.height / 2 : box.bottom + vertical
+      const hit = document.elementFromPoint(x, y)
+      return { x, y, owns: element.contains(hit), notDrawing: !document.querySelector('.studio-ground')?.contains(hit) }
+    }, [horizontal, vertical])
+    expect(point.owns, selector).toBe(true)
+    expect(point.notDrawing, selector).toBe(true)
+    await page.mouse.click(point.x, point.y)
+    await page.mouse.wheel(0, 120)
+    // Wheel delivery and any camera update settle across animation frames.
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+    expect(await readState(), selector).toEqual(before)
+  }
+  expect(await page.locator('footer.foot-bar').evaluate((element) => {
+    const box = element.getBoundingClientRect()
+    return !document.querySelector('.studio-ground')?.contains(document.elementFromPoint(box.right - 40, box.top + box.height / 2))
+  }), 'footer.foot-bar').toBe(true)
+})
+
 test.describe('route matrix, rail ON', () => {
   for (const surface of ['cad', 'solar']) {
     test(`Start preserves the ${surface} profile, document, prompt and mounted nodes`, async ({ page, request }) => {
@@ -695,10 +742,10 @@ test.describe('route matrix, rail ON', () => {
 
     // SEATING (W4e), the reference's bands to the pixel at the 1600x1000
     // viewport: a 28px top band, the 95px ribbon, the 32px document tabs,
-    // the canvas from (250, 155), the 250px properties pane, the viewport
+    // the full-bleed canvas, the 250px properties pane, the viewport
     // strip at the canvas's top-left and the view cube at its top-right,
     // the 25px command line 35px off the bottom, the 31px status bar, and
-    // the ribbon's opaque #2a2a2a.
+    // the ribbon's translucent backing.
     const seating = await page.evaluate(() => {
       const r = (sel) => {
         const el = document.querySelector(sel)
@@ -710,20 +757,21 @@ test.describe('route matrix, rail ON', () => {
       return {
         header: r('header.top'), band: r('.drafting-ribbon'), tabs: r('.viewer-toolbar'), pane: r('[data-testid="properties-dock"]'),
         strip: r('.cockpit-view'), cube: r('.cockpit-cube-wrap'), well: r('.bar.bar-command-line'), status: r('footer.foot-bar'),
+        viewportW: innerWidth, viewportH: innerHeight,
         ground: r('.studio-ground'), shellW: Math.round(shell.width), shellH: Math.round(shell.height),
-        glass: getComputedStyle(document.querySelector('.drafting-ribbon'), '::before').backgroundColor,
+        glass: getComputedStyle(document.querySelector('.drafting-ribbon')).backgroundColor,
       }
     })
     expect(seating.header.h).toBe(28)
     expect([seating.band.y, seating.band.h]).toEqual([28, 95])
     expect([seating.tabs.y, seating.tabs.h]).toEqual([123, 32])
-    expect([seating.ground.x, seating.ground.y]).toEqual([250, 155])
+    expect([seating.ground.x, seating.ground.y, seating.ground.w, seating.ground.h]).toEqual([0, 0, seating.viewportW, seating.viewportH])
     expect([seating.pane.x, seating.pane.y, seating.pane.w]).toEqual([0, 155, 250])
     expect([seating.strip.x, seating.strip.y, seating.strip.h]).toEqual([250, 155, 26])
     expect(seating.cube.x).toBeGreaterThan(seating.shellW / 2)
     expect([seating.status.h, seating.status.bottom]).toEqual([31, seating.shellH])
     expect([seating.well.h, seating.shellH - seating.well.bottom]).toEqual([25, 35])
-    expect(seating.glass).toBe('rgb(42, 42, 42)')
+    expect(seating.glass).toBe('rgba(30, 34, 39, 0.86)')
     test.info().annotations.push({ type: 'seating', description: JSON.stringify(seating) })
 
     // Slice E: the command well is the reference's one-line docked prompt on
@@ -1141,9 +1189,24 @@ test.describe('route matrix, rail ON', () => {
     await expect(historyDialog).toHaveCount(0)
     await expect(promptRow).toHaveAttribute('data-op', 'createLine')
     await expect(lineTool).toHaveAttribute('aria-expanded', 'true')
-    const groundPick = (fx, fy) => page.evaluate(([px, py]) => {
+    const groundPick = (fx, fy) => page.evaluate(async ([px, py]) => {
       const ground = document.querySelector('.studio-ground')
-      const box = ground.getBoundingClientRect()
+      const canvas = ground.querySelector('.viewer-canvas')
+      let previous
+      let settled = false
+      for (let attempt = 0; attempt < 60; attempt++) {
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+        const reading = JSON.stringify([canvas.getAttribute('data-safe-rect'), canvas.__cadviewer.project(0, 0)])
+        if (reading === previous) { settled = true; break }
+        previous = reading
+      }
+      if (!settled) throw new Error('geometry did not settle')
+      const safe = canvas?.getAttribute('data-safe-rect')?.split(',').map(Number)
+      const [left, top, width, height] = safe || []
+      const origin = canvas?.getBoundingClientRect()
+      const box = safe?.length === 4 && safe.every(Number.isFinite) && origin
+        ? { left: origin.left + left, top: origin.top + top, width, height }
+        : ground.getBoundingClientRect()
       const x = Math.round(box.left + box.width * px)
       const y = Math.round(box.top + box.height * py)
       const hit = document.elementFromPoint(x, y)
@@ -1712,7 +1775,18 @@ test.describe('route matrix, rail ON', () => {
     await bar.fill('GROUP')
     await bar.press('Enter')
     await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'group')
-    const groupPick = await page.evaluate(({ x, y }) => document.querySelector('.studio-ground .viewer-canvas').__cadviewer.project(x, y), groupLines[1])
+    const groupPick = await page.evaluate(async ({ x, y }) => {
+      const canvas = document.querySelector('.studio-ground .viewer-canvas')
+      let previous
+      for (let attempt = 0; attempt < 60; attempt++) {
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+        const point = canvas.__cadviewer.project(x, y)
+        const reading = JSON.stringify([canvas.getAttribute('data-safe-rect'), point])
+        if (reading === previous) return point
+        previous = reading
+      }
+      throw new Error('geometry did not settle')
+    }, groupLines[1])
     await page.mouse.click(groupPick.x, groupPick.y)
     await expect(page.getByLabel('ribbon members')).toHaveText('2 objects')
     await page.getByTestId('cockpit-prompt-run').click()
@@ -2001,7 +2075,13 @@ test.describe('route matrix, rail ON', () => {
     await expect(showResult).toHaveCount(0)
     const visibleResult = await page.evaluate(() => {
       const mount = document.querySelector('.studio-ground .viewer-canvas')
-      const rect = mount.querySelector('canvas').getBoundingClientRect()
+      const canvasRect = mount.querySelector('canvas').getBoundingClientRect()
+      const safe = mount.getAttribute('data-safe-rect')?.split(',').map(Number)
+      const rect = safe ? {
+        left: canvasRect.left + safe[0], top: canvasRect.top + safe[1],
+        right: canvasRect.left + safe[0] + safe[2], bottom: canvasRect.top + safe[1] + safe[3],
+        width: safe[2], height: safe[3],
+      } : canvasRect
       const a = mount.__cadviewer.project(1000000, 0)
       const b = mount.__cadviewer.project(1000001, 0)
       return { inside: [a, b].every((p) => p.x >= rect.left && p.x <= rect.right && p.y >= rect.top && p.y <= rect.bottom), share: Math.max(Math.abs(b.x - a.x) / rect.width, Math.abs(b.y - a.y) / rect.height) }
@@ -2079,6 +2159,8 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'move', { timeout: 20_000 })
     await expect(page.locator('[data-testid="cockpit-prompt"] .cp-run')).toBeDisabled()
     await expect(page.getByTestId('cockpit-prompt-note')).toHaveText('an INSERT is placed, not edited, in this round')
+    // Wait for the arming handoff: an Escape still in the Command bar is left to the bar (W4f-2).
+    await expect(page.getByLabel('ribbon dx', { exact: true })).toBeFocused()
     await page.keyboard.press('Escape')
     await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
     await bar.fill('block')
@@ -2296,11 +2378,13 @@ test.describe('route matrix, rail ON', () => {
       })
       .map((el) => `${el.tagName}.${el.className}`.slice(0, 60)))
     expect(solarSlabs, 'a light page-shaped block is sitting on the solar drawing').toEqual([])
-    // The document band belongs ON the drawing, above the ground - that is
-    // the geometry the frame broke, so it is measured, not assumed.
-    const solarBandTop = (await page.locator('.viewer-toolbar').boundingBox()).y
+    // The Solar band owns its empty space over the full-bleed drawing.
     const solarGroundTop = (await page.locator('.studio-shell .studio-ground').boundingBox()).y
-    expect(solarBandTop).toBeLessThan(solarGroundTop)
+    expect(solarGroundTop).toBe(0)
+    expect(await page.locator('.viewer-toolbar').evaluate((element) => {
+      const box = element.getBoundingClientRect()
+      return element.contains(document.elementFromPoint(box.right - 6, box.top + box.height / 2))
+    })).toBe(true)
     await page.getByRole('tab', { name: 'CAD', exact: true }).click()
     await expect(page.locator('.app[data-surface="cad"]')).toHaveCount(1)
 

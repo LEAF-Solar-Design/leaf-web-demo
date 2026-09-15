@@ -80,11 +80,12 @@ export function ViewCluster({ viewerRef }) {
 // node (the portal target) so only pointer traffic that actually reaches the
 // drawing through the console's punch-through counts; over a painted pane
 // the readout simply holds, and leaving the ground clears it.
-export function useCursorReadout(ground, viewerRef, refs) {
+export function useCursorReadout(ground, viewerRef, refs, canvasSelector = null) {
   useEffect(() => {
     if (!ground || typeof window === 'undefined') return undefined
     let frame = 0
     let last = null
+    let offCanvas = false
     const write = () => {
       frame = 0
       const viewer = viewerRef.current
@@ -96,6 +97,13 @@ export function useCursorReadout(ground, viewerRef, refs) {
       if (refs.scale.current) refs.scale.current.textContent = formatScale(pose?.worldPerPixel)
     }
     const onMove = (event) => {
+      const target = event.target
+      if (canvasSelector != null && !(target instanceof Element && ground.contains(target) && ground.contains(target.closest(canvasSelector)))) {
+        if (!offCanvas) onLeave()
+        offCanvas = true
+        return
+      }
+      offCanvas = false
       last = { x: event.clientX, y: event.clientY }
       if (!frame) frame = window.requestAnimationFrame(write)
     }
@@ -111,7 +119,7 @@ export function useCursorReadout(ground, viewerRef, refs) {
       ground.removeEventListener('pointermove', onMove)
       ground.removeEventListener('pointerleave', onLeave)
     }
-  }, [ground, viewerRef, refs])
+  }, [ground, viewerRef, refs, canvasSelector])
 }
 
 // The status bar's left end (W4e slice I): the reference's Model tab, the
@@ -223,9 +231,9 @@ export function StatusToggles() {
   )
 }
 
-export function CockpitStatus({ ground, viewerRef, shown = null, selectedHandle = null }) {
+export function CockpitStatus({ ground, viewerRef, shown = null, selectedHandle = null, canvasSelector = null }) {
   const refs = useRef({ x: { current: null }, y: { current: null }, scale: { current: null } }).current
-  useCursorReadout(ground, viewerRef, refs)
+  useCursorReadout(ground, viewerRef, refs, canvasSelector)
   return (
     <span className="cockpit-status" data-testid="cockpit-status">
       <span className="cockpit-coord">X <b ref={(el) => { refs.x.current = el }}>—</b></span>

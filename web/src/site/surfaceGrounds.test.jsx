@@ -31,30 +31,77 @@ describe('groundShowsDrawing', () => {
 })
 
 describe('measureContainedWindow', () => {
-  const board = { left: 250, top: 155, width: 1350, height: 814 }
-  const toolbar = { height: 24, bottom: 152 }
-  const column = { left: 0, width: 1600 }
-  const prompt = { height: 80, top: 890 }
+  const board = { left: 0, top: 0, width: 1920, height: 940 }
   const element = (rect) => ({ getBoundingClientRect: () => rect })
+  const rows = [
+    ['header.top', 'top', [0, 0, 1920, 28]],
+    ['#drafting-ribbon', 'top', [0, 28, 1920, 95]],
+    ['.viewer-toolbar', 'top', [0, 123, 1920, 32]],
+    ['[data-testid="cockpit-view"]', 'top', [250, 155, 1670, 26]],
+    ['.properties-dock', 'left', [0, 155, 250, 754]],
+    ['.bar-dock', 'bottom', [600, 880, 720, 25]],
+    ['footer.foot-bar', 'bottom', [0, 909, 1920, 31]],
+  ]
 
   it.each([
-    ['the proof page', board, column, prompt, { top: 14, left: 14, width: 1322, height: 707 }],
-    ['a narrower column', board, { left: 300, width: 1000 }, prompt, { top: 14, left: 64, width: 972, height: 707 }],
-    ['the Properties pane closed', { left: 0, top: 155, width: 1600, height: 814 }, column, prompt, { top: 14, left: 14, width: 1572, height: 707 }],
-    ['a board without a box', { ...board, width: 0 }, column, prompt, null],
-    ['a prompt above the toolbar', board, column, { ...prompt, top: 100 }, null],
-  ])('measures %s against the board box', (_name, boardRect, columnRect, promptRect, expected) => {
-    const elements = {
-      '.app .viewer-toolbar': element(toolbar),
-      '.app main.center-scroll': element(columnRect),
-      '.app .bar-dock': element(promptRect),
-    }
+    ['the proof page', board, rows, { left: 266, top: 197, width: 1638, height: 667 }],
+    ['the proof page with prompt reserve', board, rows.map((row) => row[0] === '.bar-dock' ? [...row, { reserve: 50 }] : row), { left: 266, top: 197, width: 1638, height: 617 }],
+    ['the Properties pane closed', board, rows.filter(([selector]) => selector !== '.properties-dock'), { left: 16, top: 197, width: 1888, height: 667 }],
+    ['a board without a box', { ...board, width: 0 }, rows, null],
+    ['no occluders', board, [], { left: 16, top: 16, width: 1888, height: 908 }],
+  ])('measures %s against the board box', (_name, boardRect, occluderRows, expected) => {
+    const elements = Object.fromEntries(occluderRows.map(([selector, _edge, [left, top, width, height]]) => [
+      selector, element({ left, top, width, height }),
+    ]))
     const doc = { querySelector: (selector) => elements[selector] }
-    expect(measureContainedWindow(element(boardRect), doc)).toEqual(expected)
+    const occluders = occluderRows.map(([selector, edge, _rect, options]) => [selector, edge, options])
+    expect(measureContainedWindow(element(boardRect), doc, occluders)).toEqual(expected)
+  })
+
+  it('returns null without a board', () => {
+    expect(measureContainedWindow(null)).toBeNull()
   })
 })
 
 describe('ProjectBoardGround', () => {
+  it('repositions the contained desk when Properties mounts late', async () => {
+    let frame
+    const animationFrame = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      frame = callback
+      return 1
+    })
+    const occluders = [['.viewer-toolbar', 'top'], ['.bar-dock', 'bottom'], ['.properties-dock', 'left']]
+    try {
+      const { container, unmount } = render(
+        <div className="app">
+          <div className="viewer-toolbar" />
+          <div className="bar-dock" />
+          <ProjectBoardGround active contained occluders={occluders} />
+        </div>,
+      )
+      container.querySelector('[data-ground="browser"]').getBoundingClientRect = () => ({ left: 0, top: 0, width: 1000, height: 900 })
+      container.querySelector('.viewer-toolbar').getBoundingClientRect = () => ({ left: 0, top: 60, width: 1000, height: 40 })
+      container.querySelector('.bar-dock').getBoundingClientRect = () => ({ left: 0, top: 700, width: 1000, height: 60 })
+      fireEvent(window, new Event('resize'))
+      act(() => frame())
+      const desk = container.querySelector('.ground-desk')
+      expect(desk).toHaveStyle({ top: '116px', left: '16px', width: '968px', height: '568px' })
+
+      frame = undefined
+      const properties = document.createElement('div')
+      properties.className = 'properties-dock'
+      properties.getBoundingClientRect = () => ({ left: 0, top: 100, width: 250, height: 600 })
+      container.querySelector('.app').append(properties)
+      await act(async () => {})
+      expect(frame).toBeTypeOf('function')
+      act(() => frame())
+      expect(desk).toHaveStyle({ top: '116px', left: '266px', width: '718px', height: '568px' })
+      unmount()
+    } finally {
+      animationFrame.mockRestore()
+    }
+  })
+
   it('describes each catalog tool and its declared drawing effect only in the studio presentation', () => {
     const tools = { families: [{ family_id: 'measurement', label: 'Measurement', capabilities: [
       { name: 'edit', label: 'Edit panels', description: 'Moves the selected panels.', capabilities: ['drawing.read', 'drawing.write'] },
@@ -87,12 +134,13 @@ describe('ProjectBoardGround', () => {
       frame = callback
       return 1
     })
+    const occluders = [['.viewer-toolbar', 'top'], ['.bar-dock', 'bottom']]
     const view = (request, boardCatalog = null) => (
       <div className="app">
         <div className="viewer-toolbar" />
         <main className="center-scroll" />
         <div className="bar-dock"><button type="button">Other focus</button></div>
-        <SurfaceGrounds surface={surface} boardVisible startFocusRequest={request} catalog={boardCatalog} />
+        <SurfaceGrounds surface={surface} boardVisible startFocusRequest={request} catalog={boardCatalog} occluders={occluders} />
       </div>
     )
     try {
@@ -104,26 +152,25 @@ describe('ProjectBoardGround', () => {
       expect(document.activeElement).toBe(document.body)
 
       const toolbar = container.querySelector('.viewer-toolbar')
-      const column = container.querySelector('main.center-scroll')
       const prompt = container.querySelector('.bar-dock')
       const board = container.querySelector('[data-ground="browser"]')
       board.getBoundingClientRect = () => ({ left: 0, top: 0, width: 1000, height: 900 })
-      toolbar.getBoundingClientRect = () => ({ height: 40, bottom: 100 })
-      column.getBoundingClientRect = () => ({ left: 20, width: 800 })
-      prompt.getBoundingClientRect = () => ({ height: 60, top: 700 })
+      toolbar.getBoundingClientRect = () => ({ left: 0, top: 60, width: 1000, height: 40 })
+      prompt.getBoundingClientRect = () => ({ left: 0, top: 700, width: 1000, height: 60 })
       fireEvent(window, new Event('resize'))
       act(() => frame())
       expect(container.querySelector('.ground-desk')).toHaveAttribute('data-measured', 'true')
-      expect(container.querySelector('.ground-desk')).toHaveStyle({ top: '114px', left: '34px', width: '772px', height: '572px' })
+      expect(container.querySelector('.ground-desk')).toHaveStyle({ top: '116px', left: '16px', width: '968px', height: '568px' })
       expect(heading).toHaveFocus()
       expect(focus).toHaveBeenCalledTimes(1)
 
       const other = screen.getByRole('button', { name: 'Other focus' })
       other.focus()
       rerender(view(1, catalog))
-      prompt.getBoundingClientRect = () => ({ height: 60, top: 650 })
+      prompt.getBoundingClientRect = () => ({ left: 0, top: 650, width: 1000, height: 60 })
       fireEvent(window, new Event('resize'))
       act(() => frame())
+      expect(container.querySelector('.ground-desk')).toHaveStyle({ top: '116px', left: '16px', width: '968px', height: '518px' })
       expect(other).toHaveFocus()
       expect(focus).toHaveBeenCalledTimes(1)
 
@@ -135,7 +182,7 @@ describe('ProjectBoardGround', () => {
     }
   })
 
-  it('keeps the contained desk unmeasured without a measurable toolbar', () => {
+  it('keeps the contained desk unmeasured without a measurable board', () => {
     const { container } = render(<SurfaceGrounds surface="cad" boardVisible />)
     const board = container.querySelector('[data-ground="browser"]')
     expect(board).toHaveAttribute('data-board-layout', 'contained')
