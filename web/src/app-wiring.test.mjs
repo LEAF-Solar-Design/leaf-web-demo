@@ -21,6 +21,17 @@ const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
 const viewerSource = readFileSync(new URL('./components/Viewer.jsx', import.meta.url), 'utf8')
 
 describe('W4g bleed-2b: profile presentation preserves the engine document', () => {
+  it('mounts the head opener after the engine document under its own studio and engine gates', () => {
+    const ribbonEnd = appSource.indexOf('</DraftingRibbon>')
+    const engine = appSource.indexOf('<EngineDocumentView')
+    const opener = appSource.indexOf('<EngineHeadOpener')
+    const guard = appSource.lastIndexOf('{ENV_CAD_EDIT && studioGround && (', opener)
+    assert.equal(appSource.split('<EngineHeadOpener').length - 1, 1)
+    assert.ok(ribbonEnd >= 0 && engine >= 0)
+    assert.ok(opener > ribbonEnd && opener > engine)
+    assert.ok(guard >= 0)
+    assert.doesNotMatch(appSource.slice(guard, opener), /</)
+  })
   it('mounts the engine document after the drafting ribbon under the studio and engine gates', () => {
     const ribbonStart = appSource.indexOf('{studioGround && drafting && (')
     const ribbonEnd = appSource.indexOf('</DraftingRibbon>', ribbonStart)

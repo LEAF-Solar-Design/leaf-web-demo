@@ -3482,24 +3482,6 @@ export default function App() {
                   reach the engine through this consumer; renders nothing. */}
               {ENV_CAD_EDIT && <CommandLineArmer />}
               {ENV_CAD_EDIT && <StatusModesBridge />}
-              {/* W4g-1b: the console's OWN drawing opens in the engine at
-                  mount (GET .../dxf), so Draw/Modify are live without an
-                  import; a moved head (a tool run, undo/redo, restore)
-                  re-opens a clean engine copy. The studio's drafting surfaces
-                  only; the rail-OFF shell stays byte-identical (no fetch, no
-                  engine view, no card stamp outside the cockpit). W4g-1c:
-                  the public demo (mock) has no server head, so its head is
-                  the static /sample.dxf, the synthesis of the very intake it
-                  draws, at version 1; the Draw tools go live there too, and
-                  Save stays honestly off (no target). */}
-              {ENV_CAD_EDIT && (
-                <EngineHeadOpener
-                  drawingId={REQUESTED_DRAWING_ID}
-                  enabled={!!studioGround && !!drafting && !!intake}
-                  headKey={drawingState?.head ?? (mock ? 1 : null)}
-                  fetchDxf={mock ? fetchSampleDxf : fetchDrawingDxf}
-                />
-              )}
               {/* W4f slice A1: a click on the drawing answers the armed
                   prompt's point steps; while a point command is live the
                   card carries data-cockpit-picking and the console's
@@ -3550,6 +3532,24 @@ export default function App() {
                 setResultCandidate(null)
                 setOffscreenResult(null)
               }}
+            />
+          )}
+          {/* W4g-1b: the console's OWN drawing opens in the engine at
+              mount (GET .../dxf), so Draw/Modify are live without an
+              import; a moved head (a tool run, undo/redo, restore)
+              re-opens a clean engine copy. The studio's drafting surfaces
+              only; the rail-OFF shell stays byte-identical (no fetch, no
+              engine view, no card stamp outside the cockpit). W4g-1c:
+              the public demo (mock) has no server head, so its head is
+              the static /sample.dxf, the synthesis of the very intake it
+              draws, at version 1; the Draw tools go live there too, and
+              Save stays honestly off (no target). The opener is mounted for the whole studio so a trip to Browser or iOS keeps its one-attempt key and never re-opens the head. */}
+          {ENV_CAD_EDIT && studioGround && (
+            <EngineHeadOpener
+              drawingId={REQUESTED_DRAWING_ID}
+              enabled={!!studioGround && !!drafting && !!intake}
+              headKey={drawingState?.head ?? (mock ? 1 : null)}
+              fetchDxf={mock ? fetchSampleDxf : fetchDrawingDxf}
             />
           )}
           <div className="viewer-toolbar">
