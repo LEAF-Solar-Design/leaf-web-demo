@@ -56,6 +56,8 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     ...context,
   }
   let started = false
+  let lastRefusedText = null
+  let refusedCount = 0
   // NO OVERRIDE STATE LIVES HERE, and that absence is the round-3 fix. Round 2
   // kept an armed-override latch on this line; both hosts short-circuit
   // ABOVE dispatch (App on `running`, ToolCast on its precondition set), so a
@@ -106,9 +108,15 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     track('route.outcome', { outcome, ...(route.tool ? { tool: route.tool } : {}) })
   }
 
-  const commitDecision = (decision, { routeOutcome = 'invalidated' } = {}) => {
-    const committed = adapters.commitDecision ? adapters.commitDecision(decision) : decision
+  const commitDecision = (decision, { routeOutcome = 'invalidated', requestText = null } = {}) => {
+    const refused = requestText !== null && decision?.lane === 'run' &&
+      (typeof decision.tool !== 'string' || !decision.tool.trim())
+    const count = refused ? (requestText === lastRefusedText ? refusedCount + 1 : 1) : 0
+    const nextDecision = count >= 2 ? { ...decision, repeat: count } : decision
+    const committed = adapters.commitDecision ? adapters.commitDecision(nextDecision) : nextDecision
     if (committed !== undefined) {
+      lastRefusedText = refused ? requestText : null
+      refusedCount = count
       if (state.route && state.route !== committed) noteRouteResolved(routeOutcome, state.route)
       publish({ route: committed })
     }
@@ -158,6 +166,8 @@ export function createCatalogController({ services, adapters = {}, context = {} 
   // replaced, or the armed confirmation died). An explicit `outcome` from the
   // caller wins over the ranTool inference.
   const dismissRoute = ({ ranTool = null, outcome = null } = {}) => {
+    lastRefusedText = null
+    refusedCount = 0
     if (state.route) {
       noteRouteResolved(
         outcome
@@ -170,6 +180,10 @@ export function createCatalogController({ services, adapters = {}, context = {} 
   }
 
   const setPrompt = (value) => {
+    if (value.trim() !== lastRefusedText) {
+      lastRefusedText = null
+      refusedCount = 0
+    }
     // Typing over a shown route resolves it: the user moved on. An edit also
     // retires the credential refusal, which was about the text that WAS there;
     // a notice outliving its text reads as a stuck error.
@@ -204,6 +218,10 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     //
     const text = (typeof override === 'string' ? override : state.prompt).trim()
     if (!text || state.routing || current.running) return undefined
+    if (text !== lastRefusedText) {
+      lastRefusedText = null
+      refusedCount = 0
+    }
     if (state.secretRefusal) publish({ secretRefusal: null })
     // W4f slice B: a typed CAD command word (LINE, C, MOVE ...) on a drafting
     // surface is the cockpit's business, not the router's. The adapter
@@ -234,7 +252,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     const slash = slashDecision(text, state.tools)
     if (slash.handled) {
       publish({ route: null, routeError: null })
-      return slash.decision ? commitDecision(slash.decision) : undefined
+      return slash.decision ? commitDecision(slash.decision, { requestText: text }) : undefined
     }
 
     publish({ routing: true, route: null, routeError: null })
@@ -245,7 +263,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
         (decision.lane === 'run' && !!decision.tool && confidence >= thresholds.CHIP_ONLY)
 
       if (chipOnly) {
-        commitDecision(decision)
+        commitDecision(decision, { requestText: text })
         if (decision.lane === 'build') openAuthorFlow(text)
       } else {
         const hint = {
@@ -256,7 +274,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
         }
         publish({ agentBanner: null })
         if (decision.lane === 'run' && !!decision.tool && confidence >= thresholds.RACE_MIN) {
-          commitDecision(decision)
+          commitDecision(decision, { requestText: text })
           try {
             await adapters.startAgentTurn(text, hint, { allowSecretOnce })
             publish({ agentMode: 'race' })
@@ -274,7 +292,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
             publish({ agentMode: 'primary' })
           } catch (error) {
             if (isSecretRefused(error)) throw error
-            commitDecision(decision)
+            commitDecision(decision, { requestText: text })
             if (decision.lane === 'build') openAuthorFlow(text)
             publish({ agentBanner: adapters.agentBannerFor?.(error) || null })
           }
@@ -317,6 +335,8 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     openTool(tool) { publish({ openTool: tool || null }) },
     closeTool() { publish({ openTool: null }) },
     resetTransient() {
+      lastRefusedText = null
+      refusedCount = 0
       adapters.dismissDecision?.()
       publish({
         openTool: null,

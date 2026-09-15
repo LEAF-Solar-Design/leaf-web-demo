@@ -71,6 +71,21 @@ describe('RoutePanel demo refusals and outages', () => {
     expect(screen.getByLabelText('Request').value).toBe('Inspect unusual geometry')
   })
 
+  it('announces the number of repeated demo refusals', () => {
+    mountRefusal({ lane: 'run', tool: null, confidence: 0, stub: true, stubKind: 'demo', repeat: 3 })
+    const sentence = screen.getByText('No matching tool in this demo. Try another description or browse available tools. Still no match after 3 tries.')
+    expect(sentence.tagName).toBe('SPAN')
+    expect(sentence.getAttribute('aria-live')).toBe('polite')
+    expect(sentence.closest('.resolver-header')).not.toBeNull()
+  })
+
+  it('keeps the first refusal sentence unchanged', () => {
+    mountRefusal({ lane: 'run', tool: null, confidence: 0, stub: true, stubKind: 'demo' })
+    expect(screen.getByText('No matching tool in this demo. Try another description or browse available tools.').textContent)
+      .toBe('No matching tool in this demo. Try another description or browse available tools.')
+    expect(screen.queryByText(/Still no match after/)).toBeNull()
+  })
+
   it.each([null, '', '   '])('keeps the live no-match header with catalog picks for tool %s', (tool) => {
     const callbacks = mountRefusal({ lane: 'run', tool, confidence: 0.1, alternatives: [] })
     expect(screen.getByText('No matching capability. Try another description or browse available tools.').closest('.resolver-header')).not.toBeNull()

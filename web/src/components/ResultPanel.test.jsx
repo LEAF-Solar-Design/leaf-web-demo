@@ -7,6 +7,33 @@ import ResultPanel from './ResultPanel.jsx'
 
 afterEach(cleanup)
 
+describe('ResultPanel outcome fallbacks', () => {
+  it('reports a successful run with no result', () => {
+    render(<ResultPanel running={false} result={{ ok: true }} />)
+    expect(screen.getByText('Completed with no output.')).toBeInTheDocument()
+  })
+
+  it('reports a nested-only result without an empty key/value table', () => {
+    const { container } = render(<ResultPanel running={false} result={{ ok: true, result: { nested: { a: 1 } } }} />)
+    expect(screen.getByText('Completed with no output.')).toBeInTheDocument()
+    expect(container.querySelector('table.kv')).toBeNull()
+  })
+
+  it('reports a failed run without a reason', () => {
+    render(<ResultPanel running={false} result={{ ok: false }} />)
+    expect(screen.getByText('The run failed without reporting a reason.')).toBeInTheDocument()
+    expect(screen.queryByText('Completed with no output.')).toBeNull()
+  })
+
+  it('keeps the counts table for counts output', () => {
+    render(<ResultPanel running={false} result={{ ok: true, result: { counts: { Panels: 4 }, total: 4 } }} />)
+    expect(screen.getByRole('table')).toHaveClass('counts')
+    expect(screen.getByRole('cell', { name: 'Panels' })).toBeInTheDocument()
+    expect(screen.getByRole('cell', { name: '4' })).toBeInTheDocument()
+    expect(screen.queryByText('Completed with no output.')).toBeNull()
+  })
+})
+
 
 describe('ResultPanel actionable error guidance', () => {
   it('shows the next action and responsible actor from the shared envelope', () => {
@@ -39,4 +66,3 @@ describe('ResultPanel actionable error guidance', () => {
     expect(screen.getByText('Workspace admin')).toBeInTheDocument()
   })
 })
-

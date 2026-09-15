@@ -126,6 +126,21 @@ const DECLARED_AND_USED = [
 ]
 
 describe('App.jsx wiring', () => {
+  it('acknowledges interrupting live and mock runs after detaching', () => {
+    const start = stripped.indexOf('onInterruptRun: () => {')
+    const end = stripped.indexOf('onClearSelection:', start)
+    assert.ok(start >= 0 && end > start, 'interrupt handler must survive the transform')
+    const handler = stripped.slice(start, end)
+    assert.match(handler, /interruptRun\(\);[\s\S]*showToast\(/)
+    assert.match(handler, /typeof currentJob\?\.tool === "string" && currentJob\.tool\.trim\(\) \? currentJob\.tool : "the run"/)
+    assert.match(handler, /text:\s*mock\s*\?\s*`Stopped waiting for \$\{tool\}\.`\s*:\s*`Stopped following \$\{tool\}\. It keeps running; find it in Jobs\.`/)
+  })
+
+  it('names the quick tools as version history actions', () => {
+    assert.match(stripped, /id: "quick-undo",\s*label: "Undo version"/)
+    assert.match(stripped, /id: "quick-redo",\s*label: "Redo version"/)
+  })
+
   it('only swallows parseable unarmed points, so comma prose reaches the catalog', () => {
     assert.match(stripped, /if \(parsePointExpression\(text\) !== null\)/)
     assert.doesNotMatch(stripped, /isPointExpression\(text\)/)
