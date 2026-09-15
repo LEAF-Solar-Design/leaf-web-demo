@@ -44,7 +44,10 @@ export default function ClaudeAccountPanel({
   const [showAdd, setShowAdd] = useState(false)
   const rootRef = useRef(null)
   const pop = useExit(open)
-  const linked = !!grant?.linked
+  const known = typeof grant?.linked === 'boolean'
+  const restricted = grant?.read_status === 'restricted'
+  const canManage = !loading && known
+  const linked = grant?.linked === true
   const accounts = Array.isArray(grant?.accounts) ? grant.accounts : []
   const shownAccounts = accounts.length
     ? accounts
@@ -73,7 +76,10 @@ export default function ClaudeAccountPanel({
   }, [open])
 
   useEffect(() => {
-    if (linked) {
+    if (!canManage) {
+      setShowAdd(false)
+      setConfirmRemove(null)
+    } else if (linked) {
       setToken('')
       setLabel('')
       setShowAdd(false)
@@ -81,7 +87,7 @@ export default function ClaudeAccountPanel({
       setShowAdd(true)
       setLabel((current) => current || 'My Claude account')
     }
-  }, [linked, accounts.length])
+  }, [canManage, linked, accounts.length])
 
   if (mock) return null
 
@@ -93,12 +99,13 @@ export default function ClaudeAccountPanel({
 
   const submit = async () => {
     const value = token.trim()
-    if (!value || busy || (kind === 'oauth' && (!label.trim() || !plan))) return
+    if (!canManage || !value || busy || (kind === 'oauth' && (!label.trim() || !plan))) return
     await onLink(value, kind, label.trim(), kind === 'oauth' ? plan : undefined)
     setToken('')
   }
 
-  const stateLabel = loading ? 'checking' : linked ? `${shownAccounts.length} mounted` : 'not linked'
+  const stateLabel = loading ? 'checking' : restricted ? 'access restricted'
+    : !known ? 'unavailable' : linked ? `${shownAccounts.length} mounted` : 'not linked'
   const isApiKey = kind === 'api_key'
 
   return (
@@ -121,7 +128,14 @@ export default function ClaudeAccountPanel({
             <button className="key hot" onClick={() => onToggle(false)} aria-label="Close Claude account panel">Esc</button>
           </div>
 
-          {linked && (
+          {!loading && !known && (
+            <p className="ca-copy" role="status">
+              {restricted
+                ? 'Only the tenant owner can view or manage Claude accounts. This does not indicate whether authoring is available.'
+                : 'Claude account status is unavailable. This does not indicate whether an account is linked.'}
+            </p>
+          )}
+          {canManage && linked && (
             <div className="ca-linked">
               <div className="ca-kindline">automatic tenant routing</div>
               <p className="ca-copy">Each turn uses the least-used eligible mount in this tenant. Mounts are never pooled across tenants.</p>
@@ -160,7 +174,7 @@ export default function ClaudeAccountPanel({
             </div>
           )}
 
-          {(!linked || showAdd) && (
+          {canManage && (!linked || showAdd) && (
             <div className="ca-setup">
               <div className="ca-choice" role="radiogroup" aria-label="Credential type">
                 <button type="button" role="radio" aria-checked={!isApiKey} className={`ca-opt ${!isApiKey ? 'on' : ''}`} onClick={() => setKind('oauth')} disabled={busy}>Claude subscription</button>
