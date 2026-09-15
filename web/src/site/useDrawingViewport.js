@@ -4,30 +4,37 @@ export function computeSafeRect(canvasRect, occluders, { padding = 16 } = {}) {
   if (!canvasRect) return null
   const { left: x, top: y, width, height } = canvasRect
   if (![x, y, width, height, padding].every(Number.isFinite) || width <= 0 || height <= 0) return null
-  let left = x, top = y, right = x + width, bottom = y + height
-  for (const { rect, edge, reserve } of occluders) {
-    if (!rect || ![rect.left, rect.top, rect.width, rect.height].every(Number.isFinite)
-      || rect.width <= 0 || rect.height <= 0) continue
-    const r = rect.left + rect.width, b = rect.top + rect.height
-    if (r <= x || b <= y || rect.left >= x + width || rect.top >= y + height) continue
-    let side = edge
-    if (side === 'nearest') {
-      const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2
-      side = [
-        ['top', Math.abs(cy - y)], ['bottom', Math.abs(y + height - cy)],
-        ['left', Math.abs(cx - x)], ['right', Math.abs(x + width - cx)],
-      ].sort((a, b) => a[1] - b[1])[0][0]
+  let hasReserve = false
+  function measure(ignoreReserves) {
+    let left = x, top = y, right = x + width, bottom = y + height
+    for (const { rect, edge, reserve } of occluders) {
+      const positiveReserve = Number.isFinite(reserve) && reserve > 0
+      if (positiveReserve) hasReserve = true
+      if (!rect || ![rect.left, rect.top, rect.width, rect.height].every(Number.isFinite)
+        || rect.width <= 0 || rect.height <= 0) continue
+      const r = rect.left + rect.width, b = rect.top + rect.height
+      if (r <= x || b <= y || rect.left >= x + width || rect.top >= y + height) continue
+      let side = edge
+      if (side === 'nearest') {
+        const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2
+        side = [
+          ['top', Math.abs(cy - y)], ['bottom', Math.abs(y + height - cy)],
+          ['left', Math.abs(cx - x)], ['right', Math.abs(x + width - cx)],
+        ].sort((a, b) => a[1] - b[1])[0][0]
+      }
+      const extra = !ignoreReserves && positiveReserve ? reserve : 0
+      if (side === 'top') top = Math.max(top, b + extra)
+      if (side === 'bottom') bottom = Math.min(bottom, rect.top - extra)
+      if (side === 'left') left = Math.max(left, r + extra)
+      if (side === 'right') right = Math.min(right, rect.left - extra)
     }
-    const extra = Number.isFinite(reserve) && reserve > 0 ? reserve : 0
-    if (side === 'top') top = Math.max(top, b + extra)
-    if (side === 'bottom') bottom = Math.min(bottom, rect.top - extra)
-    if (side === 'left') left = Math.max(left, r + extra)
-    if (side === 'right') right = Math.min(right, rect.left - extra)
+    left += padding; top += padding; right -= padding; bottom -= padding
+    if (right <= left || bottom <= top) return null
+    const result = { left: Math.round(left - x), top: Math.round(top - y), width: Math.round(right - left), height: Math.round(bottom - top) }
+    return result.width > 0 && result.height > 0 ? result : null
   }
-  left += padding; top += padding; right -= padding; bottom -= padding
-  if (right <= left || bottom <= top) return null
-  const result = { left: Math.round(left - x), top: Math.round(top - y), width: Math.round(right - left), height: Math.round(bottom - top) }
-  return result.width > 0 && result.height > 0 ? result : null
+  const reserved = measure(false)
+  return reserved || (hasReserve ? measure(true) : null)
 }
 
 export default function useDrawingViewport(root, occluderSpecs) {

@@ -18,6 +18,16 @@ describe('computeSafeRect', () => {
   ])('reserves valid bottom space (%s)', (reserve, height) => {
     expect(computeSafeRect(canvas, [{ ...cover('bottom', 600, 880, 720, 25), reserve }])).toEqual(rect(16, 16, 1888, height))
   })
+  it.each([
+    [380, 50, rect(16, 396, 768, 28)],
+    [380, 10, rect(16, 396, 768, 18)],
+    [480, 50, null],
+  ])('uses reserves only when a safe rectangle remains (top %s, reserve %s)', (topHeight, reserve, expected) => {
+    expect(computeSafeRect(rect(0, 0, 800, 500), [
+      cover('top', 0, 0, 800, topHeight),
+      { ...cover('bottom', 200, 440, 400, 25), reserve },
+    ])).toEqual(expected)
+  })
   it('reserves space toward the interior after resolving the side', () => {
     expect(computeSafeRect(canvas, [{ ...cover('top', 0, 0, 1920, 28), reserve: 10 }])).toEqual(rect(16, 54, 1888, 870))
     expect(computeSafeRect(canvas, [{ ...cover('nearest', 0, 400, 100, 100), reserve: 20 }])).toEqual(rect(136, 16, 1768, 908))
