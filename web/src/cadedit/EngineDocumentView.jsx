@@ -96,11 +96,16 @@ export default function EngineDocumentView({ viewerRef = null, onShown = null, o
     const previous = historyRef.current
     let createdResult = null
     if (lastRef.current !== entities || previous.documentId !== documentId) {
-      const selected = entities.find((entity) => String(entity.id) === session.selectedId)
-      if (selected && previous.documentId === documentId && session.undoDepth > previous.undoDepth
-        && lastRef.current && !lastRef.current.some((entity) => entity.id === selected.id)
+      if (previous.documentId === documentId && session.undoDepth > previous.undoDepth
+        && lastRef.current
         && / applied: entity /.test(session.status || '')) {
-        createdResult = { handle: hexHandle(selected.id), kind: selected.kind || selected.type || 'entity' }
+        const ids = new Set()
+        for (const entity of lastRef.current) ids.add(entity.id)
+        let added = null
+        for (const entity of entities) {
+          if (!ids.has(entity.id) && (!added || String(added.id) !== session.selectedId)) added = entity
+        }
+        if (added) createdResult = { documentId, handle: hexHandle(added.id), kind: added.kind || added.type || 'entity' }
       }
       lastRef.current = entities
       intakeRef.current = {

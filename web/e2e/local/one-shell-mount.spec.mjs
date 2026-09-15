@@ -1776,7 +1776,7 @@ test.describe('route matrix, rail ON', () => {
     await bar.fill('10<90')
     await bar.press('Enter')
     await expect.poll(readPointResult).toEqual([[10, 0], [10, 10]])
-    await expect(cockpitCount).toContainText(`${drawingCountBeforeLine + 2} entities`)
+    await expect(cockpitCount).toContainText(new RegExp('(^|\\D)' + (drawingCountBeforeLine + 2) + ' entities'))
     const createdLayer = await page.evaluate(() => {
       const result = window.__commandPointResult
       return result.entities.find((entity) => String(entity.id) === result.id).layer
@@ -1847,7 +1847,7 @@ test.describe('route matrix, rail ON', () => {
     await expect(dock.locator('.sel-field').filter({ has: page.locator('dt', { hasText: /^Layer$/ }) }).locator('dd')).toHaveText(createdLayer)
     await expect(dock.getByTestId('dock-geometry').locator('dt', { hasText: /^Start$/ }).locator('+ dd')).toHaveText('10.00, 0.00')
     await expect(dock.getByTestId('dock-geometry').locator('dt', { hasText: /^End$/ }).locator('+ dd')).toHaveText('10.00, 10.00')
-    await expect(cockpitCount).toContainText(`${drawingCountBeforeLine + 2} entities`)
+    await expect(cockpitCount).toContainText(new RegExp('(^|\\D)' + (drawingCountBeforeLine + 2) + ' entities'))
 
     // A one-unit LINE far from the current drawing is sub-pixel at the
     // viewer's automatic full fit. The dock must reveal that exact result.
@@ -1861,7 +1861,7 @@ test.describe('route matrix, rail ON', () => {
     await expect.poll(readPointResult).toEqual([[1000000, 0], [1000001, 0]])
     const showResult = dock.getByRole('button', { name: 'Show result', exact: true })
     await expect(showResult).toBeVisible()
-    await expect(dock.getByTestId('dock-drawing')).toContainText(`${undoDepthBeforeTiny + 1} to undo`)
+    await expect(dock.getByTestId('dock-drawing')).toContainText(new RegExp('(^|\\D)' + (undoDepthBeforeTiny + 1) + ' to undo'))
     await page.locator('body').press('Escape')
     await showResult.click()
     await expect(showResult).toHaveCount(0)
@@ -1877,11 +1877,11 @@ test.describe('route matrix, rail ON', () => {
     expect(visibleResult.share).toBeLessThan(0.45)
     await page.getByRole('tab', { name: 'Insert' }).click()
     await ribbon.locator('[data-tool="undo-edit"]').click()
-    await expect(cockpitCount).toContainText(`${drawingCountBeforeLine + 2} entities`)
-    await expect(dock.getByTestId('dock-drawing')).toContainText(`${undoDepthBeforeTiny} to undo`)
+    await expect(cockpitCount).toContainText(new RegExp('(^|\\D)' + (drawingCountBeforeLine + 2) + ' entities'))
+    await expect(dock.getByTestId('dock-drawing')).toContainText(new RegExp('(^|\\D)' + (undoDepthBeforeTiny) + ' to undo'))
     await ribbon.locator('[data-tool="redo-edit"]').click()
-    await expect(cockpitCount).toContainText(`${drawingCountBeforeLine + 3} entities`)
-    await expect(dock.getByTestId('dock-drawing')).toContainText(`${undoDepthBeforeTiny + 1} to undo`)
+    await expect(cockpitCount).toContainText(new RegExp('(^|\\D)' + (drawingCountBeforeLine + 3) + ' entities'))
+    await expect(dock.getByTestId('dock-drawing')).toContainText(new RegExp('(^|\\D)' + (undoDepthBeforeTiny + 1) + ' to undo'))
 
     // A sentence is still a sentence: it routes, it never arms. LAST in the
     // row on purpose: while its route decision is shown the Command bar's

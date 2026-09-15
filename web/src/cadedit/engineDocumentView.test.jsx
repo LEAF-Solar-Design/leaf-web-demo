@@ -219,7 +219,7 @@ describe('EngineDocumentView (W4f slice A0)', () => {
     workers[0].emit({ type: 'editApplied', op: 'createLine', ok: true, createdId: '42', entities: [LINE, created], entityCount: 2, bytes: new Uint8Array([49]), byteLength: 1 })
     const [intake, history] = onShown.mock.lastCall
     expect(intake.polylines.find((p) => p.handle === '2A')).toMatchObject({ layer: 'New layer', pts: created.vertices })
-    expect(history).toEqual({ undoDepth: 1, redoDepth: 0, createdResult: { handle: '2A', kind: 'LINE' } })
+    expect(history).toEqual({ undoDepth: 1, redoDepth: 0, createdResult: { documentId: 'one.dxf', handle: '2A', kind: 'LINE' } })
     const applies = viewer.applyVersion.mock.calls.length
     act(() => sessionActions.select('e1'))
     expect(viewer.applyVersion).toHaveBeenCalledTimes(applies)
@@ -231,6 +231,18 @@ describe('EngineDocumentView (W4f slice A0)', () => {
     workers[0].emit({ type: 'documentLoaded', documentId: 'one.dxf', entities: [LINE, created], entityCount: 2, unsupported: [] })
     expect(onShown.mock.lastCall[0].polylines).toHaveLength(2)
     expect(onShown.mock.lastCall[1]).toEqual({ undoDepth: 1, redoDepth: 0, createdResult: null })
+  })
+
+  it('reports the created entity when the same batch selects an existing entity', async () => {
+    mount()
+    await openAndLoad([LINE])
+    const created = { ...LINE, id: '42' }
+    act(() => {
+      workers[0].listeners.get('message')({ data: { type: 'editApplied', op: 'createLine', ok: true, createdId: '42', entities: [LINE, created], entityCount: 2, bytes: new Uint8Array([49]), byteLength: 1 } })
+      sessionActions.select('e1')
+    })
+    expect(screen.getByTestId('engine-selection').textContent).toBe('e1')
+    expect(onShown.mock.lastCall[1].createdResult).toEqual({ documentId: 'one.dxf', handle: '2A', kind: 'LINE' })
   })
 
   it('mirrors changed hex handles to decimal engine ids and clears on an empty canvas click', async () => {

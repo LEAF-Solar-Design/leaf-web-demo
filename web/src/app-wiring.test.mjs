@@ -18,6 +18,7 @@ import { describe, it } from 'node:test'
 import esbuild from 'esbuild'
 
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
+const appNoComments = appSource.replace(new RegExp('\\{/\\*[\\s\\S]*?\\*/\\}', 'g'), '')
 const stripped = esbuild.transformSync(appSource, { loader: 'jsx' }).code
 const promptBoxSessionBinding = /React\.createElement\(\s*PromptBox,\s*\{[^}]*\bsessionId:\s*agentSessionId\b/
 const conversePanelSessionBinding = /React\.createElement\(\s*ConversePanel,\s*\{[^}]*\bsessionId:\s*agentSessionId\b/
@@ -138,14 +139,19 @@ describe('App.jsx wiring', () => {
       assert.match(stripped, /selectEntity\(drawingIntake, selectedHandle,/)
       assert.match(stripped, /drawingIntake\.polylines \|\| \[\]/)
       assert.match(stripped, /drawingExtents\(drawingIntake\.polylines\)/)
-      assert.match(appSource, new RegExp('<Legend\\s+layers=\\{drawingIntake.layers\\}'))
-      assert.match(appSource, new RegExp('<CockpitStatus[^>]*shown=\\{drawingIntake\\}'))
-      assert.match(appSource, new RegExp('onShown=\\{\\(intake, history\\) => \\{\\s*setActiveIntake\\(intake\\)'))
-      assert.match(appSource, new RegExp('onHidden=\\{\\(\\) => \\{\\s*setActiveIntake\\(null\\)'))
-      assert.match(appSource, /undoDepth: history.undoDepth, redoDepth: history.redoDepth/)
+      assert.match(appNoComments, new RegExp('<Legend\\s+layers=\\{drawingIntake.layers\\}'))
+      assert.match(appNoComments, new RegExp('<CockpitStatus[^>]*shown=\\{drawingIntake\\}'))
+      assert.match(appNoComments, new RegExp('onShown=\\{\\(intake, history\\) => \\{\\s*setActiveIntake\\(intake\\)'))
+      assert.match(appNoComments, new RegExp('onHidden=\\{\\(\\) => \\{\\s*setActiveIntake\\(null\\)'))
+      assert.match(appNoComments, /undoDepth: history.undoDepth, redoDepth: history.redoDepth/)
+    })
+    it('drops a result from a different document before resolving its handle', () => {
+      assert.match(appNoComments, new RegExp('if \\(!resultCandidate \\|\\| !activeIntake \\|\\| resultCandidate.documentId !== activeIntake.documentId\\) return null'))
+      assert.match(appNoComments, new RegExp('if \\(!intake \\|\\| \\(resultCandidate && resultCandidate.documentId !== intake.documentId\\)\\) \\{\\s*setResultCandidate\\(null\\)\\s*setOffscreenResult\\(null\\)'))
+      assert.match(appNoComments, new RegExp('if \\(intake && history\\?\\.createdResult\\?\\.documentId === intake.documentId\\)'))
     })
     it('passes the visibility result and viewer pose handler to the dock', () => {
-      assert.match(appSource, new RegExp('offscreenResult=\\{offscreenResult\\}\\s+onShowResult=\\{showCreatedResult\\}'))
+      assert.match(appNoComments, new RegExp('offscreenResult=\\{offscreenResult\\}\\s+onShowResult=\\{showCreatedResult\\}'))
       assert.match(stripped, new RegExp('viewer\\.setView\\(\\{\\s*center:'))
       assert.match(stripped, /pose\.zoom \* 0\.4 \/ span/)
     })

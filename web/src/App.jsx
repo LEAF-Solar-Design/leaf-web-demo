@@ -1229,7 +1229,7 @@ export default function App() {
   }, [drawingIntake, selectedHandle, selection])
 
   const resultBounds = useMemo(() => {
-    if (!resultCandidate || !activeIntake) return null
+    if (!resultCandidate || !activeIntake || resultCandidate.documentId !== activeIntake.documentId) return null
     return drawingExtents((activeIntake.polylines || []).filter((entity) => entity.handle === resultCandidate.handle))
   }, [activeIntake, resultCandidate])
   useEffect(() => {
@@ -1242,11 +1242,15 @@ export default function App() {
     const measure = () => {
       const viewer = viewerRef.current
       const rect = studioGround.querySelector('.viewer-canvas canvas')?.getBoundingClientRect()
-      const a = viewer?.project?.(resultBounds.minX, resultBounds.minY)
-      const b = viewer?.project?.(resultBounds.maxX, resultBounds.maxY)
-      if (rect?.width > 0 && rect.height > 0 && a && b) {
-        const outside = [a, b].some((p) => p.x < rect.left || p.x > rect.right || p.y < rect.top || p.y > rect.bottom)
-        const tiny = Math.max(Math.abs(b.x - a.x), Math.abs(b.y - a.y)) < 8
+      const points = [
+        viewer?.project?.(resultBounds.minX, resultBounds.minY),
+        viewer?.project?.(resultBounds.minX, resultBounds.maxY),
+        viewer?.project?.(resultBounds.maxX, resultBounds.minY),
+        viewer?.project?.(resultBounds.maxX, resultBounds.maxY),
+      ]
+      if (rect?.width > 0 && rect.height > 0 && points.every((p) => Number.isFinite(p?.x) && Number.isFinite(p?.y))) {
+        const outside = points.some((p) => p.x < rect.left || p.x > rect.right || p.y < rect.top || p.y > rect.bottom)
+        const tiny = Math.max(Math.max(...points.map((p) => p.x)) - Math.min(...points.map((p) => p.x)), Math.max(...points.map((p) => p.y)) - Math.min(...points.map((p) => p.y))) < 8
         if (!outside && !tiny) {
           setOffscreenResult(null)
           setResultCandidate(null)
@@ -1264,12 +1268,16 @@ export default function App() {
     const viewer = viewerRef.current
     const rect = studioGround?.querySelector('.viewer-canvas canvas')?.getBoundingClientRect()
     const pose = viewer?.getPose?.()
-    const a = viewer?.project?.(resultBounds.minX, resultBounds.minY)
-    const b = viewer?.project?.(resultBounds.maxX, resultBounds.maxY)
-    if (!pose || !a || !b || !(rect?.width > 0 && rect.height > 0)) return
+    const points = [
+      viewer?.project?.(resultBounds.minX, resultBounds.minY),
+      viewer?.project?.(resultBounds.minX, resultBounds.maxY),
+      viewer?.project?.(resultBounds.maxX, resultBounds.minY),
+      viewer?.project?.(resultBounds.maxX, resultBounds.maxY),
+    ]
+    if (!pose || !points.every((p) => Number.isFinite(p?.x) && Number.isFinite(p?.y)) || !(rect?.width > 0 && rect.height > 0)) return
     // Viewer.setView uses applyViewPose's center object and absolute zoom.
     // Projected spans account for the current camera tilt and aspect ratio.
-    const span = Math.max(Math.abs(b.x - a.x) / rect.width, Math.abs(b.y - a.y) / rect.height)
+    const span = Math.max((Math.max(...points.map((p) => p.x)) - Math.min(...points.map((p) => p.x))) / rect.width, (Math.max(...points.map((p) => p.y)) - Math.min(...points.map((p) => p.y))) / rect.height)
     const zoom = span > 0 ? pose.zoom * 0.4 / span : pose.zoom
     viewer.setView({ center: { x: (resultBounds.minX + resultBounds.maxX) / 2, y: (resultBounds.minY + resultBounds.maxY) / 2 }, zoom })
   }, [resultBounds, studioGround])
@@ -3351,7 +3359,11 @@ export default function App() {
                   onShown={(intake, history) => {
                     setActiveIntake(intake)
                     setEngineHistory(history ? { undoDepth: history.undoDepth, redoDepth: history.redoDepth } : null)
-                    if (history?.createdResult) {
+                    if (!intake || (resultCandidate && resultCandidate.documentId !== intake.documentId)) {
+                      setResultCandidate(null)
+                      setOffscreenResult(null)
+                    }
+                    if (intake && history?.createdResult?.documentId === intake.documentId) {
                       setOffscreenResult(null)
                       setResultCandidate(history.createdResult)
                     }
