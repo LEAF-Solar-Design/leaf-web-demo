@@ -10,6 +10,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import useExit from '../useExit.js'
 import { humanKey } from '../labels.js'
+import { MIN_RUN_MATCH_CONF } from '../mock/mockNlPrompt.js'
 
 function defaultsOf(schema) {
   const out = {}
@@ -47,7 +48,8 @@ export default function RoutePanel({
     () => (route && route.lane === 'run' ? tools.find((t) => t.name === route.tool) || null : null),
     [route, tools],
   )
-  const confident = !!route && route.lane === 'run' && route.confidence >= 0.7
+  const outage = route?.stubKind === 'outage'
+  const confident = !!route && !outage && route.lane === 'run' && route.confidence >= 0.7
   const params = useMemo(
     () => (route?.runIntent?.params
       || (toolObj ? { ...defaultsOf(toolObj.params), ...(route?.params || {}) } : (route?.params || {}))),
@@ -59,6 +61,7 @@ export default function RoutePanel({
   // doesn't include. Distinct from `locked` (another session holds the checkout).
   const entBlocked = isWrite && !writeEntitled
   const requestRun = () => {
+    if (outage || route.confidence < MIN_RUN_MATCH_CONF) return
     if (route.runIntent) onConfirmIntent(route.runIntent, toolObj, params)
     else if (toolObj) onPickAlternative(toolObj.name)
   }
@@ -68,7 +71,10 @@ export default function RoutePanel({
   // server router returns alternatives as {tool, confidence} (no description),
   // so resolve descriptions from the catalog; the stub's inline one wins.
   const rows = useMemo(() => {
-    if (!route || route.lane !== 'run' || (confident && toolObj)) return []
+    if (!route || (!outage && route.lane !== 'run') || (confident && toolObj)) return []
+    if (outage || !route.tool || route.confidence < MIN_RUN_MATCH_CONF) {
+      return tools.map((t) => ({ kind: 'pick', tool: t.name, description: t.description || '' }))
+    }
     const descOf = (name) => tools.find((t) => t.name === name)?.description || ''
     const out = []
     if (toolObj) {
@@ -78,7 +84,7 @@ export default function RoutePanel({
       out.push({ kind: 'pick', tool: a.tool, confidence: a.confidence, description: a.description || descOf(a.tool) })
     }
     return out
-  }, [route, confident, toolObj, tools])
+  }, [route, confident, toolObj, tools, outage])
 
   useEffect(() => { setActiveIdx(0); enterArmedAtRef.current = performance.now() + 350 }, [route])
 
@@ -107,8 +113,8 @@ export default function RoutePanel({
         '[role="textbox"]', '[role="searchbox"]', '[role="combobox"]', '[role="spinbutton"]',
       ].join(','))) return
       e.preventDefault()
-      if (route.lane === 'build') { onOpenAuthor(); return }
-      if (route.lane === 'solve') { if (onDismiss) onDismiss(); return }
+      if (!outage && route.lane === 'build') { onOpenAuthor(); return }
+      if (!outage && route.lane === 'solve') { if (onDismiss) onDismiss(); return }
       if (confident && toolObj) {
         if (!running && !locked && !entBlocked) requestRun()
         return
@@ -123,14 +129,14 @@ export default function RoutePanel({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [route, exiting, rows, activeIdx, confident, toolObj, params, running, locked, entBlocked,
+  }, [route, exiting, rows, activeIdx, confident, toolObj, params, running, locked, entBlocked, outage,
       onConfirmIntent, onPickAlternative, onOpenAuthor, onDismiss])
 
   if (!route) return null
   const motion = exiting ? 'exit' : 'enter'
 
   // ---- BUILD lane: decision strip pointing at the author flow ---------------
-  if (route.lane === 'build') {
+  if (!outage && route.lane === 'build') {
     return (
       <div className={`strip-decision ${motion}`}>
         <span className="dot square" aria-hidden="true" />
@@ -146,7 +152,7 @@ export default function RoutePanel({
   }
 
   // ---- SOLVE lane: honest not-wired advisory strip --------------------------
-  if (route.lane === 'solve') {
+  if (!outage && route.lane === 'solve') {
     return (
       <div className={`strip-decision ${motion}`}>
         <span className="dot square" aria-hidden="true" />
@@ -183,7 +189,7 @@ export default function RoutePanel({
                   : 'you confirm before it runs.'}
           </span>
         </span>
-        {route.stub && <span className="dim">Routing service unavailable. Using local catalog matching.</span>}
+        {route.stubKind === 'demo' && <span className="dim">This demo matches requests against a limited tool catalog.</span>}
         <button
           type="button"
           className="chip-act"
@@ -204,9 +210,15 @@ export default function RoutePanel({
   return (
     <div ref={resolverRef} className={`resolver ${motion}`} role="listbox" aria-label="Route resolver">
       <div className="resolver-header">
-        {route.stub && <span>Routing service unavailable. Using local catalog matching. </span>}
-        {toolObj
-          ? <>Run · best guess {conf}% match</>
+        {route.stubKind === 'demo' && <span>This demo matches requests against a limited tool catalog.</span>}
+        {outage
+          ? <span>Routing is unavailable right now: {route.stubReason}</span>
+          : typeof route.tool !== 'string' || !route.tool.trim() || (route.stubKind === 'demo' && route.confidence < MIN_RUN_MATCH_CONF)
+            ? <span>{route.stubKind === 'demo'
+              ? 'No matching tool in this demo. Try another description or browse available tools.'
+              : 'No matching capability. Try another description or browse available tools.'}</span>
+            : toolObj
+          ? <>Catalog match · {conf}% match</>
           : route.slash
             ? <>“/{route.tool}” isn’t a tool in this catalog. Pick an alternative:</>
             : <>“{route.tool}” is live-only — not in this catalog. Pick an alternative:</>}
@@ -244,7 +256,7 @@ export default function RoutePanel({
         <div className="resolver-row">
           <span className="lbar" aria-hidden="true" />
           <span className="dot hollow" aria-hidden="true" />
-          <span className="label">No matching capability — rephrase, or open the author flow.</span>
+          <span className="label">No matching capability. Try another description or browse available tools.</span>
         </div>
       )}
     </div>

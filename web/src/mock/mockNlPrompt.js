@@ -25,7 +25,13 @@ function alternatives(tools, exclude) {
     .map((t) => ({ tool: t.name, description: t.description }))
 }
 
+export const MIN_RUN_MATCH_CONF = 0.55
+const NO_DEMO_MATCH = 'No matching tool in this demo. Try another description or browse available tools.'
+
 function runMatch(tool, params, confidence, rationale, tools, extra = {}) {
+  if (confidence < MIN_RUN_MATCH_CONF) {
+    return { lane: 'run', tool: null, params: {}, confidence, stubKind: 'demo', rationale: NO_DEMO_MATCH, alternatives: alternatives(tools, []) }
+  }
   return { lane: 'run', tool, params, confidence, rationale, alternatives: alternatives(tools, [tool]), ...extra }
 }
 
@@ -34,6 +40,9 @@ export function matchPrompt(text, tools = []) {
   const t = raw.toLowerCase().trim()
   const has = (...ws) => ws.some((w) => t.includes(w))
   const find = (name) => tools.find((x) => x.name === name)
+
+  // Commands are resolved by the command bar, not by prose keyword matching.
+  if (t.startsWith('/')) return runMatch(null, {}, 0, NO_DEMO_MATCH, tools)
 
   // ---- BUILD lane: author a new capability --------------------------------
   const buildVerb = /^(build|author|make|create|write|generate)\b/.test(t)
@@ -92,11 +101,6 @@ export function matchPrompt(text, tools = []) {
       `Select every entity on the ${layer ? layer.trim() + ' ' : ''}layer.`, tools)
   }
 
-  // ---- low confidence: best guess + alternatives --------------------------
-  const guess = find('count-by-layer') ? 'count-by-layer' : (tools[0]?.name || null)
-  return {
-    lane: 'run', tool: guess, params: {}, confidence: 0.42,
-    rationale: "I'm not sure which capability you meant — here is my best guess.",
-    alternatives: alternatives(tools, guess ? [guess] : []),
-  }
+  // No rule matched, so there is no candidate to authorize.
+  return runMatch(null, {}, 0, NO_DEMO_MATCH, tools)
 }

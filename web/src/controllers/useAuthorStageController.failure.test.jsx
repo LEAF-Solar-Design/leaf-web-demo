@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, renderHook } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, renderHook, screen } from '@testing-library/react'
 import { stageAuthorTool as realStageAuthorTool } from '../api.js'
 import { INFLIGHT_AUTHOR_KEY, readInflightAuthor } from '../authorStagePointer.js'
 import useAuthorStageController from './useAuthorStageController.js'
@@ -43,6 +43,46 @@ async function createFailed() {
 }
 
 describe('failed author recovery', () => {
+  it('marks only the mock missing-authority refusal as signed-out-demo', async () => {
+    for (const mock of [true, false]) {
+      const stageAuthorTool = vi.fn()
+      const hook = renderHook(() => useAuthorStageController({
+        mock, storage: memoryStorage(), stageAuthorTool, authorityProvider: async () => null,
+      }))
+      await act(async () => { await hook.result.current.stage(description) })
+      expect(hook.result.current.error.reasonCode).toBe(mock ? 'signed-out-demo' : undefined)
+      expect(hook.result.current.error.description).toBe(description)
+      expect(stageAuthorTool).not.toHaveBeenCalled()
+      hook.unmount()
+    }
+  })
+
+  it('renders the signed-out limit with the original description retained on the failure', async () => {
+    const storage = memoryStorage()
+    const stageAuthorTool = vi.fn()
+    function DemoAuthor() {
+      const controller = useAuthorStageController({
+        mock: true, storage, stageAuthorTool, authorityProvider: async () => null,
+      })
+      return <>
+        <textarea aria-label="Description" defaultValue={description} />
+        <button onClick={() => controller.stage(description)}>Build</button>
+        {controller.error && <div role="alert">
+          <span>{controller.error.message}</span>
+          <span>{controller.error.description}</span>
+        </div>}
+      </>
+    }
+    render(<DemoAuthor />)
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Build' })) })
+    expect(screen.getByText('Tool building is unavailable in this signed-out demo.')).toBeTruthy()
+    expect(screen.getByRole('alert').textContent).toContain(description)
+    expect(screen.getByLabelText('Description').value).toBe(description)
+    expect(screen.getByRole('alert').textContent).not.toMatch(/wait|retry|try again/i)
+    expect(stageAuthorTool).not.toHaveBeenCalled()
+    expect(readInflightAuthor(storage)).toBeNull()
+  })
+
   it('keeps the accepted request identity and bounded metadata after terminal failure', async () => {
     const { storage, stageAuthorTool, hook } = await createFailed()
     const pointer = readInflightAuthor(storage)

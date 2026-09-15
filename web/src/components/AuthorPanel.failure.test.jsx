@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import AuthorPanel from './AuthorPanel.jsx'
+import useAuthorStageController from '../controllers/useAuthorStageController.js'
 
 afterEach(cleanup)
 
@@ -21,6 +22,39 @@ function renderFailure({ pollUrl = `/api/author/stages/${changeSetId}` } = {}) {
 }
 
 describe('failed author request controls', () => {
+  it('preserves the signed-out demo description without Retry or Resume controls', async () => {
+    const authorityProvider = vi.fn(async () => null)
+    const stageAuthorTool = vi.fn()
+    function DemoAuthor() {
+      const controller = useAuthorStageController({ mock: true, authorityProvider, stageAuthorTool })
+      return <AuthorPanel onAuthor={controller.stage} stageActivity={controller} />
+    }
+    render(<DemoAuthor />)
+    fireEvent.change(screen.getByLabelText('What should the tool do?'), { target: { value: description } })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Generate tool' })) })
+    expect(screen.getByText(/Tool building is unavailable in this signed-out demo\./)).toBeInTheDocument()
+    expect(screen.getByText('Your description is preserved.')).toBeInTheDocument()
+    expect(screen.getByLabelText('What should the tool do?')).toHaveValue(description)
+    expect(screen.queryByRole('button', { name: /Retry|Resume/i })).not.toBeInTheDocument()
+    fireEvent.keyDown(document, { key: 'R' })
+    expect(authorityProvider).toHaveBeenCalledTimes(1)
+    expect(stageAuthorTool).not.toHaveBeenCalled()
+  })
+
+  it.each([false, true])('suppresses the signed-out control even when resumable is %s', (resumable) => {
+    const error = Object.assign(new Error('Tool building is unavailable in this signed-out demo.'), {
+      reasonCode: 'signed-out-demo',
+    })
+    render(<AuthorPanel onAuthor={vi.fn()} stageActivity={{ error, resumable }} onResumeAuthor={vi.fn()} />)
+    expect(screen.queryByRole('button', { name: /Retry|Resume/i })).not.toBeInTheDocument()
+    expect(screen.getByText('Your description is preserved.')).toBeInTheDocument()
+  })
+
+  it.each([false, true])('keeps the existing recovery control for other errors when resumable is %s', (resumable) => {
+    render(<AuthorPanel onAuthor={vi.fn()} stageActivity={{ error: new Error('Connection lost'), resumable }} onResumeAuthor={vi.fn()} />)
+    expect(screen.getByRole('button', { name: resumable ? 'Resume authoring' : /Retry/ })).toBeInTheDocument()
+  })
+
   it('shows the request and restores its description without claiming zero charges', () => {
     const { onAuthor } = renderFailure()
     expect(screen.getByTestId('author-failed-request')).toHaveTextContent(changeSetId)

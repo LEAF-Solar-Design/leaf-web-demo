@@ -377,7 +377,7 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
 
   // X1 mnemonic: R retries a failed Generate (never while typing in a field).
   useEffect(() => {
-    if (!err || busy || stageActivity?.failedRequest) return
+    if (!err || err.reasonCode === 'signed-out-demo' || busy || stageActivity?.failedRequest) return
     const onKey = (e) => {
       if (e.key !== 'r' && e.key !== 'R') return
       if (e.metaKey || e.ctrlKey || e.altKey) return
@@ -495,7 +495,7 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
             <button type="button" className="chip-act" data-testid="author-failed-new-attempt"
               disabled={busyNow || publishing || !buildEntitled}
               onClick={() => submit(undefined, { newAttempt: true })}>Start new attempt</button>
-          </> : <button className="chip-act" onClick={stageActivity?.resumable ? onResumeAuthor : submit}>
+          </> : err.reasonCode !== 'signed-out-demo' && <button className="chip-act" onClick={stageActivity?.resumable ? onResumeAuthor : submit}>
             {stageActivity?.resumable ? 'Resume authoring' : <>Retry <span className="key">R</span></>}
           </button>}
           <span className="err-note">Your description is preserved.</span>

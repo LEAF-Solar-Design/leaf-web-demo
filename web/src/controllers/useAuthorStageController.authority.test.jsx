@@ -39,18 +39,22 @@ describe('useAuthorStageController turn-authority provider', () => {
     expect(result.current.phase).toBe('succeeded')
   })
 
-  it('does not submit when the provider returns null', async () => {
+  // Demo authority refusal is a persistent limit; live mode keeps its turn advice.
+  it.each([false, true])('does not submit when the provider returns null (mock: %s)', async (mock) => {
     const authorityProvider = vi.fn(async () => null)
     const stageAuthorTool = vi.fn(async () => staged())
     const { result } = renderHook(() => useAuthorStageController({
-      mock: false, storage: memoryStorage(), stageAuthorTool, authorityProvider,
+      mock, storage: memoryStorage(), stageAuthorTool, authorityProvider,
     }))
 
     await act(async () => { await result.current.stage('count panels near the ridge line') })
 
     expect(authorityProvider).toHaveBeenCalledTimes(1)
     expect(stageAuthorTool).not.toHaveBeenCalled()
-    expect(result.current.error.message).toContain('Could not start authoring')
+    expect(result.current.error.message).toBe(mock
+      ? 'Tool building is unavailable in this signed-out demo.'
+      : 'Could not start authoring in this conversation. Wait for the current turn to finish, then try again.')
+    expect(result.current.error.description).toBe('count panels near the ridge line')
     expect(result.current.pointer).toBeNull()
     await act(async () => { await result.current.resume() })
     expect(authorityProvider).toHaveBeenCalledTimes(1)
