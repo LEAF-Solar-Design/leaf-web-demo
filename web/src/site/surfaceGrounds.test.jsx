@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 
-import SurfaceGrounds, { DeviceGround, ProjectBoardGround, groundShowsDrawing } from './SurfaceGrounds.jsx'
+import SurfaceGrounds, { DeviceGround, ProjectBoardGround, groundShowsDrawing, measureContainedWindow } from './SurfaceGrounds.jsx'
 import { deriveWorkspaceProjectState } from './workspaceProjectState.js'
 
 afterEach(cleanup)
@@ -27,6 +27,30 @@ describe('groundShowsDrawing', () => {
     expect(groundShowsDrawing('browser')).toBe(false)
     expect(groundShowsDrawing('ios')).toBe(false)
     expect(groundShowsDrawing(undefined)).toBe(false)
+  })
+})
+
+describe('measureContainedWindow', () => {
+  const board = { left: 250, top: 155, width: 1350, height: 814 }
+  const toolbar = { height: 24, bottom: 152 }
+  const column = { left: 0, width: 1600 }
+  const prompt = { height: 80, top: 890 }
+  const element = (rect) => ({ getBoundingClientRect: () => rect })
+
+  it.each([
+    ['the proof page', board, column, prompt, { top: 14, left: 14, width: 1322, height: 707 }],
+    ['a narrower column', board, { left: 300, width: 1000 }, prompt, { top: 14, left: 64, width: 972, height: 707 }],
+    ['the Properties pane closed', { left: 0, top: 155, width: 1600, height: 814 }, column, prompt, { top: 14, left: 14, width: 1572, height: 707 }],
+    ['a board without a box', { ...board, width: 0 }, column, prompt, null],
+    ['a prompt above the toolbar', board, column, { ...prompt, top: 100 }, null],
+  ])('measures %s against the board box', (_name, boardRect, columnRect, promptRect, expected) => {
+    const elements = {
+      '.app .viewer-toolbar': element(toolbar),
+      '.app main.center-scroll': element(columnRect),
+      '.app .bar-dock': element(promptRect),
+    }
+    const doc = { querySelector: (selector) => elements[selector] }
+    expect(measureContainedWindow(element(boardRect), doc)).toEqual(expected)
   })
 })
 
@@ -56,12 +80,15 @@ describe('ProjectBoardGround', () => {
       const toolbar = container.querySelector('.viewer-toolbar')
       const column = container.querySelector('main.center-scroll')
       const prompt = container.querySelector('.bar-dock')
+      const board = container.querySelector('[data-ground="browser"]')
+      board.getBoundingClientRect = () => ({ left: 0, top: 0, width: 1000, height: 900 })
       toolbar.getBoundingClientRect = () => ({ height: 40, bottom: 100 })
       column.getBoundingClientRect = () => ({ left: 20, width: 800 })
       prompt.getBoundingClientRect = () => ({ height: 60, top: 700 })
       fireEvent(window, new Event('resize'))
       act(() => frame())
       expect(container.querySelector('.ground-desk')).toHaveAttribute('data-measured', 'true')
+      expect(container.querySelector('.ground-desk')).toHaveStyle({ top: '114px', left: '34px', width: '772px', height: '572px' })
       expect(heading).toHaveFocus()
       expect(focus).toHaveBeenCalledTimes(1)
 

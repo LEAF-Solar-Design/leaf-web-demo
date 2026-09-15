@@ -61,17 +61,27 @@ export function measureGroundWindow(doc = document) {
   }
 }
 
-function measureContainedWindow() {
-  const toolbar = document.querySelector('.app .viewer-toolbar')?.getBoundingClientRect()
-  const column = document.querySelector('.app main.center-scroll')?.getBoundingClientRect()
-  const prompt = document.querySelector('.app .bar-dock')?.getBoundingClientRect()
+export function measureContainedWindow(board, doc = document) {
+  const origin = board?.getBoundingClientRect()
+  if (!(origin?.width > 0) || !(origin?.height > 0)) return null
+  const toolbar = doc.querySelector('.app .viewer-toolbar')?.getBoundingClientRect()
+  const column = doc.querySelector('.app main.center-scroll')?.getBoundingClientRect()
+  const prompt = doc.querySelector('.app .bar-dock')?.getBoundingClientRect()
   if (!toolbar?.height || !column?.width || !prompt?.height) return null
-  const top = toolbar.bottom + WINDOW_GUTTER
-  return { top, left: column.left + WINDOW_GUTTER, width: column.width - WINDOW_GUTTER * 2,
-    height: Math.max(0, prompt.top - WINDOW_GUTTER - top) }
+  const left = Math.max(column.left, origin.left) + WINDOW_GUTTER
+  const right = Math.min(column.left + column.width, origin.left + origin.width) - WINDOW_GUTTER
+  const top = Math.max(toolbar.bottom, origin.top) + WINDOW_GUTTER
+  const bottom = Math.min(prompt.top, origin.top + origin.height) - WINDOW_GUTTER
+  if (!(right > left) || !(bottom > top)) return null
+  return {
+    top: Math.round(top - origin.top),
+    left: Math.round(left - origin.left),
+    width: Math.round(right - left),
+    height: Math.round(bottom - top),
+  }
 }
 
-function useGroundWindow(active, contained = false) {
+function useGroundWindow(active, contained = false, boardRef) {
   const [rect, setRect] = useState(null)
   useLayoutEffect(() => {
     if (!active || typeof window === 'undefined') { setRect(null); return undefined }
@@ -79,7 +89,7 @@ function useGroundWindow(active, contained = false) {
     const measure = () => {
       frame = 0
       setRect((prev) => {
-        const next = contained ? measureContainedWindow() : measureGroundWindow()
+        const next = contained ? measureContainedWindow(boardRef.current) : measureGroundWindow()
         if (!next) return null
         if (prev && prev.top === next.top && prev.left === next.left
           && prev.width === next.width && prev.height === next.height) return prev
@@ -95,6 +105,7 @@ function useGroundWindow(active, contained = false) {
     const prompt = contained ? document.querySelector('.app .bar-dock') : null
     if (observer && prompt) observer.observe(prompt)
     if (observer && scroller) observer.observe(scroller)
+    if (observer && contained && boardRef.current) observer.observe(boardRef.current)
     window.addEventListener('resize', schedule)
     scroller?.addEventListener('scroll', schedule, { passive: true })
     return () => {
@@ -103,7 +114,7 @@ function useGroundWindow(active, contained = false) {
       window.removeEventListener('resize', schedule)
       scroller?.removeEventListener('scroll', schedule)
     }
-  }, [active, contained])
+  }, [active, contained, boardRef])
   return rect
 }
 
@@ -229,7 +240,8 @@ export function ProjectBoardGround({
   worldSpace = import.meta.env.VITE_WORLD_SPACE_BOARD === '1', store,
 }) {
   const state = workspaceProject || EMPTY_WORKSPACE_PROJECT
-  const win = useGroundWindow(active, contained)
+  const boardRef = useRef(null)
+  const win = useGroundWindow(active, contained, boardRef)
   const localHeadingRef = useRef(null)
   const containedHeadingRef = headingRef || localHeadingRef
   const lastFocusRequest = useRef(0)
@@ -243,6 +255,7 @@ export function ProjectBoardGround({
   return (
     <div
       className="studio-ground-board"
+      ref={boardRef}
       data-ground="browser"
       data-board-layout={contained ? 'contained' : undefined}
       data-project-state={state.kind}
