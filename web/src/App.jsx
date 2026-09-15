@@ -2282,6 +2282,14 @@ export default function App() {
             ? { elapsed_ms: interruptSnapshotRef.current.elapsedMs } : {}),
         })
         interruptRun()
+        const tool = typeof currentJob?.tool === 'string' && currentJob.tool.trim() ? currentJob.tool : 'the run'
+        showToast(result != null
+          ? { text: `Stopped waiting for the drawing to refresh after ${tool}.` }
+          : { text: mock
+          ? `Stopped waiting for ${tool}.`
+          : currentJob?.job_id
+            ? `Stopped following ${tool}. It keeps running; find it in Jobs.`
+            : `Stopped waiting for ${tool} to be accepted. If the server accepts it, it will appear in Jobs.` })
       },
       onClearSelection: () => setSelectedHandle(null),
       onCloseProject: () => onCloseProject(),
@@ -2299,7 +2307,7 @@ export default function App() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [drawer, historyOpen, route, routeErr, runErr, running, selectedHandle,
-      interruptRun, onDispatch, openProjectId, onCloseProject, rTarget,
+      interruptRun, currentJob?.tool, currentJob?.job_id, result, mock, showToast, onDispatch, openProjectId, onCloseProject, rTarget,
       closeHistory, loadHistory, retryTools, loadCatalog, onRetryViewerRefresh, dismissRoute, clearRouteError])
 
   // Click-to-fall-through (operator rule): a click anywhere on the surface that
@@ -2772,8 +2780,8 @@ export default function App() {
       quickAfter: [
         { id: 'print', label: 'Print', icon: 'print', disabled: true, reason: 'printing is not in the browser engine' },
         { id: 'sep-1', kind: 'sep' },
-        { ...undo, id: 'quick-undo', label: 'Undo' },
-        { ...redo, id: 'quick-redo', label: 'Redo' },
+        { ...undo, id: 'quick-undo', label: 'Undo version' },
+        { ...redo, id: 'quick-redo', label: 'Redo version' },
         // The tool rail's expand affordance rides the band on every tab
         // (the Manage tab carries it as a panel too), so the catalog is
         // always one click away while the rail hides behind the cockpit.

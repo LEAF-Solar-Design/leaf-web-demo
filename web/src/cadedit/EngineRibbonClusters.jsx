@@ -82,6 +82,12 @@ function hasVisibleEscOwner() {
 // header for what is deliberately absent).
 export { DRAW_REASONS, MODIFY_REASONS, drawReason, modifyReason } from '../lib/actionRegistry.js'
 
+export function historyStepReason(session, kind) {
+  if (!session.engineParsed) return MODIFY_REASONS.noDocument
+  if (session.busy) return MODIFY_REASONS.busy
+  return session[kind === 'undo' ? 'undoDepth' : 'redoDepth'] ? '' : `nothing to ${kind}`
+}
+
 export const SAVE_REASONS = Object.freeze({
   noDocument: 'no drawing in the browser engine yet',
   nothingEdited: 'edit something first',
@@ -151,7 +157,7 @@ const offTool = ({ id, label, icon, reason = NOT_IN_ENGINE }, size = 'small') =>
 })
 
 export default function EngineRibbonClusters({ importOpen = false, onToggleImport, panels = ['draw', 'modify'] }) {
-  const { session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap, reach, selectGroup } = useEngineSessionContext()
+  const { session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap, reach, selectGroup, refuse } = useEngineSessionContext()
   const modify = modifyReason(session, reach)
   // W4g-7b-03c-f: the Properties panel's own ladder, which waives the
   // INSERT-reference rung `modify` still refuses (a property is not
@@ -264,6 +270,14 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // W4f-3: LINE chains. A run remembers where the segment ends; once the
   // engine has drawn it, that end becomes the next segment's first point.
   const chainRef = useRef(null)
+  const submissionRef = useRef(null)
+  useEffect(() => {
+    if (submissionRef.current?.armed !== armed || !session.busy) {
+      submissionRef.current = null
+    } else if (submissionRef.current) {
+      submissionRef.current.confirmed = true
+    }
+  }, [armed, session.status, session.busy])
   const run = () => {
     if (!prompt || runOff) return
     if (gatheringMembers) {
@@ -278,6 +292,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
       if (isPointExpression(inputs[kx])) { setInput(kx, effective[kx]); setInput(ky, effective[ky]) }
     }
     chainRef.current = armedOp === 'createLine' ? { x: effective.x2, y: effective.y2 } : null
+    submissionRef.current = { armed, confirmed: false }
     if (armedGroup === 'draw') create(armedOp, effective)
     else if (armedOp === 'pasteClip') pasteFromClipboard(effective)
     else applyEdit(armedOp, effective)
@@ -294,6 +309,15 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   const cancel = () => {
     const toolId = armed ? `${armed.group}:${armed.op}` : ''
     setArmed(null)
+    if (armed) {
+      const verb = PROMPTS[armed.op]?.verb || 'Command'
+      refuse(session.busy
+        ? submissionRef.current?.armed === armed && submissionRef.current.confirmed
+          ? `${verb} prompt closed; the edit already sent will still finish.`
+          : `${verb} cancelled; nothing was sent, and the current engine step will still finish.`
+        : `${verb} cancelled.`)
+    }
+    submissionRef.current = null
     // Focus returns to the tool that armed the command, where the pointer
     // or Tab was before the prompt took it.
     if (toolId && typeof document !== 'undefined') {
@@ -508,11 +532,8 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // distinct from the console's version undo on the View tab), each disabled
   // with its reason when there is nothing to step to. They ride the File
   // panel inline and the top band as quick-access buttons, like Open/Save.
-  const historyReason = !session.engineParsed
-    ? MODIFY_REASONS.noDocument
-    : session.busy ? MODIFY_REASONS.busy : ''
-  const undoReason = historyReason || (session.undoDepth ? '' : 'nothing to undo')
-  const redoReason = historyReason || (session.redoDepth ? '' : 'nothing to redo')
+  const undoReason = historyStepReason(session, 'undo')
+  const redoReason = historyStepReason(session, 'redo')
   fileTools.push(
     {
       id: 'undo-edit', label: 'Undo edit', text: 'Undo edit', icon: 'undo', size: 'small',

@@ -11,7 +11,7 @@ import CadEditSurface from './CadEditSurface.jsx'
 import CommandLineArmer, { acceptsCommand } from './CommandLineArmer.jsx'
 import CanvasPointPicker from './CanvasPointPicker.jsx'
 import EngineRibbonClusters from './EngineRibbonClusters.jsx'
-import EngineSessionProvider from './EngineSessionProvider.jsx'
+import EngineSessionProvider, { useEngineSessionContext } from './EngineSessionProvider.jsx'
 import DraftingRibbon from '../site/DraftingRibbon.jsx'
 
 class ScriptedWorker {
@@ -36,9 +36,15 @@ function fileOf(name = 'one.dxf') {
 let workers
 function mount(picker = null) {
   workers = []
+  const handle = {}
+  function Probe() {
+    handle.context = useEngineSessionContext()
+    return null
+  }
   const createWorker = vi.fn(() => { const w = new ScriptedWorker(); workers.push(w); return w })
   render(
     <EngineSessionProvider createWorker={createWorker}>
+      <Probe />
       <DraftingRibbon clusters={[]}>
         <EngineRibbonClusters importOpen={false} onToggleImport={() => {}} />
         <CommandLineArmer />
@@ -47,6 +53,7 @@ function mount(picker = null) {
       <CadEditSurface enabled />
     </EngineSessionProvider>,
   )
+  return handle
 }
 
 async function openAndLoad(entities = [LINE]) {
@@ -74,6 +81,79 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
 describe('CommandLineArmer (W4f slice B)', () => {
+  it('typed UNDO clears a preceding REDO refusal when history is available', async () => {
+    const studio = mount()
+    await openAndLoad()
+    command(parseDrawingCommand('LINE'))
+    point('0,0')
+    point('10,0')
+    workers[0].emit({ type: 'editApplied', op: 'createLine', ok: true, createdId: 'e2', entities: [LINE, { ...LINE, id: 'e2' }], entityCount: 2, bytes: new Uint8Array([48, 10]), byteLength: 2 })
+    expect(studio.context.session.undoDepth).toBe(1)
+    expect(studio.context.session.redoDepth).toBe(0)
+    const undo = vi.spyOn(studio.context.session.actions, 'undo')
+    command(parseDrawingCommand('REDO'))
+    expect(screen.getByRole('status').textContent).toBe('REDO is unavailable (nothing to redo).')
+    command(parseDrawingCommand('UNDO'))
+    expect(undo).toHaveBeenCalledTimes(1)
+    expect(studio.context.session.busy).toBe(true)
+    expect(screen.getByRole('status').textContent).not.toContain('REDO is unavailable')
+  })
+
+  it.each([
+    ['U', 'undo', 'UNDO is unavailable (nothing to undo).'],
+    ['REDO', 'redo', 'REDO is unavailable (nothing to redo).'],
+  ])('typed %s reports an empty history without calling the action', async (word, op, sentence) => {
+    const studio = mount()
+    const action = vi.spyOn(studio.context.session.actions, op)
+    await openAndLoad()
+    expect(studio.context.session[`${op}Depth`]).toBe(0)
+    command(parseDrawingCommand(word))
+    expect(screen.getByRole('status').textContent).toBe(sentence)
+    expect(action).not.toHaveBeenCalled()
+  })
+
+  it('typed undo without a parsed document reports the document reason', () => {
+    const studio = mount()
+    const undo = vi.spyOn(studio.context.session.actions, 'undo')
+    act(() => studio.context.setInput('x', '1'))
+    command(parseDrawingCommand('U'))
+    expect(screen.getByRole('status').textContent).toBe('UNDO is unavailable (no drawing in the browser engine yet).')
+    expect(undo).not.toHaveBeenCalled()
+  })
+
+  it('typed undo while busy reports the busy reason without calling the action', async () => {
+    const studio = mount()
+    const undo = vi.spyOn(studio.context.session.actions, 'undo')
+    await openAndLoad()
+    command(parseDrawingCommand('LINE'))
+    point('0,0')
+    point('10,0')
+    expect(studio.context.session.busy).toBe(true)
+    command(parseDrawingCommand('U'))
+    expect(screen.getByRole('status').textContent).toBe('UNDO is unavailable (engine busy: wait for the current edit).')
+    expect(undo).not.toHaveBeenCalled()
+  })
+
+  it.each([true, false])('typed undo with history handles action result %s', async (result) => {
+    const studio = mount()
+    const undo = vi.spyOn(studio.context.session.actions, 'undo').mockReturnValue(result)
+    await openAndLoad()
+    command(parseDrawingCommand('LINE'))
+    point('0,0')
+    point('10,0')
+    workers[0].emit({ type: 'editApplied', op: 'createLine', ok: true, createdId: 'e2', entities: [LINE, { ...LINE, id: 'e2' }], entityCount: 2, bytes: new Uint8Array([48, 10]), byteLength: 2 })
+    expect(studio.context.session.undoDepth).toBe(1)
+    const status = screen.getByRole('status').textContent
+    command(parseDrawingCommand('U'))
+    expect(undo).toHaveBeenCalledTimes(1)
+    if (result) {
+      expect(screen.getByRole('status').textContent).toBe(status)
+      expect(screen.getByRole('status').textContent).not.toContain('UNDO is unavailable')
+    } else {
+      expect(screen.getByRole('status').textContent).toBe('UNDO is unavailable (engine busy: wait for the current edit).')
+    }
+  })
+
   it.each([false, true])('keeps the endpoint cursor after a worker refusal from body focus with picker=%s', async (withPicker) => {
     vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => { cb(); return 0 })
     const ground = document.createElement('div')

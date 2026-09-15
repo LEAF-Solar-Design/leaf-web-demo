@@ -19,7 +19,7 @@ import { useEffect, useRef, useState } from 'react'
 import { DEFERRED_REASONS } from '../lib/actionRegistry.js'
 import { COCKPIT_COMMAND_EVENT } from '../lib/commandWords.js'
 
-import { PROMPTS, modifyReason } from './EngineRibbonClusters.jsx'
+import { PROMPTS, modifyReason, historyStepReason } from './EngineRibbonClusters.jsx'
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
 import { readNumber } from './engineSession.js'
 import { isPointStep, resolvePromptInputs } from './promptInputs.js'
@@ -178,8 +178,15 @@ export default function CommandLineArmer() {
         return
       }
       if (!acceptsCommand(detail)) return
-      if (detail.op === 'undo') { undo(); return }
-      if (detail.op === 'redo') { redo(); return }
+      if (detail.op === 'undo' || detail.op === 'redo') {
+        const op = detail.op
+        const verb = op.toUpperCase()
+        const reason = historyStepReason(session, op)
+        if (reason) { refuse(`${verb} is unavailable (${reason}).`); return }
+        const action = op === 'undo' ? undo : redo
+        if (action() === false) refuse(`${verb} is unavailable (engine busy: wait for the current edit).`)
+        return
+      }
       if (detail.op === 'copyClip' || detail.op === 'cutClip') {
         // Like ERASE: on a live selection it runs, and the store's own
         // refusal sentence covers the rest (no selection, a kind that

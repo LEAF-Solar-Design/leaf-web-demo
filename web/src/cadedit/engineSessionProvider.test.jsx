@@ -29,7 +29,7 @@ import CadEditSurface from './CadEditSurface.jsx'
 import CanvasPointPicker from './CanvasPointPicker.jsx'
 import EngineDocumentView from './EngineDocumentView.jsx'
 import EngineRibbonClusters, {
-  DRAW_REASONS, MODIFY_REASONS, SAVE_REASONS, PROMPTS, promptKeys, drawReason, modifyReason, saveReason,
+  DRAW_REASONS, MODIFY_REASONS, SAVE_REASONS, PROMPTS, promptKeys, drawReason, modifyReason, saveReason, historyStepReason,
 } from './EngineRibbonClusters.jsx'
 import EngineSessionProvider, { DEFAULT_EDIT_INPUTS, MAX_INPUT_CHARS, useEngineSessionContext } from './EngineSessionProvider.jsx'
 import { SESSION_ERROR } from './engineSession.js'
@@ -952,6 +952,94 @@ describe('the command prompt (W4e slice H): a tool arms, the command line asks i
   })
 })
 
+describe('command cancellation status', () => {
+  it('clears a refusal on an action that leaves the store status unchanged', async () => {
+    const studio = mount()
+    await openAndLoad(studio, [LINE])
+    const status = screen.getByRole('status').textContent
+    const actions = studio.context.session.actions
+    act(() => studio.context.refuse('X'))
+    expect(screen.getByRole('status').textContent).toBe('X')
+    expect(studio.context.session.actions).toBe(actions)
+    act(() => studio.context.session.actions.select('e1'))
+    expect(studio.context.session.selectedId).toBe('e1')
+    expect(screen.getByRole('status').textContent).toBe(status)
+    expect(studio.context.session.actions).toBe(actions)
+  })
+
+  it('closing a busy LINE prompt says the submitted edit will still finish', async () => {
+    const studio = mount()
+    await openAndLoad(studio, [LINE])
+    fireEvent.click(document.querySelector('.drafting-ribbon [data-tool="draw:createLine"]'))
+    runPrompt()
+    expect(studio.context.session.busy).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByTestId('cockpit-prompt')).toBeNull()
+    expect(screen.getByRole('status').textContent).toBe('LINE prompt closed; the edit already sent will still finish.')
+  })
+
+  it.each(['Saving, nothing sent', 'Stale marker', 'Finished edit'])('%s: cancelling CIRCLE during save does not claim an edit was sent', async (scenario) => {
+    let resolveSave
+    const saved = new Promise((resolve) => { resolveSave = resolve })
+    const save = vi.fn(() => saved)
+    const studio = mount({ saveTarget: { drawingId: 'rooftop', headVersion: 4, save } })
+    await openAndLoad(studio, [LINE])
+    if (scenario === 'Finished edit') {
+      fireEvent.click(document.querySelector('.drafting-ribbon [data-tool="draw:createLine"]'))
+      runPrompt()
+    } else {
+      act(() => studio.context.session.actions.create('createLine', studio.context.inputs))
+    }
+    studio.workers[0].emit(editApplied('createLine', [LINE]))
+    expect(studio.context.session.busy).toBe(false)
+    expect(saveTool().disabled).toBe(false)
+
+    let refusedCreate
+    if (scenario === 'Stale marker') {
+      // Live validation holds a zero radius before run. Inject it at the
+      // store call to exercise a synchronous refusal after run's marker.
+      const create = studio.context.session.actions.create
+      refusedCreate = vi.spyOn(studio.context.session.actions, 'create').mockImplementationOnce((op, inputs) => create(op, { ...inputs, r: '0' }))
+    }
+    fireEvent.click(document.querySelector('.drafting-ribbon [data-tool="draw:createCircle"]'))
+    if (scenario === 'Stale marker') {
+      const beforeRun = studio.workers[0].posted.length
+      runPrompt()
+      expect(refusedCreate).toHaveBeenCalledTimes(1)
+      expect(studio.context.session.errorKind).toBe(SESSION_ERROR.REFUSED)
+      expect(studio.context.session.busy).toBe(false)
+      expect(studio.workers[0].posted).toHaveLength(beforeRun)
+      refusedCreate.mockRestore()
+    }
+
+    const beforeSave = studio.workers[0].posted.length
+    let saving
+    act(() => { saving = studio.context.session.actions.save() })
+    expect(studio.context.session.busy).toBe(true)
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1))
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByTestId('cockpit-prompt')).toBeNull()
+    expect(screen.getByRole('status').textContent).toBe('CIRCLE cancelled; nothing was sent, and the current engine step will still finish.')
+    expect(studio.workers[0].posted).toHaveLength(beforeSave)
+    await act(async () => {
+      resolveSave({ new_version: { version: 5, parent: 4 } })
+      await saving
+    })
+    expect(studio.context.session.busy).toBe(false)
+  })
+
+  it.each(['Escape', 'Cancel'])('cancelling LINE through %s removes the prompt and announces the verb', async (method) => {
+    const studio = mount()
+    await openAndLoad(studio, [LINE])
+    fireEvent.click(document.querySelector('.drafting-ribbon [data-tool="draw:createLine"]'))
+    expect(screen.getByTestId('cockpit-prompt').getAttribute('data-op')).toBe('createLine')
+    if (method === 'Escape') fireEvent.keyDown(document.body, { key: 'Escape' })
+    else fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByTestId('cockpit-prompt')).toBeNull()
+    expect(screen.getByRole('status').textContent).toBe('LINE cancelled.')
+  })
+})
+
 describe('the band\'s Undo edit / Redo edit (W4f slice F)', () => {
   // No band slot in this mount, so the tools render inline in the File panel
   // (the band gets the same records as quick-access buttons).
@@ -984,6 +1072,13 @@ describe('the band\'s Undo edit / Redo edit (W4f slice F)', () => {
 })
 
 describe('the reason ladders are pure and total', () => {
+  it.each(['undo', 'redo'])('historyStepReason orders document, busy, and %s depth', (kind) => {
+    expect(historyStepReason({ engineParsed: false, busy: true }, kind)).toBe(MODIFY_REASONS.noDocument)
+    expect(historyStepReason({ engineParsed: true, busy: true, undoDepth: 0, redoDepth: 0 }, kind)).toBe(MODIFY_REASONS.busy)
+    expect(historyStepReason({ engineParsed: true, busy: false, undoDepth: 0, redoDepth: 0 }, kind)).toBe(`nothing to ${kind}`)
+    expect(historyStepReason({ engineParsed: true, busy: false, undoDepth: 1, redoDepth: 1 }, kind)).toBe('')
+  })
+
   it('modifyReason resolves in the order a user clears them', () => {
     expect(modifyReason(null)).toBe(MODIFY_REASONS.noDocument)
     expect(modifyReason({ errorKind: SESSION_ERROR.CRASHED, engineParsed: true })).toBe(MODIFY_REASONS.crashed)

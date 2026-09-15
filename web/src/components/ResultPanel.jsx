@@ -104,7 +104,7 @@ function FileLinks({ files }) {
 
 function ResultBody({ result }) {
   const data = result?.result
-  if (!data) return null
+  if (!data) return result?.overlay ? null : <p className="result-empty">Completed with no output.</p>
   if (data.solver === 'arlo-design') return <ArloProposalReview key={`${result.job_context?.job_id || 'local'}:${data.result_sha256}`} envelope={data} context={result.job_context} />
   if (data.table && typeof data.table === 'object') {
     const scalars = {}
@@ -137,7 +137,11 @@ function ResultBody({ result }) {
     if (v !== null && typeof v === 'object') continue
     scalars[k] = v
   }
-  return <KeyValue data={scalars} />
+  return Object.keys(scalars).length > 0
+    ? <KeyValue data={scalars} />
+    : result.overlay || (Array.isArray(data.files) && data.files.length > 0)
+      ? null
+      : <p className="result-empty">Completed with no output.</p>
 }
 
 // X1 failed-act row: plain sentence naming what failed (code demoted to a
@@ -244,6 +248,7 @@ export default function ResultPanel({ running, error, result, tool, onRetry, not
 
           {result.ok && <ResultBody result={result} />}
           {result.error && <ErrorLine err={result.error} onRetry={onRetry} retry={!isEnt && isRetryable(result.error)} quota={calm} toolName={result.tool} />}
+          {!result.ok && !result.error && <p className="result-empty">The run failed without reporting a reason.</p>}
 
           {result.overlay && (
             <div className="overlay-summary">
