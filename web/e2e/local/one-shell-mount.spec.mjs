@@ -1855,6 +1855,9 @@ test.describe('route matrix, rail ON', () => {
     // A one-unit LINE far from the current drawing is sub-pixel at the
     // viewer's automatic full fit. The dock must reveal that exact result.
     const undoDepthBeforeTiny = Number((await dock.getByTestId('dock-drawing').locator('dt', { hasText: /^Browser edits$/ }).locator('+ dd').textContent()).match(/^[\d,]+/)[0].replaceAll(',', ''))
+    // The status count before the tiny LINE: the retry LINE and the mixed loop above have drawn since
+    // drawingCountBeforeLine was read, so undo and redo are checked against this count, as the dock's are.
+    const entitiesBeforeTiny = Number((await cockpitCount.textContent()).match(/([\d,]+) entities/)[1].replaceAll(',', ''))
     await bar.fill('LINE')
     await bar.press('Enter')
     await bar.fill('1000000,0')
@@ -1880,10 +1883,10 @@ test.describe('route matrix, rail ON', () => {
     expect(visibleResult.share).toBeLessThan(0.45)
     await page.getByRole('tab', { name: 'Insert' }).click()
     await ribbon.locator('[data-tool="undo-edit"]').click()
-    await expect(cockpitCount).toContainText(new RegExp('(^|[^\\d,])' + (drawingCountBeforeLine + 2).toLocaleString('en-US') + ' entities'))
+    await expect(cockpitCount).toContainText(new RegExp('(^|[^\\d,])' + entitiesBeforeTiny.toLocaleString('en-US') + ' entities'))
     await expect(dock.getByTestId('dock-drawing')).toContainText(new RegExp('(^|[^\\d,])' + (undoDepthBeforeTiny).toLocaleString('en-US') + ' to undo'))
     await ribbon.locator('[data-tool="redo-edit"]').click()
-    await expect(cockpitCount).toContainText(new RegExp('(^|[^\\d,])' + (drawingCountBeforeLine + 3).toLocaleString('en-US') + ' entities'))
+    await expect(cockpitCount).toContainText(new RegExp('(^|[^\\d,])' + (entitiesBeforeTiny + 1).toLocaleString('en-US') + ' entities'))
     await expect(dock.getByTestId('dock-drawing')).toContainText(new RegExp('(^|[^\\d,])' + (undoDepthBeforeTiny + 1).toLocaleString('en-US') + ' to undo'))
 
     // A sentence is still a sentence: it routes, it never arms. LAST in the
