@@ -1751,7 +1751,7 @@ test.describe('route matrix, rail ON', () => {
     for (const unarmedPoint of ['0,0', '10,5', '@10,0', '10<90']) {
       await bar.fill(unarmedPoint)
       await bar.press('Enter')
-      await expect(page.getByText('Start a drawing command before entering a point.', { exact: true })).toBeVisible()
+      await expect(page.locator('.toast')).toContainText('Start a drawing command before entering a point.')
     }
     expect(pointRoutes).toHaveLength(0)
     await bar.fill('LINE')
