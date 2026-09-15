@@ -29,7 +29,7 @@ import CadEditSurface from './CadEditSurface.jsx'
 import CanvasPointPicker from './CanvasPointPicker.jsx'
 import EngineDocumentView from './EngineDocumentView.jsx'
 import EngineRibbonClusters, {
-  DRAW_REASONS, MODIFY_REASONS, SAVE_REASONS, PROMPTS, promptKeys, drawReason, modifyReason, saveReason,
+  DRAW_REASONS, MODIFY_REASONS, SAVE_REASONS, PROMPTS, promptKeys, drawReason, modifyReason, saveReason, historyStepReason,
 } from './EngineRibbonClusters.jsx'
 import EngineSessionProvider, { DEFAULT_EDIT_INPUTS, MAX_INPUT_CHARS, useEngineSessionContext } from './EngineSessionProvider.jsx'
 import { SESSION_ERROR } from './engineSession.js'
@@ -952,6 +952,19 @@ describe('the command prompt (W4e slice H): a tool arms, the command line asks i
   })
 })
 
+describe('command cancellation status', () => {
+  it.each(['Escape', 'Cancel'])('cancelling LINE through %s removes the prompt and announces the verb', async (method) => {
+    const studio = mount()
+    await openAndLoad(studio, [LINE])
+    fireEvent.click(document.querySelector('.drafting-ribbon [data-tool="draw:createLine"]'))
+    expect(screen.getByTestId('cockpit-prompt').getAttribute('data-op')).toBe('createLine')
+    if (method === 'Escape') fireEvent.keyDown(document.body, { key: 'Escape' })
+    else fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByTestId('cockpit-prompt')).toBeNull()
+    expect(screen.getByRole('status').textContent).toBe('LINE cancelled.')
+  })
+})
+
 describe('the band\'s Undo edit / Redo edit (W4f slice F)', () => {
   // No band slot in this mount, so the tools render inline in the File panel
   // (the band gets the same records as quick-access buttons).
@@ -984,6 +997,13 @@ describe('the band\'s Undo edit / Redo edit (W4f slice F)', () => {
 })
 
 describe('the reason ladders are pure and total', () => {
+  it.each(['undo', 'redo'])('historyStepReason orders document, busy, and %s depth', (kind) => {
+    expect(historyStepReason({ engineParsed: false, busy: true }, kind)).toBe(MODIFY_REASONS.noDocument)
+    expect(historyStepReason({ engineParsed: true, busy: true, undoDepth: 0, redoDepth: 0 }, kind)).toBe(MODIFY_REASONS.busy)
+    expect(historyStepReason({ engineParsed: true, busy: false, undoDepth: 0, redoDepth: 0 }, kind)).toBe(`nothing to ${kind}`)
+    expect(historyStepReason({ engineParsed: true, busy: false, undoDepth: 1, redoDepth: 1 }, kind)).toBe('')
+  })
+
   it('modifyReason resolves in the order a user clears them', () => {
     expect(modifyReason(null)).toBe(MODIFY_REASONS.noDocument)
     expect(modifyReason({ errorKind: SESSION_ERROR.CRASHED, engineParsed: true })).toBe(MODIFY_REASONS.crashed)
