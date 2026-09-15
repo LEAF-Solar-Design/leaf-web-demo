@@ -32,6 +32,42 @@ const FAMS = [
 ]
 
 describe('DraftingRibbon', () => {
+  it.each([
+    ['1366x768', 2], ['800x500 at 2x', 1], ['390x844', 0], ['1024x1366', 1],
+  ])('%s exposes the last panel through More panels without remounting tools', (_viewport, visiblePanelCount) => {
+    const onCopy = vi.fn()
+    render(<DraftingRibbon visiblePanelCount={visiblePanelCount} clusters={[
+      { id: 'draw', label: 'Draw', tools: [{ id: 'line', label: 'Line' }] },
+      { id: 'modify', label: 'Modify', tools: [{ id: 'move', label: 'Move' }] },
+      { id: 'clipboard', label: 'Clipboard', tools: [{ id: 'copy', label: 'Copy', onClick: onCopy }] },
+    ]} />)
+    const copy = document.querySelector('[data-tool="copy"]')
+    const more = screen.getByRole('button', { name: 'More panels' })
+    expect(more.getAttribute('aria-expanded')).toBe('false')
+    expect(copy.closest('.ribbon-cluster').hidden).toBe(true)
+    fireEvent.click(more)
+    expect(more.getAttribute('aria-expanded')).toBe('true')
+    expect(document.getElementById(more.getAttribute('aria-controls')).contains(copy)).toBe(true)
+    expect(screen.getByRole('group', { name: 'Clipboard' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Copy' })).toBe(copy)
+    expect(document.activeElement.dataset.tool).toBe('line')
+    fireEvent.click(copy)
+    expect(onCopy).toHaveBeenCalledTimes(1)
+    fireEvent.keyDown(copy, { key: 'Escape' })
+    expect(document.activeElement).toBe(more)
+    expect(more.getAttribute('aria-expanded')).toBe('false')
+    expect(copy.closest('.ribbon-cluster').hidden).toBe(true)
+  })
+
+  it('restores every panel when capacity returns and hides the unused overflow control', () => {
+    const clusters = [{ id: 'clipboard', label: 'Clipboard', tools: [{ id: 'copy', label: 'Copy' }] }]
+    const { rerender } = render(<DraftingRibbon clusters={clusters} visiblePanelCount={0} />)
+    expect(screen.queryByRole('button', { name: 'Copy' })).toBeNull()
+    rerender(<DraftingRibbon clusters={clusters} visiblePanelCount={1} />)
+    expect(screen.getByRole('button', { name: 'Copy' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'More panels' })).toBeNull()
+  })
+
   it('renders one cluster per family and arms the catalog run path with ribbon attribution', () => {
     const onRequestRun = vi.fn()
     render(<DraftingRibbon clusters={catalogClusters(FAMS, { onRequestRun })} />)

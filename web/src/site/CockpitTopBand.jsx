@@ -57,7 +57,15 @@ export default function CockpitTopBand({ tab = 'draw', onTab, before = [], after
         <span id={QUICK_FILE_SLOT_ID} className="cockpit-quick-slot" />
         {after.map((tool) => <QuickButton key={tool.id} tool={tool} />)}
       </div>
-      <div className="cockpit-ribbon-tabs" role="tablist" aria-label="Ribbon" onKeyDown={moveRovingTab}>
+      <div className="cockpit-ribbon-tabs" role="tablist" aria-label="Ribbon" onKeyDown={(event) => {
+        if (event.key === 'Tab' && !event.shiftKey && event.target.getAttribute('aria-selected') === 'true') {
+          const ribbon = document.getElementById('drafting-ribbon')
+          const tool = [...(ribbon?.querySelectorAll('.ribbon-tool:not(:disabled), .ribbon-more:not(:disabled)') || [])]
+            .find((element) => !element.closest('[hidden]'))
+          if (tool) { event.preventDefault(); tool.focus(); return }
+        }
+        moveRovingTab(event)
+      }}>
         {RIBBON_TABS.map((t) => {
           const selected = t.id === tab
           const off = !!t.reason
