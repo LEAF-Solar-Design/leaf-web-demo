@@ -40,7 +40,9 @@ function focusRun() {
   document.querySelector('#cockpit-prompt [data-testid="cockpit-prompt-run"]')?.focus()
 }
 
-export default function CanvasPointPicker({ viewerRef = null, ground = null, onPicking = null }) {
+export default function CanvasPointPicker({ viewerRef = null, ground = null, onPicking = null, canvasSelector = null }) {
+  const canvasSelectorRef = useRef(canvasSelector)
+  canvasSelectorRef.current = canvasSelector
   const { session, inputs, setInput, armed, ortho, setOrtho, osnap, setOsnap, highlightedIds } = useEngineSessionContext()
   useEffect(() => {
     viewerRef?.current?.setHighlight?.(Array.from(highlightedIds || []))
@@ -111,6 +113,13 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
     let down = null
     let frame = 0
     let last = null
+    let offCanvas = false
+    const onCanvas = (event) => {
+      const selector = canvasSelectorRef.current
+      if (selector == null) return true
+      const target = event.target
+      return target instanceof Element && ground.contains(target) && ground.contains(target.closest(selector))
+    }
     const viewer = () => viewerRef?.current
     // The snap under the cursor, if any: the aperture in world units is one
     // extra unproject SNAP_PX to the right (zoom-aware), the search is one
@@ -160,11 +169,18 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
       v.setRubberBand?.(ghost ? ghost.pts : null, !!ghost?.closed)
     }
     const onMove = (event) => {
+      if (!onCanvas(event)) {
+        if (!offCanvas) onLeave()
+        offCanvas = true
+        return
+      }
+      offCanvas = false
       if (!machine.current?.sequence) return
       last = { x: event.clientX, y: event.clientY }
       if (!frame) frame = window.requestAnimationFrame(draw)
     }
     const onDown = (event) => {
+      if (!onCanvas(event)) { down = null; return }
       if (event.button !== 0 || !machine.current?.sequence) return
       down = { x: event.clientX, y: event.clientY, t: performance.now() }
     }
@@ -214,6 +230,7 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
       detail.handled = acceptPoint(rewound, detail.point[0], detail.point[1], null, true)
     }
     const onUp = (event) => {
+      if (!onCanvas(event)) { down = null; return }
       if (!down) return
       const moved = Math.hypot(event.clientX - down.x, event.clientY - down.y)
       const dt = performance.now() - down.t
@@ -254,6 +271,13 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
       acceptPoint(m, px, py, edgeStep ? edgeCtx : apertureCtx)
     }
     const onLeave = () => { last = null; const v = viewer(); v?.setRubberBand?.(null); if (v) showMarker(v, null) }
+    const onCancel = () => {
+      down = null
+      if (frame) window.cancelAnimationFrame(frame)
+      frame = 0
+      onLeave()
+    }
+    const onWindowUp = (event) => { if (!onCanvas(event)) down = null }
     const onBlockUp = (event) => {
       if (machine.current?.op === 'createBlock') onUp(event)
     }
@@ -263,6 +287,9 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
     ground.addEventListener('pointerup', onBlockUp, true)
     ground.addEventListener('pointerup', onUp)
     ground.addEventListener('pointerleave', onLeave)
+    ground.addEventListener('pointercancel', onCancel)
+    window.addEventListener('pointercancel', onCancel)
+    if (canvasSelector != null) window.addEventListener('pointerup', onWindowUp, true)
     return () => {
       if (frame) window.cancelAnimationFrame(frame)
       window.removeEventListener('cockpit:pick-point', onPoint)
@@ -271,9 +298,12 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
       ground.removeEventListener('pointerup', onBlockUp, true)
       ground.removeEventListener('pointerup', onUp)
       ground.removeEventListener('pointerleave', onLeave)
+      ground.removeEventListener('pointercancel', onCancel)
+      window.removeEventListener('pointercancel', onCancel)
+      if (canvasSelector != null) window.removeEventListener('pointerup', onWindowUp, true)
       viewer()?.setRubberBand?.(null)
       viewer()?.setSnapMarker?.(null)
     }
-  }, [ground, viewerRef, setInput])
+  }, [ground, viewerRef, setInput, canvasSelector])
   return null
 }

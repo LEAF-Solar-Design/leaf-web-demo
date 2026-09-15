@@ -671,6 +671,15 @@ describe('App.jsx wiring', () => {
     assert.doesNotMatch(mutated, binding)
   })
 
+  it('limits studio point picking and cursor readout to the viewer canvas', () => {
+    for (const component of ['CanvasPointPicker', 'CockpitStatus']) {
+      const mount = appNoComments.match(new RegExp('<' + component + '\\s[\\s\\S]*?/>'))?.[0]
+      assert.ok(mount, component + ' mount exists')
+      assert.match(mount, /canvasSelector="\.viewer-canvas"/)
+      assert.match(mount, new RegExp('ground=\\{studioGround\\}'))
+    }
+  })
+
   it('opts studio frame and grounds into customer copy with explicit mock state', () => {
     for (const component of ['SurfaceFrame', 'SurfaceGrounds']) {
       const mount = new RegExp('<' + component + '\\s[\\s\\S]*?/>|<' + component + '\\s[\\s\\S]*?>')

@@ -38,7 +38,7 @@ let ground
 let onPicking
 let context
 function Probe() { context = useEngineSessionContext(); return null }
-function mount(withArmer = false) {
+function mount(withArmer = false, canvasSelector = null) {
   workers = []
   // World = client / 10, so a click at (120, 30) is world (12, 3).
   viewer = { unproject: vi.fn((cx, cy) => ({ x: cx / 10, y: cy / 10 })), setRubberBand: vi.fn(), setSnapMarker: vi.fn() }
@@ -53,7 +53,7 @@ function mount(withArmer = false) {
       <DraftingRibbon clusters={[]}>
         <EngineRibbonClusters importOpen={false} onToggleImport={() => {}} />
       </DraftingRibbon>
-      <CanvasPointPicker viewerRef={{ current: viewer }} ground={ground} onPicking={onPicking} />
+      <CanvasPointPicker viewerRef={{ current: viewer }} ground={ground} onPicking={onPicking} canvasSelector={canvasSelector} />
       <CadEditSurface enabled />
     </EngineSessionProvider>,
   )
@@ -198,6 +198,60 @@ it('resolves the nearest edge before excluding picked or selected members', asyn
   act(() => { context.setInput('members', ''); context.session.actions.select('10') })
   click(15, 0)
   expect(context.inputs.members).toBe('')
+})
+
+describe('canvas ownership', () => {
+  async function setup() {
+    mount(false, '.viewer-canvas')
+    ground.innerHTML = '<div class="viewer-canvas"><canvas></canvas></div><div class="studio-ground-board"></div>'
+    await openAndLoad()
+    act(() => { context.setArmed({ group: 'draw', op: 'createLine' }); context.setOsnap(false) })
+    return { canvas: ground.querySelector('canvas'), board: ground.querySelector('.studio-ground-board') }
+  }
+  const pointer = (target, type) => act(() => {
+    target.dispatchEvent(new MouseEvent(type, { clientX: 120, clientY: 30, button: 0, bubbles: true }))
+  })
+  const expectNoPick = (initialInputs) => {
+    expect(viewer.unproject).not.toHaveBeenCalled()
+    expect(context.inputs.x).toBe(initialInputs.x)
+    expect(context.inputs.y).toBe(initialInputs.y)
+  }
+
+  it('does not complete a board press on the canvas', async () => {
+    const { canvas, board } = await setup()
+    const initialInputs = { x: context.inputs.x, y: context.inputs.y }
+    pointer(board, 'pointerdown')
+    pointer(canvas, 'pointerup')
+    expectNoPick(initialInputs)
+  })
+
+  it('forgets a canvas press released over chrome', async () => {
+    const { canvas } = await setup()
+    const initialInputs = { x: context.inputs.x, y: context.inputs.y }
+    pointer(canvas, 'pointerdown')
+    pointer(document.body, 'pointerup')
+    pointer(canvas, 'pointerup')
+    expectNoPick(initialInputs)
+  })
+
+  it('forgets a canvas press canceled on window', async () => {
+    const { canvas } = await setup()
+    const initialInputs = { x: context.inputs.x, y: context.inputs.y }
+    pointer(canvas, 'pointerdown')
+    pointer(window, 'pointercancel')
+    pointer(canvas, 'pointerup')
+    expectNoPick(initialInputs)
+  })
+
+  it('records a complete canvas click', async () => {
+    const { canvas } = await setup()
+    pointer(canvas, 'pointerdown')
+    pointer(canvas, 'pointerup')
+    expect(viewer.unproject).toHaveBeenCalledTimes(1)
+    expect(viewer.unproject).toHaveBeenCalledWith(120, 30)
+    expect(context.inputs).toMatchObject({ x: '12', y: '3' })
+    expect(document.activeElement).toBe(screen.getByLabelText('ribbon x2'))
+  })
 })
 
 describe('CanvasPointPicker (W4f slice A1)', () => {

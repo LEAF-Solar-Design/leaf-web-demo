@@ -3523,6 +3523,7 @@ export default function App() {
                 <CanvasPointPicker
                   viewerRef={viewerRef}
                   ground={studioGround}
+                  canvasSelector=".viewer-canvas"
                   onPicking={(live) => {
                     const el = workspaceCardRef.current
                     if (!el) return
@@ -4152,7 +4153,7 @@ export default function App() {
         {/* W4b cockpit: live cursor coordinates, scale, counts, selection
             (studio only; DOM-written at rAF rate, never React state). */}
         {studioGround && groundShowsDrawing(activeSurface) && (
-          <CockpitStatus ground={studioGround} viewerRef={viewerRef} shown={drawingIntake} selectedHandle={selectedHandle} />
+          <CockpitStatus ground={studioGround} viewerRef={viewerRef} shown={drawingIntake} selectedHandle={selectedHandle} canvasSelector=".viewer-canvas" />
         )}
         {/* W4e: ORTHO and OSNAP real through StatusModesBridge; the rest honestly off, plus fullscreen. */}
         <SurfaceFrame.Cockpit />
