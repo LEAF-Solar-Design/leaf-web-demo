@@ -566,15 +566,9 @@ export async function getEntitlements() {
 //   POST   /api/tenant/claude-grant {token} -> {linked: true, linked_at}
 //   DELETE /api/tenant/claude-grant -> {linked: false}
 // All tenant-scoped (X-Tenant-Id / auth). LIVE only — mock hides the panel.
-// getClaudeGrant returns null when the sibling endpoint isn't deployed yet
-// (404/unreachable) so the affordance degrades to today's ungated behavior
-// (no proactive authoring gate) instead of surfacing a red failure.
+// Administrative status failures are not evidence of an unlinked account.
 export async function getClaudeGrant() {
-  try {
-    return await http('/api/tenant/claude-grant', { headers: { 'X-Tenant-Id': TENANT } })
-  } catch {
-    return null
-  }
+  return http('/api/tenant/claude-grant', { headers: { 'X-Tenant-Id': TENANT } })
 }
 
 // POST the token ONCE. Callers must clear their field immediately after; this

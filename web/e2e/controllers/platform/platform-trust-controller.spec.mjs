@@ -245,3 +245,55 @@ test('controller restarts after a framework lifecycle cleanup', async () => {
   expect(healthReads).toBe(1)
   expect(controller.getSnapshot().health).toEqual({ ok: true })
 })
+
+
+for (const [name, status, expected] of [['forbidden', 403, 'restricted'], ['service failure', 503, 'unavailable'], ['network failure', undefined, 'unavailable']]) {
+  test(`grant ${name} is unknown, not unlinked or an authoring denial`, async () => {
+    const error = Object.assign(new Error(name), { status })
+    const controller = createPlatformTrustController({ services: { getClaudeGrant: async () => { throw error } } })
+    await controller.loadGrant()
+    expect(controller.getSnapshot()).toMatchObject({ grant: { read_status: expected }, grantErr: name, grantLoading: false, authRequired: false })
+    expect(controller.getSnapshot().grant.linked).toBeUndefined()
+  })
+}
+
+test('failed stale grant read cannot replace a successful mutation', async () => {
+  const read = deferred()
+  const controller = createPlatformTrustController({ services: {
+    getClaudeGrant: () => read.promise,
+    linkClaudeGrant: async () => ({ linked: true, accounts: [] }),
+  } })
+  const pending = controller.loadGrant()
+  await controller.linkClaude('fixture-only', 'oauth')
+  read.reject(Object.assign(new Error('forbidden'), { status: 403 }))
+  await pending
+  expect(controller.getSnapshot()).toMatchObject({ grant: { linked: true }, grantErr: null, grantBusy: false })
+})
+
+test('status read during mutation does not supersede it', async () => {
+  const mutation = deferred()
+  let reads = 0
+  const controller = createPlatformTrustController({ services: {
+    getClaudeGrant: async () => { reads++; return { linked: false } },
+    linkClaudeGrant: () => mutation.promise,
+  } })
+  const pending = controller.linkClaude('fixture-only', 'oauth')
+  await controller.loadGrant()
+  expect(reads).toBe(0)
+  expect(controller.getSnapshot().grantBusy).toBe(true)
+  mutation.resolve({ linked: true })
+  await pending
+  expect(controller.getSnapshot()).toMatchObject({ grant: { linked: true }, grantBusy: false })
+})
+
+test('known unlinked status recovers from a failed read', async () => {
+  let failed = true
+  const controller = createPlatformTrustController({ services: { getClaudeGrant: async () => {
+    if (failed) throw Object.assign(new Error('forbidden'), { status: 403 })
+    return { linked: false }
+  } } })
+  await controller.loadGrant()
+  failed = false
+  await controller.loadGrant()
+  expect(controller.getSnapshot()).toMatchObject({ grant: { linked: false }, grantErr: null })
+})
