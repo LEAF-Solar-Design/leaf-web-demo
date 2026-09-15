@@ -2159,6 +2159,8 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'move', { timeout: 20_000 })
     await expect(page.locator('[data-testid="cockpit-prompt"] .cp-run')).toBeDisabled()
     await expect(page.getByTestId('cockpit-prompt-note')).toHaveText('an INSERT is placed, not edited, in this round')
+    // Wait for the arming handoff: an Escape still in the Command bar is left to the bar (W4f-2).
+    await expect(page.getByLabel('ribbon dx', { exact: true })).toBeFocused()
     await page.keyboard.press('Escape')
     await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
     await bar.fill('block')
