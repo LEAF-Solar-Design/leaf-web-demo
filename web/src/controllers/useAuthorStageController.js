@@ -101,13 +101,16 @@ export default function useAuthorStageController({
           // The one-call credential override also applies to the turn start.
           authority = (await authorityProvider(initial.description, { allowSecretOnce })) || null
           if (!authority?.sessionId || !authority?.turnId) {
-            throw new Error('Could not start authoring in this conversation. Wait for the current turn to finish, then try again.')
+            throw new Error(mock
+              ? 'Tool building is unavailable in this signed-out demo.'
+              : 'Could not start authoring in this conversation. Wait for the current turn to finish, then try again.')
           }
         } catch (cause) {
           // No stage POST has happened, so do not retain a pointer that would
           // silently start another turn on reconnect. A new click may retry.
           const failure = cause instanceof Error ? cause : new Error(String(cause))
           failure.authorTerminal = true
+          failure.description = initial.description
           throw failure
         }
       }

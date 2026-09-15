@@ -42,6 +42,52 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
+describe('RoutePanel demo refusals and outages', () => {
+  function mountRefusal(nextRoute) {
+    const onPickAlternative = vi.fn()
+    const onConfirmIntent = vi.fn()
+    render(<>
+      <input aria-label="Request" defaultValue="Inspect unusual geometry" />
+      <RoutePanel route={nextRoute} tools={tools} running={false} writeLocked={false}
+        onPickAlternative={onPickAlternative} onConfirmIntent={onConfirmIntent}
+        onOpenAuthor={vi.fn()} onDismiss={vi.fn()} />
+    </>)
+    return { onPickAlternative, onConfirmIntent }
+  }
+
+  it('shows the demo limit and preserves input until a catalog tool is picked', () => {
+    const callbacks = mountRefusal({ lane: 'run', tool: null, confidence: 0, stub: true, stubKind: 'demo' })
+    expect(screen.getByText('This demo matches requests against a limited tool catalog.')).toBeTruthy()
+    expect(screen.getByText('No matching tool in this demo. Try another description or browse available tools.')).toBeTruthy()
+    expect(screen.getByLabelText('Request').value).toBe('Inspect unusual geometry')
+    expect(screen.queryByRole('button', { name: /^Run/ })).toBeNull()
+    expect(screen.queryByText(/Routing is unavailable/)).toBeNull()
+    expect(callbacks.onConfirmIntent).not.toHaveBeenCalled()
+    expect(callbacks.onPickAlternative).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('option'))
+    expect(callbacks.onPickAlternative).toHaveBeenCalledWith(tools[0].name)
+    expect(callbacks.onConfirmIntent).not.toHaveBeenCalled()
+    expect(screen.getByLabelText('Request').value).toBe('Inspect unusual geometry')
+  })
+
+  it('offers only catalog picks during a live outage, even for a confident fallback', () => {
+    const callbacks = mountRefusal({ ...route, stub: true, stubKind: 'outage', stubReason: 'Connection lost' })
+    expect(screen.getByText('Routing is unavailable right now: Connection lost')).toBeTruthy()
+    expect(screen.queryByText('This demo matches requests against a limited tool catalog.')).toBeNull()
+    expect(screen.queryByRole('button', { name: /^Run/ })).toBeNull()
+    fireEvent.click(screen.getByRole('option'))
+    expect(callbacks.onPickAlternative).toHaveBeenCalledWith(tools[0].name)
+    expect(callbacks.onConfirmIntent).not.toHaveBeenCalled()
+  })
+
+  it('does not authorize a below-floor tool supplied in a route', () => {
+    const callbacks = mountRefusal({ ...route, confidence: 0.54, stubKind: 'demo' })
+    expect(screen.queryByRole('button', { name: /^Run/ })).toBeNull()
+    fireEvent.click(screen.getByRole('option'))
+    expect(callbacks.onConfirmIntent).not.toHaveBeenCalled()
+  })
+})
+
 describe('RoutePanel Enter ownership', () => {
   it.each([
     ['input', <input data-testid="editor" />],

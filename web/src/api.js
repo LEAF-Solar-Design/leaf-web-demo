@@ -13,7 +13,7 @@
 import { createRunSubmissionRequest } from './runIntent.js'
 import { runMock } from './mock/mockEngine.js'
 import { authorMock } from './mock/mockAuthor.js'
-import { matchPrompt } from './mock/mockNlPrompt.js'
+import { matchPrompt, MIN_RUN_MATCH_CONF } from './mock/mockNlPrompt.js'
 import { humanizeError } from './errorHumanize.js'
 import { groupToolsByFamily } from './mock/mockCapabilities.js'
 import { listMockCatalogTools, registerMockCatalogTool } from './mock/mockCatalog.js'
@@ -220,7 +220,7 @@ export async function nlPrompt(mock, text, tools = [], { allowSecretOnce = false
   // not on screen.
   const guard = guardedText(text, { allowSecretOnce, credentialMountAvailable: !mock })
   if (!guard.ok) throw new SecretRefusedError(guard.refusal)
-  if (mock) return { ...matchPrompt(text, tools), stub: true }
+  if (mock) return { ...matchPrompt(text, tools), stub: true, stubKind: 'demo' }
   try {
     const res = await apiFetch(`${API_BASE}/api/nl-prompt`, {
       method: 'POST',
@@ -244,8 +244,12 @@ export async function nlPrompt(mock, text, tools = [], { allowSecretOnce = false
     return route
   } catch (e) {
     if (e?.status === 401) throw e
-    // Endpoint not live yet (sibling lands it concurrently) — route locally.
-    const route = { ...matchPrompt(text, tools), stub: true, stubReason: humanizeError(e) }
+    // Local matches remain catalog suggestions while the live router is down.
+    const local = matchPrompt(text, tools)
+    const route = {
+      ...local, tool: local.confidence >= MIN_RUN_MATCH_CONF ? local.tool : null,
+      stub: true, stubKind: 'outage', stubReason: humanizeError(e),
+    }
     track('prompt.routed', {
       lane: route.lane, tool: route.tool, stub: true,
       alternatives_n: (route.alternatives || []).length,

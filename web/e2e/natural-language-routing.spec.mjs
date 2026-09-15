@@ -82,10 +82,10 @@ test('router transport loss falls back visibly to local catalog matching', async
   await page.getByRole('button', { name: 'Run', exact: true }).click()
 
   const resolver = page.getByRole('listbox', { name: 'Route resolver' })
-  await expect(resolver).toContainText('Routing service unavailable. Using local catalog matching.')
+  await expect(resolver).toContainText('Routing is unavailable right now')
   await expect(resolver).toContainText('count-panels')
   const options = resolver.getByRole('option')
-  await expect(options).toHaveCount(2)
+  await expect(options).toHaveCount(2) // The fixture catalog contains COUNT_TOOL and CAT_TOOL.
   await options.first().focus()
   await page.keyboard.press('ArrowDown')
   await expect(options.nth(1)).toBeFocused()
