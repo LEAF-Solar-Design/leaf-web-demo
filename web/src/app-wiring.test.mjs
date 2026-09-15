@@ -126,6 +126,15 @@ const DECLARED_AND_USED = [
 ]
 
 describe('App.jsx wiring', () => {
+  it('names the drawing refresh wait when interrupting a finished job', () => {
+    const start = stripped.indexOf('onInterruptRun: () => {')
+    const end = stripped.indexOf('onClearSelection:', start)
+    assert.ok(start >= 0 && end > start, 'interrupt handler must survive the transform')
+    const handler = stripped.slice(start, end)
+    assert.match(handler, new RegExp('showToast\\(result != null\\s*\\?\\s*\\{\\s*text:\\s*`Stopped waiting for the drawing to refresh after \\$\\{tool\\}\\.`'))
+    assert.match(stripped, /interruptRun,\s*currentJob\?\.tool,\s*result,\s*mock,\s*showToast/)
+  })
+
   it('acknowledges interrupting live and mock runs after detaching', () => {
     const start = stripped.indexOf('onInterruptRun: () => {')
     const end = stripped.indexOf('onClearSelection:', start)

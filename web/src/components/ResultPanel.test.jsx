@@ -8,6 +8,17 @@ import ResultPanel from './ResultPanel.jsx'
 afterEach(cleanup)
 
 describe('ResultPanel outcome fallbacks', () => {
+  it('does not call highlight overlay output empty', () => {
+    render(<ResultPanel running={false} result={{ ok: true, result: {}, overlay: { highlight_handles: ['A1'] } }} />)
+    expect(screen.queryByText('Completed with no output.')).toBeNull()
+    expect(screen.getByText('1 panel highlighted in the viewer')).toBeInTheDocument()
+  })
+
+  it('does not call files-only output empty', () => {
+    render(<ResultPanel running={false} result={{ ok: true, result: { files: [{ name: 'a.dxf' }] } }} />)
+    expect(screen.queryByText('Completed with no output.')).toBeNull()
+  })
+
   it('reports a successful run with no result', () => {
     render(<ResultPanel running={false} result={{ ok: true }} />)
     expect(screen.getByText('Completed with no output.')).toBeInTheDocument()

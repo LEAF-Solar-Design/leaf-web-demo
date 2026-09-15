@@ -300,7 +300,12 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   const cancel = () => {
     const toolId = armed ? `${armed.group}:${armed.op}` : ''
     setArmed(null)
-    if (armed) refuse(`${PROMPTS[armed.op]?.verb || 'Command'} cancelled.`)
+    if (armed) {
+      const verb = PROMPTS[armed.op]?.verb || 'Command'
+      refuse(session.busy
+        ? `${verb} prompt closed; the edit already sent will still finish.`
+        : `${verb} cancelled.`)
+    }
     // Focus returns to the tool that armed the command, where the pointer
     // or Tab was before the prompt took it.
     if (toolId && typeof document !== 'undefined') {

@@ -248,6 +248,13 @@ export default function EngineSessionProvider({
     setRefusalState(typeof sentence === 'string' ? sentence.slice(0, MAX_REACH_SENTENCE) : '')
   }, [])
   useEffect(() => { setRefusalState('') }, [session.status])
+  const actions = useMemo(() => Object.fromEntries(Object.entries(session.actions).map(([name, action]) => [
+    name,
+    (...args) => {
+      setRefusalState('')
+      return action(...args)
+    },
+  ])), [session.actions])
 
   // W4g-1b: engine reach. Fails closed on any shape outside the vocabulary
   // (a consumer bug never puts a non-sentence on the ribbon); bounded text.
@@ -277,7 +284,7 @@ export default function EngineSessionProvider({
   // A live refusal overrides only the status a consumer READS; every other
   // field (engineParsed, busy, errorKind, entities...) stays the real
   // session's own, so the reason ladders above never see a phantom refusal.
-  const sessionForConsumers = refusal ? { ...session, status: refusal } : session
+  const sessionForConsumers = { ...session, actions, ...(refusal ? { status: refusal } : {}) }
   const value = useMemo(
     () => ({
       session: sessionForConsumers, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap,

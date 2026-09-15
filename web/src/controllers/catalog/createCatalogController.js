@@ -109,7 +109,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
   }
 
   const commitDecision = (decision, { routeOutcome = 'invalidated', requestText = null } = {}) => {
-    const refused = requestText !== null && decision?.lane === 'run' &&
+    const refused = requestText !== null && decision?.lane === 'run' && decision.stubKind !== 'outage' &&
       (typeof decision.tool !== 'string' || !decision.tool.trim())
     const count = refused ? (requestText === lastRefusedText ? refusedCount + 1 : 1) : 0
     const nextDecision = count >= 2 ? { ...decision, repeat: count } : decision
@@ -359,6 +359,8 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     completeSlash(name) { setPrompt(name ? `/${name}` : '/') },
     dispatchSlash(name) { return dispatch(name ? `/${name}` : '/') },
     pickAlternative(name) {
+      lastRefusedText = null
+      refusedCount = 0
       return commitDecision(alternativeDecision(state.route, name), { routeOutcome: 'alternative_picked' })
     },
     clearRouteError() { publish({ routeError: null }) },

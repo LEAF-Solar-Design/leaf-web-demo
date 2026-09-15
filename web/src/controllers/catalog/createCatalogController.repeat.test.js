@@ -26,6 +26,31 @@ function setup() {
 afterEach(() => vi.clearAllMocks())
 
 describe('consecutive refused dispatches', () => {
+  it('resets after an alternative pick even when the host rejects the commit', async () => {
+    const { controller, adapters } = setup()
+    await controller.actions.dispatch('unmatched')
+    await controller.actions.dispatch('unmatched')
+    expect(controller.getState().route.repeat).toBe(2)
+    adapters.commitDecision.mockReturnValueOnce(undefined)
+    expect(controller.actions.pickAlternative('count-by-layer')).toBeUndefined()
+    await controller.actions.dispatch('unmatched')
+    expect(controller.getState().route).not.toHaveProperty('repeat')
+  })
+
+  it('never counts repeated routing outages or carries refusal history through them', async () => {
+    const { controller, services } = setup()
+    await controller.actions.dispatch('unmatched')
+    await controller.actions.dispatch('unmatched')
+    const outage = { ...refusal, stubKind: 'outage' }
+    services.routePrompt.mockResolvedValueOnce(outage).mockResolvedValueOnce(outage)
+    await controller.actions.dispatch('unmatched')
+    expect(controller.getState().route).not.toHaveProperty('repeat')
+    await controller.actions.dispatch('unmatched')
+    expect(controller.getState().route).not.toHaveProperty('repeat')
+    await controller.actions.dispatch('unmatched')
+    expect(controller.getState().route).not.toHaveProperty('repeat')
+  })
+
   it('commits repeat 2 and 3 for the same trimmed request', async () => {
     const { controller, adapters } = setup()
     controller.actions.setPrompt('move all panels 500 units north')

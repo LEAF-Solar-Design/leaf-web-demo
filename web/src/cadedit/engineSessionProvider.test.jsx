@@ -953,6 +953,31 @@ describe('the command prompt (W4e slice H): a tool arms, the command line asks i
 })
 
 describe('command cancellation status', () => {
+  it('clears a refusal on an action that leaves the store status unchanged', async () => {
+    const studio = mount()
+    await openAndLoad(studio, [LINE])
+    const status = screen.getByRole('status').textContent
+    const actions = studio.context.session.actions
+    act(() => studio.context.refuse('X'))
+    expect(screen.getByRole('status').textContent).toBe('X')
+    expect(studio.context.session.actions).toBe(actions)
+    act(() => studio.context.session.actions.select('e1'))
+    expect(studio.context.session.selectedId).toBe('e1')
+    expect(screen.getByRole('status').textContent).toBe(status)
+    expect(studio.context.session.actions).toBe(actions)
+  })
+
+  it('closing a busy LINE prompt says the submitted edit will still finish', async () => {
+    const studio = mount()
+    await openAndLoad(studio, [LINE])
+    fireEvent.click(document.querySelector('.drafting-ribbon [data-tool="draw:createLine"]'))
+    runPrompt()
+    expect(studio.context.session.busy).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByTestId('cockpit-prompt')).toBeNull()
+    expect(screen.getByRole('status').textContent).toBe('LINE prompt closed; the edit already sent will still finish.')
+  })
+
   it.each(['Escape', 'Cancel'])('cancelling LINE through %s removes the prompt and announces the verb', async (method) => {
     const studio = mount()
     await openAndLoad(studio, [LINE])

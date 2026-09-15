@@ -2283,7 +2283,9 @@ export default function App() {
         })
         interruptRun()
         const tool = typeof currentJob?.tool === 'string' && currentJob.tool.trim() ? currentJob.tool : 'the run'
-        showToast({ text: mock
+        showToast(result != null
+          ? { text: `Stopped waiting for the drawing to refresh after ${tool}.` }
+          : { text: mock
           ? `Stopped waiting for ${tool}.`
           : `Stopped following ${tool}. It keeps running; find it in Jobs.` })
       },
@@ -2303,7 +2305,7 @@ export default function App() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [drawer, historyOpen, route, routeErr, runErr, running, selectedHandle,
-      interruptRun, currentJob?.tool, mock, showToast, onDispatch, openProjectId, onCloseProject, rTarget,
+      interruptRun, currentJob?.tool, result, mock, showToast, onDispatch, openProjectId, onCloseProject, rTarget,
       closeHistory, loadHistory, retryTools, loadCatalog, onRetryViewerRefresh, dismissRoute, clearRouteError])
 
   // Click-to-fall-through (operator rule): a click anywhere on the surface that

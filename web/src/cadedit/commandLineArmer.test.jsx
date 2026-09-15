@@ -81,6 +81,24 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
 describe('CommandLineArmer (W4f slice B)', () => {
+  it('typed UNDO clears a preceding REDO refusal when history is available', async () => {
+    const studio = mount()
+    await openAndLoad()
+    command(parseDrawingCommand('LINE'))
+    point('0,0')
+    point('10,0')
+    workers[0].emit({ type: 'editApplied', op: 'createLine', ok: true, createdId: 'e2', entities: [LINE, { ...LINE, id: 'e2' }], entityCount: 2, bytes: new Uint8Array([48, 10]), byteLength: 2 })
+    expect(studio.context.session.undoDepth).toBe(1)
+    expect(studio.context.session.redoDepth).toBe(0)
+    const undo = vi.spyOn(studio.context.session.actions, 'undo')
+    command(parseDrawingCommand('REDO'))
+    expect(screen.getByRole('status').textContent).toBe('REDO is unavailable (nothing to redo).')
+    command(parseDrawingCommand('UNDO'))
+    expect(undo).toHaveBeenCalledTimes(1)
+    expect(studio.context.session.busy).toBe(true)
+    expect(screen.getByRole('status').textContent).not.toContain('REDO is unavailable')
+  })
+
   it.each([
     ['U', 'undo', 'UNDO is unavailable (nothing to undo).'],
     ['REDO', 'redo', 'REDO is unavailable (nothing to redo).'],
