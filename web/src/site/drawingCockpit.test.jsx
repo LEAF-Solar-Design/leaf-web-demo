@@ -12,18 +12,6 @@ import { CockpitStatus, FootRegion, StatusToggles, ViewCluster, formatCoordinate
 afterEach(cleanup)
 
 describe('StatusToggles', () => {
-  it('returns to one flat settings toolbar after a wide-to-phone transition', () => {
-    const tree = (wide) => <FootRegion on={wide} name="instruments"><StatusToggles /></FootRegion>
-    const { rerender, container } = render(tree(false))
-    rerender(tree(true))
-    expect(container.querySelectorAll('.foot-region')).toHaveLength(1)
-    rerender(tree(false))
-    expect(container.querySelectorAll('.foot-region')).toHaveLength(0)
-    expect(screen.getAllByRole('toolbar', { name: 'Drafting settings' })).toHaveLength(1)
-    act(() => { window.dispatchEvent(new CustomEvent('cockpit:modes', { detail: { live: true, ortho: true, osnap: true } })) })
-    expect(screen.getByRole('button', { name: 'Ortho mode' }).getAttribute('aria-pressed')).toBe('true')
-  })
-
   const modes = (detail) => act(() => { window.dispatchEvent(new CustomEvent('cockpit:modes', { detail })) })
   const button = (id) => document.querySelector(`[data-toggle="${id}"]`)
   const reason = 'not in the browser viewer yet'

@@ -1,12 +1,50 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import CockpitTopBand from './CockpitTopBand.jsx'
+import CockpitTopBand, { RIBBON_TABS } from './CockpitTopBand.jsx'
 import DraftingRibbon from './DraftingRibbon.jsx'
 
 afterEach(cleanup)
 
 describe('CockpitTopBand panel focus', () => {
+  it.each(RIBBON_TABS.filter((tab) => !tab.reason))('$label: Tab skips CSS-hidden controls and enters the first visible enabled control', ({ id, label }) => {
+    render(<>
+      <CockpitTopBand tab={id} />
+      <button>Details</button>
+      <DraftingRibbon tab={id}>
+        <div style={{ display: 'none' }}><button className="ribbon-tool">Hidden by display</button></div>
+        <button className="ribbon-tool" style={{ visibility: 'hidden' }}>Hidden by visibility</button>
+        <button className="ribbon-tool" disabled>Unavailable</button>
+        <button className="ribbon-tool">Visible command</button>
+      </DraftingRibbon>
+    </>)
+    const tab = screen.getByRole('tab', { name: label, exact: true })
+    tab.focus()
+    fireEvent.keyDown(tab, { key: 'Tab' })
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Visible command' }))
+  })
+
+  it.each(RIBBON_TABS.filter((tab) => !tab.reason))('$label: Tab reaches More panels with no expanded panel', ({ id, label }) => {
+    render(<><CockpitTopBand tab={id} /><DraftingRibbon tab={id} visiblePanelCount={0} clusters={[
+      { id: 'panel', label: 'Panel', tools: [{ id: 'command', label: 'Command' }] },
+    ]} /></>)
+    const tab = screen.getByRole('tab', { name: label, exact: true })
+    tab.focus()
+    fireEvent.keyDown(tab, { key: 'Tab' })
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'More panels' }))
+  })
+
+  it('Annotate with only unavailable tools focuses the panel itself', () => {
+    render(<><CockpitTopBand tab="annotate" /><button>Details</button><DraftingRibbon tab="annotate" clusters={[
+      { id: 'annotation', label: 'Annotation', tools: [{ id: 'text', label: 'Text', disabled: true, reason: 'not in the browser engine yet' }] },
+    ]} /></>)
+    const tab = screen.getByRole('tab', { name: 'Annotate' })
+    tab.focus()
+    fireEvent.keyDown(tab, { key: 'Tab' })
+    expect(document.activeElement).toBe(screen.getByRole('toolbar', { name: 'Drafting tools' }))
+    expect(screen.getByRole('button', { name: /Text/ }).disabled).toBe(true)
+  })
+
   it('Tab from Draw skips a disabled tool and the intervening Details chip', () => {
     render(<>
       <CockpitTopBand />

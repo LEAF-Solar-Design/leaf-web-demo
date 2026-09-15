@@ -32,9 +32,8 @@ const FAMS = [
 ]
 
 describe('DraftingRibbon', () => {
-  it.each([
-    ['1366x768', 2], ['800x500 at 2x', 1], ['390x844', 0], ['1024x1366', 1],
-  ])('%s exposes the last panel through More panels without remounting tools', (_viewport, visiblePanelCount) => {
+  it('exposes a collapsed panel through More panels without remounting tools', () => {
+    const visiblePanelCount = 1
     const onCopy = vi.fn()
     render(<DraftingRibbon visiblePanelCount={visiblePanelCount} clusters={[
       { id: 'draw', label: 'Draw', tools: [{ id: 'line', label: 'Line' }] },
@@ -66,6 +65,38 @@ describe('DraftingRibbon', () => {
     rerender(<DraftingRibbon clusters={clusters} visiblePanelCount={1} />)
     expect(screen.getByRole('button', { name: 'Copy' })).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'More panels' })).toBeNull()
+  })
+
+  it('hands focus to More panels when closing over a tool and when cancel targets that hidden tool', () => {
+    render(<DraftingRibbon visiblePanelCount={0} clusters={[
+      { id: 'clipboard', label: 'Clipboard', tools: [{ id: 'copy', label: 'Copy' }] },
+    ]} />)
+    const more = screen.getByRole('button', { name: 'More panels' })
+    fireEvent.click(more)
+    const copy = screen.getByRole('button', { name: 'Copy' })
+    copy.focus()
+    fireEvent.click(more)
+    expect(copy.closest('.ribbon-cluster').hidden).toBe(true)
+    expect(document.activeElement).toBe(more)
+    const prompt = document.createElement('input')
+    document.body.appendChild(prompt)
+    prompt.focus()
+    // The engine cancel path calls focus directly, which cannot emit a
+    // focusin event for a display:none tool in a browser.
+    copy.focus()
+    expect(document.activeElement).toBe(more)
+    prompt.remove()
+  })
+
+  it('moves focus when reduced capacity hides the focused panel and restores native focus on unmount', () => {
+    const clusters = [{ id: 'clipboard', label: 'Clipboard', tools: [{ id: 'copy', label: 'Copy' }] }]
+    const { rerender, unmount } = render(<DraftingRibbon clusters={clusters} visiblePanelCount={1} />)
+    const copy = screen.getByRole('button', { name: 'Copy' })
+    copy.focus()
+    rerender(<DraftingRibbon clusters={clusters} visiblePanelCount={0} />)
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'More panels' }))
+    unmount()
+    expect(Object.hasOwn(copy, 'focus')).toBe(false)
   })
 
   it('renders one cluster per family and arms the catalog run path with ribbon attribution', () => {

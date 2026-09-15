@@ -60,9 +60,18 @@ export default function CockpitTopBand({ tab = 'draw', onTab, before = [], after
       <div className="cockpit-ribbon-tabs" role="tablist" aria-label="Ribbon" onKeyDown={(event) => {
         if (event.key === 'Tab' && !event.shiftKey && event.target.getAttribute('aria-selected') === 'true') {
           const ribbon = document.getElementById('drafting-ribbon')
-          const tool = [...(ribbon?.querySelectorAll('.ribbon-tool:not(:disabled), .ribbon-more:not(:disabled)') || [])]
-            .find((element) => !element.closest('[hidden]'))
-          if (tool) { event.preventDefault(); tool.focus(); return }
+          const controls = ribbon?.querySelectorAll('button:not(:disabled), select:not(:disabled), input:not(:disabled), [tabindex="0"]') || []
+          const tool = [...controls].find((element) => {
+            if (element.closest('[hidden], [inert]')) return false
+            for (let node = element; node && node !== ribbon; node = node.parentElement) {
+              const style = getComputedStyle(node)
+              if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false
+            }
+            return true
+          })
+          // Annotate can contain only unavailable tools. Keep its panel in
+          // the keyboard path without enabling a command that does not exist.
+          if (ribbon) { event.preventDefault(); (tool || ribbon).focus(); return }
         }
         moveRovingTab(event)
       }}>

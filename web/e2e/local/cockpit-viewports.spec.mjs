@@ -28,8 +28,8 @@ async function expectSeparateTabs(page) {
   const profiles = await page.locator('.tc-product-tabs').boundingBox()
   expect(ribbon).not.toBeNull()
   expect(profiles).not.toBeNull()
-  expect(ribbon.y + ribbon.height <= profiles.y || profiles.y + profiles.height <= ribbon.y ||
-    ribbon.x + ribbon.width <= profiles.x || profiles.x + profiles.width <= ribbon.x).toBe(true)
+  expect(ribbon.y + ribbon.height + 1 <= profiles.y || profiles.y + profiles.height + 1 <= ribbon.y ||
+    ribbon.x + ribbon.width + 1 <= profiles.x || profiles.x + profiles.width + 1 <= ribbon.x).toBe(true)
 }
 
 for (const condition of conditions) {
@@ -84,6 +84,14 @@ for (const condition of conditions) {
       await expectSeparateTabs(page)
 
       const canvas = page.locator('.studio-ground .viewer-canvas canvas')
+      if (condition.viewport.width < 981) {
+        const activity = await page.locator('.studio-shell .rail-stack').boundingBox()
+        const drawing = await canvas.boundingBox()
+        const band = await ribbon.boundingBox()
+        expect(activity).not.toBeNull()
+        expect(activity.y).toBeGreaterThanOrEqual(drawing.y + drawing.height)
+        expect(activity.y).toBeGreaterThanOrEqual(band.y + band.height)
+      }
       // On narrow screens the readout overlays the drawing. On wide screens
       // its real home is the properties dock, so use the canvas itself there.
       const target = condition.viewport.width < 981
@@ -123,9 +131,9 @@ for (const condition of conditions) {
   })
 }
 
-test.describe('reference frame', () => {
-  test.use({ viewport: { width: 1920, height: 940 }, deviceScaleFactor: 1, hasTouch: false })
-  test('cockpit viewports 1920x940 preserves the W4e band edges', async ({ page, request }) => {
+for (const hasTouch of [false, true]) test.describe(`reference frame hasTouch=${hasTouch}`, () => {
+  test.use({ viewport: { width: 1920, height: 940 }, deviceScaleFactor: 1, hasTouch })
+  test(`cockpit viewports 1920x940 preserves the W4e band edges hasTouch=${hasTouch}`, async ({ page, request }) => {
     await boot(page, request)
     const edges = await page.evaluate(() => {
       const rect = (selector) => {

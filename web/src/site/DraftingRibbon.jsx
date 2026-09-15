@@ -205,7 +205,23 @@ export default function DraftingRibbon({ clusters = [], tab = 'draw', children =
     const panels = panelsRef.current
     const more = moreRef.current
     if (!ribbon || !panels || !more) return undefined
+    // A display:none descendant receives no focus event. Route direct
+    // command-cancel focus calls before the browser discards them.
+    const focusMethods = new Map()
+    const guardFocus = () => {
+      panels.querySelectorAll('button, input, select, textarea, [tabindex]').forEach((control) => {
+        if (focusMethods.has(control)) return
+        const descriptor = Object.getOwnPropertyDescriptor(control, 'focus')
+        const focus = control.focus
+        focusMethods.set(control, descriptor)
+        control.focus = function (options) {
+          if (control.closest('.ribbon-cluster[hidden]')) more.focus(options)
+          else focus.call(control, options)
+        }
+      })
+    }
     const measure = () => {
+      guardFocus()
       if (open) {
         if (ribbon.clientWidth !== measuredWidthRef.current) {
           more.focus()
@@ -241,7 +257,13 @@ export default function DraftingRibbon({ clusters = [], tab = 'draw', children =
     const mutations = new MutationObserver(measure)
     mutations.observe(panels, { childList: true, subtree: true })
     window.addEventListener('resize', measure)
-    return () => { observer?.disconnect(); mutations.disconnect(); window.removeEventListener('resize', measure) }
+    return () => {
+      observer?.disconnect(); mutations.disconnect(); window.removeEventListener('resize', measure)
+      focusMethods.forEach((descriptor, control) => {
+        if (descriptor) Object.defineProperty(control, 'focus', descriptor)
+        else delete control.focus
+      })
+    }
   }, [clusters, children, tab, visiblePanelCount, open])
   useLayoutEffect(() => {
     if (!open) return
@@ -255,6 +277,7 @@ export default function DraftingRibbon({ clusters = [], tab = 'draw', children =
       id="drafting-ribbon"
       className="drafting-ribbon"
       role="toolbar"
+      tabIndex={-1}
       aria-label="Drafting tools"
       data-testid="drafting-ribbon"
       data-tab={tab}

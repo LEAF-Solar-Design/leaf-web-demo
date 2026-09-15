@@ -828,13 +828,15 @@
 }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drafting-ribbon[data-overflow-open="true"] .ribbon-tool[data-size="large"] { height: 76px; }
 @media (max-width: 1499px) {
+  .studio-shell .cockpit-band { display: flex; align-items: center; flex-wrap: nowrap; height: var(--ck-top); min-width: 0; }
+  .studio-shell .cockpit-band > * { flex-shrink: 0; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) { --ck-canvas-top: 183px; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-nav {
     position: static; height: 28px; min-height: 28px; box-sizing: border-box;
     margin: 0; padding: 0 4px; display: flex; align-items: center;
     overflow-x: auto; flex-wrap: nowrap; background: var(--ck-chrome);
   }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs { flex-wrap: nowrap; flex-shrink: 0; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs { flex-wrap: nowrap; flex-shrink: 0; height: 22px; min-height: 0; margin: 0; padding: 0; box-sizing: border-box; }
   .studio-shell .cockpit-ribbon-tabs { margin-left: 8px; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drafting-ribbon { overflow: hidden; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool-label {
@@ -850,7 +852,7 @@
 @media (min-width: 981px) and (max-width: 1499px) {
   .studio-shell:has(.app:is([data-surface="cad"], [data-surface="solar"])) .studio-ground { top: 183px; }
 }
-@media (pointer: coarse), (max-width: 980px) {
+@media (pointer: coarse) and (max-width: 1499px), (max-width: 980px) {
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) { --ck-ribbon: 151px; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool,
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-status-toggles button {
@@ -873,16 +875,33 @@
   }
   .studio-shell:has(.app:is([data-surface="cad"], [data-surface="solar"])) { overflow: hidden; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) header.top { height: 88px; align-items: flex-start; position: fixed; inset: 0 0 auto; z-index: 45; }
-  .studio-shell .cockpit-band { display: flex; flex-direction: column; flex: 0 0 auto; width: calc(100vw - 20px); min-width: 0; }
+  .studio-shell .cockpit-band { display: flex; flex-direction: column; align-items: stretch; flex: 0 0 auto; height: 88px; width: calc(100vw - 20px); min-width: 0; }
   .studio-shell .cockpit-quick { height: 44px; flex-shrink: 0; }
   .studio-shell .cockpit-ribbon-tabs { height: 44px; margin-left: 0; overflow-x: auto; flex-shrink: 0; }
   .studio-shell .cockpit-ribbon-tabs [role="tab"] { padding: 0 10px; min-width: 44px; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-nav { height: 44px; min-height: 44px; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .center-col { position: absolute; inset: 88px 0 46px; min-height: 0; overflow: hidden; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs { height: 42px; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .center-col { position: absolute; inset: 88px 0 100px; min-height: 0; overflow: hidden; }
+  /* Collapsed activity headings occupy their own strip below the drawing,
+     above the command input. The grid's auto placement cannot cover tools. */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) > .rail-stack {
+    position: fixed; inset: auto 0 76px; height: 24px; min-height: 0;
+    display: flex; flex-direction: row; gap: 8px; overflow: hidden;
+    background: var(--ck-chrome); z-index: 3;
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) > .rail-stack > * {
+    position: static; flex: 0 0 auto; height: 24px; min-height: 0; max-height: 24px;
+    margin: 0; padding: 0 4px; border: 0; overflow: hidden;
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) > .rail-stack h2 { margin: 0; line-height: 24px; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) main.center-scroll { min-height: 0; padding: 0; }
   .studio-shell:has(.app:is([data-surface="cad"], [data-surface="solar"])) .studio-ground { inset: 315px 0 100px; }
   .studio-shell .selection-readout { position: fixed; left: 14px; bottom: 110px; pointer-events: none; }
   .studio-shell .selection-readout :is(button, a, input, select, textarea, [tabindex]) { pointer-events: auto; }
+  /* The empty result card overlaps the phone readout too. Its text must
+     pass drawing taps through, while its real controls remain usable. */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .result-block { pointer-events: none; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .result-block :is(button, a, input, select, textarea, [tabindex]) { pointer-events: auto; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar {
     position: fixed; left: 0; right: 0; bottom: 0; height: 46px; min-height: 46px;
     display: flex; flex-wrap: nowrap; overflow-x: auto; padding: 0 4px; gap: 4px;
