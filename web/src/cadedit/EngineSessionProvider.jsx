@@ -142,6 +142,8 @@ export default function EngineSessionProvider({
   // a change, with a boolean.
   onDirtyChange = null,
   onBeforeEdit = null,
+  // Called once before a valid non-null command is stored; return false to refuse it (nothing is stored).
+  onBeforeArm = null,
   children,
 }) {
   // No identity provider means no drawing identity, which is a real state
@@ -182,6 +184,8 @@ export default function EngineSessionProvider({
 
   // The armed command: null, or { group, op }. Fails closed on any other
   // shape (a consumer bug never leaves the prompt pointing at a non-command).
+  const onBeforeArmRef = useRef(onBeforeArm)
+  onBeforeArmRef.current = onBeforeArm
   const setArmedState = useCallback((next) => {
     setEditState((current) => current.armed === next ? current : { ...current, armed: next })
   }, [])
@@ -197,6 +201,7 @@ export default function EngineSessionProvider({
       && next.from.every((v) => typeof v === 'number' && Number.isFinite(v))
       ? Object.freeze([next.from[0], next.from[1]])
       : null
+    if (onBeforeArmRef.current?.() === false) return
     setEditState((current) => {
       const previous = current.armed
       if (!rearm && previous && previous.group === group && previous.op === op && sameFrom(previous.from, from)) return current

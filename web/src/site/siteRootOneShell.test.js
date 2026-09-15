@@ -25,6 +25,8 @@ export function stripComments(src) {
 
 const read = (rel) => stripComments(raw(rel))
 
+const viewerPortalPattern = /studioGround\s*\?\s*createPortal\(<div className="studio-ground-viewer"[\s\S]{0,600}?\bhidden=\{effectiveGround !== 'drawing' && leavingGround !== 'drawing'\}[\s\S]{0,600}?>\{viewerEl\}<\/div>,\s*studioGround\)\s*:\s*viewerEl/
+
 // The studio-shell JSX block: from the host div to the rollback arm.
 function studioArm(src) {
   const start = src.indexOf('<div className="studio-shell"')
@@ -81,7 +83,7 @@ describe('App portal wiring', () => {
 
   it('renders the Viewer through the ground portal ONLY when a ground exists', () => {
     expect(src).toMatch(/const studioGround = useStudioGround\(\)/)
-    expect(src).toMatch(/studioGround\s*\n?\s*\? createPortal\(<div className="studio-ground-viewer" hidden=\{boardVisible \|\| !groundShowsDrawing\(activeSurface\)\}>\{viewerEl\}<\/div>, studioGround\)\s*\n?\s*: viewerEl/)
+    expect(src).toMatch(viewerPortalPattern)
   })
 
   it('mounts the surface grounds ONLY through the ground portal (rail OFF has no ground, so none of it)', () => {
@@ -163,8 +165,9 @@ describe('falsification', () => {
   })
 
   it('a portal without the null-ground inline fallback fails the portal pin', () => {
+    expect(read('../App.jsx')).toMatch(viewerPortalPattern)
     const mutated = read('../App.jsx').replace(': viewerEl', ': null')
-    expect(mutated).not.toMatch(/\? createPortal\(<div className="studio-ground-viewer" hidden=\{boardVisible \|\| !groundShowsDrawing\(activeSurface\)\}>\{viewerEl\}<\/div>, studioGround\)\s*\n?\s*: viewerEl/)
+    expect(mutated).not.toMatch(viewerPortalPattern)
   })
 
   it('an inline (unguarded) SurfaceGrounds fails the portal-only pin', () => {

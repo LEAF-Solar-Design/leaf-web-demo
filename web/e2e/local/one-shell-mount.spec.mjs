@@ -188,7 +188,8 @@ test.describe('route matrix, rail ON', () => {
       const line = page.locator('[data-tool="draw:createLine"]')
       await expect(line).toBeEnabled({ timeout: 30_000 })
       await line.evaluate((node) => node.addEventListener('click', () => {
-        node.dataset.returnedBeforeAction = String(document.querySelector('[data-ground="browser"]').hidden
+        const board = document.querySelector('[data-ground="browser"]')
+        node.dataset.returnedBeforeAction = String((board.hidden || board.hasAttribute('inert'))
           && !document.querySelector('[data-testid="cockpit-prompt"]'))
       }, { once: true }))
       await line.click()
@@ -2106,6 +2107,200 @@ test.describe('route matrix, rail ON', () => {
     await bar.press('Enter')
     await sentenceRoute
     await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
+  })
+
+  test('W4g bleed-2a: CAD and Solar CAD keep one canvas, one WebGL context and the camera', async ({ page, request }) => {
+    test.setTimeout(120_000)
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    await page.goto('/app?surface=cad&drawing=cat-panels')
+    const viewer = page.locator('.studio-ground .viewer-canvas')
+    const canvas = viewer.locator('canvas')
+    const safeRectPattern = /^\d+,\d+,\d+,\d+$/
+    await expect.poll(() => canvas.count(), { timeout: 30_000 }).toBe(1)
+    await expect.poll(() => viewer.getAttribute('data-safe-rect')).toMatch(safeRectPattern)
+
+    const ribbon = page.getByTestId('drafting-ribbon')
+    const engine = await request.get('/engine/engine.js').catch(() => null)
+    const cadEditOn = (await ribbon.locator('[data-group="modify"]').count()) > 0
+    if (engine && engine.status() === 200 && cadEditOn) {
+      // Opening the engine head replaces the initial intake's canvas once.
+      await expect.poll(() => page.locator('.workspace-card').getAttribute('data-engine-document'), { timeout: 60_000 }).toMatch(/\S+/)
+    }
+    const settleFrames = () => page.evaluate(() => new Promise((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(resolve))
+    }))
+    await page.evaluate(() => new Promise((resolve, reject) => {
+      const selector = '.studio-ground .viewer-canvas canvas'
+      let current = document.querySelector(selector)
+      let stableSince = performance.now()
+      let frame
+      const timeout = setTimeout(() => {
+        cancelAnimationFrame(frame)
+        reject(new Error('Canvas did not remain stable for 500 ms within 15 s'))
+      }, 15_000)
+      const check = (now) => {
+        const next = document.querySelector(selector)
+        if (next !== current || !next) {
+          current = next
+          stableSince = now
+        }
+        if (current && now - stableSince >= 500) {
+          clearTimeout(timeout)
+          resolve()
+          return
+        }
+        frame = requestAnimationFrame(check)
+      }
+      frame = requestAnimationFrame(check)
+    }))
+    await canvas.evaluate((el) => { el.__bleed2a = 1 })
+    const readPose = () => viewer.evaluate((el) => el.__cadviewer.cameraPose())
+    const cadPose = await readPose()
+    const expectSameCanvas = async () => {
+      await expect.poll(() => canvas.count()).toBe(1)
+      await expect.poll(() => canvas.evaluate((el) => el.__bleed2a)).toBe(1)
+      await expect.poll(() => canvas.evaluate((el) => {
+        const context = el.getContext('webgl2') || el.getContext('webgl')
+        return context ? context.isContextLost() : null
+      })).toBe(false)
+    }
+
+    await page.getByRole('tab', { name: 'Solar CAD', exact: true }).click()
+    await expect.poll(() => page.locator('.app[data-surface="solar"]').count()).toBe(1)
+    await settleFrames()
+    await expectSameCanvas()
+    await expect.poll(readPose).toEqual(cadPose)
+
+    await page.getByRole('tab', { name: 'CAD', exact: true }).click()
+    await expect.poll(() => page.locator('.app[data-surface="cad"]').count()).toBe(1)
+    await settleFrames()
+    await expectSameCanvas()
+    await expect.poll(readPose).toEqual(cadPose)
+
+    await page.getByRole('tab', { name: 'Browser', exact: true }).click()
+    await expect.poll(() => page.locator('.app[data-surface="browser"]').count()).toBe(1)
+    await settleFrames()
+    await page.getByRole('tab', { name: 'CAD', exact: true }).click()
+    await expect.poll(() => page.locator('.app[data-surface="cad"]').count()).toBe(1)
+    await settleFrames()
+    await expectSameCanvas()
+    await expect.poll(() => viewer.getAttribute('data-safe-rect')).toMatch(safeRectPattern)
+  })
+
+  test('W4g bleed-2b: profile switches settle, fade inertly and keep one canvas', async ({ page, request }) => {
+    test.setTimeout(120_000)
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    await page.emulateMedia({ reducedMotion: 'no-preference' })
+    await page.goto('/app?surface=cad&drawing=cat-panels')
+    await expectOneCanvasIn(page, '.studio-ground')
+    const ribbon = page.getByTestId('drafting-ribbon')
+    const engine = await request.get('/engine/engine.js').catch(() => null)
+    const cadEditOn = (await ribbon.locator('[data-group="modify"]').count()) > 0
+    if (engine && engine.status() === 200 && cadEditOn) {
+      await expect.poll(() => page.locator('.workspace-card').getAttribute('data-engine-document'), { timeout: 60_000 }).toMatch(/\S+/)
+    }
+    await page.evaluate(() => new Promise((resolve, reject) => {
+      const selector = '.studio-ground .viewer-canvas canvas'
+      let current = document.querySelector(selector)
+      let stableSince = performance.now()
+      let frame
+      const timeout = setTimeout(() => {
+        cancelAnimationFrame(frame)
+        reject(new Error('Canvas did not remain stable for 500 ms within 15 s'))
+      }, 15_000)
+      const check = (now) => {
+        const next = document.querySelector(selector)
+        if (next !== current || !next) {
+          current = next
+          stableSince = now
+        }
+        if (current && now - stableSince >= 500) {
+          clearTimeout(timeout)
+          resolve()
+          return
+        }
+        frame = requestAnimationFrame(check)
+      }
+      frame = requestAnimationFrame(check)
+    }))
+    await page.locator('.studio-ground .viewer-canvas canvas').evaluate((canvas) => { canvas.__bleed2a = 1 })
+    await page.evaluate(() => {
+      const recorder = { leaving: [], phases: [], started: 0, settled: null }
+      window.__bleed2b = recorder
+      document.addEventListener('click', (event) => {
+        if (event.target.closest('[role="tab"][data-surface]')) window.__bleed2b.started = performance.now()
+      }, true)
+      const record = (records) => {
+        for (const mutation of records) {
+          const name = mutation.attributeName
+          const value = mutation.target.getAttribute(name)
+          if (value || mutation.oldValue) recorder.phases.push({ name, value, oldValue: mutation.oldValue })
+        }
+        for (const ground of document.querySelectorAll('[data-ground-phase="leaving"]')) {
+          recorder.leaving.push({
+            ariaHidden: ground.getAttribute('aria-hidden') === 'true',
+            inert: ground.hasAttribute('inert'),
+            painted: !ground.hidden,
+          })
+        }
+        if (!document.querySelector('[data-ground-phase], [data-studio-transition]')) recorder.settled = performance.now()
+      }
+      const observer = new MutationObserver(record)
+      for (const root of [document.querySelector('.studio-ground'), document.querySelector('.app')]) {
+        observer.observe(root, { subtree: true, attributes: true, attributeOldValue: true, attributeFilter: ['data-ground-phase', 'data-studio-transition'] })
+      }
+      window.__bleed2bObserver = observer
+    })
+    const resetRecorder = () => page.evaluate(() => {
+      Object.assign(window.__bleed2b, { leaving: [], phases: [], started: 0, settled: null })
+    })
+    const expectSettled = async (surface, motion) => {
+      await expect(page.locator('.app[data-surface="' + surface + '"]')).toHaveCount(1)
+      await expect(page.locator('[data-ground-phase], [data-studio-transition]')).toHaveCount(0, { timeout: 500 })
+      const receipt = await page.evaluate(() => window.__bleed2b)
+      if (motion) {
+        expect(receipt.leaving.length).toBeGreaterThan(0)
+        expect(receipt.leaving.every((ground) => ground.ariaHidden && ground.inert && ground.painted)).toBe(true)
+        expect(receipt.settled).not.toBeNull()
+        expect(receipt.started).toBeGreaterThan(0)
+        // Fake-timer unit rows pin exact timings; this sequence settles within a second of the page click on a loaded host.
+        expect(receipt.settled - receipt.started).toBeLessThanOrEqual(1000)
+      } else {
+        expect(receipt.phases).toEqual([])
+        expect(receipt.leaving).toEqual([])
+      }
+    }
+    for (const [name, surface] of [['Browser', 'browser'], ['CAD', 'cad']]) {
+      await resetRecorder()
+      await page.getByRole('tab', { name, exact: true }).click()
+      await expectSettled(surface, true)
+    }
+    await resetRecorder()
+    await page.evaluate(() => new Promise((resolve) => {
+      document.querySelector('[role="tab"][data-surface="browser"]').click()
+      setTimeout(() => {
+        document.querySelector('[role="tab"][data-surface="cad"]').click()
+        resolve()
+      }, 40)
+    }))
+    await expect(page.locator('.app[data-surface="cad"]')).toHaveCount(1)
+    await expect(page.locator('[data-ground-phase], [data-studio-transition]')).toHaveCount(0, { timeout: 500 })
+    const reversal = await page.evaluate(() => window.__bleed2b)
+    expect(reversal.settled).not.toBeNull()
+    expect(reversal.started).toBeGreaterThan(0)
+    // Fake-timer unit rows pin exact timings; this sequence settles within a second of the page click on a loaded host.
+    expect(reversal.settled - reversal.started).toBeLessThanOrEqual(1000)
+    expect(await page.locator('.studio-ground .viewer-canvas canvas').evaluate((canvas) => canvas.__bleed2a)).toBe(1)
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    for (const [name, surface] of [['Browser', 'browser'], ['CAD', 'cad']]) {
+      await resetRecorder()
+      await page.getByRole('tab', { name, exact: true }).click()
+      await expectSettled(surface, false)
+    }
+    expect(await page.locator('.studio-ground .viewer-canvas canvas').evaluate((canvas) => canvas.__bleed2a)).toBe(1)
+    await page.evaluate(() => window.__bleed2bObserver.disconnect())
   })
 
   test('W4g-7b-02c: INSERT of an existing block, on the real engine', async ({ page, request }) => {

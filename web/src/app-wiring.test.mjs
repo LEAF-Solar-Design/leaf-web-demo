@@ -18,6 +18,104 @@ import { describe, it } from 'node:test'
 import esbuild from 'esbuild'
 
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
+const viewerSource = readFileSync(new URL('./components/Viewer.jsx', import.meta.url), 'utf8')
+
+describe('W4g bleed-2b: profile presentation preserves the engine document', () => {
+  it('mounts the head opener after the engine document under its own studio and engine gates', () => {
+    const ribbonEnd = appSource.indexOf('</DraftingRibbon>')
+    const engine = appSource.indexOf('<EngineDocumentView')
+    const opener = appSource.indexOf('<EngineHeadOpener')
+    const guard = appSource.lastIndexOf('{ENV_CAD_EDIT && studioGround && (', opener)
+    assert.equal(appSource.split('<EngineHeadOpener').length - 1, 1)
+    assert.ok(ribbonEnd >= 0 && engine >= 0)
+    assert.ok(opener > ribbonEnd && opener > engine)
+    assert.ok(guard >= 0)
+    assert.doesNotMatch(appSource.slice(guard, opener), /</)
+  })
+  it('mounts the engine document after the drafting ribbon under the studio and engine gates', () => {
+    const ribbonStart = appSource.indexOf('{studioGround && drafting && (')
+    const ribbonEnd = appSource.indexOf('</DraftingRibbon>', ribbonStart)
+    const engine = appSource.indexOf('<EngineDocumentView')
+    assert.ok(ribbonStart >= 0 && ribbonEnd > ribbonStart)
+    assert.ok(engine > ribbonEnd)
+    assert.match(appSource.slice(ribbonEnd, engine), new RegExp('\\)\\}\\s*[\\s\\S]*?\\{ENV_CAD_EDIT && studioGround && \\(\\s*$'))
+    assert.equal(appSource.split('<EngineDocumentView').length - 1, 1)
+  })
+  it('closes Start before requesting a profile and commits the URL with the state', () => {
+    const selectStart = appSource.indexOf('const onSelectSurface =')
+    const selectEnd = appSource.indexOf('[returnToDrawing, request])', selectStart)
+    assert.ok(selectStart >= 0 && selectEnd > selectStart)
+    const select = appSource.slice(selectStart, selectEnd)
+    assert.match(select, /returnToDrawing\(\)\s+request\(id\)/)
+    assert.doesNotMatch(select, /setActiveSurface|replaceState/)
+    const commitStart = appSource.indexOf('const onCommit =')
+    const commitEnd = appSource.indexOf('}, [])', commitStart)
+    assert.ok(commitStart >= 0 && commitEnd > commitStart)
+    const commit = appSource.slice(commitStart, commitEnd)
+    assert.match(commit, /setActiveSurface\(id\)/)
+    assert.match(commit, /searchForProductSurface\(window\.location\.search, id\)/)
+    assert.match(commit, /window\.history\.replaceState/)
+    assert.match(appSource, /committed: activeSurface, onCommit, isDrafting: groundShowsDrawing/)
+  })
+  it('settles presentation at drawing actions and exposes phases only in the studio', () => {
+    assert.match(appSource, new RegExp('<EngineSessionProvider[^>]+onBeforeEdit=\\{closeStartForChange\\}\\s+onBeforeArm=\\{onBeforeArm\\}'))
+    assert.match(appSource, new RegExp('const \\{ phase, request, settle, exitPending \\} = useStudioTransition\\('))
+    const clickStart = appSource.indexOf('onClickCapture=')
+    const clickEnd = appSource.indexOf('onChangeCapture=', clickStart)
+    assert.ok(clickStart >= 0 && clickEnd > clickStart)
+    const click = appSource.slice(clickStart, clickEnd)
+    assert.match(click, new RegExp('if \\(exitPending\\(\\)\\) \\{\\s*event\\.preventDefault\\(\\);\\s*event\\.stopPropagation\\(\\);\\s*return\\s*\\}\\s*settle\\(\\)\\s+returnToDrawing\\(\\)'))
+    assert.match(click, /settle\(\)\s+returnToDrawing\(\)/)
+    const armStart = appSource.indexOf('const onBeforeArm = useCallback(')
+    const armEnd = appSource.indexOf('}, [', armStart)
+    assert.ok(armStart >= 0 && armEnd > armStart)
+    assert.match(appSource.slice(armStart, armEnd), /if \(exitPending\(\)\) return false\s+settle\(\)\s+return true/)
+    const start = appSource.indexOf('const closeStartForChange =')
+    const end = appSource.indexOf('const onReturnToDrawing =', start)
+    assert.match(appSource.slice(start, end), /settle\(\)/)
+    assert.match(appSource, new RegExp("data-studio-transition=\\{studioGround && phase !== 'idle' \\? phase : undefined\\}"))
+    assert.match(appSource, /const effectiveGround = studioGround \? \(boardVisible \? 'board' : surfaceGround\(activeSurface\)\) : null/)
+    assert.match(appSource, /const leavingGround = useLeavingGround\(effectiveGround\)/)
+    assert.match(appSource, new RegExp('leavingGround=\\{leavingGround\\}'))
+    const viewer = appSource.slice(appSource.indexOf('? createPortal(<div className="studio-ground-viewer"'), appSource.indexOf(': viewerEl', appSource.indexOf('? createPortal(<div className="studio-ground-viewer"')))
+    assert.match(viewer, /data-ground-phase=/)
+    assert.match(viewer, /aria-hidden=/)
+    assert.match(viewer, /inert=/)
+  })
+  it('leaving studio chrome takes no pointer', () => {
+    const css = readFileSync(new URL('./site/landing.css', import.meta.url), 'utf8')
+    const selector = '.studio-shell .app[data-studio-transition="out"] :is('
+    const start = css.indexOf(selector)
+    assert.ok(start >= 0)
+    const open = css.indexOf('{', start)
+    const close = css.indexOf('}', open)
+    assert.ok(open > start && close > open)
+    assert.match(css.slice(open + 1, close), /pointer-events:\s*none\s*;/)
+  })
+})
+
+describe('W4g bleed-2a: one canvas across CAD and Solar CAD', () => {
+  it('passes a palette revision to the studio viewer', () => {
+    const viewer = appSource.slice(appSource.indexOf('const viewerEl = ('), appSource.indexOf('const legendEl ='))
+    assert.match(viewer, /paletteRevision=\{studioGround \? \(surfaceSlots\.groundMaterial\.layerAccent === 'solar' \? 'solar' : 'base'\) : undefined\}/)
+    assert.match(viewer, /colorForLayer=\{studioGround \? studioColorForLayer : surfaceColorForLayer\}/)
+  })
+  it('keeps the studio colour callback stable through its render-time ref', () => {
+    assert.match(appSource, /surfaceColorForLayerRef\.current = surfaceColorForLayer/)
+    assert.match(appSource, /const studioColorForLayer = useCallback\(\(layer\) => surfaceColorForLayerRef\.current\(layer\), \[\]\)/)
+  })
+  it('only rebuilds for callback identity when no revision is supplied', () => {
+    assert.ok(!viewerSource.includes('[activeIntake, colorForLayer, background, panelSculpture]'))
+    assert.ok(viewerSource.includes('paletteRevision === undefined'))
+  })
+  it('exports the in-place layer recolouring helper', () => {
+    assert.match(viewerSource, /export function recolorLayerGroups\(/)
+  })
+  it('ignores zero-size resize notifications before resizing the renderer', () => {
+    assert.match(viewerSource, new RegExp('function onResize\\(\\)\\s*\\{\\s*const w = mount\\.clientWidth, h = mount\\.clientHeight\\s*if \\(!\\(w > 0\\) \\|\\| !\\(h > 0\\)\\) return\\s*renderer\\.setSize\\('))
+  })
+})
+
 const appNoComments = decomment(appSource)
 const stripped = esbuild.transformSync(appSource, { loader: 'jsx' }).code
 describe('studio unobstructed drawing viewport', () => {
