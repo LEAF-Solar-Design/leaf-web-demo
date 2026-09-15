@@ -1836,7 +1836,10 @@ test.describe('route matrix, rail ON', () => {
     page.off('request', onPointRoute)
 
     // Resolve the same handle again through the workbench, not just the
-    // create's automatic selection, without changing either count.
+    // create's automatic selection, without changing either count. Both
+    // orders of the mixed loop above end on the segment (10,0) -> (20,0),
+    // so the chained handle's dock geometry reads that segment.
+    const entitiesBeforeReselect = (await cockpitCount.textContent()).match(/([\d,]+) entities/)[1]
     await dock.getByRole('button', { name: 'Deselect', exact: true }).click()
     const chainedId = await page.evaluate(() => window.__commandPointResult.id)
     await page.getByRole('tab', { name: 'Insert' }).click()
@@ -1846,8 +1849,8 @@ test.describe('route matrix, rail ON', () => {
     if (!importWasOpen) await importBtn.click()
     await expect(dock.locator('.sel-field').filter({ has: page.locator('dt', { hasText: /^Layer$/ }) }).locator('dd')).toHaveText(createdLayer)
     await expect(dock.getByTestId('dock-geometry').locator('dt', { hasText: /^Start$/ }).locator('+ dd')).toHaveText('10.00, 0.00')
-    await expect(dock.getByTestId('dock-geometry').locator('dt', { hasText: /^End$/ }).locator('+ dd')).toHaveText('10.00, 10.00')
-    await expect(cockpitCount).toContainText(new RegExp('(^|[^\\d,])' + (drawingCountBeforeLine + 2).toLocaleString('en-US') + ' entities'))
+    await expect(dock.getByTestId('dock-geometry').locator('dt', { hasText: /^End$/ }).locator('+ dd')).toHaveText('20.00, 0.00')
+    await expect(cockpitCount).toContainText(new RegExp('(^|[^\\d,])' + entitiesBeforeReselect + ' entities'))
 
     // A one-unit LINE far from the current drawing is sub-pixel at the
     // viewer's automatic full fit. The dock must reveal that exact result.
