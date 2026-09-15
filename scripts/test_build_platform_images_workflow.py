@@ -3037,18 +3037,38 @@ def main() -> None:
     # keyed on the build job's own digest is bypassed three ways, all live:
     # an adopted merge skips the whole matrix, the resume arm skips
     # build-image when the exact tags exist, and the surface-reuse arm does
-    # the same. Reading the supply-set artifact is what makes this
-    # bypass-proof, so the download and the digest resolve are both pinned.
+    # the same. Reading the supply set is what makes this bypass-proof,
+    # so the S3 read and the digest resolve are both pinned.
     assert harvest["needs"] == ["prepare", "verify", "adopt"]
-    download = next(
-        s for s in harvest_steps
-        if str(s.get("uses", "")).startswith("actions/download-artifact@")
+    # S3 avoids the shared 500 MB Actions cap that caused run 34643249943
+    # to die on "Artifact not found" with all scans skipped, UNAVAILABLE not RED.
+    assert not any(
+        str(s.get("uses", "")).startswith("actions/download-artifact@")
+        for s in harvest_steps
     )
-    assert download["with"]["name"] == "${{ env.SUPPLY_SET }}"
-    assert harvest["env"]["SUPPLY_SET"] == (
-        "staging-supply-set-${{ needs.prepare.outputs.source_sha }}"
-        "-attempt-${{ github.run_attempt }}"
-    )
+    assert "SUPPLY_SET" not in harvest["env"]
+    assert harvest["env"]["SOURCE_SHA"] == "${{ needs.prepare.outputs.source_sha }}"
+    read = _sole_named(harvest_steps, "Read the staging supply set this run published from S3")
+    read_code = _executable_bash(read["run"])
+    assert ('key="${MQ_TRANSPORT_PREFIX}release/$SOURCE_SHA/'
+            '$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/staging-supply-set.json"') in read_code
+    assert "--checksum-mode ENABLED" in read_code
+    assert "openssl dgst -sha256 -binary supply-set/staging-supply-set.json" in read_code
+    # Cross-check the producer against the runner because the producer IS this run.
+    for field in (
+        '.Metadata["run-id"] == $run',
+        '.Metadata["run-attempt"] == $attempt',
+        '.Metadata["head-sha"] == $source',
+        '.Metadata["repository-id"] == $repo',
+        '.Metadata["workflow-ref"] == $workflow',
+        ".Metadata.event == $event",
+    ):
+        assert field in read_code, field
+    assert "aws s3api list-objects-v2" not in read_code
+    names = [s.get("name") for s in harvest_steps]
+    assert (names.index("Configure AWS credentials (OIDC)")
+            < names.index("Read the staging supply set this run published from S3")
+            < names.index("Resolve the five immutable digests to scan"))
     resolve = next(s for s in harvest_steps if s.get("id") == "digests")
     assert "leaf.staging-supply-set.v3" in resolve["run"]
 
@@ -7979,6 +7999,73 @@ def test_mq_transport_duplicate_guard_documents_jam_and_squat() -> None:
     assert "attempt-2 jam" in evidence["run"]
     assert "permanent squat" in evidence["run"]
     assert "admin purge" in evidence["run"]
+
+
+def test_mq_release_supply_set_is_published_by_both_producers() -> None:
+    """Both producer arms publish the key CVE harvest reads (run 34643249943)."""
+    doc = _strict_yaml(WORKFLOW.read_text(encoding="utf-8"))
+    puts = []
+    for producer in ("verify", "adopt"):
+        job = doc["jobs"][producer]
+        steps = job["steps"]
+        found = [
+            s for s in steps
+            if s.get("name") == "Put release staging-supply-set.json to S3"
+        ]
+        assert len(found) == 1, producer
+        put = found[0]
+        puts.append(put)
+        code = _executable_bash(put["run"])
+        assert code.startswith("set -euo pipefail\n")
+        key = ('key="${MQ_TRANSPORT_PREFIX}release/$SOURCE_SHA/'
+               '$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/staging-supply-set.json"')
+        assert key in code
+        for variable, pattern in (
+            ("SOURCE_SHA", "^[0-9a-f]{40}$"),
+            ("GITHUB_RUN_ID", "^[1-9][0-9]*$"),
+            ("GITHUB_RUN_ATTEMPT", "^[1-9][0-9]*$"),
+        ):
+            guard = '[[' + f' "${variable}" =~ {pattern} ]] || exit 1'
+            assert guard in code
+            assert code.index(guard) < code.index(key) < code.index("aws s3api put-object")
+        logical = code.replace("\\\n", "")
+        command = next(l for l in logical.splitlines() if l.startswith("aws s3api put-object"))
+        for flag in (
+            '--bucket "$MQ_TRANSPORT_BUCKET"', '--key "$key"',
+            '--body "$RUNNER_TEMP/staging-supply-set.json"', "--if-none-match '*'",
+            "--checksum-algorithm SHA256",
+            '--metadata "run-id=$GITHUB_RUN_ID,run-attempt=$GITHUB_RUN_ATTEMPT,'
+            'workflow-ref=$GITHUB_WORKFLOW_REF,repository-id=$GITHUB_REPOSITORY_ID,'
+            'head-sha=$SOURCE_SHA,event=$GITHUB_EVENT_NAME"',
+        ):
+            assert flag in command, (producer, flag)
+        assert logical.splitlines()[-1] == command
+        assert "||" not in command and "&&" not in command
+        uploads = [
+            s for s in steps
+            if s.get("name") == "Upload immutable staging supply-set manifest"
+        ]
+        assert len(uploads) == 1, producer
+        upload = uploads[0]
+        assert steps.index(put) + 1 == steps.index(upload)
+        assert job["env"]["SOURCE_SHA"] == "${{ needs.prepare.outputs.source_sha }}"
+        if producer == "verify":
+            assert set(put) == {"name", "run"}
+            # The staging relay still reads the artifact and has no S3 path,
+            # so a failed upload must redden the run rather than strand it.
+            assert "continue-on-error" not in upload
+    assert puts[0]["run"] == puts[1]["run"]
+
+
+def test_every_artifact_upload_declares_bounded_retention() -> None:
+    # The 90-day default is a defect on sight under the shared 500 MB cap.
+    doc = _strict_yaml(WORKFLOW.read_text(encoding="utf-8"))
+    for job_name, job in doc["jobs"].items():
+        for step in job.get("steps", []):
+            if step.get("uses") == "actions/upload-artifact@v4":
+                options = step["with"]
+                assert "retention-days" in options, (job_name, step)
+                assert 1 <= options["retention-days"] <= 30, (job_name, step)
 
 
 def _mq_release_pairs(doc):
