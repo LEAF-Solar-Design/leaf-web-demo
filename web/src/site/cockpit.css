@@ -850,7 +850,14 @@
   }
 }
 @media (min-width: 981px) and (max-width: 1499px) {
-  .studio-shell:has(.app:is([data-surface="cad"], [data-surface="solar"])) .studio-ground { top: 183px; }
+  /* The second tablist starts 2px below the 28px Ribbon tablist. The
+     extra space belongs to the band, including its canvas compensation. */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) { --ck-canvas-top: 185px; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-nav {
+    height: 30px; min-height: 30px; padding-top: 2px; align-items: flex-start;
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs { align-self: flex-start; }
+  .studio-shell:has(.app:is([data-surface="cad"], [data-surface="solar"])) .studio-ground { top: 185px; }
 }
 @media (pointer: coarse) and (max-width: 1499px), (max-width: 980px) {
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) { --ck-ribbon: 151px; }
@@ -864,15 +871,16 @@
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-status-toggles { display: inline-flex; flex-wrap: nowrap; }
 }
 @media (min-width: 981px) and (max-width: 1499px) and (pointer: coarse) {
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) { --ck-canvas-top: 239px; --ck-status: 46px; }
-  .studio-shell:has(.app:is([data-surface="cad"], [data-surface="solar"])) .studio-ground { top: 239px; bottom: 46px; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) { --ck-canvas-top: 241px; --ck-status: 46px; }
+  .studio-shell:has(.app:is([data-surface="cad"], [data-surface="solar"])) .studio-ground { top: 241px; bottom: 46px; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .foot-region { height: 44px; }
 }
-/* The phone stack needs 415px of chrome plus 85px of usable ground (500px).
+/* 800x500 keeps the phone stack: panels stay in one scrolled ribbon row,
+   and DraftingRibbon measures the document band's bottom for the ground.
    Short landscape screens retain the narrow ground and shell scrolling. */
 @media (max-width: 980px) and (min-height: 500px) {
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) {
-    --ck-top: 44px; --ck-canvas-top: 315px; --ck-status: 46px;
+    --ck-top: 44px; --ck-canvas-top: var(--cockpit-stack-top, 315px); --ck-status: 46px;
     height: 100dvh; min-height: 0; grid-template-rows: 88px minmax(0, 1fr) 46px;
   }
   .studio-shell:has(.app:is([data-surface="cad"], [data-surface="solar"])) { overflow: hidden; }
@@ -897,12 +905,24 @@
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) > .rail-stack h2 { margin: 0; line-height: 24px; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) main.center-scroll { min-height: 0; padding: 0; }
-  .studio-shell:has(.app:is([data-surface="cad"], [data-surface="solar"])) .studio-ground { inset: 315px 0 100px; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drafting-ribbon:not([data-overflow-open="true"]) {
+    flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden;
+  }
+  .studio-shell:has(.app:is([data-surface="cad"], [data-surface="solar"])) .studio-ground { inset: var(--cockpit-stack-top, 315px) 0 100px; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) > aside.nav {
+    position: fixed; top: var(--ck-canvas-top); right: 0; bottom: 100px; left: auto;
+    width: min(240px, 40vw); min-height: 0; overflow: auto;
+  }
   .studio-shell .selection-readout { position: fixed; left: 14px; bottom: 110px; pointer-events: none; }
   .studio-shell .selection-readout :is(button, a, input, select, textarea, [tabindex]) { pointer-events: auto; }
-  /* The empty result card overlaps the phone readout too. Its text must
-     pass drawing taps through, while its real controls remain usable. */
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .result-block { pointer-events: none; }
+  /* Result content stays inside the measured drawing area, clear of both
+     the ribbon and prompt. Idle uses the same treatment as the wide frame. */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .result-block {
+    position: fixed; top: var(--ck-canvas-top); bottom: auto; left: auto; right: 4px;
+    width: min(420px, 40vw); max-height: max(0px, calc(100dvh - var(--ck-canvas-top) - 100px));
+    box-sizing: border-box; overflow: auto; pointer-events: none;
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .result-block:has(.result-panel > p.panel-sub) { display: none; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .result-block :is(button, a, input, select, textarea, [tabindex]) { pointer-events: auto; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar {
     position: fixed; left: 0; right: 0; bottom: 0; height: 46px; min-height: 46px;

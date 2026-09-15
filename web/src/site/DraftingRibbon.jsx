@@ -49,14 +49,28 @@ function useBandHeight(ref) {
     if (!el) return undefined
     const host = el.closest('.workspace-card') || el.parentElement
     if (!host) return undefined
-    const publish = () => { host.style.setProperty(RIBBON_HEIGHT_VAR, `${Math.round(el.offsetHeight)}px`) }
+    const shell = el.closest('.studio-shell')
+    const app = el.closest('.app')
+    const toolbar = host.querySelector('.viewer-toolbar')
+    const publish = () => {
+      host.style.setProperty(RIBBON_HEIGHT_VAR, `${Math.round(el.offsetHeight)}px`)
+      // The narrow ground is a sibling of the app. Publish its real band
+      // edge on their shared shell, including the document tabs and nav.
+      if (shell && toolbar && window.innerWidth <= 980 && window.innerHeight >= 500) {
+        shell.style.setProperty('--cockpit-stack-top', `${toolbar.getBoundingClientRect().bottom}px`)
+      } else shell?.style.removeProperty('--cockpit-stack-top')
+    }
     publish()
-    if (typeof ResizeObserver === 'undefined') return () => host.style.removeProperty(RIBBON_HEIGHT_VAR)
-    const observer = new ResizeObserver(publish)
-    observer.observe(el)
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(publish)
+    observer?.observe(el)
+    if (toolbar) observer?.observe(toolbar)
+    for (const band of app?.querySelectorAll('header.top, .tc-product-nav') || []) observer?.observe(band)
+    window.addEventListener('resize', publish)
     return () => {
-      observer.disconnect()
+      observer?.disconnect()
+      window.removeEventListener('resize', publish)
       host.style.removeProperty(RIBBON_HEIGHT_VAR)
+      shell?.style.removeProperty('--cockpit-stack-top')
     }
   }, [ref])
 }
