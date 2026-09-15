@@ -106,9 +106,9 @@ assert(app.includes('const armDecision = useCallback((decision) =>'),
   'all route decisions must cross the shared intent staging seam')
 assert(app.includes('commitDecision: (decision) => catalogUiRef.current.armDecision?.(decision)'),
   'the catalog controller is not connected to the shared intent seam')
-assert(catalogController.includes('commitDecision(decision)'),
+assert(catalogController.includes('commitDecision(decision, { requestText: text })'),
   'NL routes do not use the shared intent seam')
-assert(catalogController.includes('slash.decision ? commitDecision(slash.decision) : undefined'),
+assert(catalogController.includes('slash.decision ? commitDecision(slash.decision, { requestText: text }) : undefined'),
   'slash routes do not use the shared intent seam')
 assert(app.includes('runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)'),
   'route dismissal does not invalidate the active intent')
