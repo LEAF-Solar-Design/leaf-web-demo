@@ -18,6 +18,7 @@
 //     did (`display: none`, not unmount).
 import { Children, useLayoutEffect, useRef, useState } from 'react'
 import WorldSpaceBoard from './WorldSpaceBoard.jsx'
+import { computeSafeRect } from './useDrawingViewport.js'
 import { START_BOARD_COPY } from './startBoardCopy.js'
 import { isWriteTool } from '../lib/toolRecord.js'
 import { formatElementId } from '../lib/elementIdentity.js'
@@ -62,35 +63,33 @@ export function measureGroundWindow(doc = document) {
   }
 }
 
-export function measureContainedWindow(board, doc = document) {
+export function measureContainedWindow(board, doc = document, occluders = []) {
   const origin = board?.getBoundingClientRect()
   if (!(origin?.width > 0) || !(origin?.height > 0)) return null
-  const toolbar = doc.querySelector('.app .viewer-toolbar')?.getBoundingClientRect()
-  const column = doc.querySelector('.app main.center-scroll')?.getBoundingClientRect()
-  const prompt = doc.querySelector('.app .bar-dock')?.getBoundingClientRect()
-  if (!toolbar?.height || !column?.width || !prompt?.height) return null
-  const left = Math.max(column.left, origin.left) + WINDOW_GUTTER
-  const right = Math.min(column.left + column.width, origin.left + origin.width) - WINDOW_GUTTER
-  const top = Math.max(toolbar.bottom, origin.top) + WINDOW_GUTTER
-  const bottom = Math.min(prompt.top, origin.top + origin.height) - WINDOW_GUTTER
-  if (!(right > left) || !(bottom > top)) return null
-  return {
-    top: Math.round(top - origin.top),
-    left: Math.round(left - origin.left),
-    width: Math.round(right - left),
-    height: Math.round(bottom - top),
-  }
+  return computeSafeRect(origin, occluders.map(([selector, edge]) => ({
+    rect: doc.querySelector(selector)?.getBoundingClientRect(), edge,
+  })), { padding: 16 })
 }
 
-function useGroundWindow(active, contained = false, boardRef) {
+const NO_OCCLUDERS = []
+
+function useGroundWindow(active, contained = false, boardRef, occluders = NO_OCCLUDERS) {
   const [rect, setRect] = useState(null)
   useLayoutEffect(() => {
     if (!active || typeof window === 'undefined') { setRect(null); return undefined }
     let frame = 0
+    let observed = new Set()
+    let observer = null
     const measure = () => {
       frame = 0
+      const next = contained ? measureContainedWindow(boardRef.current, document, occluders) : measureGroundWindow()
+      if (contained && observer) {
+        const targets = new Set([boardRef.current, ...occluders.map(([selector]) => document.querySelector(selector))].filter(Boolean))
+        for (const element of observed) if (!targets.has(element)) observer.unobserve(element)
+        for (const element of targets) if (!observed.has(element)) observer.observe(element)
+        observed = targets
+      }
       setRect((prev) => {
-        const next = contained ? measureContainedWindow(boardRef.current) : measureGroundWindow()
         if (!next) return null
         if (prev && prev.top === next.top && prev.left === next.left
           && prev.width === next.width && prev.height === next.height) return prev
@@ -98,15 +97,14 @@ function useGroundWindow(active, contained = false, boardRef) {
       })
     }
     const schedule = () => { if (!frame) frame = window.requestAnimationFrame(measure) }
-    measure()
-    const panel = contained ? document.querySelector('.app .viewer-toolbar') : document.getElementById('product-surface-panel')
+    const panel = contained ? boardRef.current : document.getElementById('product-surface-panel')
     const scroller = document.querySelector('main.center-scroll')
-    const observer = (typeof ResizeObserver !== 'undefined' && panel) ? new ResizeObserver(schedule) : null
-    observer?.observe(panel)
-    const prompt = contained ? document.querySelector('.app .bar-dock') : null
-    if (observer && prompt) observer.observe(prompt)
-    if (observer && scroller) observer.observe(scroller)
-    if (observer && contained && boardRef.current) observer.observe(boardRef.current)
+    observer = (typeof ResizeObserver !== 'undefined' && panel) ? new ResizeObserver(schedule) : null
+    if (!contained) {
+      observer?.observe(panel)
+      if (observer && scroller) observer.observe(scroller)
+    }
+    measure()
     window.addEventListener('resize', schedule)
     scroller?.addEventListener('scroll', schedule, { passive: true })
     return () => {
@@ -115,7 +113,7 @@ function useGroundWindow(active, contained = false, boardRef) {
       window.removeEventListener('resize', schedule)
       scroller?.removeEventListener('scroll', schedule)
     }
-  }, [active, contained, boardRef])
+  }, [active, contained, boardRef, occluders])
   return rect
 }
 
@@ -250,12 +248,13 @@ function BoardTiles({ workspace, drawing, catalog, renderTile, studioPresentatio
 export function ProjectBoardGround({
   active = false, workspaceProject = null, workspace = null, drawing = null, catalog = null, mock = false,
   contained = false, onReturnToDrawing = null, headingRef = null, startFocusRequest = 0,
+  occluders = NO_OCCLUDERS,
   studioPresentation = false,
   worldSpace = import.meta.env.VITE_WORLD_SPACE_BOARD === '1', store,
 }) {
   const state = workspaceProject || EMPTY_WORKSPACE_PROJECT
   const boardRef = useRef(null)
-  const win = useGroundWindow(active, contained, boardRef)
+  const win = useGroundWindow(active, contained, boardRef, occluders)
   const localHeadingRef = useRef(null)
   const containedHeadingRef = headingRef || localHeadingRef
   const lastFocusRequest = useRef(0)
@@ -376,6 +375,7 @@ export function DeviceGround({
 export default function SurfaceGrounds({
   surface, workspaceProject, workspace, drawing, catalog, mock,
   boardVisible, onReturnToDrawing, headingRef, startFocusRequest,
+  occluders = NO_OCCLUDERS,
   studioPresentation = false,
   iosEnabled, iosContract, revision,
 }) {
@@ -392,6 +392,7 @@ export default function SurfaceGrounds({
       <ProjectBoardGround
         active={boardVisible ?? surfaceGround(surface) === 'board'}
         contained={boardVisible === true && groundShowsDrawing(surface)}
+        occluders={occluders}
         onReturnToDrawing={onReturnToDrawing}
         headingRef={headingRef}
         startFocusRequest={startFocusRequest}

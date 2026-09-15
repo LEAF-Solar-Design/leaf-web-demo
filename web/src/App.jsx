@@ -3377,6 +3377,7 @@ export default function App() {
             old shell has no ground, so rail OFF renders none of this. */}
         {studioGround && createPortal(
           <SurfaceGrounds
+            occluders={STUDIO_DRAWING_OCCLUDERS}
             studioPresentation={Boolean(studioGround)}
             surface={activeSurface}
             boardVisible={boardVisible}

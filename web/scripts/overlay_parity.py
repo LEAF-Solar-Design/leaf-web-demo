@@ -1,7 +1,8 @@
 """W4e parity instrument: score a cockpit screenshot against the reference.
 
 Usage:
-    python scripts/overlay_parity.py <reference.png> <ours.png> [--out DIR] [--json]
+    python scripts/overlay_parity.py <reference.png> <ours.png> [--out DIR] [--json] [--mask L,T,W,H]
+    python scripts/overlay_parity.py --selftest
 
 Writes blend / diff / side-by-side PNGs next to <ours.png> (or into --out)
 and prints:
@@ -19,6 +20,9 @@ bounded to the two images given; nothing is fetched.
 """
 from __future__ import annotations
 
+import argparse
+import contextlib
+import io
 import json
 import sys
 from pathlib import Path
@@ -83,30 +87,96 @@ def mean_abs_diff(a, b, mask=None):
     return 100.0 * total / (255.0 * count)
 
 
-def main(argv):
-    args = [a for a in argv if not a.startswith('--')]
-    flags = {a for a in argv if a.startswith('--')}
-    out_dir = None
-    if '--out' in argv:
-        out_dir = Path(argv[argv.index('--out') + 1])
-        args = [a for a in args if a != str(out_dir)]
-    if len(args) < 2:
-        print(__doc__)
-        return 2
-    ref_path, ours_path = Path(args[0]), Path(args[1])
-    if not ref_path.is_file() or not ours_path.is_file():
-        print('missing image', file=sys.stderr)
-        return 2
-    ref = Image.open(ref_path).convert('RGB')
-    ours = Image.open(ours_path).convert('RGB')
+def parse_mask(value):
+    parts = value.split(',')
+    if len(parts) != 4 or any(not part.isascii() or not part.isdecimal() for part in parts):
+        raise argparse.ArgumentTypeError('--mask requires four non-negative integers: L,T,W,H')
+    return tuple(int(part) for part in parts)
+
+
+def selftest():
+    # A small synthetic cockpit carries every named edge, so the normal
+    # chrome gate is exercised as well as the canvas-only gate.
+    reference = Image.new('RGB', (320, 912), 'black')
+    for index, top in enumerate(REFERENCE_EDGES_Y):
+        reference.paste('white' if index % 2 == 0 else 'black',
+                        (0, top, reference.width, reference.height))
+    reference.paste('white', (REFERENCE_EDGE_X, 500, reference.width, 501))
+
+    def run(ours, *options):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            code = main(['reference.png', 'ours.png', '--json', *options],
+                        images=(reference, ours))
+        return code, output.getvalue()
+
+    code, output = run(reference.copy())
+    report = json.loads(output)
+    identical = (code == 0 and report['gate'] and report['whole_frame_diff_pct'] == 0
+                 and report['chrome_diff_pct'] == 0)
+    canvas_code, canvas_output = run(reference.copy(), '--canvas-only', '--mask', '0,0,8,8')
+    identical = identical and canvas_code == 0 and json.loads(canvas_output)['canvas_diff_pct'] == 0
+    code, output = run(Image.new('RGB', (321, 912)))
+    mismatch = code == 2 and 'size mismatch: reference 320x912, ours 321x912' in output
+    changed = reference.copy()
+    changed.paste('white', (0, 0, 8, 8))
+    _, unmasked = run(changed, '--mask', '0,0,0,0')
+    _, masked = run(changed, '--mask', '0,0,8,8')
+    mask_works = (json.loads(unmasked)['chrome_diff_pct'] > 0
+                  and json.loads(masked)['chrome_diff_pct'] == 0
+                  and json.loads(masked)['canvas_diff_pct'] == 100)
+    invalid_masks = all(run(reference, '--mask', value)[0] == 2
+                        for value in ('1,2,3', '-1,0,1,1', '0,0,1.5,1', '0,0,x,1'))
+    ok = identical and mismatch and mask_works and invalid_masks
+    print('SELFTEST ' + ('PASS' if ok else 'FAIL'))
+    return 0 if ok else 1
+
+
+def main(argv, *, images=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('reference', nargs='?')
+    parser.add_argument('ours', nargs='?')
+    parser.add_argument('--out', type=Path)
+    parser.add_argument('--json', action='store_true')
+    parser.add_argument('--canvas-only', action='store_true')
+    parser.add_argument('--mask', type=parse_mask)
+    parser.add_argument('--selftest', action='store_true')
+    try:
+        options = parser.parse_args(argv)
+        if options.selftest:
+            return selftest()
+        if not options.reference or not options.ours:
+            parser.error('reference and ours images are required')
+    except SystemExit as error:
+        return error.code
+    out_dir = options.out
+    ref_path, ours_path = Path(options.reference), Path(options.ours)
+    if images is None:
+        if not ref_path.is_file() or not ours_path.is_file():
+            print('missing image', file=sys.stderr)
+            return 2
+        try:
+            with Image.open(ref_path) as image:
+                ref = image.convert('RGB')
+            with Image.open(ours_path) as image:
+                ours = image.convert('RGB')
+        except (OSError, ValueError) as error:
+            print(f'invalid image: {error}', file=sys.stderr)
+            return 2
+    else:
+        ref, ours = images
     if ours.size != ref.size:
-        ours = ours.resize(ref.size, Image.LANCZOS)
+        print(f'size mismatch: reference {ref.width}x{ref.height}, ours {ours.width}x{ours.height}',
+              file=sys.stderr)
+        return 2
     w, h = ref.size
 
-    # Chrome mask: everything except the canvas box.
+    # Chrome is everything outside the supplied canvas rectangle.
+    left, top, width, height = options.mask if options.mask is not None else (REFERENCE_EDGE_X, 155, max(0, w - REFERENCE_EDGE_X), 880 - 155)
     mask = Image.new('L', ref.size, 255)
-    canvas = Image.new('L', (w - REFERENCE_EDGE_X, 880 - 155), 0)
-    mask.paste(canvas, (REFERENCE_EDGE_X, 155))
+    right, bottom = min(w, left + width), min(h, top + height)
+    if right > left and bottom > top:
+        mask.paste(0, (left, top, right, bottom))
 
     whole = mean_abs_diff(ref, ours)
     chrome = mean_abs_diff(ref, ours, mask)
@@ -116,7 +186,7 @@ def main(argv):
     # `--canvas-only` makes it the gate (at or below CANVAS_GATE) instead of
     # the chrome number, because that comparison is ours-vs-ours, not
     # ours-vs-reference.
-    canvas_only = '--canvas-only' in flags
+    canvas_only = options.canvas_only
     canvas_mask = ImageChops.invert(mask)
     canvas_diff = mean_abs_diff(ref, ours, canvas_mask)
 
@@ -149,15 +219,16 @@ def main(argv):
     else:
         ok = ok and chrome <= CHROME_GATE
 
-    out_dir = out_dir or ours_path.parent
-    out_dir.mkdir(parents=True, exist_ok=True)
-    stem = ours_path.stem
-    Image.blend(ref, ours, 0.5).save(out_dir / f'{stem}-blend.png')
-    ImageChops.difference(ref, ours).save(out_dir / f'{stem}-diff.png')
-    side = Image.new('RGB', (w * 2, h))
-    side.paste(ref, (0, 0))
-    side.paste(ours, (w, 0))
-    side.save(out_dir / f'{stem}-side.png')
+    if images is None:
+        out_dir = out_dir or ours_path.parent
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stem = ours_path.stem
+        Image.blend(ref, ours, 0.5).save(out_dir / f'{stem}-blend.png')
+        ImageChops.difference(ref, ours).save(out_dir / f'{stem}-diff.png')
+        side = Image.new('RGB', (w * 2, h))
+        side.paste(ref, (0, 0))
+        side.paste(ours, (w, 0))
+        side.save(out_dir / f'{stem}-side.png')
 
     report = {
         'reference': str(ref_path), 'ours': str(ours_path),
@@ -167,7 +238,7 @@ def main(argv):
         'chrome_gate_pct': CHROME_GATE, 'edge_tolerance_px': EDGE_TOLERANCE,
         'edges': rows, 'our_edges_y': our_y[:60], 'our_edges_x': our_x[:20], 'gate': ok,
     }
-    if '--json' in flags:
+    if options.json:
         print(json.dumps(report, indent=2))
     else:
         for r in rows:

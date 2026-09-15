@@ -83,6 +83,45 @@ async function interact(page) {
   await expect(page).toHaveURL(/\/app$/)
 }
 
+test('option A: translucent chrome owns clicks and wheel over the full-bleed drawing', async ({ page, request }) => {
+  test.setTimeout(120_000)
+  await page.setViewportSize({ width: 1920, height: 940 })
+  await requireLocalReady(request, test, API_BASE)
+  await setRail(page, '1')
+  await page.goto('/app?surface=cad&drawing=cat-panels')
+  await expectOneCanvasIn(page, '.studio-ground')
+  const canvas = page.locator('.studio-ground .viewer-canvas')
+  await expect.poll(() => canvas.evaluate((el) => !!el.__cadviewer?.cameraPose())).toBe(true)
+  await expect(canvas).toHaveAttribute('data-safe-rect', /width/)
+  await expect(page.locator('[data-tool="draw:createLine"]')).toBeEnabled({ timeout: 30_000 })
+  const readState = () => page.evaluate(() => ({
+    pose: document.querySelector('.studio-ground .viewer-canvas').__cadviewer.cameraPose(),
+    selection: document.querySelector('.selection-readout')?.textContent,
+  }))
+  await expect(page.locator('.selection-readout')).toBeVisible()
+  const before = await readState()
+  for (const [selector, horizontal, vertical] of [
+    ['#drafting-ribbon', -6, -6],
+    ['.properties-dock', 8, -8],
+    ['[data-testid="cockpit-view"]', -6, null],
+    ['.bar.bar-command-line', 3, null],
+    ['footer.foot-bar', -40, null],
+  ]) {
+    const point = await page.locator(selector).evaluate((element, [horizontal, vertical]) => {
+      const box = element.getBoundingClientRect()
+      const x = horizontal < 0 ? box.right + horizontal : box.left + horizontal
+      const y = vertical === null ? box.top + box.height / 2 : box.bottom + vertical
+      return { x, y, owns: element.contains(document.elementFromPoint(x, y)) }
+    }, [horizontal, vertical])
+    expect(point.owns, selector).toBe(true)
+    await page.mouse.click(point.x, point.y)
+    await page.mouse.wheel(0, 120)
+    // Wheel delivery and any camera update settle across animation frames.
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+    expect(await readState(), selector).toEqual(before)
+  }
+})
+
 test.describe('route matrix, rail ON', () => {
   for (const surface of ['cad', 'solar']) {
     test(`Start preserves the ${surface} profile, document, prompt and mounted nodes`, async ({ page, request }) => {
@@ -695,10 +734,10 @@ test.describe('route matrix, rail ON', () => {
 
     // SEATING (W4e), the reference's bands to the pixel at the 1600x1000
     // viewport: a 28px top band, the 95px ribbon, the 32px document tabs,
-    // the canvas from (250, 155), the 250px properties pane, the viewport
+    // the full-bleed canvas, the 250px properties pane, the viewport
     // strip at the canvas's top-left and the view cube at its top-right,
     // the 25px command line 35px off the bottom, the 31px status bar, and
-    // the ribbon's opaque #2a2a2a.
+    // the ribbon's translucent backing.
     const seating = await page.evaluate(() => {
       const r = (sel) => {
         const el = document.querySelector(sel)
@@ -710,6 +749,7 @@ test.describe('route matrix, rail ON', () => {
       return {
         header: r('header.top'), band: r('.drafting-ribbon'), tabs: r('.viewer-toolbar'), pane: r('[data-testid="properties-dock"]'),
         strip: r('.cockpit-view'), cube: r('.cockpit-cube-wrap'), well: r('.bar.bar-command-line'), status: r('footer.foot-bar'),
+        viewportW: innerWidth, viewportH: innerHeight,
         ground: r('.studio-ground'), shellW: Math.round(shell.width), shellH: Math.round(shell.height),
         glass: getComputedStyle(document.querySelector('.drafting-ribbon'), '::before').backgroundColor,
       }
@@ -717,13 +757,13 @@ test.describe('route matrix, rail ON', () => {
     expect(seating.header.h).toBe(28)
     expect([seating.band.y, seating.band.h]).toEqual([28, 95])
     expect([seating.tabs.y, seating.tabs.h]).toEqual([123, 32])
-    expect([seating.ground.x, seating.ground.y]).toEqual([250, 155])
+    expect([seating.ground.x, seating.ground.y, seating.ground.w, seating.ground.h]).toEqual([0, 0, seating.viewportW, seating.viewportH])
     expect([seating.pane.x, seating.pane.y, seating.pane.w]).toEqual([0, 155, 250])
     expect([seating.strip.x, seating.strip.y, seating.strip.h]).toEqual([250, 155, 26])
     expect(seating.cube.x).toBeGreaterThan(seating.shellW / 2)
     expect([seating.status.h, seating.status.bottom]).toEqual([31, seating.shellH])
     expect([seating.well.h, seating.shellH - seating.well.bottom]).toEqual([25, 35])
-    expect(seating.glass).toBe('rgb(42, 42, 42)')
+    expect(seating.glass).toBe('rgba(30, 34, 39, 0.86)')
     test.info().annotations.push({ type: 'seating', description: JSON.stringify(seating) })
 
     // Slice E: the command well is the reference's one-line docked prompt on
@@ -1143,7 +1183,12 @@ test.describe('route matrix, rail ON', () => {
     await expect(lineTool).toHaveAttribute('aria-expanded', 'true')
     const groundPick = (fx, fy) => page.evaluate(([px, py]) => {
       const ground = document.querySelector('.studio-ground')
-      const box = ground.getBoundingClientRect()
+      const canvas = ground.querySelector('.viewer-canvas')
+      const safe = JSON.parse(canvas?.getAttribute('data-safe-rect') || 'null')
+      const origin = canvas?.getBoundingClientRect()
+      const box = safe && origin
+        ? { left: origin.left + safe.left, top: origin.top + safe.top, width: safe.width, height: safe.height }
+        : ground.getBoundingClientRect()
       const x = Math.round(box.left + box.width * px)
       const y = Math.round(box.top + box.height * py)
       const hit = document.elementFromPoint(x, y)
@@ -2302,13 +2347,16 @@ test.describe('route matrix, rail ON', () => {
       })
       .map((el) => `${el.tagName}.${el.className}`.slice(0, 60)))
     expect(solarSlabs, 'a light page-shaped block is sitting on the solar drawing').toEqual([])
-    // The document band belongs ON the drawing, above the ground - that is
-    // the geometry the frame broke, so it is measured, not assumed.
-    const solarBandTop = (await page.locator('.viewer-toolbar').boundingBox()).y
+    // The Solar band owns its empty space over the full-bleed drawing.
     const solarGroundTop = (await page.locator('.studio-shell .studio-ground').boundingBox()).y
-    expect(solarBandTop).toBeLessThan(solarGroundTop)
+    expect(solarGroundTop).toBe(0)
+    expect(await page.locator('.viewer-toolbar').evaluate((element) => {
+      const box = element.getBoundingClientRect()
+      return element.contains(document.elementFromPoint(box.right - 6, box.top + box.height / 2))
+    })).toBe(true)
     await page.getByRole('tab', { name: 'CAD', exact: true }).click()
     await expect(page.locator('.app[data-surface="cad"]')).toHaveCount(1)
+
 
     // The entitlements panel is hosted in the dock, not stacked in the column.
     const ent = page.locator('.ent-panel')

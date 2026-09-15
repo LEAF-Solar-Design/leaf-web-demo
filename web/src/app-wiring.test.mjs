@@ -681,6 +681,9 @@ describe('App.jsx wiring', () => {
   })
 
   it('opts studio frame and grounds into customer copy with explicit mock state', () => {
+    const grounds = appNoComments.match(/<SurfaceGrounds\s[\s\S]*?\/>/)?.[0]
+    assert.ok(grounds, 'SurfaceGrounds mount exists')
+    assert.match(grounds, new RegExp('occluders=\\{STUDIO_DRAWING_OCCLUDERS\\}'))
     for (const component of ['SurfaceFrame', 'SurfaceGrounds']) {
       const mount = new RegExp('<' + component + '\\s[\\s\\S]*?/>|<' + component + '\\s[\\s\\S]*?>')
       const source = appNoComments.match(mount)?.[0]
