@@ -40,7 +40,7 @@ for (const condition of conditions) {
       await boot(page, request)
       await expectSeparateTabs(page)
       if (condition.viewport.width === 1366) {
-        expect(await page.locator('.studio-ground .viewer-canvas canvas').boundingBox()).toEqual({
+        await expect.poll(() => page.locator('.studio-ground .viewer-canvas canvas').boundingBox()).toEqual({
           x: 0, y: 0, width: condition.viewport.width, height: condition.viewport.height,
         })
       }
@@ -171,7 +171,7 @@ for (const hasTouch of [false, true]) test.describe(`reference frame hasTouch=${
       return [rect('header.top'), rect('#drafting-ribbon'), rect('.viewer-toolbar'), rect('footer.foot-bar')]
     })
     expect(edges).toEqual([[0, 28], [28, 95], [123, 32], [909, 31]])
-    expect(await page.locator('.studio-ground .viewer-canvas canvas').boundingBox()).toEqual({
+    await expect.poll(() => page.locator('.studio-ground .viewer-canvas canvas').boundingBox()).toEqual({
       x: 0, y: 0, width: 1920, height: 940,
     })
   })
