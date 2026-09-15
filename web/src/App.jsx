@@ -1237,6 +1237,9 @@ export default function App() {
     if (resultCandidate && !resultBounds) setResultCandidate(null)
     if (!resultBounds || !studioGround) return undefined
     let frame
+    // Stop after 600 consecutive invalid frames, about ten seconds at 60 fps.
+    const maxInvalidFrames = 600
+    let invalidFrames = 0
     // applyVersion rebuilds and refits the scene. Measure after that layout,
     // then watch the candidate until a pan, zoom or Show result reveals it.
     const measure = () => {
@@ -1249,6 +1252,7 @@ export default function App() {
         viewer?.project?.(resultBounds.maxX, resultBounds.maxY),
       ]
       if (rect?.width > 0 && rect.height > 0 && points.every((p) => Number.isFinite(p?.x) && Number.isFinite(p?.y))) {
+        invalidFrames = 0
         const outside = points.some((p) => p.x < rect.left || p.x > rect.right || p.y < rect.top || p.y > rect.bottom)
         const tiny = Math.max(Math.max(...points.map((p) => p.x)) - Math.min(...points.map((p) => p.x)), Math.max(...points.map((p) => p.y)) - Math.min(...points.map((p) => p.y))) < 8
         if (!outside && !tiny) {
@@ -1257,6 +1261,10 @@ export default function App() {
           return
         }
         setOffscreenResult((current) => current === resultCandidate ? current : resultCandidate)
+      } else if (++invalidFrames >= maxInvalidFrames) {
+        setResultCandidate(null)
+        setOffscreenResult(null)
+        return
       }
       frame = requestAnimationFrame(measure)
     }

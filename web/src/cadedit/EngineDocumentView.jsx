@@ -27,6 +27,7 @@ export default function EngineDocumentView({ viewerRef = null, onShown = null, o
   const lastRef = useRef(null)
   const intakeRef = useRef(null)
   const historyRef = useRef({ documentId: '', undoDepth: 0 })
+  const pendingCreationRef = useRef(null)
   // Both mirrors share this ref so each other's writes cannot echo as changes.
   const lastSelectedHandleRef = useRef(undefined)
   const lastEngineSelectionRef = useRef(undefined)
@@ -82,6 +83,7 @@ export default function EngineDocumentView({ viewerRef = null, onShown = null, o
   useEffect(() => {
     const viewer = viewerRef?.current
     if (!entities) {
+      pendingCreationRef.current = null
       if (lastRef.current !== null) {
         lastRef.current = null
         intakeRef.current = null
@@ -95,17 +97,21 @@ export default function EngineDocumentView({ viewerRef = null, onShown = null, o
     if (!viewer || typeof viewer.applyVersion !== 'function') return undefined
     const previous = historyRef.current
     let createdResult = null
+    const pending = pendingCreationRef.current
+    if (pending && (pending.entities !== entities || pending.documentId !== documentId || pending.undoDepth !== session.undoDepth)) {
+      pendingCreationRef.current = null
+    }
+    const pendingStatusChanged = pendingCreationRef.current && previous.status !== session.status
     if (lastRef.current !== entities || previous.documentId !== documentId) {
       if (previous.documentId === documentId && session.undoDepth > previous.undoDepth
-        && lastRef.current
-        && / applied: entity /.test(session.status || '')) {
+        && lastRef.current) {
         const ids = new Set()
-        for (const entity of lastRef.current) ids.add(entity.id)
-        let added = null
+        for (const entity of lastRef.current) ids.add(String(entity.id))
+        const addedIds = []
         for (const entity of entities) {
-          if (!ids.has(entity.id) && (!added || String(added.id) !== session.selectedId)) added = entity
+          if (!ids.has(String(entity.id))) addedIds.push(String(entity.id))
         }
-        if (added) createdResult = { documentId, handle: hexHandle(added.id), kind: added.kind || added.type || 'entity' }
+        if (addedIds.length) pendingCreationRef.current = { entities, documentId, undoDepth: session.undoDepth, addedIds }
       }
       lastRef.current = entities
       intakeRef.current = {
@@ -114,10 +120,18 @@ export default function EngineDocumentView({ viewerRef = null, onShown = null, o
       }
       viewer.applyVersion(intakeRef.current)
       viewer.setHighlight?.(Array.from(highlightedIds || []))
-    } else if (previous.undoDepth === session.undoDepth && previous.redoDepth === session.redoDepth) {
+    } else if (previous.undoDepth === session.undoDepth && previous.redoDepth === session.redoDepth && !pendingStatusChanged) {
       return undefined
     }
-    historyRef.current = { documentId, undoDepth: session.undoDepth, redoDepth: session.redoDepth }
+    if (pendingCreationRef.current && / applied: entity /.test(session.status || '')) {
+      const { addedIds } = pendingCreationRef.current
+      const selectedId = String(session.selectedId)
+      const addedId = addedIds.includes(selectedId) ? selectedId : addedIds[addedIds.length - 1]
+      const added = entities.find((entity) => String(entity.id) === addedId)
+      if (added) createdResult = { documentId, handle: hexHandle(added.id), kind: added.kind || added.type || 'entity' }
+      pendingCreationRef.current = null
+    }
+    historyRef.current = { documentId, undoDepth: session.undoDepth, redoDepth: session.redoDepth, status: session.status }
     onShown?.(intakeRef.current, { undoDepth: session.undoDepth, redoDepth: session.redoDepth, createdResult })
     return undefined
   }, [viewerRef, entities, documentId, onShown, highlightedIds, session.undoDepth, session.redoDepth, session.selectedId, session.status])

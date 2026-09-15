@@ -18,7 +18,7 @@ import { describe, it } from 'node:test'
 import esbuild from 'esbuild'
 
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
-const appNoComments = appSource.replace(new RegExp('\\{/\\*[\\s\\S]*?\\*/\\}', 'g'), '')
+const appNoComments = decomment(appSource)
 const stripped = esbuild.transformSync(appSource, { loader: 'jsx' }).code
 const promptBoxSessionBinding = /React\.createElement\(\s*PromptBox,\s*\{[^}]*\bsessionId:\s*agentSessionId\b/
 const conversePanelSessionBinding = /React\.createElement\(\s*ConversePanel,\s*\{[^}]*\bsessionId:\s*agentSessionId\b/

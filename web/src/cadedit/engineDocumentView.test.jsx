@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import CadEditSurface from './CadEditSurface.jsx'
 import EngineDocumentView from './EngineDocumentView.jsx'
 import EngineSessionProvider, { useEngineSessionContext } from './EngineSessionProvider.jsx'
+import * as engineSessionContext from './EngineSessionProvider.jsx'
 
 class ScriptedWorker {
   constructor() { this.posted = []; this.listeners = new Map(); this.terminated = false }
@@ -200,6 +201,38 @@ describe.each([true, false])('EngineDocumentView reverse selection (callback ena
 })
 
 describe('EngineDocumentView (W4f slice A0)', () => {
+  it('compares mixed numeric and string ids without reporting an existing entity as created', async () => {
+    mount()
+    await openAndLoad([{ ...LINE, id: 1 }])
+    act(() => {
+      workers[0].listeners.get('message')({ data: { type: 'editApplied', op: 'createLine', ok: true, createdId: '42', entities: [{ ...LINE, id: '1' }, { ...LINE, id: '42' }], entityCount: 2, bytes: new Uint8Array([49]), byteLength: 1 } })
+      sessionActions.select('1')
+    })
+    expect(onShown.mock.lastCall[1].createdResult).toEqual({ documentId: 'one.dxf', handle: '2A', kind: 'LINE' })
+  })
+
+  it('reports a pending creation when its status arrives after the entities and depth', () => {
+    const session = { engineParsed: true, documentId: 'one.dxf', entities: [LINE], undoDepth: 0, redoDepth: 0, selectedId: 'e1', status: 'Ready', actions: { select: vi.fn() } }
+    vi.spyOn(engineSessionContext, 'useEngineSessionContext').mockImplementation(() => ({ session, highlightedIds: [] }))
+    const viewer = { applyVersion: vi.fn() }
+    const viewerRef = { current: viewer }
+    const onShown = vi.fn()
+    const tree = () => <EngineDocumentView viewerRef={viewerRef} onShown={onShown} />
+    const utils = render(tree())
+    session.entities = [LINE, { ...LINE, id: '42' }]
+    session.undoDepth = 1
+    utils.rerender(tree())
+    expect(onShown.mock.lastCall[1].createdResult).toBeNull()
+    const applies = viewer.applyVersion.mock.calls.length
+    session.status = 'LINE applied: entity 42'
+    utils.rerender(tree())
+    expect(onShown.mock.lastCall[1].createdResult).toEqual({ documentId: 'one.dxf', handle: '2A', kind: 'LINE' })
+    expect(viewer.applyVersion).toHaveBeenCalledTimes(applies)
+    onShown.mockClear()
+    utils.rerender(tree())
+    expect(onShown).not.toHaveBeenCalled()
+  })
+
   it('reports document close and unmount through onHidden exactly once', async () => {
     const onHidden = vi.fn()
     const utils = mount({ onHidden })
