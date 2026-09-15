@@ -46,12 +46,12 @@ describe('Start is a view inside the current workspace profile', () => {
   })
 
   it('returns to the drawing at engine, catalog and version sinks', () => {
-    assert.match(appNoComments, new RegExp('<EngineSessionProvider[^>]+onBeforeEdit=\\{returnToDrawing\\}'))
+    assert.match(appNoComments, new RegExp('<EngineSessionProvider[^>]+onBeforeEdit=\\{closeStartForChange\\}'))
     const runStart = appNoComments.indexOf('const onRun = useCallback')
     const runEnd = appNoComments.indexOf('const onConfirmCatalogRun =', runStart)
     assert.notEqual(runStart, -1)
     assert.notEqual(runEnd, -1)
-    assert.match(appNoComments.slice(runStart, runEnd), /if\s*\(writeLocked && isWrite\)\s*return null\s+returnToDrawing\(\)/)
+    assert.match(appNoComments.slice(runStart, runEnd), /if\s*\(writeLocked && isWrite\)\s*return null\s+closeStartForChange\(\)/)
     for (const [name, target] of [
       ['onPreviewVersionTracked', 'onPreviewVersion'],
       ['onBackToHeadTracked', 'onBackToHead'],
@@ -62,8 +62,8 @@ describe('Start is a view inside the current workspace profile', () => {
       assert.notEqual(start, -1)
       assert.notEqual(end, -1)
       const callback = appNoComments.slice(start, end + 2)
-      assert.match(callback, new RegExp('returnToDrawing\\(\\)[\\s\\S]*?return ' + target + '\\(\\.\\.\\.args\\)'))
-      assert.match(callback, new RegExp('\\[' + target + ', returnToDrawing\\]'))
+      assert.match(callback, new RegExp('closeStartForChange\\(\\)[\\s\\S]*?return ' + target + '\\(\\.\\.\\.args\\)'))
+      assert.match(callback, new RegExp('\\[' + target + ', closeStartForChange\\]'))
     }
     for (const [prop, callback] of [
       ['onPreview', 'onPreviewVersionTracked'],
@@ -74,6 +74,43 @@ describe('Start is a view inside the current workspace profile', () => {
     }
   })
 
+  it('closes Start for changes without a synchronous flush or focus move', () => {
+    const start = appNoComments.indexOf('const closeStartForChange = useCallback')
+    const end = appNoComments.indexOf('const onReturnToDrawing =', start)
+    assert.notEqual(start, -1)
+    assert.notEqual(end, -1)
+    const close = appNoComments.slice(start, end)
+    assert.match(close, /if\s*\(!startOpenRef\.current\)\s*return/)
+    assert.match(close, /startOpenRef\.current\s*=\s*false/)
+    assert.match(close, /setStartOpen\(false\)/)
+    assert.doesNotMatch(close, /flushSync|focus/)
+    for (const [component, prop] of [
+      ['EngineSessionProvider', 'onBeforeEdit'],
+      ['ConversePanel', 'onBeforeWriteApproval'],
+      ['VersionHistory', 'onBeforeRestore'],
+    ]) {
+      const mountStart = appNoComments.indexOf('<' + component)
+      assert.notEqual(mountStart, -1)
+      const mountEnd = appNoComments.indexOf('/>', mountStart)
+      assert.notEqual(mountEnd, -1)
+      assert.ok(appNoComments.slice(mountStart, mountEnd).includes(prop + '={closeStartForChange}'))
+    }
+  })
+
+  it('closes Start before either viewer recovery request', () => {
+    assert.match(appNoComments, /retryRefresh:\s*onRetryViewerRefreshRaw/)
+    assert.match(appNoComments, /retryUnreadableHead:\s*retryUnreadableHeadRaw/)
+    for (const name of ['onRetryViewerRefresh', 'retryUnreadableHead']) {
+      const start = appNoComments.indexOf('const ' + name + ' = useCallback')
+      const end = appNoComments.indexOf('])', start)
+      assert.notEqual(start, -1)
+      assert.notEqual(end, -1)
+      const callback = appNoComments.slice(start, end + 2)
+      assert.match(callback, new RegExp('closeStartForChange\\(\\)\\s+return '
+        + name + 'Raw\\(\\.\\.\\.args\\)'))
+      assert.match(callback, new RegExp('\\[' + name + 'Raw, closeStartForChange\\]'))
+    }
+  })
   it('shows the Run and Build gloss beside the shared prompt for every visible board', () => {
     const dock = appNoComments.indexOf('<div className="bar-dock">')
     assert.notEqual(dock, -1)

@@ -195,6 +195,7 @@ export default function ConversePanel({
   // The browser engine holds unsaved edits (App's engineDirty); a write
   // approval is held with the one-head sentence.
   engineDirty = false,
+  onBeforeWriteApproval = null,
 }) {
   const [events, setEvents] = useState([])
   const [input, setInput] = useState('')
@@ -217,9 +218,11 @@ export default function ConversePanel({
   const [secretNotice, setSecretNotice] = useState(null)
   const writeLockedRef = useRef(writeLocked)
   const engineDirtyRef = useRef(engineDirty)
+  const onBeforeWriteApprovalRef = useRef(onBeforeWriteApproval)
   const refreshApprovalsRef = useRef(null)
   writeLockedRef.current = writeLocked
   engineDirtyRef.current = engineDirty
+  onBeforeWriteApprovalRef.current = onBeforeWriteApproval
   const writeHold = (isWrite) => {
     const held = isWrite && (writeLocked || engineDirty)
     return { held, label: writeLocked ? 'Editing locked' : 'Unsaved browser edits', title: writeLocked ? undefined : REASONS.unsavedEngineEdits }
@@ -597,6 +600,7 @@ export default function ConversePanel({
     if (deciding || (ok && blocked)) return
     setDeciding(confirmationId); setSendErr(null)
     try {
+      if (ok && isWrite && !(writeLockedRef.current || engineDirtyRef.current)) onBeforeWriteApprovalRef.current?.()
       const res = await resolveApproval(
         confirmationId, owningSessionId, ok, decisionRecorded, {
           beforeResume: () => !(ok && isWrite && (writeLockedRef.current || engineDirtyRef.current)),

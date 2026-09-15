@@ -275,6 +275,11 @@ export default function App() {
       else barInputRef.current?.focus()
     }
   }, [])
+  const closeStartForChange = useCallback(() => {
+    if (!startOpenRef.current) return
+    startOpenRef.current = false
+    setStartOpen(false)
+  }, [])
   const onReturnToDrawing = useCallback(() => returnToDrawing(true), [returnToDrawing])
   const [mock, setMock] = useState(config.mockDefault)
   const [loadErr, setLoadErr] = useState(null)
@@ -554,11 +559,19 @@ export default function App() {
     previewVersion: onPreviewVersion,
     backToHead: onBackToHead,
     markRefreshFailure,
-    retryRefresh: onRetryViewerRefresh,
+    retryRefresh: onRetryViewerRefreshRaw,
     recordRestore: onRestoreCommitted,
     recordCommittedUnreadableHead,
-    retryUnreadableHead,
+    retryUnreadableHead: retryUnreadableHeadRaw,
   } = drawingActions
+  const onRetryViewerRefresh = useCallback((...args) => {
+    closeStartForChange()
+    return onRetryViewerRefreshRaw(...args)
+  }, [onRetryViewerRefreshRaw, closeStartForChange])
+  const retryUnreadableHead = useCallback((...args) => {
+    closeStartForChange()
+    return retryUnreadableHeadRaw(...args)
+  }, [retryUnreadableHeadRaw, closeStartForChange])
   const platform = usePlatformTrustController({ mock })
   const {
     usage,
@@ -1387,20 +1400,20 @@ export default function App() {
   }, [historyOpen, onToggleHistory, returnToDrawing])
 
   const onPreviewVersionTracked = useCallback((...args) => {
-    returnToDrawing()
+    closeStartForChange()
     track('drawing.version_navigated', { action: 'preview' })
     return onPreviewVersion(...args)
-  }, [onPreviewVersion, returnToDrawing])
+  }, [onPreviewVersion, closeStartForChange])
 
   const onBackToHeadTracked = useCallback((...args) => {
-    returnToDrawing()
+    closeStartForChange()
     return onBackToHead(...args)
-  }, [onBackToHead, returnToDrawing])
+  }, [onBackToHead, closeStartForChange])
 
   const onRestoredTracked = useCallback((...args) => {
-    returnToDrawing()
+    closeStartForChange()
     return onRestoreCommitted(...args)
-  }, [onRestoreCommitted, returnToDrawing])
+  }, [onRestoreCommitted, closeStartForChange])
 
   // --- version-history browser + read-only preview -------------------------
   // --- projects / orgs workspace handlers (item 1) -------------------------
@@ -1666,7 +1679,7 @@ export default function App() {
     if (previewing) return null
     const isWrite = isWriteTool(tool)
     if (writeLocked && isWrite) return null
-    returnToDrawing()
+    closeStartForChange()
     // W4g-2 (one head), held at EXECUTION time. armDecision refuses the click
     // that stages a run, but the confirm strip stays open while the drafter
     // keeps drawing (engine tools never touch the run intent), so an edit
@@ -1712,7 +1725,7 @@ export default function App() {
     return envelope
   }, [agentMode, catalogRunContext, checkout.actions, clearAgentMode, dismissRoute, loadUsage, mock,
     health?.aps_live, openProjectId, prepareRunParams, markRefreshFailure, previewing, rehydrate, runJob,
-    shown, writeLocked, returnToDrawing])
+    shown, writeLocked, closeStartForChange])
 
   const onConfirmCatalogRun = useCallback(async (intent, tool, params) => {
     let currentTool = tool
@@ -2981,7 +2994,7 @@ export default function App() {
     }
   }
   const engineScope = (node) => (ENV_CAD_EDIT ? (
-    <EngineSessionProvider saveTarget={engineSaveTarget} onSaved={onEngineSaved} onDirtyChange={onEngineDirtyChange} onBeforeEdit={returnToDrawing}>{node}</EngineSessionProvider>
+    <EngineSessionProvider saveTarget={engineSaveTarget} onSaved={onEngineSaved} onDirtyChange={onEngineDirtyChange} onBeforeEdit={closeStartForChange}>{node}</EngineSessionProvider>
   ) : node)
 
   return (
@@ -3625,6 +3638,7 @@ export default function App() {
                         mock={mock}
                         capability={checkout.actions.getCapability()}
                         onRestored={onRestoredTracked}
+                        onBeforeRestore={closeStartForChange}
                         headWarning={unreadableHead}
                         mutationBlocked={drawingMutationsBlocked}
                       />
@@ -3899,6 +3913,7 @@ export default function App() {
             onLinkClaude={() => setClaudeOpen(true)}
             onAttachJob={onAttachAgentJob}
             onJobLinked={refreshJobs}
+            onBeforeWriteApproval={closeStartForChange}
             engineDirty={engineDirty}
           />
         )}

@@ -256,7 +256,7 @@ export default function EngineSessionProvider({
     name,
     (...args) => {
       setRefusalState('')
-      if (DRAWING_EDIT_ACTIONS.has(name)) onBeforeEditRef.current?.()
+      if (DRAWING_EDIT_ACTIONS.has(name) || (name === 'copyToClipboard' && args[0] === true)) onBeforeEditRef.current?.()
       return action(...args)
     },
   ])), [session.actions])

@@ -953,6 +953,25 @@ describe('the command prompt (W4e slice H): a tool arms, the command line asks i
 })
 
 describe('Start returns to the drawing at the engine edit sink', () => {
+  it('closes Start once before cut posts its internal delete', async () => {
+    const onBeforeEdit = vi.fn()
+    const studio = mount({ onBeforeEdit })
+    await openAndLoad(studio, [LINE])
+    act(() => studio.context.session.actions.select('e1'))
+    const worker = studio.workers[0]
+    const post = vi.spyOn(worker, 'postMessage')
+    act(() => studio.context.session.actions.copyToClipboard(false))
+    act(() => studio.context.session.actions.copyToClipboard())
+    expect(onBeforeEdit).not.toHaveBeenCalled()
+    expect(post).not.toHaveBeenCalled()
+
+    act(() => studio.context.session.actions.copyToClipboard(true))
+    expect(onBeforeEdit).toHaveBeenCalledTimes(1)
+    expect(post).toHaveBeenCalledTimes(1)
+    expect(post).toHaveBeenCalledWith({ type: 'applyEdit', op: 'delete', payload: { entityId: 'e1' } })
+    expect(onBeforeEdit.mock.invocationCallOrder[0]).toBeLessThan(post.mock.invocationCallOrder[0])
+  })
+
   it('calls onBeforeEdit once for each drawing edit, before create posts', async () => {
     const onBeforeEdit = vi.fn()
     const studio = mount({ onBeforeEdit })
