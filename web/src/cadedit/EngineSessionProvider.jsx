@@ -284,7 +284,7 @@ export default function EngineSessionProvider({
   // A live refusal overrides only the status a consumer READS; every other
   // field (engineParsed, busy, errorKind, entities...) stays the real
   // session's own, so the reason ladders above never see a phantom refusal.
-  const sessionForConsumers = { ...session, actions, ...(refusal ? { status: refusal } : {}) }
+  const sessionForConsumers = useMemo(() => ({ ...session, actions, ...(refusal ? { status: refusal } : {}) }), [session, actions, refusal])
   const value = useMemo(
     () => ({
       session: sessionForConsumers, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap,
