@@ -1794,29 +1794,30 @@ test.describe('route matrix, rail ON', () => {
       for (const mode of ['cockpit-osnap', 'cockpit-ortho']) {
         if (await page.getByTestId(mode).getAttribute('aria-pressed') === 'true') await page.getByTestId(mode).click()
       }
-      const clickWorld = async (x, y) => {
-        const pixel = await page.evaluate(([wx, wy]) => {
-          const canvas = document.querySelector('.studio-ground .viewer-canvas')
-          const p = canvas.__cadviewer.project(wx, wy)
-          return { x: p.x, y: p.y, onGround: !!document.elementFromPoint(p.x, p.y)?.closest('.studio-ground') }
-        }, [x, y])
-        expect(pixel.onGround).toBe(true)
-        await page.mouse.click(pixel.x, pixel.y)
-      }
+      // A canvas pick on a pixel measured to be on the drawing; with the whole drawing fitted, world (5,5) and
+      // (10,0) project under the prompt strip, so the step asserts the rounded world point the picker writes.
+      const c = await groundPick(0.62, 0.55)
+      expect(c.onGround, `mixed ${order} pick pixel (${c.x},${c.y}) hit ${c.name}, not the drawing`).toBe(true)
+      const picked = [Number(r3(c.wx)), Number(r3(c.wy))]
       if (order === 'bar/click/bar') {
         await bar.fill('5,5')
         await bar.press('Enter')
-        await clickWorld(10, 0)
+        await page.mouse.click(c.x, c.y)
+        await expect.poll(readPointResult).toEqual([[5, 5], picked])
+        await expect(bar).toHaveAttribute('placeholder', 'LINE  Specify next point:')
+        await bar.fill('20,0')
+        await bar.press('Enter')
+        await expect.poll(readPointResult).toEqual([picked, [20, 0]])
       } else {
-        await clickWorld(5, 5)
+        await page.mouse.click(c.x, c.y)
         await bar.fill('10,0')
         await bar.press('Enter')
+        await expect.poll(readPointResult).toEqual([picked, [10, 0]])
+        await expect(bar).toHaveAttribute('placeholder', 'LINE  Specify next point:')
+        await bar.fill('20,0')
+        await bar.press('Enter')
+        await expect.poll(readPointResult).toEqual([[10, 0], [20, 0]])
       }
-      await expect.poll(readPointResult).toEqual([[5, 5], [10, 0]])
-      await expect(bar).toHaveAttribute('placeholder', 'LINE  Specify next point:')
-      await bar.fill('20,0')
-      await bar.press('Enter')
-      await expect.poll(readPointResult).toEqual([[10, 0], [20, 0]])
     }
     expect(pointRoutes).toHaveLength(0)
     await page.locator('body').press('Escape')
