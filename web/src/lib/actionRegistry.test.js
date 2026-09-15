@@ -27,6 +27,7 @@ import {
   KNOWN_REASON_VALUES,
   LADDER_REASONS,
   MODIFY_REASONS,
+  PROPERTY_REASONS,
   PLACED_KINDS,
   MAX_ID_CHARS,
   MAX_LABEL_CHARS,
@@ -45,6 +46,7 @@ import {
   ladderListener,
   modifyReason,
   propertyReason,
+  propertyControlReason,
   retryRung,
   ribbonTool,
   slashCommandHandlers,
@@ -55,6 +57,31 @@ import {
 // --- 1: the registry holds up ---------------------------------------------
 
 describe('the registry', () => {
+  it('explains Polyline commands and disabled property controls in the reason vocabulary', () => {
+    expect(byId('draw:createPolyline').title({})).toContain('PLINE')
+    expect(byId('draw:createPolyline').title({})).toMatch(/\bPL\b/)
+    for (const op of ['matchprop', 'setColor', 'setLinetype', 'setLineweight']) {
+      for (const [session, key] of [
+        [null, 'noDocument'],
+        [{ errorKind: 'crashed' }, 'crashed'],
+        [{ engineParsed: true, busy: true }, 'busy'],
+        [{ engineParsed: true }, 'noSelection'],
+        [{ engineParsed: true, selected: { editable: false, type: 'DIMENSION' } }, 'readOnlyKind'],
+      ]) {
+        expect(propertyControlReason(session)).toBe(PROPERTY_REASONS[key])
+        const reason = byId(`modify:${op}`).when({ session })
+        expect(reason).toBe(PROPERTY_REASONS[key])
+        expect(KNOWN_REASON_VALUES.has(reason)).toBe(true)
+        expect(reason).toContain('Match copies')
+        expect(reason).toContain('ByLayer inherits layer properties')
+      }
+      const editable = { engineParsed: true, selected: { editable: true } }
+      expect(propertyControlReason(editable)).toBe('')
+      expect(byId(`modify:${op}`).when({ session: editable })).toBe('')
+    }
+    expect(byId('modify:matchprop').when({ session: { engineParsed: true } })).toContain('select a source object first')
+  })
+
   it('is frozen, and so is every record and every trigger table inside it', () => {
     expect(Object.isFrozen(ACTIONS)).toBe(true)
     for (const action of ACTIONS) {

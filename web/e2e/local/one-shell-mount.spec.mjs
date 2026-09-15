@@ -958,7 +958,7 @@ test.describe('route matrix, rail ON', () => {
     // Run waits, so Enter posts nothing (before, it read from the status
     // after a refused run).
     await page.getByLabel('ribbon r').fill('0')
-    await expect(page.getByTestId('cockpit-prompt-note')).toHaveText('Circle refused: r must be greater than 0.')
+    await expect(page.getByTestId('cockpit-prompt-note')).toHaveText('Circle refused: radius must be greater than 0.')
     await expect(page.getByTestId('cockpit-prompt-run')).toBeDisabled()
     await page.getByLabel('ribbon r').press('Enter')
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('3')
@@ -1121,7 +1121,7 @@ test.describe('route matrix, rail ON', () => {
     // number back releases it.
     await page.getByLabel('ribbon x2', { exact: true }).fill('abc')
     await expect(page.getByLabel('ribbon x2', { exact: true })).toHaveAttribute('aria-invalid', 'true')
-    await expect(page.getByTestId('cockpit-prompt-note')).toHaveText('Line refused: x, y, x2 and y2 must all be numbers.')
+    await expect(page.getByTestId('cockpit-prompt-note')).toHaveText('Line refused: first point x, first point y, next point x and next point y must all be numbers.')
     await expect(page.getByTestId('cockpit-prompt-run')).toBeDisabled()
     await page.getByLabel('ribbon x2', { exact: true }).fill('50')
     await expect(page.getByTestId('cockpit-prompt-note')).toHaveCount(0)

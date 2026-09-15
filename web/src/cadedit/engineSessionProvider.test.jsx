@@ -467,7 +467,8 @@ describe('the Draw group (W4d Slice B): creation from the ribbon, selection land
     fireEvent.change(screen.getByLabelText('ribbon r'), { target: { value: '0' } })
     // W4f-6: the store's sentence shows as the operand is typed and Run
     // waits; a click on Run (or Enter) posts nothing.
-    expect(screen.getByTestId('cockpit-prompt-note').textContent).toMatch(/Circle refused: r must be greater than 0/)
+    // S07 humanizes field names at display time.
+    expect(screen.getByTestId('cockpit-prompt-note').textContent).toMatch(/Circle refused: radius must be greater than 0/)
     expect(screen.getByTestId('cockpit-prompt-run').disabled).toBe(true)
     runPrompt()
     fireEvent.keyDown(screen.getByLabelText('ribbon r'), { key: 'Enter' })
@@ -705,11 +706,13 @@ describe('the command prompt (W4e slice H): a tool arms, the command line asks i
     // A word where a number belongs: the store's refusal, live, on the
     // field and on Run; Enter posts nothing.
     fireEvent.change(screen.getByLabelText('ribbon x'), { target: { value: 'abc' } })
-    expect(note().textContent).toBe('Line refused: x, y, x2 and y2 must all be numbers.')
+    // S07 humanizes field names in the displayed note.
+    expect(note().textContent).toBe('Line refused: first point x, first point y, next point x and next point y must all be numbers.')
     expect(screen.getByLabelText('ribbon x').getAttribute('aria-invalid')).toBe('true')
     expect(screen.getByLabelText('ribbon y').getAttribute('aria-invalid')).toBeNull()
     expect(run().disabled).toBe(true)
-    expect(run().getAttribute('aria-label')).toBe('Run (unavailable: Line refused: x, y, x2 and y2 must all be numbers.)')
+    // S07 uses the same humanized sentence in Run's accessible name.
+    expect(run().getAttribute('aria-label')).toBe('Run (unavailable: Line refused: first point x, first point y, next point x and next point y must all be numbers.)')
     fireEvent.keyDown(screen.getByLabelText('ribbon x'), { key: 'Enter' })
     expect(studio.workers[0].posted.filter((message) => message.type === 'applyEdit')).toHaveLength(0)
     // Numbers that make a degenerate line: the sentence names it, no field
@@ -745,7 +748,8 @@ describe('the command prompt (W4e slice H): a tool arms, the command line asks i
     expect(studio.context.session.selectedId).toBe('e9')
     expect(note()).toBeNull()
     fireEvent.change(screen.getByLabelText('ribbon dx'), { target: { value: 'zz' } })
-    expect(note().textContent).toBe('Move refused: dx and dy must both be numbers.')
+    // S07 displays the move prompt's displacement labels.
+    expect(note().textContent).toBe('Move refused: displacement x and displacement y must both be numbers.')
     expect(screen.getByLabelText('ribbon dx').getAttribute('aria-invalid')).toBe('true')
     expect(run().disabled).toBe(true)
     fireEvent.change(screen.getByLabelText('ribbon dx'), { target: { value: '2' } })

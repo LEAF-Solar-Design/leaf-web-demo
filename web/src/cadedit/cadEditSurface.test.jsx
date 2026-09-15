@@ -255,6 +255,15 @@ afterEach(() => {
 })
 
 describe('acceptance: the editing surface mounts only behind cad_edit', () => {
+  it('states the DXF limit and content-dependent acceptance before import', () => {
+    render(withInertProvider(<CadEditSurface enabled />))
+    const hint = screen.getByText(/Leaf Automation accepts DXF input/)
+    expect(hint.textContent).toContain('16 MiB')
+    expect(hint.textContent).toContain('ASCII or binary')
+    expect(hint.textContent).toContain('checks size before parsing')
+    expect(hint.textContent).toContain('acceptance from the file contents')
+  })
+
   it('renders nothing when the flag is off', () => {
     render(<CadEditSurface enabled={false} />)
     expect(screen.queryByTestId('cad-edit-workbench')).toBeNull()
