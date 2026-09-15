@@ -18,6 +18,7 @@ describe('pointExpression (W4f-8): the command line\'s point grammar', () => {
   })
 
   it('parses the four forms and refuses everything else', () => {
+    expect(parsePointExpression('2 rows, 10 panels each')).toBeNull()
     expect(parsePointExpression('10,5')).toEqual({ relative: false, polar: false, a: 10, b: 5 })
     expect(parsePointExpression(' @ -10 , 5.25 ')).toEqual({ relative: true, polar: false, a: -10, b: 5.25 })
     expect(parsePointExpression('20<45')).toEqual({ relative: false, polar: true, a: 20, b: 45 })
@@ -45,6 +46,16 @@ describe('pointExpression (W4f-8): the command line\'s point grammar', () => {
     expect(resolvePointExpression('@10,5', [1])).toBeNull()
     expect(resolvePointExpression('nope')).toBeNull()
     expect(resolvePointExpression('10')).toBeNull()
+  })
+
+  it('can resolve bare polar text relative to an anchor without extending its length', () => {
+    const raw = `${'0'.repeat(60)}1<90`
+    expect(resolvePointExpression(raw, [10, 5], { relative: true })).toEqual([10, 6])
+    expect(resolvePointExpression('10,5', [100, 100], { relative: true })).toEqual([10, 5])
+    expect(resolvePointExpression(raw, null, { relative: true })).toBeNull()
+    expect(pointExpressionRefusal(raw, null, { relative: true })).toBe('"@" needs a previous point to measure from.')
+    expect(resolvePointExpression(`0${raw}`, [0, 0], { relative: true })).toBeNull()
+    expect(pointExpressionRefusal(`0${raw}`, [0, 0], { relative: true })).toContain('is not a point: use x,y')
   })
 
   it('names the refusal in the drafter\'s words', () => {

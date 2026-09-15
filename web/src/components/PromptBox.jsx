@@ -102,6 +102,7 @@ export default function PromptBox({
   // CSS lays out as one row, and swaps the caret glyph for the prompt word.
   // False (the default, and rail OFF) renders byte-for-byte as before.
   commandLine = false,
+  armedAsk = '',
   // Standardization slice 5a: the stage (/try, site/ToolCast.jsx) mounts THIS
   // component where its hand-rolled .tc-bar block stood, and 36 e2e rows key
   // off that block's hooks. Everything below is optional and defaults to
@@ -732,7 +733,7 @@ export default function PromptBox({
           </div>
         )}
         <div className={withAlias('bar-input', classNames.wrap)}>
-          <span className="bar-caret" aria-hidden="true">{commandLine ? 'Command:' : '›'}</span>
+          <span className="bar-caret" aria-hidden="true">{commandLine ? armedAsk || 'Command:' : '›'}</span>
           {/* A textarea, not an input: Shift+Enter (and Ctrl+J) must be able to
               put a real newline in the buffer — an <input> silently cannot hold
               one, so the existing `!e.shiftKey` dispatch guard was only ever
@@ -756,7 +757,7 @@ export default function PromptBox({
             onKeyDown={onKeyDown}
             onFocus={() => setFocused(true)}
             onBlur={() => setFocused(false)}
-            placeholder={placeholder}
+            placeholder={commandLine && armedAsk ? armedAsk : placeholder}
             spellCheck={false}
             aria-label="Command bar"
             data-testid="command-bar"

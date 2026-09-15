@@ -125,6 +125,10 @@ const DECLARED_AND_USED = [
 ]
 
 describe('App.jsx wiring', () => {
+  it('only swallows parseable unarmed points, so comma prose reaches the catalog', () => {
+    assert.match(stripped, /if \(parsePointExpression\(text\) !== null\)/)
+    assert.doesNotMatch(stripped, /isPointExpression\(text\)/)
+  })
   describe('W4g selection mirror back', () => {
     it('mounts StatusModesBridge under the engine flag', () => {
       assert.match(appSource, /\{ENV_CAD_EDIT && <StatusModesBridge \/>\}/)

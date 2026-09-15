@@ -64,14 +64,15 @@ export function parsePointExpression(raw) {
 /**
  * The point the expression names, as [x, y] rounded to three decimals, or
  * null when it does not parse, when a relative form has no anchor, or when
- * the anchor is not a finite pair.
+ * the anchor is not a finite pair. The relative option measures bare polar
+ * text from the anchor without changing the text subject to the length bound.
  */
-export function resolvePointExpression(raw, anchor = null) {
+export function resolvePointExpression(raw, anchor = null, { relative = false } = {}) {
   const p = parsePointExpression(raw)
   if (!p) return null
   let x = p.polar ? p.a * Math.cos(p.b * DEG) : p.a
   let y = p.polar ? p.a * Math.sin(p.b * DEG) : p.b
-  if (p.relative) {
+  if (p.relative || (relative && p.polar)) {
     if (!Array.isArray(anchor) || anchor.length !== 2 || !Number.isFinite(anchor[0]) || !Number.isFinite(anchor[1])) return null
     x += anchor[0]
     y += anchor[1]
@@ -81,10 +82,10 @@ export function resolvePointExpression(raw, anchor = null) {
 }
 
 /** Why an expression resolved to nothing, in the drafter's words, or '' when it resolved. */
-export function pointExpressionRefusal(raw, anchor = null) {
-  if (!isPointExpression(raw)) return ''
+export function pointExpressionRefusal(raw, anchor = null, options = {}) {
+  if (!isPointExpression(raw) && !(typeof raw === 'string' && raw.trim().length > MAX_EXPRESSION_CHARS)) return ''
   const p = parsePointExpression(raw)
   if (!p) return `"${String(raw).trim()}" is not a point: use x,y, @dx,dy, dist<angle or @dist<angle.`
-  if (p.relative && resolvePointExpression(raw, anchor) === null) return '"@" needs a previous point to measure from.'
-  return resolvePointExpression(raw, anchor) === null ? `"${String(raw).trim()}" does not resolve to a finite point.` : ''
+  if ((p.relative || (options.relative && p.polar)) && resolvePointExpression(raw, anchor, options) === null) return '"@" needs a previous point to measure from.'
+  return resolvePointExpression(raw, anchor, options) === null ? `"${String(raw).trim()}" does not resolve to a finite point.` : ''
 }

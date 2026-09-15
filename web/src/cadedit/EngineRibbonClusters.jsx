@@ -185,6 +185,15 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // the first cut disabled the fields for every reason, against this
   // comment; engineSessionProvider.test pins the split.)
   const armedOp = armed ? armed.op : ''
+  const [commandState, setCommandState] = useState(null)
+  useEffect(() => {
+    const onArmed = (event) => {
+      setCommandState(event.detail)
+    }
+    window.addEventListener('cockpit:armed', onArmed)
+    window.dispatchEvent(new CustomEvent('cockpit:armed-request'))
+    return () => window.removeEventListener('cockpit:armed', onArmed)
+  }, [])
   const armedGroup = armed ? armed.group : ''
   const prompt = armedOp ? PROMPTS[armedOp] : null
   // W4g-7b-04c-8: every prompt field shares the provider's bounds and arm reset.
@@ -273,6 +282,15 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     else if (armedOp === 'pasteClip') pasteFromClipboard(effective)
     else applyEdit(armedOp, effective)
   }
+  const runRef = useRef(null)
+  runRef.current = { armed, run }
+  useEffect(() => {
+    const onRun = (event) => {
+      if (event.detail?.armed === runRef.current.armed) runRef.current.run()
+    }
+    window.addEventListener('cockpit:run', onRun)
+    return () => window.removeEventListener('cockpit:run', onRun)
+  }, [])
   const cancel = () => {
     const toolId = armed ? `${armed.group}:${armed.op}` : ''
     setArmed(null)
@@ -283,13 +301,19 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     }
   }
   const promptRef = useRef(null)
+  const focusPrompt = (fallback) => {
+    const detail = { handled: false }
+    window.dispatchEvent(new CustomEvent('cockpit:focus-step', { detail }))
+    // Standalone ribbon consumers have no command-bar cursor.
+    if (!detail.handled) promptRef.current?.querySelector(fallback)?.focus()
+  }
   const blockArm = armedOp === 'createBlock' ? armed : null
   useEffect(() => {
     // Arming puts the caret in the first field the way the reference's
     // command line takes typing the moment a command starts.
     chainRef.current = null
     if (!armedOp) return undefined
-    promptRef.current?.querySelector(armedOp === 'group' || armedOp === 'createBlock' ? '[aria-label="ribbon members"]' : 'input:not([disabled])')?.focus()
+    focusPrompt(armedOp === 'group' || armedOp === 'createBlock' ? '[aria-label="ribbon members"]' : 'input:not([disabled])')
     return undefined
   }, [armedOp, blockArm])
   useEffect(() => {
@@ -324,7 +348,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     }
     const active = document.activeElement
     if (active && active !== document.body && !promptRef.current?.contains(active)) return undefined
-    promptRef.current?.querySelector(nextField)?.focus()
+    focusPrompt(nextField)
     return undefined
   }, [armedOp, session.busy])
   const cancelRef = useRef(cancel)
@@ -575,6 +599,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
       onKeyDown={onPromptKeyDown}
     >
       <span className="cp-verb">{prompt.verb}</span>
+      {commandState?.op === armedOp && <span className="cp-ask" data-testid="cockpit-active-ask" aria-live="polite">{commandState.ask}</span>}
       {armedOp === 'ungroup' && <datalist id="cockpit-group-names">{(session.entities.groups || []).map((group) => <option key={group.name} value={group.name} />)}</datalist>}
       {prompt.verb === 'INSERT' && (
         <datalist id={BLOCK_CATALOGUE_ID}>

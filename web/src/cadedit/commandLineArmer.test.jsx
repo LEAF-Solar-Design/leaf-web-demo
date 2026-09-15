@@ -9,6 +9,7 @@ import { COCKPIT_COMMAND_EVENT, parseDrawingCommand } from '../lib/commandWords.
 
 import CadEditSurface from './CadEditSurface.jsx'
 import CommandLineArmer, { acceptsCommand } from './CommandLineArmer.jsx'
+import CanvasPointPicker from './CanvasPointPicker.jsx'
 import EngineRibbonClusters from './EngineRibbonClusters.jsx'
 import EngineSessionProvider from './EngineSessionProvider.jsx'
 import DraftingRibbon from '../site/DraftingRibbon.jsx'
@@ -33,7 +34,7 @@ function fileOf(name = 'one.dxf') {
 }
 
 let workers
-function mount() {
+function mount(picker = null) {
   workers = []
   const createWorker = vi.fn(() => { const w = new ScriptedWorker(); workers.push(w); return w })
   render(
@@ -42,6 +43,7 @@ function mount() {
         <EngineRibbonClusters importOpen={false} onToggleImport={() => {}} />
         <CommandLineArmer />
       </DraftingRibbon>
+      {picker && <CanvasPointPicker {...picker} />}
       <CadEditSurface enabled />
     </EngineSessionProvider>,
   )
@@ -59,6 +61,11 @@ async function openAndLoad(entities = [LINE]) {
 
 const command = (detail) => act(() => { window.dispatchEvent(new CustomEvent(COCKPIT_COMMAND_EVENT, { detail })) })
 const promptEl = () => screen.queryByTestId('cockpit-prompt')
+const point = (text) => {
+  const detail = { text, handled: false }
+  act(() => window.dispatchEvent(new CustomEvent('cockpit:point', { detail })))
+  return detail.handled
+}
 
 beforeEach(() => {
   globalThis.URL.createObjectURL = vi.fn(() => 'blob:cad-edit-test')
@@ -67,6 +74,169 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
 describe('CommandLineArmer (W4f slice B)', () => {
+  it.each([false, true])('keeps the endpoint cursor after a worker refusal from body focus with picker=%s', async (withPicker) => {
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => { cb(); return 0 })
+    const ground = document.createElement('div')
+    mount(withPicker ? { ground, viewerRef: { current: {} } } : null)
+    await openAndLoad()
+    command(parseDrawingCommand('LINE'))
+    point('0,0')
+    point('10,0')
+    expect(workers[0].posted.at(-1)).toMatchObject({ type: 'applyEdit', payload: { x1: 0, y1: 0, x2: 10, y2: 0 } })
+    act(() => {
+      const tabIndex = document.body.getAttribute('tabindex')
+      document.body.setAttribute('tabindex', '-1')
+      document.body.focus()
+      if (tabIndex === null) document.body.removeAttribute('tabindex')
+      else document.body.setAttribute('tabindex', tabIndex)
+    })
+    expect(document.activeElement).toBe(document.body)
+    workers[0].emit({ type: 'editApplied', op: 'createLine', ok: false, reason: 'worker rejected segment' })
+    expect(screen.getByLabelText('ribbon x2')).toHaveFocus()
+    let state
+    window.addEventListener('cockpit:armed', (event) => { state = event.detail }, { once: true })
+    act(() => window.dispatchEvent(new CustomEvent('cockpit:armed-request')))
+    expect(state).toMatchObject({ op: 'createLine', step: 1 })
+    expect(screen.getByTestId('cockpit-active-ask').textContent).toBe('LINE  Specify next point:')
+    point('20,0')
+    expect(screen.getByLabelText('ribbon x').value).toBe('0')
+    expect(screen.getByLabelText('ribbon y').value).toBe('0')
+    expect(workers[0].posted.filter((message) => message.type === 'applyEdit')).toHaveLength(2)
+    expect(workers[0].posted.at(-1)).toMatchObject({ type: 'applyEdit', payload: { x1: 0, y1: 0, x2: 20, y2: 0 } })
+  })
+
+  it.each([false, true])('keeps a refused LINE endpoint correctable with picker=%s', async (withPicker) => {
+    const ground = document.createElement('div')
+    mount(withPicker ? { ground, viewerRef: { current: {} } } : null)
+    await openAndLoad()
+    command(parseDrawingCommand('LINE'))
+    const layer = screen.getByLabelText('ribbon layer').value
+    point('0,0')
+    point('0,0')
+    expect(workers[0].posted.filter((m) => m.type === 'applyEdit')).toHaveLength(0)
+    expect(screen.getByTestId('cockpit-active-ask').textContent).toBe('LINE  Specify next point:')
+    expect(screen.getByTestId('cockpit-prompt-note').textContent).toContain('refused')
+    point('10,0')
+    expect(screen.getByLabelText('ribbon layer').value).toBe(layer)
+    expect(workers[0].posted.at(-1)).toMatchObject({ type: 'applyEdit', op: 'createLine', payload: { x1: 0, y1: 0, x2: 10, y2: 0 } })
+  })
+
+  it.each(['bar/click/bar', 'click/bar/bar'])('chains two segments through one point step: %s', async (order) => {
+    const ground = document.createElement('div')
+    const viewer = { unproject: (x, y) => ({ x, y }), setRubberBand: vi.fn() }
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => { cb(); return 0 })
+    mount({ ground, viewerRef: { current: viewer } })
+    await openAndLoad()
+    act(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'F3' })))
+    const click = (x, y) => act(() => {
+      ground.dispatchEvent(new MouseEvent('pointerdown', { clientX: x, clientY: y, button: 0 }))
+      ground.dispatchEvent(new MouseEvent('pointerup', { clientX: x, clientY: y, button: 0 }))
+    })
+    command(parseDrawingCommand('LINE'))
+    if (order === 'bar/click/bar') { point('5,5'); click(10, 0) }
+    else { click(5, 5); point('10,0') }
+    expect(workers[0].posted.filter((m) => m.type === 'applyEdit')).toHaveLength(1)
+    expect(workers[0].posted.at(-1)).toMatchObject({ payload: { x1: 5, y1: 5, x2: 10, y2: 0 } })
+    workers[0].emit({ type: 'editApplied', op: 'createLine', ok: true, createdId: 'e2', entities: [LINE, { ...LINE, id: 'e2', vertices: [[5, 5], [10, 0]] }], entityCount: 2 })
+    point('20,0')
+    expect(workers[0].posted.filter((m) => m.type === 'applyEdit')).toHaveLength(2)
+    expect(workers[0].posted.at(-1)).toMatchObject({ payload: { x1: 10, y1: 0, x2: 20, y2: 0 } })
+    expect(screen.getByLabelText('ribbon layer').value).toBe('')
+  })
+
+  it('rewinds a corrected CIRCLE centre through the picker and reanchors the radius ghost', async () => {
+    const ground = document.createElement('div')
+    const viewer = { unproject: (x, y) => ({ x, y }), setRubberBand: vi.fn() }
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => { cb(); return 0 })
+    mount({ ground, viewerRef: { current: viewer } })
+    await openAndLoad()
+    act(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'F3' })))
+    const click = (x, y) => act(() => {
+      ground.dispatchEvent(new MouseEvent('pointerdown', { clientX: x, clientY: y, button: 0 }))
+      ground.dispatchEvent(new MouseEvent('pointerup', { clientX: x, clientY: y, button: 0 }))
+    })
+    command(parseDrawingCommand('CIRCLE'))
+    click(5, 5)
+    act(() => screen.getByLabelText('ribbon x').focus())
+    point('10,0')
+    expect(screen.getByLabelText('ribbon x').value).toBe('10')
+    expect(screen.getByLabelText('ribbon y').value).toBe('0')
+    expect(screen.getByTestId('cockpit-active-ask').textContent).toBe('CIRCLE  Specify radius:')
+    act(() => ground.dispatchEvent(new MouseEvent('pointermove', { clientX: 10, clientY: 10 })))
+    const [ghost, closed] = viewer.setRubberBand.mock.calls.at(-1)
+    expect(closed).toBe(true)
+    expect(ghost[0]).toEqual([20, 0])
+    expect(ghost[24][0]).toBeCloseTo(0)
+    expect(ghost[24][1]).toBeCloseTo(0)
+    click(10, 10)
+    expect(screen.getByLabelText('ribbon r').value).toBe('10')
+  })
+
+  it('refuses a bar point for a later picker step without writing its fields', async () => {
+    mount({ ground: document.createElement('div'), viewerRef: { current: {} } })
+    await openAndLoad()
+    command(parseDrawingCommand('LINE'))
+    const x2 = screen.getByLabelText('ribbon x2').value
+    const y2 = screen.getByLabelText('ribbon y2').value
+    act(() => screen.getByLabelText('ribbon x2').focus())
+    point('20,0')
+    expect(screen.getByLabelText('ribbon x2').value).toBe(x2)
+    expect(screen.getByLabelText('ribbon y2').value).toBe(y2)
+    expect(screen.getByRole('status').textContent).toContain('Start a drawing command before entering a point.')
+    expect(workers[0].posted.filter((message) => message.type === 'applyEdit')).toHaveLength(0)
+  })
+
+  it.each([false, true])('bounds the typed polar text before resolving it from the anchor with picker=%s', async (withPicker) => {
+    mount(withPicker ? { ground: document.createElement('div'), viewerRef: { current: {} } } : null)
+    await openAndLoad()
+    command(parseDrawingCommand('LINE'))
+    point('0,0')
+    const raw = `${'0'.repeat(60)}1<90`
+    expect(raw).toHaveLength(64)
+    point(`0${raw}`)
+    expect(screen.getByRole('status').textContent).toContain('is not a point: use x,y, @dx,dy, dist<angle or @dist<angle.')
+    expect(workers[0].posted.filter((message) => message.type === 'applyEdit')).toHaveLength(0)
+    point(raw)
+    expect(screen.getByLabelText('ribbon x2').value).toBe('0')
+    expect(screen.getByLabelText('ribbon y2').value).toBe('1')
+    expect(workers[0].posted.at(-1)).toMatchObject({ type: 'applyEdit', payload: { x1: 0, y1: 0, x2: 0, y2: 1 } })
+  })
+
+  it('takes absolute, relative and polar points through the armed operand and publishes its live ask', async () => {
+    mount()
+    await openAndLoad()
+    expect(point('0,0')).toBe(false)
+    command(parseDrawingCommand('LINE'))
+    expect(screen.getByTestId('cockpit-active-ask').textContent).toBe('LINE  Specify first point:')
+    expect(point('@10,0')).toBe(true)
+    expect(screen.getByRole('status').textContent).toContain('needs a previous point')
+    expect(screen.getByLabelText('ribbon x').value).toBe('@10,0')
+    expect(point('0,0')).toBe(true)
+    expect(screen.getByTestId('cockpit-active-ask').textContent).toBe('LINE  Specify next point:')
+    expect(point('@10,0')).toBe(true)
+    expect(screen.getByLabelText('ribbon x2').value).toBe('10')
+    expect(screen.getByLabelText('ribbon y2').value).toBe('0')
+    expect(workers[0].posted.at(-1)).toMatchObject({ type: 'applyEdit', op: 'createLine', payload: { x1: 0, y1: 0, x2: 10, y2: 0 } })
+    workers[0].emit({ type: 'editApplied', op: 'createLine', ok: true, createdId: 'e2', entities: [LINE, { ...LINE, id: 'e2', vertices: [[0, 0], [10, 0]] }], entityCount: 2 })
+    expect(screen.getByTestId('cockpit-active-ask').textContent).toBe('LINE  Specify next point:')
+    expect(point('10<90')).toBe(true)
+    expect(screen.getByLabelText('ribbon x2').value).toBe('10')
+    expect(screen.getByLabelText('ribbon y2').value).toBe('10')
+    expect(workers[0].posted.at(-1)).toMatchObject({ type: 'applyEdit', op: 'createLine', payload: { x1: 10, y1: 0, x2: 10, y2: 10 } })
+  })
+
+  it('keeps a point typed for a scalar and names the field without advancing', async () => {
+    mount()
+    await openAndLoad()
+    command(parseDrawingCommand('CIRCLE'))
+    point('0,0')
+    expect(point('10,10')).toBe(true)
+    expect(screen.getByLabelText('ribbon r').value).toBe('10,10')
+    expect(screen.getByRole('status').textContent).toContain('r needs a scalar')
+    expect(screen.getByTestId('cockpit-active-ask').textContent).toBe('CIRCLE  Specify radius:')
+    expect(screen.getByTestId('cockpit-prompt-run')).toBeDisabled()
+  })
+
   it('a draw word arms its prompt like the ribbon click; a second word re-arms; malformed details are ignored', async () => {
     mount()
     await openAndLoad()

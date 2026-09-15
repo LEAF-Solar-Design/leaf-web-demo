@@ -83,6 +83,8 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
   fromRef.current = armedFrom
   const inputsRef = useRef(inputs)
   inputsRef.current = inputs
+  const busyRef = useRef(session.busy)
+  busyRef.current = session.busy
   // W4g-6: an edge pick resolves against the entity list, minus the selection.
   const entitiesRef = useRef(session.entities)
   entitiesRef.current = session.entities
@@ -166,6 +168,51 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
       if (event.button !== 0 || !machine.current?.sequence) return
       down = { x: event.clientX, y: event.clientY, t: performance.now() }
     }
+    const acceptPoint = (m, px, py, context = null, typed = false) => {
+      if (busyRef.current) return false
+      const step = currentStep(m)
+      const { state, writes } = applyPick(m, px, py, inputsRef.current, context)
+      if (!writes.length && state === m) return false
+      machine.current = state
+      for (const [key, value] of writes) setInput(key, value)
+      // Preserve click-only Run behavior; a bar entry submits a mixed LINE.
+      state.barPoint = typed || m.barPoint
+      const detail = { op: m.op, key: step.keys?.[0] || step.key, run: !!state.barPoint, handled: false }
+      window.dispatchEvent(new CustomEvent('cockpit:picked', { detail }))
+      // Keep the endpoint and ghost anchor until the store accepts the run.
+      // A refusal then lets either surface correct the same endpoint.
+      const runLine = detail.handled && detail.run && m.op === 'createLine' && m.step === 1
+      if (runLine) machine.current = { ...m, barPoint: state.barPoint }
+      const nextStep = currentStep(machine.current)
+      window.requestAnimationFrame(() => {
+        const focus = { handled: false }
+        window.dispatchEvent(new CustomEvent('cockpit:focus-step', { detail: focus }))
+        if (focus.handled) return
+        if (nextStep) focusField(nextStep.keys ? nextStep.keys[0] : nextStep.key)
+        else if (state.op === 'createBlock') document.querySelector('#cockpit-prompt [aria-label="ribbon block name"]')?.focus()
+        else focusRun()
+      })
+      draw()
+      return true
+    }
+    const onPoint = (event) => {
+      const m = machine.current
+      const detail = event.detail
+      if (!detail || !m?.sequence) return
+      if (!Array.isArray(detail.point) || detail.point.length !== 2) return
+      const index = m.sequence.findIndex((step) => step.kind === 'point' && step.keys[0] === detail.key)
+      if (index < 0) return
+      if (index > m.step) {
+        detail.handled = true
+        detail.refusal = 'Start a drawing command before entering a point.'
+        return
+      }
+      // Replacing an earlier point discards its dependent picks and anchor.
+      const rewound = index < m.step
+        ? { ...m, step: index, picked: m.picked.slice(0, index), base: index === 0 ? null : m.base }
+        : m
+      detail.handled = acceptPoint(rewound, detail.point[0], detail.point[1], null, true)
+    }
     const onUp = (event) => {
       if (!down) return
       const moved = Math.hypot(event.clientX - down.x, event.clientY - down.y)
@@ -204,25 +251,13 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
         const tol = q ? Math.abs(q.x - p.x) : 0
         apertureCtx = { tol }
       }
-      const { state, writes } = applyPick(m, px, py, inputsRef.current, edgeStep ? edgeCtx : apertureCtx)
-      if (!writes.length && state === m) return
-      machine.current = state
-      for (const [key, value] of writes) setInput(key, value)
-      const nextStep = wantsPick(state) ? state.sequence[Math.min(state.step, state.sequence.length - 1)] : null
-      // The caret moves after React has painted the writes: a Run button
-      // that was disabled a moment ago (an empty or refused operand, W4f-6)
-      // only takes focus once the render has enabled it.
-      window.requestAnimationFrame(() => {
-        if (nextStep) focusField(nextStep.keys ? nextStep.keys[0] : nextStep.key)
-        else if (state.op === 'createBlock') document.querySelector('#cockpit-prompt [aria-label="ribbon block name"]')?.focus()
-        else focusRun()
-      })
-      draw()
+      acceptPoint(m, px, py, edgeStep ? edgeCtx : apertureCtx)
     }
     const onLeave = () => { last = null; const v = viewer(); v?.setRubberBand?.(null); if (v) showMarker(v, null) }
     const onBlockUp = (event) => {
       if (machine.current?.op === 'createBlock') onUp(event)
     }
+    window.addEventListener('cockpit:pick-point', onPoint)
     ground.addEventListener('pointermove', onMove, { passive: true })
     ground.addEventListener('pointerdown', onDown)
     ground.addEventListener('pointerup', onBlockUp, true)
@@ -230,6 +265,7 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
     ground.addEventListener('pointerleave', onLeave)
     return () => {
       if (frame) window.cancelAnimationFrame(frame)
+      window.removeEventListener('cockpit:pick-point', onPoint)
       ground.removeEventListener('pointermove', onMove)
       ground.removeEventListener('pointerdown', onDown)
       ground.removeEventListener('pointerup', onBlockUp, true)

@@ -6,6 +6,15 @@ import { PROMPTS } from './EngineRibbonClusters.jsx'
 import { isPointStep, resolvePromptInputs } from './promptInputs.js'
 
 describe('resolvePromptInputs', () => {
+  it('refuses a point in a scalar field by name and retains the entered text', () => {
+    const inputs = { x: '0', y: '0', r: '10,10' }
+    const out = resolvePromptInputs(PROMPTS.createCircle, inputs)
+    expect(out.expressionRefusal).toBe('CIRCLE refused: r needs a scalar, not a point.')
+    expect(out.failedExpression.has('r')).toBe(true)
+    expect(out.effective.r).toBe('10,10')
+    expect(inputs.r).toBe('10,10')
+  })
+
   it('resolves a point expression in a step\'s first field into both fields, chaining the next point off the first', () => {
     const out = resolvePromptInputs(PROMPTS.createLine, { x: '10,5', y: '', x2: '@5,5', y2: '', layer: '0' })
     expect(out.effective).toEqual({ x: '10', y: '5', x2: '15', y2: '10', layer: '0' })

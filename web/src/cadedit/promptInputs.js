@@ -38,6 +38,14 @@ export function resolvePromptInputs(prompt, inputs, from = null) {
   // malformed pair still parseFloats to its first number, so the numeric
   // test alone would not blame it).
   const failedExpression = new Set()
+  for (const step of prompt?.steps || []) {
+    if (step.fields.length !== 1) continue
+    const [key, label, mode = 'decimal'] = step.fields[0]
+    if ((mode === 'decimal' || mode === 'decimal-default') && isPointExpression(inputs[key])) {
+      failedExpression.add(key)
+      if (!expressionRefusal) expressionRefusal = `${prompt.verb} refused: ${label} needs a scalar, not a point.`
+    }
+  }
   let previousPoint = Array.isArray(from) && Number.isFinite(from[0]) && Number.isFinite(from[1]) ? [from[0], from[1]] : null
   for (const step of pointSteps) {
     const [[kx], [ky]] = step.fields
