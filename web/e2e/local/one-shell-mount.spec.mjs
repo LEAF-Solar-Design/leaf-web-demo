@@ -1088,6 +1088,10 @@ test.describe('route matrix, rail ON', () => {
     // W4f-5: Enter draws that segment (the chain moves on), then F3 turns
     // OSNAP on and a click a few pixels off the imported polyline's corner
     // (50, 5) lands exactly on it. F3 again turns it off.
+    // The picker hands the caret to Run in a frame after the pick, so the Enter
+    // waits for Run to hold focus, as the first segment does; an Enter pressed
+    // before that handoff reaches the body and draws nothing.
+    await expect(page.getByTestId('cockpit-prompt-run')).toBeFocused()
     await page.keyboard.press('Enter')
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('5', { timeout: 60_000 })
     await page.keyboard.press('F3')
