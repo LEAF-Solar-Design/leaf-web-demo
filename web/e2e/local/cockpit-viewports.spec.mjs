@@ -142,6 +142,7 @@ test.describe('phone landscape', () => {
     expect(box.height).toBeGreaterThanOrEqual(120)
     const command = page.getByLabel('Command bar', { exact: true })
     await expect(command).toBeInViewport({ ratio: 1 })
+    await expect(page.locator('footer.foot-bar')).toBeInViewport({ ratio: 1 })
     await command.click()
     await expect(command).toBeFocused()
   })
