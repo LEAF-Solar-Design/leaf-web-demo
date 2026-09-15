@@ -2195,28 +2195,37 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.locator(STUDIO)).toHaveCount(1)
   })
 
-  test('<=980px: the shell is the scroll surface and the ground stays pinned', async ({ page, request }) => {
+  test('<=980px: the CAD shell does not scroll and the ground stays pinned between the fixed chrome', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
     await setRail(page, '1')
     await page.setViewportSize({ width: 900, height: 640 })
     await page.goto('/app')
     await expectOneCanvasIn(page, '.studio-ground')
+    // #1228 (W4g-remainder S05) pins the header, ribbon, command line and status bar on the CAD and Solar surfaces
+    // at <=980px and insets the drawing ground between them, so the shell itself no longer scrolls
+    // (cockpit-viewports.spec.mjs asserts the same at 390x844). The W4c scrolling stack this row used to pin is gone.
     const before = await page.evaluate(() => {
       const shell = document.querySelector('.studio-shell')
       return { scrollHeight: shell.scrollHeight, clientHeight: shell.clientHeight, overflowY: getComputedStyle(shell).overflowY }
     })
-    expect(before.overflowY).toBe('auto')
-    expect(before.scrollHeight, 'stacked console must overflow the viewport').toBeGreaterThan(before.clientHeight)
-    const after = await page.evaluate(() => {
+    expect(before.overflowY).toBe('hidden')
+    expect(before.scrollHeight - before.clientHeight, 'the fixed CAD stack must fit the viewport').toBeLessThanOrEqual(1)
+    const ground = await page.evaluate(() => {
+      const box = () => {
+        const rect = document.querySelector('.studio-ground').getBoundingClientRect()
+        return { top: rect.top, bottom: rect.bottom, height: rect.height }
+      }
       const shell = document.querySelector('.studio-shell')
+      const first = box()
       shell.scrollTop = 400
-      const ground = document.querySelector('.studio-ground').getBoundingClientRect()
-      return { scrollTop: shell.scrollTop, groundTop: ground.top, groundHeight: ground.height, viewport: window.innerHeight }
+      return { first, after: box(), scrollTop: shell.scrollTop, viewport: window.innerHeight }
     })
-    expect(after.scrollTop).toBeGreaterThan(0)
-    expect(after.groundTop).toBe(0)
-    expect(after.groundHeight).toBe(after.viewport)
+    expect(ground.scrollTop).toBeLessThanOrEqual(1)
+    expect(Math.abs(ground.after.top - ground.first.top)).toBeLessThanOrEqual(1)
+    expect(ground.first.top).toBeGreaterThanOrEqual(0)
+    expect(ground.first.bottom).toBeLessThanOrEqual(ground.viewport)
+    expect(ground.first.height, 'the drawing ground keeps a usable height').toBeGreaterThanOrEqual(120)
   })
 })
 
