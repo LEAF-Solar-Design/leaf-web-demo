@@ -86,7 +86,7 @@ export default function CommandLineArmer() {
   useEffect(() => () => window.dispatchEvent(new CustomEvent('cockpit:armed', { detail: null })), [])
   useEffect(() => {
     const onRefocus = (event) => {
-      if (!live.current.prompt || !event.detail) return
+      if (!live.current.prompt || !event.detail || event.detail.complete === true) return
       event.detail.handled = true
       setFocusRequest((request) => request + 1)
     }

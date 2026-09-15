@@ -185,7 +185,7 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
       if (runLine) machine.current = { ...m, barPoint: state.barPoint }
       const nextStep = currentStep(machine.current)
       window.requestAnimationFrame(() => {
-        const focus = { handled: false }
+        const focus = { handled: false, complete: !nextStep }
         window.dispatchEvent(new CustomEvent('cockpit:focus-step', { detail: focus }))
         if (focus.handled) return
         if (nextStep) focusField(nextStep.keys ? nextStep.keys[0] : nextStep.key)
