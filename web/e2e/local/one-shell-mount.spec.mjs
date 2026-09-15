@@ -1868,7 +1868,10 @@ test.describe('route matrix, rail ON', () => {
     const showResult = dock.getByRole('button', { name: 'Show result', exact: true })
     await expect(showResult).toBeVisible()
     await expect(dock.getByTestId('dock-drawing')).toContainText(new RegExp('(^|[^\\d,])' + (undoDepthBeforeTiny + 1).toLocaleString('en-US') + ' to undo'))
-    await page.locator('body').press('Escape')
+    // End the LINE chain through the prompt's own Cancel: focus is still in the Command bar after the typed
+    // points, and Escape pressed there belongs to the bar, so a body Escape would leave LINE armed.
+    await page.getByTestId('cockpit-prompt').getByRole('button', { name: 'Cancel', exact: true }).click()
+    await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
     await showResult.click()
     await expect(showResult).toHaveCount(0)
     const visibleResult = await page.evaluate(() => {
