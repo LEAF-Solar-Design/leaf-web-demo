@@ -45,6 +45,7 @@ describe('studio unobstructed drawing viewport', () => {
     const list = appNoComments.slice(start, appNoComments.indexOf('])', start))
     for (const selector of ['header.top', '#drafting-ribbon', '.viewer-toolbar', '[data-testid="cockpit-view"]',
       '.properties-dock', '.bar.bar-command-line', 'footer.foot-bar', '.rail-stack']) assert.ok(list.includes(selector), selector)
+    assert.ok(list.includes('reserve: 50'))
     assert.ok(!list.includes("'.bar-dock'"))
     assert.ok(!list.includes('cockpit-prompt'))
     assert.ok(!list.includes('cockpit-cube'))

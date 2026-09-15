@@ -13,6 +13,15 @@ const chrome = [cover('top', 0, 0, 1920, 28), cover('top', 0, 28, 1920, 95),
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); document.body.innerHTML = '' })
 
 describe('computeSafeRect', () => {
+  it.each([
+    [50, 798], [undefined, 848], [0, 848], [-10, 848], [NaN, 848], [Infinity, 848],
+  ])('reserves valid bottom space (%s)', (reserve, height) => {
+    expect(computeSafeRect(canvas, [{ ...cover('bottom', 600, 880, 720, 25), reserve }])).toEqual(rect(16, 16, 1888, height))
+  })
+  it('reserves space toward the interior after resolving the side', () => {
+    expect(computeSafeRect(canvas, [{ ...cover('top', 0, 0, 1920, 28), reserve: 10 }])).toEqual(rect(16, 54, 1888, 870))
+    expect(computeSafeRect(canvas, [{ ...cover('nearest', 0, 400, 100, 100), reserve: 20 }])).toEqual(rect(136, 16, 1768, 908))
+  })
   it('measures full-bleed chrome, a closed pane and a wrapped prompt', () => {
     expect(computeSafeRect(canvas, chrome)).toEqual(rect(266, 197, 1638, 667))
     expect(computeSafeRect(canvas, chrome.filter(({ edge }) => edge !== 'left'))).toEqual(rect(16, 197, 1888, 667))
@@ -54,10 +63,11 @@ describe('useDrawingViewport', () => {
     const removed = vi.spyOn(window, 'removeEventListener')
     const scrollRemoved = vi.spyOn(document.querySelector('main'), 'removeEventListener')
     const shellRemoved = vi.spyOn(document.querySelector('.studio-shell'), 'removeEventListener')
-    const specs = [['.bar-dock', 'bottom']]
+    const specs = [['.bar-dock', 'bottom', { reserve: 50 }]]
     const { result, unmount } = renderHook(() => useDrawingViewport(root, specs))
     flush()
     expect(measure).toHaveBeenCalledTimes(1)
+    expect(result.current).toEqual(rect(16, 16, 1888, 798))
     expect(observe).toHaveBeenCalledWith(canvasElement)
     expect(observe).toHaveBeenCalledWith(dock)
     const previous = result.current

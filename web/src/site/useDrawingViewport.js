@@ -5,7 +5,7 @@ export function computeSafeRect(canvasRect, occluders, { padding = 16 } = {}) {
   const { left: x, top: y, width, height } = canvasRect
   if (![x, y, width, height, padding].every(Number.isFinite) || width <= 0 || height <= 0) return null
   let left = x, top = y, right = x + width, bottom = y + height
-  for (const { rect, edge } of occluders) {
+  for (const { rect, edge, reserve } of occluders) {
     if (!rect || ![rect.left, rect.top, rect.width, rect.height].every(Number.isFinite)
       || rect.width <= 0 || rect.height <= 0) continue
     const r = rect.left + rect.width, b = rect.top + rect.height
@@ -18,10 +18,11 @@ export function computeSafeRect(canvasRect, occluders, { padding = 16 } = {}) {
         ['left', Math.abs(cx - x)], ['right', Math.abs(x + width - cx)],
       ].sort((a, b) => a[1] - b[1])[0][0]
     }
-    if (side === 'top') top = Math.max(top, b)
-    if (side === 'bottom') bottom = Math.min(bottom, rect.top)
-    if (side === 'left') left = Math.max(left, r)
-    if (side === 'right') right = Math.min(right, rect.left)
+    const extra = Number.isFinite(reserve) && reserve > 0 ? reserve : 0
+    if (side === 'top') top = Math.max(top, b + extra)
+    if (side === 'bottom') bottom = Math.min(bottom, rect.top - extra)
+    if (side === 'left') left = Math.max(left, r + extra)
+    if (side === 'right') right = Math.min(right, rect.left - extra)
   }
   left += padding; top += padding; right -= padding; bottom -= padding
   if (right <= left || bottom <= top) return null
@@ -45,8 +46,8 @@ export default function useDrawingViewport(root, occluderSpecs) {
     function measure() {
       frame = null
       const canvas = root.querySelector('.viewer-canvas canvas')
-      const elements = occluderSpecs.map(([selector, edge]) => ({ element: doc.querySelector(selector), edge }))
-      const next = computeSafeRect(canvas?.getBoundingClientRect(), elements.map(({ element, edge }) => ({ rect: element?.getBoundingClientRect(), edge })))
+      const elements = occluderSpecs.map(([selector, edge, options]) => ({ element: doc.querySelector(selector), edge, reserve: options?.reserve }))
+      const next = computeSafeRect(canvas?.getBoundingClientRect(), elements.map(({ element, edge, reserve }) => ({ rect: element?.getBoundingClientRect(), edge, reserve })))
       setSafe((previous) => previous === next || (previous && next && ['left', 'top', 'width', 'height'].every((key) => previous[key] === next[key])) ? previous : next)
       const targets = new Set([canvas, ...elements.map(({ element }) => element)].filter(Boolean))
       for (const element of observed) if (!targets.has(element)) observer.unobserve(element)

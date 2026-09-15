@@ -45,6 +45,7 @@ describe('measureContainedWindow', () => {
 
   it.each([
     ['the proof page', board, rows, { left: 266, top: 197, width: 1638, height: 667 }],
+    ['the proof page with prompt reserve', board, rows.map((row) => row[0] === '.bar-dock' ? [...row, { reserve: 50 }] : row), { left: 266, top: 197, width: 1638, height: 617 }],
     ['the Properties pane closed', board, rows.filter(([selector]) => selector !== '.properties-dock'), { left: 16, top: 197, width: 1888, height: 667 }],
     ['a board without a box', { ...board, width: 0 }, rows, null],
     ['no occluders', board, [], { left: 16, top: 16, width: 1888, height: 908 }],
@@ -53,7 +54,7 @@ describe('measureContainedWindow', () => {
       selector, element({ left, top, width, height }),
     ]))
     const doc = { querySelector: (selector) => elements[selector] }
-    const occluders = occluderRows.map(([selector, edge]) => [selector, edge])
+    const occluders = occluderRows.map(([selector, edge, _rect, options]) => [selector, edge, options])
     expect(measureContainedWindow(element(boardRect), doc, occluders)).toEqual(expected)
   })
 

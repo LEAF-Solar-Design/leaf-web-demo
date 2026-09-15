@@ -105,21 +105,29 @@ test('option A: translucent chrome owns clicks and wheel over the full-bleed dra
     ['.properties-dock', 8, -8],
     ['[data-testid="cockpit-view"]', -6, null],
     ['.bar.bar-command-line', 3, null],
-    ['footer.foot-bar', -40, null],
+    ['footer.foot-bar', null, null],
   ]) {
     const point = await page.locator(selector).evaluate((element, [horizontal, vertical]) => {
-      const box = element.getBoundingClientRect()
-      const x = horizontal < 0 ? box.right + horizontal : box.left + horizontal
+      const button = horizontal === null ? element.querySelector('.cockpit-status-toggles button') : null
+      if (horizontal === null && !button) throw new Error('footer status button is absent')
+      const box = (button || element).getBoundingClientRect()
+      const x = horizontal === null ? box.left + box.width / 2 : horizontal < 0 ? box.right + horizontal : box.left + horizontal
       const y = vertical === null ? box.top + box.height / 2 : box.bottom + vertical
-      return { x, y, owns: element.contains(document.elementFromPoint(x, y)) }
+      const hit = document.elementFromPoint(x, y)
+      return { x, y, owns: element.contains(hit), notDrawing: !document.querySelector('.studio-ground')?.contains(hit) }
     }, [horizontal, vertical])
     expect(point.owns, selector).toBe(true)
+    expect(point.notDrawing, selector).toBe(true)
     await page.mouse.click(point.x, point.y)
     await page.mouse.wheel(0, 120)
     // Wheel delivery and any camera update settle across animation frames.
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
     expect(await readState(), selector).toEqual(before)
   }
+  expect(await page.locator('footer.foot-bar').evaluate((element) => {
+    const box = element.getBoundingClientRect()
+    return !document.querySelector('.studio-ground')?.contains(document.elementFromPoint(box.right - 40, box.top + box.height / 2))
+  }), 'footer.foot-bar').toBe(true)
 })
 
 test.describe('route matrix, rail ON', () => {
@@ -1181,9 +1189,18 @@ test.describe('route matrix, rail ON', () => {
     await expect(historyDialog).toHaveCount(0)
     await expect(promptRow).toHaveAttribute('data-op', 'createLine')
     await expect(lineTool).toHaveAttribute('aria-expanded', 'true')
-    const groundPick = (fx, fy) => page.evaluate(([px, py]) => {
+    const groundPick = (fx, fy) => page.evaluate(async ([px, py]) => {
       const ground = document.querySelector('.studio-ground')
       const canvas = ground.querySelector('.viewer-canvas')
+      let previous
+      let settled = false
+      for (let attempt = 0; attempt < 60; attempt++) {
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+        const reading = JSON.stringify([canvas.getAttribute('data-safe-rect'), canvas.__cadviewer.project(0, 0)])
+        if (reading === previous) { settled = true; break }
+        previous = reading
+      }
+      if (!settled) throw new Error('geometry did not settle')
       const safe = canvas?.getAttribute('data-safe-rect')?.split(',').map(Number)
       const [left, top, width, height] = safe || []
       const origin = canvas?.getBoundingClientRect()
@@ -1758,7 +1775,18 @@ test.describe('route matrix, rail ON', () => {
     await bar.fill('GROUP')
     await bar.press('Enter')
     await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'group')
-    const groupPick = await page.evaluate(({ x, y }) => document.querySelector('.studio-ground .viewer-canvas').__cadviewer.project(x, y), groupLines[1])
+    const groupPick = await page.evaluate(async ({ x, y }) => {
+      const canvas = document.querySelector('.studio-ground .viewer-canvas')
+      let previous
+      for (let attempt = 0; attempt < 60; attempt++) {
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+        const point = canvas.__cadviewer.project(x, y)
+        const reading = JSON.stringify([canvas.getAttribute('data-safe-rect'), point])
+        if (reading === previous) return point
+        previous = reading
+      }
+      throw new Error('geometry did not settle')
+    }, groupLines[1])
     await page.mouse.click(groupPick.x, groupPick.y)
     await expect(page.getByLabel('ribbon members')).toHaveText('2 objects')
     await page.getByTestId('cockpit-prompt-run').click()

@@ -66,8 +66,8 @@ export function measureGroundWindow(doc = document) {
 export function measureContainedWindow(board, doc = document, occluders = []) {
   const origin = board?.getBoundingClientRect()
   if (!(origin?.width > 0) || !(origin?.height > 0)) return null
-  return computeSafeRect(origin, occluders.map(([selector, edge]) => ({
-    rect: doc.querySelector(selector)?.getBoundingClientRect(), edge,
+  return computeSafeRect(origin, occluders.map(([selector, edge, options]) => ({
+    rect: doc.querySelector(selector)?.getBoundingClientRect(), edge, reserve: options?.reserve,
   })), { padding: 16 })
 }
 
