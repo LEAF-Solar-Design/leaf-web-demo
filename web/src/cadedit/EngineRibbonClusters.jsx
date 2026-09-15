@@ -270,6 +270,14 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // W4f-3: LINE chains. A run remembers where the segment ends; once the
   // engine has drawn it, that end becomes the next segment's first point.
   const chainRef = useRef(null)
+  const submissionRef = useRef(null)
+  useEffect(() => {
+    if (submissionRef.current?.armed !== armed || !session.busy) {
+      submissionRef.current = null
+    } else if (submissionRef.current) {
+      submissionRef.current.confirmed = true
+    }
+  }, [armed, session.status, session.busy])
   const run = () => {
     if (!prompt || runOff) return
     if (gatheringMembers) {
@@ -284,6 +292,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
       if (isPointExpression(inputs[kx])) { setInput(kx, effective[kx]); setInput(ky, effective[ky]) }
     }
     chainRef.current = armedOp === 'createLine' ? { x: effective.x2, y: effective.y2 } : null
+    submissionRef.current = { armed, confirmed: false }
     if (armedGroup === 'draw') create(armedOp, effective)
     else if (armedOp === 'pasteClip') pasteFromClipboard(effective)
     else applyEdit(armedOp, effective)
@@ -303,9 +312,12 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     if (armed) {
       const verb = PROMPTS[armed.op]?.verb || 'Command'
       refuse(session.busy
-        ? `${verb} prompt closed; the edit already sent will still finish.`
+        ? submissionRef.current?.armed === armed && submissionRef.current.confirmed
+          ? `${verb} prompt closed; the edit already sent will still finish.`
+          : `${verb} cancelled; nothing was sent, and the current engine step will still finish.`
         : `${verb} cancelled.`)
     }
+    submissionRef.current = null
     // Focus returns to the tool that armed the command, where the pointer
     // or Tab was before the prompt took it.
     if (toolId && typeof document !== 'undefined') {

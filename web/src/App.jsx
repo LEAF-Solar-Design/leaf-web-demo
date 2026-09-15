@@ -2287,7 +2287,9 @@ export default function App() {
           ? { text: `Stopped waiting for the drawing to refresh after ${tool}.` }
           : { text: mock
           ? `Stopped waiting for ${tool}.`
-          : `Stopped following ${tool}. It keeps running; find it in Jobs.` })
+          : currentJob?.job_id
+            ? `Stopped following ${tool}. It keeps running; find it in Jobs.`
+            : `Stopped waiting for ${tool} to be accepted. If the server accepts it, it will appear in Jobs.` })
       },
       onClearSelection: () => setSelectedHandle(null),
       onCloseProject: () => onCloseProject(),
@@ -2305,7 +2307,7 @@ export default function App() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [drawer, historyOpen, route, routeErr, runErr, running, selectedHandle,
-      interruptRun, currentJob?.tool, result, mock, showToast, onDispatch, openProjectId, onCloseProject, rTarget,
+      interruptRun, currentJob?.tool, currentJob?.job_id, result, mock, showToast, onDispatch, openProjectId, onCloseProject, rTarget,
       closeHistory, loadHistory, retryTools, loadCatalog, onRetryViewerRefresh, dismissRoute, clearRouteError])
 
   // Click-to-fall-through (operator rule): a click anywhere on the surface that

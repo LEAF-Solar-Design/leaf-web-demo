@@ -978,6 +978,56 @@ describe('command cancellation status', () => {
     expect(screen.getByRole('status').textContent).toBe('LINE prompt closed; the edit already sent will still finish.')
   })
 
+  it.each(['Saving, nothing sent', 'Stale marker', 'Finished edit'])('%s: cancelling CIRCLE during save does not claim an edit was sent', async (scenario) => {
+    let resolveSave
+    const saved = new Promise((resolve) => { resolveSave = resolve })
+    const save = vi.fn(() => saved)
+    const studio = mount({ saveTarget: { drawingId: 'rooftop', headVersion: 4, save } })
+    await openAndLoad(studio, [LINE])
+    if (scenario === 'Finished edit') {
+      fireEvent.click(document.querySelector('.drafting-ribbon [data-tool="draw:createLine"]'))
+      runPrompt()
+    } else {
+      act(() => studio.context.session.actions.create('createLine', studio.context.inputs))
+    }
+    studio.workers[0].emit(editApplied('createLine', [LINE]))
+    expect(studio.context.session.busy).toBe(false)
+    expect(saveTool().disabled).toBe(false)
+
+    let refusedCreate
+    if (scenario === 'Stale marker') {
+      // Live validation holds a zero radius before run. Inject it at the
+      // store call to exercise a synchronous refusal after run's marker.
+      const create = studio.context.session.actions.create
+      refusedCreate = vi.spyOn(studio.context.session.actions, 'create').mockImplementationOnce((op, inputs) => create(op, { ...inputs, r: '0' }))
+    }
+    fireEvent.click(document.querySelector('.drafting-ribbon [data-tool="draw:createCircle"]'))
+    if (scenario === 'Stale marker') {
+      const beforeRun = studio.workers[0].posted.length
+      runPrompt()
+      expect(refusedCreate).toHaveBeenCalledTimes(1)
+      expect(studio.context.session.errorKind).toBe(SESSION_ERROR.REFUSED)
+      expect(studio.context.session.busy).toBe(false)
+      expect(studio.workers[0].posted).toHaveLength(beforeRun)
+      refusedCreate.mockRestore()
+    }
+
+    const beforeSave = studio.workers[0].posted.length
+    let saving
+    act(() => { saving = studio.context.session.actions.save() })
+    expect(studio.context.session.busy).toBe(true)
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1))
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByTestId('cockpit-prompt')).toBeNull()
+    expect(screen.getByRole('status').textContent).toBe('CIRCLE cancelled; nothing was sent, and the current engine step will still finish.')
+    expect(studio.workers[0].posted).toHaveLength(beforeSave)
+    await act(async () => {
+      resolveSave({ new_version: { version: 5, parent: 4 } })
+      await saving
+    })
+    expect(studio.context.session.busy).toBe(false)
+  })
+
   it.each(['Escape', 'Cancel'])('cancelling LINE through %s removes the prompt and announces the verb', async (method) => {
     const studio = mount()
     await openAndLoad(studio, [LINE])
