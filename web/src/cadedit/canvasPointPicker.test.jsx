@@ -8,6 +8,7 @@ import DraftingRibbon from '../site/DraftingRibbon.jsx'
 
 import CadEditSurface from './CadEditSurface.jsx'
 import CanvasPointPicker from './CanvasPointPicker.jsx'
+import CommandLineArmer from './CommandLineArmer.jsx'
 import { applyPick, startPicking } from './pointPicking.js'
 import EngineRibbonClusters from './EngineRibbonClusters.jsx'
 import EngineSessionProvider, { useEngineSessionContext } from './EngineSessionProvider.jsx'
@@ -37,7 +38,7 @@ let ground
 let onPicking
 let context
 function Probe() { context = useEngineSessionContext(); return null }
-function mount() {
+function mount(withArmer = false) {
   workers = []
   // World = client / 10, so a click at (120, 30) is world (12, 3).
   viewer = { unproject: vi.fn((cx, cy) => ({ x: cx / 10, y: cy / 10 })), setRubberBand: vi.fn(), setSnapMarker: vi.fn() }
@@ -48,6 +49,7 @@ function mount() {
   render(
     <EngineSessionProvider createWorker={createWorker}>
       <Probe />
+      {withArmer && <CommandLineArmer />}
       <DraftingRibbon clusters={[]}>
         <EngineRibbonClusters importOpen={false} onToggleImport={() => {}} />
       </DraftingRibbon>
@@ -199,6 +201,29 @@ it('resolves the nearest edge before excluding picked or selected members', asyn
 })
 
 describe('CanvasPointPicker (W4f slice A1)', () => {
+  it('focuses Run after the second LINE canvas pick with the armer live', async () => {
+    mount(true)
+    await openAndLoad()
+    act(() => { context.setArmed({ group: 'draw', op: 'createLine' }); context.setOsnap(false) })
+    click(120, 30)
+    expect(document.activeElement).toBe(screen.getByLabelText('ribbon x2'))
+    click(200, 80)
+    expect(context.inputs).toMatchObject({ x: '12', y: '3', x2: '20', y2: '8' })
+    expect(document.activeElement).toBe(screen.getByTestId('cockpit-prompt-run'))
+  })
+
+  it('still claims a focus-step without complete and focuses the armer cursor field', async () => {
+    mount(true)
+    await openAndLoad()
+    act(() => { context.setArmed({ group: 'draw', op: 'createLine' }); context.setOsnap(false) })
+    click(120, 30)
+    act(() => screen.getByLabelText('ribbon y2').focus())
+    const detail = { handled: false }
+    act(() => window.dispatchEvent(new CustomEvent('cockpit:focus-step', { detail })))
+    expect(detail.handled).toBe(true)
+    expect(document.activeElement).toBe(screen.getByLabelText('ribbon x2'))
+  })
+
   it('keeps the LINE caret handoff and next pick across a same-op input update', async () => {
     mount()
     await openAndLoad()
