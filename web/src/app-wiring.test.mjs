@@ -129,6 +129,28 @@ describe('App.jsx wiring', () => {
     assert.match(stripped, /if \(parsePointExpression\(text\) !== null\)/)
     assert.doesNotMatch(stripped, /isPointExpression\(text\)/)
   })
+  describe('S03 one drawing truth', () => {
+    // The engine paints the viewer while shown; the console intake remains
+    // the exact fallback when the consumer closes or unmounts.
+    it('binds selection, geometry, legend, dock totals and status to the active intake', () => {
+      assert.match(stripped, /const drawingIntake = activeIntake \|\| shown/)
+      assert.match(stripped, /countEntitiesByLayer\(drawingIntake\)/)
+      assert.match(stripped, /selectEntity\(drawingIntake, selectedHandle,/)
+      assert.match(stripped, /drawingIntake\.polylines \|\| \[\]/)
+      assert.match(stripped, /drawingExtents\(drawingIntake\.polylines\)/)
+      assert.match(appSource, new RegExp('<Legend\\s+layers=\\{drawingIntake.layers\\}'))
+      assert.match(appSource, new RegExp('<CockpitStatus[^>]*shown=\\{drawingIntake\\}'))
+      assert.match(appSource, new RegExp('onShown=\\{\\(intake, history\\) => \\{\\s*setActiveIntake\\(intake\\)'))
+      assert.match(appSource, new RegExp('onHidden=\\{\\(\\) => \\{\\s*setActiveIntake\\(null\\)'))
+      assert.match(appSource, /undoDepth: history.undoDepth, redoDepth: history.redoDepth/)
+    })
+    it('passes the visibility result and viewer pose handler to the dock', () => {
+      assert.match(appSource, new RegExp('offscreenResult=\\{offscreenResult\\}\\s+onShowResult=\\{showCreatedResult\\}'))
+      assert.match(stripped, new RegExp('viewer\\.setView\\(\\{\\s*center:'))
+      assert.match(stripped, /pose\.zoom \* 0\.4 \/ span/)
+    })
+  })
+
   describe('W4g selection mirror back', () => {
     it('mounts StatusModesBridge under the engine flag', () => {
       assert.match(appSource, /\{ENV_CAD_EDIT && <StatusModesBridge \/>\}/)

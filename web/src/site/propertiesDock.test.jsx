@@ -51,6 +51,16 @@ describe('PropertiesDock', () => {
 })
 
 describe('GeometryRows', () => {
+  it('shows chained open endpoints through the drawing-unit formatter only when both exist', () => {
+    const geometry = { vertices: 2, closed: false, length: 10, area: null, first: [10, -0], last: [10, 10] }
+    const { rerender } = render(<GeometryRows geometry={geometry} />)
+    expect(screen.getByText('Start').nextSibling.textContent).toBe('10.00, 0.00')
+    expect(screen.getByText('End').nextSibling.textContent).toBe('10.00, 10.00')
+    rerender(<GeometryRows geometry={{ ...geometry, last: null }} />)
+    expect(screen.queryByText('Start')).toBeNull()
+    expect(screen.queryByText('End')).toBeNull()
+  })
+
   it('open polyline: Length (not Perimeter), no area row', () => {
     render(<GeometryRows geometry={{ vertices: 3, closed: false, length: 12, area: null }} />)
     expect(screen.getByText('Length')).toBeTruthy()

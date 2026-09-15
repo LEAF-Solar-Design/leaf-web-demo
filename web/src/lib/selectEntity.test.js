@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { selectEntity } from './selectEntity.js'
+import { engineIntake } from '../cadedit/engineIntake.js'
 
 const intake = {
   polylines: [{ handle: 'p1', layer: 'Roof' }],
@@ -15,6 +16,15 @@ const intake = {
 }
 
 describe('selectEntity', () => {
+  it('resolves an engine-only handle to its real layer while active, then restores the console fallback', () => {
+    const activeIntake = engineIntake([{ id: '42', type: 'LINE', layer: 'Engine layer', vertices: [[10, 0, 0], [10, 10, 0]] }], 'engine.dxf')
+    const options = { onUnresolved: (handle) => ({ handle, kind: 'entity', layer: null }) }
+    expect(selectEntity(activeIntake || intake, '2A', options)).toEqual({ handle: '2A', kind: 'polyline', layer: 'Engine layer' })
+    expect(selectEntity(null || intake, '2A', options)).toEqual({ handle: '2A', kind: 'entity', layer: null })
+    expect(selectEntity(null || intake, 'p1', options)).toEqual(selectEntity(intake, 'p1', options))
+    expect(activeIntake.polylines).toHaveLength(1)
+  })
+
   it('resolves a matching polyline, insert, and 3dface', () => {
     expect(selectEntity(intake, 'p1')).toEqual({ handle: 'p1', kind: 'polyline', layer: 'Roof' })
     expect(selectEntity(intake, 'i1')).toEqual({ handle: 'i1', kind: 'insert', layer: 'Blocks', name: 'Panel' })

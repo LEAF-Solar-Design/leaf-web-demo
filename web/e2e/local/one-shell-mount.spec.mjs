@@ -1744,6 +1744,10 @@ test.describe('route matrix, rail ON', () => {
       }
 
     // The Command bar's points use the engine, including LINE continuation.
+    const cockpitCount = page.getByTestId('cockpit-status').locator('.cockpit-count')
+    const drawingCountBeforeLine = Number((await cockpitCount.textContent()).match(/^\d+/)[0])
+    const dock = page.getByTestId('properties-dock')
+    const dockCountBeforeLine = Number((await dock.getByTestId('dock-drawing').locator('dt', { hasText: /^Entities$/ }).locator('+ dd').textContent()).replaceAll(',', ''))
     await page.locator('body').press('Escape')
     const pointRoutes = []
     const onPointRoute = (req) => { if (req.url().includes('/api/nl-prompt')) pointRoutes.push(req) }
@@ -1772,6 +1776,15 @@ test.describe('route matrix, rail ON', () => {
     await bar.fill('10<90')
     await bar.press('Enter')
     await expect.poll(readPointResult).toEqual([[10, 0], [10, 10]])
+    await expect(cockpitCount).toContainText(`${drawingCountBeforeLine + 2} entities`)
+    const createdLayer = await page.evaluate(() => {
+      const result = window.__commandPointResult
+      return result.entities.find((entity) => String(entity.id) === result.id).layer
+    })
+    await expect(dock.locator('.sel-field').filter({ has: page.locator('dt', { hasText: /^Layer$/ }) }).locator('dd')).toHaveText(createdLayer)
+    await expect(dock.getByTestId('dock-geometry').locator('dt', { hasText: /^Start$/ }).locator('+ dd')).toHaveText('10.00, 0.00')
+    await expect(dock.getByTestId('dock-geometry').locator('dt', { hasText: /^End$/ }).locator('+ dd')).toHaveText('10.00, 10.00')
+    await expect(dock.getByTestId('dock-drawing').locator('dt', { hasText: /^Entities$/ }).locator('+ dd')).toHaveText((dockCountBeforeLine + 2).toLocaleString())
     await expect(bar).toHaveAttribute('placeholder', 'LINE  Specify next point:')
     await page.locator('body').press('Escape')
     await bar.fill('LINE')
@@ -1821,6 +1834,54 @@ test.describe('route matrix, rail ON', () => {
     expect(pointRoutes).toHaveLength(0)
     await page.locator('body').press('Escape')
     page.off('request', onPointRoute)
+
+    // Resolve the same handle again through the workbench, not just the
+    // create's automatic selection, without changing either count.
+    await dock.getByRole('button', { name: 'Deselect', exact: true }).click()
+    const chainedId = await page.evaluate(() => window.__commandPointResult.id)
+    await page.getByRole('tab', { name: 'Insert' }).click()
+    const importWasOpen = await importBtn.getAttribute('aria-expanded') === 'true'
+    if (!importWasOpen) await importBtn.click()
+    await page.getByTestId('cad-edit-entity-list').locator(`input[type="radio"][value="${chainedId}"]`).check()
+    if (!importWasOpen) await importBtn.click()
+    await expect(dock.locator('.sel-field').filter({ has: page.locator('dt', { hasText: /^Layer$/ }) }).locator('dd')).toHaveText(createdLayer)
+    await expect(dock.getByTestId('dock-geometry').locator('dt', { hasText: /^Start$/ }).locator('+ dd')).toHaveText('10.00, 0.00')
+    await expect(dock.getByTestId('dock-geometry').locator('dt', { hasText: /^End$/ }).locator('+ dd')).toHaveText('10.00, 10.00')
+    await expect(cockpitCount).toContainText(`${drawingCountBeforeLine + 2} entities`)
+
+    // A one-unit LINE far from the current drawing is sub-pixel at the
+    // viewer's automatic full fit. The dock must reveal that exact result.
+    const undoDepthBeforeTiny = Number((await dock.getByTestId('dock-drawing').locator('dt', { hasText: /^Browser edits$/ }).locator('+ dd').textContent()).match(/^[\d,]+/)[0].replaceAll(',', ''))
+    await bar.fill('LINE')
+    await bar.press('Enter')
+    await bar.fill('1000000,0')
+    await bar.press('Enter')
+    await bar.fill('1000001,0')
+    await bar.press('Enter')
+    await expect.poll(readPointResult).toEqual([[1000000, 0], [1000001, 0]])
+    const showResult = dock.getByRole('button', { name: 'Show result', exact: true })
+    await expect(showResult).toBeVisible()
+    await expect(dock.getByTestId('dock-drawing')).toContainText(`${undoDepthBeforeTiny + 1} to undo`)
+    await page.locator('body').press('Escape')
+    await showResult.click()
+    await expect(showResult).toHaveCount(0)
+    const visibleResult = await page.evaluate(() => {
+      const mount = document.querySelector('.studio-ground .viewer-canvas')
+      const rect = mount.querySelector('canvas').getBoundingClientRect()
+      const a = mount.__cadviewer.project(1000000, 0)
+      const b = mount.__cadviewer.project(1000001, 0)
+      return { inside: [a, b].every((p) => p.x >= rect.left && p.x <= rect.right && p.y >= rect.top && p.y <= rect.bottom), share: Math.max(Math.abs(b.x - a.x) / rect.width, Math.abs(b.y - a.y) / rect.height) }
+    })
+    expect(visibleResult.inside).toBe(true)
+    expect(visibleResult.share).toBeGreaterThan(0.35)
+    expect(visibleResult.share).toBeLessThan(0.45)
+    await page.getByRole('tab', { name: 'Insert' }).click()
+    await ribbon.locator('[data-tool="undo-edit"]').click()
+    await expect(cockpitCount).toContainText(`${drawingCountBeforeLine + 2} entities`)
+    await expect(dock.getByTestId('dock-drawing')).toContainText(`${undoDepthBeforeTiny} to undo`)
+    await ribbon.locator('[data-tool="redo-edit"]').click()
+    await expect(cockpitCount).toContainText(`${drawingCountBeforeLine + 3} entities`)
+    await expect(dock.getByTestId('dock-drawing')).toContainText(`${undoDepthBeforeTiny + 1} to undo`)
 
     // A sentence is still a sentence: it routes, it never arms. LAST in the
     // row on purpose: while its route decision is shown the Command bar's

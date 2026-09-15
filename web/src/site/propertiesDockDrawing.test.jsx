@@ -27,6 +27,19 @@ describe('drawingExtents', () => {
 })
 
 describe('DrawingRows', () => {
+  it('names the engine history and offers Show result only for a hidden new result', () => {
+    const onShowResult = vi.fn()
+    const drawing = { name: 'engine.dxf', entities: 2, undoDepth: 3, redoDepth: 1 }
+    const { rerender } = render(<PropertiesDock drawing={drawing} offscreenResult={{ handle: '2A', kind: 'LINE' }} onShowResult={onShowResult} />)
+    expect(screen.getByText('Browser edits').nextSibling).toHaveTextContent('3 to undo · 1 to redo')
+    expect(screen.getByRole('status')).toHaveTextContent('New LINE is off-screen.')
+    screen.getByRole('button', { name: 'Show result', exact: true }).click()
+    expect(onShowResult).toHaveBeenCalledTimes(1)
+    rerender(<PropertiesDock drawing={{ name: 'console.dwg', entities: 1 }} />)
+    expect(screen.queryByText('Browser edits')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Show result' })).toBeNull()
+  })
+
   it('renders every fact as a label | field row and dashes for what is absent', () => {
     render(<DrawingRows drawing={{ name: 'roof.dwg', entities: 2345, polylines: 2345, inserts: 0, faces: 0, layers: 4, layersShown: 3, extents: null, source: 'sample data' }} />)
     const rows = screen.getByTestId('dock-drawing')

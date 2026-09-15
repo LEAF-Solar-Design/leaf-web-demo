@@ -36,6 +36,16 @@ describe('entityGeometry', () => {
     const g = entityGeometry({ pts: SQUARE, closed: false }, 'polyline')
     expect(g.area).toBeNull()
     expect(g.length).toBe(30)
+    expect(g.first).toEqual([0, 0])
+    expect(g.last).toEqual([0, 10])
+  })
+  it('open endpoints retain exact XY values and require at least two points', () => {
+    const pts = [[-0, 1.123456789, 8], [10.987654321, -2.123456789, 9]]
+    const open = entityGeometry({ pts, closed: false }, 'polyline')
+    expect(open.first).toEqual(pts[0].slice(0, 2))
+    expect(open.last).toEqual(pts[1].slice(0, 2))
+    expect(Object.is(open.first[0], -0)).toBe(true)
+    expect(entityGeometry({ pts: [pts[0]], closed: false }, 'polyline')).not.toHaveProperty('first')
   })
   it('insert: position/rotation/scale, absent fields null', () => {
     expect(entityGeometry({ pt: [5, 6, 0], rot: 45, scale: [1, 1, 1] }, 'insert'))
