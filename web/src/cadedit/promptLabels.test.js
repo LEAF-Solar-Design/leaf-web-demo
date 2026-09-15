@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { PROMPTS, humanizeRefusal } from './promptKeys.js'
 
 describe('prompt labels and refusals', () => {
@@ -45,6 +45,50 @@ describe('prompt labels and refusals', () => {
     const result = humanizeRefusal(sentence, PROMPTS[op])
     expect(result).toBe(expected)
     expect(humanizeRefusal(result, PROMPTS[op])).toBe(expected)
+  })
+
+  it('constructs no lookbehind pattern for any prompt', () => {
+    const NativeRegExp = globalThis.RegExp
+    const constructor = vi.spyOn(globalThis, 'RegExp').mockImplementation(function (source, flags) {
+      return new NativeRegExp(source, flags)
+    })
+    let sources
+    try {
+      for (const prompt of Object.values(PROMPTS)) {
+        humanizeRefusal('x r dx sx', { ...prompt })
+      }
+      sources = constructor.mock.calls.map(([source]) => String(source))
+    } finally {
+      constructor.mockRestore()
+    }
+    expect(sources).toHaveLength(Object.keys(PROMPTS).length)
+    for (const source of sources) expect(source).not.toContain('(?<')
+  })
+
+  it('constructs the pattern once per prompt object', () => {
+    const prompt = { ...PROMPTS.createLine }
+    const NativeRegExp = globalThis.RegExp
+    const constructor = vi.spyOn(globalThis, 'RegExp').mockImplementation(function (source, flags) {
+      return new NativeRegExp(source, flags)
+    })
+    let constructions
+    let first
+    let second
+    try {
+      first = humanizeRefusal('x', prompt)
+      second = humanizeRefusal('y', prompt)
+      constructions = constructor.mock.calls.length
+    } finally {
+      constructor.mockRestore()
+    }
+    expect(first).toBe('first point x')
+    expect(second).toBe('first point y')
+    expect(constructions).toBe(1)
+  })
+
+  it('keeps the declared adjacent-label output', () => {
+    expect(humanizeRefusal('x2first point x', PROMPTS.createLine))
+      .toBe('x2first point first point x')
   })
 
   it('preserves sentences without key tokens and absent prompts', () => {

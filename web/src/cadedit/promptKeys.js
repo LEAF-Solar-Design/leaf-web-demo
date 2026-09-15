@@ -190,9 +190,12 @@ export const PROMPTS = Object.freeze({
   setLineweight: { verb: 'LWEIGHT', steps: [{ ask: 'Enter new lineweight <ByLayer>:', fields: [['lineweight', 'lineweight', 'text']] }] },
 })
 
-/** Replace only whole input-key tokens with this prompt's shown labels. */
-export function humanizeRefusal(sentence, prompt) {
-  if (!sentence || !prompt) return sentence
+const refusalPatterns = new WeakMap()
+const refusalWordCharacter = /[\p{L}\p{N}_]/u
+
+function refusalPattern(prompt) {
+  const cached = refusalPatterns.get(prompt)
+  if (cached) return cached
   const protectedSpans = []
   const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   for (const step of prompt.steps) {
@@ -203,21 +206,47 @@ export function humanizeRefusal(sentence, prompt) {
   }
   protectedSpans.sort((a, b) => b.length - a.length)
   for (let i = 0; i < protectedSpans.length; i += 1) {
-    protectedSpans[i] = `(?<![\\p{L}\\p{N}_])${escape(protectedSpans[i])}(?![\\p{L}\\p{N}_])`
+    protectedSpans[i] = `${escape(protectedSpans[i])}(?![\\p{L}\\p{N}_])`
   }
   // This literal teaches point-entry grammar, not field names; preserve it whole.
   // Complete quoted inputs and existing labels also stay byte-identical.
-  protectedSpans.unshift(escape('x,y, @dx,dy, dist<angle or @dist<angle'), '"[^"]*?"')
-  const spans = new RegExp(`(${protectedSpans.join('|')})|(?<![\\p{L}\\p{N}_])[A-Za-z_][A-Za-z0-9_]*(?![\\p{L}\\p{N}_])`, 'gu')
-  return sentence.replace(spans, (token, protectedSpan) => {
-    if (protectedSpan !== undefined) return token
-    for (const step of prompt.steps) {
-      for (const field of step.fields) {
-        if (field[0] === token) return field.shown ?? field[1]
+  const boundedSpans = protectedSpans.length ? protectedSpans.join('|') : '(?!)'
+  const spans = new RegExp(`(${escape('x,y, @dx,dy, dist<angle or @dist<angle')}|"[^"]*?")|(${boundedSpans})|([A-Za-z_][A-Za-z0-9_]*(?![\\p{L}\\p{N}_]))`, 'gu')
+  refusalPatterns.set(prompt, spans)
+  return spans
+}
+
+/** Replace only whole input-key tokens with this prompt's shown labels. */
+export function humanizeRefusal(sentence, prompt) {
+  if (!sentence || !prompt) return sentence
+  const spans = refusalPattern(prompt)
+  spans.lastIndex = 0
+  let result = ''
+  let copiedThrough = 0
+  let match
+  while ((match = spans.exec(sentence)) !== null) {
+    const [token, unboundedSpan, , keyToken] = match
+    const index = match.index
+    // Check the leading boundary in code for browsers without lookbehind.
+    if (unboundedSpan === undefined && index > 0 && refusalWordCharacter.test(sentence[index - 1])) {
+      spans.lastIndex = index + 1
+      continue
+    }
+    let replacement = token
+    if (keyToken !== undefined) {
+      findField: for (const step of prompt.steps) {
+        for (const field of step.fields) {
+          if (field[0] === token) {
+            replacement = field.shown ?? field[1]
+            break findField
+          }
+        }
       }
     }
-    return token
-  })
+    result += sentence.slice(copiedThrough, index) + replacement
+    copiedThrough = spans.lastIndex
+  }
+  return result + sentence.slice(copiedThrough)
 }
 
 /** All prompt input keys, including canvas pick state; no provider or ribbon dependency. */
