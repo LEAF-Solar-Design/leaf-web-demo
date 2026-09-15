@@ -646,7 +646,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
           data-testid="cockpit-osnap"
           aria-pressed={osnap}
           onClick={() => setOsnap(!osnap)}
-          title={osnap ? 'Object snap on: picks land on nearby endpoints, midpoints and centres (F3).' : 'Object snap off: picks land exactly where you click (F3).'}
+          title={osnap ? 'Object snap on: picks land on nearby endpoints, midpoints and centres (F3).' : 'Object snap off: picks do not snap to endpoints, midpoints or centres (F3).'}
         >
           OSNAP
         </button>

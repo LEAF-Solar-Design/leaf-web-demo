@@ -29,6 +29,24 @@ describe('prompt labels and refusals', () => {
       .toBe('CIRCLE refused: radius needs a scalar, not a point.')
   })
 
+  it.each([
+    ['existing positional label', 'createInsert', 'INSERT refused: x scale must be a number.', 'INSERT refused: x scale must be a number.'],
+    ['quoted point and grammar', 'createLine', 'LINE refused: "x,y,z" is not a point: use x,y, @dx,dy, dist<angle or @dist<angle.', 'LINE refused: "x,y,z" is not a point: use x,y, @dx,dy, dist<angle or @dist<angle.'],
+    ['quoted block name', 'createInsert', 'INSERT refused: block "x" was not found.', 'INSERT refused: block "x" was not found.'],
+    ['quoted Unicode name', 'createLine', 'Layer "éx" is unavailable.', 'Layer "éx" is unavailable.'],
+    ['Unicode token boundaries', 'createLine', 'éx xé 2x x2é _x x_', 'éx xé 2x x2é _x x_'],
+    ['existing shown labels', 'createLine', 'first point x and next point y must be numbers.', 'first point x and next point y must be numbers.'],
+    ['scale key', 'createInsert', 'sx must be a number.', 'x scale must be a number.'],
+    ['line keys', 'createLine', 'Line refused: x, y, x2 and y2 must all be numbers.', 'Line refused: first point x, first point y, next point x and next point y must all be numbers.'],
+    ['circle key', 'createCircle', 'CIRCLE refused: r needs a scalar, not a point.', 'CIRCLE refused: radius needs a scalar, not a point.'],
+    ['move keys', 'move', 'Move refused: dx and dy must both be numbers.', 'Move refused: displacement x and displacement y must both be numbers.'],
+    ['unmatched quote', 'createLine', 'LINE refused: "x must be a number.', 'LINE refused: "first point x must be a number.'],
+  ])('preserves %s and is idempotent', (_reason, op, sentence, expected) => {
+    const result = humanizeRefusal(sentence, PROMPTS[op])
+    expect(result).toBe(expected)
+    expect(humanizeRefusal(result, PROMPTS[op])).toBe(expected)
+  })
+
   it('preserves sentences without key tokens and absent prompts', () => {
     const sentence = 'Line refused: the two points must differ.'
     expect(humanizeRefusal(sentence, PROMPTS.createLine)).toBe(sentence)

@@ -193,12 +193,31 @@ export const PROMPTS = Object.freeze({
 /** Replace only whole input-key tokens with this prompt's shown labels. */
 export function humanizeRefusal(sentence, prompt) {
   if (!sentence || !prompt) return sentence
-  const labels = new Map(prompt.steps.flatMap((step) => step.fields.map((field) => [field[0], field.shown ?? field[1]])))
+  const protectedSpans = []
+  const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  for (const step of prompt.steps) {
+    for (const field of step.fields) {
+      if (/\s/.test(field[1])) protectedSpans.push(field[1])
+      if (field.shown && /\s/.test(field.shown)) protectedSpans.push(field.shown)
+    }
+  }
+  protectedSpans.sort((a, b) => b.length - a.length)
+  for (let i = 0; i < protectedSpans.length; i += 1) {
+    protectedSpans[i] = `(?<![\\p{L}\\p{N}_])${escape(protectedSpans[i])}(?![\\p{L}\\p{N}_])`
+  }
   // This literal teaches point-entry grammar, not field names; preserve it whole.
-  const grammar = 'x,y, @dx,dy, dist<angle or @dist<angle'
-  return sentence.split(grammar)
-    .map((part) => part.replace(/\b[A-Za-z_][A-Za-z0-9_]*\b/g, (token) => labels.get(token) ?? token))
-    .join(grammar)
+  // Complete quoted inputs and existing labels also stay byte-identical.
+  protectedSpans.unshift(escape('x,y, @dx,dy, dist<angle or @dist<angle'), '"[^"]*?"')
+  const spans = new RegExp(`(${protectedSpans.join('|')})|(?<![\\p{L}\\p{N}_])[A-Za-z_][A-Za-z0-9_]*(?![\\p{L}\\p{N}_])`, 'gu')
+  return sentence.replace(spans, (token, protectedSpan) => {
+    if (protectedSpan !== undefined) return token
+    for (const step of prompt.steps) {
+      for (const field of step.fields) {
+        if (field[0] === token) return field.shown ?? field[1]
+      }
+    }
+    return token
+  })
 }
 
 /** All prompt input keys, including canvas pick state; no provider or ribbon dependency. */

@@ -5,7 +5,7 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { MODIFY_REASONS, forGroup, propertyReason } from '../lib/actionRegistry.js'
+import { MODIFY_REASONS, PROPERTY_REASONS, forGroup, propertyReason } from '../lib/actionRegistry.js'
 import { parseDrawingCommand } from '../lib/commandWords.js'
 import DraftingRibbon from '../site/DraftingRibbon.jsx'
 import EngineRibbonClusters from './EngineRibbonClusters.jsx'
@@ -340,8 +340,9 @@ describe('W4g-7b-03c-g F5: the combos show the ACTUAL ladder rung', () => {
   it('says "no drawing" before any document is open, never the hardcoded "select an entity"', () => {
     mountProperties()
     const select = screen.getByLabelText(/^Color/)
-    expect(select.getAttribute('aria-label')).toBe(`Color (unavailable: ${MODIFY_REASONS.noDocument})`)
+    expect(select.getAttribute('aria-label')).toBe(`Color (unavailable: ${PROPERTY_REASONS.noDocument})`)
     expect(select.getAttribute('aria-label')).not.toContain(MODIFY_REASONS.noSelection)
+    expect(select.getAttribute('aria-label')).not.toContain(PROPERTY_REASONS.noSelection)
   })
 })
 
