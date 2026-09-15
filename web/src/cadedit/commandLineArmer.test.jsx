@@ -59,6 +59,11 @@ async function openAndLoad(entities = [LINE]) {
 
 const command = (detail) => act(() => { window.dispatchEvent(new CustomEvent(COCKPIT_COMMAND_EVENT, { detail })) })
 const promptEl = () => screen.queryByTestId('cockpit-prompt')
+const point = (text) => {
+  const detail = { text, handled: false }
+  act(() => window.dispatchEvent(new CustomEvent('cockpit:point', { detail })))
+  return detail.handled
+}
 
 beforeEach(() => {
   globalThis.URL.createObjectURL = vi.fn(() => 'blob:cad-edit-test')
@@ -67,6 +72,41 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
 describe('CommandLineArmer (W4f slice B)', () => {
+  it('takes absolute, relative and polar points through the armed operand and publishes its live ask', async () => {
+    mount()
+    await openAndLoad()
+    expect(point('0,0')).toBe(false)
+    command(parseDrawingCommand('LINE'))
+    expect(screen.getByTestId('cockpit-active-ask').textContent).toBe('LINE  Specify first point:')
+    expect(point('@10,0')).toBe(true)
+    expect(screen.getByRole('status').textContent).toContain('needs a previous point')
+    expect(screen.getByLabelText('ribbon x').value).toBe('@10,0')
+    expect(point('0,0')).toBe(true)
+    expect(screen.getByTestId('cockpit-active-ask').textContent).toBe('LINE  Specify next point:')
+    expect(point('@10,0')).toBe(true)
+    expect(screen.getByLabelText('ribbon x2').value).toBe('10')
+    expect(screen.getByLabelText('ribbon y2').value).toBe('0')
+    expect(workers[0].posted.at(-1)).toMatchObject({ type: 'applyEdit', op: 'createLine', payload: { x1: 0, y1: 0, x2: 10, y2: 0 } })
+    workers[0].emit({ type: 'editApplied', op: 'createLine', ok: true, createdId: 'e2', entities: [LINE, { ...LINE, id: 'e2', vertices: [[0, 0], [10, 0]] }], entityCount: 2 })
+    expect(screen.getByTestId('cockpit-active-ask').textContent).toBe('LINE  Specify next point:')
+    expect(point('10<90')).toBe(true)
+    expect(screen.getByLabelText('ribbon x2').value).toBe('10')
+    expect(screen.getByLabelText('ribbon y2').value).toBe('10')
+    expect(workers[0].posted.at(-1)).toMatchObject({ type: 'applyEdit', op: 'createLine', payload: { x1: 10, y1: 0, x2: 10, y2: 10 } })
+  })
+
+  it('keeps a point typed for a scalar and names the field without advancing', async () => {
+    mount()
+    await openAndLoad()
+    command(parseDrawingCommand('CIRCLE'))
+    point('0,0')
+    expect(point('10,10')).toBe(true)
+    expect(screen.getByLabelText('ribbon r').value).toBe('10,10')
+    expect(screen.getByRole('status').textContent).toContain('r needs a scalar')
+    expect(screen.getByTestId('cockpit-active-ask').textContent).toBe('CIRCLE  Specify radius:')
+    expect(screen.getByTestId('cockpit-prompt-run')).toBeDisabled()
+  })
+
   it('a draw word arms its prompt like the ribbon click; a second word re-arms; malformed details are ignored', async () => {
     mount()
     await openAndLoad()

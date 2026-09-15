@@ -67,6 +67,7 @@ import EngineDocumentView from './cadedit/EngineDocumentView.jsx'
 import EngineHeadOpener from './cadedit/EngineHeadOpener.jsx'
 import CanvasPointPicker from './cadedit/CanvasPointPicker.jsx'
 import { COCKPIT_COMMAND_EVENT, parseDrawingCommand } from './lib/commandWords.js'
+import { isPointExpression } from './cadedit/pointExpression.js'
 import { markInstant } from './lib/instant.js'
 import { agentBannerFor } from './lib/agentBanner.js'
 import { selectEntity } from './lib/selectEntity.js'
@@ -660,7 +661,16 @@ export default function App() {
     drawingCommand: (text) => {
       if (!drawingCommandOnRef.current) return false
       const command = parseDrawingCommand(text)
-      if (!command) return false
+      if (!command) {
+        const point = { text, handled: false }
+        window.dispatchEvent(new CustomEvent('cockpit:point', { detail: point }))
+        if (point.handled) return true
+        if (isPointExpression(text) && /^\s*[@+\-.\d<]/.test(text)) {
+          showToast({ text: 'Start a drawing command before entering a point.' })
+          return true
+        }
+        return false
+      }
       // W4g-7b-05c: a deferred word (LEADER, BLOCK, GROUP, UNGROUP) carries
       // its frozen reason through the same event, so the Armer can surface it
       // instead of silently dropping the word.
@@ -670,8 +680,15 @@ export default function App() {
       window.dispatchEvent(new CustomEvent(COCKPIT_COMMAND_EVENT, { detail }))
       return true
     },
-  }), [sessionActions])
+  }), [sessionActions, showToast])
   const drawingCommandOnRef = useRef(false)
+  const [armedPromptAsk, setArmedPromptAsk] = useState('')
+  useEffect(() => {
+    const onArmed = (event) => setArmedPromptAsk(typeof event.detail?.ask === 'string' ? event.detail.ask : '')
+    window.addEventListener('cockpit:armed', onArmed)
+    window.dispatchEvent(new CustomEvent('cockpit:armed-request'))
+    return () => window.removeEventListener('cockpit:armed', onArmed)
+  }, [])
   // The refusal copy's closing sentence points at the Claude accounts panel
   // only where that panel exists. It is mounted under `{!mock && ...}` below
   // and self-guards with `if (mock) return null`, so this is the same answer
@@ -2948,6 +2965,7 @@ export default function App() {
           // Rail OFF (and every non-drafting surface) the prop is false and
           // the well renders exactly as before.
           commandLine={!!studioGround && surfaceSlots.commandLine}
+          armedAsk={armedPromptAsk}
           // Slice 8c: connected Link-a-service servers join the @ mounts
           // list by label, through the same mcpDiscoveryEnabled gate.
           connectedMcpServers={connectedMcpServers}

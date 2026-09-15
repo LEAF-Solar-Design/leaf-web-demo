@@ -520,6 +520,19 @@ test.describe('route matrix, rail ON', () => {
   })
 
   test("the cockpit's actual tools (W4d Slice A): real groups, honest gating, one engine session", async ({ page, request }) => {
+    await page.addInitScript(() => {
+      const NativeWorker = window.Worker
+      window.Worker = class extends NativeWorker {
+        constructor(...args) {
+          super(...args)
+          this.addEventListener('message', ({ data }) => {
+            if (data?.type === 'editApplied' && data.ok && Array.isArray(data.entities)) {
+              window.__commandPointResult = { id: String(data.createdId), entities: data.entities }
+            }
+          })
+        }
+      }
+    })
     // W4g-4: the verb rows (COPY, ROTATE, EXPLODE x2 on the real engine) grew this
     // row past three minutes on a loaded host; five is its budget now.
     test.setTimeout(300_000)
@@ -1730,12 +1743,46 @@ test.describe('route matrix, rail ON', () => {
         }
       }
 
+    // The Command bar's points use the engine, including LINE continuation.
+    await page.locator('body').press('Escape')
+    const pointRoutes = []
+    const onPointRoute = (req) => { if (req.url().includes('/api/nl-prompt')) pointRoutes.push(req) }
+    page.on('request', onPointRoute)
+    await bar.fill('0,0')
+    await bar.press('Enter')
+    await expect(page.getByText('Start a drawing command before entering a point.', { exact: true })).toBeVisible()
+    expect(pointRoutes).toHaveLength(0)
+    await bar.fill('LINE')
+    await bar.press('Enter')
+    await expect(bar).toHaveAttribute('placeholder', 'LINE  Specify first point:')
+    await bar.fill('0,0')
+    await bar.press('Enter')
+    await expect(bar).toHaveAttribute('placeholder', 'LINE  Specify next point:')
+    await expect(page.getByTestId('cockpit-active-ask')).toHaveText('LINE  Specify next point:')
+    await bar.fill('@10,0')
+    await bar.press('Enter')
+    const readPointResult = () => page.evaluate(() => {
+      const result = window.__commandPointResult
+      return result?.entities.find((entity) => String(entity.id) === result.id)?.vertices?.map((p) => p.slice(0, 2))
+    })
+    await expect.poll(readPointResult).toEqual([[0, 0], [10, 0]])
+    await expect(bar).toHaveAttribute('placeholder', 'LINE  Specify next point:')
+    await bar.fill('10<90')
+    await bar.press('Enter')
+    await expect.poll(readPointResult).toEqual([[10, 0], [10, 10]])
+    await expect(bar).toHaveAttribute('placeholder', 'LINE  Specify next point:')
+    expect(pointRoutes).toHaveLength(0)
+    await page.locator('body').press('Escape')
+    page.off('request', onPointRoute)
+
     // A sentence is still a sentence: it routes, it never arms. LAST in the
     // row on purpose: while its route decision is shown the Command bar's
     // Enter belongs to the decision strip, so a word typed after it would be
     // swallowed (the race that failed this row once).
+    const sentenceRoute = page.waitForRequest((req) => req.url().includes('/api/nl-prompt') && req.postDataJSON()?.text === 'draw a line across the roof')
     await bar.fill('draw a line across the roof')
     await bar.press('Enter')
+    await sentenceRoute
     await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
   })
 

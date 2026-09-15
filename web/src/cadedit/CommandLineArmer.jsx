@@ -14,13 +14,16 @@
  * op the ribbon's PROMPTS or OPS knows; anything else is ignored. Every op is
  * validated again by the store when it runs.
  */
-import { useEffect } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import { DEFERRED_REASONS } from '../lib/actionRegistry.js'
 import { COCKPIT_COMMAND_EVENT } from '../lib/commandWords.js'
 
 import { PROMPTS, modifyReason } from './EngineRibbonClusters.jsx'
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
+import { readNumber } from './engineSession.js'
+import { isPointStep, resolvePromptInputs } from './promptInputs.js'
+import { isPointExpression, pointExpressionRefusal, resolvePointExpression } from './pointExpression.js'
 
 // W4g-5c: the clipboard is the third engine group whose words this gate
 // admits. A group missing here is dropped SILENTLY (App has already cleared
@@ -46,7 +49,81 @@ export function acceptsCommand(detail) {
 }
 
 export default function CommandLineArmer() {
-  const { session, inputs, setArmed, refuse } = useEngineSessionContext()
+  const { session, inputs, setInput, armed, setArmed, refuse } = useEngineSessionContext()
+  const [cursor, setCursor] = useState({ armed: null, index: 0 })
+  const [runRequest, setRunRequest] = useState(null)
+  useEffect(() => {
+    if (runRequest) window.dispatchEvent(new CustomEvent('cockpit:run', { detail: runRequest }))
+  }, [runRequest])
+  const prompt = armed ? PROMPTS[armed.op] : null
+  const index = cursor.armed === armed ? cursor.index : armed?.from ? 1 : 0
+  const step = prompt?.steps[index]
+  const ask = prompt ? `${prompt.verb}  ${step?.ask || 'Press Run to finish.'}` : ''
+  const live = useRef(null)
+  live.current = { armed, prompt, index, step, inputs, session }
+  useEffect(() => {
+    const publish = () => window.dispatchEvent(new CustomEvent('cockpit:armed', {
+      detail: armed ? { op: armed.op, ask, step: index } : null,
+    }))
+    publish()
+    window.addEventListener('cockpit:armed-request', publish)
+    return () => window.removeEventListener('cockpit:armed-request', publish)
+  }, [armed, ask, index])
+  useEffect(() => () => window.dispatchEvent(new CustomEvent('cockpit:armed', { detail: null })), [])
+  useEffect(() => {
+    const onFocus = (event) => {
+      const current = live.current
+      if (!current.prompt || !event.target.closest?.('#cockpit-prompt')) return
+      const label = event.target.getAttribute('aria-label')
+      const next = current.prompt.steps.findIndex((candidate) => candidate.fields.some(([, name]) => label === `ribbon ${name}`))
+      if (next >= 0) setCursor({ armed: current.armed, index: next })
+    }
+    const onPoint = (event) => {
+      const detail = event.detail
+      const current = live.current
+      if (!detail || typeof detail.text !== 'string' || !current.prompt || !current.step) return
+      detail.handled = true
+      if (current.session.busy) { refuse('Wait for the drawing command to finish.'); return }
+      const { fields } = current.step
+      const [key, label, mode = 'decimal'] = fields[0]
+      const raw = detail.text.trim()
+      if (isPointStep(current.step)) {
+        let anchor = current.armed.from || null
+        const prior = resolvePromptInputs(current.prompt, current.inputs, anchor).effective
+        for (const candidate of current.prompt.steps.slice(0, current.index)) {
+          if (!isPointStep(candidate)) continue
+          const point = candidate.fields.map(([name]) => readNumber(prior[name]))
+          if (point.every(Number.isFinite)) anchor = point
+        }
+        if (key === 'dx') anchor = [0, 0]
+        // Command-bar polar distances, like relative pairs, measure from the last point.
+        const expression = raw.includes('<') && !raw.startsWith('@') ? `@${raw}` : raw
+        const point = resolvePointExpression(expression, anchor)
+        if (!point) {
+          setInput(key, raw)
+          refuse(`${current.prompt.verb} refused: ${label}: ${pointExpressionRefusal(expression, anchor) || 'enter a point using x,y.'}`)
+          return
+        }
+        fields.forEach(([name], offset) => setInput(name, String(point[offset])))
+      } else {
+        setInput(key, raw)
+        if ((mode === 'decimal' || mode === 'decimal-default') && (isPointExpression(raw) || readNumber(raw) === null)) {
+          refuse(`${current.prompt.verb} refused: ${label} needs a scalar, not a point or invalid number.`)
+          return
+        }
+      }
+      refuse('')
+      const next = current.index + 1
+      setCursor({ armed: current.armed, index: next })
+      if (current.armed.op === 'createLine' && current.index === 1) setRunRequest({ armed: current.armed })
+    }
+    window.addEventListener('focusin', onFocus)
+    window.addEventListener('cockpit:point', onPoint)
+    return () => {
+      window.removeEventListener('focusin', onFocus)
+      window.removeEventListener('cockpit:point', onPoint)
+    }
+  }, [setInput, refuse])
   const { applyEdit, undo, redo, copyToClipboard } = session.actions
   useEffect(() => {
     if (typeof window === 'undefined') return undefined
