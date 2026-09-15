@@ -58,7 +58,8 @@ describe('RoutePanel demo refusals and outages', () => {
   it('shows the demo limit and preserves input until a catalog tool is picked', () => {
     const callbacks = mountRefusal({ lane: 'run', tool: null, confidence: 0, stub: true, stubKind: 'demo' })
     expect(screen.getByText('This demo matches requests against a limited tool catalog.')).toBeTruthy()
-    expect(screen.getByText('No matching tool in this demo. Try another description or browse available tools.')).toBeTruthy()
+    expect(screen.getByText('No matching tool in this demo. Try another description or browse available tools.').closest('.resolver-header')).not.toBeNull()
+    expect(screen.queryByText(/live-only|isn’t a tool in this catalog/)).toBeNull()
     expect(screen.getByLabelText('Request').value).toBe('Inspect unusual geometry')
     expect(screen.queryByRole('button', { name: /^Run/ })).toBeNull()
     expect(screen.queryByText(/Routing is unavailable/)).toBeNull()
@@ -68,6 +69,25 @@ describe('RoutePanel demo refusals and outages', () => {
     expect(callbacks.onPickAlternative).toHaveBeenCalledWith(tools[0].name)
     expect(callbacks.onConfirmIntent).not.toHaveBeenCalled()
     expect(screen.getByLabelText('Request').value).toBe('Inspect unusual geometry')
+  })
+
+  it.each([null, '', '   '])('keeps the live no-match header with catalog picks for tool %s', (tool) => {
+    const callbacks = mountRefusal({ lane: 'run', tool, confidence: 0.1, alternatives: [] })
+    expect(screen.getByText('No matching capability. Try another description or browse available tools.').closest('.resolver-header')).not.toBeNull()
+    expect(screen.queryByText(/live-only|isn’t a tool in this catalog/)).toBeNull()
+    expect(screen.getAllByRole('option')).toHaveLength(tools.length)
+    fireEvent.click(screen.getByRole('option'))
+    expect(callbacks.onPickAlternative).toHaveBeenCalledWith(tools[0].name)
+    expect(callbacks.onConfirmIntent).not.toHaveBeenCalled()
+  })
+
+  it('keeps the live-only header for a named live tool below the floor', () => {
+    const callbacks = mountRefusal({ lane: 'run', tool: 'inspect-live-geometry', confidence: 0.1, alternatives: [] })
+    expect(screen.getByText('“inspect-live-geometry” is live-only — not in this catalog. Pick an alternative:').closest('.resolver-header')).not.toBeNull()
+    expect(screen.queryByText(/No matching capability/)).toBeNull()
+    fireEvent.click(screen.getByRole('option'))
+    expect(callbacks.onPickAlternative).toHaveBeenCalledWith(tools[0].name)
+    expect(callbacks.onConfirmIntent).not.toHaveBeenCalled()
   })
 
   it('offers only catalog picks during a live outage, even for a confident fallback', () => {

@@ -213,8 +213,10 @@ export default function RoutePanel({
         {route.stubKind === 'demo' && <span>This demo matches requests against a limited tool catalog.</span>}
         {outage
           ? <span>Routing is unavailable right now: {route.stubReason}</span>
-          : route.stubKind === 'demo' && (!route.tool || route.confidence < MIN_RUN_MATCH_CONF)
-            ? <span>No matching tool in this demo. Try another description or browse available tools.</span>
+          : typeof route.tool !== 'string' || !route.tool.trim() || (route.stubKind === 'demo' && route.confidence < MIN_RUN_MATCH_CONF)
+            ? <span>{route.stubKind === 'demo'
+              ? 'No matching tool in this demo. Try another description or browse available tools.'
+              : 'No matching capability. Try another description or browse available tools.'}</span>
             : toolObj
           ? <>Catalog match · {conf}% match</>
           : route.slash

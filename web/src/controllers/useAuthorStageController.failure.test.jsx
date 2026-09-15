@@ -43,6 +43,20 @@ async function createFailed() {
 }
 
 describe('failed author recovery', () => {
+  it('marks only the mock missing-authority refusal as signed-out-demo', async () => {
+    for (const mock of [true, false]) {
+      const stageAuthorTool = vi.fn()
+      const hook = renderHook(() => useAuthorStageController({
+        mock, storage: memoryStorage(), stageAuthorTool, authorityProvider: async () => null,
+      }))
+      await act(async () => { await hook.result.current.stage(description) })
+      expect(hook.result.current.error.reasonCode).toBe(mock ? 'signed-out-demo' : undefined)
+      expect(hook.result.current.error.description).toBe(description)
+      expect(stageAuthorTool).not.toHaveBeenCalled()
+      hook.unmount()
+    }
+  })
+
   it('renders the signed-out limit with the original description retained on the failure', async () => {
     const storage = memoryStorage()
     const stageAuthorTool = vi.fn()
