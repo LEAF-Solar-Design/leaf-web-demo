@@ -923,6 +923,10 @@
   }
   .studio-shell .selection-readout { position: fixed; left: 14px; bottom: 110px; pointer-events: none; }
   .studio-shell .selection-readout :is(button, a, input, select, textarea, [tabindex]) { pointer-events: auto; }
+  /* At 800x500, elementsFromPoint(93, 368) found the entity head and panel
+     above the canvas. Pass drawing taps through while keeping controls active. */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) section.ent-panel { pointer-events: none; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) section.ent-panel :is(button, a, input, select, textarea, [tabindex], [role="button"], [role="option"], [role="checkbox"]) { pointer-events: auto; }
   /* Result content stays inside the measured drawing area, clear of both
      the ribbon and prompt. Idle uses the same treatment as the wide frame. */
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .result-block {
