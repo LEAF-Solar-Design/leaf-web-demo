@@ -61,6 +61,21 @@ describe('CockpitTopBand panel focus', () => {
     expect(screen.getAllByRole('tab').filter((tab) => tab.tabIndex === 0)).toEqual([draw])
   })
 
+  it('Tab from Draw skips a disabled first child with tabIndex zero', () => {
+    render(<>
+      <CockpitTopBand />
+      <div id="drafting-ribbon" tabIndex={-1}>
+        <button disabled tabIndex={0}>Unavailable</button>
+        <span role="button" aria-disabled="true" tabIndex={0}>Unavailable custom control</span>
+        <button>Enabled command</button>
+      </div>
+    </>)
+    const draw = screen.getByRole('tab', { name: 'Draw' })
+    draw.focus()
+    fireEvent.keyDown(draw, { key: 'Tab' })
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Enabled command' }))
+  })
+
   it('Tab reaches More panels when every panel has collapsed', () => {
     render(<><CockpitTopBand /><DraftingRibbon visiblePanelCount={0} clusters={[
       { id: 'clipboard', label: 'Clipboard', tools: [{ id: 'copy', label: 'Copy' }] },

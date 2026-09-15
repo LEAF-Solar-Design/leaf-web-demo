@@ -60,7 +60,7 @@ export default function CockpitTopBand({ tab = 'draw', onTab, before = [], after
       <div className="cockpit-ribbon-tabs" role="tablist" aria-label="Ribbon" onKeyDown={(event) => {
         if (event.key === 'Tab' && !event.shiftKey && event.target.getAttribute('aria-selected') === 'true') {
           const ribbon = document.getElementById('drafting-ribbon')
-          const controls = ribbon?.querySelectorAll('button:not(:disabled), select:not(:disabled), input:not(:disabled), [tabindex="0"]') || []
+          const controls = ribbon?.querySelectorAll('button:not(:disabled), select:not(:disabled), input:not(:disabled), [tabindex="0"]:not(:disabled):not([aria-disabled="true"])') || []
           const tool = [...controls].find((element) => {
             if (element.closest('[hidden], [inert]')) return false
             for (let node = element; node && node !== ribbon; node = node.parentElement) {

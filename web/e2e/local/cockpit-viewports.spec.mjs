@@ -131,6 +131,22 @@ for (const condition of conditions) {
   })
 }
 
+test.describe('phone landscape', () => {
+  test.use({ viewport: { width: 844, height: 390 }, deviceScaleFactor: 1, hasTouch: true })
+  test('cockpit viewports 844x390: landscape keeps drawing ground and command input usable', async ({ page, request }) => {
+    await boot(page, request)
+    await expect(page.locator('.studio-shell .app')).toHaveAttribute('data-surface', 'cad')
+    const ground = page.locator('.studio-shell .studio-ground')
+    await expect(ground).toBeVisible()
+    const box = await ground.boundingBox()
+    expect(box.height).toBeGreaterThanOrEqual(120)
+    const command = page.getByLabel('Command bar', { exact: true })
+    await expect(command).toBeInViewport({ ratio: 1 })
+    await command.click()
+    await expect(command).toBeFocused()
+  })
+})
+
 for (const hasTouch of [false, true]) test.describe(`reference frame hasTouch=${hasTouch}`, () => {
   test.use({ viewport: { width: 1920, height: 940 }, deviceScaleFactor: 1, hasTouch })
   test(`cockpit viewports 1920x940 preserves the W4e band edges hasTouch=${hasTouch}`, async ({ page, request }) => {
