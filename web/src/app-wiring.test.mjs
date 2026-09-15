@@ -575,4 +575,14 @@ describe('App.jsx wiring', () => {
     assert.notEqual(mutated, appSource, 'the falsification mutation must remove the ConversePanel attribute')
     assert.doesNotMatch(mutated, binding)
   })
+
+  it('opts studio frame and grounds into customer copy with explicit mock state', () => {
+    for (const component of ['SurfaceFrame', 'SurfaceGrounds']) {
+      const mount = new RegExp('<' + component + '\\s[\\s\\S]*?/>|<' + component + '\\s[\\s\\S]*?>')
+      const source = appNoComments.match(mount)?.[0]
+      assert.ok(source, component + ' mount exists')
+      assert.match(source, new RegExp('studioPresentation=\\{Boolean\\(studioGround\\)\\}'))
+      assert.match(source, new RegExp('mock=\\{mock\\}'))
+    }
+  })
 })

@@ -19,6 +19,7 @@
 import { Children, useLayoutEffect, useRef, useState } from 'react'
 import WorldSpaceBoard from './WorldSpaceBoard.jsx'
 import { START_BOARD_COPY } from './startBoardCopy.js'
+import { isWriteTool } from '../lib/toolRecord.js'
 import { formatElementId } from '../lib/elementIdentity.js'
 import { PRODUCT_SURFACES, SHARED_WORKSPACE_CAPABILITIES, surfaceGround } from './productSurfaces.js'
 import { EMPTY_WORKSPACE_PROJECT } from './workspaceProjectState.js'
@@ -160,7 +161,7 @@ function shortId(value, n = 8) {
 // same GET /api/projects/:id/workspace payload WorkspaceSummary renders;
 // null (no project open, or the offline demo) renders the honest empties.
 // ---------------------------------------------------------------------------
-function BoardTiles({ workspace, drawing, catalog, renderTile }) {
+function BoardTiles({ workspace, drawing, catalog, renderTile, studioPresentation = false }) {
   const versions = workspace?.drawing_versions || []
   const jobs = [...(workspace?.jobs || [])].reverse().slice(0, 5) // newest first
   const tools = workspace?.built_tools || []
@@ -220,7 +221,19 @@ function BoardTiles({ workspace, drawing, catalog, renderTile }) {
               <>
                 <strong>{families.length} {families.length === 1 ? 'family' : 'families'} · {capabilityTotal(families)} tools</strong>
                 <ul>{families.map((family) => (
-                  <li key={family.family_id} data-element-id={formatElementId('family', family.family_id) || undefined}>{family.label}</li>
+                  <li key={family.family_id} data-element-id={formatElementId('family', family.family_id) || undefined}>{family.label}
+                    {studioPresentation && <ul className="ground-catalog-tools">
+                      {(family.capabilities || []).map((tool) => (
+                        <li key={tool.name} className="ground-catalog-tool">
+                          <strong>{tool.label || tool.name}</strong>
+                          <p>{tool.description || START_BOARD_COPY.missingDescription}</p>
+                          <p>{isWriteTool(tool) ? START_BOARD_COPY.changesDrawing
+                            : Array.isArray(tool.capabilities) && tool.capabilities.includes('drawing.read')
+                              ? START_BOARD_COPY.readsDrawing : START_BOARD_COPY.unspecifiedDrawingEffect}</p>
+                        </li>
+                      ))}
+                    </ul>}
+                  </li>
                 ))}</ul>
               </>
             ) : <p className="ground-empty">Loading the live catalog</p>}
@@ -237,6 +250,7 @@ function BoardTiles({ workspace, drawing, catalog, renderTile }) {
 export function ProjectBoardGround({
   active = false, workspaceProject = null, workspace = null, drawing = null, catalog = null, mock = false,
   contained = false, onReturnToDrawing = null, headingRef = null, startFocusRequest = 0,
+  studioPresentation = false,
   worldSpace = import.meta.env.VITE_WORLD_SPACE_BOARD === '1', store,
 }) {
   const state = workspaceProject || EMPTY_WORKSPACE_PROJECT
@@ -258,6 +272,7 @@ export function ProjectBoardGround({
       ref={boardRef}
       data-ground="browser"
       data-board-layout={contained ? 'contained' : undefined}
+      data-studio-presentation={studioPresentation ? 'true' : undefined}
       data-project-state={state.kind}
       hidden={!active}
       role="region"
@@ -268,6 +283,7 @@ export function ProjectBoardGround({
           <header className="ground-board-header">
             <div>
               <h1 ref={containedHeadingRef} tabIndex={-1}>{START_BOARD_COPY.heading}</h1>
+              {studioPresentation && mock && state.action?.disabled && <p className="start-board-project-caveat">{START_BOARD_COPY.projectDemoCaveat}</p>}
               <p>{state.kind === 'project' ? state.label : drawing?.name || state.drawingName}</p>
             </div>
             <button type="button" onClick={onReturnToDrawing}>{START_BOARD_COPY.returnToDrawing}</button>
@@ -275,11 +291,11 @@ export function ProjectBoardGround({
         )}
         {worldSpace ? (
           <WorldSpaceBoard key={workspaceProject?.project_id || 'anonymous'} scopeId={workspaceProject?.project_id || 'anonymous'} viewport={win} store={store}>
-            {(renderTile) => <BoardTiles workspace={workspace} drawing={drawing} catalog={catalog} renderTile={renderTile} />}
+            {(renderTile) => <BoardTiles workspace={workspace} drawing={drawing} catalog={catalog} renderTile={renderTile} studioPresentation={studioPresentation} />}
           </WorldSpaceBoard>
         ) : (
           <div className="ground-tiles">
-            <BoardTiles workspace={workspace} drawing={drawing} catalog={catalog} />
+            <BoardTiles workspace={workspace} drawing={drawing} catalog={catalog} studioPresentation={studioPresentation} />
           </div>
         )}
         {mock && <p className="ground-note">Offline demo build: no workspace service stands behind this board.</p>}
@@ -360,6 +376,7 @@ export function DeviceGround({
 export default function SurfaceGrounds({
   surface, workspaceProject, workspace, drawing, catalog, mock,
   boardVisible, onReturnToDrawing, headingRef, startFocusRequest,
+  studioPresentation = false,
   iosEnabled, iosContract, revision,
 }) {
   const projectLabel = workspaceProject?.kind === 'project'
@@ -378,6 +395,7 @@ export default function SurfaceGrounds({
         onReturnToDrawing={onReturnToDrawing}
         headingRef={headingRef}
         startFocusRequest={startFocusRequest}
+        studioPresentation={studioPresentation}
         workspaceProject={workspaceProject}
         workspace={workspace}
         drawing={drawing}

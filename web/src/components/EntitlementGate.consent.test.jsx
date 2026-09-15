@@ -30,6 +30,27 @@ const PAID = {
 
 const switchEl = () => screen.getByRole('switch', { name: /Usage telemetry/ })
 
+describe('studio plan presentation', () => {
+  it.each([
+    [{ mock: true }, 'Offline demo', 'Demo mode', 'Offline demo: you cannot save edits to a live drawing or create a workspace project. Local drawing changes stay in this browser session.'],
+    [{ mock: false, loading: true }, 'Checking plan', 'Checking', null],
+    [{ mock: false }, 'Plan details unavailable', 'Not verified', 'Plan details are unavailable. We cannot confirm which tools are included.'],
+    [{ mock: false, tier: 'team', entitlements: PAID }, 'Plan permissions checked', null, 'These permissions describe your plan. A drawing and connected services may still be required.'],
+  ])('reports %s honestly', (props, head, state, footer) => {
+    const { container } = render(<EntitlementGate {...props} studioPresentation />)
+    expect(container.querySelector('.ent-head')).toHaveTextContent(head)
+    expect([...container.querySelectorAll('.ent-rows .ent-state')].map((row) => row.textContent))
+      .toEqual(state ? Array(4).fill(state) : ['included', 'included', 'not in plan', 'included'])
+    if (footer) expect(screen.getByText(footer)).toBeInTheDocument()
+    if (props.entitlements) expect(screen.getByText(/Some capabilities aren’t in the team plan \(authoring\)/)).toBeInTheDocument()
+    for (const hint of ['Inspect and measure the drawing', 'Change the drawing', 'Create reusable tools', 'Ask questions about your work']) {
+      expect(container.querySelector('.ent-rows')).toHaveTextContent(hint)
+    }
+    expect(container.textContent).not.toMatch(/drawing\.read|drawing\.write|build lane|converse lane|full access/)
+    expect(switchEl()).toBeInTheDocument()
+  })
+})
+
 beforeEach(() => {
   try { localStorage.clear() } catch { /* jsdom always has it */ }
   setUsageConsent(false)

@@ -2986,6 +2986,7 @@ export default function App() {
       catalogError={catalogErr}
       workspaceProject={workspaceProjectState}
       boardPresentation={boardVisible}
+      studioPresentation={Boolean(studioGround)}
       headingRef={boardHeadingRef}
       onSelect={onSelectSurface}
       onCreateProject={onCreateProject}
@@ -3330,6 +3331,7 @@ export default function App() {
             old shell has no ground, so rail OFF renders none of this. */}
         {studioGround && createPortal(
           <SurfaceGrounds
+            studioPresentation={Boolean(studioGround)}
             surface={activeSurface}
             boardVisible={boardVisible}
             startFocusRequest={startFocusRequest}

@@ -234,7 +234,7 @@ export function SurfaceCapabilities({ surface, catalog, catalogError }) {
 // it says which of the two is missing, why that matters, and offers the one
 // action that closes the gap — never a bare "No project open" next to a header
 // that is plainly showing an open, editable drawing.
-export function WorkspaceProjectSlot({ state, onCreateProject }) {
+export function WorkspaceProjectSlot({ state, onCreateProject, studioPresentation = false, mock = false }) {
   if (!state) return null
   if (state.kind === 'project') {
     return <span className="dim" data-testid="surface-project-state" data-project-state="project">{state.label}</span>
@@ -248,7 +248,7 @@ export function WorkspaceProjectSlot({ state, onCreateProject }) {
   const missingHandler = Boolean(action) && !onCreateProject
   const disabled = Boolean(action?.disabled) || missingHandler
   const reason = action?.disabled
-    ? action.reason
+    ? studioPresentation && mock ? START_BOARD_COPY.projectDemoReason : action.reason
     : missingHandler
       ? WORKSPACE_PROJECT_COPY.reasonNoHandler
       : null
@@ -318,6 +318,7 @@ export function ProductSurfaceFrame({
   activeSurface, states, projectSlot, catalog, catalogError,
   workspaceProject = EMPTY_WORKSPACE_PROJECT, onCreateProject = null,
   boardPresentation = false, headingRef = null,
+  studioPresentation = false, mock = false,
 }) {
   const surface = productSurface(activeSurface)
   const status = states[surface.id]
@@ -347,11 +348,12 @@ export function ProductSurfaceFrame({
         <strong>{status.label}</strong>
       </div>
       <h1 ref={boardPresentation ? headingRef : undefined} tabIndex={boardPresentation ? -1 : undefined}>{boardPresentation ? START_BOARD_COPY.heading : surface.title}</h1>
+      {studioPresentation && boardPresentation && mock && workspaceProject?.action?.disabled && <p className="start-board-project-caveat">{START_BOARD_COPY.projectDemoCaveat}</p>}
       <p>{surface.description}</p>
       <div className="tc-product-project">
         {projectSlot}
         {showProjectState && (
-          <WorkspaceProjectSlot state={workspaceProject} onCreateProject={onCreateProject} />
+          <WorkspaceProjectSlot state={workspaceProject} onCreateProject={onCreateProject} studioPresentation={studioPresentation} mock={mock} />
         )}
       </div>
       <div className="tc-product-columns">

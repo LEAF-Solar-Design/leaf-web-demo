@@ -55,6 +55,32 @@ describe('measureContainedWindow', () => {
 })
 
 describe('ProjectBoardGround', () => {
+  it('describes each catalog tool and its declared drawing effect only in the studio presentation', () => {
+    const tools = { families: [{ family_id: 'measurement', label: 'Measurement', capabilities: [
+      { name: 'edit', label: 'Edit panels', description: 'Moves the selected panels.', capabilities: ['drawing.read', 'drawing.write'] },
+      { name: 'measure', capabilities: ['drawing.read'] },
+      { name: 'unknown', description: 'Checks a service.' },
+    ] }] }
+    const { container, rerender } = render(<ProjectBoardGround active catalog={tools} studioPresentation />)
+    const tile = within(container.querySelector('[data-tile="catalog"]'))
+    expect(tile.getByText('Measurement')).toHaveAttribute('data-element-id', 'family:measurement')
+    expect(tile.getByText('Edit panels')).toBeInTheDocument()
+    expect(tile.getByText('Moves the selected panels.')).toBeInTheDocument()
+    expect(tile.getByText('measure')).toBeInTheDocument()
+    expect(tile.getByText('unknown')).toBeInTheDocument()
+    for (const text of ['Changes the drawing', 'Does not change the drawing', 'No description provided.', 'Drawing effect not specified.']) {
+      expect(tile.getByText(text)).toBeInTheDocument()
+    }
+    rerender(<ProjectBoardGround active catalog={tools} />)
+    expect(tile.queryByText('Edit panels')).toBeNull()
+  })
+
+  it('puts the offline project limit immediately below the contained heading', () => {
+    const workspaceProject = deriveWorkspaceProjectState({ drawingName: 'demo', mock: true })
+    const { container } = render(<ProjectBoardGround active contained mock studioPresentation workspaceProject={workspaceProject} />)
+    expect(container.querySelector('h1').nextElementSibling.textContent).toBe('Offline demo: workspace project creation is unavailable.')
+  })
+
   it.each(['cad', 'solar'])('focuses each %s Start request once, after measurement', (surface) => {
     let frame
     const animationFrame = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {

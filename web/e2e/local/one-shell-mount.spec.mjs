@@ -26,6 +26,31 @@ const API_BASE = process.env.LEAF_E2E_API_BASE || 'http://127.0.0.1:8230'
 
 const STUDIO = '.studio-shell[data-scene="app"][data-mode="console"]'
 
+async function expectStudioBoardDetails(page, board) {
+  const heading = page.getByRole('heading', { level: 1, name: 'Project board', exact: true })
+  await expect(heading.locator('+ p')).toHaveText('Offline demo: workspace project creation is unavailable.')
+  await expect(heading.locator('+ p')).toBeInViewport()
+  for (const effect of ['Does not change the drawing', 'Changes the drawing']) {
+    const row = board.locator('.ground-catalog-tool').filter({ has: page.getByText(effect, { exact: true }) }).first()
+    await expect(row).toBeAttached()
+    await row.scrollIntoViewIfNeeded()
+    const name = row.locator('strong')
+    await expect(name).not.toBeEmpty()
+    for (const text of [name, row.getByText(effect, { exact: true })]) {
+      await expect(text).toBeVisible()
+      await expect(text).toBeInViewport({ ratio: 1 })
+      expect(await text.evaluate((node) => node.clientWidth > 0 && node.scrollWidth <= node.clientWidth)).toBe(true)
+    }
+  }
+  const planHead = page.getByTestId('properties-dock').locator('.dock-section-head', { hasText: 'Plan' })
+  const openPlan = await planHead.count() && await planHead.getAttribute('aria-expanded') === 'false'
+  if (openPlan) await planHead.click()
+  const plan = page.getByRole('region', { name: 'Entitlements', exact: true })
+  await expect(plan.locator('.ent-head')).toContainText('Offline demo')
+  await expect(plan).not.toContainText('full access')
+  if (openPlan) await planHead.click()
+}
+
 // One canvas, and it lives where the mode says: the studio ground when the
 // rail is on, the console's inline wrap when it is off.
 async function expectOneCanvasIn(page, containerSelector) {
@@ -81,6 +106,9 @@ test.describe('route matrix, rail ON', () => {
       const railNode = await continuity.elementHandle()
       const boardNode = await board.elementHandle()
       const opener = surface === 'cad' ? page.locator('.doc-tab-start') : page.getByRole('button', { name: 'Open the project board', exact: true })
+      await opener.click()
+      await expectStudioBoardDetails(page, board)
+      await page.getByRole('button', { name: 'Return to drawing', exact: true }).click()
       await prompt.fill('Keep this project draft')
       await opener.click()
       const heading = page.getByRole('heading', { level: 1, name: 'Project board', exact: true })
@@ -230,6 +258,7 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.locator('.studio-ground .viewer-canvas canvas')).toHaveCount(1)
     await expect(board.locator('[data-tile="drawing"]')).toContainText(/polylines/)
     await expect(board.locator('[data-tile="catalog"]')).toContainText(/famil/)
+    await expectStudioBoardDetails(page, board)
 
     await page.getByRole('tab', { name: 'iOS' }).click()
     await expect(device).toBeVisible()

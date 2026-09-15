@@ -1168,6 +1168,11 @@
 .ground-tile ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; font-size: 12px; color: rgba(240, 242, 240, .78); }
 .ground-tile li { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ground-tile li strong { font-size: 12px; }
+.studio-ground-board[data-studio-presentation="true"] .ground-tiles { grid-auto-rows: minmax(min-content, auto); overflow: auto; }
+.studio-ground-board[data-studio-presentation="true"] .ground-tile[data-tile="catalog"] { grid-column: 1 / -1; overflow: auto; }
+.studio-ground-board[data-studio-presentation="true"] .ground-tile[data-tile="catalog"] li { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; min-width: 0; }
+.studio-ground-board[data-studio-presentation="true"] .ground-catalog-tools { grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 8px; margin: 4px 0 8px; }
+.studio-ground-board[data-studio-presentation="true"] .ground-catalog-tool { display: grid; align-content: start; gap: 3px; }
 .ground-empty { color: rgba(240, 242, 240, .5) !important; font-style: italic; }
 .ground-note { margin: 0; font: 11px var(--font-mono); color: rgba(240, 242, 240, .55); }
 .ground-device-stage { display: flex; align-items: center; justify-content: center; gap: 44px; }

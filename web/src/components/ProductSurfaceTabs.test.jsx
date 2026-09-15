@@ -16,6 +16,19 @@ import { deriveWorkspaceProjectState } from '../site/workspaceProjectState.js'
 
 afterEach(cleanup)
 
+it('puts the studio demo creation limit at the board heading and associates one reason', () => {
+  const workspaceProject = deriveWorkspaceProjectState({ drawingName: 'demo', mock: true })
+  const { container } = render(<ProductSurfaceFrame activeSurface="browser" states={states} workspaceProject={workspaceProject} boardPresentation studioPresentation mock />)
+  const heading = screen.getByRole('heading', { level: 1, name: 'Project board' })
+  expect(heading.nextElementSibling.textContent).toBe('Offline demo: workspace project creation is unavailable.')
+  const action = screen.getByTestId('surface-project-action')
+  expect(action).toBeDisabled()
+  expect(action).toHaveAttribute('aria-describedby', 'surface-project-reason')
+  expect(container.querySelectorAll('#surface-project-reason')).toHaveLength(1)
+  expect(document.getElementById('surface-project-reason').textContent).toBe('Creating a workspace project is unavailable in this offline demo.')
+  expect(heading.nextElementSibling.compareDocumentPosition(action) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+})
+
 const states = productSurfaceStates({ sessionActive: true, hasDrawing: true, apsLive: true, iosReady: false })
 
 const catalogA = {
