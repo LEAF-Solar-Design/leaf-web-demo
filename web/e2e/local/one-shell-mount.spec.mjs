@@ -835,7 +835,7 @@ test.describe('route matrix, rail ON', () => {
       const reason = await authorBtn.getAttribute('title')
       expect(['your plan does not include authoring tools', 'the authoring stage is off on this deployment']).toContain(reason)
       await expect(authorBtn).toBeDisabled()
-      await expect(authorBtn).toHaveAttribute('aria-label', `Author tool (unavailable: ${reason})`)
+      await expect(authorBtn).toHaveAttribute('aria-label', `author-tool (unavailable: ${reason})`)
       // Keep the fallback in this owned spec; app-wiring.test.mjs is outside
       // this executor's file ownership. These checks inspect real producers,
       // not a mocked publish response or an injected catalog tool.
