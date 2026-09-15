@@ -273,7 +273,7 @@ export default function App() {
       window.history.replaceState(null, '', `${window.location.pathname}${next}${window.location.hash}`)
     } catch { /* URL sync is a convenience; state alone still switches the tab */ }
   }, [])
-  const { phase, request, settle } = useStudioTransition({
+  const { phase, request, settle, exitPending } = useStudioTransition({
     committed: activeSurface, onCommit, isDrafting: groundShowsDrawing,
     reducedMotion: studioGround ? undefined : true,
   })
@@ -306,6 +306,11 @@ export default function App() {
     startOpenRef.current = false
     setStartOpen(false)
   }, [settle])
+  const onBeforeArm = useCallback(() => {
+    if (exitPending()) return false
+    settle()
+    return true
+  }, [exitPending, settle])
   const onReturnToDrawing = useCallback(() => returnToDrawing(true), [returnToDrawing])
   const [mock, setMock] = useState(config.mockDefault)
   const [loadErr, setLoadErr] = useState(null)
@@ -3030,7 +3035,7 @@ export default function App() {
     }
   }
   const engineScope = (node) => (ENV_CAD_EDIT ? (
-    <EngineSessionProvider saveTarget={engineSaveTarget} onSaved={onEngineSaved} onDirtyChange={onEngineDirtyChange} onBeforeEdit={closeStartForChange} onBeforeArm={settle}>{node}</EngineSessionProvider>
+    <EngineSessionProvider saveTarget={engineSaveTarget} onSaved={onEngineSaved} onDirtyChange={onEngineDirtyChange} onBeforeEdit={closeStartForChange} onBeforeArm={onBeforeArm}>{node}</EngineSessionProvider>
   ) : node)
 
   return (
@@ -3179,6 +3184,7 @@ export default function App() {
     <div className="app" ref={projectLayout.appRef} data-project-workspace={projectLayout.active ? 'results' : undefined} data-project-tools={projectLayout.toolsOpen ? 'open' : 'closed'} data-project-activity={projectLayout.activityOpen ? 'open' : 'closed'} data-studio-transition={studioGround && phase !== 'idle' ? phase : undefined} data-surface={studioGround ? activeSurface : undefined} data-start-open={studioGround && startOpen ? 'true' : undefined} data-tour="shell"
       onClickCapture={(event) => {
         if (event.target instanceof Element && event.target.closest('.ribbon-tool:not(:disabled), .cockpit-quick button:not(:disabled), .cp-run:not(:disabled)')) {
+          if (exitPending()) { event.preventDefault(); event.stopPropagation(); return }
           settle()
           returnToDrawing()
         }

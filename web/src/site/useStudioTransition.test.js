@@ -17,6 +17,66 @@ beforeEach(() => vi.useFakeTimers())
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals() })
 
 describe('studio chrome transitions', () => {
+  it("an unrelated re-render with the unchanged prop does not erase the hook's own commit", () => {
+    const onCommit = vi.fn()
+    const { result, rerender } = renderHook(({ committed }) => useStudioTransition({
+      committed, onCommit, isDrafting, reducedMotion: false,
+    }), { initialProps: { committed: 'cad' } })
+    act(() => result.current.request('browser'))
+    expect(result.current.phase).toBe('out')
+    advance(STUDIO_MOTION.chromeOutMs)
+    expect(onCommit.mock.calls).toEqual([['browser']])
+    rerender({ committed: 'cad' })
+    act(() => result.current.request('cad'))
+    expect(onCommit.mock.calls).toEqual([['browser'], ['cad']])
+    expect(result.current.phase).toBe('in')
+    expect(vi.getTimerCount()).toBe(1)
+  })
+
+  it("the parent's rendered value wins once it changes", () => {
+    const onCommit = vi.fn()
+    const { result, rerender } = renderHook(({ committed }) => useStudioTransition({
+      committed, onCommit, isDrafting, reducedMotion: false,
+    }), { initialProps: { committed: 'cad' } })
+    act(() => result.current.request('browser'))
+    advance(STUDIO_MOTION.chromeOutMs)
+    expect(onCommit.mock.calls).toEqual([['browser']])
+    rerender({ committed: 'solar' })
+    act(() => result.current.request('solar'))
+    expect(onCommit.mock.calls).toEqual([['browser']])
+    act(() => result.current.request('cad'))
+    expect(onCommit.mock.calls).toEqual([['browser'], ['cad']])
+    expect(result.current.phase).toBe('idle')
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('exitPending reads true only while an exit is pending', () => {
+    const { result } = renderHook(() => {
+      const [committed, setCommitted] = useState('cad')
+      return useStudioTransition({ committed, onCommit: setCommitted, isDrafting, reducedMotion: false })
+    })
+    const exitPending = result.current.exitPending
+    expect(exitPending()).toBe(false)
+    act(() => {
+      result.current.request('browser')
+      expect(exitPending()).toBe(true)
+    })
+    act(() => result.current.settle())
+    expect(exitPending()).toBe(false)
+    act(() => result.current.request('cad'))
+    expect(result.current.phase).toBe('in')
+    expect(exitPending()).toBe(false)
+    act(() => {
+      result.current.request('browser')
+      expect(exitPending()).toBe(true)
+      result.current.request('cad')
+      expect(exitPending()).toBe(false)
+    })
+    expect(result.current.phase).toBe('idle')
+    expect(result.current.exitPending).toBe(exitPending)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
   it('keeps Browser as the latest batched request after the CAD exit', () => {
     const onCommit = vi.fn()
     const { result } = renderHook(() => {

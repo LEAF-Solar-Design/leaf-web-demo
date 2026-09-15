@@ -953,6 +953,16 @@ describe('the command prompt (W4e slice H): a tool arms, the command line asks i
 })
 
 describe('Start returns to the drawing at the engine edit sink', () => {
+  it.each([false, true, undefined])('lets onBeforeArm refuse only with false (return: %s)', (allowed) => {
+    const onBeforeArm = vi.fn(() => allowed)
+    const studio = mount({ onBeforeArm })
+    const inputs = studio.context.inputs
+    act(() => studio.context.setArmed({ group: 'draw', op: 'createLine' }))
+    expect(onBeforeArm).toHaveBeenCalledTimes(1)
+    expect(studio.context.armed).toEqual(allowed === false ? null : { group: 'draw', op: 'createLine' })
+    if (allowed === false) expect(studio.context.inputs).toBe(inputs)
+  })
+
   it('settles presentation once before a valid arm, but never for disarming or a refused shape', () => {
     const onBeforeArm = vi.fn()
     const studio = mount({ onBeforeArm })

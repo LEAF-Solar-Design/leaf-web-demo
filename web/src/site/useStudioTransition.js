@@ -26,8 +26,17 @@ export function useStudioTransition({ committed, onCommit, isDrafting, reducedMo
   const [phase, setPhase] = useState('idle')
   const timer = useRef(null)
   const pending = useRef(null)
-  const latest = useRef({ committed, onCommit, isDrafting, reducedMotion })
-  latest.current = { committed, onCommit, isDrafting, reducedMotion }
+  // An unrelated render, including flushSync, must not erase a commit React
+  // has not applied yet. The parent's rendered value wins as soon as it changes.
+  const committedRef = useRef(committed)
+  const lastProp = useRef(committed)
+  if (committed !== lastProp.current) {
+    lastProp.current = committed
+    committedRef.current = committed
+  }
+  const latest = useRef({ onCommit, isDrafting, reducedMotion })
+  latest.current = { onCommit, isDrafting, reducedMotion }
+  const exitPending = useCallback(() => pending.current !== null, [])
   const cancel = useCallback(() => {
     clearTimeout(timer.current)
     timer.current = null
@@ -40,7 +49,7 @@ export function useStudioTransition({ committed, onCommit, isDrafting, reducedMo
     pending.current = null
     if (target !== null) {
       latest.current.onCommit(target)
-      latest.current.committed = target
+      committedRef.current = target
     }
     setPhase('idle')
   }, [cancel])
@@ -50,21 +59,21 @@ export function useStudioTransition({ committed, onCommit, isDrafting, reducedMo
     pending.current = null
     setPhase('idle')
     const current = latest.current
-    if (target === current.committed) return
+    if (target === committedRef.current) return
     const reduced = current.reducedMotion ?? prefersReducedMotion()
-    if (reduced || current.isDrafting(current.committed) === current.isDrafting(target)) {
+    if (reduced || current.isDrafting(committedRef.current) === current.isDrafting(target)) {
       current.onCommit(target)
-      latest.current.committed = target
-    } else if (current.isDrafting(current.committed)) {
+      committedRef.current = target
+    } else if (current.isDrafting(committedRef.current)) {
       pending.current = target
       setPhase('out')
       timer.current = setTimeout(settle, STUDIO_MOTION.chromeOutMs)
     } else {
       current.onCommit(target)
-      latest.current.committed = target
+      committedRef.current = target
       setPhase('in')
       timer.current = setTimeout(() => { timer.current = null; setPhase('idle') }, STUDIO_MOTION.chromeInMs)
     }
   }, [cancel, settle])
-  return { phase, request, settle }
+  return { phase, request, settle, exitPending }
 }

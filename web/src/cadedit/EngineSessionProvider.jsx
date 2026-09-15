@@ -142,6 +142,7 @@ export default function EngineSessionProvider({
   // a change, with a boolean.
   onDirtyChange = null,
   onBeforeEdit = null,
+  // Called once before a valid non-null command is stored; return false to refuse it (nothing is stored).
   onBeforeArm = null,
   children,
 }) {
@@ -200,7 +201,7 @@ export default function EngineSessionProvider({
       && next.from.every((v) => typeof v === 'number' && Number.isFinite(v))
       ? Object.freeze([next.from[0], next.from[1]])
       : null
-    onBeforeArmRef.current?.()
+    if (onBeforeArmRef.current?.() === false) return
     setEditState((current) => {
       const previous = current.armed
       if (!rearm && previous && previous.group === group && previous.op === op && sameFrom(previous.from, from)) return current
