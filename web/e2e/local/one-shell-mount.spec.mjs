@@ -1969,6 +1969,7 @@ test.describe('route matrix, rail ON', () => {
     await bar.press('Enter')
     // BLOCK is live since #1140; dismiss its prompt before undo.
     await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'createBlock')
+    await expect(page.getByLabel('ribbon members', { exact: true })).toBeFocused()
     await page.keyboard.press('Escape')
     await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(countBefore + 1))
