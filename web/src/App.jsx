@@ -259,6 +259,7 @@ export default function App() {
   const startOpenerRef = useRef(null)
   const boardHeadingRef = useRef(null)
   const onOpenStart = useCallback((event) => {
+    if (startOpenRef.current) return
     startOpenerRef.current = event?.currentTarget || document.activeElement
     startOpenRef.current = true
     setStartFocusRequest((request) => request + 1)
@@ -1386,9 +1387,20 @@ export default function App() {
   }, [historyOpen, onToggleHistory, returnToDrawing])
 
   const onPreviewVersionTracked = useCallback((...args) => {
+    returnToDrawing()
     track('drawing.version_navigated', { action: 'preview' })
     return onPreviewVersion(...args)
-  }, [onPreviewVersion])
+  }, [onPreviewVersion, returnToDrawing])
+
+  const onBackToHeadTracked = useCallback((...args) => {
+    returnToDrawing()
+    return onBackToHead(...args)
+  }, [onBackToHead, returnToDrawing])
+
+  const onRestoredTracked = useCallback((...args) => {
+    returnToDrawing()
+    return onRestoreCommitted(...args)
+  }, [onRestoreCommitted, returnToDrawing])
 
   // --- version-history browser + read-only preview -------------------------
   // --- projects / orgs workspace handlers (item 1) -------------------------
@@ -1654,6 +1666,7 @@ export default function App() {
     if (previewing) return null
     const isWrite = isWriteTool(tool)
     if (writeLocked && isWrite) return null
+    returnToDrawing()
     // W4g-2 (one head), held at EXECUTION time. armDecision refuses the click
     // that stages a run, but the confirm strip stays open while the drafter
     // keeps drawing (engine tools never touch the run intent), so an edit
@@ -1699,7 +1712,7 @@ export default function App() {
     return envelope
   }, [agentMode, catalogRunContext, checkout.actions, clearAgentMode, dismissRoute, loadUsage, mock,
     health?.aps_live, openProjectId, prepareRunParams, markRefreshFailure, previewing, rehydrate, runJob,
-    shown, writeLocked])
+    shown, writeLocked, returnToDrawing])
 
   const onConfirmCatalogRun = useCallback(async (intent, tool, params) => {
     let currentTool = tool
@@ -2968,7 +2981,7 @@ export default function App() {
     }
   }
   const engineScope = (node) => (ENV_CAD_EDIT ? (
-    <EngineSessionProvider saveTarget={engineSaveTarget} onSaved={onEngineSaved} onDirtyChange={onEngineDirtyChange}>{node}</EngineSessionProvider>
+    <EngineSessionProvider saveTarget={engineSaveTarget} onSaved={onEngineSaved} onDirtyChange={onEngineDirtyChange} onBeforeEdit={returnToDrawing}>{node}</EngineSessionProvider>
   ) : node)
 
   return (
@@ -3604,14 +3617,14 @@ export default function App() {
                         loading={historyLoading}
                         previewingVersion={previewing?.version ?? null}
                         onPreview={onPreviewVersionTracked}
-                        onBackToHead={onBackToHead}
+                        onBackToHead={onBackToHeadTracked}
                         onClose={closeHistory}
                         onRetry={loadHistory}
                         retryKey={rTarget === 'history'}
                         exiting={historyExit.exiting}
                         mock={mock}
                         capability={checkout.actions.getCapability()}
-                        onRestored={onRestoreCommitted}
+                        onRestored={onRestoredTracked}
                         headWarning={unreadableHead}
                         mutationBlocked={drawingMutationsBlocked}
                       />

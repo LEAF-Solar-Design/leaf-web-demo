@@ -29,6 +29,7 @@ describe('Start is a view inside the current workspace profile', () => {
     const start = appNoComments.indexOf('const onOpenStart =')
     const end = appNoComments.indexOf('const returnToDrawing =', start)
     const handler = appNoComments.slice(start, end)
+    assert.match(handler, /if\s*\(startOpenRef\.current\)\s*return\s+startOpenerRef\.current\s*=/)
     assert.match(handler, /setStartOpen\(true\)/)
     assert.doesNotMatch(handler, /onSelectSurface|setActiveSurface|history\.|dispatchEvent|setOpenProject/)
     assert.match(appNoComments, /\[startOpen, setStartOpen\] = useState\(false\)/)
@@ -42,6 +43,35 @@ describe('Start is a view inside the current workspace profile', () => {
     assert.equal((appNoComments.match(/setStartFocusRequest\(/g) || []).length, 1)
     assert.match(appNoComments, /<SurfaceGrounds\s[\s\S]*?startFocusRequest=\{startFocusRequest\}/)
     assert.doesNotMatch(appNoComments, /boardHeadingRef\.current\?\.focus\(\)/)
+  })
+
+  it('returns to the drawing at engine, catalog and version sinks', () => {
+    assert.match(appNoComments, new RegExp('<EngineSessionProvider[^>]+onBeforeEdit=\\{returnToDrawing\\}'))
+    const runStart = appNoComments.indexOf('const onRun = useCallback')
+    const runEnd = appNoComments.indexOf('const onConfirmCatalogRun =', runStart)
+    assert.notEqual(runStart, -1)
+    assert.notEqual(runEnd, -1)
+    assert.match(appNoComments.slice(runStart, runEnd), /if\s*\(writeLocked && isWrite\)\s*return null\s+returnToDrawing\(\)/)
+    for (const [name, target] of [
+      ['onPreviewVersionTracked', 'onPreviewVersion'],
+      ['onBackToHeadTracked', 'onBackToHead'],
+      ['onRestoredTracked', 'onRestoreCommitted'],
+    ]) {
+      const start = appNoComments.indexOf(`const ${name} = useCallback`)
+      const end = appNoComments.indexOf('])', start)
+      assert.notEqual(start, -1)
+      assert.notEqual(end, -1)
+      const callback = appNoComments.slice(start, end + 2)
+      assert.match(callback, new RegExp('returnToDrawing\\(\\)[\\s\\S]*?return ' + target + '\\(\\.\\.\\.args\\)'))
+      assert.match(callback, new RegExp('\\[' + target + ', returnToDrawing\\]'))
+    }
+    for (const [prop, callback] of [
+      ['onPreview', 'onPreviewVersionTracked'],
+      ['onBackToHead', 'onBackToHeadTracked'],
+      ['onRestored', 'onRestoredTracked'],
+    ]) {
+      assert.match(appNoComments, new RegExp('<VersionHistory\\s[^>]*' + prop + '=\\{' + callback + '\\}'))
+    }
   })
 
   it('shows the Run and Build gloss beside the shared prompt for every visible board', () => {

@@ -27,9 +27,8 @@ const API_BASE = process.env.LEAF_E2E_API_BASE || 'http://127.0.0.1:8230'
 const STUDIO = '.studio-shell[data-scene="app"][data-mode="console"]'
 
 async function expectStudioBoardDetails(page, board) {
-  const heading = page.getByRole('heading', { level: 1, name: 'Project board', exact: true })
-  await expect(heading.locator('+ p')).toHaveText('Offline demo: workspace project creation is unavailable.')
-  await expect(heading.locator('+ p')).toBeInViewport()
+  // The proof stack runs live; the demo caveat is pinned by the unit rows.
+  await expect(page.locator('.start-board-project-caveat')).toHaveCount(0)
   for (const effect of ['Does not change the drawing', 'Changes the drawing']) {
     const row = board.locator('.ground-catalog-tool').filter({ has: page.getByText(effect, { exact: true }) }).first()
     await expect(row).toBeAttached()
@@ -46,8 +45,9 @@ async function expectStudioBoardDetails(page, board) {
   const openPlan = await planHead.count() && await planHead.getAttribute('aria-expanded') === 'false'
   if (openPlan) await planHead.click()
   const plan = page.getByRole('region', { name: 'Entitlements', exact: true })
-  await expect(plan.locator('.ent-head')).toContainText('Offline demo')
+  await expect(plan.locator('.ent-head')).toContainText(/Plan permissions checked|Plan details unavailable/)
   await expect(plan).not.toContainText('full access')
+  await expect(plan).not.toContainText(/drawing\.read|drawing\.write|build lane|converse lane/)
   if (openPlan) await planHead.click()
 }
 
