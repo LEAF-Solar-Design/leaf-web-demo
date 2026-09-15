@@ -94,7 +94,7 @@ function Cockpit({ onToggleImport = () => {} }) {
   )
 }
 
-function mount({ saveTarget = null, onSaved = null, withIdentity = false } = {}) {
+function mount({ saveTarget = null, onSaved = null, onBeforeEdit, withIdentity = false } = {}) {
   const workers = []
   const createWorker = vi.fn(() => {
     const worker = new ScriptedWorker()
@@ -110,7 +110,7 @@ function mount({ saveTarget = null, onSaved = null, withIdentity = false } = {})
   }
 
   const tree = (
-    <EngineSessionProvider createWorker={createWorker} saveTarget={saveTarget} onSaved={onSaved}>
+    <EngineSessionProvider createWorker={createWorker} saveTarget={saveTarget} onSaved={onSaved} onBeforeEdit={onBeforeEdit}>
       <Probe />
       <Cockpit />
     </EngineSessionProvider>
@@ -949,6 +949,83 @@ describe('the command prompt (W4e slice H): a tool arms, the command line asks i
     act(() => { studio.workers[0].die() })
     expect(studio.context.session.errorKind).toBe(SESSION_ERROR.CRASHED)
     expect(promptEl()).toBeNull()
+  })
+})
+
+describe('Start returns to the drawing at the engine edit sink', () => {
+  it('closes Start once before cut posts its internal delete', async () => {
+    const onBeforeEdit = vi.fn()
+    const studio = mount({ onBeforeEdit })
+    await openAndLoad(studio, [LINE])
+    act(() => studio.context.session.actions.select('e1'))
+    const worker = studio.workers[0]
+    const post = vi.spyOn(worker, 'postMessage')
+    act(() => studio.context.session.actions.copyToClipboard(false))
+    act(() => studio.context.session.actions.copyToClipboard())
+    expect(onBeforeEdit).not.toHaveBeenCalled()
+    expect(post).not.toHaveBeenCalled()
+
+    act(() => studio.context.session.actions.copyToClipboard(true))
+    expect(onBeforeEdit).toHaveBeenCalledTimes(1)
+    expect(post).toHaveBeenCalledTimes(1)
+    expect(post).toHaveBeenCalledWith({ type: 'applyEdit', op: 'delete', payload: { entityId: 'e1' } })
+    expect(onBeforeEdit.mock.invocationCallOrder[0]).toBeLessThan(post.mock.invocationCallOrder[0])
+  })
+
+  it('calls onBeforeEdit once for each drawing edit, before create posts', async () => {
+    const onBeforeEdit = vi.fn()
+    const studio = mount({ onBeforeEdit })
+    await openAndLoad(studio, [LINE])
+    const worker = studio.workers[0]
+    const before = worker.posted.length
+    onBeforeEdit.mockImplementationOnce(() => expect(worker.posted.length).toBe(before))
+    act(() => studio.context.session.actions.create('createLine', DEFAULT_EDIT_INPUTS))
+    expect(onBeforeEdit).toHaveBeenCalledTimes(1)
+    expect(worker.posted.length).toBe(before + 1)
+    worker.emit(editApplied('createLine', [LINE]))
+
+    act(() => studio.context.session.actions.select('e1'))
+    act(() => studio.context.session.actions.applyEdit('move', DEFAULT_EDIT_INPUTS))
+    expect(onBeforeEdit).toHaveBeenCalledTimes(2)
+    worker.emit(editApplied('move', [LINE]))
+
+    act(() => studio.context.session.actions.copyToClipboard())
+    act(() => studio.context.session.actions.pasteFromClipboard({ x: '10', y: '20' }))
+    expect(onBeforeEdit).toHaveBeenCalledTimes(3)
+    worker.emit(editApplied('createLine', [LINE]))
+
+    act(() => studio.context.session.actions.undo())
+    expect(onBeforeEdit).toHaveBeenCalledTimes(4)
+    worker.emit(loadedMessage([LINE]))
+    act(() => studio.context.session.actions.redo())
+    expect(onBeforeEdit).toHaveBeenCalledTimes(5)
+    worker.emit(loadedMessage([LINE]))
+  })
+
+  it('does not call onBeforeEdit for opening, selection, saving, copying or reset', async () => {
+    const onBeforeEdit = vi.fn()
+    const studio = mount({ onBeforeEdit })
+    await openAndLoad(studio, [LINE])
+    act(() => studio.context.session.actions.openBytes(new Uint8Array([48, 10]), 'one.dxf'))
+    studio.workers[0].emit(loadedMessage([LINE]))
+    act(() => studio.context.session.actions.select('e1'))
+    act(() => studio.context.session.actions.copyToClipboard())
+    await act(async () => { await studio.context.session.actions.save() })
+    act(() => studio.context.session.actions.reset())
+    expect(onBeforeEdit).not.toHaveBeenCalled()
+  })
+
+  it('creates normally without an onBeforeEdit callback', async () => {
+    const studio = mount()
+    await openAndLoad(studio, [LINE])
+    const worker = studio.workers[0]
+    const before = worker.posted.length
+    act(() => studio.context.session.actions.create('createLine', DEFAULT_EDIT_INPUTS))
+    expect(worker.posted.length).toBe(before + 1)
+    expect(worker.posted[before]).toMatchObject({ type: 'applyEdit', op: 'createLine' })
+    worker.emit(editApplied('createLine', [LINE, POLY]))
+    expect(studio.context.session.entities).toHaveLength(2)
+    expect(studio.context.session.busy).toBe(false)
   })
 })
 

@@ -184,6 +184,9 @@ export default function SurfaceFrame({
   onSelect = null,
   onCreateProject = null,
   projectSlot = null,
+  boardPresentation = false,
+  studioPresentation = false,
+  headingRef = null,
   session = null,
   posture = null,
   entitlement = null,
@@ -225,6 +228,9 @@ export default function SurfaceFrame({
     onSelect,
     onCreateProject,
     projectSlot,
+    boardPresentation,
+    studioPresentation,
+    headingRef,
     session,
     posture,
     entitlement,
@@ -295,6 +301,10 @@ function Frame() {
       workspaceProject={frame.workspaceProject}
       onCreateProject={frame.onCreateProject}
       projectSlot={frame.projectSlot}
+      boardPresentation={frame.boardPresentation}
+      studioPresentation={frame.studioPresentation}
+      mock={frame.mock}
+      headingRef={frame.headingRef}
     />
   )
 }
@@ -320,6 +330,7 @@ function Entitlement({ at = 'inline' }) {
       entitlements={ent.entitlements}
       loading={ent.loading}
       mock={ent.mock}
+      studioPresentation={frame.studioPresentation}
     />
   )
 }

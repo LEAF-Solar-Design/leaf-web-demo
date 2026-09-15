@@ -42,7 +42,7 @@ import { CONTINUITY_HOST_CLASS, useContinuityPublish } from './continuityStore.j
 import { StatusToggles } from './DrawingCockpit.jsx'
 import SurfaceFrame from './SurfaceFrame.jsx'
 import { surfaceContract } from './productSurfaces.js'
-import { EMPTY_WORKSPACE_PROJECT } from './workspaceProjectState.js'
+import { EMPTY_WORKSPACE_PROJECT, deriveWorkspaceProjectState } from './workspaceProjectState.js'
 
 const FIXTURE_PATH = join(dirname(fileURLToPath(import.meta.url)), 'surfaceFrame.today-fixture.json')
 // Regeneration is a deliberate, out-of-band act, never something a failing run
@@ -106,6 +106,33 @@ const COMMAND_BAR = () => <div className="cb-sentinel" data-testid="command-bar-
 const PROJECT_SLOT = <div className="ios-slot-sentinel" data-testid="ios-project-slot">ship lane</div>
 
 function noop() {}
+
+it('forwards studio presentation and explicit demo state to plan and project slots', () => {
+  const workspaceProject = deriveWorkspaceProjectState({ drawingName: 'demo', mock: true })
+  const { container } = render(
+    <SurfaceFrame scene="console" activeSurface="browser" states={STATES} workspaceProject={workspaceProject} boardPresentation studioPresentation mock entitlement={{ mock: true, placement: 'inline' }}>
+      <SurfaceFrame.Frame />
+      <SurfaceFrame.Entitlement />
+    </SurfaceFrame>,
+  )
+  expect(container.querySelector('.ent-head').textContent).toContain('Offline demo')
+  expect(container.querySelector('h1').nextElementSibling.textContent).toBe('Offline demo: workspace project creation is unavailable.')
+  expect(container.querySelectorAll('#surface-project-reason')).toHaveLength(1)
+  expect(container.querySelector('#surface-project-reason').textContent).toBe('Creating a workspace project is unavailable in this offline demo.')
+})
+
+it('forwards the opt-in board presentation and heading ref through the frame slot', () => {
+  const headingRef = { current: null }
+  const { container } = render(
+    <SurfaceFrame scene="console" activeSurface="browser" states={STATES} workspaceProject={EMPTY_WORKSPACE_PROJECT} boardPresentation headingRef={headingRef}>
+      <SurfaceFrame.Frame />
+    </SurfaceFrame>,
+  )
+  expect(container.querySelectorAll('h1')).toHaveLength(1)
+  expect(container.querySelector('h1').textContent).toBe('Project board')
+  expect(headingRef.current).toBe(container.querySelector('h1'))
+  expect(headingRef.current.tabIndex).toBe(-1)
+})
 
 // Console posture. `studio` is App's useStudioGround() truthiness; the rest are
 // App.jsx:2257/2264/2284 postures. wide + collapsed is the shipped default.

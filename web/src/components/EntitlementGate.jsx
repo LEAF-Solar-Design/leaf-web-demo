@@ -23,6 +23,7 @@ import {
   usageConsentGranted,
 } from '../lib/telemetryConsent.js'
 import { TELEMETRY_BUILD_DISABLED } from '../telemetry.js'
+import { START_BOARD_COPY } from '../site/startBoardCopy.js'
 
 // The exact copy. Honest on both halves: it names what would be collected AND
 // says what the switch does not touch, because a toggle that silently also
@@ -161,6 +162,7 @@ export default function EntitlementGate({
   entitlements,
   loading,
   mock,
+  studioPresentation = false,
   // Defaulted from the build fence so every existing mount site is unchanged;
   // a prop only so the disabled arm has a spec that does not need a rebuild.
   telemetryDisabled = TELEMETRY_BUILD_DISABLED,
@@ -172,13 +174,19 @@ export default function EntitlementGate({
   const rows = ROWS.map((r) => ({ ...r, on: entValue(ents, r.key) }))
   const allOn = rows.every((r) => r.on)
   const tierLabel = tier || 'demo'
+  const studioKnown = !mock && !loading && known
+  const studioHead = mock ? START_BOARD_COPY.demoHead
+    : loading ? START_BOARD_COPY.checkingHead
+      : known ? START_BOARD_COPY.checkedHead : START_BOARD_COPY.unavailableHead
+  const studioState = mock ? START_BOARD_COPY.demoState
+    : loading ? START_BOARD_COPY.checkingState : START_BOARD_COPY.unavailableState
 
   return (
     <section className="ent-panel" aria-label="Entitlements">
       <div className="ent-head">
         <span className="ent-k">Entitlements</span>
-        <span className="ent-tier">tier {tierLabel}</span>
-        {known ? (
+        {studioPresentation ? <span className="ent-tier">{studioHead}</span> : <span className="ent-tier">tier {tierLabel}</span>}
+        {studioPresentation ? null : known ? (
           <span className="ent-src">enforced server-side{source ? ` · ${source}` : ''}</span>
         ) : (!mock && loading) ? (
           <span className="ent-src dim ent-checking">
@@ -194,14 +202,20 @@ export default function EntitlementGate({
         {rows.map((r) => (
           <div key={r.key} className={`ent-row ${r.on ? 'on' : 'off'}`}>
             <span className="ent-label">
-              {r.label}{r.hint ? <span className="dim"> · {r.hint}</span> : null}
+              {r.label}{r.hint ? <span className="dim"> · {studioPresentation ? START_BOARD_COPY.entitlementHints[r.key] : r.hint}</span> : null}
             </span>
-            <span className={`ent-state ${r.on ? 'on' : ''}`}>{r.on ? 'included' : 'not in plan'}</span>
+            <span className={`ent-state ${r.on ? 'on' : ''}`}>{studioPresentation && !studioKnown ? studioState : r.on ? 'included' : 'not in plan'}</span>
           </div>
         ))}
       </div>
 
-      {!known ? (
+      {studioPresentation && <>
+        {mock ? <p className="ent-note">{START_BOARD_COPY.demoFooter}</p>
+          : loading ? null
+            : known ? <p className="ent-note">{START_BOARD_COPY.checkedFooter}</p>
+              : <p className="ent-note">{START_BOARD_COPY.unavailableFooter}</p>}
+      </>}
+      {studioPresentation && (!studioKnown || allOn) ? null : !known ? (
         <p className="ent-note">
           demo tier · full access — entitlements apply once you sign in to a plan.
         </p>

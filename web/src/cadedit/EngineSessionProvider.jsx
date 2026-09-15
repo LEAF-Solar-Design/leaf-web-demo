@@ -44,6 +44,7 @@ import useEngineSession, { SESSION_ERROR } from './engineSession.js'
 import { promptKeys } from './promptKeys.js'
 
 const EngineSessionContext = createContext(null)
+const DRAWING_EDIT_ACTIONS = Object.freeze(new Set(['create', 'applyEdit', 'pasteFromClipboard', 'undo', 'redo']))
 
 function defaultCreateWorker() {
   // The one legal spawn shape, and the only place this repo's web tree names
@@ -140,6 +141,7 @@ export default function EngineSessionProvider({
   // server head under them can be refused with the reason. Called only on
   // a change, with a boolean.
   onDirtyChange = null,
+  onBeforeEdit = null,
   children,
 }) {
   // No identity provider means no drawing identity, which is a real state
@@ -248,10 +250,13 @@ export default function EngineSessionProvider({
     setRefusalState(typeof sentence === 'string' ? sentence.slice(0, MAX_REACH_SENTENCE) : '')
   }, [])
   useEffect(() => { setRefusalState('') }, [session.status])
+  const onBeforeEditRef = useRef(onBeforeEdit)
+  onBeforeEditRef.current = onBeforeEdit
   const actions = useMemo(() => Object.fromEntries(Object.entries(session.actions).map(([name, action]) => [
     name,
     (...args) => {
       setRefusalState('')
+      if (DRAWING_EDIT_ACTIONS.has(name) || (name === 'copyToClipboard' && args[0] === true)) onBeforeEditRef.current?.()
       return action(...args)
     },
   ])), [session.actions])

@@ -16,6 +16,19 @@ import { deriveWorkspaceProjectState } from '../site/workspaceProjectState.js'
 
 afterEach(cleanup)
 
+it('puts the studio demo creation limit at the board heading and associates one reason', () => {
+  const workspaceProject = deriveWorkspaceProjectState({ drawingName: 'demo', mock: true })
+  const { container } = render(<ProductSurfaceFrame activeSurface="browser" states={states} workspaceProject={workspaceProject} boardPresentation studioPresentation mock />)
+  const heading = screen.getByRole('heading', { level: 1, name: 'Project board' })
+  expect(heading.nextElementSibling.textContent).toBe('Offline demo: workspace project creation is unavailable.')
+  const action = screen.getByTestId('surface-project-action')
+  expect(action).toBeDisabled()
+  expect(action).toHaveAttribute('aria-describedby', 'surface-project-reason')
+  expect(container.querySelectorAll('#surface-project-reason')).toHaveLength(1)
+  expect(document.getElementById('surface-project-reason').textContent).toBe('Creating a workspace project is unavailable in this offline demo.')
+  expect(heading.nextElementSibling.compareDocumentPosition(action) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+})
+
 const states = productSurfaceStates({ sessionActive: true, hasDrawing: true, apsLive: true, iosReady: false })
 
 const catalogA = {
@@ -66,6 +79,20 @@ function frame(surface, catalog, catalogError = null) {
 }
 
 describe('F-7: surface frames render the live tenant catalog', () => {
+  it('presents one Project board heading and owns the project slot once when opted in', () => {
+    const headingRef = { current: null }
+    render(<ProductSurfaceFrame activeSurface="browser" states={states} catalog={catalogA}
+      boardPresentation headingRef={headingRef} projectSlot={<span data-testid="caller-project-slot">Project controls</span>}
+      workspaceProject={deriveWorkspaceProjectState({ openProjectId: 'p1', projectName: 'North Yard', orgId: 'o1' })} />)
+    const heading = screen.getByRole('heading', { level: 1, name: 'Project board' })
+    expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1)
+    expect(headingRef.current).toBe(heading)
+    expect(heading).toHaveAttribute('tabindex', '-1')
+    expect(screen.getAllByTestId('caller-project-slot')).toHaveLength(1)
+    expect(screen.getAllByTestId('surface-project-state')).toHaveLength(1)
+    expect(screen.getByTestId('surface-project-state')).toHaveTextContent('North Yard')
+  })
+
   it.each(['browser', 'solar', 'ios'])('%s content changes when the tenant catalog changes', (surface) => {
     const { rerender } = render(frame(surface, catalogA))
     const live = screen.getByTestId('surface-capabilities-live')

@@ -81,7 +81,7 @@ describe('App portal wiring', () => {
 
   it('renders the Viewer through the ground portal ONLY when a ground exists', () => {
     expect(src).toMatch(/const studioGround = useStudioGround\(\)/)
-    expect(src).toMatch(/studioGround\s*\n?\s*\? createPortal\(<div className="studio-ground-viewer" hidden=\{!groundShowsDrawing\(activeSurface\)\}>\{viewerEl\}<\/div>, studioGround\)\s*\n?\s*: viewerEl/)
+    expect(src).toMatch(/studioGround\s*\n?\s*\? createPortal\(<div className="studio-ground-viewer" hidden=\{boardVisible \|\| !groundShowsDrawing\(activeSurface\)\}>\{viewerEl\}<\/div>, studioGround\)\s*\n?\s*: viewerEl/)
   })
 
   it('mounts the surface grounds ONLY through the ground portal (rail OFF has no ground, so none of it)', () => {
@@ -108,7 +108,7 @@ describe('App portal wiring', () => {
     expect(src).toMatch(/\{studioGround && groundShowsDrawing\(activeSurface\) && \(\s*\n?\s*<CockpitStatus/)
     // (`data-tour="shell"` after it is slice 4b's console tour anchor; the
     // surface attribute's gate is what this pin guards.)
-    expect(src).toMatch(/<div className="app"[^>]*\bdata-surface=\{studioGround \? activeSurface : undefined\} data-tour="shell">/)
+    expect(src).toMatch(/<div className="app"[^>]*\bdata-surface=\{studioGround \? activeSurface : undefined\} data-start-open=\{studioGround && startOpen \? 'true' : undefined\} data-tour="shell"\s+onClickCapture=/)
   })
 
   it('never seeds intake synchronously — the single-mount invariant of the portal', () => {
@@ -164,7 +164,7 @@ describe('falsification', () => {
 
   it('a portal without the null-ground inline fallback fails the portal pin', () => {
     const mutated = read('../App.jsx').replace(': viewerEl', ': null')
-    expect(mutated).not.toMatch(/\? createPortal\(<div className="studio-ground-viewer" hidden=\{!groundShowsDrawing\(activeSurface\)\}>\{viewerEl\}<\/div>, studioGround\)\s*\n?\s*: viewerEl/)
+    expect(mutated).not.toMatch(/\? createPortal\(<div className="studio-ground-viewer" hidden=\{boardVisible \|\| !groundShowsDrawing\(activeSurface\)\}>\{viewerEl\}<\/div>, studioGround\)\s*\n?\s*: viewerEl/)
   })
 
   it('an inline (unguarded) SurfaceGrounds fails the portal-only pin', () => {

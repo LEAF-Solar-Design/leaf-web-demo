@@ -4,11 +4,11 @@
  * version, or ship-lane progress. Exactly one ground is visible per surface;
  * the others stay mounted but hidden.
  */
-import { afterEach, describe, expect, it } from 'vitest'
-import { cleanup, render, screen, within } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 
-import SurfaceGrounds, { DeviceGround, ProjectBoardGround, groundShowsDrawing } from './SurfaceGrounds.jsx'
+import SurfaceGrounds, { DeviceGround, ProjectBoardGround, groundShowsDrawing, measureContainedWindow } from './SurfaceGrounds.jsx'
 import { deriveWorkspaceProjectState } from './workspaceProjectState.js'
 
 afterEach(cleanup)
@@ -30,7 +30,139 @@ describe('groundShowsDrawing', () => {
   })
 })
 
+describe('measureContainedWindow', () => {
+  const board = { left: 250, top: 155, width: 1350, height: 814 }
+  const toolbar = { height: 24, bottom: 152 }
+  const column = { left: 0, width: 1600 }
+  const prompt = { height: 80, top: 890 }
+  const element = (rect) => ({ getBoundingClientRect: () => rect })
+
+  it.each([
+    ['the proof page', board, column, prompt, { top: 14, left: 14, width: 1322, height: 707 }],
+    ['a narrower column', board, { left: 300, width: 1000 }, prompt, { top: 14, left: 64, width: 972, height: 707 }],
+    ['the Properties pane closed', { left: 0, top: 155, width: 1600, height: 814 }, column, prompt, { top: 14, left: 14, width: 1572, height: 707 }],
+    ['a board without a box', { ...board, width: 0 }, column, prompt, null],
+    ['a prompt above the toolbar', board, column, { ...prompt, top: 100 }, null],
+  ])('measures %s against the board box', (_name, boardRect, columnRect, promptRect, expected) => {
+    const elements = {
+      '.app .viewer-toolbar': element(toolbar),
+      '.app main.center-scroll': element(columnRect),
+      '.app .bar-dock': element(promptRect),
+    }
+    const doc = { querySelector: (selector) => elements[selector] }
+    expect(measureContainedWindow(element(boardRect), doc)).toEqual(expected)
+  })
+})
+
 describe('ProjectBoardGround', () => {
+  it('describes each catalog tool and its declared drawing effect only in the studio presentation', () => {
+    const tools = { families: [{ family_id: 'measurement', label: 'Measurement', capabilities: [
+      { name: 'edit', label: 'Edit panels', description: 'Moves the selected panels.', capabilities: ['drawing.read', 'drawing.write'] },
+      { name: 'measure', capabilities: ['drawing.read'] },
+      { name: 'unknown', description: 'Checks a service.' },
+    ] }] }
+    const { container, rerender } = render(<ProjectBoardGround active catalog={tools} studioPresentation />)
+    const tile = within(container.querySelector('[data-tile="catalog"]'))
+    expect(tile.getByText('Measurement')).toHaveAttribute('data-element-id', 'family:measurement')
+    expect(tile.getByText('Edit panels')).toBeInTheDocument()
+    expect(tile.getByText('Moves the selected panels.')).toBeInTheDocument()
+    expect(tile.getByText('measure')).toBeInTheDocument()
+    expect(tile.getByText('unknown')).toBeInTheDocument()
+    for (const text of ['Changes the drawing', 'Does not change the drawing', 'No description provided.', 'Drawing effect not specified.']) {
+      expect(tile.getByText(text)).toBeInTheDocument()
+    }
+    rerender(<ProjectBoardGround active catalog={tools} />)
+    expect(tile.queryByText('Edit panels')).toBeNull()
+  })
+
+  it('puts the offline project limit immediately below the contained heading', () => {
+    const workspaceProject = deriveWorkspaceProjectState({ drawingName: 'demo', mock: true })
+    const { container } = render(<ProjectBoardGround active contained mock studioPresentation workspaceProject={workspaceProject} />)
+    expect(container.querySelector('h1').nextElementSibling.textContent).toBe('Offline demo: workspace project creation is unavailable.')
+  })
+
+  it.each(['cad', 'solar'])('focuses each %s Start request once, after measurement', (surface) => {
+    let frame
+    const animationFrame = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      frame = callback
+      return 1
+    })
+    const view = (request, boardCatalog = null) => (
+      <div className="app">
+        <div className="viewer-toolbar" />
+        <main className="center-scroll" />
+        <div className="bar-dock"><button type="button">Other focus</button></div>
+        <SurfaceGrounds surface={surface} boardVisible startFocusRequest={request} catalog={boardCatalog} />
+      </div>
+    )
+    try {
+      const { container, rerender } = render(view(1))
+      const heading = screen.getByRole('heading', { level: 1, name: 'Project board' })
+      const focus = vi.spyOn(heading, 'focus')
+      expect(container.querySelector('.ground-desk')).toHaveAttribute('data-measured', 'false')
+      expect(heading).not.toHaveFocus()
+      expect(document.activeElement).toBe(document.body)
+
+      const toolbar = container.querySelector('.viewer-toolbar')
+      const column = container.querySelector('main.center-scroll')
+      const prompt = container.querySelector('.bar-dock')
+      const board = container.querySelector('[data-ground="browser"]')
+      board.getBoundingClientRect = () => ({ left: 0, top: 0, width: 1000, height: 900 })
+      toolbar.getBoundingClientRect = () => ({ height: 40, bottom: 100 })
+      column.getBoundingClientRect = () => ({ left: 20, width: 800 })
+      prompt.getBoundingClientRect = () => ({ height: 60, top: 700 })
+      fireEvent(window, new Event('resize'))
+      act(() => frame())
+      expect(container.querySelector('.ground-desk')).toHaveAttribute('data-measured', 'true')
+      expect(container.querySelector('.ground-desk')).toHaveStyle({ top: '114px', left: '34px', width: '772px', height: '572px' })
+      expect(heading).toHaveFocus()
+      expect(focus).toHaveBeenCalledTimes(1)
+
+      const other = screen.getByRole('button', { name: 'Other focus' })
+      other.focus()
+      rerender(view(1, catalog))
+      prompt.getBoundingClientRect = () => ({ height: 60, top: 650 })
+      fireEvent(window, new Event('resize'))
+      act(() => frame())
+      expect(other).toHaveFocus()
+      expect(focus).toHaveBeenCalledTimes(1)
+
+      rerender(view(2, catalog))
+      expect(heading).toHaveFocus()
+      expect(focus).toHaveBeenCalledTimes(2)
+    } finally {
+      animationFrame.mockRestore()
+    }
+  })
+
+  it('keeps the contained desk unmeasured without a measurable toolbar', () => {
+    const { container } = render(<SurfaceGrounds surface="cad" boardVisible />)
+    const board = container.querySelector('[data-ground="browser"]')
+    expect(board).toHaveAttribute('data-board-layout', 'contained')
+    expect(board.querySelector('.ground-desk')).toHaveAttribute('data-measured', 'false')
+  })
+
+  it.each(['cad', 'solar'])('opens the same board in %s with its own heading and return action', (surface) => {
+    const onReturnToDrawing = vi.fn()
+    const view = (boardVisible) => <SurfaceGrounds surface={surface} boardVisible={boardVisible} onReturnToDrawing={onReturnToDrawing} />
+    const { container, rerender } = render(view(false))
+    const board = container.querySelector('[data-ground="browser"]')
+    expect(board).toHaveAttribute('hidden')
+    rerender(view(true))
+    expect(container.querySelector('[data-ground="browser"]')).toBe(board)
+    expect(board).not.toHaveAttribute('hidden')
+    expect(board).toHaveAttribute('data-board-layout', 'contained')
+    const heading = within(board).getByRole('heading', { level: 1, name: 'Project board' })
+    expect(heading).toHaveAttribute('tabindex', '-1')
+    expect(within(board).getAllByRole('heading', { level: 1 })).toHaveLength(1)
+    fireEvent.click(within(board).getByRole('button', { name: 'Return to drawing' }))
+    expect(onReturnToDrawing).toHaveBeenCalledTimes(1)
+    rerender(view(false))
+    expect(container.querySelector('[data-ground="browser"]')).toBe(board)
+    expect(board).toHaveAttribute('hidden')
+    expect(board).not.toHaveAttribute('data-board-layout')
+  })
+
   it('renders the honest empties with no project, no drawing, and no catalog yet', () => {
     render(<ProjectBoardGround active />)
     const board = screen.getByRole('region', { name: 'Project workspace' })

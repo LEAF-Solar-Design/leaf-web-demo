@@ -67,6 +67,31 @@ const setupStream = async (props = {}) => {
 }
 
 describe('assistant write approvals honour the one-head rule', () => {
+  it.each([false, true])('closes Start before sending a write approval (resume: %s)', async (resume) => {
+    APPROVALS = [{ ...WRITE_APPROVAL, ...(resume ? { resume_required: true, approved: true } : {}) }]
+    const onBeforeWriteApproval = vi.fn()
+    await setup({ onBeforeWriteApproval })
+    fireEvent.click(screen.getByRole('button', { name: resume ? 'Resume approved request' : 'Approve' }))
+    await waitFor(() => expect(resolveApproval).toHaveBeenCalledTimes(1))
+    expect(onBeforeWriteApproval).toHaveBeenCalledTimes(1)
+    expect(onBeforeWriteApproval.mock.invocationCallOrder[0]).toBeLessThan(resolveApproval.mock.invocationCallOrder[0])
+  })
+
+  it.each([
+    ['denial', {}, 'Deny', true],
+    ['read', { engineDirty: true }, 'Approve', true],
+    ['dirty write', { engineDirty: true }, 'Unsaved browser edits', false],
+    ['locked write', { writeLocked: true }, 'Editing locked', false],
+  ])('does not close Start for %s', async (kind, props, label, sends) => {
+    APPROVALS = [{ ...WRITE_APPROVAL, capability: kind === 'read' ? 'drawing.read' : 'drawing.write' }]
+    const onBeforeWriteApproval = vi.fn()
+    await setup({ ...props, onBeforeWriteApproval })
+    fireEvent.click(screen.getByRole('button', { name: label }))
+    if (sends) await waitFor(() => expect(resolveApproval).toHaveBeenCalledTimes(1))
+    else expect(resolveApproval).not.toHaveBeenCalled()
+    expect(onBeforeWriteApproval).not.toHaveBeenCalled()
+  })
+
   it('holds a write with the unsaved-edits sentence and leaves Deny enabled', async () => {
     APPROVALS = [WRITE_APPROVAL]
     await setup({ engineDirty: true })

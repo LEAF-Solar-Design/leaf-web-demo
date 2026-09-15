@@ -117,7 +117,7 @@ export function useCursorReadout(ground, viewerRef, refs) {
 // The status bar's left end (W4e slice I): the reference's Model tab, the
 // drawing's name tab, and +. Model is the only space this viewer has, so the
 // tab is a readout; the name tab is the same drawing the document band
-// shows; + opens the project board (a real surface switch).
+// shows; + opens the project board inside the current workspace profile.
 export function StatusTabs({ name = '', onStart = null }) {
   return (
     <span className="cockpit-status-tabs" data-testid="cockpit-status-tabs">

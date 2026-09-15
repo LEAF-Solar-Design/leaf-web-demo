@@ -26,6 +26,31 @@ const API_BASE = process.env.LEAF_E2E_API_BASE || 'http://127.0.0.1:8230'
 
 const STUDIO = '.studio-shell[data-scene="app"][data-mode="console"]'
 
+async function expectStudioBoardDetails(page, board) {
+  // The proof stack runs live; the demo caveat is pinned by the unit rows.
+  await expect(page.locator('.start-board-project-caveat')).toHaveCount(0)
+  for (const effect of ['Does not change the drawing', 'Changes the drawing']) {
+    const row = board.locator('.ground-catalog-tool').filter({ has: page.getByText(effect, { exact: true }) }).first()
+    await expect(row).toBeAttached()
+    await row.scrollIntoViewIfNeeded()
+    const name = row.locator('strong')
+    await expect(name).not.toBeEmpty()
+    for (const text of [name, row.getByText(effect, { exact: true })]) {
+      await expect(text).toBeVisible()
+      await expect(text).toBeInViewport({ ratio: 1 })
+      expect(await text.evaluate((node) => node.clientWidth > 0 && node.scrollWidth <= node.clientWidth)).toBe(true)
+    }
+  }
+  const planHead = page.getByTestId('properties-dock').locator('.dock-section-head', { hasText: 'Plan' })
+  const openPlan = await planHead.count() && await planHead.getAttribute('aria-expanded') === 'false'
+  if (openPlan) await planHead.click()
+  const plan = page.getByRole('region', { name: 'Entitlements', exact: true })
+  await expect(plan.locator('.ent-head')).toContainText(/Plan permissions checked|Plan details unavailable/)
+  await expect(plan).not.toContainText('full access')
+  await expect(plan).not.toContainText(/drawing\.read|drawing\.write|build lane|converse lane/)
+  if (openPlan) await planHead.click()
+}
+
 // One canvas, and it lives where the mode says: the studio ground when the
 // rail is on, the console's inline wrap when it is off.
 async function expectOneCanvasIn(page, containerSelector) {
@@ -59,6 +84,80 @@ async function interact(page) {
 }
 
 test.describe('route matrix, rail ON', () => {
+  for (const surface of ['cad', 'solar']) {
+    test(`Start preserves the ${surface} profile, document, prompt and mounted nodes`, async ({ page, request }) => {
+      test.setTimeout(120_000)
+      await requireLocalReady(request, test, API_BASE)
+      await setRail(page, '1')
+      await page.goto(`/app?surface=${surface}`)
+      await expectOneCanvasIn(page, '.studio-ground')
+      await expect(page.locator('[data-tool="draw:createLine"]')).toBeEnabled({ timeout: 30_000 })
+      const viewer = page.locator('.studio-ground-viewer')
+      const continuity = page.getByTestId('continuity-rail')
+      const board = page.locator('[data-ground="browser"]')
+      const prompt = page.getByLabel('Command bar', { exact: true })
+      const selected = page.locator('[aria-label="Workspace profile"] [aria-selected="true"]')
+      const profile = await selected.getAttribute('data-surface')
+      const url = page.url()
+      const documentName = await page.locator('.viewer-title').textContent()
+      const documentId = await page.locator('.workspace-card').getAttribute('data-engine-document')
+      expect(documentId).toBeTruthy()
+      const viewerNode = await viewer.elementHandle()
+      const railNode = await continuity.elementHandle()
+      const boardNode = await board.elementHandle()
+      const opener = surface === 'cad' ? page.locator('.doc-tab-start') : page.getByRole('button', { name: 'Open the project board', exact: true })
+      await opener.click()
+      await expectStudioBoardDetails(page, board)
+      await page.getByRole('button', { name: 'Return to drawing', exact: true }).click()
+      await prompt.fill('Keep this project draft')
+      await opener.click()
+      const heading = page.getByRole('heading', { level: 1, name: 'Project board', exact: true })
+      await expect(heading).toBeFocused()
+      await expect(page.locator('h1:visible')).toHaveCount(1)
+      await expect(selected).toHaveAttribute('data-surface', profile)
+      expect(page.url()).toBe(url)
+      await expect(page.getByText('Run uses an existing tool. Build creates a new tool. Review the proposed action before it runs.', { exact: false })).toBeInViewport()
+      const back = page.getByRole('button', { name: 'Return to drawing', exact: true })
+      await expect(back).toBeInViewport()
+      await expect(viewer).toBeAttached()
+      await expect(viewer).toBeHidden()
+      await back.click()
+      await expect(viewer).toBeVisible()
+      await expect(opener).toBeFocused()
+      await expect(prompt).toHaveValue('Keep this project draft')
+      expect(await viewer.evaluate((node, previous) => node === previous, viewerNode)).toBe(true)
+      expect(await continuity.evaluate((node, previous) => node === previous, railNode)).toBe(true)
+      expect(await board.evaluate((node, previous) => node === previous, boardNode)).toBe(true)
+      expect(await page.locator('.viewer-title').textContent()).toBe(documentName)
+      await expect(page.locator('.workspace-card')).toHaveAttribute('data-engine-document', documentId)
+      expect(page.url()).toBe(url)
+      await opener.click()
+      await expect(heading).toBeFocused()
+      await page.keyboard.press('Escape')
+      await expect(viewer).toBeVisible()
+      await expect(board).toBeHidden()
+      await expect(opener).toBeFocused()
+      await opener.click()
+      const line = page.locator('[data-tool="draw:createLine"]')
+      await expect(line).toBeEnabled({ timeout: 30_000 })
+      await line.evaluate((node) => node.addEventListener('click', () => {
+        node.dataset.returnedBeforeAction = String(document.querySelector('[data-ground="browser"]').hidden
+          && !document.querySelector('[data-testid="cockpit-prompt"]'))
+      }, { once: true }))
+      await line.click()
+      await expect(line).toHaveAttribute('data-returned-before-action', 'true')
+      await expect(board).toBeHidden()
+      await expect(viewer).toBeVisible()
+      await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', 'createLine')
+      await page.getByRole('button', { name: 'Cancel', exact: true }).click()
+      await opener.click()
+      await page.reload()
+      await expect(viewer).toBeVisible()
+      await expect(board).toBeHidden()
+      expect(page.url()).toBe(url)
+    })
+  }
+
   test('/app boots studio mode console: one canvas in the ground, one controller, one command bar', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
@@ -159,6 +258,7 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.locator('.studio-ground .viewer-canvas canvas')).toHaveCount(1)
     await expect(board.locator('[data-tile="drawing"]')).toContainText(/polylines/)
     await expect(board.locator('[data-tile="catalog"]')).toContainText(/famil/)
+    await expectStudioBoardDetails(page, board)
 
     await page.getByRole('tab', { name: 'iOS' }).click()
     await expect(device).toBeVisible()
@@ -240,8 +340,24 @@ test.describe('route matrix, rail ON', () => {
     await expect(status.locator('.cockpit-scale b')).toContainText(/1px = /)
     // Browser keeps its page furniture (the frame is the page there).
     await page.getByRole('tab', { name: 'Browser' }).click()
+    await expect(page.getByRole('tab', { name: 'Browser' })).toBeFocused()
     await expect(page.locator('.app[data-surface="browser"]')).toHaveCount(1)
-    await expect(page.locator('.home-q')).toBeVisible()
+    await expect(page.locator('h1:visible')).toHaveCount(1)
+    await expect(page.getByRole('heading', { level: 1, name: 'Project board', exact: true })).toBeVisible()
+    await expect(page.getByRole('heading', { level: 1, name: 'Project board', exact: true })).not.toBeFocused()
+    const profileTabs = page.getByRole('tablist', { name: 'Workspace profile' }).getByRole('tab')
+    const profileNames = await profileTabs.evaluateAll((tabs) => tabs.map((tab) => tab.getAttribute('aria-label')))
+    const nextProfileName = profileNames[(profileNames.indexOf('Browser') + 1) % profileNames.length]
+    const nextProfileTab = page.getByRole('tablist', { name: 'Workspace profile' }).getByRole('tab', { name: nextProfileName, exact: true })
+    await page.getByRole('tab', { name: 'Browser' }).press('ArrowRight')
+    await expect(nextProfileTab).toBeFocused()
+    await expect(nextProfileTab).toHaveAttribute('aria-selected', 'true')
+    await nextProfileTab.press('ArrowLeft')
+    await expect(page.getByRole('tab', { name: 'Browser' })).toBeFocused()
+    await expect(page.getByRole('tab', { name: 'Browser' })).toHaveAttribute('aria-selected', 'true')
+    await expect(page.locator('.app[data-surface="browser"]')).toHaveCount(1)
+    await expect(page.getByRole('heading', { level: 1, name: 'Project board', exact: true })).toBeVisible()
+    await expect(page.getByRole('heading', { level: 1, name: 'Project board', exact: true })).not.toBeFocused()
     await expect(page.getByTestId('cockpit-view')).toHaveCount(0)
     await expect(page.getByTestId('cockpit-status')).toHaveCount(0)
   })

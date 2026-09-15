@@ -20,6 +20,110 @@ import esbuild from 'esbuild'
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
 const appNoComments = decomment(appSource)
 const stripped = esbuild.transformSync(appSource, { loader: 'jsx' }).code
+describe('Start is a view inside the current workspace profile', () => {
+  it('wires all three Start controls to one memory-only handler', () => {
+    assert.match(appSource, new RegExp('className="doc-tab-start"\\s+onClick=\\{onOpenStart\\}'))
+    assert.match(appSource, new RegExp('className="doc-tab-close"[\\s\\S]*?onClick=\\{onOpenStart\\}'))
+    assert.match(appSource, new RegExp('<StatusTabs[^>]+onStart=\\{onOpenStart\\}'))
+    assert.doesNotMatch(appNoComments, /onSelectSurface\('browser'\)/)
+    const start = appNoComments.indexOf('const onOpenStart =')
+    const end = appNoComments.indexOf('const returnToDrawing =', start)
+    const handler = appNoComments.slice(start, end)
+    assert.match(handler, /if\s*\(startOpenRef\.current\)\s*return\s+startOpenerRef\.current\s*=/)
+    assert.match(handler, /setStartOpen\(true\)/)
+    assert.doesNotMatch(handler, /onSelectSurface|setActiveSurface|history\.|dispatchEvent|setOpenProject/)
+    assert.match(appNoComments, /\[startOpen, setStartOpen\] = useState\(false\)/)
+  })
+
+  it('requests heading focus from the board only when Start opens', () => {
+    assert.match(appNoComments, /\[startFocusRequest, setStartFocusRequest\] = useState\(0\)/)
+    const start = appNoComments.indexOf('const onOpenStart =')
+    const end = appNoComments.indexOf('const returnToDrawing =', start)
+    assert.match(appNoComments.slice(start, end), /setStartFocusRequest\(\(request\) => request \+ 1\)/)
+    assert.equal((appNoComments.match(/setStartFocusRequest\(/g) || []).length, 1)
+    assert.match(appNoComments, /<SurfaceGrounds\s[\s\S]*?startFocusRequest=\{startFocusRequest\}/)
+    assert.doesNotMatch(appNoComments, /boardHeadingRef\.current\?\.focus\(\)/)
+  })
+
+  it('returns to the drawing at engine, catalog and version sinks', () => {
+    assert.match(appNoComments, new RegExp('<EngineSessionProvider[^>]+onBeforeEdit=\\{closeStartForChange\\}'))
+    const runStart = appNoComments.indexOf('const onRun = useCallback')
+    const runEnd = appNoComments.indexOf('const onConfirmCatalogRun =', runStart)
+    assert.notEqual(runStart, -1)
+    assert.notEqual(runEnd, -1)
+    assert.match(appNoComments.slice(runStart, runEnd), /if\s*\(writeLocked && isWrite\)\s*return null\s+closeStartForChange\(\)/)
+    for (const [name, target] of [
+      ['onPreviewVersionTracked', 'onPreviewVersion'],
+      ['onBackToHeadTracked', 'onBackToHead'],
+      ['onRestoredTracked', 'onRestoreCommitted'],
+    ]) {
+      const start = appNoComments.indexOf(`const ${name} = useCallback`)
+      const end = appNoComments.indexOf('])', start)
+      assert.notEqual(start, -1)
+      assert.notEqual(end, -1)
+      const callback = appNoComments.slice(start, end + 2)
+      assert.match(callback, new RegExp('closeStartForChange\\(\\)[\\s\\S]*?return ' + target + '\\(\\.\\.\\.args\\)'))
+      assert.match(callback, new RegExp('\\[' + target + ', closeStartForChange\\]'))
+    }
+    for (const [prop, callback] of [
+      ['onPreview', 'onPreviewVersionTracked'],
+      ['onBackToHead', 'onBackToHeadTracked'],
+      ['onRestored', 'onRestoredTracked'],
+    ]) {
+      assert.match(appNoComments, new RegExp('<VersionHistory\\s[^>]*' + prop + '=\\{' + callback + '\\}'))
+    }
+  })
+
+  it('closes Start for changes without a synchronous flush or focus move', () => {
+    const start = appNoComments.indexOf('const closeStartForChange = useCallback')
+    const end = appNoComments.indexOf('const onReturnToDrawing =', start)
+    assert.notEqual(start, -1)
+    assert.notEqual(end, -1)
+    const close = appNoComments.slice(start, end)
+    assert.match(close, /if\s*\(!startOpenRef\.current\)\s*return/)
+    assert.match(close, /startOpenRef\.current\s*=\s*false/)
+    assert.match(close, /setStartOpen\(false\)/)
+    assert.doesNotMatch(close, /flushSync|focus/)
+    for (const [component, prop] of [
+      ['EngineSessionProvider', 'onBeforeEdit'],
+      ['ConversePanel', 'onBeforeWriteApproval'],
+      ['VersionHistory', 'onBeforeRestore'],
+    ]) {
+      const mountStart = appNoComments.indexOf('<' + component)
+      assert.notEqual(mountStart, -1)
+      const mountEnd = appNoComments.indexOf('/>', mountStart)
+      assert.notEqual(mountEnd, -1)
+      assert.ok(appNoComments.slice(mountStart, mountEnd).includes(prop + '={closeStartForChange}'))
+    }
+  })
+
+  it('closes Start before either viewer recovery request', () => {
+    assert.match(appNoComments, /retryRefresh:\s*onRetryViewerRefreshRaw/)
+    assert.match(appNoComments, /retryUnreadableHead:\s*retryUnreadableHeadRaw/)
+    for (const name of ['onRetryViewerRefresh', 'retryUnreadableHead']) {
+      const start = appNoComments.indexOf('const ' + name + ' = useCallback')
+      const end = appNoComments.indexOf('])', start)
+      assert.notEqual(start, -1)
+      assert.notEqual(end, -1)
+      const callback = appNoComments.slice(start, end + 2)
+      assert.match(callback, new RegExp('closeStartForChange\\(\\)\\s+return '
+        + name + 'Raw\\(\\.\\.\\.args\\)'))
+      assert.match(callback, new RegExp('\\[' + name + 'Raw, closeStartForChange\\]'))
+    }
+  })
+  it('shows the Run and Build gloss beside the shared prompt for every visible board', () => {
+    const dock = appNoComments.indexOf('<div className="bar-dock">')
+    assert.notEqual(dock, -1)
+    const gloss = appNoComments.slice(dock, dock + 280)
+    assert.match(gloss, /boardVisible &&/)
+    assert.match(gloss, /START_BOARD_COPY\.gloss/)
+    assert.match(gloss, /mock &&/)
+    assert.doesNotMatch(gloss, /openProjectId/)
+    assert.match(appNoComments, new RegExp('const shell = \\{\\s*startOpen,'))
+    assert.match(appNoComments, /onCloseStart: onReturnToDrawing/)
+    assert.match(appNoComments, new RegExp('boardVisible=\\{boardVisible\\}'))
+  })
+})
 const promptBoxSessionBinding = /React\.createElement\(\s*PromptBox,\s*\{[^}]*\bsessionId:\s*agentSessionId\b/
 const conversePanelSessionBinding = /React\.createElement\(\s*ConversePanel,\s*\{[^}]*\bsessionId:\s*agentSessionId\b/
 
@@ -537,5 +641,15 @@ describe('App.jsx wiring', () => {
     const mutated = appSource.replace(binding, '$1')
     assert.notEqual(mutated, appSource, 'the falsification mutation must remove the ConversePanel attribute')
     assert.doesNotMatch(mutated, binding)
+  })
+
+  it('opts studio frame and grounds into customer copy with explicit mock state', () => {
+    for (const component of ['SurfaceFrame', 'SurfaceGrounds']) {
+      const mount = new RegExp('<' + component + '\\s[\\s\\S]*?/>|<' + component + '\\s[\\s\\S]*?>')
+      const source = appNoComments.match(mount)?.[0]
+      assert.ok(source, component + ' mount exists')
+      assert.match(source, new RegExp('studioPresentation=\\{Boolean\\(studioGround\\)\\}'))
+      assert.match(source, new RegExp('mock=\\{mock\\}'))
+    }
   })
 })

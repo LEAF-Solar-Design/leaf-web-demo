@@ -70,6 +70,7 @@ function fmtAbs(iso) {
 export default function VersionHistory({
   data, error, loading, previewingVersion, onPreview, onBackToHead, onClose, onRetry,
   retryKey, exiting, mock, capability, onRestored, headWarning, mutationBlocked = false,
+  onBeforeRestore = null,
 }) {
   // Self-contained restore state (see the integration note above for why).
   // The CONFIRM/PENDING/ERROR machine lives in VersionList; what stays here is
@@ -104,6 +105,7 @@ export default function VersionHistory({
   // exactly as it did before.
   async function doRestore(v) {
     if (drawingId == null || restoreBlocked) return
+    onBeforeRestore?.()
     const result = await restoreDrawingVersion(useMock, drawingId, v, capability)
     // The restore is already committed. Record its new head before any
     // best-effort history refresh, which can fail or remain pending. This

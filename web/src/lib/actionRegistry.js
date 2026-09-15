@@ -282,6 +282,7 @@ export const INTERACTIVE_TARGET_SELECTOR = 'button, a, summary, [role="button"],
 export const ESCAPE_RUNGS = Object.freeze([
   Object.freeze({ id: 'drawer', open: (ctx) => !!ctx.drawer, run: (ctx) => ctx.onCloseDrawer?.() }),
   Object.freeze({ id: 'history', open: (ctx) => !!ctx.historyOpen, run: (ctx) => ctx.onCloseHistory?.() }),
+  Object.freeze({ id: 'start', open: (ctx) => !!ctx.startOpen, run: (ctx) => ctx.onCloseStart?.() }),
   Object.freeze({ id: 'route', open: (ctx) => !!ctx.route, run: (ctx) => ctx.onDismissRoute?.() }),
   Object.freeze({ id: 'errors', open: (ctx) => !!ctx.routeErr || !!ctx.runErr, run: (ctx) => ctx.onClearErrors?.() }),
   // Esc-on-running is the ONE interrupt gesture (the rail keeps the job;
@@ -341,8 +342,8 @@ function isInteractiveTarget(target) {
  *   instant        whether the change lands frame-of-keypress (markInstant).
  *
  * Order and skip rules are the ladder's own, unchanged: Cmd/Ctrl+K wins even
- * inside a field; Esc pops one rung when one is open (never preventDefaulted,
- * so a focused control still sees the key) and returns null when nothing is
+ * inside a field; Esc pops one rung when one is open (Start consumes it,
+ * while earlier owners keep their existing behavior) and returns null when nothing is
  * open, so the ladder leaves the key alone; R fires only outside a text field,
  * only unmodified, and only when a retry rung is live, otherwise the key FALLS
  * THROUGH to the bar; Shift+? (slice 10b) opens the shortcut sheet, same
@@ -351,7 +352,7 @@ function isInteractiveTarget(target) {
  * overlay (drawer, history) owns the typing.
  */
 export function ladderDecision(event, ctx = {}) {
-  if (!event || typeof event.key !== 'string') return null
+  if (!event || event.defaultPrevented || typeof event.key !== 'string') return null
   const tag = String(event.target?.tagName || '').toLowerCase()
   const typing = isTypingTag(tag)
 
@@ -364,7 +365,7 @@ export function ladderDecision(event, ctx = {}) {
     // No open rung: nothing to close, so the ladder leaves the key alone
     // (null, no preventDefault). Esc is not printable, so it never reaches the
     // type-to-fall-through route below either.
-    return rung ? { id: 'bar:escape', rung, route: 'kbd', preventDefault: false, instant: true } : null
+    return rung ? { id: 'bar:escape', rung, route: 'kbd', preventDefault: rung === 'start', instant: true } : null
   }
 
   if (!typing && (event.key === 'r' || event.key === 'R')
