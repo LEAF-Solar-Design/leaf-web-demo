@@ -4,8 +4,8 @@
  * version, or ship-lane progress. Exactly one ground is visible per surface;
  * the others stay mounted but hidden.
  */
-import { afterEach, describe, expect, it } from 'vitest'
-import { cleanup, render, screen, within } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 
 import SurfaceGrounds, { DeviceGround, ProjectBoardGround, groundShowsDrawing } from './SurfaceGrounds.jsx'
@@ -31,6 +31,34 @@ describe('groundShowsDrawing', () => {
 })
 
 describe('ProjectBoardGround', () => {
+  it('keeps the contained desk unmeasured without a measurable toolbar', () => {
+    const { container } = render(<SurfaceGrounds surface="cad" boardVisible />)
+    const board = container.querySelector('[data-ground="browser"]')
+    expect(board).toHaveAttribute('data-board-layout', 'contained')
+    expect(board.querySelector('.ground-desk')).toHaveAttribute('data-measured', 'false')
+  })
+
+  it.each(['cad', 'solar'])('opens the same board in %s with its own heading and return action', (surface) => {
+    const onReturnToDrawing = vi.fn()
+    const view = (boardVisible) => <SurfaceGrounds surface={surface} boardVisible={boardVisible} onReturnToDrawing={onReturnToDrawing} />
+    const { container, rerender } = render(view(false))
+    const board = container.querySelector('[data-ground="browser"]')
+    expect(board).toHaveAttribute('hidden')
+    rerender(view(true))
+    expect(container.querySelector('[data-ground="browser"]')).toBe(board)
+    expect(board).not.toHaveAttribute('hidden')
+    expect(board).toHaveAttribute('data-board-layout', 'contained')
+    const heading = within(board).getByRole('heading', { level: 1, name: 'Project board' })
+    expect(heading).toHaveAttribute('tabindex', '-1')
+    expect(within(board).getAllByRole('heading', { level: 1 })).toHaveLength(1)
+    fireEvent.click(within(board).getByRole('button', { name: 'Return to drawing' }))
+    expect(onReturnToDrawing).toHaveBeenCalledTimes(1)
+    rerender(view(false))
+    expect(container.querySelector('[data-ground="browser"]')).toBe(board)
+    expect(board).toHaveAttribute('hidden')
+    expect(board).not.toHaveAttribute('data-board-layout')
+  })
+
   it('renders the honest empties with no project, no drawing, and no catalog yet', () => {
     render(<ProjectBoardGround active />)
     const board = screen.getByRole('region', { name: 'Project workspace' })

@@ -66,6 +66,20 @@ function frame(surface, catalog, catalogError = null) {
 }
 
 describe('F-7: surface frames render the live tenant catalog', () => {
+  it('presents one Project board heading and owns the project slot once when opted in', () => {
+    const headingRef = { current: null }
+    render(<ProductSurfaceFrame activeSurface="browser" states={states} catalog={catalogA}
+      boardPresentation headingRef={headingRef} projectSlot={<span data-testid="caller-project-slot">Project controls</span>}
+      workspaceProject={deriveWorkspaceProjectState({ openProjectId: 'p1', projectName: 'North Yard', orgId: 'o1' })} />)
+    const heading = screen.getByRole('heading', { level: 1, name: 'Project board' })
+    expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1)
+    expect(headingRef.current).toBe(heading)
+    expect(heading).toHaveAttribute('tabindex', '-1')
+    expect(screen.getAllByTestId('caller-project-slot')).toHaveLength(1)
+    expect(screen.getAllByTestId('surface-project-state')).toHaveLength(1)
+    expect(screen.getByTestId('surface-project-state')).toHaveTextContent('North Yard')
+  })
+
   it.each(['browser', 'solar', 'ios'])('%s content changes when the tenant catalog changes', (surface) => {
     const { rerender } = render(frame(surface, catalogA))
     const live = screen.getByTestId('surface-capabilities-live')

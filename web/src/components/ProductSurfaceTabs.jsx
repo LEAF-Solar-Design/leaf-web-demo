@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { PRODUCT_SURFACES, SHARED_WORKSPACE_CAPABILITIES, productSurface, surfaceContract } from '../site/productSurfaces.js'
 import { EMPTY_WORKSPACE_PROJECT, WORKSPACE_PROJECT_COPY } from '../site/workspaceProjectState.js'
 import { useContinuityHost } from '../site/continuityStore.js'
+import { START_BOARD_COPY } from '../site/startBoardCopy.js'
 import { moveRovingTab } from '../lib/roving.js'
 import {
   mergeSurfaceContract, peekSurfaceConfigSource, touchedSurfaceConfigSlots, useSurfaceConfigOverlay,
@@ -316,6 +317,7 @@ function surfaceNote(surfaceId, workspaceProject) {
 export function ProductSurfaceFrame({
   activeSurface, states, projectSlot, catalog, catalogError,
   workspaceProject = EMPTY_WORKSPACE_PROJECT, onCreateProject = null,
+  boardPresentation = false, headingRef = null,
 }) {
   const surface = productSurface(activeSurface)
   const status = states[surface.id]
@@ -344,7 +346,7 @@ export function ProductSurfaceFrame({
         <span>{surface.eyebrow}</span>
         <strong>{status.label}</strong>
       </div>
-      <h1>{surface.title}</h1>
+      <h1 ref={boardPresentation ? headingRef : undefined} tabIndex={boardPresentation ? -1 : undefined}>{boardPresentation ? START_BOARD_COPY.heading : surface.title}</h1>
       <p>{surface.description}</p>
       <div className="tc-product-project">
         {projectSlot}

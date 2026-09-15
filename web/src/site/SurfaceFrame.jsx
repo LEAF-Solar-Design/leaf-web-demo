@@ -184,6 +184,8 @@ export default function SurfaceFrame({
   onSelect = null,
   onCreateProject = null,
   projectSlot = null,
+  boardPresentation = false,
+  headingRef = null,
   session = null,
   posture = null,
   entitlement = null,
@@ -225,6 +227,8 @@ export default function SurfaceFrame({
     onSelect,
     onCreateProject,
     projectSlot,
+    boardPresentation,
+    headingRef,
     session,
     posture,
     entitlement,
@@ -295,6 +299,8 @@ function Frame() {
       workspaceProject={frame.workspaceProject}
       onCreateProject={frame.onCreateProject}
       projectSlot={frame.projectSlot}
+      boardPresentation={frame.boardPresentation}
+      headingRef={frame.headingRef}
     />
   )
 }

@@ -107,6 +107,19 @@ const PROJECT_SLOT = <div className="ios-slot-sentinel" data-testid="ios-project
 
 function noop() {}
 
+it('forwards the opt-in board presentation and heading ref through the frame slot', () => {
+  const headingRef = { current: null }
+  const { container } = render(
+    <SurfaceFrame scene="console" activeSurface="browser" states={STATES} workspaceProject={EMPTY_WORKSPACE_PROJECT} boardPresentation headingRef={headingRef}>
+      <SurfaceFrame.Frame />
+    </SurfaceFrame>,
+  )
+  expect(container.querySelectorAll('h1')).toHaveLength(1)
+  expect(container.querySelector('h1').textContent).toBe('Project board')
+  expect(headingRef.current).toBe(container.querySelector('h1'))
+  expect(headingRef.current.tabIndex).toBe(-1)
+})
+
 // Console posture. `studio` is App's useStudioGround() truthiness; the rest are
 // App.jsx:2257/2264/2284 postures. wide + collapsed is the shipped default.
 const POSTURE = Object.freeze({

@@ -20,6 +20,44 @@ import esbuild from 'esbuild'
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
 const appNoComments = decomment(appSource)
 const stripped = esbuild.transformSync(appSource, { loader: 'jsx' }).code
+describe('Start is a view inside the current workspace profile', () => {
+  it('wires all three Start controls to one memory-only handler', () => {
+    assert.match(appSource, new RegExp('className="doc-tab-start"\\s+onClick=\\{onOpenStart\\}'))
+    assert.match(appSource, new RegExp('className="doc-tab-close"[\\s\\S]*?onClick=\\{onOpenStart\\}'))
+    assert.match(appSource, new RegExp('<StatusTabs[^>]+onStart=\\{onOpenStart\\}'))
+    assert.doesNotMatch(appNoComments, /onSelectSurface\('browser'\)/)
+    const start = appNoComments.indexOf('const onOpenStart =')
+    const end = appNoComments.indexOf('const returnToDrawing =', start)
+    const handler = appNoComments.slice(start, end)
+    assert.match(handler, /setStartOpen\(true\)/)
+    assert.doesNotMatch(handler, /onSelectSurface|setActiveSurface|history\.|dispatchEvent|setOpenProject/)
+    assert.match(appNoComments, /\[startOpen, setStartOpen\] = useState\(false\)/)
+  })
+
+  it('focuses the heading only when Start opens, not when the Browser board becomes visible', () => {
+    assert.match(appNoComments, /\[startOpen, setStartOpen\] = useState\(false\)/)
+    assert.ok(appNoComments.replace(/\r\n/g, '\n').includes([
+      'useLayoutEffect(() => {',
+      '    if (startOpen) boardHeadingRef.current?.focus()',
+      '  }, [startOpen])',
+    ].join('\n')))
+    assert.doesNotMatch(appNoComments, /\[startOpen, boardVisible\]/)
+    assert.doesNotMatch(appNoComments, /if \(boardVisible\) boardHeadingRef\.current\?\.focus\(\)/)
+  })
+
+  it('shows the Run and Build gloss beside the shared prompt for every visible board', () => {
+    const dock = appNoComments.indexOf('<div className="bar-dock">')
+    assert.notEqual(dock, -1)
+    const gloss = appNoComments.slice(dock, dock + 280)
+    assert.match(gloss, /boardVisible &&/)
+    assert.match(gloss, /START_BOARD_COPY\.gloss/)
+    assert.match(gloss, /mock &&/)
+    assert.doesNotMatch(gloss, /openProjectId/)
+    assert.match(appNoComments, new RegExp('const shell = \\{\\s*startOpen,'))
+    assert.match(appNoComments, /onCloseStart: onReturnToDrawing/)
+    assert.match(appNoComments, new RegExp('boardVisible=\\{boardVisible\\}'))
+  })
+})
 const promptBoxSessionBinding = /React\.createElement\(\s*PromptBox,\s*\{[^}]*\bsessionId:\s*agentSessionId\b/
 const conversePanelSessionBinding = /React\.createElement\(\s*ConversePanel,\s*\{[^}]*\bsessionId:\s*agentSessionId\b/
 

@@ -1,9 +1,10 @@
 import './structural.css'
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, Suspense } from 'react'
-import { createPortal } from 'react-dom'
+import { createPortal, flushSync } from 'react-dom'
 import { track, setTourStep } from './telemetry.js'
 import { useStudioGround } from './site/studioGround.js'
 import SurfaceGrounds, { groundShowsDrawing } from './site/SurfaceGrounds.jsx'
+import { START_BOARD_COPY } from './site/startBoardCopy.js'
 import { CockpitStatus, FootRegion, StatusTabs, ViewCluster } from './site/DrawingCockpit.jsx'
 // Slice 4a: the ONE shell wrapper both scenes mount, and the console nav
 // rail it used to spell inline. Every shared chrome gate lives there now.
@@ -252,6 +253,26 @@ export default function App() {
   // consumer is the Viewer render site, which portals into it; null renders
   // the old shell byte-for-byte (the rollback contract, studioGround.js).
   const studioGround = useStudioGround()
+  const [startOpen, setStartOpen] = useState(false)
+  const startOpenRef = useRef(false)
+  const startOpenerRef = useRef(null)
+  const boardHeadingRef = useRef(null)
+  const onOpenStart = useCallback((event) => {
+    startOpenerRef.current = event?.currentTarget || document.activeElement
+    startOpenRef.current = true
+    setStartOpen(true)
+  }, [])
+  const returnToDrawing = useCallback((restoreFocus = false) => {
+    if (!startOpenRef.current) return
+    startOpenRef.current = false
+    flushSync(() => setStartOpen(false))
+    if (restoreFocus) {
+      const opener = startOpenerRef.current
+      if (opener?.isConnected && opener.getClientRects().length) opener.focus()
+      else barInputRef.current?.focus()
+    }
+  }, [])
+  const onReturnToDrawing = useCallback(() => returnToDrawing(true), [returnToDrawing])
   const [mock, setMock] = useState(config.mockDefault)
   const [loadErr, setLoadErr] = useState(null)
   const [intakeRetryKey, setIntakeRetryKey] = useState(0) // X3 Retry — bumping re-runs the intake load effect
@@ -681,12 +702,24 @@ export default function App() {
       const detail = command.reason
         ? { group: command.group, op: command.op, reason: command.reason }
         : { group: command.group, op: command.op }
+      returnToDrawing()
       window.dispatchEvent(new CustomEvent(COCKPIT_COMMAND_EVENT, { detail }))
       return true
     },
-  }), [sessionActions, showToast])
+  }), [sessionActions, showToast, returnToDrawing])
   const drawingCommandOnRef = useRef(false)
   const [armedPromptAsk, setArmedPromptAsk] = useState('')
+  useEffect(() => {
+    const beforeArmedAction = () => {
+      if (armedPromptAsk) returnToDrawing()
+    }
+    window.addEventListener('cockpit:point', beforeArmedAction, true)
+    window.addEventListener('cockpit:run', beforeArmedAction, true)
+    return () => {
+      window.removeEventListener('cockpit:point', beforeArmedAction, true)
+      window.removeEventListener('cockpit:run', beforeArmedAction, true)
+    }
+  }, [armedPromptAsk, returnToDrawing])
   useEffect(() => {
     const onArmed = (event) => setArmedPromptAsk(typeof event.detail?.ask === 'string' ? event.detail.ask : '')
     window.addEventListener('cockpit:armed', onArmed)
@@ -1345,9 +1378,10 @@ export default function App() {
   }, [drawingState, redoDrawingVersion, showToast, viewViewer])
 
   const onToggleHistoryTracked = useCallback(() => {
+    returnToDrawing()
     if (!historyOpen) track('drawing.version_navigated', { action: 'history' })
     onToggleHistory()
-  }, [historyOpen, onToggleHistory])
+  }, [historyOpen, onToggleHistory, returnToDrawing])
 
   const onPreviewVersionTracked = useCallback((...args) => {
     track('drawing.version_navigated', { action: 'preview' })
@@ -2253,6 +2287,7 @@ export default function App() {
     // that is not the ladder's allocates nothing here, as the pre-slice
     // if/else chain allocated nothing.
     const shell = {
+      startOpen,
       drawer,
       historyOpen,
       route,
@@ -2269,6 +2304,7 @@ export default function App() {
       focusBar: () => barInputRef.current?.focus(),
       onCloseDrawer: () => setDrawer(null),
       onCloseHistory: () => closeHistory(),
+      onCloseStart: onReturnToDrawing,
       onDismissRoute: () => dismissRoute(),
       onClearErrors: () => { clearRouteError(); clearRunErr() },
       onInterruptRun: () => {
@@ -2306,7 +2342,7 @@ export default function App() {
     const onKey = ladderListener(shell, ladderHandlers, markInstant)
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [drawer, historyOpen, route, routeErr, runErr, running, selectedHandle,
+  }, [startOpen, onReturnToDrawing, drawer, historyOpen, route, routeErr, runErr, running, selectedHandle,
       interruptRun, currentJob?.tool, currentJob?.job_id, result, mock, showToast, onDispatch, openProjectId, onCloseProject, rTarget,
       closeHistory, loadHistory, retryTools, loadCatalog, onRetryViewerRefresh, dismissRoute, clearRouteError])
 
@@ -2422,12 +2458,13 @@ export default function App() {
   const projectLayout = useProjectWorkspaceLayout({ mock, projectId: openProjectId, surface: activeSurface })
   revealProjectToolsRef.current = projectLayout.revealTools
   const onSelectSurface = useCallback((id) => {
+    returnToDrawing()
     setActiveSurface(id)
     try {
       const next = searchForProductSurface(window.location.search, id)
       window.history.replaceState(null, '', `${window.location.pathname}${next}${window.location.hash}`)
     } catch { /* URL sync is a convenience; state alone still switches the tab */ }
-  }, [])
+  }, [returnToDrawing])
   // W4c-V1: the nav rail's spine posture on drafting surfaces under the
   // studio. IN-MEMORY on purpose: the rollback contract forbids new storage
   // keys under the studio and stale ?params, so the posture resets per page
@@ -2495,6 +2532,10 @@ export default function App() {
   // instead of the bare contract; byte-identical to `surfaceContract(id)`
   // for a tenant with no overlay (useSurfaceContract's own contract).
   const surfaceSlots = useSurfaceContract(activeSurface, mock)
+  const boardVisible = !!studioGround && (startOpen || surfaceSlots.ground === 'board')
+  useLayoutEffect(() => {
+    if (startOpen) boardHeadingRef.current?.focus()
+  }, [startOpen])
   // Keeps its name: ~20 sites read `studioGround && drafting`, and the App
   // wiring pin (src/app-wiring.test.mjs) guards that exact shape against the
   // white screen it was written for. Was groundShowsDrawing(activeSurface).
@@ -2945,6 +2986,8 @@ export default function App() {
       catalog={catalog}
       catalogError={catalogErr}
       workspaceProject={workspaceProjectState}
+      boardPresentation={boardVisible}
+      headingRef={boardHeadingRef}
       onSelect={onSelectSurface}
       onCreateProject={onCreateProject}
       projectSlot={surfaceSlots.chrome.projectSlot === 'ios-surface'
@@ -3071,7 +3114,14 @@ export default function App() {
         onUnlink: mcpRegistry.unlink,
       }}
     >
-    <div className="app" ref={projectLayout.appRef} data-project-workspace={projectLayout.active ? 'results' : undefined} data-project-tools={projectLayout.toolsOpen ? 'open' : 'closed'} data-project-activity={projectLayout.activityOpen ? 'open' : 'closed'} data-surface={studioGround ? activeSurface : undefined} data-tour="shell">
+    <div className="app" ref={projectLayout.appRef} data-project-workspace={projectLayout.active ? 'results' : undefined} data-project-tools={projectLayout.toolsOpen ? 'open' : 'closed'} data-project-activity={projectLayout.activityOpen ? 'open' : 'closed'} data-surface={studioGround ? activeSurface : undefined} data-start-open={studioGround && startOpen ? 'true' : undefined} data-tour="shell"
+      onClickCapture={(event) => {
+        if (event.target instanceof Element && event.target.closest('.ribbon-tool:not(:disabled), .cockpit-quick button:not(:disabled), .cp-run:not(:disabled)')) returnToDrawing()
+      }}
+      onChangeCapture={(event) => {
+        if (event.target instanceof Element && event.target.closest('.drafting-ribbon, .cockpit-quick, #cockpit-import-pane input[type="file"]')) returnToDrawing()
+      }}
+    >
       <header className="top">
         <div className="mark"><span className="diamond" aria-hidden="true" /> Leaf — build CAD tools with AI</div>
         {/* W4e: on the studio's drafting surfaces the header IS the
@@ -3249,7 +3299,7 @@ export default function App() {
             }}
           />
         )}
-        {!mock && openProjectId ? <h1 className="home-q">{currentProjectName}</h1> : <>
+        {!boardVisible && (!mock && openProjectId ? <h1 className="home-q">{currentProjectName}</h1> : <>
         <div className="kicker">Home · one prompt, two lanes</div>
         <h1 className="home-q">What should Leaf do to <em>{projectName}</em>?</h1>
         <div className="hint">
@@ -3257,7 +3307,7 @@ export default function App() {
           <b>Build</b>. You confirm before anything runs — paid actions never auto-execute.
         </div>
 
-        </>}
+        </>)}
 
         <SurfaceFrame.Tabs />
         {!mock && openProjectId && (
@@ -3282,6 +3332,9 @@ export default function App() {
         {studioGround && createPortal(
           <SurfaceGrounds
             surface={activeSurface}
+            boardVisible={boardVisible}
+            onReturnToDrawing={onReturnToDrawing}
+            headingRef={boardHeadingRef}
             workspaceProject={workspaceProjectState}
             workspace={!mock && openProjectId ? workspace : null}
             drawing={shown ? { name: projectName, polylines: shown.polylines.length, layers: shown.layers.length } : null}
@@ -3355,7 +3408,7 @@ export default function App() {
               {ENV_CAD_EDIT && (
                 <EngineRibbonClusters
                   importOpen={importOpen}
-                  onToggleImport={() => setImportOpen((o) => !o)}
+                  onToggleImport={() => { returnToDrawing(); setImportOpen((o) => !o) }}
                   panels={ribbonTab === 'insert' ? ['file'] : ribbonTab === 'draw' ? ['draw', 'modify', 'annotation', 'block', 'clipboard', 'properties', 'groups'] : ribbonTab === 'view' ? ['script'] : []}
                 />
               )}
@@ -3451,7 +3504,7 @@ export default function App() {
                 below already names what it actually does, and none of them
                 claims role="tab" or aria-selected. */}
             {studioGround && drafting && (
-              <button type="button" className="doc-tab-start" onClick={() => onSelectSurface('browser')}>Start</button>
+              <button type="button" className="doc-tab-start" onClick={onOpenStart}>Start</button>
             )}
             <div className="viewer-title">
               {/* One loading voice per pane — the pulse-dot line in the viewer
@@ -3472,7 +3525,7 @@ export default function App() {
                 className="doc-tab-close"
                 aria-label="Close the drawing view and return to Start"
                 title="Close (back to Start)"
-                onClick={() => onSelectSurface('browser')}
+                onClick={onOpenStart}
               >
                 ×
               </button>
@@ -3485,7 +3538,7 @@ export default function App() {
                 title="Open a DXF"
                 aria-expanded={importOpen}
                 aria-controls="cockpit-import-pane"
-                onClick={() => setImportOpen((o) => !o)}
+                onClick={() => { returnToDrawing(); setImportOpen((o) => !o) }}
               >
                 +
               </button>
@@ -3669,7 +3722,7 @@ export default function App() {
               // on Browser/iOS it stays mounted (WebGL, lock, job state
               // survive) but hidden while that surface's own ground shows.
               return studioGround
-                ? createPortal(<div className="studio-ground-viewer" hidden={!groundShowsDrawing(activeSurface)}>{viewerEl}</div>, studioGround)
+                ? createPortal(<div className="studio-ground-viewer" hidden={boardVisible || !groundShowsDrawing(activeSurface)}>{viewerEl}</div>, studioGround)
                 : viewerEl
             })()}
             {/* W4c-V2: under the studio the Legend and the readout live in
@@ -3842,6 +3895,7 @@ export default function App() {
         </main>
 
         <div className="bar-dock">
+          {boardVisible && <p className="start-board-gloss">{START_BOARD_COPY.gloss}{mock && <> {START_BOARD_COPY.mockGloss}</>}</p>}
           {/* W4e slice H: the engine's command prompt ("LINE  Specify first
               point:") portals here, the line above the command input, on the
               studio's drafting surfaces (empty otherwise). */}
@@ -3975,7 +4029,7 @@ export default function App() {
             the reference's Model tab, the drawing's name, and + (the project
             board). Rail OFF and every other surface: nothing here. */}
         {studioGround && drafting && (
-          <StatusTabs name={shown ? `${projectName}.dwg` : ''} onStart={() => onSelectSurface('browser')} />
+          <StatusTabs name={shown ? `${projectName}.dwg` : ''} onStart={onOpenStart} />
         )}
         </FootRegion>
         <FootRegion on={footRegions} name="system">

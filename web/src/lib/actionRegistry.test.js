@@ -413,6 +413,30 @@ const SHELL_STATES = [
 ]
 
 describe('the key ladder, table-driven', () => {
+  it('returns from Start before touching a route, run, selection or project', () => {
+    const onCloseStart = vi.fn()
+    const onInterruptRun = vi.fn()
+    const onCloseProject = vi.fn()
+    const shell = { startOpen: true, running: true, openProjectId: 'p1' }
+    const event = { key: 'Escape', preventDefault: vi.fn() }
+    expect(ladderDecision(event, shell)).toEqual({ id: 'bar:escape', rung: 'start', route: 'kbd', preventDefault: true, instant: true })
+    ladderListener(shell, (state) => ({ ...state, onCloseStart, onInterruptRun, onCloseProject }))(event)
+    expect(onCloseStart).toHaveBeenCalledTimes(1)
+    expect(onInterruptRun).not.toHaveBeenCalled()
+    expect(onCloseProject).not.toHaveBeenCalled()
+    expect(ladderDecision(event, { ...shell, drawer: 'tools' }).rung).toBe('drawer')
+    expect(ladderDecision(event, { ...shell, historyOpen: true }).rung).toBe('history')
+  })
+
+  it.each(['focused picker', 'armed command', 'WorldSpace card fit'])('leaves an Escape consumed by %s with its owner', () => {
+    const event = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true })
+    event.preventDefault()
+    const handlers = vi.fn()
+    expect(ladderDecision(event, { startOpen: true })).toBeNull()
+    ladderListener({ startOpen: true }, handlers)(event)
+    expect(handlers).not.toHaveBeenCalled()
+  })
+
   it('agrees with the pre-slice if/else on every key x target x shell state', () => {
     let cases = 0
     for (const [name, make] of TARGETS) {
@@ -433,7 +457,7 @@ describe('the key ladder, table-driven', () => {
 
   it('pops exactly one Esc rung, topmost first, and runs only that handler', () => {
     expect(ESCAPE_RUNGS.map((r) => r.id))
-      .toEqual(['drawer', 'history', 'route', 'errors', 'running', 'selection', 'project'])
+      .toEqual(['drawer', 'history', 'start', 'route', 'errors', 'running', 'selection', 'project'])
     const seen = []
     const ctx = {
       drawer: 'tools', historyOpen: true, running: true, openProjectId: 'p1',

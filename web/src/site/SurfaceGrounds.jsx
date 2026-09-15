@@ -18,6 +18,7 @@
 //     did (`display: none`, not unmount).
 import { Children, useLayoutEffect, useState } from 'react'
 import WorldSpaceBoard from './WorldSpaceBoard.jsx'
+import { START_BOARD_COPY } from './startBoardCopy.js'
 import { formatElementId } from '../lib/elementIdentity.js'
 import { PRODUCT_SURFACES, SHARED_WORKSPACE_CAPABILITIES, surfaceGround } from './productSurfaces.js'
 import { EMPTY_WORKSPACE_PROJECT } from './workspaceProjectState.js'
@@ -60,7 +61,17 @@ export function measureGroundWindow(doc = document) {
   }
 }
 
-function useGroundWindow(active) {
+function measureContainedWindow() {
+  const toolbar = document.querySelector('.app .viewer-toolbar')?.getBoundingClientRect()
+  const column = document.querySelector('.app main.center-scroll')?.getBoundingClientRect()
+  const prompt = document.querySelector('.app .bar-dock')?.getBoundingClientRect()
+  if (!toolbar?.height || !column?.width || !prompt?.height) return null
+  const top = toolbar.bottom + WINDOW_GUTTER
+  return { top, left: column.left + WINDOW_GUTTER, width: column.width - WINDOW_GUTTER * 2,
+    height: Math.max(0, prompt.top - WINDOW_GUTTER - top) }
+}
+
+function useGroundWindow(active, contained = false) {
   const [rect, setRect] = useState(null)
   useLayoutEffect(() => {
     if (!active || typeof window === 'undefined') { setRect(null); return undefined }
@@ -68,7 +79,7 @@ function useGroundWindow(active) {
     const measure = () => {
       frame = 0
       setRect((prev) => {
-        const next = measureGroundWindow()
+        const next = contained ? measureContainedWindow() : measureGroundWindow()
         if (!next) return null
         if (prev && prev.top === next.top && prev.left === next.left
           && prev.width === next.width && prev.height === next.height) return prev
@@ -77,10 +88,12 @@ function useGroundWindow(active) {
     }
     const schedule = () => { if (!frame) frame = window.requestAnimationFrame(measure) }
     measure()
-    const panel = document.getElementById('product-surface-panel')
+    const panel = contained ? document.querySelector('.app .viewer-toolbar') : document.getElementById('product-surface-panel')
     const scroller = document.querySelector('main.center-scroll')
     const observer = (typeof ResizeObserver !== 'undefined' && panel) ? new ResizeObserver(schedule) : null
     observer?.observe(panel)
+    const prompt = contained ? document.querySelector('.app .bar-dock') : null
+    if (observer && prompt) observer.observe(prompt)
     if (observer && scroller) observer.observe(scroller)
     window.addEventListener('resize', schedule)
     scroller?.addEventListener('scroll', schedule, { passive: true })
@@ -90,7 +103,7 @@ function useGroundWindow(active) {
       window.removeEventListener('resize', schedule)
       scroller?.removeEventListener('scroll', schedule)
     }
-  }, [active])
+  }, [active, contained])
   return rect
 }
 
@@ -212,22 +225,33 @@ function BoardTiles({ workspace, drawing, catalog, renderTile }) {
 
 export function ProjectBoardGround({
   active = false, workspaceProject = null, workspace = null, drawing = null, catalog = null, mock = false,
+  contained = false, onReturnToDrawing = null, headingRef = null,
   worldSpace = import.meta.env.VITE_WORLD_SPACE_BOARD === '1', store,
 }) {
   const state = workspaceProject || EMPTY_WORKSPACE_PROJECT
-  const win = useGroundWindow(active)
-  // No header of its own: the frame's chrome above the window already
-  // carries the eyebrow, title, and the project line (with its action).
+  const win = useGroundWindow(active, contained)
+  // Browser uses the frame's chrome. Drafting Start owns its header inside
+  // the ground because a drawing profile has no product frame.
   return (
     <div
       className="studio-ground-board"
       data-ground="browser"
+      data-board-layout={contained ? 'contained' : undefined}
       data-project-state={state.kind}
       hidden={!active}
       role="region"
       aria-label="Project workspace"
     >
       <div className="ground-desk" style={windowStyle(win)} data-measured={win ? 'true' : 'false'}>
+        {contained && (
+          <header className="ground-board-header">
+            <div>
+              <h1 ref={headingRef} tabIndex={-1}>{START_BOARD_COPY.heading}</h1>
+              <p>{state.kind === 'project' ? state.label : drawing?.name || state.drawingName}</p>
+            </div>
+            <button type="button" onClick={onReturnToDrawing}>{START_BOARD_COPY.returnToDrawing}</button>
+          </header>
+        )}
         {worldSpace ? (
           <WorldSpaceBoard key={workspaceProject?.project_id || 'anonymous'} scopeId={workspaceProject?.project_id || 'anonymous'} viewport={win} store={store}>
             {(renderTile) => <BoardTiles workspace={workspace} drawing={drawing} catalog={catalog} renderTile={renderTile} />}
@@ -314,6 +338,7 @@ export function DeviceGround({
 // switch never remounts a ground any more than it remounts the drawing.
 export default function SurfaceGrounds({
   surface, workspaceProject, workspace, drawing, catalog, mock,
+  boardVisible, onReturnToDrawing, headingRef,
   iosEnabled, iosContract, revision,
 }) {
   const projectLabel = workspaceProject?.kind === 'project'
@@ -327,7 +352,10 @@ export default function SurfaceGrounds({
           surfaceGround falls closed to the CAD contract, whose ground is
           'drawing'. */}
       <ProjectBoardGround
-        active={surfaceGround(surface) === 'board'}
+        active={boardVisible ?? surfaceGround(surface) === 'board'}
+        contained={boardVisible === true && groundShowsDrawing(surface)}
+        onReturnToDrawing={onReturnToDrawing}
+        headingRef={headingRef}
         workspaceProject={workspaceProject}
         workspace={workspace}
         drawing={drawing}
@@ -335,7 +363,7 @@ export default function SurfaceGrounds({
         mock={mock}
       />
       <DeviceGround
-        active={surfaceGround(surface) === 'device-stage'}
+        active={!boardVisible && surfaceGround(surface) === 'device-stage'}
         enabled={iosEnabled}
         contract={iosContract}
         projectLabel={projectLabel}
