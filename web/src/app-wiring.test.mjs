@@ -20,6 +20,34 @@ import esbuild from 'esbuild'
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
 const appNoComments = decomment(appSource)
 const stripped = esbuild.transformSync(appSource, { loader: 'jsx' }).code
+describe('studio unobstructed drawing viewport', () => {
+  it('passes the measured safe rectangle only in the studio', () => {
+    assert.match(appNoComments, new RegExp('safeRect=\\{studioGround \\? drawingViewport : null\\}'))
+    assert.ok(appNoComments.includes('useDrawingViewport(studioGround && groundShowsDrawing(activeSurface) ? studioGround : null, STUDIO_DRAWING_OCCLUDERS)'))
+    assert.ok(appNoComments.includes('drawingViewportRef.current = drawingViewport'))
+  })
+  it('uses safe bounds for result visibility and Show result framing', () => {
+    const start = appNoComments.indexOf('const maxInvalidFrames =')
+    const show = appNoComments.indexOf('const showCreatedResult =', start)
+    const end = appNoComments.indexOf('const seatVersion =', show)
+    const visibility = appNoComments.slice(start, show)
+    const framing = appNoComments.slice(show, end)
+    assert.ok(visibility.includes('drawingViewportRef.current'))
+    assert.ok(visibility.includes('canvasRect.left + safe.left'))
+    assert.ok(visibility.includes('< 8'))
+    assert.ok(framing.includes('drawingViewportRef.current'))
+    assert.ok(framing.includes('viewer.frame('))
+    assert.ok(framing.includes('viewer.setView('))
+  })
+  it('names all nine occluders and excludes the view cube', () => {
+    const start = appNoComments.indexOf('const STUDIO_DRAWING_OCCLUDERS = Object.freeze(')
+    assert.ok(start >= 0)
+    const list = appNoComments.slice(start, appNoComments.indexOf('])', start))
+    for (const selector of ['header.top', '#drafting-ribbon', '.viewer-toolbar', '[data-testid="cockpit-view"]',
+      '.properties-dock', '.bar-dock', '[data-testid="cockpit-prompt"]', 'footer.foot-bar', '.rail-stack']) assert.ok(list.includes(selector), selector)
+    assert.ok(!list.includes('cockpit-cube'))
+  })
+})
 describe('Start is a view inside the current workspace profile', () => {
   it('wires all three Start controls to one memory-only handler', () => {
     assert.match(appSource, new RegExp('className="doc-tab-start"\\s+onClick=\\{onOpenStart\\}'))

@@ -2001,7 +2001,13 @@ test.describe('route matrix, rail ON', () => {
     await expect(showResult).toHaveCount(0)
     const visibleResult = await page.evaluate(() => {
       const mount = document.querySelector('.studio-ground .viewer-canvas')
-      const rect = mount.querySelector('canvas').getBoundingClientRect()
+      const canvasRect = mount.querySelector('canvas').getBoundingClientRect()
+      const safe = mount.getAttribute('data-safe-rect')?.split(',').map(Number)
+      const rect = safe ? {
+        left: canvasRect.left + safe[0], top: canvasRect.top + safe[1],
+        right: canvasRect.left + safe[0] + safe[2], bottom: canvasRect.top + safe[1] + safe[3],
+        width: safe[2], height: safe[3],
+      } : canvasRect
       const a = mount.__cadviewer.project(1000000, 0)
       const b = mount.__cadviewer.project(1000001, 0)
       return { inside: [a, b].every((p) => p.x >= rect.left && p.x <= rect.right && p.y >= rect.top && p.y <= rect.bottom), share: Math.max(Math.abs(b.x - a.x) / rect.width, Math.abs(b.y - a.y) / rect.height) }
