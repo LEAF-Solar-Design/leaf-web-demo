@@ -69,6 +69,19 @@ beforeEach(() => {
 afterEach(() => { cleanup(); context = null; vi.useRealTimers() })
 
 describe('W4g-7a the script runner', () => {
+  it('opens the hidden script input from a ribbon button and keeps both file types', () => {
+    mount()
+    const input = screen.getByLabelText('Script file')
+    const click = vi.spyOn(input, 'click').mockImplementation(() => {})
+    const choose = screen.getByRole('button', { name: 'Choose script' })
+    expect(choose.classList.contains('ribbon-tool')).toBe(true)
+    expect(input.hidden).toBe(true)
+    expect(input.accept).toBe('.scr,.txt')
+    fireEvent.click(choose)
+    expect(click).toHaveBeenCalledTimes(1)
+    click.mockRestore()
+  })
+
   it('runs named GROUP and UNGROUP without a scalar selection', async () => {
     mount()
     await openAndLoad([H, L2])

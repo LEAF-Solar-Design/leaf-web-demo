@@ -55,6 +55,20 @@ import {
 // --- 1: the registry holds up ---------------------------------------------
 
 describe('the registry', () => {
+  it('explains Polyline commands and disabled property controls in the reason vocabulary', () => {
+    expect(byId('draw:createPolyline').title({})).toContain('PLINE')
+    expect(byId('draw:createPolyline').title({})).toMatch(/\bPL\b/)
+    for (const op of ['matchprop', 'setColor', 'setLinetype', 'setLineweight']) {
+      for (const session of [null, { errorKind: 'crashed' }, { engineParsed: true, busy: true }, { engineParsed: true }, { engineParsed: true, selected: { editable: false, type: 'DIMENSION' } }]) {
+        const reason = byId(`modify:${op}`).when({ session })
+        expect(KNOWN_REASON_VALUES.has(reason)).toBe(true)
+        expect(reason).toContain('Match copies')
+        expect(reason).toContain('ByLayer inherits layer properties')
+      }
+    }
+    expect(byId('modify:matchprop').when({ session: { engineParsed: true } })).toContain('select a source object first')
+  })
+
   it('is frozen, and so is every record and every trigger table inside it', () => {
     expect(Object.isFrozen(ACTIONS)).toBe(true)
     for (const action of ACTIONS) {

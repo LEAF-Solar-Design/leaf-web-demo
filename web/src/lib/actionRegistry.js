@@ -114,6 +114,14 @@ export const MODIFY_REASONS = Object.freeze({
   readOnlyKind: 'read-only entity kind',
 })
 
+export const PROPERTY_REASONS = Object.freeze({
+  noDocument: 'Match copies properties to another object; ByLayer inherits layer properties: open a drawing in Leaf Automation first',
+  crashed: 'Match copies properties to another object; ByLayer inherits layer properties: the engine stopped, so open the drawing again',
+  busy: 'Match copies properties to another object; ByLayer inherits layer properties: wait for the current edit',
+  noSelection: 'Match copies the selected object\'s layer, colour, linetype and lineweight to another object; ByLayer inherits layer properties: select a source object first',
+  readOnlyKind: 'Match copies properties to another object; ByLayer inherits layer properties: select an object whose properties can be edited',
+})
+
 export const PLACED_KINDS = new Set(['INSERT', 'DIMENSION', 'MLEADER'])
 
 // W4g-5c: the clipboard's ladder. CUT and COPY answer to the Modify ladder
@@ -157,6 +165,7 @@ export const KNOWN_REASON_VALUES = Object.freeze(new Set([
   ...Object.values(REASONS),
   ...Object.values(DRAW_REASONS),
   ...Object.values(MODIFY_REASONS),
+  ...Object.values(PROPERTY_REASONS),
   ...Object.values(CLIPBOARD_REASONS),
   ...Object.values(LADDER_REASONS),
 ]))
@@ -204,6 +213,13 @@ export function propertyReason(session, reach = null) {
   if (!session.selected) return MODIFY_REASONS.noSelection
   if (session.selected.editable === false && session.selected.type !== 'INSERT') return MODIFY_REASONS.readOnlyKind
   return ''
+}
+
+/** The same property gate, with the controls explained in its reason. */
+export function propertyControlReason(session, reach = null) {
+  const reason = propertyReason(session, reach)
+  const key = Object.keys(MODIFY_REASONS).find((key) => MODIFY_REASONS[key] === reason)
+  return key ? PROPERTY_REASONS[key] : reason
 }
 
 /**
@@ -463,7 +479,7 @@ const engineOp = (group, op, label, display, icon, title, size, panel = group) =
       // that refuses an INSERT reference for geometry alone; every other
       // Modify op keeps the full ladder.
       : panel === 'properties'
-        ? (ctx) => propertyReason(ctx.session, ctx.reach)
+        ? (ctx) => propertyControlReason(ctx.session, ctx.reach)
         : (ctx) => modifyReason(ctx.session, ctx.reach),
   // Arming vs. running is the consumer's decision (a tool with operands opens
   // the command prompt; one without runs on click), so the record names the
@@ -515,7 +531,7 @@ const ACTION_LIST = [
   // Draw: each button creates ONE primitive from the numeric operands. The
   // engine validates again and refuses with a typed reason.
   engineOp('draw', 'createLine', 'line', 'Line', 'line', 'Draw a line from x,y to x2,y2', 'large'),
-  engineOp('draw', 'createPolyline', 'polyline', 'Polyline', 'polyline', 'Draw a polyline through the points listed (x,y pairs)', 'large'),
+  engineOp('draw', 'createPolyline', 'polyline', 'Polyline', 'polyline', 'Draw a polyline through the points listed (x,y pairs) with PLINE or PL', 'large'),
   engineOp('draw', 'createCircle', 'circle', 'Circle', 'circle', 'Draw a circle at x,y with radius r', 'large'),
   engineOp('draw', 'createArc', 'arc', 'Arc', 'arc', 'Draw an arc at x,y with radius r from start to end (degrees)', 'large'),
   // W4g-4 RECTANG: two opposite corners; the store lowers it to the closed

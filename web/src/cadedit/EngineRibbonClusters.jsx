@@ -35,11 +35,11 @@ import { createPortal } from 'react-dom'
 import { RibbonCluster, RibbonTool, RibbonWidget } from '../site/DraftingRibbon.jsx'
 import { QuickButton, QUICK_FILE_SLOT_ID } from '../site/CockpitTopBand.jsx'
 
-import { DEFERRED_REASONS, DRAW_REASONS, MODIFY_REASONS, clipboardReason, drawReason, forGroup, modifyReason, propertyReason, ribbonTool } from '../lib/actionRegistry.js'
+import { DEFERRED_REASONS, DRAW_REASONS, MODIFY_REASONS, clipboardReason, drawReason, forGroup, modifyReason, propertyReason, propertyControlReason, ribbonTool } from '../lib/actionRegistry.js'
 
 import { ACI_NAMES, LINEWEIGHT_VALUES, admissibleBlockName, admissibleServerName, buildCreatePayload, buildEditPayload, formatLineweight, readNumber } from './engineSession.js'
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
-import { PROMPTS } from './promptKeys.js'
+import { PROMPTS, humanizeRefusal } from './promptKeys.js'
 import { isPointExpression } from './pointExpression.js'
 import { resolvePromptInputs } from './promptInputs.js'
 import ScriptPanel from './ScriptPanel.jsx'
@@ -239,7 +239,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
       : buildEditPayload(armedOp, session.selectedId, effective, session.entities.linetypes, session.entities)).refusal || '')
     : ''
   const runOff = promptOff || !!liveRefusal || (!!waitingStep && !gatheringMembers)
-  const runReason = promptReason || liveRefusal
+  const runReason = humanizeRefusal(promptReason || liveRefusal, prompt)
   const runHold = runReason || (waitingStep ? waitingStep.ask : '')
   const toggleArmed = (group, op) => setArmed(armedOp === op ? null : { group, op }, { rearm: true })
   // The one context the Draw and Modify records read: the session their reason
@@ -458,23 +458,24 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // computed value, same class as the Draw/Modify/Clipboard/Annotation/
   // Properties/Block clusters' own `reason = action.when(engineCtx)` above,
   // and like them counts as one more unverifiable-but-budgeted expression.
+  const propertyControl = propertyControlReason(session, reach)
   const propertyWidgets = [
     {
       id: 'prop-color', label: 'Color', value: colorValue,
       options: withCurrentOption(['ByLayer', 'ByBlock', ...Object.values(ACI_NAMES), 'index...'], colorValue),
-      disabled: !!property, reason: property,
+      disabled: !!property, reason: propertyControl,
       onChange: (value) => (value === 'index...' ? toggleArmed('modify', 'setColor') : applyEdit('setColor', { aci: value })),
     },
     {
       id: 'prop-linetype', label: 'Linetype', value: linetypeValue, title: LINETYPE_TITLE,
       options: withCurrentOption(linetypeCatalogue, linetypeValue),
-      disabled: !!property, reason: property,
+      disabled: !!property, reason: propertyControl,
       onChange: (value) => applyEdit('setLinetype', { linetype: value }),
     },
     {
       id: 'prop-lineweight', label: 'Lineweight', value: lineweightValue,
       options: withCurrentOption(['ByLayer', 'ByBlock', 'Default', ...LINEWEIGHT_VALUES.map(formatLineweight)], lineweightValue),
-      disabled: !!property, reason: property,
+      disabled: !!property, reason: propertyControl,
       onChange: (value) => applyEdit('setLineweight', { lineweight: value }),
     },
   ]
@@ -530,7 +531,11 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
 
   // One field of the prompt: the SAME operator record the pane's fields bind
   // to (provider `inputs`), named `ribbon <label>` for the locator contract.
-  const field = ([key, label, mode = 'decimal', wide = false]) => {
+  const field = (definition) => {
+    const [key, label, mode = 'decimal', wide = false] = definition
+    const shown = definition.shown ?? label
+    const accessibleLabel = ['x', 'y', 'x1', 'y1', 'x2', 'y2', 'cx', 'cy', 'dx', 'dy'].includes(key)
+      ? key : key === 'a0' ? 'start' : key === 'a1' ? 'end' : key === 'r' && armedOp !== 'fillet' ? 'r' : label
     if (key === 'members') return <span key={key} className="cp-field" tabIndex={0} aria-label="ribbon members">{new Set([session.selectedId, ...String(inputs.members || '').split(/\s+/)].filter(Boolean)).size} objects</span>
     if (key === 'style') {
       return (
@@ -539,7 +544,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
           className="cp-input"
           value={promptInputs[key]}
           onChange={(event) => setPromptInput(key, event.target.value)}
-          aria-label={`ribbon ${label}`}
+          aria-label={`ribbon ${accessibleLabel}`}
           disabled={fieldsOff}
         >
           <option value="">Standard (default)</option>
@@ -554,7 +559,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
             type="checkbox"
             checked={promptInputs[key] === 'true'}
             onChange={(event) => setPromptInput(key, event.target.checked ? 'true' : 'false')}
-            aria-label={`ribbon ${label}`}
+            aria-label={`ribbon ${accessibleLabel}`}
             disabled={fieldsOff}
           />
           {label}
@@ -578,10 +583,10 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
         maxLength={key === 'groupName' ? 255 : undefined}
         value={promptInputs[key]}
         onChange={(event) => setPromptInput(key, event.target.value)}
-        aria-label={`ribbon ${label}`}
+        aria-label={`ribbon ${accessibleLabel}`}
         aria-invalid={invalid ? 'true' : undefined}
-        placeholder={label}
-        title={label}
+        placeholder={shown}
+        title={shown}
         disabled={fieldsOff}
       />
     )
@@ -629,7 +634,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
           data-testid="cockpit-ortho"
           aria-pressed={ortho}
           onClick={() => setOrtho(!ortho)}
-          title={`Ortho ${ortho ? 'on' : 'off'}: picks snap to the axis of the larger move from the last point (F8)`}
+          title={ortho ? 'Ortho on: picks snap to the horizontal or vertical axis through the previous point (F8).' : 'Ortho off: picks are not constrained to the horizontal or vertical axis through the previous point (F8).'}
         >
           ORTHO
         </button>
@@ -641,7 +646,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
           data-testid="cockpit-osnap"
           aria-pressed={osnap}
           onClick={() => setOsnap(!osnap)}
-          title={`Object snap ${osnap ? 'on' : 'off'}: picks land on endpoints, midpoints and centres within reach (F3)`}
+          title={osnap ? 'Object snap on: picks land on nearby endpoints, midpoints and centres (F3).' : 'Object snap off: picks land exactly where you click (F3).'}
         >
           OSNAP
         </button>

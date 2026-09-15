@@ -54,6 +54,7 @@ export default function ScriptPanel() {
   // the session read when that line was dispatched.
   const runRef = useRef(null)
   const timerRef = useRef(null)
+  const fileRef = useRef(null)
 
   const stop = useCallback((phase, sentence) => {
     if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null }
@@ -168,24 +169,27 @@ export default function ScriptPanel() {
   const running = report.phase === 'running'
   const hold = running ? 'a script is running' : gate || (!text.trim() ? 'enter or choose a script' : '')
   return (
-    <div className="ribbon-cluster-tools cockpit-script" data-testid="cockpit-script">
+    <div className="ribbon-cluster-tools cockpit-script" data-testid="cockpit-script" style={{ gridRow: '1 / span 3', gridTemplateColumns: '210px auto', gridTemplateRows: 'repeat(3, 26px)', height: 78 }}>
       <textarea
         className="cp-input cp-script"
         aria-label="ribbon script"
         placeholder="line 0,0 10,10"
-        rows={3}
+        rows={2}
+        style={{ gridRow: '1 / span 2', height: 52, boxSizing: 'border-box', resize: 'none' }}
         value={text}
         onChange={(event) => setText(event.target.value.slice(0, MAX_SCRIPT_CHARS))}
         disabled={running}
         spellCheck={false}
       />
-      <span className="cp-actions">
-        <label className="cp-field">
-          <input type="file" accept=".scr,.txt" aria-label="Script file" onChange={onFile} disabled={running} />
-        </label>
+      <span className="cp-actions" style={{ gridColumn: 2, gridRow: '1 / span 2', display: 'flex', flexDirection: 'column' }}>
+        <input ref={fileRef} type="file" accept=".scr,.txt" aria-label="Script file" onChange={onFile} disabled={running} hidden />
+        <button type="button" className="ribbon-tool" data-size="row" title={running ? 'A script is running; wait before choosing another script.' : 'Choose a .scr or .txt script file.'} onClick={() => fileRef.current?.click()} disabled={running}>
+          Choose script
+        </button>
         <button
           type="button"
-          className="cp-run"
+          className="cp-run ribbon-tool"
+          data-size="row"
           data-testid="cockpit-script-run"
           disabled={!!hold}
           title={hold || 'Run the script, one command per line'}
@@ -195,7 +199,7 @@ export default function ScriptPanel() {
           Run script
         </button>
       </span>
-      <span className="cp-note" data-testid="cockpit-script-status" data-phase={report.phase}>{report.text}</span>
+      <span className="cp-note" style={{ gridColumn: '1 / -1', gridRow: 3 }} data-testid="cockpit-script-status" data-phase={report.phase}>{report.text}</span>
     </div>
   )
 }
