@@ -92,7 +92,7 @@ test('option A: translucent chrome owns clicks and wheel over the full-bleed dra
   await expectOneCanvasIn(page, '.studio-ground')
   const canvas = page.locator('.studio-ground .viewer-canvas')
   await expect.poll(() => canvas.evaluate((el) => !!el.__cadviewer?.cameraPose())).toBe(true)
-  await expect(canvas).toHaveAttribute('data-safe-rect', /width/)
+  await expect(canvas).toHaveAttribute('data-safe-rect', /^\d+,\d+,\d+,\d+$/)
   await expect(page.locator('[data-tool="draw:createLine"]')).toBeEnabled({ timeout: 30_000 })
   const readState = () => page.evaluate(() => ({
     pose: document.querySelector('.studio-ground .viewer-canvas').__cadviewer.cameraPose(),
@@ -751,7 +751,7 @@ test.describe('route matrix, rail ON', () => {
         strip: r('.cockpit-view'), cube: r('.cockpit-cube-wrap'), well: r('.bar.bar-command-line'), status: r('footer.foot-bar'),
         viewportW: innerWidth, viewportH: innerHeight,
         ground: r('.studio-ground'), shellW: Math.round(shell.width), shellH: Math.round(shell.height),
-        glass: getComputedStyle(document.querySelector('.drafting-ribbon'), '::before').backgroundColor,
+        glass: getComputedStyle(document.querySelector('.drafting-ribbon')).backgroundColor,
       }
     })
     expect(seating.header.h).toBe(28)
@@ -1184,10 +1184,11 @@ test.describe('route matrix, rail ON', () => {
     const groundPick = (fx, fy) => page.evaluate(([px, py]) => {
       const ground = document.querySelector('.studio-ground')
       const canvas = ground.querySelector('.viewer-canvas')
-      const safe = JSON.parse(canvas?.getAttribute('data-safe-rect') || 'null')
+      const safe = canvas?.getAttribute('data-safe-rect')?.split(',').map(Number)
+      const [left, top, width, height] = safe || []
       const origin = canvas?.getBoundingClientRect()
-      const box = safe && origin
-        ? { left: origin.left + safe.left, top: origin.top + safe.top, width: safe.width, height: safe.height }
+      const box = safe?.length === 4 && safe.every(Number.isFinite) && origin
+        ? { left: origin.left + left, top: origin.top + top, width, height }
         : ground.getBoundingClientRect()
       const x = Math.round(box.left + box.width * px)
       const y = Math.round(box.top + box.height * py)
@@ -2356,7 +2357,6 @@ test.describe('route matrix, rail ON', () => {
     })).toBe(true)
     await page.getByRole('tab', { name: 'CAD', exact: true }).click()
     await expect(page.locator('.app[data-surface="cad"]')).toHaveCount(1)
-
 
     // The entitlements panel is hosted in the dock, not stacked in the column.
     const ent = page.locator('.ent-panel')

@@ -9,6 +9,26 @@
 // controls target, and calls controls.update() after a mutation.
 import * as THREE from 'three'
 
+export function nextFitState(state, event) {
+  switch (event) {
+    case 'fit': return { fitted: true, interacting: state.interacting }
+    case 'start': return { fitted: state.fitted, interacting: true }
+    case 'change': return state.interacting ? { fitted: false, interacting: true } : state
+    case 'end': return { fitted: state.fitted, interacting: false }
+    default: return state
+  }
+}
+
+export function safeRectCameraAction({ fitted, from, to }) {
+  const keys = ['left', 'top', 'width', 'height']
+  const valid = (rect) => !!rect && keys.every((key) => Number.isFinite(rect[key]))
+  if (!valid(to)) return 'none'
+  const hasFrom = valid(from)
+  if (hasFrom && keys.every((key) => from[key] === to[key])) return 'none'
+  if (fitted) return 'refit'
+  return hasFrom ? 'shift' : 'none'
+}
+
 /** Fit world bounds into a canvas-local drawing rectangle. */
 export function safeFitFrustum({ width, height, safe, bounds, margin = 1.08 }) {
   const rect = safe ?? { left: 0, top: 0, width, height }

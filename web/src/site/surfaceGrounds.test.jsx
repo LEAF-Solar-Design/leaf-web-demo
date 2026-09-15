@@ -63,6 +63,44 @@ describe('measureContainedWindow', () => {
 })
 
 describe('ProjectBoardGround', () => {
+  it('repositions the contained desk when Properties mounts late', async () => {
+    let frame
+    const animationFrame = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      frame = callback
+      return 1
+    })
+    const occluders = [['.viewer-toolbar', 'top'], ['.bar-dock', 'bottom'], ['.properties-dock', 'left']]
+    try {
+      const { container, unmount } = render(
+        <div className="app">
+          <div className="viewer-toolbar" />
+          <div className="bar-dock" />
+          <ProjectBoardGround active contained occluders={occluders} />
+        </div>,
+      )
+      container.querySelector('[data-ground="browser"]').getBoundingClientRect = () => ({ left: 0, top: 0, width: 1000, height: 900 })
+      container.querySelector('.viewer-toolbar').getBoundingClientRect = () => ({ left: 0, top: 60, width: 1000, height: 40 })
+      container.querySelector('.bar-dock').getBoundingClientRect = () => ({ left: 0, top: 700, width: 1000, height: 60 })
+      fireEvent(window, new Event('resize'))
+      act(() => frame())
+      const desk = container.querySelector('.ground-desk')
+      expect(desk).toHaveStyle({ top: '116px', left: '16px', width: '968px', height: '568px' })
+
+      frame = undefined
+      const properties = document.createElement('div')
+      properties.className = 'properties-dock'
+      properties.getBoundingClientRect = () => ({ left: 0, top: 100, width: 250, height: 600 })
+      container.querySelector('.app').append(properties)
+      await act(async () => {})
+      expect(frame).toBeTypeOf('function')
+      act(() => frame())
+      expect(desk).toHaveStyle({ top: '116px', left: '266px', width: '718px', height: '568px' })
+      unmount()
+    } finally {
+      animationFrame.mockRestore()
+    }
+  })
+
   it('describes each catalog tool and its declared drawing effect only in the studio presentation', () => {
     const tools = { families: [{ family_id: 'measurement', label: 'Measurement', capabilities: [
       { name: 'edit', label: 'Edit panels', description: 'Moves the selected panels.', capabilities: ['drawing.read', 'drawing.write'] },

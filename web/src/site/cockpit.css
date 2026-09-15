@@ -1009,6 +1009,18 @@
   }
 }
 
+/* Scrollports keep their glass on the host so the backing cannot scroll away. */
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .properties-dock { background: var(--ck-glass-panel); }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drafting-ribbon { background: var(--ck-glass-band); }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar { background: var(--ck-glass-dock); }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .properties-dock::before,
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drafting-ribbon::before,
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar::before { content: none; }
+@media (max-width: 1499px) {
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-nav { background: var(--ck-glass-band); }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-nav::before { content: none; }
+}
+
 /* ---- W4e round 2: the pane's Drawing section (label | field rows) ---- */
 @media (min-width: 981px) {
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .dock-drawing { display: grid; grid-template-columns: 104px 1fr; gap: 2px 6px; padding: 0 4px; margin: 0; }

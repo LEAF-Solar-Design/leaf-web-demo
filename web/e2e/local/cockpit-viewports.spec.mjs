@@ -91,9 +91,12 @@ for (const condition of conditions) {
       const canvas = page.locator('.studio-ground .viewer-canvas canvas')
       if (condition.viewport.width < 981) {
         const activity = await page.locator('.studio-shell .rail-stack').boundingBox()
+        await expect(page.locator('.studio-ground .viewer-canvas')).toHaveAttribute('data-safe-rect', /^\d+,\d+,\d+,\d+$/)
         const safeBottom = await canvas.evaluate((element) => {
-          const safe = JSON.parse(element.closest('.viewer-canvas').getAttribute('data-safe-rect'))
-          return element.getBoundingClientRect().top + safe.top + safe.height
+          const safe = element.closest('.viewer-canvas').getAttribute('data-safe-rect')?.split(',').map(Number)
+          if (safe?.length !== 4 || !safe.every(Number.isFinite)) throw new Error('Invalid safe rectangle')
+          const [left, top, width, height] = safe
+          return element.getBoundingClientRect().top + top + height
         })
         const band = await ribbon.boundingBox()
         expect(activity).not.toBeNull()

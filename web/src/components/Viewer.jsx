@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react'
-import { applyViewPose, cameraPose, pickLineThreshold, safeFitFrustum, safeCenterShift, unprojectClientToPlane } from './viewerMath.js'
+import { applyViewPose, cameraPose, nextFitState, pickLineThreshold, safeFitFrustum, safeCenterShift, safeRectCameraAction, unprojectClientToPlane } from './viewerMath.js'
 import { expandBulgedPolylines, intakeRoundPolylines } from '../cadedit/engineIntake.js'
 import { formatElementId } from '../lib/elementIdentity.js'
 import * as THREE from 'three'
@@ -131,6 +131,7 @@ const Viewer = forwardRef(function Viewer(
   safeRectRef.current = safeRect
   const previousSafeRef = useRef(safeRect)
   const fittedRef = useRef(false)
+  const interactingRef = useRef(false)
   // Latest onSelectEntity kept in a ref so the (one-time) pointer handler never
   // fires a stale closure.
   const onSelectRef = useRef(onSelectEntity)
@@ -506,12 +507,21 @@ const Viewer = forwardRef(function Viewer(
       camera.updateProjectionMatrix()
       controls.target.set(centerX, centerY, targetZ)
       controls.update()
-      fittedRef.current = true
+      updateFitState('fit')
     }
     previousSafeRef.current = safeRectRef.current
     fitToBounds()
-    const onControlsStart = () => { fittedRef.current = false }
+    function updateFitState(event) {
+      const next = nextFitState({ fitted: fittedRef.current, interacting: interactingRef.current }, event)
+      fittedRef.current = next.fitted
+      interactingRef.current = next.interacting
+    }
+    const onControlsStart = () => updateFitState('start')
+    const onControlsChange = () => updateFitState('change')
+    const onControlsEnd = () => updateFitState('end')
     controls.addEventListener('start', onControlsStart)
+    controls.addEventListener('change', onControlsChange)
+    controls.addEventListener('end', onControlsEnd)
     const recordCameraPose = () => {
       mount.dataset.cameraPosition = camera.position
         .toArray()
@@ -642,6 +652,9 @@ const Viewer = forwardRef(function Viewer(
       dom.removeEventListener('pointerup', onPointerUp)
       controls.removeEventListener('change', recordCameraPose)
       controls.removeEventListener('start', onControlsStart)
+      controls.removeEventListener('change', onControlsChange)
+      controls.removeEventListener('end', onControlsEnd)
+      interactingRef.current = false
       controls.dispose()
       renderer.dispose()
       if (renderer.domElement.parentNode) renderer.domElement.parentNode.removeChild(renderer.domElement)
@@ -659,8 +672,10 @@ const Viewer = forwardRef(function Viewer(
     const from = previousSafeRef.current
     previousSafeRef.current = safeRect
     const s = stateRef.current
-    if (!s || s.sculpture || from === safeRect) return
-    if (fittedRef.current) { s.fitToBounds(); return }
+    if (!s || s.sculpture) return
+    const action = safeRectCameraAction({ fitted: fittedRef.current, from, to: safeRect })
+    if (action === 'refit') { s.fitToBounds(); return }
+    if (action !== 'shift') return
     const width = s.renderer.domElement.clientWidth
     const { dx, dy } = safeCenterShift({
       unitsPerPixel: (s.camera.right - s.camera.left) / (s.camera.zoom * width),

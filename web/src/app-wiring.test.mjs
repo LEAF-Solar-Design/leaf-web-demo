@@ -39,12 +39,14 @@ describe('studio unobstructed drawing viewport', () => {
     assert.ok(framing.includes('viewer.frame('))
     assert.ok(framing.includes('viewer.setView('))
   })
-  it('names all nine occluders and excludes the view cube', () => {
+  it('names all eight occluders and excludes growing command chrome and the view cube', () => {
     const start = appNoComments.indexOf('const STUDIO_DRAWING_OCCLUDERS = Object.freeze(')
     assert.ok(start >= 0)
     const list = appNoComments.slice(start, appNoComments.indexOf('])', start))
     for (const selector of ['header.top', '#drafting-ribbon', '.viewer-toolbar', '[data-testid="cockpit-view"]',
-      '.properties-dock', '.bar-dock', '[data-testid="cockpit-prompt"]', 'footer.foot-bar', '.rail-stack']) assert.ok(list.includes(selector), selector)
+      '.properties-dock', '.bar.bar-command-line', 'footer.foot-bar', '.rail-stack']) assert.ok(list.includes(selector), selector)
+    assert.ok(!list.includes("'.bar-dock'"))
+    assert.ok(!list.includes('cockpit-prompt'))
     assert.ok(!list.includes('cockpit-cube'))
   })
 })

@@ -26,10 +26,11 @@ import { loadDemoSolve } from './site/intakeCache.js'
 // The 3D viewer drags in `three`; loading it lazily (mirroring the auth.js
 // dynamic-import pattern) keeps first paint off the critical path.
 const Viewer = React.lazy(() => import('./components/Viewer.jsx'))
+// Only the command line's fixed-height well occludes the bottom; the growing dock and prompt row do not, so arming or disarming a command never moves the drawing.
 const STUDIO_DRAWING_OCCLUDERS = Object.freeze([
   ['header.top', 'top'], ['#drafting-ribbon', 'top'], ['.viewer-toolbar', 'top'],
   ['[data-testid="cockpit-view"]', 'top'], ['.properties-dock', 'left'],
-  ['.bar-dock', 'bottom'], ['[data-testid="cockpit-prompt"]', 'bottom'],
+  ['.bar.bar-command-line', 'bottom'],
   ['footer.foot-bar', 'bottom'], ['.rail-stack', 'nearest'],
 ])
 import Legend from './components/Legend.jsx'

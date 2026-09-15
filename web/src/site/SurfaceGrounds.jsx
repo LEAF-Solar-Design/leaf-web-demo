@@ -105,11 +105,17 @@ function useGroundWindow(active, contained = false, boardRef, occluders = NO_OCC
       if (observer && scroller) observer.observe(scroller)
     }
     measure()
+    const discovery = contained && typeof MutationObserver !== 'undefined' ? new MutationObserver((records) => {
+      if (records.some((record) => [...record.addedNodes, ...record.removedNodes].some((node) =>
+        node.nodeType === 1 && occluders.some(([selector]) => node.matches(selector) || node.querySelector(selector))))) schedule()
+    }) : null
+    discovery?.observe(document.body, { childList: true, subtree: true })
     window.addEventListener('resize', schedule)
     scroller?.addEventListener('scroll', schedule, { passive: true })
     return () => {
       if (frame) window.cancelAnimationFrame(frame)
       observer?.disconnect()
+      discovery?.disconnect()
       window.removeEventListener('resize', schedule)
       scroller?.removeEventListener('scroll', schedule)
     }

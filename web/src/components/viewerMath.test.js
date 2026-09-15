@@ -9,14 +9,56 @@ import * as THREE from 'three'
 import {
   applyViewPose,
   cameraPose,
+  nextFitState,
   ndcFromClient,
   pickLineThreshold,
   safeFitFrustum,
   safeCenterShift,
+  safeRectCameraAction,
   unprojectClientToPlane,
 } from './viewerMath.js'
 
 const RECT = { left: 10, top: 20, width: 800, height: 600 }
+
+describe('nextFitState', () => {
+  const fitted = Object.freeze({ fitted: true, interacting: false })
+  it('keeps the fit after a stationary interaction', () => {
+    const started = nextFitState(fitted, 'start')
+    expect(started).toEqual({ fitted: true, interacting: true })
+    expect(nextFitState(started, 'end')).toEqual(fitted)
+  })
+  it('clears the fit only for a camera change during interaction', () => {
+    const changed = nextFitState(nextFitState(fitted, 'start'), 'change')
+    expect(changed).toEqual({ fitted: false, interacting: true })
+    expect(nextFitState(changed, 'end')).toEqual({ fitted: false, interacting: false })
+    expect(nextFitState(changed, 'fit')).toEqual({ fitted: true, interacting: true })
+    expect(changed).toEqual({ fitted: false, interacting: true })
+  })
+  it('preserves state identity for programmatic changes and unknown events', () => {
+    expect(nextFitState(fitted, 'change')).toBe(fitted)
+    expect(nextFitState(fitted, 'unknown')).toBe(fitted)
+    expect(nextFitState({ fitted: false, interacting: false }, 'fit')).toEqual(fitted)
+  })
+})
+
+describe('safeRectCameraAction', () => {
+  const from = { left: 16, top: 42, width: 1318, height: 702 }
+  const to = { left: 16, top: 42, width: 1318, height: 684 }
+  it.each([
+    [true, null, from, 'refit'],
+    [false, null, from, 'none'],
+    [true, from, { ...from }, 'none'],
+    [true, from, null, 'none'],
+    [true, from, to, 'refit'],
+    [false, from, to, 'shift'],
+    [false, from, { ...to, left: NaN }, 'none'],
+    [true, from, { ...to, height: Infinity }, 'none'],
+    [true, from, { left: 16, top: 42, width: 1318 }, 'none'],
+    [false, { ...from, top: NaN }, to, 'none'],
+  ])('chooses %s, %j, %j as %s', (fitted, previous, next, expected) => {
+    expect(safeRectCameraAction({ fitted, from: previous, to: next })).toBe(expected)
+  })
+})
 
 describe('safeFitFrustum', () => {
   const input = { width: 1920, height: 940, bounds: { cx: 0, cy: 0, w: 1000, h: 500 } }
