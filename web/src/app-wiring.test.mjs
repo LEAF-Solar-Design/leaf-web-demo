@@ -20,6 +20,47 @@ import esbuild from 'esbuild'
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
 const viewerSource = readFileSync(new URL('./components/Viewer.jsx', import.meta.url), 'utf8')
 
+describe('W4g bleed-2b: profile presentation preserves the engine document', () => {
+  it('mounts the engine document after the drafting ribbon under the studio and engine gates', () => {
+    const ribbonStart = appSource.indexOf('{studioGround && drafting && (')
+    const ribbonEnd = appSource.indexOf('</DraftingRibbon>', ribbonStart)
+    const engine = appSource.indexOf('<EngineDocumentView')
+    assert.ok(ribbonStart >= 0 && ribbonEnd > ribbonStart)
+    assert.ok(engine > ribbonEnd)
+    assert.match(appSource.slice(ribbonEnd, engine), new RegExp('\\)\\}\\s*[\\s\\S]*?\\{ENV_CAD_EDIT && studioGround && \\(\\s*$'))
+    assert.equal(appSource.split('<EngineDocumentView').length - 1, 1)
+  })
+  it('closes Start before requesting a profile and commits the URL with the state', () => {
+    const selectStart = appSource.indexOf('const onSelectSurface =')
+    const selectEnd = appSource.indexOf('[returnToDrawing, request])', selectStart)
+    assert.ok(selectStart >= 0 && selectEnd > selectStart)
+    const select = appSource.slice(selectStart, selectEnd)
+    assert.match(select, /returnToDrawing\(\)\s+request\(id\)/)
+    assert.doesNotMatch(select, /setActiveSurface|replaceState/)
+    const commitStart = appSource.indexOf('const onCommit =')
+    const commitEnd = appSource.indexOf('}, [])', commitStart)
+    assert.ok(commitStart >= 0 && commitEnd > commitStart)
+    const commit = appSource.slice(commitStart, commitEnd)
+    assert.match(commit, /setActiveSurface\(id\)/)
+    assert.match(commit, /searchForProductSurface\(window\.location\.search, id\)/)
+    assert.match(commit, /window\.history\.replaceState/)
+    assert.match(appSource, /committed: activeSurface, onCommit, isDrafting: groundShowsDrawing/)
+  })
+  it('settles presentation at drawing actions and exposes phases only in the studio', () => {
+    const start = appSource.indexOf('const closeStartForChange =')
+    const end = appSource.indexOf('const onReturnToDrawing =', start)
+    assert.match(appSource.slice(start, end), /settle\(\)/)
+    assert.match(appSource, new RegExp("data-studio-transition=\\{studioGround && phase !== 'idle' \\? phase : undefined\\}"))
+    assert.match(appSource, /const effectiveGround = studioGround \? \(boardVisible \? 'board' : surfaceGround\(activeSurface\)\) : null/)
+    assert.match(appSource, /const leavingGround = useLeavingGround\(effectiveGround\)/)
+    assert.match(appSource, new RegExp('leavingGround=\\{leavingGround\\}'))
+    const viewer = appSource.slice(appSource.indexOf('? createPortal(<div className="studio-ground-viewer"'), appSource.indexOf(': viewerEl', appSource.indexOf('? createPortal(<div className="studio-ground-viewer"')))
+    assert.match(viewer, /data-ground-phase=/)
+    assert.match(viewer, /aria-hidden=/)
+    assert.match(viewer, /inert=/)
+  })
+})
+
 describe('W4g bleed-2a: one canvas across CAD and Solar CAD', () => {
   it('passes a palette revision to the studio viewer', () => {
     const viewer = appSource.slice(appSource.indexOf('const viewerEl = ('), appSource.indexOf('const legendEl ='))

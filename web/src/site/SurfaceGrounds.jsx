@@ -253,6 +253,7 @@ function BoardTiles({ workspace, drawing, catalog, renderTile, studioPresentatio
 
 export function ProjectBoardGround({
   active = false, workspaceProject = null, workspace = null, drawing = null, catalog = null, mock = false,
+  leavingGround = null,
   contained = false, onReturnToDrawing = null, headingRef = null, startFocusRequest = 0,
   occluders = NO_OCCLUDERS,
   studioPresentation = false,
@@ -260,7 +261,8 @@ export function ProjectBoardGround({
 }) {
   const state = workspaceProject || EMPTY_WORKSPACE_PROJECT
   const boardRef = useRef(null)
-  const win = useGroundWindow(active, contained, boardRef, occluders)
+  const leaving = leavingGround === 'board'
+  const win = useGroundWindow(active || leaving, contained, boardRef, occluders)
   const localHeadingRef = useRef(null)
   const containedHeadingRef = headingRef || localHeadingRef
   const lastFocusRequest = useRef(0)
@@ -279,7 +281,10 @@ export function ProjectBoardGround({
       data-board-layout={contained ? 'contained' : undefined}
       data-studio-presentation={studioPresentation ? 'true' : undefined}
       data-project-state={state.kind}
-      hidden={!active}
+      hidden={!active && !leaving}
+      data-ground-phase={leaving ? 'leaving' : active && leavingGround ? 'entering' : undefined}
+      aria-hidden={leaving ? 'true' : undefined}
+      inert={leaving ? '' : undefined}
       role="region"
       aria-label="Project workspace"
     >
@@ -318,9 +323,11 @@ export function ProjectBoardGround({
 // ---------------------------------------------------------------------------
 export function DeviceGround({
   active = false, enabled = false, contract = null, projectLabel = null, revision = null,
+  leavingGround = null,
 }) {
   const state = enabled ? (deriveIosState(contract) ?? 'malformed') : 'dormant'
-  const win = useGroundWindow(active)
+  const leaving = leavingGround === 'device-stage'
+  const win = useGroundWindow(active || leaving)
   const label = state === 'dormant'
     ? 'Not available yet'
     : state === 'malformed' ? 'Status unreadable' : IOS_STATE_LABEL[state]
@@ -335,7 +342,10 @@ export function DeviceGround({
       className="studio-ground-device"
       data-ground="ios"
       data-state={state}
-      hidden={!active}
+      hidden={!active && !leaving}
+      data-ground-phase={leaving ? 'leaving' : active && leavingGround ? 'entering' : undefined}
+      aria-hidden={leaving ? 'true' : undefined}
+      inert={leaving ? '' : undefined}
       role="region"
       aria-label="iOS ship lane"
     >
@@ -380,7 +390,7 @@ export function DeviceGround({
 // switch never remounts a ground any more than it remounts the drawing.
 export default function SurfaceGrounds({
   surface, workspaceProject, workspace, drawing, catalog, mock,
-  boardVisible, onReturnToDrawing, headingRef, startFocusRequest,
+  boardVisible, onReturnToDrawing, headingRef, startFocusRequest, leavingGround = null,
   occluders = NO_OCCLUDERS,
   studioPresentation = false,
   iosEnabled, iosContract, revision,
@@ -397,6 +407,7 @@ export default function SurfaceGrounds({
           'drawing'. */}
       <ProjectBoardGround
         active={boardVisible ?? surfaceGround(surface) === 'board'}
+        leavingGround={leavingGround}
         contained={boardVisible === true && groundShowsDrawing(surface)}
         occluders={occluders}
         onReturnToDrawing={onReturnToDrawing}
@@ -411,6 +422,7 @@ export default function SurfaceGrounds({
       />
       <DeviceGround
         active={!boardVisible && surfaceGround(surface) === 'device-stage'}
+        leavingGround={leavingGround}
         enabled={iosEnabled}
         contract={iosContract}
         projectLabel={projectLabel}

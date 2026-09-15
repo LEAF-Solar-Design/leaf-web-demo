@@ -411,6 +411,16 @@ describe('F-7: surface frames render the live tenant catalog', () => {
     expect(reduced).toContain('.tc-product-morph { animation: none; }')
     expect(reduced).toContain('.tc-continuity[data-pulse="true"] .tc-continuity-item { animation: none; }')
     expect(reduced).toContain('.tc-product-tabs button { transition: none; }')
+    for (const selector of [
+      '.studio-ground > [data-ground-phase="leaving"]',
+      '.studio-ground > [data-ground-phase="entering"]',
+      '.studio-shell .app[data-studio-transition="out"]',
+      '.studio-shell .app[data-studio-transition="in"]',
+    ]) {
+      const start = reduced.indexOf(selector)
+      expect(start).toBeGreaterThanOrEqual(0)
+      expect(reduced.slice(start, reduced.indexOf('}', start))).toContain('animation: none;')
+    }
   })
 
   it('F-8: the frame morph wrapper keys on the surface so switches animate', () => {

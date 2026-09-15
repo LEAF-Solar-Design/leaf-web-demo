@@ -13,6 +13,38 @@ import { deriveWorkspaceProjectState } from './workspaceProjectState.js'
 
 afterEach(cleanup)
 
+describe('W4g bleed-2b: ground crossfade accessibility', () => {
+  it('paints the leaving board inertly and marks the active device entering', () => {
+    const { container, rerender } = render(<SurfaceGrounds surface="ios" leavingGround="board" />)
+    const board = container.querySelector('[data-ground="browser"]')
+    const device = container.querySelector('[data-ground="ios"]')
+    expect(board.hidden).toBe(false)
+    expect(board.getAttribute('data-ground-phase')).toBe('leaving')
+    expect(board.getAttribute('aria-hidden')).toBe('true')
+    expect(board.hasAttribute('inert')).toBe(true)
+    expect(device.getAttribute('data-ground-phase')).toBe('entering')
+    expect(device.hasAttribute('aria-hidden')).toBe(false)
+    expect(device.hasAttribute('inert')).toBe(false)
+    rerender(<SurfaceGrounds surface="ios" />)
+    expect(board.hidden).toBe(true)
+    expect(device.hidden).toBe(false)
+    for (const ground of [board, device]) {
+      expect(ground.hasAttribute('data-ground-phase')).toBe(false)
+      expect(ground.hasAttribute('inert')).toBe(false)
+      expect(ground.hasAttribute('aria-hidden')).toBe(false)
+    }
+  })
+  it('paints the leaving device inertly while the board enters', () => {
+    const { container } = render(<SurfaceGrounds surface="browser" leavingGround="device-stage" />)
+    const device = container.querySelector('[data-ground="ios"]')
+    expect(device.hidden).toBe(false)
+    expect(device.getAttribute('data-ground-phase')).toBe('leaving')
+    expect(device.getAttribute('aria-hidden')).toBe('true')
+    expect(device.hasAttribute('inert')).toBe(true)
+    expect(container.querySelector('[data-ground="browser"]').getAttribute('data-ground-phase')).toBe('entering')
+  })
+})
+
 const catalog = {
   families: [
     { family_id: 'measurement', label: 'Measurement', capabilities: [{ name: 'count-by-layer' }, { name: 'measure-panel-area' }] },

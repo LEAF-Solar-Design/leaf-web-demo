@@ -4,6 +4,7 @@ import { createPortal, flushSync } from 'react-dom'
 import { track, setTourStep } from './telemetry.js'
 import { useStudioGround } from './site/studioGround.js'
 import useDrawingViewport from './site/useDrawingViewport.js'
+import { useLeavingGround, useStudioTransition } from './site/useStudioTransition.js'
 import SurfaceGrounds, { groundShowsDrawing } from './site/SurfaceGrounds.jsx'
 import { START_BOARD_COPY } from './site/startBoardCopy.js'
 import { CockpitStatus, FootRegion, StatusTabs, ViewCluster } from './site/DrawingCockpit.jsx'
@@ -88,6 +89,7 @@ import {
   productSurfaceFromSearch,
   searchForProductSurface,
   surfaceContract,
+  surfaceGround,
 } from './site/productSurfaces.js'
 import { useSurfaceContract } from './site/useSurfaceContract.js'
 import { fetchIosSurfaceStatus } from './ios/iosSurfaceStatus.js'
@@ -261,6 +263,20 @@ export default function App() {
   // consumer is the Viewer render site, which portals into it; null renders
   // the old shell byte-for-byte (the rollback contract, studioGround.js).
   const studioGround = useStudioGround()
+  const [activeSurface, setActiveSurface] = useState(() => {
+    try { return productSurfaceFromSearch(window.location.search) } catch { return 'cad' }
+  })
+  const onCommit = useCallback((id) => {
+    setActiveSurface(id)
+    try {
+      const next = searchForProductSurface(window.location.search, id)
+      window.history.replaceState(null, '', `${window.location.pathname}${next}${window.location.hash}`)
+    } catch { /* URL sync is a convenience; state alone still switches the tab */ }
+  }, [])
+  const { phase, request, settle } = useStudioTransition({
+    committed: activeSurface, onCommit, isDrafting: groundShowsDrawing,
+    reducedMotion: studioGround ? undefined : true,
+  })
   const drawingViewportRef = useRef(null)
   const [startOpen, setStartOpen] = useState(false)
   const [startFocusRequest, setStartFocusRequest] = useState(0)
@@ -285,10 +301,11 @@ export default function App() {
     }
   }, [])
   const closeStartForChange = useCallback(() => {
+    settle()
     if (!startOpenRef.current) return
     startOpenRef.current = false
     setStartOpen(false)
-  }, [])
+  }, [settle])
   const onReturnToDrawing = useCallback(() => returnToDrawing(true), [returnToDrawing])
   const [mock, setMock] = useState(config.mockDefault)
   const [loadErr, setLoadErr] = useState(null)
@@ -2499,21 +2516,14 @@ export default function App() {
   // the user picks another tab (or arrives with ?surface=). The tabs, frame,
   // IosSurface, and EditSurface existed fully built and tested but were never
   // mounted (2026-08-30 finding); this is the mount, not new surface behavior.
-  const [activeSurface, setActiveSurface] = useState(() => {
-    try { return productSurfaceFromSearch(window.location.search) } catch { return 'cad' }
-  })
   const projectLayout = useProjectWorkspaceLayout({ mock, projectId: openProjectId, surface: activeSurface })
   const drawingViewport = useDrawingViewport(studioGround && groundShowsDrawing(activeSurface) ? studioGround : null, STUDIO_DRAWING_OCCLUDERS)
   drawingViewportRef.current = drawingViewport
   revealProjectToolsRef.current = projectLayout.revealTools
   const onSelectSurface = useCallback((id) => {
     returnToDrawing()
-    setActiveSurface(id)
-    try {
-      const next = searchForProductSurface(window.location.search, id)
-      window.history.replaceState(null, '', `${window.location.pathname}${next}${window.location.hash}`)
-    } catch { /* URL sync is a convenience; state alone still switches the tab */ }
-  }, [returnToDrawing])
+    request(id)
+  }, [returnToDrawing, request])
   // W4c-V1: the nav rail's spine posture on drafting surfaces under the
   // studio. IN-MEMORY on purpose: the rollback contract forbids new storage
   // keys under the studio and stale ?params, so the posture resets per page
@@ -2582,6 +2592,8 @@ export default function App() {
   // for a tenant with no overlay (useSurfaceContract's own contract).
   const surfaceSlots = useSurfaceContract(activeSurface, mock)
   const boardVisible = !!studioGround && (startOpen || surfaceSlots.ground === 'board')
+  const effectiveGround = studioGround ? (boardVisible ? 'board' : surfaceGround(activeSurface)) : null
+  const leavingGround = useLeavingGround(effectiveGround)
   // Keeps its name: ~20 sites read `studioGround && drafting`, and the App
   // wiring pin (src/app-wiring.test.mjs) guards that exact shape against the
   // white screen it was written for. Was groundShowsDrawing(activeSurface).
@@ -3164,7 +3176,7 @@ export default function App() {
         onUnlink: mcpRegistry.unlink,
       }}
     >
-    <div className="app" ref={projectLayout.appRef} data-project-workspace={projectLayout.active ? 'results' : undefined} data-project-tools={projectLayout.toolsOpen ? 'open' : 'closed'} data-project-activity={projectLayout.activityOpen ? 'open' : 'closed'} data-surface={studioGround ? activeSurface : undefined} data-start-open={studioGround && startOpen ? 'true' : undefined} data-tour="shell"
+    <div className="app" ref={projectLayout.appRef} data-project-workspace={projectLayout.active ? 'results' : undefined} data-project-tools={projectLayout.toolsOpen ? 'open' : 'closed'} data-project-activity={projectLayout.activityOpen ? 'open' : 'closed'} data-studio-transition={studioGround && phase !== 'idle' ? phase : undefined} data-surface={studioGround ? activeSurface : undefined} data-start-open={studioGround && startOpen ? 'true' : undefined} data-tour="shell"
       onClickCapture={(event) => {
         if (event.target instanceof Element && event.target.closest('.ribbon-tool:not(:disabled), .cockpit-quick button:not(:disabled), .cp-run:not(:disabled)')) returnToDrawing()
       }}
@@ -3385,6 +3397,7 @@ export default function App() {
             studioPresentation={Boolean(studioGround)}
             surface={activeSurface}
             boardVisible={boardVisible}
+            leavingGround={leavingGround}
             startFocusRequest={startFocusRequest}
             onReturnToDrawing={onReturnToDrawing}
             headingRef={boardHeadingRef}
@@ -3469,39 +3482,6 @@ export default function App() {
                   reach the engine through this consumer; renders nothing. */}
               {ENV_CAD_EDIT && <CommandLineArmer />}
               {ENV_CAD_EDIT && <StatusModesBridge />}
-              {/* W4f slice A0: while a DXF is open in the engine, the canvas
-                  shows the ENGINE document through the viewer's own
-                  applyVersion seam (the console drawing returns on close);
-                  the card carries data-engine-document for the pins. */}
-              {ENV_CAD_EDIT && (
-                <EngineDocumentView
-                  viewerRef={viewerRef}
-                  selectedHandle={selectedHandle}
-                  onSelectedHandleChange={setSelectedHandle}
-                  onShown={(intake, history) => {
-                    setActiveIntake(intake)
-                    setEngineHistory(history ? { undoDepth: history.undoDepth, redoDepth: history.redoDepth } : null)
-                    if (!intake || (resultCandidate && resultCandidate.documentId !== intake.documentId)) {
-                      setResultCandidate(null)
-                      setOffscreenResult(null)
-                    }
-                    if (intake && history?.createdResult?.documentId === intake.documentId) {
-                      setOffscreenResult(null)
-                      setResultCandidate(history.createdResult)
-                    }
-                    const el = workspaceCardRef.current
-                    if (!el) return
-                    if (intake) el.dataset.engineDocument = intake.documentId
-                    else delete el.dataset.engineDocument
-                  }}
-                  onHidden={() => {
-                    setActiveIntake(null)
-                    setEngineHistory(null)
-                    setResultCandidate(null)
-                    setOffscreenResult(null)
-                  }}
-                />
-              )}
               {/* W4g-1b: the console's OWN drawing opens in the engine at
                   mount (GET .../dxf), so Draw/Modify are live without an
                   import; a moved head (a tool run, undo/redo, restore)
@@ -3538,6 +3518,39 @@ export default function App() {
                 />
               )}
             </DraftingRibbon>
+          )}
+          {/* W4f slice A0: while a DXF is open in the engine, the canvas
+              shows the ENGINE document through the viewer's own
+              applyVersion seam (the console drawing returns on close);
+              the card carries data-engine-document for the pins. */}
+          {ENV_CAD_EDIT && studioGround && (
+            <EngineDocumentView
+              viewerRef={viewerRef}
+              selectedHandle={selectedHandle}
+              onSelectedHandleChange={setSelectedHandle}
+              onShown={(intake, history) => {
+                setActiveIntake(intake)
+                setEngineHistory(history ? { undoDepth: history.undoDepth, redoDepth: history.redoDepth } : null)
+                if (!intake || (resultCandidate && resultCandidate.documentId !== intake.documentId)) {
+                  setResultCandidate(null)
+                  setOffscreenResult(null)
+                }
+                if (intake && history?.createdResult?.documentId === intake.documentId) {
+                  setOffscreenResult(null)
+                  setResultCandidate(history.createdResult)
+                }
+                const el = workspaceCardRef.current
+                if (!el) return
+                if (intake) el.dataset.engineDocument = intake.documentId
+                else delete el.dataset.engineDocument
+              }}
+              onHidden={() => {
+                setActiveIntake(null)
+                setEngineHistory(null)
+                setResultCandidate(null)
+                setOffscreenResult(null)
+              }}
+            />
           )}
           <div className="viewer-toolbar">
             {/* W4e: the toolbar is the reference's document-tab band. Start
@@ -3779,7 +3792,12 @@ export default function App() {
               // on Browser/iOS it stays mounted (WebGL, lock, job state
               // survive) but hidden while that surface's own ground shows.
               return studioGround
-                ? createPortal(<div className="studio-ground-viewer" hidden={boardVisible || !groundShowsDrawing(activeSurface)}>{viewerEl}</div>, studioGround)
+                ? createPortal(<div className="studio-ground-viewer"
+                    hidden={effectiveGround !== 'drawing' && leavingGround !== 'drawing'}
+                    data-ground-phase={leavingGround === 'drawing' ? 'leaving' : effectiveGround === 'drawing' && leavingGround ? 'entering' : undefined}
+                    aria-hidden={leavingGround === 'drawing' ? 'true' : undefined}
+                    inert={leavingGround === 'drawing' ? '' : undefined}
+                  >{viewerEl}</div>, studioGround)
                 : viewerEl
             })()}
             {/* W4c-V2: under the studio the Legend and the readout live in
