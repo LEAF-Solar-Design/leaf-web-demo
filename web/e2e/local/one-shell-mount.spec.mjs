@@ -1748,9 +1748,11 @@ test.describe('route matrix, rail ON', () => {
     const pointRoutes = []
     const onPointRoute = (req) => { if (req.url().includes('/api/nl-prompt')) pointRoutes.push(req) }
     page.on('request', onPointRoute)
-    await bar.fill('0,0')
-    await bar.press('Enter')
-    await expect(page.getByText('Start a drawing command before entering a point.', { exact: true })).toBeVisible()
+    for (const unarmedPoint of ['0,0', '10,5', '@10,0', '10<90']) {
+      await bar.fill(unarmedPoint)
+      await bar.press('Enter')
+      await expect(page.getByText('Start a drawing command before entering a point.', { exact: true })).toBeVisible()
+    }
     expect(pointRoutes).toHaveLength(0)
     await bar.fill('LINE')
     await bar.press('Enter')
@@ -1771,6 +1773,51 @@ test.describe('route matrix, rail ON', () => {
     await bar.press('Enter')
     await expect.poll(readPointResult).toEqual([[10, 0], [10, 10]])
     await expect(bar).toHaveAttribute('placeholder', 'LINE  Specify next point:')
+    await page.locator('body').press('Escape')
+    await bar.fill('LINE')
+    await bar.press('Enter')
+    await bar.fill('0,0')
+    await bar.press('Enter')
+    const layerBeforeRetry = await page.getByLabel('ribbon layer', { exact: true }).inputValue()
+    await bar.fill('0,0')
+    await bar.press('Enter')
+    await expect(page.getByTestId('cockpit-prompt-note')).toContainText('refused')
+    await expect(bar).toHaveAttribute('placeholder', 'LINE  Specify next point:')
+    await bar.fill('10,0')
+    await bar.press('Enter')
+    await expect.poll(readPointResult).toEqual([[0, 0], [10, 0]])
+    await expect(page.getByLabel('ribbon layer', { exact: true })).toHaveValue(layerBeforeRetry)
+    for (const order of ['bar/click/bar', 'click/bar/bar']) {
+      await page.locator('body').press('Escape')
+      await bar.fill('LINE')
+      await bar.press('Enter')
+      for (const mode of ['cockpit-osnap', 'cockpit-ortho']) {
+        if (await page.getByTestId(mode).getAttribute('aria-pressed') === 'true') await page.getByTestId(mode).click()
+      }
+      const clickWorld = async (x, y) => {
+        const pixel = await page.evaluate(([wx, wy]) => {
+          const canvas = document.querySelector('.studio-ground .viewer-canvas')
+          const p = canvas.__cadviewer.project(wx, wy)
+          return { x: p.x, y: p.y, onGround: !!document.elementFromPoint(p.x, p.y)?.closest('.studio-ground') }
+        }, [x, y])
+        expect(pixel.onGround).toBe(true)
+        await page.mouse.click(pixel.x, pixel.y)
+      }
+      if (order === 'bar/click/bar') {
+        await bar.fill('5,5')
+        await bar.press('Enter')
+        await clickWorld(10, 0)
+      } else {
+        await clickWorld(5, 5)
+        await bar.fill('10,0')
+        await bar.press('Enter')
+      }
+      await expect.poll(readPointResult).toEqual([[5, 5], [10, 0]])
+      await expect(bar).toHaveAttribute('placeholder', 'LINE  Specify next point:')
+      await bar.fill('20,0')
+      await bar.press('Enter')
+      await expect.poll(readPointResult).toEqual([[10, 0], [20, 0]])
+    }
     expect(pointRoutes).toHaveLength(0)
     await page.locator('body').press('Escape')
     page.off('request', onPointRoute)
@@ -1779,8 +1826,8 @@ test.describe('route matrix, rail ON', () => {
     // row on purpose: while its route decision is shown the Command bar's
     // Enter belongs to the decision strip, so a word typed after it would be
     // swallowed (the race that failed this row once).
-    const sentenceRoute = page.waitForRequest((req) => req.url().includes('/api/nl-prompt') && req.postDataJSON()?.text === 'draw a line across the roof')
-    await bar.fill('draw a line across the roof')
+    const sentenceRoute = page.waitForRequest((req) => req.url().includes('/api/nl-prompt') && req.postDataJSON()?.text === '2 rows, 10 panels each')
+    await bar.fill('2 rows, 10 panels each')
     await bar.press('Enter')
     await sentenceRoute
     await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)

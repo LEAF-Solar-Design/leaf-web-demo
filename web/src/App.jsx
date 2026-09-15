@@ -67,7 +67,7 @@ import EngineDocumentView from './cadedit/EngineDocumentView.jsx'
 import EngineHeadOpener from './cadedit/EngineHeadOpener.jsx'
 import CanvasPointPicker from './cadedit/CanvasPointPicker.jsx'
 import { COCKPIT_COMMAND_EVENT, parseDrawingCommand } from './lib/commandWords.js'
-import { isPointExpression } from './cadedit/pointExpression.js'
+import { parsePointExpression } from './cadedit/pointExpression.js'
 import { markInstant } from './lib/instant.js'
 import { agentBannerFor } from './lib/agentBanner.js'
 import { selectEntity } from './lib/selectEntity.js'
@@ -665,7 +665,7 @@ export default function App() {
         const point = { text, handled: false }
         window.dispatchEvent(new CustomEvent('cockpit:point', { detail: point }))
         if (point.handled) return true
-        if (isPointExpression(text) && /^\s*[@+\-.\d<]/.test(text)) {
+        if (parsePointExpression(text) !== null) {
           showToast({ text: 'Start a drawing command before entering a point.' })
           return true
         }

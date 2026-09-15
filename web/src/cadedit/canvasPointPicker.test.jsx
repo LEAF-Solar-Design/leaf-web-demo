@@ -77,6 +77,19 @@ function click(x, y) {
   })
 }
 
+it('a bar point uses the click sequence and its ghost anchor', async () => {
+  mount()
+  await openAndLoad()
+  act(() => { context.setArmed({ group: 'draw', op: 'createLine' }); context.setOsnap(false) })
+  const detail = { point: [5, 5], key: 'x', handled: false }
+  act(() => window.dispatchEvent(new CustomEvent('cockpit:pick-point', { detail })))
+  expect(detail.handled).toBe(true)
+  act(() => ground.dispatchEvent(new MouseEvent('pointermove', { clientX: 100, clientY: 0 })))
+  expect(viewer.setRubberBand).toHaveBeenLastCalledWith([[5, 5], [10, 0]], false)
+  click(100, 0)
+  expect(context.inputs).toMatchObject({ x: '5', y: '5', x2: '10', y2: '0' })
+})
+
 it('GROUP appends picked edges and ignores the selection and duplicate picks', async () => {
   mount()
   const lines = [0, 10, 20].map((y, i) => ({ id: String(10 + i), type: 'LINE', editable: true, vertices: [[0, y, 0], [3, y, 0]] }))

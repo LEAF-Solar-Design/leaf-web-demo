@@ -18,6 +18,7 @@ describe('pointExpression (W4f-8): the command line\'s point grammar', () => {
   })
 
   it('parses the four forms and refuses everything else', () => {
+    expect(parsePointExpression('2 rows, 10 panels each')).toBeNull()
     expect(parsePointExpression('10,5')).toEqual({ relative: false, polar: false, a: 10, b: 5 })
     expect(parsePointExpression(' @ -10 , 5.25 ')).toEqual({ relative: true, polar: false, a: -10, b: 5.25 })
     expect(parsePointExpression('20<45')).toEqual({ relative: false, polar: true, a: 20, b: 45 })

@@ -9,6 +9,7 @@ import { COCKPIT_COMMAND_EVENT, parseDrawingCommand } from '../lib/commandWords.
 
 import CadEditSurface from './CadEditSurface.jsx'
 import CommandLineArmer, { acceptsCommand } from './CommandLineArmer.jsx'
+import CanvasPointPicker from './CanvasPointPicker.jsx'
 import EngineRibbonClusters from './EngineRibbonClusters.jsx'
 import EngineSessionProvider from './EngineSessionProvider.jsx'
 import DraftingRibbon from '../site/DraftingRibbon.jsx'
@@ -33,7 +34,7 @@ function fileOf(name = 'one.dxf') {
 }
 
 let workers
-function mount() {
+function mount(picker = null) {
   workers = []
   const createWorker = vi.fn(() => { const w = new ScriptedWorker(); workers.push(w); return w })
   render(
@@ -42,6 +43,7 @@ function mount() {
         <EngineRibbonClusters importOpen={false} onToggleImport={() => {}} />
         <CommandLineArmer />
       </DraftingRibbon>
+      {picker && <CanvasPointPicker {...picker} />}
       <CadEditSurface enabled />
     </EngineSessionProvider>,
   )
@@ -72,6 +74,45 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
 describe('CommandLineArmer (W4f slice B)', () => {
+  it.each([false, true])('keeps a refused LINE endpoint correctable with picker=%s', async (withPicker) => {
+    const ground = document.createElement('div')
+    mount(withPicker ? { ground, viewerRef: { current: {} } } : null)
+    await openAndLoad()
+    command(parseDrawingCommand('LINE'))
+    const layer = screen.getByLabelText('ribbon layer').value
+    point('0,0')
+    point('0,0')
+    expect(workers[0].posted.filter((m) => m.type === 'applyEdit')).toHaveLength(0)
+    expect(screen.getByTestId('cockpit-active-ask').textContent).toBe('LINE  Specify next point:')
+    expect(screen.getByTestId('cockpit-prompt-note').textContent).toContain('refused')
+    point('10,0')
+    expect(screen.getByLabelText('ribbon layer').value).toBe(layer)
+    expect(workers[0].posted.at(-1)).toMatchObject({ type: 'applyEdit', op: 'createLine', payload: { x1: 0, y1: 0, x2: 10, y2: 0 } })
+  })
+
+  it.each(['bar/click/bar', 'click/bar/bar'])('chains two segments through one point step: %s', async (order) => {
+    const ground = document.createElement('div')
+    const viewer = { unproject: (x, y) => ({ x, y }), setRubberBand: vi.fn() }
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => { cb(); return 0 })
+    mount({ ground, viewerRef: { current: viewer } })
+    await openAndLoad()
+    act(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'F3' })))
+    const click = (x, y) => act(() => {
+      ground.dispatchEvent(new MouseEvent('pointerdown', { clientX: x, clientY: y, button: 0 }))
+      ground.dispatchEvent(new MouseEvent('pointerup', { clientX: x, clientY: y, button: 0 }))
+    })
+    command(parseDrawingCommand('LINE'))
+    if (order === 'bar/click/bar') { point('5,5'); click(10, 0) }
+    else { click(5, 5); point('10,0') }
+    expect(workers[0].posted.filter((m) => m.type === 'applyEdit')).toHaveLength(1)
+    expect(workers[0].posted.at(-1)).toMatchObject({ payload: { x1: 5, y1: 5, x2: 10, y2: 0 } })
+    workers[0].emit({ type: 'editApplied', op: 'createLine', ok: true, createdId: 'e2', entities: [LINE, { ...LINE, id: 'e2', vertices: [[5, 5], [10, 0]] }], entityCount: 2 })
+    point('20,0')
+    expect(workers[0].posted.filter((m) => m.type === 'applyEdit')).toHaveLength(2)
+    expect(workers[0].posted.at(-1)).toMatchObject({ payload: { x1: 10, y1: 0, x2: 20, y2: 0 } })
+    expect(screen.getByLabelText('ribbon layer').value).toBe('')
+  })
+
   it('takes absolute, relative and polar points through the armed operand and publishes its live ask', async () => {
     mount()
     await openAndLoad()

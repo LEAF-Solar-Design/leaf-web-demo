@@ -104,6 +104,10 @@ export default function CommandLineArmer() {
           refuse(`${current.prompt.verb} refused: ${label}: ${pointExpressionRefusal(expression, anchor) || 'enter a point using x,y.'}`)
           return
         }
+        // A live picker owns the point sequence for both input surfaces.
+        const pick = { point, key, handled: false }
+        window.dispatchEvent(new CustomEvent('cockpit:pick-point', { detail: pick }))
+        if (pick.handled) { refuse(''); return }
         fields.forEach(([name], offset) => setInput(name, String(point[offset])))
       } else {
         setInput(key, raw)
@@ -114,13 +118,26 @@ export default function CommandLineArmer() {
       }
       refuse('')
       const next = current.index + 1
-      setCursor({ armed: current.armed, index: next })
       if (current.armed.op === 'createLine' && current.index === 1) setRunRequest({ armed: current.armed })
+      else setCursor({ armed: current.armed, index: next })
+    }
+    const onPicked = (event) => {
+      const current = live.current
+      const detail = event.detail
+      if (!current.prompt || detail?.op !== current.armed.op) return
+      const index = current.prompt.steps.findIndex((candidate) => candidate.fields.some(([key]) => key === detail.key))
+      if (index < 0) return
+      detail.handled = true
+      const runLine = current.armed.op === 'createLine' && index === 1
+      setCursor({ armed: current.armed, index: runLine ? index : index + 1 })
+      if (runLine && detail.run) setRunRequest({ armed: current.armed })
     }
     window.addEventListener('focusin', onFocus)
+    window.addEventListener('cockpit:picked', onPicked)
     window.addEventListener('cockpit:point', onPoint)
     return () => {
       window.removeEventListener('focusin', onFocus)
+      window.removeEventListener('cockpit:picked', onPicked)
       window.removeEventListener('cockpit:point', onPoint)
     }
   }, [setInput, refuse])
