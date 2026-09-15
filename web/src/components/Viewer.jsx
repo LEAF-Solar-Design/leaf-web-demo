@@ -21,6 +21,22 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 const CLICK_MOVE_PX = 5      // pointer travel under this = click (not a pan/drag)
 const CLICK_MAX_MS = 500
 
+export function recolorLayerGroups(layerGroups, colorForLayer) {
+  if (!(layerGroups instanceof Map) || typeof colorForLayer !== 'function') return 0
+  let updated = 0
+  for (const [layer, group] of layerGroups) {
+    const value = colorForLayer(layer)
+    for (const child of group.children) {
+      const material = child.material
+      if (typeof material?.color?.set !== 'function') continue
+      material.color.set(value)
+      if (typeof material.emissive?.set === 'function') material.emissive.set(value)
+      updated++
+    }
+  }
+  return updated
+}
+
 export function addPickDescriptor(index, handle, descriptor) {
   if (!index.has(handle)) index.set(handle, [])
   index.get(handle).push(descriptor)
@@ -117,7 +133,7 @@ function makeGlowTexture() {
 
 const Viewer = forwardRef(function Viewer(
   {
-    intake, colorForLayer, visibleLayers,
+    intake, colorForLayer, visibleLayers, paletteRevision = undefined,
     highlightHandles, markers, overlayPolylines,
     selectedHandle, onSelectEntity, pendingEdit,
     background, controlsEnabled = true, rotateEnabled = false,
@@ -127,6 +143,8 @@ const Viewer = forwardRef(function Viewer(
 ) {
   const mountRef = useRef(null)
   const stateRef = useRef(null)
+  const colorForLayerRef = useRef(colorForLayer)
+  colorForLayerRef.current = colorForLayer
   const safeRectRef = useRef(safeRect)
   safeRectRef.current = safeRect
   const previousSafeRef = useRef(safeRect)
@@ -283,7 +301,7 @@ const Viewer = forwardRef(function Viewer(
 
     const layerGroups = new Map()
     for (const [layer, polys] of byLayer) {
-      const col = new THREE.Color(colorForLayer(layer))
+      const col = new THREE.Color(colorForLayerRef.current(layer))
       const group = new THREE.Group()
 
       const fillPos = []
@@ -581,6 +599,7 @@ const Viewer = forwardRef(function Viewer(
 
     function onResize() {
       const w = mount.clientWidth, h = mount.clientHeight
+      if (!(w > 0) || !(h > 0)) return
       renderer.setSize(w, h)
       if (!sculpture && safeRectRef.current && fittedRef.current) fitToBounds()
       else applyFrustum()
@@ -666,7 +685,12 @@ const Viewer = forwardRef(function Viewer(
       delete mount.__cadviewer
       stateRef.current = null
     }
-  }, [activeIntake, colorForLayer, background, panelSculpture])
+  }, [activeIntake, paletteRevision === undefined ? colorForLayer : null, background, panelSculpture])
+
+  useEffect(() => {
+    if (paletteRevision === undefined || !stateRef.current) return
+    recolorLayerGroups(stateRef.current.layerGroups, colorForLayerRef.current)
+  }, [paletteRevision])
 
   useEffect(() => {
     const from = previousSafeRef.current

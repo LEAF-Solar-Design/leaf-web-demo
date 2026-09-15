@@ -18,6 +18,30 @@ import { describe, it } from 'node:test'
 import esbuild from 'esbuild'
 
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
+const viewerSource = readFileSync(new URL('./components/Viewer.jsx', import.meta.url), 'utf8')
+
+describe('W4g bleed-2a: one canvas across CAD and Solar CAD', () => {
+  it('passes a palette revision to the studio viewer', () => {
+    const viewer = appSource.slice(appSource.indexOf('const viewerEl = ('), appSource.indexOf('const legendEl ='))
+    assert.match(viewer, /paletteRevision=\{studioGround \? \(surfaceSlots\.groundMaterial\.layerAccent === 'solar' \? 'solar' : 'base'\) : undefined\}/)
+    assert.match(viewer, /colorForLayer=\{studioGround \? studioColorForLayer : surfaceColorForLayer\}/)
+  })
+  it('keeps the studio colour callback stable through its render-time ref', () => {
+    assert.match(appSource, /surfaceColorForLayerRef\.current = surfaceColorForLayer/)
+    assert.match(appSource, /const studioColorForLayer = useCallback\(\(layer\) => surfaceColorForLayerRef\.current\(layer\), \[\]\)/)
+  })
+  it('only rebuilds for callback identity when no revision is supplied', () => {
+    assert.ok(!viewerSource.includes('[activeIntake, colorForLayer, background, panelSculpture]'))
+    assert.ok(viewerSource.includes('paletteRevision === undefined'))
+  })
+  it('exports the in-place layer recolouring helper', () => {
+    assert.match(viewerSource, /export function recolorLayerGroups\(/)
+  })
+  it('ignores zero-size resize notifications before resizing the renderer', () => {
+    assert.match(viewerSource, new RegExp('function onResize\\(\\)\\s*\\{\\s*const w = mount\\.clientWidth, h = mount\\.clientHeight\\s*if \\(!\\(w > 0\\) \\|\\| !\\(h > 0\\)\\) return\\s*renderer\\.setSize\\('))
+  })
+})
+
 const appNoComments = decomment(appSource)
 const stripped = esbuild.transformSync(appSource, { loader: 'jsx' }).code
 describe('studio unobstructed drawing viewport', () => {

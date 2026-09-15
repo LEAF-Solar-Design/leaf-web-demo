@@ -2631,6 +2631,9 @@ export default function App() {
     // surfaceSlots is a frozen per-id literal, so its identity changes exactly
     // when activeSurface does: same memo invalidation as before.
   }, [studioGround, surfaceSlots, colorForLayer])
+  const surfaceColorForLayerRef = useRef(surfaceColorForLayer)
+  surfaceColorForLayerRef.current = surfaceColorForLayer
+  const studioColorForLayer = useCallback((layer) => surfaceColorForLayerRef.current(layer), [])
 
   // W4c-V3: the 135 REAL solved string routes over the bundled rooftop
   // sample, on the Solar tab only. Honesty gates, all structural:
@@ -3751,7 +3754,8 @@ export default function App() {
                 <Viewer
                   ref={viewerRef}
                   intake={intake}
-                  colorForLayer={surfaceColorForLayer}
+                  colorForLayer={studioGround ? studioColorForLayer : surfaceColorForLayer}
+                  paletteRevision={studioGround ? (surfaceSlots.groundMaterial.layerAccent === 'solar' ? 'solar' : 'base') : undefined}
                   stringRoutes={solarStringRoutes}
                   visibleLayers={visibleLayers}
                   highlightHandles={overlay?.highlight_handles}

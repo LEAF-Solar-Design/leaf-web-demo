@@ -2108,6 +2108,85 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
   })
 
+  test('W4g bleed-2a: CAD and Solar CAD keep one canvas, one WebGL context and the camera', async ({ page, request }) => {
+    test.setTimeout(120_000)
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    await page.goto('/app?surface=cad&drawing=cat-panels')
+    const viewer = page.locator('.studio-ground .viewer-canvas')
+    const canvas = viewer.locator('canvas')
+    const safeRectPattern = /^\d+,\d+,\d+,\d+$/
+    await expect.poll(() => canvas.count(), { timeout: 30_000 }).toBe(1)
+    await expect.poll(() => viewer.getAttribute('data-safe-rect')).toMatch(safeRectPattern)
+
+    const ribbon = page.getByTestId('drafting-ribbon')
+    const engine = await request.get('/engine/engine.js').catch(() => null)
+    const cadEditOn = (await ribbon.locator('[data-group="modify"]').count()) > 0
+    if (engine && engine.status() === 200 && cadEditOn) {
+      // Opening the engine head replaces the initial intake's canvas once.
+      await expect.poll(() => page.locator('.workspace-card').getAttribute('data-engine-document'), { timeout: 60_000 }).toMatch(/\S+/)
+    }
+    const settleFrames = () => page.evaluate(() => new Promise((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(resolve))
+    }))
+    await page.evaluate(() => new Promise((resolve, reject) => {
+      const selector = '.studio-ground .viewer-canvas canvas'
+      let current = document.querySelector(selector)
+      let stableSince = performance.now()
+      let frame
+      const timeout = setTimeout(() => {
+        cancelAnimationFrame(frame)
+        reject(new Error('Canvas did not remain stable for 500 ms within 15 s'))
+      }, 15_000)
+      const check = (now) => {
+        const next = document.querySelector(selector)
+        if (next !== current || !next) {
+          current = next
+          stableSince = now
+        }
+        if (current && now - stableSince >= 500) {
+          clearTimeout(timeout)
+          resolve()
+          return
+        }
+        frame = requestAnimationFrame(check)
+      }
+      frame = requestAnimationFrame(check)
+    }))
+    await canvas.evaluate((el) => { el.__bleed2a = 1 })
+    const readPose = () => viewer.evaluate((el) => el.__cadviewer.cameraPose())
+    const cadPose = await readPose()
+    const expectSameCanvas = async () => {
+      await expect.poll(() => canvas.count()).toBe(1)
+      await expect.poll(() => canvas.evaluate((el) => el.__bleed2a)).toBe(1)
+      await expect.poll(() => canvas.evaluate((el) => {
+        const context = el.getContext('webgl2') || el.getContext('webgl')
+        return context ? context.isContextLost() : null
+      })).toBe(false)
+    }
+
+    await page.getByRole('tab', { name: 'Solar CAD', exact: true }).click()
+    await expect.poll(() => page.locator('.app[data-surface="solar"]').count()).toBe(1)
+    await settleFrames()
+    await expectSameCanvas()
+    await expect.poll(readPose).toEqual(cadPose)
+
+    await page.getByRole('tab', { name: 'CAD', exact: true }).click()
+    await expect.poll(() => page.locator('.app[data-surface="cad"]').count()).toBe(1)
+    await settleFrames()
+    await expectSameCanvas()
+    await expect.poll(readPose).toEqual(cadPose)
+
+    await page.getByRole('tab', { name: 'Browser', exact: true }).click()
+    await expect.poll(() => page.locator('.app[data-surface="browser"]').count()).toBe(1)
+    await settleFrames()
+    await page.getByRole('tab', { name: 'CAD', exact: true }).click()
+    await expect.poll(() => page.locator('.app[data-surface="cad"]').count()).toBe(1)
+    await settleFrames()
+    await expectSameCanvas()
+    await expect.poll(() => viewer.getAttribute('data-safe-rect')).toMatch(safeRectPattern)
+  })
+
   test('W4g-7b-02c: INSERT of an existing block, on the real engine', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
