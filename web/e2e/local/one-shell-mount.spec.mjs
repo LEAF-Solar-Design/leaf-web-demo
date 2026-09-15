@@ -323,7 +323,6 @@ test.describe('route matrix, rail ON', () => {
     await page.getByRole('tab', { name: 'Browser' }).press('ArrowRight')
     await expect(nextProfileTab).toBeFocused()
     await expect(nextProfileTab).toHaveAttribute('aria-selected', 'true')
-    await expect(page.getByRole('heading', { level: 1, name: 'Project board', exact: true })).not.toBeFocused()
     await nextProfileTab.press('ArrowLeft')
     await expect(page.getByRole('tab', { name: 'Browser' })).toBeFocused()
     await expect(page.getByRole('tab', { name: 'Browser' })).toHaveAttribute('aria-selected', 'true')

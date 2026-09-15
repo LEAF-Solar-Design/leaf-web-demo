@@ -34,15 +34,14 @@ describe('Start is a view inside the current workspace profile', () => {
     assert.match(appNoComments, /\[startOpen, setStartOpen\] = useState\(false\)/)
   })
 
-  it('focuses the heading only when Start opens, not when the Browser board becomes visible', () => {
-    assert.match(appNoComments, /\[startOpen, setStartOpen\] = useState\(false\)/)
-    assert.ok(appNoComments.replace(/\r\n/g, '\n').includes([
-      'useLayoutEffect(() => {',
-      '    if (startOpen) boardHeadingRef.current?.focus()',
-      '  }, [startOpen])',
-    ].join('\n')))
-    assert.doesNotMatch(appNoComments, /\[startOpen, boardVisible\]/)
-    assert.doesNotMatch(appNoComments, /if \(boardVisible\) boardHeadingRef\.current\?\.focus\(\)/)
+  it('requests heading focus from the board only when Start opens', () => {
+    assert.match(appNoComments, /\[startFocusRequest, setStartFocusRequest\] = useState\(0\)/)
+    const start = appNoComments.indexOf('const onOpenStart =')
+    const end = appNoComments.indexOf('const returnToDrawing =', start)
+    assert.match(appNoComments.slice(start, end), /setStartFocusRequest\(\(request\) => request \+ 1\)/)
+    assert.equal((appNoComments.match(/setStartFocusRequest\(/g) || []).length, 1)
+    assert.match(appNoComments, /<SurfaceGrounds\s[\s\S]*?startFocusRequest=\{startFocusRequest\}/)
+    assert.doesNotMatch(appNoComments, /boardHeadingRef\.current\?\.focus\(\)/)
   })
 
   it('shows the Run and Build gloss beside the shared prompt for every visible board', () => {

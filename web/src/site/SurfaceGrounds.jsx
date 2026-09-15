@@ -16,7 +16,7 @@
 //     an unmount): the drawing ground survives tab switches with its WebGL
 //     context, lock, and job state, exactly as the workspace card always
 //     did (`display: none`, not unmount).
-import { Children, useLayoutEffect, useState } from 'react'
+import { Children, useLayoutEffect, useRef, useState } from 'react'
 import WorldSpaceBoard from './WorldSpaceBoard.jsx'
 import { START_BOARD_COPY } from './startBoardCopy.js'
 import { formatElementId } from '../lib/elementIdentity.js'
@@ -225,11 +225,19 @@ function BoardTiles({ workspace, drawing, catalog, renderTile }) {
 
 export function ProjectBoardGround({
   active = false, workspaceProject = null, workspace = null, drawing = null, catalog = null, mock = false,
-  contained = false, onReturnToDrawing = null, headingRef = null,
+  contained = false, onReturnToDrawing = null, headingRef = null, startFocusRequest = 0,
   worldSpace = import.meta.env.VITE_WORLD_SPACE_BOARD === '1', store,
 }) {
   const state = workspaceProject || EMPTY_WORKSPACE_PROJECT
   const win = useGroundWindow(active, contained)
+  const localHeadingRef = useRef(null)
+  const containedHeadingRef = headingRef || localHeadingRef
+  const lastFocusRequest = useRef(0)
+  useLayoutEffect(() => {
+    if (!active || !contained || !win || startFocusRequest <= lastFocusRequest.current) return
+    lastFocusRequest.current = startFocusRequest
+    containedHeadingRef.current?.focus()
+  }, [active, contained, win, startFocusRequest, containedHeadingRef])
   // Browser uses the frame's chrome. Drafting Start owns its header inside
   // the ground because a drawing profile has no product frame.
   return (
@@ -246,7 +254,7 @@ export function ProjectBoardGround({
         {contained && (
           <header className="ground-board-header">
             <div>
-              <h1 ref={headingRef} tabIndex={-1}>{START_BOARD_COPY.heading}</h1>
+              <h1 ref={containedHeadingRef} tabIndex={-1}>{START_BOARD_COPY.heading}</h1>
               <p>{state.kind === 'project' ? state.label : drawing?.name || state.drawingName}</p>
             </div>
             <button type="button" onClick={onReturnToDrawing}>{START_BOARD_COPY.returnToDrawing}</button>
@@ -338,7 +346,7 @@ export function DeviceGround({
 // switch never remounts a ground any more than it remounts the drawing.
 export default function SurfaceGrounds({
   surface, workspaceProject, workspace, drawing, catalog, mock,
-  boardVisible, onReturnToDrawing, headingRef,
+  boardVisible, onReturnToDrawing, headingRef, startFocusRequest,
   iosEnabled, iosContract, revision,
 }) {
   const projectLabel = workspaceProject?.kind === 'project'
@@ -356,6 +364,7 @@ export default function SurfaceGrounds({
         contained={boardVisible === true && groundShowsDrawing(surface)}
         onReturnToDrawing={onReturnToDrawing}
         headingRef={headingRef}
+        startFocusRequest={startFocusRequest}
         workspaceProject={workspaceProject}
         workspace={workspace}
         drawing={drawing}

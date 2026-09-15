@@ -254,12 +254,14 @@ export default function App() {
   // the old shell byte-for-byte (the rollback contract, studioGround.js).
   const studioGround = useStudioGround()
   const [startOpen, setStartOpen] = useState(false)
+  const [startFocusRequest, setStartFocusRequest] = useState(0)
   const startOpenRef = useRef(false)
   const startOpenerRef = useRef(null)
   const boardHeadingRef = useRef(null)
   const onOpenStart = useCallback((event) => {
     startOpenerRef.current = event?.currentTarget || document.activeElement
     startOpenRef.current = true
+    setStartFocusRequest((request) => request + 1)
     setStartOpen(true)
   }, [])
   const returnToDrawing = useCallback((restoreFocus = false) => {
@@ -2533,9 +2535,6 @@ export default function App() {
   // for a tenant with no overlay (useSurfaceContract's own contract).
   const surfaceSlots = useSurfaceContract(activeSurface, mock)
   const boardVisible = !!studioGround && (startOpen || surfaceSlots.ground === 'board')
-  useLayoutEffect(() => {
-    if (startOpen) boardHeadingRef.current?.focus()
-  }, [startOpen])
   // Keeps its name: ~20 sites read `studioGround && drafting`, and the App
   // wiring pin (src/app-wiring.test.mjs) guards that exact shape against the
   // white screen it was written for. Was groundShowsDrawing(activeSurface).
@@ -3333,6 +3332,7 @@ export default function App() {
           <SurfaceGrounds
             surface={activeSurface}
             boardVisible={boardVisible}
+            startFocusRequest={startFocusRequest}
             onReturnToDrawing={onReturnToDrawing}
             headingRef={boardHeadingRef}
             workspaceProject={workspaceProjectState}

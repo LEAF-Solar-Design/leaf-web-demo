@@ -5,7 +5,7 @@
  * the others stay mounted but hidden.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 
 import SurfaceGrounds, { DeviceGround, ProjectBoardGround, groundShowsDrawing } from './SurfaceGrounds.jsx'
@@ -31,6 +31,57 @@ describe('groundShowsDrawing', () => {
 })
 
 describe('ProjectBoardGround', () => {
+  it.each(['cad', 'solar'])('focuses each %s Start request once, after measurement', (surface) => {
+    let frame
+    const animationFrame = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      frame = callback
+      return 1
+    })
+    const view = (request, boardCatalog = null) => (
+      <div className="app">
+        <div className="viewer-toolbar" />
+        <main className="center-scroll" />
+        <div className="bar-dock"><button type="button">Other focus</button></div>
+        <SurfaceGrounds surface={surface} boardVisible startFocusRequest={request} catalog={boardCatalog} />
+      </div>
+    )
+    try {
+      const { container, rerender } = render(view(1))
+      const heading = screen.getByRole('heading', { level: 1, name: 'Project board' })
+      const focus = vi.spyOn(heading, 'focus')
+      expect(container.querySelector('.ground-desk')).toHaveAttribute('data-measured', 'false')
+      expect(heading).not.toHaveFocus()
+      expect(document.activeElement).toBe(document.body)
+
+      const toolbar = container.querySelector('.viewer-toolbar')
+      const column = container.querySelector('main.center-scroll')
+      const prompt = container.querySelector('.bar-dock')
+      toolbar.getBoundingClientRect = () => ({ height: 40, bottom: 100 })
+      column.getBoundingClientRect = () => ({ left: 20, width: 800 })
+      prompt.getBoundingClientRect = () => ({ height: 60, top: 700 })
+      fireEvent(window, new Event('resize'))
+      act(() => frame())
+      expect(container.querySelector('.ground-desk')).toHaveAttribute('data-measured', 'true')
+      expect(heading).toHaveFocus()
+      expect(focus).toHaveBeenCalledTimes(1)
+
+      const other = screen.getByRole('button', { name: 'Other focus' })
+      other.focus()
+      rerender(view(1, catalog))
+      prompt.getBoundingClientRect = () => ({ height: 60, top: 650 })
+      fireEvent(window, new Event('resize'))
+      act(() => frame())
+      expect(other).toHaveFocus()
+      expect(focus).toHaveBeenCalledTimes(1)
+
+      rerender(view(2, catalog))
+      expect(heading).toHaveFocus()
+      expect(focus).toHaveBeenCalledTimes(2)
+    } finally {
+      animationFrame.mockRestore()
+    }
+  })
+
   it('keeps the contained desk unmeasured without a measurable toolbar', () => {
     const { container } = render(<SurfaceGrounds surface="cad" boardVisible />)
     const board = container.querySelector('[data-ground="browser"]')
