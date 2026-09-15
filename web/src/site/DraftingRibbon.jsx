@@ -49,14 +49,28 @@ function useBandHeight(ref) {
     if (!el) return undefined
     const host = el.closest('.workspace-card') || el.parentElement
     if (!host) return undefined
-    const publish = () => { host.style.setProperty(RIBBON_HEIGHT_VAR, `${Math.round(el.offsetHeight)}px`) }
+    const shell = el.closest('.studio-shell')
+    const app = el.closest('.app')
+    const toolbar = host.querySelector('.viewer-toolbar')
+    const publish = () => {
+      host.style.setProperty(RIBBON_HEIGHT_VAR, `${Math.round(el.offsetHeight)}px`)
+      // The narrow ground is a sibling of the app. Publish its real band
+      // edge on their shared shell, including the document tabs and nav.
+      if (shell && toolbar && window.innerWidth <= 980 && window.innerHeight >= 500) {
+        shell.style.setProperty('--cockpit-stack-top', `${toolbar.getBoundingClientRect().bottom}px`)
+      } else shell?.style.removeProperty('--cockpit-stack-top')
+    }
     publish()
-    if (typeof ResizeObserver === 'undefined') return () => host.style.removeProperty(RIBBON_HEIGHT_VAR)
-    const observer = new ResizeObserver(publish)
-    observer.observe(el)
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(publish)
+    observer?.observe(el)
+    if (toolbar) observer?.observe(toolbar)
+    for (const band of app?.querySelectorAll('header.top, .tc-product-nav') || []) observer?.observe(band)
+    window.addEventListener('resize', publish)
     return () => {
-      observer.disconnect()
+      observer?.disconnect()
+      window.removeEventListener('resize', publish)
       host.style.removeProperty(RIBBON_HEIGHT_VAR)
+      shell?.style.removeProperty('--cockpit-stack-top')
     }
   }, [ref])
 }
@@ -191,9 +205,85 @@ export function RibbonCluster({ id, label, kind = 'group', note = null, extra = 
   )
 }
 
-export default function DraftingRibbon({ clusters = [], tab = 'draw', children = null }) {
+export default function DraftingRibbon({ clusters = [], tab = 'draw', children = null, visiblePanelCount = null }) {
   const list = Array.isArray(clusters) ? clusters : []
   const ref = useRef(null)
+  const panelsRef = useRef(null)
+  const moreRef = useRef(null)
+  const measuredWidthRef = useRef(0)
+  const [overflow, setOverflow] = useState(false)
+  const [open, setOpen] = useState(false)
+  useLayoutEffect(() => { setOpen(false) }, [tab])
+  useLayoutEffect(() => {
+    const ribbon = ref.current
+    const panels = panelsRef.current
+    const more = moreRef.current
+    if (!ribbon || !panels || !more) return undefined
+    // A display:none descendant receives no focus event. Route direct
+    // command-cancel focus calls before the browser discards them.
+    const focusMethods = new Map()
+    const guardFocus = () => {
+      panels.querySelectorAll('button, input, select, textarea, [tabindex]').forEach((control) => {
+        if (focusMethods.has(control)) return
+        const descriptor = Object.getOwnPropertyDescriptor(control, 'focus')
+        const focus = control.focus
+        focusMethods.set(control, descriptor)
+        control.focus = function (options) {
+          if (control.closest('.ribbon-cluster[hidden]')) more.focus(options)
+          else focus.call(control, options)
+        }
+      })
+    }
+    const measure = () => {
+      guardFocus()
+      if (open) {
+        if (ribbon.clientWidth !== measuredWidthRef.current) {
+          more.focus()
+          setOpen(false)
+        }
+        return
+      }
+      measuredWidthRef.current = ribbon.clientWidth
+      const groups = [...panels.querySelectorAll('.ribbon-cluster')]
+      groups.forEach((group) => { group.hidden = false })
+      more.hidden = false
+      const available = ribbon.clientWidth - 4
+      const widths = groups.map((group) => group.getBoundingClientRect().width)
+      const total = widths.reduce((sum, width) => sum + width, 0)
+      const needsOverflow = visiblePanelCount !== null
+        ? groups.length > visiblePanelCount
+        : available > 0 && total > available
+      let used = 0
+      const limit = available - more.getBoundingClientRect().width
+      groups.forEach((group, index) => {
+        used += widths[index]
+        const hide = needsOverflow && (visiblePanelCount !== null ? index >= visiblePanelCount : used > limit)
+        if (hide && group.contains(document.activeElement)) more.focus()
+        group.hidden = hide
+      })
+      if (!needsOverflow && document.activeElement === more) panels.querySelector('.ribbon-tool:not(:disabled)')?.focus()
+      more.hidden = !needsOverflow
+      setOverflow(needsOverflow)
+    }
+    measure()
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure)
+    observer?.observe(ribbon)
+    const mutations = new MutationObserver(measure)
+    mutations.observe(panels, { childList: true, subtree: true })
+    window.addEventListener('resize', measure)
+    return () => {
+      observer?.disconnect(); mutations.disconnect(); window.removeEventListener('resize', measure)
+      focusMethods.forEach((descriptor, control) => {
+        if (descriptor) Object.defineProperty(control, 'focus', descriptor)
+        else delete control.focus
+      })
+    }
+  }, [clusters, children, tab, visiblePanelCount, open])
+  useLayoutEffect(() => {
+    if (!open) return
+    panelsRef.current?.querySelectorAll('.ribbon-cluster').forEach((group) => { group.hidden = false })
+    panelsRef.current?.querySelector('.ribbon-tool:not(:disabled)')?.focus()
+  }, [open])
   useBandHeight(ref)
   return (
     <div
@@ -201,10 +291,24 @@ export default function DraftingRibbon({ clusters = [], tab = 'draw', children =
       id="drafting-ribbon"
       className="drafting-ribbon"
       role="toolbar"
+      tabIndex={-1}
       aria-label="Drafting tools"
       data-testid="drafting-ribbon"
       data-tab={tab}
+      data-overflow-open={open ? 'true' : undefined}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape' && open) {
+          event.preventDefault()
+          event.stopPropagation()
+          moreRef.current?.focus()
+          setOpen(false)
+        }
+      }}
+      onBlur={(event) => {
+        if (open && !event.currentTarget.contains(event.relatedTarget)) setOpen(false)
+      }}
     >
+      <div id="drafting-ribbon-panels" className="ribbon-panels" ref={panelsRef}>
       {children}
       {list.length === 0 && !children && (
         // Honest empty: a sentence, never a fabricated cluster.
@@ -225,6 +329,19 @@ export default function DraftingRibbon({ clusters = [], tab = 'draw', children =
           {(cluster.tools || []).map((tool) => <RibbonTool key={tool.id} tool={tool} />)}
         </RibbonCluster>
       ))}
+      </div>
+      <button
+        ref={moreRef}
+        type="button"
+        className="ribbon-more"
+        hidden={!overflow}
+        aria-label="More panels"
+        aria-expanded={open}
+        aria-controls="drafting-ribbon-panels"
+        onClick={() => setOpen((value) => !value)}
+      >
+        More panels
+      </button>
     </div>
   )
 }

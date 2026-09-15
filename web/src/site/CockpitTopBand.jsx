@@ -57,7 +57,24 @@ export default function CockpitTopBand({ tab = 'draw', onTab, before = [], after
         <span id={QUICK_FILE_SLOT_ID} className="cockpit-quick-slot" />
         {after.map((tool) => <QuickButton key={tool.id} tool={tool} />)}
       </div>
-      <div className="cockpit-ribbon-tabs" role="tablist" aria-label="Ribbon" onKeyDown={moveRovingTab}>
+      <div className="cockpit-ribbon-tabs" role="tablist" aria-label="Ribbon" onKeyDown={(event) => {
+        if (event.key === 'Tab' && !event.shiftKey && event.target.getAttribute('aria-selected') === 'true') {
+          const ribbon = document.getElementById('drafting-ribbon')
+          const controls = ribbon?.querySelectorAll('button:not(:disabled), select:not(:disabled), input:not(:disabled), [tabindex="0"]:not(:disabled):not([aria-disabled="true"])') || []
+          const tool = [...controls].find((element) => {
+            if (element.closest('[hidden], [inert]')) return false
+            for (let node = element; node && node !== ribbon; node = node.parentElement) {
+              const style = getComputedStyle(node)
+              if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false
+            }
+            return true
+          })
+          // Annotate can contain only unavailable tools. Keep its panel in
+          // the keyboard path without enabling a command that does not exist.
+          if (ribbon) { event.preventDefault(); (tool || ribbon).focus(); return }
+        }
+        moveRovingTab(event)
+      }}>
         {RIBBON_TABS.map((t) => {
           const selected = t.id === tab
           const off = !!t.reason

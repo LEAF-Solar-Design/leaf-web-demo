@@ -32,6 +32,73 @@ const FAMS = [
 ]
 
 describe('DraftingRibbon', () => {
+  it('exposes a collapsed panel through More panels without remounting tools', () => {
+    const visiblePanelCount = 1
+    const onCopy = vi.fn()
+    render(<DraftingRibbon visiblePanelCount={visiblePanelCount} clusters={[
+      { id: 'draw', label: 'Draw', tools: [{ id: 'line', label: 'Line' }] },
+      { id: 'modify', label: 'Modify', tools: [{ id: 'move', label: 'Move' }] },
+      { id: 'clipboard', label: 'Clipboard', tools: [{ id: 'copy', label: 'Copy', onClick: onCopy }] },
+    ]} />)
+    const copy = document.querySelector('[data-tool="copy"]')
+    const more = screen.getByRole('button', { name: 'More panels' })
+    expect(more.getAttribute('aria-expanded')).toBe('false')
+    expect(copy.closest('.ribbon-cluster').hidden).toBe(true)
+    fireEvent.click(more)
+    expect(more.getAttribute('aria-expanded')).toBe('true')
+    expect(document.getElementById(more.getAttribute('aria-controls')).contains(copy)).toBe(true)
+    expect(screen.getByRole('group', { name: 'Clipboard' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Copy' })).toBe(copy)
+    expect(document.activeElement.dataset.tool).toBe('line')
+    fireEvent.click(copy)
+    expect(onCopy).toHaveBeenCalledTimes(1)
+    fireEvent.keyDown(copy, { key: 'Escape' })
+    expect(document.activeElement).toBe(more)
+    expect(more.getAttribute('aria-expanded')).toBe('false')
+    expect(copy.closest('.ribbon-cluster').hidden).toBe(true)
+  })
+
+  it('restores every panel when capacity returns and hides the unused overflow control', () => {
+    const clusters = [{ id: 'clipboard', label: 'Clipboard', tools: [{ id: 'copy', label: 'Copy' }] }]
+    const { rerender } = render(<DraftingRibbon clusters={clusters} visiblePanelCount={0} />)
+    expect(screen.queryByRole('button', { name: 'Copy' })).toBeNull()
+    rerender(<DraftingRibbon clusters={clusters} visiblePanelCount={1} />)
+    expect(screen.getByRole('button', { name: 'Copy' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'More panels' })).toBeNull()
+  })
+
+  it('hands focus to More panels when closing over a tool and when cancel targets that hidden tool', () => {
+    render(<DraftingRibbon visiblePanelCount={0} clusters={[
+      { id: 'clipboard', label: 'Clipboard', tools: [{ id: 'copy', label: 'Copy' }] },
+    ]} />)
+    const more = screen.getByRole('button', { name: 'More panels' })
+    fireEvent.click(more)
+    const copy = screen.getByRole('button', { name: 'Copy' })
+    copy.focus()
+    fireEvent.click(more)
+    expect(copy.closest('.ribbon-cluster').hidden).toBe(true)
+    expect(document.activeElement).toBe(more)
+    const prompt = document.createElement('input')
+    document.body.appendChild(prompt)
+    prompt.focus()
+    // The engine cancel path calls focus directly, which cannot emit a
+    // focusin event for a display:none tool in a browser.
+    copy.focus()
+    expect(document.activeElement).toBe(more)
+    prompt.remove()
+  })
+
+  it('moves focus when reduced capacity hides the focused panel and restores native focus on unmount', () => {
+    const clusters = [{ id: 'clipboard', label: 'Clipboard', tools: [{ id: 'copy', label: 'Copy' }] }]
+    const { rerender, unmount } = render(<DraftingRibbon clusters={clusters} visiblePanelCount={1} />)
+    const copy = screen.getByRole('button', { name: 'Copy' })
+    copy.focus()
+    rerender(<DraftingRibbon clusters={clusters} visiblePanelCount={0} />)
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'More panels' }))
+    unmount()
+    expect(Object.hasOwn(copy, 'focus')).toBe(false)
+  })
+
   it('renders one cluster per family and arms the catalog run path with ribbon attribution', () => {
     const onRequestRun = vi.fn()
     render(<DraftingRibbon clusters={catalogClusters(FAMS, { onRequestRun })} />)
