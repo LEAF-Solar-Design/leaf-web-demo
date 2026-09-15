@@ -51,6 +51,10 @@ export function GeometryRows({ geometry }) {
           <dt>Closed</dt><dd>{geometry.closed ? 'yes' : 'no'}</dd>
           <dt>{geometry.closed ? 'Perimeter' : 'Length'}</dt><dd>{formatUnits(geometry.length)} u</dd>
           {geometry.area != null && (<><dt>Area</dt><dd>{formatUnits(geometry.area)} u²</dd></>)}
+          {geometry.first && geometry.last && (<>
+            <dt>Start</dt><dd>{geometry.first.map((v) => formatUnits(v)).join(', ')}</dd>
+            <dt>End</dt><dd>{geometry.last.map((v) => formatUnits(v)).join(', ')}</dd>
+          </>)}
         </>
       )}
       {'position' in geometry && (
@@ -74,11 +78,12 @@ export function GeometryRows({ geometry }) {
 // while nothing was selected. Client-derived truth only: the counts the
 // intake carries and the extents computed from its vertices; '—' for
 // anything absent, never an invented number.
-export function DrawingRows({ drawing }) {
+export function DrawingRows({ drawing, offscreenResult = null, onShowResult = null }) {
   if (!drawing) return null
   const n = (v) => (Number.isFinite(v) ? v.toLocaleString() : '—')
   const u = (v) => (Number.isFinite(v) ? `${formatUnits(v)} u` : '—')
   return (
+    <>
     <dl className="dock-drawing" data-testid="dock-drawing">
       <dt>Name</dt><dd title={drawing.name || ''}>{drawing.name || '—'}</dd>
       <dt>Entities</dt><dd>{n(drawing.entities)}</dd>
@@ -92,7 +97,14 @@ export function DrawingRows({ drawing }) {
       <dt>Width</dt><dd>{u(drawing.extents ? drawing.extents.maxX - drawing.extents.minX : NaN)}</dd>
       <dt>Height</dt><dd>{u(drawing.extents ? drawing.extents.maxY - drawing.extents.minY : NaN)}</dd>
       <dt>Source</dt><dd>{drawing.source || '—'}</dd>
+      {drawing.undoDepth != null && (<>
+        <dt>Browser edits</dt><dd>{n(drawing.undoDepth)} to undo · {n(drawing.redoDepth)} to redo</dd>
+      </>)}
     </dl>
+    {offscreenResult && (
+      <p className="dock-result" role="status">New {offscreenResult.kind} is off-screen. <button type="button" onClick={onShowResult}>Show result</button></p>
+    )}
+    </>
   )
 }
 
@@ -120,7 +132,7 @@ export function drawingExtents(polylines) {
 // control at its right; ours is real (App unmounts the pane and the canvas
 // takes the column) and the View tab's Properties tool brings it back. No
 // pin: there is no auto-hide behaviour to pin, so a pin would be a dead control.
-export default function PropertiesDock({ layers, selection, geometry, plan = null, drawing = null, onClose = null }) {
+export default function PropertiesDock({ layers, selection, geometry, plan = null, drawing = null, onClose = null, offscreenResult = null, onShowResult = null }) {
   return (
     <aside className="properties-dock" aria-label="Properties" data-testid="properties-dock">
       <div className="dock-title">
@@ -130,7 +142,7 @@ export default function PropertiesDock({ layers, selection, geometry, plan = nul
         )}
       </div>
       <DockSection title="Layers">{layers}</DockSection>
-      {drawing && <DockSection title="Drawing"><DrawingRows drawing={drawing} /></DockSection>}
+      {drawing && <DockSection title="Drawing"><DrawingRows drawing={drawing} offscreenResult={offscreenResult} onShowResult={onShowResult} /></DockSection>}
       <DockSection title="Selection">
         {selection}
         <GeometryRows geometry={geometry} />

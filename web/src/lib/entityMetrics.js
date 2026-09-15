@@ -52,6 +52,10 @@ export function entityGeometry(entity, kind) {
       closed: !!entity.closed,
       length: polyLength(pts, !!entity.closed),
       area: entity.closed && pts.length >= 3 ? polyArea(pts) : null,
+      ...(!entity.closed && pts.length >= 2 ? {
+        first: pts[0].slice(0, 2),
+        last: pts[pts.length - 1].slice(0, 2),
+      } : {}),
     }
   }
   if (kind === 'insert') {

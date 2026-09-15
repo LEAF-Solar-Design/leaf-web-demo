@@ -257,6 +257,10 @@ export default function App() {
   const [intakeRetryKey, setIntakeRetryKey] = useState(0) // X3 Retry — bumping re-runs the intake load effect
   const [selectedTool, setSelectedTool] = useState(null)
   const [selectedHandle, setSelectedHandle] = useState(null)
+  const [activeIntake, setActiveIntake] = useState(null)
+  const [engineHistory, setEngineHistory] = useState(null)
+  const [resultCandidate, setResultCandidate] = useState(null)
+  const [offscreenResult, setOffscreenResult] = useState(null)
   const [pendingEdit, setPendingEdit] = useState(null)
   // Write-loop (§11, live mode): the current drawing/version chain from the last
   // drawing response and an undo/redo-in-flight guard. Version-completed events
@@ -1203,25 +1207,88 @@ export default function App() {
   // Count ALL entity kinds per layer (polylines + inserts + 3DFACEs) so
   // insert/face-only layers (e.g. the ?fixture=edit Blocks/Surfaces layers)
   // stop reading 0 in the legend.
-  const layerCounts = useMemo(() => countEntitiesByLayer(shown), [shown])
+  const drawingIntake = activeIntake || shown
+  const layerCounts = useMemo(() => countEntitiesByLayer(drawingIntake), [drawingIntake])
 
   // resolve the picked handle to an entity descriptor for the readout
-  const selection = useMemo(() => selectEntity(shown, selectedHandle, {
+  const selection = useMemo(() => selectEntity(drawingIntake, selectedHandle, {
     onUnresolved: (handle) => ({ handle, kind: 'entity', layer: null }),
-  }), [selectedHandle, shown])
+  }), [selectedHandle, drawingIntake])
   // W4c-V2: the raw intake entity behind the selection, resolved in place -
   // selectEntity deliberately drops geometry and its descriptor shape is
   // pinned by exact-shape tests, so the dock derives from the intake here.
   // Scope-reset for free: a drawing/tenant switch clears selectedHandle and
   // replaces `shown`, so no stale geometry can survive the switch.
   const selectedEntityGeometry = useMemo(() => {
-    if (!selectedHandle || !shown) return null
-    const entity = (shown.polylines || []).find((e) => e.handle === selectedHandle)
-      || (shown.inserts || []).find((e) => e.handle === selectedHandle)
-      || (shown.faces3d || []).find((e) => e.handle === selectedHandle)
+    if (!selectedHandle || !drawingIntake) return null
+    const entity = (drawingIntake.polylines || []).find((e) => e.handle === selectedHandle)
+      || (drawingIntake.inserts || []).find((e) => e.handle === selectedHandle)
+      || (drawingIntake.faces3d || []).find((e) => e.handle === selectedHandle)
     if (!entity) return null
     return entityGeometry(entity, selection?.kind)
-  }, [shown, selectedHandle, selection])
+  }, [drawingIntake, selectedHandle, selection])
+
+  const resultBounds = useMemo(() => {
+    if (!resultCandidate || !activeIntake || resultCandidate.documentId !== activeIntake.documentId) return null
+    return drawingExtents((activeIntake.polylines || []).filter((entity) => entity.handle === resultCandidate.handle))
+  }, [activeIntake, resultCandidate])
+  useEffect(() => {
+    setOffscreenResult(null)
+    if (resultCandidate && !resultBounds) setResultCandidate(null)
+    if (!resultBounds || !studioGround) return undefined
+    let frame
+    // Stop after 600 consecutive invalid frames, about ten seconds at 60 fps.
+    const maxInvalidFrames = 600
+    let invalidFrames = 0
+    // applyVersion rebuilds and refits the scene. Measure after that layout,
+    // then watch the candidate until a pan, zoom or Show result reveals it.
+    const measure = () => {
+      const viewer = viewerRef.current
+      const rect = studioGround.querySelector('.viewer-canvas canvas')?.getBoundingClientRect()
+      const points = [
+        viewer?.project?.(resultBounds.minX, resultBounds.minY),
+        viewer?.project?.(resultBounds.minX, resultBounds.maxY),
+        viewer?.project?.(resultBounds.maxX, resultBounds.minY),
+        viewer?.project?.(resultBounds.maxX, resultBounds.maxY),
+      ]
+      if (rect?.width > 0 && rect.height > 0 && points.every((p) => Number.isFinite(p?.x) && Number.isFinite(p?.y))) {
+        invalidFrames = 0
+        const outside = points.some((p) => p.x < rect.left || p.x > rect.right || p.y < rect.top || p.y > rect.bottom)
+        const tiny = Math.max(Math.max(...points.map((p) => p.x)) - Math.min(...points.map((p) => p.x)), Math.max(...points.map((p) => p.y)) - Math.min(...points.map((p) => p.y))) < 8
+        if (!outside && !tiny) {
+          setOffscreenResult(null)
+          setResultCandidate(null)
+          return
+        }
+        setOffscreenResult((current) => current === resultCandidate ? current : resultCandidate)
+      } else if (++invalidFrames >= maxInvalidFrames) {
+        setResultCandidate(null)
+        setOffscreenResult(null)
+        return
+      }
+      frame = requestAnimationFrame(measure)
+    }
+    frame = requestAnimationFrame(() => { frame = requestAnimationFrame(measure) })
+    return () => cancelAnimationFrame(frame)
+  }, [resultBounds, resultCandidate, studioGround])
+  const showCreatedResult = useCallback(() => {
+    if (!resultBounds) return
+    const viewer = viewerRef.current
+    const rect = studioGround?.querySelector('.viewer-canvas canvas')?.getBoundingClientRect()
+    const pose = viewer?.getPose?.()
+    const points = [
+      viewer?.project?.(resultBounds.minX, resultBounds.minY),
+      viewer?.project?.(resultBounds.minX, resultBounds.maxY),
+      viewer?.project?.(resultBounds.maxX, resultBounds.minY),
+      viewer?.project?.(resultBounds.maxX, resultBounds.maxY),
+    ]
+    if (!pose || !points.every((p) => Number.isFinite(p?.x) && Number.isFinite(p?.y)) || !(rect?.width > 0 && rect.height > 0)) return
+    // Viewer.setView uses applyViewPose's center object and absolute zoom.
+    // Projected spans account for the current camera tilt and aspect ratio.
+    const span = Math.max((Math.max(...points.map((p) => p.x)) - Math.min(...points.map((p) => p.x))) / rect.width, (Math.max(...points.map((p) => p.y)) - Math.min(...points.map((p) => p.y))) / rect.height)
+    const zoom = span > 0 ? pose.zoom * 0.4 / span : pose.zoom
+    viewer.setView({ center: { x: (resultBounds.minX + resultBounds.maxX) / 2, y: (resultBounds.minY + resultBounds.maxY) / 2 }, zoom })
+  }, [resultBounds, studioGround])
 
   // Swap the viewer + panels to a drawing version (§11). The completed event
   // ("Version 2 created" / "Reverted to version 1") fires the NT2 toast.
@@ -2758,23 +2825,24 @@ export default function App() {
   // name makes the build transform rename one of them and the App wiring
   // pins (src/app-wiring.test.mjs) then miss the bootstrap's pattern.
   const paneDrawingFacts = useMemo(() => {
-    if (!(studioGround && drafting && shown)) return null
-    const layers = Array.isArray(shown.layers) ? shown.layers : []
-    const polylines = Array.isArray(shown.polylines) ? shown.polylines.length : 0
-    const inserts = Array.isArray(shown.inserts) ? shown.inserts.length : 0
-    const faces = Array.isArray(shown.faces3d) ? shown.faces3d.length : 0
+    if (!(studioGround && drafting && drawingIntake)) return null
+    const layers = Array.isArray(drawingIntake.layers) ? drawingIntake.layers : []
+    const polylines = Array.isArray(drawingIntake.polylines) ? drawingIntake.polylines.length : 0
+    const inserts = Array.isArray(drawingIntake.inserts) ? drawingIntake.inserts.length : 0
+    const faces = Array.isArray(drawingIntake.faces3d) ? drawingIntake.faces3d.length : 0
     return {
-      name: `${projectName}.dwg`,
+      name: activeIntake ? activeIntake.documentId : `${projectName}.dwg`,
       entities: polylines + inserts + faces,
       polylines,
       inserts,
       faces,
       layers: layers.length,
       layersShown: layers.filter((l) => visibleLayers[l] !== false).length,
-      extents: drawingExtents(shown.polylines),
-      source: mock ? 'sample data' : 'project drawing',
+      extents: drawingExtents(drawingIntake.polylines),
+      source: activeIntake ? 'browser drawing' : mock ? 'sample data' : 'project drawing',
+      ...(activeIntake && engineHistory ? engineHistory : {}),
     }
-  }, [studioGround, drafting, shown, projectName, visibleLayers, mock])
+  }, [studioGround, drafting, drawingIntake, activeIntake, engineHistory, projectName, visibleLayers, mock])
 
   // W4d Slice A: the ONE engine-session mount wraps the drawing workspace,
   // so the ribbon's engine clusters and the import pane consume the same
@@ -3296,11 +3364,27 @@ export default function App() {
                   viewerRef={viewerRef}
                   selectedHandle={selectedHandle}
                   onSelectedHandleChange={setSelectedHandle}
-                  onShown={(intake) => {
+                  onShown={(intake, history) => {
+                    setActiveIntake(intake)
+                    setEngineHistory(history ? { undoDepth: history.undoDepth, redoDepth: history.redoDepth } : null)
+                    if (!intake || (resultCandidate && resultCandidate.documentId !== intake.documentId)) {
+                      setResultCandidate(null)
+                      setOffscreenResult(null)
+                    }
+                    if (intake && history?.createdResult?.documentId === intake.documentId) {
+                      setOffscreenResult(null)
+                      setResultCandidate(history.createdResult)
+                    }
                     const el = workspaceCardRef.current
                     if (!el) return
                     if (intake) el.dataset.engineDocument = intake.documentId
                     else delete el.dataset.engineDocument
+                  }}
+                  onHidden={() => {
+                    setActiveIntake(null)
+                    setEngineHistory(null)
+                    setResultCandidate(null)
+                    setOffscreenResult(null)
                   }}
                 />
               )}
@@ -3585,9 +3669,9 @@ export default function App() {
                 for every field); rail OFF renders them inline byte-for-byte.
                 Geometry is client-derived from the intake entity in place. */}
             {(() => {
-              const legendEl = shown ? (
+              const legendEl = drawingIntake ? (
                 <Legend
-                  layers={shown.layers}
+                  layers={drawingIntake.layers}
                   counts={layerCounts}
                   colorForLayer={surfaceColorForLayer}
                   visibleLayers={visibleLayers}
@@ -3632,6 +3716,8 @@ export default function App() {
                     selection={readoutEl}
                     geometry={selectedEntityGeometry}
                     drawing={paneDrawingFacts}
+                    offscreenResult={offscreenResult}
+                    onShowResult={showCreatedResult}
                     onClose={() => setPaneOpen(false)}
                     plan={<SurfaceFrame.Entitlement at="docked" />}
                   />
@@ -3953,7 +4039,7 @@ export default function App() {
         {/* W4b cockpit: live cursor coordinates, scale, counts, selection
             (studio only; DOM-written at rAF rate, never React state). */}
         {studioGround && groundShowsDrawing(activeSurface) && (
-          <CockpitStatus ground={studioGround} viewerRef={viewerRef} shown={shown} selectedHandle={selectedHandle} />
+          <CockpitStatus ground={studioGround} viewerRef={viewerRef} shown={drawingIntake} selectedHandle={selectedHandle} />
         )}
         {/* W4e: ORTHO and OSNAP real through StatusModesBridge; the rest honestly off, plus fullscreen. */}
         <SurfaceFrame.Cockpit />

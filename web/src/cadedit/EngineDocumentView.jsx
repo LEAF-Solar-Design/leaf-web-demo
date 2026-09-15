@@ -19,12 +19,15 @@ import { engineIntake, hexHandle } from './engineIntake.js'
 import { SESSION_ERROR } from './engineSession.js'
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
 
-export default function EngineDocumentView({ viewerRef = null, onShown = null, selectedHandle = null, onSelectedHandleChange = null }) {
+export default function EngineDocumentView({ viewerRef = null, onShown = null, onHidden = null, selectedHandle = null, onSelectedHandleChange = null }) {
   const { session, highlightedIds } = useEngineSessionContext()
   const showing = session.engineParsed && session.errorKind !== SESSION_ERROR.CRASHED
   const entities = showing ? session.entities : null
   const documentId = showing ? session.documentId : ''
   const lastRef = useRef(null)
+  const intakeRef = useRef(null)
+  const historyRef = useRef({ documentId: '', undoDepth: 0 })
+  const pendingCreationRef = useRef(null)
   // Both mirrors share this ref so each other's writes cannot echo as changes.
   const lastSelectedHandleRef = useRef(undefined)
   const lastEngineSelectionRef = useRef(undefined)
@@ -75,25 +78,63 @@ export default function EngineDocumentView({ viewerRef = null, onShown = null, s
   // render) tells the host the stamp is gone (kimi, #969).
   const onShownRef = useRef(onShown)
   onShownRef.current = onShown
+  const onHiddenRef = useRef(onHidden)
+  onHiddenRef.current = onHidden
   useEffect(() => {
     const viewer = viewerRef?.current
-    if (!viewer || typeof viewer.applyVersion !== 'function') return undefined
     if (!entities) {
+      pendingCreationRef.current = null
       if (lastRef.current !== null) {
         lastRef.current = null
-        viewer.applyVersion(null)
+        intakeRef.current = null
+        historyRef.current = { documentId: '', undoDepth: 0 }
+        viewer?.applyVersion?.(null)
         onShown?.(null)
+        onHiddenRef.current?.()
       }
       return undefined
     }
-    if (lastRef.current === entities) return undefined
-    lastRef.current = entities
-    const intake = engineIntake(entities, documentId)
-    viewer.applyVersion(intake)
-    viewer.setHighlight?.(Array.from(highlightedIds || []))
-    onShown?.(intake)
+    if (!viewer || typeof viewer.applyVersion !== 'function') return undefined
+    const previous = historyRef.current
+    let createdResult = null
+    const pending = pendingCreationRef.current
+    if (pending && (pending.entities !== entities || pending.documentId !== documentId || pending.undoDepth !== session.undoDepth)) {
+      pendingCreationRef.current = null
+    }
+    const pendingStatusChanged = pendingCreationRef.current && previous.status !== session.status
+    if (lastRef.current !== entities || previous.documentId !== documentId) {
+      if (previous.documentId === documentId && session.undoDepth > previous.undoDepth
+        && lastRef.current) {
+        const ids = new Set()
+        for (const entity of lastRef.current) ids.add(String(entity.id))
+        const addedIds = []
+        for (const entity of entities) {
+          if (!ids.has(String(entity.id))) addedIds.push(String(entity.id))
+        }
+        if (addedIds.length) pendingCreationRef.current = { entities, documentId, undoDepth: session.undoDepth, addedIds }
+      }
+      lastRef.current = entities
+      intakeRef.current = {
+        ...engineIntake(entities, documentId),
+        layers: Array.from(new Set(entities.map((entity) => entity.layer || '0'))),
+      }
+      viewer.applyVersion(intakeRef.current)
+      viewer.setHighlight?.(Array.from(highlightedIds || []))
+    } else if (previous.undoDepth === session.undoDepth && previous.redoDepth === session.redoDepth && !pendingStatusChanged) {
+      return undefined
+    }
+    if (pendingCreationRef.current && / applied: entity /.test(session.status || '')) {
+      const { addedIds } = pendingCreationRef.current
+      const selectedId = String(session.selectedId)
+      const addedId = addedIds.includes(selectedId) ? selectedId : addedIds[addedIds.length - 1]
+      const added = entities.find((entity) => String(entity.id) === addedId)
+      if (added) createdResult = { documentId, handle: hexHandle(added.id), kind: added.kind || added.type || 'entity' }
+      pendingCreationRef.current = null
+    }
+    historyRef.current = { documentId, undoDepth: session.undoDepth, redoDepth: session.redoDepth, status: session.status }
+    onShown?.(intakeRef.current, { undoDepth: session.undoDepth, redoDepth: session.redoDepth, createdResult })
     return undefined
-  }, [viewerRef, entities, documentId, onShown, highlightedIds])
+  }, [viewerRef, entities, documentId, onShown, highlightedIds, session.undoDepth, session.redoDepth, session.selectedId, session.status])
   // Unmount (the surface leaves): the console drawing comes back.
   useEffect(() => () => {
     if (lastRef.current === null) return
@@ -101,6 +142,7 @@ export default function EngineDocumentView({ viewerRef = null, onShown = null, s
     const viewer = viewerRef?.current
     if (viewer && typeof viewer.applyVersion === 'function') viewer.applyVersion(null)
     onShownRef.current?.(null)
+    onHiddenRef.current?.()
   }, [viewerRef])
   return null
 }

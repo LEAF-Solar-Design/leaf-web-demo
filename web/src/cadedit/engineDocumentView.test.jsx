@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import CadEditSurface from './CadEditSurface.jsx'
 import EngineDocumentView from './EngineDocumentView.jsx'
 import EngineSessionProvider, { useEngineSessionContext } from './EngineSessionProvider.jsx'
+import * as engineSessionContext from './EngineSessionProvider.jsx'
 
 class ScriptedWorker {
   constructor() { this.posted = []; this.listeners = new Map(); this.terminated = false }
@@ -200,6 +201,83 @@ describe.each([true, false])('EngineDocumentView reverse selection (callback ena
 })
 
 describe('EngineDocumentView (W4f slice A0)', () => {
+  it('compares mixed numeric and string ids without reporting an existing entity as created', async () => {
+    mount()
+    await openAndLoad([{ ...LINE, id: 1 }])
+    act(() => {
+      workers[0].listeners.get('message')({ data: { type: 'editApplied', op: 'createLine', ok: true, createdId: '42', entities: [{ ...LINE, id: '1' }, { ...LINE, id: '42' }], entityCount: 2, bytes: new Uint8Array([49]), byteLength: 1 } })
+      sessionActions.select('1')
+    })
+    expect(onShown.mock.lastCall[1].createdResult).toEqual({ documentId: 'one.dxf', handle: '2A', kind: 'LINE' })
+  })
+
+  it('reports a pending creation when its status arrives after the entities and depth', () => {
+    const session = { engineParsed: true, documentId: 'one.dxf', entities: [LINE], undoDepth: 0, redoDepth: 0, selectedId: 'e1', status: 'Ready', actions: { select: vi.fn() } }
+    vi.spyOn(engineSessionContext, 'useEngineSessionContext').mockImplementation(() => ({ session, highlightedIds: [] }))
+    const viewer = { applyVersion: vi.fn() }
+    const viewerRef = { current: viewer }
+    const onShown = vi.fn()
+    const tree = () => <EngineDocumentView viewerRef={viewerRef} onShown={onShown} />
+    const utils = render(tree())
+    session.entities = [LINE, { ...LINE, id: '42' }]
+    session.undoDepth = 1
+    utils.rerender(tree())
+    expect(onShown.mock.lastCall[1].createdResult).toBeNull()
+    const applies = viewer.applyVersion.mock.calls.length
+    session.status = 'LINE applied: entity 42'
+    utils.rerender(tree())
+    expect(onShown.mock.lastCall[1].createdResult).toEqual({ documentId: 'one.dxf', handle: '2A', kind: 'LINE' })
+    expect(viewer.applyVersion).toHaveBeenCalledTimes(applies)
+    onShown.mockClear()
+    utils.rerender(tree())
+    expect(onShown).not.toHaveBeenCalled()
+  })
+
+  it('reports document close and unmount through onHidden exactly once', async () => {
+    const onHidden = vi.fn()
+    const utils = mount({ onHidden })
+    await openAndLoad([LINE])
+    act(() => sessionActions.reset())
+    expect(onHidden).toHaveBeenCalledTimes(1)
+    expect(onShown).toHaveBeenLastCalledWith(null)
+    await openAndLoad([CIRCLE], 'two.dxf')
+    utils.unmount()
+    expect(onHidden).toHaveBeenCalledTimes(2)
+  })
+
+  it('publishes create identity and engine undo/redo depths without refitting on selection', async () => {
+    mount()
+    await openAndLoad([LINE])
+    const created = { ...LINE, id: '42', layer: 'New layer', vertices: [[10, 0, 0], [10, 10, 0]] }
+    workers[0].emit({ type: 'editApplied', op: 'createLine', ok: true, createdId: '42', entities: [LINE, created], entityCount: 2, bytes: new Uint8Array([49]), byteLength: 1 })
+    const [intake, history] = onShown.mock.lastCall
+    expect(intake.polylines.find((p) => p.handle === '2A')).toMatchObject({ layer: 'New layer', pts: created.vertices })
+    expect(history).toEqual({ undoDepth: 1, redoDepth: 0, createdResult: { documentId: 'one.dxf', handle: '2A', kind: 'LINE' } })
+    const applies = viewer.applyVersion.mock.calls.length
+    act(() => sessionActions.select('e1'))
+    expect(viewer.applyVersion).toHaveBeenCalledTimes(applies)
+    act(() => sessionActions.undo())
+    workers[0].emit({ type: 'documentLoaded', documentId: 'one.dxf', entities: [LINE], entityCount: 1, unsupported: [] })
+    expect(onShown.mock.lastCall[0].polylines).toHaveLength(1)
+    expect(onShown.mock.lastCall[1]).toEqual({ undoDepth: 0, redoDepth: 1, createdResult: null })
+    act(() => sessionActions.redo())
+    workers[0].emit({ type: 'documentLoaded', documentId: 'one.dxf', entities: [LINE, created], entityCount: 2, unsupported: [] })
+    expect(onShown.mock.lastCall[0].polylines).toHaveLength(2)
+    expect(onShown.mock.lastCall[1]).toEqual({ undoDepth: 1, redoDepth: 0, createdResult: null })
+  })
+
+  it('reports the created entity when the same batch selects an existing entity', async () => {
+    mount()
+    await openAndLoad([LINE])
+    const created = { ...LINE, id: '42' }
+    act(() => {
+      workers[0].listeners.get('message')({ data: { type: 'editApplied', op: 'createLine', ok: true, createdId: '42', entities: [LINE, created], entityCount: 2, bytes: new Uint8Array([49]), byteLength: 1 } })
+      sessionActions.select('e1')
+    })
+    expect(screen.getByTestId('engine-selection').textContent).toBe('e1')
+    expect(onShown.mock.lastCall[1].createdResult).toEqual({ documentId: 'one.dxf', handle: '2A', kind: 'LINE' })
+  })
+
   it('mirrors changed hex handles to decimal engine ids and clears on an empty canvas click', async () => {
     const utils = mount()
     await openAndLoad([{ ...LINE, id: '10' }, { ...CIRCLE, id: '16' }])
@@ -249,7 +327,8 @@ describe('EngineDocumentView (W4f slice A0)', () => {
     expect(intake.documentId).toBe('one.dxf')
     expect(intake.polylines.map((p) => p.handle)).toEqual(['e1', 'e2'])
     expect(intake.polylines[1].closed).toBe(true)
-    expect(onShown).toHaveBeenCalledWith(intake)
+    expect(intake.layers).toEqual(['Panels', '0'])
+    expect(onShown).toHaveBeenCalledWith(intake, { undoDepth: 0, redoDepth: 0, createdResult: null })
     // An edit re-parses: a new entity list, a new intake; the same list never re-applies.
     workers[0].emit({ type: 'editApplied', op: 'delete', ok: true, entities: [CIRCLE], entityCount: 1, bytes: new Uint8Array([48]), byteLength: 1 })
     expect(viewer.applyVersion).toHaveBeenCalledTimes(2)
