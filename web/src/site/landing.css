@@ -812,6 +812,11 @@
 }
 .tc-bar .bar .bar-controls .tc-run:hover:not(:disabled) { background: #4ade80; }
 .tc-bar .bar .bar-controls .tc-run:disabled { background: #22c55e; color: #04140a; opacity: .42; cursor: default; }
+/* Inert bar (sign in or a drawing is required first): the Run chip drops its filled primary face and reads as a quiet chip, so nothing on the pane invites a click that cannot run. */
+.tc-bar.tc-bar-inert .bar .bar-controls .tc-run,
+.tc-bar-inert .tc-run { background: rgba(34, 197, 94, .08); color: #71717a; box-shadow: none; opacity: 1; cursor: default; }
+.tc-bar.tc-bar-inert .bar .bar-controls .tc-run:hover:not(:disabled),
+.tc-bar-inert .tc-run:hover { background: rgba(34, 197, 94, .08); color: #71717a; }
 
 /* ---------------- tool: caption (z 15) ---------------- */
 
