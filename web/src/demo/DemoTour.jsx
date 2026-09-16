@@ -16,6 +16,42 @@ import './demo.css'
 
 const MARGIN = 14
 
+// Phone width (lane 3, one-shell narrow): at or under this width the card is
+// a compact coach that sits at the bottom of the viewport, above the command
+// line and status bar zone, and never assumes a 380px card fits. The
+// reserve is the cockpit's fixed bottom chrome at phone width (status bar
+// 46px + command line at bottom 50px + a gap), see cockpit.css.
+const NARROW_MAX = 600
+const NARROW_BOTTOM_RESERVE = 110
+const NARROW_INSET = 8
+
+function readNarrow() {
+  return typeof window !== 'undefined' && window.innerWidth <= NARROW_MAX
+}
+
+// Tracks the phone breakpoint. Resize is the source of truth (jsdom has it);
+// a matchMedia change listener is added when the API exists, so a browser
+// that resizes without a resize event (split view) still flips the coach.
+function useNarrowViewport() {
+  const [narrow, setNarrow] = useState(readNarrow)
+  useEffect(() => {
+    const update = () => setNarrow(readNarrow())
+    window.addEventListener('resize', update)
+    let mql = null
+    if (typeof window.matchMedia === 'function') {
+      mql = window.matchMedia(`(max-width: ${NARROW_MAX}px)`)
+      if (mql && typeof mql.addEventListener === 'function') mql.addEventListener('change', update)
+      else mql = null
+    }
+    update()
+    return () => {
+      window.removeEventListener('resize', update)
+      if (mql) mql.removeEventListener('change', update)
+    }
+  }, [])
+  return narrow
+}
+
 // A tour anchor id is a short lowercase slug (`shell`, `viewer`,
 // `command-bar`, `right-rail`). Anything else is refused before it reaches
 // querySelector, so a contract typo or a hostile string can never become a
@@ -67,6 +103,10 @@ export default function DemoTour({
 }) {
   const [uncontrolled, setUncontrolled] = useState(0)
   const index = typeof controlledIndex === 'number' ? controlledIndex : uncontrolled
+  // Phone width: the card is a collapsed coach (step, title, controls) that
+  // the reader expands for the body copy. Desktop never reads this.
+  const narrow = useNarrowViewport()
+  const [coachOpen, setCoachOpen] = useState(false)
   const step = steps[Math.max(0, Math.min(index, steps.length - 1))]
 
   const setIndex = useCallback((next) => {
@@ -192,11 +232,29 @@ export default function DemoTour({
   // assumed — a prompt beat renders well past the 240px this used to guess, which
   // pushed the Back/Skip/Next row below the fold on a 768px laptop.
   const cardStyle = (() => {
-    if (!rect) return { left: '50%', top: '50%', transform: 'translate(-50%, -50%)' }
     const H = cardH
-    const W = 380
     const vh = window.innerHeight
     const vw = window.innerWidth
+    if (narrow) {
+      // Phone: full width less an inset, anchored at the bottom above the
+      // command line and status bar. When the spotlight itself sits in that
+      // bottom zone (the command bar beat) the coach rises above the
+      // spotlight instead of covering it. Every number is computed from the
+      // viewport, and maxHeight clamps the box to it even when the measured
+      // height is stale, so Next and Skip are always on screen.
+      const width = Math.max(0, vw - NARROW_INSET * 2)
+      const bottomAnchor = Math.max(NARROW_INSET, vh - NARROW_BOTTOM_RESERVE - H)
+      let top = bottomAnchor
+      let floor = vh - NARROW_INSET
+      if (rect && rect.top + rect.height > bottomAnchor && rect.top - H - MARGIN >= NARROW_INSET) {
+        top = rect.top - H - MARGIN
+        floor = rect.top - MARGIN
+      }
+      top = Math.max(NARROW_INSET, Math.min(top, Math.max(NARROW_INSET, vh - H - NARROW_INSET)))
+      return { left: NARROW_INSET, top, width, maxHeight: Math.max(0, Math.min(floor, vh - NARROW_INSET) - top) }
+    }
+    if (!rect) return { left: '50%', top: '50%', transform: 'translate(-50%, -50%)' }
+    const W = 380
     const clampTop = (t) => Math.max(64, Math.min(t, Math.max(64, vh - H - 16)))
     const left = Math.max(16, Math.min(rect.left, vw - W - 16))
     const below = rect.top + rect.height + MARGIN
@@ -221,20 +279,41 @@ export default function DemoTour({
         ? <div className="tour-spot" style={rect} />
         : <div className="tour-dim" />}
 
-      <div className="tour-banner">
-        <span className="tour-banner-title">{bannerTitle}</span>
-        <span className="tour-banner-sub">{bannerSubtitle}</span>
-        <button type="button" className="chip-neutral tour-banner-exit" onClick={onExit}>
-          Exit — explore freely
-        </button>
-      </div>
+      {/* Phone width: no banner strip (it covered the cockpit's one-line
+          header); Skip in the coach is the same exit. */}
+      {!narrow && (
+        <div className="tour-banner">
+          <span className="tour-banner-title">{bannerTitle}</span>
+          <span className="tour-banner-sub">{bannerSubtitle}</span>
+          <button type="button" className="chip-neutral tour-banner-exit" onClick={onExit}>
+            Exit — explore freely
+          </button>
+        </div>
+      )}
 
-      <div ref={cardRef} className={`tour-card${rect ? '' : ' is-centered'}`} style={cardStyle}>
-        <div className="tour-card-step">Step {index + 1} of {steps.length}</div>
+      <div
+        ref={cardRef}
+        className={`tour-card${!rect && !narrow ? ' is-centered' : ''}${narrow ? ' is-coach' : ''}${narrow && coachOpen ? ' is-open' : ''}`}
+        style={cardStyle}
+        data-placement={narrow ? 'coach' : undefined}
+      >
+        <div className="tour-card-step">
+          Step {index + 1} of {steps.length}
+          {narrow && (
+            <button
+              type="button"
+              className="chip-neutral tour-coach-toggle"
+              aria-expanded={coachOpen}
+              onClick={() => setCoachOpen((open) => !open)}
+            >
+              {coachOpen ? 'Less' : 'More'}
+            </button>
+          )}
+        </div>
         <div className="tour-card-title">{step.title}</div>
-        <p className="tour-card-body">{step.body}</p>
+        {(!narrow || coachOpen) && <p className="tour-card-body">{step.body}</p>}
 
-        {step.prompt && (
+        {step.prompt && (!narrow || coachOpen) && (
           <div className="tour-card-prompt">
             {typed}<span className="tour-caret">▌</span>
           </div>
