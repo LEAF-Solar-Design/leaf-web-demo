@@ -21,6 +21,9 @@ const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
 const viewerSource = readFileSync(new URL('./components/Viewer.jsx', import.meta.url), 'utf8')
 
 describe('C-05 ship context wiring', () => {
+  it('C-05 row10 the ship receipt handler opens the real details disclosure', () => {
+    assert.match(appSource, new RegExp(String.raw`ship: \{ contract: iosContract, revision: canonicalVersionId \|\| null, onLaunch: null, onReceipts: iosContract\?\.receipt_id \? \(\) => \{\s*const details = document\.querySelector\('\.studio-profile-info details'\)\s*if \(details\) \{ details\.open = true; details\.querySelector\('summary'\)\?\.focus\(\) \}\s*\} : null \}`))
+  })
   it('C-05 row8 consumes the existing contract and canonical revision', () => {
     assert.match(appSource, new RegExp(String.raw`ship: \{ contract: iosContract, revision: canonicalVersionId \|\| null, onLaunch: null`))
     assert.ok(appSource.includes('openAgentMode, jobs.length, iosContract, canonicalVersionId, setNavExpanded'))

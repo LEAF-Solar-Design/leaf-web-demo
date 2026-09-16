@@ -83,19 +83,29 @@ const PROFILE_ICONS = Object.freeze({
 })
 const profileBase = (id, label) => ({ id, label, icon: PROFILE_ICONS[id] || DEFAULT_TOOL_ICON, title: label })
 
-export function shipStatusRows(contract, revision) {
-  const state = deriveIosState(contract)
-  const valid = state !== null && state !== 'never-configured'
-  const stage = typeof contract?.build_stage === 'string' ? contract.build_stage : ''
+function wellFormedShipContract(contract) {
+  return contract !== null && typeof contract === 'object' && !Array.isArray(contract)
+    && typeof contract.receipt_id === 'string' && contract.receipt_id.trim().length > 0
+    && typeof contract.reported_at === 'string' && contract.reported_at.trim().length > 0
+    && contract.readiness !== null && typeof contract.readiness === 'object' && !Array.isArray(contract.readiness)
+    && typeof contract.readiness.healthy === 'boolean'
+    && typeof contract.readiness.launchable === 'boolean'
+    && (contract.build_stage == null || typeof contract.build_stage === 'string')
+}
+
+export function shipStatusRows(contract, revision, onReceipts) {
+  const valid = wellFormedShipContract(contract) && typeof onReceipts === 'function'
+  const state = valid ? deriveIosState(contract) : null
+  const stage = valid ? contract.build_stage || '' : ''
   const readinessLabel = state === 'in-progress'
     ? `Apple readiness: in progress${stage ? ` (${stage})` : ''}`
     : `Apple readiness: ${state}`
   return [
     valid && revision
-      ? { ...profileBase('ship:revision', `Approved revision ${revision}`.slice(0, 64)), disabled: false, title: `reported ${contract.reported_at}` }
+      ? { ...profileBase('ship:revision', `Approved revision ${revision}`.slice(0, 64)), disabled: false, title: `reported ${contract.reported_at}`, onClick: onReceipts }
       : { ...profileBase('ship:revision', 'Approved revision'), disabled: true, reason: PROFILE_REASONS.approvedRevision, onClick: undefined },
     valid
-      ? { ...profileBase('ship:readiness', readinessLabel.slice(0, 64)), disabled: false, state, pressed: state === 'ready' }
+      ? { ...profileBase('ship:readiness', readinessLabel.slice(0, 64)), disabled: false, state, pressed: state === 'ready', onClick: onReceipts }
       : { ...profileBase('ship:readiness', 'Mounted Apple readiness'), disabled: true, reason: PROFILE_REASONS.appleReadiness, onClick: undefined },
   ]
 }
@@ -239,8 +249,7 @@ export function profileRibbonTabs(profile, ctx = {}) {
   const ship = profileRecord(context.ship)
   const onLaunch = profileHandler(ship.onLaunch)
   const onShipReceipts = profileHandler(ship.onReceipts)
-  const [revision, readiness] = shipStatusRows(ship.contract, ship.revision)
-    .map((tool) => ({ ...tool, onClick: tool.disabled ? undefined : onShipReceipts ?? undefined }))
+  const [revision, readiness] = shipStatusRows(ship.contract, ship.revision, onShipReceipts)
   return [{ id: 'ship', label: 'Ship', clusters: [
     profileGroup('revision', 'Revision', [
       revision,

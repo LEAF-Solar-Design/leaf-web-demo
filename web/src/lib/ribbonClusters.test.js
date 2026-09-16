@@ -56,10 +56,10 @@ describe('C-05 ship contract status rows', () => {
     ])
   }
   it('C-05 row1 no contract or revision leaves both rows disabled', () => {
-    absent(shipStatusRows(null, null))
+    absent(shipStatusRows(null, null, vi.fn()))
   })
   it('C-05 row2 a revision alone is not approved', () => {
-    absent(shipStatusRows(null, 'v12'))
+    absent(shipStatusRows(null, 'v12', vi.fn()))
   })
   it('C-05 row3 a ready contract opens the same receipt details from both rows', () => {
     const onReceipts = vi.fn()
@@ -75,24 +75,45 @@ describe('C-05 ship contract status rows', () => {
     expect(tools[2]).toMatchObject({ label: 'TestFlight build', disabled: true, reason: PROFILE_REASONS.testflightBuild })
   })
   it('C-05 row4 in progress echoes the reported build stage', () => {
-    const rows = shipStatusRows({ ...contract, readiness: { healthy: true, launchable: false }, build_stage: 'archive' }, 'v12')
+    const rows = shipStatusRows({ ...contract, readiness: { healthy: true, launchable: false }, build_stage: 'archive' }, 'v12', vi.fn())
     expect(rows[1]).toMatchObject({ label: 'Apple readiness: in progress (archive)', disabled: false, state: 'in-progress' })
-    expect(shipStatusRows({ ...contract, readiness: { healthy: true, launchable: false } }, 'v12')[1].label).toBe('Apple readiness: in progress')
+    expect(shipStatusRows({ ...contract, readiness: { healthy: true, launchable: false } }, 'v12', vi.fn())[1].label).toBe('Apple readiness: in progress')
   })
   it('C-05 row5 an unhealthy device keeps the approved revision enabled', () => {
     for (const launchable of [false, true]) {
-      const rows = shipStatusRows({ ...contract, readiness: { healthy: false, launchable } }, 'v12')
+      const rows = shipStatusRows({ ...contract, readiness: { healthy: false, launchable } }, 'v12', vi.fn())
       expect(rows[0].disabled).toBe(false)
       expect(rows[1]).toMatchObject({ label: 'Apple readiness: unavailable', disabled: false, state: 'unavailable' })
     }
   })
   it('C-05 row6 malformed readiness fails closed without guessing', () => {
-    for (const readiness of [undefined, {}, { healthy: 'yes' }, { healthy: true }, { launchable: true }]) {
-      absent(shipStatusRows({ ...contract, readiness }, 'v12'))
+    for (const readiness of [undefined, {}, { healthy: 'yes' }, { healthy: true }, { launchable: true }, { healthy: true, launchable: 'false' }, { healthy: 'true', launchable: true }]) {
+      absent(shipStatusRows({ ...contract, readiness }, 'v12', vi.fn()))
+    }
+  })
+  it('C-05 row6 malformed receipt and report fields fail closed without throwing', () => {
+    const missingReceipt = { ...contract }
+    delete missingReceipt.receipt_id
+    for (const malformed of [
+      missingReceipt,
+      { ...contract, receipt_id: '' },
+      { ...contract, reported_at: '' },
+      { ...contract, reported_at: 42 },
+      { ...contract, reported_at: { toString: 42, valueOf: 42 } },
+      { ...contract, build_stage: 42 },
+    ]) {
+      expect(() => absent(shipStatusRows(malformed, 'v12', vi.fn()))).not.toThrow()
+    }
+  })
+  it('C-05 row6 absent or invalid details openers disable both rows', () => {
+    for (const onReceipts of [undefined, null, false, 'open']) {
+      absent(shipStatusRows(contract, 'v12', onReceipts))
+      const tools = profileRibbonTabs('ship', { ship: { contract, revision: 'v12', onReceipts } })[0].clusters.map((cluster) => cluster.tools[0])
+      absent(tools.slice(0, 2))
     }
   })
   it('C-05 row7 long stage and revision labels stay within 64 characters', () => {
-    const rows = shipStatusRows({ ...contract, readiness: { healthy: true, launchable: false }, build_stage: 'a'.repeat(2000) }, 'v'.repeat(2000))
+    const rows = shipStatusRows({ ...contract, readiness: { healthy: true, launchable: false }, build_stage: 'a'.repeat(2000) }, 'v'.repeat(2000), vi.fn())
     for (const row of rows) {
       expect(row.label.length).toBeLessThanOrEqual(64)
       expect(row.disabled).toBe(false)
@@ -101,6 +122,15 @@ describe('C-05 ship contract status rows', () => {
   it('C-05 row8 the mock context keeps the rows disabled even with a details handler', () => {
     const tools = profileRibbonTabs('ship', { ship: { contract: null, revision: null, onReceipts: vi.fn() } })[0].clusters.map((cluster) => cluster.tools[0])
     absent(tools.slice(0, 2))
+  })
+  it('C-05 row10 each status row invokes the injected details opener once with no arguments', () => {
+    for (const index of [0, 1]) {
+      const onReceipts = vi.fn()
+      const tools = profileRibbonTabs('ship', { ship: { contract, revision: 'v12', onReceipts } })[0].clusters.map((cluster) => cluster.tools[0])
+      tools[index].onClick()
+      expect(onReceipts).toHaveBeenCalledTimes(1)
+      expect(onReceipts).toHaveBeenCalledWith()
+    }
   })
 })
 
