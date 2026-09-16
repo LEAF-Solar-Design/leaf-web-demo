@@ -1,0 +1,45 @@
+{
+  "schema": "w4g-align/candidate-manifest.v1",
+  "candidate": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "main": {"sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "older_open_prs": 0},
+  "staging": {"source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "identity_status": "ANONYMOUS", "ladder": [401, 200, 403]},
+  "baseline_proof": {"run": "baseline-fixture", "reds": ["spec.mjs:521:3 › existing red"]},
+  "candidate_proof": {"run": "candidate-fixture", "reds": ["spec.mjs:521:3 › existing red"]},
+  "start_board": {"rows": [{"name": "fixture start", "pass": true}]},
+  "surfaces": {
+    "browser": {"cockpit": true, "evidence": "browser fixture"},
+    "cad": {"cockpit": true, "evidence": "cad fixture"},
+    "solar": {"cockpit": true, "evidence": "solar fixture"},
+    "ios": {"cockpit": true, "evidence": "ios fixture"},
+    "solar_home": "solar", "ios_contract": "setup-required"
+  },
+  "ssd2": {"served": 2, "total": 2, "evidence": "served fixture"},
+  "ssd1": {"proven": 2, "total": 2, "evidence": "proven fixture"},
+  "ssd3": {"prs": [{"number": 101, "merged": true}]},
+  "ssd5": {"disposition": "fixture disposition"},
+  "production_plan": {"receipt": "production_candidate_manifest.json"},
+  "prod_smoke": {"receipt": "production_candidate_manifest.json"},
+  "auth_ladder": {"receipt": "production_candidate_manifest.json"},
+  "hardening": {
+    "enforcement_fail_closed_pr": {"number": 102, "merged": true},
+    "authored_execution_staging": 0, "authored_execution_production": 0,
+    "aps_max_concurrency_staging": 10,
+    "aps_window_receipt": "production_candidate_manifest.json",
+    "aps_max_concurrency_production": 1
+  },
+  "door_pr": {"number": 103, "state": "draft", "rollback": "restore prior production pin"},
+  "operator_items": [{"id": "P-001", "owner": "operator", "text": "Review production promotion separately"}],
+  "exit": 0, "planned_operations": 1, "promotion": "fixture-only",
+  "source_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "images": {
+    "app": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "broker": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "canonical-worker": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "harness": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "web": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "result": "7 passed in fixture", "staging_refusal": "fixture staging promotion refused",
+  "served_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "pass": true, "ladder": [401, 200, 403],
+  "fixture_note": "The staging object supplies both offline identity and the auth receipt ladder."
+}
