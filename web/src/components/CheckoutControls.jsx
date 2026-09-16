@@ -40,9 +40,11 @@ export default function CheckoutControls({
         <span className="checkout-unknown">
           Could not read the edit lock — writes paused
         </span>
-        <span className="checkout-code" data-testid="checkout-failure-code">
-          code {failure?.errorCode || (typeof failure?.status === 'number' ? `HTTP ${failure.status}` : 'local')}{failure?.errorId ? ` · error_id ${failure.errorId}` : ''}
-        </span>
+        {failure !== null && typeof failure === 'object' && (
+          <span className="checkout-code" data-testid="checkout-failure-code">
+            code {failure?.errorCode || (typeof failure?.status === 'number' ? `HTTP ${failure.status}` : 'local')}{failure?.errorId ? ` · error_id ${failure.errorId}` : ''}
+          </span>
+        )}
         {onRetry && (
           <button className="chip-act" onClick={onRetry} disabled={busy || disabled}>
             Retry

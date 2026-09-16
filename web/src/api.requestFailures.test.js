@@ -48,6 +48,12 @@ describe('request failure diagnostics', () => {
     expect(recentRequestFailures()[0]).not.toHaveProperty('message')
   })
 
+  it('does not extract a prefix of a 32-hex error token', async () => {
+    failWith(500, { error: { message: 'internal server error (error_id: 0123456789abcdef0123456789abcdef)' } })
+    await expect(getTools(false)).rejects.toMatchObject({ status: 500 })
+    expect(recentRequestFailures()[0].errorId).toBeNull()
+  })
+
   it('records null error fields for a non-JSON response', async () => {
     failWith(502, null, true)
     await expect(getTools(false)).rejects.toMatchObject({ status: 502 })

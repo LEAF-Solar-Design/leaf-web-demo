@@ -152,6 +152,16 @@ describe('W4g S08: checkout read failure diagnostics', () => {
     expect(controller.getSnapshot().failure.errorId).toBe('0123456789abcdef')
   })
 
+  it('does not extract a prefix of a 32-hex error token', async () => {
+    const services = makeServices()
+    services.loadVersions.mockRejectedValueOnce({
+      status: 500, body: { error: { message: 'internal server error (error_id: 0123456789abcdef0123456789abcdef)' } },
+    })
+    const controller = createCheckoutController({ drawingId: 'demo', services })
+    await controller.refresh()
+    expect(controller.getSnapshot().failure.errorId).toBeNull()
+  })
+
   it('records a local failure without response metadata', async () => {
     const services = makeServices()
     services.loadVersions.mockRejectedValueOnce(new Error('boom'))
