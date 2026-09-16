@@ -398,9 +398,13 @@ test.describe('route matrix, rail ON', () => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
     await setRail(page, '1')
-    // server/routers/session.py returns 404 for an unknown, non-curated
-    // drawing on the local APS_LIVE=0 stack. No route is mocked or seeded.
-    const drawing = 'c04a-empty-solar-starter'
+    // On the local APS_LIVE=0 stack write_loop.ensure_demo_drawing bootstraps ANY
+    // slug-safe first-seen id with the demo intake (a 200 that seats a drawing), so
+    // the only honest 404 the session route gives is an id outside its slug rule:
+    // uppercase is refused as `drawing unavailable`. That 404 is the CONFIRMED
+    // absence App's drawingLoad needs before the starter may open (CORRECTION 2).
+    // No route is mocked or seeded.
+    const drawing = 'C04A-EMPTY-SOLAR-STARTER'
     const writes = []
     let sampleFetches = 0
     page.on('request', (req) => {
