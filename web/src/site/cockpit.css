@@ -1070,6 +1070,9 @@
        --ck-drawer: the catalog drawer's height; the job strip is 24px;
        --ck-ent: the folded entitlements strip at the top of the drawer. */
     --ck-top: 44px; --ck-dock: 112px; --ck-drawer: 26vh; --ck-ent: 54px;
+    /* Slice 13b cad-skin aliases for the three phone-only tokens above, the
+       same shape as the base scope's list (see cadSkinCoverage.test.js). */
+    --leaf-dock: var(--ck-dock); --leaf-drawer: var(--ck-drawer); --leaf-ent: var(--ck-ent);
     grid-template-rows: 44px minmax(0, 1fr) 46px;
     max-width: 100vw; overflow: hidden;
   }
