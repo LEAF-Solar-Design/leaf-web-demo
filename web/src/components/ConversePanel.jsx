@@ -319,6 +319,7 @@ export default function ConversePanel({
     const decisions = new Map() // confirmation_id -> {approved, by}
     const completed = new Set()
     let quota = false
+    let quotaRetry = null
     let grant = false
     const turnOf = (id) => {
       const key = id || `_${turns.length}`
@@ -352,7 +353,7 @@ export default function ConversePanel({
           t.started = true
           t.images = thumbnailImages(data.images)
           t.imageDescriptors = (data.images || []).filter((image) => !image?.data)
-        quota = false; grant = false // a fresh turn clears the paused banners
+        quota = false; quotaRetry = null; grant = false // a fresh turn clears the paused banners
       } else if (type === 'text_delta') {
         const last = t.feed[t.feed.length - 1]
         if (last && last.kind === 'text') last.text += data.text || ''
@@ -388,8 +389,20 @@ export default function ConversePanel({
         if (t.stopReason === 'llm_quota_exhausted') quota = true
       } else if (type === 'error') {
         const code = String(data.error?.error_code || '').toLowerCase()
-        if (code === 'llm_quota_exhausted') quota = true
-        else if (code === 'grant_required') grant = true
+        if (code === 'llm_quota_exhausted') {
+          quota = true
+          // A terminal provider error may be the last durable event. Finish
+          // only its turn; never replay the request or its consumed approval.
+          t.stopReason = code
+          completed.add(t.turnId)
+          const seconds = data.error?.retry_after_s
+          const eventTime = typeof env.ts === 'string' ? Date.parse(env.ts) : NaN
+          const retryTime = eventTime + seconds * 1000
+          quotaRetry = typeof seconds === 'number' && Number.isFinite(seconds) && seconds >= 0
+            ? { seconds, at: Number.isFinite(retryTime) && Math.abs(retryTime) <= 8640000000000000
+              ? new Date(retryTime).toISOString() : null }
+            : null
+        } else if (code === 'grant_required') grant = true
         else t.feed.push({ kind: 'error', code, message: data.error?.message || 'turn error' })
       }
     }
@@ -402,7 +415,7 @@ export default function ConversePanel({
     // reading, not a per-turn one, so the newest turn_usage is the truth.
     let latestUsage = null
     for (const t of turns) if (t.usage) latestUsage = t.usage
-    return { turns, decisions, completed, quota, grant, active, latestUsage,
+    return { turns, decisions, completed, quota, quotaRetry, grant, active, latestUsage,
              activeTurnId: activeTurn ? activeTurn.turnId : null }
   }, [events])
 
@@ -905,7 +918,13 @@ export default function ConversePanel({
       </div>
 
       {showQuota && (
-        <div className="banner"><span><b>AI paused</b> — your built tools keep working.</span></div>
+        <div className="banner"><span><b>AI paused</b>. Your built tools keep working.
+          {model.quotaRetry && <>{' '}The affected provider reported a retry interval of {model.quotaRetry.seconds} seconds.
+            {model.quotaRetry.at
+              ? <> Retry time: <time dateTime={model.quotaRetry.at}>{model.quotaRetry.at}</time>.</>
+              : <> The event timestamp is unavailable.</>}
+          </>}
+        </span></div>
       )}
       {showGrant && (
         <div className="banner">

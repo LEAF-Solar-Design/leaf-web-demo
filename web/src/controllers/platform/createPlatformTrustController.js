@@ -176,13 +176,16 @@ export function createPlatformTrustController({
     try {
       const value = await services.getClaudeGrant?.()
       if (!current('grant', generation)) return null
+      if (typeof value?.linked !== 'boolean') throw new Error('Claude account status is unavailable.')
       recordOutcome('grant')
-      publish({ grant: value ?? null, grantLoading: false })
+      publish({ grant: value, grantLoading: false })
       return value ?? null
     } catch (error) {
       if (!current('grant', generation)) return null
       recordOutcome('grant', error)
-      publish({ grant: null, grantLoading: false, grantErr: safeError(error) })
+      // No linked field: unreadable administration must not gate authoring.
+      publish({ grant: { read_status: error?.status === 403 ? 'restricted' : 'unavailable' },
+        grantLoading: false, grantErr: safeError(error) })
       return null
     }
   }

@@ -1244,7 +1244,7 @@
   margin: 0 0 6px; padding: 8px 12px; border-radius: 4px;
   background: #151b18; color: rgba(240, 242, 240, .92); font-size: 12px; line-height: 1.5;
 }
-.studio-shell .app[data-start-open="true"] .cockpit-view { visibility: hidden; }
+.studio-shell .app[data-start-open="true"] :is(.cockpit-view, .cockpit-cube-wrap, .cockpit-cube-wcs) { visibility: hidden; }
 @media (max-width: 980px) {
   .studio-ground-board[data-board-layout="contained"] .ground-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); overflow: auto; }
 }

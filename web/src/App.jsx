@@ -3532,6 +3532,7 @@ export default function App() {
             leavingGround={leavingGround}
             startFocusRequest={startFocusRequest}
             onReturnToDrawing={drafting ? onReturnToDrawing : null}
+            onCreateProject={onCreateProject}
             headingRef={boardHeadingRef}
             workspaceProject={workspaceProjectState}
             workspace={!mock && openProjectId ? workspace : null}
