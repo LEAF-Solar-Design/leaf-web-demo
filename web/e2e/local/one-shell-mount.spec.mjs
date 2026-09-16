@@ -281,6 +281,23 @@ test.describe('route matrix, rail ON', () => {
     }
   })
 
+  test('W4g S08: an explicit demo boots without one authenticated request', async ({ page, request }) => {
+    test.setTimeout(120_000)
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    const apiRequests = []
+    page.on('request', (request) => {
+      const { pathname } = new URL(request.url())
+      if (pathname.startsWith('/api/') && pathname !== '/api/telemetry') {
+        apiRequests.push(`${request.method()} ${pathname}`)
+      }
+    })
+    await page.goto('/app?demo=1')
+    await expect(page.locator(STUDIO)).toHaveCount(1)
+    await expect(page.locator('footer.foot-bar')).toContainText('sample data')
+    expect(apiRequests, `unexpected API requests: ${apiRequests.join(', ')}`).toEqual([])
+  })
+
   test('each tab has its own ground: drawing for CAD and Solar CAD, the project board for Browser, the device stage for iOS', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)

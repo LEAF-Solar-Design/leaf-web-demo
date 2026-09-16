@@ -96,7 +96,7 @@ import { fetchIosSurfaceStatus } from './ios/iosSurfaceStatus.js'
 // `logout` is no longer imported here: the session controller owns ending a
 // session (useSessionController defaults endSession to auth.js logout).
 import { authConfigured, login, isSignedIn, handleRedirectCallback, isAuthRedirectCallback } from './auth.js'
-import { shouldAutoDemo } from './demoState.js'
+import { shouldAutoDemo, explicitDemo } from './demoState.js'
 import { humanizeError } from './errorHumanize.js'
 import { cadTimingRows } from './cadTimingPresentation.js'
 import { getSessionHolderId } from './checkoutIdentity.js'
@@ -312,7 +312,8 @@ export default function App() {
     return true
   }, [exitPending, settle])
   const onReturnToDrawing = useCallback(() => returnToDrawing(true), [returnToDrawing])
-  const [mock, setMock] = useState(config.mockDefault)
+  const [mock, setMock] = useState(() => config.mockDefault
+    || explicitDemo({ search: typeof window !== 'undefined' ? window.location.search : '', signedIn: isSignedIn() }))
   const [loadErr, setLoadErr] = useState(null)
   const [intakeRetryKey, setIntakeRetryKey] = useState(0) // X3 Retry — bumping re-runs the intake load effect
   const [selectedTool, setSelectedTool] = useState(null)
@@ -4220,8 +4221,9 @@ export default function App() {
       {/* Lane E operator console entry: renders nothing unless a single
           probe of GET /api/operator/sessions says the operator surface is
           mounted (LEAF_OPERATOR_ENABLED=1) AND this caller holds a grant.
-          Tenant deployments never see it and never re-probe. */}
-      <OperatorEntry />
+          Tenant deployments never see it and never re-probe.
+          The demo has no operator grant, so the probe would only produce the 404 the campaign counted. */}
+      {!mock && <OperatorEntry />}
     </div>
     </SurfaceFrame>
   )

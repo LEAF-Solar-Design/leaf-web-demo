@@ -130,6 +130,11 @@ async function apiFetch(input, init, source = 'api') {
 // A tiny artificial delay so mock runs show loading states like the real thing.
 const nap = (ms) => new Promise((r) => setTimeout(r, ms))
 
+const REQUEST_FAILURE_CAP = 8
+const requestFailures = []
+export function recentRequestFailures() { return requestFailures.slice() }
+export function clearRequestFailures() { requestFailures.length = 0 }
+
 async function http(path, opts, timeoutMs = null) {
   const headers = { ...(opts?.headers || {}), ...authHeaders() }
   const request = timeoutMs == null
@@ -149,6 +154,19 @@ async function http(path, opts, timeoutMs = null) {
       error_code: e.body?.error?.error_code,
       endpoint_class: path.split('?')[0].split('/').slice(0, 3).join('/'),
     })
+    requestFailures.push(Object.freeze({
+      at: new Date().toISOString(),
+      method: opts?.method || 'GET',
+      endpointClass: path.split('?')[0].split('/').slice(0, 3).join('/'),
+      status: res.status,
+      errorCode: e.body?.error?.error_code ?? null,
+      errorId: typeof e.body?.error?.message === 'string'
+        ? e.body.error.message.match(/error_id: ([0-9a-f]{16})/)?.[1] ?? null
+        : null,
+    }))
+    if (requestFailures.length > REQUEST_FAILURE_CAP) {
+      requestFailures.splice(0, requestFailures.length - REQUEST_FAILURE_CAP)
+    }
     throw e
   }
   return res.json()
