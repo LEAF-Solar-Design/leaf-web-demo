@@ -90,6 +90,7 @@ import CommandLineArmer from './cadedit/CommandLineArmer.jsx'
 import StatusModesBridge from './cadedit/StatusModesBridge.jsx'
 import EngineDocumentView from './cadedit/EngineDocumentView.jsx'
 import EngineHeadOpener from './cadedit/EngineHeadOpener.jsx'
+import SolarStarterOpener, { SOLAR_STARTER_EMPTY_INTAKE } from './cadedit/SolarStarterOpener.jsx'
 import CanvasPointPicker from './cadedit/CanvasPointPicker.jsx'
 import { COCKPIT_COMMAND_EVENT, parseDrawingCommand } from './lib/commandWords.js'
 import { parsePointExpression } from './cadedit/pointExpression.js'
@@ -276,6 +277,8 @@ export default function App() {
   // module-const behavior — the seed is frozen at mount and nothing in this
   // shell promotes a new identity yet.
   const { drawingId: REQUESTED_DRAWING_ID, source: DRAWING_SOURCE } = useDrawingIdentity()
+  const requestedDrawingIdRef = useRef(REQUESTED_DRAWING_ID)
+  requestedDrawingIdRef.current = REQUESTED_DRAWING_ID
   // W3 one-shell: non-null ONLY under the studio shell (rail on). The sole
   // consumer is the Viewer render site, which portals into it; null renders
   // the old shell byte-for-byte (the rollback contract, studioGround.js).
@@ -332,6 +335,7 @@ export default function App() {
   const [mock, setMock] = useState(() => config.mockDefault
     || explicitDemo({ search: typeof window !== 'undefined' ? window.location.search : '', signedIn: isSignedIn() }))
   const [loadErr, setLoadErr] = useState(null)
+  const [drawingLoad, setDrawingLoad] = useState({ drawingId: REQUESTED_DRAWING_ID, state: 'pending' })
   const [intakeRetryKey, setIntakeRetryKey] = useState(0) // X3 Retry — bumping re-runs the intake load effect
   const [selectedTool, setSelectedTool] = useState(null)
   const [selectedHandle, setSelectedHandle] = useState(null)
@@ -516,6 +520,13 @@ export default function App() {
   }, [agentSessionId, mock])
 
   const viewerRef = useRef(null)
+  const [, setSolarStarterViewerMounted] = useState(false)
+  const solarStarterViewerRef = useCallback((viewer) => {
+    viewerRef.current = viewer
+    // A lazy Viewer can arrive after the engine parsed. Notify App once so
+    // EngineDocumentView's onShown effect sees the newly attached viewer.
+    if (viewer) setSolarStarterViewerMounted(true)
+  }, [])
   const drawingErrorRef = useRef(null)
   const catalogUiRef = useRef({})
   const authorSectionRef = useRef(null)
@@ -959,15 +970,19 @@ export default function App() {
   // load session (intake + tenant echo) + reset transient state on mode/fixture change
   useEffect(() => {
     let alive = true
-    resetDrawing(); setLoadErr(null)
+    const loadDrawingId = REQUESTED_DRAWING_ID
+    const current = () => alive && loadDrawingId === requestedDrawingIdRef.current
+    if (!current()) return undefined
+    resetDrawing(); setDrawingLoad({ drawingId: loadDrawingId, state: 'pending' }); setLoadErr(null)
     resetCatalogTransient()
     clearToast(); setDrawer(null); setTenant(null)
     setTier(null); setOrg(null)
     clearAgentSession()
     mockVersions.reset()
     const seat = (d, options = {}) => {
-      if (!alive) return
+      if (!current()) return
       seatIntake(d, options)
+      setDrawingLoad({ drawingId: loadDrawingId, state: d != null ? 'seated' : 'absent' })
       // MOCK write loop (M3): v1 of the 'demo' chain is the intake just seated,
       // so re-running the demo always starts from a clean v1.
       if (mock && !isEditFixture) mockVersions.seedBase(d)
@@ -982,7 +997,7 @@ export default function App() {
     if (!mock) sessionActions.checking()
     getSession(mock, DRAWING_SOURCE)
       .then(async ({ intake: d, tenant: t, tier: ti, org: o }) => {
-        if (!alive) return
+        if (!current()) return
         // A 200 from /api/session IS the platform session, so publish it before
         // any secondary request can report a newer auth failure. In particular,
         // a /versions 401 must remain `required` instead of being overwritten by
@@ -991,15 +1006,15 @@ export default function App() {
         let drawingSummary = null
         if (!mock) {
           try {
-            drawingSummary = await getDrawingVersions(false, REQUESTED_DRAWING_ID)
+            drawingSummary = await getDrawingVersions(false, loadDrawingId)
           } catch {
             // Keep the intake readable, but leave its version unknown. The
             // run-intent gate below refuses live legacy writes in this state.
           }
         }
-        if (!alive) return
+        if (!current()) return
         seat(d, {
-          drawingId: REQUESTED_DRAWING_ID,
+          drawingId: loadDrawingId,
           ...(drawingSummary ? { drawingState: drawingSummary } : {}),
         })
         setTenant(t); setTier(ti); setOrg(o)
@@ -1009,7 +1024,8 @@ export default function App() {
         if (!mock && o) adoptOrgId(o)
       })
       .catch((e) => {
-        if (!alive) return
+        if (!current()) return
+        setDrawingLoad({ drawingId: loadDrawingId, state: e?.status === 404 ? 'absent' : 'failed' })
         setLoadErr(humanizeError(e))
         if (!mock && is401(e)) {
           // `tokenInvalidated` stays FALSE on purpose: this is render state
@@ -1034,7 +1050,7 @@ export default function App() {
     // is what re-runs getSession after a post-callback 401 instead of stranding
     // this page holding a valid token behind a signed-out surface. Identical
     // wiring to ToolCast's session effect.
-  }, [mock, isEditFixture, intakeRetryKey, resetCatalogTransient, resetDrawing, seatIntake,
+  }, [mock, isEditFixture, intakeRetryKey, REQUESTED_DRAWING_ID, DRAWING_SOURCE, resetCatalogTransient, resetDrawing, seatIntake,
       sessionActions, session.recoveries])
 
   // Auth0 return leg: if we came back from Universal Login (?code=&state=),
@@ -1123,6 +1139,8 @@ export default function App() {
   // would move the server head under them, so it is refused with the reason
   // until the drafter saves or discards.
   const [engineDirty, setEngineDirty] = useState(false)
+  const [solarStarterRetryKey, setSolarStarterRetryKey] = useState(0)
+  const [solarStarter, setSolarStarter] = useState('idle')
   // The same fact as a ref, for the EXECUTION-time check in onRun: a confirm
   // that awaited the catalog refetch holds the onRun it started with, so a
   // closure read there could be older than the edit that made the engine
@@ -3642,6 +3660,7 @@ export default function App() {
           {ENV_CAD_EDIT && studioGround && (
             <EngineDocumentView
               viewerRef={viewerRef}
+              consoleIntake={intake}
               selectedHandle={selectedHandle}
               onSelectedHandleChange={setSelectedHandle}
               onShown={(intake, history) => {
@@ -3684,6 +3703,15 @@ export default function App() {
               enabled={!!studioGround && !!drafting && !!intake}
               headKey={drawingState?.head ?? (mock ? 1 : null)}
               fetchDxf={mock ? fetchSampleDxf : fetchDrawingDxf}
+            />
+          )}
+          {ENV_CAD_EDIT && studioGround && (
+            <SolarStarterOpener
+              enabled={!mock && drawingLoad.drawingId === REQUESTED_DRAWING_ID && drawingLoad.state === 'absent' && surfaceSlots.toolbar.profile === 'solar'}
+              fetchDxf={fetchSampleDxf}
+              drawingSeated={drawingLoad.drawingId === REQUESTED_DRAWING_ID && drawingLoad.state === 'seated'}
+              retryKey={solarStarterRetryKey}
+              onStarterState={setSolarStarter}
             />
           )}
           <div className="viewer-toolbar">
@@ -3867,6 +3895,12 @@ export default function App() {
               further down, wherever propertyRowsEl sits. */}
           {ENV_CAD_EDIT && <EngineDockProperties />}
           <div className="viewer-wrap">
+            {!mock && drawingLoad.drawingId === REQUESTED_DRAWING_ID && drawingLoad.state === 'absent' && surfaceSlots.toolbar.profile === 'solar' && solarStarter === 'failed' && (
+              <div className="loading-line dim" role="status">
+                <span>The rooftop starter could not be opened. Retry or import a DXF.</span>
+                <button className="chip-act" onClick={() => setSolarStarterRetryKey((k) => k + 1)}>Retry rooftop starter</button>
+              </div>
+            )}
             {/* X3 whole-pane takeover: red dot + what failed + quiet reason + Retry. */}
             {loadErr && !signedOut && (
               <div className="pane-fail" role="alert" style={{ position: 'absolute', inset: 0 }}>
@@ -3889,7 +3923,7 @@ export default function App() {
                 <span className="dot live pulse" aria-hidden="true" /> Loading drawing
               </div>
             )}
-            {intake && (() => {
+            {(intake || solarStarter === 'open') && (() => {
               // W3 one-shell: the console OWNS this element — every prop, the
               // ref, the version/undo/redo imperative path — in BOTH shells.
               // Under the studio shell the element PORTALS into the ground
@@ -3900,8 +3934,8 @@ export default function App() {
               const viewerEl = (
                 <Suspense fallback={<ViewerSkeleton />}>
                 <Viewer
-                  ref={viewerRef}
-                  intake={intake}
+                  ref={intake ? viewerRef : solarStarterViewerRef}
+                  intake={intake ?? SOLAR_STARTER_EMPTY_INTAKE}
                   colorForLayer={studioGround ? studioColorForLayer : surfaceColorForLayer}
                   paletteRevision={studioGround ? (surfaceSlots.groundMaterial.layerAccent === 'solar' ? 'solar' : 'base') : undefined}
                   stringRoutes={solarStringRoutes}

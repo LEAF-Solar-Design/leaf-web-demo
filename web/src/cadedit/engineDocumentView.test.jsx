@@ -2,6 +2,7 @@
 // own applyVersion seam while a DXF is open, and the console drawing comes
 // back when it closes, the worker dies, or the surface unmounts.
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { useEffect } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import CadEditSurface from './CadEditSurface.jsx'
@@ -201,6 +202,36 @@ describe.each([true, false])('EngineDocumentView reverse selection (callback ena
 })
 
 describe('EngineDocumentView (W4f slice A0)', () => {
+  it('row21 reapplies the retained dirty starter after the Viewer seats console intake', async () => {
+    const session = { engineParsed: true, documentId: 'solar-starter.dxf', dirty: true, entities: [LINE], undoDepth: 1, redoDepth: 0, selectedId: '', actions: { select: vi.fn() } }
+    vi.spyOn(engineSessionContext, 'useEngineSessionContext').mockImplementation(() => ({ session, highlightedIds: [] }))
+    let canvasIntake = null
+    const viewer = { applyVersion: vi.fn((intake) => { canvasIntake = intake }) }
+    const viewerRef = { current: viewer }
+    const onShown = vi.fn()
+    function ViewerIntakeReset({ intake }) {
+      useEffect(() => { if (intake) canvasIntake = intake }, [intake])
+      return null
+    }
+    const tree = (consoleIntake) => <>
+      <EngineDocumentView viewerRef={viewerRef} onShown={onShown} consoleIntake={consoleIntake} />
+      <ViewerIntakeReset intake={consoleIntake} />
+    </>
+    const view = render(tree(null))
+    const projection = canvasIntake
+    expect(projection.documentId).toBe('solar-starter.dxf')
+    expect(projection.polylines).toHaveLength(1)
+    const consoleIntake = { dwg: 'real.dxf', polylines: [] }
+    await act(async () => {
+      view.rerender(tree(consoleIntake))
+    })
+    // The Viewer's passive effect ran after the bridge in this same commit.
+    expect(canvasIntake).toBe(projection)
+    expect(viewer.applyVersion).toHaveBeenCalledTimes(2)
+    expect(session.documentId).toBe('solar-starter.dxf')
+    expect(session.dirty).toBe(true)
+  })
+
   it('compares mixed numeric and string ids without reporting an existing entity as created', async () => {
     mount()
     await openAndLoad([{ ...LINE, id: 1 }])
