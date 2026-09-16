@@ -124,6 +124,14 @@ describe('App portal wiring', () => {
     // camera pose lost). Pinned here because nothing at runtime would fail.
     expect(src).not.toMatch(/initialIntake/)
   })
+
+  it('keeps the phone drawer state inside the studio shell with a bounded default', () => {
+    expect(src).toContain("const STUDIO_DRAWERS = Object.freeze(['nav', 'jobs', 'result', 'plan', 'none'])")
+    expect(src).toContain("const [studioDrawer, setStudioDrawer] = useState('none')")
+    expect(src).toContain("STUDIO_DRAWERS.includes(name) ? name : 'none'")
+    expect(src).toContain('data-drawer={studioShell ? studioDrawer : undefined}')
+    expect(src).toMatch(/\{studioShell && \(\s*<div className="studio-drawer-tabs"/)
+  })
 })
 
 describe('rollback contract', () => {

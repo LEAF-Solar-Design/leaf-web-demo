@@ -1110,6 +1110,7 @@
    command bar is already viewport-fixed at this breakpoint (styles.css). */
 @media (max-width: 980px) {
   .studio-shell { overflow-x: hidden; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  .studio-shell:has(.app[data-studio-shell="cockpit"]) { overflow: hidden; }
   .studio-shell .studio-ground { position: fixed; inset: 0; }
 }
 

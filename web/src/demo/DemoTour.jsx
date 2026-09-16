@@ -27,12 +27,9 @@ const NARROW_BOTTOM_RESERVE = 110
 const NARROW_INSET = 8
 const NARROW_MAX_VH = 0.4
 
-// The fixed bottom chrome at phone width, top to bottom in cockpit.css: the
-// job strip, the catalog drawer, the command line, the status bar. Only a
-// box whose top edge lies in the lower part of the viewport counts (a rail
-// at the top of a plain page is not bottom chrome); the job strip's top is
-// 0.74vh less 136px in the cockpit, above 0.4vh at every phone height.
-const NARROW_CHROME = '.rail-stack, aside.nav, .bar-dock, footer.foot-bar'
+// Folded panel headings sit just above the command bar. An open drawer
+// raises the coach so its controls never cover the drawer's content.
+const NARROW_CHROME = '.studio-drawer-tabs, .rail-stack, aside.nav, .bar-dock, footer.foot-bar, .app[data-drawer="result"] .result-block, .app[data-drawer="plan"] .ent-panel, .app[data-drawer="plan"] .studio-profile-info'
 const NARROW_CHROME_MIN_TOP = 0.4
 
 function readNarrow() {
@@ -47,7 +44,8 @@ function readChromeTop() {
   let top = null
   for (const el of document.querySelectorAll(NARROW_CHROME)) {
     const r = el.getBoundingClientRect()
-    if (!r.height || r.top < vh * NARROW_CHROME_MIN_TOP || r.top >= vh) continue
+    const studio = el.closest('.app[data-studio-shell="cockpit"]')
+    if (!r.height || r.top < (studio ? 0 : vh * NARROW_CHROME_MIN_TOP) || r.top >= vh) continue
     if (top === null || r.top < top) top = r.top
   }
   return top
@@ -144,8 +142,18 @@ export default function DemoTour({
   // Phone width: the bottom chrome's top edge, measured with the spotlight
   // so a resize or a drawer change moves the coach's floor with it.
   const [chromeTop, setChromeTop] = useState(null)
+  const [chromeBottom, setChromeBottom] = useState(0)
   const measure = useCallback(() => {
-    if (readNarrow()) setChromeTop(readChromeTop())
+    if (readNarrow()) {
+      setChromeTop(readChromeTop())
+      const shell = document.querySelector('.app[data-studio-shell="cockpit"]')
+      let bottom = 0
+      for (const band of shell?.querySelectorAll('header.top, .tc-product-nav, #drafting-ribbon, .viewer-toolbar') || []) {
+        const box = band.getBoundingClientRect()
+        if (box.height) bottom = Math.max(bottom, box.bottom)
+      }
+      setChromeBottom(bottom)
+    }
     const el = resolveTourTarget(step, anchors)
     const next = (() => {
       if (!el) return null
@@ -178,16 +186,21 @@ export default function DemoTour({
     if (el && typeof ResizeObserver !== 'undefined') {
       ro = new ResizeObserver(() => measure())
       ro.observe(el)
+      if (narrow) document.querySelectorAll(NARROW_CHROME).forEach((chrome) => ro.observe(chrome))
     }
+    const shell = document.querySelector('.app[data-studio-shell="cockpit"]')
+    const drawers = narrow && shell && typeof MutationObserver !== 'undefined' ? new MutationObserver(measure) : null
+    drawers?.observe(shell, { attributes: true, attributeFilter: ['data-drawer'] })
     window.addEventListener('resize', measure)
     window.addEventListener('scroll', measure, true)
     return () => {
       clearTimeout(id)
       if (ro) ro.disconnect()
+      drawers?.disconnect()
       window.removeEventListener('resize', measure)
       window.removeEventListener('scroll', measure, true)
     }
-  }, [measure, step, anchors])
+  }, [measure, step, anchors, narrow])
 
   // --- fire the canned prompt once per beat --------------------------------
   const firedFor = useRef(null)
@@ -232,9 +245,9 @@ export default function DemoTour({
   useLayoutEffect(() => {
     const el = cardRef.current
     if (!el) return
-    const h = Math.round(el.getBoundingClientRect().height)
+    const h = Math.round(Math.max(el.scrollHeight, el.getBoundingClientRect().height))
     if (h) setCardH((prev) => (prev === h ? prev : h))
-  }, [step, landed, typed, needsEffect])
+  }, [step, landed, typed, needsEffect, narrow, coachOpen])
 
   // NOTE: the tour deliberately does NOT own Escape. A capture-phase Esc listener
   // here terminated the whole walkthrough when the user only meant to dismiss the
@@ -274,13 +287,14 @@ export default function DemoTour({
       // are always on screen.
       const width = Math.max(0, vw - NARROW_INSET * 2)
       const cap = Math.floor(vh * NARROW_MAX_VH)
-      const box = Math.min(H, cap)
+      const ceiling = chromeBottom + NARROW_INSET
       let floor = (chromeTop === null ? vh - NARROW_BOTTOM_RESERVE : chromeTop) - NARROW_INSET
+      const box = Math.max(0, Math.min(H, cap, floor - ceiling))
       if (rect && rect.top - MARGIN < floor && rect.top + rect.height > floor - box
-        && rect.top - MARGIN - NARROW_INSET >= box) {
+        && rect.top - MARGIN - ceiling >= box) {
         floor = rect.top - MARGIN
       }
-      const top = Math.max(NARROW_INSET, floor - box)
+      const top = Math.max(ceiling, floor - box)
       return { left: NARROW_INSET, top, width, maxHeight: Math.max(0, Math.min(cap, floor - top)) }
     }
     if (!rect) return { left: '50%', top: '50%', transform: 'translate(-50%, -50%)' }

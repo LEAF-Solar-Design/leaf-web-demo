@@ -53,6 +53,8 @@
   --ck-bulb: #f2c94c;
   --ck-warn: #f0c97b;
   --ck-top: 28px;
+  --ck-dock: 112px; /* phone bottom dock and drawer heading heights; the phone block overrides both */
+  --ck-drawer: 44px;
   --ck-ribbon: 95px;
   --ck-doctabs: 32px;
   --ck-canvas-top: 155px;
@@ -98,6 +100,10 @@
   --leaf-status: var(--ck-status);
   --leaf-pane: var(--ck-pane);
   --leaf-spine: var(--ck-spine);
+
+  /* Alias the phone dock and folded drawer sizes. */
+  --leaf-dock: var(--ck-dock);
+  --leaf-drawer: var(--ck-drawer);
 
   /* Ratified CAD dock host contract, backed by this skin's existing values. */
   --background: var(--ck-chrome);
@@ -655,19 +661,19 @@
      ribbon, or the command line. The card's inline position (JS-placed next
      to the spotlit element) yields here, so the important flags are the
      contract, not a shortcut. */
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-banner {
+  .studio-shell .app[data-studio-shell="cockpit"] .tour-banner {
     top: auto; bottom: 36px; left: auto; right: 14px; width: auto; max-width: 520px;
     display: flex; flex-wrap: nowrap; align-items: center; gap: 10px;
     padding: 4px 8px; border-radius: 3px;
     background: var(--ck-recess); border: 1px solid #3a3a3a; backdrop-filter: none; font-family: var(--ck-font);
   }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-banner .tour-banner-title { font: 400 11px var(--ck-font); white-space: nowrap; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-banner .tour-banner-sub { display: none; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-banner .tour-banner-exit {
+  .studio-shell .app[data-studio-shell="cockpit"] .tour-banner .tour-banner-title { font: 400 11px var(--ck-font); white-space: nowrap; }
+  .studio-shell .app[data-studio-shell="cockpit"] .tour-banner .tour-banner-sub { display: none; }
+  .studio-shell .app[data-studio-shell="cockpit"] .tour-banner .tour-banner-exit {
     white-space: nowrap; height: 20px; padding: 0 8px; font: 400 11px/20px var(--ck-font); border-radius: 3px;
     background: var(--ck-title); border: 1px solid #4a4a4a; color: var(--ck-ink);
   }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card {
+  .studio-shell .app[data-studio-shell="cockpit"] .tour-card {
     left: auto !important; right: 14px !important;
     top: auto !important; bottom: 70px !important; width: 260px; max-width: 260px; padding: 10px 12px;
     border-radius: 3px; font-family: var(--ck-font);
@@ -675,16 +681,16 @@
        exception once it sits on the canvas. */
     background: var(--ck-chrome); color: var(--ck-ink); border: 1px solid var(--ck-edge); box-shadow: 0 12px 32px rgba(0, 0, 0, .5);
   }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card :is(.tour-card-step, .tour-card-wait) { color: #9a9a9a; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card :is(.tour-card-title) { color: #fff; font: 600 12.5px/16px var(--ck-font); margin: 2px 0 4px; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card :is(.tour-card-step, .tour-card-wait) { font: 400 10px/14px var(--ck-font); }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card :is(.tour-card-body, .tour-card-prompt) { color: #d0d0d0; font: 400 11px/16px var(--ck-font); margin: 0 0 6px; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card :is(.chip-neutral, .primary) { height: 20px; padding: 0 8px; font: 400 11px/20px var(--ck-font); border-radius: 3px; box-shadow: none; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card .chip-neutral { background: var(--ck-title); color: var(--ck-ink); border: 1px solid #4a4a4a; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card .primary { background: var(--ck-model); color: #fff; border: 1px solid #1390cc; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card .tour-card-actions { gap: 6px; margin-top: 6px; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card .tour-dot { background: #5a5a5a; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card .tour-dot.on { background: var(--ck-cmd); }
+  .studio-shell .app[data-studio-shell="cockpit"] .tour-card :is(.tour-card-step, .tour-card-wait) { color: #9a9a9a; }
+  .studio-shell .app[data-studio-shell="cockpit"] .tour-card :is(.tour-card-title) { color: #fff; font: 600 12.5px/16px var(--ck-font); margin: 2px 0 4px; }
+  .studio-shell .app[data-studio-shell="cockpit"] .tour-card :is(.tour-card-step, .tour-card-wait) { font: 400 10px/14px var(--ck-font); }
+  .studio-shell .app[data-studio-shell="cockpit"] .tour-card :is(.tour-card-body, .tour-card-prompt) { color: #d0d0d0; font: 400 11px/16px var(--ck-font); margin: 0 0 6px; }
+  .studio-shell .app[data-studio-shell="cockpit"] .tour-card :is(.chip-neutral, .primary) { height: 20px; padding: 0 8px; font: 400 11px/20px var(--ck-font); border-radius: 3px; box-shadow: none; }
+  .studio-shell .app[data-studio-shell="cockpit"] .tour-card .chip-neutral { background: var(--ck-title); color: var(--ck-ink); border: 1px solid #4a4a4a; }
+  .studio-shell .app[data-studio-shell="cockpit"] .tour-card .primary { background: var(--ck-model); color: #fff; border: 1px solid #1390cc; }
+  .studio-shell .app[data-studio-shell="cockpit"] .tour-card .tour-card-actions { gap: 6px; margin-top: 6px; }
+  .studio-shell .app[data-studio-shell="cockpit"] .tour-card .tour-dot { background: #5a5a5a; }
+  .studio-shell .app[data-studio-shell="cockpit"] .tour-card .tour-dot.on { background: var(--ck-cmd); }
 }
 
 /* ---- the icon atoms (studio-wide: any cockpit chrome may use them) ---- */
@@ -1032,243 +1038,123 @@
   }
 }
 
-/* ---- Phone (lane 3, one-shell narrow): the cockpit at 390x844 ------------
-   Placed LAST so it wins every same-specificity tie with the 980px stack
-   above, which it refines rather than replaces. Nothing here matches above
-   600px, so the desktop cockpit is byte-identical.
-
-   The screen, top to bottom, every band one line tall:
-     header.top        44px  brand mark, quick access + ribbon tabs (one
-                             scrolling line), the session chips
-     .tc-product-nav   44px  the four-profile strip (in the centre column)
-     .drafting-ribbon  ~44px the Tools disclosure (closed: one button row)
-     .viewer-toolbar   ~34px the document tabs; the ground starts under it
-     the drawing       the rest, down to the drawer zone
-     .rail-stack       24px  the job, inbox and integrations headings
-     aside.nav         26vh  the catalog drawer, scrolling inside
-     .bar-dock               the command line, fixed (bottom 50px)
-     footer.foot-bar   46px  the status bar, fixed
-
-   Two facts shape the bottom. The drawers cannot share a flow (aside.nav
-   and .rail-stack are siblings of .center-col; the result and plan panels
-   live inside main), so a stack of fixed boxes with KNOWN heights is the
-   only overlap-free layout: the catalog drawer takes a fixed 26vh, the job
-   strip sits on top of it, and the centre column ends where the strip
-   begins. 26vh also keeps the job strip's centre in the lower half of the
-   screen at 600x500, which is what useDrawingViewport's 'nearest' rule
-   needs to cut the drawing's fit region at the strip's top edge (the
-   drawers are not occluders themselves).
-
-   NEEDS App.jsx STATE (lane 2 reads this): one drawer open at a time. With
-   an `data-drawer="nav|jobs|result|plan"` attribute on .app the closed
-   drawers would fold to a heading row and the open one could take 45vh;
-   until then the catalog holds a fixed 26vh, the result and the plan stack
-   inside the centre column, and the plan folds to its heading row. */
-@media (max-width: 600px) and (min-height: 500px) {
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) {
-    /* --ck-dock: the fixed command line and status bar zone at the bottom;
-       --ck-drawer: the catalog drawer's height; the job strip is 24px;
-       --ck-ent: the folded entitlements strip at the top of the drawer. */
-    --ck-top: 44px; --ck-dock: 112px; --ck-drawer: 26vh; --ck-ent: 54px;
-    /* Slice 13b cad-skin aliases for the three phone-only tokens above, the
-       same shape as the base scope's list (see cadSkinCoverage.test.js). */
-    --leaf-dock: var(--ck-dock); --leaf-drawer: var(--ck-drawer); --leaf-ent: var(--ck-ent);
-    grid-template-rows: 44px minmax(0, 1fr) 46px;
+/* One phone layout for every studio profile. The four headings share one
+   row above the command bar. Only the last opened drawer gets body space. */
+@media (max-width: 600px) {
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] {
+    --ck-top: 88px; --ck-dock: 112px; --ck-drawer: 44px;
+    --ck-canvas-top: var(--cockpit-stack-top, 208px);
+    height: 100dvh; min-height: 0; grid-template-rows: 88px minmax(0, 1fr) 46px;
     max-width: 100vw; overflow: hidden;
   }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] header.top { height: 88px; align-items: flex-start; padding: 0 6px; gap: 6px; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .cockpit-band {
+    display: flex; flex-direction: column; align-items: stretch; height: 88px;
+    width: auto; flex: 1 1 0; min-width: 0; gap: 0; overflow: hidden;
+  }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .cockpit-quick { height: 44px; flex-shrink: 0; overflow-x: auto; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .cockpit-ribbon-tabs {
+    height: 44px; margin-left: 0; overflow-x: auto; overflow-y: hidden; flex-shrink: 0;
+  }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .cockpit-ribbon-tabs [role="tab"] { min-width: 44px; padding: 0 9px; font-size: 12px; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] header.top .who { padding-top: 10px; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .start-board-gloss { display: none; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .center-col {
+    position: absolute; inset: 88px 0 calc(var(--ck-dock) + var(--ck-drawer));
+    display: flex; flex-direction: column; min-height: 0; overflow: hidden;
+  }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] main.center-scroll { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] main.center-scroll > * { flex: 0 0 auto; min-width: 0; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tc-product-nav { top: auto; height: 44px; min-height: 44px; flex-shrink: 0; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tc-product-tabs [role="tab"] { min-width: 0; padding: 4px 10px 3px; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] main.center-scroll > .workspace-card { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .workspace-card > * { flex: 0 0 auto; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .workspace-card > .viewer-wrap { flex: 1 1 auto; height: auto; min-height: 0; }
 
-  /* Header: one 44px line. The band scrolls sideways as ONE strip (quick
-     access, then the ribbon tabs) and gives up its fixed width so the
-     session chips at the right stay on screen. */
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) header.top {
-    height: 44px; align-items: center; padding: 0 6px; gap: 6px;
-  }
-  .studio-shell .cockpit-band {
-    flex-direction: row; align-items: center; height: 44px; width: auto;
-    flex: 1 1 0; min-width: 0; gap: 2px;
-    overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
-  }
-  .studio-shell .cockpit-band::-webkit-scrollbar { display: none; }
-  .studio-shell .cockpit-quick { height: 44px; }
-  .studio-shell .cockpit-ribbon-tabs { height: 44px; margin-left: 4px; overflow: visible; }
-  .studio-shell .cockpit-ribbon-tabs [role="tab"] { padding: 0 9px; font-size: 12px; }
-
-  /* The centre column runs from the header to the job strip. It is a flex
-     column: the band and document tabs at the top, the drawing window
-     (the transparent .viewer-wrap) takes the rest, and the result and plan
-     panels stack at its foot without overlapping anything. */
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .center-col {
-    inset: 44px 0 calc(var(--ck-dock) + var(--ck-drawer) + 24px);
-    display: flex; flex-direction: column;
-  }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) main.center-scroll {
-    flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: hidden;
-  }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) main.center-scroll > * { flex: 0 0 auto; min-width: 0; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-nav { top: auto; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs [role="tab"] { min-width: 0; padding: 4px 10px 3px; }
-  /* Named as main's child so it outranks the `main.center-scroll > *` rule
-     above; otherwise the card keeps `flex: 0 0 auto`, the drawing window
-     keeps the base `height: 0`, and every panel after the card (the
-     entitlements card, the result) lands under the document tabs, over the
-     zoom cluster and the layer legend. */
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) main.center-scroll > .workspace-card {
-    flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column;
-  }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .workspace-card > * { flex: 0 0 auto; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .workspace-card > .viewer-wrap {
-    flex: 1 1 auto; height: auto; min-height: 0;
-  }
-
-  /* The Tools disclosure. Closed, the band is one button row and reserves
-     no empty height. The overflow control is DraftingRibbon's own "More
-     panels" button (its accessible name is unchanged); the visible label
-     reads Tools here. Panel children stay mounted: the closed state only
-     hides them, as the 980px stack already does.
-     The 100vw minimum on a closed cluster is what turns the band into a
-     disclosure at every panel count: DraftingRibbon's measure compares the
-     clusters' summed width with the band's width, so one cluster wider than
-     the band always overflows, every cluster hides, and the button shows.
-     The open sheet resets the minimum, so it never scrolls sideways. */
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drafting-ribbon {
-    height: auto; min-height: 0; padding: 2px 4px; align-items: center;
-  }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drafting-ribbon:not([data-overflow-open="true"]) {
-    overflow: hidden;
-  }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drafting-ribbon:not([data-overflow-open="true"]) .ribbon-cluster {
-    min-width: 100vw;
-  }
-  .studio-shell .ribbon-more {
-    flex: 1 1 auto; width: 100%; min-width: 0; min-height: 40px; margin: 0; padding: 0 10px;
-    font-size: 0; line-height: 0; text-align: left;
-  }
-  .studio-shell .ribbon-more::before {
-    content: 'Tools'; font: 500 13px/1 var(--ck-font); color: var(--ck-ink);
-  }
-  .studio-shell .ribbon-more[aria-expanded="true"]::before { content: 'Hide tools'; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-empty { padding: 12px 6px; }
-  /* The sheet opens under the document tabs (the measured band edge), so
-     the Tools button stays visible to close it; Escape and a tap elsewhere
-     close it too (DraftingRibbon's own blur handling). */
-  .studio-shell .drafting-ribbon[data-overflow-open="true"] .ribbon-panels {
+  /* All profiles use the same Tools disclosure below their ribbon tabs. */
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .drafting-ribbon { height: auto; min-height: 0; padding: 2px 4px; align-items: center; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .drafting-ribbon:not([data-overflow-open="true"]) { overflow: hidden; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .drafting-ribbon:not([data-overflow-open="true"]) .ribbon-cluster { min-width: 100vw; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .ribbon-more { flex: 1 1 auto; width: 100%; min-width: 0; min-height: 40px; margin: 0; padding: 0 10px; font-size: 0; line-height: 0; text-align: left; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .ribbon-more::before { content: 'Tools'; font: 500 13px/1 var(--ck-font); color: var(--ck-ink); }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .ribbon-more[aria-expanded="true"]::before { content: 'Hide tools'; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .ribbon-empty { padding: 12px 6px; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .drafting-ribbon[data-overflow-open="true"] .ribbon-panels {
     inset: auto 0 auto 0; top: var(--ck-canvas-top);
-    max-height: calc(100dvh - var(--ck-canvas-top) - var(--ck-dock) - var(--ck-drawer) - 24px);
+    max-height: calc(100dvh - var(--ck-canvas-top) - var(--ck-dock) - var(--ck-drawer));
     flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 0;
     padding: 4px 8px 8px; overflow-x: hidden; overflow-y: auto;
     border-left: 0; border-right: 0; box-shadow: 0 18px 48px rgba(0, 0, 0, .55);
   }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drafting-ribbon[data-overflow-open="true"] .ribbon-cluster {
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .drafting-ribbon[data-overflow-open="true"] .ribbon-cluster {
     width: 100%; min-width: 0; max-width: none; box-sizing: border-box;
-    padding: 6px 0 4px; border-right: 0; border-bottom: 1px solid var(--ck-divider);
-    grid-template-rows: auto 18px;
+    padding: 6px 0 4px; border-right: 0; border-bottom: 1px solid var(--ck-divider); grid-template-rows: auto 18px;
   }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drafting-ribbon[data-overflow-open="true"] .ribbon-cluster:last-child { border-bottom: 0; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drafting-ribbon[data-overflow-open="true"] .ribbon-cluster-label {
-    justify-content: flex-start; padding: 0 2px;
-  }
-
-  /* The import workbench floats over the drawing window, full width. */
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cad-edit-workbench {
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .drafting-ribbon[data-overflow-open="true"] .ribbon-cluster-label { justify-content: flex-start; padding: 0 2px; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .cad-edit-workbench {
     position: fixed; top: var(--ck-canvas-top); left: 8px; right: 8px; width: auto; z-index: 6;
-    max-height: calc(100dvh - var(--ck-canvas-top) - var(--ck-dock) - var(--ck-drawer) - 32px);
+    max-height: calc(100dvh - var(--ck-canvas-top) - var(--ck-dock) - var(--ck-drawer) - 8px);
   }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .cockpit-view { top: 8px; right: 8px; padding: 4px 5px; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .viewer-wrap .legend { top: 50px; right: 8px; min-width: 0; max-width: 46vw; max-height: 34%; overflow: auto; padding: 6px 8px; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .selection-readout { left: 8px; bottom: calc(var(--ck-dock) + var(--ck-drawer) + 8px); min-width: 0; max-width: calc(100vw - 16px); }
 
-  /* Drawing instruments: the view cluster keeps the top-right corner, the
-     layer legend sits under it on the same edge, and the selection readout
-     sits above the job strip. Coordinates and the cube stay folded (the
-     980px stack hides them). */
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-view { top: 8px; right: 8px; padding: 4px 5px; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-wrap .legend {
-    top: 50px; right: 8px; min-width: 0; max-width: 46vw; max-height: 34%;
-    overflow: auto; padding: 6px 8px;
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .studio-drawer-tabs {
+    position: fixed; inset: auto 0 var(--ck-dock); height: var(--ck-drawer); z-index: 35;
+    display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+    background: var(--ck-glass-dock); border-top: 1px solid var(--ck-edge);
   }
-  .studio-shell .selection-readout {
-    left: 8px; bottom: calc(var(--ck-dock) + var(--ck-drawer) + 32px);
-    min-width: 0; max-width: calc(100vw - 16px);
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .studio-drawer-tabs button {
+    min-width: 0; min-height: 44px; padding: 0 4px; border: 0; border-right: 1px solid var(--ck-edge);
+    border-radius: 0; background: transparent; color: var(--ck-ink); font: 500 12px var(--ck-font);
   }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .studio-drawer-tabs button[aria-expanded="true"] { background: var(--ck-model); color: #fff; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .studio-drawer-tabs button:focus-visible { outline: 2px solid var(--ck-sel); outline-offset: -2px; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] > aside.nav,
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] > .rail-stack,
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .result-block,
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] main.center-scroll > section.ent-panel,
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .studio-profile-info {
+    display: none; position: fixed; top: auto; left: 0; right: 0;
+    bottom: calc(var(--ck-dock) + var(--ck-drawer)); width: auto; height: auto;
+    min-height: 0; max-width: none; max-height: min(45vh, calc(100dvh - var(--ck-canvas-top) - var(--ck-dock) - var(--ck-drawer)));
+    margin: 0; padding: 8px; box-sizing: border-box; overflow-x: hidden; overflow-y: auto;
+    border: 1px solid var(--ck-edge); border-radius: 0; background: var(--ck-chrome); color: var(--ck-ink);
+    box-shadow: none; z-index: 34; pointer-events: auto;
+  }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface][data-drawer="nav"] > aside.nav,
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface][data-drawer="jobs"] > .rail-stack,
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface][data-drawer="result"] .result-block,
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface][data-drawer="plan"] main.center-scroll > section.ent-panel,
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface][data-drawer="plan"] .studio-profile-info { display: block; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface][data-drawer="plan"] > .rail-stack:has(.studio-profile-info) { display: contents; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface][data-drawer="plan"] > .rail-stack > :not(.studio-profile-info) { display: none; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] > .rail-stack > :not(.studio-profile-info) { position: static; width: auto; height: auto; min-height: 0; max-height: none; overflow: visible; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface][data-drawer="jobs"] > .rail-stack > .studio-profile-info { display: none; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface]:has(.tour-card) :is(aside.nav, .rail-stack, .result-block, main.center-scroll > section.ent-panel, .studio-profile-info) {
+    max-height: min(45vh, max(44px, calc(100dvh - var(--ck-canvas-top) - var(--ck-dock) - var(--ck-drawer) - 164px)));
+  }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .result-block .card { background: transparent; color: var(--ck-ink); border: 0; margin: 0; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .result-block :is(h3, h4, p, strong) { color: var(--ck-ink); }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] main.center-scroll > section.ent-panel :is(.ent-rows, .ent-note, .ent-consent) { display: block; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] main.center-scroll > section.ent-panel .ent-head { display: flex; }
 
-  /* The result and plan panels: bottom drawers inside the centre column,
-     each scrolling inside its cap, stacked so neither overlaps the other,
-     the job strip or the command line. The plan folds to its heading row
-     (its rows and notes need the open-drawer state named above). */
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .result-block {
-    position: static; top: auto; right: auto; left: auto; bottom: auto;
-    width: auto; max-width: none; max-height: 45vh; margin: 0 8px 6px; flex: 0 1 auto;
-  }
-  /* The entitlements card folds into the catalog drawer: a fixed strip of
-     two rows (the Entitlements heading, the telemetry switch) pinned to
-     the drawer's top edge under the job strip, so it is never over the
-     drawing, the zoom cluster or the document tabs. The drawer reserves
-     the strip's height above its own heading. The entitlement rows and
-     the notes stay folded; the switch keeps its pointer events (the 980px
-     stack passes the card's own taps through). */
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) main.center-scroll > section.ent-panel {
-    position: fixed; left: 0; right: 0; top: auto;
-    bottom: calc(var(--ck-dock) + var(--ck-drawer) - var(--ck-ent));
-    height: var(--ck-ent); max-height: none; box-sizing: border-box; z-index: 5;
-    display: flex; flex-direction: column; justify-content: center; gap: 2px;
-    margin: 0; padding: 2px 8px; overflow: hidden;
-    border: 0; border-bottom: 1px solid var(--ck-divider); border-radius: 0;
-    background: var(--ck-chrome); box-shadow: none;
-  }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) main.center-scroll > section.ent-panel :is(.ent-rows, .ent-panel > .ent-note, .ent-consent .ent-note) { display: none; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) main.center-scroll > section.ent-panel .ent-head {
-    display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; overflow: hidden; margin: 0; padding: 0; border: 0;
-  }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) main.center-scroll > section.ent-panel .ent-head > * {
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
-  }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) main.center-scroll > section.ent-panel .ent-consent {
-    margin: 0; padding: 0; border: 0;
-  }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) main.center-scroll > section.ent-panel .ent-consent-row {
-    padding: 0; gap: 8px;
-  }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) main.center-scroll > section.ent-panel .ent-consent-row .ent-label {
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
-  }
-
-  /* The job strip sits on the catalog drawer; the drawer sits on the
-     command line. Both span the width; the drawer scrolls inside, under
-     the folded entitlements strip that takes its first --ck-ent. */
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) > .rail-stack {
-    inset: auto 0 calc(var(--ck-dock) + var(--ck-drawer)); height: 24px;
-    border-top: 1px solid var(--ck-edge); z-index: 4;
-  }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) > aside.nav {
-    position: fixed; top: auto; left: 0; right: 0; bottom: var(--ck-dock);
-    width: auto; height: var(--ck-drawer); min-height: 0; max-height: none;
-    margin: 0; padding: calc(4px + var(--ck-ent)) 8px 4px; border: 0; border-top: 1px solid var(--ck-edge); border-radius: 0;
-    box-shadow: none; overflow-x: hidden; overflow-y: auto; z-index: 4;
-  }
-
-  /* The status bar keeps the document tab, the drafting toggles and the
-     backend state; counts, the build hash and the second stat fold away. */
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar > :is(span.dim, span[style], .foot-stat + .foot-stat) { display: none; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar > * { padding-right: 8px; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar > * + * { padding-left: 8px; }
-
-  /* The tour coach on the drawing (DemoTour.jsx places it above the job
-     strip). The desktop card's dark chrome lives in the 981px block and
-     never matches here, so without these the coach takes the root paper
-     card with the cockpit's light ink on it: a pale title, and Back and
-     Skip reading as disabled. Same materials as the desktop card; Back
-     and Skip carry the same ink as Next. */
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card.is-coach {
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] footer.foot-bar > :is(span.dim, span[style], .foot-stat + .foot-stat) { display: none; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] footer.foot-bar > * { padding-right: 8px; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] footer.foot-bar > * + * { padding-left: 8px; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach {
     background: var(--ck-chrome); color: var(--ck-ink); border: 1px solid var(--ck-edge);
     border-radius: 4px; font-family: var(--ck-font); box-shadow: 0 12px 32px rgba(0, 0, 0, .5);
   }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card.is-coach :is(.tour-card-step, .tour-card-wait) { color: var(--ck-label); }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card.is-coach .tour-card-title { color: #fff; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card.is-coach :is(.tour-card-body, .tour-card-prompt) { color: #d0d0d0; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card.is-coach .tour-card-prompt { background: var(--ck-recess); border-color: var(--ck-edge); }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card.is-coach :is(.chip-neutral, .primary) {
-    padding: 0 12px; font: 400 13px/1 var(--ck-font); border-radius: 4px; box-shadow: none;
-  }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card.is-coach .chip-neutral { background: var(--ck-title); color: #fff; border: 1px solid #5a5a5a; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card.is-coach .primary { background: var(--ck-model); color: #fff; border: 1px solid #1390cc; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card.is-coach .tour-coach-toggle { padding: 0 10px; font-size: 12px; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card.is-coach .tour-dot { background: #5a5a5a; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-card.is-coach .tour-dot.on { background: var(--ck-cmd); }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach :is(.tour-card-step, .tour-card-wait) { color: var(--ck-label); }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach .tour-card-title { color: #fff; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach :is(.tour-card-body, .tour-card-prompt) { color: #d0d0d0; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach .tour-card-prompt { background: var(--ck-recess); border-color: var(--ck-edge); }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach :is(.chip-neutral, .primary) { padding: 0 12px; font: 400 13px/1 var(--ck-font); border-radius: 4px; box-shadow: none; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach .chip-neutral { background: var(--ck-title); color: #fff; border: 1px solid #5a5a5a; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach .chip-neutral:disabled { opacity: .7; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach .primary { background: var(--ck-model); color: #fff; border: 1px solid #1390cc; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach .tour-coach-toggle { padding: 0 10px; font-size: 12px; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach .tour-dot { background: #5a5a5a; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach .tour-dot.on { background: var(--ck-cmd); }
 }

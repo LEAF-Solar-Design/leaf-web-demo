@@ -90,7 +90,7 @@ for (const condition of conditions) {
 
       const canvas = page.locator('.studio-ground .viewer-canvas canvas')
       if (condition.viewport.width < 981) {
-        const activity = await page.locator('.studio-shell .rail-stack').boundingBox()
+        const activity = await page.locator(condition.viewport.width <= 600 ? '.studio-drawer-tabs' : '.studio-shell .rail-stack').boundingBox()
         await expect(page.locator('.studio-ground .viewer-canvas')).toHaveAttribute('data-safe-rect', /^\d+,\d+,\d+,\d+$/)
         const safeBottom = await canvas.evaluate((element) => {
           const safe = element.closest('.viewer-canvas').getAttribute('data-safe-rect')?.split(',').map(Number)
@@ -131,6 +131,9 @@ for (const condition of conditions) {
         }
       }
       if (condition.viewport.width === 390) {
+        await expect(page.locator('.app')).toHaveAttribute('data-drawer', 'none')
+        await expect(page.locator('aside.nav')).toBeHidden()
+        await expect(page.locator('.studio-drawer-tabs')).toBeVisible()
         await expect(page.locator('[data-toggle="ortho"]')).toBeInViewport({ ratio: 1 })
         await page.setViewportSize({ width: 1024, height: 1366 })
         await page.setViewportSize(condition.viewport)
@@ -141,6 +144,86 @@ for (const condition of conditions) {
     })
   })
 }
+
+test.describe('shared phone workspace', () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true })
+
+  test('all four profiles share one band and exclusive bottom drawers', async ({ page, request }) => {
+    await boot(page, request)
+    const panels = page.getByRole('group', { name: 'Workspace panels', exact: true })
+    const selectors = { Catalog: 'aside.nav', Jobs: '.rail-stack', Result: '.result-block', Plan: '.ent-panel:visible' }
+    let bandEdges = null
+    for (const profile of ['Browser', 'CAD', 'Solar CAD', 'iOS', 'Browser']) {
+      await page.getByRole('tab', { name: profile, exact: true }).click()
+      await expect(page.locator('.app')).toHaveAttribute('data-studio-shell', 'cockpit')
+      await expect(page.getByTestId('cockpit-band')).toHaveCount(1)
+      await expectSeparateTabs(page)
+      const edges = await page.getByTestId('cockpit-band').evaluate((el) => {
+        const { y, height } = el.getBoundingClientRect()
+        return [Math.round(y), Math.round(height)]
+      })
+      if (bandEdges) expect(edges).toEqual(bandEdges)
+      else bandEdges = edges
+      await expect(page.getByRole('tablist', { name: 'Ribbon', exact: true })).toBeInViewport()
+      if (profile === 'Browser' || profile === 'iOS') {
+        for (const id of ['quick-import-dxf', 'quick-save-version', 'quick-undo-edit', 'quick-redo-edit']) {
+          const action = page.locator(`[data-quick="${id}"]`)
+          await expect(action).toBeDisabled()
+          await expect(action).toHaveAttribute('title', /: .+/)
+        }
+      }
+      if (profile === 'Solar CAD') {
+        await page.getByRole('tab', { name: 'Solar', exact: true }).click()
+        await openPanels(page)
+        await expect(page.getByTestId('drafting-ribbon').getByRole('group', { name: 'Stringing', exact: true })).toBeVisible()
+        await expect(page.getByTestId('drafting-ribbon').getByRole('group', { name: 'Equipment placement', exact: true })).toBeVisible()
+        await page.keyboard.press('Escape')
+      }
+      for (const [label, value] of [['Catalog', 'nav'], ['Jobs', 'jobs'], ['Result', 'result'], ['Plan', 'plan']]) {
+        await panels.getByRole('button', { name: label, exact: true }).click()
+        await expect(page.locator('.app')).toHaveAttribute('data-drawer', value)
+        await expect(panels.locator('[aria-expanded="true"]')).toHaveCount(1)
+        const drawer = page.locator(selectors[label]).first()
+        await expect(drawer).toBeVisible()
+        const drawerBox = await drawer.boundingBox()
+        const headings = await panels.boundingBox()
+        const command = await page.locator('.bar-dock').boundingBox()
+        expect(drawerBox.height).toBeLessThanOrEqual(844 * 0.45 + 1)
+        expect(drawerBox.y + drawerBox.height).toBeLessThanOrEqual(headings.y + 1)
+        expect(headings.y + headings.height).toBeLessThanOrEqual(command.y + 1)
+        for (const [other, selector] of Object.entries(selectors)) {
+          if (other !== label) await expect(page.locator(selector).first()).toBeHidden()
+        }
+      }
+      await panels.getByRole('button', { name: 'Plan', exact: true }).click()
+      await expect(page.locator('.app')).toHaveAttribute('data-drawer', 'none')
+      await expect(panels.locator('[aria-expanded="true"]')).toHaveCount(0)
+      await expect(page.getByLabel('Command bar', { exact: true })).toBeInViewport()
+    }
+  })
+
+  test('the demo coach stays above the folded headings and command bar', async ({ page, request }) => {
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    await page.goto('/try?demo=tour&dev=1')
+    await page.getByLabel('Use mock data (off = live backend)').check()
+    const coach = page.locator('.tour-card.is-coach')
+    await expect(coach).toBeVisible()
+    for (const profile of ['Browser', 'CAD', 'Solar CAD', 'iOS']) {
+      await page.getByRole('tab', { name: profile, exact: true }).click()
+      await expect(page.locator('.app')).toHaveAttribute('data-drawer', 'none')
+      await expect(page.locator('.tour-banner')).toHaveCount(0)
+      await expect(coach.getByRole('button', { name: 'Back', exact: true })).toBeInViewport({ ratio: 1 })
+      await expect(coach.getByRole('button', { name: 'Skip', exact: true })).toBeInViewport({ ratio: 1 })
+      await expect.poll(async () => {
+        const box = await coach.boundingBox()
+        const headings = await page.locator('.studio-drawer-tabs').boundingBox()
+        const command = await page.locator('.bar-dock').boundingBox()
+        return box.y + box.height <= headings.y && command.y - box.y - box.height <= 60
+      }).toBe(true)
+    }
+  })
+})
 
 test.describe('phone landscape', () => {
   test.use({ viewport: { width: 844, height: 390 }, deviceScaleFactor: 1, hasTouch: true })

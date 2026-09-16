@@ -20,6 +20,18 @@ import esbuild from 'esbuild'
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
 const viewerSource = readFileSync(new URL('./components/Viewer.jsx', import.meta.url), 'utf8')
 
+describe('one-shell profile band', () => {
+  it('mounts one band from the shell contract and retains unavailable quick actions', () => {
+    assert.equal((appSource.match(/<CockpitTopBand\b/g) || []).length, 1)
+    assert.match(appSource, /studioShell && surfaceSlots\.toolbar\.ribbon && \(\s*<CockpitTopBand/)
+    assert.match(appSource, /const WORKSPACE_QUICK_BEFORE = Object\.freeze\(/)
+    assert.match(appSource, /const WORKSPACE_QUICK_AFTER = Object\.freeze\(/)
+    for (const id of ['quick-import-dxf', 'quick-save-version', 'quick-undo-edit', 'quick-redo-edit', 'quick-undo', 'quick-redo']) {
+      assert.ok(appSource.includes(`id: '${id}'`), `missing quick action ${id}`)
+    }
+  })
+})
+
 describe('W4g S08-c: the Details drawer carries sanitized diagnostics', () => {
   it('imports the diagnostics composer and request failure collector', () => {
     assert.match(appSource, new RegExp("import \\{[^}]*\\bcomposeDiagnostics\\b[^}]*\\} from './diagnostics\\.js'"))

@@ -65,7 +65,20 @@ export const PROFILE_REASONS = Object.freeze({
 const profileRecord = (value) => value && typeof value === 'object' && !Array.isArray(value) ? value : {}
 // A handler is a function or nothing; any other value is treated as absent.
 const profileHandler = (value) => (typeof value === 'function' ? value : null)
-const profileBase = (id, label) => ({ id, label, icon: DEFAULT_TOOL_ICON, title: label })
+const PROFILE_ICONS = Object.freeze({
+  'project:open': 'open',
+  'project:change': 'open',
+  'project:create': 'new-file',
+  'files:upload': 'import',
+  'conversation:new': 'leader',
+  'activity:jobs': 'history',
+  'activity:receipts': 'save',
+  'ship:revision': 'save',
+  'ship:readiness': 'match',
+  'ship:launch': 'new-file',
+  'ship:receipts': 'history',
+})
+const profileBase = (id, label) => ({ id, label, icon: PROFILE_ICONS[id] || DEFAULT_TOOL_ICON, title: label })
 
 function profileGroup(id, label, tools) {
   return { id, label, kind: 'group', tools }
