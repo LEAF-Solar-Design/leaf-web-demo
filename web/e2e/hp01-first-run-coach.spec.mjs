@@ -134,7 +134,7 @@ test('leaving the tool scene via Back never strands the coach over the landing p
   await routeSession401(page, state)
 
   await page.goto('/')
-  await page.getByRole('button', { name: 'Try Branch — no install' }).click()
+  await page.getByRole('button', { name: 'Open workspace' }).click()
   const enteringCoach = page.getByTestId('first-run-coach')
   await expect(enteringCoach).toBeAttached()
   // Round-5 pin: a late-mounting coach must START transparent (the
@@ -202,7 +202,7 @@ test('keys pressed while the viewport is small never dismiss the coach the user 
 
   // Re-enter the tool scene at a desktop width: the coach is still offered.
   await page.setViewportSize({ width: 1280, height: 800 })
-  await page.getByRole('button', { name: 'Try Branch — no install' }).click()
+  await page.getByRole('button', { name: 'Open workspace' }).click()
   await expect(page.getByTestId('first-run-coach')).toBeVisible()
   expect(await page.evaluate(() => localStorage.getItem('leaf.coach.dismissed.v1'))).toBeNull()
 })
@@ -246,7 +246,7 @@ test('a coach that mounts while the scene is elsewhere is inert from birth', asy
   await page.setViewportSize({ width: 844, height: 390 })
 
   await page.goto('/')
-  await page.getByRole('button', { name: 'Try Branch — no install' }).click()
+  await page.getByRole('button', { name: 'Open workspace' }).click()
   await expect(page.getByRole('heading', { name: 'You are not signed in' })).toBeVisible()
   await expect(page.getByTestId('first-run-coach')).toHaveCount(0)
 

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { shouldOfferCoach } from './tourEntry.js'
+import { modChord } from '../lib/keys.js'
 import './coach.css'
 
 // HP-01 — first-run coach mark.
@@ -134,7 +135,8 @@ export default function FirstRunCoach({ signedIn = false, active = true, sceneAc
           The command bar turns plain English into a reviewed drawing change. A few keys get you there faster.
         </p>
         <div className="coach-keys">
-          <span className="key hot" title="Focus the command bar">⌘K</span>
+          {/* Platform-aware chord (Ctrl+K off Mac): the bound key already accepts both. */}
+          <span className="key hot" title="Focus the command bar">{modChord('K')}</span>
           <span className="coach-key-label">focus the bar</span>
           <span className="key hot" title="Dismiss a proposal or panel">Esc</span>
           <span className="coach-key-label">back out</span>

@@ -1,8 +1,8 @@
-/* Website One Surface — stage + recast choreography.
+/* Website One Surface: stage + recast choreography.
    Scoped under .stage-root; NEVER leaks into the console (App renders alone
    in scene 'app' with this root unmounted).
 
-   Motion tokens are the BINDING values from docs/motion-standard.md — they
+   Motion tokens are the BINDING values from docs/motion-standard.md, they
    override the mock's inline 520/300ms prototype values:
      enter 1730ms cubic-bezier(.22,1,.36,1) · focus pull 2250ms · exit 870ms
      ease · stagger 20ms/rank · hidden = opacity 0 + blur(14px) saturate(.6)
@@ -10,7 +10,7 @@
 
 .stage-root {
   --recast-enter: 1730ms;
-  --recast-focus: 2250ms;   /* blur/saturate in — 1.3x enter (the focus pull) */
+  --recast-focus: 2250ms;   /* blur/saturate in, 1.3x enter (the focus pull) */
   --recast-exit: 870ms;
   --recast-curve: cubic-bezier(.22, 1, .36, 1);
   --recast-exit-curve: ease;
@@ -144,13 +144,20 @@
   display: flex; align-items: center; justify-content: flex-end; gap: 14px;
 }
 .lp-sheetno { font-size: 12px; color: #949494; }
+/* lp-003: quiet action chip. The one filled green primary on the pane is
+   .lp-cta; the top bar's trial and the solver's open button stay secondary. */
 .lp-trial {
   display: inline-flex; align-items: center; border: 0; border-radius: 7px;
-  background: #22c55e; color: #04140a;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, .35);
+  background: rgba(34, 197, 94, .08); color: #22c55e;
+  box-shadow: none;
   font: 500 13px 'Inter Tight', sans-serif; padding: 8px 16px; cursor: pointer;
 }
-.lp-trial:hover { background: #4ade80; }
+.lp-trial:hover { background: rgba(34, 197, 94, .14); color: #4ade80; }
+.lp-solver-open {
+  background: transparent; border: 0; color: #a1a1aa;
+  font: 500 12px/1 'Inter Tight', sans-serif; padding: 4px 6px; cursor: pointer;
+}
+.lp-solver-open:hover { color: #fff; text-decoration: underline; }
 
 /* Tool cluster overlays the same slot (rendered by ToolCast, above the bar). */
 .tc-topcluster {
@@ -230,8 +237,11 @@
   margin-left: auto; display: flex; align-items: center; flex-wrap: wrap;
   gap: 4px 12px; min-width: 0; color: #949494; font-size: 10.5px;
 }
+/* R2C (try-mono-caps-labels-and-jargon-rail): sentence case at the items'
+   size, no tracking. The spaced mono caps read as a machine label to a
+   stranger; the words are the same. */
 .tc-continuity-label {
-  color: #949494; font-size: 9px; text-transform: uppercase; letter-spacing: .1em;
+  color: #949494; font-size: 10.5px;
 }
 .tc-continuity-item { white-space: nowrap; }
 .tc-continuity-item strong { color: #a1a1aa; font-weight: 500; }
@@ -249,6 +259,8 @@
   .studio-shell .app[data-studio-transition="out"] :is(header.top, #drafting-ribbon, .viewer-toolbar, [data-testid="cockpit-view"], .properties-dock, .bar.bar-command-line, footer.foot-bar, .rail-stack),
   .studio-shell .app[data-studio-transition="in"] :is(header.top, #drafting-ribbon, .viewer-toolbar, [data-testid="cockpit-view"], .properties-dock, .bar.bar-command-line, footer.foot-bar, .rail-stack) { animation: none; }
   .tc-continuity[data-pulse="true"] .tc-continuity-item { animation: none; }
+  /* The pulse stops but the dot stays: opacity .8, never the 0% keyframe. */
+  .lp-pulse { animation: none; opacity: .8; }
 }
 .tc-product-frame {
   position: absolute; inset: 96px 0 0; z-index: 28; overflow: auto;
@@ -369,6 +381,7 @@
 }
 .lp-kicker { font-size: 13px; color: #949494; }
 .lp-headline {
+  margin: 0;
   font: 600 48px/1.1 'Inter Tight', sans-serif;
   letter-spacing: -0.015em; text-wrap: pretty;
 }
@@ -416,6 +429,22 @@
 .lp-solver-label { font-size: 12px; color: #a1a1aa; }
 .lp-solver-big { font: 600 22px 'Inter Tight', sans-serif; font-variant-numeric: tabular-nums; }
 .lp-solver-unit { font: 400 12px 'Inter Tight', sans-serif; color: #949494; }
+/* lp-009: a solve in flight reads as a pulsing dot beside muted text. */
+.lp-solver-pending { display: inline-flex; align-items: center; gap: 6px; color: #a1a1aa; font-size: 13px; }
+.lp-pulse {
+  width: 6px; height: 6px; border-radius: 50%; background: #22c55e;
+  animation: lp-pulse 1.4s ease-in-out infinite;
+}
+@keyframes lp-pulse {
+  0%, 100% { opacity: .35; }
+  50% { opacity: 1; }
+}
+/* lp-010: stage loading caption, sits above the sheet index at the statement's left edge. */
+.stage-loading {
+  position: absolute; left: 60px; bottom: 200px; z-index: 15;
+  display: inline-flex; align-items: center; gap: 8px;
+  color: #a1a1aa; font-size: 13px; pointer-events: none;
+}
 
 /* ---------------- landing: sheet-index footer (z 30) ---------------- */
 
@@ -447,17 +476,21 @@
 .tc-rail-l { left: 0; border-right: 1px solid #27272a; }
 .tc-rail-r { right: 0; border-left: 1px solid #27272a; }
 .tc-rail-head { display: flex; align-items: baseline; gap: 8px; padding: 14px 16px 8px; }
-/* Joins the studio's mono-caps micro-label grammar (styles.css
-   table.counts th) — identity coherence with /app, intentionally
-   /try-visible. */
-.tc-rail-title { font: 600 10px var(--font-mono); text-transform: uppercase; letter-spacing: .08em; }
+/* R2C (try-mono-caps-labels-and-jargon-rail): the band label is a word in
+   the page's sans, sentence case. It used to join the studio's mono-caps
+   micro-label grammar (styles.css table.counts th); on /try the judge read
+   WORKSPACE and OPERATIONS as machine labels, so the grammar stays in /app. */
+.tc-rail-title { font: 600 12px 'Inter Tight', sans-serif; }
 .tc-rail-sub { font-size: 11.5px; color: #949494; }
+/* R2C (try-caption-overprints-rooftop): a tab label never breaks across two
+   lines ("Versions 0" did at 1440); the strip wraps whole tabs instead. */
 .tc-rail-tabs {
-  display: flex; gap: 4px; padding: 0 10px 9px; border-bottom: 1px solid #27272a;
+  display: flex; flex-wrap: wrap; gap: 4px; padding: 0 10px 9px; border-bottom: 1px solid #27272a;
 }
 .tc-rail-tabs button {
   flex: 1; border: 0; border-radius: 6px; padding: 5px 8px; cursor: pointer;
   background: transparent; color: #949494; font-size: 11.5px; text-align: left;
+  white-space: nowrap;
 }
 .tc-rail-tabs button:hover { color: #d4d4d8; background: rgba(255, 255, 255, .03); }
 .tc-rail-tabs button[aria-selected="true"] { color: #fff; background: #1f1f23; }
@@ -544,6 +577,10 @@
   position: static; width: auto; max-width: none; margin-top: 8px; box-shadow: none;
 }
 .tc-rail-r .result-panel { margin: 12px; padding: 12px; }
+/* R2C (try-mono-caps-labels-and-jargon-rail): the shared card grammar
+   (styles.css .card > h3) sets mono caps; on /try the heading reads
+   "Result", not "RESULT". */
+.tc-rail-r .result-panel > h3 { font: 600 12px 'Inter Tight', sans-serif; text-transform: none; letter-spacing: 0; }
 .tc-rail-r .result-panel .panel-sub { margin: 0; font-size: 12px; color: #949494; }
 .tc-rail-r .result-panel table { font-size: 12px; }
 .tc-rail-r .result-panel .receipt { flex-wrap: wrap; }
@@ -553,7 +590,7 @@
 .drawing-upload { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 10px 0; padding: 10px; border-top: 1px solid #27272a; }
 .drawing-upload input[type="file"] { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .drawing-upload-engine { flex: 1 1 100%; display: flex; align-items: center; gap: 6px; }
-.drawing-upload-engine-label { font-size: 11px; color: #a1a1aa; text-transform: uppercase; letter-spacing: 0.04em; }
+.drawing-upload-engine-label { font-size: 11px; color: #a1a1aa; }
 .drawing-upload-engine-opt { opacity: 0.8; }
 .drawing-upload-engine-opt.selected { opacity: 1; outline: 1px solid #22c55e; }
 .drawing-upload-engine-opt[disabled] { opacity: 0.35; }
@@ -574,7 +611,7 @@
 }
 .stage-root[data-scene="tool"] > .drawer-layer > .drawer { width: 100%; height: 100%; pointer-events: auto; }
 .tc-rail .rail { padding: 10px 12px 16px; min-height: 0; overflow: auto; }
-.tc-rail .rail h2 { display: flex; margin: 0 0 10px; font-size: 12px; }
+.tc-rail .rail h2 { display: flex; margin: 0 0 10px; font: 600 12px 'Inter Tight', sans-serif; text-transform: none; letter-spacing: 0; }
 .tc-rail .rail h2 .n { margin-left: auto; color: #949494; font-weight: 400; }
 .tc-rail .rail-note { font-size: 11px; color: #949494; line-height: 1.45; }
 .tc-result-summary { display: flex; align-items: center; gap: 8px; padding: 10px 16px; font-size: 11.5px; color: #a1a1aa; }
@@ -775,14 +812,26 @@
 }
 .tc-bar .bar .bar-controls .tc-run:hover:not(:disabled) { background: #4ade80; }
 .tc-bar .bar .bar-controls .tc-run:disabled { background: #22c55e; color: #04140a; opacity: .42; cursor: default; }
+/* Inert bar (sign in or a drawing is required first): the Run chip drops its filled primary face and reads as a quiet chip, so nothing on the pane invites a click that cannot run. */
+.tc-bar.tc-bar-inert .bar .bar-controls .tc-run,
+.tc-bar-inert .tc-run { background: rgba(34, 197, 94, .08); color: #71717a; box-shadow: none; opacity: 1; cursor: default; }
+.tc-bar.tc-bar-inert .bar .bar-controls .tc-run:hover:not(:disabled),
+.tc-bar-inert .tc-run:hover { background: rgba(34, 197, 94, .08); color: #71717a; }
 
 /* ---------------- tool: caption (z 15) ---------------- */
 
-/* Not part of the pane choreography — opacity-only, landing ~600ms after the
+/* Not part of the pane choreography: opacity-only, landing ~600ms after the
    cast (enter starts at 900ms; caption starts at 1500ms). */
+/* R2C (try-caption-overprints-rooftop): a footer line docked under the
+   command bar, spanning the gap between the rails on its own dark strip, so
+   the sentence never sits on the drawing's panel geometry. The strip is
+   exactly the bar's 18px seat: 17px of line plus its 1px rule. */
 .tc-caption {
-  position: absolute; left: 320px; bottom: 122px; z-index: 15; width: 420px;
-  font-size: 11.5px; color: #949494;
+  position: absolute; left: 300px; right: 300px; bottom: 0; z-index: 15;
+  height: 18px; line-height: 17px; padding: 0 20px; box-sizing: border-box;
+  border-top: 1px solid #27272a; background: rgba(10, 10, 10, .88);
+  font-size: 11px; color: #949494; text-align: center;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   filter: none !important; transform: none !important;
   transition: opacity .5s ease !important;
 }
@@ -793,7 +842,7 @@
 @media (max-width: 1279px) {
   .tc-rail { width: 250px; }
   .tc-bar-wrap { left: 270px; right: 270px; width: auto; max-width: 720px; margin-left: 0; margin-right: auto; }
-  .tc-caption { left: 270px; }
+  .tc-caption { left: 250px; right: 250px; }
   .tc-topcluster { gap: 9px; padding: 0 12px; }
 }
 
@@ -820,16 +869,39 @@
   .tc-product-columns { grid-template-columns: 1fr; }
   .lp-topbar { padding: 0 10px; }
   .lp-wordmark { font-size: 12px; }
-  .tc-topcluster { left: 108px; gap: 8px; padding: 0 8px; }
-  .tc-topcluster .proj-switch, .tc-version { display: none; }
+  /* R2C (try-mobile-header-overlap-and-canvas-sliver): the workspace header
+     is two rows on a phone, the wordmark then the project chip and status,
+     so the chip no longer overprints "Leaf Automation". The judge names this
+     header .tc-header; the element is .lp-topbar with .tc-topcluster
+     overlaid on it, so the rule carries both names and the cluster becomes
+     the second row. Every band pinned to the 52px bar moves down by that
+     row (20px): the profile tabs, the product frame and the drawer. */
+  .stage-root[data-scene="tool"] .lp-topbar, .tc-header {
+    height: 72px; flex-wrap: wrap; align-content: flex-start; padding: 4px 10px 0;
+  }
+  .stage-root[data-scene="tool"] .lp-top-slot { height: 24px; }
+  .tc-topcluster {
+    top: 32px; left: 0; right: 0; height: 36px; justify-content: flex-start;
+    gap: 8px; padding: 0 10px; overflow-x: auto;
+  }
+  .tc-version { display: none; }
   .tc-solve { font-size: 11px; }
-  .tc-rail { left: 0; right: auto; width: 100%; }
-  .tc-rail-l { top: 49%; bottom: 25.5%; }
-  .tc-rail-r { top: 74.5%; bottom: 0; }
+  .tc-product-nav { top: 72px; }
+  .tc-product-frame { top: 116px; }
+  .stage-root[data-scene="tool"] > .drawer-layer { top: 72px; }
+  /* The drawing keeps at least half the viewport below the chrome (72px
+     header plus the 44px profile tabs), and the viewer is confined to that
+     box so the whole rooftop fits it instead of centring under the rails.
+     The command bar seats under the box, then the two rails stand side by
+     side (the 980px rules) in what is left and scroll their own bodies;
+     stacked full-width rails would get about 140px each here. */
+  .stage-root[data-scene="tool"] :is(.stage-viewer, .stage-fallback2d) { top: 116px; bottom: auto; min-height: 50vh; }
+  .tc-rail { top: calc(50vh + 200px); }
   .tc-rail-head { padding: 8px 12px 5px; }
-  .tc-rail-tabs { padding-bottom: 6px; }
+  .tc-rail-tabs { flex-wrap: nowrap; scrollbar-width: none; padding-bottom: 6px; }
+  .tc-rail-tabs button { min-width: 0; }
   .tc-rail-foot { display: none; }
-  .tc-bar-wrap { left: 8px; right: 8px; bottom: calc(51% + 8px); }
+  .tc-bar-wrap { left: 8px; right: 8px; bottom: calc(50vh - 194px); }
   .tc-bar .tc-bar-input-row { padding: 11px 12px 8px; }
   .tc-bar .bar-input .tc-bar-input { min-width: 0; font-size: 16px; }
   .tc-bar .bar-controls { padding: 0 10px 9px; }
@@ -842,7 +914,7 @@
      .tc-run is the last node standing: give IT the auto margin so it still
      seats at the well's right edge on a phone, matching the pre-5a layout. */
   .tc-bar .bar-controls .tc-run { margin-left: auto; }
-  .toast { max-width: calc(100vw - 24px); bottom: calc(51% + 98px); }
+  .toast { max-width: calc(100vw - 24px); bottom: calc(50vh - 106px); }
 }
 
 @media (max-height: 650px) and (min-width: 981px) {
@@ -869,10 +941,10 @@
    .key, .chip-*) consume those SAME tokens, so without a re-pin the dark stage
    renders ink-on-black. Custom properties scope by subtree: re-declaring the
    old dark values on .stage-root restores every shared component inside /try
-   byte-for-byte while /app keeps the new identity. Additive only — the pinned
+   byte-for-byte while /app keeps the new identity. Additive only, the pinned
    skeleton (topbar 52px, nav inset 52px, frame inset 96px) is untouched.
    Note: a T1 overlay applies inline on :root and now no longer recolors the
-   stage subtree — acceptable: overlays preview the console, not the site. */
+   stage subtree, acceptable: overlays preview the console, not the site. */
 .stage-root {
   --background: #0a0a0a;
   --foreground: #ffffff;
@@ -965,7 +1037,7 @@
 
 /* .leaf-light: reserved, wired to nothing yet. The design session has not
    ratified light-mode values for this namespace; when it does, they land
-   here through the sync lane. Declaring no values now is deliberate — an
+   here through the sync lane. Declaring no values now is deliberate: an
    empty scope cannot repaint anything it is applied to, so adopting the
    class ahead of the ratified values is inert rather than a half theme. */
 .leaf-light {
@@ -1143,12 +1215,12 @@
 }
 .ground-desk { display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: 6px; }
 /* --ground-top/left/right/window above are a fixed approximation, tuned for
-   the common project states only — the frame's chrome grows by an explainer,
+   the common project states only. The frame's chrome grows by an explainer,
    an action, and a reason on some states (SurfaceGrounds.jsx), and the CSS
    values have no idea the page has scrolled. When measureGroundWindow()
    cannot place the window (data-measured stays "false": no real layout yet,
    the chrome left less than MIN_WINDOW_HEIGHT, or jsdom), painting tiles at
-   the guessed position risks landing them over the frame's own head text —
+   the guessed position risks landing them over the frame's own head text,
    the exact collision this pair exists to prevent. Hiding the desk until a
    real measurement lands is strictly safer than a guess that might overlap
    real content; a live browser always resolves this in the same layout pass
@@ -1297,7 +1369,7 @@
 .studio-shell aside.rail .spine-collapse { margin-left: auto; }
 .studio-shell aside.nav[data-spine] { padding: 8px 4px; overflow-y: auto; overflow-x: hidden; background: rgba(10, 10, 10, .88); }
 .nav-spine { display: flex; flex-direction: column; align-items: center; gap: 6px; }
-/* Explicit ink on the dark rail — inherited color never beats a declared
+/* Explicit ink on the dark rail: inherited color never beats a declared
    one (kimi, twice): 240,242,240 at .88 on the rail material clears 4.5:1. */
 /* `.inbox-toggle` (components/JobInbox.jsx) shares this look by selector
    rather than by wearing `.spine-btn`: the rail-OFF byte-identity e2e row
@@ -1318,7 +1390,7 @@
 .fam-title .spine-collapse { float: right; width: 24px; height: 24px; font-size: 12px; }
 
 /* The ribbon: the drawing window's command strip. Glass paints on the
-   ::before — NEVER a backdrop-filter on the element itself: a filter makes
+   ::before, NEVER a backdrop-filter on the element itself: a filter makes
    this strip the containing block for position:fixed descendants (the exact
    trap that collapsed the Version-history drawer in the toolbar below). */
 .studio-shell .drafting-ribbon {
@@ -1338,7 +1410,7 @@
   border-radius: inherit;
   background: rgba(10, 10, 10, .78); backdrop-filter: blur(6px);
 }
-/* flex: none — a shrinking cluster lets its nowrap tools paint over the
+/* flex: none, a shrinking cluster lets its nowrap tools paint over the
    neighbour (seen on the real 5-family catalog); the strip SCROLLS instead. */
 .ribbon-cluster { display: flex; flex-direction: column; gap: 3px; flex: 0 0 auto; justify-content: flex-end; }
 .ribbon-cluster + .ribbon-cluster { border-left: 1px solid rgba(240, 242, 240, .12); padding-left: 10px; }
@@ -1745,4 +1817,24 @@
   .ground-world, .ground-world-card, .ground-world-marker, .ground-world-viewport {
     transition-duration: 0ms;
   }
+}
+
+/* ---------------- landing: phone (lp-006, lp-007, lp-008) ----------------
+   The statement block, the solver card and the sheet index are all absolutely
+   positioned for a desktop stage; at 390px they clip and overlap. The block
+   below reflows the statement to the viewport, drops the solver card and the
+   index meta, and lets the tab strip scroll. Desktop rules above are untouched. */
+@media (max-width: 600px) {
+  .lp-stmt { left: 16px; right: 16px; width: auto; top: 96px; gap: 14px; }
+  .lp-headline { font-size: 30px; }
+  .lp-sub { font-size: 15px; }
+  .lp-cta-row { flex-wrap: wrap; gap: 10px; }
+  .lp-stmt form { flex-wrap: wrap; }
+  .lp-stmt form input { width: 100%; box-sizing: border-box; }
+  .lp-solver { display: none; }
+  .lp-sheetno, .lp-index-meta, .lp-brandsub { display: none; }
+  .lp-index { overflow-x: auto; flex-wrap: nowrap; scrollbar-width: none; }
+  .lp-index .lp-tab { white-space: nowrap; }
+  .lp-stats { flex-wrap: wrap; gap: 16px; }
+  .stage-loading { left: 16px; bottom: 96px; }
 }

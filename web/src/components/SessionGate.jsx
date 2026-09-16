@@ -42,16 +42,35 @@ export function DemandCaptureCard({ compact = false }) {
   )
 }
 
+// One filled primary per gate: the demo is the only route to the sample
+// rooftop, so it carries chip-act and Sign in stays a quiet chip whenever both
+// render. The demand form is folded closed behind a quiet toggle so a stranger
+// is not asked for an email before seeing the product.
 export default function SessionGate({ configured, onSignIn, onDemo }) {
+  const [demandOpen, setDemandOpen] = useState(false)
+  const signInClass = onDemo ? 'tc-bar-chip' : 'chip-act'
   return (
     <section className="session-gate" aria-labelledby="session-gate-title">
       <h3 id="session-gate-title">You are not signed in</h3>
       <p>Sign in to load your tools and drawings from the cloud workspace.</p>
       <div>
-        {configured && <button type="button" className="chip-act" onClick={onSignIn}>Sign in</button>}
-        {onDemo && <button type="button" className="tc-bar-chip" onClick={onDemo}>Explore the demo</button>}
+        {onDemo && <button type="button" className="chip-act" onClick={onDemo}>Explore the demo</button>}
+        {configured && <button type="button" className={signInClass} onClick={onSignIn}>Sign in</button>}
       </div>
-      <DemandCaptureCard />
+      <button
+        type="button"
+        className="tc-bar-chip"
+        aria-expanded={demandOpen}
+        aria-controls="session-gate-demand"
+        onClick={() => setDemandOpen((open) => !open)}
+      >
+        Need a plan that fits?
+      </button>
+      {demandOpen && (
+        <div id="session-gate-demand">
+          <DemandCaptureCard compact />
+        </div>
+      )}
     </section>
   )
 }

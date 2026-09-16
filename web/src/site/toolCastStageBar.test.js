@@ -45,7 +45,15 @@ describe('slice 5a: the stage mounts PromptBox where its .tc-bar rows stood', ()
   })
 
   it('keeps the project label and the static ⌘K keycap on their e2e hooks', () => {
-    expect(promptBox).toMatch(/projectSlot=\{<span className="bar-proj tc-bar-proj">\{activeDrawingId \|\| 'No drawing'\}<\/span>\}/)
+    // Pilot round 2 (try-canvas-shows-rooftop-while-copy-says-no-drawing):
+    // the slot's literal moved from `activeDrawingId || 'No drawing'` to
+    // stageDrawingLabel, which says 'Sample rooftop (preview)' only while
+    // signed out with nothing mounted (StageLayer paints the sample rooftop
+    // there). Signed in with nothing mounted still reads 'No drawing', which
+    // live-service-surface.spec.mjs pins on .tc-bar-proj.
+    expect(toolCast).toMatch(/^  const stageDrawingLabel = activeDrawingId \|\| \(sessionAuthRequired \? 'Sample rooftop \(preview\)' : 'No drawing'\)$/m)
+    expect(promptBox).toMatch(/projectName=\{stageDrawingLabel\}/)
+    expect(promptBox).toMatch(/projectSlot=\{<span className="bar-proj tc-bar-proj">\{stageDrawingLabel\}<\/span>\}/)
     expect(toolCast).toMatch(/^const STAGE_BAR_KEYCAP = <span className="key tc-bar-key">⌘K<\/span>$/m)
     expect(promptBox).toMatch(/keycap=\{STAGE_BAR_KEYCAP\}/)
   })
@@ -116,5 +124,43 @@ describe('slice 5a: the stage mounts PromptBox where its .tc-bar rows stood', ()
   it('the phone breakpoint restores the right-edge push onto .tc-run itself', () => {
     const phoneBlock = landing.slice(landing.indexOf('@media (max-width: 600px)'), landing.indexOf('@media (max-height: 650px)'))
     expect(phoneBlock).toMatch(/^  \.tc-bar \.bar-controls \.tc-run \{ margin-left: auto; \}$/m)
+  })
+})
+
+// UI pilot round 2, record R2A (findings2.json). Source pins for the same
+// reason as above: ToolCast.jsx does not mount here.
+describe('pilot round 2: the signed-out stage reads as a state, not a failure', () => {
+  it('a 401 on the session, and the auth-required effect, set the signed-out phase, never failed', () => {
+    // The session effect's 401 branch.
+    expect(toolCast).toMatch(/if \(cause\?\.status === 401\) \{\s*requireAuth\('\/api\/session'\)\s*setError\(null\)\s*setPhase\('signed-out'\)\s*return\s*\}/)
+    // The sessionAuthRequired effect.
+    expect(toolCast).toMatch(/if \(!sessionAuthRequired\) return\s*setLeftView\('operator'\)\s*setRightView\('execution'\)\s*setError\(null\)\s*setPhase\('signed-out'\)/)
+    // The label is hollow and neutral; 'failed' keeps the red face.
+    expect(toolCast).toMatch(/^  if \(phase === 'signed-out'\) return 'Not signed in'$/m)
+    expect(toolCast).toMatch(/^  if \(phase === 'failed'\) return 'Request failed'$/m)
+    expect(toolCast).toMatch(/^  const statusClass = phase === 'failed' \? 'red' : \(phase === 'proposal' \|\| phase === 'empty' \|\| phase === 'signed-out' \? 'hollow' : 'live'\)$/m)
+  })
+
+  it('the inert bar carries a strip with the one enabling action, on the SessionGate demo handler', () => {
+    expect(toolCast).toMatch(/^  const barInert = sessionAuthRequired && !hasDrawing$/m)
+    expect(toolCast).toMatch(/^  const openSampleRooftop = useCallback\(\(\) => \{ window\.location\.href = '\/try\?demo=1' \}, \[\]\)$/m)
+    const tcBar = barBlock.slice(barBlock.indexOf('className={`tc-bar '), barBlock.indexOf('<RoutePanel'))
+    expect(tcBar).toMatch(/\$\{barInert \? ' tc-bar-inert' : ''\}/)
+    expect(tcBar).toMatch(/\{barInert && \(\s*<div className="strip-decision enter" role="status" data-testid="tc-bar-inert-strip">/)
+    expect(tcBar).toMatch(/<button type="button" className="chip-act" onClick=\{openSampleRooftop\}>Open the sample rooftop<\/button>/)
+    // SessionGate's Explore the demo is the same handler, not a second copy.
+    expect(toolCast).toMatch(/onDemo=\{openSampleRooftop\}/)
+    expect(toolCast).not.toMatch(/onDemo=\{\(\) => \{ window\.location\.href/)
+  })
+
+  it('the Execution checklist waits for a drawing or a job; before that, one sentence', () => {
+    const rail = toolCast.slice(toolCast.indexOf("{rightView === 'execution' && <><div className=\"tc-events\">"), toolCast.indexOf('`previewLocked` closes the surface gap'))
+    expect(rail).toMatch(/\{\(hasDrawing \|\| currentJobId \|\| linkedJobId\) \? \(<>/)
+    expect(rail).toMatch(/<div className="tc-event" data-testid="tc-events-empty">\s*<span className="dot hollow" \/>\s*<span className="tc-event-text">Your first run will show its steps here<\/span>/)
+    // The checklist rows themselves are unchanged (cat-standards-surface and
+    // the guest upload e2e rows still read them once a drawing is mounted).
+    expect(rail).toMatch(/<span className="tc-event-text">Panels preserved<\/span>/)
+    expect(rail).toMatch(/<span className="tc-event-text">Tool job<\/span>/)
+    expect(rail).toMatch(/<span className="tc-event-text">Version head<\/span>/)
   })
 })

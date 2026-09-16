@@ -1,5 +1,18 @@
 import { useRef } from 'react'
 
+// The http helper's Error message is the request itself ("GET /api/x -> 404",
+// api.js). That is a diagnostic, not a sentence for a stranger on /try, so a
+// transport-shaped error renders one fixed line and keeps the raw text in the
+// title attribute. The controller's own human messages (file type, size
+// limit, extraction failure) are already sentences and pass through as they are.
+const TRANSPORT_ERROR = /^(GET|POST|PUT|PATCH|DELETE) \/\S* -> \d{3}$/
+const UPLOADS_UNAVAILABLE = 'Uploads are unavailable right now.'
+
+function presentError(error) {
+  const raw = String(error)
+  return TRANSPORT_ERROR.test(raw) ? { text: UPLOADS_UNAVAILABLE, title: raw } : { text: raw, title: undefined }
+}
+
 export default function DrawingUploadControl({ policy, policyLoading, busy, phase, error, engine, onEngineChange, onUpload, onCancel }) {
   const inputRef = useRef(null)
   const accepted = (policy?.accepted || ['.dwg', '.dxf']).join(',')
@@ -16,6 +29,7 @@ export default function DrawingUploadControl({ policy, policyLoading, busy, phas
   // enforces; hidden only when the server predates the engine field.
   const engines = policy?.dwg_engines
   const localOk = policy?.dwg_local_ok !== false
+  const shownError = error ? presentError(error) : null
   return (
     <div className="drawing-upload">
       {Array.isArray(engines) && engines.length > 0 && (
@@ -53,7 +67,7 @@ export default function DrawingUploadControl({ policy, policyLoading, busy, phas
       <span className="drawing-upload-note">
         {policyLoading ? 'Checking upload policy' : policy?.enabled === false ? 'Uploads unavailable' : maxMb ? `${maxMb} MB max` : ''}
       </span>
-      {error && <span className="drawing-upload-error" role="alert">{error}</span>}
+      {shownError && <span className="drawing-upload-error" role="alert" title={shownError.title}>{shownError.text}</span>}
       {phase === 'ready' && <span className="drawing-upload-ready" role="status">Drawing ready</span>}
     </div>
   )
