@@ -16,6 +16,30 @@ import {
 import { groundShowsDrawing } from './SurfaceGrounds.jsx'
 
 describe('product surface contract', () => {
+  it('C-04C row1 signed out still reads sign-in / Sign in', () => {
+    expect(productSurfaceStates({ sessionActive: false, solarReady: true }).solar)
+      .toEqual({ state: 'sign-in', label: 'Sign in' })
+  })
+
+  it('C-04C row2 no shown template and no drawing reads Template pending', () => {
+    expect(productSurfaceStates({ sessionActive: true, hasDrawing: false, solarReady: false }).solar)
+      .toEqual({ state: 'beta', label: 'Template pending' })
+    expect(productSurfaceStates({ sessionActive: true }).solar)
+      .toEqual({ state: 'beta', label: 'Template pending' })
+  })
+
+  it('C-04C row3 a console drawing alone still reads Beta', () => {
+    expect(productSurfaceStates({ sessionActive: true, hasDrawing: true, solarReady: false }).solar)
+      .toEqual({ state: 'beta', label: 'Beta' })
+  })
+
+  it('C-04C row4 solarReady reads available / Ready', () => {
+    for (const hasDrawing of [false, true]) {
+      expect(productSurfaceStates({ sessionActive: true, hasDrawing, solarReady: true }).solar)
+        .toEqual({ state: 'available', label: 'Ready' })
+    }
+  })
+
   it('defines the five profiles once over one shared capability substrate', () => {
     expect(PRODUCT_SURFACES.map(({ id }) => id)).toEqual(['browser', 'cad', 'solar', 'ios', 'sheets'])
     expect(new Set(PRODUCT_SURFACES.map(({ id }) => id)).size).toBe(5)

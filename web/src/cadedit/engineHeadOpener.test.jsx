@@ -85,14 +85,15 @@ describe('EngineHeadOpener', () => {
     await waitFor(() => expect(workers.length).toBe(1))
     const documentId = headDocumentId('rooftop_demo', 1)
     loaded(workers[0], documentId)
-    expect(onDocumentChange).toHaveBeenLastCalledWith({ documentId, committedVersion: 1, entityCount: 1 })
+    // C-04C: provenance distinguishes the committed head from a same-name hand import.
+    expect(onDocumentChange).toHaveBeenLastCalledWith({ documentId, committedVersion: 1, entityCount: 1, documentOrigin: 'head' })
     const calls = onDocumentChange.mock.calls.length
     studio.rerender({})
     await settle()
     expect(onDocumentChange).toHaveBeenCalledTimes(calls)
     await act(async () => { await studio.context.session.actions.open(fileOf(documentId)) })
     loaded(workers[workers.length - 1], documentId, [LINE, { ...LINE, id: 'e2' }])
-    expect(onDocumentChange).toHaveBeenLastCalledWith({ documentId, committedVersion: null, entityCount: 2 })
+    expect(onDocumentChange).toHaveBeenLastCalledWith({ documentId, committedVersion: null, entityCount: 2, documentOrigin: 'import' })
     studio.unmount()
     expect(onDocumentChange).toHaveBeenLastCalledWith(null)
   })

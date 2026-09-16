@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
-import EngineRibbonClusters from './EngineRibbonClusters.jsx'
+import EngineRibbonClusters, { armedToolElement } from './EngineRibbonClusters.jsx'
 import EngineSessionProvider, { useEngineSessionContext } from './EngineSessionProvider.jsx'
 import { buildCreatePayload, buildEditPayload } from './engineSession.js'
 import { profileEntryTab, profileRibbonTabs } from '../lib/ribbonClusters.js'
@@ -60,6 +60,38 @@ async function open(entities = [outline]) {
 afterEach(cleanup)
 
 describe('Solar panel geometry', () => {
+  it('C-04C row14 Escape returns focus to the Solar panel outline tool', async () => {
+    mount()
+    await open()
+    const tool = document.querySelector('.drafting-ribbon [data-tool="solar-panels:createRectangle"]')
+    expect(tool).not.toBeNull()
+    fireEvent.click(tool)
+    const operand = screen.getByLabelText('ribbon x')
+    expect(document.activeElement).toBe(operand)
+    fireEvent.keyDown(operand, { key: 'Escape' })
+    expect(screen.queryByLabelText('ribbon x')).toBeNull()
+    expect(document.activeElement).toBe(tool)
+  })
+  it('C-04C row15 resolves the exact tool before a unique suffix and rejects ambiguity', () => {
+    const view = render(<div className="drafting-ribbon">
+      <button data-tool="draw:createRectangle">Draw rectangle</button>
+      <button data-tool="solar-panels:createRectangle">Panel outline</button>
+    </div>)
+    const exact = screen.getByRole('button', { name: 'Draw rectangle' })
+    expect(armedToolElement('draw', 'createRectangle')).toBe(exact)
+    view.rerender(<div className="drafting-ribbon">
+      <button data-tool="solar-panels:createRectangle">Panel outline</button>
+    </div>)
+    expect(armedToolElement('draw', 'createRectangle'))
+      .toBe(screen.getByRole('button', { name: 'Panel outline' }))
+    view.rerender(<div className="drafting-ribbon">
+      <button data-tool="solar-panels:createRectangle">Panel outline</button>
+      <button data-tool="other:createRectangle">Other rectangle</button>
+    </div>)
+    expect(armedToolElement('draw', 'createRectangle')).toBeNull()
+    view.unmount()
+    expect(armedToolElement('draw', 'createRectangle')).toBeNull()
+  })
   it('row1 builds one closed four-vertex outline with area 2', async () => {
     const { payload } = buildCreatePayload('createRectangle', { x: '0', y: '0', x2: '2', y2: '1', layer: 'Panels' })
     expect(payload).toEqual({ points: [0, 0, 2, 0, 2, 1, 0, 1], closed: true, layer: 'Panels' })

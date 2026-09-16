@@ -110,7 +110,7 @@ export default function SolarStarterOpener({ enabled = false, drawingSeated = fa
         }
         settled = true
         ownsRef.current = true
-        latest.actions.openBytes(answer.bytes, SOLAR_STARTER_DOCUMENT_ID)
+        latest.actions.openBytes(answer.bytes, SOLAR_STARTER_DOCUMENT_ID, { starter: true })
         report(REACH_STATE.OPEN, '', { source: 'sample-static' })
       } catch (error) {
         if (!current()) return

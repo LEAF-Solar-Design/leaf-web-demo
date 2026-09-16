@@ -50,7 +50,7 @@ it('row2 empty engine opens exactly one local uncommitted starter', async () => 
   expect(setReach).toHaveBeenLastCalledWith({ state: 'opening', sentence: 'opening the rooftop starter...' })
   await settle()
   expect(fetchDxf).toHaveBeenCalledTimes(1)
-  expect(openBytes.mock.calls).toEqual([[bytes, 'solar-starter.dxf']])
+  expect(openBytes.mock.calls).toEqual([[bytes, 'solar-starter.dxf', { starter: true }]])
   expect(setReach).toHaveBeenLastCalledWith({ state: 'open', sentence: '', source: 'sample-static' })
   expect(fake.context.session.savedVersion).toBeNull()
   expect(fake.context.session.actions.save).toHaveBeenCalledTimes(0)
@@ -265,7 +265,7 @@ it('row20 a later seated drawing resets the clean starter and opens the real hea
   view.rerender(tree(true)); await settle()
   expect(fetchHead).toHaveBeenCalledTimes(1)
   expect(openBytes.mock.calls).toEqual([
-    [bytes, SOLAR_STARTER_DOCUMENT_ID],
+    [bytes, SOLAR_STARTER_DOCUMENT_ID, { starter: true }],
     [bytes, 'real-v3.dxf', { committed: true, version: 3 }],
   ])
   expect(session.documentId).toBe('real-v3.dxf')

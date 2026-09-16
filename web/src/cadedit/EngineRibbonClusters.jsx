@@ -56,6 +56,14 @@ export const PROMPT_ID = 'cockpit-prompt'
 
 const ESC_OWNER_SELECTOR = '[data-escape-owner]'
 
+export function armedToolElement(group, op) {
+  if (typeof document === 'undefined') return null
+  const exact = document.querySelector(`.drafting-ribbon [data-tool="${group}:${op}"]`)
+  if (exact) return exact
+  const matches = document.querySelectorAll(`.drafting-ribbon [data-tool$=":${op}"]`)
+  return matches.length === 1 ? matches[0] : null
+}
+
 // W4g-7b-03c-f: the four Modify ops seated in the Properties panel (the
 // registry's own `panel === 'properties'` records), the armed prompt's cue
 // to read the property ladder instead of the full Modify one.
@@ -308,7 +316,6 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     return () => window.removeEventListener('cockpit:run', onRun)
   }, [])
   const cancel = () => {
-    const toolId = armed ? `${armed.group}:${armed.op}` : ''
     setArmed(null)
     if (armed) {
       const verb = PROMPTS[armed.op]?.verb || 'Command'
@@ -321,9 +328,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     submissionRef.current = null
     // Focus returns to the tool that armed the command, where the pointer
     // or Tab was before the prompt took it.
-    if (toolId && typeof document !== 'undefined') {
-      document.querySelector(`.drafting-ribbon [data-tool="${toolId}"]`)?.focus()
-    }
+    if (armed) armedToolElement(armed.group, armed.op)?.focus()
   }
   const promptRef = useRef(null)
   const focusPrompt = (fallback) => {

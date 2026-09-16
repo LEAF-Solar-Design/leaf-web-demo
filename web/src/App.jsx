@@ -2788,12 +2788,17 @@ export default function App() {
       .catch(() => { if (live) setIosContract(null) })
     return () => { live = false }
   }, [mock, openProjectId, canonicalVersionId])
+  // Readiness follows the engine projection that reached the canvas, not openBytes.
+  const solarReady = surfaceSlots.toolbar.profile === 'solar' && !!activeIntake
+    && engineDocument?.documentId === activeIntake.documentId
+    && (engineDocument.documentOrigin === 'starter' || engineDocument.documentOrigin === 'head')
   const surfaceStates = useMemo(() => productSurfaceStates({
     sessionActive: mock || !signedOut,
     hasDrawing: !!shown,
     apsLive: health ? !!health.aps_live : undefined,
     iosReady: !!(iosContract?.readiness?.healthy && iosContract?.readiness?.launchable),
-  }), [mock, signedOut, shown, health, iosContract])
+    solarReady,
+  }), [mock, signedOut, shown, health, iosContract, solarReady])
 
   const advisories = [
     quotaShown && 'spend cap',

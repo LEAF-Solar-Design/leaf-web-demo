@@ -296,10 +296,11 @@ export default function EngineSessionProvider({
   useEffect(() => {
     onDocumentChangeRef.current?.({
       documentId: session.documentId,
+      documentOrigin: session.documentOrigin,
       committedVersion: session.committedVersion,
       entityCount: session.entityCount,
     })
-  }, [session.documentId, session.committedVersion, session.entityCount])
+  }, [session.documentId, session.documentOrigin, session.committedVersion, session.entityCount])
   useEffect(() => () => { onDocumentChangeRef.current?.(null) }, [])
 
   const canSave = saveTarget !== null && saveTarget !== undefined

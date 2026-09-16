@@ -94,7 +94,7 @@ function Cockpit({ onToggleImport = () => {} }) {
   )
 }
 
-function mount({ saveTarget = null, onSaved = null, onBeforeEdit, onBeforeArm, withIdentity = false } = {}) {
+function mount({ saveTarget = null, onSaved = null, onBeforeEdit, onBeforeArm, onDocumentChange, withIdentity = false } = {}) {
   const workers = []
   const createWorker = vi.fn(() => {
     const worker = new ScriptedWorker()
@@ -110,7 +110,7 @@ function mount({ saveTarget = null, onSaved = null, onBeforeEdit, onBeforeArm, w
   }
 
   const tree = (
-    <EngineSessionProvider createWorker={createWorker} saveTarget={saveTarget} onSaved={onSaved} onBeforeEdit={onBeforeEdit} onBeforeArm={onBeforeArm}>
+    <EngineSessionProvider createWorker={createWorker} saveTarget={saveTarget} onSaved={onSaved} onBeforeEdit={onBeforeEdit} onBeforeArm={onBeforeArm} onDocumentChange={onDocumentChange}>
       <Probe />
       <Cockpit />
     </EngineSessionProvider>
@@ -143,6 +143,28 @@ async function openAndLoad(studio, entities = [LINE], name = 'one.dxf') {
   await waitFor(() => expect(studio.workers.length).toBeGreaterThan(0))
   studio.workers[studio.workers.length - 1].emit(loadedMessage(entities, name))
 }
+
+it('C-04C row6 reports documentOrigin beside document identity, version and entity count', () => {
+  const onDocumentChange = vi.fn()
+  const studio = mount({ onDocumentChange })
+  for (const [opts, documentOrigin, committedVersion] of [
+    [{ committed: true, version: 12 }, 'head', 12],
+    [{ starter: true }, 'starter', null],
+    [null, 'import', null],
+  ]) {
+    act(() => studio.context.session.actions.openBytes(new Uint8Array([48, 10]), 'same.dxf', opts))
+    studio.workers[0].emit(loadedMessage([LINE], 'same.dxf'))
+    expect(onDocumentChange).toHaveBeenLastCalledWith({
+      documentId: 'same.dxf', documentOrigin, committedVersion, entityCount: 1,
+    })
+  }
+  act(() => studio.context.session.actions.reset())
+  expect(onDocumentChange).toHaveBeenLastCalledWith({
+    documentId: '', documentOrigin: null, committedVersion: null, entityCount: 0,
+  })
+  studio.unmount()
+  expect(onDocumentChange).toHaveBeenLastCalledWith(null)
+})
 
 it('keeps prompt text beyond the scalar input limit', () => {
   const studio = mount()

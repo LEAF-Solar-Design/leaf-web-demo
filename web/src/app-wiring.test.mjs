@@ -20,6 +20,59 @@ import esbuild from 'esbuild'
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
 const viewerSource = readFileSync(new URL('./components/Viewer.jsx', import.meta.url), 'utf8')
 
+describe('C-04C Solar shown-document readiness', () => {
+  const start = appSource.indexOf('  const solarReady =')
+  const end = appSource.indexOf('  const surfaceStates =', start)
+  const derivation = appSource.slice(start, end)
+  const ready = (activeIntake, engineDocument = null, profile = 'solar', solarStarter = 'idle') => {
+    assert.ok(start >= 0 && end > start)
+    const surfaceSlots = { toolbar: { profile } }
+    return new Function('activeIntake', 'engineDocument', 'surfaceSlots', 'solarStarter',
+      `${derivation}\nreturn solarReady`)(activeIntake, engineDocument, surfaceSlots, solarStarter)
+  }
+
+  it('C-04C row5 opener open without onShown remains not ready', () => {
+    const document = { documentId: 'solar-starter.dxf', documentOrigin: 'starter' }
+    for (const state of ['idle', 'opening', 'open', 'failed']) assert.equal(ready(null, document, 'solar', state), false)
+    assert.doesNotMatch(derivation, /solarStarter|hasDrawing|session\.engineParsed/)
+    assert.match(appSource, new RegExp(String.raw`productSurfaceStates\(\{[\s\S]*?\bsolarReady,\s*\}\), \[mock, signedOut, shown, health, iosContract, solarReady\]`))
+    assert.match(appSource, new RegExp(String.raw`onShown=\{\(intake, history\) => \{\s*setActiveIntake\(intake\)`))
+  })
+
+  it('C-04C row6 shown starter requires surface, shown intake, matching document and load provenance', () => {
+    const intake = { documentId: 'solar-starter.dxf' }
+    const document = { ...intake, documentOrigin: 'starter' }
+    assert.equal(ready(intake, document), true)
+    assert.equal(ready(intake, document, 'cad'), false)
+    assert.equal(ready(intake, document), true)
+    assert.equal(ready(null, document), false)
+    assert.equal(ready(intake), false)
+    assert.equal(ready(intake, { ...document, documentId: 'other.dxf' }), false)
+    assert.equal(ready(intake, { ...document, documentOrigin: null }), false)
+    assert.match(derivation, new RegExp(String.raw`surfaceSlots\.toolbar\.profile === 'solar'`))
+    assert.doesNotMatch(derivation, /activeSurface/)
+    assert.match(derivation, /!!activeIntake/)
+    assert.ok(derivation.includes('engineDocument?.documentId === activeIntake.documentId'))
+    assert.ok(derivation.includes("engineDocument.documentOrigin === 'starter'"))
+    assert.ok(derivation.includes("engineDocument.documentOrigin === 'head'"))
+    assert.doesNotMatch(derivation, /SOLAR_STARTER_DOCUMENT_ID|headDocumentId|shownHeadVersion/)
+  })
+
+  it('C-04C row7 hand imports including reserved starter and head names are not Ready', () => {
+    for (const documentId of ['roof.dxf', 'other-v1.dxf', 'solar-starter.dxf', 'demo-v1.dxf']) {
+      assert.equal(ready({ documentId }, { documentId, documentOrigin: 'import' }), false)
+    }
+  })
+
+  it('C-04C row8 the displayed demo head makes Solar ready at any version', () => {
+    for (const documentId of ['demo-v1.dxf', 'demo-v12.dxf']) {
+      const document = { documentId, documentOrigin: 'head' }
+      assert.equal(ready({ documentId }, document), true)
+      assert.equal(ready({ documentId }, document, 'cad'), false)
+    }
+  })
+})
+
 describe('C-04B Solar ribbon wiring', () => {
   it('row9 gates solved routes on mock rooftop identity, preview, head and dirty engine', () => {
     assert.match(appSource, /solarStringsEligible = !!studioGround && surfaceSlots\.groundMaterial\.solarStrings && mock\s+&& !isEditFixture && DRAWING_SOURCE === 'rooftop_demo' && intakeIsRooftopSample/)
