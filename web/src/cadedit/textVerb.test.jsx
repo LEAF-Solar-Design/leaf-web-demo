@@ -73,13 +73,14 @@ describe('W4g-5d surface: word, prompt, pick, seat', () => {
     expect(rec.id).toBe('draw:createText')
     expect(rec.group).toBe('draw')
     expect(rec.panel).toBe('annotation')
-    // Every other draw record sits in its own panel.
+    // C-04B seats solar-panels:createRectangle in Solar's panel while keeping its draw arming group.
     // (W4g-7b-02c seats INSERT BLOCK in the Block panel the same way;
     // W4g-7b-04c-2 seats the two dimension records in annotation, same idiom.)
     const annotationOps = ['createText', 'dimLinear', 'dimAligned', 'createMleader']
+    expect(forGroup('draw').filter((a) => a.panel === 'solar-panels').map((a) => a.id)).toEqual(['solar-panels:createRectangle'])
     for (const a of forGroup('draw')) {
       if (annotationOps.includes(a.op)) expect(a.panel).toBe('annotation')
-      else if (a.op !== 'createInsert' && a.op !== 'createBlock') expect(a.panel).toBe('draw')
+      else if (a.op !== 'createInsert' && a.op !== 'createBlock') expect(a.panel).toBe(a.id === 'solar-panels:createRectangle' ? 'solar-panels' : 'draw')
     }
   })
 })

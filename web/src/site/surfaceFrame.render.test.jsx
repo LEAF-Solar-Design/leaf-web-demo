@@ -446,6 +446,47 @@ const DIVERGENCES = {
   // sequence console:cad has always had. See productSurfaces.js's solar
   // record and surfaceGates.test.js's own DIVERGENCES table.
   'console:solar': { frame: [] },
+  // C-04B added measurement and selection to Solar's familyIds. This
+  // catalog has measurement, so the stage frame lists one more featured
+  // family than the frozen fixture: one li with a strong and a span.
+  // The fixture remains evidence from the untouched worktree.
+  'stage:solar': { frame: [
+    'section|tc-product-frame|',
+    'div|tc-product-morph|',
+    'div|tc-product-frame-head|',
+    'span||',
+    'strong||',
+    'h1||',
+    'p||',
+    'div|tc-product-project|',
+    'div|tc-product-project-state|surface-project-state',
+    'strong||',
+    'p||',
+    'div|tc-product-columns|',
+    'div||',
+    'h2||',
+    'ul||',
+    'li||',
+    'li||',
+    'li||',
+    'li||',
+    'li||',
+    'li||',
+    'li||',
+    'li||',
+    'div||',
+    'h2||',
+    'div||surface-capabilities-live',
+    'p|tc-product-catalog-count|',
+    'ul||',
+    'li||',
+    'strong||',
+    'span||',
+    'li||',
+    'strong||',
+    'span||',
+    'p|tc-product-note|',
+  ] },
 }
 
 /** The expectation for one slot: the frozen fixture, unless this slot is a
