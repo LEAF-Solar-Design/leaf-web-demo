@@ -60,6 +60,8 @@ export const PROFILE_REASONS = Object.freeze({
   shipReceipts: 'No ship receipts yet',
   stringingEmpty: 'No stringing tools in this catalog yet',
   placementEmpty: 'No placement tools in this catalog yet',
+  measurementEmpty: 'No measurement tools in this catalog yet',
+  selectionEmpty: 'No selection tools in this catalog yet',
 })
 
 const profileRecord = (value) => value && typeof value === 'object' && !Array.isArray(value) ? value : {}
@@ -82,6 +84,14 @@ const profileBase = (id, label) => ({ id, label, icon: PROFILE_ICONS[id] || DEFA
 
 function profileGroup(id, label, tools) {
   return { id, label, kind: 'group', tools }
+}
+
+export function solarRouteDisplay({ eligible, previewing, head = 1, engineDirty, shown = true, routes }) {
+  return eligible && !previewing && head === 1 && !engineDirty && shown ? routes || undefined : undefined
+}
+
+export function profileEntryTab(previousProfile, profile, selected, home) {
+  return profile === 'solar' && previousProfile !== profile ? home : selected
 }
 
 /** Tab strips for the shared workspace profiles; drafting keeps its caller's panels. */
@@ -124,10 +134,32 @@ export function profileRibbonTabs(profile, ctx = {}) {
     const placement = familyTools('placement') ?? [
       { ...profileBase('placement:empty', 'Equipment placement'), disabled: true, reason: PROFILE_REASONS.placementEmpty, onClick: undefined },
     ]
+    const measurement = familyTools('measurement') ?? [
+      { ...profileBase('measurement:empty', 'Measure'), disabled: true, reason: PROFILE_REASONS.measurementEmpty, onClick: undefined },
+    ]
+    const selection = familyTools('selection') ?? [
+      { ...profileBase('selection:empty', 'Select'), disabled: true, reason: PROFILE_REASONS.selectionEmpty, onClick: undefined },
+    ]
+    const solar = profileRecord(context.solar)
+    const onToggle = profileHandler(solar.onToggle)
+    const onClear = profileHandler(context.onClearSelection)
     const tabs = drafting()
     tabs.splice(1, 0, { id: 'solar', label: 'Solar', clusters: [
-      profileGroup('stringing', 'Stringing', stringing),
+      // The engine consumer fills this seat with its four registry records.
+      profileGroup('solar-panels', 'Panel placement', []),
+      profileGroup('stringing', 'Stringing', [
+        { ...profileBase('solar-strings', 'Show solved rooftop strings'), icon: 'layers',
+          pressed: !!solar.eligible && solar.shown !== false, disabled: !solar.eligible || !onToggle,
+          reason: 'Solved routes are available only for the unchanged rooftop demo', onClick: onToggle ?? undefined },
+        ...stringing,
+      ]),
       profileGroup('placement', 'Equipment placement', placement),
+      profileGroup('measurement', 'Measure', measurement),
+      profileGroup('selection', 'Select', [
+        ...selection,
+        { ...profileBase('solar-clear-selection', 'Clear selection'), icon: 'delete',
+          disabled: !context.selectedHandle || !onClear, reason: 'Select an entity first', onClick: onClear ?? undefined },
+      ]),
     ] })
     return tabs
   }

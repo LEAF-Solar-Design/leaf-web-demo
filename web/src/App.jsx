@@ -19,7 +19,7 @@ import DraftingRibbon from './site/DraftingRibbon.jsx'
 import PropertiesDock, { drawingExtents } from './site/PropertiesDock.jsx'
 import { familiesForSurface, familyMonogram } from './lib/surfaceRails.js'
 import { byId, ladderListener, slashCommandHandlers } from './lib/actionRegistry.js'
-import { REASONS, RIBBON_RATIONALE, profileRibbonTabs, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels } from './lib/ribbonClusters.js'
+import { REASONS, RIBBON_RATIONALE, profileRibbonTabs, profileEntryTab, solarRouteDisplay, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels } from './lib/ribbonClusters.js'
 import { isWriteTool } from './lib/toolRecord.js'
 import { resolvePublishedCatalogTool } from './site/publishedCatalogTool.js'
 import { entityGeometry } from './lib/entityMetrics.js'
@@ -2740,6 +2740,7 @@ export default function App() {
   //  - never over a version preview or a mutated head (StageLayer:107
   //    precedent) - a delete-panel run makes v2 and the routes go stale.
   const [demoSolveRoutes, setDemoSolveRoutes] = useState(null)
+  const [showSolarStrings, setShowSolarStrings] = useState(true)
   const intakeIsRooftopSample = String(intake?.dwg || '').replace(/\\/g, '/').endsWith('/rooftop_demo.dwg')
   const solarStringsEligible = !!studioGround && surfaceSlots.groundMaterial.solarStrings && mock
     && !isEditFixture && DRAWING_SOURCE === 'rooftop_demo' && intakeIsRooftopSample
@@ -2754,10 +2755,11 @@ export default function App() {
     }).catch(() => { /* no solve, no overlay - never a fabricated route */ })
     return () => { live = false }
   }, [solarStringsEligible, demoSolveRoutes])
-  const solarStringRoutes = useMemo(() => {
-    if (!solarStringsEligible || previewing || (drawingState?.head ?? 1) > 1) return undefined
-    return demoSolveRoutes || undefined
-  }, [solarStringsEligible, previewing, drawingState, demoSolveRoutes])
+  const solarRoutesAvailable = solarStringsEligible && !previewing && (drawingState?.head ?? 1) === 1 && !engineDirty
+  const solarStringRoutes = useMemo(() => solarRouteDisplay({
+    eligible: solarStringsEligible, previewing, head: drawingState?.head ?? 1,
+    engineDirty, shown: showSolarStrings, routes: demoSolveRoutes,
+  }), [solarStringsEligible, previewing, drawingState, engineDirty, showSolarStrings, demoSolveRoutes])
   // iOS ship-lane readiness contract (leaf.ios-ship-surface.v1). Fetched only
   // with the surface flag baked on and a concrete project + revision; every
   // other case stays null, which IosSurface renders truthfully as
@@ -2832,6 +2834,8 @@ export default function App() {
     const openJobs = () => setJobRailExpanded(true)
     return profileRibbonTabs(surfaceSlots.toolbar.profile, {
       families: railFamilies,
+      solar: { eligible: solarRoutesAvailable, shown: showSolarStrings, onToggle: () => setShowSolarStrings((shown) => !shown) },
+      selectedHandle, onClearSelection: () => setSelectedHandle(null),
       onRun: (tool) => onRequestCatalogRun(tool, null, RIBBON_RATIONALE, 'ribbon'),
       catalogOptions: {
         onRequestRun: onRequestCatalogRun,
@@ -2860,12 +2864,16 @@ export default function App() {
   }, [surfaceSlots.toolbar.profile, railFamilies, onRequestCatalogRun, setFamilyOpen,
     running, previewing, writeLocked, canRunWrite, engineDirty, mock, signedIn, projectsErr,
     orgId, projectBusy, onCreateProject, agentDisabled, routing, clearAgentSession,
-    openAgentMode, jobs.length, iosContract?.receipt_id, setNavExpanded, setJobRailExpanded])
-  const activeRibbonTab = profileTabs.some((tab) => tab.id === ribbonTab)
-    ? ribbonTab : surfaceSlots.toolbar.home
+    openAgentMode, jobs.length, iosContract?.receipt_id, setNavExpanded, setJobRailExpanded,
+    solarRoutesAvailable, showSolarStrings, selectedHandle])
+  const previousRibbonProfile = useRef(null)
+  const entryRibbonTab = profileEntryTab(previousRibbonProfile.current, surfaceSlots.toolbar.profile, ribbonTab, surfaceSlots.toolbar.home)
+  const activeRibbonTab = profileTabs.some((tab) => tab.id === entryRibbonTab)
+    ? entryRibbonTab : surfaceSlots.toolbar.home
   useEffect(() => {
+    previousRibbonProfile.current = surfaceSlots.toolbar.profile
     if (ribbonTab !== activeRibbonTab) setRibbonTab(activeRibbonTab)
-  }, [ribbonTab, activeRibbonTab])
+  }, [ribbonTab, activeRibbonTab, surfaceSlots.toolbar.profile])
 
   const ribbon = useMemo(() => {
     if (!studioShell) {
@@ -2986,6 +2994,10 @@ export default function App() {
     // the end without a portal; the deviation is deliberate and named in
     // the W4g-5c PR, with the parity re-measure owed.
     const byTab = {
+      solar: (profileTabs.find((tab) => tab.id === 'solar')?.clusters || []).map((cluster) => cluster.id === 'solar-panels'
+        ? { ...cluster, extra: ENV_CAD_EDIT ? <div id="cockpit-solar-panels-slot" className="ribbon-slot" /> : null,
+          note: ENV_CAD_EDIT ? null : 'Panel placement needs the browser engine' }
+        : cluster),
       // The Clipboard panel stays LAST, where the reference puts it. With
       // the flag ON it is an EMPTY cluster carrying a slot div, and the
       // engine consumer portals the real tools into it; with the flag off
@@ -3627,7 +3639,7 @@ export default function App() {
                 <EngineRibbonClusters
                   importOpen={importOpen}
                   onToggleImport={() => { returnToDrawing(); setImportOpen((o) => !o) }}
-                  panels={activeRibbonTab === 'insert' ? ['file'] : activeRibbonTab === 'draw' ? ['draw', 'modify', 'annotation', 'block', 'clipboard', 'properties', 'groups'] : activeRibbonTab === 'view' ? ['script'] : []}
+                  panels={activeRibbonTab === 'solar' ? ['solar-panels'] : activeRibbonTab === 'insert' ? ['file'] : activeRibbonTab === 'draw' ? ['draw', 'modify', 'annotation', 'block', 'clipboard', 'properties', 'groups'] : activeRibbonTab === 'view' ? ['script'] : []}
                 />
               )}
               {/* W4f slice B: the command line's typed words (LINE, C, MOVE ...)

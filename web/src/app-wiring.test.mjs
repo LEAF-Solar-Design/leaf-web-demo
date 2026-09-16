@@ -20,6 +20,26 @@ import esbuild from 'esbuild'
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
 const viewerSource = readFileSync(new URL('./components/Viewer.jsx', import.meta.url), 'utf8')
 
+describe('C-04B Solar ribbon wiring', () => {
+  it('row9 gates solved routes on mock rooftop identity, preview, head and dirty engine', () => {
+    assert.match(appSource, /solarStringsEligible = !!studioGround && surfaceSlots\.groundMaterial\.solarStrings && mock\s+&& !isEditFixture && DRAWING_SOURCE === 'rooftop_demo' && intakeIsRooftopSample/)
+    assert.ok(appSource.includes('solarStringsEligible && !previewing && (drawingState?.head ?? 1) === 1 && !engineDirty'))
+    assert.match(appSource, new RegExp('solarRouteDisplay\\(\\{\\s+eligible: solarStringsEligible, previewing, head: drawingState\\?\\.head \\?\\? 1,\\s+engineDirty, shown: showSolarStrings, routes: demoSolveRoutes'))
+    assert.ok(appSource.includes('selectedHandle, onClearSelection: () => setSelectedHandle(null)'))
+  })
+  it('row12 profile entry changes only the selected ribbon tab', () => {
+    assert.ok(appSource.includes('profileEntryTab(previousRibbonProfile.current, surfaceSlots.toolbar.profile, ribbonTab, surfaceSlots.toolbar.home)'))
+    const start = appSource.indexOf('  const previousRibbonProfile = useRef(null)')
+    const end = appSource.indexOf('  const ribbon = useMemo', start)
+    const entryRule = appSource.slice(start, end)
+    assert.match(entryRule, /previousRibbonProfile.current = surfaceSlots.toolbar.profile/)
+    assert.match(entryRule, /setRibbonTab\(activeRibbonTab\)/)
+    assert.doesNotMatch(entryRule, /reset|setView|undo|openBytes|openFile/)
+    assert.ok(appSource.includes("activeRibbonTab === 'solar' ? ['solar-panels']"))
+    assert.ok(appSource.includes('id="cockpit-solar-panels-slot"'))
+  })
+})
+
 describe('Solar rooftop starter', () => {
   it('mounts SolarStarterOpener only for a live empty Solar workspace', () => {
     assert.match(appSource, /<SolarStarterOpener\s+enabled=\{!mock && drawingLoad.drawingId === REQUESTED_DRAWING_ID && drawingLoad.state === 'absent' && surfaceSlots\.toolbar\.profile === 'solar'\}\s+fetchDxf=\{fetchSampleDxf\}/)

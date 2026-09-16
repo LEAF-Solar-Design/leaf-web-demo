@@ -159,7 +159,7 @@ describe('Surface Contract — every repointed gate equals its old literal', () 
       // mount the ribbon with no tab selected.
       const home = surfaceContract(id).toolbar.home
         ?? surfaceContract(DEFAULT_PRODUCT_SURFACE).toolbar.home
-      expect(home).toBe({ browser: 'project', cad: 'draw', solar: 'draw', ios: 'ship' }[id])
+      expect(home).toBe({ browser: 'project', cad: 'draw', solar: 'solar', ios: 'ship' }[id])
       expect(c.toolbar.profile).toBe({ browser: 'project', cad: 'drafting', solar: 'solar', ios: 'ship' }[id])
       expect(c.toolbar.ribbon).toBe(true)
       expect(c.chrome.shell).toBe('cockpit')

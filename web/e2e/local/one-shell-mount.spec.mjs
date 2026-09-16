@@ -382,7 +382,7 @@ test.describe('route matrix, rail ON', () => {
     await expectOneCanvasIn(page, '.studio-ground')
 
     await expectSharedChrome(page)
-    await page.getByRole('tab', { name: 'Solar', exact: true }).click()
+    await expect(page.getByRole('tab', { name: 'Solar', exact: true })).toHaveAttribute('aria-selected', 'true')
     const solarRibbon = page.getByTestId('drafting-ribbon')
     await expect(solarRibbon.getByRole('group', { name: 'Stringing', exact: true })).toBeVisible()
     await expect(solarRibbon.getByRole('group', { name: 'Equipment placement', exact: true })).toBeVisible()
@@ -2610,6 +2610,68 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.getByTestId('cockpit-prompt-run')).toBeDisabled()
   })
 
+  test('C-04B Solar census: five clusters, geometry tools, solved toggle and profile continuity', async ({ page, request }) => {
+    test.setTimeout(120_000)
+    await page.setViewportSize({ width: 1920, height: 1080 })
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    await page.goto('/app?surface=solar&dev=1')
+    await expect(page.getByRole('tab', { name: 'Solar', exact: true })).toHaveAttribute('aria-selected', 'true')
+    await page.getByLabel('Use mock data (off = live backend)').check()
+    await expectOneCanvasIn(page, '.studio-ground')
+    await expectSharedChrome(page)
+    const ribbon = page.getByTestId('drafting-ribbon')
+    await expect(ribbon.locator('.ribbon-cluster')).toHaveCount(5)
+    expect(await ribbon.locator('.ribbon-cluster').evaluateAll((groups) => groups.map((group) => group.getAttribute('aria-label'))))
+      .toEqual(['Panel placement', 'Stringing', 'Equipment placement', 'Measure', 'Select'])
+    const toggle = ribbon.locator('[data-tool="solar-strings"]')
+    await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+    await expect(page.locator('.viewer-canvas[data-string-routes="134"]')).toHaveCount(1, { timeout: 30_000 })
+    await toggle.click()
+    await expect(toggle).toHaveAttribute('aria-pressed', 'false')
+    await expect(page.locator('.viewer-canvas[data-string-routes]')).toHaveCount(0)
+    await toggle.click()
+    await expect(page.locator('.viewer-canvas[data-string-routes="134"]')).toHaveCount(1)
+    const outline = ribbon.locator('[data-tool="solar-panels:createRectangle"]')
+    await expect(outline).toBeEnabled({ timeout: 60_000 })
+    const count = page.getByTestId('cad-edit-entity-count')
+    const before = Number(await count.textContent())
+    await outline.click()
+    for (const [field, value] of [['x', '0'], ['y', '0'], ['x2', '2'], ['y2', '1']]) {
+      await page.getByLabel(`ribbon ${field}`, { exact: true }).fill(value)
+    }
+    await page.getByTestId('cockpit-prompt-run').click()
+    await expect(count).toHaveText(String(before + 1), { timeout: 60_000 })
+    await expect(page.locator('.viewer-canvas[data-string-routes]')).toHaveCount(0)
+    await expect(toggle).toBeDisabled()
+    await expect(toggle).toHaveAttribute('title', 'Solved routes are available only for the unchanged rooftop demo')
+    await page.keyboard.press('Escape')
+    for (const op of ['arrayRect', 'move', 'rotate']) {
+      const tool = ribbon.locator(`[data-tool="solar-panels:${op}"]`)
+      await expect(tool).toBeEnabled()
+      await tool.click()
+      await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', op)
+      await page.keyboard.press('Escape')
+    }
+    const readState = () => page.evaluate(() => ({
+      document: document.querySelector('.workspace-card').getAttribute('data-engine-document'),
+      count: document.querySelector('[data-testid="cad-edit-entity-count"]').textContent,
+      undo: document.querySelector('[data-tool="quick-undo-edit"]').getAttribute('title'),
+      pose: document.querySelector('.studio-ground .viewer-canvas').__cadviewer.cameraPose(),
+    }))
+    const state = await readState()
+    for (const chooseModel of [false, true]) {
+      await page.getByRole('tab', { name: 'CAD', exact: true }).click()
+      await expect(page.getByRole('tab', { name: 'Draw', exact: true })).toHaveAttribute('aria-selected', 'true')
+      if (chooseModel) await page.getByRole('tab', { name: 'Model', exact: true }).click()
+      await page.getByRole('tab', { name: 'Solar CAD', exact: true }).click()
+      await expect(page.getByRole('tab', { name: 'Solar', exact: true })).toHaveAttribute('aria-selected', 'true')
+      expect(await readState()).toEqual(state)
+    }
+    await expectOneCanvasIn(page, '.studio-ground')
+    await expectSharedChrome(page)
+  })
+
   test('solar depth: real solved strings on the Solar tab only, honesty-gated (W4c-V3)', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
@@ -2634,7 +2696,7 @@ test.describe('route matrix, rail ON', () => {
     await page.getByRole('tab', { name: 'Solar CAD' }).click()
     await expect(page.locator(`.viewer-canvas[data-string-routes="${expected}"]`)).toHaveCount(1, { timeout: 20_000 })
     await expectSharedChrome(page)
-    await page.getByRole('tab', { name: 'Solar', exact: true }).click()
+    await expect(page.getByRole('tab', { name: 'Solar', exact: true })).toHaveAttribute('aria-selected', 'true')
     await expect(page.getByTestId('drafting-ribbon').getByRole('group', { name: 'Stringing', exact: true })).toBeVisible()
     await expect(page.getByTestId('drafting-ribbon').getByRole('group', { name: 'Equipment placement', exact: true })).toBeVisible()
 
