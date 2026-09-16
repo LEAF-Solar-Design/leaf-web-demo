@@ -22,7 +22,7 @@ const viewerSource = readFileSync(new URL('./components/Viewer.jsx', import.meta
 
 describe('Solar rooftop starter', () => {
   it('mounts SolarStarterOpener only for a live empty Solar workspace', () => {
-    assert.match(appSource, /<SolarStarterOpener\s+enabled=\{!mock && drawingLoad === 'absent' && surfaceSlots\.toolbar\.profile === 'solar'\}\s+fetchDxf=\{fetchSampleDxf\}/)
+    assert.match(appSource, /<SolarStarterOpener\s+enabled=\{!mock && drawingLoad.drawingId === REQUESTED_DRAWING_ID && drawingLoad.state === 'absent' && surfaceSlots\.toolbar\.profile === 'solar'\}\s+fetchDxf=\{fetchSampleDxf\}/)
   })
   it('row13 bootstraps only the Viewer with the empty starter intake', () => {
     assert.match(appSource, /\(intake \|\| solarStarter === 'open'\) &&/)
@@ -30,11 +30,56 @@ describe('Solar rooftop starter', () => {
     assert.match(appSource, /ref=\{intake \? viewerRef : solarStarterViewerRef\}/)
   })
   it('row16 drawingLoad distinguishes pending, seated, absent and failed session loads', () => {
-    assert.match(appSource, /const \[drawingLoad, setDrawingLoad\] = useState\('pending'\)/)
-    assert.match(appSource, /resetDrawing\(\); setDrawingLoad\('pending'\)/)
-    assert.match(appSource, /seatIntake\(d, options\)\s+setDrawingLoad\(d != null \? 'seated' : 'absent'\)/)
-    assert.match(appSource, /if \(!alive\) return\s+setDrawingLoad\(e\?\.status === 404 \? 'absent' : 'failed'\)/)
-    assert.match(appSource, /<SolarStarterOpener\s+enabled=\{!mock && drawingLoad === 'absent' && surfaceSlots\.toolbar\.profile === 'solar'\}/)
+    assert.ok(appSource.includes("useState({ drawingId: REQUESTED_DRAWING_ID, state: 'pending' })"))
+    assert.ok(appSource.includes("resetDrawing(); setDrawingLoad({ drawingId: loadDrawingId, state: 'pending' })"))
+    assert.ok(appSource.includes("setDrawingLoad({ drawingId: loadDrawingId, state: d != null ? 'seated' : 'absent' })"))
+    assert.ok(appSource.includes("setDrawingLoad({ drawingId: loadDrawingId, state: e?.status === 404 ? 'absent' : 'failed' })"))
+  })
+  it('row19 pins drawing identity and drops superseded loader replies before cleanup', async () => {
+    assert.ok(appSource.includes('requestedDrawingIdRef.current = REQUESTED_DRAWING_ID'))
+    assert.ok(appSource.includes('alive && loadDrawingId === requestedDrawingIdRef.current'))
+    assert.match(appSource, /\[mock, isEditFixture, intakeRetryKey, REQUESTED_DRAWING_ID, DRAWING_SOURCE,/)
+    assert.equal(appSource.split("drawingLoad.drawingId === REQUESTED_DRAWING_ID && drawingLoad.state === 'absent'").length - 1, 2)
+    assert.ok(appSource.includes("drawingSeated={drawingLoad.drawingId === REQUESTED_DRAWING_ID && drawingLoad.state === 'seated'}"))
+    assert.ok(appSource.includes('consoleIntake={intake}'))
+    const start = appSource.indexOf('    let alive = true', appSource.indexOf('// load session (intake'))
+    const end = appSource.indexOf('  }, [mock, isEditFixture, intakeRetryKey', start)
+    assert.ok(start > 0 && end > start)
+    const body = appSource.slice(start, end)
+    for (const result of ['success', 'absent', 'failed']) {
+      const loads = [], seats = [], requests = []
+      const requestedDrawingIdRef = { current: 'A' }
+      const noop = () => {}
+      const context = {
+        REQUESTED_DRAWING_ID: 'A', DRAWING_SOURCE: 'A', requestedDrawingIdRef,
+        mock: false, isEditFixture: false, resetDrawing: noop,
+        setDrawingLoad: (value) => loads.push(value), setLoadErr: noop,
+        resetCatalogTransient: noop, clearToast: noop, setDrawer: noop,
+        setTenant: noop, setTier: noop, setOrg: noop, clearAgentSession: noop,
+        mockVersions: { reset: noop }, seatIntake: (value) => seats.push(value),
+        sessionActions: { checking: noop, activate: noop },
+        getSession: (_, source) => new Promise((resolve, reject) => requests.push({ source, resolve, reject })),
+        getDrawingVersions: async () => ({ head: 1 }), adoptOrgId: noop,
+        humanizeError: () => 'failed', is401: () => false,
+      }
+      const run = () => new Function(...Object.keys(context), body)(...Object.values(context))
+      const cleanA = run()
+      requestedDrawingIdRef.current = 'B'
+      context.REQUESTED_DRAWING_ID = 'B'
+      context.DRAWING_SOURCE = 'B'
+      const cleanB = run()
+      if (result === 'success') requests[0].resolve({ intake: { dwg: 'A' } })
+      else requests[0].reject({ status: result === 'absent' ? 404 : 503 })
+      await new Promise((done) => setImmediate(done))
+      assert.deepEqual(loads, [{ drawingId: 'A', state: 'pending' }, { drawingId: 'B', state: 'pending' }])
+      assert.deepEqual(seats, [])
+      assert.deepEqual(requests.map((request) => request.source), ['A', 'B'])
+      requests[1].resolve({ intake: { dwg: 'B' } })
+      await new Promise((done) => setImmediate(done))
+      assert.deepEqual(loads.at(-1), { drawingId: 'B', state: 'seated' })
+      assert.deepEqual(seats, [{ dwg: 'B' }])
+      cleanA(); cleanB()
+    }
   })
 })
 
@@ -615,13 +660,15 @@ describe('App.jsx wiring', () => {
   })
 
   it('seats live intake with the mapped store drawing and its durable version summary', () => {
+    // Bind the load to its starting identity so a later identity cannot receive its result.
+    assert.match(appSource, /\/\/ load session \(intake[^\n]*\n\s*useEffect[^\n]*\n\s*let alive = true\s*const loadDrawingId = REQUESTED_DRAWING_ID/)
     assert.match(
       stripped,
-      /drawingSummary\s*=\s*await getDrawingVersions\(false,\s*REQUESTED_DRAWING_ID\)/,
+      /drawingSummary\s*=\s*await getDrawingVersions\(false,\s*loadDrawingId\)/,
     )
     assert.match(
       stripped,
-      /drawingId:\s*REQUESTED_DRAWING_ID[\s\S]*drawingState:\s*drawingSummary/,
+      /drawingId:\s*loadDrawingId[\s\S]*drawingState:\s*drawingSummary/,
     )
     assert.match(stripped, /fallbackDrawingId:\s*REQUESTED_DRAWING_ID/)
   })

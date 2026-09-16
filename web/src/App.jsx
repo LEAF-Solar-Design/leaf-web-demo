@@ -277,6 +277,8 @@ export default function App() {
   // module-const behavior — the seed is frozen at mount and nothing in this
   // shell promotes a new identity yet.
   const { drawingId: REQUESTED_DRAWING_ID, source: DRAWING_SOURCE } = useDrawingIdentity()
+  const requestedDrawingIdRef = useRef(REQUESTED_DRAWING_ID)
+  requestedDrawingIdRef.current = REQUESTED_DRAWING_ID
   // W3 one-shell: non-null ONLY under the studio shell (rail on). The sole
   // consumer is the Viewer render site, which portals into it; null renders
   // the old shell byte-for-byte (the rollback contract, studioGround.js).
@@ -333,7 +335,7 @@ export default function App() {
   const [mock, setMock] = useState(() => config.mockDefault
     || explicitDemo({ search: typeof window !== 'undefined' ? window.location.search : '', signedIn: isSignedIn() }))
   const [loadErr, setLoadErr] = useState(null)
-  const [drawingLoad, setDrawingLoad] = useState('pending')
+  const [drawingLoad, setDrawingLoad] = useState({ drawingId: REQUESTED_DRAWING_ID, state: 'pending' })
   const [intakeRetryKey, setIntakeRetryKey] = useState(0) // X3 Retry — bumping re-runs the intake load effect
   const [selectedTool, setSelectedTool] = useState(null)
   const [selectedHandle, setSelectedHandle] = useState(null)
@@ -968,16 +970,19 @@ export default function App() {
   // load session (intake + tenant echo) + reset transient state on mode/fixture change
   useEffect(() => {
     let alive = true
-    resetDrawing(); setDrawingLoad('pending'); setLoadErr(null)
+    const loadDrawingId = REQUESTED_DRAWING_ID
+    const current = () => alive && loadDrawingId === requestedDrawingIdRef.current
+    if (!current()) return undefined
+    resetDrawing(); setDrawingLoad({ drawingId: loadDrawingId, state: 'pending' }); setLoadErr(null)
     resetCatalogTransient()
     clearToast(); setDrawer(null); setTenant(null)
     setTier(null); setOrg(null)
     clearAgentSession()
     mockVersions.reset()
     const seat = (d, options = {}) => {
-      if (!alive) return
+      if (!current()) return
       seatIntake(d, options)
-      setDrawingLoad(d != null ? 'seated' : 'absent')
+      setDrawingLoad({ drawingId: loadDrawingId, state: d != null ? 'seated' : 'absent' })
       // MOCK write loop (M3): v1 of the 'demo' chain is the intake just seated,
       // so re-running the demo always starts from a clean v1.
       if (mock && !isEditFixture) mockVersions.seedBase(d)
@@ -992,7 +997,7 @@ export default function App() {
     if (!mock) sessionActions.checking()
     getSession(mock, DRAWING_SOURCE)
       .then(async ({ intake: d, tenant: t, tier: ti, org: o }) => {
-        if (!alive) return
+        if (!current()) return
         // A 200 from /api/session IS the platform session, so publish it before
         // any secondary request can report a newer auth failure. In particular,
         // a /versions 401 must remain `required` instead of being overwritten by
@@ -1001,15 +1006,15 @@ export default function App() {
         let drawingSummary = null
         if (!mock) {
           try {
-            drawingSummary = await getDrawingVersions(false, REQUESTED_DRAWING_ID)
+            drawingSummary = await getDrawingVersions(false, loadDrawingId)
           } catch {
             // Keep the intake readable, but leave its version unknown. The
             // run-intent gate below refuses live legacy writes in this state.
           }
         }
-        if (!alive) return
+        if (!current()) return
         seat(d, {
-          drawingId: REQUESTED_DRAWING_ID,
+          drawingId: loadDrawingId,
           ...(drawingSummary ? { drawingState: drawingSummary } : {}),
         })
         setTenant(t); setTier(ti); setOrg(o)
@@ -1019,8 +1024,8 @@ export default function App() {
         if (!mock && o) adoptOrgId(o)
       })
       .catch((e) => {
-        if (!alive) return
-        setDrawingLoad(e?.status === 404 ? 'absent' : 'failed')
+        if (!current()) return
+        setDrawingLoad({ drawingId: loadDrawingId, state: e?.status === 404 ? 'absent' : 'failed' })
         setLoadErr(humanizeError(e))
         if (!mock && is401(e)) {
           // `tokenInvalidated` stays FALSE on purpose: this is render state
@@ -1045,7 +1050,7 @@ export default function App() {
     // is what re-runs getSession after a post-callback 401 instead of stranding
     // this page holding a valid token behind a signed-out surface. Identical
     // wiring to ToolCast's session effect.
-  }, [mock, isEditFixture, intakeRetryKey, resetCatalogTransient, resetDrawing, seatIntake,
+  }, [mock, isEditFixture, intakeRetryKey, REQUESTED_DRAWING_ID, DRAWING_SOURCE, resetCatalogTransient, resetDrawing, seatIntake,
       sessionActions, session.recoveries])
 
   // Auth0 return leg: if we came back from Universal Login (?code=&state=),
@@ -3655,6 +3660,7 @@ export default function App() {
           {ENV_CAD_EDIT && studioGround && (
             <EngineDocumentView
               viewerRef={viewerRef}
+              consoleIntake={intake}
               selectedHandle={selectedHandle}
               onSelectedHandleChange={setSelectedHandle}
               onShown={(intake, history) => {
@@ -3701,8 +3707,9 @@ export default function App() {
           )}
           {ENV_CAD_EDIT && studioGround && (
             <SolarStarterOpener
-              enabled={!mock && drawingLoad === 'absent' && surfaceSlots.toolbar.profile === 'solar'}
+              enabled={!mock && drawingLoad.drawingId === REQUESTED_DRAWING_ID && drawingLoad.state === 'absent' && surfaceSlots.toolbar.profile === 'solar'}
               fetchDxf={fetchSampleDxf}
+              drawingSeated={drawingLoad.drawingId === REQUESTED_DRAWING_ID && drawingLoad.state === 'seated'}
               retryKey={solarStarterRetryKey}
               onStarterState={setSolarStarter}
             />
@@ -3888,7 +3895,7 @@ export default function App() {
               further down, wherever propertyRowsEl sits. */}
           {ENV_CAD_EDIT && <EngineDockProperties />}
           <div className="viewer-wrap">
-            {!mock && drawingLoad === 'absent' && surfaceSlots.toolbar.profile === 'solar' && solarStarter === 'failed' && (
+            {!mock && drawingLoad.drawingId === REQUESTED_DRAWING_ID && drawingLoad.state === 'absent' && surfaceSlots.toolbar.profile === 'solar' && solarStarter === 'failed' && (
               <div className="loading-line dim" role="status">
                 <span>The rooftop starter could not be opened. Retry or import a DXF.</span>
                 <button className="chip-act" onClick={() => setSolarStarterRetryKey((k) => k + 1)}>Retry rooftop starter</button>

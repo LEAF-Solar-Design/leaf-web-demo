@@ -4,6 +4,7 @@ import { resolve } from 'node:path'
 import { act, cleanup, render } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import SolarStarterOpener, { SOLAR_STARTER_DOCUMENT_ID, SOLAR_STARTER_EMPTY_INTAKE } from './SolarStarterOpener.jsx'
+import EngineHeadOpener from './EngineHeadOpener.jsx'
 import { SESSION_ERROR } from './engineSessionErrors.js'
 
 const fake = vi.hoisted(() => ({ context: null }))
@@ -21,7 +22,7 @@ beforeEach(() => {
   setReach = vi.fn()
   fake.context = { setReach, session: {
     documentId: '', engineParsed: false, busy: false, dirty: false, savedVersion: null,
-    actions: { openBytes, save: vi.fn(), checkout: vi.fn() },
+    actions: { openBytes, reset: vi.fn(), save: vi.fn(), checkout: vi.fn() },
   } }
 })
 afterEach(cleanup)
@@ -87,6 +88,17 @@ it('row6 waits until busy clears', async () => {
   expect(fetchDxf).toHaveBeenCalledTimes(1)
   expect(openBytes).toHaveBeenCalledTimes(1)
 })
+it('row5 a dirty flip after fetch resolves blocks the post-await open', async () => {
+  const resolve = pending()
+  mount(); await settle()
+  resolve()
+  // No rerender: only the post-await dirty guard can protect this document.
+  Object.assign(fake.context.session, { documentId: SOLAR_STARTER_DOCUMENT_ID, dirty: true })
+  await settle()
+  expect(fetchDxf).toHaveBeenCalledTimes(1)
+  expect(openBytes).toHaveBeenCalledTimes(0)
+  expect(fake.context.session.dirty).toBe(true)
+})
 it('row7 discards a reply after leaving the profile', async () => {
   const resolve = pending()
   const view = mount(); await settle()
@@ -146,7 +158,12 @@ it('row13 viewer bootstrap uses only the empty presentation intake', () => {
     return <div data-testid="starter-viewer" />
   })
   const viewerRef = { current: null }
-  const solarStarterViewerRef = vi.fn((value) => { viewerRef.current = value })
+  const appSource = readFileSync(resolve(process.cwd(), 'src/App.jsx'), 'utf8')
+  const callbackBody = appSource.match(/const solarStarterViewerRef = useCallback\(\(viewer\) => \{([\s\S]*?)\}, \[\]\)/)?.[1]
+  expect(callbackBody).toBeTruthy()
+  const setSolarStarterViewerMounted = vi.fn()
+  const solarStarterViewerRef = vi.fn(new Function('viewerRef', 'setSolarStarterViewerMounted', 'viewer', callbackBody)
+    .bind(null, viewerRef, setSolarStarterViewerMounted))
   function Mount({ intake, solarStarter }) {
     return (intake || solarStarter === 'open') && <Viewer
       ref={intake ? viewerRef : solarStarterViewerRef}
@@ -159,6 +176,7 @@ it('row13 viewer bootstrap uses only the empty presentation intake', () => {
   expect(received).toHaveBeenLastCalledWith(SOLAR_STARTER_EMPTY_INTAKE)
   expect(solarStarterViewerRef).toHaveBeenLastCalledWith(viewer)
   expect(viewerRef.current).toBe(viewer)
+  expect(setSolarStarterViewerMounted).toHaveBeenLastCalledWith(true)
   view.unmount()
   solarStarterViewerRef.mockClear()
   const intake = { dwg: 'real.dxf' }
@@ -224,4 +242,59 @@ it('row18 failure text never exposes the fetch error message', async () => {
   mount(); await settle()
   expect(setReach).toHaveBeenLastCalledWith({ state: 'failed', sentence: 'the rooftop starter could not be opened: fetch failed; retry or import a DXF' })
   expect(JSON.stringify(setReach.mock.calls)).not.toContain('REVIEW_SENTINEL')
+})
+
+it('row20 a later seated drawing resets the clean starter and opens the real head', async () => {
+  const session = fake.context.session
+  openBytes.mockImplementation((_, documentId) => { session.documentId = documentId; session.engineParsed = true })
+  session.actions.reset.mockImplementation(() => { session.documentId = ''; session.engineParsed = false })
+  const fetchHead = vi.fn(async () => ({ bytes, version: 3, head: 3 }))
+  const tree = (seated, pendingLoad = false) => <>
+    <EngineHeadOpener drawingId="real" enabled={seated} headKey={3} fetchDxf={fetchHead} />
+    <SolarStarterOpener enabled={!seated && !pendingLoad} drawingSeated={seated} fetchDxf={fetchDxf} onStarterState={onStarterState} />
+  </>
+  const view = render(tree(false)); await settle()
+  expect(session.documentId).toBe(SOLAR_STARTER_DOCUMENT_ID)
+  view.rerender(tree(false, true)); await settle()
+  expect(session.actions.reset).toHaveBeenCalledTimes(0)
+  view.rerender(tree(true)); await settle()
+  expect(session.actions.reset).toHaveBeenCalledTimes(1)
+  expect(onStarterState).toHaveBeenLastCalledWith('idle')
+  expect(setReach).toHaveBeenLastCalledWith({ state: 'idle', sentence: '' })
+  // The fake reset does not notify React; render its new snapshot as the store does.
+  view.rerender(tree(true)); await settle()
+  expect(fetchHead).toHaveBeenCalledTimes(1)
+  expect(openBytes.mock.calls).toEqual([
+    [bytes, SOLAR_STARTER_DOCUMENT_ID],
+    [bytes, 'real-v3.dxf', { committed: true, version: 3 }],
+  ])
+  expect(session.documentId).toBe('real-v3.dxf')
+})
+
+it('row21 a later seated intake preserves the owned dirty starter', async () => {
+  const view = mount(); await settle()
+  Object.assign(fake.context.session, { documentId: SOLAR_STARTER_DOCUMENT_ID, engineParsed: true, dirty: true })
+  view.update({ enabled: false }); await settle()
+  view.update({ drawingSeated: true }); await settle()
+  expect(fake.context.session.actions.reset).toHaveBeenCalledTimes(0)
+  expect(fake.context.session.documentId).toBe(SOLAR_STARTER_DOCUMENT_ID)
+  expect(fake.context.session.dirty).toBe(true)
+  expect(openBytes).toHaveBeenCalledTimes(1)
+  expect(onStarterState).toHaveBeenLastCalledWith('open')
+  expect(setReach).toHaveBeenLastCalledWith({ state: 'open', sentence: '', source: 'sample-static' })
+})
+
+it('row22 a foreign document relinquishes ownership before a same-name hand import refusal', async () => {
+  const view = mount(); await settle()
+  Object.assign(fake.context.session, { documentId: 'roof.dxf', engineParsed: true })
+  view.update({ enabled: false }); await settle()
+  expect(onStarterState).toHaveBeenLastCalledWith('idle')
+  Object.assign(fake.context.session, { documentId: SOLAR_STARTER_DOCUMENT_ID, engineParsed: false, errorKind: SESSION_ERROR.REFUSED })
+  const count = setReach.mock.calls.length
+  view.update({ enabled: true }); await settle()
+  view.update({ retryKey: 1 }); await settle()
+  expect(setReach).toHaveBeenCalledTimes(count)
+  expect(fetchDxf).toHaveBeenCalledTimes(1)
+  expect(openBytes).toHaveBeenCalledTimes(1)
+  expect(onStarterState).toHaveBeenLastCalledWith('idle')
 })
