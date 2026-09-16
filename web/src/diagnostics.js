@@ -40,7 +40,7 @@ export function composeDiagnostics(input = {}) {
     DIAGNOSTICS_TITLE,
     `build ${clean(buildHash)}`,
     `mode ${clean(mode)}`,
-    `served ${servedSourceSha === null ? 'not available (sample data)' : clean(servedSourceSha)}`,
+    `served ${servedSourceSha === null ? `not available${mode === 'sample data' ? ' (sample data)' : ''}` : clean(servedSourceSha)}`,
     `task ${taskRevision === null ? 'not available' : clean(taskRevision)}`,
     `page ${clean(pathname)}`,
     `time ${clean(at)}`,

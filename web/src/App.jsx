@@ -512,14 +512,16 @@ export default function App() {
   // catalog. Fetched once; resolves to [] on any failure, in which case the
   // picker falls back to the catalog lane's runnable tools — today's
   // behaviour exactly, so a registry outage costs the menu nothing.
+  // The demo never asks the server for the registry; the picker falls back to the catalog lane as on a registry outage.
   const [registryEntries, setRegistryEntries] = useState([])
   const [catalogSkills, setCatalogSkills] = useState([])
   useEffect(() => {
+    if (mock) { setRegistryEntries([]); setCatalogSkills([]); return undefined }
     let live = true
     fetchRegistry().then((r) => { if (live) setRegistryEntries(r.entries || []) })
     fetchSkills().then((r) => { if (live) setCatalogSkills(r.skills || []) })
     return () => { live = false }
-  }, [])
+  }, [mock])
 
   const resultBlockRef = useRef(null)   // toast "View" scroll target (result)
   const workspaceCardRef = useRef(null) // toast "View" scroll target (viewer)
@@ -3143,6 +3145,7 @@ export default function App() {
           projectName={currentProjectName || projectName}
           inputRef={barInputRef}
           routeActive={!!route}
+          mcpDiscoveryEnabled={!mock}
           onOpenAuthor={onOpenAuthor}
           // Slice 8a round 3: the bar has no guard of its own. This is the
           // refusal the TRANSPORT raised (api.nlPrompt / converse.postMessage)

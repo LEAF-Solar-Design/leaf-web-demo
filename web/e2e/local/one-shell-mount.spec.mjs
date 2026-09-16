@@ -304,6 +304,7 @@ test.describe('route matrix, rail ON', () => {
     await setRail(page, '1')
     await page.goto('/app')
     await expect(page.locator(STUDIO)).toHaveCount(1)
+    await expect(page.locator('footer.foot-bar')).toContainText(/backend · (local only|cloud live)/, { timeout: 30_000 })
     await page.locator('header.top').getByRole('button', { name: 'Details', exact: true }).click()
     const diagnostics = page.getByTestId('diagnostics-block')
     await expect(diagnostics).toHaveText(/^Leaf Automation diagnostics\n/)

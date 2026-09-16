@@ -27,6 +27,12 @@ describe('support diagnostics', () => {
     expect(block).toContain('edit lock not applicable\nrequest failures (0)\n  none\nunavailable controls (0) local\n  none')
   })
 
+  it('names unavailable live identity without blaming sample data', () => {
+    const block = composeDiagnostics({ ...live, mode: 'live', servedSourceSha: null, taskRevision: null })
+    expect(block).toContain('served not available\ntask not available')
+    expect(block).not.toContain('(sample data)')
+  })
+
   it('redacts credentials before truncation in identity and record fields', () => {
     const jwt = `${'a'.repeat(16)}.${'b'.repeat(16)}.${'c'.repeat(16)}`
     const block = composeDiagnostics({ ...live, buildHash: jwt, editLock: { state: jwt }, failures: [{ errorId: jwt }], refusals: [{ label: jwt, code: 'Bearer secret' }] })

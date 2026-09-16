@@ -48,6 +48,21 @@ describe('W4g S08-c: the Details drawer carries sanitized diagnostics', () => {
 })
 
 describe('W4g S08-a: an explicit demo starts in mock', () => {
+  it('gates registry and skills discovery on mock', () => {
+    const start = appSource.indexOf('const [catalogSkills, setCatalogSkills]')
+    const end = appSource.indexOf('}, [mock])', start)
+    assert.ok(start >= 0 && end > start)
+    const effect = appSource.slice(start, end + '}, [mock])'.length)
+    const guard = effect.indexOf('if (mock)')
+    assert.ok(guard >= 0 && guard < effect.indexOf('fetchRegistry('))
+    assert.ok(guard < effect.indexOf('fetchSkills('))
+    assert.ok(effect.endsWith('}, [mock])'))
+  })
+  it('gates PromptBox MCP discovery on mock', () => {
+    const promptBox = appSource.match(/<PromptBox\s[\s\S]*?\/>/)?.[0]
+    assert.ok(promptBox)
+    assert.ok(promptBox.includes('mcpDiscoveryEnabled={!mock}'))
+  })
   it('decides explicit demo mode in the lazy initial state', () => {
     assert.match(appSource, new RegExp('useState\\(\\(\\) => config\\.mockDefault[\\s\\S]{0,200}explicitDemo\\(\\{'))
     assert.match(appSource, new RegExp("import \\{[^}]*\\bexplicitDemo\\b[^}]*\\} from './demoState\\.js'"))
