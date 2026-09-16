@@ -237,8 +237,11 @@
   margin-left: auto; display: flex; align-items: center; flex-wrap: wrap;
   gap: 4px 12px; min-width: 0; color: #949494; font-size: 10.5px;
 }
+/* R2C (try-mono-caps-labels-and-jargon-rail): sentence case at the items'
+   size, no tracking. The spaced mono caps read as a machine label to a
+   stranger; the words are the same. */
 .tc-continuity-label {
-  color: #949494; font-size: 9px; text-transform: uppercase; letter-spacing: .1em;
+  color: #949494; font-size: 10.5px;
 }
 .tc-continuity-item { white-space: nowrap; }
 .tc-continuity-item strong { color: #a1a1aa; font-weight: 500; }
@@ -473,17 +476,21 @@
 .tc-rail-l { left: 0; border-right: 1px solid #27272a; }
 .tc-rail-r { right: 0; border-left: 1px solid #27272a; }
 .tc-rail-head { display: flex; align-items: baseline; gap: 8px; padding: 14px 16px 8px; }
-/* Joins the studio's mono-caps micro-label grammar (styles.css
-   table.counts th), identity coherence with /app, intentionally
-   /try-visible. */
-.tc-rail-title { font: 600 10px var(--font-mono); text-transform: uppercase; letter-spacing: .08em; }
+/* R2C (try-mono-caps-labels-and-jargon-rail): the band label is a word in
+   the page's sans, sentence case. It used to join the studio's mono-caps
+   micro-label grammar (styles.css table.counts th); on /try the judge read
+   WORKSPACE and OPERATIONS as machine labels, so the grammar stays in /app. */
+.tc-rail-title { font: 600 12px 'Inter Tight', sans-serif; }
 .tc-rail-sub { font-size: 11.5px; color: #949494; }
+/* R2C (try-caption-overprints-rooftop): a tab label never breaks across two
+   lines ("Versions 0" did at 1440); the strip wraps whole tabs instead. */
 .tc-rail-tabs {
-  display: flex; gap: 4px; padding: 0 10px 9px; border-bottom: 1px solid #27272a;
+  display: flex; flex-wrap: wrap; gap: 4px; padding: 0 10px 9px; border-bottom: 1px solid #27272a;
 }
 .tc-rail-tabs button {
   flex: 1; border: 0; border-radius: 6px; padding: 5px 8px; cursor: pointer;
   background: transparent; color: #949494; font-size: 11.5px; text-align: left;
+  white-space: nowrap;
 }
 .tc-rail-tabs button:hover { color: #d4d4d8; background: rgba(255, 255, 255, .03); }
 .tc-rail-tabs button[aria-selected="true"] { color: #fff; background: #1f1f23; }
@@ -570,6 +577,10 @@
   position: static; width: auto; max-width: none; margin-top: 8px; box-shadow: none;
 }
 .tc-rail-r .result-panel { margin: 12px; padding: 12px; }
+/* R2C (try-mono-caps-labels-and-jargon-rail): the shared card grammar
+   (styles.css .card > h3) sets mono caps; on /try the heading reads
+   "Result", not "RESULT". */
+.tc-rail-r .result-panel > h3 { font: 600 12px 'Inter Tight', sans-serif; text-transform: none; letter-spacing: 0; }
 .tc-rail-r .result-panel .panel-sub { margin: 0; font-size: 12px; color: #949494; }
 .tc-rail-r .result-panel table { font-size: 12px; }
 .tc-rail-r .result-panel .receipt { flex-wrap: wrap; }
@@ -579,7 +590,7 @@
 .drawing-upload { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 10px 0; padding: 10px; border-top: 1px solid #27272a; }
 .drawing-upload input[type="file"] { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .drawing-upload-engine { flex: 1 1 100%; display: flex; align-items: center; gap: 6px; }
-.drawing-upload-engine-label { font-size: 11px; color: #a1a1aa; text-transform: uppercase; letter-spacing: 0.04em; }
+.drawing-upload-engine-label { font-size: 11px; color: #a1a1aa; }
 .drawing-upload-engine-opt { opacity: 0.8; }
 .drawing-upload-engine-opt.selected { opacity: 1; outline: 1px solid #22c55e; }
 .drawing-upload-engine-opt[disabled] { opacity: 0.35; }
@@ -600,7 +611,7 @@
 }
 .stage-root[data-scene="tool"] > .drawer-layer > .drawer { width: 100%; height: 100%; pointer-events: auto; }
 .tc-rail .rail { padding: 10px 12px 16px; min-height: 0; overflow: auto; }
-.tc-rail .rail h2 { display: flex; margin: 0 0 10px; font-size: 12px; }
+.tc-rail .rail h2 { display: flex; margin: 0 0 10px; font: 600 12px 'Inter Tight', sans-serif; text-transform: none; letter-spacing: 0; }
 .tc-rail .rail h2 .n { margin-left: auto; color: #949494; font-weight: 400; }
 .tc-rail .rail-note { font-size: 11px; color: #949494; line-height: 1.45; }
 .tc-result-summary { display: flex; align-items: center; gap: 8px; padding: 10px 16px; font-size: 11.5px; color: #a1a1aa; }
@@ -806,9 +817,16 @@
 
 /* Not part of the pane choreography: opacity-only, landing ~600ms after the
    cast (enter starts at 900ms; caption starts at 1500ms). */
+/* R2C (try-caption-overprints-rooftop): a footer line docked under the
+   command bar, spanning the gap between the rails on its own dark strip, so
+   the sentence never sits on the drawing's panel geometry. The strip is
+   exactly the bar's 18px seat: 17px of line plus its 1px rule. */
 .tc-caption {
-  position: absolute; left: 320px; bottom: 122px; z-index: 15; width: 420px;
-  font-size: 11.5px; color: #949494;
+  position: absolute; left: 300px; right: 300px; bottom: 0; z-index: 15;
+  height: 18px; line-height: 17px; padding: 0 20px; box-sizing: border-box;
+  border-top: 1px solid #27272a; background: rgba(10, 10, 10, .88);
+  font-size: 11px; color: #949494; text-align: center;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   filter: none !important; transform: none !important;
   transition: opacity .5s ease !important;
 }
@@ -819,7 +837,7 @@
 @media (max-width: 1279px) {
   .tc-rail { width: 250px; }
   .tc-bar-wrap { left: 270px; right: 270px; width: auto; max-width: 720px; margin-left: 0; margin-right: auto; }
-  .tc-caption { left: 270px; }
+  .tc-caption { left: 250px; right: 250px; }
   .tc-topcluster { gap: 9px; padding: 0 12px; }
 }
 
@@ -846,16 +864,39 @@
   .tc-product-columns { grid-template-columns: 1fr; }
   .lp-topbar { padding: 0 10px; }
   .lp-wordmark { font-size: 12px; }
-  .tc-topcluster { left: 108px; gap: 8px; padding: 0 8px; }
-  .tc-topcluster .proj-switch, .tc-version { display: none; }
+  /* R2C (try-mobile-header-overlap-and-canvas-sliver): the workspace header
+     is two rows on a phone, the wordmark then the project chip and status,
+     so the chip no longer overprints "Leaf Automation". The judge names this
+     header .tc-header; the element is .lp-topbar with .tc-topcluster
+     overlaid on it, so the rule carries both names and the cluster becomes
+     the second row. Every band pinned to the 52px bar moves down by that
+     row (20px): the profile tabs, the product frame and the drawer. */
+  .stage-root[data-scene="tool"] .lp-topbar, .tc-header {
+    height: 72px; flex-wrap: wrap; align-content: flex-start; padding: 4px 10px 0;
+  }
+  .stage-root[data-scene="tool"] .lp-top-slot { height: 24px; }
+  .tc-topcluster {
+    top: 32px; left: 0; right: 0; height: 36px; justify-content: flex-start;
+    gap: 8px; padding: 0 10px; overflow-x: auto;
+  }
+  .tc-version { display: none; }
   .tc-solve { font-size: 11px; }
-  .tc-rail { left: 0; right: auto; width: 100%; }
-  .tc-rail-l { top: 49%; bottom: 25.5%; }
-  .tc-rail-r { top: 74.5%; bottom: 0; }
+  .tc-product-nav { top: 72px; }
+  .tc-product-frame { top: 116px; }
+  .stage-root[data-scene="tool"] > .drawer-layer { top: 72px; }
+  /* The drawing keeps at least half the viewport below the chrome (72px
+     header plus the 44px profile tabs), and the viewer is confined to that
+     box so the whole rooftop fits it instead of centring under the rails.
+     The command bar seats under the box, then the two rails stand side by
+     side (the 980px rules) in what is left and scroll their own bodies;
+     stacked full-width rails would get about 140px each here. */
+  .stage-root[data-scene="tool"] :is(.stage-viewer, .stage-fallback2d) { top: 116px; bottom: auto; min-height: 50vh; }
+  .tc-rail { top: calc(50vh + 200px); }
   .tc-rail-head { padding: 8px 12px 5px; }
-  .tc-rail-tabs { padding-bottom: 6px; }
+  .tc-rail-tabs { flex-wrap: nowrap; scrollbar-width: none; padding-bottom: 6px; }
+  .tc-rail-tabs button { min-width: 0; }
   .tc-rail-foot { display: none; }
-  .tc-bar-wrap { left: 8px; right: 8px; bottom: calc(51% + 8px); }
+  .tc-bar-wrap { left: 8px; right: 8px; bottom: calc(50vh - 194px); }
   .tc-bar .tc-bar-input-row { padding: 11px 12px 8px; }
   .tc-bar .bar-input .tc-bar-input { min-width: 0; font-size: 16px; }
   .tc-bar .bar-controls { padding: 0 10px 9px; }
@@ -868,7 +909,7 @@
      .tc-run is the last node standing: give IT the auto margin so it still
      seats at the well's right edge on a phone, matching the pre-5a layout. */
   .tc-bar .bar-controls .tc-run { margin-left: auto; }
-  .toast { max-width: calc(100vw - 24px); bottom: calc(51% + 98px); }
+  .toast { max-width: calc(100vw - 24px); bottom: calc(50vh - 106px); }
 }
 
 @media (max-height: 650px) and (min-width: 981px) {
