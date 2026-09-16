@@ -394,6 +394,28 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.locator('.studio-ground .studio-ground-viewer')).toBeHidden()
   })
 
+  test('C-05 row8 demo Ship status rows stay disabled with Setup required', async ({ page, request }) => {
+    test.setTimeout(120_000)
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    await page.setViewportSize({ width: 1600, height: 1000 })
+    await page.goto('/app?surface=ios&dev=1')
+    await page.getByLabel('Use mock data (off = live backend)').check()
+    await expect(page.getByRole('tab', { name: 'Ship', exact: true })).toHaveAttribute('aria-selected', 'true')
+    const ribbon = page.getByTestId('drafting-ribbon')
+    for (const [id, reason] of [
+      ['ship:revision', 'No approved revision for this project yet'],
+      ['ship:readiness', 'Apple readiness is not mounted'],
+    ]) {
+      const tool = ribbon.locator(`[data-tool="${id}"]`)
+      await expect(tool).toBeDisabled()
+      await expect(tool).toHaveAttribute('title', reason)
+      await expect(tool).toHaveAccessibleName(new RegExp(reason))
+    }
+    await expect(page.getByRole('tab', { name: 'iOS', exact: true }).locator('small')).toHaveText('Setup required')
+    // Contract-served rows are unit-proven only; the demo publishes no contract.
+  })
+
   test('C-04 solar-starter opens locally in a live empty Solar workspace', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
