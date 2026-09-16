@@ -41,6 +41,11 @@ export function ContinuityRail({ activeSurface, workspaceProject = null, catalog
   // which fabricated an identifier inside the fix for fabricated state. That
   // prop is gone; callers pass the derived state or nothing.
   const state = workspaceProject || EMPTY_WORKSPACE_PROJECT
+  // Every label here is sentence case in source; the spaced mono caps the
+  // stranger sees (ui-loop round 2, try-mono-caps-labels-and-jargon-rail) is
+  // landing.css's .tc-continuity-label text-transform, which the CSS record
+  // owns. Hiding the rail while sessionAuthRequired is ToolCast's call (record
+  // R2A). The markup below stays byte-identical to continuityHoist's fixture.
   return (
     <div className="tc-continuity" data-testid="continuity-rail" data-pulse={pulse ? 'true' : 'false'} data-project-state={state.kind}>
       <span className="tc-continuity-label">Carried across every profile</span>
