@@ -2632,6 +2632,25 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.locator('.viewer-canvas[data-string-routes]')).toHaveCount(0)
     await toggle.click()
     await expect(page.locator('.viewer-canvas[data-string-routes="134"]')).toHaveCount(1)
+    // A clean hand import must not inherit the console rooftop's solve.
+    await page.getByRole('tab', { name: 'Insert', exact: true }).click()
+    await ribbon.locator('[data-tool="import-dxf"]').click()
+    const foreignDxf = readFileSync(fileURLToPath(new URL('../fixtures/block-fixture.dxf', import.meta.url)))
+    await page.getByLabel('DXF file').setInputFiles({ name: 'other.dxf', mimeType: 'application/dxf', buffer: foreignDxf })
+    await expect(page.locator('.workspace-card[data-engine-document="other.dxf"]')).toHaveCount(1, { timeout: 60_000 })
+    await page.getByRole('tab', { name: 'Solar', exact: true }).click()
+    await expect(toggle).toBeDisabled()
+    await expect(toggle).toHaveAttribute('aria-pressed', 'false')
+    await expect(toggle).toHaveAttribute('title', 'Solved routes cover the rooftop demo only')
+    await expect(page.locator('.viewer-canvas[data-string-routes]')).toHaveCount(0)
+    // Switching the data session closes the imported engine document.
+    // Re-enter the sample through its normal opener, with the toggle still on.
+    await page.getByLabel('Use mock data (off = live backend)').uncheck()
+    await expect(page.locator('.workspace-card[data-engine-document="other.dxf"]')).toHaveCount(0)
+    await page.getByLabel('Use mock data (off = live backend)').check()
+    await expect(toggle).toBeEnabled({ timeout: 60_000 })
+    await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+    await expect(page.locator('.viewer-canvas[data-string-routes="134"]')).toHaveCount(1, { timeout: 30_000 })
     const outline = ribbon.locator('[data-tool="solar-panels:createRectangle"]')
     await expect(outline).toBeEnabled({ timeout: 60_000 })
     const count = page.getByTestId('cad-edit-entity-count')
@@ -2660,10 +2679,10 @@ test.describe('route matrix, rail ON', () => {
       pose: document.querySelector('.studio-ground .viewer-canvas').__cadviewer.cameraPose(),
     }))
     const state = await readState()
-    for (const chooseModel of [false, true]) {
+    for (const chooseView of [false, true]) {
       await page.getByRole('tab', { name: 'CAD', exact: true }).click()
       await expect(page.getByRole('tab', { name: 'Draw', exact: true })).toHaveAttribute('aria-selected', 'true')
-      if (chooseModel) await page.getByRole('tab', { name: 'Model', exact: true }).click()
+      if (chooseView) await page.getByRole('tab', { name: 'View', exact: true }).click()
       await page.getByRole('tab', { name: 'Solar CAD', exact: true }).click()
       await expect(page.getByRole('tab', { name: 'Solar', exact: true })).toHaveAttribute('aria-selected', 'true')
       expect(await readState()).toEqual(state)

@@ -23,9 +23,18 @@ const viewerSource = readFileSync(new URL('./components/Viewer.jsx', import.meta
 describe('C-04B Solar ribbon wiring', () => {
   it('row9 gates solved routes on mock rooftop identity, preview, head and dirty engine', () => {
     assert.match(appSource, /solarStringsEligible = !!studioGround && surfaceSlots\.groundMaterial\.solarStrings && mock\s+&& !isEditFixture && DRAWING_SOURCE === 'rooftop_demo' && intakeIsRooftopSample/)
-    assert.ok(appSource.includes('solarStringsEligible && !previewing && (drawingState?.head ?? 1) === 1 && !engineDirty'))
-    assert.match(appSource, new RegExp('solarRouteDisplay\\(\\{\\s+eligible: solarStringsEligible, previewing, head: drawingState\\?\\.head \\?\\? 1,\\s+engineDirty, shown: showSolarStrings, routes: demoSolveRoutes'))
+    assert.match(appSource, new RegExp(String.raw`solarRouteStatus\(\{\s+eligible: solarStringsEligible, previewing, head: drawingState\?\.head \?\? 1,\s+engineDirty,`))
+    assert.match(appSource, new RegExp(String.raw`solarRouteDisplay\(\{\s+status: solarRoutesStatus, shown: showSolarStrings, routes: demoSolveRoutes`))
     assert.ok(appSource.includes('selectedHandle, onClearSelection: () => setSelectedHandle(null)'))
+  })
+  it('row16 binds routes to the displayed document and records solve failure or emptiness', () => {
+    assert.ok(appSource.includes('documentId: activeIntake?.documentId ?? null'))
+    assert.ok(appSource.includes('allowedDocumentIds: [`${REQUESTED_DRAWING_ID}-v1.dxf`, SOLAR_STARTER_DOCUMENT_ID]'))
+    assert.ok(appSource.includes("const [demoSolveState, setDemoSolveState] = useState('pending')"))
+    assert.match(appSource, new RegExp(String.raw`\.catch\(\(\) => \{\s+if \(live\) setDemoSolveState\('failed'\)`))
+    assert.ok(appSource.includes("setDemoSolveState(routes.length ? 'loaded' : 'empty')"))
+    assert.ok(appSource.includes('solve: demoSolveState, routes: demoSolveRoutes'))
+    assert.ok(appSource.includes('solar: { status: solarRoutesStatus, shown: showSolarStrings'))
   })
   it('row12 profile entry changes only the selected ribbon tab', () => {
     assert.ok(appSource.includes('profileEntryTab(previousRibbonProfile.current, surfaceSlots.toolbar.profile, ribbonTab, surfaceSlots.toolbar.home)'))

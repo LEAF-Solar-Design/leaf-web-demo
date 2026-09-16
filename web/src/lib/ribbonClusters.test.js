@@ -21,6 +21,8 @@ import {
   layersCluster,
   profileRibbonTabs,
   solarRouteDisplay,
+  solarRouteStatus,
+  solarStringsControl,
   railCluster,
   referencePanels,
   versionCluster,
@@ -67,26 +69,68 @@ function toolsOf(cluster) {
 describe('row9 Solar solved-route eligibility', () => {
   const bundle = JSON.parse(readFileSync(new URL('../../public/demo-solve.json', import.meta.url), 'utf8'))
   const routes = bundle.solve.strings.filter((route) => Array.isArray(route.pts) && route.pts.length >= 2)
-  const clean = { eligible: true, head: 1, previewing: false, engineDirty: false, shown: true, routes }
+  const clean = { eligible: true, head: 1, previewing: false, engineDirty: false, solve: 'loaded', shown: true, routes }
   it('row7 shows the 134 drawable solved rooftop routes by default', () => {
-    expect(solarRouteDisplay(clean)).toHaveLength(134)
+    expect(solarRouteDisplay({ ...clean, status: solarRouteStatus(clean) })).toHaveLength(134)
     const onToggle = vi.fn()
-    const toggle = profileRibbonTabs('solar', { solar: { eligible: true, onToggle } })[1].clusters[1].tools[0]
+    const toggle = profileRibbonTabs('solar', { solar: { status: 'ready', onToggle } })[1].clusters[1].tools[0]
     expect(toggle).toMatchObject({ pressed: true, disabled: false })
     toggle.onClick()
     expect(onToggle).toHaveBeenCalledOnce()
   })
   it('row8 turning the toggle off clears the overlay', () => {
-    expect(solarRouteDisplay({ ...clean, shown: false })).toBeUndefined()
-    expect(profileRibbonTabs('solar', { solar: { eligible: true, shown: false, onToggle: vi.fn() } })[1].clusters[1].tools[0].pressed).toBe(false)
+    expect(solarRouteDisplay({ ...clean, status: solarRouteStatus(clean), shown: false })).toBeUndefined()
+    expect(profileRibbonTabs('solar', { solar: { status: 'ready', shown: false, onToggle: vi.fn() } })[1].clusters[1].tools[0].pressed).toBe(false)
   })
   it.each([
     ['live tenant', { eligible: false }], ['edit fixture', { eligible: false }],
     ['version preview', { previewing: true }], ['mutated head', { head: 2 }], ['dirty engine', { engineDirty: true }],
   ])('row9 %s has no routes and names the unavailable state', (_, gate) => {
-    expect(solarRouteDisplay({ ...clean, ...gate })).toBeUndefined()
-    const toggle = profileRibbonTabs('solar', { solar: { eligible: false, onToggle: vi.fn() } })[1].clusters[1].tools[0]
+    const status = solarRouteStatus({ ...clean, ...gate })
+    expect(status).toBe(gate.eligible === false ? 'ineligible' : 'stale')
+    expect(solarRouteDisplay({ ...clean, status })).toBeUndefined()
+    const toggle = profileRibbonTabs('solar', { solar: { status, onToggle: vi.fn() } })[1].clusters[1].tools[0]
     expect(toggle).toMatchObject({ disabled: true, pressed: false, reason: 'Solved routes are available only for the unchanged rooftop demo' })
+  })
+})
+
+describe('Solar displayed-document route states', () => {
+  const routes = [{ id: 'route', pts: [[0, 0], [2, 1]] }]
+  const clean = { eligible: true, head: 1, engineDirty: false, previewing: false,
+    documentId: null, allowedDocumentIds: ['demo-v1.dxf', 'solar-starter.dxf'], solve: 'loaded', routes }
+  it.each([
+    ['ineligible', { eligible: false }], ['stale', { previewing: true }],
+    ['stale', { head: 2 }], ['stale', { engineDirty: true }],
+    ['foreign', { documentId: 'other.dxf' }], ['loading', { solve: null }],
+    ['loading', { solve: 'pending' }], ['unavailable', { solve: 'failed' }],
+    ['unavailable', { solve: 'empty' }], ['unavailable', { routes: [] }],
+    ['ready', {}], ['ready', { documentId: 'demo-v1.dxf' }],
+    ['ready', { documentId: 'solar-starter.dxf' }],
+  ])('row13 identifies %s from the displayed document and solve', (status, input) => {
+    expect(solarRouteStatus({ ...clean, ...input })).toBe(status)
+  })
+  it('row14 displays routes only while ready and shown', () => {
+    for (const status of ['ineligible', 'stale', 'foreign', 'loading', 'unavailable', 'ready']) {
+      for (const shown of [false, true]) {
+        expect(solarRouteDisplay({ status, shown, routes })).toBe(status === 'ready' && shown ? routes : undefined)
+      }
+    }
+  })
+  it('row15 enables and presses the toggle only with usable routes', () => {
+    const onToggle = vi.fn()
+    for (const status of ['ineligible', 'stale', 'foreign', 'loading', 'unavailable']) {
+      const control = solarStringsControl(status, true, onToggle)
+      expect(control).toMatchObject({ disabled: true, pressed: false })
+      expect(control.reason.length).toBeGreaterThanOrEqual(12)
+      expect(control.onClick).toBeUndefined()
+    }
+    expect(solarStringsControl('foreign', true, onToggle).reason).toContain('rooftop demo')
+    for (const shown of [false, true]) {
+      const control = solarStringsControl('ready', shown, onToggle)
+      expect(control).toMatchObject({ disabled: false, pressed: shown })
+      control.onClick()
+    }
+    expect(onToggle).toHaveBeenCalledTimes(2)
   })
 })
 

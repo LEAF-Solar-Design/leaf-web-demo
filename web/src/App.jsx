@@ -19,7 +19,7 @@ import DraftingRibbon from './site/DraftingRibbon.jsx'
 import PropertiesDock, { drawingExtents } from './site/PropertiesDock.jsx'
 import { familiesForSurface, familyMonogram } from './lib/surfaceRails.js'
 import { byId, ladderListener, slashCommandHandlers } from './lib/actionRegistry.js'
-import { REASONS, RIBBON_RATIONALE, profileRibbonTabs, profileEntryTab, solarRouteDisplay, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels } from './lib/ribbonClusters.js'
+import { REASONS, RIBBON_RATIONALE, profileRibbonTabs, profileEntryTab, solarRouteStatus, solarRouteDisplay, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels } from './lib/ribbonClusters.js'
 import { isWriteTool } from './lib/toolRecord.js'
 import { resolvePublishedCatalogTool } from './site/publishedCatalogTool.js'
 import { entityGeometry } from './lib/entityMetrics.js'
@@ -90,7 +90,7 @@ import CommandLineArmer from './cadedit/CommandLineArmer.jsx'
 import StatusModesBridge from './cadedit/StatusModesBridge.jsx'
 import EngineDocumentView from './cadedit/EngineDocumentView.jsx'
 import EngineHeadOpener from './cadedit/EngineHeadOpener.jsx'
-import SolarStarterOpener, { SOLAR_STARTER_EMPTY_INTAKE } from './cadedit/SolarStarterOpener.jsx'
+import SolarStarterOpener, { SOLAR_STARTER_DOCUMENT_ID, SOLAR_STARTER_EMPTY_INTAKE } from './cadedit/SolarStarterOpener.jsx'
 import CanvasPointPicker from './cadedit/CanvasPointPicker.jsx'
 import { COCKPIT_COMMAND_EVENT, parseDrawingCommand } from './lib/commandWords.js'
 import { parsePointExpression } from './cadedit/pointExpression.js'
@@ -2740,26 +2740,35 @@ export default function App() {
   //  - never over a version preview or a mutated head (StageLayer:107
   //    precedent) - a delete-panel run makes v2 and the routes go stale.
   const [demoSolveRoutes, setDemoSolveRoutes] = useState(null)
+  const [demoSolveState, setDemoSolveState] = useState('pending')
   const [showSolarStrings, setShowSolarStrings] = useState(true)
   const intakeIsRooftopSample = String(intake?.dwg || '').replace(/\\/g, '/').endsWith('/rooftop_demo.dwg')
   const solarStringsEligible = !!studioGround && surfaceSlots.groundMaterial.solarStrings && mock
     && !isEditFixture && DRAWING_SOURCE === 'rooftop_demo' && intakeIsRooftopSample
   useEffect(() => {
-    if (!solarStringsEligible || demoSolveRoutes) return undefined
+    if (!solarStringsEligible || demoSolveState !== 'pending') return undefined
     let live = true
     loadDemoSolve().then((solve) => {
-      if (!live || !Array.isArray(solve?.strings)) return
-      setDemoSolveRoutes(solve.strings
+      if (!live) return
+      const routes = (Array.isArray(solve?.strings) ? solve.strings : [])
         .filter((route) => Array.isArray(route.pts) && route.pts.length >= 2)
-        .map((route) => ({ id: route.id, pts: route.pts })))
-    }).catch(() => { /* no solve, no overlay - never a fabricated route */ })
+        .map((route) => ({ id: route.id, pts: route.pts }))
+      setDemoSolveRoutes(routes)
+      setDemoSolveState(routes.length ? 'loaded' : 'empty')
+    }).catch(() => {
+      if (live) setDemoSolveState('failed')
+    })
     return () => { live = false }
-  }, [solarStringsEligible, demoSolveRoutes])
-  const solarRoutesAvailable = solarStringsEligible && !previewing && (drawingState?.head ?? 1) === 1 && !engineDirty
-  const solarStringRoutes = useMemo(() => solarRouteDisplay({
+  }, [solarStringsEligible, demoSolveState])
+  const solarRoutesStatus = solarRouteStatus({
     eligible: solarStringsEligible, previewing, head: drawingState?.head ?? 1,
-    engineDirty, shown: showSolarStrings, routes: demoSolveRoutes,
-  }), [solarStringsEligible, previewing, drawingState, engineDirty, showSolarStrings, demoSolveRoutes])
+    engineDirty, documentId: activeIntake?.documentId ?? null,
+    allowedDocumentIds: [`${REQUESTED_DRAWING_ID}-v1.dxf`, SOLAR_STARTER_DOCUMENT_ID],
+    solve: demoSolveState, routes: demoSolveRoutes,
+  })
+  const solarStringRoutes = useMemo(() => solarRouteDisplay({
+    status: solarRoutesStatus, shown: showSolarStrings, routes: demoSolveRoutes,
+  }), [solarRoutesStatus, showSolarStrings, demoSolveRoutes])
   // iOS ship-lane readiness contract (leaf.ios-ship-surface.v1). Fetched only
   // with the surface flag baked on and a concrete project + revision; every
   // other case stays null, which IosSurface renders truthfully as
@@ -2834,7 +2843,7 @@ export default function App() {
     const openJobs = () => setJobRailExpanded(true)
     return profileRibbonTabs(surfaceSlots.toolbar.profile, {
       families: railFamilies,
-      solar: { eligible: solarRoutesAvailable, shown: showSolarStrings, onToggle: () => setShowSolarStrings((shown) => !shown) },
+      solar: { status: solarRoutesStatus, shown: showSolarStrings, onToggle: () => setShowSolarStrings((shown) => !shown) },
       selectedHandle, onClearSelection: () => setSelectedHandle(null),
       onRun: (tool) => onRequestCatalogRun(tool, null, RIBBON_RATIONALE, 'ribbon'),
       catalogOptions: {
@@ -2865,7 +2874,7 @@ export default function App() {
     running, previewing, writeLocked, canRunWrite, engineDirty, mock, signedIn, projectsErr,
     orgId, projectBusy, onCreateProject, agentDisabled, routing, clearAgentSession,
     openAgentMode, jobs.length, iosContract?.receipt_id, setNavExpanded, setJobRailExpanded,
-    solarRoutesAvailable, showSolarStrings, selectedHandle])
+    solarRoutesStatus, showSolarStrings, selectedHandle])
   const previousRibbonProfile = useRef(null)
   const entryRibbonTab = profileEntryTab(previousRibbonProfile.current, surfaceSlots.toolbar.profile, ribbonTab, surfaceSlots.toolbar.home)
   const activeRibbonTab = profileTabs.some((tab) => tab.id === entryRibbonTab)

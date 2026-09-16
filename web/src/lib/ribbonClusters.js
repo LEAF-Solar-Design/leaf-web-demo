@@ -86,8 +86,29 @@ function profileGroup(id, label, tools) {
   return { id, label, kind: 'group', tools }
 }
 
-export function solarRouteDisplay({ eligible, previewing, head = 1, engineDirty, shown = true, routes }) {
-  return eligible && !previewing && head === 1 && !engineDirty && shown ? routes || undefined : undefined
+export function solarRouteStatus({ eligible, previewing, head = 1, engineDirty, documentId, allowedDocumentIds = [], solve, routes }) {
+  if (!eligible) return 'ineligible'
+  if (previewing || head !== 1 || engineDirty) return 'stale'
+  if (documentId != null && !allowedDocumentIds.includes(documentId)) return 'foreign'
+  if (solve == null || solve === 'pending') return 'loading'
+  if (solve !== 'loaded' || !Array.isArray(routes) || routes.length === 0) return 'unavailable'
+  return 'ready'
+}
+
+export function solarRouteDisplay({ status, shown = true, routes }) {
+  return status === 'ready' && shown ? routes : undefined
+}
+
+export function solarStringsControl(status, shown, onToggle) {
+  const base = { ...profileBase('solar-strings', 'Show solved rooftop strings'), icon: 'layers' }
+  switch (status) {
+    case 'ready': return { ...base, disabled: false, pressed: shown, reason: 'Show or hide solved rooftop routes', onClick: onToggle }
+    case 'stale': return { ...base, disabled: true, pressed: false, reason: 'Solved routes are available only for the unchanged rooftop demo', onClick: undefined }
+    case 'foreign': return { ...base, disabled: true, pressed: false, reason: 'Solved routes cover the rooftop demo only', onClick: undefined }
+    case 'loading': return { ...base, disabled: true, pressed: false, reason: 'Solved routes are loading', onClick: undefined }
+    case 'unavailable': return { ...base, disabled: true, pressed: false, reason: 'No solved routes are available for this drawing', onClick: undefined }
+    default: return { ...base, disabled: true, pressed: false, reason: 'Solved routes are available only for the unchanged rooftop demo', onClick: undefined }
+  }
 }
 
 export function profileEntryTab(previousProfile, profile, selected, home) {
@@ -148,9 +169,7 @@ export function profileRibbonTabs(profile, ctx = {}) {
       // The engine consumer fills this seat with its four registry records.
       profileGroup('solar-panels', 'Panel placement', []),
       profileGroup('stringing', 'Stringing', [
-        { ...profileBase('solar-strings', 'Show solved rooftop strings'), icon: 'layers',
-          pressed: !!solar.eligible && solar.shown !== false, disabled: !solar.eligible || !onToggle,
-          reason: 'Solved routes are available only for the unchanged rooftop demo', onClick: onToggle ?? undefined },
+        solarStringsControl(solar.status, solar.shown !== false, onToggle),
         ...stringing,
       ]),
       profileGroup('placement', 'Equipment placement', placement),
