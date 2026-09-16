@@ -288,6 +288,7 @@ jobs:
         with:
           name: docs-noop-${{ github.sha }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/docs-noop/docs-noop.json
+          retention-days: 30
 
       - name: Require exact source to be reviewed
         if: steps.decide.outputs.build == 'true'
@@ -2150,6 +2151,9 @@ jobs:
       AWS_REGION: us-east-1
       ECR_REGISTRY: 807034087062.dkr.ecr.us-east-1.amazonaws.com
       TAG: ${{ needs.prepare.outputs.tag }}
+      # Same name and value adopt binds, so the S3 put below is byte-identical
+      # to the adopted path's.
+      SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
 
     steps:
       - uses: actions/checkout@v4
@@ -2294,6 +2298,27 @@ jobs:
             done
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # Native staging deploy hand-off: release/<sha40>/<run_id>-<attempt>/staging-supply-set.json.
+      # Same key, same discipline as the adopted path's put below: cve-harvest
+      # reads ONE key whichever producer minted it. verify and adopt are
+      # mutually exclusive (an adopted merge skips the build matrix, and this
+      # job requires needs.build.result == 'success'), so --if-none-match '*'
+      # never collides with adopt's put for the same run.
+      - name: Put release staging-supply-set.json to S3
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || exit 1
+          key="${MQ_TRANSPORT_PREFIX}release/$SOURCE_SHA/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/staging-supply-set.json"
+          aws s3api put-object --bucket "$MQ_TRANSPORT_BUCKET" --key "$key" \
+            --body "$RUNNER_TEMP/staging-supply-set.json" --if-none-match '*' --checksum-algorithm SHA256 \
+            --metadata "run-id=$GITHUB_RUN_ID,run-attempt=$GITHUB_RUN_ATTEMPT,workflow-ref=$GITHUB_WORKFLOW_REF,repository-id=$GITHUB_REPOSITORY_ID,head-sha=$SOURCE_SHA,event=$GITHUB_EVENT_NAME"
+
+      # NOT best effort, unlike the adopted path's copy: dispatch-staging-deploys.yml
+      # still reads this supply set as an Actions artifact and has no S3 read. Until
+      # that relay moves to the transport bucket, a failed upload here must redden the
+      # run rather than strand the relay. cve-harvest no longer waits on it either way.
       - name: Upload immutable staging supply-set manifest
         uses: actions/upload-artifact@v4
         with:
@@ -3936,7 +3961,7 @@ jobs:
 
     env:
       ECR_REGISTRY: 807034087062.dkr.ecr.us-east-1.amazonaws.com
-      SUPPLY_SET: staging-supply-set-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
+      SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
 
     steps:
       # The allowlist and its validator live in the repo, and this job's phase-1
@@ -3951,11 +3976,61 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Download the staging supply set this run published
-        uses: actions/download-artifact@v4
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6.1.0
         with:
-          name: ${{ env.SUPPLY_SET }}
-          path: supply-set
+          role-to-assume: ${{ secrets.AWS_ECR_PULL_ROLE }}
+          aws-region: us-east-1
+          role-session-name: GHA-HarvestPlatformCVEs-${{ github.run_id }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # The supply set crosses jobs on the S3 transport, never on an Actions
+      # artifact. The org's 500 MB Actions storage is shared by every repo, and
+      # once it is full GitHub refuses EVERY upload for its own 6-to-12 hour
+      # recount; the adopted path's upload is best effort, so an adopted run
+      # under the cap reached this job with no artifact minted and died on
+      # "Artifact not found" (run 34643249943, 2026-09-11) with all five scans
+      # skipped, reading UNAVAILABLE rather than RED. Canon:
+      # ~/.claude/rules/ci-artifacts-and-github-budget.md (2026-09-07).
+      #
+      # The producer is THIS run: verify or adopt, both named in `needs` and
+      # both required to be a success by the job `if:` above, which is GitHub's
+      # own record that the producing job completed successfully. So the key is
+      # exact, no listing, no Actions API call, and none of the shared 5,000/h
+      # GitHub API budget is spent. The producer run-record cross-check the
+      # artifact path implied is made here against the runner's own
+      # environment, which is strictly stronger than a fetched run record: the
+      # metadata was stamped by the producing STEP from its runner's
+      # environment, never from the manifest body.
+      - name: Read the staging supply set this run published from S3
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || exit 1
+          mkdir -p supply-set
+          key="${MQ_TRANSPORT_PREFIX}release/$SOURCE_SHA/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/staging-supply-set.json"
+          aws s3api get-object --bucket "$MQ_TRANSPORT_BUCKET" --key "$key" \
+            --checksum-mode ENABLED supply-set/staging-supply-set.json \
+            > "$RUNNER_TEMP/supply-set-get.json"
+          expected="$(jq -er '.ChecksumSHA256' "$RUNNER_TEMP/supply-set-get.json")"
+          actual="$(openssl dgst -sha256 -binary supply-set/staging-supply-set.json | base64 -w0)"
+          [ "$actual" = "$expected" ] || {
+            echo "::error::Staging supply-set checksum mismatch"
+            exit 1
+          }
+          jq -e --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg source "$SOURCE_SHA" --arg repo "$GITHUB_REPOSITORY_ID" \
+            --arg workflow "$GITHUB_WORKFLOW_REF" --arg event "$GITHUB_EVENT_NAME" '
+            .Metadata["run-id"] == $run and .Metadata["run-attempt"] == $attempt
+            and .Metadata["head-sha"] == $source and .Metadata["repository-id"] == $repo
+            and .Metadata["workflow-ref"] == $workflow and .Metadata.event == $event
+          ' "$RUNNER_TEMP/supply-set-get.json" >/dev/null || {
+            echo "::error::Staging supply-set S3 metadata provenance invalid"
+            exit 1
+          }
 
       - name: Resolve the five immutable digests to scan
         id: digests
@@ -3979,16 +4054,6 @@ jobs:
             }
             echo "${image//-/_}=$ECR_REGISTRY/leaf-platform-$image@$digest" >> "$GITHUB_OUTPUT"
           done
-
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v6.1.0
-        with:
-          role-to-assume: ${{ secrets.AWS_ECR_PULL_ROLE }}
-          aws-region: us-east-1
-          role-session-name: GHA-HarvestPlatformCVEs-${{ github.run_id }}
-
-      - name: Login to ECR
-        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Validate expiring CVE allowlist
         run: python .github/scripts/validate_cve_allowlist.py .github/cve-allowlist/platform-images.trivyignore
