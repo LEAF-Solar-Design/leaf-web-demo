@@ -9,6 +9,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { catalogClusters } from '../lib/ribbonClusters.js'
+import { REASONS, reasonCode } from '../lib/actionRegistry.js'
 
 import DraftingRibbon, { RIBBON_HEIGHT_VAR, RibbonCluster, RibbonTool } from './DraftingRibbon.jsx'
 
@@ -32,6 +33,17 @@ const FAMS = [
 ]
 
 describe('DraftingRibbon', () => {
+  it('exposes local codes only for disabled tools with registered reasons', () => {
+    const reason = REASONS['unsavedEngineEdits']
+    render(<>
+      <RibbonTool tool={{ id: 'save', label: 'Save', disabled: true, reason }} />
+      <RibbonTool tool={{ id: 'open', label: 'Open', reason }} />
+      <RibbonTool tool={{ id: 'other', label: 'Other', disabled: true, reason: 'unregistered reason' }} />
+    </>)
+    expect(screen.getByRole('button', { name: /Save \(unavailable/ }).getAttribute('data-reason-code')).toBe(reasonCode(reason))
+    expect(screen.getByRole('button', { name: 'Open' }).hasAttribute('data-reason-code')).toBe(false)
+    expect(screen.getByRole('button', { name: /Other \(unavailable/ }).hasAttribute('data-reason-code')).toBe(false)
+  })
   it('exposes a collapsed panel through More panels without remounting tools', () => {
     const visiblePanelCount = 1
     const onCopy = vi.fn()

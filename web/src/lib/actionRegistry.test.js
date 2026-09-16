@@ -20,6 +20,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   ACTIONS,
+  CLIPBOARD_REASONS,
   DEFERRED_REASONS,
   DRAW_REASONS,
   ESCAPE_RUNGS,
@@ -35,6 +36,7 @@ import {
   RETRY_RUNGS,
   SURFACES,
   accessibleName,
+  reasonCode,
   byId,
   drawReason,
   escapeRung,
@@ -55,6 +57,29 @@ import {
 } from './actionRegistry.js'
 
 // --- 1: the registry holds up ---------------------------------------------
+
+describe('stable local reason codes', () => {
+  const maps = { REASONS, DRAW_REASONS, MODIFY_REASONS, PROPERTY_REASONS, CLIPBOARD_REASONS, DEFERRED_REASONS, LADDER_REASONS }
+  it('resolves every known sentence back through its map and key', () => {
+    for (const sentence of KNOWN_REASON_VALUES) {
+      const code = reasonCode(sentence)
+      expect(code).toMatch(/^[A-Z_]+\.[A-Za-z][A-Za-z0-9]*$/)
+      const [name, key] = code.split('.')
+      expect(maps[name][key]).toBe(sentence)
+    }
+    for (const [name, map] of Object.entries(maps)) {
+      for (const [key, sentence] of Object.entries(map)) {
+        const first = Object.entries(maps).find(([, values]) => Object.values(values).includes(sentence))
+        expect(reasonCode(sentence)).toBe(`${first[0]}.${Object.keys(first[1]).find((k) => first[1][k] === sentence)}`)
+        expect(maps[name][key]).toBe(sentence)
+      }
+    }
+    expect(reasonCode(REASONS['unsavedEngineEdits'])).toBe('REASONS.unsavedEngineEdits')
+  })
+  it.each(['', 'not a reason', undefined])('returns no code for %s', (sentence) => {
+    expect(reasonCode(sentence)).toBe('')
+  })
+})
 
 describe('the registry', () => {
   it('explains Polyline commands and disabled property controls in the reason vocabulary', () => {

@@ -3,10 +3,20 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import CockpitTopBand, { RIBBON_TABS } from './CockpitTopBand.jsx'
 import DraftingRibbon from './DraftingRibbon.jsx'
+import { REASONS, reasonCode } from '../lib/actionRegistry.js'
 
 afterEach(cleanup)
 
 describe('CockpitTopBand panel focus', () => {
+  it('exposes a local code only for a disabled quick tool with a registered reason', () => {
+    const reason = REASONS['unsavedEngineEdits']
+    render(<CockpitTopBand before={[
+      { id: 'save', label: 'Save', disabled: true, reason },
+      { id: 'open', label: 'Open', reason },
+    ]} />)
+    expect(screen.getByRole('button', { name: /Save \(unavailable/ }).getAttribute('data-reason-code')).toBe(reasonCode(reason))
+    expect(screen.getByRole('button', { name: 'Open' }).hasAttribute('data-reason-code')).toBe(false)
+  })
   it.each(RIBBON_TABS.filter((tab) => !tab.reason))('$label: Tab skips CSS-hidden controls and enters the first visible enabled control', ({ id, label }) => {
     render(<>
       <CockpitTopBand tab={id} />

@@ -32,7 +32,7 @@
 // silently no-ops on gated writes.
 import { useLayoutEffect, useRef, useState } from 'react'
 
-import { accessibleName } from '../lib/actionRegistry.js'
+import { accessibleName, reasonCode } from '../lib/actionRegistry.js'
 import { formatElementId } from '../lib/elementIdentity.js'
 import { familyMonogram } from '../lib/surfaceRails.js'
 import CockpitIcon from './CockpitIcon.jsx'
@@ -91,6 +91,7 @@ export function RibbonTool({ tool }) {
       disabled={disabled}
       title={unavailable ? reason : (title || label)}
       aria-label={accessibleName(label, unavailable ? reason : '')}
+      data-reason-code={unavailable ? (reasonCode(reason) || undefined) : undefined}
       aria-pressed={typeof pressed === 'boolean' ? pressed : undefined}
       aria-expanded={typeof expanded === 'boolean' ? expanded : undefined}
       aria-controls={controls || undefined}
@@ -134,6 +135,7 @@ export function RibbonWidget({ widget }) {
       <span className="ribbon-note">{label}</span>
       <select
         aria-label={accessibleName(label, unavailable ? reason : '')}
+        data-reason-code={unavailable ? (reasonCode(reason) || undefined) : undefined}
         value={walk ?? value}
         disabled={disabled}
         onFocus={() => { keyboardWalkRef.current = false; setWalk(null) }}
