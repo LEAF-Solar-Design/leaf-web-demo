@@ -44,10 +44,11 @@ def probe_gh_open_prs(candidate):
     limit = 100
     while True:
         rows = json.loads(command("gh", "pr", "list", "--state", "open",
-                                  "--json", "number,createdAt", "--limit", str(limit)))
+                                  "--json", "number,createdAt,isDraft", "--limit", str(limit)))
         if len(rows) < limit:
+            # A draft is held by design (line 13 requires one), so it is not counted.
             return sum(datetime.fromisoformat(row["createdAt"].replace("Z", "+00:00"))
-                       < cutoff for row in rows)
+                       < cutoff for row in rows if row.get("isDraft") is not True)
         limit *= 2
 
 
