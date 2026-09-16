@@ -6,6 +6,9 @@
 // and an action's label, icon, reason, keyboard cap and run handler were
 // written out once per path with nothing holding them together.
 //
+// Stable reason codes live in data attributes, never accessible names: the
+// frozen sentence set is the honesty contract, and adding codes to sentences
+// would fail check:honesty-ladder.
 // PURE AND REACT-FREE by construction: no JSX, no hooks, no DOM writes, no
 // import that reaches React. `run` never performs the effect itself — it names
 // the handler on the caller's context and passes the operands. That is what
@@ -159,6 +162,19 @@ export const LADDER_REASONS = Object.freeze({
   nothingToRetry: 'no failed step to retry right now',
   retryOwnedByResult: 'the result panel owns this retry',
 })
+
+let reasonCodes
+export function reasonCode(sentence) {
+  if (!reasonCodes) {
+    reasonCodes = new Map()
+    for (const [name, reasons] of Object.entries({ REASONS, DRAW_REASONS, MODIFY_REASONS, PROPERTY_REASONS, CLIPBOARD_REASONS, DEFERRED_REASONS, LADDER_REASONS })) {
+      for (const [key, value] of Object.entries(reasons)) {
+        if (!reasonCodes.has(value)) reasonCodes.set(value, `${name}.${key}`)
+      }
+    }
+  }
+  return reasonCodes.get(sentence) || ''
+}
 
 /** Every sentence this registry is allowed to hand a renderer. */
 export const KNOWN_REASON_VALUES = Object.freeze(new Set([

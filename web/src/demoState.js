@@ -1,3 +1,5 @@
+// explicitDemo is the /app twin of ToolCast's PUBLIC_DEMO. Decide it BEFORE
+// the first render so signed-out demo visitors never start live requests.
 // Pure demo-mode decision helper — no import.meta, no React, so `node` can
 // import it headless for the check script. The deployed link (a VITE_MOCK=0
 // build) still lands zero-click on the demo: when the live session load sees a
@@ -13,4 +15,14 @@
 // must surface as an error, never silently switch the user onto mock data.
 export function shouldAutoDemo({ authRequired, authConfigured, mock, signedIn } = {}) {
   return !!(authRequired && !authConfigured && !mock && !signedIn)
+}
+
+export function explicitDemo({ search, signedIn } = {}) {
+  if (signedIn || typeof search !== 'string' || !search) return false
+  try {
+    // URLSearchParams tolerates broken escapes; reject malformed queries first.
+    decodeURIComponent(search)
+    const demo = new URLSearchParams(search).get('demo')
+    return demo === '1' || demo === 'tour'
+  } catch { return false }
 }

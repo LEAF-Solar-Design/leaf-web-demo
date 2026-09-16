@@ -3,8 +3,9 @@
 // header, provenance in mono, ONE quiet action. Rendered at App level inside
 // .drawer-layer (structural.css) so the rail behind never re-flows. Esc closes
 // (App's global key ladder) and the header cap mirrors it.
+// The diagnostics block sanctions a second control for support near the top band.
 
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import useExit from '../useExit.js'
 
 export default function DetailsDrawer({ data, onClose }) {
@@ -15,6 +16,31 @@ export default function DetailsDrawer({ data, onClose }) {
   const closeRef = useRef(null)
   const restoreRef = useRef(null)
   const open = !!data
+  const [copyLabel, setCopyLabel] = useState('Copy diagnostics')
+  const copyTimer = useRef(null)
+  const copyGeneration = useRef(0)
+
+  useEffect(() => {
+    setCopyLabel('Copy diagnostics')
+    return () => {
+      clearTimeout(copyTimer.current)
+      copyGeneration.current += 1
+    }
+  }, [data?.diagnostics])
+
+  const copy = async () => {
+    const generation = ++copyGeneration.current
+    clearTimeout(copyTimer.current)
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable')
+      await navigator.clipboard.writeText(shown.diagnostics)
+      if (generation !== copyGeneration.current) return
+      setCopyLabel('Copied')
+      copyTimer.current = setTimeout(() => setCopyLabel('Copy diagnostics'), 1500)
+    } catch {
+      if (generation === copyGeneration.current) setCopyLabel('Copy failed, select the text above')
+    }
+  }
 
   useEffect(() => {
     if (!open) return undefined
@@ -48,7 +74,7 @@ export default function DetailsDrawer({ data, onClose }) {
     }
   }
   if (!shown) return null
-  const { title, rows = [], action, foot } = shown
+  const { title, rows = [], action, foot, diagnostics } = shown
   return (
     <div className="drawer-layer">
       <aside ref={drawerRef} className={`drawer ${exiting ? 'exit' : 'enter'}`} role="dialog" aria-modal="true" aria-label={title} onKeyDown={ownKeyboard}>
@@ -62,6 +88,11 @@ export default function DetailsDrawer({ data, onClose }) {
           {rows.map((r, i) => (
             <div className="drawer-mono" key={i}>{r}</div>
           ))}
+          {typeof diagnostics === 'string' && <>
+            <pre className="drawer-mono drawer-diag" data-testid="diagnostics-block" tabIndex={0}
+              style={{ whiteSpace: 'pre-wrap', userSelect: 'text', margin: '8px 0' }}>{diagnostics}</pre>
+            <button type="button" className="chip-act drawer-act" data-testid="copy-diagnostics" onClick={copy}>{copyLabel}</button>
+          </>}
           {action && (
             <button type="button" className="chip-act drawer-act" onClick={action.onClick}>
               {action.label}

@@ -20,7 +20,7 @@ import CheckoutChip from './CheckoutChip.jsx'
 // Calm posture throughout — a checkout is an expected coordination state, never
 // an error. Live only (the parent gates on !mock).
 export default function CheckoutControls({
-  lockedByOther, legacyByOther, staleByOther, canTake, heldByUs, unknown, readFailed, busy, disabled = false, onTake, onRelease, onRetry,
+  lockedByOther, legacyByOther, staleByOther, canTake, heldByUs, unknown, readFailed, failure = null, busy, disabled = false, onTake, onRelease, onRetry,
 }) {
   if (unknown) {
     // Both states pause writes, and only the wording differs. Every read now
@@ -40,6 +40,11 @@ export default function CheckoutControls({
         <span className="checkout-unknown">
           Could not read the edit lock — writes paused
         </span>
+        {failure !== null && typeof failure === 'object' && (
+          <span className="checkout-code" data-testid="checkout-failure-code">
+            code {failure?.errorCode || (typeof failure?.status === 'number' ? `HTTP ${failure.status}` : 'local')}{failure?.errorId ? ` · error_id ${failure.errorId}` : ''}
+          </span>
+        )}
         {onRetry && (
           <button className="chip-act" onClick={onRetry} disabled={busy || disabled}>
             Retry

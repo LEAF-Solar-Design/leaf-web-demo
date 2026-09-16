@@ -96,8 +96,10 @@ import { fetchIosSurfaceStatus } from './ios/iosSurfaceStatus.js'
 // `logout` is no longer imported here: the session controller owns ending a
 // session (useSessionController defaults endSession to auth.js logout).
 import { authConfigured, login, isSignedIn, handleRedirectCallback, isAuthRedirectCallback } from './auth.js'
-import { shouldAutoDemo } from './demoState.js'
+import { shouldAutoDemo, explicitDemo } from './demoState.js'
 import { humanizeError } from './errorHumanize.js'
+import { composeDiagnostics, collectRefusals, taskRevisionOf } from './diagnostics.js'
+import { recentRequestFailures } from './api.js'
 import { cadTimingRows } from './cadTimingPresentation.js'
 import { getSessionHolderId } from './checkoutIdentity.js'
 import {
@@ -312,7 +314,8 @@ export default function App() {
     return true
   }, [exitPending, settle])
   const onReturnToDrawing = useCallback(() => returnToDrawing(true), [returnToDrawing])
-  const [mock, setMock] = useState(config.mockDefault)
+  const [mock, setMock] = useState(() => config.mockDefault
+    || explicitDemo({ search: typeof window !== 'undefined' ? window.location.search : '', signedIn: isSignedIn() }))
   const [loadErr, setLoadErr] = useState(null)
   const [intakeRetryKey, setIntakeRetryKey] = useState(0) // X3 Retry — bumping re-runs the intake load effect
   const [selectedTool, setSelectedTool] = useState(null)
@@ -509,14 +512,16 @@ export default function App() {
   // catalog. Fetched once; resolves to [] on any failure, in which case the
   // picker falls back to the catalog lane's runnable tools — today's
   // behaviour exactly, so a registry outage costs the menu nothing.
+  // The demo never asks the server for the registry; the picker falls back to the catalog lane as on a registry outage.
   const [registryEntries, setRegistryEntries] = useState([])
   const [catalogSkills, setCatalogSkills] = useState([])
   useEffect(() => {
+    if (mock) { setRegistryEntries([]); setCatalogSkills([]); return undefined }
     let live = true
     fetchRegistry().then((r) => { if (live) setRegistryEntries(r.entries || []) })
     fetchSkills().then((r) => { if (live) setCatalogSkills(r.skills || []) })
     return () => { live = false }
-  }, [])
+  }, [mock])
 
   const resultBlockRef = useRef(null)   // toast "View" scroll target (result)
   const workspaceCardRef = useRef(null) // toast "View" scroll target (viewer)
@@ -2277,6 +2282,8 @@ export default function App() {
       `org ${org || '—'}`,
       `tenant ${tenantLabel} · tier ${tierDisplay}`,
       `mode ${mock ? 'mock (no cloud)' : `live · ${config.apiBase}`}`,
+      `served ${health?.source_sha || (mock ? 'sample data' : 'not available')}`,
+      `task ${taskRevisionOf(health?.task_definition_arn) || 'not available'}`,
       `entitlement tier ${gateTier}`,
     ]
     if (!mock && usage) {
@@ -2289,6 +2296,18 @@ export default function App() {
     setDrawer({
       title: 'Session · provenance',
       rows,
+      diagnostics: composeDiagnostics({
+        buildHash: __BUILD_HASH__, mode: mock ? 'sample data' : 'live',
+        servedSourceSha: mock ? null : (health?.source_sha ?? null),
+        taskRevision: mock ? null : taskRevisionOf(health?.task_definition_arn),
+        pathname: window.location.pathname, at: new Date().toISOString(),
+        sessionState: mock ? 'demo' : (isSignedIn() ? 'signed in' : 'signed out'),
+        editLock: mock ? null : {
+          state: checkout.readFailed ? 'read failed' : lock.unknown ? 'checking' : heldByUs ? 'held by you' : otherHeldCheckout ? 'held by another editor' : 'free',
+          ...checkout.failure,
+        },
+        failures: recentRequestFailures(), refusals: collectRefusals(document),
+      }),
       // W2b: the controller owns sign-out, exactly as /try does. Its signOut
       // still calls auth.js logout(), and additionally tells the state machine
       // the refusal reason is `signed_out` — the ONE reason the bounded token
@@ -2299,7 +2318,7 @@ export default function App() {
         : { label: 'Refresh', onClick: () => { loadUsage(); loadHealth() } },
       foot: 'Your account and usage.',
     })
-  }, [org, tenantLabel, tierDisplay, mock, usage, gateTier, loadUsage, loadHealth, sessionActions])
+  }, [org, tenantLabel, tierDisplay, mock, usage, gateTier, loadUsage, loadHealth, sessionActions, health, checkout.readFailed, checkout.failure, lock.unknown, heldByUs, otherHeldCheckout])
 
   // Esc while a live run is in flight: detach this session from the job (the
   // rail keeps tracking it; the close beacon flags it reap-able server-side).
@@ -3126,6 +3145,7 @@ export default function App() {
           projectName={currentProjectName || projectName}
           inputRef={barInputRef}
           routeActive={!!route}
+          mcpDiscoveryEnabled={!mock}
           onOpenAuthor={onOpenAuthor}
           // Slice 8a round 3: the bar has no guard of its own. This is the
           // refusal the TRANSPORT raised (api.nlPrompt / converse.postMessage)
@@ -3246,7 +3266,7 @@ export default function App() {
               {pendingApprovalsUnavailable && <span className="dot red" aria-hidden="true" />}
             </button>
           )}
-          <button type="button" className="chip-act" onClick={openSessionDetails}>Details</button>
+          <button type="button" className="chip-act" onClick={openSessionDetails} title={`Session details · build ${__BUILD_HASH__}`}>Details</button>
           {/* Persistent identity control: before this, sign-out lived only
               behind Details -> the session drawer, so the header carried no
               reachable exit for a signed-in operator (2026-09-02
@@ -3638,6 +3658,7 @@ export default function App() {
                   heldByUs={heldByUs}
                   unknown={lock.unknown}
                   readFailed={checkout.readFailed}
+                  failure={checkout.failure}
                   busy={checkout.busy}
                   onTake={checkout.actions.take}
                   onRelease={checkout.actions.release}
@@ -4220,8 +4241,9 @@ export default function App() {
       {/* Lane E operator console entry: renders nothing unless a single
           probe of GET /api/operator/sessions says the operator surface is
           mounted (LEAF_OPERATOR_ENABLED=1) AND this caller holds a grant.
-          Tenant deployments never see it and never re-probe. */}
-      <OperatorEntry />
+          Tenant deployments never see it and never re-probe.
+          The demo has no operator grant, so the probe would only produce the 404 the campaign counted. */}
+      {!mock && <OperatorEntry />}
     </div>
     </SurfaceFrame>
   )

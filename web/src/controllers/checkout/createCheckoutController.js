@@ -93,6 +93,7 @@ export function createCheckoutController({ mock = false, drawingId = null, holde
     error: null,
     unknown: !mock,
     readFailed: false,
+    failure: null,
   }
   // Issued once by a successful take. It is a bearer credential, so keep it
   // outside snapshots and React state, and never persist it.
@@ -136,10 +137,10 @@ export function createCheckoutController({ mock = false, drawingId = null, holde
     const seq = ++refreshSeq
     const drawing = state.drawingId
     if (state.mock || !drawing) {
-      publish({ checkout: null, error: null, unknown: false, readFailed: false })
+      publish({ checkout: null, error: null, unknown: false, readFailed: false, failure: null })
       return null
     }
-    publish({ unknown: true, readFailed: false, error: null })
+    publish({ unknown: true, readFailed: false, failure: null, error: null })
     try {
       const manifest = await services.loadVersions(drawing)
       if (disposed || seq !== refreshSeq || drawing !== state.drawingId) return null
@@ -151,6 +152,7 @@ export function createCheckoutController({ mock = false, drawingId = null, holde
         error: null,
         unknown: false,
         readFailed: false,
+        failure: null,
       })
       return live
     } catch (error) {
@@ -158,6 +160,12 @@ export function createCheckoutController({ mock = false, drawingId = null, holde
       publish({
         checkout: null,
         error: String(error?.message || error),
+        failure: Object.freeze({
+          at: new Date().toISOString(),
+          status: error?.status ?? null,
+          errorCode: error?.body?.error?.error_code ?? null,
+          errorId: /error_id: ([0-9a-f]{16})(?![0-9A-Za-z])/.exec(error?.body?.error?.message)?.[1] ?? null,
+        }),
         unknown: true,
         readFailed: true,
       })
@@ -215,6 +223,7 @@ export function createCheckoutController({ mock = false, drawingId = null, holde
         checkout: changed ? null : state.checkout,
         unknown: next.mock ? false : (changed ? true : state.unknown),
         readFailed: false,
+        failure: null,
         error: null,
         // mutate()'s finally guards its busy:false on the OLD drawingId, so a
         // scope change mid-mutation would strand busy forever (panel W2c,

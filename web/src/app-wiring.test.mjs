@@ -20,6 +20,67 @@ import esbuild from 'esbuild'
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
 const viewerSource = readFileSync(new URL('./components/Viewer.jsx', import.meta.url), 'utf8')
 
+describe('W4g S08-c: the Details drawer carries sanitized diagnostics', () => {
+  it('imports the diagnostics composer and request failure collector', () => {
+    assert.match(appSource, new RegExp("import \\{[^}]*\\bcomposeDiagnostics\\b[^}]*\\} from './diagnostics\\.js'"))
+    assert.match(appSource, new RegExp("import \\{[^}]*\\brecentRequestFailures\\b[^}]*\\} from './api\\.js'"))
+  })
+
+  it('includes served identity and sanitized diagnostics in session details', () => {
+    const start = appSource.indexOf('const openSessionDetails = useCallback(')
+    assert.notEqual(start, -1)
+    const end = appSource.indexOf('}, [', start)
+    assert.notEqual(end, -1)
+    const body = appSource.slice(start, end)
+    for (const literal of ['served ', 'taskRevisionOf(', 'diagnostics: composeDiagnostics({', 'collectRefusals(document)']) {
+      assert.ok(body.includes(literal), `missing session diagnostics: ${literal}`)
+    }
+  })
+
+  it('passes checkout failure metadata to the banner and exposes the build on Details hover', () => {
+    const checkout = appSource.match(/<CheckoutControls\s[\s\S]*?\/>/)?.[0]
+    assert.ok(checkout)
+    assert.ok(checkout.includes('failure={checkout.failure}'))
+    const details = appSource.match(new RegExp('<button[^>]*onClick=\\{openSessionDetails\\}[^>]*>Details</button>'))?.[0]
+    assert.ok(details)
+    assert.ok(details.includes('title={`Session details · build ${__BUILD_HASH__}`}'))
+  })
+})
+
+describe('W4g S08-a: an explicit demo starts in mock', () => {
+  it('gates registry and skills discovery on mock', () => {
+    const start = appSource.indexOf('const [catalogSkills, setCatalogSkills]')
+    const end = appSource.indexOf('}, [mock])', start)
+    assert.ok(start >= 0 && end > start)
+    const effect = appSource.slice(start, end + '}, [mock])'.length)
+    const guard = effect.indexOf('if (mock)')
+    assert.ok(guard >= 0 && guard < effect.indexOf('fetchRegistry('))
+    assert.ok(guard < effect.indexOf('fetchSkills('))
+    assert.ok(effect.endsWith('}, [mock])'))
+  })
+  it('gates PromptBox MCP discovery on mock', () => {
+    const promptBox = appSource.match(/<PromptBox\s[\s\S]*?\/>/)?.[0]
+    assert.ok(promptBox)
+    assert.ok(promptBox.includes('mcpDiscoveryEnabled={!mock}'))
+  })
+  it('decides explicit demo mode in the lazy initial state', () => {
+    assert.match(appSource, new RegExp('useState\\(\\(\\) => config\\.mockDefault[\\s\\S]{0,200}explicitDemo\\(\\{'))
+    assert.match(appSource, new RegExp("import \\{[^}]*\\bexplicitDemo\\b[^}]*\\} from './demoState\\.js'"))
+  })
+  it('renders the operator probe once and only outside mock', () => {
+    assert.equal(appSource.split('<OperatorEntry />').length - 1, 1)
+    assert.ok(appSource.split('\n').some((line) => line.includes('{!mock && <OperatorEntry />}')))
+  })
+  it('preserves the live session transitions and the 401 auto-demo hatch', () => {
+    for (const literal of [
+      'if (!mock) sessionActions.checking()',
+      'if (!mock) sessionActions.activate({ tenant: t, tier: ti, org: o })',
+      'if (!mock && is401(e)) {',
+      'if (shouldAutoDemo({ authRequired: true, authConfigured, mock, signedIn: isSignedIn() })) setMock(true)',
+    ]) assert.ok(appSource.includes(literal), `missing session contract: ${literal}`)
+  })
+})
+
 describe('W4g bleed-2b: profile presentation preserves the engine document', () => {
   it('mounts the head opener after the engine document under its own studio and engine gates', () => {
     const ribbonEnd = appSource.indexOf('</DraftingRibbon>')

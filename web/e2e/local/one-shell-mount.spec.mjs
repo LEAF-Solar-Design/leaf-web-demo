@@ -281,6 +281,43 @@ test.describe('route matrix, rail ON', () => {
     }
   })
 
+  test('W4g S08: an explicit demo boots without one authenticated request', async ({ page, request }) => {
+    test.setTimeout(120_000)
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    const apiRequests = []
+    page.on('request', (request) => {
+      const { pathname } = new URL(request.url())
+      if (pathname.startsWith('/api/') && pathname !== '/api/telemetry') {
+        apiRequests.push(`${request.method()} ${pathname}`)
+      }
+    })
+    await page.goto('/app?demo=1')
+    await expect(page.locator(STUDIO)).toHaveCount(1)
+    await expect(page.locator('footer.foot-bar')).toContainText('sample data')
+    expect(apiRequests, `unexpected API requests: ${apiRequests.join(', ')}`).toEqual([])
+  })
+
+  test('W4g S08: Details carries a copyable diagnostics block with the served build', async ({ page, request }) => {
+    test.setTimeout(120_000)
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    await page.goto('/app')
+    await expect(page.locator(STUDIO)).toHaveCount(1)
+    await expect(page.locator('footer.foot-bar')).toContainText(/backend · (local only|cloud live)/, { timeout: 30_000 })
+    await page.locator('header.top').getByRole('button', { name: 'Details', exact: true }).click()
+    const diagnostics = page.getByTestId('diagnostics-block')
+    await expect(diagnostics).toHaveText(/^Leaf Automation diagnostics\n/)
+    await expect(diagnostics).toContainText('mode live')
+    await expect(diagnostics).toContainText(/served [0-9a-f]{40}/)
+    await expect(diagnostics).toContainText('page /app')
+    await expect(diagnostics).toContainText('unavailable controls (')
+    await expect(page.getByTestId('copy-diagnostics')).toBeVisible()
+    await expect(page.getByTestId('copy-diagnostics')).toHaveText('Copy diagnostics')
+    await page.keyboard.press('Escape')
+    await expect(diagnostics).toHaveCount(0)
+  })
+
   test('each tab has its own ground: drawing for CAD and Solar CAD, the project board for Browser, the device stage for iOS', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)

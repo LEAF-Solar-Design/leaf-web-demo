@@ -1,6 +1,6 @@
 // Node oracle for M2 — asserts the shouldAutoDemo truth table on the real pure
 // module (no import.meta / React, so `node` imports it directly).
-import { shouldAutoDemo } from '../src/demoState.js'
+import { shouldAutoDemo, explicitDemo } from '../src/demoState.js'
 
 function assert(cond, msg) {
   if (!cond) { console.error('FAIL:', msg); process.exit(1) }
@@ -34,5 +34,16 @@ assert(shouldAutoDemo({ authRequired: false, authConfigured: false, mock: false 
 assert(shouldAutoDemo({ authRequired: false, authConfigured: true, mock: false }) === false,
   'no auth requirement -> false')
 assert(shouldAutoDemo({}) === false, 'empty args -> false')
+
+for (const search of ['?demo=1', 'demo=1', '?demo=tour', 'demo=tour']) {
+  assert(explicitDemo({ search, signedIn: false }) === true, `${search} signed out -> true`)
+  assert(explicitDemo({ search }) === true, `${search} omitted signedIn -> true`)
+  assert(explicitDemo({ search, signedIn: true }) === false, `${search} signed in -> false`)
+}
+for (const search of ['?demo=off', '?demo=', '?demo=locked', '?demo=degraded', '?other=1', '', 1, null, '?demo=1&bad=%', '?demo=%E0%A4']) {
+  assert(explicitDemo({ search }) === false, `${search} -> false`)
+}
+assert(explicitDemo({}) === false, 'explicit demo empty args -> false')
+assert(explicitDemo() === false, 'explicit demo omitted args -> false')
 
 console.log('DEMO_STATE_OK')
