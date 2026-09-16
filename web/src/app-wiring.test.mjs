@@ -20,6 +20,16 @@ import esbuild from 'esbuild'
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
 const viewerSource = readFileSync(new URL('./components/Viewer.jsx', import.meta.url), 'utf8')
 
+describe('Solar rooftop starter', () => {
+  it('mounts SolarStarterOpener only for a live empty Solar workspace', () => {
+    assert.match(appSource, /<SolarStarterOpener\s+enabled=\{!mock && !intake && surfaceSlots\.toolbar\.profile === 'solar'\}\s+fetchDxf=\{fetchSampleDxf\}/)
+  })
+  it('row13 bootstraps only the Viewer with the empty starter intake', () => {
+    assert.match(appSource, /\(intake \|\| solarStarter === 'open'\) &&/)
+    assert.match(appSource, /<Viewer\s[\s\S]*?intake=\{intake \?\? SOLAR_STARTER_EMPTY_INTAKE\}/)
+  })
+})
+
 describe('one-shell profile band', () => {
   it('mounts one band from the shell contract and retains unavailable quick actions', () => {
     assert.equal((appSource.match(/<CockpitTopBand\b/g) || []).length, 1)

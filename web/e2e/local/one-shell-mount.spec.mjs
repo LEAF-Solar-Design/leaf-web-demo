@@ -394,6 +394,55 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.locator('.studio-ground .studio-ground-viewer')).toBeHidden()
   })
 
+  test('C-04 solar-starter opens locally in a live empty Solar workspace', async ({ page, request }) => {
+    test.setTimeout(120_000)
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    // server/routers/session.py returns 404 for an unknown, non-curated
+    // drawing on the local APS_LIVE=0 stack. No route is mocked or seeded.
+    const drawing = 'c04a-empty-solar-starter'
+    const writes = []
+    let sampleFetches = 0
+    page.on('request', (req) => {
+      const path = new URL(req.url()).pathname
+      if (req.method() === 'POST' && path.startsWith('/api/drawings/')) writes.push(path)
+      if (path === '/sample.dxf') sampleFetches += 1
+    })
+    const missing = page.waitForResponse((response) => {
+      const url = new URL(response.url())
+      return url.pathname === '/api/session' && url.searchParams.get('dwg') === drawing
+    })
+    await page.goto(`/app?surface=solar&drawing=${drawing}`)
+    expect((await missing).status()).toBe(404)
+    await expect(page.locator('.workspace-card')).toHaveAttribute('data-engine-document', 'solar-starter.dxf', { timeout: 60_000 })
+    await expectOneCanvasIn(page, '.studio-ground')
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('2345')
+    await page.getByRole('tab', { name: 'Draw', exact: true }).click()
+    await expect(page.locator('[data-tool="draw:createLine"]')).toBeEnabled()
+    await page.getByRole('tab', { name: 'Insert', exact: true }).click()
+    const save = page.locator('[data-tool="save-version"]')
+    await expect(save).toBeDisabled()
+    await expect(save).toHaveAttribute('title', /edit something first|download-only here: no project target/)
+    // Read the rendered canvas into 2D on a frame: nontransparent colored
+    // pixels prove the starter geometry reached WebGL, beyond its store count.
+    await expect.poll(() => page.locator('.studio-ground .viewer-canvas canvas').evaluate((canvas) => new Promise((resolve) => {
+      requestAnimationFrame(() => {
+        const copy = document.createElement('canvas')
+        copy.width = canvas.width; copy.height = canvas.height
+        const ctx = copy.getContext('2d')
+        ctx.drawImage(canvas, 0, 0)
+        const pixels = ctx.getImageData(0, 0, copy.width, copy.height).data
+        let painted = 0
+        for (let i = 0; i < pixels.length; i += 4) {
+          if (pixels[i + 3] && Math.max(pixels[i], pixels[i + 1], pixels[i + 2]) > 40) painted += 1
+        }
+        resolve(painted)
+      })
+    })), { timeout: 30_000 }).toBeGreaterThan(0)
+    expect(sampleFetches).toBe(1)
+    expect(writes).toEqual([])
+  })
+
   test('floating rails, dark chrome, and the drawing cockpit (W4b)', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)

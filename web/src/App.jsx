@@ -90,6 +90,7 @@ import CommandLineArmer from './cadedit/CommandLineArmer.jsx'
 import StatusModesBridge from './cadedit/StatusModesBridge.jsx'
 import EngineDocumentView from './cadedit/EngineDocumentView.jsx'
 import EngineHeadOpener from './cadedit/EngineHeadOpener.jsx'
+import SolarStarterOpener, { SOLAR_STARTER_EMPTY_INTAKE } from './cadedit/SolarStarterOpener.jsx'
 import CanvasPointPicker from './cadedit/CanvasPointPicker.jsx'
 import { COCKPIT_COMMAND_EVENT, parseDrawingCommand } from './lib/commandWords.js'
 import { parsePointExpression } from './cadedit/pointExpression.js'
@@ -516,6 +517,13 @@ export default function App() {
   }, [agentSessionId, mock])
 
   const viewerRef = useRef(null)
+  const [, setSolarStarterViewerMounted] = useState(false)
+  const solarStarterViewerRef = useCallback((viewer) => {
+    viewerRef.current = viewer
+    // A lazy Viewer can arrive after the engine parsed. Notify App once so
+    // EngineDocumentView's onShown effect sees the newly attached viewer.
+    if (viewer) setSolarStarterViewerMounted(true)
+  }, [])
   const drawingErrorRef = useRef(null)
   const catalogUiRef = useRef({})
   const authorSectionRef = useRef(null)
@@ -1123,6 +1131,8 @@ export default function App() {
   // would move the server head under them, so it is refused with the reason
   // until the drafter saves or discards.
   const [engineDirty, setEngineDirty] = useState(false)
+  const [solarStarterRetryKey, setSolarStarterRetryKey] = useState(0)
+  const [solarStarter, setSolarStarter] = useState('idle')
   // The same fact as a ref, for the EXECUTION-time check in onRun: a confirm
   // that awaited the catalog refetch holds the onRun it started with, so a
   // closure read there could be older than the edit that made the engine
@@ -3686,6 +3696,14 @@ export default function App() {
               fetchDxf={mock ? fetchSampleDxf : fetchDrawingDxf}
             />
           )}
+          {ENV_CAD_EDIT && studioGround && (
+            <SolarStarterOpener
+              enabled={!mock && !intake && surfaceSlots.toolbar.profile === 'solar'}
+              fetchDxf={fetchSampleDxf}
+              retryKey={solarStarterRetryKey}
+              onStarterState={setSolarStarter}
+            />
+          )}
           <div className="viewer-toolbar">
             {/* W4e: the toolbar is the reference's document-tab band. Start
                 is the project board (the Browser tab, a real surface switch);
@@ -3867,6 +3885,12 @@ export default function App() {
               further down, wherever propertyRowsEl sits. */}
           {ENV_CAD_EDIT && <EngineDockProperties />}
           <div className="viewer-wrap">
+            {!mock && !intake && surfaceSlots.toolbar.profile === 'solar' && solarStarter === 'failed' && (
+              <div className="loading-line dim" role="status">
+                <span>The rooftop starter could not be opened. Retry or import a DXF.</span>
+                <button className="chip-act" onClick={() => setSolarStarterRetryKey((k) => k + 1)}>Retry rooftop starter</button>
+              </div>
+            )}
             {/* X3 whole-pane takeover: red dot + what failed + quiet reason + Retry. */}
             {loadErr && !signedOut && (
               <div className="pane-fail" role="alert" style={{ position: 'absolute', inset: 0 }}>
@@ -3889,7 +3913,7 @@ export default function App() {
                 <span className="dot live pulse" aria-hidden="true" /> Loading drawing
               </div>
             )}
-            {intake && (() => {
+            {(intake || solarStarter === 'open') && (() => {
               // W3 one-shell: the console OWNS this element — every prop, the
               // ref, the version/undo/redo imperative path — in BOTH shells.
               // Under the studio shell the element PORTALS into the ground
@@ -3900,8 +3924,8 @@ export default function App() {
               const viewerEl = (
                 <Suspense fallback={<ViewerSkeleton />}>
                 <Viewer
-                  ref={viewerRef}
-                  intake={intake}
+                  ref={intake ? viewerRef : solarStarterViewerRef}
+                  intake={intake ?? SOLAR_STARTER_EMPTY_INTAKE}
                   colorForLayer={studioGround ? studioColorForLayer : surfaceColorForLayer}
                   paletteRevision={studioGround ? (surfaceSlots.groundMaterial.layerAccent === 'solar' ? 'solar' : 'base') : undefined}
                   stringRoutes={solarStringRoutes}
