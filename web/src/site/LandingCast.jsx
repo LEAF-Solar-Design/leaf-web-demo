@@ -19,7 +19,10 @@ export function enterDemo() {
   // Full navigation, not the SPA router: the demo flag is read once at boot
   // (demoState.js, drawingIdentity.js), so a client-side route change leaves
   // the signed-out live shell mounted with the query ignored.
-  window.location.assign('/try?demo=1')
+  // Lands in the cockpit demo (the one shell: sample rooftop, guided tour,
+  // the four profiles), not the ToolCast stage; the website's forwarded
+  // /try?demo=1 reaches the same console via authBoot.js under ONE_SHELL.
+  window.location.assign('/app?demo=1')
 }
 
 const SHEETS = [
