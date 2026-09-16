@@ -173,10 +173,23 @@ describe('ProjectBoardGround', () => {
     expect(tile.queryByText('Edit panels')).toBeNull()
   })
 
-  it('puts the offline project limit immediately below the contained heading', () => {
+  it('offers project creation from the contained board with the derived drawing name', () => {
+    const workspaceProject = deriveWorkspaceProjectState({ drawingName: 'North Yard', orgId: 'org-1' })
+    const onCreateProject = vi.fn()
+    render(<ProjectBoardGround active contained workspaceProject={workspaceProject} onCreateProject={onCreateProject} />)
+    const button = screen.getByRole('button', { name: 'Create project from this drawing' })
+    expect(button).toBeEnabled()
+    fireEvent.click(button)
+    expect(onCreateProject).toHaveBeenCalledTimes(1)
+    expect(onCreateProject).toHaveBeenCalledWith(workspaceProject.action.projectName)
+  })
+
+  it('disables project creation in the contained offline demo and explains the limit once', () => {
     const workspaceProject = deriveWorkspaceProjectState({ drawingName: 'demo', mock: true })
     const { container } = render(<ProjectBoardGround active contained mock studioPresentation workspaceProject={workspaceProject} />)
-    expect(container.querySelector('h1').nextElementSibling.textContent).toBe('Offline demo: workspace project creation is unavailable.')
+    expect(screen.getByRole('button', { name: 'Create project from this drawing' })).toBeDisabled()
+    expect(screen.getAllByText('Creating a workspace project is unavailable in this offline demo.')).toHaveLength(1)
+    expect(container.querySelector('.start-board-project-caveat')).toBeNull()
   })
 
   it.each(['cad', 'solar'])('focuses each %s Start request once, after measurement', (surface) => {

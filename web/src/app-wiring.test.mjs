@@ -846,6 +846,7 @@ describe('App.jsx wiring', () => {
     const grounds = appNoComments.match(/<SurfaceGrounds\s[\s\S]*?\/>/)?.[0]
     assert.ok(grounds, 'SurfaceGrounds mount exists')
     assert.match(grounds, new RegExp('occluders=\\{STUDIO_DRAWING_OCCLUDERS\\}'))
+    assert.match(grounds, /onCreateProject=\{onCreateProject\}/)
     for (const component of ['SurfaceFrame', 'SurfaceGrounds']) {
       const mount = new RegExp('<' + component + '\\s[\\s\\S]*?/>|<' + component + '\\s[\\s\\S]*?>')
       const source = appNoComments.match(mount)?.[0]
