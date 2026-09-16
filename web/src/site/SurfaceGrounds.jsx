@@ -24,6 +24,7 @@ import { isWriteTool } from '../lib/toolRecord.js'
 import { formatElementId } from '../lib/elementIdentity.js'
 import { PRODUCT_SURFACES, SHARED_WORKSPACE_CAPABILITIES, surfaceGround } from './productSurfaces.js'
 import { EMPTY_WORKSPACE_PROJECT } from './workspaceProjectState.js'
+import { WorkspaceProjectSlot } from '../components/ProductSurfaceTabs.jsx'
 import { deriveIosState, humanizeStage, IOS_STATE_LABEL } from '../ios/IosSurface.jsx'
 
 // THE WINDOW. On Browser and iOS the product frame (#product-surface-panel)
@@ -255,6 +256,7 @@ export function ProjectBoardGround({
   active = false, workspaceProject = null, workspace = null, drawing = null, catalog = null, mock = false,
   leavingGround = null,
   contained = false, onReturnToDrawing = null, headingRef = null, startFocusRequest = 0,
+  onCreateProject = null,
   occluders = NO_OCCLUDERS,
   studioPresentation = false, studioShell = false,
   worldSpace = import.meta.env.VITE_WORLD_SPACE_BOARD === '1', store,
@@ -294,8 +296,8 @@ export function ProjectBoardGround({
           <header className="ground-board-header">
             <div>
               <h1 ref={containedHeadingRef} tabIndex={-1}>{START_BOARD_COPY.heading}</h1>
-              {studioPresentation && mock && state.action?.disabled && <p className="start-board-project-caveat">{START_BOARD_COPY.projectDemoCaveat}</p>}
               <p>{state.kind === 'project' ? state.label : drawing?.name || state.drawingName}</p>
+              <WorkspaceProjectSlot state={state} onCreateProject={onCreateProject} studioPresentation={studioPresentation} mock={mock} />
             </div>
             {onReturnToDrawing && <button type="button" onClick={onReturnToDrawing}>{START_BOARD_COPY.returnToDrawing}</button>}
           </header>
@@ -395,6 +397,7 @@ export function DeviceGround({
 export default function SurfaceGrounds({
   surface, workspaceProject, workspace, drawing, catalog, mock,
   boardVisible, onReturnToDrawing, headingRef, startFocusRequest, leavingGround = null,
+  onCreateProject,
   occluders = NO_OCCLUDERS,
   studioPresentation = false, studioShell = false,
   iosEnabled, iosContract, revision,
@@ -415,6 +418,7 @@ export default function SurfaceGrounds({
         contained={studioShell || (boardVisible === true && groundShowsDrawing(surface))}
         occluders={occluders}
         onReturnToDrawing={onReturnToDrawing}
+        onCreateProject={onCreateProject}
         headingRef={headingRef}
         startFocusRequest={startFocusRequest}
         studioPresentation={studioPresentation}
