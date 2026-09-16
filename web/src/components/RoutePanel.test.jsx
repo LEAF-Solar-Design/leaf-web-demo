@@ -3,6 +3,7 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import RoutePanel from './RoutePanel.jsx'
+import { alternativeDecision } from '../controllers/catalog/catalogRouting.js'
 
 const route = {
   lane: 'run',
@@ -69,6 +70,22 @@ describe('RoutePanel demo refusals and outages', () => {
     expect(callbacks.onPickAlternative).toHaveBeenCalledWith(tools[0].name)
     expect(callbacks.onConfirmIntent).not.toHaveBeenCalled()
     expect(screen.getByLabelText('Request').value).toBe('Inspect unusual geometry')
+  })
+
+  it('a catalog pick keeps the demo disclosure (W4g #125)', () => {
+    const picked = alternativeDecision({
+      lane: 'run',
+      tool: null,
+      confidence: 0,
+      stub: true,
+      stubKind: 'demo',
+      alternatives: [{ tool: tools[0].name }],
+    }, tools[0].name)
+
+    mountRefusal(picked)
+
+    expect(screen.getByText('This demo matches requests against a limited tool catalog.')).toBeTruthy()
+    expect(screen.getByRole('button', { name: /^Run/ })).toBeTruthy()
   })
 
   it('announces the number of repeated demo refusals', () => {
