@@ -1984,8 +1984,32 @@ jobs:
             digest-web-dist --root dist)"
           echo "sha256=$artifact_sha256" >> "$GITHUB_OUTPUT"
 
+      # Cross-job supply cannot depend on the shared Actions artifact quota.
+      # Publish the authoritative bytes under this exact producer attempt;
+      # a conditional put prevents a second writer from replacing them.
+      - name: Put exact v3 web deployment artifact to S3
+        if: matrix.image == 'web'
+        env:
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          WEB_DIST_ROOT: ${{ steps.surface.outputs.reuse == 'true' && format('{0}/reused-web-dist', runner.temp) || 'web/dist' }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Invalid surface source SHA"; exit 1; }
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo "::error::Invalid surface run ID"; exit 1; }
+          [[ "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || { echo "::error::Invalid surface run attempt"; exit 1; }
+          python scripts/platform_release_manifest.py pack-web-dist \
+            --root "$WEB_DIST_ROOT" \
+            --output "$RUNNER_TEMP/surface-web-dist.zip" >/dev/null
+          key="${MQ_TRANSPORT_PREFIX}surface/$SOURCE_SHA/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/surface-web-dist.zip"
+          aws s3api put-object --bucket "$MQ_TRANSPORT_BUCKET" --key "$key" \
+            --body "$RUNNER_TEMP/surface-web-dist.zip" --if-none-match '*' --checksum-algorithm SHA256 \
+            --metadata "run-id=$GITHUB_RUN_ID,run-attempt=$GITHUB_RUN_ATTEMPT,workflow-ref=$GITHUB_WORKFLOW_REF,repository-id=$GITHUB_REPOSITORY_ID,head-sha=$SOURCE_SHA,event=$GITHUB_EVENT_NAME"
+
       - name: Preserve the exact v3 web deployment artifact
         if: matrix.image == 'web'
+        # Best effort because the S3 object above is authoritative. A quota
+        # refusal must not block verify after the supply bytes were stored.
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: surface-web-dist-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
@@ -2074,7 +2098,30 @@ jobs:
             + (if .service == "web" then {artifact_sha256} else {} end)
           ' "$RUNNER_TEMP/surface-predicate.json" > "$RUNNER_TEMP/service-entry.json"
 
+      - name: Put exact v3 service entry to S3
+        env:
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          IMAGE: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Invalid surface source SHA"; exit 1; }
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo "::error::Invalid surface run ID"; exit 1; }
+          [[ "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || { echo "::error::Invalid surface run attempt"; exit 1; }
+          case "$IMAGE" in
+            app|broker|canonical-worker|harness|web) ;;
+            *) echo "::error::Invalid surface image"; exit 1 ;;
+          esac
+          # The runner owns the transport identity, including for reused
+          # entries. Never derive it from a service entry's producer fields.
+          key="${MQ_TRANSPORT_PREFIX}surface/$SOURCE_SHA/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/service-entry-$IMAGE.json"
+          aws s3api put-object --bucket "$MQ_TRANSPORT_BUCKET" --key "$key" \
+            --body "$RUNNER_TEMP/service-entry.json" --if-none-match '*' --checksum-algorithm SHA256 \
+            --metadata "run-id=$GITHUB_RUN_ID,run-attempt=$GITHUB_RUN_ATTEMPT,workflow-ref=$GITHUB_WORKFLOW_REF,repository-id=$GITHUB_REPOSITORY_ID,head-sha=$SOURCE_SHA,event=$GITHUB_EVENT_NAME"
+
       - name: Upload exact v3 service entry
+        # Best effort because the S3 object above is authoritative. The
+        # cross-job hand-off canon forbids a quota-limited artifact dependency.
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: surface-result-${{ matrix.image }}-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
@@ -2110,24 +2157,85 @@ jobs:
           ref: ${{ needs.prepare.outputs.source_sha }}
           persist-credentials: false
 
-      - name: Download exact v3 service entries
-        uses: actions/download-artifact@v4
-        with:
-          pattern: surface-result-*-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/surface-results
-
-      - name: Download exact v3 web deployment artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: surface-web-dist-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
-          path: web/dist
-
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v6.1.0
         with:
           role-to-assume: ${{ secrets.AWS_ECR_PUSH_ROLE }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: GHA-VerifyPlatformImages-${{ github.run_id }}
+
+      # Exact-key reads need no bucket listing permission. Fail closed on
+      # missing bytes or foreign producer metadata before any supply-set
+      # verification consumes them; the checksum alone proves only bytes.
+      - name: Read exact v3 service entries from S3
+        env:
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Invalid surface source SHA"; exit 1; }
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo "::error::Invalid surface run ID"; exit 1; }
+          [[ "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || { echo "::error::Invalid surface run attempt"; exit 1; }
+          for image in app broker canonical-worker harness web; do
+            # Keep the SHA and attempt suffix: the supply-set writer below
+            # requires this exact directory to select one entry per image.
+            entry_dir="$RUNNER_TEMP/surface-results/surface-result-$image-$SOURCE_SHA-attempt-$GITHUB_RUN_ATTEMPT"
+            mkdir -p "$entry_dir"
+            entry="$entry_dir/service-entry.json"
+            response="$RUNNER_TEMP/surface-entry-$image-get.json"
+            key="${MQ_TRANSPORT_PREFIX}surface/$SOURCE_SHA/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/service-entry-$image.json"
+            aws s3api get-object --bucket "$MQ_TRANSPORT_BUCKET" --key "$key" \
+              --checksum-mode ENABLED "$entry" > "$response" || {
+                echo "::error::Failed to read the exact surface entry for $image"; exit 1;
+              }
+            expected="$(jq -er '.ChecksumSHA256' "$response")" || {
+              echo "::error::Surface entry checksum missing for $image"; exit 1;
+            }
+            actual="$(openssl dgst -sha256 -binary "$entry" | base64 -w0)"
+            [ "$actual" = "$expected" ] || { echo "::error::Surface entry checksum mismatch for $image"; exit 1; }
+            jq -e --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" \
+              --arg source "$SOURCE_SHA" --arg repo "$GITHUB_REPOSITORY_ID" \
+              --arg workflow "$GITHUB_WORKFLOW_REF" --arg event "$GITHUB_EVENT_NAME" '
+              .Metadata["run-id"] == $run and .Metadata["run-attempt"] == $attempt
+              and .Metadata["head-sha"] == $source and .Metadata["repository-id"] == $repo
+              and .Metadata["workflow-ref"] == $workflow and .Metadata.event == $event
+            ' "$response" >/dev/null || {
+              echo "::error::Surface entry producer metadata mismatch for $image"; exit 1;
+            }
+          done
+
+      - name: Read exact v3 web deployment artifact from S3
+        env:
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Invalid surface source SHA"; exit 1; }
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo "::error::Invalid surface run ID"; exit 1; }
+          [[ "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || { echo "::error::Invalid surface run attempt"; exit 1; }
+          archive="$RUNNER_TEMP/surface-web-dist.zip"
+          response="$RUNNER_TEMP/surface-web-get.json"
+          key="${MQ_TRANSPORT_PREFIX}surface/$SOURCE_SHA/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/surface-web-dist.zip"
+          aws s3api get-object --bucket "$MQ_TRANSPORT_BUCKET" --key "$key" \
+            --checksum-mode ENABLED "$archive" > "$response" || {
+              echo "::error::Failed to read the exact surface web artifact"; exit 1;
+            }
+          expected="$(jq -er '.ChecksumSHA256' "$response")" || {
+            echo "::error::Surface web checksum missing"; exit 1;
+          }
+          actual="$(openssl dgst -sha256 -binary "$archive" | base64 -w0)"
+          [ "$actual" = "$expected" ] || { echo "::error::Surface web checksum mismatch"; exit 1; }
+          jq -e --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg source "$SOURCE_SHA" --arg repo "$GITHUB_REPOSITORY_ID" \
+            --arg workflow "$GITHUB_WORKFLOW_REF" --arg event "$GITHUB_EVENT_NAME" '
+            .Metadata["run-id"] == $run and .Metadata["run-attempt"] == $attempt
+            and .Metadata["head-sha"] == $source and .Metadata["repository-id"] == $repo
+            and .Metadata["workflow-ref"] == $workflow and .Metadata.event == $event
+          ' "$response" >/dev/null || {
+            echo "::error::Surface web producer metadata mismatch"; exit 1;
+          }
+          # pack-web-dist includes the dist/ prefix, so extract into web
+          # to preserve the downstream web/dist layout without nesting it.
+          mkdir -p web
+          unzip -o -q "$archive" -d web
 
       - name: Login to ECR for immutable digest verification
         uses: aws-actions/amazon-ecr-login@v2
