@@ -15,6 +15,7 @@
 // persisted before the first authed render on every landing.
 
 import { isAuthRedirectCallback } from '../auth.js'
+import { ONE_SHELL_ENABLED } from '../lib/runtimeFlags.js'
 
 const APP_BOOT_PARAMS = ['fixture', 'dev', 'drawing']
 
@@ -28,11 +29,18 @@ export function shouldDeferForAuthCallback(search = window.location.search) {
 // boots straight into the console regardless of path. An auth callback also
 // boots the console, but only AFTER shouldDeferForAuthCallback clears -- the
 // deferral is what keeps the burst behind the token write.
+//
+// ONE SHELL (lane 4): the website forwards its Try button to /try?demo=1, and
+// under the runtime rail that exact reading boots the same cockpit demo the
+// landing's own button lands in (/app?demo=1). Only the literal '1' counts;
+// bare /try, /try?demo=0 and the rail-OFF case stay on the stage as before.
+// Never throws on a malformed search: the catch falls through to path routing.
 export function bootWantsApp(search, path = window.location.pathname) {
   try {
     const q = new URLSearchParams(search)
     if (APP_BOOT_PARAMS.some((k) => q.has(k))) return true
     if (q.has('demo') && path !== '/try') return true
+    if (ONE_SHELL_ENABLED && path === '/try' && q.get('demo') === '1') return true
     if (q.has('ops') && path !== '/try') return true
     if (isAuthRedirectCallback(search) && path !== '/try') return true
   } catch { /* malformed search — fall through to path routing */ }

@@ -62,7 +62,17 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
+  vi.doUnmock('../lib/runtimeFlags.js')
 })
+
+// The one-shell rail is read once at module evaluation; beforeEach resets the
+// module graph and SiteRoot is imported per mount, so a doMock here lands.
+function stubOneShellRail(enabled) {
+  vi.doMock('../lib/runtimeFlags.js', () => ({
+    ONE_SHELL_ENABLED: enabled,
+    readOneShellEnabled: () => enabled,
+  }))
+}
 
 async function mountFrontDoor(path = '/', hostname = 'platform.leafdesign.ai') {
   const browserWindow = window
@@ -102,9 +112,10 @@ describe('Leaf workspace guest front door', () => {
     for (const name of ['Try Branch on the sample rooftop', 'Open workspace', 'Open in workspace']) {
       fireEvent.click(screen.getByRole('button', { name }))
     }
-    // The trial button is a full navigation so the boot path reads ?demo=1;
-    // the workspace buttons stay on the SPA router.
-    expect(mocks.assign.mock.calls).toEqual([['/try?demo=1']])
+    // The trial button is a full navigation so the boot path reads ?demo=1,
+    // landing in the cockpit demo (the one shell); the workspace buttons stay
+    // on the SPA router and on /try.
+    expect(mocks.assign.mock.calls).toEqual([['/app?demo=1']])
     expect(mocks.navigate.mock.calls).toEqual([['/try'], ['/try']])
     expect(mocks.hrefSet).not.toHaveBeenCalled()
     expect(mocks.demand).not.toHaveBeenCalled()
@@ -118,14 +129,42 @@ describe('Leaf workspace guest front door', () => {
     expect(mocks.hrefSet).not.toHaveBeenCalled()
   })
 
-  it('boots the guest target into the tool scene with public demo enabled', async () => {
-    await mountFrontDoor('/try?demo=1')
-    expect(document.querySelector('.stage-root').getAttribute('data-scene')).toBe('tool')
+  it('boots the guest target into the console scene with public demo enabled', async () => {
+    await mountFrontDoor('/app?demo=1')
+    await screen.findByTestId('app-stub')
     expect(screen.getByTestId('identity-stub').getAttribute('data-public-demo')).toBe('true')
-    expect(screen.getByTestId('tool-stub').getAttribute('data-active')).toBe('true')
-    expect(screen.queryByTestId('app-stub')).toBeNull()
+    expect(document.querySelector('.stage-root')).toBeNull()
+    expect(screen.queryByTestId('tool-stub')).toBeNull()
     expect(mocks.assign).not.toHaveBeenCalled()
     expect(mocks.replace).not.toHaveBeenCalled()
+  })
+
+  it('boots the forwarded /try?demo=1 into the same console scene under the one-shell rail', async () => {
+    stubOneShellRail(true)
+    await mountFrontDoor('/try?demo=1')
+    await screen.findByTestId('app-stub')
+    expect(document.querySelector('.studio-shell').getAttribute('data-scene')).toBe('app')
+    expect(screen.getByTestId('identity-stub').getAttribute('data-public-demo')).toBe('true')
+    expect(document.querySelector('.stage-root')).toBeNull()
+    expect(screen.queryByTestId('tool-stub')).toBeNull()
+    expect(mocks.assign).not.toHaveBeenCalled()
+    expect(mocks.replace).not.toHaveBeenCalled()
+  })
+
+  it('keeps /try?demo=1 on the tool scene with the one-shell rail off', async () => {
+    stubOneShellRail(false)
+    await mountFrontDoor('/try?demo=1')
+    expect(document.querySelector('.stage-root').getAttribute('data-scene')).toBe('tool')
+    expect(screen.getByTestId('tool-stub').getAttribute('data-active')).toBe('true')
+    expect(screen.queryByTestId('app-stub')).toBeNull()
+  })
+
+  it('keeps bare /try on the tool scene whatever the rail says', async () => {
+    stubOneShellRail(true)
+    await mountFrontDoor('/try')
+    expect(document.querySelector('.stage-root').getAttribute('data-scene')).toBe('tool')
+    expect(screen.getByTestId('tool-stub').getAttribute('data-active')).toBe('true')
+    expect(screen.queryByTestId('app-stub')).toBeNull()
   })
 
   it('keeps signed-in workspace buttons and the shortcut on the existing /try navigation', async () => {
@@ -135,7 +174,7 @@ describe('Leaf workspace guest front door', () => {
       fireEvent.click(screen.getByRole('button', { name }))
     }
     fireEvent.keyDown(document.body, { key: 'T' })
-    expect(mocks.assign.mock.calls).toEqual([['/try?demo=1']])
+    expect(mocks.assign.mock.calls).toEqual([['/app?demo=1']])
     expect(mocks.navigate.mock.calls).toEqual([['/try'], ['/try'], ['/try']])
     expect(mocks.replace).not.toHaveBeenCalled()
   })
@@ -168,7 +207,7 @@ describe('Leaf workspace guest front door', () => {
     expect(screen.queryByText('Interest saved. No payment required.')).toBeNull()
     expect(screen.getByRole('button', { name: 'Register interest' }).disabled).toBe(false)
     fireEvent.click(screen.getByRole('button', { name: 'Try Branch on the sample rooftop' }))
-    expect(mocks.assign).toHaveBeenCalledWith('/try?demo=1')
+    expect(mocks.assign).toHaveBeenCalledWith('/app?demo=1')
   })
 
   it('contains no handler assigning the visitor to leafautomation.ai or a payment funnel', () => {
