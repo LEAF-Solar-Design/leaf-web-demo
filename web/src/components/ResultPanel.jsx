@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { humanKey } from '../labels.js'
 import { errorActorLabel, errorPresentation } from '../errorPresentation.js'
+import { modChord } from '../lib/keys.js'
 import ArloProposalReview from './ArloProposalReview.jsx'
 
 // Renders a Result envelope (CONTRACT §3): result data (counts table or
@@ -227,7 +228,7 @@ export default function ResultPanel({ running, error, result, tool, onRetry, not
         <p className="panel-sub">
           Run a tool or type what you want in the bar below — the result and its
           drawing markup appear here.
-          {' '}<span className="key">⌘K</span>
+          {' '}<span className="key">{modChord('K')}</span>
         </p>
       )}
       {/* Live progress rides the SB3 running strip above the docked bar
