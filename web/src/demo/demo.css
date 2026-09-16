@@ -192,3 +192,30 @@
     transition: none;
   }
 }
+
+/* Phone width (lane 3, one-shell narrow): the card is a compact coach.
+   DemoTour.jsx computes its box from the viewport (left, top, width and a
+   maxHeight clamp), so the width rule above must not fight it; the coach
+   only carries the tighter spacing and the More/Less toggle. Desktop rules
+   above are untouched. */
+.tour-card.is-coach {
+  width: auto;
+  padding: 10px 12px 12px;
+  border-radius: 10px;
+}
+.tour-card.is-coach .tour-card-step {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.tour-card.is-coach .tour-coach-toggle {
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+.tour-card.is-coach .tour-card-title { margin: 4px 0 4px; font-size: 14px; }
+.tour-card.is-coach .tour-card-body { font-size: 13px; line-height: 1.45; }
+.tour-card.is-coach .tour-dots { margin-top: 8px; }
+.tour-card.is-coach .tour-card-actions { margin-top: 10px; flex-wrap: wrap; }
+.tour-card.is-coach .tour-card-actions button { min-height: 36px; }

@@ -16,6 +16,66 @@ import './demo.css'
 
 const MARGIN = 14
 
+// Phone width (lane 3, one-shell narrow): at or under this width the card is
+// a compact coach inside the drawing area, its bottom edge resting on the
+// top of the fixed bottom chrome, never over the drawers, the command line
+// or the status bar, and never taller than NARROW_MAX_VH of the viewport.
+// The reserve stands in when no bottom chrome is laid out (status bar 46px
+// + command line at bottom 50px + a gap), see cockpit.css.
+const NARROW_MAX = 600
+const NARROW_BOTTOM_RESERVE = 110
+const NARROW_INSET = 8
+const NARROW_MAX_VH = 0.4
+
+// The fixed bottom chrome at phone width, top to bottom in cockpit.css: the
+// job strip, the catalog drawer, the command line, the status bar. Only a
+// box whose top edge lies in the lower part of the viewport counts (a rail
+// at the top of a plain page is not bottom chrome); the job strip's top is
+// 0.74vh less 136px in the cockpit, above 0.4vh at every phone height.
+const NARROW_CHROME = '.rail-stack, aside.nav, .bar-dock, footer.foot-bar'
+const NARROW_CHROME_MIN_TOP = 0.4
+
+function readNarrow() {
+  return typeof window !== 'undefined' && window.innerWidth <= NARROW_MAX
+}
+
+// The top edge of the highest bottom-chrome box, or null when none is laid
+// out (jsdom, or a page without the cockpit's drawers).
+function readChromeTop() {
+  if (typeof document === 'undefined') return null
+  const vh = window.innerHeight
+  let top = null
+  for (const el of document.querySelectorAll(NARROW_CHROME)) {
+    const r = el.getBoundingClientRect()
+    if (!r.height || r.top < vh * NARROW_CHROME_MIN_TOP || r.top >= vh) continue
+    if (top === null || r.top < top) top = r.top
+  }
+  return top
+}
+
+// Tracks the phone breakpoint. Resize is the source of truth (jsdom has it);
+// a matchMedia change listener is added when the API exists, so a browser
+// that resizes without a resize event (split view) still flips the coach.
+function useNarrowViewport() {
+  const [narrow, setNarrow] = useState(readNarrow)
+  useEffect(() => {
+    const update = () => setNarrow(readNarrow())
+    window.addEventListener('resize', update)
+    let mql = null
+    if (typeof window.matchMedia === 'function') {
+      mql = window.matchMedia(`(max-width: ${NARROW_MAX}px)`)
+      if (mql && typeof mql.addEventListener === 'function') mql.addEventListener('change', update)
+      else mql = null
+    }
+    update()
+    return () => {
+      window.removeEventListener('resize', update)
+      if (mql) mql.removeEventListener('change', update)
+    }
+  }, [])
+  return narrow
+}
+
 // A tour anchor id is a short lowercase slug (`shell`, `viewer`,
 // `command-bar`, `right-rail`). Anything else is refused before it reaches
 // querySelector, so a contract typo or a hostile string can never become a
@@ -67,6 +127,10 @@ export default function DemoTour({
 }) {
   const [uncontrolled, setUncontrolled] = useState(0)
   const index = typeof controlledIndex === 'number' ? controlledIndex : uncontrolled
+  // Phone width: the card is a collapsed coach (step, title, controls) that
+  // the reader expands for the body copy. Desktop never reads this.
+  const narrow = useNarrowViewport()
+  const [coachOpen, setCoachOpen] = useState(false)
   const step = steps[Math.max(0, Math.min(index, steps.length - 1))]
 
   const setIndex = useCallback((next) => {
@@ -77,7 +141,11 @@ export default function DemoTour({
 
   // --- spotlight geometry --------------------------------------------------
   const [rect, setRect] = useState(null)
+  // Phone width: the bottom chrome's top edge, measured with the spotlight
+  // so a resize or a drawer change moves the coach's floor with it.
+  const [chromeTop, setChromeTop] = useState(null)
   const measure = useCallback(() => {
+    if (readNarrow()) setChromeTop(readChromeTop())
     const el = resolveTourTarget(step, anchors)
     const next = (() => {
       if (!el) return null
@@ -171,7 +239,7 @@ export default function DemoTour({
   // NOTE: the tour deliberately does NOT own Escape. A capture-phase Esc listener
   // here terminated the whole walkthrough when the user only meant to dismiss the
   // route card / History / a selection, with no way back in. Exit stays reachable
-  // via the banner's "Exit — explore freely" and the card's "Skip"; Esc goes back
+  // via the banner's "Exit and explore freely" and the card's "Skip"; Esc goes back
   // to App's own Esc ladder, which is what the rest of the app expects.
 
   // Focus starts inside the overlay so the first Tab reaches Exit/Skip/Next
@@ -192,11 +260,31 @@ export default function DemoTour({
   // assumed — a prompt beat renders well past the 240px this used to guess, which
   // pushed the Back/Skip/Next row below the fold on a 768px laptop.
   const cardStyle = (() => {
-    if (!rect) return { left: '50%', top: '50%', transform: 'translate(-50%, -50%)' }
     const H = cardH
-    const W = 380
     const vh = window.innerHeight
     const vw = window.innerWidth
+    if (narrow) {
+      // Phone: full width less an inset, the bottom edge on the floor (the
+      // top of the highest bottom-chrome box, the job strip in the cockpit,
+      // less a gap), the box capped at NARROW_MAX_VH of the viewport. When
+      // the spotlight itself overlaps that box (the command bar beat) the
+      // floor moves above the spotlight instead, if the box still fits.
+      // Every number is computed from the viewport, and maxHeight clamps
+      // the box even when the measured height is stale, so Next and Skip
+      // are always on screen.
+      const width = Math.max(0, vw - NARROW_INSET * 2)
+      const cap = Math.floor(vh * NARROW_MAX_VH)
+      const box = Math.min(H, cap)
+      let floor = (chromeTop === null ? vh - NARROW_BOTTOM_RESERVE : chromeTop) - NARROW_INSET
+      if (rect && rect.top - MARGIN < floor && rect.top + rect.height > floor - box
+        && rect.top - MARGIN - NARROW_INSET >= box) {
+        floor = rect.top - MARGIN
+      }
+      const top = Math.max(NARROW_INSET, floor - box)
+      return { left: NARROW_INSET, top, width, maxHeight: Math.max(0, Math.min(cap, floor - top)) }
+    }
+    if (!rect) return { left: '50%', top: '50%', transform: 'translate(-50%, -50%)' }
+    const W = 380
     const clampTop = (t) => Math.max(64, Math.min(t, Math.max(64, vh - H - 16)))
     const left = Math.max(16, Math.min(rect.left, vw - W - 16))
     const below = rect.top + rect.height + MARGIN
@@ -221,20 +309,41 @@ export default function DemoTour({
         ? <div className="tour-spot" style={rect} />
         : <div className="tour-dim" />}
 
-      <div className="tour-banner">
-        <span className="tour-banner-title">{bannerTitle}</span>
-        <span className="tour-banner-sub">{bannerSubtitle}</span>
-        <button type="button" className="chip-neutral tour-banner-exit" onClick={onExit}>
-          Exit — explore freely
-        </button>
-      </div>
+      {/* Phone width: no banner strip (it covered the cockpit's one-line
+          header); Skip in the coach is the same exit. */}
+      {!narrow && (
+        <div className="tour-banner">
+          <span className="tour-banner-title">{bannerTitle}</span>
+          <span className="tour-banner-sub">{bannerSubtitle}</span>
+          <button type="button" className="chip-neutral tour-banner-exit" onClick={onExit}>
+            Exit and explore freely
+          </button>
+        </div>
+      )}
 
-      <div ref={cardRef} className={`tour-card${rect ? '' : ' is-centered'}`} style={cardStyle}>
-        <div className="tour-card-step">Step {index + 1} of {steps.length}</div>
+      <div
+        ref={cardRef}
+        className={`tour-card${!rect && !narrow ? ' is-centered' : ''}${narrow ? ' is-coach' : ''}${narrow && coachOpen ? ' is-open' : ''}`}
+        style={cardStyle}
+        data-placement={narrow ? 'coach' : undefined}
+      >
+        <div className="tour-card-step">
+          Step {index + 1} of {steps.length}
+          {narrow && (
+            <button
+              type="button"
+              className="chip-neutral tour-coach-toggle"
+              aria-expanded={coachOpen}
+              onClick={() => setCoachOpen((open) => !open)}
+            >
+              {coachOpen ? 'Less' : 'More'}
+            </button>
+          )}
+        </div>
         <div className="tour-card-title">{step.title}</div>
-        <p className="tour-card-body">{step.body}</p>
+        {(!narrow || coachOpen) && <p className="tour-card-body">{step.body}</p>}
 
-        {step.prompt && (
+        {step.prompt && (!narrow || coachOpen) && (
           <div className="tour-card-prompt">
             {typed}<span className="tour-caret">▌</span>
           </div>
@@ -267,7 +376,7 @@ export default function DemoTour({
             onClick={next}
             disabled={!canAdvance}
           >
-            {isLast || step.action === 'exit' ? 'Exit — explore freely' : 'Next'}
+            {isLast || step.action === 'exit' ? 'Exit and explore freely' : 'Next'}
           </button>
         </div>
       </div>
