@@ -2705,7 +2705,7 @@ test.describe('route matrix, rail ON', () => {
     expect(await page.locator('.studio-shell').evaluate((el) => el.scrollHeight - el.clientHeight)).toBeLessThanOrEqual(1)
   })
 
-  test('C-04B Solar census: five clusters, geometry tools, solved toggle and profile continuity', async ({ page, request }) => {
+  test('C-04B Solar census: five clusters, geometry tools, solved toggle and profile continuity; C-04C row7 reserved-name import is not Ready', async ({ page, request }) => {
     test.setTimeout(120_000)
     await page.setViewportSize({ width: 1600, height: 1000 })
     await requireLocalReady(request, test, API_BASE)
@@ -2737,6 +2737,10 @@ test.describe('route matrix, rail ON', () => {
       await ribbon.locator('[data-tool="import-dxf"]').click()
       await page.getByLabel('DXF file').setInputFiles({ name, mimeType: 'application/dxf', buffer: foreignDxf })
       await expect(page.locator('.workspace-card[data-engine-document]')).toHaveAttribute('data-engine-document', name, { timeout: 60_000 })
+      // C-04C row7: even an import named after the head is not a ready template.
+      const solarStatus = page.getByRole('tab', { name: 'Solar CAD', exact: true }).locator('small')
+      await expect(solarStatus).toHaveText(/^(Template pending|Beta)$/)
+      await expect(solarStatus).toHaveAttribute('data-state', 'beta')
       await page.getByRole('tab', { name: 'Solar', exact: true }).click()
       await expect(toggle).toBeDisabled()
       await expect(toggle).toHaveAttribute('aria-pressed', 'false')

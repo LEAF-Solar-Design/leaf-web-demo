@@ -141,6 +141,38 @@ async function openDocument(session, file = fileOf()) {
   await act(async () => { await session.current.actions.open(file) })
 }
 
+describe('C-04C load provenance', () => {
+  it('C-04C row6 documentOrigin follows committed, starter and import loads and survives undo/redo reload', async () => {
+    const session = mountSession()
+    expect(session.current.documentOrigin).toBeNull()
+    for (const [name, opts, origin] of [
+      ['demo-v12.dxf', { committed: true, version: 12 }, 'head'],
+      ['solar-starter.dxf', { starter: true }, 'starter'],
+      ['demo-v1.dxf', null, 'import'],
+    ]) {
+      act(() => session.current.actions.openBytes(new Uint8Array([48, 10]), name, opts))
+      expect(session.current.documentOrigin).toBeNull()
+      const worker = session.workers[0]
+      worker.emit(loadedMessage([LINE], name))
+      expect(session.current.documentOrigin).toBe(origin)
+      act(() => session.current.actions.select('e1'))
+      act(() => session.current.actions.applyEdit('delete', {}))
+      worker.emit(editedMessage('delete', []))
+      act(() => session.current.actions.undo())
+      worker.emit(loadedMessage([LINE], name))
+      expect(session.current.documentOrigin).toBe(origin)
+      act(() => session.current.actions.redo())
+      worker.emit(loadedMessage([], name))
+      expect(session.current.documentOrigin).toBe(origin)
+    }
+    await openDocument(session, fileOf('solar-starter.dxf'))
+    session.workers[0].emit(loadedMessage([LINE], 'solar-starter.dxf'))
+    expect(session.current.documentOrigin).toBe('import')
+    act(() => session.current.actions.reset())
+    expect(session.current.documentOrigin).toBeNull()
+  })
+})
+
 describe('member gestures re-arm from empty operands', () => {
   it.each(['createLine', 'createBlock', 'group'])('keeps inputs and the focus target on a same-op %s update', async (op) => {
     const worker = new ScriptedWorker()

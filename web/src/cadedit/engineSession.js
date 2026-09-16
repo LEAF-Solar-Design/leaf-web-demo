@@ -102,6 +102,7 @@ export function projectionEntities(message) {
 
 const INITIAL_SESSION = Object.freeze({
   documentId: '',
+  documentOrigin: null,
   documentLoadIdentity: null,
   entities: NO_ENTITIES,
   entityCount: 0,
@@ -1044,6 +1045,7 @@ export default function useEngineSession({
   saveTargetRef.current = saveTarget
   // W4g-3b: whether the load in flight is the head (see openBytes).
   const committedLoadRef = useRef(false)
+  const documentOriginRef = useRef(null)
   const committedVersionRef = useRef(null)
   const onSavedRef = useRef(onSaved)
   onSavedRef.current = onSaved
@@ -1151,6 +1153,7 @@ export default function useEngineSession({
         history.current = history.original
         patch({
           documentLoadIdentity,
+          documentOrigin: documentOriginRef.current,
           entities,
           entityCount: message.entityCount ?? 0,
           blockBasePatched: message.blockBasePatched ?? false,
@@ -1297,7 +1300,8 @@ export default function useEngineSession({
     // a save diffs against. Any other shape (a hand import) keeps no base.
     committedLoadRef.current = !!(opts && typeof opts === 'object' && opts.committed === true)
     committedVersionRef.current = committedLoadRef.current && Number.isInteger(opts.version) && opts.version > 0 ? opts.version : null
-    patch({ busy: true, documentId: name, errorKind: null, status: `Opening ${name}...` })
+    documentOriginRef.current = committedLoadRef.current ? 'head' : opts?.starter === true ? 'starter' : 'import'
+    patch({ busy: true, documentId: name, documentOrigin: null, errorKind: null, status: `Opening ${name}...` })
     const boundary = ensureBoundary()
     // W4f slice F: the opened bytes are the floor of the undo history.
     clearHistory()
@@ -1325,7 +1329,7 @@ export default function useEngineSession({
       return
     }
     const generation = generationRef.current
-    patch({ busy: true, documentId: file.name, errorKind: null, status: `Reading ${file.name}...` })
+    patch({ busy: true, documentId: file.name, documentOrigin: null, errorKind: null, status: `Reading ${file.name}...` })
     let bytes
     try {
       bytes = new Uint8Array(await file.arrayBuffer())
