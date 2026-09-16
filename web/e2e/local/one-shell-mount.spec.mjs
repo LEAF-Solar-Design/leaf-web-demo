@@ -1336,13 +1336,14 @@ test.describe('route matrix, rail ON', () => {
     await page.locator('[data-toggle="ortho"]').click()
     await expect(page.getByTestId('cockpit-ortho')).toHaveAttribute('aria-pressed', 'false')
     await expect(page.locator('[data-toggle="snap"]')).toBeDisabled()
-    await expect(page.locator('[data-toggle="snap"]')).toHaveAttribute('title', /not in the browser viewer yet/)
-    // W4f-6: the prompt validates as you type with the store's own sentence:
+    await expect(page.locator('[data-toggle="snap"]')).toHaveAttribute('title', /moves the cursor in fixed steps\. Not in the browser viewer yet\./)
+    // W4f-6: the prompt validates as you type with the store's own sentence,
+    // and since S12 that sentence names only the field at fault (support F2):
     // a word in x2 outlines the field, names the refusal and holds Run; the
     // number back releases it.
     await page.getByLabel('ribbon x2', { exact: true }).fill('abc')
     await expect(page.getByLabel('ribbon x2', { exact: true })).toHaveAttribute('aria-invalid', 'true')
-    await expect(page.getByTestId('cockpit-prompt-note')).toHaveText('Line refused: first point x, first point y, next point x and next point y must all be numbers.')
+    await expect(page.getByTestId('cockpit-prompt-note')).toHaveText('Line refused: next point x must be a number.')
     await expect(page.getByTestId('cockpit-prompt-run')).toBeDisabled()
     await page.getByLabel('ribbon x2', { exact: true }).fill('50')
     await expect(page.getByTestId('cockpit-prompt-note')).toHaveCount(0)
