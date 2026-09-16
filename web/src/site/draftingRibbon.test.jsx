@@ -8,7 +8,7 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { catalogClusters } from '../lib/ribbonClusters.js'
+import { catalogClusters, profileRibbonTabs } from '../lib/ribbonClusters.js'
 import { REASONS, reasonCode } from '../lib/actionRegistry.js'
 
 import DraftingRibbon, { RIBBON_HEIGHT_VAR, RibbonCluster, RibbonTool } from './DraftingRibbon.jsx'
@@ -33,6 +33,17 @@ const FAMS = [
 ]
 
 describe('DraftingRibbon', () => {
+  it('renders a profile tab outside the catalog placement tabs', () => {
+    const solar = profileRibbonTabs('solar')[1]
+    render(<DraftingRibbon tab={solar.id} clusters={solar.clusters} />)
+    expect(screen.getByRole('toolbar', { name: 'Drafting tools' }).getAttribute('data-tab')).toBe('solar')
+    expect(screen.getByRole('group', { name: 'Stringing' })).toBeTruthy()
+    expect(screen.getByRole('group', { name: 'Equipment placement' })).toBeTruthy()
+    const empty = screen.getByRole('button', { name: 'Stringing (unavailable: No stringing tools in this catalog yet)' })
+    expect(empty.disabled).toBe(true)
+    expect(empty.title).toBe('No stringing tools in this catalog yet')
+  })
+
   it('exposes local codes only for disabled tools with registered reasons', () => {
     const reason = REASONS['unsavedEngineEdits']
     render(<>
