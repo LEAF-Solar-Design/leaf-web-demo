@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { REACH_STATE, useEngineSessionContext } from './EngineSessionProvider.jsx'
+import { SESSION_ERROR } from './engineSessionErrors.js'
 
 export const SOLAR_STARTER_DOCUMENT_ID = 'solar-starter.dxf'
 // The bundled intake's top-level shape, with no console drawing or geometry.
@@ -19,6 +20,7 @@ export default function SolarStarterOpener({ enabled = false, fetchDxf = null, r
   const edgeRef = useRef(0)
   const activeRef = useRef(false)
   const ownsRef = useRef(false)
+  const refusedRef = useRef(false)
 
   useEffect(() => {
     if (enabled) edgeRef.current += 1
@@ -30,7 +32,13 @@ export default function SolarStarterOpener({ enabled = false, fetchDxf = null, r
       latestRef.current.onStarterState?.(state)
     }
     if (!enabled) return undefined
-    if (session.documentId !== '' || session.engineParsed) {
+    const starterOrEmpty = session.documentId === '' || session.documentId === SOLAR_STARTER_DOCUMENT_ID
+    if (ownsRef.current && starterOrEmpty && !session.engineParsed && !refusedRef.current
+      && (session.errorKind === SESSION_ERROR.REFUSED || session.errorKind === SESSION_ERROR.CRASHED)) {
+      refusedRef.current = true
+      report(REACH_STATE.FAILED, 'the rooftop starter could not be opened: the engine refused the document; retry or import a DXF')
+    }
+    if (!starterOrEmpty || (session.engineParsed && !refusedRef.current)) {
       if (activeRef.current && !ownsRef.current) {
         activeRef.current = false
         report(REACH_STATE.IDLE)
@@ -43,6 +51,7 @@ export default function SolarStarterOpener({ enabled = false, fetchDxf = null, r
     attemptRef.current = key
     activeRef.current = true
     ownsRef.current = false
+    refusedRef.current = false
     const generation = ++generationRef.current
     let cancelled = false
     let settled = false
@@ -56,7 +65,7 @@ export default function SolarStarterOpener({ enabled = false, fetchDxf = null, r
         const answer = await latestRef.current.fetchDxf(SOLAR_STARTER_DOCUMENT_ID)
         if (!current()) return
         const latest = latestRef.current.session
-        if (latest.documentId !== '' || latest.engineParsed || latest.dirty) {
+        if ((latest.documentId !== '' && latest.documentId !== SOLAR_STARTER_DOCUMENT_ID) || latest.engineParsed || latest.dirty) {
           settled = true
           activeRef.current = false
           report(REACH_STATE.IDLE)
@@ -69,7 +78,9 @@ export default function SolarStarterOpener({ enabled = false, fetchDxf = null, r
           return
         }
         if (Object.prototype.toString.call(answer?.bytes) !== '[object Uint8Array]') {
-          throw new Error('the sample answered with no document')
+          settled = true
+          report(REACH_STATE.FAILED, 'the rooftop starter could not be opened: the sample answered with no document; retry or import a DXF')
+          return
         }
         settled = true
         ownsRef.current = true
@@ -79,7 +90,8 @@ export default function SolarStarterOpener({ enabled = false, fetchDxf = null, r
         if (!current()) return
         settled = true
         ownsRef.current = false
-        report(REACH_STATE.FAILED, `the rooftop starter could not be opened: ${error?.message || 'fetch failed'}; retry or import a DXF`)
+        const reason = Number.isFinite(error?.status) ? `HTTP ${error.status}` : 'fetch failed'
+        report(REACH_STATE.FAILED, `the rooftop starter could not be opened: ${reason}; retry or import a DXF`)
       }
     })()
     return () => {
@@ -87,7 +99,7 @@ export default function SolarStarterOpener({ enabled = false, fetchDxf = null, r
       generationRef.current += 1
       if (!settled) attemptRef.current = null
     }
-  }, [enabled, retryKey, session.documentId, session.engineParsed, session.busy, session.dirty, setReach])
+  }, [enabled, retryKey, session.documentId, session.engineParsed, session.busy, session.dirty, session.errorKind, setReach])
 
   useEffect(() => () => {
     generationRef.current += 1

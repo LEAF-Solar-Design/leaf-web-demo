@@ -333,6 +333,7 @@ export default function App() {
   const [mock, setMock] = useState(() => config.mockDefault
     || explicitDemo({ search: typeof window !== 'undefined' ? window.location.search : '', signedIn: isSignedIn() }))
   const [loadErr, setLoadErr] = useState(null)
+  const [drawingLoad, setDrawingLoad] = useState('pending')
   const [intakeRetryKey, setIntakeRetryKey] = useState(0) // X3 Retry — bumping re-runs the intake load effect
   const [selectedTool, setSelectedTool] = useState(null)
   const [selectedHandle, setSelectedHandle] = useState(null)
@@ -967,7 +968,7 @@ export default function App() {
   // load session (intake + tenant echo) + reset transient state on mode/fixture change
   useEffect(() => {
     let alive = true
-    resetDrawing(); setLoadErr(null)
+    resetDrawing(); setDrawingLoad('pending'); setLoadErr(null)
     resetCatalogTransient()
     clearToast(); setDrawer(null); setTenant(null)
     setTier(null); setOrg(null)
@@ -976,6 +977,7 @@ export default function App() {
     const seat = (d, options = {}) => {
       if (!alive) return
       seatIntake(d, options)
+      setDrawingLoad(d != null ? 'seated' : 'absent')
       // MOCK write loop (M3): v1 of the 'demo' chain is the intake just seated,
       // so re-running the demo always starts from a clean v1.
       if (mock && !isEditFixture) mockVersions.seedBase(d)
@@ -1018,6 +1020,7 @@ export default function App() {
       })
       .catch((e) => {
         if (!alive) return
+        setDrawingLoad(e?.status === 404 ? 'absent' : 'failed')
         setLoadErr(humanizeError(e))
         if (!mock && is401(e)) {
           // `tokenInvalidated` stays FALSE on purpose: this is render state
@@ -3698,7 +3701,7 @@ export default function App() {
           )}
           {ENV_CAD_EDIT && studioGround && (
             <SolarStarterOpener
-              enabled={!mock && !intake && surfaceSlots.toolbar.profile === 'solar'}
+              enabled={!mock && drawingLoad === 'absent' && surfaceSlots.toolbar.profile === 'solar'}
               fetchDxf={fetchSampleDxf}
               retryKey={solarStarterRetryKey}
               onStarterState={setSolarStarter}
@@ -3885,7 +3888,7 @@ export default function App() {
               further down, wherever propertyRowsEl sits. */}
           {ENV_CAD_EDIT && <EngineDockProperties />}
           <div className="viewer-wrap">
-            {!mock && !intake && surfaceSlots.toolbar.profile === 'solar' && solarStarter === 'failed' && (
+            {!mock && drawingLoad === 'absent' && surfaceSlots.toolbar.profile === 'solar' && solarStarter === 'failed' && (
               <div className="loading-line dim" role="status">
                 <span>The rooftop starter could not be opened. Retry or import a DXF.</span>
                 <button className="chip-act" onClick={() => setSolarStarterRetryKey((k) => k + 1)}>Retry rooftop starter</button>

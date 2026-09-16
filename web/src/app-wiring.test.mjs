@@ -22,11 +22,19 @@ const viewerSource = readFileSync(new URL('./components/Viewer.jsx', import.meta
 
 describe('Solar rooftop starter', () => {
   it('mounts SolarStarterOpener only for a live empty Solar workspace', () => {
-    assert.match(appSource, /<SolarStarterOpener\s+enabled=\{!mock && !intake && surfaceSlots\.toolbar\.profile === 'solar'\}\s+fetchDxf=\{fetchSampleDxf\}/)
+    assert.match(appSource, /<SolarStarterOpener\s+enabled=\{!mock && drawingLoad === 'absent' && surfaceSlots\.toolbar\.profile === 'solar'\}\s+fetchDxf=\{fetchSampleDxf\}/)
   })
   it('row13 bootstraps only the Viewer with the empty starter intake', () => {
     assert.match(appSource, /\(intake \|\| solarStarter === 'open'\) &&/)
     assert.match(appSource, /<Viewer\s[\s\S]*?intake=\{intake \?\? SOLAR_STARTER_EMPTY_INTAKE\}/)
+    assert.match(appSource, /ref=\{intake \? viewerRef : solarStarterViewerRef\}/)
+  })
+  it('row16 drawingLoad distinguishes pending, seated, absent and failed session loads', () => {
+    assert.match(appSource, /const \[drawingLoad, setDrawingLoad\] = useState\('pending'\)/)
+    assert.match(appSource, /resetDrawing\(\); setDrawingLoad\('pending'\)/)
+    assert.match(appSource, /seatIntake\(d, options\)\s+setDrawingLoad\(d != null \? 'seated' : 'absent'\)/)
+    assert.match(appSource, /if \(!alive\) return\s+setDrawingLoad\(e\?\.status === 404 \? 'absent' : 'failed'\)/)
+    assert.match(appSource, /<SolarStarterOpener\s+enabled=\{!mock && drawingLoad === 'absent' && surfaceSlots\.toolbar\.profile === 'solar'\}/)
   })
 })
 
