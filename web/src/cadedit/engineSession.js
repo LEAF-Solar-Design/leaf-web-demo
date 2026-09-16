@@ -385,7 +385,7 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
   }
   if (op === 'createArc') {
     const [cx, cy, radius, startDeg, endDeg] = [x, y, r, a0, a1].map(fmtDelta)
-    const refusal = numericRefusal('Arc', [['x', cx], ['y', cy], ['r', radius], ['start', startDeg], ['end', endDeg]])
+    const refusal = numericRefusal('Arc', [['x', cx], ['y', cy], ['r', radius], ['a0', startDeg], ['a1', endDeg]], 'x, y, r, start and end')
     if (refusal) return { refusal }
     if (radius <= 0) return { refusal: 'Arc refused: r must be greater than 0.' }
     if ((endDeg - startDeg) % 360 === 0) return { refusal: 'Arc refused: start and end must differ (degrees).' }

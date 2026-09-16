@@ -22,6 +22,13 @@ describe('prompt labels and refusals', () => {
     expect(humanizeRefusal('index dx dy dx2', PROMPTS.move)).toBe('index displacement x displacement y dx2')
   })
 
+  it('humanizes partial Arc refusals using the prompt field ids', () => {
+    expect(humanizeRefusal('Arc refused: a1 must be a number.', PROMPTS.createArc))
+      .toBe('Arc refused: end angle must be a number.')
+    expect(humanizeRefusal('Arc refused: a0 and a1 must be numbers.', PROMPTS.createArc))
+      .toBe('Arc refused: start angle and end angle must be numbers.')
+  })
+
   it('preserves point-entry grammar while humanizing scalar field names', () => {
     const grammar = 'LINE refused: "10,5,6" is not a point: use x,y, @dx,dy, dist<angle or @dist<angle.'
     expect(humanizeRefusal(grammar, PROMPTS.createLine)).toBe(grammar)

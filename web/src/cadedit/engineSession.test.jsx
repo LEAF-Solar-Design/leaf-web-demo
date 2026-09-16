@@ -1116,11 +1116,19 @@ describe('draw dispatch (W4d Draw group): creation needs no selection, and the s
       .toBe('Mirror refused: y1 must be a number.')
   })
 
+  it.each([
+    [{ x: '0', y: '0', r: '5', a0: '0', a1: 'bad' }, 'Arc refused: a1 must be a number.'],
+    [{ x: '0', y: '0', r: '5', a0: 'bad', a1: 'bad' }, 'Arc refused: a0 and a1 must be numbers.'],
+    [{ x: 'bad', y: 'bad', r: 'bad', a0: 'bad', a1: 'bad' }, 'Arc refused: x, y, r, start and end must all be numbers.'],
+  ])('S12 Arc uses prompt field ids and preserves all-invalid wording: %j', (inputs, expected) => {
+    expect(buildCreatePayload('createArc', inputs).refusal).toBe(expected)
+  })
+
   it('S12 joins two or three failed fields and preserves all-invalid wording', () => {
     expect(buildCreatePayload('createLine', { x: 'bad', y: '0', x2: '10', y2: 'bad' }).refusal)
       .toBe('Line refused: x and y2 must be numbers.')
     expect(buildCreatePayload('createArc', { x: 'bad', y: '0', r: 'bad', a0: '0', a1: 'bad' }).refusal)
-      .toBe('Arc refused: x, r and end must be numbers.')
+      .toBe('Arc refused: x, r and a1 must be numbers.')
     expect(buildCreatePayload('createCircle', { x: 'bad', y: 'bad', r: 'bad' }).refusal)
       .toBe('Circle refused: x, y and r must all be numbers.')
     expect(buildCreatePayload('createEllipse', { x: 'bad', y: 'bad', x2: 'bad', y2: 'bad' }).refusal)
