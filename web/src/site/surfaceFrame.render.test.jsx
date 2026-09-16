@@ -30,7 +30,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { cleanup, render } from '@testing-library/react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import EntitlementGate from '../components/EntitlementGate.jsx'
 import JobRail from '../components/JobRail.jsx'
@@ -106,6 +106,27 @@ const COMMAND_BAR = () => <div className="cb-sentinel" data-testid="command-bar-
 const PROJECT_SLOT = <div className="ios-slot-sentinel" data-testid="ios-project-slot">ship lane</div>
 
 function noop() {}
+
+function studioFrame(surface) {
+  return <SurfaceFrame scene="console" activeSurface={surface} states={STATES}
+    workspaceProject={EMPTY_WORKSPACE_PROJECT} studioShell
+    projectSlot={surfaceContract(surface).chrome.projectSlot === 'ios-surface' ? PROJECT_SLOT : null}>
+    <SurfaceFrame.Frame />
+  </SurfaceFrame>
+}
+
+if (!CAPTURE) it.each(['browser', 'ios'])('%s uses a compact inspector in the cockpit and retains the paper frame outside it', (surface) => {
+  const { container, rerender } = render(studioFrame(surface))
+  expect(sequence(container)).toEqual(FIXTURE[`console:${surface}`].studioFrame)
+  expect(container.querySelector('.tc-product-frame')).toBeNull()
+  expect(container.querySelector('#product-surface-panel').getAttribute('aria-labelledby')).toBe(`product-surface-tab-${surface}`)
+  expect(container.querySelector('details').open).toBe(false)
+  rerender(<SurfaceFrame scene="console" activeSurface={surface} states={STATES} workspaceProject={EMPTY_WORKSPACE_PROJECT}>
+    <SurfaceFrame.Frame />
+  </SurfaceFrame>)
+  expect(container.querySelector('.tc-product-frame')).not.toBeNull()
+  expect(container.querySelector('.studio-profile-info')).toBeNull()
+})
 
 it('forwards studio presentation and explicit demo state to plan and project slots', () => {
   const workspaceProject = deriveWorkspaceProjectState({ drawingName: 'demo', mock: true })
@@ -398,6 +419,7 @@ if (CAPTURE) {
           testCase.console ? todayConsole(testCase.surface) : todayStage(testCase.surface),
         )
       }
+      for (const surface of ['browser', 'ios']) out[`console:${surface}`].studioFrame = slotSequence(studioFrame(surface))
       writeFileSync(FIXTURE_PATH, `${JSON.stringify(out, null, 2)}\n`)
     })
   })
@@ -567,20 +589,33 @@ describe.skipIf(CAPTURE)('SurfaceFrame — the gates it now owns', () => {
   // provider, so a wrong scene is loud on the FIRST render, not a silently
   // wrong gate three components deep.
   describe('scene is a required, explicit contract — a wrong one throws, never falls open', () => {
+    const expectInvalidScene = (element) => {
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        expect(() => render(element)).toThrow(/scene must be 'console' or 'stage'/)
+        expect(error).toHaveBeenCalled()
+        for (const args of error.mock.calls) {
+          expect(args.map(String).join(' ')).toMatch(/SurfaceFrame: scene must be 'console' or 'stage'|The above error occurred in the <SurfaceFrame> component/)
+        }
+      } finally {
+        error.mockRestore()
+      }
+    }
+
     it('throws when scene is not passed at all', () => {
-      expect(() => render(
+      expectInvalidScene(
         <SurfaceFrame activeSurface="cad" states={STATES}>
           <SurfaceFrame.Tabs />
         </SurfaceFrame>,
-      )).toThrow(/scene must be 'console' or 'stage'/)
+      )
     })
 
     it('throws when scene is a garbage value (e.g. a surface id typoed into it)', () => {
-      expect(() => render(
+      expectInvalidScene(
         <SurfaceFrame scene="cad" activeSurface="cad" states={STATES}>
           <SurfaceFrame.Tabs />
         </SurfaceFrame>,
-      )).toThrow(/scene must be 'console' or 'stage'/)
+      )
     })
 
     it('accepts exactly "console" and "stage", nothing else', () => {

@@ -1,4 +1,5 @@
 import './structural.css'
+import './site/studioShell.css'
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, Suspense } from 'react'
 import { createPortal, flushSync } from 'react-dom'
 import { track, setTourStep } from './telemetry.js'
@@ -18,7 +19,7 @@ import DraftingRibbon from './site/DraftingRibbon.jsx'
 import PropertiesDock, { drawingExtents } from './site/PropertiesDock.jsx'
 import { familiesForSurface, familyMonogram } from './lib/surfaceRails.js'
 import { byId, ladderListener, slashCommandHandlers } from './lib/actionRegistry.js'
-import { REASONS, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels } from './lib/ribbonClusters.js'
+import { REASONS, RIBBON_RATIONALE, profileRibbonTabs, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels } from './lib/ribbonClusters.js'
 import { isWriteTool } from './lib/toolRecord.js'
 import { resolvePublishedCatalogTool } from './site/publishedCatalogTool.js'
 import { entityGeometry } from './lib/entityMetrics.js'
@@ -2622,16 +2623,13 @@ export default function App() {
   // wiring pin (src/app-wiring.test.mjs) guards that exact shape against the
   // white screen it was written for. Was groundShowsDrawing(activeSurface).
   const drafting = surfaceSlots.chrome.cockpit
-  // P1: the status bar is grouped into regions on exactly the surfaces that
-  // have instruments to group — the studio's drafting surfaces — and only at
-  // the width where the cockpit layout that styles those regions actually
-  // runs. `wideViewport` IS `(min-width: 981px)`, the same breakpoint
-  // cockpit.css uses, so the wrapper can never exist without its rules: below
-  // it the old shell's own `footer.foot-bar > *` rules (styles.css) style the
-  // segments as the bar's direct children, and a wrapper there would hide
-  // them from that selector. One gate for all three FootRegions, so they can
-  // never disagree; off, each is a fragment and the DOM is byte-identical.
-  const footRegions = Boolean(studioGround) && drafting && wideViewport
+  const studioShell = !!studioGround && surfaceSlots.chrome.shell === 'cockpit'
+  const [studioRibbonHost, setStudioRibbonHost] = useState(null)
+  const projectSwitcherRef = useRef(null)
+  // Every studio profile shares the status regions at the wide breakpoint.
+  // Below it the flat footer rules still own the segments. Rail OFF each
+  // FootRegion is a fragment, preserving the original DOM.
+  const footRegions = studioShell && wideViewport
   // The properties dock's declared sections; null off a drafting surface. Its
   // TRUTHINESS is the mount gate (paneOpen is the second gate, below).
   const dockSections = surfaceSlots.rails.dock
@@ -2763,9 +2761,61 @@ export default function App() {
   // engine's own clusters (Drawing, Modify) render as the ribbon's children
   // so they can read the ONE engine session through context. Studio-only:
   // rail OFF the ribbon never mounts and this list is never read.
+  // One profile ribbon over the same project, catalog and conversation owners.
+  const profileTabs = useMemo(() => {
+    const openProjects = () => {
+      const button = projectSwitcherRef.current?.querySelector('button.proj-chip')
+      flushSync(() => { if (button?.getAttribute('aria-expanded') !== 'true') button?.click() })
+      button?.focus()
+    }
+    const openJobs = () => setJobRailExpanded(true)
+    return profileRibbonTabs(surfaceSlots.toolbar.profile, {
+      families: railFamilies,
+      onRun: (tool) => onRequestCatalogRun(tool, null, RIBBON_RATIONALE, 'ribbon'),
+      catalogOptions: {
+        onRequestRun: onRequestCatalogRun,
+        onOpenFamily: (family) => { setNavExpanded(true); setFamilyOpen(family.family_id, true) },
+        running: !!running, previewing: !!previewing, writeLocked,
+        writeEntitled: canRunWrite, engineDirty,
+      },
+      project: {
+        onOpen: !mock && signedIn && !projectsErr ? openProjects : null,
+        onChange: !mock && signedIn && !projectsErr ? openProjects : null,
+        onCreate: !mock && signedIn && orgId && !projectsErr && !projectBusy ? onCreateProject : null,
+      },
+      // This console has no DrawingUploadControl mount or upload controller.
+      files: { onUpload: null },
+      conversation: {
+        onNew: !agentDisabled && signedIn && !running && !routing
+          ? () => { clearAgentSession(); openAgentMode(); barInputRef.current?.focus() } : null,
+      },
+      activity: { onJobs: openJobs, onReceipts: jobs.length ? openJobs : null },
+      // IosSurface is readiness-only here; launching belongs to the ship host.
+      ship: { onLaunch: null, onReceipts: iosContract?.receipt_id ? () => {
+        const details = document.querySelector('.studio-profile-info details')
+        if (details) { details.open = true; details.querySelector('summary')?.focus() }
+      } : null },
+    })
+  }, [surfaceSlots.toolbar.profile, railFamilies, onRequestCatalogRun, setFamilyOpen,
+    running, previewing, writeLocked, canRunWrite, engineDirty, mock, signedIn, projectsErr,
+    orgId, projectBusy, onCreateProject, agentDisabled, routing, clearAgentSession,
+    openAgentMode, jobs.length, iosContract?.receipt_id])
+  const activeRibbonTab = profileTabs.some((tab) => tab.id === ribbonTab)
+    ? ribbonTab : surfaceSlots.toolbar.home
+  useEffect(() => {
+    if (ribbonTab !== activeRibbonTab) setRibbonTab(activeRibbonTab)
+  }, [ribbonTab, activeRibbonTab])
+
   const ribbon = useMemo(() => {
-    if (!(studioGround && drafting)) {
+    if (!studioShell) {
       return { clusters: [], quickBefore: [], quickAfter: [], view: null, version: null, rail: [], author: null }
+    }
+    if (!drafting) {
+      return { clusters: profileTabs.find((tab) => tab.id === activeRibbonTab)?.clusters || [],
+        quickBefore: [], quickAfter: [
+          { id: 'quick-rail', dataTool: 'rail-expand', label: 'Tool rail', icon: 'sidebar',
+            expanded: navExpanded, onClick: () => setNavExpanded((open) => !open) },
+        ], view: null, version: null, rail: [], author: null }
     }
     const view = viewCluster({ viewerRef, hasDrawing: !!shown, paneOpen, onTogglePane: () => setPaneOpen((o) => !o) })
     const version = versionCluster({
@@ -2892,7 +2942,7 @@ export default function App() {
     }
     const [undo, redo] = version.tools
     return {
-      clusters: byTab[ribbonTab] || byTab.draw,
+      clusters: byTab[activeRibbonTab] || profileTabs.find((tab) => tab.id === activeRibbonTab)?.clusters || byTab.draw,
       // Slice 10b: the palette (below) reads these FOUR straight off this
       // one computation rather than calling their builders a second time —
       // the ONE authorCluster call this file may carry
@@ -2917,7 +2967,7 @@ export default function App() {
         ] : []),
       ],
     }
-  }, [studioGround, drafting, shown, drawingState, canUndo, canRedo, versionBusy, running, previewing,
+  }, [studioShell, drafting, profileTabs, activeRibbonTab, navExpanded, navSpine, shown, drawingState, canUndo, canRedo, versionBusy, running, previewing,
     drawingMutationsBlocked, historyOpen, onUndo, onRedo, onToggleHistoryTracked, layerCounts, visibleLayers,
     toggleLayer, railFamilies, onRequestCatalogRun, writeLocked, canRunWrite, canBuild, entOf, ribbonTab, colorForLayer, paneOpen,
     lastAuthoredTool, onUseAuthored, setFamilyOpen, engineDirty])
@@ -3073,6 +3123,7 @@ export default function App() {
       workspaceProject={workspaceProjectState}
       boardPresentation={boardVisible}
       studioPresentation={Boolean(studioGround)}
+      studioShell={studioShell}
       headingRef={boardHeadingRef}
       onSelect={onSelectSurface}
       onCreateProject={onCreateProject}
@@ -3201,7 +3252,7 @@ export default function App() {
         onUnlink: mcpRegistry.unlink,
       }}
     >
-    <div className="app" ref={projectLayout.appRef} data-project-workspace={projectLayout.active ? 'results' : undefined} data-project-tools={projectLayout.toolsOpen ? 'open' : 'closed'} data-project-activity={projectLayout.activityOpen ? 'open' : 'closed'} data-studio-transition={studioGround && phase !== 'idle' ? phase : undefined} data-surface={studioGround ? activeSurface : undefined} data-start-open={studioGround && startOpen ? 'true' : undefined} data-tour="shell"
+    <div className="app" ref={projectLayout.appRef} data-project-workspace={!studioShell && projectLayout.active ? 'results' : undefined} data-project-tools={projectLayout.toolsOpen ? 'open' : 'closed'} data-project-activity={projectLayout.activityOpen ? 'open' : 'closed'} data-studio-transition={studioGround && phase !== 'idle' ? phase : undefined} data-studio-shell={studioShell ? 'cockpit' : undefined} data-surface={studioGround ? activeSurface : undefined} data-start-open={studioGround && startOpen ? 'true' : undefined} data-tour="shell"
       onClickCapture={(event) => {
         if (event.target instanceof Element && event.target.closest('.ribbon-tool:not(:disabled), .cockpit-quick button:not(:disabled), .cp-run:not(:disabled)')) {
           if (exitPending()) { event.preventDefault(); event.stopPropagation(); return }
@@ -3219,10 +3270,10 @@ export default function App() {
             reference's top band: quick access, then the ribbon tabs. The
             engine's Open/Save portal into the band's slot. Rail OFF and
             every other surface: nothing here. */}
-        {studioGround && drafting && (
-          <CockpitTopBand tab={ribbonTab} onTab={setRibbonTab} before={ribbon.quickBefore} after={ribbon.quickAfter} />
+        {studioShell && surfaceSlots.toolbar.ribbon && (
+          <CockpitTopBand tabs={profileTabs} tab={activeRibbonTab} onTab={setRibbonTab} before={ribbon.quickBefore} after={ribbon.quickAfter} />
         )}
-        <div className="proj">
+        <div className="proj" ref={projectSwitcherRef}>
           <ProjectSwitcher
             mock={mock}
             projectName={projectName}
@@ -3243,7 +3294,7 @@ export default function App() {
           </span>
           {mock && <span className="tag amber">Demo</span>}
         </div>
-        <ProjectWorkspaceControls {...projectLayout} />
+        <ProjectWorkspaceControls {...projectLayout} active={!studioShell && projectLayout.active} />
         <div className="spacer" />
         <div className="who">
           {/* Header metadata (org · tenant · tier · spend · API base) is demoted
@@ -3360,7 +3411,7 @@ export default function App() {
         {mock && !tourOn && <DemoBanner />}
         {/* There is a way back IN: leaving the tour (Skip / Exit) used to be
             one-way, with a hard reload the only re-entry — forbidden on stage. */}
-        {mock && !tourOn && tourAvailable.current && !(studioGround && drafting) && (
+        {mock && !tourOn && tourAvailable.current && !studioShell && (
           <button
             type="button"
             className="chip-neutral"
@@ -3424,11 +3475,12 @@ export default function App() {
           <SurfaceGrounds
             occluders={STUDIO_DRAWING_OCCLUDERS}
             studioPresentation={Boolean(studioGround)}
+            studioShell={studioShell}
             surface={activeSurface}
             boardVisible={boardVisible}
             leavingGround={leavingGround}
             startFocusRequest={startFocusRequest}
-            onReturnToDrawing={onReturnToDrawing}
+            onReturnToDrawing={drafting ? onReturnToDrawing : null}
             headingRef={boardHeadingRef}
             workspaceProject={workspaceProjectState}
             workspace={!mock && openProjectId ? workspace : null}
@@ -3445,7 +3497,8 @@ export default function App() {
             read into the frame, which owns it for BOTH scenes now. Solar still
             renders it over the shown workspace card, today's quirk, preserved
             deliberately, not fixed. */}
-        <SurfaceFrame.Frame />
+        {studioShell && <div className="studio-chrome-host" data-ribbon-context={drafting ? 'drawing' : 'workspace'} ref={setStudioRibbonHost} />}
+        {!studioShell && <SurfaceFrame.Frame />}
         {/* The CAD workspace hides (not unmounts) on other tabs so live
             drawing, lock, and job state survive tab switches untouched.
             Solar shows it too: that tab IS the CAD workspace on the solar
@@ -3493,29 +3546,29 @@ export default function App() {
               strip, in the cockpit grammar. Studio-only (rail OFF renders
               nothing); tools are the ACTIVE SURFACE's fold, wired through
               the same run-decision path as the rail (source 'ribbon'). */}
-          {studioGround && drafting && (
-            <DraftingRibbon clusters={ribbonClusters} tab={ribbonTab}>
+          {studioShell && surfaceSlots.toolbar.ribbon && studioRibbonHost && createPortal(
+            <DraftingRibbon clusters={ribbonClusters} tab={activeRibbonTab}>
               {/* The engine's own panels (File, Draw, Modify) read the ONE
                   session through context; ENV_CAD_EDIT first so a flag-off
                   build folds them away with the provider. Always mounted so
                   the quick-access Open/Save and the operand line exist on
                   every tab; the tab picks which panels the band shows. */}
-              {ENV_CAD_EDIT && (
+              {ENV_CAD_EDIT && drafting && (
                 <EngineRibbonClusters
                   importOpen={importOpen}
                   onToggleImport={() => { returnToDrawing(); setImportOpen((o) => !o) }}
-                  panels={ribbonTab === 'insert' ? ['file'] : ribbonTab === 'draw' ? ['draw', 'modify', 'annotation', 'block', 'clipboard', 'properties', 'groups'] : ribbonTab === 'view' ? ['script'] : []}
+                  panels={activeRibbonTab === 'insert' ? ['file'] : activeRibbonTab === 'draw' ? ['draw', 'modify', 'annotation', 'block', 'clipboard', 'properties', 'groups'] : activeRibbonTab === 'view' ? ['script'] : []}
                 />
               )}
               {/* W4f slice B: the command line's typed words (LINE, C, MOVE ...)
                   reach the engine through this consumer; renders nothing. */}
-              {ENV_CAD_EDIT && <CommandLineArmer />}
-              {ENV_CAD_EDIT && <StatusModesBridge />}
+              {ENV_CAD_EDIT && drafting && <CommandLineArmer />}
+              {ENV_CAD_EDIT && drafting && <StatusModesBridge />}
               {/* W4f slice A1: a click on the drawing answers the armed
                   prompt's point steps; while a point command is live the
                   card carries data-cockpit-picking and the console's
                   click-to-select stands aside (the Viewer callback below). */}
-              {ENV_CAD_EDIT && (
+              {ENV_CAD_EDIT && drafting && (
                 <CanvasPointPicker
                   viewerRef={viewerRef}
                   ground={studioGround}
@@ -3528,7 +3581,7 @@ export default function App() {
                   }}
                 />
               )}
-            </DraftingRibbon>
+            </DraftingRibbon>, studioRibbonHost,
           )}
           {/* W4f slice A0: while a DXF is open in the engine, the canvas
               shows the ENGINE document through the viewer's own
@@ -3997,7 +4050,7 @@ export default function App() {
         {/* Studio drafting surfaces host it in the dock (see the dock's Plan
             section); everywhere else it renders here, unchanged. Slice 4a: the
             choice is the frame's `entitlement.placement`, declared once. */}
-        <SurfaceFrame.Entitlement at="inline" />
+        {(!studioShell || drafting) && <SurfaceFrame.Entitlement at="inline" />}
         </main>
 
         <div className="bar-dock">
@@ -4113,6 +4166,7 @@ export default function App() {
           (components/JobRail.jsx), not as a separate sibling here. */}
 
       <div className="rail-stack">
+        {studioShell && <SurfaceFrame.Frame />}
         {!mock && <SurfaceFrame.Conversations />}
         <SurfaceFrame.JobRail />
         <SurfaceFrame.Inbox />
@@ -4134,9 +4188,16 @@ export default function App() {
         {/* W4e: on the studio's drafting surfaces the status bar opens with
             the reference's Model tab, the drawing's name, and + (the project
             board). Rail OFF and every other surface: nothing here. */}
-        {studioGround && drafting && (
+        {studioShell && (drafting ? (
           <StatusTabs name={shown ? `${projectName}.dwg` : ''} onStart={onOpenStart} />
-        )}
+        ) : (
+          <span className="cockpit-status-tabs" data-testid="cockpit-status-tabs">
+            <span className="foot-model-tab">{surfaceSlots.ground === 'device-stage' ? 'Revision' : 'Project'}</span>
+            <span className="foot-doc-tab">{surfaceSlots.ground === 'device-stage'
+              ? canonicalVersionId || 'No approved revision'
+              : workspaceProjectState.kind === 'project' ? workspaceProjectState.label : 'No project open'}</span>
+          </span>
+        ))}
         </FootRegion>
         <FootRegion on={footRegions} name="system">
         {/* Traversal left: a named "← Parent" link while a project is open. */}
@@ -4179,7 +4240,7 @@ export default function App() {
         {!mock && usage && (
           <span className="dim">${Number(usage.today?.usd_est || 0).toFixed(3)} today</span>
         )}
-        {mock && !tourOn && tourAvailable.current && studioGround && drafting && (
+        {mock && !tourOn && tourAvailable.current && studioShell && (
           <button
             type="button"
             className="chip-neutral"

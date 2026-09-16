@@ -1,0 +1,524 @@
+/* One-shell shared chrome. These bands use the existing cockpit skin.
+   Drafting instruments remain in cockpit.css; rail OFF has no shell hook. */
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] {
+  --ck-font: system-ui, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --ck-chrome: #2a2a2a;
+  --ck-glass-band: rgba(30, 34, 39, .86);
+  --ck-glass-panel: rgba(30, 34, 39, .90);
+  --ck-glass-dock: rgba(30, 34, 39, .92);
+  --ck-glass-blur: blur(6px);
+  --ck-recess: #232323;
+  --ck-title: #3c3c3c;
+  --ck-field: #232323;
+  --ck-canvas: #212830;
+  --ck-active: #1390cc;
+  --ck-model: #0f74a6;
+  --ck-sel: #00b4ff;
+  --ck-cmd: #04b255;
+  --ck-label: #b8b8b8; 
+  --ck-ink: #e2e2e2;
+  --ck-ink-dim: #b8b8b8;
+  --ck-ink-off: #767676;
+  --ck-edge: #424242;
+  --ck-divider: #3a3a3a;
+  --ck-hover: #3c3c3c;
+  --ck-bulb: #f2c94c;
+  --ck-warn: #f0c97b;
+  --ck-top: 28px;
+  --ck-ribbon: 95px;
+  --ck-doctabs: 32px;
+  --ck-canvas-top: 155px;
+  --ck-status: 31px; 
+  --ck-pane: 250px;
+  --ck-spine: 56px;
+  font-family: var(--ck-font);
+  --leaf-font: var(--ck-font);
+  --leaf-chrome: var(--ck-chrome);
+  --leaf-glass-band: var(--ck-glass-band);
+  --leaf-glass-panel: var(--ck-glass-panel);
+  --leaf-glass-dock: var(--ck-glass-dock);
+  --leaf-glass-blur: var(--ck-glass-blur);
+  --leaf-recess: var(--ck-recess);
+  --leaf-title: var(--ck-title);
+  --leaf-field: var(--ck-field);
+  --leaf-canvas: var(--ck-canvas);
+  --leaf-active: var(--ck-active);
+  --leaf-model: var(--ck-model);
+  --leaf-sel: var(--ck-sel);
+  --leaf-cmd: var(--ck-cmd);
+  --leaf-label: var(--ck-label);
+  --leaf-ink: var(--ck-ink);
+  --leaf-ink-dim: var(--ck-ink-dim);
+  --leaf-ink-off: var(--ck-ink-off);
+  --leaf-edge: var(--ck-edge);
+  --leaf-divider: var(--ck-divider);
+  --leaf-hover: var(--ck-hover);
+  --leaf-bulb: var(--ck-bulb);
+  --leaf-warn: var(--ck-warn);
+  --leaf-top: var(--ck-top);
+  --leaf-ribbon: var(--ck-ribbon);
+  --leaf-doctabs: var(--ck-doctabs);
+  --leaf-canvas-top: var(--ck-canvas-top);
+  --leaf-status: var(--ck-status);
+  --leaf-pane: var(--ck-pane);
+  --leaf-spine: var(--ck-spine);
+  --background: var(--ck-chrome);
+  --card: var(--ck-recess);
+  --border: var(--ck-title);
+  --primary: var(--ck-cmd);
+  --foreground: var(--ck-ink);
+  --muted: var(--ck-label);
+  --font-label: var(--ck-font);
+  --font-sans: var(--ck-font);
+  --cad-selection: var(--ck-sel);
+  --cad-tab-band: var(--ck-top);
+  --cad-icon-ribbon: var(--ck-ribbon);
+  --cad-doc-tabs: var(--ck-doctabs);
+  --cad-properties-pane: var(--ck-pane);
+  --cad-status-bar: var(--ck-status);
+}
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top {
+  height: var(--ck-top); min-height: 0; box-sizing: border-box;
+  padding: 0 4px 0 6px; gap: 4px; flex-wrap: nowrap; overflow: hidden;
+  background: transparent; backdrop-filter: none;
+  border-bottom: 0; color: var(--ck-ink); box-shadow: inset 0 1px 0 var(--ck-recess);
+}
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top .mark { font-size: 0; gap: 0; margin-right: 2px; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top .mark .diamond { width: 9px; height: 9px; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top .proj { display: none; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top .spacer { flex: 1; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top .who { gap: 4px; flex: 0 0 auto; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top :is(.chip-act, .tc-account-signout, .switch) {
+  height: 20px; padding: 0 8px; font: 500 11px var(--ck-font); line-height: 20px;
+  background: var(--ck-title); border: 1px solid #4a4a4a; border-radius: 3px; color: var(--ck-ink);
+}
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top .chip-act .key { font-size: 9px; padding: 0 4px; }
+@media (max-width: 980px) {
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar > span[style] { order: 1; }
+}
+@media (min-width: 981px) {
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-nav {
+    position: fixed; top: 0; left: max(600px, 45%); right: auto; z-index: 6;
+    height: var(--ck-top); margin: 0; padding: 0 4px; display: flex; align-items: center;
+    background: transparent; border: 0; border-radius: 0; box-shadow: none;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs { gap: 2px; margin: 0; padding: 0; border: 0; background: transparent; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs [role="tab"] {
+    height: 22px; padding: 0 8px; gap: 5px; border-radius: 3px; border: 1px solid transparent;
+    font: 400 11px var(--ck-font); color: #9a9a9a; background: transparent; box-shadow: none; align-items: center;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs [role="tab"]:hover { background: var(--ck-hover); color: #fff; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs [role="tab"][aria-selected="true"] {
+    background: var(--ck-title); border-color: #4a4a4a; color: #fff; box-shadow: none;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs [role="tab"] small { font: 400 10px var(--ck-font); letter-spacing: 0; text-transform: none; color: var(--ck-label); }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-nav .tc-account-signout { display: none; }
+}
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] main.center-scroll { padding: 0; }
+@media (min-width: 981px) {
+.studio-shell .app[data-studio-shell="cockpit"][data-surface]:has(aside.rail[data-spine]) { grid-template-columns: 0 1fr 0; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface]:has(aside.nav[data-spine="hidden"]):has(aside.rail[data-spine]) { grid-template-columns: 0 1fr 0; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] aside.rail[data-spine] {
+    position: fixed; right: 12px; bottom: 0; top: auto; z-index: 41;
+    width: auto; height: 29px; padding: 0 6px; margin: 0;
+    display: flex; align-items: center; border: 0; box-shadow: none; background: transparent; overflow: visible;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] aside.rail[data-spine] .rail-spine { flex-direction: row; gap: 6px; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] aside.rail[data-spine] .spine-btn {
+    width: 22px; height: 20px; font-size: 11px; border-radius: 3px; background: var(--ck-title); border-color: #4a4a4a;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] aside.rail[data-spine] .rail-spine-count { font: 400 11px var(--ck-font); color: #cfcfcf; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] aside.rail:not([data-spine]) {
+    position: fixed; right: 0; top: var(--ck-canvas-top); bottom: var(--ck-status); z-index: 5;
+    width: 300px; margin: 0; border: 0; border-left: 1px solid var(--ck-edge); border-radius: 0; box-shadow: -8px 0 24px rgba(0, 0, 0, .4);
+    background: var(--ck-chrome);
+  }
+}
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .drafting-ribbon {
+  height: var(--ck-ribbon); box-sizing: border-box;
+  display: flex; flex-wrap: nowrap; align-items: stretch; gap: 0;
+  padding: 0 2px; margin: 0;
+  border: 0; border-top: 1px solid #424242; border-radius: 0;
+  background: transparent; color: var(--ck-ink);
+  overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
+}
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .drafting-ribbon::-webkit-scrollbar { display: none; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .drafting-ribbon::before {
+  background: var(--ck-glass-band); backdrop-filter: var(--ck-glass-blur);
+}
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-cluster {
+  display: grid; grid-template-rows: 78px 15px; gap: 0; align-content: start;
+  flex: 0 0 auto; padding: 1px 5px 0; margin: 0; justify-content: start;
+  border: 0; border-right: 1px solid var(--ck-divider);
+}
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-cluster:last-child { border-right: 0; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-cluster-tools {
+  display: grid; grid-auto-flow: column; grid-template-rows: repeat(3, 26px);
+  gap: 0 2px; align-content: start; align-items: start;
+}
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-slot { display: contents; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-slot-panel {
+  display: block; grid-row: 1 / span 3; align-self: start; min-width: 0;
+}
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-cluster-label {
+  grid-row: 2; align-self: end; justify-content: center; margin: 0; padding: 0 2px; gap: 0;
+  font: 400 10px/15px var(--ck-font); letter-spacing: 0; text-transform: none;
+  color: var(--ck-label); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-cluster-label.as-button { color: #9a9a9a; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-cluster-label.as-button:hover { color: #fff; background: var(--ck-hover); }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-cluster[data-note] .ribbon-cluster-label { color: var(--ck-warn); text-decoration: underline dotted; text-underline-offset: 2px; cursor: help; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-monogram { display: none; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-note {
+  position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
+}
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool {
+  position: relative;
+  width: 26px; height: 26px; padding: 0; margin: 0;
+  display: inline-flex; align-items: center; justify-content: center; gap: 0;
+  border: 0; border-radius: 3px; background: transparent;
+  font: 400 10px/11px var(--ck-font); color: var(--ck-ink); white-space: nowrap;
+  text-decoration: none; cursor: pointer;
+}
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool.write { border: 0; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool:hover:not(:disabled) { background: var(--ck-hover); }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool:focus-visible { outline: 2px solid var(--ck-sel); outline-offset: -2px; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool:disabled { color: var(--ck-ink-off); background: transparent; cursor: not-allowed; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[aria-expanded="true"] { background: var(--ck-hover); }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool .ribbon-tool-label { display: none; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-size="large"] {
+  grid-row: 1 / span 3; width: 57px; height: 78px; box-sizing: border-box;
+  flex-direction: column; justify-content: space-between; padding: 5px 2px 4px; gap: 3px;
+}
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-size="large"] .ribbon-tool-label {
+  display: block; width: 100%; font: 400 10px/11px var(--ck-font); color: #d0d0d0;
+  white-space: normal; text-align: center; max-height: 22px; overflow: hidden;
+}
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-size="large"]:disabled .ribbon-tool-label { color: var(--ck-ink-off); }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-size="row"] {
+  width: 104px; height: 26px; justify-content: flex-start; padding: 0 4px; gap: 5px;
+}
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-size="row"] .ribbon-tool-label {
+  display: inline; font: 400 11px var(--ck-font); overflow: hidden; text-overflow: ellipsis; min-width: 0;
+}
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[aria-pressed="true"] { background: #1f4a63; border: 0; box-shadow: inset 0 0 0 1px var(--ck-active); color: var(--ck-ink); }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[aria-pressed="false"] { text-decoration: none; color: var(--ck-ink-dim); }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-size="row"][aria-pressed="true"] { background: transparent; box-shadow: none; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-size="row"][aria-pressed="true"] .ci { color: var(--ck-bulb); }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-size="row"][aria-pressed="false"] .ci { color: var(--ck-ink-off); }
+@media (min-width: 981px) {
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .bar-dock {
+    position: fixed; left: 50%; right: auto; bottom: 35px; width: 720px; max-width: none; margin: 0 0 0 -360px; z-index: 30;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .bar.bar-command-line {
+    min-height: 0; height: 25px; box-sizing: border-box; margin: 0;
+    flex-direction: row; flex-wrap: nowrap; align-items: center;
+    background: transparent; border: 1px solid #3a3a3a; border-radius: 0; box-shadow: none;
+    font-family: var(--ck-font);
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .bar-command-line .bar-input {
+    flex: 1 1 auto; min-width: 0; height: 23px; padding: 0 0 0 8px; gap: 6px; align-items: center;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .bar-command-line .bar-caret {
+    font: 400 12px var(--ck-font); letter-spacing: 0; text-transform: none; color: var(--ck-cmd); white-space: nowrap;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .bar-command-line .bar-caret::after {
+    content: '>'; display: inline-flex; align-items: center; justify-content: center;
+    width: 14px; height: 17px; margin-left: 6px; font-size: 11px; color: #bdbdbd;
+    background: #2e2e2e; border: 1px solid #444;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .bar-command-line :is(.bar-field, .bar-input input) {
+    font: 400 12px/21px var(--ck-font); height: 21px; min-height: 0; max-height: 21px; padding: 0 6px; margin: 0;
+    background: #2a2a2a; border: 1px solid #3f3f3f; border-radius: 0; color: #e6e6e6; resize: none; overflow: hidden;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .bar-command-line .bar-controls {
+    flex: 0 0 auto; height: 23px; padding: 0 3px 0 0; gap: 3px; align-items: center;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .bar-command-line .bar-controls :is(.bar-add, .bar-scope, .bar-proj, .key, .chip-act, .bar-lanes) {
+    height: 18px; padding: 0 6px; font: 400 10px/18px var(--ck-font); border-radius: 2px;
+    background: transparent; color: #9a9a9a; border: 1px solid transparent;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .bar-command-line .bar-controls :is(.bar-add, .bar-scope, .chip-act):hover:not(:disabled) { background: var(--ck-title); color: var(--ck-ink); }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .bar-command-line .bar-controls .chip-act:disabled { background: transparent; color: #6a6a6a; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .bar-command-line .bar-controls .bar-proj { display: none; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .bar-command-line .converse-note {
+    position: absolute; left: 0; right: 0; bottom: 100%; margin-bottom: 4px; padding: 2px 8px;
+    font: 400 11px var(--ck-font); background: var(--ck-recess); border: 1px solid #3a3a3a;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar {
+    height: var(--ck-status); min-height: 0; box-sizing: border-box;
+    display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: stretch;
+    padding: 0 0 0 30px; gap: 0; overflow: hidden;
+    background: transparent; backdrop-filter: none; border-top: 2px solid #424242;
+    font: 400 11px var(--ck-font); letter-spacing: 0; text-transform: none; color: #cfcfcf;
+    font-variant-numeric: tabular-nums;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] :is(footer.foot-bar > :not(.foot-region), .foot-region > *) {
+    height: 29px; padding: 0 8px; gap: 5px; white-space: nowrap;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .foot-region {
+    display: flex; align-items: center; height: 29px; min-width: 0; padding: 0;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .foot-region-docs { justify-content: flex-start; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .foot-region-system {
+    justify-content: flex-end; overflow: hidden; padding: 0 10px;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .foot-region-system > * + * { border-left: 1px solid #383838; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .foot-region-instruments {
+    justify-content: flex-end; padding-right: 6px; background: transparent;
+    box-shadow: inset 1px 0 0 var(--ck-edge);
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar :is(.dim, .foot-stat, .ok-txt, .warn-txt) { color: #cfcfcf; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar .chip-act,
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar .chip-neutral {
+    height: 20px; padding: 0 8px; font: 400 11px var(--ck-font); line-height: 20px; margin: 0 4px;
+    background: var(--ck-title); border: 1px solid #4a4a4a; border-radius: 3px; color: var(--ck-ink);
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .foot-model-tab {
+    background: var(--ck-model); color: #fff; padding: 0 12px; border-left: 0;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] aside.rail[data-spine] {
+    margin: 0; border: 0; border-left: 1px solid var(--ck-edge); border-radius: 0; box-shadow: none; backdrop-filter: none;
+    background: var(--ck-chrome);
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .demo-banner { display: none; }
+}
+@media (min-width: 981px) {
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .foot-region-docs { padding: 0; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .cockpit-status-tabs { padding: 0; gap: 0; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .foot-region-system :is(.foot-stat, .dim) { color: #9a9a9a; font-size: 10.5px; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar .ok-txt { color: #8fbf9f; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar .warn-txt { color: #c9a86a; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .foot-region-system > span[style] { color: #9a9a9a; font-size: 10.5px; margin-left: 0 !important; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar .foot-model-tab,
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar .foot-doc-tab,
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar .foot-doc-add {
+    display: inline-flex; align-items: center; height: 29px; padding: 0 12px; font: 400 12px var(--ck-font); white-space: nowrap;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar .foot-model-tab { background: var(--ck-model); color: #fff; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar .foot-doc-tab { color: #d4d4d4; max-width: 280px; overflow: hidden; text-overflow: ellipsis; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar .foot-doc-add {
+    width: 29px; padding: 0; justify-content: center; border: 0; background: transparent; color: #d4d4d4; font-size: 15px; cursor: pointer;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar .foot-doc-add:hover { background: #2e2e2e; color: #fff; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar::after {
+    content: '\2261' / ''; position: absolute; left: 0; bottom: 0; width: 30px; height: 29px;
+    display: flex; align-items: center; justify-content: center; font-size: 16px; color: #cfcfcf;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar { position: relative; }
+}
+@media (min-width: 981px) {
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] aside.nav:not([data-spine]) {
+    position: fixed; left: 0; top: var(--ck-canvas-top); bottom: var(--ck-status); z-index: 5;
+    width: 300px; margin: 0; border: 0; border-right: 1px solid var(--ck-edge); border-radius: 0;
+    box-shadow: 8px 0 24px rgba(0, 0, 0, .4); backdrop-filter: none; background: var(--ck-chrome);
+    overflow-y: auto;
+  }
+}
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .drafting-ribbon[data-overflow-open="true"] { overflow: visible; z-index: 60; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .drafting-ribbon[data-overflow-open="true"] .ribbon-cluster {
+  max-width: 100%; box-sizing: border-box; grid-template-rows: auto 20px;
+}
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .drafting-ribbon[data-overflow-open="true"] .ribbon-cluster-tools {
+  display: flex; flex-wrap: wrap; gap: 4px; max-width: 100%;
+}
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .drafting-ribbon[data-overflow-open="true"] .ribbon-tool[data-size="large"] { height: 76px; }
+@media (max-width: 1499px) {
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] { --ck-canvas-top: 183px; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-nav {
+    position: relative; inset: auto; height: 28px; min-height: 28px; box-sizing: border-box;
+    margin: 0; padding: 0 4px; display: flex; align-items: center;
+    overflow-x: auto; flex-wrap: nowrap; background: transparent; isolation: isolate; pointer-events: auto;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs { flex-wrap: nowrap; flex-shrink: 0; height: 22px; min-height: 0; margin: 0; padding: 0; box-sizing: border-box; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .drafting-ribbon { overflow: hidden; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool-label {
+    hyphens: none; overflow-wrap: normal; word-break: normal;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-size="large"] {
+    width: 76px;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-size="large"] .ribbon-tool-label {
+    max-height: none; overflow: visible;
+  }
+}
+@media (min-width: 981px) and (max-width: 1499px) {
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] { --ck-canvas-top: 185px; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-nav {
+    height: 30px; min-height: 30px; padding-top: 2px; align-items: flex-start;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs { align-self: flex-start; }
+}
+@media (pointer: coarse) and (max-width: 1499px), (max-width: 980px) {
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] { --ck-ribbon: 151px; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool {
+    min-width: 44px; min-height: 44px; box-sizing: border-box;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-cluster { grid-template-rows: 132px 17px; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-cluster-tools { grid-template-rows: repeat(3, 44px); }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-size="large"] { height: 132px; justify-content: center; }
+}
+@media (min-width: 981px) and (max-width: 1499px) and (pointer: coarse) {
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] { --ck-canvas-top: 241px; --ck-status: 46px; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .foot-region { height: 44px; }
+}
+@media (max-width: 980px) and (min-height: 500px) {
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] {
+    --ck-top: 44px; --ck-canvas-top: var(--cockpit-stack-top, 315px); --ck-status: 46px;
+    height: 100dvh; min-height: 0; grid-template-rows: 88px minmax(0, 1fr) 46px;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top { height: 88px; align-items: flex-start; position: fixed; inset: 0 0 auto; z-index: 45; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-nav { height: 44px; min-height: 44px; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs { height: 42px; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .center-col { position: absolute; inset: 88px 0 100px; min-height: 0; overflow: hidden; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] > .rail-stack {
+    position: fixed; inset: auto 0 76px; height: 24px; min-height: 0;
+    display: flex; flex-direction: row; gap: 8px; overflow: hidden;
+    background: var(--ck-chrome); z-index: 3;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] > .rail-stack > * {
+    position: static; flex: 0 0 auto; height: 24px; min-height: 0; max-height: 24px;
+    margin: 0; padding: 0 4px; border: 0; overflow: hidden;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] > .rail-stack h2 { margin: 0; line-height: 24px; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] main.center-scroll { min-height: 0; padding: 0; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .drafting-ribbon:not([data-overflow-open="true"]) {
+    flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] > aside.nav {
+    position: fixed; top: var(--ck-canvas-top); right: 0; bottom: 100px; left: auto;
+    width: min(240px, 40vw); min-height: 0; overflow: auto;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar {
+    position: fixed; left: 0; right: 0; bottom: 0; height: 46px; min-height: 46px;
+    display: flex; flex-wrap: nowrap; overflow-x: auto; padding: 0 4px; gap: 4px;
+    background: transparent; z-index: 40;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar > * { flex-shrink: 0; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .bar-dock {
+    position: fixed; left: 4px; right: 4px; bottom: 50px; width: auto; max-width: none; margin: 0;
+  }
+}
+@media (max-width: 980px) and (max-height: 499px) {
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] { padding-bottom: 100px; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar {
+    position: fixed; left: 0; right: 0; bottom: 0; height: 46px; min-height: 46px;
+    display: flex; flex-wrap: nowrap; overflow-x: auto; padding: 0 4px; gap: 4px;
+    background: transparent; z-index: 40;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar > * { flex-shrink: 0; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .bar-dock {
+    position: fixed; left: 4px; right: 4px; bottom: 50px; width: auto; max-width: none; margin: 0; z-index: 30;
+  }
+}
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top,
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .drafting-ribbon,
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .bar.bar-command-line,
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar,
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .foot-region-instruments {
+  background: transparent; isolation: isolate; pointer-events: auto;
+  backdrop-filter: none;
+}
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .foot-region-instruments { position: relative; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top::before,
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .drafting-ribbon::before,
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .bar.bar-command-line::before,
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar::before,
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .foot-region-instruments::before {
+  content: ''; position: absolute; inset: 0; z-index: -1;
+  pointer-events: none; border-radius: inherit;
+}
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top::before {
+  background: var(--ck-glass-band); backdrop-filter: var(--ck-glass-blur);
+}
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .bar.bar-command-line::before,
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar::before,
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .foot-region-instruments::before {
+  background: var(--ck-glass-dock); backdrop-filter: none;
+}
+@media (max-width: 1499px) {
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-nav::before {
+    content: ''; position: absolute; inset: 0; z-index: -1;
+    pointer-events: none; border-radius: inherit;
+    background: var(--ck-glass-band); backdrop-filter: var(--ck-glass-blur);
+  }
+}
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .drafting-ribbon { background: var(--ck-glass-band); }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar { background: var(--ck-glass-dock); }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .drafting-ribbon::before,
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar::before { content: none; }
+@media (max-width: 1499px) {
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-nav { background: var(--ck-glass-band); }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-nav::before { content: none; }
+}
+
+/* Shared flow host stays outside the hidden drawing card and passes empty space through. */
+.studio-shell .app[data-studio-shell="cockpit"] .studio-chrome-host { pointer-events: none; }
+:where(.studio-shell .app[data-studio-shell="cockpit"] .studio-chrome-host > *) { pointer-events: auto; }
+.studio-shell .app[data-studio-shell="cockpit"] :is(.kicker, .home-q, .hint, .tc-continuity, .demo-banner) { display: none; }
+.studio-shell .app[data-studio-shell="cockpit"] .cockpit-ribbon-tabs { min-width: 0; }
+.studio-shell .app[data-studio-shell="cockpit"] .ribbon-tool:disabled { color: var(--ck-label); }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .studio-profile-info {
+  position: fixed; right: 12px; top: calc(var(--ck-canvas-top) + 8px); z-index: 5;
+  width: min(260px, calc(100vw - 24px)); max-height: calc(100dvh - var(--ck-canvas-top) - 112px);
+  overflow: auto; box-sizing: border-box; padding: 8px 12px;
+  border: 1px solid var(--ck-edge); border-radius: 4px;
+  background: var(--ck-glass-panel); color: var(--ck-ink); font: 400 12px/1.5 var(--ck-font);
+}
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .studio-profile-info summary { cursor: pointer; font-weight: 600; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .studio-profile-info :is(p, .ios-surface, .ios-surface p) { color: var(--ck-ink-dim); }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .studio-profile-info :is(h2, h3, strong) { color: var(--ck-ink); font-size: 13px; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .studio-profile-info summary:focus-visible { outline: 2px solid var(--ck-sel); outline-offset: 2px; }
+/* The existing project switcher opens from the ribbon, retaining its own menu state. */
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top:has(.proj-chip[aria-expanded="true"]) { overflow: visible; z-index: 46; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top .proj:has(.proj-chip[aria-expanded="true"]) {
+  display: flex; position: absolute; left: 8px; top: 100%; z-index: 46;
+  background: var(--ck-glass-panel); color: var(--ck-ink);
+}
+.studio-shell .app[data-studio-shell="cockpit"] .proj-menu { max-width: calc(100vw - 24px); }
+/* Portal grounds carry the same hook because their DOM is a sibling of App. */
+.studio-shell [data-studio-shell="cockpit"]:is(.studio-ground-board, .studio-ground-device) {
+  --ck-font: system-ui, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --ck-canvas: #212830; --ck-glass-panel: rgba(30, 34, 39, .90);
+  --ck-ink: #e2e2e2; --ck-ink-dim: #b8b8b8; --ck-edge: #424242;
+  background: var(--ck-canvas); color: var(--ck-ink); font: 400 13px/1.5 var(--ck-font);
+}
+.studio-shell [data-studio-shell="cockpit"] .ground-tile {
+  background: var(--ck-glass-panel); border: 1px solid var(--ck-edge); border-radius: 4px;
+  color: var(--ck-ink); box-shadow: none;
+}
+.studio-shell [data-studio-shell="cockpit"] :is(.ground-tile h3, .ground-eyebrow, .device-k, .ground-note, .ground-lane, .device-meta, .device-stage) {
+  font-family: var(--ck-font); font-size: 12px; letter-spacing: 0; text-transform: none; color: var(--ck-ink-dim);
+}
+.studio-shell [data-studio-shell="cockpit"] :is(.ground-tile p, .ground-tile ul, .ground-board-header p, .ground-catalog-tool p) { color: var(--ck-ink-dim); }
+.studio-shell [data-studio-shell="cockpit"] .ground-empty { color: var(--ck-ink-dim) !important; }
+.studio-shell [data-studio-shell="cockpit"] :is(.ground-tile strong, .ground-board-header h1, .device-v) { color: var(--ck-ink); font-family: var(--ck-font); }
+.studio-shell [data-studio-shell="cockpit"] .ground-board-header h1 { font-size: 20px; }
+.studio-shell [data-studio-shell="cockpit"] .device-frame { background: var(--ck-glass-panel); border-color: var(--ck-edge); }
+.studio-shell [data-studio-shell="cockpit"] .device-screen { background: var(--ck-canvas); }
+.studio-shell [data-studio-shell="cockpit"] .ground-device-stage { overflow: auto; box-sizing: border-box; padding: 12px; }
+.studio-shell [data-studio-shell="cockpit"] .ground-desk { min-height: 0; }
+@media (max-width: 980px) {
+  .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs [role="tab"] { min-height: 42px; padding: 0 10px; font: 400 12px var(--ck-font); }
+  .studio-shell .app[data-studio-shell="cockpit"] .tc-product-tabs [role="tab"] small { display: none; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-surface] .studio-profile-info { width: auto; max-width: calc(100vw - 24px); height: auto; min-height: 0; max-height: calc(100dvh - var(--ck-canvas-top) - 112px); }
+  .studio-shell .app[data-studio-shell="cockpit"] .bar.bar-command-line { flex-direction: row; flex-wrap: nowrap; background: var(--ck-glass-dock); font-family: var(--ck-font); }
+  .studio-shell .app[data-studio-shell="cockpit"] .bar-command-line .bar-input { min-width: 0; padding: 5px 8px; }
+  .studio-shell .app[data-studio-shell="cockpit"] .bar-command-line .bar-caret { text-transform: none; letter-spacing: 0; font: 400 12px var(--ck-font); }
+  .studio-shell .app[data-studio-shell="cockpit"] .bar-command-line .bar-field { color: var(--ck-ink); font-family: var(--ck-font); }
+  .studio-shell .app[data-studio-shell="cockpit"] .cockpit-status-tabs { display: inline-flex; gap: 8px; align-items: center; font: 400 12px var(--ck-font); }
+  .studio-shell [data-studio-shell="cockpit"] .ground-device-stage { flex-direction: column; justify-content: flex-start; gap: 16px; }
+  .studio-shell [data-studio-shell="cockpit"] .device-frame { flex-shrink: 0; width: 140px; height: 240px; }
+  .studio-shell [data-studio-shell="cockpit"] .ground-tiles { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Profile commands use readable rows in the same panel grid. */
+.studio-shell .app[data-studio-shell="cockpit"] .studio-chrome-host[data-ribbon-context="workspace"] .ribbon-tool {
+  width: 168px; justify-content: flex-start; gap: 6px; padding: 0 6px; font-size: 12px;
+}
+.studio-shell .app[data-studio-shell="cockpit"] .studio-chrome-host[data-ribbon-context="workspace"] .ribbon-tool .ribbon-tool-label {
+  display: inline; overflow: hidden; text-overflow: ellipsis; color: var(--ck-ink);
+}
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .studio-profile-info .ent-panel {
+  margin: 8px 0 0; padding: 8px; border-color: var(--ck-edge); background: transparent; color: var(--ck-ink);
+}

@@ -154,11 +154,11 @@ const CONTRACT_FIXTURE = {
   browser: {
     ground: 'board',
     scene: 'app',
-    chrome: { productFrame: true, workspaceCard: false, cockpit: false, stageBranch: 'frame', projectSlot: null, tab: true },
-    toolbar: { ribbon: false, home: null, quick: null },
-    rails: { left: 'nav', right: 'job-rail', dock: null },
+    chrome: { shell: 'cockpit', productFrame: true, workspaceCard: false, cockpit: false, stageBranch: 'frame', projectSlot: null, tab: true },
+    toolbar: { profile: 'project', ribbon: true, home: 'project', quick: null },
+    rails: { left: 'spine', right: 'job-spine', dock: null },
     groundMaterial: { layerAccent: null, solarStrings: false },
-    commandLine: false,
+    commandLine: true,
     authoring: true,
     versions: 'none',
     conversations: { scope: 'drawing' },
@@ -176,8 +176,8 @@ const CONTRACT_FIXTURE = {
   cad: {
     ground: 'drawing',
     scene: 'app',
-    chrome: { productFrame: false, workspaceCard: true, cockpit: true, stageBranch: 'cad', projectSlot: null, tab: true },
-    toolbar: { ribbon: true, home: 'draw', quick: null },
+    chrome: { shell: 'cockpit', productFrame: false, workspaceCard: true, cockpit: true, stageBranch: 'cad', projectSlot: null, tab: true },
+    toolbar: { profile: 'drafting', ribbon: true, home: 'draw', quick: null },
     rails: { left: 'spine', right: 'job-spine', dock: ['layers', 'drawing', 'selection', 'plan'] },
     groundMaterial: { layerAccent: null, solarStrings: false },
     commandLine: true,
@@ -203,8 +203,8 @@ const CONTRACT_FIXTURE = {
     // the P1 studio-shell pass fixed that, and this fixture row records the
     // fixed value. stageBranch stays 'frame': the stage genuinely diverges
     // from the console here (D1), and this pass did not touch the stage.
-    chrome: { productFrame: false, workspaceCard: true, cockpit: true, stageBranch: 'frame', projectSlot: null, tab: true },
-    toolbar: { ribbon: true, home: 'draw', quick: null },
+    chrome: { shell: 'cockpit', productFrame: false, workspaceCard: true, cockpit: true, stageBranch: 'frame', projectSlot: null, tab: true },
+    toolbar: { profile: 'solar', ribbon: true, home: 'draw', quick: null },
     rails: { left: 'spine', right: 'job-spine', dock: ['layers', 'drawing', 'selection', 'plan'] },
     groundMaterial: { layerAccent: 'solar', solarStrings: true },
     commandLine: true,
@@ -224,11 +224,11 @@ const CONTRACT_FIXTURE = {
   ios: {
     ground: 'device-stage',
     scene: 'app',
-    chrome: { productFrame: true, workspaceCard: false, cockpit: false, stageBranch: 'ios', projectSlot: 'ios-surface', tab: true },
-    toolbar: { ribbon: false, home: null, quick: null },
-    rails: { left: 'nav', right: 'job-rail', dock: null },
+    chrome: { shell: 'cockpit', productFrame: true, workspaceCard: false, cockpit: false, stageBranch: 'ios', projectSlot: 'ios-surface', tab: true },
+    toolbar: { profile: 'ship', ribbon: true, home: 'ship', quick: null },
+    rails: { left: 'spine', right: 'job-spine', dock: null },
     groundMaterial: { layerAccent: null, solarStrings: false },
-    commandLine: false,
+    commandLine: true,
     authoring: true,
     versions: 'none',
     conversations: { scope: 'drawing' },
@@ -326,8 +326,8 @@ describe('Surface Contract — schema', () => {
       const contract = surfaceContract(id)
       expect(Object.keys(contract).sort()).toEqual([...CONTRACT_KEYS].sort())
       expect(Object.keys(contract.chrome).sort())
-        .toEqual(['cockpit', 'productFrame', 'projectSlot', 'stageBranch', 'tab', 'workspaceCard'])
-      expect(Object.keys(contract.toolbar).sort()).toEqual(['home', 'quick', 'ribbon'])
+        .toEqual(['cockpit', 'productFrame', 'projectSlot', ...(contract.scene === 'app' ? ['shell'] : []), 'stageBranch', 'tab', 'workspaceCard'])
+      expect(Object.keys(contract.toolbar).sort()).toEqual(['home', ...(contract.scene === 'app' ? ['profile'] : []), 'quick', 'ribbon'])
       expect(Object.keys(contract.rails).sort()).toEqual(['dock', 'left', 'right'])
       expect(Object.keys(contract.groundMaterial).sort()).toEqual(['layerAccent', 'solarStrings'])
       expect(Object.keys(contract.conversations)).toEqual(['scope'])

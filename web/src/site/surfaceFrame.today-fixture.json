@@ -94,19 +94,21 @@
     ],
     "jobRail": [
       "aside|rail|",
-      "h2||",
-      "span|n|",
-      "div|rail-note|",
-      "div|rail-ledger|",
-      "div|rail-empty|",
-      "div|rail-note|",
-      "button|chip-act|"
+      "div|rail-spine|",
+      "button|spine-btn spine-expand|",
+      "span|rail-spine-count|"
     ],
     "toast": [
       "div|toast enter|",
       "span||"
     ],
-    "cockpit": []
+    "cockpit": [],
+    "studioFrame": [
+      "section|studio-profile-info|",
+      "details||",
+      "summary||",
+      "p||"
+    ]
   },
   "console:cad": {
     "tabs": [
@@ -421,19 +423,22 @@
     ],
     "jobRail": [
       "aside|rail|",
-      "h2||",
-      "span|n|",
-      "div|rail-note|",
-      "div|rail-ledger|",
-      "div|rail-empty|",
-      "div|rail-note|",
-      "button|chip-act|"
+      "div|rail-spine|",
+      "button|spine-btn spine-expand|",
+      "span|rail-spine-count|"
     ],
     "toast": [
       "div|toast enter|",
       "span||"
     ],
-    "cockpit": []
+    "cockpit": [],
+    "studioFrame": [
+      "section|studio-profile-info|",
+      "details||",
+      "summary||",
+      "p||",
+      "div|ios-slot-sentinel|ios-project-slot"
+    ]
   },
   "stage:browser": {
     "tabs": [

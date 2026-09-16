@@ -94,7 +94,7 @@ describe('W4g bleed-2b: profile presentation preserves the engine document', () 
     assert.doesNotMatch(appSource.slice(guard, opener), /</)
   })
   it('mounts the engine document after the drafting ribbon under the studio and engine gates', () => {
-    const ribbonStart = appSource.indexOf('{studioGround && drafting && (')
+    const ribbonStart = appSource.indexOf('{studioShell && surfaceSlots.toolbar.ribbon && studioRibbonHost && createPortal(')
     const ribbonEnd = appSource.indexOf('</DraftingRibbon>', ribbonStart)
     const engine = appSource.indexOf('<EngineDocumentView')
     assert.ok(ribbonStart >= 0 && ribbonEnd > ribbonStart)
@@ -477,7 +477,7 @@ describe('App.jsx wiring', () => {
 
   describe('W4g selection mirror back', () => {
     it('mounts StatusModesBridge under the engine flag', () => {
-      assert.match(appSource, /\{ENV_CAD_EDIT && <StatusModesBridge \/>\}/)
+      assert.match(appSource, /\{ENV_CAD_EDIT && drafting && <StatusModesBridge \/>\}/)
     })
     it('passes the console selection setter to EngineDocumentView', () => {
       assert.match(appSource, /<EngineDocumentView\b(?:(?!\/>)[\s\S])*?\bonSelectedHandleChange=\{setSelectedHandle\}/)
@@ -670,7 +670,7 @@ describe('App.jsx wiring', () => {
     // cannot be dropped as "redundant" by a later reader.
     assert.match(
       stripped,
-      /footRegions\s*=\s*Boolean\(studioGround\)\s*&&\s*drafting\s*&&\s*wideViewport/,
+      /footRegions\s*=\s*studioShell\s*&&\s*wideViewport/,
     )
     // ...and that gate is the ONLY thing deciding it, on every FootRegion:
     // three mounts, each reading the same binding, so they cannot disagree
