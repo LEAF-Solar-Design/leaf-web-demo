@@ -126,13 +126,34 @@ def report(manifest, directory, live=True):
     collect(manifest)
 
     def safe(value):
-        value = clean(value)
+        base = clean(value)
+        spans = []
         for secret in sorted(secrets, key=len, reverse=True):
-            value = value.replace(secret, "[redacted]")
-        value = re.sub(r"(?i)[a-z][a-z0-9+.-]*://[^\s/?#]*@[^\s]*", "[redacted-url]", value)
-        value = re.sub(r"(?i)Bearer\s+\S+", "[redacted]", value)
-        value = re.sub(r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?![A-Za-z0-9_-])", "[redacted]", value)
-        return " ".join(value.split())[:400]
+            start = base.find(secret)
+            while start != -1:
+                spans.append((start, start + len(secret), False))
+                start = base.find(secret, start + 1)
+        for pattern, is_url in (
+            (r"(?i)[a-z][a-z0-9+.-]*://[^\s/?#]*@[^\s]*", True),
+            (r"(?i)Bearer\s+\S+", False),
+            (r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?![A-Za-z0-9_-])", False),
+        ):
+            spans.extend((match.start(), match.end(), is_url)
+                         for match in re.finditer(pattern, base))
+        merged = []
+        for start, end, is_url in sorted(spans):
+            if merged and start <= merged[-1][1]:
+                previous = merged[-1]
+                merged[-1] = (previous[0], max(previous[1], end), previous[2] or is_url)
+            else:
+                merged.append((start, end, is_url))
+        parts = []
+        cursor = 0
+        for start, end, is_url in merged:
+            parts.extend((base[cursor:start], "[redacted-url]" if is_url else "[redacted]"))
+            cursor = end
+        parts.append(base[cursor:])
+        return " ".join("".join(parts).split())[:400]
 
     def path(value):
         return local_path(value, directory)

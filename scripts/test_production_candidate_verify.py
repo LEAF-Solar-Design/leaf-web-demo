@@ -1,6 +1,7 @@
 """Ten frozen V-01 rows. No test invokes a live network probe."""
 
 import importlib.util
+import builtins
 import io
 import json
 import os
@@ -87,6 +88,26 @@ def test_row2_new_red(candidate):
     assert "new_reds=1" in line(result.stdout, 3)
 
 
+def test_row1_older_open_pr(candidate):
+    candidate[0]["main"]["older_open_prs"] = 1
+    result = cli(candidate)
+    assert result.returncode == 1
+    assert line(result.stdout, 1).startswith("01 FAIL ")
+    assert "older_open_prs=1" in line(result.stdout, 1)
+
+
+def test_row2_equal_count_replacement_red(candidate):
+    data = candidate[0]
+    data["candidate_proof"]["reds"] = list(data["baseline_proof"]["reds"])
+    data["candidate_proof"]["reds"][0] = "replacement.mjs:10:2 › replacement broken row"
+    assert len(data["candidate_proof"]["reds"]) == len(data["baseline_proof"]["reds"])
+    result = cli(candidate)
+    assert result.returncode == 1
+    assert line(result.stdout, 3).startswith("03 FAIL ")
+    assert "replacement broken row" in line(result.stdout, 3)
+    assert "new_reds=1" in line(result.stdout, 3)
+
+
 def test_row3_line_number_and_ansi_normalization(candidate):
     candidate[0]["candidate_proof"]["reds"] = ["\x1b[31mspec.mjs:574:3 › existing red\x1b[0m"]
     result = cli(candidate)
@@ -114,7 +135,7 @@ def test_row5_missing_auth_ladder(candidate):
 
 
 @pytest.mark.parametrize("state, status, code", [
-    ("merged", "FAIL", 1), ("closed", "FAIL", 1), ("draft", "PASS", 0),
+    ("merged", "FAIL", 1), ("closed", "FAIL", 1), ("open", "FAIL", 1), ("draft", "PASS", 0),
 ])
 def test_row6_merged_door(candidate, state, status, code):
     candidate[0]["door_pr"]["state"] = state
@@ -156,8 +177,25 @@ def test_row7_live_probe_error(candidate, monkeypatch, capsys, failure):
     assert captured.err == ""
 
 
-def test_row8_refused_candidate(candidate):
-    candidate[0]["candidate"] = "not a sha"
+def test_row7_live_production_sha_mismatch(candidate, monkeypatch, capsys):
+    data, _ = candidate
+    different = "c" * 40
+    monkeypatch.setattr(verifier, "probe_health_sha", lambda origin: (
+        data["staging"] if origin == verifier.STAGING else {"source_sha": different}))
+    path = write(candidate)
+    assert verifier.main(["--manifest", str(path), "--live"]) == 1
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    for number in range(1, 14):
+        status = "FAIL" if number == 10 else "PASS"
+        assert line(captured.out, number).startswith(f"{number:02d} {status} ")
+    assert data["served_source_sha"] in line(captured.out, 10)
+    assert different in line(captured.out, 10)
+
+
+@pytest.mark.parametrize("invalid", ["not a sha", "z" * 40])
+def test_row8_refused_candidate(candidate, invalid):
+    candidate[0]["candidate"] = invalid
     result = cli(candidate)
     assert result.returncode == 2
     assert result.stdout == ""
@@ -200,6 +238,33 @@ def test_row9_receipt_values_redact_earlier_evidence(candidate):
     assert "[redacted]" in line(result.stdout, 5)
 
 
+def test_row9_sensitive_key_values(candidate):
+    values = {key: f"private-{key}-741" for key in ("jwt", "secret", "password", "authorization")}
+    candidate[0]["auth_ladder"].update(values)
+    candidate[0]["ssd5"]["disposition"] = " ".join(values.values())
+    result = cli(candidate)
+    assert result.returncode == 0
+    for value in values.values():
+        assert value not in result.stdout + result.stderr
+    assert line(result.stdout, 8).endswith("SSD5=" + " ".join(["[redacted]"] * 4))
+
+
+@pytest.mark.parametrize("token, disposition, replacement", [
+    ("@example.invalid", "HTTPS://alice:p4ss@example.invalid/receipt", "[redacted-url]"),
+    ("Bearer", "Bearer uncatalogued-private-741", "[redacted]"),
+])
+def test_row9_overlapping_redaction_rules(candidate, token, disposition, replacement):
+    candidate[0]["auth_ladder"]["token"] = token
+    candidate[0]["ssd5"]["disposition"] = disposition
+    result = cli(candidate)
+    assert result.returncode == 0
+    output = result.stdout + result.stderr
+    for value in (token, disposition, "p4ss", "uncatalogued-private-741"):
+        assert value not in output
+    assert line(result.stdout, 8).startswith("08 PASS ")
+    assert line(result.stdout, 8).endswith("SSD5=" + replacement)
+
+
 @pytest.mark.parametrize("receipt_path", [r"\\server\share\receipt.json", "//server/share/receipt.json",
                                           "HTTPS://alice:p4ss@example.invalid/receipt"])
 @pytest.mark.parametrize("section, field, number", [
@@ -211,12 +276,19 @@ def test_row10_refused_receipt_path(candidate, monkeypatch, capsys, receipt_path
 
     def forbidden(*args, **kwargs):
         calls.append(args)
-        raise AssertionError("network must not be used")
+        raise AssertionError("network and filesystem opens must not be used")
 
     monkeypatch.setattr(verifier.urllib.request, "urlopen", forbidden)
+    # Exercise the in-memory report so reading the manifest and unrelated local
+    # receipts cannot mask an attempted open of the refused path.
+    for receipt_section in ("production_plan", "prod_smoke", "auth_ladder"):
+        candidate[0].pop(receipt_section, None)
+    candidate[0]["hardening"]["aps_window_receipt"] = receipt_path
+    candidate[0].setdefault(section, {})
     candidate[0][section][field] = receipt_path
-    path = write(candidate)
-    assert verifier.main(["--manifest", str(path), "--no-live"]) == 1
+    monkeypatch.setattr(builtins, "open", forbidden)
+    monkeypatch.setattr(Path, "open", forbidden)
+    assert verifier.report(candidate[0], candidate[1].parent, live=False) == 1
     captured = capsys.readouterr()
     assert line(captured.out, number).startswith(f"{number:02d} PENDING ")
     assert "path refused" in line(captured.out, number)
