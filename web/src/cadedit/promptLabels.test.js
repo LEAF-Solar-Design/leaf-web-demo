@@ -13,11 +13,20 @@ describe('prompt labels and refusals', () => {
   })
 
   it('uses the circle labels without replacing letters inside words', () => {
+    expect(humanizeRefusal('Circle refused: r must be a number.', PROMPTS.createCircle))
+      .toBe('Circle refused: radius must be a number.')
     expect(humanizeRefusal('Circle refused: x, y and r must all be numbers.', PROMPTS.createCircle))
       .toBe('Circle refused: center x, center y and radius must all be numbers.')
     expect(humanizeRefusal('Circle refused: radius must be positive.', PROMPTS.createCircle))
       .toBe('Circle refused: radius must be positive.')
     expect(humanizeRefusal('index dx dy dx2', PROMPTS.move)).toBe('index displacement x displacement y dx2')
+  })
+
+  it('humanizes partial Arc refusals using the prompt field ids', () => {
+    expect(humanizeRefusal('Arc refused: a1 must be a number.', PROMPTS.createArc))
+      .toBe('Arc refused: end angle must be a number.')
+    expect(humanizeRefusal('Arc refused: a0 and a1 must be numbers.', PROMPTS.createArc))
+      .toBe('Arc refused: start angle and end angle must be numbers.')
   })
 
   it('preserves point-entry grammar while humanizing scalar field names', () => {

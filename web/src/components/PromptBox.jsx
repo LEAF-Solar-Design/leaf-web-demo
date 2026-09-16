@@ -131,7 +131,7 @@ export default function PromptBox({
   //   both asserted by e2e rows.
   runLabel = 'Run',
   routingLabel = 'Routing…',
-  placeholder = 'Find, act, or build… ( / for tools)',
+  placeholder,
   // dropIngestEnabled: the G2 drop catcher below. The stage turns it OFF
   //   because a drop on its bar already means "open this DWG or DXF"
   //   (ToolCast's own handler on .tc-bar), and one gesture cannot carry two
@@ -757,7 +757,7 @@ export default function PromptBox({
             onKeyDown={onKeyDown}
             onFocus={() => setFocused(true)}
             onBlur={() => setFocused(false)}
-            placeholder={commandLine && armedAsk ? armedAsk : placeholder}
+            placeholder={placeholder !== undefined ? placeholder : commandLine ? armedAsk || 'Type a command, or describe what you want ( / for tools)' : 'Find, act, or build… ( / for tools)'}
             spellCheck={false}
             aria-label="Command bar"
             data-testid="command-bar"
