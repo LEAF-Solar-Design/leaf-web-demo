@@ -17,16 +17,40 @@ import './demo.css'
 const MARGIN = 14
 
 // Phone width (lane 3, one-shell narrow): at or under this width the card is
-// a compact coach that sits at the bottom of the viewport, above the command
-// line and status bar zone, and never assumes a 380px card fits. The
-// reserve is the cockpit's fixed bottom chrome at phone width (status bar
-// 46px + command line at bottom 50px + a gap), see cockpit.css.
+// a compact coach inside the drawing area, its bottom edge resting on the
+// top of the fixed bottom chrome, never over the drawers, the command line
+// or the status bar, and never taller than NARROW_MAX_VH of the viewport.
+// The reserve stands in when no bottom chrome is laid out (status bar 46px
+// + command line at bottom 50px + a gap), see cockpit.css.
 const NARROW_MAX = 600
 const NARROW_BOTTOM_RESERVE = 110
 const NARROW_INSET = 8
+const NARROW_MAX_VH = 0.4
+
+// The fixed bottom chrome at phone width, top to bottom in cockpit.css: the
+// job strip, the catalog drawer, the command line, the status bar. Only a
+// box whose top edge lies in the lower part of the viewport counts (a rail
+// at the top of a plain page is not bottom chrome); the job strip's top is
+// 0.74vh less 136px in the cockpit, above 0.4vh at every phone height.
+const NARROW_CHROME = '.rail-stack, aside.nav, .bar-dock, footer.foot-bar'
+const NARROW_CHROME_MIN_TOP = 0.4
 
 function readNarrow() {
   return typeof window !== 'undefined' && window.innerWidth <= NARROW_MAX
+}
+
+// The top edge of the highest bottom-chrome box, or null when none is laid
+// out (jsdom, or a page without the cockpit's drawers).
+function readChromeTop() {
+  if (typeof document === 'undefined') return null
+  const vh = window.innerHeight
+  let top = null
+  for (const el of document.querySelectorAll(NARROW_CHROME)) {
+    const r = el.getBoundingClientRect()
+    if (!r.height || r.top < vh * NARROW_CHROME_MIN_TOP || r.top >= vh) continue
+    if (top === null || r.top < top) top = r.top
+  }
+  return top
 }
 
 // Tracks the phone breakpoint. Resize is the source of truth (jsdom has it);
@@ -117,7 +141,11 @@ export default function DemoTour({
 
   // --- spotlight geometry --------------------------------------------------
   const [rect, setRect] = useState(null)
+  // Phone width: the bottom chrome's top edge, measured with the spotlight
+  // so a resize or a drawer change moves the coach's floor with it.
+  const [chromeTop, setChromeTop] = useState(null)
   const measure = useCallback(() => {
+    if (readNarrow()) setChromeTop(readChromeTop())
     const el = resolveTourTarget(step, anchors)
     const next = (() => {
       if (!el) return null
@@ -211,7 +239,7 @@ export default function DemoTour({
   // NOTE: the tour deliberately does NOT own Escape. A capture-phase Esc listener
   // here terminated the whole walkthrough when the user only meant to dismiss the
   // route card / History / a selection, with no way back in. Exit stays reachable
-  // via the banner's "Exit — explore freely" and the card's "Skip"; Esc goes back
+  // via the banner's "Exit and explore freely" and the card's "Skip"; Esc goes back
   // to App's own Esc ladder, which is what the rest of the app expects.
 
   // Focus starts inside the overlay so the first Tab reaches Exit/Skip/Next
@@ -236,22 +264,24 @@ export default function DemoTour({
     const vh = window.innerHeight
     const vw = window.innerWidth
     if (narrow) {
-      // Phone: full width less an inset, anchored at the bottom above the
-      // command line and status bar. When the spotlight itself sits in that
-      // bottom zone (the command bar beat) the coach rises above the
-      // spotlight instead of covering it. Every number is computed from the
-      // viewport, and maxHeight clamps the box to it even when the measured
-      // height is stale, so Next and Skip are always on screen.
+      // Phone: full width less an inset, the bottom edge on the floor (the
+      // top of the highest bottom-chrome box, the job strip in the cockpit,
+      // less a gap), the box capped at NARROW_MAX_VH of the viewport. When
+      // the spotlight itself overlaps that box (the command bar beat) the
+      // floor moves above the spotlight instead, if the box still fits.
+      // Every number is computed from the viewport, and maxHeight clamps
+      // the box even when the measured height is stale, so Next and Skip
+      // are always on screen.
       const width = Math.max(0, vw - NARROW_INSET * 2)
-      const bottomAnchor = Math.max(NARROW_INSET, vh - NARROW_BOTTOM_RESERVE - H)
-      let top = bottomAnchor
-      let floor = vh - NARROW_INSET
-      if (rect && rect.top + rect.height > bottomAnchor && rect.top - H - MARGIN >= NARROW_INSET) {
-        top = rect.top - H - MARGIN
+      const cap = Math.floor(vh * NARROW_MAX_VH)
+      const box = Math.min(H, cap)
+      let floor = (chromeTop === null ? vh - NARROW_BOTTOM_RESERVE : chromeTop) - NARROW_INSET
+      if (rect && rect.top - MARGIN < floor && rect.top + rect.height > floor - box
+        && rect.top - MARGIN - NARROW_INSET >= box) {
         floor = rect.top - MARGIN
       }
-      top = Math.max(NARROW_INSET, Math.min(top, Math.max(NARROW_INSET, vh - H - NARROW_INSET)))
-      return { left: NARROW_INSET, top, width, maxHeight: Math.max(0, Math.min(floor, vh - NARROW_INSET) - top) }
+      const top = Math.max(NARROW_INSET, floor - box)
+      return { left: NARROW_INSET, top, width, maxHeight: Math.max(0, Math.min(cap, floor - top)) }
     }
     if (!rect) return { left: '50%', top: '50%', transform: 'translate(-50%, -50%)' }
     const W = 380
@@ -286,7 +316,7 @@ export default function DemoTour({
           <span className="tour-banner-title">{bannerTitle}</span>
           <span className="tour-banner-sub">{bannerSubtitle}</span>
           <button type="button" className="chip-neutral tour-banner-exit" onClick={onExit}>
-            Exit — explore freely
+            Exit and explore freely
           </button>
         </div>
       )}
@@ -346,7 +376,7 @@ export default function DemoTour({
             onClick={next}
             disabled={!canAdvance}
           >
-            {isLast || step.action === 'exit' ? 'Exit — explore freely' : 'Next'}
+            {isLast || step.action === 'exit' ? 'Exit and explore freely' : 'Next'}
           </button>
         </div>
       </div>

@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
 //
 // Lane 3 (one-shell narrow): at phone width the tour card is a compact coach
-// anchored at the bottom of the viewport, above the cockpit's command line
-// and status bar, with Next and Skip always inside the viewport. The
-// placement is computed from window.innerWidth and innerHeight (the old math
-// assumed a 380px card plus margins, which pushed the controls off a 390px
-// screen). Desktop placement is unchanged, pinned by the last block.
+// inside the drawing area, its bottom edge above the cockpit's job strip,
+// catalog drawer, command line and status bar, at most 40 percent of the
+// viewport tall, with Next and Skip always inside the viewport. The
+// placement is computed from window.innerWidth and innerHeight and from the
+// bottom chrome's measured top edge (the old math assumed a 380px card plus
+// margins, which pushed the controls off a 390px screen). Desktop placement
+// is unchanged, pinned by the last block.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 
@@ -34,8 +36,33 @@ function setViewport(width, height) {
 function mountTarget(rect) {
   document.body.innerHTML = '<div class="app"><div class="bar"></div></div>'
   const bar = document.querySelector('.bar')
-  bar.getBoundingClientRect = () => ({ ...rect, right: rect.left + rect.width, bottom: rect.top + rect.height, x: rect.left, y: rect.top, toJSON() {} })
+  fakeRect(bar, rect)
   return bar
+}
+
+function fakeRect(el, rect) {
+  el.getBoundingClientRect = () => ({ ...rect, right: rect.left + rect.width, bottom: rect.top + rect.height, x: rect.left, y: rect.top, toJSON() {} })
+}
+
+// The cockpit's fixed bottom chrome at phone width, as cockpit.css lays it
+// out (top to bottom): the 24px job strip, the 26vh catalog drawer, the
+// command line docked 50px up, the 46px status bar. Returns each box's top.
+function mountPhoneChrome(width, height) {
+  document.body.innerHTML = '<div class="app"><main class="center-scroll"><div class="bar"></div></main></div>'
+    + '<div class="rail-stack"></div><aside class="nav"></aside><div class="bar-dock"></div><footer class="foot-bar"></footer>'
+  const dock = 112
+  const drawer = Math.round(height * 0.26)
+  const tops = {
+    strip: height - dock - drawer - 24,
+    drawer: height - dock - drawer,
+    commandBar: height - 50 - 62,
+    statusBar: height - 46,
+  }
+  fakeRect(document.querySelector('.rail-stack'), { top: tops.strip, left: 0, width, height: 24 })
+  fakeRect(document.querySelector('aside.nav'), { top: tops.drawer, left: 0, width, height: drawer })
+  fakeRect(document.querySelector('.bar-dock'), { top: tops.commandBar, left: 4, width: width - 8, height: 62 })
+  fakeRect(document.querySelector('footer.foot-bar'), { top: tops.statusBar, left: 0, width, height: 46 })
+  return tops
 }
 
 const px = (value) => (typeof value === 'number' ? value : parseFloat(value))
@@ -75,6 +102,35 @@ describe('DemoTour at 390x844: the coach', () => {
     expect(px(top)).toBeLessThan(bar.getBoundingClientRect().top)
     expect(screen.getByRole('button', { name: 'Next' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Skip' })).toBeTruthy()
+  })
+
+  it('sits above the job strip, never inside the drawer zone or over the command bar', () => {
+    const tops = mountPhoneChrome(390, 844)
+    render(<DemoTour steps={STEPS} onExit={() => {}} />)
+    const card = document.querySelector('.tour-card')
+    const { top, maxHeight } = card.style
+    const bottom = px(top) + px(maxHeight)
+    expect(px(top)).toBeGreaterThanOrEqual(0)
+    // The coach's bottom edge is above the top of the drawer zone (the job
+    // strip is its first band), so it is above the command bar too.
+    expect(bottom).toBeLessThanOrEqual(tops.strip)
+    expect(bottom).toBeLessThanOrEqual(tops.drawer)
+    expect(bottom).toBeLessThanOrEqual(tops.commandBar)
+    expect(px(maxHeight)).toBeLessThanOrEqual(844 * 0.4)
+    expect(screen.getByRole('button', { name: 'Back' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Skip' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Next' })).toBeTruthy()
+  })
+
+  it('never exceeds 40 percent of the viewport height', () => {
+    setViewport(390, 600)
+    const tops = mountPhoneChrome(390, 600)
+    render(<DemoTour steps={STEPS} onExit={() => {}} />)
+    const card = document.querySelector('.tour-card')
+    const { top, maxHeight } = card.style
+    expect(px(maxHeight)).toBeLessThanOrEqual(600 * 0.4)
+    expect(px(top) + px(maxHeight)).toBeLessThanOrEqual(tops.strip)
+    expect(px(top)).toBeGreaterThanOrEqual(0)
   })
 
   it('starts collapsed, expands on More, and carries no banner strip', () => {
