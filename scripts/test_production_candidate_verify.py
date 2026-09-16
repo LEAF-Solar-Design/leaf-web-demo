@@ -125,6 +125,22 @@ def test_row4_plan_source_mismatch(candidate):
     assert "c" * 40 in evidence and candidate[0]["candidate"] in evidence
 
 
+def test_row4_plan_exit_false_is_not_zero(candidate):
+    candidate[0]["exit"] = False
+    result = cli(candidate)
+    assert result.returncode == 1
+    evidence = line(result.stdout, 9)
+    assert evidence.startswith("09 FAIL ") and "exit=False" in evidence
+
+
+def test_row4_failing_start_board_row(candidate):
+    candidate[0]["start_board"]["rows"] = [{"name": "fixture start", "pass": True}, {"name": "broken row", "pass": False}]
+    result = cli(candidate)
+    assert result.returncode == 1
+    evidence = line(result.stdout, 4)
+    assert evidence.startswith("04 FAIL ") and "broken row" in evidence
+
+
 def test_row5_missing_auth_ladder(candidate):
     del candidate[0]["auth_ladder"]
     result = cli(candidate)

@@ -229,7 +229,8 @@ def report(manifest, directory, live=True):
     def plan_check():
         data = receipt("production_plan")
         source = data["source_revision"]
-        ok = data["exit"] == 0 and type(data["planned_operations"]) is int and data["planned_operations"] >= 1
+        # an int 0 exactly: JSON false compares equal to 0 in Python and is not a passing exit
+        ok = type(data["exit"]) is int and data["exit"] == 0 and type(data["planned_operations"]) is int and data["planned_operations"] >= 1
         ok = ok and nonempty(data["promotion"]) and source == candidate
         ok = ok and all(re.fullmatch(r"sha256:[0-9a-fA-F]{64}", data["images"].get(role, "")) for role in ROLES)
         return ok, f"source_revision={source} candidate={candidate}; exit={data['exit']}; planned_operations={data['planned_operations']}; promotion={data['promotion']}; five image digests={'valid' if ok else 'see receipt'}"
