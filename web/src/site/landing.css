@@ -1,8 +1,8 @@
-/* Website One Surface — stage + recast choreography.
+/* Website One Surface: stage + recast choreography.
    Scoped under .stage-root; NEVER leaks into the console (App renders alone
    in scene 'app' with this root unmounted).
 
-   Motion tokens are the BINDING values from docs/motion-standard.md — they
+   Motion tokens are the BINDING values from docs/motion-standard.md, they
    override the mock's inline 520/300ms prototype values:
      enter 1730ms cubic-bezier(.22,1,.36,1) · focus pull 2250ms · exit 870ms
      ease · stagger 20ms/rank · hidden = opacity 0 + blur(14px) saturate(.6)
@@ -10,7 +10,7 @@
 
 .stage-root {
   --recast-enter: 1730ms;
-  --recast-focus: 2250ms;   /* blur/saturate in — 1.3x enter (the focus pull) */
+  --recast-focus: 2250ms;   /* blur/saturate in, 1.3x enter (the focus pull) */
   --recast-exit: 870ms;
   --recast-curve: cubic-bezier(.22, 1, .36, 1);
   --recast-exit-curve: ease;
@@ -144,13 +144,20 @@
   display: flex; align-items: center; justify-content: flex-end; gap: 14px;
 }
 .lp-sheetno { font-size: 12px; color: #949494; }
+/* lp-003: quiet action chip. The one filled green primary on the pane is
+   .lp-cta; the top bar's trial and the solver's open button stay secondary. */
 .lp-trial {
   display: inline-flex; align-items: center; border: 0; border-radius: 7px;
-  background: #22c55e; color: #04140a;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, .35);
+  background: rgba(34, 197, 94, .08); color: #22c55e;
+  box-shadow: none;
   font: 500 13px 'Inter Tight', sans-serif; padding: 8px 16px; cursor: pointer;
 }
-.lp-trial:hover { background: #4ade80; }
+.lp-trial:hover { background: rgba(34, 197, 94, .14); color: #4ade80; }
+.lp-solver-open {
+  background: transparent; border: 0; color: #a1a1aa;
+  font: 500 12px/1 'Inter Tight', sans-serif; padding: 4px 6px; cursor: pointer;
+}
+.lp-solver-open:hover { color: #fff; text-decoration: underline; }
 
 /* Tool cluster overlays the same slot (rendered by ToolCast, above the bar). */
 .tc-topcluster {
@@ -249,6 +256,8 @@
   .studio-shell .app[data-studio-transition="out"] :is(header.top, #drafting-ribbon, .viewer-toolbar, [data-testid="cockpit-view"], .properties-dock, .bar.bar-command-line, footer.foot-bar, .rail-stack),
   .studio-shell .app[data-studio-transition="in"] :is(header.top, #drafting-ribbon, .viewer-toolbar, [data-testid="cockpit-view"], .properties-dock, .bar.bar-command-line, footer.foot-bar, .rail-stack) { animation: none; }
   .tc-continuity[data-pulse="true"] .tc-continuity-item { animation: none; }
+  /* The pulse stops but the dot stays: opacity .8, never the 0% keyframe. */
+  .lp-pulse { animation: none; opacity: .8; }
 }
 .tc-product-frame {
   position: absolute; inset: 96px 0 0; z-index: 28; overflow: auto;
@@ -369,6 +378,7 @@
 }
 .lp-kicker { font-size: 13px; color: #949494; }
 .lp-headline {
+  margin: 0;
   font: 600 48px/1.1 'Inter Tight', sans-serif;
   letter-spacing: -0.015em; text-wrap: pretty;
 }
@@ -416,6 +426,22 @@
 .lp-solver-label { font-size: 12px; color: #a1a1aa; }
 .lp-solver-big { font: 600 22px 'Inter Tight', sans-serif; font-variant-numeric: tabular-nums; }
 .lp-solver-unit { font: 400 12px 'Inter Tight', sans-serif; color: #949494; }
+/* lp-009: a solve in flight reads as a pulsing dot beside muted text. */
+.lp-solver-pending { display: inline-flex; align-items: center; gap: 6px; color: #a1a1aa; font-size: 13px; }
+.lp-pulse {
+  width: 6px; height: 6px; border-radius: 50%; background: #22c55e;
+  animation: lp-pulse 1.4s ease-in-out infinite;
+}
+@keyframes lp-pulse {
+  0%, 100% { opacity: .35; }
+  50% { opacity: 1; }
+}
+/* lp-010: stage loading caption, sits above the sheet index at the statement's left edge. */
+.stage-loading {
+  position: absolute; left: 60px; bottom: 200px; z-index: 15;
+  display: inline-flex; align-items: center; gap: 8px;
+  color: #a1a1aa; font-size: 13px; pointer-events: none;
+}
 
 /* ---------------- landing: sheet-index footer (z 30) ---------------- */
 
@@ -448,7 +474,7 @@
 .tc-rail-r { right: 0; border-left: 1px solid #27272a; }
 .tc-rail-head { display: flex; align-items: baseline; gap: 8px; padding: 14px 16px 8px; }
 /* Joins the studio's mono-caps micro-label grammar (styles.css
-   table.counts th) — identity coherence with /app, intentionally
+   table.counts th), identity coherence with /app, intentionally
    /try-visible. */
 .tc-rail-title { font: 600 10px var(--font-mono); text-transform: uppercase; letter-spacing: .08em; }
 .tc-rail-sub { font-size: 11.5px; color: #949494; }
@@ -778,7 +804,7 @@
 
 /* ---------------- tool: caption (z 15) ---------------- */
 
-/* Not part of the pane choreography — opacity-only, landing ~600ms after the
+/* Not part of the pane choreography: opacity-only, landing ~600ms after the
    cast (enter starts at 900ms; caption starts at 1500ms). */
 .tc-caption {
   position: absolute; left: 320px; bottom: 122px; z-index: 15; width: 420px;
@@ -869,10 +895,10 @@
    .key, .chip-*) consume those SAME tokens, so without a re-pin the dark stage
    renders ink-on-black. Custom properties scope by subtree: re-declaring the
    old dark values on .stage-root restores every shared component inside /try
-   byte-for-byte while /app keeps the new identity. Additive only — the pinned
+   byte-for-byte while /app keeps the new identity. Additive only, the pinned
    skeleton (topbar 52px, nav inset 52px, frame inset 96px) is untouched.
    Note: a T1 overlay applies inline on :root and now no longer recolors the
-   stage subtree — acceptable: overlays preview the console, not the site. */
+   stage subtree, acceptable: overlays preview the console, not the site. */
 .stage-root {
   --background: #0a0a0a;
   --foreground: #ffffff;
@@ -965,7 +991,7 @@
 
 /* .leaf-light: reserved, wired to nothing yet. The design session has not
    ratified light-mode values for this namespace; when it does, they land
-   here through the sync lane. Declaring no values now is deliberate — an
+   here through the sync lane. Declaring no values now is deliberate: an
    empty scope cannot repaint anything it is applied to, so adopting the
    class ahead of the ratified values is inert rather than a half theme. */
 .leaf-light {
@@ -1143,12 +1169,12 @@
 }
 .ground-desk { display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: 6px; }
 /* --ground-top/left/right/window above are a fixed approximation, tuned for
-   the common project states only — the frame's chrome grows by an explainer,
+   the common project states only. The frame's chrome grows by an explainer,
    an action, and a reason on some states (SurfaceGrounds.jsx), and the CSS
    values have no idea the page has scrolled. When measureGroundWindow()
    cannot place the window (data-measured stays "false": no real layout yet,
    the chrome left less than MIN_WINDOW_HEIGHT, or jsdom), painting tiles at
-   the guessed position risks landing them over the frame's own head text —
+   the guessed position risks landing them over the frame's own head text,
    the exact collision this pair exists to prevent. Hiding the desk until a
    real measurement lands is strictly safer than a guess that might overlap
    real content; a live browser always resolves this in the same layout pass
@@ -1297,7 +1323,7 @@
 .studio-shell aside.rail .spine-collapse { margin-left: auto; }
 .studio-shell aside.nav[data-spine] { padding: 8px 4px; overflow-y: auto; overflow-x: hidden; background: rgba(10, 10, 10, .88); }
 .nav-spine { display: flex; flex-direction: column; align-items: center; gap: 6px; }
-/* Explicit ink on the dark rail — inherited color never beats a declared
+/* Explicit ink on the dark rail: inherited color never beats a declared
    one (kimi, twice): 240,242,240 at .88 on the rail material clears 4.5:1. */
 /* `.inbox-toggle` (components/JobInbox.jsx) shares this look by selector
    rather than by wearing `.spine-btn`: the rail-OFF byte-identity e2e row
@@ -1318,7 +1344,7 @@
 .fam-title .spine-collapse { float: right; width: 24px; height: 24px; font-size: 12px; }
 
 /* The ribbon: the drawing window's command strip. Glass paints on the
-   ::before — NEVER a backdrop-filter on the element itself: a filter makes
+   ::before, NEVER a backdrop-filter on the element itself: a filter makes
    this strip the containing block for position:fixed descendants (the exact
    trap that collapsed the Version-history drawer in the toolbar below). */
 .studio-shell .drafting-ribbon {
@@ -1338,7 +1364,7 @@
   border-radius: inherit;
   background: rgba(10, 10, 10, .78); backdrop-filter: blur(6px);
 }
-/* flex: none — a shrinking cluster lets its nowrap tools paint over the
+/* flex: none, a shrinking cluster lets its nowrap tools paint over the
    neighbour (seen on the real 5-family catalog); the strip SCROLLS instead. */
 .ribbon-cluster { display: flex; flex-direction: column; gap: 3px; flex: 0 0 auto; justify-content: flex-end; }
 .ribbon-cluster + .ribbon-cluster { border-left: 1px solid rgba(240, 242, 240, .12); padding-left: 10px; }
@@ -1745,4 +1771,24 @@
   .ground-world, .ground-world-card, .ground-world-marker, .ground-world-viewport {
     transition-duration: 0ms;
   }
+}
+
+/* ---------------- landing: phone (lp-006, lp-007, lp-008) ----------------
+   The statement block, the solver card and the sheet index are all absolutely
+   positioned for a desktop stage; at 390px they clip and overlap. The block
+   below reflows the statement to the viewport, drops the solver card and the
+   index meta, and lets the tab strip scroll. Desktop rules above are untouched. */
+@media (max-width: 600px) {
+  .lp-stmt { left: 16px; right: 16px; width: auto; top: 96px; gap: 14px; }
+  .lp-headline { font-size: 30px; }
+  .lp-sub { font-size: 15px; }
+  .lp-cta-row { flex-wrap: wrap; gap: 10px; }
+  .lp-stmt form { flex-wrap: wrap; }
+  .lp-stmt form input { width: 100%; box-sizing: border-box; }
+  .lp-solver { display: none; }
+  .lp-sheetno, .lp-index-meta, .lp-brandsub { display: none; }
+  .lp-index { overflow-x: auto; flex-wrap: nowrap; scrollbar-width: none; }
+  .lp-index .lp-tab { white-space: nowrap; }
+  .lp-stats { flex-wrap: wrap; gap: 16px; }
+  .stage-loading { left: 16px; bottom: 96px; }
 }
