@@ -69,7 +69,7 @@ function toolsOf(cluster) {
 describe('row9 Solar solved-route eligibility', () => {
   const bundle = JSON.parse(readFileSync(new URL('../../public/demo-solve.json', import.meta.url), 'utf8'))
   const routes = bundle.solve.strings.filter((route) => Array.isArray(route.pts) && route.pts.length >= 2)
-  const clean = { eligible: true, head: 1, previewing: false, engineDirty: false, solve: 'loaded', shown: true, routes }
+  const clean = { eligible: true, head: 1, previewing: false, engineDirty: false, documentId: null, solve: 'loaded', shown: true, routes }
   it('row7 shows the 134 drawable solved rooftop routes by default', () => {
     expect(solarRouteDisplay({ ...clean, status: solarRouteStatus(clean) })).toHaveLength(134)
     const onToggle = vi.fn()
@@ -97,15 +97,20 @@ describe('row9 Solar solved-route eligibility', () => {
 describe('Solar displayed-document route states', () => {
   const routes = [{ id: 'route', pts: [[0, 0], [2, 1]] }]
   const clean = { eligible: true, head: 1, engineDirty: false, previewing: false,
-    documentId: null, allowedDocumentIds: ['demo-v1.dxf', 'solar-starter.dxf'], solve: 'loaded', routes }
+    documentId: null, committedVersion: null, headDocumentId: 'demo-v1.dxf', solve: 'loaded', routes }
   it.each([
     ['ineligible', { eligible: false }], ['stale', { previewing: true }],
     ['stale', { head: 2 }], ['stale', { engineDirty: true }],
     ['foreign', { documentId: 'other.dxf' }], ['loading', { solve: null }],
     ['loading', { solve: 'pending' }], ['unavailable', { solve: 'failed' }],
     ['unavailable', { solve: 'empty' }], ['unavailable', { routes: [] }],
-    ['ready', {}], ['ready', { documentId: 'demo-v1.dxf' }],
-    ['ready', { documentId: 'solar-starter.dxf' }],
+    ['ready', {}], ['ready', { documentId: 'demo-v1.dxf', committedVersion: 1 }],
+    ['foreign', { documentId: 'demo-v1.dxf', committedVersion: null }],
+    ['foreign', { documentId: 'demo-v1.dxf', committedVersion: 2 }],
+    ['foreign', { documentId: 'demo-v1.dxf', committedVersion: '1' }],
+    ['foreign', { documentId: undefined }], ['foreign', { documentId: 1 }],
+    ['foreign', { documentId: false }], ['foreign', { documentId: {} }],
+    ['foreign', { documentId: 'solar-starter.dxf', committedVersion: 1 }],
   ])('row13 identifies %s from the displayed document and solve', (status, input) => {
     expect(solarRouteStatus({ ...clean, ...input })).toBe(status)
   })

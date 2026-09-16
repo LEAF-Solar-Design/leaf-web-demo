@@ -86,10 +86,11 @@ function profileGroup(id, label, tools) {
   return { id, label, kind: 'group', tools }
 }
 
-export function solarRouteStatus({ eligible, previewing, head = 1, engineDirty, documentId, allowedDocumentIds = [], solve, routes }) {
+export function solarRouteStatus({ eligible, previewing, head = 1, engineDirty, documentId, committedVersion, headDocumentId, solve, routes }) {
   if (!eligible) return 'ineligible'
   if (previewing || head !== 1 || engineDirty) return 'stale'
-  if (documentId != null && !allowedDocumentIds.includes(documentId)) return 'foreign'
+  // The starter opener is disabled on mock, and solved routes are mock-only.
+  if (documentId !== null && !(typeof documentId === 'string' && documentId === headDocumentId && committedVersion === 1)) return 'foreign'
   if (solve == null || solve === 'pending') return 'loading'
   if (solve !== 'loaded' || !Array.isArray(routes) || routes.length === 0) return 'unavailable'
   return 'ready'

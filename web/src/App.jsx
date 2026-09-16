@@ -90,7 +90,7 @@ import CommandLineArmer from './cadedit/CommandLineArmer.jsx'
 import StatusModesBridge from './cadedit/StatusModesBridge.jsx'
 import EngineDocumentView from './cadedit/EngineDocumentView.jsx'
 import EngineHeadOpener from './cadedit/EngineHeadOpener.jsx'
-import SolarStarterOpener, { SOLAR_STARTER_DOCUMENT_ID, SOLAR_STARTER_EMPTY_INTAKE } from './cadedit/SolarStarterOpener.jsx'
+import SolarStarterOpener, { SOLAR_STARTER_EMPTY_INTAKE } from './cadedit/SolarStarterOpener.jsx'
 import CanvasPointPicker from './cadedit/CanvasPointPicker.jsx'
 import { COCKPIT_COMMAND_EVENT, parseDrawingCommand } from './lib/commandWords.js'
 import { parsePointExpression } from './cadedit/pointExpression.js'
@@ -1139,6 +1139,7 @@ export default function App() {
   // would move the server head under them, so it is refused with the reason
   // until the drafter saves or discards.
   const [engineDirty, setEngineDirty] = useState(false)
+  const [engineDocument, setEngineDocument] = useState(null)
   const [solarStarterRetryKey, setSolarStarterRetryKey] = useState(0)
   const [solarStarter, setSolarStarter] = useState('idle')
   // The same fact as a ref, for the EXECUTION-time check in onRun: a confirm
@@ -2762,8 +2763,10 @@ export default function App() {
   }, [solarStringsEligible, demoSolveState])
   const solarRoutesStatus = solarRouteStatus({
     eligible: solarStringsEligible, previewing, head: drawingState?.head ?? 1,
-    engineDirty, documentId: activeIntake?.documentId ?? null,
-    allowedDocumentIds: [`${REQUESTED_DRAWING_ID}-v1.dxf`, SOLAR_STARTER_DOCUMENT_ID],
+    engineDirty,
+    documentId: activeIntake?.documentId ?? null,
+    committedVersion: engineDocument?.committedVersion ?? null,
+    headDocumentId: `${REQUESTED_DRAWING_ID}-v1.dxf`,
     solve: demoSolveState, routes: demoSolveRoutes,
   })
   const solarStringRoutes = useMemo(() => solarRouteDisplay({
@@ -3194,7 +3197,7 @@ export default function App() {
     }
   }
   const engineScope = (node) => (ENV_CAD_EDIT ? (
-    <EngineSessionProvider saveTarget={engineSaveTarget} onSaved={onEngineSaved} onDirtyChange={onEngineDirtyChange} onBeforeEdit={closeStartForChange} onBeforeArm={onBeforeArm}>{node}</EngineSessionProvider>
+    <EngineSessionProvider saveTarget={engineSaveTarget} onSaved={onEngineSaved} onDirtyChange={onEngineDirtyChange} onDocumentChange={setEngineDocument} onBeforeEdit={closeStartForChange} onBeforeArm={onBeforeArm}>{node}</EngineSessionProvider>
   ) : node)
 
   return (

@@ -28,8 +28,24 @@ describe('C-04B Solar ribbon wiring', () => {
     assert.ok(appSource.includes('selectedHandle, onClearSelection: () => setSelectedHandle(null)'))
   })
   it('row16 binds routes to the displayed document and records solve failure or emptiness', () => {
-    assert.ok(appSource.includes('documentId: activeIntake?.documentId ?? null'))
-    assert.ok(appSource.includes('allowedDocumentIds: [`${REQUESTED_DRAWING_ID}-v1.dxf`, SOLAR_STARTER_DOCUMENT_ID]'))
+    const assertRouteBinding = (source) => {
+      const block = source.match(new RegExp(String.raw`solarRouteStatus\(\{([\s\S]*?)\}\)`))?.[1]
+      assert.ok(block, 'the route status call exists')
+      for (const line of block.split(/\r?\n/)) {
+        assert.doesNotMatch(line, /^\s*\/\//, 'route status inputs must be executable')
+      }
+      assert.doesNotMatch(block, /\/\*|\*\//, 'route status inputs must not be block comments')
+      assert.match(block, /^\s*documentId: activeIntake\?\.documentId \?\? null,\s*$/m)
+      assert.match(block, /^\s*committedVersion: engineDocument\?\.committedVersion \?\? null,\s*$/m)
+      assert.ok(block.includes('headDocumentId: `${REQUESTED_DRAWING_ID}-v1.dxf`'))
+    }
+    assertRouteBinding(appSource)
+    const commented = appSource.replace('    documentId: activeIntake?.documentId ?? null,', '    // documentId: activeIntake?.documentId ?? null,')
+    assert.notEqual(commented, appSource, 'the comment mutation must apply')
+    assert.throws(() => assertRouteBinding(commented))
+    assert.ok(appSource.includes('const [engineDocument, setEngineDocument] = useState(null)'))
+    assert.match(stripped, /onDocumentChange:\s*setEngineDocument/)
+    assert.equal(appSource.includes('allowedDocumentIds'), false)
     assert.ok(appSource.includes("const [demoSolveState, setDemoSolveState] = useState('pending')"))
     assert.match(appSource, new RegExp(String.raw`\.catch\(\(\) => \{\s+if \(live\) setDemoSolveState\('failed'\)`))
     assert.ok(appSource.includes("setDemoSolveState(routes.length ? 'loaded' : 'empty')"))
