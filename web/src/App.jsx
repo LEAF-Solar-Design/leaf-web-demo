@@ -98,6 +98,8 @@ import { fetchIosSurfaceStatus } from './ios/iosSurfaceStatus.js'
 import { authConfigured, login, isSignedIn, handleRedirectCallback, isAuthRedirectCallback } from './auth.js'
 import { shouldAutoDemo, explicitDemo } from './demoState.js'
 import { humanizeError } from './errorHumanize.js'
+import { composeDiagnostics, collectRefusals, taskRevisionOf } from './diagnostics.js'
+import { recentRequestFailures } from './api.js'
 import { cadTimingRows } from './cadTimingPresentation.js'
 import { getSessionHolderId } from './checkoutIdentity.js'
 import {
@@ -2278,6 +2280,8 @@ export default function App() {
       `org ${org || '—'}`,
       `tenant ${tenantLabel} · tier ${tierDisplay}`,
       `mode ${mock ? 'mock (no cloud)' : `live · ${config.apiBase}`}`,
+      `served ${health?.source_sha || (mock ? 'sample data' : 'not available')}`,
+      `task ${taskRevisionOf(health?.task_definition_arn) || 'not available'}`,
       `entitlement tier ${gateTier}`,
     ]
     if (!mock && usage) {
@@ -2290,6 +2294,18 @@ export default function App() {
     setDrawer({
       title: 'Session · provenance',
       rows,
+      diagnostics: composeDiagnostics({
+        buildHash: __BUILD_HASH__, mode: mock ? 'sample data' : 'live',
+        servedSourceSha: mock ? null : (health?.source_sha ?? null),
+        taskRevision: mock ? null : taskRevisionOf(health?.task_definition_arn),
+        pathname: window.location.pathname, at: new Date().toISOString(),
+        sessionState: mock ? 'demo' : (isSignedIn() ? 'signed in' : 'signed out'),
+        editLock: mock ? null : {
+          state: checkout.readFailed ? 'read failed' : lock.unknown ? 'checking' : heldByUs ? 'held by you' : otherHeldCheckout ? 'held by another editor' : 'free',
+          ...checkout.failure,
+        },
+        failures: recentRequestFailures(), refusals: collectRefusals(document),
+      }),
       // W2b: the controller owns sign-out, exactly as /try does. Its signOut
       // still calls auth.js logout(), and additionally tells the state machine
       // the refusal reason is `signed_out` — the ONE reason the bounded token
@@ -2300,7 +2316,7 @@ export default function App() {
         : { label: 'Refresh', onClick: () => { loadUsage(); loadHealth() } },
       foot: 'Your account and usage.',
     })
-  }, [org, tenantLabel, tierDisplay, mock, usage, gateTier, loadUsage, loadHealth, sessionActions])
+  }, [org, tenantLabel, tierDisplay, mock, usage, gateTier, loadUsage, loadHealth, sessionActions, health, checkout.readFailed, checkout.failure, lock.unknown, heldByUs, otherHeldCheckout])
 
   // Esc while a live run is in flight: detach this session from the job (the
   // rail keeps tracking it; the close beacon flags it reap-able server-side).
@@ -3247,7 +3263,7 @@ export default function App() {
               {pendingApprovalsUnavailable && <span className="dot red" aria-hidden="true" />}
             </button>
           )}
-          <button type="button" className="chip-act" onClick={openSessionDetails}>Details</button>
+          <button type="button" className="chip-act" onClick={openSessionDetails} title={`Session details · build ${__BUILD_HASH__}`}>Details</button>
           {/* Persistent identity control: before this, sign-out lived only
               behind Details -> the session drawer, so the header carried no
               reachable exit for a signed-in operator (2026-09-02
@@ -3639,6 +3655,7 @@ export default function App() {
                   heldByUs={heldByUs}
                   unknown={lock.unknown}
                   readFailed={checkout.readFailed}
+                  failure={checkout.failure}
                   busy={checkout.busy}
                   onTake={checkout.actions.take}
                   onRelease={checkout.actions.release}

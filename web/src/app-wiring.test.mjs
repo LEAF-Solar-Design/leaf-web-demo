@@ -20,6 +20,33 @@ import esbuild from 'esbuild'
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
 const viewerSource = readFileSync(new URL('./components/Viewer.jsx', import.meta.url), 'utf8')
 
+describe('W4g S08-c: the Details drawer carries sanitized diagnostics', () => {
+  it('imports the diagnostics composer and request failure collector', () => {
+    assert.match(appSource, new RegExp("import \\{[^}]*\\bcomposeDiagnostics\\b[^}]*\\} from './diagnostics\\.js'"))
+    assert.match(appSource, new RegExp("import \\{[^}]*\\brecentRequestFailures\\b[^}]*\\} from './api\\.js'"))
+  })
+
+  it('includes served identity and sanitized diagnostics in session details', () => {
+    const start = appSource.indexOf('const openSessionDetails = useCallback(')
+    assert.notEqual(start, -1)
+    const end = appSource.indexOf('}, [', start)
+    assert.notEqual(end, -1)
+    const body = appSource.slice(start, end)
+    for (const literal of ['served ', 'taskRevisionOf(', 'diagnostics: composeDiagnostics({', 'collectRefusals(document)']) {
+      assert.ok(body.includes(literal), `missing session diagnostics: ${literal}`)
+    }
+  })
+
+  it('passes checkout failure metadata to the banner and exposes the build on Details hover', () => {
+    const checkout = appSource.match(/<CheckoutControls\s[\s\S]*?\/>/)?.[0]
+    assert.ok(checkout)
+    assert.ok(checkout.includes('failure={checkout.failure}'))
+    const details = appSource.match(new RegExp('<button[^>]*onClick=\\{openSessionDetails\\}[^>]*>Details</button>'))?.[0]
+    assert.ok(details)
+    assert.ok(details.includes('title={`Session details · build ${__BUILD_HASH__}`}'))
+  })
+})
+
 describe('W4g S08-a: an explicit demo starts in mock', () => {
   it('decides explicit demo mode in the lazy initial state', () => {
     assert.match(appSource, new RegExp('useState\\(\\(\\) => config\\.mockDefault[\\s\\S]{0,200}explicitDemo\\(\\{'))

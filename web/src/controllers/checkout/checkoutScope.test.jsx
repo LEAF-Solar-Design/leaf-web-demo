@@ -19,7 +19,7 @@ import {
   HOLDER_STORAGE_KEY,
   stageCheckoutReloadHandoff,
 } from '../../checkoutIdentity.js'
-import { checkoutScopeDrawingId } from './createCheckoutController.js'
+import { checkoutScopeDrawingId, createCheckoutController } from './createCheckoutController.js'
 import useCheckoutController from './useCheckoutController.js'
 
 // --- seams -----------------------------------------------------------------
@@ -119,6 +119,48 @@ describe('checkoutScopeDrawingId', () => {
       drawingState: { drawing_id: 'tenant-a-drawing' },
       requestedDrawingId: 'tenant-a-drawing',
     })).toBeNull()
+  })
+})
+
+describe('W4g S08: checkout read failure diagnostics', () => {
+  it('keeps the response code and timestamp, then clears them after a successful refresh', async () => {
+    const services = makeServices()
+    services.loadVersions.mockRejectedValueOnce({
+      status: 401, body: { error: { error_code: 'UNAUTHENTICATED', message: 'no' } },
+    })
+    const controller = createCheckoutController({ drawingId: 'demo', services })
+    await controller.refresh()
+    const { failure, readFailed } = controller.getSnapshot()
+    expect(readFailed).toBe(true)
+    expect(failure).toEqual({
+      at: expect.any(String), status: 401, errorCode: 'UNAUTHENTICATED', errorId: null,
+    })
+    expect(new Date(failure.at).toISOString()).toBe(failure.at)
+    expect(Object.isFrozen(failure)).toBe(true)
+    await controller.refresh()
+    expect(controller.getSnapshot().failure).toBeNull()
+    expect(controller.getSnapshot().readFailed).toBe(false)
+  })
+
+  it('keeps the error_id from the response message', async () => {
+    const services = makeServices()
+    services.loadVersions.mockRejectedValueOnce({
+      status: 500, body: { error: { message: 'failed, error_id: 0123456789abcdef' } },
+    })
+    const controller = createCheckoutController({ drawingId: 'demo', services })
+    await controller.refresh()
+    expect(controller.getSnapshot().failure.errorId).toBe('0123456789abcdef')
+  })
+
+  it('records a local failure without response metadata', async () => {
+    const services = makeServices()
+    services.loadVersions.mockRejectedValueOnce(new Error('boom'))
+    const controller = createCheckoutController({ drawingId: 'demo', services })
+    await controller.refresh()
+    expect(controller.getSnapshot().readFailed).toBe(true)
+    expect(controller.getSnapshot().failure).toEqual({
+      at: expect.any(String), status: null, errorCode: null, errorId: null,
+    })
   })
 })
 
