@@ -9,6 +9,7 @@
 // from EngineRibbonClusters (it reads the ONE engine session), so this band
 // never touches the session. Tabs that have no real panel set yet are
 // disabled with their reason, never a fake tab.
+import { useEffect, useRef } from 'react'
 import { accessibleName, reasonCode } from '../lib/actionRegistry.js'
 import { formatElementId } from '../lib/elementIdentity.js'
 import { moveRovingTab } from '../lib/roving.js'
@@ -50,7 +51,25 @@ export function QuickButton({ tool }) {
   )
 }
 
-export default function CockpitTopBand({ tab = 'draw', onTab, before = [], after = [] }) {
+export default function CockpitTopBand({ tab = 'draw', onTab, before = [], after = [], tabs, selected, onSelect }) {
+  const list = tabs ?? RIBBON_TABS
+  const requested = selected ?? tab
+  const active = list.some((item) => item.id === requested)
+    ? requested
+    : list.find((item) => !item.reason)?.id
+  const select = onSelect ?? onTab
+  const fallbackRef = useRef(null)
+  useEffect(() => {
+    if (active === undefined || active === requested) {
+      fallbackRef.current = null
+      return
+    }
+    if (typeof select !== 'function') return
+    const previous = fallbackRef.current
+    if (previous?.requested === requested && previous?.active === active) return
+    fallbackRef.current = { requested, active }
+    select(active)
+  }, [active, requested, select])
   return (
     <div className="cockpit-band" data-testid="cockpit-band">
       <div className="cockpit-quick" role="toolbar" aria-label="Quick access">
@@ -76,8 +95,8 @@ export default function CockpitTopBand({ tab = 'draw', onTab, before = [], after
         }
         moveRovingTab(event)
       }}>
-        {RIBBON_TABS.map((t) => {
-          const selected = t.id === tab
+        {list.map((t) => {
+          const selected = t.id === active
           const off = !!t.reason
           return (
             <button
@@ -85,6 +104,7 @@ export default function CockpitTopBand({ tab = 'draw', onTab, before = [], after
               type="button"
               role="tab"
               id={`ribbon-tab-${t.id}`}
+              data-tab={tabs === undefined ? undefined : t.id}
               aria-selected={selected}
               aria-controls="drafting-ribbon"
               tabIndex={selected ? 0 : -1}
@@ -92,7 +112,7 @@ export default function CockpitTopBand({ tab = 'draw', onTab, before = [], after
               title={off ? `${t.label}: ${t.reason}` : t.label}
               aria-label={accessibleName(t.label, off ? t.reason : '')}
               data-reason-code={off ? (reasonCode(t.reason) || undefined) : undefined}
-              onClick={() => { if (!off) onTab?.(t.id) }}
+              onClick={() => { if (!off) select?.(t.id) }}
             >
               {t.label}
             </button>
