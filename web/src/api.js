@@ -161,7 +161,7 @@ async function http(path, opts, timeoutMs = null) {
       status: res.status,
       errorCode: e.body?.error?.error_code ?? null,
       errorId: typeof e.body?.error?.message === 'string'
-        ? e.body.error.message.match(/error_id: ([0-9a-f]{16})(?![0-9a-f])/)?.[1] ?? null
+        ? e.body.error.message.match(/error_id: ([0-9a-f]{16})(?![0-9A-Za-z])/)?.[1] ?? null
         : null,
     }))
     if (requestFailures.length > REQUEST_FAILURE_CAP) {

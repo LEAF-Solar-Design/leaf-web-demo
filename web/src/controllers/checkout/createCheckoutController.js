@@ -164,7 +164,7 @@ export function createCheckoutController({ mock = false, drawingId = null, holde
           at: new Date().toISOString(),
           status: error?.status ?? null,
           errorCode: error?.body?.error?.error_code ?? null,
-          errorId: /error_id: ([0-9a-f]{16})(?![0-9a-f])/.exec(error?.body?.error?.message)?.[1] ?? null,
+          errorId: /error_id: ([0-9a-f]{16})(?![0-9A-Za-z])/.exec(error?.body?.error?.message)?.[1] ?? null,
         }),
         unknown: true,
         readFailed: true,

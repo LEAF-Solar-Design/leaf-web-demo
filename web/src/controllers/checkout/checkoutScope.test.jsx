@@ -142,20 +142,26 @@ describe('W4g S08: checkout read failure diagnostics', () => {
     expect(controller.getSnapshot().readFailed).toBe(false)
   })
 
-  it('keeps the error_id from the response message', async () => {
+  it.each([
+    'failed, error_id: 0123456789abcdef',
+    'internal server error (error_id: 0123456789abcdef)',
+  ])('keeps the error_id from the response message: %s', async (message) => {
     const services = makeServices()
     services.loadVersions.mockRejectedValueOnce({
-      status: 500, body: { error: { message: 'failed, error_id: 0123456789abcdef' } },
+      status: 500, body: { error: { message } },
     })
     const controller = createCheckoutController({ drawingId: 'demo', services })
     await controller.refresh()
     expect(controller.getSnapshot().failure.errorId).toBe('0123456789abcdef')
   })
 
-  it('does not extract a prefix of a 32-hex error token', async () => {
+  it.each([
+    'internal server error (error_id: 0123456789abcdef0123456789abcdef)',
+    'error_id: 0123456789abcdefABC',
+  ])('does not extract a prefix of an alphanumeric error token: %s', async (message) => {
     const services = makeServices()
     services.loadVersions.mockRejectedValueOnce({
-      status: 500, body: { error: { message: 'internal server error (error_id: 0123456789abcdef0123456789abcdef)' } },
+      status: 500, body: { error: { message } },
     })
     const controller = createCheckoutController({ drawingId: 'demo', services })
     await controller.refresh()

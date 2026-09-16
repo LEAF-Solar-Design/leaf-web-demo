@@ -34,7 +34,7 @@ describe('support diagnostics', () => {
   })
 
   it('redacts credentials before truncation in identity and record fields', () => {
-    const jwt = `${'a'.repeat(16)}.${'b'.repeat(16)}.${'c'.repeat(16)}`
+    const jwt = `${'a'.repeat(16)}.${'b'.repeat(16)}.${'c'.repeat(32)}`
     const block = composeDiagnostics({ ...live, buildHash: jwt, editLock: { state: jwt }, failures: [{ errorId: jwt }], refusals: [{ label: jwt, code: 'Bearer secret' }] })
     expect(block).not.toContain(jwt)
     expect(block).not.toContain('secret')
@@ -92,6 +92,51 @@ describe('support diagnostics', () => {
     const block = composeDiagnostics({ ...live, refusals: collectRefusals(root) })
     expect(block).toContain('  [unexpected] = REASONS.running')
     expect(block).not.toContain(label)
+  })
+
+  it.each(['tenant-acme.internal', 'Save: version', 'Save/version', 'Save_version'])('rejects punctuation outside the app control label grammar: %s', (label) => {
+    expect(composeDiagnostics({ ...live, refusals: [{ label, code: 'REASONS.running' }] })).toContain('  [unexpected] = REASONS.running')
+  })
+
+  it('admits opaque-demo-key as a label because shape cannot recognize a secret name', () => {
+    expect(composeDiagnostics({ ...live, refusals: [{ label: 'opaque-demo-key', code: 'REASONS.running' }] })).toContain('  opaque-demo-key = REASONS.running')
+  })
+
+  it.each([
+    ['/app/tenant-acme', '/app'],
+    ['/app/deep/link', '/app'],
+    ['/', '/'],
+  ])('writes only the route family for %s', (pathname, family) => {
+    expect(composeDiagnostics({ ...live, pathname }).split('\n')[5]).toBe(`page ${family}`)
+  })
+
+  it('redacts a whitespace-header JWT anywhere in a collected value before field validation', () => {
+    const jwt = 'IHsiYWxnIjoiSFMyNTYifQ.e30.i6bacCXO-AcRciU6SBWV69jGZUAyTRUBElxh-7znrz8'
+    const root = document.createElement('div')
+    root.innerHTML = `<button aria-label="Save ${jwt} version" data-reason-code="${jwt}">Save</button>`
+    const refusals = collectRefusals(root)
+    expect(refusals).toEqual([{ label: 'Save [redacted] version', code: '[redacted]' }])
+    const block = composeDiagnostics({ ...live, buildHash: jwt, refusals })
+    expect(block).not.toContain(jwt)
+    expect(block).toContain('build [unexpected]')
+    expect(block).toContain('  [unexpected] = [unexpected]')
+  })
+
+  it('does not redact 1.2.3 inside a label, though dots fail the label grammar', () => {
+    const root = document.createElement('div')
+    root.innerHTML = '<button aria-label="Version 1.2.3" data-reason-code="REASONS.running">Run</button>'
+    const refusals = collectRefusals(root)
+    expect(refusals[0].label).toBe('Version 1.2.3')
+    expect(composeDiagnostics({ ...live, refusals })).toContain('  [unexpected] = REASONS.running')
+  })
+
+  it.each([
+    'quota_exceeded', 'turn_in_progress', 'session_not_found',
+    'llm_quota_exhausted', 'llm_rate_limited', 'confirmation_expired', 'UNAUTHENTICATED',
+  ])('writes the server error code %s unchanged', (errorCode) => {
+    const block = composeDiagnostics({ ...live, editLock: { ...live.editLock, errorCode }, failures: [{ ...live.failures[0], errorCode }] })
+    expect(block).toContain(`edit lock read failed code ${errorCode} error_id`)
+    expect(block).toContain(`POST /api/drawing 403 ${errorCode} error_id=`)
   })
 
   it('accepts the CI build fallback and a well-formed refusal', () => {

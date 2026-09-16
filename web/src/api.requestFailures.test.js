@@ -41,15 +41,21 @@ describe('request failure diagnostics', () => {
     expect(recentRequestFailures()).toHaveLength(1)
   })
 
-  it('extracts the server error token without retaining the message', async () => {
-    failWith(500, { error: { message: 'internal server error (error_id: 0123456789abcdef)' } })
+  it.each([
+    'internal server error (error_id: 0123456789abcdef)',
+    'failed, error_id: 0123456789abcdef',
+  ])('extracts the server error token without retaining the message: %s', async (message) => {
+    failWith(500, { error: { message } })
     await expect(getTools(false)).rejects.toMatchObject({ status: 500 })
     expect(recentRequestFailures()[0]).toMatchObject({ errorCode: null, errorId: '0123456789abcdef' })
     expect(recentRequestFailures()[0]).not.toHaveProperty('message')
   })
 
-  it('does not extract a prefix of a 32-hex error token', async () => {
-    failWith(500, { error: { message: 'internal server error (error_id: 0123456789abcdef0123456789abcdef)' } })
+  it.each([
+    'internal server error (error_id: 0123456789abcdef0123456789abcdef)',
+    'error_id: 0123456789abcdefABC',
+  ])('does not extract a prefix of an alphanumeric error token: %s', async (message) => {
+    failWith(500, { error: { message } })
     await expect(getTools(false)).rejects.toMatchObject({ status: 500 })
     expect(recentRequestFailures()[0].errorId).toBeNull()
   })

@@ -1,11 +1,19 @@
-// Pure support diagnostics: allowlist shapes, not names. A diagnostics block
-// never carries a value it did not expect.
+/**
+ * Support diagnostics guarantee provenance plus shape: values come from named
+ * sources the app owns or serves, including the client build hash, server health
+ * record, app route family, registry's frozen reason codes, app control labels,
+ * server error codes, and transport endpoint classes.
+ * Each value is validated against its field grammar, with credential-shaped
+ * tokens redacted as a second net.
+ * The composer does not inspect content for meaning, so it cannot recognize a
+ * legitimate label, code or route that a tenant chose to name after a secret.
+ */
 export const DIAGNOSTICS_TITLE = 'Leaf Automation diagnostics'
 
 function clean(value) {
   const text = String(value ?? 'unknown').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, '')
   if (/Bearer /i.test(text)) return '[redacted]'
-  return text.replace(/[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}|eyJ[A-Za-z0-9_-]{20,}/g, '[redacted]').slice(0, 200)
+  return text.replace(/[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]{32,}/g, '[redacted]').slice(0, 200)
 }
 
 const shapes = {
@@ -13,16 +21,16 @@ const shapes = {
   mode: /^(?:sample data|live)$/,
   servedSourceSha: /^[0-9a-f]{40}$/,
   taskRevision: /^[A-Za-z0-9._-]{1,80}:\d{1,6}$/,
-  pathname: /^\/[A-Za-z0-9._~\/-]{0,120}$/,
+  pathname: /^\/[A-Za-z0-9-]{0,32}$/,
   at: /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/,
   sessionState: /^(?:demo|signed in|signed out|checking|refused)$/,
   state: /^(?:read failed|checking|held by you|held by another editor|free)$/,
-  errorCode: /^[A-Z][A-Z0-9_]{0,63}$/,
+  errorCode: /^[A-Za-z][A-Za-z0-9_]{0,63}$/,
   errorId: /^[0-9a-f]{16}$/,
   method: /^[A-Z]{3,7}$/,
   endpointClass: /^\/api\/[A-Za-z0-9._-]{1,40}(\/[A-Za-z0-9._-]{1,40})?$/,
   code: /^([A-Z]+_)?REASONS\.[A-Za-z0-9_]{1,40}$/,
-  label: /^[A-Za-z0-9 ._:/()+-]{1,60}$/,
+  label: /^[A-Za-z0-9 ()+-]{1,60}$/,
 }
 
 function field(value, name) {
@@ -70,7 +78,7 @@ export function composeDiagnostics(input = {}) {
     `mode ${field(mode, 'mode')}`,
     `served ${servedSourceSha === null ? `not available${mode === 'sample data' ? ' (sample data)' : ''}` : identity(servedSourceSha, 'servedSourceSha')}`,
     `task ${taskRevision === null ? 'not available' : identity(taskRevision, 'taskRevision')}`,
-    `page ${field(pathname, 'pathname')}`,
+    `page ${field(typeof pathname === 'string' ? pathname.split('/').slice(0, 2).join('/') : pathname, 'pathname')}`,
     `time ${field(at, 'at')}`,
     `session ${field(sessionState, 'sessionState')}`,
     editLock == null ? 'edit lock not applicable' : `edit lock ${field(editLock.state, 'state')}${editLock.errorCode != null ? optional(editLock.errorCode, ' code ', 'errorCode') : optional(editLock.status, ' code HTTP ', 'status')}${optional(editLock.errorId, ' error_id ', 'errorId')}${optional(editLock.at, ' at ', 'at')}`,
