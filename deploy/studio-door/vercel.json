@@ -1,0 +1,21 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "https://platform-staging.leafdesign.ai/$1"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        {
+          "key": "X-Leaf-Studio-Door",
+          "value": "vercel-rewrite"
+        }
+      ]
+    }
+  ]
+}
