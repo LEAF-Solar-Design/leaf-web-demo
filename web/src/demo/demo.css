@@ -199,6 +199,7 @@
    only carries the tighter spacing and the More/Less toggle. Desktop rules
    above are untouched. */
 .tour-card.is-coach {
+  box-sizing: border-box;
   width: auto;
   padding: 10px 12px 12px;
   border-radius: 10px;

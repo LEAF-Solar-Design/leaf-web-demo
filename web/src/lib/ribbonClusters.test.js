@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { DEFERRED_REASONS } from './actionRegistry.js'
 import { RIBBON_TABS } from '../site/CockpitTopBand.jsx'
+import { hasIcon } from '../site/CockpitIcon.jsx'
 import {
   CATALOG_TOOL_NOTE_ALL_PLACED,
   MAX_LAYER_TOOLS,
@@ -40,6 +41,22 @@ const FAMS = [
     ],
   },
 ]
+
+describe('profile command icons', () => {
+  it('uses installed icons for every project and ship command while retaining reasons', () => {
+    for (const profile of ['project', 'ship']) {
+      const tools = profileRibbonTabs(profile).flatMap((tab) => tab.clusters.flatMap((cluster) => cluster.tools))
+      expect(tools.length).toBeGreaterThan(0)
+      for (const tool of tools) {
+        expect(hasIcon(tool.icon), tool.id).toBe(true)
+        expect(tool.icon, tool.id).not.toBe('toolbox')
+        expect(tool.disabled, tool.id).toBe(true)
+        expect(typeof tool.reason, tool.id).toBe('string')
+        expect(tool.reason.length, tool.id).toBeGreaterThan(0)
+      }
+    }
+  })
+})
 
 function toolsOf(cluster) {
   return Object.fromEntries(cluster.tools.map((t) => [t.id, t]))
@@ -125,8 +142,17 @@ describe('profileRibbonTabs', () => {
       PROFILE_REASONS.openProject, PROFILE_REASONS.changeProject, PROFILE_REASONS.createProject,
       PROFILE_REASONS.uploadDrawing, PROFILE_REASONS.newConversation, PROFILE_REASONS.openJobs, PROFILE_REASONS.openReceipts,
     ])
+    const expectedIcons = {
+      'project:open': 'open',
+      'project:change': 'open',
+      'project:create': 'new-file',
+      'files:upload': 'import',
+      'conversation:new': 'leader',
+      'activity:jobs': 'history',
+      'activity:receipts': 'save',
+    }
     for (const tool of tools) {
-      expect(tool).toMatchObject({ disabled: true, icon: 'toolbox', title: tool.label })
+      expect(tool).toMatchObject({ disabled: true, icon: expectedIcons[tool.id], title: tool.label })
       expect(tool.onClick).toBeUndefined()
     }
     // Reason text is fixed per tool; ctx cannot override it.

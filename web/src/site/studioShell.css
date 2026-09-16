@@ -1,5 +1,7 @@
 /* One-shell shared chrome. These bands use the existing cockpit skin.
    Drafting instruments remain in cockpit.css; rail OFF has no shell hook. */
+.studio-shell .studio-drawer-tabs { display: none; }
+.studio-shell .app[data-studio-shell="cockpit"] .result-block:has(.result-panel > p.panel-sub) { display: none; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] {
   --ck-font: system-ui, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   --ck-chrome: #2a2a2a;
@@ -457,6 +459,7 @@
 :where(.studio-shell .app[data-studio-shell="cockpit"] .studio-chrome-host > *) { pointer-events: auto; }
 .studio-shell .app[data-studio-shell="cockpit"] :is(.kicker, .home-q, .hint, .tc-continuity, .demo-banner) { display: none; }
 .studio-shell .app[data-studio-shell="cockpit"] .cockpit-ribbon-tabs { min-width: 0; }
+.studio-shell .app[data-studio-shell="cockpit"] .cockpit-band { min-width: 0; }
 .studio-shell .app[data-studio-shell="cockpit"] .ribbon-tool:disabled { color: var(--ck-label); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .studio-profile-info {
   position: fixed; right: 12px; top: calc(var(--ck-canvas-top) + 8px); z-index: 5;
@@ -521,4 +524,14 @@
 }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .studio-profile-info .ent-panel {
   margin: 8px 0 0; padding: 8px; border-color: var(--ck-edge); background: transparent; color: var(--ck-ink);
+}
+
+/* The guided state is a chip on every studio profile, including tablets. */
+@media (min-width: 601px) and (max-width: 980px) {
+  .studio-shell .app[data-studio-shell="cockpit"] .tour-banner {
+    top: auto; bottom: 116px; left: auto; right: 8px; width: auto;
+    max-width: calc(100vw - 16px); padding: 4px 8px; border: 1px solid var(--ck-edge);
+    border-radius: 3px; background: var(--ck-recess); color: var(--ck-ink);
+  }
+  .studio-shell .app[data-studio-shell="cockpit"] .tour-banner-sub { display: none; }
 }

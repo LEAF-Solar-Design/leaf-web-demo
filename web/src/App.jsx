@@ -28,6 +28,20 @@ import { loadDemoSolve } from './site/intakeCache.js'
 // The 3D viewer drags in `three`; loading it lazily (mirroring the auth.js
 // dynamic-import pattern) keeps first paint off the critical path.
 const Viewer = React.lazy(() => import('./components/Viewer.jsx'))
+const STUDIO_DRAWERS = Object.freeze(['nav', 'jobs', 'result', 'plan', 'none'])
+const WORKSPACE_QUICK_BEFORE = Object.freeze([
+  { id: 'new', label: 'New drawing', icon: 'new-file', disabled: true, reason: 'new drawings start on the project board (Start tab)' },
+  { id: 'quick-import-dxf', dataTool: 'quick-import-dxf', label: 'Open DXF', icon: 'open', disabled: true, reason: 'Drawing upload is unavailable in this session' },
+  { id: 'quick-save-version', dataTool: 'quick-save-version', label: 'Save version', icon: 'save', disabled: true, reason: REASONS.noVersions },
+  { id: 'quick-undo-edit', dataTool: 'quick-undo-edit', label: 'Undo edit', icon: 'undo', disabled: true, reason: REASONS.noVersions },
+  { id: 'quick-redo-edit', dataTool: 'quick-redo-edit', label: 'Redo edit', icon: 'redo', disabled: true, reason: REASONS.noVersions },
+])
+const WORKSPACE_QUICK_AFTER = Object.freeze([
+  { id: 'print', label: 'Print', icon: 'print', disabled: true, reason: 'printing is not in the browser engine' },
+  { id: 'sep-1', kind: 'sep' },
+  { id: 'quick-undo', label: 'Undo version', icon: 'undo', disabled: true, reason: REASONS.noVersions },
+  { id: 'quick-redo', label: 'Redo version', icon: 'redo', disabled: true, reason: REASONS.noVersions },
+])
 // The bottom occluder is the command line's fixed-height well plus a constant 50 px reserve for the prompt's two rows, so an armed prompt never covers fitted geometry and arming or disarming a command still never moves the drawing.
 const STUDIO_DRAWING_OCCLUDERS = Object.freeze([
   ['header.top', 'top'], ['#drafting-ribbon', 'top'], ['.viewer-toolbar', 'top'],
@@ -2555,14 +2569,33 @@ export default function App() {
   // load (accepted V1 cost). Default COLLAPSED on CAD/Solar — the drafting
   // ribbon carries the tool set there and an expanded catalog beside it is
   // exactly the duplication ACCEPTANCE deferred the ribbon to avoid.
-  const [navExpanded, setNavExpanded] = useState(false)
+  const [studioDrawer, setStudioDrawer] = useState('none')
+  const [navExpanded, setNavExpandedState] = useState(false)
+  const setNavExpanded = useCallback((open) => {
+    setNavExpandedState(open)
+    setStudioDrawer((current) => open ? 'nav' : current === 'nav' ? 'none' : current)
+  }, [])
   // W4c-C: the DXF import surface is a floating cockpit pane on drafting
   // surfaces (it was a full-width page block across the drawing); the ribbon
   // opens it. Rail OFF it renders inline exactly as before.
   const [importOpen, setImportOpen] = useState(false)
   // W4d Slice D: the job monitor's posture on drafting surfaces (spine by
   // default; in-memory only, like the nav posture).
-  const [jobRailExpanded, setJobRailExpanded] = useState(false)
+  const [jobRailExpanded, setJobRailExpandedState] = useState(false)
+  const setJobRailExpanded = useCallback((open) => {
+    setJobRailExpandedState(open)
+    setStudioDrawer((current) => open ? 'jobs' : current === 'jobs' ? 'none' : current)
+  }, [])
+  const toggleStudioDrawer = useCallback((name) => {
+    const next = STUDIO_DRAWERS.includes(name) ? name : 'none'
+    setStudioDrawer((current) => current === next ? 'none' : next)
+    if (next === 'nav') setNavExpandedState(true)
+    if (next === 'jobs') setJobRailExpandedState(true)
+    if (next === 'plan') {
+      const details = document.querySelector('.app[data-studio-shell="cockpit"] .studio-profile-info details')
+      if (details) details.open = true
+    }
+  }, [])
   // Slice 11a: the builds poll (GET /api/builds, validated records from
   // every lane). Mock mode makes no request; the rail hosts one
   // BuildQueueCard per record and the toolbar badge counts the open ones.
@@ -2594,6 +2627,16 @@ export default function App() {
   const [wideViewport, setWideViewport] = useState(() => {
     try { return window.matchMedia('(min-width: 981px)').matches } catch { return true }
   })
+  const [phoneViewport, setPhoneViewport] = useState(() => {
+    try { return window.matchMedia('(max-width: 600px)').matches } catch { return false }
+  })
+  useEffect(() => {
+    let mq
+    try { mq = window.matchMedia('(max-width: 600px)') } catch { return undefined }
+    const sync = () => setPhoneViewport(mq.matches)
+    mq.addEventListener?.('change', sync)
+    return () => mq.removeEventListener?.('change', sync)
+  }, [])
   useEffect(() => {
     let mq
     try { mq = window.matchMedia('(min-width: 981px)') } catch { return undefined }
@@ -2799,7 +2842,7 @@ export default function App() {
   }, [surfaceSlots.toolbar.profile, railFamilies, onRequestCatalogRun, setFamilyOpen,
     running, previewing, writeLocked, canRunWrite, engineDirty, mock, signedIn, projectsErr,
     orgId, projectBusy, onCreateProject, agentDisabled, routing, clearAgentSession,
-    openAgentMode, jobs.length, iosContract?.receipt_id])
+    openAgentMode, jobs.length, iosContract?.receipt_id, setNavExpanded, setJobRailExpanded])
   const activeRibbonTab = profileTabs.some((tab) => tab.id === ribbonTab)
     ? ribbonTab : surfaceSlots.toolbar.home
   useEffect(() => {
@@ -2812,12 +2855,17 @@ export default function App() {
     }
     if (!drafting) {
       return { clusters: profileTabs.find((tab) => tab.id === activeRibbonTab)?.clusters || [],
-        quickBefore: [], quickAfter: [
+        quickBefore: WORKSPACE_QUICK_BEFORE, quickAfter: [
+          ...WORKSPACE_QUICK_AFTER,
           { id: 'quick-rail', dataTool: 'rail-expand', label: 'Tool rail', icon: 'sidebar',
-            expanded: navExpanded, onClick: () => setNavExpanded((open) => !open) },
+            expanded: phoneViewport ? studioDrawer === 'nav' : navExpanded,
+            onClick: () => phoneViewport ? toggleStudioDrawer('nav') : setNavExpanded(!navExpanded) },
         ], view: null, version: null, rail: [], author: null }
     }
-    const view = viewCluster({ viewerRef, hasDrawing: !!shown, paneOpen, onTogglePane: () => setPaneOpen((o) => !o) })
+    const view = viewCluster({
+      viewerRef, hasDrawing: !!shown, paneOpen: phoneViewport ? studioDrawer === 'plan' : paneOpen,
+      onTogglePane: () => phoneViewport ? toggleStudioDrawer('plan') : setPaneOpen((open) => !open),
+    })
     const version = versionCluster({
       hasVersions: !!drawingState,
       canUndo,
@@ -2961,13 +3009,16 @@ export default function App() {
         // The tool rail's expand affordance rides the band on every tab
         // (the Manage tab carries it as a panel too), so the catalog is
         // always one click away while the rail hides behind the cockpit.
-        ...(navSpine ? [
+        ...((navSpine || phoneViewport) ? [
           { id: 'sep-2', kind: 'sep' },
-          { id: 'quick-rail', dataTool: 'rail-expand', label: 'Tool rail', icon: 'sidebar', title: 'Expand the tool rail', onClick: () => setNavExpanded(true) },
+          { id: 'quick-rail', dataTool: 'rail-expand', label: 'Tool rail', icon: 'sidebar', title: 'Expand the tool rail',
+            expanded: phoneViewport ? studioDrawer === 'nav' : navExpanded,
+            onClick: () => phoneViewport ? toggleStudioDrawer('nav') : setNavExpanded(true) },
         ] : []),
       ],
     }
-  }, [studioShell, drafting, profileTabs, activeRibbonTab, navExpanded, navSpine, shown, drawingState, canUndo, canRedo, versionBusy, running, previewing,
+  }, [studioShell, drafting, profileTabs, activeRibbonTab, navExpanded, navSpine, setNavExpanded, toggleStudioDrawer, phoneViewport, studioDrawer,
+    shown, drawingState, canUndo, canRedo, versionBusy, running, previewing,
     drawingMutationsBlocked, historyOpen, onUndo, onRedo, onToggleHistoryTracked, layerCounts, visibleLayers,
     toggleLayer, railFamilies, onRequestCatalogRun, writeLocked, canRunWrite, canBuild, entOf, ribbonTab, colorForLayer, paneOpen,
     lastAuthoredTool, onUseAuthored, setFamilyOpen, engineDirty])
@@ -3252,7 +3303,7 @@ export default function App() {
         onUnlink: mcpRegistry.unlink,
       }}
     >
-    <div className="app" ref={projectLayout.appRef} data-project-workspace={!studioShell && projectLayout.active ? 'results' : undefined} data-project-tools={projectLayout.toolsOpen ? 'open' : 'closed'} data-project-activity={projectLayout.activityOpen ? 'open' : 'closed'} data-studio-transition={studioGround && phase !== 'idle' ? phase : undefined} data-studio-shell={studioShell ? 'cockpit' : undefined} data-surface={studioGround ? activeSurface : undefined} data-start-open={studioGround && startOpen ? 'true' : undefined} data-tour="shell"
+    <div className="app" ref={projectLayout.appRef} data-project-workspace={!studioShell && projectLayout.active ? 'results' : undefined} data-project-tools={projectLayout.toolsOpen ? 'open' : 'closed'} data-project-activity={projectLayout.activityOpen ? 'open' : 'closed'} data-studio-transition={studioGround && phase !== 'idle' ? phase : undefined} data-drawer={studioShell ? studioDrawer : undefined} data-studio-shell={studioShell ? 'cockpit' : undefined} data-surface={studioGround ? activeSurface : undefined} data-start-open={studioGround && startOpen ? 'true' : undefined} data-tour="shell"
       onClickCapture={(event) => {
         if (event.target instanceof Element && event.target.closest('.ribbon-tool:not(:disabled), .cockpit-quick button:not(:disabled), .cp-run:not(:disabled)')) {
           if (exitPending()) { event.preventDefault(); event.stopPropagation(); return }
@@ -4165,6 +4216,14 @@ export default function App() {
           BuildQueueCard renders per-record inside SurfaceFrame.JobRail
           (components/JobRail.jsx), not as a separate sibling here. */}
 
+      {studioShell && (
+        <div className="studio-drawer-tabs" role="group" aria-label="Workspace panels">
+          <button type="button" aria-expanded={studioDrawer === 'nav'} onClick={() => toggleStudioDrawer('nav')}>Catalog</button>
+          <button type="button" aria-expanded={studioDrawer === 'jobs'} onClick={() => toggleStudioDrawer('jobs')}>Jobs</button>
+          <button type="button" aria-expanded={studioDrawer === 'result'} onClick={() => toggleStudioDrawer('result')}>Result</button>
+          <button type="button" aria-expanded={studioDrawer === 'plan'} onClick={() => toggleStudioDrawer('plan')}>Plan</button>
+        </div>
+      )}
       <div className="rail-stack">
         {studioShell && <SurfaceFrame.Frame />}
         {!mock && <SurfaceFrame.Conversations />}

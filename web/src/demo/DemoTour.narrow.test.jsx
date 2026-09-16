@@ -44,21 +44,21 @@ function fakeRect(el, rect) {
   el.getBoundingClientRect = () => ({ ...rect, right: rect.left + rect.width, bottom: rect.top + rect.height, x: rect.left, y: rect.top, toJSON() {} })
 }
 
-// The cockpit's fixed bottom chrome at phone width, as cockpit.css lays it
-// out (top to bottom): the 24px job strip, the 26vh catalog drawer, the
-// command line docked 50px up, the 46px status bar. Returns each box's top.
-function mountPhoneChrome(width, height) {
-  document.body.innerHTML = '<div class="app"><main class="center-scroll"><div class="bar"></div></main></div>'
-    + '<div class="rail-stack"></div><aside class="nav"></aside><div class="bar-dock"></div><footer class="foot-bar"></footer>'
+// The shared panel headings are folded by default, just above the command.
+function mountPhoneChrome(width, height, openDrawer = false) {
+  document.body.innerHTML = '<div class="app" data-studio-shell="cockpit" data-drawer="none">'
+    + '<main class="center-scroll"><div class="bar"></div></main>'
+    + '<div class="studio-drawer-tabs"></div><div class="rail-stack"></div><aside class="nav"></aside>'
+    + '<div class="bar-dock"></div><footer class="foot-bar"></footer></div>'
   const dock = 112
-  const drawer = Math.round(height * 0.26)
+  const drawer = openDrawer ? Math.round(height * 0.35) : 0
   const tops = {
-    strip: height - dock - drawer - 24,
-    drawer: height - dock - drawer,
-    commandBar: height - 50 - 62,
+    strip: height - dock - 44,
+    drawer: height - dock - 44 - drawer,
+    commandBar: height - dock,
     statusBar: height - 46,
   }
-  fakeRect(document.querySelector('.rail-stack'), { top: tops.strip, left: 0, width, height: 24 })
+  fakeRect(document.querySelector('.studio-drawer-tabs'), { top: tops.strip, left: 0, width, height: 44 })
   fakeRect(document.querySelector('aside.nav'), { top: tops.drawer, left: 0, width, height: drawer })
   fakeRect(document.querySelector('.bar-dock'), { top: tops.commandBar, left: 4, width: width - 8, height: 62 })
   fakeRect(document.querySelector('footer.foot-bar'), { top: tops.statusBar, left: 0, width, height: 46 })
@@ -104,22 +104,30 @@ describe('DemoTour at 390x844: the coach', () => {
     expect(screen.getByRole('button', { name: 'Skip' })).toBeTruthy()
   })
 
-  it('sits above the job strip, never inside the drawer zone or over the command bar', () => {
+  it('sits just above folded panel headings and the command bar', () => {
     const tops = mountPhoneChrome(390, 844)
     render(<DemoTour steps={STEPS} onExit={() => {}} />)
     const card = document.querySelector('.tour-card')
     const { top, maxHeight } = card.style
     const bottom = px(top) + px(maxHeight)
     expect(px(top)).toBeGreaterThanOrEqual(0)
-    // The coach's bottom edge is above the top of the drawer zone (the job
-    // strip is its first band), so it is above the command bar too.
+    // Only the heading row separates the coach from the command bar.
     expect(bottom).toBeLessThanOrEqual(tops.strip)
     expect(bottom).toBeLessThanOrEqual(tops.drawer)
     expect(bottom).toBeLessThanOrEqual(tops.commandBar)
+    expect(tops.commandBar - bottom).toBeLessThanOrEqual(60)
     expect(px(maxHeight)).toBeLessThanOrEqual(844 * 0.4)
     expect(screen.getByRole('button', { name: 'Back' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Skip' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Next' })).toBeTruthy()
+  })
+
+  it('rises above an open catalog drawer', () => {
+    const tops = mountPhoneChrome(390, 844, true)
+    render(<DemoTour steps={STEPS} onExit={() => {}} />)
+    const { top, maxHeight } = document.querySelector('.tour-card').style
+    expect(px(top) + px(maxHeight)).toBeLessThanOrEqual(tops.drawer)
+    expect(px(top)).toBeGreaterThanOrEqual(0)
   })
 
   it('never exceeds 40 percent of the viewport height', () => {

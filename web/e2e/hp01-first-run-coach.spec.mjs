@@ -49,7 +49,12 @@ test('an explicit demo param keeps absolute priority and suppresses the coach', 
   await routeSession401(page, state)
 
   await page.goto('/try?demo=1')
-  await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
+  await expect(page.locator('.app .workspace-card')).toHaveCount(1)
+  await expect(page.locator('.viewer-canvas canvas')).toHaveCount(1, { timeout: 30_000 })
+  await expect(page.locator('.viewer-canvas canvas')).toBeVisible()
+  await expect(page.getByLabel('Command bar', { exact: true })).toBeVisible()
+  await expect(page.locator('[data-controller-instance]')).toHaveCount(1)
+  await expect(page.getByTestId('operator-phase')).toHaveCount(0)
   await expect(page.getByTestId('first-run-coach')).toHaveCount(0)
 })
 

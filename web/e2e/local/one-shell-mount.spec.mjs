@@ -26,6 +26,16 @@ const API_BASE = process.env.LEAF_E2E_API_BASE || 'http://127.0.0.1:8230'
 
 const STUDIO = '.studio-shell[data-scene="app"][data-mode="console"]'
 
+async function expectSharedChrome(page) {
+  await expect(page.locator('.app[data-studio-shell="cockpit"]')).toHaveCount(1)
+  await expect(page.getByTestId('cockpit-band')).toHaveCount(1)
+  await expect(page.getByRole('toolbar', { name: 'Quick access', exact: true })).toBeVisible()
+  await expect(page.getByRole('tablist', { name: 'Ribbon', exact: true })).toBeVisible()
+  await expect(page.getByRole('tablist', { name: 'Workspace profile', exact: true })).toBeVisible()
+  await expect(page.locator('.bar.bar-command-line')).toHaveCount(1)
+  await expect(page.locator('footer.foot-bar')).toBeVisible()
+}
+
 async function expectStudioBoardDetails(page, board) {
   // The proof stack runs live; the demo caveat is pinned by the unit rows.
   await expect(page.locator('.start-board-project-caveat')).toHaveCount(0)
@@ -41,14 +51,18 @@ async function expectStudioBoardDetails(page, board) {
       expect(await text.evaluate((node) => node.clientWidth > 0 && node.scrollWidth <= node.clientWidth)).toBe(true)
     }
   }
-  const planHead = page.getByTestId('properties-dock').locator('.dock-section-head', { hasText: 'Plan' })
+  const planHead = page.getByTestId('properties-dock').locator('.dock-section-head:visible', { hasText: 'Plan' })
   const openPlan = await planHead.count() && await planHead.getAttribute('aria-expanded') === 'false'
   if (openPlan) await planHead.click()
+  const summary = page.locator('.studio-profile-info details')
+  const openSummary = await summary.count() && !(await summary.evaluate((node) => node.open))
+  if (openSummary) await summary.locator('summary').click()
   const plan = page.getByRole('region', { name: 'Entitlements', exact: true })
   await expect(plan.locator('.ent-head')).toContainText(/Plan permissions checked|Plan details unavailable/)
   await expect(plan).not.toContainText('full access')
   await expect(plan).not.toContainText(/drawing\.read|drawing\.write|build lane|converse lane/)
   if (openPlan) await planHead.click()
+  if (openSummary) await summary.locator('summary').click()
 }
 
 // One canvas, and it lives where the mode says: the studio ground when the
@@ -99,6 +113,7 @@ test('option A: translucent chrome owns clicks and wheel over the full-bleed dra
     selection: document.querySelector('.selection-readout')?.textContent,
   }))
   await expect(page.locator('.selection-readout')).toBeVisible()
+  await expectSharedChrome(page)
   const before = await readState()
   for (const [selector, horizontal, vertical] of [
     ['#drafting-ribbon', -6, -6],
@@ -152,7 +167,8 @@ test.describe('route matrix, rail ON', () => {
       const viewerNode = await viewer.elementHandle()
       const railNode = await continuity.elementHandle()
       const boardNode = await board.elementHandle()
-      const opener = surface === 'cad' ? page.locator('.doc-tab-start') : page.getByRole('button', { name: 'Open the project board', exact: true })
+      const opener = page.locator('.doc-tab-start')
+      await expectSharedChrome(page)
       await opener.click()
       await expectStudioBoardDetails(page, board)
       await page.getByRole('button', { name: 'Return to drawing', exact: true }).click()
@@ -213,6 +229,7 @@ test.describe('route matrix, rail ON', () => {
     await page.goto('/app')
     await expect(page.locator(STUDIO)).toHaveCount(1)
     await expectOneCanvasIn(page, '.studio-ground')
+    await expectSharedChrome(page)
     // No duplicate-instance regressions: one checkout stamp, one WORKSPACE
     // controller stamp (W4c-0 debt: a duplicated WorkspaceControllerProvider
     // would be a second converse session, invisible to the checkout stamp),
@@ -341,6 +358,7 @@ test.describe('route matrix, rail ON', () => {
     await expect(device).toBeHidden()
     // The canvas is still there (hidden), never torn down by a tab switch.
     await expect(page.locator('.studio-ground .viewer-canvas canvas')).toHaveCount(1)
+    await expectSharedChrome(page)
     await expect(board.locator('[data-tile="drawing"]')).toContainText(/polylines/)
     await expect(board.locator('[data-tile="catalog"]')).toContainText(/famil/)
     await expectStudioBoardDetails(page, board)
@@ -351,12 +369,19 @@ test.describe('route matrix, rail ON', () => {
     await expect(viewer).toBeHidden()
     await expect(device.locator('.device-frame')).toHaveCount(1)
     await expect(device.locator('[data-testid="device-state"]')).not.toBeEmpty()
+    await expectSharedChrome(page)
 
     await page.getByRole('tab', { name: 'Solar CAD' }).click()
     await expect(viewer).toBeVisible()
     await expect(board).toBeHidden()
     await expect(device).toBeHidden()
     await expectOneCanvasIn(page, '.studio-ground')
+
+    await expectSharedChrome(page)
+    await page.getByRole('tab', { name: 'Solar', exact: true }).click()
+    const solarRibbon = page.getByTestId('drafting-ribbon')
+    await expect(solarRibbon.getByRole('group', { name: 'Stringing', exact: true })).toBeVisible()
+    await expect(solarRibbon.getByRole('group', { name: 'Equipment placement', exact: true })).toBeVisible()
 
     // Deep link straight into a non-drawing surface boots that ground.
     await page.goto('/app?surface=browser')
@@ -383,7 +408,7 @@ test.describe('route matrix, rail ON', () => {
     const continuity = page.locator('.tc-continuity')
     await expect(continuity).toBeAttached()
     await expect(continuity).toBeHidden()
-    // Rails float: inset with rounded corners; header and footer are dark.
+    // Shared chrome docks to the viewport and keeps the drawing behind it.
     const chrome = await page.evaluate(() => {
       const cs = (sel) => getComputedStyle(document.querySelector(sel))
       const rgb = (v) => v.match(/\d+/g).slice(0, 3).map(Number)
@@ -399,9 +424,11 @@ test.describe('route matrix, rail ON', () => {
         footerBg: rgb(cs('footer.foot-bar').backgroundColor),
       }
     })
-    expect(chrome.navRadius).toBe('8px')
     if (chrome.navHidden) expect(chrome.navWidth).toBeLessThanOrEqual(1)
-    else expect(chrome.navLeft).toBeGreaterThanOrEqual(12)
+    else {
+      expect(chrome.navRadius).toBe('0px')
+      expect(chrome.navLeft).toBe(0)
+    }
     expect(chrome.railRight).toBeGreaterThanOrEqual(12)
     // Dark chrome: the reference cockpit's own chrome is #2a2a2a (42) and
     // its recessed bands #232323 (35); anything lighter than 48 is paper.
@@ -423,7 +450,7 @@ test.describe('route matrix, rail ON', () => {
     await page.mouse.move(box.x + box.width / 2 + 5, box.y + box.height / 2 + 5)
     await expect(status.locator('.cockpit-coord b').first()).not.toHaveText('—')
     await expect(status.locator('.cockpit-scale b')).toContainText(/1px = /)
-    // Browser keeps its page furniture (the frame is the page there).
+    // Browser keeps the shared chrome and owns its board heading.
     await page.getByRole('tab', { name: 'Browser' }).click()
     await expect(page.getByRole('tab', { name: 'Browser' })).toBeFocused()
     await expect(page.locator('.app[data-surface="browser"]')).toHaveCount(1)
@@ -447,16 +474,11 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.getByTestId('cockpit-status')).toHaveCount(0)
   })
 
-  test('/try stays the operator stage; /sheets and unknown paths never mount the studio', async ({ page, request }) => {
+  test('bare /try stays the operator stage; /sheets and unknown paths never mount the studio', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
     await setRail(page, '1')
     await page.goto('/try')
-    await expect(page.locator('main.stage-root[data-scene="tool"]')).toHaveCount(1)
-    await expect(page.locator(STUDIO)).toHaveCount(0)
-    // ?demo on /try stays operator mode (route matrix, ?demo row — the BOOT
-    // consumer; the drawing-selection consumer is a separate owed test).
-    await page.goto('/try?demo=1')
     await expect(page.locator('main.stage-root[data-scene="tool"]')).toHaveCount(1)
     await expect(page.locator(STUDIO)).toHaveCount(0)
     // The studio branch lives ONLY in the scene-app arm.
@@ -466,6 +488,18 @@ test.describe('route matrix, rail ON', () => {
     await page.goto('/definitely-not-a-route')
     await expect(page.locator(STUDIO)).toHaveCount(0)
     await expect(page.locator('main.stage-root[data-scene="tool"]')).toHaveCount(0)
+  })
+
+  test('/try?demo=1 mounts the shared console and its drawing', async ({ page, request }) => {
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    await page.goto('/try?demo=1')
+    await expect(page.locator(STUDIO)).toHaveCount(1)
+    await expect(page.locator('main.stage-root[data-scene="tool"]')).toHaveCount(0)
+    await expectOneCanvasIn(page, '.studio-ground')
+    await expectSharedChrome(page)
+    await expect(page.locator('[data-controller-instance]')).toHaveCount(1)
+    await expect(page.getByTestId('first-run-coach')).toHaveCount(0)
   })
 
   test('Esc at top level in console mode never leaves /app (route matrix, Esc row)', async ({ page, request }) => {
@@ -523,10 +557,11 @@ test.describe('route matrix, rail ON', () => {
     })
     expect(overlaps).toBe(0)
 
-    // Browser is not a drafting surface: expanded rail, folded families, no
-    // ribbon, no spine - the rail populates per application.
+    // Browser selects project tools within the same shell and ribbon.
     await page.getByRole('tab', { name: 'Browser' }).click()
-    await expect(page.getByTestId('drafting-ribbon')).toHaveCount(0)
+    await expectSharedChrome(page)
+    await expect(page.getByTestId('drafting-ribbon')).toBeVisible()
+    await expect(page.getByRole('tab', { name: 'Project', exact: true })).toHaveAttribute('aria-selected', 'true')
     await expect(page.locator('aside.nav[data-spine]')).toHaveCount(0)
     await expect(page.locator('.fam-title')).toBeVisible()
   })
@@ -2195,6 +2230,7 @@ test.describe('route matrix, rail ON', () => {
     await canvas.evaluate((el) => { el.__bleed2a = 1 })
     const readPose = () => viewer.evaluate((el) => el.__cadviewer.cameraPose())
     const cadPose = await readPose()
+    await expectSharedChrome(page)
     const expectSameCanvas = async () => {
       await expect.poll(() => canvas.count()).toBe(1)
       await expect.poll(() => canvas.evaluate((el) => el.__bleed2a)).toBe(1)
@@ -2263,6 +2299,7 @@ test.describe('route matrix, rail ON', () => {
       }
       frame = requestAnimationFrame(check)
     }))
+    await expectSharedChrome(page)
     await page.locator('.studio-ground .viewer-canvas canvas').evaluate((canvas) => { canvas.__bleed2a = 1 })
     await page.evaluate(() => {
       const recorder = { leaving: [], phases: [], started: 0, settled: null }
@@ -2539,6 +2576,10 @@ test.describe('route matrix, rail ON', () => {
 
     await page.getByRole('tab', { name: 'Solar CAD' }).click()
     await expect(page.locator(`.viewer-canvas[data-string-routes="${expected}"]`)).toHaveCount(1, { timeout: 20_000 })
+    await expectSharedChrome(page)
+    await page.getByRole('tab', { name: 'Solar', exact: true }).click()
+    await expect(page.getByTestId('drafting-ribbon').getByRole('group', { name: 'Stringing', exact: true })).toBeVisible()
+    await expect(page.getByTestId('drafting-ribbon').getByRole('group', { name: 'Equipment placement', exact: true })).toBeVisible()
 
     // Back to CAD: the overlay leaves with the surface.
     await page.getByRole('tab', { name: 'CAD', exact: true }).click()
@@ -2557,6 +2598,7 @@ test.describe('route matrix, rail ON', () => {
 
     await page.getByRole('tab', { name: 'Solar CAD' }).click()
     await expect(page.getByRole('tab', { name: 'Solar CAD' })).toHaveAttribute('aria-selected', 'true')
+    await expectSharedChrome(page)
     // Give the bundled solve enough time to load on the pre-fix path. The
     // fixture must remain route-free after that same async boundary.
     await page.waitForTimeout(500)
@@ -2660,6 +2702,7 @@ test.describe('route matrix, rail ON', () => {
     await page.goto('/app')
     await expect(page.locator('.studio-shell')).toHaveCount(0)
     await expect(page.locator('.viewer-wrap .viewer-canvas canvas')).toHaveCount(1, { timeout: 30_000 })
+    await expect(page.locator('.app[data-drawer], .studio-drawer-tabs')).toHaveCount(0)
     // The card grows no cockpit hooks, and the blocks keep their page flow.
     await expect(page.locator('.workspace-card[data-import-open]')).toHaveCount(0)
     await expect(page.locator('.workspace-card#cockpit-import-pane')).toHaveCount(0)
@@ -2748,6 +2791,7 @@ test.describe('route matrix, rail OFF + rollback', () => {
     await expectOneCanvasIn(page, '.viewer-wrap')
     expect(await page.locator('[data-checkout-instance]').count()).toBe(1)
     expect(await page.locator('[data-controller-instance]').count()).toBe(1)
+    await expect(page.locator('.app[data-studio-shell], .app[data-drawer], .studio-drawer-tabs')).toHaveCount(0)
     // No surface ground, no surface hook, no cockpit without the shell.
     await expect(page.locator('[data-ground]')).toHaveCount(0)
     await expect(page.locator('.app[data-surface]')).toHaveCount(0)
@@ -2806,5 +2850,6 @@ test.describe('route matrix, rail OFF + rollback', () => {
     // No storage residue from the studio session: nothing the old shell did
     // not already own on its own fresh boot may survive the rollback.
     expect(residue(baseline, await storageKeys(page)), 'stale storage survived rollback').toEqual([])
+    await expect(page.locator('.app[data-studio-shell], .app[data-drawer], .studio-drawer-tabs')).toHaveCount(0)
   })
 })
