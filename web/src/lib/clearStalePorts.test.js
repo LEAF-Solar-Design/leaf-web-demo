@@ -97,6 +97,50 @@ it('writes an empty receipt when there is no listener', async () => {
   expect(JSON.parse(readFileSync(receiptPath, 'utf8'))).toEqual(receipt)
 }, 15_000)
 
+it('slow discovery within the deadline succeeds', async () => {
+  const receiptPath = receiptFile()
+  const exec = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 1200))
+    return { stdout: '', stderr: '' }
+  }
+  const started = Date.now()
+  const receipt = await clearStalePorts({ ports: [5275], receiptPath, timeoutMs: 5000, exec })
+  expect(Date.now() - started).toBeGreaterThanOrEqual(1200)
+  expect(receipt.ok).toBe(true)
+  expect(receipt.remaining).toEqual([])
+  expect(receipt.signalled).toEqual([])
+})
+
+it('an exhausted deadline fails honestly', async () => {
+  const receiptPath = receiptFile()
+  const exec = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 800))
+    return { stdout: '', stderr: '' }
+  }
+  const receipt = await clearStalePorts({ ports: [5275], receiptPath, timeoutMs: 400, log: () => {}, exec })
+  expect(receipt.ok).toBe(false)
+  expect(receipt.error).toMatch(/exceeded 400 ms/)
+  expect(receipt.signalled).toEqual([])
+  expect(JSON.parse(readFileSync(receiptPath, 'utf8'))).toEqual(receipt)
+})
+
+it('every subprocess timeout is the remaining budget, never a fixed 750', async () => {
+  const receiptPath = receiptFile()
+  const timeouts = []
+  const exec = async (file, args, options) => {
+    timeouts.push(options.timeout)
+    return { stdout: '', stderr: '' }
+  }
+  const receipt = await clearStalePorts({ ports: [5275, 5276], receiptPath, timeoutMs: 3000, exec })
+  expect(receipt.ok).toBe(true)
+  expect(timeouts.length).toBeGreaterThan(0)
+  for (const [index, timeout] of timeouts.entries()) {
+    expect(timeout).toBeGreaterThan(750)
+    expect(timeout).toBeLessThanOrEqual(3000)
+    if (index > 0) expect(timeout).toBeLessThanOrEqual(timeouts[index - 1])
+  }
+})
+
 it.each([
   ['zero port', ['--ports', '0']],
   ['non-numeric port', ['--ports', 'abc']],

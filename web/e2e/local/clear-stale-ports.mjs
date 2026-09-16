@@ -6,6 +6,8 @@ import { writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 
+const defaultExec = promisify(execFile)
+
 function validate(ports, receiptPath) {
   if (!Array.isArray(ports) || !ports.length
     || ports.some((port) => !Number.isInteger(port) || port < 1 || port > 65535)
@@ -14,7 +16,7 @@ function validate(ports, receiptPath) {
   }
 }
 
-export async function clearStalePorts({ ports, receiptPath, timeoutMs = 10_000, log = console.log }) {
+export async function clearStalePorts({ ports, receiptPath, timeoutMs = 10_000, log = console.log, exec = defaultExec }) {
   validate(ports, receiptPath)
   const receipt = { ok: false, remaining: [], signalled: [], error: null }
   const deadline = Date.now() + timeoutMs
@@ -23,8 +25,8 @@ export async function clearStalePorts({ ports, receiptPath, timeoutMs = 10_000, 
     if (left <= 0) throw new Error('Port cleanup exceeded ' + timeoutMs + ' ms')
     return left
   }
-  const run = (file, args) => promisify(execFile)(file, args, {
-    timeout: Math.max(1, Math.min(750, budget())),
+  const run = (file, args) => exec(file, args, {
+    timeout: Math.max(1, budget()),
     killSignal: 'SIGKILL', windowsHide: true,
   })
   const pause = async (ms) => {
