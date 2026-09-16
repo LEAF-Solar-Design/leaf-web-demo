@@ -215,6 +215,10 @@ function phaseLabel(phase) {
   if (phase === 'complete') return PROOF_MODE ? 'Cat version ready' : '3D cat ready'
   if (phase === 'tool-complete') return 'Tool run complete'
   if (phase === 'undone') return 'Original restored'
+  // Pilot round 2 (try-signed-out-reads-as-request-failed): an anonymous
+  // visitor made no request, so the 401 is a state, not a failure. 'failed'
+  // stays for real failures that carry an error sentence.
+  if (phase === 'signed-out') return 'Not signed in'
   if (phase === 'failed') return 'Request failed'
   return 'Workspace state unavailable'
 }
@@ -539,7 +543,7 @@ export default function ToolCast({
         if (cause?.status === 401) {
           requireAuth('/api/session')
           setError(null)
-          setPhase('failed')
+          setPhase('signed-out')
           return
         }
         if (isWorkspaceBootstrapRequired(cause)) {
@@ -855,7 +859,7 @@ export default function ToolCast({
     setLeftView('operator')
     setRightView('execution')
     setError(null)
-    setPhase('failed')
+    setPhase('signed-out')
     runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
     catalog.actions.dismissRoute()
     clearConverse()
@@ -1504,7 +1508,20 @@ export default function ToolCast({
   }, [activeSurface, iosShipExecution?.execution_id, iosShipExecution?.receipt_id,
     iosShipExecution?.status, workspace.openProjectId])
 
-  const statusClass = phase === 'failed' ? 'red' : (phase === 'proposal' || phase === 'empty' ? 'hollow' : 'live')
+  const statusClass = phase === 'failed' ? 'red' : (phase === 'proposal' || phase === 'empty' || phase === 'signed-out' ? 'hollow' : 'live')
+  // Pilot round 2 (try-canvas-shows-rooftop-while-copy-says-no-drawing): with
+  // no drawing mounted StageLayer still paints the site's sample rooftop
+  // (StageScene.jsx, intakeOverride null), so a signed-out bar that said
+  // 'No drawing' contradicted the canvas. Signed in with nothing mounted keeps
+  // 'No drawing' (live-service-surface.spec.mjs pins it). The header chip
+  // reads workspaceProjectState and stays 'Project None open': that is the
+  // workspace-project concept, not the drawing (workspaceProjectState.js).
+  const stageDrawingLabel = activeDrawingId || (sessionAuthRequired ? 'Sample rooftop (preview)' : 'No drawing')
+  // Pilot round 2 (try-run-chip-primary-while-inert): signed out with no
+  // drawing, nothing can run, so the bar carries a strip naming the one
+  // enabling action. Same handler as SessionGate's Explore the demo.
+  const barInert = sessionAuthRequired && !hasDrawing
+  const openSampleRooftop = useCallback(() => { window.location.href = '/try?demo=1' }, [])
   const productStates = productSurfaceStates({
     sessionActive: platformSession.status === 'active',
     hasDrawing,
@@ -1548,7 +1565,7 @@ export default function ToolCast({
   const commandBarBlock = (
       <div className={`tc-bar-wrap${focusView ? ' tc-focus-hidden' : ''}`} data-cast="tool" style={{ '--rank': 2 }}>
         <div
-          className={`tc-bar ${uploadDragActive ? 'upload-drag-active' : ''}`}
+          className={`tc-bar ${uploadDragActive ? 'upload-drag-active' : ''}${barInert ? ' tc-bar-inert' : ''}`}
           data-tour="command-bar"
           onDragEnter={(event) => { event.preventDefault(); setUploadDragActive(true) }}
           onDragOver={(event) => { event.preventDefault(); setUploadDragActive(true) }}
@@ -1563,6 +1580,18 @@ export default function ToolCast({
           }}
         >
           {uploadDragActive && <div className="tc-upload-drop" role="status">Drop a DWG or DXF to open it here</div>}
+          {/* Pilot round 2 (try-run-chip-primary-while-inert): the Run chip
+              is already disabled by the session rung, but its accent face
+              read as live. This strip names the enabling action; the quiet
+              face for .tc-bar-inert .tc-run lives in landing.css (record
+              R2B, not this one). */}
+          {barInert && (
+            <div className="strip-decision enter" role="status" data-testid="tc-bar-inert-strip">
+              <span className="dot hollow" aria-hidden="true" />
+              <span className="strip-sentence">Open the sample rooftop to run a request.<span className="dim"> Nothing runs while you are signed out.</span></span>
+              <button type="button" className="chip-act" onClick={openSampleRooftop}>Open the sample rooftop</button>
+            </div>
+          )}
           {routeError && (
             <div className="strip-decision enter error" role="alert">
               <span className="dot red" aria-hidden="true" />
@@ -1661,7 +1690,7 @@ export default function ToolCast({
             onDispatch={dispatchRequest}
             routing={routing}
             hintLane={route?.lane}
-            projectName={activeDrawingId || 'No drawing'}
+            projectName={stageDrawingLabel}
             routeActive={!!route}
             onOpenAuthor={() => setLeftView('author')}
             tools={tools}
@@ -1679,7 +1708,7 @@ export default function ToolCast({
             paletteActions={stagePaletteActions}
             commandLine
             classNames={STAGE_BAR_CLASSES}
-            projectSlot={<span className="bar-proj tc-bar-proj">{activeDrawingId || 'No drawing'}</span>}
+            projectSlot={<span className="bar-proj tc-bar-proj">{stageDrawingLabel}</span>}
             keycap={STAGE_BAR_KEYCAP}
             disabledReason={stageRunDisabledReason({
               sessionActive: platformSession.status === 'active',
@@ -1934,7 +1963,7 @@ export default function ToolCast({
               <SessionGate
                 configured={authConfigured}
                 onSignIn={signInWithCheckoutRelease}
-                onDemo={() => { window.location.href = '/try?demo=1' }}
+                onDemo={openSampleRooftop}
               />
             </>
           ) : sessionId ? (
@@ -2108,6 +2137,10 @@ export default function ToolCast({
             <span className="tc-event-text hot">{phaseLabel(phase)}</span>
             <span className="tc-event-time">now</span>
           </div>
+          {/* Pilot round 2 (try-pending-checklist-with-nothing-running): the
+              checklist only exists once there is a drawing or a job to report
+              on. Before that, one sentence instead of a queue of 'pending'. */}
+          {(hasDrawing || currentJobId || linkedJobId) ? (<>
           <div className="tc-event">
             <span className="dot" />
             <span className="tc-event-text">Panels preserved</span>
@@ -2123,6 +2156,12 @@ export default function ToolCast({
             <span className="tc-event-text">Version head</span>
             <span className="tc-event-time">v{version}</span>
           </div>
+          </>) : (
+          <div className="tc-event" data-testid="tc-events-empty">
+            <span className="dot hollow" />
+            <span className="tc-event-text">Your first run will show its steps here</span>
+          </div>
+          )}
         </div>
         {/* `previewLocked` closes the surface gap PR #409 filed and #410 only
             half-closed: #410 folded preview into `writeLocked`, so a TOOL run
