@@ -2,7 +2,7 @@
   "schema": "w4g-align/candidate-manifest.v1",
   "candidate": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "main": {"sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "older_open_prs": 0},
-  "staging": {"source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "identity_status": "ANONYMOUS", "ladder": [401, 200, 403]},
+  "staging": {"source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "identity_status": 401, "ladder": [401, 200, 403]},
   "baseline_proof": {"run": "baseline-fixture", "reds": ["spec.mjs:521:3 › existing red"]},
   "candidate_proof": {"run": "candidate-fixture", "reds": ["spec.mjs:521:3 › existing red"]},
   "start_board": {"rows": [{"name": "fixture start", "pass": true}]},

@@ -7,6 +7,7 @@ Receipt paths resolve beside the manifest, including the self-contained fixture.
 import argparse
 from datetime import datetime
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -53,18 +54,22 @@ def probe_gh_open_prs(candidate):
 def get_json(url):
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(request, timeout=15) as response:
+        if response.status != 200:
+            raise urllib.error.HTTPError(url, response.status, "unexpected status", {}, None)
         return json.load(response)
 
 
 def probe_health_sha(origin):
     health = get_json(origin + "/api/health")
+    if not isinstance(health.get("source_sha"), str) or not SHA.fullmatch(health["source_sha"]):
+        raise ValueError()
     result = {"source_sha": health["source_sha"]}
     if origin == STAGING:
         try:
-            identity = get_json(origin + "/api/identity")
-            result["identity_status"] = identity.get("status", "unreported")
+            get_json(origin + "/api/identity")
+            result["identity_status"] = "HTTP 200"
         except urllib.error.HTTPError as error:
-            result["identity_status"] = "ANONYMOUS" if error.code == 401 else str(error.code)
+            result["identity_status"] = 401 if error.code == 401 else f"HTTP {error.code}"
         except Exception as error:
             result["identity_status"] = type(error).__name__
     return result
@@ -76,39 +81,61 @@ def title(value):
 
 def clean(value):
     value = ANSI.sub("", str(value))
-    value = re.sub(r"(?i)Bearer\s+\S+", "[redacted]", value)
-    value = re.sub(r"eyJ[A-Za-z0-9_.-]*", "[redacted]", value)
-    value = re.sub(r"https?://\S+", "[url omitted]", value)
-    return " ".join(value.split())
+    return re.sub(r"[\x00-\x1f\x7f-\x9f]", "", value)
+
+
+class PathRefused(ValueError):
+    pass
+
+
+def local_path(value, directory):
+    def validate(text, absolute=False):
+        if text.startswith(("\\\\", "//")) or "://" in text:
+            raise PathRefused()
+        if absolute and not (re.fullmatch(r"[A-Za-z]:[\\/].*", text) if os.name == "nt"
+                             else text.startswith("/")):
+            raise PathRefused()
+
+    validate(str(value))
+    resolved = Path(value).expanduser()
+    validate(str(resolved))
+    if not resolved.is_absolute():
+        resolved = directory / resolved
+    validate(str(resolved.absolute()), absolute=True)
+    resolved = resolved.resolve()
+    validate(str(resolved), absolute=True)
+    return resolved
 
 
 def report(manifest, directory, live=True):
     results = []
-    secrets = []
+    secrets = set()
+    lines = []
 
-    def collect(value):
+    def collect(value, sensitive=False):
         if isinstance(value, dict):
             for key, item in value.items():
-                if re.search(r"token|jwt|password|secret|credential|authorization", key, re.I):
-                    if isinstance(item, str) and item:
-                        secrets.append(item)
-                else:
-                    collect(item)
+                collect(item, sensitive or bool(re.search(
+                    r"token|jwt|password|secret|credential|authorization|bearer|cookie", key, re.I)))
         elif isinstance(value, list):
             for item in value:
-                collect(item)
+                collect(item, sensitive)
+        elif sensitive and isinstance(value, str) and len(clean(value)) >= 4:
+            secrets.add(clean(value))
 
     collect(manifest)
 
     def safe(value):
-        value = str(value)
+        value = clean(value)
         for secret in sorted(secrets, key=len, reverse=True):
             value = value.replace(secret, "[redacted]")
-        return clean(value)
+        value = re.sub(r"(?i)[a-z][a-z0-9+.-]*://[^\s/?#]*@[^\s]*", "[redacted-url]", value)
+        value = re.sub(r"(?i)Bearer\s+\S+", "[redacted]", value)
+        value = re.sub(r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?![A-Za-z0-9_-])", "[redacted]", value)
+        return " ".join(value.split())[:400]
 
     def path(value):
-        resolved = Path(value).expanduser()
-        return resolved if resolved.is_absolute() else directory / resolved
+        return local_path(value, directory)
 
     def receipt(section):
         with path(manifest[section]["receipt"]).open(encoding="utf-8") as stream:
@@ -120,10 +147,14 @@ def report(manifest, directory, live=True):
         try:
             outcome, evidence = operation()
             status = outcome if isinstance(outcome, str) else "PASS" if outcome else "FAIL"
+        except PathRefused:
+            status, evidence = "PENDING", "path refused"
+        except urllib.error.HTTPError as error:
+            status, evidence = "PENDING", f"HTTP {error.code}"
         except Exception as error:
             status, evidence = "PENDING", type(error).__name__
         results.append(status)
-        print(f"{number:02d} {status} {name} :: {safe(evidence)}")
+        lines.append((number, status, name, evidence))
 
     candidate = manifest["candidate"]
 
@@ -133,12 +164,19 @@ def report(manifest, directory, live=True):
             count = probe_gh_open_prs(candidate) if live else manifest["main"]["older_open_prs"]
         except Exception as error:
             return "PENDING", f"main={sha} candidate={candidate}; gh {type(error).__name__}"
+        if live and (sha != candidate or type(count) is not int or count != 0):
+            return "PENDING", f"main={sha} candidate={candidate}; older_open_prs={count}"
         return sha == candidate and type(count) is int and count == 0, f"main={sha} candidate={candidate}; older_open_prs={count}"
 
     def staging_check():
         data = probe_health_sha(STAGING) if live else manifest["staging"]
         sha = data["source_sha"] if isinstance(data, dict) else data
         identity = data.get("identity_status", "unreported") if isinstance(data, dict) else "unreported"
+        if identity != 401:
+            detail = f"HTTP {identity}" if isinstance(identity, int) else identity
+            return "PENDING", f"served={sha} candidate={candidate}; identity={detail}"
+        if live and sha != candidate:
+            return "PENDING", f"served={sha} candidate={candidate}; identity={identity}"
         return sha == candidate, f"served={sha} candidate={candidate}; identity={identity}"
 
     def proof_check():
@@ -218,6 +256,9 @@ def report(manifest, directory, live=True):
     check(11, "auth ladder", auth_check)
     check(12, "hardening", hardening_check)
     check(13, "door PR", door_check)
+    # Collect all receipt secrets before emitting even the earliest evidence.
+    for number, status, name, evidence in lines:
+        print(f"{number:02d} {status} {safe(name)} :: {safe(evidence)}")
     items = manifest.get("operator_items", [])
     items = items if isinstance(items, list) else []
     print(f"14 OPERATOR operator items :: {len(items)} items")
@@ -246,7 +287,7 @@ def main(argv=None):
     parser.set_defaults(live=True)
     args = parser.parse_args(argv)
     try:
-        source = Path(args.manifest).expanduser().resolve()
+        source = local_path(args.manifest, Path.cwd())
         with source.open(encoding="utf-8") as stream:
             manifest = json.load(stream)
         if not isinstance(manifest, dict) or manifest.get("schema") != SCHEMA:
