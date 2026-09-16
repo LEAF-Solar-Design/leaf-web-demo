@@ -94,6 +94,13 @@ export function alternativeDecision(previous, name) {
     alternatives: (previous?.alternatives || []).filter((item) => item.tool !== name),
     stub: previous?.stub,
     stubReason: previous?.stubReason,
+    // Provenance survives the pick: a route picked from a demo stub's list is still
+    // demo-matched, so the disclosure keeps rendering (W4g #125). An outage stub's
+    // kind is deliberately NOT carried: RoutePanel keys its "routing unavailable"
+    // resolver on stubKind === 'outage', and a pick is a client-side decision the
+    // user just made, so carrying it would bounce them back to the list. stubReason
+    // is still copied above, so the outage cause is not lost.
+    ...(previous?.stubKind === 'demo' ? { stubKind: 'demo' } : {}),
     // Provenance survives the pick: an alternative from a slash route is
     // still slash-originated (P2 run.confirm_shown attribution).
     slash: previous?.slash,
