@@ -20,8 +20,9 @@
 // present, disabled, and say so (operator decision, W4e plan: mirror the
 // reference's eight Draw-tab panels).
 import { zoomViewer } from '../site/DrawingCockpit.jsx'
+import { RIBBON_TABS } from '../site/CockpitTopBand.jsx'
 import { DEFERRED_REASONS, REASONS, forCluster, ribbonTool } from './actionRegistry.js'
-import { isWriteTool, toolIcon, toolMcpSource, toolPlacementSize, toolPlacementTab } from './toolRecord.js'
+import { DEFAULT_TOOL_ICON, isWriteTool, toolIcon, toolMcpSource, toolPlacementSize, toolPlacementTab } from './toolRecord.js'
 
 // The reason vocabulary moved to the action registry with slice 10a, because
 // `when(ctx)` is the registry's half of the honesty contract this file's header
@@ -40,6 +41,139 @@ export const MAX_LAYER_TOOLS = 10
 // record now answers both, and a record that answers neither renders exactly as
 // it did — that equality is pinned in ribbonClusters.test.js.
 export const CATALOG_TOOL_NOTE_ALL_PLACED = 'Every catalog tool sits on its own ribbon tab.'
+
+// One fixed sentence per profile tool for its unavailable state. The caller
+// passes a handler or null, never reason text: a null handler renders the
+// tool disabled with the sentence below, so every profile record keeps a
+// literal `PROFILE_REASONS.key` the honesty-ladder gate can resolve.
+export const PROFILE_REASONS = Object.freeze({
+  openProject: 'Sign in to open a project',
+  changeProject: 'Sign in to change projects',
+  createProject: 'Project creation is unavailable in this session',
+  uploadDrawing: 'Drawing upload is unavailable in this session',
+  newConversation: 'Conversations need a signed-in session',
+  openJobs: 'The job monitor is unavailable in this session',
+  openReceipts: 'Receipts are unavailable in this session',
+  approvedRevision: 'No approved revision for this project yet',
+  appleReadiness: 'Apple readiness is not mounted',
+  testflightBuild: 'The ship lane is not ready; no launch control is available',
+  shipReceipts: 'No ship receipts yet',
+  stringingEmpty: 'No stringing tools in this catalog yet',
+  placementEmpty: 'No placement tools in this catalog yet',
+})
+
+const profileRecord = (value) => value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+// A handler is a function or nothing; any other value is treated as absent.
+const profileHandler = (value) => (typeof value === 'function' ? value : null)
+const profileBase = (id, label) => ({ id, label, icon: DEFAULT_TOOL_ICON, title: label })
+
+function profileGroup(id, label, tools) {
+  return { id, label, kind: 'group', tools }
+}
+
+/** Tab strips for the shared workspace profiles; drafting keeps its caller's panels. */
+export function profileRibbonTabs(profile, ctx = {}) {
+  const drafting = () => RIBBON_TABS.map((tab) => ({ ...tab, clusters: [] }))
+  if (profile !== 'solar' && profile !== 'project' && profile !== 'ship') return drafting()
+  const context = profileRecord(ctx)
+  const families = (Array.isArray(context.families) ? context.families : [])
+    .filter((family) => family && typeof family === 'object' && !Array.isArray(family))
+    .map((family) => ({
+      ...family,
+      family_id: typeof family.family_id === 'string' ? family.family_id : family.id,
+      capabilities: (Array.isArray(family.capabilities) ? family.capabilities : [])
+        .filter((tool) => tool && typeof tool === 'object' && !Array.isArray(tool) && typeof tool.name === 'string' && tool.name.trim()),
+    }))
+  const options = profileRecord(context.catalogOptions)
+  // The existing catalog projection owns every run gate and every reason;
+  // this only normalises the option shapes a caller could get wrong.
+  const catalogOptions = {
+    ...options,
+    onRequestRun: profileHandler(options.onRequestRun) ?? undefined,
+    onOpenFamily: profileHandler(options.onOpenFamily),
+    writeLockNote: typeof options.writeLockNote === 'string' ? options.writeLockNote : '',
+  }
+  if (profile === 'solar') {
+    const onRun = profileHandler(context.onRun)
+    const gate = {
+      ...catalogOptions,
+      writeEntitled: catalogOptions.writeEntitled ?? true,
+      onRequestRun: onRun ? (tool) => onRun(tool) : undefined,
+    }
+    const familyTools = (id) => {
+      const family = families.find((item) => item.family_id === id)
+      return family?.capabilities.length ? familyCluster(family, family.capabilities, gate, null).tools : null
+    }
+    // An absent or empty family is ONE honest disabled tool, never a fabricated command.
+    const stringing = familyTools('stringing') ?? [
+      { ...profileBase('stringing:empty', 'Stringing'), disabled: true, reason: PROFILE_REASONS.stringingEmpty, onClick: undefined },
+    ]
+    const placement = familyTools('placement') ?? [
+      { ...profileBase('placement:empty', 'Equipment placement'), disabled: true, reason: PROFILE_REASONS.placementEmpty, onClick: undefined },
+    ]
+    const tabs = drafting()
+    tabs.splice(1, 0, { id: 'solar', label: 'Solar', clusters: [
+      profileGroup('stringing', 'Stringing', stringing),
+      profileGroup('placement', 'Equipment placement', placement),
+    ] })
+    return tabs
+  }
+  if (profile === 'project') {
+    const project = profileRecord(context.project)
+    const onOpen = profileHandler(project.onOpen)
+    const onChange = profileHandler(project.onChange)
+    const onCreate = profileHandler(project.onCreate)
+    const onUpload = profileHandler(profileRecord(context.files).onUpload)
+    const onNew = profileHandler(profileRecord(context.conversation).onNew)
+    const activity = profileRecord(context.activity)
+    const onJobs = profileHandler(activity.onJobs)
+    const onReceipts = profileHandler(activity.onReceipts)
+    return [
+      { id: 'project', label: 'Project', clusters: [
+        profileGroup('project', 'Project', [
+          { ...profileBase('project:open', 'Open project'), disabled: !onOpen, reason: PROFILE_REASONS.openProject, onClick: onOpen ?? undefined },
+          { ...profileBase('project:change', 'Change project'), disabled: !onChange, reason: PROFILE_REASONS.changeProject, onClick: onChange ?? undefined },
+          { ...profileBase('project:create', 'Create project'), disabled: !onCreate, reason: PROFILE_REASONS.createProject, onClick: onCreate ?? undefined },
+        ]),
+        profileGroup('files', 'Files', [
+          { ...profileBase('files:upload', 'Upload drawing'), disabled: !onUpload, reason: PROFILE_REASONS.uploadDrawing, onClick: onUpload ?? undefined },
+        ]),
+        profileGroup('conversation', 'Conversation', [
+          { ...profileBase('conversation:new', 'New conversation'), disabled: !onNew, reason: PROFILE_REASONS.newConversation, onClick: onNew ?? undefined },
+        ]),
+      ] },
+      { id: 'tools', label: 'Tools', clusters: catalogClusters(families, catalogOptions) },
+      { id: 'activity', label: 'Activity', clusters: [
+        profileGroup('jobs', 'Jobs', [
+          { ...profileBase('activity:jobs', 'Open job monitor'), disabled: !onJobs, reason: PROFILE_REASONS.openJobs, onClick: onJobs ?? undefined },
+        ]),
+        profileGroup('receipts', 'Receipts', [
+          { ...profileBase('activity:receipts', 'Open receipts'), disabled: !onReceipts, reason: PROFILE_REASONS.openReceipts, onClick: onReceipts ?? undefined },
+        ]),
+      ] },
+    ]
+  }
+  const ship = profileRecord(context.ship)
+  const onLaunch = profileHandler(ship.onLaunch)
+  const onShipReceipts = profileHandler(ship.onReceipts)
+  return [{ id: 'ship', label: 'Ship', clusters: [
+    // Revision and readiness are status rows: no handler exists for them yet,
+    // so they stay disabled and say so rather than pretend to open anything.
+    profileGroup('revision', 'Revision', [
+      { ...profileBase('ship:revision', 'Approved revision'), disabled: true, reason: PROFILE_REASONS.approvedRevision, onClick: undefined },
+    ]),
+    profileGroup('readiness', 'Readiness', [
+      { ...profileBase('ship:readiness', 'Mounted Apple readiness'), disabled: true, reason: PROFILE_REASONS.appleReadiness, onClick: undefined },
+    ]),
+    // Without a launch handler there is no launch path, and the tool never implies one.
+    profileGroup('ship', 'Ship', [
+      { ...profileBase('ship:launch', 'TestFlight build'), disabled: !onLaunch, reason: PROFILE_REASONS.testflightBuild, onClick: onLaunch ?? undefined },
+    ]),
+    profileGroup('receipts', 'Receipts', [
+      { ...profileBase('ship:receipts', 'Open ship receipts'), disabled: !onShipReceipts, reason: PROFILE_REASONS.shipReceipts, onClick: onShipReceipts ?? undefined },
+    ]),
+  ] }]
+}
 
 /**
  * The catalog families of the active surface as `family` clusters — the

@@ -6,15 +6,18 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import { DEFERRED_REASONS } from './actionRegistry.js'
+import { RIBBON_TABS } from '../site/CockpitTopBand.jsx'
 import {
   CATALOG_TOOL_NOTE_ALL_PLACED,
   MAX_LAYER_TOOLS,
+  PROFILE_REASONS,
   REASONS,
   RIBBON_RATIONALE,
   authorCluster,
   catalogClusters,
   catalogTabClusters,
   layersCluster,
+  profileRibbonTabs,
   railCluster,
   referencePanels,
   versionCluster,
@@ -41,6 +44,149 @@ const FAMS = [
 function toolsOf(cluster) {
   return Object.fromEntries(cluster.tools.map((t) => [t.id, t]))
 }
+
+describe('profileRibbonTabs', () => {
+  it('keeps the drafting tab order and reasons, with caller-owned clusters', () => {
+    expect(profileRibbonTabs('drafting')).toEqual(RIBBON_TABS.map((tab) => ({ ...tab, clusters: [] })))
+    for (const profile of ['unknown', null, undefined, {}, ['solar'], 7]) {
+      expect(profileRibbonTabs(profile)).toEqual(profileRibbonTabs('drafting'))
+    }
+  })
+
+  it('inserts Solar after Draw with one honest disabled tool per empty family', () => {
+    for (const families of [undefined, [], [{ family_id: 'stringing', capabilities: [] }, { id: 'placement', capabilities: [] }]]) {
+      const tabs = profileRibbonTabs('solar', { families })
+      expect(tabs.map((tab) => tab.id)).toEqual(['draw', 'solar', 'model', 'insert', 'annotate', 'view', 'manage'])
+      expect(tabs.filter((tab) => tab.id !== 'solar')).toEqual(profileRibbonTabs('drafting'))
+      expect(tabs[1].clusters.map(({ id, label, kind }) => ({ id, label, kind }))).toEqual([
+        { id: 'stringing', label: 'Stringing', kind: 'group' },
+        { id: 'placement', label: 'Equipment placement', kind: 'group' },
+      ])
+      for (const cluster of tabs[1].clusters) {
+        expect(cluster.tools).toHaveLength(1)
+        expect(cluster.tools[0]).toMatchObject({ id: `${cluster.id}:empty`, disabled: true, reason: `No ${cluster.id} tools in this catalog yet` })
+        expect(cluster.tools[0].onClick).toBeUndefined()
+      }
+      expect(tabs[1].clusters.map((cluster) => cluster.tools[0].reason)).toEqual([PROFILE_REASONS.stringingEmpty, PROFILE_REASONS.placementEmpty])
+    }
+  })
+
+  it('uses the catalog tool projection and gates for real solar families', () => {
+    const onRun = vi.fn()
+    const read = { name: 'string-panels', label: 'String panels', icon: 'layers', description: 'Read panel strings.', placement: { tab: 'draw', size: 'row' } }
+    const write = { name: 'place-inverter', capabilities: ['drawing.write'] }
+    const families = [
+      { family_id: 'stringing', label: 'Strings', capabilities: [read] },
+      { id: 'placement', label: 'Placement', capabilities: [write] },
+    ]
+    const ctx = { families, onRun, catalogOptions: { writeLocked: true, writeLockNote: 'Held by another editor' } }
+    const [stringing, placement] = profileRibbonTabs('solar', ctx)[1].clusters
+    expect(stringing.tools[0]).toMatchObject({ id: read.name, label: read.name, text: read.label, icon: 'layers', size: 'row', title: read.description, disabled: false, reason: '' })
+    stringing.tools[0].onClick()
+    expect(onRun).toHaveBeenCalledTimes(1)
+    expect(onRun).toHaveBeenCalledWith(read)
+    expect(placement.tools[0]).toMatchObject({ disabled: true, write: true, reason: 'Held by another editor' })
+    expect(profileRibbonTabs('solar', { ...ctx, catalogOptions: { running: true } })[1].clusters[0].tools[0].reason).toBe(REASONS.running)
+    // The records are the catalog projection's own: a tool that names its own
+    // tab still seats on Solar (the family is the home), and a write tool is
+    // gated by the same entitlement rung with the same reason.
+    const unentitled = profileRibbonTabs('solar', { families, onRun, catalogOptions: { writeEntitled: false } })[1].clusters
+    expect(unentitled[0].tools[0]).toMatchObject({ id: read.name, disabled: false, reason: '' })
+    expect(unentitled[1].tools[0]).toMatchObject({ id: write.name, write: true, disabled: true, reason: REASONS.writeUnentitled })
+  })
+
+  it('wires project, file, conversation, activity and catalog handlers', () => {
+    const handlers = Array.from({ length: 8 }, () => vi.fn())
+    const [onOpen, onChange, onCreate, onUpload, onNew, onJobs, onReceipts, onRequestRun] = handlers
+    const tabs = profileRibbonTabs('project', {
+      project: { onOpen, onChange, onCreate }, files: { onUpload }, conversation: { onNew },
+      activity: { onJobs, onReceipts }, families: FAMS, catalogOptions: { onRequestRun },
+    })
+    expect(tabs.map(({ id, label }) => [id, label])).toEqual([['project', 'Project'], ['tools', 'Tools'], ['activity', 'Activity']])
+    expect(tabs[0].clusters.map((cluster) => cluster.label)).toEqual(['Project', 'Files', 'Conversation'])
+    expect(tabs[2].clusters.map((cluster) => cluster.label)).toEqual(['Jobs', 'Receipts'])
+    const commands = [...tabs[0].clusters, ...tabs[2].clusters].flatMap((cluster) => cluster.tools)
+    expect(commands.map((tool) => tool.label)).toEqual(['Open project', 'Change project', 'Create project', 'Upload drawing', 'New conversation', 'Open job monitor', 'Open receipts'])
+    commands.forEach((tool) => { expect(tool.disabled).toBe(false); tool.onClick() })
+    handlers.slice(0, 7).forEach((handler) => expect(handler).toHaveBeenCalledTimes(1))
+    const withoutClicks = (clusters) => clusters.map((cluster) => ({ ...cluster, tools: cluster.tools.map(({ onClick, ...tool }) => tool) }))
+    expect(withoutClicks(tabs[1].clusters)).toEqual(withoutClicks(catalogClusters(FAMS, { onRequestRun })))
+    tabs[1].clusters[0].tools[0].onClick()
+    expect(onRequestRun).toHaveBeenCalledWith(FAMS[0].capabilities[0], null, RIBBON_RATIONALE, 'ribbon')
+  })
+
+  it('disables missing or invalid project handlers with the fixed profile reasons', () => {
+    const tabs = profileRibbonTabs('project', {
+      project: { onOpen: null, onChange: false, onCreate: 'create' },
+      files: {}, conversation: { onNew: 7 }, activity: { onJobs: {}, onReceipts: [] }, families: [],
+    })
+    const tools = [...tabs[0].clusters, ...tabs[2].clusters].flatMap((cluster) => cluster.tools)
+    expect(tools.map((tool) => tool.reason)).toEqual([
+      PROFILE_REASONS.openProject, PROFILE_REASONS.changeProject, PROFILE_REASONS.createProject,
+      PROFILE_REASONS.uploadDrawing, PROFILE_REASONS.newConversation, PROFILE_REASONS.openJobs, PROFILE_REASONS.openReceipts,
+    ])
+    for (const tool of tools) {
+      expect(tool).toMatchObject({ disabled: true, icon: 'toolbox', title: tool.label })
+      expect(tool.onClick).toBeUndefined()
+    }
+    // Reason text is fixed per tool; ctx cannot override it.
+    const overridden = profileRibbonTabs('project', { project: { onOpen: null, reasons: { open: 'Custom' } }, files: { reason: 'Custom' } })
+    expect(overridden[0].clusters[0].tools[0].reason).toBe(PROFILE_REASONS.openProject)
+    expect(overridden[0].clusters[1].tools[0].reason).toBe(PROFILE_REASONS.uploadDrawing)
+    expect(overridden[1].clusters).toEqual(catalogClusters([]))
+  })
+
+  it('keeps ship statuses honest and enables only real launch and receipt handlers', () => {
+    const onLaunch = vi.fn()
+    const onReceipts = vi.fn()
+    const [tab] = profileRibbonTabs('ship', { ship: { onLaunch, onReceipts } })
+    expect([tab.id, tab.label]).toEqual(['ship', 'Ship'])
+    expect(tab.clusters.map((cluster) => cluster.label)).toEqual(['Revision', 'Readiness', 'Ship', 'Receipts'])
+    const tools = tab.clusters.flatMap((cluster) => cluster.tools)
+    expect(tools.map((tool) => tool.label)).toEqual(['Approved revision', 'Mounted Apple readiness', 'TestFlight build', 'Open ship receipts'])
+    // The two status rows have no handler to bind yet: disabled, and they say so.
+    expect(tools.slice(0, 2).map((tool) => [tool.disabled, tool.reason, tool.onClick])).toEqual([
+      [true, PROFILE_REASONS.approvedRevision, undefined], [true, PROFILE_REASONS.appleReadiness, undefined],
+    ])
+    expect(tools[2].disabled).toBe(false)
+    tools[2].onClick()
+    expect(onLaunch).toHaveBeenCalledTimes(1)
+    tools[3].onClick()
+    expect(onReceipts).toHaveBeenCalledTimes(1)
+    // No launch handler: no launch path is implied.
+    const [, , launch, receipts] = profileRibbonTabs('ship', { ship: { onLaunch: 'go', launchReason: 'ignored' } })[0].clusters.map((cluster) => cluster.tools[0])
+    expect(launch).toMatchObject({ disabled: true, reason: PROFILE_REASONS.testflightBuild })
+    expect(launch.onClick).toBeUndefined()
+    expect(receipts).toMatchObject({ disabled: true, reason: PROFILE_REASONS.shipReceipts })
+    expect(receipts.onClick).toBeUndefined()
+  })
+
+  it('freezes one plain sentence per profile tool', () => {
+    expect(Object.isFrozen(PROFILE_REASONS)).toBe(true)
+    for (const sentence of Object.values(PROFILE_REASONS)) {
+      expect(typeof sentence).toBe('string')
+      expect(sentence.length).toBeGreaterThanOrEqual(12)
+    }
+  })
+
+  it('handles absent and malformed context without inventing enabled commands', () => {
+    for (const ctx of [undefined, null, false, 42, 'context', [], {
+      project: null, files: [], conversation: false, activity: 'jobs', ship: { onLaunch: true, launchReason: {} },
+      catalogOptions: { onRequestRun: 'run', onOpenFamily: true, writeLockNote: {} },
+      families: [null, false, [], { id: 'stringing', capabilities: {} }, { id: 'placement', capabilities: [null, {}, false] }],
+    }]) {
+      for (const profile of ['drafting', 'solar', 'project', 'ship']) {
+        const tabs = profileRibbonTabs(profile, ctx)
+        for (const tool of tabs.flatMap((tab) => tab.clusters.flatMap((cluster) => cluster.tools))) {
+          expect(tool.disabled).toBe(true)
+          expect(typeof tool.reason).toBe('string')
+          expect(tool.reason.length).toBeGreaterThan(0)
+          expect(tool.onClick).toBeUndefined()
+        }
+      }
+    }
+  })
+})
 
 describe('catalogClusters', () => {
   it('maps one family cluster per family and arms the catalog run path with ribbon attribution', () => {
