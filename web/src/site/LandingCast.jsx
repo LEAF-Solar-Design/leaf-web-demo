@@ -16,7 +16,10 @@ export function enterWorkspace() {
 }
 
 export function enterDemo() {
-  navigate('/try?demo=1')
+  // Full navigation, not the SPA router: the demo flag is read once at boot
+  // (demoState.js, drawingIdentity.js), so a client-side route change leaves
+  // the signed-out live shell mounted with the query ignored.
+  window.location.assign('/try?demo=1')
 }
 
 const SHEETS = [
