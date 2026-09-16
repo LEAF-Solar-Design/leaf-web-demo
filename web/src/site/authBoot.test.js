@@ -6,11 +6,24 @@
 // and every other path booted the console immediately, which is what put the
 // API burst in front of the token write.
 
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { bootWantsApp, shouldDeferForAuthCallback } from './authBoot.js'
 
 const CALLBACK = '?code=abc&state=xyz'
+
+// The one-shell rail is read ONCE at module evaluation (runtimeFlags.js), so
+// each rail state needs a fresh module graph: mock the flag module the way
+// authBoot.js reads it, then import a new authBoot instance behind it.
+async function bootWantsAppWithRail(enabled) {
+  vi.resetModules()
+  vi.doMock('../lib/runtimeFlags.js', () => ({
+    ONE_SHELL_ENABLED: enabled,
+    readOneShellEnabled: () => enabled,
+  }))
+  const mod = await import('./authBoot.js')
+  return mod.bootWantsApp
+}
 
 describe('auth callback deferral', () => {
   it('defers on the origin landing the SPA actually redirects to', () => {
@@ -49,6 +62,7 @@ describe('console boot back-compat', () => {
   })
 
   it('keeps /try on the stage for the surface-scoped params', () => {
+    // No runtime flags in this environment, so the one-shell rail reads OFF.
     expect(bootWantsApp('?demo=1', '/try')).toBe(false)
     expect(bootWantsApp('?ops=1', '/try')).toBe(false)
     expect(bootWantsApp(CALLBACK, '/try')).toBe(false)
@@ -57,5 +71,42 @@ describe('console boot back-compat', () => {
   it('falls through to path routing on a malformed search', () => {
     expect(bootWantsApp('%', '/')).toBe(false)
     expect(bootWantsApp('', '/')).toBe(false)
+  })
+})
+
+describe('one-shell demo entry', () => {
+  afterEach(() => {
+    vi.doUnmock('../lib/runtimeFlags.js')
+    vi.resetModules()
+  })
+
+  it('boots the forwarded /try?demo=1 into the cockpit demo with the rail on', async () => {
+    const wantsApp = await bootWantsAppWithRail(true)
+    expect(wantsApp('?demo=1', '/try')).toBe(true)
+    // The landing's own Try button target, unchanged by the rail.
+    expect(wantsApp('?demo=1', '/app')).toBe(true)
+  })
+
+  it('keeps /try?demo=1 on the stage with the rail off', async () => {
+    const wantsApp = await bootWantsAppWithRail(false)
+    expect(wantsApp('?demo=1', '/try')).toBe(false)
+    expect(wantsApp('?demo=1', '/app')).toBe(true)
+  })
+
+  it('only the literal demo=1 on /try counts, whatever the rail says', async () => {
+    for (const enabled of [true, false]) {
+      const wantsApp = await bootWantsAppWithRail(enabled)
+      expect({ enabled, bare: wantsApp('', '/try') }).toEqual({ enabled, bare: false })
+      expect({ enabled, off: wantsApp('?demo=0', '/try') }).toEqual({ enabled, off: false })
+      expect({ enabled, tour: wantsApp('?demo=tour', '/try') }).toEqual({ enabled, tour: false })
+      expect({ enabled, ops: wantsApp('?ops=1', '/try') }).toEqual({ enabled, ops: false })
+      expect({ enabled, callback: wantsApp(CALLBACK, '/try') }).toEqual({ enabled, callback: false })
+    }
+  })
+
+  it('never throws on a malformed search with the rail on', async () => {
+    const wantsApp = await bootWantsAppWithRail(true)
+    expect(wantsApp('%', '/try')).toBe(false)
+    expect(wantsApp('%', '/')).toBe(false)
   })
 })
