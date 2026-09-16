@@ -2789,7 +2789,7 @@ export default function App() {
     return () => { live = false }
   }, [mock, openProjectId, canonicalVersionId])
   // Readiness follows the engine projection that reached the canvas, not openBytes.
-  const solarReady = activeSurface === 'solar' && !!activeIntake
+  const solarReady = surfaceSlots.toolbar.profile === 'solar' && !!activeIntake
     && engineDocument?.documentId === activeIntake.documentId
     && (engineDocument.documentOrigin === 'starter' || engineDocument.documentOrigin === 'head')
   const surfaceStates = useMemo(() => productSurfaceStates({

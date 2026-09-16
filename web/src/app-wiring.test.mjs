@@ -24,10 +24,11 @@ describe('C-04C Solar shown-document readiness', () => {
   const start = appSource.indexOf('  const solarReady =')
   const end = appSource.indexOf('  const surfaceStates =', start)
   const derivation = appSource.slice(start, end)
-  const ready = (activeIntake, engineDocument = null, activeSurface = 'solar', solarStarter = 'idle') => {
+  const ready = (activeIntake, engineDocument = null, profile = 'solar', solarStarter = 'idle') => {
     assert.ok(start >= 0 && end > start)
-    return new Function('activeIntake', 'engineDocument', 'activeSurface', 'solarStarter',
-      `${derivation}\nreturn solarReady`)(activeIntake, engineDocument, activeSurface, solarStarter)
+    const surfaceSlots = { toolbar: { profile } }
+    return new Function('activeIntake', 'engineDocument', 'surfaceSlots', 'solarStarter',
+      `${derivation}\nreturn solarReady`)(activeIntake, engineDocument, surfaceSlots, solarStarter)
   }
 
   it('C-04C row5 opener open without onShown remains not ready', () => {
@@ -48,7 +49,8 @@ describe('C-04C Solar shown-document readiness', () => {
     assert.equal(ready(intake), false)
     assert.equal(ready(intake, { ...document, documentId: 'other.dxf' }), false)
     assert.equal(ready(intake, { ...document, documentOrigin: null }), false)
-    assert.match(derivation, /activeSurface === 'solar'/)
+    assert.match(derivation, new RegExp(String.raw`surfaceSlots\.toolbar\.profile === 'solar'`))
+    assert.doesNotMatch(derivation, /activeSurface/)
     assert.match(derivation, /!!activeIntake/)
     assert.ok(derivation.includes('engineDocument?.documentId === activeIntake.documentId'))
     assert.ok(derivation.includes("engineDocument.documentOrigin === 'starter'"))
