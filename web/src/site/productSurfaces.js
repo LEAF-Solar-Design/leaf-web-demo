@@ -349,7 +349,7 @@ export const PRODUCT_SURFACES = Object.freeze([
     eyebrow: 'Leaf Automation template',
     title: 'Apply the Leaf Automation solar tool set',
     description: 'Start from a versioned solar template with standards, catalog tools, and project-owned versions.',
-    familyIds: Object.freeze(['stringing', 'placement']),
+    familyIds: Object.freeze(['stringing', 'placement', 'measurement', 'selection']),
     contract: deepFreeze({
       // ground: SurfaceGrounds.jsx:106 DRAWING_SURFACES includes 'solar'.
       ground: 'drawing',
@@ -384,7 +384,7 @@ export const PRODUCT_SURFACES = Object.freeze([
       toolbar: {
         profile: 'solar',
         ribbon: true, // App.jsx:2898
-        home: 'draw', // App.jsx:2234
+        home: 'solar', // Selected on profile entry; later tab choices stay local.
         quick: null,
       },
       rails: {

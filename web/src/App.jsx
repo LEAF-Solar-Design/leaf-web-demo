@@ -19,7 +19,7 @@ import DraftingRibbon from './site/DraftingRibbon.jsx'
 import PropertiesDock, { drawingExtents } from './site/PropertiesDock.jsx'
 import { familiesForSurface, familyMonogram } from './lib/surfaceRails.js'
 import { byId, ladderListener, slashCommandHandlers } from './lib/actionRegistry.js'
-import { REASONS, RIBBON_RATIONALE, profileRibbonTabs, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels } from './lib/ribbonClusters.js'
+import { REASONS, RIBBON_RATIONALE, profileRibbonTabs, profileEntryTab, solarRouteStatus, solarRouteDisplay, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels } from './lib/ribbonClusters.js'
 import { isWriteTool } from './lib/toolRecord.js'
 import { resolvePublishedCatalogTool } from './site/publishedCatalogTool.js'
 import { entityGeometry } from './lib/entityMetrics.js'
@@ -1139,6 +1139,7 @@ export default function App() {
   // would move the server head under them, so it is refused with the reason
   // until the drafter saves or discards.
   const [engineDirty, setEngineDirty] = useState(false)
+  const [engineDocument, setEngineDocument] = useState(null)
   const [solarStarterRetryKey, setSolarStarterRetryKey] = useState(0)
   const [solarStarter, setSolarStarter] = useState('idle')
   // The same fact as a ref, for the EXECUTION-time check in onRun: a confirm
@@ -2740,24 +2741,37 @@ export default function App() {
   //  - never over a version preview or a mutated head (StageLayer:107
   //    precedent) - a delete-panel run makes v2 and the routes go stale.
   const [demoSolveRoutes, setDemoSolveRoutes] = useState(null)
+  const [demoSolveState, setDemoSolveState] = useState('pending')
+  const [showSolarStrings, setShowSolarStrings] = useState(true)
   const intakeIsRooftopSample = String(intake?.dwg || '').replace(/\\/g, '/').endsWith('/rooftop_demo.dwg')
   const solarStringsEligible = !!studioGround && surfaceSlots.groundMaterial.solarStrings && mock
     && !isEditFixture && DRAWING_SOURCE === 'rooftop_demo' && intakeIsRooftopSample
   useEffect(() => {
-    if (!solarStringsEligible || demoSolveRoutes) return undefined
+    if (!solarStringsEligible || demoSolveState !== 'pending') return undefined
     let live = true
     loadDemoSolve().then((solve) => {
-      if (!live || !Array.isArray(solve?.strings)) return
-      setDemoSolveRoutes(solve.strings
+      if (!live) return
+      const routes = (Array.isArray(solve?.strings) ? solve.strings : [])
         .filter((route) => Array.isArray(route.pts) && route.pts.length >= 2)
-        .map((route) => ({ id: route.id, pts: route.pts })))
-    }).catch(() => { /* no solve, no overlay - never a fabricated route */ })
+        .map((route) => ({ id: route.id, pts: route.pts }))
+      setDemoSolveRoutes(routes)
+      setDemoSolveState(routes.length ? 'loaded' : 'empty')
+    }).catch(() => {
+      if (live) setDemoSolveState('failed')
+    })
     return () => { live = false }
-  }, [solarStringsEligible, demoSolveRoutes])
-  const solarStringRoutes = useMemo(() => {
-    if (!solarStringsEligible || previewing || (drawingState?.head ?? 1) > 1) return undefined
-    return demoSolveRoutes || undefined
-  }, [solarStringsEligible, previewing, drawingState, demoSolveRoutes])
+  }, [solarStringsEligible, demoSolveState])
+  const solarRoutesStatus = solarRouteStatus({
+    eligible: solarStringsEligible, previewing, head: drawingState?.head ?? 1,
+    engineDirty,
+    documentId: activeIntake?.documentId ?? null,
+    committedVersion: engineDocument?.committedVersion ?? null,
+    headDocumentId: `${REQUESTED_DRAWING_ID}-v1.dxf`,
+    solve: demoSolveState, routes: demoSolveRoutes,
+  })
+  const solarStringRoutes = useMemo(() => solarRouteDisplay({
+    status: solarRoutesStatus, shown: showSolarStrings, routes: demoSolveRoutes,
+  }), [solarRoutesStatus, showSolarStrings, demoSolveRoutes])
   // iOS ship-lane readiness contract (leaf.ios-ship-surface.v1). Fetched only
   // with the surface flag baked on and a concrete project + revision; every
   // other case stays null, which IosSurface renders truthfully as
@@ -2832,6 +2846,8 @@ export default function App() {
     const openJobs = () => setJobRailExpanded(true)
     return profileRibbonTabs(surfaceSlots.toolbar.profile, {
       families: railFamilies,
+      solar: { status: solarRoutesStatus, shown: showSolarStrings, onToggle: () => setShowSolarStrings((shown) => !shown) },
+      selectedHandle, onClearSelection: () => setSelectedHandle(null),
       onRun: (tool) => onRequestCatalogRun(tool, null, RIBBON_RATIONALE, 'ribbon'),
       catalogOptions: {
         onRequestRun: onRequestCatalogRun,
@@ -2860,12 +2876,16 @@ export default function App() {
   }, [surfaceSlots.toolbar.profile, railFamilies, onRequestCatalogRun, setFamilyOpen,
     running, previewing, writeLocked, canRunWrite, engineDirty, mock, signedIn, projectsErr,
     orgId, projectBusy, onCreateProject, agentDisabled, routing, clearAgentSession,
-    openAgentMode, jobs.length, iosContract?.receipt_id, setNavExpanded, setJobRailExpanded])
-  const activeRibbonTab = profileTabs.some((tab) => tab.id === ribbonTab)
-    ? ribbonTab : surfaceSlots.toolbar.home
+    openAgentMode, jobs.length, iosContract?.receipt_id, setNavExpanded, setJobRailExpanded,
+    solarRoutesStatus, showSolarStrings, selectedHandle])
+  const previousRibbonProfile = useRef(null)
+  const entryRibbonTab = profileEntryTab(previousRibbonProfile.current, surfaceSlots.toolbar.profile, ribbonTab, surfaceSlots.toolbar.home)
+  const activeRibbonTab = profileTabs.some((tab) => tab.id === entryRibbonTab)
+    ? entryRibbonTab : surfaceSlots.toolbar.home
   useEffect(() => {
+    previousRibbonProfile.current = surfaceSlots.toolbar.profile
     if (ribbonTab !== activeRibbonTab) setRibbonTab(activeRibbonTab)
-  }, [ribbonTab, activeRibbonTab])
+  }, [ribbonTab, activeRibbonTab, surfaceSlots.toolbar.profile])
 
   const ribbon = useMemo(() => {
     if (!studioShell) {
@@ -2986,6 +3006,10 @@ export default function App() {
     // the end without a portal; the deviation is deliberate and named in
     // the W4g-5c PR, with the parity re-measure owed.
     const byTab = {
+      solar: (profileTabs.find((tab) => tab.id === 'solar')?.clusters || []).map((cluster) => cluster.id === 'solar-panels'
+        ? { ...cluster, extra: ENV_CAD_EDIT ? <div id="cockpit-solar-panels-slot" className="ribbon-slot" /> : null,
+          note: ENV_CAD_EDIT ? null : 'Panel placement needs the browser engine' }
+        : cluster),
       // The Clipboard panel stays LAST, where the reference puts it. With
       // the flag ON it is an EMPTY cluster carrying a slot div, and the
       // engine consumer portals the real tools into it; with the flag off
@@ -3173,7 +3197,7 @@ export default function App() {
     }
   }
   const engineScope = (node) => (ENV_CAD_EDIT ? (
-    <EngineSessionProvider saveTarget={engineSaveTarget} onSaved={onEngineSaved} onDirtyChange={onEngineDirtyChange} onBeforeEdit={closeStartForChange} onBeforeArm={onBeforeArm}>{node}</EngineSessionProvider>
+    <EngineSessionProvider saveTarget={engineSaveTarget} onSaved={onEngineSaved} onDirtyChange={onEngineDirtyChange} onDocumentChange={setEngineDocument} onBeforeEdit={closeStartForChange} onBeforeArm={onBeforeArm}>{node}</EngineSessionProvider>
   ) : node)
 
   return (
@@ -3627,7 +3651,7 @@ export default function App() {
                 <EngineRibbonClusters
                   importOpen={importOpen}
                   onToggleImport={() => { returnToDrawing(); setImportOpen((o) => !o) }}
-                  panels={activeRibbonTab === 'insert' ? ['file'] : activeRibbonTab === 'draw' ? ['draw', 'modify', 'annotation', 'block', 'clipboard', 'properties', 'groups'] : activeRibbonTab === 'view' ? ['script'] : []}
+                  panels={activeRibbonTab === 'solar' ? ['solar-panels'] : activeRibbonTab === 'insert' ? ['file'] : activeRibbonTab === 'draw' ? ['draw', 'modify', 'annotation', 'block', 'clipboard', 'properties', 'groups'] : activeRibbonTab === 'view' ? ['script'] : []}
                 />
               )}
               {/* W4f slice B: the command line's typed words (LINE, C, MOVE ...)

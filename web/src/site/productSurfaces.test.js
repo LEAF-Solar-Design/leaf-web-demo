@@ -204,7 +204,7 @@ const CONTRACT_FIXTURE = {
     // fixed value. stageBranch stays 'frame': the stage genuinely diverges
     // from the console here (D1), and this pass did not touch the stage.
     chrome: { shell: 'cockpit', productFrame: false, workspaceCard: true, cockpit: true, stageBranch: 'frame', projectSlot: null, tab: true },
-    toolbar: { profile: 'solar', ribbon: true, home: 'draw', quick: null },
+    toolbar: { profile: 'solar', ribbon: true, home: 'solar', quick: null },
     rails: { left: 'spine', right: 'job-spine', dock: ['layers', 'drawing', 'selection', 'plan'] },
     groundMaterial: { layerAccent: 'solar', solarStrings: true },
     commandLine: true,
@@ -377,7 +377,7 @@ describe('Surface Contract — schema', () => {
     // A contract edit must never reshape the presentation record beside it.
     expect(Object.keys(productSurface('cad')).sort())
       .toEqual(['contract', 'description', 'eyebrow', 'familyIds', 'id', 'label', 'title'])
-    expect(productSurface('solar').familyIds).toEqual(['stringing', 'placement'])
+    expect(productSurface('solar').familyIds).toEqual(['stringing', 'placement', 'measurement', 'selection'])
     expect(productSurface('cad').familyIds).toBe(null)
   })
 

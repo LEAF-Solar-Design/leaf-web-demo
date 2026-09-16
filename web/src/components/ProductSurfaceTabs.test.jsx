@@ -103,11 +103,12 @@ describe('F-7: surface frames render the live tenant catalog', () => {
     expect(after).not.toBe(before)
   })
 
-  it('solar features the stringing and placement families, not the whole catalog', () => {
+  it('solar features the stringing, placement, measurement and selection families', () => {
     render(frame('solar', catalogA))
     const live = screen.getByTestId('surface-capabilities-live')
     expect(live.textContent).toContain('String autofill')
-    expect(live.textContent).not.toContain('Count by layer')
+    // C-04B adds measurement and selection to Solar's featured families.
+    expect(live.textContent).toContain('Count by layer')
   })
 
   it('ios presents the whole tenant catalog (a build ships the full tool set)', () => {
@@ -118,12 +119,13 @@ describe('F-7: surface frames render the live tenant catalog', () => {
   })
 
   it('an empty featured set says so honestly and still reports the live catalog', () => {
+    // C-04B includes measurement and selection in Solar, so only a non-Solar family leaves this set empty.
     const noSolar = { families: [
-      { family_id: 'measurement', label: 'Measurement', capabilities: [{ name: 'count-by-layer', label: 'Count by layer' }] },
+      { family_id: 'custom', label: 'Custom', capabilities: [{ name: 'custom-tool', label: 'Custom tool' }] },
     ] }
     render(frame('solar', noSolar))
     const live = screen.getByTestId('surface-capabilities-live')
-    expect(live.textContent).toContain('No stringing or placement tools are registered')
+    expect(live.textContent).toContain('No stringing or placement or measurement or selection tools are registered')
     expect(live.textContent).toContain('1 family · 1 capabilities live')
   })
 

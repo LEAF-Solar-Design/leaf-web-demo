@@ -157,9 +157,12 @@ describe('W4g-4b MATCHPROP', () => {
     expect(rec.panel).toBe('properties')
     expect(rec.icon).toBe('match')
     // W4g-7b-03c: setColor/setLinetype/setLineweight join matchprop in the
-    // Properties panel; every other Modify record still sits in its own.
+    // Properties panel; the remaining Modify records use their operation seats.
     const propertiesOps = new Set(['matchprop', 'setColor', 'setLinetype', 'setLineweight'])
-    for (const a of forGroup('modify')) if (!propertiesOps.has(a.op)) expect(a.panel).toBe('modify')
+    // C-04B seats Panel placement's draw/modify ops in solar-panels while preserving their arming groups.
+    const solarModifyIds = ['solar-panels:arrayRect', 'solar-panels:move', 'solar-panels:rotate']
+    expect(forGroup('modify').filter((a) => a.panel === 'solar-panels').map((a) => a.id)).toEqual(solarModifyIds)
+    for (const a of forGroup('modify')) if (!propertiesOps.has(a.op)) expect(a.panel).toBe(solarModifyIds.includes(a.id) ? 'solar-panels' : 'modify')
     expect(PROMPTS.matchprop.steps.map((s) => s.ask)).toEqual(['Select destination object:'])
     expect(PROMPTS.createPoint.steps.map((s) => s.ask)).toEqual(['Specify a point:', 'Layer:'])
     expect(PROMPTS.createEllipse.steps.map((s) => s.ask)).toEqual(['Specify center of ellipse:', 'Specify endpoint of axis:', 'Specify ratio (minor to major, 0 to 1):', 'Layer:'])

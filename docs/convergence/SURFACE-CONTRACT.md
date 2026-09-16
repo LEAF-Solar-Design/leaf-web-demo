@@ -116,13 +116,24 @@ the `/sheets` arm, added by slice 5b and read off `SiteRoot.jsx` / `SheetsPage.j
 | `chrome.stageBranch` | `frame` | `cad` | `frame` | `ios` | `null` |
 | `chrome.projectSlot` | `null` | `null` | `null` | `ios-surface` | `null` |
 | `toolbar.ribbon` | `false` | `true` | `true` | `false` | `false` |
-| `toolbar.home` | `null` | `draw` | `draw` | `null` | `null` |
+| `toolbar.home` | `null` | `draw` | `solar` | `null` | `null` |
+| `familyIds` | `custom, measurement, selection` | `null` | `stringing, placement, measurement, selection` | `null` | `[]` |
 | `toolbar.quick` | `null` | `null` | `null` | `null` | `null` |
 | `rails.left` | `nav` | `spine` | `spine` | `nav` | `none` |
 | `rails.right` | `job-rail` | `job-spine` | `job-spine` | `job-rail` | `none` |
 | `rails.dock` | `null` | `[layers, drawing, selection, plan]` | `[layers, drawing, selection, plan]` | `null` | `null` |
 | `groundMaterial.layerAccent` | `null` | `null` | `solar` | `null` | `null` |
 | `groundMaterial.solarStrings` | `false` | `false` | `true` | `false` | `false` |
+
+C-04B: entering the Solar profile selects its `solar` home tab at index 1.
+Later tab choices stay with the drafter. Profile entry changes no drawing,
+camera or undo state. The tab seats Panel placement, Stringing, Equipment
+placement, Measure and Select in that order. Panel placement draws outlines
+with the existing rectangle, array, move and rotate operations. Catalog tools
+retain their names and run gates; empty families state that they have no tools.
+The pressed solved-route toggle shows 134 drawable rooftop routes only on the
+clean mock rooftop head, with no preview or local engine edits. It is a read-only
+overlay, never drawing entities or certified equipment data.
 | `commandLine` | `false` | `true` | `true` | `false` | `false` |
 | `authoring` | `true` | `true` | `true` | `true` | `false` |
 | `versions` | `none` | `drawing` | `drawing` | `none` | `none` |

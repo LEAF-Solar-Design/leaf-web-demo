@@ -32,14 +32,14 @@ function fileOf(name = 'hand.dxf') {
 
 let workers
 let handle
-function mount({ drawingId = 'rooftop_demo', enabled = true, headKey = 1, fetchDxf, onDirtyChange = null } = {}) {
+function mount({ drawingId = 'rooftop_demo', enabled = true, headKey = 1, fetchDxf, onDirtyChange = null, onDocumentChange = null } = {}) {
   workers = []
   handle = {}
   const createWorker = vi.fn(() => { const w = new ScriptedWorker(); workers.push(w); return w })
   function Probe() { handle.context = useEngineSessionContext(); return null }
   function Tree(props) {
     return (
-      <EngineSessionProvider createWorker={createWorker} onDirtyChange={props.onDirtyChange}>
+      <EngineSessionProvider createWorker={createWorker} onDirtyChange={props.onDirtyChange} onDocumentChange={props.onDocumentChange}>
         <Probe />
         <EngineHeadOpener drawingId={props.drawingId} enabled={props.enabled} headKey={props.headKey} fetchDxf={props.fetchDxf} />
         <DraftingRibbon clusters={[]}>
@@ -49,8 +49,8 @@ function mount({ drawingId = 'rooftop_demo', enabled = true, headKey = 1, fetchD
       </EngineSessionProvider>
     )
   }
-  const utils = render(<Tree drawingId={drawingId} enabled={enabled} headKey={headKey} fetchDxf={fetchDxf} onDirtyChange={onDirtyChange} />)
-  handle.rerender = (next) => utils.rerender(<Tree drawingId={drawingId} enabled={enabled} headKey={headKey} fetchDxf={fetchDxf} onDirtyChange={onDirtyChange} {...next} />)
+  const utils = render(<Tree drawingId={drawingId} enabled={enabled} headKey={headKey} fetchDxf={fetchDxf} onDirtyChange={onDirtyChange} onDocumentChange={onDocumentChange} />)
+  handle.rerender = (next) => utils.rerender(<Tree drawingId={drawingId} enabled={enabled} headKey={headKey} fetchDxf={fetchDxf} onDirtyChange={onDirtyChange} onDocumentChange={onDocumentChange} {...next} />)
   handle.unmount = utils.unmount
   return handle
 }
@@ -78,6 +78,25 @@ beforeEach(() => {
 afterEach(() => { cleanup() })
 
 describe('EngineHeadOpener', () => {
+  it('row17 reports committed head provenance, plain same-name imports, and null on unmount', async () => {
+    const onDocumentChange = vi.fn()
+    const studio = mount({ fetchDxf: vi.fn(async () => answer(1)), onDocumentChange })
+    await settle()
+    await waitFor(() => expect(workers.length).toBe(1))
+    const documentId = headDocumentId('rooftop_demo', 1)
+    loaded(workers[0], documentId)
+    expect(onDocumentChange).toHaveBeenLastCalledWith({ documentId, committedVersion: 1, entityCount: 1 })
+    const calls = onDocumentChange.mock.calls.length
+    studio.rerender({})
+    await settle()
+    expect(onDocumentChange).toHaveBeenCalledTimes(calls)
+    await act(async () => { await studio.context.session.actions.open(fileOf(documentId)) })
+    loaded(workers[workers.length - 1], documentId, [LINE, { ...LINE, id: 'e2' }])
+    expect(onDocumentChange).toHaveBeenLastCalledWith({ documentId, committedVersion: null, entityCount: 2 })
+    studio.unmount()
+    expect(onDocumentChange).toHaveBeenLastCalledWith(null)
+  })
+
   it('opens the head into the engine at mount and the tools go live without an import', async () => {
     const fetchDxf = vi.fn(async () => answer(3))
     const studio = mount({ fetchDxf })

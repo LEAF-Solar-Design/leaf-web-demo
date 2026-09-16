@@ -471,7 +471,7 @@ const ribbon = (id, label, display, icon, title, when, run, extra = {}) => ({
 // differ only for W4g-5d's TEXT, a draw create the reference seats in its
 // Annotation panel, so every gate that admits `draw` admits it unchanged.
 const engineOp = (group, op, label, display, icon, title, size, panel = group) => ({
-  id: `${group}:${op}`,
+  id: `${panel === 'solar-panels' ? panel : group}:${op}`,
   op,
   group,
   panel,
@@ -554,6 +554,11 @@ const ACTION_LIST = [
   // W4g-4 RECTANG: two opposite corners; the store lowers it to the closed
   // polyline the engine draws.
   engineOp('draw', 'createRectangle', 'rectangle', 'Rectangle', 'rectangle', 'Draw a rectangle from corner x,y to corner x2,y2', 'small'),
+  // Solar uses drawing geometry and the existing arming groups, not equipment INSERTs.
+  engineOp('draw', 'createRectangle', 'Panel outline', 'Panel outline', 'rectangle', 'Draw a rectangular panel outline', 'small', 'solar-panels'),
+  engineOp('modify', 'arrayRect', 'Panel array', 'Panel array', 'array', 'Copy the selected outline into rows and columns', 'small', 'solar-panels'),
+  engineOp('modify', 'move', 'Move panel', 'Move panel', 'move', 'Move the selected panel geometry', 'small', 'solar-panels'),
+  engineOp('modify', 'rotate', 'Rotate panel', 'Rotate panel', 'rotate', 'Rotate the selected panel geometry', 'small', 'solar-panels'),
   // W4g-4b: the rest of the reference's small Draw column, engine-backed.
   engineOp('draw', 'createEllipse', 'ellipse', 'Ellipse', 'ellipse', 'Draw an ellipse from a centre, an axis endpoint and a minor-to-major ratio', 'small'),
   engineOp('draw', 'createPoint', 'point', 'Point', 'point', 'Place a point at x,y', 'small'),

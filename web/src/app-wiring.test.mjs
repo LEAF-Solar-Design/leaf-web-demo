@@ -20,6 +20,51 @@ import esbuild from 'esbuild'
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
 const viewerSource = readFileSync(new URL('./components/Viewer.jsx', import.meta.url), 'utf8')
 
+describe('C-04B Solar ribbon wiring', () => {
+  it('row9 gates solved routes on mock rooftop identity, preview, head and dirty engine', () => {
+    assert.match(appSource, /solarStringsEligible = !!studioGround && surfaceSlots\.groundMaterial\.solarStrings && mock\s+&& !isEditFixture && DRAWING_SOURCE === 'rooftop_demo' && intakeIsRooftopSample/)
+    assert.match(appSource, new RegExp(String.raw`solarRouteStatus\(\{\s+eligible: solarStringsEligible, previewing, head: drawingState\?\.head \?\? 1,\s+engineDirty,`))
+    assert.match(appSource, new RegExp(String.raw`solarRouteDisplay\(\{\s+status: solarRoutesStatus, shown: showSolarStrings, routes: demoSolveRoutes`))
+    assert.ok(appSource.includes('selectedHandle, onClearSelection: () => setSelectedHandle(null)'))
+  })
+  it('row16 binds routes to the displayed document and records solve failure or emptiness', () => {
+    const assertRouteBinding = (source) => {
+      const block = source.match(new RegExp(String.raw`solarRouteStatus\(\{([\s\S]*?)\}\)`))?.[1]
+      assert.ok(block, 'the route status call exists')
+      for (const line of block.split(/\r?\n/)) {
+        assert.doesNotMatch(line, /^\s*\/\//, 'route status inputs must be executable')
+      }
+      assert.doesNotMatch(block, /\/\*|\*\//, 'route status inputs must not be block comments')
+      assert.match(block, /^\s*documentId: activeIntake\?\.documentId \?\? null,\s*$/m)
+      assert.match(block, /^\s*committedVersion: engineDocument\?\.committedVersion \?\? null,\s*$/m)
+      assert.ok(block.includes('headDocumentId: `${REQUESTED_DRAWING_ID}-v1.dxf`'))
+    }
+    assertRouteBinding(appSource)
+    const commented = appSource.replace('    documentId: activeIntake?.documentId ?? null,', '    // documentId: activeIntake?.documentId ?? null,')
+    assert.notEqual(commented, appSource, 'the comment mutation must apply')
+    assert.throws(() => assertRouteBinding(commented))
+    assert.ok(appSource.includes('const [engineDocument, setEngineDocument] = useState(null)'))
+    assert.match(stripped, /onDocumentChange:\s*setEngineDocument/)
+    assert.equal(appSource.includes('allowedDocumentIds'), false)
+    assert.ok(appSource.includes("const [demoSolveState, setDemoSolveState] = useState('pending')"))
+    assert.match(appSource, new RegExp(String.raw`\.catch\(\(\) => \{\s+if \(live\) setDemoSolveState\('failed'\)`))
+    assert.ok(appSource.includes("setDemoSolveState(routes.length ? 'loaded' : 'empty')"))
+    assert.ok(appSource.includes('solve: demoSolveState, routes: demoSolveRoutes'))
+    assert.ok(appSource.includes('solar: { status: solarRoutesStatus, shown: showSolarStrings'))
+  })
+  it('row12 profile entry changes only the selected ribbon tab', () => {
+    assert.ok(appSource.includes('profileEntryTab(previousRibbonProfile.current, surfaceSlots.toolbar.profile, ribbonTab, surfaceSlots.toolbar.home)'))
+    const start = appSource.indexOf('  const previousRibbonProfile = useRef(null)')
+    const end = appSource.indexOf('  const ribbon = useMemo', start)
+    const entryRule = appSource.slice(start, end)
+    assert.match(entryRule, /previousRibbonProfile.current = surfaceSlots.toolbar.profile/)
+    assert.match(entryRule, /setRibbonTab\(activeRibbonTab\)/)
+    assert.doesNotMatch(entryRule, /reset|setView|undo|openBytes|openFile/)
+    assert.ok(appSource.includes("activeRibbonTab === 'solar' ? ['solar-panels']"))
+    assert.ok(appSource.includes('id="cockpit-solar-panels-slot"'))
+  })
+})
+
 describe('Solar rooftop starter', () => {
   it('mounts SolarStarterOpener only for a live empty Solar workspace', () => {
     assert.match(appSource, /<SolarStarterOpener\s+enabled=\{!mock && drawingLoad.drawingId === REQUESTED_DRAWING_ID && drawingLoad.state === 'absent' && surfaceSlots\.toolbar\.profile === 'solar'\}\s+fetchDxf=\{fetchSampleDxf\}/)

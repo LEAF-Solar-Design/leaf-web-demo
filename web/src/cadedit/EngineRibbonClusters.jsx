@@ -180,6 +180,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // a slot the real Match tool is portaled into, the Clipboard idiom.
   const propertiesSlot = useSlot('cockpit-properties-slot')
   const groupsSlot = useSlot('cockpit-groups-slot')
+  const solarPanelsSlot = useSlot('cockpit-solar-panels-slot')
   const show = new Set(Array.isArray(panels) ? panels : [])
 
   // The armed command (provider state, so it outlives the ribbon's tab
@@ -702,6 +703,11 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   )
   return (
     <>
+      {show.has('solar-panels') && solarPanelsSlot && createPortal(
+        [...forGroup('draw'), ...forGroup('modify')].filter((action) => action.panel === 'solar-panels').map((action) => (
+          <RibbonTool key={action.id} tool={ribbonTool(action, engineCtx, { write: action.write, ...armedAttrs(action.op) })} />
+        )), solarPanelsSlot,
+      )}
       {show.has('groups') && (groupsSlot ? createPortal(groupTools(), groupsSlot) : <RibbonCluster id="groups" label="Groups" note={draw || null}>{groupTools()}</RibbonCluster>)}
       {quickSlot
         ? createPortal(quick.map((tool) => <QuickButton key={tool.id} tool={tool} />), quickSlot)
