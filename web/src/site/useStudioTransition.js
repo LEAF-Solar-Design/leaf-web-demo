@@ -1,4 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { surfaceContract } from './productSurfaces.js'
+
+// Drafting profiles share a canvas and swap its palette without a chrome fade.
+export const studioChromeIdentity = (surface) => {
+  const slots = surfaceContract(surface)
+  return slots.chrome.cockpit ? 'drawing' : slots.toolbar.profile
+}
 
 export const STUDIO_MOTION = Object.freeze({ chromeOutMs: 80, chromeInMs: 140, groundMs: 180, easing: 'cubic-bezier(.2,0,0,1)' })
 
@@ -61,13 +68,20 @@ export function useStudioTransition({ committed, onCommit, isDrafting, reducedMo
     const current = latest.current
     if (target === committedRef.current) return
     const reduced = current.reducedMotion ?? prefersReducedMotion()
-    if (reduced || current.isDrafting(committedRef.current) === current.isDrafting(target)) {
+    if (reduced || studioChromeIdentity(committedRef.current) === studioChromeIdentity(target)) {
       current.onCommit(target)
       committedRef.current = target
-    } else if (current.isDrafting(committedRef.current)) {
+    } else if (current.isDrafting(committedRef.current) || !current.isDrafting(target)) {
       pending.current = target
       setPhase('out')
-      timer.current = setTimeout(settle, STUDIO_MOTION.chromeOutMs)
+      const entering = !current.isDrafting(committedRef.current)
+      timer.current = setTimeout(() => {
+        settle()
+        if (entering) {
+          setPhase('in')
+          timer.current = setTimeout(() => { timer.current = null; setPhase('idle') }, STUDIO_MOTION.chromeInMs)
+        }
+      }, STUDIO_MOTION.chromeOutMs)
     } else {
       current.onCommit(target)
       committedRef.current = target

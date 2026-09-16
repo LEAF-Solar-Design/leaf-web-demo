@@ -256,7 +256,7 @@ export function ProjectBoardGround({
   leavingGround = null,
   contained = false, onReturnToDrawing = null, headingRef = null, startFocusRequest = 0,
   occluders = NO_OCCLUDERS,
-  studioPresentation = false,
+  studioPresentation = false, studioShell = false,
   worldSpace = import.meta.env.VITE_WORLD_SPACE_BOARD === '1', store,
 }) {
   const state = workspaceProject || EMPTY_WORKSPACE_PROJECT
@@ -271,13 +271,14 @@ export function ProjectBoardGround({
     lastFocusRequest.current = startFocusRequest
     containedHeadingRef.current?.focus()
   }, [active, contained, win, startFocusRequest, containedHeadingRef])
-  // Browser uses the frame's chrome. Drafting Start owns its header inside
-  // the ground because a drawing profile has no product frame.
+  // In the shared shell the board owns its heading and measured window.
+  // Outside it the legacy product frame still supplies Browser's heading.
   return (
     <div
       className="studio-ground-board"
       ref={boardRef}
       data-ground="browser"
+      data-studio-shell={studioShell ? 'cockpit' : undefined}
       data-board-layout={contained ? 'contained' : undefined}
       data-studio-presentation={studioPresentation ? 'true' : undefined}
       data-project-state={state.kind}
@@ -296,7 +297,7 @@ export function ProjectBoardGround({
               {studioPresentation && mock && state.action?.disabled && <p className="start-board-project-caveat">{START_BOARD_COPY.projectDemoCaveat}</p>}
               <p>{state.kind === 'project' ? state.label : drawing?.name || state.drawingName}</p>
             </div>
-            <button type="button" onClick={onReturnToDrawing}>{START_BOARD_COPY.returnToDrawing}</button>
+            {onReturnToDrawing && <button type="button" onClick={onReturnToDrawing}>{START_BOARD_COPY.returnToDrawing}</button>}
           </header>
         )}
         {worldSpace ? (
@@ -323,11 +324,12 @@ export function ProjectBoardGround({
 // ---------------------------------------------------------------------------
 export function DeviceGround({
   active = false, enabled = false, contract = null, projectLabel = null, revision = null,
-  leavingGround = null,
+  leavingGround = null, studioShell = false, occluders = NO_OCCLUDERS,
 }) {
+  const boardRef = useRef(null)
   const state = enabled ? (deriveIosState(contract) ?? 'malformed') : 'dormant'
   const leaving = leavingGround === 'device-stage'
-  const win = useGroundWindow(active || leaving)
+  const win = useGroundWindow(active || leaving, studioShell, boardRef, occluders)
   const label = state === 'dormant'
     ? 'Not available yet'
     : state === 'malformed' ? 'Status unreadable' : IOS_STATE_LABEL[state]
@@ -340,7 +342,9 @@ export function DeviceGround({
   return (
     <div
       className="studio-ground-device"
+      ref={boardRef}
       data-ground="ios"
+      data-studio-shell={studioShell ? 'cockpit' : undefined}
       data-state={state}
       hidden={!active && !leaving}
       data-ground-phase={leaving ? 'leaving' : active && leavingGround ? 'entering' : undefined}
@@ -392,7 +396,7 @@ export default function SurfaceGrounds({
   surface, workspaceProject, workspace, drawing, catalog, mock,
   boardVisible, onReturnToDrawing, headingRef, startFocusRequest, leavingGround = null,
   occluders = NO_OCCLUDERS,
-  studioPresentation = false,
+  studioPresentation = false, studioShell = false,
   iosEnabled, iosContract, revision,
 }) {
   const projectLabel = workspaceProject?.kind === 'project'
@@ -408,12 +412,13 @@ export default function SurfaceGrounds({
       <ProjectBoardGround
         active={boardVisible ?? surfaceGround(surface) === 'board'}
         leavingGround={leavingGround}
-        contained={boardVisible === true && groundShowsDrawing(surface)}
+        contained={studioShell || (boardVisible === true && groundShowsDrawing(surface))}
         occluders={occluders}
         onReturnToDrawing={onReturnToDrawing}
         headingRef={headingRef}
         startFocusRequest={startFocusRequest}
         studioPresentation={studioPresentation}
+        studioShell={studioShell}
         workspaceProject={workspaceProject}
         workspace={workspace}
         drawing={drawing}
@@ -423,6 +428,8 @@ export default function SurfaceGrounds({
       <DeviceGround
         active={!boardVisible && surfaceGround(surface) === 'device-stage'}
         leavingGround={leavingGround}
+        studioShell={studioShell}
+        occluders={occluders}
         enabled={iosEnabled}
         contract={iosContract}
         projectLabel={projectLabel}

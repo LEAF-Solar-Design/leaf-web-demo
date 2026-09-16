@@ -13,6 +13,25 @@ import { deriveWorkspaceProjectState } from './workspaceProjectState.js'
 
 afterEach(cleanup)
 
+it('themes both persistent grounds through the shell contract without a paper frame measurement', () => {
+  const { container, rerender } = render(<SurfaceGrounds surface="browser" studioShell studioPresentation />)
+  const board = container.querySelector('[data-ground="browser"]')
+  const device = container.querySelector('[data-ground="ios"]')
+  expect(board.getAttribute('data-studio-shell')).toBe('cockpit')
+  expect(device.getAttribute('data-studio-shell')).toBe('cockpit')
+  expect(board.getAttribute('data-board-layout')).toBe('contained')
+  expect(board.hidden).toBe(false)
+  rerender(<SurfaceGrounds surface="ios" studioShell studioPresentation />)
+  expect(container.querySelector('[data-ground="browser"]')).toBe(board)
+  expect(container.querySelector('[data-ground="ios"]')).toBe(device)
+  expect(board.hidden).toBe(true)
+  expect(device.hidden).toBe(false)
+  const css = readFileSync(`${process.cwd()}/src/site/studioShell.css`, 'utf8')
+  expect(css).toContain('[data-studio-shell="cockpit"]')
+  expect(css).toContain('text-transform: none')
+  expect(css).toContain('var(--ck-glass-panel)')
+})
+
 describe('W4g bleed-2b: ground crossfade accessibility', () => {
   it('paints the leaving board inertly and marks the active device entering', () => {
     const { container, rerender } = render(<SurfaceGrounds surface="ios" leavingGround="board" />)

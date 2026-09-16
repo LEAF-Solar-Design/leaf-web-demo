@@ -150,6 +150,8 @@ export const PRODUCT_SURFACES = Object.freeze([
       //   the console. (Slice 5b added the slot; see the sheets record.)
       scene: 'app',
       chrome: {
+        // Static shell/profile slots are not overlay-authorable; the schema stays closed.
+        shell: 'cockpit',
         // productFrame: App.jsx:2838 `activeSurface !== 'cad'` -> true.
         //   (The stage agrees: ToolCast.jsx:2139 renders the frame here too.)
         productFrame: true,
@@ -172,25 +174,20 @@ export const PRODUCT_SURFACES = Object.freeze([
         tab: true,
       },
       toolbar: {
-        // ribbon: App.jsx:2898 `studioGround && drafting` -> no DraftingRibbon.
-        ribbon: false,
-        // home: no ribbon here, so no home tab is declared. (App.jsx:2234
-        //   useState('draw') is console-global state, not a per-surface value;
-        //   CockpitTopBand.jsx:17 RIBBON_TABS[0] is 'draw'.)
-        home: null,
+        profile: 'project',
+        // The shared shell seats this profile's project, tools and activity tabs.
+        ribbon: true,
+        // Invalid selections fall back to this profile's home on a switch.
+        home: 'project',
         // quick: CockpitTopBand.jsx takes `before`/`after` as PROPS built in
         //   App.jsx:2453-2468 — code, not data — so there is no data source
         //   to read ids from. Slice 3 promotes them to a registry.
         quick: null,
       },
       rails: {
-        // left: App.jsx:2281 navSpine = studioGround && drafting && !navExpanded
-        //   && wideViewport -> false here, so the full nav rail renders
-        //   (App.jsx:2645). Wide-viewport default; see the doc.
-        left: 'nav',
-        // right: App.jsx:3460 JobRail spine prop -> false, so the expanded
-        //   job rail renders (App.jsx:3445). Wide-viewport default.
-        right: 'job-rail',
+        // Shared cockpit postures at the wide breakpoint, opened by the ribbon.
+        left: 'spine',
+        right: 'job-spine',
         // dock: PropertiesDock mounts only under `studioGround && drafting
         //   && wideViewport` (App.jsx:3191) — nothing declares a board dock.
         //   `paneOpen` (App.jsx:2241, default true) is the dock's SECOND gate
@@ -209,7 +206,7 @@ export const PRODUCT_SURFACES = Object.freeze([
       //   solarStrings: App.jsx:2313 solarStringsEligible.
       groundMaterial: { layerAccent: null, solarStrings: false },
       // commandLine: App.jsx:3419 PromptBox commandLine={!!studioGround && drafting}.
-      commandLine: false,
+      commandLine: true,
       // authoring: App.jsx:2735 AuthorPanel sits in the nav rail, which is not
       //   surface-gated (App.jsx:2645, 2653). Slice 7a closed the stage's own
       //   divergence (D3): ToolCast.jsx's workspace rail now reads this same
@@ -277,6 +274,8 @@ export const PRODUCT_SURFACES = Object.freeze([
       ground: 'drawing',
       scene: 'app', // SiteRoot.jsx:228-232, a studio tab
       chrome: {
+        // Static shell/profile slots are not overlay-authorable; the schema stays closed.
+        shell: 'cockpit',
         // productFrame: App.jsx:2838 `activeSurface !== 'cad'` -> false.
         productFrame: false,
         // workspaceCard: App.jsx:2859 `cad || solar` -> shown.
@@ -289,6 +288,7 @@ export const PRODUCT_SURFACES = Object.freeze([
         tab: true, // ProductSurfaceTabs.jsx:72
       },
       toolbar: {
+        profile: 'drafting',
         // ribbon: App.jsx:2898 `studioGround && drafting` -> DraftingRibbon mounts.
         ribbon: true,
         // home: App.jsx:2234 useState('draw'); CockpitTopBand.jsx:18 tab id 'draw'.
@@ -355,6 +355,8 @@ export const PRODUCT_SURFACES = Object.freeze([
       ground: 'drawing',
       scene: 'app', // SiteRoot.jsx:228-232, a studio tab
       chrome: {
+        // Static shell/profile slots are not overlay-authorable; the schema stays closed.
+        shell: 'cockpit',
         // productFrame: FALSE — a DELIBERATE divergence from the old literal
         //   `activeSurface !== 'cad'` (App.jsx:2838), which is what the P1
         //   pass fixes. Measured at 1512x950 before the fix: the frame was a
@@ -380,6 +382,7 @@ export const PRODUCT_SURFACES = Object.freeze([
         tab: true, // ProductSurfaceTabs.jsx:72
       },
       toolbar: {
+        profile: 'solar',
         ribbon: true, // App.jsx:2898
         home: 'draw', // App.jsx:2234
         quick: null,
@@ -429,6 +432,8 @@ export const PRODUCT_SURFACES = Object.freeze([
       ground: 'device-stage',
       scene: 'app', // SiteRoot.jsx:228-232, a studio tab
       chrome: {
+        // Static shell/profile slots are not overlay-authorable; the schema stays closed.
+        shell: 'cockpit',
         // productFrame: App.jsx:2838 -> true (with the iOS project slot).
         //   Stage divergence: ToolCast.jsx:2077 gives ios its own rail instead.
         productFrame: true,
@@ -443,18 +448,19 @@ export const PRODUCT_SURFACES = Object.freeze([
         tab: true, // ProductSurfaceTabs.jsx:72
       },
       toolbar: {
-        ribbon: false, // App.jsx:2898
-        home: null,
+        profile: 'ship',
+        ribbon: true, // App.jsx:2898
+        home: 'ship',
         quick: null,
       },
       rails: {
-        left: 'nav', // App.jsx:2281 navSpine false
-        right: 'job-rail', // App.jsx:3460 spine false
+        left: 'spine', // Shared studio tool rail
+        right: 'job-spine', // Shared studio job rail
         dock: null, // App.jsx:3191 drafting-only (paneOpen is its second gate)
       },
       // groundMaterial: the device stage carries neither (App.jsx:2296, :2313).
       groundMaterial: { layerAccent: null, solarStrings: false },
-      commandLine: false, // App.jsx:3419
+      commandLine: true, // App.jsx:3419
       authoring: true, // App.jsx:2735 (the nav rail is not surface-gated)
       versions: 'none', // App.jsx:3041 inside the hidden card (App.jsx:2859)
       conversations: { scope: 'drawing' }, // converse.js:129-134

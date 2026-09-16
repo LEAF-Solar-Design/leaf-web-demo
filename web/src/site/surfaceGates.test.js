@@ -120,12 +120,12 @@ describe('Surface Contract — every repointed gate equals its old literal', () 
       expect(c.chrome.stageBranch).toBe(OLD.stageBranch(id))
     })
 
-    it(`${id}: rails.left === 'spine' matches the old navSpine surface term`, () => {
-      expect(c.rails.left === 'spine').toBe(OLD.drafting(id))
+    it(`${id}: rails.left declares the shared spine`, () => {
+      expect(c.rails.left === 'spine').toBe(true)
     })
 
-    it(`${id}: rails.right === 'job-spine' matches the old JobRail surface term`, () => {
-      expect(c.rails.right === 'job-spine').toBe(OLD.drafting(id))
+    it(`${id}: rails.right declares the shared job spine`, () => {
+      expect(c.rails.right === 'job-spine').toBe(true)
     })
 
     it(`${id}: rails.dock is truthy exactly where the dock used to mount`, () => {
@@ -134,8 +134,8 @@ describe('Surface Contract — every repointed gate equals its old literal', () 
       expect(!!c.rails.dock).toBe(OLD.drafting(id))
     })
 
-    it(`${id}: commandLine === the old PromptBox commandLine surface term`, () => {
-      expect(c.commandLine).toBe(OLD.drafting(id))
+    it(`${id}: commandLine is shared across studio profiles`, () => {
+      expect(c.commandLine).toBe(true)
     })
 
     it(`${id}: groundMaterial.layerAccent === 'solar' iff the surface is solar`, () => {
@@ -152,14 +152,17 @@ describe('Surface Contract — every repointed gate equals its old literal', () 
       expect(surfaceGround(id) === 'drawing').toBe(OLD.drafting(id))
     })
 
-    it(`${id}: the ribbon opens on the same tab useState('draw') used to give`, () => {
+    it(`${id}: the shared shell declares its own ribbon profile and home`, () => {
       // The console's ribbon tab is GLOBAL state, so App reads toolbar.home
       // with a fallback to the default surface's home. Both arms must land on
       // the literal the fallback replaced, or a browser -> cad switch would
       // mount the ribbon with no tab selected.
       const home = surfaceContract(id).toolbar.home
         ?? surfaceContract(DEFAULT_PRODUCT_SURFACE).toolbar.home
-      expect(home).toBe(OLD.ribbonHome())
+      expect(home).toBe({ browser: 'project', cad: 'draw', solar: 'draw', ios: 'ship' }[id])
+      expect(c.toolbar.profile).toBe({ browser: 'project', cad: 'drafting', solar: 'solar', ios: 'ship' }[id])
+      expect(c.toolbar.ribbon).toBe(true)
+      expect(c.chrome.shell).toBe('cockpit')
     })
   }
 
