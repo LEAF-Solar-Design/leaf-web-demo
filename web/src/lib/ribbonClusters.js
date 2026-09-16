@@ -102,7 +102,7 @@ export function shipStatusRows(contract, revision, onReceipts) {
     : `Apple readiness: ${state}`
   return [
     valid && revision
-      ? { ...profileBase('ship:revision', `Approved revision ${revision}`.slice(0, 64)), disabled: false, title: `reported ${contract.reported_at}`, onClick: onReceipts }
+      ? { ...profileBase('ship:revision', `Approved revision ${revision}`.slice(0, 64)), disabled: false, title: `reported ${contract.reported_at}`.slice(0, 64), onClick: onReceipts }
       : { ...profileBase('ship:revision', 'Approved revision'), disabled: true, reason: PROFILE_REASONS.approvedRevision, onClick: undefined },
     valid
       ? { ...profileBase('ship:readiness', readinessLabel.slice(0, 64)), disabled: false, state, pressed: state === 'ready', onClick: onReceipts }

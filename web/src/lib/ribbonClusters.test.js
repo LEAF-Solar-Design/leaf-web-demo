@@ -118,6 +118,9 @@ describe('C-05 ship contract status rows', () => {
       expect(row.label.length).toBeLessThanOrEqual(64)
       expect(row.disabled).toBe(false)
     }
+    const [revision] = shipStatusRows({ ...contract, reported_at: 'x'.repeat(2000) }, 'v12', vi.fn())
+    expect(revision.title.length).toBeLessThanOrEqual(64)
+    expect(revision.label).toBe('Approved revision v12')
   })
   it('C-05 row8 the mock context keeps the rows disabled even with a details handler', () => {
     const tools = profileRibbonTabs('ship', { ship: { contract: null, revision: null, onReceipts: vi.fn() } })[0].clusters.map((cluster) => cluster.tools[0])

@@ -20,9 +20,52 @@ import esbuild from 'esbuild'
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
 const viewerSource = readFileSync(new URL('./components/Viewer.jsx', import.meta.url), 'utf8')
 
+function codeOnly(src) {
+  const chars = src.split('')
+  let i = 0
+  while (i < src.length) {
+    const quote = src[i]
+    if (quote === "'" || quote === '"' || quote === '`') {
+      i++
+      while (i < src.length) {
+        if (src[i] === '\\') i += 2
+        else if (src[i++] === quote) break
+      }
+    } else if (src[i] === '/' && src[i + 1] === '/') {
+      i += 2
+      while (i < src.length && src[i] !== '\n' && src[i] !== '\r') chars[i++] = ' '
+    } else if (src[i] === '/' && src[i + 1] === '*') {
+      i += 2
+      while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) {
+        if (src[i] !== '\n' && src[i] !== '\r') chars[i] = ' '
+        i++
+      }
+      i += 2
+    } else {
+      i++
+    }
+  }
+  return chars.join('')
+}
+
 describe('C-05 ship context wiring', () => {
+  const receiptHandlerPattern = new RegExp(String.raw`ship: \{ contract: iosContract, revision: canonicalVersionId \|\| null, onLaunch: null, onReceipts: iosContract\?\.receipt_id \? \(\) => \{\s*const details = document\.querySelector\('\.studio-profile-info details'\)\s*if \(details\) \{ details\.open = true; details\.querySelector\('summary'\)\?\.focus\(\) \}\s*\} : null \}`)
   it('C-05 row10 the ship receipt handler opens the real details disclosure', () => {
-    assert.match(appSource, new RegExp(String.raw`ship: \{ contract: iosContract, revision: canonicalVersionId \|\| null, onLaunch: null, onReceipts: iosContract\?\.receipt_id \? \(\) => \{\s*const details = document\.querySelector\('\.studio-profile-info details'\)\s*if \(details\) \{ details\.open = true; details\.querySelector\('summary'\)\?\.focus\(\) \}\s*\} : null \}`))
+    assert.match(codeOnly(appSource), receiptHandlerPattern)
+  })
+  it('C-05 row11 ignores a commented handler and preserves literal slashes', () => {
+    const fixture = `/*
+ship: { contract: iosContract, revision: canonicalVersionId || null, onLaunch: null, onReceipts: iosContract?.receipt_id ? () => {
+  const details = document.querySelector('.studio-profile-info details')
+  if (details) { details.open = true; details.querySelector('summary')?.focus() }
+} : null }
+*/
+ship: { contract: iosContract, revision: canonicalVersionId || null, onLaunch: null, onReceipts: iosContract?.receipt_id ? () => {} : null }`
+    assert.match(fixture, receiptHandlerPattern)
+    assert.doesNotMatch(codeOnly(fixture), receiptHandlerPattern)
+    const literals = "const string = '//not-a-comment'; const template = `//not-a-comment`"
+    assert.equal(codeOnly(literals), literals)
+    assert.equal(codeOnly('// hidden\r\nactive /* hidden\nbody */'), '//       \r\nactive /*       \n     */')
   })
   it('C-05 row8 consumes the existing contract and canonical revision', () => {
     assert.match(appSource, new RegExp(String.raw`ship: \{ contract: iosContract, revision: canonicalVersionId \|\| null, onLaunch: null`))
