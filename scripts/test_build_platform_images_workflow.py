@@ -3132,9 +3132,20 @@ def main() -> None:
         s for s in verify_steps
         if str(s.get("uses", "")).startswith("actions/download-artifact")
     ]
-    assert len(downloads) == 2
-    assert downloads[0]["with"]["pattern"].startswith("surface-result-")
-    assert downloads[1]["with"]["name"].startswith("surface-web-dist-")
+    assert len(downloads) == 0
+    s3_reads = [
+        s for s in verify_steps
+        if "aws s3api get-object" in s.get("run", "")
+    ]
+    assert len(s3_reads) == 2
+    assert s3_reads[0]["name"] == "Read exact v3 service entries from S3"
+    assert s3_reads[1]["name"] == "Read exact v3 web deployment artifact from S3"
+    assert "surface-result-" in s3_reads[0]["run"]
+    assert "surface-web-dist.zip" in s3_reads[1]["run"]
+    for step in s3_reads:
+        assert "--checksum-mode ENABLED" in step["run"]
+        assert "ChecksumSHA256" in step["run"]
+        assert "if" not in step
     adopt_nodes = [
         s for s in adopt_steps
         if str(s.get("uses", "")).startswith("actions/setup-node")
@@ -7001,13 +7012,41 @@ def test_selector_off_full_build_always_mints_v3_without_enabling_reuse() -> Non
     assert "if" not in materialize
     assert "if" not in upload
     assert materialize["env"]["LOOKUP_TAG"] == "${{ steps.surface.outputs.lookup_tag }}"
+    service_put = next(
+        step for step in build_steps
+        if step.get("name") == "Put exact v3 service entry to S3"
+    )
+    web_put = next(
+        step for step in build_steps
+        if step.get("name") == "Put exact v3 web deployment artifact to S3"
+    )
+    assert "if" not in service_put
+    assert web_put["if"] == "matrix.image == 'web'"
+    for step in (service_put, web_put):
+        assert "aws s3api put-object" in step["run"]
+        assert "--if-none-match" in step["run"]
+        assert "--checksum-algorithm SHA256" in step["run"]
+        for key in (
+            "run-id", "run-attempt", "head-sha", "repository-id", "workflow-ref", "event",
+        ):
+            assert key in step["run"]
+    web_upload = next(
+        step for step in build_steps
+        if step.get("name") == "Preserve the exact v3 web deployment artifact"
+    )
+    assert upload["continue-on-error"] is True
+    assert web_upload["continue-on-error"] is True
     verify_steps = parsed["jobs"]["verify"]["steps"]
     for name in (
-        "Download exact v3 service entries",
-        "Download exact v3 web deployment artifact",
+        "Read exact v3 service entries from S3",
+        "Read exact v3 web deployment artifact from S3",
     ):
         step = next(candidate for candidate in verify_steps if candidate.get("name") == name)
         assert "if" not in step
+        for key in (
+            "run-id", "run-attempt", "head-sha", "repository-id", "workflow-ref", "event",
+        ):
+            assert key in step["run"]
     writer = next(
         step for step in verify_steps
         if step.get("name") == "Write the immutable five-service staging supply set"
