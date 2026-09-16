@@ -99,11 +99,11 @@ describe('Leaf workspace guest front door', () => {
     await mountFrontDoor('/', hostname)
     expect(document.querySelector('.stage-root').getAttribute('data-scene')).toBe('site')
     expect(mocks.replace).not.toHaveBeenCalled()
-    for (const name of ['Try Branch — no install', 'Open workspace', 'Solve']) {
+    for (const name of ['Try Branch on the sample rooftop', 'Open workspace', 'Open in workspace']) {
       fireEvent.click(screen.getByRole('button', { name }))
     }
     expect(mocks.navigate.mock.calls).toEqual([
-      ['/try'], ['/try'], ['/try'],
+      ['/try?demo=1'], ['/try'], ['/try'],
     ])
     expect(mocks.assign).not.toHaveBeenCalled()
     expect(mocks.hrefSet).not.toHaveBeenCalled()
@@ -131,44 +131,44 @@ describe('Leaf workspace guest front door', () => {
   it('keeps signed-in workspace buttons and the shortcut on the existing /try navigation', async () => {
     mocks.signedIn.mockReturnValue(true)
     await mountFrontDoor()
-    for (const name of ['Try Branch — no install', 'Open workspace', 'Solve']) {
+    for (const name of ['Try Branch on the sample rooftop', 'Open workspace', 'Open in workspace']) {
       fireEvent.click(screen.getByRole('button', { name }))
     }
     fireEvent.keyDown(document.body, { key: 'T' })
-    expect(mocks.navigate.mock.calls).toEqual([['/try'], ['/try'], ['/try'], ['/try']])
+    expect(mocks.navigate.mock.calls).toEqual([['/try?demo=1'], ['/try'], ['/try'], ['/try']])
     expect(mocks.assign).not.toHaveBeenCalled()
     expect(mocks.replace).not.toHaveBeenCalled()
   })
 
-  it('shows a named pricing placeholder and routes pricing interest to demand capture', async () => {
+  it('shows honest pricing copy and routes pricing interest to demand capture', async () => {
     await mountFrontDoor()
-    expect(document.querySelector('.lp-price').textContent).toBe('PRICING PLACEHOLDER')
+    expect(document.querySelector('.lp-price').textContent).toBe('Free to try. Pricing coming soon.')
     expect(screen.queryByText(/\$299|14-day trial|Start free trial/)).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: '05 Pricing placeholder' }))
-    const email = screen.getByLabelText('Interested in a bring-your-own-key workspace?')
-    expect(document.activeElement).toBe(email)
+    fireEvent.click(screen.getByRole('button', { name: '05 Pricing' }))
+    expect(mocks.navigate).toHaveBeenCalledWith('/sheets#05')
+    const email = screen.getByLabelText('Want a workspace that uses your own API key?')
     fireEvent.change(email, { target: { value: 'guest@example.com' } })
     fireEvent.submit(screen.getByRole('form', { name: 'Register interest' }))
     await screen.findByText('Interest saved. No payment required.')
     expect(mocks.demand).toHaveBeenCalledWith({
-      email: 'guest@example.com', interest: 'Bring-your-own-key workspace',
+      email: 'guest@example.com', interest: 'Workspace with your own API key',
     })
     expect(mocks.assign).not.toHaveBeenCalled()
-    expect(mocks.navigate).not.toHaveBeenCalled()
+    expect(mocks.navigate).toHaveBeenCalledTimes(1)
   })
 
   it('keeps the sandbox available when demand capture fails', async () => {
     mocks.demand.mockRejectedValueOnce(new Error('unavailable'))
     await mountFrontDoor()
-    fireEvent.change(screen.getByLabelText('Interested in a bring-your-own-key workspace?'), {
+    fireEvent.change(screen.getByLabelText('Want a workspace that uses your own API key?'), {
       target: { value: 'guest@example.com' },
     })
     fireEvent.submit(screen.getByRole('form', { name: 'Register interest' }))
     await screen.findByRole('alert')
     expect(screen.queryByText('Interest saved. No payment required.')).toBeNull()
     expect(screen.getByRole('button', { name: 'Register interest' }).disabled).toBe(false)
-    fireEvent.click(screen.getByRole('button', { name: 'Try Branch — no install' }))
-    expect(mocks.navigate).toHaveBeenCalledWith('/try')
+    fireEvent.click(screen.getByRole('button', { name: 'Try Branch on the sample rooftop' }))
+    expect(mocks.navigate).toHaveBeenCalledWith('/try?demo=1')
   })
 
   it('contains no handler assigning the visitor to leafautomation.ai or a payment funnel', () => {

@@ -1,4 +1,4 @@
-// Site-scene overlays — copy VERBATIM from the "Website One Surface" mock,
+// Site-scene overlays: copy VERBATIM from the "Website One Surface" mock,
 // EXCEPT numbers that describe the live demo solve: those come from
 // loadDemoSolve() (the same data animating the stage) so the page can never
 // claim what the data doesn't show.
@@ -15,15 +15,19 @@ export function enterWorkspace() {
   navigate('/try')
 }
 
+export function enterDemo() {
+  navigate('/try?demo=1')
+}
+
 const SHEETS = [
   { code: '02', label: '02 The problem' },
   { code: '03', label: '03 How Branch works' },
   { code: '04', label: '04 Proof' },
-  { code: '05', label: '05 Pricing placeholder' },
+  { code: '05', label: '05 Pricing' },
   { code: '06', label: '06 Docs' },
 ]
 
-export default function LandingCast({ onTryTool = enterWorkspace }) {
+export default function LandingCast({ onTryTool = enterWorkspace, onTryDemo = enterDemo }) {
   const [solve, setSolve] = useState(null)
   const [email, setEmail] = useState('')
   const [demandStatus, setDemandStatus] = useState('idle')
@@ -32,7 +36,7 @@ export default function LandingCast({ onTryTool = enterWorkspace }) {
     if (demandStatus === 'pending' || demandStatus === 'saved') return
     setDemandStatus('pending')
     try {
-      await submitDemandCapture({ email: email.trim(), interest: 'Bring-your-own-key workspace' })
+      await submitDemandCapture({ email: email.trim(), interest: 'Workspace with your own API key' })
       setDemandStatus('saved')
     } catch {
       setDemandStatus('error')
@@ -42,14 +46,14 @@ export default function LandingCast({ onTryTool = enterWorkspace }) {
     let live = true
     loadDemoSolve()
       .then((d) => { if (live) setSolve(d) })
-      .catch(() => { /* widget falls back to a placeholder dash */ })
+      .catch(() => { /* widget keeps showing the pending state */ })
     return () => { live = false }
   }, [])
   const maxString = solve?.electrical?.max_modules_per_string
 
   return (
     <>
-      {/* Top bar — persistent chrome shell (never recasts); the right-hand
+      {/* Top bar: persistent chrome shell (never recasts); the right-hand
           site cluster dissolves with the site cast. */}
       <div className="lp-topbar" data-cast="both">
         <img src="/site/icon-color.png" width="24" height="24" alt="" className="lp-roundel" />
@@ -57,7 +61,7 @@ export default function LandingCast({ onTryTool = enterWorkspace }) {
         <span className="lp-brandsub">/ Leaf Build · utility-estimation</span>
         <div className="lp-top-slot">
           <div className="lp-top-site" data-cast="site" style={{ '--rank': 0 }}>
-            <span className="lp-sheetno">Sheet 01 of 07 — Cover</span>
+            <span className="lp-sheetno">Sheet 01 of 07, Cover</span>
             <button type="button" className="lp-trial" onClick={onTryTool}>Open workspace</button>
           </div>
         </div>
@@ -66,18 +70,19 @@ export default function LandingCast({ onTryTool = enterWorkspace }) {
       {/* Statement block */}
       <div className="lp-stmt" data-cast="site" style={{ '--rank': 0 }}>
         <span className="lp-kicker">We do the drafting. You do the engineering.</span>
-        <div className="lp-headline">
+        <h1 className="lp-headline">
           Three decades of <span className="lp-headline-accent">manual drafting</span>, dressed up as engineering.
-        </div>
+        </h1>
         <div className="lp-sub">
-          Branch is stringing this 3.2 MW rooftop live behind this page — 25 hours of drafting in 3 minutes, zero NEC violations.
+          Leaf Automation Studio builds CAD tools from plain English and runs them on your drawing.
+          Branch is stringing this 3.2 MW rooftop live behind this page: 25 hours of drafting in 3 minutes, zero NEC violations.
         </div>
         <div className="lp-cta-row">
-          <button type="button" className="lp-cta" onClick={onTryTool}>Try Branch — no install</button>
-          <span className="lp-price">PRICING PLACEHOLDER</span>
+          <button type="button" className="lp-cta" onClick={onTryDemo}>Try Branch on the sample rooftop</button>
+          <span className="lp-price">Free to try. Pricing coming soon.</span>
         </div>
         <form onSubmit={registerInterest} aria-label="Register interest">
-          <label htmlFor="front-door-email">Interested in a bring-your-own-key workspace?</label>
+          <label htmlFor="front-door-email">Want a workspace that uses your own API key?</label>
           <input id="front-door-email" type="email" autoComplete="email" required disabled={demandStatus === 'pending' || demandStatus === 'saved'} value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Email address" />
           <button type="submit" className="chip-act" disabled={demandStatus === 'pending' || demandStatus === 'saved'}>
             {demandStatus === 'pending' ? 'Saving interest' : 'Register interest'}
@@ -92,7 +97,7 @@ export default function LandingCast({ onTryTool = enterWorkspace }) {
           </div>
           <div>
             <div className="lp-stat-mid">0 of 12k</div>
-            <div className="lp-stat-sub">NEC violations · survey n=18</div>
+            <div className="lp-stat-sub">NEC violations · 18 projects surveyed</div>
           </div>
         </div>
       </div>
@@ -101,16 +106,17 @@ export default function LandingCast({ onTryTool = enterWorkspace }) {
       <div className="lp-solver" data-cast="site" style={{ '--rank': 1 }}>
         <div className="lp-solver-head">
           <span className="dot live" />
-          <span className="lp-solver-title">String solver — live</span>
-          <span className="lp-solver-tier">class-b widget</span>
+          <span className="lp-solver-title">String solver</span>
         </div>
         <div className="lp-solver-row">
           <span className="lp-solver-field">Q.Peak 425 <span className="lp-solver-caret">▾</span></span>
-          <button type="button" className="chip-act lp-solver-solve" onClick={onTryTool}>Solve</button>
+          <button type="button" className="lp-solver-open" onClick={onTryTool}>Open in workspace</button>
         </div>
         <div className="lp-solver-out">
           <span className="lp-solver-label">Max string · NEC 690.7</span>
-          <span className="lp-solver-big">{maxString ?? '—'} <span className="lp-solver-unit">modules</span></span>
+          {maxString == null
+            ? <span className="lp-solver-pending"><span className="lp-pulse" /> Solving</span>
+            : <span className="lp-solver-big">{maxString} <span className="lp-solver-unit">modules</span></span>}
         </div>
       </div>
 
@@ -122,7 +128,7 @@ export default function LandingCast({ onTryTool = enterWorkspace }) {
             key={s.code}
             type="button"
             className="lp-tab"
-            onClick={() => s.code === '05' ? document.getElementById('front-door-email')?.focus() : navigate(`/sheets#${s.code}`)}
+            onClick={() => navigate(`/sheets#${s.code}`)}
           >
             {s.label}
           </button>
