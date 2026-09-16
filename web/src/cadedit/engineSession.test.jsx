@@ -1109,16 +1109,34 @@ describe('drawing switch mid-edit', () => {
 describe('draw dispatch (W4d Draw group): creation needs no selection, and the selection lands on what was drawn', () => {
   const DRAWN = { id: 'e3', type: 'LINE', layer: '0', vertices: [[0, 0], [100, 0]] }
 
+  it('S12 names only the failed field for create and edit verbs', () => {
+    expect(buildCreatePayload('createCircle', { x: '0', y: '0', r: 'abc' }).refusal)
+      .toBe('Circle refused: r must be a number.')
+    expect(buildEditPayload('mirror', 'e1', { x1: '0', y1: 'a', x2: '0', y2: '10' }).refusal)
+      .toBe('Mirror refused: y1 must be a number.')
+  })
+
+  it('S12 joins two or three failed fields and preserves all-invalid wording', () => {
+    expect(buildCreatePayload('createLine', { x: 'bad', y: '0', x2: '10', y2: 'bad' }).refusal)
+      .toBe('Line refused: x and y2 must be numbers.')
+    expect(buildCreatePayload('createArc', { x: 'bad', y: '0', r: 'bad', a0: '0', a1: 'bad' }).refusal)
+      .toBe('Arc refused: x, r and end must be numbers.')
+    expect(buildCreatePayload('createCircle', { x: 'bad', y: 'bad', r: 'bad' }).refusal)
+      .toBe('Circle refused: x, y and r must all be numbers.')
+    expect(buildCreatePayload('createEllipse', { x: 'bad', y: 'bad', x2: 'bad', y2: 'bad' }).refusal)
+      .toBe('Ellipse refused: the centre x, y and the axis endpoint x2, y2 must all be numbers.')
+  })
+
   it('every create op is refused as a sentence before the engine sees a malformed operand', () => {
     // W4f-9: a decimal literal or nothing; a typo's numeric prefix is never read.
-    expect(buildCreatePayload('createLine', { x: '0', y: '0', x2: '10abc', y2: '0' }).refusal).toMatch(/must all be numbers/)
-    expect(buildCreatePayload('createLine', { x: '0', y: '0', x2: '1,5', y2: '0' }).refusal).toMatch(/must all be numbers/)
+    expect(buildCreatePayload('createLine', { x: '0', y: '0', x2: '10abc', y2: '0' }).refusal).toBe('Line refused: x2 must be a number.')
+    expect(buildCreatePayload('createLine', { x: '0', y: '0', x2: '1,5', y2: '0' }).refusal).toBe('Line refused: x2 must be a number.')
     expect(buildCreatePayload('createLine', { x: ' 0 ', y: '-.5', x2: '1e2', y2: '+7' }).payload).toEqual({ x1: 0, y1: -0.5, x2: 100, y2: 7, layer: '' })
     expect(buildEditPayload('moveVertex', 'e1', { vertexIndex: '3abc', dx: '1', dy: '1' }).refusal).toMatch(/non-negative integer/)
     expect(buildEditPayload('moveVertex', 'e1', { vertexIndex: '-1', dx: '1', dy: '1' }).refusal).toMatch(/non-negative integer/)
     expect(buildEditPayload('moveVertex', 'e1', { vertexIndex: ' 3 ', dx: '1', dy: '1' }).payload).toEqual({ entityId: 'e1', vertexIndex: 3, dx: 1, dy: 1 })
     expect(buildEditPayload('move', 'e1', { dx: '10abc', dy: '0' }).refusal).toMatch(/must both be numbers/)
-    expect(buildCreatePayload('createLine', { x: '0', y: '0', x2: 'nope', y2: '0' }).refusal).toMatch(/must all be numbers/)
+    expect(buildCreatePayload('createLine', { x: '0', y: '0', x2: 'nope', y2: '0' }).refusal).toBe('Line refused: x2 must be a number.')
     expect(buildCreatePayload('createLine', { x: '1', y: '1', x2: '1', y2: '1' }).refusal).toMatch(/must differ/)
     expect(buildCreatePayload('createCircle', { x: '0', y: '0', r: '0' }).refusal).toMatch(/greater than 0/)
     expect(buildCreatePayload('createArc', { x: '0', y: '0', r: '1', a0: '45', a1: '405' }).refusal).toMatch(/start and end must differ/)

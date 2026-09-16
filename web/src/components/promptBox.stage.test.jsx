@@ -96,6 +96,24 @@ describe('the console render (no stage props) is byte-identical to before slice 
   })
 })
 
+describe('S12 command bar grammar', () => {
+  it('pairs the neutral command-line hint with the Command caret', () => {
+    const { container } = mount({ commandLine: true })
+    expect(screen.getByLabelText('Command bar')).toHaveAttribute('placeholder', 'Type a command, or describe what you want ( / for tools)')
+    expect(container.querySelector('.bar-caret').textContent).toBe('Command:')
+  })
+
+  it('keeps the shared hint on other surfaces', () => {
+    mount()
+    expect(screen.getByLabelText('Command bar')).toHaveAttribute('placeholder', 'Find, act, or build… ( / for tools)')
+  })
+
+  it.each([false, true])('honors an explicit placeholder with commandLine=%s', (commandLine) => {
+    mount({ commandLine, placeholder: 'Choose your next step' })
+    expect(screen.getByLabelText('Command bar')).toHaveAttribute('placeholder', 'Choose your next step')
+  })
+})
+
 describe('the stage mount (/try): the tc-bar hooks ride on PromptBox’s own nodes', () => {
   const STAGE = {
     classNames: { wrap: 'tc-bar-input-row', input: 'tc-bar-input', run: 'tc-run' },

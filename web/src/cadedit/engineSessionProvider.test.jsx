@@ -707,12 +707,12 @@ describe('the command prompt (W4e slice H): a tool arms, the command line asks i
     // field and on Run; Enter posts nothing.
     fireEvent.change(screen.getByLabelText('ribbon x'), { target: { value: 'abc' } })
     // S07 humanizes field names in the displayed note.
-    expect(note().textContent).toBe('Line refused: first point x, first point y, next point x and next point y must all be numbers.')
+    expect(note().textContent).toBe('Line refused: first point x must be a number.')
     expect(screen.getByLabelText('ribbon x').getAttribute('aria-invalid')).toBe('true')
     expect(screen.getByLabelText('ribbon y').getAttribute('aria-invalid')).toBeNull()
     expect(run().disabled).toBe(true)
     // S07 uses the same humanized sentence in Run's accessible name.
-    expect(run().getAttribute('aria-label')).toBe('Run (unavailable: Line refused: first point x, first point y, next point x and next point y must all be numbers.)')
+    expect(run().getAttribute('aria-label')).toBe('Run (unavailable: Line refused: first point x must be a number.)')
     fireEvent.keyDown(screen.getByLabelText('ribbon x'), { key: 'Enter' })
     expect(studio.workers[0].posted.filter((message) => message.type === 'applyEdit')).toHaveLength(0)
     // Numbers that make a degenerate line: the sentence names it, no field

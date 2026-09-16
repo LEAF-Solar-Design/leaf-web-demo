@@ -13,6 +13,8 @@ describe('prompt labels and refusals', () => {
   })
 
   it('uses the circle labels without replacing letters inside words', () => {
+    expect(humanizeRefusal('Circle refused: r must be a number.', PROMPTS.createCircle))
+      .toBe('Circle refused: radius must be a number.')
     expect(humanizeRefusal('Circle refused: x, y and r must all be numbers.', PROMPTS.createCircle))
       .toBe('Circle refused: center x, center y and radius must all be numbers.')
     expect(humanizeRefusal('Circle refused: radius must be positive.', PROMPTS.createCircle))

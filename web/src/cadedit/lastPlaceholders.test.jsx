@@ -50,7 +50,7 @@ describe('W4g-4b POINT and ELLIPSE creates', () => {
     expect(buildCreatePayload('createEllipse', { x: '10', y: '0', x2: '15', y2: '0', ratio: '0' }).refusal).toBe('Ellipse refused: the ratio (minor to major) must be greater than 0 and at most 1.')
     expect(buildCreatePayload('createEllipse', { x: '10', y: '0', x2: '15', y2: '0', ratio: '1.5' }).refusal).toBe('Ellipse refused: the ratio (minor to major) must be greater than 0 and at most 1.')
     expect(buildCreatePayload('createEllipse', { x: '10', y: '0', x2: '15', y2: '0', ratio: '1' }).payload.ratio).toBe(1)
-    expect(buildCreatePayload('createEllipse', { x: '10', y: 'n', x2: '15', y2: '0', ratio: '1' }).refusal).toMatch(/must all be numbers/)
+    expect(buildCreatePayload('createEllipse', { x: '10', y: 'n', x2: '15', y2: '0', ratio: '1' }).refusal).toBe('Ellipse refused: y must be a number.')
   })
 
   it('the words, the picks and the ellipse ghost', () => {

@@ -179,6 +179,14 @@ function fmtDelta(raw) {
   return readNumber(raw)
 }
 
+function numericRefusal(verb, fields, allFields) {
+  const failed = fields.filter(([, value]) => value === null).map(([key]) => key)
+  if (!failed.length) return null
+  const names = failed.length === 1 ? failed[0] : `${failed.slice(0, -1).join(', ')} and ${failed.at(-1)}`
+  if (failed.length === fields.length) return `${verb} refused: ${allFields || names} must all be numbers.`
+  return `${verb} refused: ${names} must be ${failed.length === 1 ? 'a number' : 'numbers'}.`
+}
+
 // W4g-7b-02c-e: the ONE name rule an INSERT's block name must pass, shared by
 // the store's own validation and the prompt's datalist (EngineRibbonClusters.jsx),
 // so the datalist never offers a name a typed selection would then refuse:
@@ -342,7 +350,8 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
   }
   if (MLEADER_TABLE.has(op)) {
     const [px, py, lx, ly] = [x, y, x2, y2].map(fmtDelta)
-    if ([px, py, lx, ly].some((v) => v === null)) return { refusal: 'Mleader refused: x, y, x2 and y2 must all be numbers.' }
+    const refusal = numericRefusal('Mleader', [['x', px], ['y', py], ['x2', lx], ['y2', ly]])
+    if (refusal) return { refusal }
     if (Number(px.toFixed(3)) === Number(lx.toFixed(3)) && Number(py.toFixed(3)) === Number(ly.toFixed(3))) return { refusal: 'the two points coincide at the drawing precision (0.001)' }
     const value = String(text ?? '')
     if (value.includes('^')) return { refusal: "mleader text cannot contain ^: the engine's DXF reader rewrites it" }
@@ -362,21 +371,22 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
   }
   if (op === 'createLine') {
     const [x1, y1, xx2, yy2] = [x, y, x2, y2].map(fmtDelta)
-    if ([x1, y1, xx2, yy2].some((v) => v === null)) return { refusal: 'Line refused: x, y, x2 and y2 must all be numbers.' }
+    const refusal = numericRefusal('Line', [['x', x1], ['y', y1], ['x2', xx2], ['y2', yy2]])
+    if (refusal) return { refusal }
     if (x1 === xx2 && y1 === yy2) return { refusal: 'Line refused: the two points must differ.' }
     return { payload: { x1, y1, x2: xx2, y2: yy2, layer: layerName } }
   }
   if (op === 'createCircle') {
     const [cx, cy, radius] = [x, y, r].map(fmtDelta)
-    if ([cx, cy, radius].some((v) => v === null)) return { refusal: 'Circle refused: x, y and r must all be numbers.' }
+    const refusal = numericRefusal('Circle', [['x', cx], ['y', cy], ['r', radius]])
+    if (refusal) return { refusal }
     if (radius <= 0) return { refusal: 'Circle refused: r must be greater than 0.' }
     return { payload: { cx, cy, radius, layer: layerName } }
   }
   if (op === 'createArc') {
     const [cx, cy, radius, startDeg, endDeg] = [x, y, r, a0, a1].map(fmtDelta)
-    if ([cx, cy, radius, startDeg, endDeg].some((v) => v === null)) {
-      return { refusal: 'Arc refused: x, y, r, start and end must all be numbers.' }
-    }
+    const refusal = numericRefusal('Arc', [['x', cx], ['y', cy], ['r', radius], ['start', startDeg], ['end', endDeg]])
+    if (refusal) return { refusal }
     if (radius <= 0) return { refusal: 'Arc refused: r must be greater than 0.' }
     if ((endDeg - startDeg) % 360 === 0) return { refusal: 'Arc refused: start and end must differ (degrees).' }
     return { payload: { cx, cy, radius, startDeg, endDeg, layer: layerName } }
@@ -414,7 +424,8 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
     // the minor-to-major ratio in (0, 1]; the engine takes the axis relative
     // to the centre, so the difference is sent, never the endpoint.
     const [cx, cy, ex, ey] = [x, y, x2, y2].map(fmtDelta)
-    if ([cx, cy, ex, ey].some((v) => v === null)) return { refusal: 'Ellipse refused: the centre x, y and the axis endpoint x2, y2 must all be numbers.' }
+    const refusal = numericRefusal('Ellipse', [['x', cx], ['y', cy], ['x2', ex], ['y2', ey]], 'the centre x, y and the axis endpoint x2, y2')
+    if (refusal) return { refusal }
     if (cx === ex && cy === ey) return { refusal: 'Ellipse refused: the axis endpoint must differ from the centre.' }
     const k = fmtDelta(ratio)
     if (k === null) return { refusal: 'Ellipse refused: the ratio must be a number.' }
@@ -518,7 +529,8 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
     // draws (corner, corner, corner, corner). A zero-width or zero-height
     // rectangle is a line, not a rectangle, and is refused.
     const [x1, y1, xx2, yy2] = [x, y, x2, y2].map(fmtDelta)
-    if ([x1, y1, xx2, yy2].some((v) => v === null)) return { refusal: 'Rectangle refused: x, y, x2 and y2 must all be numbers.' }
+    const refusal = numericRefusal('Rectangle', [['x', x1], ['y', y1], ['x2', xx2], ['y2', yy2]])
+    if (refusal) return { refusal }
     if (x1 === xx2 || y1 === yy2) return { refusal: 'Rectangle refused: the corners must differ in both x and y.' }
     return { payload: { points: [x1, y1, xx2, y1, xx2, yy2, x1, yy2], closed: true, layer: layerName } }
   }
@@ -871,7 +883,8 @@ export function buildEditPayload(op, entityId, { dx, dy, vertexIndex, layer, x1,
   // here with the operator-facing sentence; the engine validates again.
   if (op === 'mirror') {
     const [ax, ay, bx, by] = [x1, y1, x2, y2].map(fmtDelta)
-    if ([ax, ay, bx, by].some((v) => v === null)) return { refusal: 'Mirror refused: x1, y1, x2 and y2 must all be numbers.' }
+    const refusal = numericRefusal('Mirror', [['x1', ax], ['y1', ay], ['x2', bx], ['y2', by]])
+    if (refusal) return { refusal }
     if (ax === bx && ay === by) return { refusal: 'Mirror refused: the two points of the mirror line must differ.' }
     payload.x1 = ax
     payload.y1 = ay

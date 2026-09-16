@@ -164,11 +164,11 @@ export function FootRegion({ on, name, children }) {
 }
 
 const STATUS_TOGGLES = Object.freeze([
-  { id: 'snap', label: 'Snap mode', icon: 'snap' },
-  { id: 'grid', label: 'Grid display', icon: 'grid' },
-  { id: 'ortho', label: 'Ortho mode', icon: 'ortho', live: true },
-  { id: 'polar', label: 'Polar tracking', icon: 'polar' },
-  { id: 'osnap', label: 'Object snap', icon: 'osnap', live: true },
+  { id: 'snap', label: 'Snap mode', icon: 'snap', effect: 'moves the cursor in fixed steps' },
+  { id: 'grid', label: 'Grid display', icon: 'grid', effect: 'shows a reference grid behind the drawing' },
+  { id: 'ortho', label: 'Ortho mode', icon: 'ortho', live: true, effect: 'locks drawing to horizontal and vertical' },
+  { id: 'polar', label: 'Polar tracking', icon: 'polar', effect: 'guides the cursor along set angles' },
+  { id: 'osnap', label: 'Object snap', icon: 'osnap', live: true, effect: 'locks the cursor onto existing geometry, like endpoints and midpoints' },
 ])
 const TOGGLE_REASON = 'not in the browser viewer yet'
 
@@ -204,7 +204,7 @@ export function StatusToggles() {
           type="button"
           data-toggle={t.id}
           aria-pressed={state[t.id]}
-          title={`${t.label} ${state[t.id] ? 'on' : 'off'} (${t.id === 'ortho' ? 'F8' : 'F3'})`}
+          title={`${t.label} ${state[t.id] ? 'on' : 'off'} (${t.id === 'ortho' ? 'F8' : 'F3'}). ${t.effect[0].toUpperCase() + t.effect.slice(1)}.`}
           aria-label={t.label}
           onClick={() => {
             if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('cockpit:mode-toggle', { detail: { id: t.id } }))
@@ -218,7 +218,7 @@ export function StatusToggles() {
           type="button"
           data-toggle={t.id}
           disabled
-          title={`${t.label}: ${TOGGLE_REASON}`}
+          title={`${t.label}: ${t.effect}. ${TOGGLE_REASON[0].toUpperCase() + TOGGLE_REASON.slice(1)}.`}
           aria-label={`${t.label} (unavailable: ${TOGGLE_REASON})`}
         >
           <CockpitIcon id={t.icon} fallback={t.label} size="strip" />

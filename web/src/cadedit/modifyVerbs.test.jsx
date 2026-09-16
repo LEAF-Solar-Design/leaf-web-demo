@@ -21,7 +21,7 @@ describe('W4g-4 store: operand reading for the new verbs', () => {
       .toEqual({ payload: { entityId: 'e1', x1: 0, y1: 0, x2: 0, y2: 10, keep: true } })
     expect(buildEditPayload('mirror', 'e1', { x1: '0', y1: '0', x2: '0', y2: '10', keep: 'false' }).payload.keep).toBe(false)
     expect(buildEditPayload('mirror', 'e1', { x1: '1', y1: '1', x2: '1', y2: '1' }).refusal).toBe('Mirror refused: the two points of the mirror line must differ.')
-    expect(buildEditPayload('mirror', 'e1', { x1: '1', y1: 'a', x2: '2', y2: '2' }).refusal).toBe('Mirror refused: x1, y1, x2 and y2 must all be numbers.')
+    expect(buildEditPayload('mirror', 'e1', { x1: '1', y1: 'a', x2: '2', y2: '2' }).refusal).toBe('Mirror refused: y1 must be a number.')
     expect(buildEditPayload('rotate', 'e1', { cx: '5', cy: '5', deg: '90' })).toEqual({ payload: { entityId: 'e1', cx: 5, cy: 5, deg: 90 } })
     expect(buildEditPayload('rotate', 'e1', { cx: '5', cy: '5', deg: 'ninety' }).refusal).toBe('Rotate refused: the angle must be a number (degrees).')
     expect(buildEditPayload('rotate', 'e1', { cx: '', cy: '5', deg: '1' }).refusal).toBe('Rotate refused: the base point x and y must both be numbers.')
@@ -36,7 +36,7 @@ describe('W4g-4 store: operand reading for the new verbs', () => {
     expect(buildCreatePayload('createRectangle', { x: '0', y: '0', x2: '4', y2: '3', layer: 'P' }))
       .toEqual({ payload: { points: [0, 0, 4, 0, 4, 3, 0, 3], closed: true, layer: 'P' } })
     expect(buildCreatePayload('createRectangle', { x: '0', y: '0', x2: '0', y2: '3' }).refusal).toBe('Rectangle refused: the corners must differ in both x and y.')
-    expect(buildCreatePayload('createRectangle', { x: '0', y: 'q', x2: '1', y2: '3' }).refusal).toBe('Rectangle refused: x, y, x2 and y2 must all be numbers.')
+    expect(buildCreatePayload('createRectangle', { x: '0', y: 'q', x2: '1', y2: '3' }).refusal).toBe('Rectangle refused: y must be a number.')
     // W4g-6: a batch (the intersection verbs) selects the last entity it made.
     expect(CREATING_EDITS).toEqual(['copy', 'mirror', 'explode', 'arrayRect', 'arrayPolar', 'batch'])
   })

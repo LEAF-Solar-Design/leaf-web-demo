@@ -19,7 +19,7 @@ describe('StatusToggles', () => {
     expect(screen.getAllByRole('button').map((el) => el.dataset.toggle)).toEqual(['snap', 'grid', 'ortho', 'polar', 'osnap', 'fullscreen'])
     for (const id of ['snap', 'grid', 'ortho', 'polar', 'osnap']) {
       expect(button(id).disabled).toBe(true)
-      expect(button(id).title).toContain(reason)
+      expect(button(id).title).toContain('Not in the browser viewer yet.')
       expect(button(id).getAttribute('aria-label')).toContain(reason)
       expect(button(id).hasAttribute('aria-pressed')).toBe(false)
     }
@@ -28,6 +28,20 @@ describe('StatusToggles', () => {
   it('starts with the five disabled placeholders in their original order', () => {
     render(<StatusToggles />)
     expectDisabled()
+  })
+
+  it('S12 explains each placeholder effect and preserves its accessible label', () => {
+    render(<StatusToggles />)
+    for (const [id, label, effect] of [
+      ['snap', 'Snap mode', 'moves the cursor in fixed steps'],
+      ['grid', 'Grid display', 'shows a reference grid behind the drawing'],
+      ['ortho', 'Ortho mode', 'locks drawing to horizontal and vertical'],
+      ['polar', 'Polar tracking', 'guides the cursor along set angles'],
+      ['osnap', 'Object snap', 'locks the cursor onto existing geometry, like endpoints and midpoints'],
+    ]) {
+      expect(button(id).title).toBe(`${label}: ${effect}. Not in the browser viewer yet.`)
+      expect(button(id).getAttribute('aria-label')).toBe(`${label} (unavailable: not in the browser viewer yet)`)
+    }
   })
 
   it('requests the modes exactly once on mount', () => {
@@ -49,14 +63,14 @@ describe('StatusToggles', () => {
     expect(button('osnap').disabled).toBe(false)
     expect(button('ortho').getAttribute('aria-pressed')).toBe('false')
     expect(button('osnap').getAttribute('aria-pressed')).toBe('true')
-    expect(button('ortho').title).toBe('Ortho mode off (F8)')
-    expect(button('osnap').title).toBe('Object snap on (F3)')
+    expect(button('ortho').title).toBe('Ortho mode off (F8). Locks drawing to horizontal and vertical.')
+    expect(button('osnap').title).toBe('Object snap on (F3). Locks the cursor onto existing geometry, like endpoints and midpoints.')
     expect(button('ortho').getAttribute('aria-label')).toBe('Ortho mode')
     expect(button('osnap').getAttribute('aria-label')).toBe('Object snap')
     expect(['snap', 'grid', 'polar'].map((id) => button(id).outerHTML)).toEqual(placeholders)
     modes({ live: true, ortho: true, osnap: false })
-    expect(button('ortho').title).toBe('Ortho mode on (F8)')
-    expect(button('osnap').title).toBe('Object snap off (F3)')
+    expect(button('ortho').title).toBe('Ortho mode on (F8). Locks drawing to horizontal and vertical.')
+    expect(button('osnap').title).toBe('Object snap off (F3). Locks the cursor onto existing geometry, like endpoints and midpoints.')
   })
 
   it('dispatches one toggle and waits for the provider to change pressed state', () => {
