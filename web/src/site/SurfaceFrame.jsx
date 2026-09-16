@@ -186,6 +186,7 @@ export default function SurfaceFrame({
   projectSlot = null,
   boardPresentation = false,
   studioPresentation = false,
+  studioShell = false,
   headingRef = null,
   session = null,
   posture = null,
@@ -230,6 +231,7 @@ export default function SurfaceFrame({
     projectSlot,
     boardPresentation,
     studioPresentation,
+    studioShell,
     headingRef,
     session,
     posture,
@@ -292,6 +294,21 @@ function Frame() {
     ? frame.contract.chrome.productFrame
     : frame.contract.chrome.stageBranch === 'frame'
   if (!declared) return null
+  if (isConsole(frame) && frame.studioShell && frame.contract.chrome.shell === 'cockpit') {
+    const project = frame.workspaceProject
+    return (
+      <section id="product-surface-panel" className="studio-profile-info" role="tabpanel" aria-labelledby={`product-surface-tab-${frame.activeSurface}`}>
+        <details>
+          <summary>{frame.contract.ground === 'device-stage' ? 'iOS readiness' : 'Project summary'}</summary>
+          <p>{project?.kind === 'project' ? project.label : 'No project open'}</p>
+          {project?.drawingName && <p>Drawing: {project.drawingName}</p>}
+          {frame.projectSlot}
+          <Entitlement at="inline" />
+          {frame.catalogError && <p role="status">{frame.catalogError}</p>}
+        </details>
+      </section>
+    )
+  }
   return (
     <ProductSurfaceFrame
       activeSurface={frame.activeSurface}

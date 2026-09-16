@@ -110,6 +110,8 @@ describe('App portal wiring', () => {
     expect(src).toMatch(/\{studioGround && groundShowsDrawing\(activeSurface\) && \(\s*\n?\s*<CockpitStatus/)
     // (`data-tour="shell"` after it is slice 4b's console tour anchor; the
     // surface attribute's gate is what this pin guards.)
+    expect(src).toContain("const studioShell = !!studioGround && surfaceSlots.chrome.shell === 'cockpit'")
+    expect(src).toMatch(/data-studio-shell=\{studioShell \? 'cockpit' : undefined\} data-surface=/)
     expect(src).toMatch(/<div className="app"[^>]*\bdata-surface=\{studioGround \? activeSurface : undefined\} data-start-open=\{studioGround && startOpen \? 'true' : undefined\} data-tour="shell"\s+onClickCapture=/)
   })
 
