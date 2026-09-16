@@ -20,6 +20,7 @@
 // present, disabled, and say so (operator decision, W4e plan: mirror the
 // reference's eight Draw-tab panels).
 import { zoomViewer } from '../site/DrawingCockpit.jsx'
+import { deriveIosState } from '../ios/IosSurface.jsx'
 import { RIBBON_TABS } from '../site/CockpitTopBand.jsx'
 import { DEFERRED_REASONS, REASONS, forCluster, ribbonTool } from './actionRegistry.js'
 import { DEFAULT_TOOL_ICON, isWriteTool, toolIcon, toolMcpSource, toolPlacementSize, toolPlacementTab } from './toolRecord.js'
@@ -81,6 +82,33 @@ const PROFILE_ICONS = Object.freeze({
   'ship:receipts': 'history',
 })
 const profileBase = (id, label) => ({ id, label, icon: PROFILE_ICONS[id] || DEFAULT_TOOL_ICON, title: label })
+
+function wellFormedShipContract(contract) {
+  return contract !== null && typeof contract === 'object' && !Array.isArray(contract)
+    && typeof contract.receipt_id === 'string' && contract.receipt_id.trim().length > 0
+    && typeof contract.reported_at === 'string' && contract.reported_at.trim().length > 0
+    && contract.readiness !== null && typeof contract.readiness === 'object' && !Array.isArray(contract.readiness)
+    && typeof contract.readiness.healthy === 'boolean'
+    && typeof contract.readiness.launchable === 'boolean'
+    && (contract.build_stage == null || typeof contract.build_stage === 'string')
+}
+
+export function shipStatusRows(contract, revision, onReceipts) {
+  const valid = wellFormedShipContract(contract) && typeof onReceipts === 'function'
+  const state = valid ? deriveIosState(contract) : null
+  const stage = valid ? contract.build_stage || '' : ''
+  const readinessLabel = state === 'in-progress'
+    ? `Apple readiness: in progress${stage ? ` (${stage})` : ''}`
+    : `Apple readiness: ${state}`
+  return [
+    valid && revision
+      ? { ...profileBase('ship:revision', `Approved revision ${revision}`.slice(0, 64)), disabled: false, title: `reported ${contract.reported_at}`.slice(0, 64), onClick: onReceipts }
+      : { ...profileBase('ship:revision', 'Approved revision'), disabled: true, reason: PROFILE_REASONS.approvedRevision, onClick: undefined },
+    valid
+      ? { ...profileBase('ship:readiness', readinessLabel.slice(0, 64)), disabled: false, state, pressed: state === 'ready', onClick: onReceipts }
+      : { ...profileBase('ship:readiness', 'Mounted Apple readiness'), disabled: true, reason: PROFILE_REASONS.appleReadiness, onClick: undefined },
+  ]
+}
 
 function profileGroup(id, label, tools) {
   return { id, label, kind: 'group', tools }
@@ -221,14 +249,13 @@ export function profileRibbonTabs(profile, ctx = {}) {
   const ship = profileRecord(context.ship)
   const onLaunch = profileHandler(ship.onLaunch)
   const onShipReceipts = profileHandler(ship.onReceipts)
+  const [revision, readiness] = shipStatusRows(ship.contract, ship.revision, onShipReceipts)
   return [{ id: 'ship', label: 'Ship', clusters: [
-    // Revision and readiness are status rows: no handler exists for them yet,
-    // so they stay disabled and say so rather than pretend to open anything.
     profileGroup('revision', 'Revision', [
-      { ...profileBase('ship:revision', 'Approved revision'), disabled: true, reason: PROFILE_REASONS.approvedRevision, onClick: undefined },
+      revision,
     ]),
     profileGroup('readiness', 'Readiness', [
-      { ...profileBase('ship:readiness', 'Mounted Apple readiness'), disabled: true, reason: PROFILE_REASONS.appleReadiness, onClick: undefined },
+      readiness,
     ]),
     // Without a launch handler there is no launch path, and the tool never implies one.
     profileGroup('ship', 'Ship', [

@@ -2873,7 +2873,7 @@ export default function App() {
       },
       activity: { onJobs: openJobs, onReceipts: jobs.length ? openJobs : null },
       // IosSurface is readiness-only here; launching belongs to the ship host.
-      ship: { onLaunch: null, onReceipts: iosContract?.receipt_id ? () => {
+      ship: { contract: iosContract, revision: canonicalVersionId || null, onLaunch: null, onReceipts: iosContract?.receipt_id ? () => {
         const details = document.querySelector('.studio-profile-info details')
         if (details) { details.open = true; details.querySelector('summary')?.focus() }
       } : null },
@@ -2881,7 +2881,7 @@ export default function App() {
   }, [surfaceSlots.toolbar.profile, railFamilies, onRequestCatalogRun, setFamilyOpen,
     running, previewing, writeLocked, canRunWrite, engineDirty, mock, signedIn, projectsErr,
     orgId, projectBusy, onCreateProject, agentDisabled, routing, clearAgentSession,
-    openAgentMode, jobs.length, iosContract?.receipt_id, setNavExpanded, setJobRailExpanded,
+    openAgentMode, jobs.length, iosContract, canonicalVersionId, setNavExpanded, setJobRailExpanded,
     solarRoutesStatus, showSolarStrings, selectedHandle])
   const previousRibbonProfile = useRef(null)
   const entryRibbonTab = profileEntryTab(previousRibbonProfile.current, surfaceSlots.toolbar.profile, ribbonTab, surfaceSlots.toolbar.home)

@@ -33,6 +33,17 @@ const FAMS = [
 ]
 
 describe('DraftingRibbon', () => {
+  it('C-05 row9 exposes data-state only for a string tool state', () => {
+    render(<>
+      <RibbonTool tool={{ id: 'ship:readiness', label: 'Apple readiness: ready', state: 'ready' }} />
+      <RibbonTool tool={{ id: 'open', label: 'Open' }} />
+      <RibbonTool tool={{ id: 'other', label: 'Other', state: true }} />
+    </>)
+    expect(screen.getByRole('button', { name: 'Apple readiness: ready' }).getAttribute('data-state')).toBe('ready')
+    expect(screen.getByRole('button', { name: 'Open' }).hasAttribute('data-state')).toBe(false)
+    expect(screen.getByRole('button', { name: 'Other' }).hasAttribute('data-state')).toBe(false)
+  })
+
   it('renders a profile tab outside the catalog placement tabs', () => {
     const solar = profileRibbonTabs('solar')[1]
     render(<DraftingRibbon tab={solar.id} clusters={solar.clusters} />)
