@@ -2610,9 +2610,104 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.getByTestId('cockpit-prompt-run')).toBeDisabled()
   })
 
+  test('C-04C row9 Solar reads Ready only after the held demo DXF is shown', async ({ page, request }) => {
+    test.setTimeout(120_000)
+    await page.setViewportSize({ width: 1600, height: 1000 })
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    let releaseSample
+    let sawSample
+    const held = new Promise((resolve) => { releaseSample = resolve })
+    const requested = new Promise((resolve) => { sawSample = resolve })
+    const holdSample = async (route) => {
+      sawSample()
+      await held
+      await route.continue()
+    }
+    await page.route('**/sample.dxf', holdSample)
+    await page.goto('/app?surface=solar&dev=1')
+    await page.getByLabel('Use mock data (off = live backend)').check()
+    const solarStatus = page.getByRole('tab', { name: 'Solar CAD', exact: true }).locator('small')
+    try {
+      await requested
+      await expect(page.locator('.workspace-card[data-engine-document]')).toHaveCount(0)
+      await expect(solarStatus).toHaveText(/^(Template pending|Beta)$/)
+      await expect(solarStatus).toHaveAttribute('data-state', 'beta')
+    } finally {
+      releaseSample()
+    }
+    await expect(page.locator('.workspace-card[data-engine-document$="-v1.dxf"]')).toHaveCount(1, { timeout: 60_000 })
+    await expect(solarStatus).toHaveText('Ready')
+    await expect(solarStatus).toHaveAttribute('data-state', 'available')
+    await page.unroute('**/sample.dxf', holdSample)
+
+    // A new demo session must not inherit readiness from the previous parse.
+    await page.route('**/sample.dxf', (route) => route.fulfill({
+      status: 200, contentType: 'application/dxf', body: 'This is not a DXF document.\n',
+    }))
+    const malformedSample = page.waitForResponse('**/sample.dxf')
+    await page.reload()
+    await page.getByLabel('Use mock data (off = live backend)').check()
+    await (await malformedSample).finished()
+    // Let the engine consume the refused answer before checking readiness.
+    // The head opener's failure sentence is a separate follow-up.
+    await page.waitForTimeout(1000)
+    await expect(page.locator('.workspace-card[data-engine-document]')).toHaveCount(0)
+    await expect(solarStatus).toHaveText(/^(Template pending|Beta)$/)
+    await expect(solarStatus).toHaveAttribute('data-state', 'beta')
+  })
+
+  test('C-04C row10 Solar phone Tools reaches five clusters and preserves input and Escape focus', async ({ page, request }) => {
+    test.setTimeout(120_000)
+    await page.setViewportSize({ width: 390, height: 844 })
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    await page.goto('/app?surface=solar&dev=1')
+    await page.getByLabel('Use mock data (off = live backend)').check()
+    await expect(page.locator('.workspace-card[data-engine-document$="-v1.dxf"]')).toHaveCount(1, { timeout: 60_000 })
+    const ribbon = page.getByTestId('drafting-ribbon')
+    const tools = ribbon.getByRole('button', { name: 'More panels', exact: true })
+    await expect(tools).toBeVisible()
+    await expect(tools).toHaveAttribute('aria-expanded', 'false')
+    expect(await tools.evaluate((el) => getComputedStyle(el, '::before').content)).toContain('Tools')
+    await tools.click()
+    await expect(tools).toHaveAttribute('aria-expanded', 'true')
+    await expect(ribbon.locator('.ribbon-tool:not(:disabled)').first()).toBeFocused()
+    await expect(ribbon.locator('.ribbon-cluster')).toHaveCount(5)
+    for (const name of ['Panel placement', 'Stringing', 'Equipment placement', 'Measure', 'Select']) {
+      const cluster = ribbon.getByRole('group', { name, exact: true })
+      await cluster.scrollIntoViewIfNeeded()
+      await expect(cluster).toBeVisible()
+      const buttons = cluster.locator('.ribbon-tool:not(:disabled)')
+      for (const button of await buttons.all()) {
+        await button.scrollIntoViewIfNeeded()
+        await expect(button).toBeInViewport({ ratio: 1 })
+        await button.click({ trial: true })
+      }
+    }
+    // Escape from the disclosure returns to its opener and hides whole clusters.
+    await ribbon.locator('.ribbon-tool:not(:disabled)').last().focus()
+    await page.keyboard.press('Escape')
+    await expect(tools).toHaveAttribute('aria-expanded', 'false')
+    await expect(tools).toBeFocused()
+    await expect(ribbon.locator('.ribbon-cluster:visible')).toHaveCount(0)
+    await tools.click()
+    await ribbon.locator('[data-tool="solar-panels:createRectangle"]').click()
+    const operand = page.getByLabel('ribbon x', { exact: true })
+    await operand.fill('12')
+    await expect(operand).toHaveValue('12')
+    await expect(operand).toBeInViewport({ ratio: 1 })
+    // Focus left the disclosure for the operand; blur closes it as before.
+    await expect(tools).toHaveAttribute('aria-expanded', 'false')
+    await operand.press('Escape')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
+    await expect(tools).toBeFocused()
+    expect(await page.locator('.studio-shell').evaluate((el) => el.scrollHeight - el.clientHeight)).toBeLessThanOrEqual(1)
+  })
+
   test('C-04B Solar census: five clusters, geometry tools, solved toggle and profile continuity', async ({ page, request }) => {
     test.setTimeout(120_000)
-    await page.setViewportSize({ width: 1920, height: 1080 })
+    await page.setViewportSize({ width: 1600, height: 1000 })
     await requireLocalReady(request, test, API_BASE)
     await setRail(page, '1')
     await page.goto('/app?surface=solar&dev=1')

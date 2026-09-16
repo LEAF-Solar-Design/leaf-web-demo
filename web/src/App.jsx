@@ -89,8 +89,8 @@ import EngineDockProperties from './cadedit/EngineDockProperties.jsx'
 import CommandLineArmer from './cadedit/CommandLineArmer.jsx'
 import StatusModesBridge from './cadedit/StatusModesBridge.jsx'
 import EngineDocumentView from './cadedit/EngineDocumentView.jsx'
-import EngineHeadOpener from './cadedit/EngineHeadOpener.jsx'
-import SolarStarterOpener, { SOLAR_STARTER_EMPTY_INTAKE } from './cadedit/SolarStarterOpener.jsx'
+import EngineHeadOpener, { headDocumentId } from './cadedit/EngineHeadOpener.jsx'
+import SolarStarterOpener, { SOLAR_STARTER_DOCUMENT_ID, SOLAR_STARTER_EMPTY_INTAKE } from './cadedit/SolarStarterOpener.jsx'
 import CanvasPointPicker from './cadedit/CanvasPointPicker.jsx'
 import { COCKPIT_COMMAND_EVENT, parseDrawingCommand } from './lib/commandWords.js'
 import { parsePointExpression } from './cadedit/pointExpression.js'
@@ -2788,12 +2788,19 @@ export default function App() {
       .catch(() => { if (live) setIosContract(null) })
     return () => { live = false }
   }, [mock, openProjectId, canonicalVersionId])
+  // Readiness follows the engine projection that reached the canvas, not openBytes.
+  const shownHeadVersion = activeIntake?.documentId?.match(/-v([1-9]\d*)\.dxf$/)?.[1]
+  const solarReady = activeSurface === 'solar' && !!activeIntake && (
+    activeIntake.documentId === SOLAR_STARTER_DOCUMENT_ID
+    || (!!shownHeadVersion && activeIntake.documentId === headDocumentId(REQUESTED_DRAWING_ID, shownHeadVersion))
+  )
   const surfaceStates = useMemo(() => productSurfaceStates({
     sessionActive: mock || !signedOut,
     hasDrawing: !!shown,
     apsLive: health ? !!health.aps_live : undefined,
     iosReady: !!(iosContract?.readiness?.healthy && iosContract?.readiness?.launchable),
-  }), [mock, signedOut, shown, health, iosContract])
+    solarReady,
+  }), [mock, signedOut, shown, health, iosContract, solarReady])
 
   const advisories = [
     quotaShown && 'spend cap',
