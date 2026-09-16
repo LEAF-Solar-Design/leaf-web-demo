@@ -82,6 +82,9 @@ const StageLayer = forwardRef(function StageLayer({
   return (
     <div className="stage-layer" role={intakeOverride ? 'region' : undefined} aria-label={intakeOverride ? 'Drawing viewer' : undefined} aria-hidden={intakeOverride ? undefined : true}>
       <div className="stage-grid" />
+      {!intakeOverride && !fallback && !entered && (
+        <div className="stage-loading" aria-hidden="true"><span className="lp-pulse" /> Loading the 3.2 MW rooftop</div>
+      )}
       {fallback ? (
         <StageFallback2D />
       ) : (
