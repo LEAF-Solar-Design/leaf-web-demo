@@ -133,7 +133,7 @@ describe('W4g-7a the script runner', () => {
     fireEvent.click(runButton())
     expect(posts()).toHaveLength(1)
     reply('createLine', [H, L2], { createdId: '8' })
-    await waitFor(() => expect(status().textContent).toBe('Script stopped at line 2: Circle refused: x, y and r must all be numbers.'), { timeout: 5000 })
+    await waitFor(() => expect(status().textContent).toBe('Script stopped at line 2: Circle refused: r must be a number.'), { timeout: 5000 })
     expect(posts()).toHaveLength(1)
     expect(status().getAttribute('data-phase')).toBe('stopped')
     expect(context.session.entityCount).toBe(2)
