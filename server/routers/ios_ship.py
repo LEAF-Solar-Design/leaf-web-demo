@@ -11,6 +11,9 @@ from typing import Any, Callable, Dict, Optional
 from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from pydantic import constr
+
+from .ios_ship_provider import _authorized
 
 import deps
 import entitlements
@@ -75,6 +78,125 @@ class LaunchRequest(BaseModel):
     bundle_identifier: str
     marketing_version: str
     build_number: str
+
+
+class CatalogApprovalRequest(BaseModel):
+    revision: constr(strict=True, min_length=1, max_length=512)
+    source_revision: constr(strict=True, min_length=1, max_length=512)
+    source_sha256: constr(strict=True, min_length=1, max_length=512)
+    bundle_identifier: constr(strict=True, min_length=1, max_length=512)
+    marketing_version: constr(strict=True, min_length=1, max_length=512)
+    build_number: constr(strict=True, min_length=1, max_length=512)
+
+    class Config:
+        extra = "forbid"
+
+
+_CATALOG_BODY_FIELDS = frozenset({
+    "org_id", "project_id", "catalog_key", "repository", "source_revision",
+    "source_sha256", "bundle_identifier", "marketing_version", "build_number",
+    "producer_receipt_digest",
+})
+
+
+@router.post("/internal/v1/ios-ship/source-catalog")
+async def source_catalog(request: Request,
+                         authorization: Optional[str] = Header(default=None),
+                         provider_identity: Optional[str] = Header(
+                             default=None, alias="X-Leaf-Ios-Ship-Provider")) -> JSONResponse:
+    denied = _authorized(authorization, provider_identity)
+    if denied is not None:
+        return denied
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    if not isinstance(body, dict) or set(body) != _CATALOG_BODY_FIELDS:
+        return _failure(400, "invalid_catalog_entry", "catalog fields are required")
+    try:
+        store = _store()
+        entry = store.register_source_catalog_entry(
+            body["org_id"], body["project_id"],
+            {key: value for key, value in body.items() if key not in {"org_id", "project_id"}})
+        return JSONResponse(status_code=200, content={"ok": True, "entry": entry})
+    except Exception as exc:
+        code = getattr(exc, "code", "catalog_unavailable")
+        status = (409 if code == "catalog_conflict" else
+                  404 if code == "project_unavailable" else
+                  503 if code == "catalog_unavailable" else 400)
+        return _failure(status, code, "source catalog registration was refused")
+
+
+@router.get("/api/projects/{project_id}/ios/sources")
+def project_sources(project_id: str,
+                    tenant: Any = Depends(deps.require_tenant)) -> JSONResponse:
+    try:
+        store = _store()
+        org_id = _caller_org(store, tenant, project_id)
+        if org_id is None:
+            return _failure(404, "project_unavailable", "project is unavailable")
+        return JSONResponse(status_code=200, content={
+            "ok": True, "sources": store.list_source_catalog(org_id, project_id),
+            "approvals": store.list_revision_approvals(org_id, project_id)})
+    except Exception:
+        return _failure(503, "catalog_unavailable", "source catalog is unavailable")
+
+
+@router.post("/api/projects/{project_id}/ios/approvals")
+async def project_approval(project_id: str, req: CatalogApprovalRequest,
+                           request: Request,
+                           tenant: Any = Depends(deps.require_tenant)) -> JSONResponse:
+    tid = _tenant_id(tenant)
+    kind = "guest" if tid.startswith("guest-") else "account"
+
+    def refused(status: int, code: str, message: str, stage: str,
+                setup_action: Optional[str] = None) -> JSONResponse:
+        _ship_event(tid, kind, "approval.refused", stage, code)
+        return _failure(status, code, message, setup_action=setup_action)
+
+    try:
+        body = await request.json()
+        _reject_secret_shaped(body)
+        for name, value in body.items():
+            if value.startswith("-----BEGIN") or re.search(
+                    r"eyJ[a-zA-Z0-9_-]{10,}\.eyJ|AAAA[A-Za-z0-9+/]{20,}={0,2}", value):
+                raise ValueError(f"secret-shaped field at {name}")
+    except ValueError as exc:
+        return refused(400, "secret_shaped_field", str(exc), "validation")
+    try:
+        store = _store()
+        org_id = _caller_org(store, tenant, project_id)
+        if org_id is None:
+            return refused(404, "project_unavailable", "project is unavailable", "authorization")
+        subject = getattr(tenant, "subject", None)
+        owner = store.resolve_ship_owner(org_id, project_id, subject) if subject else None
+        if owner is None:
+            return refused(403, "approval_forbidden", "project owner is required", "authorization")
+        approval = store.approve_catalog_revision(
+            org_id, project_id, approved_by=owner, **req.dict())
+        _ship_event(tid, kind, "approval.recorded", "approved")
+        return JSONResponse(status_code=200, content={"ok": True, "approval": approval})
+    except Exception as exc:
+        code = getattr(exc, "code", "approval_unavailable")
+        status = (409 if code in {"catalog_entry_missing", "approval_tuple_mismatch", "approval_consumed"} else
+                  404 if code == "project_unavailable" else
+                  503 if code == "approval_unavailable" else 400)
+        message = str(exc) if code == "approval_tuple_mismatch" else "revision approval was refused"
+        return refused(status, code, message, "approval", getattr(exc, "setup_action", None))
+
+
+@router.get("/api/projects/{project_id}/ios/executions/latest")
+def latest_project_execution(project_id: str,
+                             tenant: Any = Depends(deps.require_tenant)) -> JSONResponse:
+    try:
+        store = _store()
+        org_id = _caller_org(store, tenant, project_id)
+        if org_id is None:
+            return _failure(404, "project_unavailable", "project is unavailable")
+        row = store.latest_execution_for_project(org_id, _tenant_id(tenant), project_id)
+        return JSONResponse(status_code=200, content={"ok": True, "execution": row})
+    except Exception:
+        return _failure(503, "execution_unavailable", "execution status is unavailable")
 
 
 def _failure(status: int, code: str, message: str, *,
