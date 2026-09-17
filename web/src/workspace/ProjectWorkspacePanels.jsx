@@ -19,7 +19,12 @@ export function paneForCapability(name) {
 }
 
 function pretty(value) {
-  const text = JSON.stringify(deepRedact(value), null, 2) ?? 'No result yet.'
+  let text
+  try {
+    text = JSON.stringify(deepRedact(value), null, 2) ?? 'No result yet.'
+  } catch {
+    return 'Result could not be rendered.'  // a value JSON cannot serialize; never a crash, never [object Object]
+  }
   return text.length > 4000 ? `${text.slice(0, 4000)}…` : text
 }
 
