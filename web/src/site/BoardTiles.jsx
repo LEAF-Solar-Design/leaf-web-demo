@@ -18,7 +18,10 @@ function capabilityTotal(families) {
 // same GET /api/projects/:id/workspace payload WorkspaceSummary renders;
 // null (no project open, or the offline demo) renders the honest empties.
 // ---------------------------------------------------------------------------
-export function BoardTiles({ workspace, drawing, catalog, renderTile, studioPresentation = false }) {
+export function BoardTiles({ workspace, drawing, catalog, renderTile, studioPresentation = false, actions }) {
+  const action = (kind, id, callback, value, text, label) => callback
+    ? <button type="button" className="ground-row-action" data-action={kind} data-id={id} aria-label={label} onClick={() => callback(value)}>{text}</button>
+    : text
   const versions = workspace?.drawing_versions || []
   const jobs = [...(workspace?.jobs || [])].reverse().slice(0, 5) // newest first
   const tools = workspace?.built_tools || []
@@ -29,7 +32,7 @@ export function BoardTiles({ workspace, drawing, catalog, renderTile, studioPres
             <h3>Drawing</h3>
             {drawing ? (
               <>
-                <strong>{drawing.name}</strong>
+                {actions?.onOpenDrawing ? <button type="button" className="ground-row-action" data-action="drawing" data-id={drawing.drawing_id} onClick={() => actions.onOpenDrawing()}>{drawing.name}</button> : <strong>{drawing.name}</strong>}
                 <p>{drawing.polylines} polylines · {drawing.layers} layers</p>
               </>
             ) : <p className="ground-empty">No drawing mounted</p>}
@@ -41,7 +44,7 @@ export function BoardTiles({ workspace, drawing, catalog, renderTile, studioPres
                 <strong>{versions.length} drawing version{versions.length === 1 ? '' : 's'}</strong>
                 <ul>
                   {[...versions].slice(-3).reverse().map((version) => (
-                    <li key={version.version_id} data-element-id={formatElementId('version', version.version_id) || undefined}>v{version.seq} · {shortId(version.drawing_id)}</li>
+                    <li key={version.version_id} data-element-id={formatElementId('version', version.version_id) || undefined}>{action('version', version.version_id, actions?.onOpenVersion, version, <>v{version.seq} · {shortId(version.drawing_id)}</>)}</li>
                   ))}
                 </ul>
               </>
@@ -53,7 +56,7 @@ export function BoardTiles({ workspace, drawing, catalog, renderTile, studioPres
               <ul>
                 {jobs.map((job) => (
                   <li key={job.job_id} data-element-id={formatElementId('job', job.job_id) || undefined}>
-                    <strong>{job.tool_name || job.kind}</strong> · {job.status || 'pending'}
+                    {action('job', job.job_id, actions?.onOpenJob, job, <><strong>{job.tool_name || job.kind}</strong> · {job.status || 'pending'}</>)}
                   </li>
                 ))}
               </ul>
@@ -66,7 +69,7 @@ export function BoardTiles({ workspace, drawing, catalog, renderTile, studioPres
                 const realId = tool.tool_id || tool.name || ''
                 return (
                   <li key={realId || i} data-element-id={(realId && formatElementId('tool', realId)) || undefined}>
-                    {tool.name || tool.tool_id}
+                    {action('tool', realId, actions?.onOpenTool, tool, tool.name || tool.tool_id)}
                   </li>
                 )
               })}</ul>
@@ -78,7 +81,7 @@ export function BoardTiles({ workspace, drawing, catalog, renderTile, studioPres
               <>
                 <strong>{families.length} {families.length === 1 ? 'family' : 'families'} · {capabilityTotal(families)} tools</strong>
                 <ul>{families.map((family) => (
-                  <li key={family.family_id} data-element-id={formatElementId('family', family.family_id) || undefined}>{family.label}
+                  <li key={family.family_id} data-element-id={formatElementId('family', family.family_id) || undefined}>{action('family', family.family_id, actions?.onOpenFamily, family, family.label)}
                     {studioPresentation && <ul className="ground-catalog-tools">
                       {(family.capabilities || []).map((tool) => (
                         <li key={tool.name} className="ground-catalog-tool">
@@ -97,7 +100,7 @@ export function BoardTiles({ workspace, drawing, catalog, renderTile, studioPres
           </section>
           <section className="ground-tile" data-tile="shared" aria-label="Shared everywhere">
             <h3>Shared everywhere</h3>
-            <ul>{SHARED_WORKSPACE_CAPABILITIES.map((capability) => <li key={capability}>{capability}</li>)}</ul>
+            <ul>{SHARED_WORKSPACE_CAPABILITIES.map((capability) => <li key={capability}>{action('capability', capability, actions?.onOpenCapability, capability, capability, `Open ${capability}`)}</li>)}</ul>
           </section>
     </>
   )

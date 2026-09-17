@@ -13,6 +13,7 @@ export function ProjectBoardGround({
   onCreateProject = null,
   occluders = NO_OCCLUDERS,
   studioPresentation = false, studioShell = false,
+  actions, panel,
   worldSpace = import.meta.env.VITE_WORLD_SPACE_BOARD === '1', store,
 }) {
   const state = workspaceProject || EMPTY_WORKSPACE_PROJECT
@@ -56,13 +57,14 @@ export function ProjectBoardGround({
             {onReturnToDrawing && <button type="button" onClick={onReturnToDrawing}>{START_BOARD_COPY.returnToDrawing}</button>}
           </header>
         )}
+        {panel}
         {worldSpace ? (
           <WorldSpaceBoard key={workspaceProject?.project_id || 'anonymous'} scopeId={workspaceProject?.project_id || 'anonymous'} viewport={win} store={store}>
-            {(renderTile) => <BoardTiles workspace={workspace} drawing={drawing} catalog={catalog} renderTile={renderTile} studioPresentation={studioPresentation} />}
+            {(renderTile) => <BoardTiles workspace={workspace} drawing={drawing} catalog={catalog} renderTile={renderTile} studioPresentation={studioPresentation} actions={actions} />}
           </WorldSpaceBoard>
         ) : (
           <div className="ground-tiles">
-            <BoardTiles workspace={workspace} drawing={drawing} catalog={catalog} studioPresentation={studioPresentation} />
+            <BoardTiles workspace={workspace} drawing={drawing} catalog={catalog} studioPresentation={studioPresentation} actions={actions} />
           </div>
         )}
         {mock && <p className="ground-note">Offline demo build: no workspace service stands behind this board.</p>}
