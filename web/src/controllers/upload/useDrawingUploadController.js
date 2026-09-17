@@ -28,5 +28,5 @@ export default function useDrawingUploadController({ onReady } = {}) {
     () => ({ upload: controller.upload, cancel: controller.cancel, refreshPolicy: controller.loadPolicy, setEngine: controller.setEngine }),
     [controller],
   )
-  return { ...state, actions, subscribeReady: controller.subscribeReady }
+  return { ...state, actions, subscribeReady: controller.subscribeReady, getSnapshot: controller.getSnapshot }
 }

@@ -11,6 +11,29 @@ vi.mock('../api.js', () => ({
 }))
 afterEach(() => { cleanup(); vi.clearAllMocks() })
 
+it('reads the live upload snapshot before React renders the busy state', async () => {
+  api.getGuestUploadPolicy.mockResolvedValue({ enabled: true, accepted: ['.dwg'], max_bytes: 100 })
+  let finish
+  api.uploadDrawing.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+  api.getUploadedDrawingIntake.mockResolvedValue({ drawing: {} })
+  api.importUploadedDrawingVersion.mockResolvedValue({ drawingVersion: { version: 1 }, replayed: false })
+  const { result } = renderHook(() => {
+    const upload = useDrawingUploadController()
+    const intake = useMaterialIntake({ upload })
+    return { upload, intake }
+  })
+  await waitFor(() => expect(result.current.upload.policy?.enabled).toBe(true))
+  await act(async () => {
+    expect(result.current.intake.begin({ projectId: 'p1', projectName: 'Roof A', fileName: 'site.dwg' })).toBe(true)
+    const pending = result.current.upload.actions.upload(new File(['dwg'], 'site.dwg'))
+    expect(result.current.intake.begin({ projectId: 'p2', projectName: 'Roof B', fileName: 'other.dwg' })).toBe(false)
+    finish({ drawing_id: 'u-0123456789', status: 'ready', extracted_version: 1 })
+    await pending
+  })
+  expect(api.importUploadedDrawingVersion.mock.calls[0][0]).toBe('p1')
+  expect(result.current.intake.target.fileName).toBe('site.dwg')
+})
+
 it('B3 row7 composes the existing ready callback and notifies attachment once', async () => {
   const drawingVersion = { version: 1, name: 'site.dwg' }
   api.getGuestUploadPolicy.mockResolvedValue({ enabled: true, accepted: ['.dwg'], max_bytes: 100 })

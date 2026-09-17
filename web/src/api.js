@@ -444,6 +444,8 @@ export async function importUploadedDrawingVersion(projectId, { drawingId, versi
       body: JSON.stringify({ source: { drawing_id: drawingId, version }, name }),
     }, path)
     const invalid = () => Object.assign(new Error('invalid_response'), { status: res.status, code: 'invalid_response' })
+    const successful = res.status >= 200 && res.status < 300
+    let text = ''
     let body
     try {
       if (Number(res.headers.get('content-length')) > 1024 * 1024) throw invalid()
@@ -451,7 +453,6 @@ export async function importUploadedDrawingVersion(projectId, { drawingId, versi
         const reader = res.body.getReader()
         const decoder = new TextDecoder()
         let bytes = 0
-        let text = ''
         try {
           while (true) {
             const chunk = await reader.read()
@@ -460,15 +461,18 @@ export async function importUploadedDrawingVersion(projectId, { drawingId, versi
             if (bytes > 1024 * 1024) { void reader.cancel(); throw invalid() }
             text += decoder.decode(chunk.value, { stream: true })
           }
-          body = JSON.parse(text + decoder.decode())
+          text += decoder.decode()
         } finally { reader.releaseLock() }
       } else {
-        const text = await res.text()
+        text = await res.text()
         if (new TextEncoder().encode(text).byteLength > 1024 * 1024) throw invalid()
-        body = JSON.parse(text)
       }
-    } catch { throw invalid() }
-    if (res.status !== 201) {
+    } catch {
+      if (successful) throw invalid()
+      throw Object.assign(new Error(`HTTP ${res.status}`), { status: res.status })
+    }
+    try { body = JSON.parse(text) } catch { if (successful) throw invalid() }
+    if (!successful) {
       throw Object.assign(new Error(typeof body?.detail === 'string' ? body.detail : `HTTP ${res.status}`), { status: res.status })
     }
     if (!body?.drawing_version || typeof body.replayed !== 'boolean') throw invalid()

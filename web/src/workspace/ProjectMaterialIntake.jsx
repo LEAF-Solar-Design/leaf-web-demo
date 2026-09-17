@@ -14,6 +14,7 @@ export default function ProjectMaterialIntake({ project, upload = {}, intake = {
     <section className="ground-pane" data-pane="material-intake">
       <DrawingUploadControl {...upload} disabled={!project || mock === true} onUpload={onStartUpload} onCancel={upload.actions?.cancel} onEngineChange={upload.actions?.setEngine} />
       <p role="status">{sentence}</p>
+      {intake.beginRefused && <p role="status">{intake.beginRefused}</p>}
       {!project && sentence !== 'Open a project first.' && <p>Open a project first.</p>}
       {mock === true && <p>Uploads are unavailable in this demo.</p>}
       {intake.phase === 'attach-failed' && <button type="button" onClick={onRetry}>Retry</button>}

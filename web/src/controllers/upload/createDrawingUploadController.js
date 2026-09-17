@@ -77,6 +77,7 @@ export function createDrawingUploadController({ services, onReady, pollMs = 500,
       if (run !== sequence) return null
       const result = { receipt, status, view }
       await Promise.all([onReady?.(result), ...Array.from(readyListeners, (listener) => listener(result))])
+      if (run !== sequence) return null
       publish({ busy: false, phase: 'ready', error: null })
       return { receipt, status, view }
     } catch (error) {
@@ -90,7 +91,7 @@ export function createDrawingUploadController({ services, onReady, pollMs = 500,
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener) },
     subscribeReady(listener) { readyListeners.add(listener); return () => readyListeners.delete(listener) },
     start() { disposed = false },
-    dispose() { disposed = true; sequence += 1 },
+    dispose() { disposed = true; sequence += 1; readyListeners.clear() },
     loadPolicy,
     upload,
     setEngine(engine) {

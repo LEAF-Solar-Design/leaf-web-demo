@@ -19,6 +19,8 @@ it('B3 row8 renders phase sentences, retry, disabled intake and material lists',
   }
   rerender(<ProjectMaterialIntake project={project} upload={upload} intake={{ phase: 'attaching', target }} />)
   expect(screen.getByText('Attaching to Roof A')).toBeTruthy()
+  rerender(<ProjectMaterialIntake project={project} upload={upload} intake={{ phase: 'pending', target, beginRefused: 'Wait for the current upload to finish.' }} />)
+  expect(screen.getByText('Wait for the current upload to finish.')).toBeTruthy()
   rerender(<ProjectMaterialIntake project={{ name: 'Roof B' }} upload={upload} intake={{ phase: 'attached', target, drawing: { name: 'site.dwg', version: 2 } }} />)
   expect(screen.getByText('Attached site.dwg as version 2 to Roof A')).toBeTruthy()
   rerender(<ProjectMaterialIntake project={project} upload={upload} intake={{ phase: 'attach-failed', target, error: 'Import unavailable.' }} onRetry={retry} />)

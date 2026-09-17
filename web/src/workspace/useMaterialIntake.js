@@ -5,8 +5,16 @@ import { createMaterialIntakeController } from './createMaterialIntakeController
 export default function useMaterialIntake({ upload, onAttached, onReady } = {}) {
   const callbacks = useRef({ onAttached, onReady })
   callbacks.current = { onAttached, onReady }
+  const uploadRef = useRef(upload)
+  uploadRef.current = upload
   const ref = useRef(null)
-  if (!ref.current) ref.current = createMaterialIntakeController({ services: { importUpload: importUploadedDrawingVersion } })
+  if (!ref.current) ref.current = createMaterialIntakeController({
+    services: { importUpload: importUploadedDrawingVersion },
+    isUploadInFlight: () => {
+      const snapshot = uploadRef.current?.getSnapshot?.() || uploadRef.current
+      return snapshot?.busy === true || ['uploading', 'extracting', 'loading'].includes(snapshot?.phase)
+    },
+  })
   const controller = ref.current
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot)
   useEffect(() => {
