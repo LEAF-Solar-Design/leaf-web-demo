@@ -74,7 +74,7 @@ const TEMPLATES = {
   count_by_layer: {
     caps: ['drawing.read'],
     params: { type: 'object', properties: {}, required: [] },
-    code: (n) => `; ${n} — generated LISP (script) tool
+    code: (n) => `; ${n}: generated LISP (script) tool
 (defun c:${n.replace(/-/g, '')} ( / ss i ent counts)
   (setq counts (list))
   (setq ss (ssget "X"))          ; all entities
@@ -92,7 +92,7 @@ const TEMPLATES = {
     },
     // `d` is the distance parsed from the description — the generated code must
     // agree with the params chip the prospect just read (falls back to 60).
-    code: (n, d = 60) => `; ${n} — generated LISP (script) tool
+    code: (n, d = 60) => `; ${n}: generated LISP (script) tool
 (defun c:${n.replace(/-/g, '')} ( / dist box near)
   (setq dist (leaf:param "distance_in" ${Number(d).toFixed(1)}))
   (setq box (leaf:drawing-bounds))
@@ -103,7 +103,7 @@ const TEMPLATES = {
   measure_area: {
     caps: ['drawing.read'],
     params: { type: 'object', properties: {}, required: [] },
-    code: (n) => `; ${n} — generated LISP (script) tool
+    code: (n) => `; ${n}: generated LISP (script) tool
 (defun c:${n.replace(/-/g, '')} ( / ss i ent total)
   (setq total 0.0)
   (setq ss (ssget "X" '((0 . "LWPOLYLINE"))))
@@ -119,7 +119,7 @@ const TEMPLATES = {
       properties: { layer: { type: 'string', title: 'Layer', default: 'Panels' } },
       required: ['layer'],
     },
-    code: (n) => `; ${n} — generated LISP (script) tool
+    code: (n) => `; ${n}: generated LISP (script) tool
 (defun c:${n.replace(/-/g, '')} ( / lyr ss)
   (setq lyr (leaf:param "layer" "Panels"))
   (setq ss (ssget "X" (list (cons 8 lyr))))
@@ -155,7 +155,7 @@ const TEMPLATES = {
       properties: { handle: { type: 'string', title: 'Handle', default: '' } },
       required: [],
     },
-    code: (n) => `; ${n} — generated LISP (script) tool
+    code: (n) => `; ${n}: generated LISP (script) tool
 (defun c:${n.replace(/-/g, '')} ( / h ent)
   (setq h (leaf:param "handle" ""))
   (setq ent (handent h))

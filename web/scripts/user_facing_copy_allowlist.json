@@ -1,3 +1,9 @@
 {
-  "entries": []
+  "entries": [
+    {
+      "file": "src/ios/IosSurface.jsx",
+      "text": " \u2014 ${stageLabel}",
+      "reason": "Owned by lane f50591d5 slice w4h-i1 until it merges; rewrite after, then drop this entry."
+    }
+  ]
 }

@@ -7,9 +7,9 @@
 // PURE by contract: no bundler-only globals, no React, no JSON imports — `node` can
 // import it headless (web/scripts/check_errors.mjs does exactly that).
 
-export const MSG_SERVICE = 'The service had a temporary problem — try again.'
-export const MSG_NETWORK = "Couldn't reach the service — check the connection and retry."
-export const MSG_GENERIC = 'Something went wrong — try again.'
+export const MSG_SERVICE = 'The service had a temporary problem. Try again.'
+export const MSG_NETWORK = "Couldn't reach the service. Check the connection and retry."
+export const MSG_GENERIC = 'Something went wrong. Try again.'
 
 // Anything that smells like transport plumbing: an HTTP verb, an /api/ path,
 // a bare "-> 500" status arrow, an EventSource/job-stream complaint.

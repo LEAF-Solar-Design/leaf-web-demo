@@ -40,7 +40,7 @@ export default function CloneDialog({
       setReceipt(result)
       setStatus('done')
     } catch (e) {
-      setError(errorMessage(e, 'The clone did not go through — nothing changed.'))
+      setError(errorMessage(e, 'The clone did not go through. Nothing changed.'))
       setStatus('failed')
     }
   }

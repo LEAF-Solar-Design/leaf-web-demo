@@ -13,12 +13,12 @@
 import { classifyAgentError } from '../converse.js'
 
 export const CONSOLE_AGENT_BANNER_COPY = {
-  quota: 'AI paused — your built tools keep working.',
+  quota: 'AI paused. Your built tools keep working.',
   grant: 'Chat needs a linked Claude account.',
-  entitlement: 'Chat isn’t included in your plan — your built tools keep working.',
-  busy: 'The assistant is mid-turn — routed deterministically instead.',
-  rate_limited: 'AI rate-limited — routed deterministically; retry shortly.',
-  unreachable: 'AI assistant unavailable — routed deterministically.',
+  entitlement: 'Chat isn’t included in your plan. Your built tools keep working.',
+  busy: 'The assistant is mid-turn, routed deterministically instead.',
+  rate_limited: 'AI rate-limited, routed deterministically; retry shortly.',
+  unreachable: 'AI assistant unavailable, routed deterministically.',
 }
 
 export const OPERATOR_AGENT_BANNER_COPY = {
