@@ -150,7 +150,7 @@ def _postgres_store():
 # *.amazonaws.com is included alongside the APS host. Extend via
 # BROKER_EGRESS_EXTRA (comma-separated host suffixes).
 # --------------------------------------------------------------------------- #
-ALLOWED_HOSTS = {"developer.api.autodesk.com", "127.0.0.1", "localhost"}
+ALLOWED_HOSTS = {"developer.api.autodesk.com", "api.leafdesign.ai", "127.0.0.1", "localhost"}
 ALLOWED_SUFFIXES = [".amazonaws.com"]
 for extra in filter(None, os.environ.get("BROKER_EGRESS_EXTRA", "").split(",")):
     ALLOWED_SUFFIXES.append(extra.strip())
@@ -2758,6 +2758,10 @@ def _broker_run_request(req: Union[BrokerRunRequest, BrokerPlanRunRequest]) -> J
         "usd_est": None,
         "status": "unknown",
     }
+    if tool.get("name") == "solar-solve-proposal":
+        entry["aps_endpoint"] = None
+        entry["aps_live"] = False
+        entry["cloud_endpoint"] = "https://api.leafdesign.ai/api/ml/"
     postgres_mode = _broker_store_mode() == "postgres"
     ledger_event_key = req.ledger_event_key or str(uuid.uuid4())
     # Identifies THIS invocation as the owner of any WorkItem correlation it
@@ -3143,6 +3147,16 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
                 tool=tool.get("name"),
             ), DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
 
+    cloud_proposal = tool.get("name") == "solar-solve-proposal"
+    if cloud_proposal:
+        with (SERVER_DIR / "catalog_tools.json").open(encoding="utf-8") as stream:
+            canonical = next(row for row in json.load(stream)["tools"]
+                             if row["name"] == "solar-solve-proposal")
+        if tool != canonical or req.aps_live or req.test_source is not None or req.file_only:
+            return _classified_bad_params(
+                "cloud_capability_invalid", "cloud proposal requires its trusted catalog capability",
+                tool=tool.get("name"))
+
     # Phase 0 deployed-posture gate: tracked builtins and APS-only tools remain
     # available, but a tenant-controlled Python file cannot load in this
     # credential-bearing process unless authored execution is enabled AND a
@@ -3152,6 +3166,7 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
     # direct function call.
     if (
         _deployed_runtime()
+        and not cloud_proposal
         and not _is_blank_dwg_request(req, tool)
         and not is_trusted_builtin_tool(tool, req.tenant_id)
     ):
@@ -3177,6 +3192,27 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
             f"tier {tier!r} is not entitled to {required_cap!r} for tool {tool.get('name')!r}",
             retryable=False, tool=tool.get("name")),
             DEFAULT_HTTP_STATUS[ErrorCode.ENTITLEMENT_REQUIRED])
+
+    if tool.get("name") == "solar-solve-proposal":
+        from leaf_cloud_client import proposal, validate_params as validate_cloud_params
+        from leaf_cloud_grants import CloudError
+
+        try:
+            validate_cloud_params(req.params)
+            if not req.job_id:
+                raise CloudError("cloud_job_identity_missing", 400)
+            _start_admitted_execution(req, admission, aps_submission=False)
+            result = proposal(req.params, req.tenant_id, req.job_id)
+            return ok_envelope(tool["name"], tool["version"], result, None,
+                               int((time.perf_counter() - t0) * 1000)), 200
+        except CloudError as exc:
+            code = (ErrorCode.BAD_PARAMS if exc.status == 400 else
+                    ErrorCode.UNAUTHENTICATED if exc.status == 401 else
+                    ErrorCode.FORBIDDEN if exc.status == 403 else ErrorCode.INTERNAL)
+            env = err_envelope(code, exc.classification, retryable=False, tool=tool.get("name"))
+            env["error"]["classification"] = exc.classification
+            env["degraded_mode"] = False
+            return env, exc.status
 
     # 1d) F12 + A4: coarse per-tenant DAILY RUN quota (tier-keyed, count-based) — a
     #     liability cap on the NUMBER of APS-money runs/tenant/UTC-day, standing

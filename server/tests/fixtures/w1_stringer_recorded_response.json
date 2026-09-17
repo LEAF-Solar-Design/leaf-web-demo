@@ -1,0 +1,19 @@
+{
+  "source": "synthetic recorded adapter response, no customer data, not a plugin capture",
+  "request": {
+    "schema_version": "leaf.stringer-request.v1",
+    "panel_groups": [{"id": 0, "panel_ids": [1, 2]}],
+    "matrix_cells": [
+      {"panel_id": 1, "row": 0, "column": 0},
+      {"panel_id": 2, "row": 0, "column": 1}
+    ],
+    "electrical": {
+      "module_voc": 48.5,
+      "max_system_voltage": 1000.0,
+      "design_min_temp_c": -25.0,
+      "temp_coeff_pct_per_c": -0.27
+    },
+    "units": "SI"
+  },
+  "response": {"strings": [{"panel_ids": [1, 2]}]}
+}

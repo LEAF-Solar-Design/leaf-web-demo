@@ -115,6 +115,12 @@ def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
     ``file_only`` and ``test_source`` are server-owned completion inputs. Omit
     them for ordinary requests to preserve their existing wire identity.
     """
+    if tool.get("name") == "solar-solve-proposal":
+        from leaf_cloud_client import validate_params as validate_cloud_params
+
+        validate_cloud_params(params)
+        if aps_live or file_only or test_source is not None:
+            raise ValueError("cloud proposal requires ordinary broker execution without APS")
     payload = {"tenant_id": tenant_id, "tool": tool, "params": params,
                   "dwg": dwg, "aps_live": bool(aps_live), "dwg_version": dwg_version,
                   "ledger_event_key": ledger_event_key,
