@@ -153,6 +153,8 @@ test.describe('route matrix, rail ON', () => {
       await setRail(page, '1')
       await page.goto(`/app?surface=${surface}`)
       await expectOneCanvasIn(page, '.studio-ground')
+      // C-04B (38e7568e): the solar profile opens on its Solar tab, so the Draw tools mount only after the Draw tab is clicked.
+      if (surface === 'solar') await page.getByRole('tab', { name: 'Draw', exact: true }).click()
       await expect(page.locator('[data-tool="draw:createLine"]')).toBeEnabled({ timeout: 30_000 })
       const viewer = page.locator('.studio-ground-viewer')
       const continuity = page.getByTestId('continuity-rail')
@@ -641,7 +643,10 @@ test.describe('route matrix, rail ON', () => {
     await expectSharedChrome(page)
     await expect(page.getByTestId('drafting-ribbon')).toBeVisible()
     await expect(page.getByRole('tab', { name: 'Project', exact: true })).toHaveAttribute('aria-selected', 'true')
-    await expect(page.locator('aside.nav[data-spine]')).toHaveCount(0)
+    // productSurfaces.js gives Browser rails.left = 'spine' in the shared cockpit.
+    await expect(page.locator('aside.nav[data-spine]')).toHaveCount(1)
+    // Expand the shared spine before checking the catalog content it owns.
+    await page.getByTestId('cockpit-band').locator('[data-tool="rail-expand"]').click()
     await expect(page.locator('.fam-title')).toBeVisible()
   })
 
@@ -951,7 +956,8 @@ test.describe('route matrix, rail ON', () => {
         outside: clusters.filter((c) => c.right > band.right + 1 || c.left < band.left - 1).length,
         rows: new Set(clusters.map((c) => Math.round(c.top))).size,
         bandHeight: Math.round(band.height),
-        published: getComputedStyle(el.closest('.workspace-card')).getPropertyValue('--cockpit-ribbon-h').trim(),
+        // The one-shell band publishes its height on the shared chrome host.
+        published: getComputedStyle(el.closest('.studio-chrome-host')).getPropertyValue('--cockpit-ribbon-h').trim(),
       }
     })
     expect(fit.overflow).toBeLessThanOrEqual(1)
