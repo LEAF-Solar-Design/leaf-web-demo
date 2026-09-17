@@ -53,8 +53,8 @@ const MARKERS = [
   // Spaces around the `=` are the live shape ("internal EPC survey, n = 18"),
   // so the marker cannot require the tight one.
   { name: 'n=', re: /\bn\s*=\s*\d/i },
-  { name: 'em dash', re: /—|&mdash;|&#8212;|&#x2014;|\\u2014/i },
-  { name: 'en dash', re: /–|&ndash;|&#8211;|&#x2013;|\\u2013/i },
+  { name: 'em dash', re: /\u2014|&mdash;|&#8212;|&#x2014;|\\u2014/i },
+  { name: 'en dash', re: /\u2013|&ndash;|&#8211;|&#x2013;|\\u2013/i },
 ];
 
 // Only these markers run over the strict pass's widened set. A dash cannot
