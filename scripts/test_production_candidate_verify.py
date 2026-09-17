@@ -96,6 +96,28 @@ def test_row1_older_open_pr(candidate):
     assert "older_open_prs=1" in line(result.stdout, 1)
 
 
+def test_row1_live_count_skips_drafts(monkeypatch):
+    candidate = "a" * 40
+
+    def command(*args):
+        if args[0:2] == ("gh", "pr"):
+            assert args == ("gh", "pr", "list", "--state", "open", "--json",
+                            "number,createdAt,isDraft", "--limit", "100")
+            return json.dumps([
+                {"number": 1, "createdAt": "2026-09-16T19:00:00Z", "isDraft": True},
+                {"number": 2, "createdAt": "2026-09-16T20:00:00Z", "isDraft": False},
+                {"number": 3, "createdAt": "2026-09-16T22:00:00Z", "isDraft": False},
+            ])
+        if args[0:2] == ("git", "show"):
+            assert args == ("git", "show", "-s", "--format=%cI", candidate)
+            return "2026-09-16T21:00:00Z"
+        raise AssertionError(args)
+
+    monkeypatch.setattr(verifier, "command", command)
+    monkeypatch.setattr(verifier.shutil, "which", lambda name: "gh")
+    assert verifier.probe_gh_open_prs(candidate) == 1
+
+
 def test_row2_equal_count_replacement_red(candidate):
     data = candidate[0]
     data["candidate_proof"]["reds"] = list(data["baseline_proof"]["reds"])
