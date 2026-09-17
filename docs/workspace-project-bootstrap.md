@@ -23,3 +23,15 @@ tenant and project identity that every app profile, including iOS, binds to.
 The two POSTs are safe to retry after a lost response. They are not a license to
 create a second tenant or project. In live mode the server derives tenancy from
 the verified session and ignores client-supplied tenant identity.
+
+## iOS source and approval
+
+1. The importer registers the immutable source catalog entry through the provider rail.
+2. A project member reads sources and approvals through `GET /api/projects/{id}/ios/sources`.
+3. A project owner approves the exact catalog tuple through `POST /api/projects/{id}/ios/approvals`.
+4. Readiness and launch consume that approval as before.
+
+The platform refuses an absent source with `catalog_entry_missing` and a tuple
+that differs from the catalog with `approval_tuple_mismatch`. The latter names
+the first field that differs, without its value. No browser free text ever
+becomes an approval.

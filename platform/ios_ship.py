@@ -90,6 +90,142 @@ class RevisionNotApproved(IosShipError):
     pass
 
 
+class CatalogConflict(IosShipError):
+    def __init__(self):
+        super().__init__("catalog_conflict", "source catalog entry already differs")
+
+
+_CATALOG_FIELDS = (
+    "catalog_key", "repository", "source_revision", "source_sha256",
+    "bundle_identifier", "marketing_version", "build_number", "producer_receipt_digest",
+)
+
+
+def register_source_catalog_entry(org_id: Any, project_id: Any, entry: Any) -> dict:
+    reject_secret_shaped(entry)
+    if not isinstance(entry, dict) or set(entry) != set(_CATALOG_FIELDS):
+        raise IosShipError("invalid_catalog_entry", "catalog fields are required")
+    for name in _CATALOG_FIELDS:
+        value = entry[name]
+        if not isinstance(value, str) or not value.strip() or len(value) > 512:
+            raise IosShipError("invalid_catalog_entry", f"{name} is invalid")
+        if value.startswith("-----BEGIN"):
+            raise SecretShapedFieldRejected(name)
+    for name in ("source_sha256", "producer_receipt_digest"):
+        if not _HASH_RE.fullmatch(entry[name]):
+            raise IosShipError("invalid_catalog_entry", f"{name} is invalid")
+    if not re.fullmatch(r"[A-Za-z0-9.-]{3,255}", entry["bundle_identifier"]):
+        raise IosShipError("invalid_catalog_entry", "bundle_identifier is invalid")
+    scope = {"org": _as_uuid(org_id, "org_id"),
+             "project": _as_uuid(project_id, "project_id")}
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM projects WHERE org_id=%(org)s AND project_id=%(project)s "
+                    "AND deleted_at IS NULL AND status='active' FOR SHARE", scope)
+        if cur.fetchone() is None:
+            raise ProjectUnavailable("project_unavailable", "project is unavailable")
+        cur.execute(
+            "INSERT INTO ios_ship_source_catalog (catalog_id, org_id, project_id, "
+            + ", ".join(_CATALOG_FIELDS) + ") VALUES (%(id)s, %(org)s, %(project)s, "
+            + ", ".join(f"%({name})s" for name in _CATALOG_FIELDS) + ") "
+            "ON CONFLICT (org_id, project_id, source_revision) DO NOTHING RETURNING *",
+            {**scope, **entry, "id": new_uuid()})
+        row = _row_dict(cur.fetchone())
+        if row is None:
+            cur.execute("SELECT * FROM ios_ship_source_catalog WHERE org_id=%(org)s "
+                        "AND project_id=%(project)s AND source_revision=%(source_revision)s",
+                        {**scope, "source_revision": entry["source_revision"]})
+            row = _row_dict(cur.fetchone())
+            if row is None or any(row[name] != entry[name] for name in _CATALOG_FIELDS):
+                raise CatalogConflict()
+        return row
+
+
+def list_source_catalog(org_id: Any, project_id: Any) -> list[dict]:
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT * FROM ios_ship_source_catalog WHERE org_id=%(org)s "
+                    "AND project_id=%(project)s ORDER BY imported_at DESC, catalog_id DESC LIMIT 50",
+                    {"org": _as_uuid(org_id, "org_id"),
+                     "project": _as_uuid(project_id, "project_id")})
+        return [_row_dict(row) for row in cur.fetchall()]
+
+
+def get_source_catalog_entry(org_id: Any, project_id: Any,
+                             source_revision: str) -> Optional[dict]:
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT * FROM ios_ship_source_catalog WHERE org_id=%(org)s "
+                    "AND project_id=%(project)s AND source_revision=%(revision)s",
+                    {"org": _as_uuid(org_id, "org_id"),
+                     "project": _as_uuid(project_id, "project_id"), "revision": source_revision})
+        return _row_dict(cur.fetchone())
+
+
+def approve_catalog_revision(
+    org_id: Any, project_id: Any, *, revision: str, source_revision: str,
+    source_sha256: str, bundle_identifier: str, marketing_version: str,
+    build_number: str, approved_by: str,
+) -> dict:
+    entry = get_source_catalog_entry(org_id, project_id, source_revision)
+    if entry is None:
+        raise RevisionNotApproved("catalog_entry_missing", "source catalog entry is missing",
+                                  setup_action="import-ios-source")
+    fields = {"source_sha256": source_sha256, "bundle_identifier": bundle_identifier,
+              "marketing_version": marketing_version, "build_number": build_number}
+    for name, value in fields.items():
+        if value != entry[name]:
+            raise IosShipError("approval_tuple_mismatch", name)
+    approval_id = record_approval(
+        org_id, project_id, revision, source_revision=source_revision,
+        approved_by=approved_by, **fields)
+    return {"approval_id": approval_id, "revision": revision,
+            "source_revision": source_revision, **fields,
+            "approved_by": approved_by, "approved": True}
+
+
+def resolve_ship_owner(org_id: Any, project_id: Any,
+                       external_subject: str) -> Optional[str]:
+    if not external_subject:
+        return None
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT b.binding_id FROM identity_bindings b "
+            "JOIN project_member_bindings m ON m.org_id=b.platform_tenant_id "
+            "AND m.binding_id=b.binding_id "
+            "WHERE b.platform_tenant_id=%(org)s AND m.project_id=%(project)s "
+            "AND b.external_authority='auth0' AND b.external_subject=%(subject)s "
+            "AND b.status='active' AND m.status='active' AND m.role = 'owner'",
+            {"org": _as_uuid(org_id, "org_id"),
+             "project": _as_uuid(project_id, "project_id"), "subject": external_subject})
+        row = cur.fetchone()
+        return str(row["binding_id"]) if row else None
+
+
+def list_revision_approvals(org_id: Any, project_id: Any) -> list[dict]:
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT approval_id, revision, source_revision, source_sha256, bundle_identifier, "
+            "marketing_version, build_number, approved, approved_by, consumed_at, created_at "
+            "FROM ios_ship_revision_approvals WHERE org_id=%(org)s AND project_id=%(project)s "
+            "ORDER BY created_at DESC, approval_id DESC LIMIT 50",
+            {"org": _as_uuid(org_id, "org_id"),
+             "project": _as_uuid(project_id, "project_id")})
+        return [_row_dict(row) for row in cur.fetchall()]
+
+
+def latest_execution_for_project(org_id: Any, tenant_id: str,
+                                  project_id: Any) -> Optional[dict]:
+    if not tenant_id:
+        raise IosShipError("invalid_scope", "tenant_id is required")
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT execution_id, revision, status, failed_stage, receipt_id, dispatch_result, "
+            "updated_at FROM ios_ship_executions WHERE org_id=%(org)s "
+            "AND tenant_id=%(tenant)s AND project_id=%(project)s "
+            "ORDER BY created_at DESC, execution_id DESC LIMIT 1",
+            {"org": _as_uuid(org_id, "org_id"), "tenant": tenant_id,
+             "project": _as_uuid(project_id, "project_id")})
+        return _row_dict(cur.fetchone())
+
+
 class LaunchSetupRequired(IosShipError):
     def __init__(self):
         super().__init__("dispatch_unavailable", "ship dispatch is not mounted",
