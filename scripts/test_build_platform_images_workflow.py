@@ -3108,6 +3108,11 @@ def main() -> None:
         "either blocks nothing while looking armed, or reddens main on "
         "findings it was only meant to record"
     )
+    harvest_upload = _sole_named(harvest_steps, "Upload the harvest")
+    assert harvest_upload["continue-on-error"] is True, (
+        "the immutable S3 supply set and blocking scan results are authoritative; "
+        "the shared Actions artifact quota must not overwrite their verdict"
+    )
 
     assert "leaf.web-source-restamp.v1" in adopt_web["run"]
     assert "spec-candidate/restamped-web/dist" in adopt_web["run"]

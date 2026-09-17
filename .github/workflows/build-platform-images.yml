@@ -4146,6 +4146,7 @@ jobs:
 
       - name: Upload the harvest
         if: ${{ success() || failure() }}
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: cve-harvest-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
