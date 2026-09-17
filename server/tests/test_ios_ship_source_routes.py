@@ -37,6 +37,10 @@ class ProjectUnavailable(StoreError):
         super().__init__("project_unavailable")
 
 
+class LaunchConflict(StoreError):
+    pass
+
+
 class FakeStore:
     def __init__(self):
         self.approvals = []
@@ -104,6 +108,8 @@ def test_provider_catalog_requires_auth_and_exact_body(monkeypatch):
     headers = {"Authorization": "Bearer test-provider-bearer", "X-Leaf-Ios-Ship-Provider": "provider-1"}
     assert client.post(url, json=body).status_code == 401
     assert client.post(url, json=body, headers={"Authorization": headers["Authorization"]}).status_code == 401
+    assert client.post(url, json=body, headers={
+        **headers, "X-Leaf-Ios-Ship-Provider": "wrong-provider"}).status_code == 401
     assert store.registrations == []
     response = client.post(url, json=body, headers=headers)
     assert response.status_code == 200
@@ -181,3 +187,19 @@ def test_latest_execution_returns_row_or_null_for_member(monkeypatch):
     assert response.status_code == 200 and response.json() == {"ok": True, "execution": None}
     response = _client("outsider").get(BASE + "/executions/latest")
     assert response.status_code == 404 and _code(response) == "project_unavailable"
+
+
+# S1 row14
+def test_consumed_approval_returns_conflict_and_refused_event(monkeypatch):
+    store = FakeStore()
+    store.error = LaunchConflict(
+        "approval_consumed",
+        "that revision's approval was consumed by a launch; approve a new revision",
+        setup_action="approve-new-revision")
+    events = []
+    monkeypatch.setattr(router, "_store", lambda: store)
+    monkeypatch.setattr(router, "_ship_event", lambda *args: events.append(args))
+    response = _client().post(BASE + "/approvals", json=APPROVAL)
+    assert response.status_code == 409 and _code(response) == "approval_consumed"
+    assert response.json()["error"]["setup_action"] == "approve-new-revision"
+    assert events == [("tenant-1", "account", "approval.refused", "approval", "approval_consumed")]

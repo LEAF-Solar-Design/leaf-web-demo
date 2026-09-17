@@ -34,4 +34,8 @@ the verified session and ignores client-supplied tenant identity.
 The platform refuses an absent source with `catalog_entry_missing` and a tuple
 that differs from the catalog with `approval_tuple_mismatch`. The latter names
 the first field that differs, without its value. No browser free text ever
-becomes an approval.
+becomes an approval of source fields.
+The `revision` is the approval's bounded project revision label (Studio's
+`canonicalVersionId`), distinct from the catalog's `source_revision` key; only
+`source_sha256`, `bundle_identifier`, `marketing_version`, and `build_number`
+must equal the entry selected by that key.

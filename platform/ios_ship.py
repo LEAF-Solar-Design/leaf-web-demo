@@ -164,6 +164,13 @@ def approve_catalog_revision(
     source_sha256: str, bundle_identifier: str, marketing_version: str,
     build_number: str, approved_by: str,
 ) -> dict:
+    """Approve catalog source fields under a distinct Studio revision label.
+
+    revision is the project revision (client canonicalVersionId), not source_revision.
+    """
+    if not isinstance(revision, str) or not revision.strip() or len(revision) > 512 \
+            or any(ord(char) < 32 or ord(char) == 127 for char in revision):
+        raise IosShipError("invalid_launch", "revision is invalid")
     entry = get_source_catalog_entry(org_id, project_id, source_revision)
     if entry is None:
         raise RevisionNotApproved("catalog_entry_missing", "source catalog entry is missing",
@@ -173,9 +180,21 @@ def approve_catalog_revision(
     for name, value in fields.items():
         if value != entry[name]:
             raise IosShipError("approval_tuple_mismatch", name)
+    org, project = _as_uuid(org_id, "org_id"), _as_uuid(project_id, "project_id")
+    with connection() as conn, conn.cursor() as cur:
+        existing = _approval_record(cur, org, project, revision)
+    if existing is not None and existing["consumed_at"] is not None:
+        raise LaunchConflict(
+            "approval_consumed",
+            "that revision's approval was consumed by a launch; approve a new revision",
+            setup_action="approve-new-revision")
     approval_id = record_approval(
         org_id, project_id, revision, source_revision=source_revision,
         approved_by=approved_by, **fields)
+    with connection() as conn, conn.cursor() as cur:
+        recorded = _approval_record(cur, org, project, revision)
+    if recorded is None or recorded["approval_id"] != approval_id:
+        raise IosShipError("approval_not_recorded", "the approval was not recorded")
     return {"approval_id": approval_id, "revision": revision,
             "source_revision": source_revision, **fields,
             "approved_by": approved_by, "approved": True}

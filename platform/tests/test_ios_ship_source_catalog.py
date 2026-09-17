@@ -110,9 +110,24 @@ def test_latest_execution_crosses_revisions_but_not_tenants(make_org):
         marketing_version="1.2", build_number="20", approved_by=principal)
     second = _launch(org, project, tenant, principal, second_approval, dispatch,
                      revision="r2", build_number="20", idempotency_key="launch-2")
+    other_project = store.create_project(org.org_id, "newer execution project")
+    with ios_ship.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO project_member_bindings "
+            "(membership_id, org_id, project_id, binding_id, role, invited_by_binding_id) "
+            "VALUES (%s, %s, %s, %s, 'owner', %s)",
+            (uuid.uuid4(), org.org_id, other_project.project_id,
+             uuid.UUID(principal), uuid.UUID(principal)))
+    other_approval = ios_ship.record_approval(
+        org.org_id, other_project.project_id, "r1", source_revision="83bbde1",
+        source_sha256="a" * 64, bundle_identifier="com.leaf.soundbeam",
+        marketing_version="1.2", build_number="19", approved_by=principal)
+    other = _launch(org, other_project, tenant, principal, other_approval, dispatch)
     with ios_ship.connection() as conn, conn.cursor() as cur:
         cur.execute("UPDATE ios_ship_executions SET created_at=created_at - interval '1 day' "
                     "WHERE execution_id=%s", (uuid.UUID(first["execution_id"]),))
+        cur.execute("UPDATE ios_ship_executions SET created_at=created_at + interval '1 day' "
+                    "WHERE execution_id=%s", (uuid.UUID(other["execution_id"]),))
     latest = ios_ship.latest_execution_for_project(org.org_id, tenant, project.project_id)
     assert latest["execution_id"] == second["execution_id"] and latest["revision"] == "r2"
     assert set(latest) == {"execution_id", "revision", "status", "failed_stage",
@@ -139,6 +154,23 @@ def test_only_current_project_owner_resolves(make_org):
     store.create_identity_binding(org, "auth0", outsider, role="owner")
     assert ios_ship.resolve_ship_owner(org, project, outsider) is None
     assert ios_ship.resolve_ship_owner(org, project, "") is None
+    for inactive in ("binding", "membership"):
+        subject = f"auth0|catalog-{uuid.uuid4()}"
+        binding = store.create_identity_binding(org, "auth0", subject, role="owner")
+        with ios_ship.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO project_member_bindings "
+                "(membership_id, org_id, project_id, binding_id, role, invited_by_binding_id) "
+                "VALUES (%s, %s, %s, %s, 'owner', %s)",
+                (uuid.uuid4(), org, project, binding.binding_id, binding.binding_id))
+            if inactive == "binding":
+                cur.execute("UPDATE identity_bindings SET status='revoked', revoked_at=NOW() "
+                            "WHERE binding_id=%s",
+                            (binding.binding_id,))
+            else:
+                cur.execute("UPDATE project_member_bindings SET status='revoked', revoked_at=NOW() "
+                            "WHERE binding_id=%s", (binding.binding_id,))
+        assert ios_ship.resolve_ship_owner(org, project, subject) is None
 
 
 # S1 row7
@@ -156,3 +188,31 @@ def test_catalog_rejects_secrets_and_every_oversize_field_before_database(make_o
         with pytest.raises(ios_ship.IosShipError) as error:
             ios_ship.register_source_catalog_entry(org, project, _entry(**{name: "x" * 513}))
         assert error.value.code == "invalid_catalog_entry"
+
+
+# S1 row13
+def test_consumed_catalog_approval_is_refused_without_writing(make_org, monkeypatch):
+    org, project, tenant, principal, _ = _seed(make_org)
+    fields = {"bundle_identifier": "com.leaf.soundbeam",
+              "marketing_version": "1.2", "build_number": "19"}
+    ios_ship.register_source_catalog_entry(org.org_id, project.project_id, _entry(**fields))
+    approval = _approve(org.org_id, project.project_id, **fields)
+    with monkeypatch.context() as patch:
+        patch.setattr(ios_ship, "record_approval", lambda *args, **kwargs: str(uuid.uuid4()))
+        with pytest.raises(ios_ship.IosShipError) as missing_write:
+            _approve(org.org_id, project.project_id, **fields)
+        assert missing_write.value.code == "approval_not_recorded"
+    _launch(org, project, tenant, principal, approval["approval_id"],
+            lambda _: {"status": "dispatched"})
+    before = ios_ship.list_revision_approvals(org.org_id, project.project_id)
+    assert len(before) == 1 and before[0]["consumed_at"] is not None
+
+    def no_write(*args, **kwargs):
+        pytest.fail("consumed approval must be refused before record_approval")
+
+    monkeypatch.setattr(ios_ship, "record_approval", no_write)
+    with pytest.raises(ios_ship.LaunchConflict) as consumed:
+        _approve(org.org_id, project.project_id, **fields)
+    assert consumed.value.code == "approval_consumed"
+    assert consumed.value.setup_action == "approve-new-revision"
+    assert ios_ship.list_revision_approvals(org.org_id, project.project_id) == before

@@ -178,7 +178,7 @@ async def project_approval(project_id: str, req: CatalogApprovalRequest,
         return JSONResponse(status_code=200, content={"ok": True, "approval": approval})
     except Exception as exc:
         code = getattr(exc, "code", "approval_unavailable")
-        status = (409 if code in {"catalog_entry_missing", "approval_tuple_mismatch"} else
+        status = (409 if code in {"catalog_entry_missing", "approval_tuple_mismatch", "approval_consumed"} else
                   404 if code == "project_unavailable" else
                   503 if code == "approval_unavailable" else 400)
         message = str(exc) if code == "approval_tuple_mismatch" else "revision approval was refused"
