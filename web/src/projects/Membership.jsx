@@ -16,7 +16,7 @@
  * what "next read" means here — if the viewer's own record is gone from it,
  * this component drops the whole project instead of rendering stale rows.
  */
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 
 export const ROLES = ['owner', 'editor', 'reviewer', 'read-only']
 
@@ -50,6 +50,7 @@ export default function Membership({
   const [search, setSearch] = useState('')
   const [inviteRole, setInviteRole] = useState('read-only')
   const [inviting, setInviting] = useState(false)
+  const invitingRef = useRef(false)
   const [pendingRoleIds, setPendingRoleIds] = useState(() => new Set())
   const [pendingRevokeIds, setPendingRevokeIds] = useState(() => new Set())
   const [error, setError] = useState(null)
@@ -96,7 +97,8 @@ export default function Membership({
 
   const submitInvite = async (event) => {
     event.preventDefault()
-    if (!selected || inviting) return
+    if (!selected || invitingRef.current) return
+    invitingRef.current = true
     setInviting(true)
     setError(null)
     try {
@@ -107,6 +109,7 @@ export default function Membership({
     } catch (e) {
       setError(errorMessage(e, 'The invite did not go through — nothing changed.'))
     } finally {
+      invitingRef.current = false
       setInviting(false)
     }
   }

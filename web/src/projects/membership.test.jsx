@@ -6,7 +6,7 @@
  *      inferred client-side; read-only sees no mutation affordances.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 
 import Membership from './Membership.jsx'
 
@@ -95,6 +95,37 @@ describe('acceptance #1: owner invites/demotes/revokes; revoked member drops the
 })
 
 describe('w4h-b4 scoped picker and roster labels', () => {
+  it('B4-c row4 locks two synchronous invite submits immediately', async () => {
+    let finishInvite
+    const onInvite = vi.fn(() => new Promise((resolve) => { finishInvite = resolve }))
+    setup({ onInvite })
+    const picker = screen.getByLabelText('Invite member')
+    fireEvent.change(picker, { target: { value: 'binding-new' } })
+    const form = picker.closest('form')
+    act(() => {
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+    expect(onInvite).toHaveBeenCalledTimes(1)
+    await act(async () => { finishInvite(); await Promise.resolve() })
+  })
+
+  it('B4-c row6 replaces email entry with two labeled organization choices', async () => {
+    const { container, onInvite } = setup({ identities: [
+      { binding_id: 'binding-alex', label: 'Alex' },
+      { binding_id: 'binding-sam', label: 'Sam' },
+    ] })
+    const picker = screen.getByRole('combobox', { name: 'Invite member' })
+    expect(picker.tagName).toBe('SELECT')
+    expect(screen.getByRole('option', { name: 'Alex' }).value).toBe('binding-alex')
+    expect(screen.getByRole('option', { name: 'Sam' }).value).toBe('binding-sam')
+    expect(container.querySelector('input[type="email"]')).toBeNull()
+    fireEvent.change(picker, { target: { value: 'binding-sam' } })
+    fireEvent.change(screen.getByRole('combobox', { name: 'Invite role' }), { target: { value: 'reviewer' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Invite' }))
+    await waitFor(() => expect(onInvite).toHaveBeenCalledWith('binding-sam', 'reviewer'))
+  })
+
   it('distinguishes short labels by role and joined date and searches the full option text', async () => {
     const { onInvite } = setup({ identities: [
       { binding_id: '12345678-owner', label: 'Member 12345678', role: 'owner', created_at: '2026-08-01T00:00:00Z' },

@@ -17,7 +17,7 @@
  * is `ENV_LIFECYCLE_UI && ...` at the ToolCast call site, which is what keeps
  * this whole subtree out of a flag-off bundle (see flag.js, bundleFence.test.js).
  */
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 
 import CloneDialog from './CloneDialog.jsx'
 import DangerZone from './DangerZone.jsx'
@@ -51,11 +51,26 @@ export default function ProjectLifecyclePanel({
 
   const { actions } = lifecycle
   const name = lifecycle.project?.name || projectName || ''
+  const ownsIdentities = identities === undefined && onLoadIdentities === undefined
+  const availableIdentities = ownsIdentities ? lifecycle.identities : identities
+  const identityLoader = ownsIdentities ? lifecycle.loadIdentities : onLoadIdentities
+  const identitiesBusy = ownsIdentities ? lifecycle.identitiesStatus === 'loading' : loadingIdentities
+  const identitiesError = ownsIdentities
+    ? lifecycle.identitiesStatus === 'error' && 'Organization members could not be loaded. Try again.'
+    : identityError
+
+  useEffect(() => {
+    setResults((previous) => {
+      const remaining = previous.filter((result) => result.projectId !== projectId
+        || !lifecycle.receipts.some((receipt) => receipt.receipt_id === result.receipt.receipt_id)).slice(-20)
+      return remaining.length === previous.length ? previous : remaining
+    })
+  }, [lifecycle.receipts, projectId, results])
 
   // Retain server receipts outside dialogs, including when a refresh fails.
   const remember = useCallback((result) => {
     if (result?.receipt?.receipt_id) {
-      setResults((previous) => [...previous, { projectId, receipt: result.receipt }])
+      setResults((previous) => [...previous, { projectId, receipt: result.receipt }].slice(-20))
     }
     return result
   }, [projectId])
@@ -68,13 +83,12 @@ export default function ProjectLifecyclePanel({
     }
   }
 
-  // Only existing bindings in the caller's organization. The parent owns the
-  // read and supplies identities; this panel never provisions or searches a directory.
+  // The hook owns the on-demand read unless a parent supplies either override.
   const loadIdentities = async () => {
-    if (loadingIdentities) return
+    if (identitiesBusy || !identityLoader) return
     setLoadingIdentities(true)
     setIdentityError(null)
-    try { await onLoadIdentities() }
+    try { await identityLoader() }
     catch { setIdentityError('Organization members could not be loaded. Try again.') }
     finally { setLoadingIdentities(false) }
   }
@@ -136,14 +150,14 @@ export default function ProjectLifecyclePanel({
               onInvite={actions.invite}
               onChangeRole={actions.changeRole}
               onRevoke={actions.revoke}
-              identities={identities}
+              identities={availableIdentities}
             />
-            {lifecycle.authority?.can_invite && onLoadIdentities && (
-              <button type="button" disabled={loadingIdentities} onClick={loadIdentities}>
-                {loadingIdentities ? 'Loading organization members…' : 'Load organization members'}
+            {lifecycle.authority?.can_invite && identityLoader && (
+              <button type="button" disabled={identitiesBusy} onClick={loadIdentities}>
+                {identitiesBusy ? 'Loading organization members…' : 'Load organization members'}
               </button>
             )}
-            {identityError && <p role="alert">{identityError}</p>}
+            {identitiesError && <p role="alert">{identitiesError}</p>}
           </div>
 
           <div className="project-lifecycle-tools">

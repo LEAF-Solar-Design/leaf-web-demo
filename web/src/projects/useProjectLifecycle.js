@@ -34,6 +34,7 @@ import {
   cloneProject,
   deleteProject,
   exportProject,
+  getOrgIdentities,
   getProjectLifecycle,
   inviteMember,
   resetProject,
@@ -96,6 +97,32 @@ export default function useProjectLifecycle(projectId, { enabled = true } = {}) 
   const [refreshing, setRefreshing] = useState(false) // post-mutation revalidation
   const [data, setData] = useState(EMPTY)
   const [error, setError] = useState(null)
+  const [identities, setIdentities] = useState(null)
+  const [identitiesStatus, setIdentitiesStatus] = useState('idle')
+  const identitiesGenerationRef = useRef(0)
+
+  useEffect(() => {
+    identitiesGenerationRef.current += 1
+    setIdentities(null)
+    setIdentitiesStatus('idle')
+    return () => { identitiesGenerationRef.current += 1 }
+  }, [enabled, projectId])
+
+  const loadIdentities = useCallback(async () => {
+    const generation = ++identitiesGenerationRef.current
+    setIdentitiesStatus('loading')
+    try {
+      const orgId = data.project?.project_id === projectId ? data.project.org_id : null
+      if (!enabled || !projectId || !orgId) throw new Error('Organization unavailable')
+      const response = await getOrgIdentities(orgId)
+      if (identitiesGenerationRef.current !== generation) return
+      setIdentities(response.identities)
+      setIdentitiesStatus('ready')
+    } catch {
+      if (identitiesGenerationRef.current !== generation) return
+      setIdentitiesStatus('error')
+    }
+  }, [data.project, enabled, projectId])
 
   // Bumped on every load and on unmount: a stale response must never overwrite
   // a newer one's state, and a resolved fetch after unmount must not set state.
@@ -187,5 +214,5 @@ export default function useProjectLifecycle(projectId, { enabled = true } = {}) 
     remove: () => deleteProject(projectId), // no refetch: the project is gone
   }), [bindingFor, projectId, runThenRefetch])
 
-  return { status, refreshing, error, refetch: load, actions, ...data }
+  return { status, refreshing, error, refetch: load, actions, identities, identitiesStatus, loadIdentities, ...data }
 }

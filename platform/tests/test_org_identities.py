@@ -35,12 +35,16 @@ def test_own_org_identities_shape(client, make_org):
     assert "private-subject" not in response.text
 
 
+# B4-c row7
 def test_another_org_identities_are_404(client, make_org):
     org = make_org(name="Caller")
     other = make_org(name="Hidden")
     _binding(other)
     response = _read(client, org, other.org_id)
     assert response.status_code == 404, response.text
+    assert response.json()["detail"] == "org not found"
+    own_response = _read(client, org)
+    assert own_response.status_code == 200, own_response.text
 
 
 def test_org_identities_cap_and_label_order(client, make_org):

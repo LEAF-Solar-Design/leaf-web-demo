@@ -18,6 +18,7 @@ vi.mock('./api.js', () => ({
   cloneProject: vi.fn(),
   deleteProject: vi.fn(),
   exportProject: vi.fn(),
+  getOrgIdentities: vi.fn(),
   getProjectLifecycle: vi.fn(),
   inviteMember: vi.fn(),
   resetProject: vi.fn(),
