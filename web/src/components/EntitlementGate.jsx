@@ -217,7 +217,7 @@ export default function EntitlementGate({
       </>}
       {studioPresentation && (!studioKnown || allOn) ? null : !known ? (
         <p className="ent-note">
-          demo tier · full access — entitlements apply once you sign in to a plan.
+          demo tier · full access. Entitlements apply once you sign in to a plan.
         </p>
       ) : allOn ? (
         <p className="ent-note">All capabilities are included on the {tierLabel} plan.</p>

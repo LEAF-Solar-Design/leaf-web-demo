@@ -599,14 +599,14 @@ export default function PromptBox({
         onDrop={dropIngestEnabled ? onDrop : undefined}
       >
         {dragging && (
-          <div className="bar-drop-hint" aria-hidden="true">Drop manifest to ingest — runs sandboxed</div>
+          <div className="bar-drop-hint" aria-hidden="true">Drop manifest to ingest, runs sandboxed</div>
         )}
         {menuOpen && (
           <div className="resolver slash-menu" id="slash-menu-listbox" role="listbox" aria-label="Tool commands">
             <div className="resolver-header">
               {matches.length > 0
                 ? <>{trigger.kind === 'resource' ? 'MCP servers · Tab inserts · Enter picks' : 'Tools · Tab completes · Enter picks — you still confirm before it runs'}</>
-                : <>{trigger.kind === 'resource' ? 'No MCP servers mounted.' : <>No tool matches “/{afterSlash}” — keep typing, or Esc to close</>}</>}
+                : <>{trigger.kind === 'resource' ? 'No MCP servers mounted.' : <>No tool matches “/{afterSlash}”. Keep typing, or Esc to close</>}</>}
             </div>
             {matches.map((t, i) => {
               const isWrite = isWriteTool(t)
@@ -817,8 +817,8 @@ export default function PromptBox({
             type="button"
             className="bar-add"
             onClick={() => openScope(2)}
-            aria-label="Add — build a new capability"
-            title="Add — build a new capability"
+            aria-label="Add: build a new capability"
+            title="Add: build a new capability"
           >
             +
           </button>
@@ -865,7 +865,7 @@ export default function PromptBox({
             role="listbox"
             aria-label="Scope"
           >
-            <div className="resolver-header">Scope — one prompt, three lanes</div>
+            <div className="resolver-header">Scope: one prompt, three lanes</div>
             {SCOPES.map((s, i) => (
               <div
                 key={s.id}

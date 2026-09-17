@@ -118,7 +118,7 @@ function ProvenanceStatus({ prov }) {
     return (
       <span className="tier-status advisory">
         <span className="dot square" aria-hidden="true" />
-        Agent unavailable — templated fallback
+        Agent unavailable, templated fallback
       </span>
     )
   }
@@ -168,7 +168,7 @@ function BuildGate() {
   return (
     <div className="author-gate" role="status">
       <div className="author-gate-body">
-        <b>Your plan doesn’t include tool authoring — upgrade to build.</b>{' '}
+        <b>Your plan doesn’t include tool authoring. Upgrade to build.</b>{' '}
         Authoring new tools is a build-lane capability enforced on Leaf. Upgrade your plan to
         generate tools with the agent.
       </div>
@@ -186,7 +186,7 @@ function QuotaGate({ limit, used }) {
     <div className="author-gate" role="status">
       <div className="author-gate-body">
         <b>You’ve used your tool authoring for today{counts}.</b>{' '}
-        Your plan includes a daily limit on authoring new tools. It resets at 00:00 UTC —
+        Your plan includes a daily limit on authoring new tools. It resets at 00:00 UTC, so
         upgrade your plan for more.
       </div>
     </div>
@@ -211,7 +211,7 @@ function ServiceGate() {
     <div className="author-gate" role="status">
       <div className="author-gate-body">
         <b>Authoring service is temporarily unavailable.</b>{' '}
-        The tool-authoring agent couldn’t be reached just now. Nothing was charged —
+        The tool-authoring agent couldn’t be reached just now. Nothing was charged, so
         please try Generate again in a moment.
       </div>
     </div>
@@ -521,7 +521,7 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
           {authored.legacy_demo && (
             <div className="customization-state" role="status">
               <span className="dot square" aria-hidden="true" />
-              <span>Authored in local demo mode — registered in this demo workspace only. Not production evidence.</span>
+              <span>Authored in local demo mode, registered in this demo workspace only. Not production evidence.</span>
             </div>
           )}
           {!authored.legacy_demo && !authored.published && (

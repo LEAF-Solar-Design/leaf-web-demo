@@ -4,7 +4,7 @@
  * Observed on production 2026-09-01: a lock taken ~4h earlier by a session that
  * closed its tab without releasing rendered as
  *
- *     Editing locked by sess-72d58f4d… until ~-4 h — read tools still run
+ *     Editing locked by sess-72d58f4d… until ~-4 h. Read tools still run
  *
  * an interval running BACKWARDS. `fmtUntil` subtracted `now` from a past
  * `expires` and formatted the negative result, because every branch tested

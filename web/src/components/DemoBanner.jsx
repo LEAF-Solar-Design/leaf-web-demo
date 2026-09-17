@@ -6,7 +6,7 @@ export default function DemoBanner() {
   return (
     <div className="demo-banner enter" role="note" aria-label="Guided demo">
       <div className="demo-banner-text">
-        <span className="demo-banner-title">Guided demo — sample rooftop</span>
+        <span className="demo-banner-title">Guided demo: sample rooftop</span>
         <span className="demo-banner-sub">
           Type what you want; Leaf authors a real CAD tool and runs it on this sample rooftop.
         </span>

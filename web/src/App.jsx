@@ -3363,7 +3363,7 @@ export default function App() {
       }}
     >
       <header className="top">
-        <div className="mark"><span className="diamond" aria-hidden="true" /> Leaf — build CAD tools with AI</div>
+        <div className="mark"><span className="diamond" aria-hidden="true" /> Leaf: build CAD tools with AI</div>
         {/* W4e: on the studio's drafting surfaces the header IS the
             reference's top band: quick access, then the ribbon tabs. The
             engine's Open/Save portal into the band's slot. Rail OFF and
@@ -3543,8 +3543,8 @@ export default function App() {
         <div className="kicker">Home · one prompt, two lanes</div>
         <h1 className="home-q">What should Leaf do to <em>{projectName}</em>?</h1>
         <div className="hint">
-          Try <b>count panels per layer</b> — one prompt, routed across <b>Run</b> ·{' '}
-          <b>Build</b>. You confirm before anything runs — paid actions never auto-execute.
+          Try <b>count panels per layer</b>: one prompt, routed across <b>Run</b> ·{' '}
+          <b>Build</b>. You confirm before anything runs, and paid actions never auto-execute.
         </div>
 
         </>)}
@@ -3898,7 +3898,7 @@ export default function App() {
               fallback note (the completion itself already toasted plainly). */}
           {refreshFail && (
             <div className="inline-error" style={{ margin: '0 0 8px' }}>
-              Couldn’t refresh the viewer — showing the previous version
+              Couldn’t refresh the viewer, showing the previous version
               <button type="button" className="chip-act" onClick={onRetryViewerRefresh}>Retry</button>
               {rTarget === 'refresh' && <span className="key" aria-hidden="true">R</span>}
             </div>
@@ -4083,7 +4083,7 @@ export default function App() {
                  to one line with a count instead of stacking. */
               advisories.length >= 2 ? (
                 <div className="banner">
-                  <span>{advisories.length} advisories — {advisories.join(' · ')}</span>
+                  <span>{advisories.length} advisories: {advisories.join(' · ')}</span>
                 </div>
               ) : (
                 <>

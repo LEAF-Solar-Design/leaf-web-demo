@@ -24,7 +24,7 @@
 export const TOUR_STEPS = [
   {
     id: 'welcome',
-    title: 'Guided demo — sample rooftop',
+    title: 'Guided demo: sample rooftop',
     body:
       'This is a real solar rooftop drawing. Type plain English; Leaf picks a tool, ' +
       'shows you what it will do, and runs it on the drawing. Nothing runs until you confirm.',
@@ -95,7 +95,7 @@ export const TOUR_STEPS = [
   },
   {
     id: 'version',
-    title: 'Edits are versioned — your call',
+    title: 'Edits are versioned, your call',
     body:
       'Deleting a panel is a real write, so nothing auto-runs. Click Run in the ' +
       'bar below to stage the next version, then press Undo to walk the drawing back.',

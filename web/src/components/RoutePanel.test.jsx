@@ -115,7 +115,7 @@ describe('RoutePanel demo refusals and outages', () => {
 
   it('keeps the live-only header for a named live tool below the floor', () => {
     const callbacks = mountRefusal({ lane: 'run', tool: 'inspect-live-geometry', confidence: 0.1, alternatives: [] })
-    expect(screen.getByText('“inspect-live-geometry” is live-only — not in this catalog. Pick an alternative:').closest('.resolver-header')).not.toBeNull()
+    expect(screen.getByText('“inspect-live-geometry” is live-only, not in this catalog. Pick an alternative:').closest('.resolver-header')).not.toBeNull()
     expect(screen.queryByText(/No matching capability/)).toBeNull()
     fireEvent.click(screen.getByRole('option'))
     expect(callbacks.onPickAlternative).toHaveBeenCalledWith(tools[0].name)

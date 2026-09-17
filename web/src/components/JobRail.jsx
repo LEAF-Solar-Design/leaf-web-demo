@@ -179,7 +179,7 @@ export default function JobRail({ mock, jobs, currentJob, inflight, reattaching,
 
       {reattaching && inflight && (
         <div className="reattach">
-          <span>Re-attaching to in-flight job — {inflight.tool}</span>
+          <span>Re-attaching to in-flight job: {inflight.tool}</span>
         </div>
       )}
 

@@ -129,7 +129,7 @@ function CustomizeChipBody({ payload }) {
       {undisplayed > 0 && (
         <span className="customize-incomplete">
           {undisplayed} more file{undisplayed === 1 ? '' : 's'} would change and are NOT
-          listed here. Do not approve this — deny it and ask for a smaller change.
+          listed here. Do not approve this. Deny it and ask for a smaller change.
         </span>
       )}
       <span className="dim">
@@ -821,7 +821,7 @@ export default function ConversePanel({
               <>
                 <span className="route-title">{item.confirmKind || 'Confirmation'}</span>
                 {item.payload && <span className="dim"> · {paramsSummary(item.payload) || ''}</span>}
-                <span className="dim"> — the assistant is asking before it proceeds.</span>
+                <span className="dim">. The assistant is asking before it proceeds.</span>
               </>
               )
             )}
@@ -901,7 +901,7 @@ export default function ConversePanel({
       <div className="converse-head">
         <span className={model.active || busy ? 'dot live pulse' : 'dot'} aria-hidden="true" />
         <span className="converse-title">Assistant</span>
-        <span className="dim">plans and explains — deterministic tools do the work</span>
+        <span className="dim">plans and explains, deterministic tools do the work</span>
         <span className="converse-spacer" />
         {/* Status strip — the terminal client's persistent model/context/cost
             reading, as a component rather than a shell script. Every field is
@@ -991,7 +991,7 @@ export default function ConversePanel({
         {queuedTurn && (
           <div className="converse-note">
             <span className="dot square" aria-hidden="true" />
-            <span className="dim">Queued — will run when the current turn finishes</span>
+            <span className="dim">Queued: will run when the current turn finishes</span>
           </div>
         )}
         {pendingUserTurns.map((u) => (
