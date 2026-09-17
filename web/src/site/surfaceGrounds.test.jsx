@@ -9,9 +9,37 @@ import { act, cleanup, fireEvent, render, screen, within } from '@testing-librar
 import { readFileSync } from 'node:fs'
 
 import SurfaceGrounds, { DeviceGround, ProjectBoardGround, groundShowsDrawing, measureContainedWindow } from './SurfaceGrounds.jsx'
+import { ProjectBoardGround as DirectProjectBoardGround } from './ProjectBoardGround.jsx'
+import { DeviceGround as DirectDeviceGround } from '../ios/DeviceGround.jsx'
+import { BoardTiles } from './BoardTiles.jsx'
 import { deriveWorkspaceProjectState } from './workspaceProjectState.js'
 
 afterEach(cleanup)
+
+describe('extracted ground exports', () => {
+  it('renders the same active board through either import', () => {
+    const { container, rerender } = render(<DirectProjectBoardGround active worldSpace={false} />)
+    const board = container.querySelector('[data-ground="browser"]')
+    const markup = board.outerHTML
+    rerender(<ProjectBoardGround active worldSpace={false} />)
+    expect(container.querySelector('[data-ground="browser"]')).toBe(board)
+    expect(board.outerHTML).toBe(markup)
+  })
+
+  it('renders the same active device stage through either import', () => {
+    const { container, rerender } = render(<DirectDeviceGround active enabled revision="rev-1" />)
+    const stage = container.querySelector('[data-ground="ios"]')
+    const markup = stage.outerHTML
+    rerender(<DeviceGround active enabled revision="rev-1" />)
+    expect(container.querySelector('[data-ground="ios"]')).toBe(stage)
+    expect(stage.outerHTML).toBe(markup)
+  })
+
+  it('exports the six board tiles', () => {
+    const { container } = render(<BoardTiles />)
+    expect(container.querySelectorAll('[data-tile]')).toHaveLength(6)
+  })
+})
 
 it('themes both persistent grounds through the shell contract without a paper frame measurement', () => {
   const { container, rerender } = render(<SurfaceGrounds surface="browser" studioShell studioPresentation />)
