@@ -728,7 +728,9 @@ def read_intake(backend, tenant_id: str, drawing_id: str,
     binds that cache to the exact immutable source bytes. Raises KeyError or
     ValueError on a missing, corrupt, or unbound representation."""
     import store
-    v, vkey = store.resolve_version(backend, tenant_id, drawing_id, version)
+    v, vkey, entry = store.resolve_version_entry(backend, tenant_id, drawing_id, version)
+    if (entry.get("note") or "").startswith("solar-bundle:"):
+        return v, store.read_graph_bundle(backend, tenant_id, drawing_id, v)["intake"]
     ckey = intake_cache_key(tenant_id, drawing_id, v)
     source = backend.get(vkey)
     try:
@@ -1351,7 +1353,8 @@ def _put_bytes_version(backend, tenant_id: str, drawing_id: str, data: bytes,
                        parent_version: int, meta: Dict[str, Any], *,
                        holder: Optional[str] = None,
                        fence: Optional[int] = None,
-                       require_parent_is_head: bool = False) -> int:
+                       require_parent_is_head: bool = False,
+                       graph_bundle: Optional[Dict[str, Any]] = None) -> int:
     """put_drawing takes a local path (immutability + sha are computed there), so
     stage `data` to a temp file and append the new version.
 
@@ -1367,12 +1370,36 @@ def _put_bytes_version(backend, tenant_id: str, drawing_id: str, data: bytes,
         return store.put_drawing(backend, tenant_id, drawing_id, tmp,
                                  parent_version=parent_version, meta=meta,
                                  holder=holder, fence=fence,
-                                 require_parent_is_head=require_parent_is_head)
+                                 require_parent_is_head=require_parent_is_head,
+                                 graph_bundle=graph_bundle)
     finally:
         try:
             os.remove(tmp)
         except OSError:
             pass
+
+
+def apply_graph_version(backend, tenant_id: str, drawing_id: str, dwg: bytes,
+                        interchange: Dict[str, Any], *, holder: str, fence: int) -> int:
+    """Commit a W1-04 result on the existing drawing write and cutover rails.
+
+    Interchange fields: graph, intake, mapping, project_id, apply_id,
+    source_version, source_sha256, source_rev. The graph source_hash is the
+    output DWG digest; source_sha256 identifies the input drawing version.
+    Call only after the existing capability/job entitlement checks.
+    """
+    if type(dwg) is not bytes or not dwg or len(dwg) > 256 * 1024 * 1024:
+        raise ValueError("invalid graph DWG payload")
+    if type(interchange) is not dict:
+        raise ValueError("invalid graph interchange result")
+    with drawing_mutation_commit_guard() as allowed:
+        if not allowed:
+            raise ValueError("drawing mutations are disabled")
+        return _put_bytes_version(
+            backend, tenant_id, drawing_id, dwg,
+            parent_version=interchange.get("source_version"),
+            meta={"tool": "solar.graph.commit"}, holder=holder, fence=fence,
+            require_parent_is_head=True, graph_bundle=interchange)
 
 
 # --------------------------------------------------------------------------- #
