@@ -226,6 +226,14 @@ def get_org(org_id: uuid.UUID, caller_org: uuid.UUID = Depends(get_org_id)):
     return {"org": org.to_dict()}
 
 
+@router.get("/orgs/{org_id}/identities")
+def get_org_identities(org_id: uuid.UUID, caller_org: uuid.UUID = Depends(get_org_id)):
+    # Match get_org's verified scope and non-disclosing mismatch response.
+    if org_id != caller_org or store.get_org(org_id) is None:
+        raise HTTPException(status_code=404, detail="org not found")
+    return {"identities": project_lifecycle.list_org_identities(org_id)}
+
+
 # --------------------------------------------------------------------------- #
 # projects
 # --------------------------------------------------------------------------- #

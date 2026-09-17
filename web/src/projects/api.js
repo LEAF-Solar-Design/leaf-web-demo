@@ -165,6 +165,12 @@ export async function createBlankProject(name, orgId) {
   return data.project
 }
 
+// GET /api/orgs/{id}/identities returns existing organization bindings.
+export async function getOrgIdentities(orgId) {
+  const id = requireUuid(orgId, 'organization')
+  return request(`/api/orgs/${id}/identities`, { orgId: id })
+}
+
 // GET /api/projects/{id}/lifecycle -> {project, members, files, receipts}.
 // The single read every lifecycle component is fed from; see
 // useProjectLifecycle.js for the one-fetch/refetch-after-mutation contract.

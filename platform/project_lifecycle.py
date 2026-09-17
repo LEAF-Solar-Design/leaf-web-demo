@@ -371,10 +371,43 @@ def _resolve_free_project_name(cur: Any, org_id: uuid.UUID, requested: str) -> s
     )
 
 
+# Read optional profile fields without requiring a schema migration. Older
+# bindings carry only identity keys; external_subject is never a display label.
+_IDENTITY_LABEL_SQL = (
+    "COALESCE(NULLIF(BTRIM(to_jsonb(b)->>'display_name'), ''), "
+    "NULLIF(BTRIM(to_jsonb(b)->>'name'), ''), "
+    "NULLIF(BTRIM(to_jsonb(b)->>'email'), ''), "
+    "'Member ' || LEFT(b.binding_id::text, 8))"
+)
+
+
+def list_org_identities(org_id: uuid.UUID) -> list[Dict[str, str]]:
+    """Existing active bindings only, with a bounded, stable display order."""
+    def operation(conn: Any) -> list[Dict[str, str]]:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT b.binding_id, b.role, b.created_at, " + _IDENTITY_LABEL_SQL + " AS label "
+                "FROM identity_bindings b "
+                "WHERE b.platform_tenant_id = %(org_id)s AND b.status = 'active' "
+                "ORDER BY " + _IDENTITY_LABEL_SQL + ' COLLATE "C", b.binding_id LIMIT 200',
+                {"org_id": org_id},
+            )
+            return [
+                {"binding_id": str(row["binding_id"]), "label": row["label"],
+                 "role": row["role"], "created_at": row["created_at"].isoformat()}
+                for row in cur.fetchall()
+            ]
+
+    return run_transaction(
+        operation, isolation="serializable", read_only=True, deferrable=True,
+    )
+
+
 def _member_dict(row: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "membership_id": str(row["membership_id"]),
         "binding_id": str(row["binding_id"]),
+        "label": row.get("label") or f"Member {str(row['binding_id'])[:8]}",
         "role": row["role"],
         "status": row["status"],
         "created_at": row["created_at"].isoformat(),
@@ -453,10 +486,13 @@ def project_snapshot(
                 cur, org_id, project_id, actor_binding_id, write=False, lock=False,
             )
             cur.execute(
-                "SELECT membership_id, binding_id, role, status, created_at, revoked_at "
-                "FROM project_member_bindings WHERE org_id = %(org_id)s "
-                "AND project_id = %(project_id)s AND status = 'active' "
-                "ORDER BY created_at, membership_id",
+                "SELECT m.membership_id, m.binding_id, m.role, m.status, "
+                "m.created_at, m.revoked_at, " + _IDENTITY_LABEL_SQL + " AS label "
+                "FROM project_member_bindings m JOIN identity_bindings b "
+                "ON b.binding_id = m.binding_id AND b.platform_tenant_id = m.org_id "
+                "WHERE m.org_id = %(org_id)s "
+                "AND m.project_id = %(project_id)s AND m.status = 'active' "
+                "ORDER BY m.created_at, m.membership_id",
                 {"org_id": org_id, "project_id": project_id},
             )
             members = [_member_dict(row) for row in cur.fetchall()]

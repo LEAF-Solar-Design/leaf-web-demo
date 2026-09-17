@@ -129,6 +129,7 @@ export default function ReceiptPanel({ receipts, title = 'Timeline', emptyLabel 
               <li key={id} className="receipt-row" data-receipt-id={id}>
                 <div className="receipt-row-head">
                   <span className="receipt-kind">{kind}</span>
+                  <span className="receipt-id">Receipt: {id}</span>
                   <time className="receipt-time" dateTime={receipt.time}>
                     {formatTime(receipt.time)}
                   </time>

@@ -19,20 +19,25 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 
 vi.mock('./api.js', () => ({
   createBlankProject: vi.fn(),
   cloneProject: vi.fn(),
   deleteProject: vi.fn(),
   exportProject: vi.fn(),
+  getOrgIdentities: vi.fn(),
   getProjectLifecycle: vi.fn(),
   inviteMember: vi.fn(),
   resetProject: vi.fn(),
   revokeMember: vi.fn(),
 }))
 
-import { getProjectLifecycle } from './api.js'
+vi.mock('./flag.js', () => ({ ENV_LIFECYCLE_UI: true }))
+
+import { cloneProject, deleteProject, exportProject, getOrgIdentities, getProjectLifecycle, inviteMember, resetProject } from './api.js'
+import { renderHook } from '@testing-library/react'
+import useProjectLifecycle from './useProjectLifecycle.js'
 import ProjectLifecyclePanel from './ProjectLifecyclePanel.jsx'
 
 afterEach(cleanup)
@@ -73,10 +78,12 @@ describe('lifecycle block renders for an open project with the flag on', () => {
 
     // Roster comes from the snapshot verbatim, with the wire's `read_only`
     // rendered in the component's own `read-only` vocabulary.
-    expect(screen.getByLabelText(`Role for ${VIEWER_BINDING}`).value).toBe('owner')
-    expect(screen.getByLabelText('Role for bbbbbbbb-cccc-4ddd-8eee-ffffffffffff').value).toBe('read-only')
-    // The invite field collects a binding id, which is what the route takes.
-    expect(screen.getByLabelText(/invite by binding id/i)).toBeTruthy()
+    // w4h-b4 replaces raw identity mechanics with labels and scoped choices.
+    expect(screen.getByLabelText('Role for Member aaaaaaaa').value).toBe('owner')
+    expect(screen.getByLabelText('Role for Member bbbbbbbb').value).toBe('read-only')
+    expect(screen.getByText('Member aaaaaaaa · joined 2026-08-01')).toBeTruthy()
+    expect(screen.getByText('Member bbbbbbbb · joined 2026-08-02')).toBeTruthy()
+    expect(screen.getByText('Organization members are unavailable. No one can be invited yet.')).toBeTruthy()
 
     expect(screen.getByRole('region', { name: 'Project timeline' })).toBeTruthy()
     expect(screen.getByText('project_created')).toBeTruthy()
@@ -99,7 +106,7 @@ describe('lifecycle block renders for an open project with the flag on', () => {
     render(<ProjectLifecyclePanel enabled projectId={PROJECT_ID} projectName="Rooftop Array" />)
 
     await waitFor(() => expect(screen.getByText(/your role: owner/i)).toBeTruthy())
-    expect(screen.getByRole('button', { name: /invite/i })).toBeTruthy()
+    expect(screen.getByText('Organization members are unavailable. No one can be invited yet.')).toBeTruthy()
   })
 
   it('renders no role matrix when the server sends no viewer', async () => {
@@ -129,6 +136,124 @@ describe('lifecycle block renders for an open project with the flag on', () => {
     const { container } = render(<ProjectLifecyclePanel enabled projectId={null} />)
     expect(container).toBeEmptyDOMElement()
     expect(getProjectLifecycle).not.toHaveBeenCalled()
+  })
+})
+
+describe('w4h-b4 lifecycle results and scoped identities', () => {
+  it('B4-c row1 loads organization members on demand with the ToolCast props', async () => {
+    getProjectLifecycle.mockResolvedValue({ ...SNAPSHOT, project: { ...SNAPSHOT.project, org_id: 'org-a' } })
+    getOrgIdentities.mockResolvedValue({ identities: [
+      { binding_id: 'binding-alex', label: 'Alex' },
+      { binding_id: 'binding-sam', label: 'Sam' },
+    ] })
+    render(<ProjectLifecyclePanel projectId={PROJECT_ID} projectName="Rooftop Array" onProjectDeleted={vi.fn()} />)
+    const load = await screen.findByRole('button', { name: 'Load organization members' })
+    expect(getOrgIdentities).not.toHaveBeenCalled()
+    fireEvent.click(load)
+    await screen.findByRole('option', { name: 'Alex' })
+    expect(screen.getByRole('option', { name: 'Sam' }).value).toBe('binding-sam')
+    expect(getOrgIdentities).toHaveBeenCalledWith('org-a')
+  })
+
+  it('B4-c row2 lets parent identities override the hook until the override is removed', async () => {
+    getProjectLifecycle.mockResolvedValue({ ...SNAPSHOT, project: { ...SNAPSHOT.project, org_id: 'org-a' } })
+    getOrgIdentities.mockResolvedValue({ identities: [{ binding_id: 'hook-binding', label: 'Hook member' }] })
+    const { rerender } = render(<ProjectLifecyclePanel enabled projectId={PROJECT_ID}
+      identities={[{ binding_id: 'parent-binding', label: 'Parent member' }]} />)
+    expect((await screen.findByRole('option', { name: 'Parent member' })).value).toBe('parent-binding')
+    expect(screen.queryByRole('button', { name: 'Load organization members' })).toBeNull()
+    expect(getOrgIdentities).not.toHaveBeenCalled()
+    rerender(<ProjectLifecyclePanel enabled projectId={PROJECT_ID} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Load organization members' }))
+    await screen.findByRole('option', { name: 'Hook member' })
+    expect(screen.queryByRole('option', { name: 'Parent member' })).toBeNull()
+  })
+
+  it('B4-c row5 drops the remembered clone receipt once a refresh carries it', async () => {
+    const receipt = { receipt_id: 'clone-remembered', action: 'project_cloned', created_at: '2026-09-17T00:00:00Z' }
+    getProjectLifecycle.mockResolvedValue(SNAPSHOT)
+    cloneProject.mockResolvedValue({ project: { project_id: 'copy', name: 'Copy' }, receipt })
+    inviteMember.mockResolvedValue({})
+    render(<ProjectLifecyclePanel enabled projectId={PROJECT_ID} />)
+    await screen.findByTestId('membership-panel')
+    fireEvent.click(screen.getByRole('button', { name: 'Clone project' }))
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Clone project' }))
+    await screen.findByText(/Clone complete:/)
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Close' }))
+    expect(screen.getAllByText('Receipt: clone-remembered')).toHaveLength(1)
+
+    getProjectLifecycle.mockResolvedValue({ ...SNAPSHOT, receipts: [...SNAPSHOT.receipts, receipt] })
+    fireEvent.change(screen.getByLabelText('Role for Member bbbbbbbb'), { target: { value: 'editor' } })
+    await waitFor(() => expect(getProjectLifecycle).toHaveBeenCalledTimes(3))
+    await waitFor(() => expect(screen.getByLabelText('Role for Member bbbbbbbb')).not.toBeDisabled())
+    expect(screen.getAllByText('Receipt: clone-remembered')).toHaveLength(1)
+
+    // A later server window omits it. A retained local copy would resurrect it.
+    getProjectLifecycle.mockResolvedValue(SNAPSHOT)
+    fireEvent.change(screen.getByLabelText('Role for Member bbbbbbbb'), { target: { value: 'reviewer' } })
+    await waitFor(() => expect(getProjectLifecycle).toHaveBeenCalledTimes(4))
+    await waitFor(() => expect(screen.queryByText('Receipt: clone-remembered')).toBeNull())
+  })
+
+  it('retains the clone receipt after closing its dialog even when refresh omits it', async () => {
+    getProjectLifecycle.mockResolvedValue(SNAPSHOT)
+    cloneProject.mockResolvedValue({ project: { project_id: 'copy', name: 'Rooftop Array (copy)' },
+      receipt: { receipt_id: 'clone-receipt', action: 'project_cloned', created_at: '2026-09-17T00:00:00Z' } })
+    render(<ProjectLifecyclePanel enabled projectId={PROJECT_ID} />)
+    await screen.findByTestId('membership-panel')
+    fireEvent.click(screen.getByRole('button', { name: 'Clone project' }))
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Clone project' }))
+    await screen.findByText(/Clone complete:/)
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Close' }))
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(within(screen.getByRole('region', { name: 'Project timeline' })).getByText('Receipt: clone-receipt')).toBeTruthy()
+  })
+
+  it('passes scoped identities and delegates their load to its parent', async () => {
+    getProjectLifecycle.mockResolvedValue(SNAPSHOT)
+    const onLoadIdentities = vi.fn().mockResolvedValue(undefined)
+    render(<ProjectLifecyclePanel enabled projectId={PROJECT_ID}
+      identities={[{ binding_id: 'binding-a', label: 'Alex' }]} onLoadIdentities={onLoadIdentities} />)
+    await screen.findByLabelText('Invite member')
+    expect(screen.getByRole('option', { name: 'Alex' }).value).toBe('binding-a')
+    fireEvent.click(screen.getByRole('button', { name: 'Load organization members' }))
+    await waitFor(() => expect(onLoadIdentities).toHaveBeenCalledTimes(1))
+  })
+
+  it('retains the export receipt after its dialog closes', async () => {
+    getProjectLifecycle.mockResolvedValue(SNAPSHOT)
+    exportProject.mockResolvedValue({ receipt: { receipt_id: 'export-receipt', action: 'project_exported', created_at: '2026-09-17T00:00:00Z' } })
+    render(<ProjectLifecyclePanel enabled projectId={PROJECT_ID} />)
+    await screen.findByTestId('membership-panel')
+    fireEvent.click(screen.getByRole('button', { name: 'Export project' }))
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Export' }))
+    await within(screen.getByRole('dialog')).findByText('export-receipt')
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Close' }))
+    expect(screen.getByText('Receipt: export-receipt')).toBeTruthy()
+  })
+
+  it.each(['Reset', 'Delete'])('retains the %s receipt when its confirmation closes', async (action) => {
+    getProjectLifecycle.mockResolvedValue(SNAPSHOT)
+    const operation = action === 'Reset' ? resetProject : deleteProject
+    operation.mockResolvedValue({ receipt: { receipt_id: 'danger-receipt', action: `project_${action.toLowerCase()}`, created_at: '2026-09-17T00:00:00Z' } })
+    const onProjectDeleted = vi.fn()
+    render(<ProjectLifecyclePanel enabled projectId={PROJECT_ID} onProjectDeleted={onProjectDeleted} />)
+    await screen.findByTestId('membership-panel')
+    fireEvent.click(screen.getByRole('button', { name: action }))
+    fireEvent.change(screen.getByLabelText(`Type the project name to confirm ${action.toLowerCase()}`), { target: { value: 'Rooftop Array' } })
+    fireEvent.click(screen.getByRole('button', { name: action }))
+    const timeline = screen.getByRole('region', { name: 'Project timeline' })
+    await within(timeline).findByText('Receipt: danger-receipt')
+    expect(screen.queryByLabelText(`Type the project name to confirm ${action.toLowerCase()}`)).toBeNull()
+    if (action === 'Delete') expect(onProjectDeleted).toHaveBeenCalledWith(PROJECT_ID, 'danger-receipt')
+  })
+
+  it('exposes drawing files from the lifecycle read without adapting their contents', async () => {
+    const files = [{ file_id: 'drawing-a', name: 'Roof.dxf' }]
+    getProjectLifecycle.mockResolvedValue({ ...SNAPSHOT, files })
+    const { result } = renderHook(() => useProjectLifecycle(PROJECT_ID))
+    await waitFor(() => expect(result.current.status).toBe('ready'))
+    expect(result.current.files).toEqual(files)
   })
 })
 
