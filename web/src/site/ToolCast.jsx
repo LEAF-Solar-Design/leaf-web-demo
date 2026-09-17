@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
+  config,
   getCapabilities,
   createOrg,
   createProject,
@@ -52,6 +53,7 @@ import { ENV_CAD_EDIT } from '../cadedit/flag.js'
 import IosSurface from '../ios/IosSurface.jsx'
 import { ENV_IOS_SURFACE } from '../ios/flag.js'
 import useIosSurface from '../ios/useIosSurface.js'
+import { useIosShipController } from '../ios/useIosShipController.js'
 import { useWorkspaceControllers } from '../controllers/WorkspaceControllerProvider.jsx'
 import useCatalogController from '../controllers/catalog/useCatalogController.js'
 import { setCredentialMountAvailable } from '../lib/secretGuardTransport.js'
@@ -89,13 +91,7 @@ import {
 import { useSurfaceContract } from './useSurfaceContract.js'
 import { deriveWorkspaceProjectState } from './workspaceProjectState.js'
 import {
-  emptyIosShipReadiness,
-  fetchIosShipReadiness,
-  getIosShipExecution,
-  getIosShipReceipt,
   iosShipLaunchAffordance,
-  makeIosShipLaunchKey,
-  requestIosShipLaunch,
 } from './iosShipReadiness.js'
 import { authConfigured, isAuthRedirectCallback, isSignedIn, login } from '../auth.js'
 import { agentBannerFor as agentBannerForKind, OPERATOR_AGENT_BANNER_COPY } from '../lib/agentBanner.js'
@@ -1395,40 +1391,16 @@ export default function ToolCast({
     await redoDrawingVersion(checkout.actions.getCapability())
   }, [busy, canRedo, checkout.actions, jobRunning, redoDrawingVersion, sessionReady])
 
-  // Wave D one-shot iOS ship lane. The surface consumes REAL readiness: the
-  // projection module fails closed to `launchable === false` for missing,
-  // invalid, stale, cross-tenant, unhealthy, or secret-shaped records, so a
-  // launch affordance can never be derived from anything the browser invents.
-  // Only the signed-in project context asks for readiness; otherwise the lane
-  // resets to the frozen empty shape.
-  const [iosShip, setIosShip] = useState(() => emptyIosShipReadiness())
-  const [iosShipBusy, setIosShipBusy] = useState(false)
-  const [iosShipError, setIosShipError] = useState(null)
-  const [iosShipExecution, setIosShipExecution] = useState(null)
-  const [iosShipReceipt, setIosShipReceipt] = useState(null)
-  useEffect(() => {
-    const projectId = workspace.openProjectId
-    const revision = workspace.canonicalVersionId
-    const signedIn = platformSession.status === 'active'
-    setIosShip(emptyIosShipReadiness('loading', null, projectId || null))
-    setIosShipExecution(null)
-    setIosShipReceipt(null)
-    // Slice 2: the ship-lane readiness read follows the DECLARED ios branch,
-    // the same one that renders it below. It replaces the inline
-    // not-equal-ios surface literal.
-    if (stageBranch !== 'ios' || !signedIn || !projectId || !revision) {
-      setIosShip(emptyIosShipReadiness('no_approved_project_revision', null, projectId || null))
-      return undefined
-    }
-    let live = true
-    setIosShipError(null)
-    fetchIosShipReadiness({ projectId, revision }).then((next) => {
-      if (!live) return
-      setIosShip(next)
-      if (!next.launchable) setIosShipError(next.setupAction || next.reason || null)
-    })
-    return () => { live = false }
-  }, [activeSurface, platformSession.status, workspace.canonicalVersionId, workspace.openProjectId])
+  // One controller owns readiness, launch, following, and reload recovery.
+  const iosShipController = useIosShipController({
+    projectId: workspace.openProjectId,
+    revision: workspace.canonicalVersionId,
+    sessionActive: platformSession.status === 'active',
+    enabled: stageBranch === 'ios' && platformSession.status === 'active',
+    tenantKey: config.tenant,
+  })
+  const { readiness: iosShip, busy: iosShipBusy, error: iosShipError,
+    execution: iosShipExecution, receipt: iosShipReceipt } = iosShipController
   // Consume-only iOS readiness (ios_surface, cards D-1..D-4): one point-in-time
   // read of GET /api/ios-surface/status per (project, revision), distinct from the
   // ios_ship LAUNCH lane above (this one only ever reads). `enabled` mirrors the
@@ -1451,62 +1423,11 @@ export default function ToolCast({
     },
   )
   const launchIosShip = useCallback(async () => {
-    const projectId = workspace.openProjectId
-    const revision = workspace.canonicalVersionId
-    if (!iosShipLaunchAffordance(iosShip, {
-      projectId, revision, sessionActive: platformSession.status === 'active',
-    }) || iosShipBusy) return
-    setIosShipBusy(true)
-    setIosShipError(null)
-    try {
-      // One reviewed idempotent launch: identifiers only. The backend owns
-      // the approved-revision gate; this browser never fabricates an approval
-      // and never sends credential material.
-      const response = await requestIosShipLaunch({
-        projectId,
-        approvedLaunch: iosShip.approvedLaunch,
-        idempotencyKey: makeIosShipLaunchKey(projectId, iosShip.approvedLaunch),
-      })
-      setIosShipExecution(response.execution)
+    const response = await iosShipController.launch()
+    if (response?.execution) {
       showToast({ text: 'iOS ship launch accepted. Track it in the lane.', action: { label: 'View', onClick: () => setRightView('execution') } })
-    } catch (cause) {
-      setIosShipError(cause?.envelope?.message || cause?.message || 'The iOS ship launch was refused.')
-    } finally {
-      setIosShipBusy(false)
     }
-  }, [iosShip, iosShipBusy, platformSession.status, setRightView, showToast, workspace.canonicalVersionId, workspace.openProjectId])
-
-  useEffect(() => {
-    const projectId = workspace.openProjectId
-    const executionId = iosShipExecution?.execution_id
-    // Slice 2: same declared ios branch as the readiness read above.
-    if (stageBranch !== 'ios' || !projectId || !executionId) return undefined
-    let live = true
-    let timer = null
-    const poll = async () => {
-      try {
-        const response = await getIosShipExecution({ projectId, executionId })
-        if (!live) return
-        const next = response.execution
-        setIosShipExecution(next)
-        if (next?.receipt_id) {
-          const receiptResponse = await getIosShipReceipt({ projectId, receiptId: next.receipt_id })
-          if (live) setIosShipReceipt(receiptResponse.receipt)
-          return
-        }
-        if (!['succeeded', 'failed'].includes(next?.status)) timer = setTimeout(poll, 2000)
-      } catch (cause) {
-        if (live) setIosShipError(cause?.message || 'The iOS ship status is unavailable.')
-      }
-    }
-    if (iosShipExecution.receipt_id) {
-      poll()
-    } else if (!['succeeded', 'failed'].includes(iosShipExecution.status)) {
-      timer = setTimeout(poll, 2000)
-    }
-    return () => { live = false; if (timer) clearTimeout(timer) }
-  }, [activeSurface, iosShipExecution?.execution_id, iosShipExecution?.receipt_id,
-    iosShipExecution?.status, workspace.openProjectId])
+  }, [iosShipController.launch, setRightView, showToast])
 
   const statusClass = phase === 'failed' ? 'red' : (phase === 'proposal' || phase === 'empty' || phase === 'signed-out' ? 'hollow' : 'live')
   // Pilot round 2 (try-canvas-shows-rooftop-while-copy-says-no-drawing): with
@@ -1897,6 +1818,7 @@ export default function ToolCast({
           {iosShipError && <p className="tc-rail-note" data-testid="ios-ship-error">{iosShipError}</p>}
         </div>
       </aside>
+      <SurfaceFrame.Toast />
       </>
       ) : authoringOnStage ? (
       <>

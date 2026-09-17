@@ -1,5 +1,5 @@
 import { useRef } from 'react'
-import { deriveIosState, humanizeStage, IOS_STATE_LABEL } from './IosSurface.jsx'
+import { deriveIosState, humanizeStage, IOS_STATE_LABEL, ShipStage } from './IosSurface.jsx'
 import { formatElementId } from '../lib/elementIdentity.js'
 import { NO_OCCLUDERS, shortId, useGroundWindow, windowStyle } from '../site/groundWindow.js'
 
@@ -13,6 +13,7 @@ import { NO_OCCLUDERS, shortId, useGroundWindow, windowStyle } from '../site/gro
 export function DeviceGround({
   active = false, enabled = false, contract = null, projectLabel = null, revision = null,
   leavingGround = null, studioShell = false, occluders = NO_OCCLUDERS,
+  ship, onLaunch,
 }) {
   const boardRef = useRef(null)
   const state = enabled ? (deriveIosState(contract) ?? 'malformed') : 'dormant'
@@ -33,7 +34,7 @@ export function DeviceGround({
       ref={boardRef}
       data-ground="ios"
       data-studio-shell={studioShell ? 'cockpit' : undefined}
-      data-state={state}
+      data-state={ship ? ship.phase : state}
       hidden={!active && !leaving}
       data-ground-phase={leaving ? 'leaving' : active && leavingGround ? 'entering' : undefined}
       aria-hidden={leaving ? 'true' : undefined}
@@ -45,9 +46,9 @@ export function DeviceGround({
         <div className="device-frame">
           <span className="device-notch" aria-hidden="true" />
           <div className="device-screen">
-            <span className="device-k">TestFlight lane</span>
-            <strong className="device-v" data-testid="device-state">{label}</strong>
-            {stage && <span className="device-stage">{stage}</span>}
+            <span className="device-k">{ship ? 'Build and delivery status' : 'TestFlight lane'}</span>
+            <strong className="device-v" data-testid="device-state">{ship ? ship.phase : label}</strong>
+            {(ship ? ship.execution?.failed_stage || ship.execution?.stage : stage) && <span className="device-stage">{ship ? ship.execution?.failed_stage || ship.execution?.stage : stage}</span>}
             {(projectLabel || revision) && (
               <span className="device-meta">
                 {projectLabel || 'project'}{revision ? ` · ${shortId(revision)}` : ''}
@@ -56,6 +57,7 @@ export function DeviceGround({
           </div>
         </div>
         <div className="ground-device-side">
+          {ship ? <ShipStage ship={ship} onLaunch={onLaunch} /> : <>
           <ol className="ground-lane" aria-label="Ship lane">
             {rungs.map((rung) => (
               <li key={rung.id} data-rung={rung.id} data-lit={rung.lit ? 'true' : 'false'} data-element-id={formatElementId('rung', rung.id) || undefined}>
@@ -72,6 +74,7 @@ export function DeviceGround({
           )}
           {state === 'dormant' && <p className="ground-note">iOS setup status isn’t available yet.</p>}
           {state === 'never-configured' && <p className="ground-note">No ship-lane readiness has been published for this revision.</p>}
+          </>}
         </div>
       </div>
     </div>

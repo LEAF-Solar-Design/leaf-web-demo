@@ -66,15 +66,18 @@ export function validateIosShipReadiness(record, expected = {}) {
     return emptyIosShipReadiness('invalid_record', null, expected.projectId)
   }
   if (record.launchable !== true || record.healthy !== true) {
-    return emptyIosShipReadiness(
+    return Object.freeze({ ...emptyIosShipReadiness(
       typeof record.reason === 'string' ? record.reason : 'unhealthy',
       typeof record.setup_action === 'string' ? record.setup_action : null,
       typeof record.project_id === 'string' ? record.project_id : expected.projectId,
-    )
+    ), grantStatus: typeof record.grant_status === 'string' ? record.grant_status : null })
   }
   const approvedLaunch = validateApprovedLaunch(record.approved_launch)
   if (!approvedLaunch || record.dispatch_available !== true || record.grant_status !== 'healthy') {
-    return emptyIosShipReadiness('invalid_record', null, expected.projectId)
+    return Object.freeze({
+      ...emptyIosShipReadiness('invalid_record', null, expected.projectId),
+      grantStatus: typeof record.grant_status === 'string' ? record.grant_status : null,
+    })
   }
   if (typeof record.project_id !== 'string' || record.project_id !== expected.projectId) {
     return emptyIosShipReadiness('project_mismatch', null, expected.projectId)
@@ -159,6 +162,7 @@ export async function getIosShipExecution({ projectId, executionId, fetchImpl = 
   const data = await res.json().catch(() => ({}))
   if (!res.ok || data.ok !== true || hasSecretShapedField(data)) {
     const error = new Error(data?.error?.message || `execution unavailable (${res.status})`)
+    error.status = res.status
     error.envelope = data?.error || null
     throw error
   }
