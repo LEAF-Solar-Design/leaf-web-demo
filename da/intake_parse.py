@@ -37,9 +37,7 @@ def source_binding(source_bytes):
     if type(source_bytes) is not bytes or not 0 < len(source_bytes) <= 256 * 1024 * 1024:
         raise ValueError("INVALID_INTAKE_SOURCE")
     digest = hashlib.sha256(source_bytes).hexdigest()
-    return {"intake_schema": "v2", "source_sha256": digest,
-            "source_byte_length": len(source_bytes),
-            "source": {"dwg_sha256": digest, "byte_length": len(source_bytes),
+    return {"source": {"dwg_sha256": digest, "byte_length": len(source_bytes),
                        "intake_schema": "v2"}}
 
 
@@ -49,7 +47,10 @@ def _intake_source(source_bytes):
         # absence explicit instead of hashing the display name or text dump.
         return {"source": {"dwg_sha256": None, "byte_length": None,
                            "intake_schema": "v2", "binding": "unavailable"}}
-    return source_binding(source_bytes)
+    binding = source_binding(source_bytes)
+    # Keep the DWG intake's compatibility fields alongside its source record.
+    return {**binding, "source_sha256": binding["source"]["dwg_sha256"],
+            "source_byte_length": binding["source"]["byte_length"]}
 
 
 def parse(families_txt, dwg, *, source_bytes=None):
