@@ -175,6 +175,35 @@ def test_bad_proposal_never_assigns_panels(case, defect):
     assert not graph["strings"]
 
 
+@pytest.mark.parametrize("axis,negative", [(0, False), (1, False), (0, True), (1, True)])
+def test_accept_candidate_rejects_out_of_bounds_mapped_path(case, monkeypatch, axis, negative):
+    graph, _, _ = case
+    proposal = candidate(case)
+    before = copy.deepcopy(graph)
+    frame = graph["frames"][0]
+    proposal["proposal"]["visited_path"][0][axis] = (
+        -1 if negative else frame["module_rows" if axis == 0 else "module_columns"])
+    # Exercise acceptance's own guard after the completion validation boundary.
+    monkeypatch.setattr(solve, "complete_search", lambda *args: proposal)
+    with pytest.raises(GraphValidationError, match="^INVALID_PATH_INDICES$"):
+        solve.accept_candidate(graph, proposal, expected_rev=0)
+    assert graph == before
+
+
+@pytest.mark.parametrize("lengths", [[], [12], [24, 1], [0, 24], [-1, 25],
+                                    [True, 23], [12.0, 12], ["12", 12]])
+def test_accept_candidate_rejects_invalid_sequence_lengths(case, monkeypatch, lengths):
+    graph, _, _ = case
+    proposal = candidate(case)
+    before = copy.deepcopy(graph)
+    proposal["proposal"]["proposal"]["data"]["best_result"]["info"]["sequence_length"] = lengths
+    # Exercise acceptance's own guard after the completion validation boundary.
+    monkeypatch.setattr(solve, "complete_search", lambda *args: proposal)
+    with pytest.raises(GraphValidationError, match="^TRUNCATED_SEQUENCE_LENGTH$"):
+        solve.accept_candidate(graph, proposal, expected_rev=0)
+    assert graph == before
+
+
 def test_unassigned_panels_explicit_and_cannot_export_current(case):
     graph, _, _ = case
     graph["panels"].append(entity("panel", 999, frame_ref=None, matrix_cell=None,

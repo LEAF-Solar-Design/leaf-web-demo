@@ -238,9 +238,15 @@ def accept_candidate(graph, candidate, *, expected_rev):
     # frame["matrix"] directly. The nested ["proposal"] below is the raw service
     # response, whose own coordinates are truncated-grid and must never be used here.
     path = verified["proposal"]["visited_path"]
+    if any(not (0 <= r < frame["module_rows"] and 0 <= c < frame["module_columns"])
+           for r, c in path):
+        raise GraphValidationError("INVALID_PATH_INDICES")
     refs = [frame["matrix"][r][c]["panel_ref"] for r, c in path]
     panels = {p["id"]: p for p in result["panels"]}
     lengths = verified["proposal"]["proposal"]["data"]["best_result"]["info"]["sequence_length"]
+    if (any(type(length) is not int or length <= 0 for length in lengths)
+            or sum(lengths) != len(path)):
+        raise GraphValidationError("TRUNCATED_SEQUENCE_LENGTH")
     strings, offset = [], 0
     tags = {s["circuit_tag"] for s in result["strings"] if s["id"] not in previous_ids}
     number = result["settings"]["string_number"]
