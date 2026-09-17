@@ -14,6 +14,69 @@ function setup(options = {}) {
 }
 
 describe('server workspace bootstrap', () => {
+  const bindingError = { status: 403, message: 'Create a workspace to continue.', body: { detail: 'verified subject has no active platform identity binding' } }
+  const oldOrgStorage = () => {
+    let id = 'old-org'
+    return { getItem: vi.fn(() => id), setItem: vi.fn((key, value) => { id = value }), removeItem: vi.fn(() => { id = null }) }
+  }
+
+  it('B1-d row1: consecutive binding failures clear the cache without publishing an error', async () => {
+    const storage = oldOrgStorage()
+    const { controller, services } = setup({ authLive: true, storage })
+    services.listProjects.mockRejectedValue(bindingError)
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await controller.loadProjects()
+      expect(controller.getSnapshot()).toMatchObject({ bootstrapState: 'unbound', orgId: null,
+        projectsError: null, bootstrapMessage: bindingError.message, projectsLoading: false })
+      expect(storage.getItem(WORKSPACE_ORG_KEY)).toBeNull()
+    }
+    expect(services.listProjects.mock.calls).toEqual([['old-org'], [null]])
+  })
+
+  it('B1-d row2: an unbound list settles an open before its stale rejection', async () => {
+    const { controller, services } = setup({ authLive: true, storage: oldOrgStorage() })
+    let rejectOpen
+    services.openProject.mockImplementationOnce(() => new Promise((resolve, reject) => { rejectOpen = reject }))
+    const opening = controller.openProject('p1')
+    expect(controller.getSnapshot().workspaceLoading).toBe(true)
+    services.listProjects.mockRejectedValue(bindingError)
+    await controller.loadProjects()
+    expect(controller.getSnapshot()).toMatchObject({ workspaceLoading: false, openProjectId: null, workspace: null,
+      canonicalVersionId: null, orgBusy: false, projectBusy: false })
+    rejectOpen(new Error('Old workspace failed.'))
+    await opening
+    expect(controller.getSnapshot()).toMatchObject({ workspaceLoading: false, openProjectId: null, workspace: null, projectsError: null })
+  })
+
+  it('B1-d row3: an unbound list releases pending creation and its single-flight guard', async () => {
+    const { controller, services } = setup({ authLive: true, storage: oldOrgStorage() })
+    let rejectCreate
+    services.createProject.mockImplementationOnce(() => new Promise((resolve, reject) => { rejectCreate = reject }))
+    const creating = controller.createProject('First')
+    expect(controller.getSnapshot().projectBusy).toBe(true)
+    services.listProjects.mockRejectedValue(bindingError)
+    await controller.loadProjects()
+    expect(controller.getSnapshot().projectBusy).toBe(false)
+    rejectCreate(new Error('Old creation failed.'))
+    await creating
+    expect(controller.getSnapshot()).toMatchObject({ projectBusy: false, projectsError: null })
+    await controller.createProject('Later')
+    expect(services.createProject).toHaveBeenCalledTimes(2)
+    expect(services.createProject).toHaveBeenLastCalledWith('Later', null)
+    expect(controller.getSnapshot().projectBusy).toBe(false)
+  })
+
+  it('B1-d row4: a server failure retains the org cache and publishes only an error', async () => {
+    const storage = oldOrgStorage()
+    const { controller, services } = setup({ authLive: true, storage })
+    services.listProjects.mockRejectedValue({ status: 500, message: 'Service unavailable.' })
+    await controller.loadProjects()
+    expect(controller.getSnapshot()).toMatchObject({ bootstrapState: 'unavailable', orgId: 'old-org',
+      projectsError: 'Service unavailable.', bootstrapMessage: null, projectsLoading: false })
+    expect(storage.getItem(WORKSPACE_ORG_KEY)).toBe('old-org')
+    expect(storage.removeItem).not.toHaveBeenCalled()
+  })
+
   it.each([undefined, false])('refuses a list without an org when authLive is %s', async (authLive) => {
     const storage = { getItem: vi.fn(() => null), setItem: vi.fn(), removeItem: vi.fn() }
     const { controller, services } = setup({ storage, ...(authLive === undefined ? {} : { authLive }) })

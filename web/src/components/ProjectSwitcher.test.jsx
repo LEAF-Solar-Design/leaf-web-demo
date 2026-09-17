@@ -9,9 +9,27 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import ProjectSwitcher from './ProjectSwitcher.jsx'
+import { createWorkspaceController } from '../controllers/workspace/createWorkspaceController.js'
 import { deriveWorkspaceProjectState, WORKSPACE_PROJECT_COPY } from '../site/workspaceProjectState.js'
 
 afterEach(cleanup)
+
+it('B1-d row5: the mounted App props show creation after an unbound list response', async () => {
+  const controller = createWorkspaceController({ authLive: true,
+    storage: { getItem: () => null, removeItem: vi.fn() },
+    services: { listProjects: vi.fn().mockRejectedValue({ status: 403,
+      body: { detail: 'verified subject has no active platform identity binding' } }) },
+  })
+  await controller.loadProjects()
+  const state = controller.getSnapshot()
+  render(<ProjectSwitcher orgId={state.orgId} unavailable={state.projectsError} />)
+  fireEvent.click(document.querySelector('.proj-chip'))
+  expect(screen.getByLabelText('Workspace name').value).toBe('My workspace')
+  expect(screen.getByRole('button', { name: 'Create workspace org' })).toBeTruthy()
+  expect(state.orgId).toBeNull()
+  expect(state.projectsError).toBeNull()
+  controller.dispose()
+})
 
 it('offers workspace creation without bootstrap props or an org', () => {
   render(<ProjectSwitcher />)

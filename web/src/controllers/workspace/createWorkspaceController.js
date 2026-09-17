@@ -65,6 +65,7 @@ export function createWorkspaceController({
     mock: !!mock,
     orgId: readStoredOrgId(storage),
     bootstrapState: 'unknown',
+    bootstrapMessage: null,
     projectsLoaded: false,
     orgDraftError: null,
     orgConflict: false,
@@ -101,7 +102,7 @@ export function createWorkspaceController({
     const request = nextGeneration('projects')
     const orgId = state.orgId
     if (state.mock || (!authLive && !orgId)) {
-      publish({ projects: [], projectsError: null, projectsLoading: false, projectsLoaded: false, bootstrapState: orgId ? 'bound' : 'unbound' })
+      publish({ projects: [], projectsError: null, projectsLoading: false, projectsLoaded: false, bootstrapState: orgId ? 'bound' : 'unbound', bootstrapMessage: null })
       return []
     }
     publish({ projectsLoading: true, projectsError: null })
@@ -110,16 +111,23 @@ export function createWorkspaceController({
       if (!isCurrent('projects', request) || state.orgId !== orgId) return null
       const projects = Array.isArray(response) ? response : response?.projects || []
       publish({ projects, projectsLoading: false, projectsLoaded: true, bootstrapState: 'bound',
-        orgConflict: false, orgDraftError: null })
+        bootstrapMessage: null, orgConflict: false, orgDraftError: null })
       return projects || []
     } catch (error) {
       if (!isCurrent('projects', request) || state.orgId !== orgId) return null
       const message = explain(error)
       const unbound = isBootstrapRequired(error)
-      if (unbound) writeStoredOrgId(null, storage)
-      publish({ projects: [], projectsError: message, projectsLoading: false, projectsLoaded: false,
-        ...(unbound ? { orgId: null } : {}),
-        bootstrapState: unbound ? 'unbound' : 'unavailable' })
+      if (unbound) {
+        invalidateAll()
+        writeStoredOrgId(null, storage)
+        publish({ projects: [], projectsError: null, projectsLoading: false, projectsLoaded: false,
+          bootstrapState: 'unbound', bootstrapMessage: message, orgId: null,
+          openProjectId: null, workspace: null, canonicalVersionId: null,
+          workspaceLoading: false, projectBusy: false, orgBusy: false })
+      } else {
+        publish({ projects: [], projectsError: message, projectsLoading: false, projectsLoaded: false,
+          bootstrapState: 'unavailable', bootstrapMessage: null })
+      }
       return null
     }
   }
@@ -189,6 +197,7 @@ export function createWorkspaceController({
     publish({
       orgId,
       bootstrapState: 'unknown',
+      bootstrapMessage: null,
       projectsLoaded: false,
       projects: [],
       projectsError: null,
@@ -222,6 +231,7 @@ export function createWorkspaceController({
       publish({
         orgId,
         bootstrapState: 'bound',
+        bootstrapMessage: null,
         projectsError: null,
         orgDraftError: null,
         orgConflict: false,
@@ -305,6 +315,7 @@ export function createWorkspaceController({
     publish({
       mock: value,
       bootstrapState: 'unknown',
+      bootstrapMessage: null,
       projectsLoaded: false,
       orgDraftError: null,
       orgConflict: false,
