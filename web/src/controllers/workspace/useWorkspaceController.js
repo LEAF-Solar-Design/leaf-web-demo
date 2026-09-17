@@ -1,11 +1,13 @@
 import { useEffect, useRef, useSyncExternalStore } from 'react'
 
 import { createWorkspaceController } from './createWorkspaceController.js'
+import { authConfigured } from '../../auth.js'
+import { isWorkspaceBootstrapRequired } from '../../api.js'
 
 /** React adapter for the framework-neutral workspace controller. */
 export default function useWorkspaceController(options) {
   const controllerRef = useRef(null)
-  if (!controllerRef.current) controllerRef.current = createWorkspaceController(options)
+  if (!controllerRef.current) controllerRef.current = createWorkspaceController({ authLive: authConfigured, isBootstrapRequired: isWorkspaceBootstrapRequired, ...options })
   const controller = controllerRef.current
   const snapshot = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot)
 

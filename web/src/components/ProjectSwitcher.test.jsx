@@ -9,9 +9,108 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import ProjectSwitcher from './ProjectSwitcher.jsx'
+import { createWorkspaceController } from '../controllers/workspace/createWorkspaceController.js'
 import { deriveWorkspaceProjectState, WORKSPACE_PROJECT_COPY } from '../site/workspaceProjectState.js'
 
 afterEach(cleanup)
+
+it('B1-d row5: the mounted App props show creation after an unbound list response', async () => {
+  const controller = createWorkspaceController({ authLive: true,
+    storage: { getItem: () => null, removeItem: vi.fn() },
+    services: { listProjects: vi.fn().mockRejectedValue({ status: 403,
+      body: { detail: 'verified subject has no active platform identity binding' } }) },
+  })
+  await controller.loadProjects()
+  const state = controller.getSnapshot()
+  render(<ProjectSwitcher orgId={state.orgId} unavailable={state.projectsError} />)
+  fireEvent.click(document.querySelector('.proj-chip'))
+  expect(screen.getByLabelText('Workspace name').value).toBe('My workspace')
+  expect(screen.getByRole('button', { name: 'Create workspace org' })).toBeTruthy()
+  expect(state.orgId).toBeNull()
+  expect(state.projectsError).toBeNull()
+  controller.dispose()
+})
+
+it('offers workspace creation without bootstrap props or an org', () => {
+  render(<ProjectSwitcher />)
+  fireEvent.click(document.querySelector('.proj-chip'))
+  expect(screen.getByLabelText('Workspace name').value).toBe('My workspace')
+  expect(screen.getByRole('button', { name: 'Create workspace org' })).toBeTruthy()
+  expect(screen.queryByText(/Loading/)).toBeNull()
+})
+
+it('shows the legacy unavailable sentence without bootstrap props or an org', () => {
+  render(<ProjectSwitcher unavailable="Workspace creation failed." />)
+  fireEvent.click(document.querySelector('.proj-chip'))
+  expect(screen.getByText('Workspace creation failed.')).toBeTruthy()
+  expect(screen.queryByText(/Loading/)).toBeNull()
+})
+
+it('shows the legacy empty project list without projectsLoaded', () => {
+  render(<ProjectSwitcher orgId="o1" />)
+  fireEvent.click(document.querySelector('.proj-chip'))
+  expect(screen.getByText('No projects yet.')).toBeTruthy()
+  expect(screen.getByLabelText('New project')).toBeTruthy()
+})
+
+it('ignores new draft and recovery props when bootstrapState is omitted', () => {
+  render(<ProjectSwitcher orgDraftError="Draft failure." orgConflict />)
+  fireEvent.click(document.querySelector('.proj-chip'))
+  expect(screen.getByLabelText('Workspace name')).toBeTruthy()
+  expect(screen.queryByText('Draft failure.')).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Use my existing workspace' })).toBeNull()
+})
+
+it.each(['bound', 'unbound'])('shows equal unavailable and draft errors once when %s', (bootstrapState) => {
+  render(<ProjectSwitcher bootstrapState={bootstrapState} unavailable="Creation failed."
+    orgDraftError="Creation failed." projectDraftError="Creation failed." />)
+  fireEvent.click(document.querySelector('.proj-chip'))
+  expect(screen.getAllByText('Creation failed.')).toHaveLength(1)
+  expect(screen.getByRole('alert').textContent).toBe('Creation failed.')
+  expect(screen.getByLabelText(bootstrapState === 'bound' ? 'New project' : 'Workspace name')).toBeTruthy()
+})
+
+it.each(['org', 'project'])('retains a failed legacy %s draft submitted with Enter', async (kind) => {
+  const create = vi.fn().mockResolvedValue(null)
+  const open = vi.fn()
+  render(<ProjectSwitcher orgId={kind === 'project' ? 'o1' : undefined}
+    projects={[{ id: 'p1', name: 'Maple' }]} onCreateOrg={create} onCreateProject={create} onOpenProject={open} />)
+  fireEvent.click(document.querySelector('.proj-chip'))
+  const input = screen.getByLabelText(kind === 'project' ? 'New project' : 'Workspace name')
+  fireEvent.change(input, { target: { value: 'Retained draft' } })
+  fireEvent.keyDown(input, { key: 'Enter' })
+  expect(create).toHaveBeenCalledExactlyOnceWith('Retained draft')
+  expect(open).not.toHaveBeenCalled()
+  await Promise.resolve()
+  expect(input.value).toBe('Retained draft')
+})
+
+it('keeps Enter in a create field out of project selection and retains failed drafts', async () => {
+  const open = vi.fn()
+  const create = vi.fn().mockResolvedValue(null)
+  render(<ProjectSwitcher bootstrapState="bound" projects={[{ id: 'p1', name: 'Maple' }]}
+    onOpenProject={open} onCreateProject={create} />)
+  fireEvent.click(document.querySelector('.proj-chip'))
+  const input = screen.getByLabelText('New project')
+  fireEvent.change(input, { target: { value: 'Draft project' } })
+  fireEvent.keyDown(input, { key: 'Enter' })
+  expect(open).not.toHaveBeenCalled()
+  expect(create).toHaveBeenCalledWith('Draft project')
+  await Promise.resolve()
+  expect(input.value).toBe('Draft project')
+})
+
+it('uses unbound server state despite an org id and recovers conflicts', () => {
+  const retry = vi.fn()
+  render(<ProjectSwitcher bootstrapState="unbound" orgId="stale" projects={[]}
+    unavailable="verified subject has no active platform identity binding"
+    orgConflict orgDraftError="Already bound to a different workspace." onLoadProjects={retry} />)
+  fireEvent.click(document.querySelector('.proj-chip'))
+  expect(screen.getByLabelText('Workspace name').value).toBe('My workspace')
+  expect(screen.getByRole('alert').textContent).toBe('Already bound to a different workspace.')
+  fireEvent.click(screen.getByRole('button', { name: 'Use my existing workspace' }))
+  expect(retry).toHaveBeenCalledTimes(1)
+})
 
 const chip = () => document.querySelector('.proj-chip')
 
