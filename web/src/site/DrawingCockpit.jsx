@@ -21,14 +21,14 @@ const ZOOM_OUT = 0.8
 // Fixed-precision, sign-stable formatting for a drawing-unit coordinate:
 // tabular in the status bar, never scientific notation, never "-0.00".
 export function formatCoordinate(value) {
-  if (!Number.isFinite(value)) return '—'
+  if (!Number.isFinite(value)) return '·'
   const fixed = value.toFixed(2)
   return fixed === '-0.00' ? '0.00' : fixed
 }
 
 // "1px = 0.42u": drawing units per screen pixel, three significant digits.
 export function formatScale(worldPerPixel) {
-  if (!Number.isFinite(worldPerPixel) || worldPerPixel <= 0) return '—'
+  if (!Number.isFinite(worldPerPixel) || worldPerPixel <= 0) return '·'
   return `1px = ${Number(worldPerPixel.toPrecision(3))}u`
 }
 
@@ -91,8 +91,8 @@ export function useCursorReadout(ground, viewerRef, refs, canvasSelector = null)
       const viewer = viewerRef.current
       if (!viewer || !last) return
       const point = typeof viewer.unproject === 'function' ? viewer.unproject(last.x, last.y) : null
-      if (refs.x.current) refs.x.current.textContent = point ? formatCoordinate(point.x) : '—'
-      if (refs.y.current) refs.y.current.textContent = point ? formatCoordinate(point.y) : '—'
+      if (refs.x.current) refs.x.current.textContent = point ? formatCoordinate(point.x) : '·'
+      if (refs.y.current) refs.y.current.textContent = point ? formatCoordinate(point.y) : '·'
       const pose = typeof viewer.getPose === 'function' ? viewer.getPose() : null
       if (refs.scale.current) refs.scale.current.textContent = formatScale(pose?.worldPerPixel)
     }
@@ -109,8 +109,8 @@ export function useCursorReadout(ground, viewerRef, refs, canvasSelector = null)
     }
     const onLeave = () => {
       last = null
-      if (refs.x.current) refs.x.current.textContent = '—'
-      if (refs.y.current) refs.y.current.textContent = '—'
+      if (refs.x.current) refs.x.current.textContent = '·'
+      if (refs.y.current) refs.y.current.textContent = '·'
     }
     ground.addEventListener('pointermove', onMove, { passive: true })
     ground.addEventListener('pointerleave', onLeave)

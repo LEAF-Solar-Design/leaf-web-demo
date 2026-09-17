@@ -246,9 +246,9 @@ export function EntitlementNotice({ required, tier, message }) {
     <div className="banner quota" role="status">
       <b>Plan</b>
       <span className="banner-rest">
-        {' — '}
+        {': '}
         {message || `your ${tier || 'current'} plan doesn’t include ${need}`}
-        {'; nothing ran — it was blocked before any billable work.'}
+        {'; nothing ran because it was blocked before any billable work.'}
       </span>
       <span className="banner-tail">
         <span className="banner-since">clears when the plan includes it</span>

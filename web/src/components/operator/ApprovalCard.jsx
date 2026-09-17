@@ -77,7 +77,7 @@ export default function ApprovalCard({
       // same rule, applied to a higher-blast-radius surface). `confirming`
       // never changes on this path, so the useEffect above leaves focus
       // exactly where it was: inside the dialog, ready to retry.
-      setError(e?.body?.detail || e?.message || 'The action did not go through — nothing changed.')
+      setError(e?.body?.detail || e?.message || 'The action did not go through; nothing changed.')
     } finally {
       setExecuting(false)
     }

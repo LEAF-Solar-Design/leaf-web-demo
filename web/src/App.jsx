@@ -250,7 +250,7 @@ function SignedOutGate({ onDemo, onSignIn }) {
         <p className="panel-sub" style={{ margin: 0 }}>
           {onSignIn
             ? 'Sign in to load your tools and drawings from the cloud workspace, or explore the interactive demo on sample data.'
-            : 'This is a live preview of Leaf against the cloud workspace. Sign-in for the live surface is coming soon — explore the interactive demo to try the prompt lanes, tool catalog, and viewer on a sample rooftop drawing.'}
+            : 'This is a live preview of Leaf against the cloud workspace. Sign-in for the live surface is coming soon. Explore the interactive demo to try the prompt lanes, tool catalog, and viewer on a sample rooftop drawing.'}
         </p>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
           {onSignIn && <button type="button" className="btn primary" onClick={onSignIn}>Sign in</button>}
@@ -698,7 +698,7 @@ export default function App() {
   // Honest identity: tenant id and tier are DISTINCT. tenant defaults to "demo"
   // off-auth; tier is only known when the session echo carries it (auth live).
   const tenantLabel = tenant || 'demo'
-  const tierDisplay = tier || '—'
+  const tierDisplay = tier || '·'
   // Entitlement tier prefers the policy read (authoritative) over the session echo.
   const entTier = entitlements?.tier || tier || 'demo'
   const gateTier = entTier
@@ -1962,7 +1962,7 @@ export default function App() {
         // Authoring is a ~1-2 min agent run — surface completion as an NT2 toast so
         // it is visible even when the author section is collapsed / scrolled away.
         showToast({
-          text: `Tool published — ${tool.name}`,
+          text: `Tool published: ${tool.name}`,
           action: {
             label: 'View',
             onClick: () => {
@@ -2002,7 +2002,7 @@ export default function App() {
     setLastAuthoredTool(runnableTool)
     commitCatalogDecision({
       lane: 'run', tool: runnableTool.name, params: {}, confidence: 0.99,
-      rationale: `Authored just now — confirm to run “${runnableTool.name}”.`,
+      rationale: `Authored just now. Confirm to run “${runnableTool.name}”.`,
       alternatives: [],
       // The refetched record, so armDecision snapshots what the catalog just
       // issued rather than this render's stale `tools`.
@@ -2250,8 +2250,8 @@ export default function App() {
         `version ${env?.result?.new_version
           ? (mockVersions.isSeeded() ? mockVersions.list().head : env.result.new_version.version)
           : (env?.version ?? '—')}`,
-        `timing ${rec.elapsed_ms != null ? `${rec.elapsed_ms} ms` : (env?.timing_ms != null ? `${env.timing_ms} ms` : '—')}`,
-        `cost ${env?.cost && env.cost.usd_est != null ? `$${Number(env.cost.usd_est).toFixed(4)}` : '—'}`,
+        `timing ${rec.elapsed_ms != null ? `${rec.elapsed_ms} ms` : (env?.timing_ms != null ? `${env.timing_ms} ms` : '·')}`,
+        `cost ${env?.cost && env.cost.usd_est != null ? `$${Number(env.cost.usd_est).toFixed(4)}` : '·'}`,
         `degraded ${(env?.degraded_mode || rec.degraded_mode) ? 'yes — local fallback' : 'no'}`,
       ]
       // A mock envelope can carry a bare string error — don't render a blank row.
@@ -2272,7 +2272,7 @@ export default function App() {
             setTimeout(() => resultBlockRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' }), 0)
           },
         },
-        foot: 'Esc closes — the rail behind never re-flows.',
+        foot: 'Esc closes. The rail behind never re-flows.',
       })
     } catch (e) {
       setRunErr(humanizeError(e))
@@ -2291,8 +2291,8 @@ export default function App() {
       `version ${env.result?.new_version
         ? (mockVersions.isSeeded() ? mockVersions.list().head : env.result.new_version.version)
         : (env.version ?? '—')}`,
-      `timing ${env.timing_ms != null ? `${env.timing_ms} ms` : '—'}`,
-      `cost ${env.cost && env.cost.usd_est != null ? `$${Number(env.cost.usd_est).toFixed(4)}` : '—'}`,
+      `timing ${env.timing_ms != null ? `${env.timing_ms} ms` : '·'}`,
+      `cost ${env.cost && env.cost.usd_est != null ? `$${Number(env.cost.usd_est).toFixed(4)}` : '·'}`,
       `degraded ${env.degraded_mode ? 'yes — local fallback' : 'no'}`,
     ]
     if (env.error) rows.push(typeof env.error === 'string'
@@ -2305,7 +2305,7 @@ export default function App() {
       action: currentJobId
         ? { label: 'Copy job id', onClick: () => navigator.clipboard?.writeText(String(currentJobId)) }
         : null,
-      foot: 'Esc closes — provenance is read-only.',
+      foot: 'Esc closes. Provenance is read-only.',
     })
   }, [result, currentJobId, selectedTool])
 
@@ -3168,7 +3168,7 @@ export default function App() {
         if (!acquired.acquired) {
           const e = new Error('drawing is checked out by '
             + (acquired.locked_by || 'another session')
-            + ' — try again when the lock clears')
+            + '. Try again when the lock clears')
           e.status = 409
           throw e
         }
@@ -4181,7 +4181,7 @@ export default function App() {
               <span className="dot live pulse" aria-hidden="true" />
               <span className="verb">
                 {(runProgress || runStatus || 'running')}
-                {selectedTool?.name ? ` — ${selectedTool.name}` : ''}
+                {selectedTool?.name ? `: ${selectedTool.name}` : ''}
                 {runElapsedMs != null ? ` · ${fmtElapsed(runElapsedMs)}` : ''}
               </span>
               <span className="key hot">Esc</span>
@@ -4193,8 +4193,8 @@ export default function App() {
               <span className="dot red" aria-hidden="true" />
               <span className="strip-sentence">
                 {routeErr
-                  ? `Couldn’t route the prompt — ${routeErr}`
-                  : `Couldn’t run ${selectedTool?.name || 'the tool'} — ${runErr}`}
+                  ? `Couldn’t route the prompt: ${routeErr}`
+                  : `Couldn’t run ${selectedTool?.name || 'the tool'}: ${runErr}`}
                 <span className="dim"> · your last good result is unchanged</span>
               </span>
               <button

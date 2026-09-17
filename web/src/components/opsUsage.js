@@ -94,10 +94,10 @@ const COMPACT = new Intl.NumberFormat('en-US', {
 
 /** A count for a scoreboard tile, or the em dash when it is not known. */
 export function formatUsageCount(value) {
-  return value === null || value === undefined ? '—' : COMPACT.format(value)
+  return value === null || value === undefined ? '·' : COMPACT.format(value)
 }
 
 /** An estimated spend, or the em dash. Never "$0.000" for an unknown. */
 export function formatUsageUsd(value) {
-  return value === null || value === undefined ? '—' : `$${Number(value).toFixed(3)}`
+  return value === null || value === undefined ? '·' : `$${Number(value).toFixed(3)}`
 }

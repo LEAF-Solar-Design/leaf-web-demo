@@ -221,7 +221,7 @@ export default function ConversationList({
                   {row.title || UNTITLED}
                 </span>
                 <span className="dim conversation-row-when">
-                  {resuming === row.id ? "Opening" : when ? when.rel : "—"}
+                  {resuming === row.id ? "Opening" : when ? when.rel : "·"}
                 </span>
               </button>
             </li>

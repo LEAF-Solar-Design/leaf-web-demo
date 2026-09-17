@@ -142,7 +142,7 @@ export default function ToolsPanel({ tools, error, running, selectedTool, onRequ
 
   return (
     <div className="tools-inner">
-      <p className="panel-sub">{subtitle || 'The classic catalog — click one, set params, run on Leaf. The prompt box above is the primary path.'}</p>
+      <p className="panel-sub">{subtitle || 'The classic catalog: click one, set params, run on Leaf. The prompt box above is the primary path.'}</p>
       {error && (
         <div className="inline-error">
           <span>Couldn’t load tools: {error}</span>

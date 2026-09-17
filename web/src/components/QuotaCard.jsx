@@ -20,11 +20,11 @@ export default function QuotaCard({ kind, message, remaining, tier, limit, used,
       <div className="banner quota" role="status">
         <b>Daily limit</b>
         <span className="banner-rest">
-          {' — '}
+          {': '}
           {haveCounts ? `${used}/${limit} runs used` : 'daily run limit reached'}
           {tier ? ` on the ${tier} tier` : ''}
           {'; '}
-          {message || 'this run was rejected before any cloud work — nothing was charged.'}
+          {message || 'this run was rejected before any cloud work; nothing was charged.'}
         </span>
         <span className="banner-tail">
           {onAction && <button className="chip-act" onClick={onAction}>View usage</button>}
@@ -38,8 +38,8 @@ export default function QuotaCard({ kind, message, remaining, tier, limit, used,
     <div className="banner quota" role="status">
       <b>Spend cap</b>
       <span className="banner-rest">
-        {' — this run wasn’t charged; '}
-        {message || 'nothing ran on the cloud — the run was rejected before any billable work.'}
+        {': this run wasn’t charged; '}
+        {message || 'nothing ran on the cloud; the run was rejected before any billable work.'}
         {hasRemaining ? ` $${remaining.toFixed(2)} left under the cap.` : ''}
       </span>
       <span className="banner-tail">

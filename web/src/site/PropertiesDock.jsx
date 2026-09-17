@@ -80,23 +80,23 @@ export function GeometryRows({ geometry }) {
 // anything absent, never an invented number.
 export function DrawingRows({ drawing, offscreenResult = null, onShowResult = null }) {
   if (!drawing) return null
-  const n = (v) => (Number.isFinite(v) ? v.toLocaleString() : '—')
-  const u = (v) => (Number.isFinite(v) ? `${formatUnits(v)} u` : '—')
+  const n = (v) => (Number.isFinite(v) ? v.toLocaleString() : '·')
+  const u = (v) => (Number.isFinite(v) ? `${formatUnits(v)} u` : '·')
   return (
     <>
     <dl className="dock-drawing" data-testid="dock-drawing">
-      <dt>Name</dt><dd title={drawing.name || ''}>{drawing.name || '—'}</dd>
+      <dt>Name</dt><dd title={drawing.name || ''}>{drawing.name || '·'}</dd>
       <dt>Entities</dt><dd>{n(drawing.entities)}</dd>
       <dt>Polylines</dt><dd>{n(drawing.polylines)}</dd>
       <dt>Block inserts</dt><dd>{n(drawing.inserts)}</dd>
       <dt>3D faces</dt><dd>{n(drawing.faces)}</dd>
       <dt>Layers</dt><dd>{n(drawing.layers)}</dd>
       <dt>Layers shown</dt><dd>{n(drawing.layersShown)}</dd>
-      <dt>Extents X</dt><dd>{drawing.extents ? `${formatUnits(drawing.extents.minX)} … ${formatUnits(drawing.extents.maxX)}` : '—'}</dd>
-      <dt>Extents Y</dt><dd>{drawing.extents ? `${formatUnits(drawing.extents.minY)} … ${formatUnits(drawing.extents.maxY)}` : '—'}</dd>
+      <dt>Extents X</dt><dd>{drawing.extents ? `${formatUnits(drawing.extents.minX)} … ${formatUnits(drawing.extents.maxX)}` : '·'}</dd>
+      <dt>Extents Y</dt><dd>{drawing.extents ? `${formatUnits(drawing.extents.minY)} … ${formatUnits(drawing.extents.maxY)}` : '·'}</dd>
       <dt>Width</dt><dd>{u(drawing.extents ? drawing.extents.maxX - drawing.extents.minX : NaN)}</dd>
       <dt>Height</dt><dd>{u(drawing.extents ? drawing.extents.maxY - drawing.extents.minY : NaN)}</dd>
-      <dt>Source</dt><dd>{drawing.source || '—'}</dd>
+      <dt>Source</dt><dd>{drawing.source || '·'}</dd>
       {drawing.undoDepth != null && (<>
         <dt>Browser edits</dt><dd>{n(drawing.undoDepth)} to undo · {n(drawing.redoDepth)} to redo</dd>
       </>)}
