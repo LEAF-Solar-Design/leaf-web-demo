@@ -1603,8 +1603,11 @@ def _pg_active_turn_tier(
     with db.cursor() as cur:
         cur.execute(
             "SELECT active_turn_tier FROM app_sessions"
-            " WHERE session_id = %s AND active_turn_id = %s AND tenant_id = %s",
-            (session_id, turn_id, tenant_id),
+            " WHERE session_id = %s AND active_turn_id = %s"
+            " AND (tenant_id = %s OR (org_id::text = %s"
+            " AND project_id IS NOT NULL"
+            " AND tenant_id = 'project:' || org_id::text || ':' || project_id::text))",
+            (session_id, turn_id, tenant_id, tenant_id),
         )
         row = cur.fetchone()
     if not row:
@@ -1621,8 +1624,11 @@ def _pg_active_turn_subject(
     with db.cursor() as cur:
         cur.execute(
             "SELECT active_turn_subject, turn_started_at FROM app_sessions"
-            " WHERE session_id = %s AND active_turn_id = %s AND tenant_id = %s",
-            (session_id, turn_id, tenant_id),
+            " WHERE session_id = %s AND active_turn_id = %s"
+            " AND (tenant_id = %s OR (org_id::text = %s"
+            " AND project_id IS NOT NULL"
+            " AND tenant_id = 'project:' || org_id::text || ':' || project_id::text))",
+            (session_id, turn_id, tenant_id, tenant_id),
         )
         row = cur.fetchone()
     if not row:

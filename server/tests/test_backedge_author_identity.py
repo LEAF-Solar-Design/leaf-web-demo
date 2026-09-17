@@ -705,26 +705,45 @@ def test_every_production_caller_applies_the_staleness_bound():
     assert "turn_max_s()" in helper_src
 
 
-def test_postgres_subject_lookup_guards_session_turn_and_tenant():
-    """The Postgres statement must carry the same three-way guard as SQLite.
+def test_postgres_subject_lookup_guards_session_turn_and_storage_tenant():
+    """The Postgres statement keeps the turn fence across both storage forms.
 
     The suite above runs on SQLite, so without this a Postgres-only mutation
     (dropping `active_turn_id` from the WHERE clause) would leave every test
-    green while letting a superseded tuple resolve the current subject.
+    green while letting a superseded tuple resolve the current subject. Project
+    sessions use a reserved tenant marker, so their organization and marker
+    must also agree before the active subject can be returned.
     """
     import inspect
 
     sql = inspect.getsource(session_store._pg_active_turn_subject)
     assert "active_turn_subject" in sql
-    # The whole conjunction, not three separate substrings: checking the parts
-    # individually still passes when an AND is flipped to an OR.
+    normalized = " ".join(sql.split()).replace('" "', "")
+    assert "WHERE session_id = %s AND active_turn_id = %s" in normalized
+    assert "tenant_id = %s OR (org_id::text = %s" in normalized
+    assert "project_id IS NOT NULL" in normalized
     assert (
-        "WHERE session_id = %s AND active_turn_id = %s AND tenant_id = %s"
-        in " ".join(sql.split()).replace('" "', "")
-    ), "postgres subject lookup lost or loosened its three-way guard"
+        "tenant_id = 'project:' || org_id::text || ':' || project_id::text"
+        in normalized
+    ), "postgres subject lookup accepts an unbound project storage marker"
     # and it must read the start time, or it cannot apply the staleness bound
     assert "turn_started_at" in sql
     assert "_turn_is_stale" in sql
+
+
+def test_postgres_tier_lookup_uses_the_same_project_storage_guard():
+    import inspect
+
+    sql = " ".join(
+        inspect.getsource(session_store._pg_active_turn_tier).split()
+    ).replace('" "', "")
+    assert "WHERE session_id = %s AND active_turn_id = %s" in sql
+    assert "tenant_id = %s OR (org_id::text = %s" in sql
+    assert "project_id IS NOT NULL" in sql
+    assert (
+        "tenant_id = 'project:' || org_id::text || ':' || project_id::text"
+        in sql
+    )
 
 
 def test_postgres_terminal_event_releases_the_subject():

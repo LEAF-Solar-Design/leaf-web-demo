@@ -331,6 +331,67 @@ def test_pending_approval_read_routes_to_postgres_with_one_timestamp(monkeypatch
     assert isinstance(calls[0][4], float)
 
 
+class _ActiveTurnCursor:
+    def __init__(self, row):
+        self.row = row
+        self.query = None
+        self.params = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def execute(self, query, params):
+        self.query = query
+        self.params = params
+
+    def fetchone(self):
+        return self.row
+
+
+class _ActiveTurnDB:
+    def __init__(self, row):
+        self.cursor_instance = _ActiveTurnCursor(row)
+
+    def cursor(self):
+        return self.cursor_instance
+
+
+def test_project_turn_authority_queries_with_org_and_exact_storage_marker(monkeypatch):
+    org_id = "11111111-1111-4111-8111-111111111111"
+    subject_db = _ActiveTurnDB({
+        "active_turn_subject": "auth0|alice",
+        "turn_started_at": 100.0,
+    })
+    monkeypatch.setattr(session_store, "_platform_db", lambda: subject_db)
+    monkeypatch.setattr(session_store, "_turn_is_stale", lambda *_args: False)
+
+    assert session_store._pg_active_turn_subject(
+        "session-project", "turn-project", org_id, 60,
+    ) == "auth0|alice"
+    assert subject_db.cursor_instance.params == (
+        "session-project", "turn-project", org_id, org_id,
+    )
+    normalized = " ".join(subject_db.cursor_instance.query.split())
+    assert "session_id = %s AND active_turn_id = %s" in normalized
+    assert "tenant_id = %s OR (org_id::text = %s" in normalized
+    assert (
+        "tenant_id = 'project:' || org_id::text || ':' || project_id::text"
+        in normalized
+    )
+
+    tier_db = _ActiveTurnDB({"active_turn_tier": "hosted_pro"})
+    monkeypatch.setattr(session_store, "_platform_db", lambda: tier_db)
+    assert session_store._pg_active_turn_tier(
+        "session-project", "turn-project", org_id,
+    ) == "hosted_pro"
+    assert tier_db.cursor_instance.params == (
+        "session-project", "turn-project", org_id, org_id,
+    )
+
+
 requires_database = pytest.mark.skipif(
     not os.environ.get("DATABASE_URL"),
     reason="PostgreSQL integration test requires explicit DATABASE_URL",
