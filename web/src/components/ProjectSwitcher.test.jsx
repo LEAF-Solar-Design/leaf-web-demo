@@ -13,6 +13,33 @@ import { deriveWorkspaceProjectState, WORKSPACE_PROJECT_COPY } from '../site/wor
 
 afterEach(cleanup)
 
+it('keeps Enter in a create field out of project selection and retains failed drafts', async () => {
+  const open = vi.fn()
+  const create = vi.fn().mockResolvedValue(null)
+  render(<ProjectSwitcher bootstrapState="bound" projects={[{ id: 'p1', name: 'Maple' }]}
+    onOpenProject={open} onCreateProject={create} />)
+  fireEvent.click(document.querySelector('.proj-chip'))
+  const input = screen.getByLabelText('New project')
+  fireEvent.change(input, { target: { value: 'Draft project' } })
+  fireEvent.keyDown(input, { key: 'Enter' })
+  expect(open).not.toHaveBeenCalled()
+  expect(create).toHaveBeenCalledWith('Draft project')
+  await Promise.resolve()
+  expect(input.value).toBe('Draft project')
+})
+
+it('uses unbound server state despite an org id and recovers conflicts', () => {
+  const retry = vi.fn()
+  render(<ProjectSwitcher bootstrapState="unbound" orgId="stale" projects={[]}
+    unavailable="verified subject has no active platform identity binding"
+    orgConflict orgDraftError="Already bound to a different workspace." onLoadProjects={retry} />)
+  fireEvent.click(document.querySelector('.proj-chip'))
+  expect(screen.getByLabelText('Workspace name').value).toBe('My workspace')
+  expect(screen.getByRole('alert').textContent).toBe('Already bound to a different workspace.')
+  fireEvent.click(screen.getByRole('button', { name: 'Use my existing workspace' }))
+  expect(retry).toHaveBeenCalledTimes(1)
+})
+
 const chip = () => document.querySelector('.proj-chip')
 
 it('shows a Projects affordance and preserves keyboard selection and project creation', () => {

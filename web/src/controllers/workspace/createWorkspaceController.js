@@ -17,6 +17,16 @@ export function writeStoredOrgId(id, storage = browserStorage()) {
 
 const defaultFormatError = (error) => String(error?.message || error)
 
+function defaultIsBootstrapRequired(error) {
+  const details = [
+    'verified subject has no active platform identity binding',
+    'verified subject has no active platform tenant authority',
+  ]
+  return error?.status === 403 && (
+    details.includes(error?.body?.detail) || details.includes(error?.body?.error?.message)
+  )
+}
+
 function invoke(callback, value) {
   try { callback?.(value) } catch { /* presentation callbacks do not own controller state */ }
 }
@@ -39,9 +49,11 @@ function orgIdOf(org) {
  */
 export function createWorkspaceController({
   mock = false,
+  authLive = true,
   services,
   storage = browserStorage(),
   formatError = defaultFormatError,
+  isBootstrapRequired = defaultIsBootstrapRequired,
   callbacks = {},
 } = {}) {
   if (!services) throw new TypeError('createWorkspaceController requires services')
@@ -51,7 +63,12 @@ export function createWorkspaceController({
   const generations = { projects: 0, workspace: 0, org: 0, project: 0 }
   let state = {
     mock: !!mock,
-    orgId: readStoredOrgId(storage),
+    orgId: mock || !authLive ? readStoredOrgId(storage) : null,
+    bootstrapState: 'unknown',
+    projectsLoaded: false,
+    orgDraftError: null,
+    orgConflict: false,
+    projectDraftError: null,
     projects: [],
     projectsError: null,
     projectsLoading: false,
@@ -83,19 +100,25 @@ export function createWorkspaceController({
   async function loadProjects() {
     const request = nextGeneration('projects')
     const orgId = state.orgId
-    if (state.mock || !orgId) {
-      publish({ projects: [], projectsError: null, projectsLoading: false })
+    if (state.mock || (!authLive && !orgId)) {
+      publish({ projects: [], projectsError: null, projectsLoading: false, projectsLoaded: false, bootstrapState: orgId ? 'bound' : 'unbound' })
       return []
     }
     publish({ projectsLoading: true, projectsError: null })
     try {
-      const projects = await services.listProjects(orgId)
+      const response = await services.listProjects(orgId)
       if (!isCurrent('projects', request) || state.orgId !== orgId) return null
-      publish({ projects: projects || [], projectsLoading: false })
+      const projects = Array.isArray(response) ? response : response?.projects || []
+      const responseOrgId = response?.org_id || orgIdOf(response?.org)
+      publish({ projects, projectsLoading: false, projectsLoaded: true, bootstrapState: 'bound',
+        ...(responseOrgId ? { orgId: responseOrgId } : {}), orgConflict: false, orgDraftError: null })
       return projects || []
     } catch (error) {
       if (!isCurrent('projects', request) || state.orgId !== orgId) return null
-      publish({ projects: [], projectsError: explain(error), projectsLoading: false })
+      const message = explain(error)
+      const unbound = isBootstrapRequired(error)
+      publish({ projects: [], projectsError: message, projectsLoading: false, projectsLoaded: false,
+        bootstrapState: unbound ? 'unbound' : 'unavailable' })
       return null
     }
   }
@@ -161,9 +184,11 @@ export function createWorkspaceController({
     if (!orgId) return false
     if (state.orgId === orgId) return true
     invalidateAll()
-    writeStoredOrgId(orgId, storage)
+    if (state.mock || !authLive) writeStoredOrgId(orgId, storage)
     publish({
       orgId,
+      bootstrapState: 'unknown',
+      projectsLoaded: false,
       projects: [],
       projectsError: null,
       projectsLoading: false,
@@ -181,9 +206,10 @@ export function createWorkspaceController({
     if (givenName == null) return null
     const name = String(givenName).trim() || 'My workspace'
     const request = nextGeneration('org')
-    publish({ orgBusy: true, projectsError: null })
+    publish({ orgBusy: true, projectsError: null, orgDraftError: null, orgConflict: false })
     try {
-      const org = await services.createOrg(name)
+      const response = await services.createOrg(name)
+      const org = response?.org || response
       const orgId = orgIdOf(org)
       if (!orgId) throw new Error('The workspace service returned an org without an id.')
       if (!isCurrent('org', request)) return null
@@ -191,9 +217,11 @@ export function createWorkspaceController({
       generations.workspace += 1
       generations.project += 1
       // Preserve App ordering: persistence first, then the in-memory org and list.
-      writeStoredOrgId(orgId, storage)
+      if (state.mock || !authLive) writeStoredOrgId(orgId, storage)
       publish({
         orgId,
+        bootstrapState: 'bound',
+        projectsLoaded: false,
         projects: [],
         projectsLoading: false,
         workspaceLoading: false,
@@ -204,7 +232,11 @@ export function createWorkspaceController({
       return org
     } catch (error) {
       if (!isCurrent('org', request)) return null
-      publish({ projectsError: explain(error), orgBusy: false })
+      const orgConflict = error?.status === 409
+      const message = orgConflict
+        ? error?.body?.detail || error?.body?.error?.message || explain(error)
+        : explain(error)
+      publish({ orgDraftError: message, orgConflict, orgBusy: false })
       return null
     }
   }
@@ -214,7 +246,7 @@ export function createWorkspaceController({
     const name = String(givenName).trim()
     const request = nextGeneration('project')
     const orgId = state.orgId
-    publish({ projectBusy: true, projectsError: null })
+    publish({ projectBusy: true, projectsError: null, projectDraftError: null })
     try {
       const project = await services.createProject(name, orgId)
       const projectId = projectIdOf(project)
@@ -250,7 +282,7 @@ export function createWorkspaceController({
       return project
     } catch (error) {
       if (!isCurrent('project', request)) return null
-      publish({ projectsError: explain(error), projectBusy: false })
+      publish({ projectDraftError: explain(error), projectBusy: false })
       return null
     }
   }
@@ -266,6 +298,12 @@ export function createWorkspaceController({
     invalidateAll()
     publish({
       mock: value,
+      orgId: value || !authLive ? readStoredOrgId(storage) : null,
+      bootstrapState: 'unknown',
+      projectsLoaded: false,
+      orgDraftError: null,
+      orgConflict: false,
+      projectDraftError: null,
       projects: [],
       projectsError: null,
       projectsLoading: false,
