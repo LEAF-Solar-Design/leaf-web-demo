@@ -26,7 +26,17 @@ CREATE TABLE IF NOT EXISTS ios_ship_source_catalog (
   )
 );
 
-DROP TRIGGER IF EXISTS ios_ship_source_catalog_immutable ON ios_ship_source_catalog;
-CREATE TRIGGER ios_ship_source_catalog_immutable
-  BEFORE UPDATE OR DELETE ON ios_ship_source_catalog
-  FOR EACH ROW EXECUTE FUNCTION leaf_reject_ledger_mutation();
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_trigger
+    WHERE tgrelid = 'ios_ship_source_catalog'::regclass
+      AND tgname = 'ios_ship_source_catalog_immutable'
+      AND NOT tgisinternal
+  ) THEN
+    CREATE TRIGGER ios_ship_source_catalog_immutable
+      BEFORE UPDATE OR DELETE ON ios_ship_source_catalog
+      FOR EACH ROW EXECUTE FUNCTION leaf_reject_ledger_mutation();
+  END IF;
+END
+$$;
