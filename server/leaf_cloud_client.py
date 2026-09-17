@@ -1,32 +1,8 @@
-"""Trusted Leaf Automation stringer adapter, proposal contract v1.
+"""Trusted Leaf Automation stringer adapter, pinned to the recorded grid contract.
 
-Wire JSON schema (to be pinned against a recorded plugin request in the w1 spike):
-{"type":"object","additionalProperties":false,
- "required":["schema_version","panel_groups","matrix_cells","electrical","units"],
- "properties":{
-   "schema_version":{"const":"leaf.stringer-request.v1"},
-   "panel_groups":{"type":"array","minItems":1,"maxItems":128,
-     "items":{"type":"object","additionalProperties":false,"required":["id","panel_ids"],
-       "properties":{"id":{"type":"integer","minimum":0,"maximum":1000000},
-       "panel_ids":{"type":"array","minItems":1,"maxItems":4096,
-         "items":{"type":"integer","minimum":0,"maximum":1000000}}}}},
-   "matrix_cells":{"type":"array","minItems":1,"maxItems":4096,
-     "items":{"type":"object","additionalProperties":false,
-       "required":["panel_id","row","column"],"properties":{
-       "panel_id":{"type":"integer","minimum":0,"maximum":1000000},
-       "row":{"type":"integer","minimum":0,"maximum":4095},
-       "column":{"type":"integer","minimum":0,"maximum":4095}}}},
-   "electrical":{"type":"object","additionalProperties":false,
-     "required":["module_voc","max_system_voltage","design_min_temp_c","temp_coeff_pct_per_c"],
-     "properties":{"module_voc":{"type":"number","exclusiveMinimum":0,"maximum":1000},
-       "max_system_voltage":{"type":"number","exclusiveMinimum":0,"maximum":2000},
-       "design_min_temp_c":{"type":"number","minimum":-100,"maximum":100},
-       "temp_coeff_pct_per_c":{"type":"number","minimum":-10,"maximum":0}}},
-   "units":{"const":"SI"}}}
-
-The provisional response is {"strings": [{"panel_ids": [integer, ...]}]}.
-Unknown response fields are rejected. This is not evidence of plugin parity.
-Sizing and wiring can reuse the trusted transport and grant interface later.
+Wire requests use PascalCase MatrixJson fields under "grid". The response is
+kept in wire coordinates for provenance; visited_path in the proposal envelope
+uses zero-based original matrix indices. No drawing is changed.
 """
 from __future__ import annotations
 
@@ -44,48 +20,82 @@ from leaf_cloud_grants import CloudError, CloudGrant, resolve_grant
 TOOL_NAME = "solar-solve-proposal"
 SOLVER_URL = "https://api.leafdesign.ai/api/ml/"
 MAX_RESPONSE_BYTES = 1024 * 1024
-PanelId = Annotated[int, Field(strict=True, ge=0, le=1000000)]
 
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
 
 
-class PanelGroup(StrictModel):
-    id: PanelId
-    panel_ids: list[PanelId] = Field(min_length=1, max_length=4096)
+class Panel(StrictModel):
+    Code: Annotated[int, Field(ge=-1, le=1)]
+    Id: str = Field(max_length=128)
+    Seq: int = Field(ge=0, le=900)
+    InverterId: int = Field(ge=-1, le=1000000)
+    StringInputNumber: int = Field(ge=0, le=1000000)
+    X: float = Field(ge=-1e12, le=1e12)
+    Y: float = Field(ge=-1e12, le=1e12)
+    Angle: float = Field(ge=-1e6, le=1e6)
 
 
-class MatrixCell(StrictModel):
-    panel_id: PanelId
-    row: int = Field(ge=0, le=4095)
-    column: int = Field(ge=0, le=4095)
+class PanelRow(StrictModel):
+    Panels: list[Panel] = Field(min_length=1, max_length=30)
 
 
-class Electrical(StrictModel):
-    module_voc: float = Field(gt=0, le=1000)
-    max_system_voltage: float = Field(gt=0, le=2000)
-    design_min_temp_c: float = Field(ge=-100, le=100)
-    temp_coeff_pct_per_c: float = Field(ge=-10, le=0)
+class MatrixJson(StrictModel):
+    Dwgname: str = Field(max_length=256)
+    Sequences: list[list[Annotated[int, Field(ge=0, le=900)]]] = Field(
+        min_length=2, max_length=2)
+    Rows: list[PanelRow] = Field(min_length=1, max_length=30)
+    Modify: list[int] = Field(max_length=0)
 
-
-class StringerRequest(StrictModel):
-    schema_version: Literal["leaf.stringer-request.v1"]
-    panel_groups: list[PanelGroup] = Field(min_length=1, max_length=128)
-    matrix_cells: list[MatrixCell] = Field(min_length=1, max_length=4096)
-    electrical: Electrical
-    units: Literal["SI"]
+    @model_validator(mode="before")
+    @classmethod
+    def reshape_sequences(cls, value):
+        if isinstance(value, dict):
+            sequences = value.get("Sequences")
+            if (isinstance(sequences, list) and len(sequences) == 4
+                    and all(type(n) is int for n in sequences)):
+                value = dict(value, Sequences=[sequences[:2], sequences[2:]])
+        return value
 
     @model_validator(mode="after")
     def coherent_matrix(self):
-        panels = [p for g in self.panel_groups for p in g.panel_ids]
-        cells = [c.panel_id for c in self.matrix_cells]
-        if (len(panels) > 4096 or len(set(panels)) != len(panels)
-                or len(set(g.id for g in self.panel_groups)) != len(self.panel_groups)
-                or len(set(cells)) != len(cells) or set(cells) != set(panels)
-                or len({(c.row, c.column) for c in self.matrix_cells}) != len(cells)):
-            raise ValueError("incoherent panel matrix")
+        if any(len(pair) != 2 for pair in self.Sequences):
+            raise ValueError("expected two sequence lengths and two counts")
+        if any(len(row.Panels) != len(self.Rows[0].Panels) for row in self.Rows):
+            raise ValueError("expected rectangular matrix")
+        panels = [p for row in self.Rows for p in row.Panels if p.Code == 1]
+        ids = [p.Id for row in self.Rows for p in row.Panels if p.Id]
+        if not panels or any(not p.Id for p in panels) or len(ids) != len(set(ids)):
+            raise ValueError("expected unique panel ids")
+        lengths, counts = self.Sequences
+        if any(count and not length for length, count in zip(lengths, counts)):
+            raise ValueError("invalid sequence length")
+        if sum(length * count for length, count in zip(lengths, counts)) != len(panels):
+            raise ValueError("sequence counts do not cover panels")
         return self
+
+
+class StringerRequest(StrictModel):
+    grid: MatrixJson
+
+    @property
+    def kept_row_indices(self) -> list[int]:
+        return [r for r, row in enumerate(self.grid.Rows)
+                if any(p.Code == 1 for p in row.Panels)]
+
+    @property
+    def kept_column_indices(self) -> list[int]:
+        return [c for c in range(len(self.grid.Rows[0].Panels))
+                if any(self.grid.Rows[r].Panels[c].Code == 1
+                       for r in self.kept_row_indices)]
+
+    def wire_payload(self) -> dict:
+        grid = self.grid.model_dump()
+        grid["Rows"] = [{"Panels": [grid["Rows"][r]["Panels"][c]
+                                  for c in self.kept_column_indices]}
+                        for r in self.kept_row_indices]
+        return {"grid": grid}
 
 
 class ProposalParams(StrictModel):
@@ -93,12 +103,99 @@ class ProposalParams(StrictModel):
     request: StringerRequest
 
 
-class StringResult(StrictModel):
-    panel_ids: list[PanelId] = Field(min_length=1, max_length=4096)
+Count = Annotated[int, Field(ge=0, le=1000000)]
+Coordinate = Annotated[int, Field(ge=1, le=30)]
+ShortText = Annotated[str, Field(min_length=1, max_length=256)]
+
+
+class StringerInfo(StrictModel):
+    steps_taken: Count
+    sequence_length: list[Annotated[int, Field(ge=1, le=900)]] = Field(
+        min_length=1, max_length=900)
+    num_panels: float = Field(ge=1, le=900)
+    visited_path: list[Annotated[list[Coordinate], Field(min_length=2, max_length=2)]] = Field(
+        min_length=1, max_length=900)
+    steps_taken_in_string: Count
+    horizontal_movements: Count
+    vertical_movements: Count
+    invalid_vertical_movements: Count
+    distance_total: float = Field(ge=0, le=1e15)
+    vertical_sequential: Count
+    diagonal_movements: Count
+    allow_one_gap_hops: bool
+    max_gap_hop: Count
+    gap_hop_movements: Count
+    vertical_temp: int = Field(ge=-1, le=1000000)
+    remaining_string_length: Count
+    sequence_length_index: Count
+    str_length_state_index: Count
+    terminated: Literal[True]
+    last_agent_x: Coordinate
+    last_agent_y: Coordinate
+
+
+class BestResult(StrictModel):
+    last_action: Count
+    terminated: Literal[True]
+    info: StringerInfo
+    beam_idx: Count
+    grid_id: ShortText
+    model_id: ShortText
+    gumbel_scale: float = Field(ge=0, le=1e6)
+    string_start_split_count: Count
+    model: ShortText
+
+
+class StringerData(StrictModel):
+    status: Literal["completed"]
+    best_result: BestResult
+    final_grid: MatrixJson
+    model_used: ShortText
+    gumbel_scale_used: float = Field(ge=0, le=1e6)
+    distance_total: float = Field(ge=0, le=1e15)
+    total_valid_solutions: Count
+    gumbel_summary: dict[Annotated[str, Field(max_length=64)], Count] = Field(max_length=128)
+    first_pass_best_distance: float = Field(ge=0, le=1e15)
+    improvement: Annotated[float, Field(ge=-1e15, le=1e15)] | None
+    second_pass_triggered: bool
 
 
 class StringerResponse(StrictModel):
-    strings: list[StringResult] = Field(min_length=1, max_length=4096)
+    status: Literal["completed"]
+    data: StringerData
+    job_id: ShortText
+
+    def original_visited_path(self, request: StringerRequest) -> list[list[int]]:
+        """Validate complete coverage and map one-based wire cells to original indices."""
+        info = self.data.best_result.info
+        rows, cols = request.kept_row_indices, request.kept_column_indices
+        path = []
+        for row, col in info.visited_path:
+            if row > len(rows) or col > len(cols):
+                raise ValueError("visited cell outside submitted grid")
+            path.append([rows[row - 1], cols[col - 1]])
+        expected = {(r, c) for r, row in enumerate(request.grid.Rows)
+                    for c, panel in enumerate(row.Panels) if panel.Code == 1}
+        if (len(path) != len(expected) or {tuple(cell) for cell in path} != expected
+                or info.num_panels != len(path) or info.steps_taken != len(path)
+                or sum(info.sequence_length) != len(path)):
+            raise ValueError("incomplete or duplicate visited path")
+        lengths, counts = request.grid.Sequences
+        expected_lengths = [length for length, count in zip(lengths, counts)
+                            for _ in range(count)]
+        if sorted(info.sequence_length) != sorted(expected_lengths):
+            raise ValueError("unexpected string lengths")
+        sent = request.wire_payload()["grid"]
+        final = self.data.final_grid.model_dump()
+        for row in final["Rows"]:
+            for panel in row["Panels"]:
+                panel["Seq"] = 0
+        for row in sent["Rows"]:
+            for panel in row["Panels"]:
+                panel["Seq"] = 0
+        if final != sent or self.data.best_result.grid_id != self.job_id:
+            raise ValueError("response grid does not match request")
+        return path
 
 
 def validate_params(params: dict) -> ProposalParams:
@@ -117,8 +214,8 @@ def proposal_provenance(result: dict, params: dict, tenant_id: str, job_id: str)
     try:
         parsed = validate_params(params)
         response = StringerResponse.model_validate(result["proposal"])
-        panels = [p for string in response.strings for p in string.panel_ids]
-        request_hash = hashlib.sha256(canonical_bytes(parsed.request.model_dump())).hexdigest()
+        path = response.original_visited_path(parsed.request)
+        request_hash = hashlib.sha256(canonical_bytes(parsed.request.wire_payload())).hexdigest()
         if (result.get("schema_version") != "leaf.solar-proposal.v1"
                 or result.get("job_id") != job_id or result.get("tenant_id") != tenant_id
                 or result.get("drawing_changed") is not False
@@ -126,8 +223,7 @@ def proposal_provenance(result: dict, params: dict, tenant_id: str, job_id: str)
                 or result.get("solver") != {"endpoint": SOLVER_URL, "adapter_version": "1.0.0"}
                 or not isinstance(result.get("response_sha256"), str)
                 or not re.fullmatch(r"[0-9a-f]{64}", result["response_sha256"])
-                or len(panels) != len(set(panels))
-                or set(panels) != {c.panel_id for c in parsed.request.matrix_cells}):
+                or result.get("visited_path") != path):
             raise ValueError()
         return {"execution_mode": "leaf_cloud_service", "solver": result["solver"],
                 "request_sha256": request_hash, "response_sha256": result["response_sha256"]}
@@ -140,7 +236,7 @@ def post_stringer(request: StringerRequest, grant: CloudGrant) -> bytes:
     try:
         deadline = time.monotonic() + 50
         with requests.post(
-            SOLVER_URL, data=canonical_bytes(request.model_dump()),
+            SOLVER_URL, data=canonical_bytes(request.wire_payload()),
             headers={"Authorization": "Bearer " + grant.access_token,
                      "Content-Type": "application/json"},
             timeout=(5, 45), allow_redirects=False, stream=True,
@@ -169,15 +265,12 @@ def proposal(params: dict, tenant_id: str, job_id: str) -> dict:
         if not isinstance(raw, bytes) or len(raw) > MAX_RESPONSE_BYTES:
             raise ValueError()
         result = StringerResponse.model_validate_json(raw)
-        panels = [p for s in result.strings for p in s.panel_ids]
-        expected = {c.panel_id for c in parsed.request.matrix_cells}
-        if len(panels) != len(set(panels)) or set(panels) != expected:
-            raise ValueError()
+        path = result.original_visited_path(parsed.request)
     except (ValidationError, ValueError, TypeError):
         raise CloudError("cloud_response_invalid", 502) from None
     return {"schema_version": "leaf.solar-proposal.v1", "job_id": job_id,
             "tenant_id": tenant_id, "drawing_changed": False,
-            "request_sha256": hashlib.sha256(canonical_bytes(parsed.request.model_dump())).hexdigest(),
+            "request_sha256": hashlib.sha256(canonical_bytes(parsed.request.wire_payload())).hexdigest(),
             "response_sha256": hashlib.sha256(raw).hexdigest(),
             "solver": {"endpoint": SOLVER_URL, "adapter_version": "1.0.0"},
-            "proposal": result.model_dump()}
+            "proposal": result.model_dump(), "visited_path": path}

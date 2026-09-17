@@ -1,9 +1,9 @@
 """W1 cloud proposal through the existing jobs and broker rails.
 
-Offline responses are synthetic. For live verification set W1_REQUIRE_LIVE=1
+Offline probes replay a real response to a synthetic request. For live verification set W1_REQUIRE_LIVE=1
 and W1_LIVE_CONFIG_FILE to a private JSON file with environment="staging",
 server_url (HTTPS origin), tenant_id, grant_ref, catalog_digest, and request
-(a sanitized W0 request matching the provisional model). The same named grant
+(a sanitized request matching the pinned grid model). The same named grant
 must be provisioned privately on the broker. LEAF_CLOUD_GRANTS_FILE supplies
 the test client's staging Auth0 token; no credential belongs in this config.
 Missing live input is a failure when requested, never a skip.
@@ -31,7 +31,10 @@ import leaf_cloud_grants as grants
 
 @pytest.fixture
 def recorded():
-    return json.loads((SERVER / "tests/fixtures/w1_stringer_recorded_response.json").read_text())
+    fixtures = SERVER / "tests/fixtures"
+    record = json.loads((fixtures / "w1_stringer_recorded_response.json").read_text())
+    return {"request": json.loads((fixtures / record["request_fixture"]).read_text()),
+            "response": json.loads((fixtures / record["response_fixture"]).read_text())}
 
 
 @pytest.fixture
@@ -81,6 +84,8 @@ def test_recorded_proposal_and_ledger(rails, params, recorded, monkeypatch):
     assert result["drawing_changed"] is False
     assert result["job_id"] == "w1-job"
     assert result["proposal"] == recorded["response"]
+    assert result["visited_path"] == [[r - 1, c - 1] for r, c in
+                                      recorded["response"]["data"]["best_result"]["info"]["visited_path"]]
     assert result["request_sha256"] == hashlib.sha256(cloud.canonical_bytes(params["request"])).hexdigest()
     assert result["response_sha256"] == hashlib.sha256(raw).hexdigest()
     entries = rails[0].LEDGER_PATH.read_text().splitlines()
@@ -111,13 +116,13 @@ def test_invalid_inputs_fail_closed(params, mutation):
     if mutation == "secret":
         params["access_token"] = "not-a-credential"
     elif mutation == "unknown":
-        params["request"]["electrical"]["unexpected"] = 1
+        params["request"]["grid"]["unexpected"] = 1
     elif mutation == "duplicate":
-        params["request"]["matrix_cells"][1]["panel_id"] = 1
+        params["request"]["grid"]["Rows"][0]["Panels"][1]["Id"] = "p0_0"
     elif mutation == "nonfinite":
-        params["request"]["electrical"]["module_voc"] = float("nan")
+        params["request"]["grid"]["Rows"][0]["Panels"][0]["X"] = float("nan")
     else:
-        params["request"]["panel_groups"] = []
+        params["request"]["grid"]["Rows"] = []
     with pytest.raises(grants.CloudError, match="cloud_request_invalid"):
         cloud.validate_params(params)
 
@@ -296,6 +301,115 @@ def test_terminal_cloud_proof_fails_closed(rails, params, recorded, monkeypatch,
                                         job_id="w1-job", durable_params=params)
 
 
+def test_pinned_fixture_shapes(params, recorded):
+    request = cloud.validate_params(params).request
+    assert request.wire_payload() == recorded["request"]
+    response = cloud.StringerResponse.model_validate(recorded["response"])
+    assert response.data.best_result.info.sequence_length == [12, 12]
+    assert len(response.original_visited_path(request)) == 24
+
+
+def test_reshape_truncate_and_restore_indices(params, recorded, monkeypatch):
+    grid = params["request"]["grid"]
+    grid["Sequences"] = [12, 12, 2, 0]
+    empty = dict(grid["Rows"][0]["Panels"][0], Code=0, Id="", Seq=0)
+    for row in grid["Rows"]:
+        row["Panels"].insert(2, copy.deepcopy(empty))
+        row["Panels"].insert(0, copy.deepcopy(empty))
+        row["Panels"].append(copy.deepcopy(empty))
+    blank = {"Panels": [copy.deepcopy(empty) for _ in range(9)]}
+    grid["Rows"].insert(1, copy.deepcopy(blank))
+    grid["Rows"].insert(0, copy.deepcopy(blank))
+    grid["Rows"].append(copy.deepcopy(blank))
+    request = cloud.validate_params(params).request
+    assert request.kept_row_indices == [1, 3, 4, 5]
+    assert request.kept_column_indices == [1, 2, 4, 5, 6, 7]
+    assert request.wire_payload() == recorded["request"]
+    sent = []
+    monkeypatch.setattr(cloud, "resolve_grant", lambda *a: grants.CloudGrant("w1-tenant", ""))
+    def post(request, grant):
+        sent.append(request.wire_payload())
+        return cloud.canonical_bytes(recorded["response"])
+    monkeypatch.setattr(cloud, "post_stringer", post)
+    result = cloud.proposal(params, "w1-tenant", "w1-job")
+    assert sent == [recorded["request"]]
+    assert result["visited_path"][0] == [5, 1]
+    assert result["visited_path"][-1] == [1, 1]
+    assert result["request_sha256"] == hashlib.sha256(
+        cloud.canonical_bytes(recorded["request"])).hexdigest()
+    cloud.proposal_provenance(result, params, "w1-tenant", "w1-job")
+    result["visited_path"][0] = [0, 0]
+    with pytest.raises(ValueError, match="terminal proof rejected"):
+        cloud.proposal_provenance(result, params, "w1-tenant", "w1-job")
+
+
+@pytest.mark.parametrize("mutation", [
+    "rows", "columns", "ragged", "code", "bool_code", "empty_id",
+    "blank_grid", "sequences", "counts", "modify",
+])
+def test_grid_bounds_and_coherence(params, mutation):
+    grid = params["request"]["grid"]
+    if mutation == "rows":
+        grid["Rows"] *= 8
+    elif mutation == "columns":
+        grid["Rows"][0]["Panels"] *= 6
+    elif mutation == "ragged":
+        grid["Rows"][0]["Panels"].pop()
+    elif mutation == "code":
+        grid["Rows"][0]["Panels"][0]["Code"] = 2
+    elif mutation == "bool_code":
+        grid["Rows"][0]["Panels"][0]["Code"] = True
+    elif mutation == "empty_id":
+        grid["Rows"][0]["Panels"][0]["Id"] = ""
+    elif mutation == "blank_grid":
+        for row in grid["Rows"]:
+            for panel in row["Panels"]:
+                panel["Code"] = 0
+    elif mutation == "sequences":
+        grid["Sequences"] = [[12], [2]]
+    elif mutation == "counts":
+        grid["Sequences"][1][0] = 1
+    else:
+        grid["Modify"] = [1]
+    with pytest.raises(grants.CloudError, match="cloud_request_invalid"):
+        cloud.validate_params(params)
+
+
+@pytest.mark.parametrize("mutation", [
+    "duplicate", "out_of_bounds", "zero_based", "fraction", "missing",
+    "unfinished", "inner_status", "counts", "lengths", "grid", "unknown",
+])
+def test_real_response_rejects_malformed_proposals(params, recorded, monkeypatch, mutation):
+    response = recorded["response"]
+    info = response["data"]["best_result"]["info"]
+    if mutation == "duplicate":
+        info["visited_path"][1] = info["visited_path"][0]
+    elif mutation == "out_of_bounds":
+        info["visited_path"][0] = [5, 1]
+    elif mutation == "zero_based":
+        info["visited_path"][0] = [0, 0]
+    elif mutation == "fraction":
+        info["visited_path"][0] = [1.5, 1]
+    elif mutation == "missing":
+        info["visited_path"].pop()
+    elif mutation == "unfinished":
+        response["data"]["best_result"]["terminated"] = False
+    elif mutation == "inner_status":
+        response["data"]["status"] = "running"
+    elif mutation == "counts":
+        info["num_panels"] = 23
+    elif mutation == "lengths":
+        info["sequence_length"] = [24]
+    elif mutation == "grid":
+        response["data"]["final_grid"]["Rows"][0]["Panels"][0]["Id"] = "other"
+    else:
+        info["unexpected"] = 1
+    monkeypatch.setattr(cloud, "resolve_grant", lambda *a: grants.CloudGrant("w1-tenant", ""))
+    monkeypatch.setattr(cloud, "post_stringer", lambda *a: cloud.canonical_bytes(response))
+    with pytest.raises(grants.CloudError, match="cloud_response_invalid"):
+        cloud.proposal(params, "w1-tenant", "job")
+
+
 def test_staging_live():
     if os.environ.get("W1_REQUIRE_LIVE") != "1":
         pytest.skip("live staging probe is opt-in")
@@ -339,16 +453,15 @@ def test_staging_live():
                 if rec.get("status") == "complete":
                     result = rec["result"]["result"]
                     proposal = cloud.StringerResponse.model_validate(result["proposal"])
-                    panels = [p for s in proposal.strings for p in s.panel_ids]
+                    path = proposal.original_visited_path(parsed.request)
                     failure = not (
                         result["job_id"] == job_id and result["tenant_id"] == config["tenant_id"]
                         and result["drawing_changed"] is False
                         and result["solver"]["endpoint"] == cloud.SOLVER_URL
                         and result["request_sha256"] == hashlib.sha256(
-                            cloud.canonical_bytes(parsed.request.model_dump())).hexdigest()
+                            cloud.canonical_bytes(parsed.request.wire_payload())).hexdigest()
                         and re.fullmatch(r"[0-9a-f]{64}", result["response_sha256"])
-                        and len(panels) == len(set(panels))
-                        and set(panels) == {c.panel_id for c in parsed.request.matrix_cells})
+                        and result["visited_path"] == path)
                     break
                 if rec.get("status") not in ("submitted", "running"):
                     raise ValueError()
