@@ -1,0 +1,142 @@
+{
+  "schema": "leaf.solar-adapter.v1",
+  "version": 1,
+  "entity_kinds": {
+    "project": {
+      "select": {
+        "scope": "named-dictionary",
+        "key": "SYNTH-PROJECT"
+      },
+      "fields": {
+        "name": {
+          "path": "name",
+          "status": "preserved"
+        },
+        "zip_code": {
+          "path": "zip_code",
+          "status": "preserved"
+        },
+        "latitude": {
+          "path": "latitude",
+          "status": "not_represented"
+        },
+        "longitude": {
+          "path": "longitude",
+          "status": "not_represented"
+        },
+        "installation_design": {
+          "path": "installation_design",
+          "status": "preserved"
+        },
+        "units": {
+          "path": "units",
+          "status": "preserved"
+        },
+        "graph_schema_version": {
+          "path": "graph_schema_version",
+          "status": "preserved"
+        },
+        "site_revision": {
+          "path": "site_revision",
+          "status": "preserved"
+        }
+      }
+    },
+    "settings": {
+      "select": {
+        "scope": "named-dictionary",
+        "key": "SYNTH-SETTINGS"
+      },
+      "fields": {
+        "panel_layer_contains": {
+          "path": "panel_layer_contains",
+          "status": "preserved"
+        },
+        "panel_group_layer": {
+          "path": "panel_group_layer",
+          "status": "preserved"
+        },
+        "string_layer": {
+          "path": "string_layer",
+          "status": "preserved"
+        },
+        "home_run_layer": {
+          "path": "home_run_layer",
+          "status": "preserved"
+        },
+        "panels_in_sequence": {
+          "path": "panels_in_sequence",
+          "status": "preserved"
+        },
+        "num_mppt": {
+          "path": "num_mppt",
+          "status": "preserved"
+        },
+        "strings_per_mppt": {
+          "path": "strings_per_mppt",
+          "status": "preserved"
+        },
+        "optimizer_ratio": {
+          "path": "optimizer_ratio",
+          "status": "preserved"
+        },
+        "use_l2_collectors": {
+          "path": "use_l2_collectors",
+          "status": "preserved"
+        },
+        "panel_group_number": {
+          "path": "panel_group_number",
+          "status": "preserved"
+        },
+        "string_number": {
+          "path": "string_number",
+          "status": "preserved"
+        },
+        "inverter_number": {
+          "path": "inverter_number",
+          "status": "preserved"
+        },
+        "mppt_letter": {
+          "path": "mppt_letter",
+          "status": "preserved"
+        },
+        "global_string_sizing_confirmed": {
+          "path": "global_string_sizing_confirmed",
+          "status": "preserved"
+        },
+        "voc_cold": {
+          "path": "voc_cold",
+          "status": "preserved"
+        }
+      }
+    },
+    "panel": {
+      "select": {
+        "scope": "entity-xdata",
+        "app": "SYNTH-PANEL"
+      },
+      "fields": {
+        "frame_ref": {
+          "path": "frame_ref",
+          "status": "preserved"
+        },
+        "matrix_cell": {
+          "path": "matrix_cell",
+          "status": "preserved"
+        },
+        "centre": {
+          "path": "centre",
+          "status": "preserved"
+        },
+        "angle": {
+          "path": "angle",
+          "status": "preserved"
+        },
+        "assignment": {
+          "path": "assignment",
+          "status": "preserved"
+        }
+      }
+    }
+  }
+}

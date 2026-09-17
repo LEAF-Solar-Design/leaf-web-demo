@@ -188,6 +188,35 @@ MUTATION_INSPECT_BLOCKS += (
 
 
 
+def build_inspect_solar_scr() -> str:
+    """Closed read operation: emit opaque DXF records, never plugin meanings."""
+    lines = (
+        '(vl-load-com)',
+        r'''(defun ls-q (s / out c hex) (setq out "\"" hex "0123456789abcdef") (foreach c (vl-string->list s) (setq out (strcat out (cond ((= c 34) "\\\"") ((= c 92) "\\\\") ((< c 32) (strcat "\\u00" (substr hex (1+ (fix (/ c 16))) 1) (substr hex (1+ (rem c 16)) 1))) (T (chr c)))))) (strcat out "\""))''',
+        r'''(defun ls-w (s) (setq ls-size (+ ls-size (strlen s))) (if (> ls-size 16000000) (exit)) (write-line s ls-f))''',
+        r'''(defun ls-num (v / s) (setq s (rtos v 2 16)) (cond ((= (substr s 1 1) ".") (strcat "0" s)) ((= (substr s 1 2) "-.") (strcat "-0" (substr s 2))) (T s)))''',
+        r'''(defun ls-point (p) (strcat "[" (ls-num (car p)) "," (ls-num (cadr p)) "]"))''',
+        r'''(defun ls-vertex (p ed en) (cond ((member (cdr (assoc 0 ed)) '("LINE" "POINT")) (cdr p)) ((= (cdr (assoc 0 ed)) "LWPOLYLINE") (trans (list (cadr p) (caddr p) (cond ((cdr (assoc 38 ed))) (T 0.0))) en 0)) (T (trans (cdr p) en 0))))''',
+        r'''(defun ls-points (ed en / out p sep) (setq out "[" sep "") (foreach p ed (if (or (= (car p) 10) (and (= (cdr (assoc 0 ed)) "LINE") (= (car p) 11))) (setq out (strcat out sep (ls-point (ls-vertex p ed en))) sep ","))) (strcat out "]"))''',
+        r'''(defun ls-store (key scope h app payload / chunks pair) (setq ls-count (1+ ls-count) chunks "") (if (> ls-count 100000) (exit)) (foreach pair payload (if (and (member (car pair) '(1 1000)) (= (type (cdr pair)) 'STR)) (setq chunks (strcat chunks (cdr pair))))) (ls-w (strcat ls-sep "{\"key\":" (ls-q key) ",\"scope\":" (ls-q scope) ",\"entity_handle\":" (if h (ls-q h) "null") ",\"app\":" (if app (ls-q app) "null") ",\"payload\":{\"dxf\":" (ls-q (vl-prin1-to-string payload)) ",\"strings\":" (ls-q chunks) "}}")) (setq ls-sep ","))''',
+        r'''(defun ls-dict (d scope h depth / rows row key child ed) (if (> depth 32) (exit)) (setq rows nil row (dictnext d T)) (while row (setq rows (cons row rows) row (dictnext d))) (foreach row (reverse rows) (setq key (cdr (assoc 3 row)) child (cond ((cdr (assoc 350 row))) ((cdr (assoc 360 row)))) (if (and key child) (progn (setq ed (entget child)) (ls-store key scope h nil ed) (if (= (cdr (assoc 0 ed)) "DICTIONARY") (ls-dict child scope h (1+ depth)))))))''',
+        r'''(setq ls-f (open "result.json" "w") ls-size 0 ls-count 0 ls-sep "")''',
+        r'''(setq ls-unit (cdr (assoc (getvar "INSUNITS") '((1 "in" 0.0254) (2 "ft" 0.3048) (4 "mm" 0.001) (5 "cm" 0.01) (6 "m" 1.0) (7 "km" 1000.0) (10 "yd" 0.9144)))))''',
+        r'''(ls-w (strcat "{\"schema\":\"leaf.solar-inspection.v1\",\"dwg_sha256\":null,\"units\":{\"drawing_units\":" (if ls-unit (ls-q (car ls-unit)) "null") ",\"meters_per_unit\":" (if ls-unit (ls-num (cadr ls-unit)) "null") "},\"entities\":["))''',
+        r'''(setq ls-ss (ssget "_X") ls-i 0)''',
+        r'''(if ls-ss (repeat (sslength ls-ss) (if (> ls-i 99999) (exit)) (setq ls-en (ssname ls-ss ls-i) ls-ed (entget ls-en) ls-kind (cdr (assoc 0 ls-ed)) ls-h (cdr (assoc 5 ls-ed)))'''
+        r'''(vla-getboundingbox (vlax-ename->vla-object ls-en) 'ls-lo 'ls-hi) (setq ls-lo (vlax-safearray->list ls-lo) ls-hi (vlax-safearray->list ls-hi))'''
+        r'''(ls-w (strcat ls-sep "{\"handle\":" (ls-q ls-h) ",\"layer\":" (ls-q (cdr (assoc 8 ls-ed))) ",\"kind\":" (ls-q ls-kind) ",\"block_name\":" (if (= ls-kind "INSERT") (ls-q (cdr (assoc 2 ls-ed))) "null") ",\"geometry\":{\"bbox\":[" (ls-num (car ls-lo)) "," (ls-num (cadr ls-lo)) "," (ls-num (car ls-hi)) "," (ls-num (cadr ls-hi)) "],\"points\":" (if (member ls-kind '("LINE" "LWPOLYLINE" "INSERT" "POINT")) (ls-points ls-ed ls-en) "null") "}}")) (setq ls-sep "," ls-i (1+ ls-i))))''',
+        r'''(ls-w "],\"stores\":[") (setq ls-sep "") (ls-dict (namedobjdict) "named-dictionary" nil 0)''',
+        r'''(setq ls-i 0) (if ls-ss (repeat (sslength ls-ss) (setq ls-ed (entget (ssname ls-ss ls-i) '("*")) ls-h (cdr (assoc 5 ls-ed))) (if (assoc 360 ls-ed) (ls-dict (cdr (assoc 360 ls-ed)) "extension-dictionary" ls-h 0)) (foreach ls-p ls-ed (if (= (car ls-p) -3) (foreach ls-x (cdr ls-p) (ls-store (car ls-x) "entity-xdata" ls-h (car ls-x) (cdr ls-x))))) (setq ls-i (1+ ls-i))))''',
+        r'''(ls-w "]}") (close ls-f)''',
+        QUIT_DEFAULT,
+    )
+    if any(len(line) > MAX_SCRIPT_LINE_CHARS for line in lines):
+        raise ValueError("Solar inspection script line limit exceeded")
+    return "\r\n".join(lines) + "\r\n"
+
+
 def build_scr(out_localname: str = OUT_LOCALNAME, *, quit_form: str = QUIT_DEFAULT,
               extra_blocks: tuple = ()) -> str:
     """Return the .scr content (CRLF line endings) for the extract Activity.

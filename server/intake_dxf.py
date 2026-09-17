@@ -142,6 +142,8 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
     """Emit ASCII DXF bytes for the intake subset. Raises IntakeDxfError."""
     if not isinstance(intake, dict):
         _fail("intake is not an object")
+    if "solar_inspection" in intake or "solar_mapping" in intake:
+        _fail("solar interchange requires the original drawing and the licensed mutation lane")
     layers_in = intake.get("layers", [])
     polylines = intake.get("polylines", [])
     texts = intake.get("texts", [])

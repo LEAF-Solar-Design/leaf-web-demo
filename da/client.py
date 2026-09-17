@@ -1008,7 +1008,7 @@ def extract(dwg_local_path: str, dry_run: bool = False, *,
                                f"report={redact.redact_url(status.get('reportUrl'))}")
         finalize_upload(output_key, up_key)
         families = download_object(output_key).decode("utf-8", "replace")
-        return parse_text(families, dwg_local_path)
+        return parse_text(families, dwg_local_path, source_bytes=download_object(input_key))
 
     # ------- legacy single-tenant demo path -------
     # Shape is still `[t/<tenant>/]in/<ts>_..._<dwg>`; the nonce makes it unique
@@ -1044,7 +1044,7 @@ def extract(dwg_local_path: str, dry_run: bool = False, *,
                            f"report={redact.redact_url(status.get('reportUrl'))}")
     finalize_upload(output_key, up_key)
     families = download_object(output_key).decode("utf-8", "replace")
-    return parse_text(families, dwg_local_path)
+    return parse_text(families, dwg_local_path, source_bytes=download_object(input_key))
 
 
 def run_tool(dwg_local_path: str, tool: dict, params: dict,
@@ -1066,6 +1066,8 @@ def run_tool(dwg_local_path: str, tool: dict, params: dict,
     Convention: each tool has a DA Activity named {TOOL_ACTIVITY_PREFIX}{engine_op}.
     """
     engine_op = tool.get("engine_op") or tool["name"].replace("-", "_")
+    if engine_op == "inspect_solar_state" and params not in ({}, None):
+        raise ValueError("inspect_solar_state accepts no parameters")
     activity_id = activity_qualified(f"{TOOL_ACTIVITY_PREFIX}{engine_op}")
     dwg_name = os.path.basename(dwg_local_path)
     ts = int(time.time())
@@ -1130,7 +1132,21 @@ def run_tool(dwg_local_path: str, tool: dict, params: dict,
                      f"report={redact.redact_url(status.get('reportUrl'))}",
         }
     finalize_upload(output_key, up_key)
-    raw = download_object(output_key).decode("utf-8", "replace")
+    raw = download_object(output_key)
+    if engine_op == "inspect_solar_state":
+        from intake_parse import source_binding
+        try:
+            from server.solar_interchange import parse_inspection
+        except ModuleNotFoundError as exc:
+            if exc.name != "server":
+                raise
+            from solar_interchange import parse_inspection
+        binding = source_binding(download_object(input_key))
+        payload = parse_inspection(raw, binding["source"]["dwg_sha256"])
+        return {"ok": True, "tool": tool.get("name"), "version": tool.get("version"),
+                "result": payload, "overlay": None, "timing_ms": timing_ms,
+                "cost": None, "error": None}
+    raw = raw.decode("utf-8", "replace")
     try:
         payload = json.loads(raw)
     except Exception as e:
@@ -1227,6 +1243,9 @@ def tool_activity_spec(tool: dict) -> dict:
     live-path guards can fail closed on it.
     """
     engine_op = tool.get("engine_op") or tool["name"].replace("-", "_")
+    if engine_op == "inspect_solar_state":
+        from mutation_apply import inspection_activity_spec
+        return inspection_activity_spec()
     if tool.get("kind") == "appbundle":
         return _appbundle_tool_activity_spec(tool, engine_op)
     script_src = tool.get("engine_script")
