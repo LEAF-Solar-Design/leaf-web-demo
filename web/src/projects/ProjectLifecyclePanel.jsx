@@ -40,31 +40,63 @@ export default function ProjectLifecyclePanel({
   projectName,
   enabled = ENV_LIFECYCLE_UI,
   onProjectDeleted,
+  identities,
+  onLoadIdentities,
 }) {
   const [openTool, setOpenTool] = useState(null) // null | 'clone' | 'export'
+  const [results, setResults] = useState([])
+  const [loadingIdentities, setLoadingIdentities] = useState(false)
+  const [identityError, setIdentityError] = useState(null)
   const lifecycle = useProjectLifecycle(projectId, { enabled: enabled && !!projectId })
 
   const { actions } = lifecycle
   const name = lifecycle.project?.name || projectName || ''
 
+  // Retain server receipts outside dialogs, including when a refresh fails.
+  const remember = useCallback((result) => {
+    if (result?.receipt?.receipt_id) {
+      setResults((previous) => [...previous, { projectId, receipt: result.receipt }])
+    }
+    return result
+  }, [projectId])
+  const receipts = [...lifecycle.receipts]
+  for (const result of results) {
+    const receipt = result.receipt
+    if (result.projectId === projectId && !receipts.some((r) => r.receipt_id === receipt.receipt_id)) {
+      receipts.push({ receipt_id: receipt.receipt_id, kind: receipt.action,
+        time: receipt.created_at, fields: {} })
+    }
+  }
+
+  // Only existing bindings in the caller's organization. The parent owns the
+  // read and supplies identities; this panel never provisions or searches a directory.
+  const loadIdentities = async () => {
+    if (loadingIdentities) return
+    setLoadingIdentities(true)
+    setIdentityError(null)
+    try { await onLoadIdentities() }
+    catch { setIdentityError('Organization members could not be loaded. Try again.') }
+    finally { setLoadingIdentities(false) }
+  }
+
   const runExport = useCallback(async ({ signal }) => {
-    const result = await actions.export({ signal })
+    const result = remember(await actions.export({ signal }))
     const artifact = result?.export
     return {
       receiptId: result?.receipt?.receipt_id,
       blob: artifact ? new Blob([JSON.stringify(artifact, null, 2)], { type: 'application/json' }) : undefined,
       filename: exportFilename(name),
     }
-  }, [actions, name])
+  }, [actions, name, remember])
 
   // Delete is the one action whose own receipt this panel cannot display: the
   // project is gone, so the panel goes with it. The receipt id is handed to the
   // parent instead, which is where it stays visible after the unmount.
   const removeProject = useCallback(async () => {
-    const result = await actions.remove()
+    const result = remember(await actions.remove())
     onProjectDeleted?.(projectId, result?.receipt?.receipt_id || null)
     return result
-  }, [actions, onProjectDeleted, projectId])
+  }, [actions, onProjectDeleted, projectId, remember])
 
   if (!enabled || !projectId) return null
 
@@ -104,9 +136,14 @@ export default function ProjectLifecyclePanel({
               onInvite={actions.invite}
               onChangeRole={actions.changeRole}
               onRevoke={actions.revoke}
-              inviteLabel="Invite by binding id"
-              inviteInputType="text"
+              identities={identities}
             />
+            {lifecycle.authority?.can_invite && onLoadIdentities && (
+              <button type="button" disabled={loadingIdentities} onClick={loadIdentities}>
+                {loadingIdentities ? 'Loading organization members…' : 'Load organization members'}
+              </button>
+            )}
+            {identityError && <p role="alert">{identityError}</p>}
           </div>
 
           <div className="project-lifecycle-tools">
@@ -122,7 +159,7 @@ export default function ProjectLifecyclePanel({
               // the copy, so the name is derived here and echoed back from the
               // server's own `project` in the response.
               onClone={async () => {
-                const result = await actions.clone(`${name} (copy)`)
+                const result = remember(await actions.clone(`${name} (copy)`))
                 return {
                   receipt_id: result?.receipt?.receipt_id,
                   project_id: result?.project?.project_id,
@@ -137,13 +174,13 @@ export default function ProjectLifecyclePanel({
             <ExportDialog onExport={runExport} onDismiss={() => setOpenTool(null)} />
           )}
 
-          <ReceiptPanel receipts={lifecycle.receipts} />
+          <ReceiptPanel receipts={receipts} />
 
           {/* No undo props on purpose: platform/project_lifecycle.py's reset and
               delete mint no restore token, so both must render as terminal. */}
           <DangerZone
             projectName={name}
-            onReset={actions.reset}
+            onReset={async () => remember(await actions.reset())}
             onDelete={removeProject}
           />
         </>

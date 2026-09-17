@@ -79,12 +79,15 @@ const COMPONENT_REGISTRY = [
         <Membership
           authority={{ role: 'owner', can_invite: true, can_manage: true }}
           members={[]}
+          identities={[]}
           onInvite={vi.fn()}
           onChangeRole={vi.fn()}
           onRevoke={vi.fn()}
         />,
       )
       await waitFor(() => expect(screen.queryAllByRole('listitem').length).toBe(0))
+      // w4h-b4: an empty scoped picker offers no invalid email invitation.
+      expect(screen.getByText('No organization members are available to invite.')).toBeTruthy()
       return utils
     },
     async error() {
@@ -94,11 +97,13 @@ const COMPONENT_REGISTRY = [
           authority={{ role: 'owner', can_invite: true, can_manage: true }}
           members={[]}
           onInvite={onInvite}
+          identities={[{ binding_id: 'binding-a', label: 'Member A' }]}
           onChangeRole={vi.fn()}
           onRevoke={vi.fn()}
         />,
       )
-      fireEvent.change(screen.getByLabelText(/invite by email/i), { target: { value: 'a@b.com' } })
+      // w4h-b4 replaces the email field with an existing organization binding.
+      fireEvent.change(screen.getByLabelText('Invite member'), { target: { value: 'binding-a' } })
       fireEvent.click(screen.getByRole('button', { name: /^invite$/i }))
       await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy())
       return utils

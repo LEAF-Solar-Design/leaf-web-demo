@@ -168,6 +168,11 @@ export async function createBlankProject(name, orgId) {
 // GET /api/projects/{id}/lifecycle -> {project, members, files, receipts}.
 // The single read every lifecycle component is fed from; see
 // useProjectLifecycle.js for the one-fetch/refetch-after-mutation contract.
+export async function getOrgIdentities(orgId) {
+  const id = requireUuid(orgId, 'organization')
+  return request(`/api/orgs/${id}/identities`, { orgId: id })
+}
+
 export async function getProjectLifecycle(projectId) {
   const id = requireUuid(projectId, 'project')
   return request(`/api/projects/${id}/lifecycle`)

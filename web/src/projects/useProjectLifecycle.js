@@ -52,7 +52,10 @@ function adaptMembers(members) {
   return (members || []).map((m) => ({
     member_id: m.membership_id,
     binding_id: m.binding_id,
-    name: m.binding_id, // the snapshot carries no display name or email
+    label: m.label,
+    name: m.display_name || m.name,
+    email: m.email,
+    created_at: m.created_at,
     role: toUiRole(m.role),
   }))
 }
@@ -81,7 +84,7 @@ function adaptAuthority(viewer) {
   }
 }
 
-const EMPTY = { project: null, members: [], receipts: [], authority: null, viewerId: null }
+const EMPTY = { project: null, members: [], files: [], receipts: [], authority: null, viewerId: null }
 
 /**
  * @param {string|null} projectId   the open project, or null for "no project"
@@ -132,6 +135,7 @@ export default function useProjectLifecycle(projectId, { enabled = true } = {}) 
       setData({
         project: snapshot.project || null,
         members,
+        files: snapshot.files || [], // read-only snapshot; no file mutation actions
         receipts: adaptReceipts(snapshot.receipts),
         authority: adaptAuthority(viewer),
         viewerId,
