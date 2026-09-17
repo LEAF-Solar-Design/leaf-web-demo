@@ -15,6 +15,7 @@ export function createDrawingUploadController({ services, onReady, pollMs = 500,
   let sequence = 0
   let disposed = false
   const listeners = new Set()
+  const readyListeners = new Set()
   const publish = (patch) => {
     if (disposed) return
     state = { ...state, ...patch }
@@ -74,7 +75,8 @@ export function createDrawingUploadController({ services, onReady, pollMs = 500,
       publish({ phase: 'loading' })
       const view = await services.intake(receipt.drawing_id, receipt.guest_session, receipt.tenant_id)
       if (run !== sequence) return null
-      await onReady?.({ receipt, status, view })
+      const result = { receipt, status, view }
+      await Promise.all([onReady?.(result), ...Array.from(readyListeners, (listener) => listener(result))])
       publish({ busy: false, phase: 'ready', error: null })
       return { receipt, status, view }
     } catch (error) {
@@ -86,6 +88,7 @@ export function createDrawingUploadController({ services, onReady, pollMs = 500,
   return {
     getSnapshot: () => snapshot,
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener) },
+    subscribeReady(listener) { readyListeners.add(listener); return () => readyListeners.delete(listener) },
     start() { disposed = false },
     dispose() { disposed = true; sequence += 1 },
     loadPolicy,
