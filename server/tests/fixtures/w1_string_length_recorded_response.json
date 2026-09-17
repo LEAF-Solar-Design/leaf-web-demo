@@ -1,0 +1,23 @@
+{
+  "evidence_kind": "recorded-synthetic",
+  "description": "Public offline StringSizer adapter fixture. Not a plugin capture or live service parity proof.",
+  "request": {
+    "schema_version": "leaf.string-length.v1",
+    "module": {"model": "fixture-module", "voc": 45.0, "temp_coeff_pct_per_c": -0.3},
+    "inverter": {"model": "fixture-inverter", "max_dc_voltage": 600.0},
+    "design_min_temp_c": -12.0,
+    "panels_in_sequence": 2,
+    "units": "SI"
+  },
+  "response": {
+    "panels_in_sequence": 2,
+    "voc_cold": {
+      "passes": true,
+      "override_accepted": false,
+      "suggested_string_length": 12,
+      "per_module": 49.995,
+      "string_voltage": 99.99,
+      "max_dc_voltage": 600.0
+    }
+  }
+}
