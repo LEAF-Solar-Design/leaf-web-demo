@@ -48,6 +48,7 @@ ENGINES = (
 )
 STATUSES = ("resolved", "unresolved")
 VERDICTS = ("pass", "fail")
+COMPARATORS = ("exact-counts-by-layer", "solar-w1-semantic")
 WAVES = (0, 1, 2, 3, 4, 5)
 REQUIRE_CHOICES = ("w0", "w1", "w2", "w3", "w4", "w5", "all-production")
 
@@ -269,7 +270,7 @@ def parse_receipt(path, capability):
             "engine": _enum_field(studio, "engine", f"{where} studio", ENGINES, required=True),
         },
         "comparator": {
-            "name": _str_field(comparator, "name", f"{where} comparator", required=True, allow_empty=False),
+            "name": _enum_field(comparator, "name", f"{where} comparator", COMPARATORS, required=True),
             "version": _str_field(comparator, "version", f"{where} comparator", required=True),
             "verdict": _enum_field(comparator, "verdict", f"{where} comparator", VERDICTS, required=True),
             "diffs": _list_of_str(comparator, "diffs", f"{where} comparator"),

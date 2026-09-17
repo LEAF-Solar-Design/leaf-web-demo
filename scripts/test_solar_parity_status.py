@@ -60,7 +60,7 @@ def receipt(capability, **overrides):
         "fixture": {"id": "fx-1", "sha256": "a" * 64},
         "plugin": {"build": "2026.9.1", "state": "committed", "receipt_sha256": "b" * 64},
         "studio": {"capability_version": "1", "engine": "browser"},
-        "comparator": {"name": "geometry", "version": "1", "verdict": "pass", "diffs": []},
+        "comparator": {"name": "exact-counts-by-layer", "version": "1", "verdict": "pass", "diffs": []},
         "synthetic_fields": [],
         "fallback_fields": [],
         "synthetic_flagged": False,
@@ -556,9 +556,10 @@ def test_json_mode_prints_nothing_else(tmp_path, capsys):
     assert captured.err == ""
 
 
-def test_pass_with_diffs_is_not_a_passing_receipt(tmp_path, capsys):
+@pytest.mark.parametrize("name", ["exact-counts-by-layer", "solar-w1-semantic"])
+def test_pass_with_diffs_is_not_a_passing_receipt(tmp_path, capsys, name):
     ledger = write_ledger(tmp_path, [row("LEAFARRAY")])
-    doc = receipt("draw-array")
+    doc = comparison_receipt() if name == "solar-w1-semantic" else receipt("draw-array")
     doc["comparator"]["diffs"] = ["membership differs"]
     write_receipt(tmp_path, "draw-array", doc)
     assert run(ledger, receipts_dir(tmp_path)) == 2
@@ -595,7 +596,16 @@ def test_forged_comparator_verdict_is_rejected(tmp_path, capsys):
     assert "disagrees with executable comparison" in capsys.readouterr().err
 
 
-def test_new_comparator_cannot_omit_evidence(tmp_path, capsys):
+def test_unknown_comparator_name_exits_2(tmp_path, capsys):
+    ledger = write_ledger(tmp_path, [row("LEAFARRAY")])
+    doc = receipt("draw-array")
+    doc["comparator"]["name"] = "geometry"
+    write_receipt(tmp_path, "draw-array", doc)
+    assert run(ledger, receipts_dir(tmp_path)) == 2
+    assert "unknown value 'geometry'" in capsys.readouterr().err
+
+
+def test_solar_w1_semantic_without_comparison_evidence_exits_2(tmp_path, capsys):
     ledger = write_ledger(tmp_path, [row("LEAFARRAY")])
     doc = comparison_receipt()
     del doc["comparison"]
