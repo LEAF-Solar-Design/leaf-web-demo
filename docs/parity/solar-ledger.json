@@ -1,0 +1,6 @@
+{
+  "schema": "leaf.solar-parity-ledger.v1",
+  "registrations_expected": 394,
+  "source": "Branch2025 claude/skills/command_surface.py list",
+  "rows": []
+}
