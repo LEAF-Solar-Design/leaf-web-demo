@@ -60,10 +60,10 @@ describe('entityGeometry', () => {
 })
 
 describe('formatUnits', () => {
-  it('fixed precision, em-dash on non-finite, never "-0.00"', () => {
+  it('fixed precision, middle dot on non-finite, never "-0.00"', () => {
     expect(formatUnits(1234.567)).toBe('1234.57')
-    expect(formatUnits(NaN)).toBe('—')
-    expect(formatUnits(Infinity)).toBe('—')
+    expect(formatUnits(NaN)).toBe('·')
+    expect(formatUnits(Infinity)).toBe('·')
     expect(formatUnits(-0.001)).toBe('0.00')
     expect(formatUnits(-0)).toBe('0.00')
     expect(formatUnits(-1.5)).toBe('-1.50')

@@ -102,7 +102,7 @@ export default function CadEditSurface({
         Leaf Automation accepts DXF input (ASCII or binary) up to 16 MiB, checks size before parsing, and determines acceptance from the file contents.{' '}
         {canSave
           ? 'Edits run entirely in your browser, inside the isolated engine worker. Nothing leaves it until you explicitly save a new version to the project or download the result.'
-          : 'Runs entirely in your browser, inside the isolated engine worker. Nothing is uploaded and nothing is saved to the project — download the result to keep it.'}
+          : 'Runs entirely in your browser, inside the isolated engine worker. Nothing is uploaded and nothing is saved to the project. Download the result to keep it.'}
       </p>
 
       <input

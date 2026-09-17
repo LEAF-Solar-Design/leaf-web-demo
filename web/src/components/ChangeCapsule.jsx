@@ -102,7 +102,7 @@ export function acceptGate({ identity, phase, intakes }) {
 const PHASE_STATUS = Object.freeze({
   empty: 'No proposal yet.',
   pending: 'Awaiting your decision. Nothing has changed yet.',
-  applying: 'Applying — not yet confirmed by the server.',
+  applying: 'Applying, not yet confirmed by the server.',
   accepted: 'Accepted and confirmed by the server.',
   rejected: 'Rejected. Nothing was applied.',
   expired: 'Expired before a decision was made. Nothing was applied.',

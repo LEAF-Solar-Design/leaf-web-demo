@@ -142,7 +142,7 @@ export default function WorkerJobsPanel({ onSignedOut }) {
     try {
       setReceipt(await operatorClient.dispatchWorker(commands))
     } catch (e) {
-      setError(e?.body?.detail || e?.message || 'The job did not dispatch — nothing ran.')
+      setError(e?.body?.detail || e?.message || 'The job did not dispatch; nothing ran.')
       if (operatorClient.isOperatorDenied(e)) onSignedOut?.()
     } finally {
       setDispatching(false)
@@ -189,7 +189,7 @@ export default function WorkerJobsPanel({ onSignedOut }) {
             type="button"
             className="chip-act operator-cancel"
             disabled={!target || cancelling}
-            aria-label={target ? 'Cancel active worker' : `Cancel (unavailable — ${CANCEL_DISABLED_REASON})`}
+            aria-label={target ? 'Cancel active worker' : `Cancel (unavailable: ${CANCEL_DISABLED_REASON})`}
             title={target ? 'Cancel this exact active worker run' : CANCEL_DISABLED_REASON}
             onClick={cancel}
           >

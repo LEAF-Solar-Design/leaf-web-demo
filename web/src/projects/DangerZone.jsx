@@ -65,7 +65,7 @@ function DangerAction({
       setOpen(false)
       setTyped('')
     } catch (e) {
-      setError(errorMessage(e, `${kind === 'delete' ? 'Delete' : 'Reset'} did not go through — nothing changed.`))
+      setError(errorMessage(e, `${kind === 'delete' ? 'Delete' : 'Reset'} did not go through. Nothing changed.`))
     } finally {
       setBusy(false)
     }

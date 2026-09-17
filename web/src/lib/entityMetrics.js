@@ -75,7 +75,7 @@ export function entityGeometry(entity, kind) {
 /** Fixed-precision drawing-unit formatter: finite → '1234.56', else '—',
  *  and negative zero never survives the rounding. */
 export function formatUnits(value, digits = 2) {
-  if (!Number.isFinite(value)) return '—'
+  if (!Number.isFinite(value)) return '·'
   const fixed = value.toFixed(digits)
   // Anything that rounds to zero renders unsigned: "-0.00" is a lie about
   // a real negative quantity and noise about a rounding artifact.

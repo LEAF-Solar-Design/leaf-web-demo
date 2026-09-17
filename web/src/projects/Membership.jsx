@@ -85,7 +85,7 @@ export default function Membership({
     try {
       await fn()
     } catch (e) {
-      setError(errorMessage(e, 'That action did not go through — nothing changed.'))
+      setError(errorMessage(e, 'That action did not go through. Nothing changed.'))
     } finally {
       setFn((prev) => {
         const next = new Set(prev)
@@ -107,7 +107,7 @@ export default function Membership({
       setSearch('')
       setInviteRole('read-only')
     } catch (e) {
-      setError(errorMessage(e, 'The invite did not go through — nothing changed.'))
+      setError(errorMessage(e, 'The invite did not go through. Nothing changed.'))
     } finally {
       invitingRef.current = false
       setInviting(false)

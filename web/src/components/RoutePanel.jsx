@@ -179,13 +179,13 @@ export default function RoutePanel({
           {isWrite && <> <span className="cap write">drawing.write</span></>}
           {summary && <span className="dim"> · {summary}</span>}
           <span className="dim">
-            {' — '}
+            {': '}
             {locked
               ? (writeLockNote || 'editing is locked by another session; this write tool is paused.')
               : entBlocked
                 ? 'your plan doesn’t include editing tools.'
                 : isWrite
-                  ? 'creates a new version — you confirm before it runs.'
+                  ? 'creates a new version; you confirm before it runs.'
                   : 'you confirm before it runs.'}
           </span>
         </span>

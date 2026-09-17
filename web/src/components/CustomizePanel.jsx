@@ -373,9 +373,9 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
                           : record.review?.pr_state === 'closed'
                             ? 'was closed without merging.'
                             : record.review?.state === 'passed'
-                              ? 'is open. Review: PASS — the merge gate is next.'
+                              ? 'is open. Review: PASS. The merge gate is next.'
                               : record.review?.state === 'failed'
-                                ? `is open. Review: RED${record.review.description ? ` (${record.review.description})` : ''} — a fix round runs before anything merges.`
+                                ? `is open. Review: RED${record.review.description ? ` (${record.review.description})` : ''}. A fix round runs before anything merges.`
                                 : record.review?.state === 'error_verdict'
                                   ? 'is open. The review produced no readable verdict; it will be re-run.'
                                   : record.review?.state === 'pending'

@@ -73,7 +73,7 @@ export default function SheetFrame({ id, context, nav = [], left, right, hero, t
     ...titleBlock,
   };
   return (
-    <section className="sheet" id={id} aria-label={`Sheet ${tb.sheetCode} — ${tb.sheetTitle}`}>
+    <section className="sheet" id={id} aria-label={`Sheet ${tb.sheetCode}: ${tb.sheetTitle}`}>
       <header className="sheet-head">
         <img src="/site/icon-color.png" width="24" height="24" alt="" className="sheet-mark" />
         <span className="sheet-brand">Leaf Automation</span>

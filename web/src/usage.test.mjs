@@ -87,9 +87,9 @@ describe('usageCost — reads total_cost_usd, not an invented name', () => {
 })
 
 describe('orDash', () => {
-  it('renders the honest em dash for absent readings', () => {
-    assert.equal(orDash(null), '—')
-    assert.equal(orDash(undefined), '—')
+  it('renders the honest middle dot for absent readings', () => {
+    assert.equal(orDash(null), '·')
+    assert.equal(orDash(undefined), '·')
   })
 
   it('formats known readings, including zero', () => {

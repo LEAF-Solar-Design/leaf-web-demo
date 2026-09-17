@@ -769,7 +769,7 @@ export default function ToolCast({
       : checkout.lockedByOther?.holder
         ? `editing is locked by ${checkout.lockedByOther.holder}; this write tool is paused.`
         : previewLocked
-          ? `you are viewing v${drawing.previewing.version} read-only — choose “Back to head” in Version history to edit again.`
+          ? `you are viewing v${drawing.previewing.version} read-only. Choose “Back to head” in Version history to edit again.`
           : 'editing is paused while Leaf checks the drawing lock.'
   const takeCheckout = useCallback((...args) => {
     if (!sessionReady) return undefined

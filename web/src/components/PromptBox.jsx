@@ -67,7 +67,7 @@ export { SECRET_REASONS, SECRET_REASONS_NO_MOUNT }
 // the real author flow, which also makes the "+" add chip an honest action.
 const SCOPES = [
   { id: 'find', lane: 'run', desc: 'run an existing tool on the drawing' },
-  { id: 'act', lane: 'solve', desc: 'cloud solve jobs — not wired in this demo' },
+  { id: 'act', lane: 'solve', desc: 'cloud solve jobs: not wired in this demo' },
   { id: 'build', lane: 'build', desc: 'author a new capability' },
 ]
 
@@ -605,7 +605,7 @@ export default function PromptBox({
           <div className="resolver slash-menu" id="slash-menu-listbox" role="listbox" aria-label="Tool commands">
             <div className="resolver-header">
               {matches.length > 0
-                ? <>{trigger.kind === 'resource' ? 'MCP servers · Tab inserts · Enter picks' : 'Tools · Tab completes · Enter picks — you still confirm before it runs'}</>
+                ? <>{trigger.kind === 'resource' ? 'MCP servers · Tab inserts · Enter picks' : 'Tools · Tab completes · Enter picks. You still confirm before it runs'}</>
                 : <>{trigger.kind === 'resource' ? 'No MCP servers mounted.' : <>No tool matches “/{afterSlash}”. Keep typing, or Esc to close</>}</>}
             </div>
             {matches.map((t, i) => {
@@ -658,7 +658,7 @@ export default function PromptBox({
             <div className="resolver-header">
               {scopeRows.length > 0
                 ? 'Actions · Enter runs it, or opens a disabled row’s reason'
-                : <>No action or artifact matches {value ? `“${value}”` : 'anything yet — keep typing'}</>}
+                : <>No action or artifact matches {value ? `“${value}”` : 'anything yet. Keep typing'}</>}
             </div>
             {scopeRows.map((row, i) => (
               <div

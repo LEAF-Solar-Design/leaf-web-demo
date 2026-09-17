@@ -155,7 +155,7 @@ function ErrorLine({ err, onRetry, retry, quota, toolName }) {
   return (
     <div className={`inline-error ${quota ? 'quota' : ''}`}>
       <span>
-        {quota ? message : `Couldn't run ${toolName || 'the tool'} — ${message}`}
+        {quota ? message : `Couldn't run ${toolName || 'the tool'}: ${message}`}
         {!quota && code && <> <code className="dim">{code}</code></>}
       </span>
       {nextAction && <span className="dim">Next: {nextAction}</span>}

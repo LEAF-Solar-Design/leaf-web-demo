@@ -82,7 +82,7 @@ describe('ops usage scoreboard', () => {
       .toHaveAttribute('aria-pressed', 'true')
   })
 
-  it('shows an em dash, not $0.000, when the LLM ledger could not be read', async () => {
+  it('shows a middle dot, not $0.000, when the LLM ledger could not be read', async () => {
     getOpsUsage.mockResolvedValue({
       tenants: [{ tenant_id: 'tenant-alpha', runs: 7, usd_est: 0.125, disabled: false,
         llm_turns: null, llm_cost_tokens: null, llm_usd_est: null }],
@@ -96,7 +96,7 @@ describe('ops usage scoreboard', () => {
 
     await screen.findByRole('region', { name: 'Usage scoreboard' })
     const profile = scope('Profile · lifetime')
-    expect(within(profile).getByText('metered · — est.')).toBeInTheDocument()
+    expect(within(profile).getByText('metered · · est.')).toBeInTheDocument()
     expect(within(profile).queryByText('metered · $0.000 est.')).toBeNull()
   })
 

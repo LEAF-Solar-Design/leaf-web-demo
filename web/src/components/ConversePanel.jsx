@@ -133,7 +133,7 @@ function CustomizeChipBody({ payload }) {
         </span>
       )}
       <span className="dim">
-        {' — '}this changes the code of the product itself. Landing pushes a review
+        {': '}this changes the code of the product itself. Landing pushes a review
         branch; nothing goes live until it is reviewed, merged and deployed.
       </span>
     </>
@@ -162,7 +162,7 @@ function fmtUsage(u) {
 const STOP_NOTES = {
   awaiting_approval: 'waiting on your decision above',
   cap_hit: 'turn hit its token cap',
-  llm_rate_limited: 'rate-limited — try again shortly',
+  llm_rate_limited: 'rate-limited. Try again shortly',
   error: 'the turn ended with an error',
   timeout: 'the turn timed out',
 }
@@ -171,16 +171,16 @@ const STOP_NOTES = {
 function bannerFor(e) {
   const kind = classifyAgentError(e)
   const fallbacks = {
-    quota: 'AI paused — your built tools keep working.',
-    rate_limited: 'AI rate-limited — retry shortly.',
+    quota: 'AI paused. Your built tools keep working.',
+    rate_limited: 'AI rate-limited. Retry shortly.',
     grant: 'Chat needs a linked Claude account.',
-    busy: 'A turn is already in flight — wait for it to finish.',
+    busy: 'A turn is already in flight. Wait for it to finish.',
     entitlement: 'Chat isn’t included in your plan.',
-    approval_stale: 'That request was already decided — ask the assistant to propose it again.',
-    confirmation_expired: 'That confirmation expired — ask the assistant to propose it again.',
-    too_large: 'That message is too large — try fewer or smaller images.',
+    approval_stale: 'That request was already decided. Ask the assistant to propose it again.',
+    confirmation_expired: 'That confirmation expired. Ask the assistant to propose it again.',
+    too_large: 'That message is too large. Try fewer or smaller images.',
   }
-  const fallback = fallbacks[kind] || 'Couldn’t reach the assistant — your built tools keep working.'
+  const fallback = fallbacks[kind] || 'Couldn’t reach the assistant. Your built tools keep working.'
   return { kind, ...errorPresentation(e, fallback), message: fallback }
 }
 
@@ -808,9 +808,9 @@ export default function ConversePanel({
                 {item.capability && <> <span className={`cap ${isWrite ? 'write' : 'read'}`}>{item.capability}</span></>}
                 {summary && <span className="dim"> · {summary}</span>}
                 <span className="dim">
-                  {' — '}
+                  {': '}
                   {item.rationale || (isWrite
-                    ? 'creates a new version — you confirm before it runs.'
+                    ? 'creates a new version; you confirm before it runs.'
                     : 'you confirm before it runs.')}
                 </span>
               </>

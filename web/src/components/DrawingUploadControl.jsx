@@ -41,7 +41,7 @@ export default function DrawingUploadControl({ policy, policyLoading, busy, phas
             aria-checked={engine === 'local'}
             className={`chip-act drawing-upload-engine-opt${engine === 'local' ? ' selected' : ''}`}
             disabled={busy || policyLoading || !localOk}
-            title={localOk ? 'Convert and read DWG locally with dwg2dxf — no APS cloud call' : 'Local conversion is not available on this deployment'}
+            title={localOk ? 'Convert and read DWG locally with dwg2dxf: no APS cloud call' : 'Local conversion is not available on this deployment'}
             onClick={() => onEngineChange?.('local')}
           >
             Local (APS-free)
