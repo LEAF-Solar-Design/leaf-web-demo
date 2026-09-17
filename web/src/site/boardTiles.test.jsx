@@ -2,6 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { BoardTiles } from './BoardTiles.jsx'
 import { ProjectBoardGround } from './ProjectBoardGround.jsx'
+import SurfaceGrounds from './SurfaceGrounds.jsx'
 
 afterEach(cleanup)
 
@@ -15,6 +16,21 @@ const props = {
   catalog: { families: [family] },
 }
 const makeActions = () => Object.fromEntries(['onOpenDrawing', 'onOpenVersion', 'onOpenJob', 'onOpenTool', 'onOpenFamily', 'onOpenCapability'].map((name) => [name, vi.fn()]))
+
+it('J1 board mount delivers all six object actions through SurfaceGrounds', () => {
+  const actions = makeActions()
+  const { container } = render(<SurfaceGrounds surface="browser" {...props} actions={actions} />)
+  for (const [kind, handler, value] of [
+    ['version', 'onOpenVersion', version], ['job', 'onOpenJob', job],
+    ['tool', 'onOpenTool', tool], ['family', 'onOpenFamily', family],
+    ['capability', 'onOpenCapability', 'conversation'],
+  ]) {
+    fireEvent.click(container.querySelector(`[data-action="${kind}"]`))
+    expect(actions[handler]).toHaveBeenCalledWith(value)
+  }
+  fireEvent.click(container.querySelector('[data-action="drawing"]'))
+  expect(actions.onOpenDrawing).toHaveBeenCalledOnce()
+})
 
 it('B2 row1 preserves the markup without callbacks', () => {
   const { container, rerender } = render(<BoardTiles {...props} actions={makeActions()} />)

@@ -20,6 +20,92 @@ import esbuild from 'esbuild'
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
 const viewerSource = readFileSync(new URL('./components/Viewer.jsx', import.meta.url), 'utf8')
 
+describe('J1 Browser composition', () => {
+  const compiled = esbuild.transformSync(appSource, { loader: 'jsx' }).code
+  const mount = (name) => {
+    const match = compiled.match(new RegExp('React\\.createElement\\(\\s*' + name + ',\\s*'))
+    assert.ok(match, name + ' must be mounted in executable App code')
+    return compiled.slice(match.index, match.index + 1800)
+  }
+
+  it('J1 row4 signed-in first run mounts the existing workspace controller entry', () => {
+    assert.match(compiled, /!mock && signedIn && !openProjectId &&.*React\.createElement\(\s*ProjectStartPanel,/s)
+    const start = mount('ProjectStartPanel')
+    for (const [prop, binding] of Object.entries({
+      bootstrapState: 'workspaceController.bootstrapState', projects: 'projects',
+      projectsLoaded: 'workspaceController.projectsLoaded', projectsLoading: 'projectsLoading',
+      openProjectId: 'openProjectId', projectsError: 'projectsErr', orgBusy: 'orgBusy',
+      projectBusy: 'projectBusy', orgDraftError: 'workspaceController.orgDraftError',
+      projectDraftError: 'workspaceController.projectDraftError', orgConflict: 'workspaceController.orgConflict',
+      onCreateOrg: 'createWorkspaceOrg', onCreateProject: 'createWorkspaceProject',
+      onOpenProject: 'onOpenProject', onLoadProjects: 'workspaceController.loadProjects',
+    })) {
+      // Controller fields are destructured in App; esbuild prints same-name props as shorthand.
+      const emitted = prop === binding ? prop : `${prop}: ${binding}`
+      assert.ok(start.split('\n').some((line) => line.trim().replace(/,$/, '') === emitted), `${prop} must reach the existing controller`)
+    }
+    assert.match(start, /drawingMounted:\s*Boolean\(shown\)/)
+    assert.equal((compiled.match(/= useWorkspaceController\(/g) || []).length, 1)
+    assert.match(compiled, /openProject:\s*onOpenProject/)
+    assert.match(compiled, /createProject:\s*createWorkspaceProject/)
+    assert.match(compiled, /createOrg:\s*createWorkspaceOrg/)
+  })
+
+  it('J1 row5 the mounted material intake binds the open project before upload', () => {
+    const live = mount('LiveProjectMaterialIntake')
+    assert.match(live, /key:\s*openProjectId/)
+    assert.match(live, /project_id:\s*openProjectId/)
+    assert.match(live, /onAttached:\s*rehydrate/)
+    assert.match(live, /artifacts:\s*workspace\?\.drawing_artifacts \|\| \[\]/)
+    assert.equal((compiled.match(/= useDrawingUploadController\(/g) || []).length, 1)
+    assert.equal((compiled.match(/= useMaterialIntake\(/g) || []).length, 1)
+
+    // Execute only the mounted adapter, with the two IO controllers replaced.
+    // This pins ordering and refusal without making an upload or a project write.
+    const begin = appSource.indexOf('function LiveProjectMaterialIntake(')
+    const end = appSource.indexOf('export default function App()', begin)
+    assert.ok(begin >= 0 && end > begin)
+    const adapter = esbuild.transformSync(appSource.slice(begin, end), { loader: 'jsx' }).code
+    const events = []
+    const project = { project_id: 'project-j1', name: 'J1 roof' }
+    const artifacts = [{ drawing_id: 'drawing-j1' }]
+    const file = { name: 'roof.dxf' }
+    const upload = { actions: { upload: (value) => events.push(['upload', value]) } }
+    let allowed = true
+    const intake = { begin: (target) => { events.push(['begin', target]); return allowed }, retry: () => {} }
+    const onAttached = () => {}
+    const renderAdapter = new Function('React', 'ProjectMaterialIntake', 'useDrawingUploadController', 'useMaterialIntake',
+      adapter + '\nreturn LiveProjectMaterialIntake')(
+      { createElement: (type, props) => ({ type, props }) }, 'ProjectMaterialIntake', () => upload,
+      (options) => { assert.equal(options.upload, upload); assert.equal(options.onAttached, onAttached); return intake },
+    )
+    const element = renderAdapter({ project, artifacts, onAttached })
+    assert.equal(element.type, 'ProjectMaterialIntake')
+    assert.equal(element.props.project, project)
+    assert.equal(element.props.upload, upload)
+    assert.equal(element.props.intake, intake)
+    assert.equal(element.props.artifacts, artifacts)
+    element.props.onStartUpload(file)
+    assert.deepEqual(events, [['begin', { projectId: 'project-j1', projectName: 'J1 roof', fileName: 'roof.dxf' }], ['upload', file]])
+    events.length = 0
+    allowed = false
+    element.props.onStartUpload(file)
+    assert.equal(events.length, 1)
+    assert.equal(events[0][0], 'begin')
+  })
+
+  it('J1 row6 demo material mounts the disabled component without an IO controller', () => {
+    const source = codeOnly(appSource)
+    assert.match(source, /projectPane === 'material' && \(mock \|\| !signedIn \|\| !openProjectId/)
+    assert.ok(source.includes('? <ProjectMaterialIntake project={null} mock={mock} artifacts={[]} />'))
+    assert.ok(source.includes(': <LiveProjectMaterialIntake'))
+    const appBody = source.slice(source.indexOf('export default function App()'))
+    assert.doesNotMatch(appBody, /useDrawingUploadController\(/)
+    assert.doesNotMatch(appBody, /useMaterialIntake\(/)
+    mount('ProjectMaterialIntake')
+  })
+})
+
 function codeOnly(src) {
   const chars = src.split('')
   let i = 0
@@ -1078,7 +1164,11 @@ describe('App.jsx wiring', () => {
     assert.match(grounds, /onCreateProject=\{onCreateProject\}/)
     for (const component of ['SurfaceFrame', 'SurfaceGrounds']) {
       const mount = new RegExp('<' + component + '\\s[\\s\\S]*?/>|<' + component + '\\s[\\s\\S]*?>')
-      const source = appNoComments.match(mount)?.[0]
+      // J1 gives the ground nested JSX panel props; its first /> now closes
+      // ProjectStartPanel, not SurfaceGrounds. Read through the portal argument.
+      const source = component === 'SurfaceGrounds'
+        ? appNoComments.match(/<SurfaceGrounds\s[\s\S]*?\/>,/)?.[0]
+        : appNoComments.match(mount)?.[0]
       assert.ok(source, component + ' mount exists')
       assert.match(source, new RegExp('studioPresentation=\\{Boolean\\(studioGround\\)\\}'))
       assert.match(source, new RegExp('mock=\\{mock\\}'))

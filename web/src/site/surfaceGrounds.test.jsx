@@ -7,6 +7,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
+import { useState } from 'react'
+import ProjectWorkspacePanels from '../workspace/ProjectWorkspacePanels.jsx'
+import ProjectMaterialIntake from '../workspace/ProjectMaterialIntake.jsx'
 
 import SurfaceGrounds, { DeviceGround, ProjectBoardGround, groundShowsDrawing, measureContainedWindow } from './SurfaceGrounds.jsx'
 import { ProjectBoardGround as DirectProjectBoardGround } from './ProjectBoardGround.jsx'
@@ -15,6 +18,84 @@ import { BoardTiles } from './BoardTiles.jsx'
 import { deriveWorkspaceProjectState } from './workspaceProjectState.js'
 
 afterEach(cleanup)
+
+const j1Workspace = {
+  project: { project_id: 'j1-project', name: 'J1 roof' },
+  drawing_versions: [{ version_id: 'j1-version', drawing_id: 'roof', seq: 1 }],
+  jobs: [{ job_id: 'j1-job', tool_name: 'Measure roof', status: 'succeeded' }],
+  built_tools: [{ tool_id: 'j1-tool', name: 'Roof count' }],
+}
+
+function J1Board() {
+  const [pane, setPane] = useState(null)
+  return <SurfaceGrounds surface="browser" workspace={j1Workspace}
+    workspaceProject={{ kind: 'project', project_id: 'j1-project', label: 'J1 roof' }}
+    actions={{ onOpenVersion: () => setPane('versions'), onOpenJob: () => setPane('jobs'), onOpenTool: () => setPane('tools') }}
+    panel={<ProjectWorkspacePanels project={j1Workspace.project} workspace={j1Workspace}
+      pane={pane} onBack={() => setPane(null)} />} />
+}
+
+it('J1 row1 Browser board versions, jobs and tools open their mounted panes', () => {
+  const { container } = render(<J1Board />)
+  for (const [action, pane] of [['version', 'versions'], ['job', 'jobs'], ['tool', 'tools']]) {
+    fireEvent.click(container.querySelector(`[data-action="${action}"]`))
+    expect(container.querySelector(`[data-pane="${pane}"]`)).not.toBeNull()
+    expect(within(container.querySelector(`[data-pane="${pane}"]`)).getByRole('heading', { name: pane[0].toUpperCase() + pane.slice(1), exact: true })).toBeTruthy()
+  }
+  // Drive the real ground above, and pin the served App's matching callbacks.
+  const app = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
+  expect(app).toMatch(/onOpenVersion: \(\) => setProjectPane\('versions'\)/)
+  expect(app).toContain("setBoardJob(job); setProjectPane('jobs')")
+  expect(app).toMatch(/onOpenTool: \(\) => setProjectPane\('tools'\)/)
+  expect(app).toContain('<ProjectWorkspacePanels')
+})
+
+it('J1 row2 Back to board preserves the open project and its board objects', () => {
+  const { container } = render(<J1Board />)
+  const board = container.querySelector('[data-ground="browser"]')
+  const version = container.querySelector('[data-action="version"]')
+  fireEvent.click(version)
+  expect(container.querySelector('[data-pane="versions"]').textContent).toContain('J1 roof')
+  fireEvent.click(screen.getByRole('button', { name: 'Back to board' }))
+  expect(container.querySelector('[data-pane]')).toBeNull()
+  expect(container.querySelector('[data-ground="browser"]')).toBe(board)
+  expect(board.dataset.projectState).toBe('project')
+  expect(container.querySelector('[data-action="version"]')).toBe(version)
+  fireEvent.click(version)
+  expect(container.querySelector('[data-pane="versions"]').textContent).toContain('J1 roof')
+  const app = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
+  expect(app).toContain('onBack={() => setProjectPane(null)}')
+})
+
+it('J1 row3 SurfaceGrounds forwards only the two new board props', () => {
+  const actions = { onOpenVersion: vi.fn() }
+  const panel = <p>Mounted project pane</p>
+  const element = SurfaceGrounds({ surface: 'browser', actions, panel, unownedProp: 'must not leak' })
+  const board = element.props.children[0]
+  expect(board.type).toBe(DirectProjectBoardGround)
+  expect(board.props.actions).toBe(actions)
+  expect(board.props.panel).toBe(panel)
+  expect(Object.keys(board.props).sort()).toEqual([
+    'active', 'leavingGround', 'contained', 'occluders', 'onReturnToDrawing', 'onCreateProject',
+    'actions', 'panel', 'headingRef', 'startFocusRequest', 'studioPresentation', 'studioShell',
+    'workspaceProject', 'workspace', 'drawing', 'catalog', 'mock',
+  ].sort())
+  const device = element.props.children[1]
+  expect(device.props).not.toHaveProperty('actions')
+  expect(device.props).not.toHaveProperty('panel')
+})
+
+it('J1 row6 the demo ground mounts disabled material without a mutation', () => {
+  const onStartUpload = vi.fn()
+  render(<SurfaceGrounds surface="browser" mock
+    panel={<ProjectMaterialIntake project={null} mock artifacts={[]} onStartUpload={onStartUpload} />} />)
+  const input = screen.getByLabelText('Drawing file')
+  expect(input.disabled).toBe(true)
+  expect(screen.getByRole('button', { name: 'Upload DWG or DXF' }).disabled).toBe(true)
+  fireEvent.change(input, { target: { files: [new File(['0\nEOF\n'], 'roof.dxf')] } })
+  expect(onStartUpload).not.toHaveBeenCalled()
+  expect(screen.getByText('Uploads are unavailable in this demo.')).toBeTruthy()
+})
 
 describe('extracted ground exports', () => {
   it('renders the same active board through either import', () => {

@@ -212,8 +212,8 @@ export const PRODUCT_SURFACES = Object.freeze([
       //   divergence (D3): ToolCast.jsx's workspace rail now reads this same
       //   slot (`authoringOnStage`) instead of the old cad-only literal.
       authoring: true,
-      // versions: App.jsx:3041 VersionHistory lives inside the workspace card,
-      //   whose display gate (App.jsx:2859) hides it off cad/solar.
+      // J1: ProjectWorkspacePanels hosts the board's version list. This slot
+      // still excludes the drawing-card VersionHistory from the board profile.
       versions: 'none',
       conversations: {
         // scope: converse.js:129-134 caches ONE session per project+drawing pair

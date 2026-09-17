@@ -47,6 +47,27 @@ const FAMS = [
   },
 ]
 
+it('J1 row7 mounted Project upload is enabled while absent handlers retain honest reasons', () => {
+  const onUpload = vi.fn()
+  const tools = profileRibbonTabs('project', { files: { onUpload } })[0].clusters.flatMap((cluster) => cluster.tools)
+  const upload = tools.find((tool) => tool.id === 'files:upload')
+  expect(upload.disabled).toBe(false)
+  expect(upload.reason).toBe(PROFILE_REASONS.uploadDrawing)
+  upload.onClick()
+  expect(onUpload).toHaveBeenCalledOnce()
+  const create = tools.find((tool) => tool.id === 'project:create')
+  expect(create).toMatchObject({ disabled: true, reason: PROFILE_REASONS.createProject })
+  expect(create.onClick).toBeUndefined()
+  const absent = profileRibbonTabs('project')[0].clusters.flatMap((cluster) => cluster.tools)
+    .find((tool) => tool.id === 'files:upload')
+  expect(absent).toMatchObject({ disabled: true, reason: PROFILE_REASONS.uploadDrawing })
+  expect(absent.onClick).toBeUndefined()
+  // Availability comes from the served mount, not a test-only callback.
+  const app = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
+  expect(app).toContain("files: { onUpload: !mock && signedIn && openProjectId ? () => setProjectPane('material') : null }")
+  expect(app).toContain('<LiveProjectMaterialIntake')
+})
+
 describe('C-05 ship contract status rows', () => {
   const contract = { readiness: { healthy: true, launchable: true }, receipt_id: 'r1', reported_at: '2026-09-16T10:00:00Z' }
   const absent = (rows) => {

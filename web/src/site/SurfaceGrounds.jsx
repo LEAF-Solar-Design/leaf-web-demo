@@ -50,7 +50,7 @@ export function groundShowsDrawing(surface) {
 export default function SurfaceGrounds({
   surface, workspaceProject, workspace, drawing, catalog, mock,
   boardVisible, onReturnToDrawing, headingRef, startFocusRequest, leavingGround = null,
-  onCreateProject,
+  onCreateProject, actions, panel,
   occluders = NO_OCCLUDERS,
   studioPresentation = false, studioShell = false,
   iosEnabled, iosContract, revision,
@@ -72,6 +72,8 @@ export default function SurfaceGrounds({
         occluders={occluders}
         onReturnToDrawing={onReturnToDrawing}
         onCreateProject={onCreateProject}
+        actions={actions}
+        panel={panel}
         headingRef={headingRef}
         startFocusRequest={startFocusRequest}
         studioPresentation={studioPresentation}
