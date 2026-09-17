@@ -151,7 +151,8 @@ test.describe('shared phone workspace', () => {
   test('all four profiles share one band and exclusive bottom drawers', async ({ page, request }) => {
     await boot(page, request)
     const panels = page.getByRole('group', { name: 'Workspace panels', exact: true })
-    const selectors = { Catalog: 'aside.nav', Jobs: '.rail-stack', Result: '.result-block', Plan: '.ent-panel:visible' }
+    // .rail-stack is the shared wrapper for Jobs and Plan.
+    const selectors = { Catalog: 'aside.nav', Jobs: '.rail-stack aside.rail', Result: '.result-block', Plan: '.ent-panel:visible' }
     let bandEdges = null
     for (const profile of ['Browser', 'CAD', 'Solar CAD', 'iOS', 'Browser']) {
       await page.getByRole('tab', { name: profile, exact: true }).click()
