@@ -288,7 +288,7 @@ jobs:
         with:
           name: docs-noop-${{ github.sha }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/docs-noop/docs-noop.json
-          retention-days: 30
+          retention-days: 3
 
       - name: Require exact source to be reviewed
         if: steps.decide.outputs.build == 'true'
@@ -1714,6 +1714,7 @@ jobs:
           fi
           echo "::notice::$IMAGE_NAME already has the complete exact output set at ${digests[0]}; skipping its build."
           echo "skip=true" >> "$GITHUB_OUTPUT"
+          echo "digest=${digests[0]}" >> "$GITHUB_OUTPUT"
 
       - name: Require the read-only canonical solver deploy key
         if: matrix.image == 'canonical-worker' && steps.surface.outputs.reuse != 'true' && steps.resume.outputs.skip != 'true'
@@ -2016,12 +2017,12 @@ jobs:
           name: surface-web-dist-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
           path: ${{ steps.surface.outputs.reuse == 'true' && format('{0}/reused-web-dist', runner.temp) || 'web/dist' }}
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 3
 
       - name: Create exact surface provenance predicate
         if: steps.surface.outputs.reuse != 'true'
         env:
-          IMAGE_DIGEST: ${{ steps.build-image.outputs.digest }}
+          IMAGE_DIGEST: ${{ steps.build-image.outputs.digest || steps.resume.outputs.digest }}
           SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
           WEB_ARTIFACT_SHA256: ${{ steps.surface-web.outputs.sha256 }}
         run: |
@@ -2050,14 +2051,14 @@ jobs:
         uses: actions/attest@v4
         with:
           subject-name: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.build-image.outputs.digest }}
+          subject-digest: ${{ steps.build-image.outputs.digest || steps.resume.outputs.digest }}
           predicate-type: ${{ env.SURFACE_PREDICATE_TYPE }}
           predicate-path: ${{ runner.temp }}/surface-predicate.json
           push-to-registry: true
 
       - name: Materialize one exact v3 service entry
         env:
-          BUILT_DIGEST: ${{ steps.build-image.outputs.digest }}
+          BUILT_DIGEST: ${{ steps.build-image.outputs.digest || steps.resume.outputs.digest }}
           REUSED_DIGEST: ${{ steps.surface.outputs.digest }}
           REUSED: ${{ steps.surface.outputs.reuse }}
           LOOKUP_TAG: ${{ steps.surface.outputs.lookup_tag }}
@@ -2128,7 +2129,7 @@ jobs:
           name: surface-result-${{ matrix.image }}-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/service-entry.json
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 3
 
   verify:
     # The full-build path fans five matrix-owned v3 entries into one strict
@@ -2325,7 +2326,7 @@ jobs:
           name: staging-supply-set-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/staging-supply-set.json
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 3
 
       - name: Upload deterministic web deployment artifact
         uses: actions/upload-artifact@v4
@@ -2333,7 +2334,7 @@ jobs:
           name: web-dist-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
           path: web/dist
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 3
 
   # Speculative image builds (operator decision D3). Dispatched per PR update
   # by speculate-platform-images.yml on the MAIN ref, so this text and the
@@ -2854,7 +2855,7 @@ jobs:
           name: spec-web-dist-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/spec-web-dist.zip
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 3
 
       - name: Put speculative web dist in S3
         if: ${{ inputs.speculative_group_head != '' && matrix.image == 'web' && steps.exists.outputs.present != 'true' }}
@@ -2933,7 +2934,7 @@ jobs:
           name: spec-surface-result-${{ matrix.image }}-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/spec-service-entry.json
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 3
 
       - name: Put speculative service entry in S3
         if: ${{ inputs.speculative_group_head != '' && steps.exists.outputs.present != 'true' }}
@@ -3177,7 +3178,7 @@ jobs:
           name: spec-v3-supply-set-${{ needs.prepare.outputs.source_tree }}
           path: ${{ runner.temp }}/spec-v3-supply-set.json
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 3
 
       - name: Put speculative supply set in S3
         if: ${{ inputs.speculative_group_head != '' && steps.evidence.outputs.complete == 'true' }}
@@ -3249,7 +3250,7 @@ jobs:
           name: spec-tag-readiness-${{ needs.prepare.outputs.source_tree }}-${{ needs.prepare.outputs.source_sha }}
           path: ${{ runner.temp }}/spec-tag-readiness.json
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 3
 
       - name: Put speculative readiness in S3
         if: ${{ inputs.speculative_group_head != '' && steps.digests.outputs.complete == 'true' }}
@@ -3837,7 +3838,7 @@ jobs:
           name: staging-supply-set-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/staging-supply-set.json
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 3
 
       # Native staging deploy hand-off: release/<sha40>/<run_id>-<attempt>/web-dist.zip.
       - name: Put release web-dist.zip to S3
@@ -3860,7 +3861,7 @@ jobs:
           name: web-dist-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
           path: spec-candidate/restamped-web/dist
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 3
 
       # Native staging deploy hand-off: release/<sha40>/<run_id>-<attempt>/web-source-restamp.json.
       - name: Put release web-source-restamp.json to S3
@@ -3883,7 +3884,7 @@ jobs:
           name: web-source-restamp-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
           path: ${{ github.workspace }}/spec-candidate/web-source-restamp.json
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 3
 
   # ---------------------------------------------------------------------
   # D3, phase 1 of 2: HARVEST the real CVE surface of what actually deploys.
@@ -4147,7 +4148,7 @@ jobs:
           name: cve-harvest-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
           path: harvest
           if-no-files-found: warn
-          retention-days: 30
+          retention-days: 3
 
   handoff:
     needs: [prepare]
@@ -4288,4 +4289,4 @@ jobs:
           name: production-handoff-candidate-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/production-handoff-candidate.json
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 3

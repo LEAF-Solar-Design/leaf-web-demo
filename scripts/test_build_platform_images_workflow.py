@@ -2822,6 +2822,7 @@ def main() -> None:
     assert 'if [ "$unique_digests" != "1" ]; then' in resume_run
     assert "resolve to different digests" in resume_run
     assert 'echo "skip=true" >> "$GITHUB_OUTPUT"' in resume_run
+    assert 'echo "digest=${digests[0]}" >> "$GITHUB_OUTPUT"' in resume_run
 
     # Mutation guard for the accumulator itself. Keep this next to the
     # executable contract so removing the append cannot leave a green suite
@@ -6880,17 +6881,27 @@ def test_digest_aware_build_attests_each_built_digest_and_never_restamps_reuse()
     image = next(step for step in steps if step.get("id") == "build-image")
     assert "steps.surface.outputs.reuse != 'true'" in image["if"]
     assert any("surface-v1-" in tag for tag in image["with"]["tags"].splitlines())
+    predicate = next(
+        step for step in steps
+        if step.get("name") == "Create exact surface provenance predicate"
+    )
+    assert predicate["env"]["IMAGE_DIGEST"] == (
+        "${{ steps.build-image.outputs.digest || steps.resume.outputs.digest }}"
+    )
     attestation = next(
         step for step in steps if step.get("name") == "Sign exact surface provenance"
     )
     assert attestation["uses"] == "actions/attest@v4"
     assert attestation["with"]["subject-digest"] == (
-        "${{ steps.build-image.outputs.digest }}"
+        "${{ steps.build-image.outputs.digest || steps.resume.outputs.digest }}"
     )
     assert attestation["with"]["push-to-registry"] is True
     result = next(
         step for step in steps
         if step.get("name") == "Materialize one exact v3 service entry"
+    )
+    assert result["env"]["BUILT_DIGEST"] == (
+        "${{ steps.build-image.outputs.digest || steps.resume.outputs.digest }}"
     )
     assert "if" not in result
     code = _executable_bash(result["run"])
@@ -7667,7 +7678,7 @@ def test_speculative_tag_readiness_is_minted_from_digests_not_v3_evidence() -> N
             "-${{ needs.prepare.outputs.source_sha }}"
         )
         assert readiness_upload["with"]["if-no-files-found"] == "error"
-        assert readiness_upload["with"]["retention-days"] == 30
+        assert readiness_upload["with"]["retention-days"] == 3
         materialize_code = _executable_bash(materialize["run"])
         assert "leaf.speculative-tag-readiness.v1" in materialize_code
         for field in (
@@ -8104,7 +8115,7 @@ def test_every_artifact_upload_declares_bounded_retention() -> None:
             if step.get("uses") == "actions/upload-artifact@v4":
                 options = step["with"]
                 assert "retention-days" in options, (job_name, step)
-                assert 1 <= options["retention-days"] <= 30, (job_name, step)
+                assert 1 <= options["retention-days"] <= 3, (job_name, step)
 
 
 def _mq_release_pairs(doc):
