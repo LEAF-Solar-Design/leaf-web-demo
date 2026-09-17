@@ -129,22 +129,34 @@ def test_empty_seed_ledger_fails_row_count(tmp_path, capsys):
     assert result["ok"] is False
 
 
-def test_shipped_seed_ledger_is_structurally_valid_and_fails_row_count():
-    """The shipped ledger must be readable (exit 1), never unreadable (exit 2)."""
+def test_shipped_ledger_is_reconciled_and_wave_one_is_open():
+    """The shipped ledger reconciles all 394 registrations (w0 passes) while W1 still owes receipts."""
     proc = subprocess.run(
         [sys.executable, str(SCRIPT), "--require", "w0", "--json"],
         capture_output=True,
         text=True,
         cwd=str(REPO_ROOT),
     )
-    assert proc.returncode == 1, proc.stderr
+    assert proc.returncode == 0, proc.stderr
     assert "Traceback" not in proc.stderr
     result = json.loads(proc.stdout)
-    assert finding_codes(result) == ["ROW_COUNT"]
-    seed = json.loads(SEED_LEDGER.read_text(encoding="utf-8"))
-    assert seed["schema"] == "leaf.solar-parity-ledger.v1"
-    assert seed["registrations_expected"] == 394
-    assert seed["rows"] == []
+    assert result["ok"] is True and result["findings"] == []
+    assert result["counts"]["rows"] == 394
+    ledger = json.loads(SEED_LEDGER.read_text(encoding="utf-8"))
+    assert ledger["schema"] == "leaf.solar-parity-ledger.v1"
+    assert ledger["registrations_expected"] == 394
+    assert len(ledger["rows"]) == 394
+    assert len({row["global"] for row in ledger["rows"]}) == 394
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), "--require", "w1", "--json"],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO_ROOT),
+    )
+    assert proc.returncode == 1, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["counts"]["duty_rows_in_scope"] > 0
+    assert all(code in {"RECEIPT_MISSING", "RECEIPT_FAIL", "RECEIPT_STALE"} for code in finding_codes(result))
 
 
 def test_valid_three_row_ledger_passes_all_production(tmp_path, capsys):
