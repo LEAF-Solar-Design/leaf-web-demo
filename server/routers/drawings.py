@@ -143,6 +143,35 @@ def _backend(tenant_id: str = ""):
     )
 
 
+@router.get("/api/drawings/{drawing_id}/graph")
+def get_graph(drawing_id: str, project_id: str, version: str = "head",
+              tenant_id: str = Depends(deps.require_active_tenant)):
+    import store
+    try:
+        bundle = store.read_graph_bundle(_backend(str(tenant_id)), str(tenant_id),
+                                         drawing_id, version, project_id=project_id)
+    except (KeyError, ValueError):
+        return error_response(ErrorCode.BAD_PARAMS, "drawing graph unavailable",
+                              retryable=False, status_code=404)
+    return with_envelope_fields(deps.tenant_echo(
+        {"graph": bundle["graph"], "receipt": bundle["receipt"],
+         "version": bundle["version"]}, tenant_id))
+
+
+@router.get("/api/drawings/{drawing_id}/mapping")
+def get_mapping(drawing_id: str, project_id: str, version: str = "head",
+                tenant_id: str = Depends(deps.require_active_tenant)):
+    import store
+    try:
+        bundle = store.read_graph_bundle(_backend(str(tenant_id)), str(tenant_id),
+                                         drawing_id, version, project_id=project_id)
+    except (KeyError, ValueError):
+        return error_response(ErrorCode.BAD_PARAMS, "drawing mapping unavailable",
+                              retryable=False, status_code=404)
+    return with_envelope_fields(deps.tenant_echo(
+        {"mapping": bundle["mapping"], "version": bundle["version"]}, tenant_id))
+
+
 @router.get("/api/drawings/{drawing_id}/intake")
 def get_intake(drawing_id: str, version: str = "head",
                tenant_id: str = Depends(deps.require_active_tenant)) -> Dict[str, Any]:
@@ -698,6 +727,12 @@ def restore_drawing_version(tenant_id: str, drawing_id: str, target_version: int
     # column. A row without one restores as null: the restoring actor is not
     # an author.
     source_ref: Optional[str] = _source_ref(source_entry.get("source_ref"))
+    source_bundle = None
+    if (source_entry.get("note") or "").startswith("solar-bundle:"):
+        try:
+            source_bundle = store.read_graph_bundle(backend, tenant_id, drawing_id, source_v)
+        except (KeyError, ValueError) as exc:
+            raise RestoreSourceUnreadable(str(exc)) from exc
 
     try:
         _, source_intake = write_loop.read_intake(
@@ -725,6 +760,22 @@ def restore_drawing_version(tenant_id: str, drawing_id: str, target_version: int
                     raise RestoreDrawingUnavailable(str(exc)) from exc
                 parent_version = int(manifest["head"])
                 put_holder = holder if holder is not None else store.ANONYMOUS_HOLDER
+                graph_bundle = None
+                if source_bundle is not None:
+                    _, _, parent_entry = store.resolve_version_entry(
+                        backend, tenant_id, drawing_id, parent_version)
+                    parent_rev = None
+                    if (parent_entry.get("note") or "").startswith("solar-bundle:"):
+                        parent_rev = store.read_graph_bundle(
+                            backend, tenant_id, drawing_id, parent_version,
+                            project_id=source_bundle["receipt"]["project_id"])["graph"]["rev"]
+                    graph_bundle = {name: source_bundle[name]
+                                    for name in ("graph", "intake", "mapping")}
+                    graph_bundle.update(
+                        project_id=source_bundle["receipt"]["project_id"],
+                        apply_id=f"restore-{source_v}-from-{parent_version}",
+                        source_version=parent_version, source_sha256=parent_entry["sha256"],
+                        source_rev=parent_rev, restore_version=source_v)
                 try:
                     new_version = write_loop._put_bytes_version(
                         backend, tenant_id, drawing_id, source_bytes,
@@ -734,14 +785,16 @@ def restore_drawing_version(tenant_id: str, drawing_id: str, target_version: int
                               "source_ref": source_ref},
                         holder=put_holder, fence=fence,
                         require_parent_is_head=True,
+                        graph_bundle=graph_bundle,
                     )
                 except ValueError as exc:
                     raise RestoreCommitRejected(str(exc)) from exc
                 restored_head_readable = True
                 try:
-                    write_loop.publish_intake_cache(
-                        backend, tenant_id, drawing_id, new_version,
-                        source_bytes, source_intake)
+                    if source_bundle is None:
+                        write_loop.publish_intake_cache(
+                            backend, tenant_id, drawing_id, new_version,
+                            source_bytes, source_intake)
                 except Exception:  # noqa: BLE001 - the immutable head committed
                     restored_head_readable = blob_is_intake
         except store.CheckoutDenied as exc:
