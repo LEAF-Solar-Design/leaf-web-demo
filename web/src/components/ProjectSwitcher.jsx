@@ -35,7 +35,10 @@ export default function ProjectSwitcher({
   const [projectDraft, setProjectDraft] = useState('')
   const rootRef = useRef(null)
   const menu = useExit(open) // 180 ms M1 exit fade on close
-  const bound = bootstrapState === 'bound' || (bootstrapState == null && !!orgId)
+  const hasBootstrapState = bootstrapState !== undefined
+  const bound = hasBootstrapState ? bootstrapState === 'bound' : !!orgId
+  const unbound = hasBootstrapState ? bootstrapState === 'unbound' : !orgId
+  const draftError = hasBootstrapState ? (unbound ? orgDraftError : projectDraftError) : null
   const onOrgCreated = () => setOrgName('My workspace')
   const onProjectCreated = () => setProjectDraft('')
   const [submitError, setSubmitError] = useState(null)
@@ -133,14 +136,14 @@ export default function ProjectSwitcher({
 
       {menu.shown && (
         <div className={`proj-menu resolver${menu.exiting ? ' exit' : ''}`} role="menu">
-          {unavailable && bootstrapState !== 'unbound' ? (
+          {unavailable && (!hasBootstrapState || (!unbound && unavailable !== draftError)) ? (
             <div className="proj-empty">
               <div className="proj-note">{formatProjectsUnavailable(unavailable)}</div>
               <div className="proj-sub">
                 Showing the current drawing: <b>{projectName}</b>. The demo keeps working without workspace projects.
               </div>
             </div>
-          ) : bootstrapState === 'unbound' ? (
+          ) : unbound ? (
             <div className="proj-empty">
               <div className="proj-sub">No workspace org yet. Create one to keep projects and jobs.</div>
               <form className="proj-create" onSubmit={(event) => { event.preventDefault(); submit('org', orgName) }}>
@@ -152,8 +155,8 @@ export default function ProjectSwitcher({
                   {orgBusy ? 'Creating…' : 'Create workspace org'}
                 </button>
               </form>
-              {(orgDraftError || submitError) && <p role="alert">{orgDraftError || submitError}</p>}
-              {orgConflict && <button type="button" onClick={onLoadProjects}>Use my existing workspace</button>}
+              {(draftError || submitError) && <p role="alert">{draftError || submitError}</p>}
+              {hasBootstrapState && orgConflict && <button type="button" onClick={onLoadProjects}>Use my existing workspace</button>}
             </div>
           ) : !bound ? (
             <div className="proj-note" role="status">Loading workspace projects…</div>
@@ -191,7 +194,7 @@ export default function ProjectSwitcher({
                       </li>
                     )
                   })}
-                  {projects.length === 0 && !loading && projectsLoaded && (
+                  {projects.length === 0 && !loading && (!hasBootstrapState || projectsLoaded) && (
                     <li className="proj-note-li">No projects yet.</li>
                   )}
                 </ul>
@@ -210,7 +213,7 @@ export default function ProjectSwitcher({
                   {projectBusy ? 'Creating…' : 'Create project'}
                 </button>
               </form>
-              {(projectDraftError || submitError) && <p role="alert">{projectDraftError || submitError}</p>}
+              {(draftError || submitError) && <p role="alert">{draftError || submitError}</p>}
             </>
           )}
         </div>
