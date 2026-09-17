@@ -34,8 +34,11 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
+import random
 import re
+import threading
 import time
 import uuid
 import urllib.parse
@@ -679,20 +682,148 @@ def cancel_workitem(workitem_id: str, dry_run: bool = False) -> dict:
             "cancelled": cancelled}
 
 
+# Poll pacing. APS limits GET workitems/:id to 150 requests/min per app and
+# answers 429 with Retry-After. Every status GET in this process goes through one
+# shared pacer, so N concurrent pollers together stay under the budget.
+# Clock, sleep and jitter are module-level indirection so tests can drive them.
+_poll_clock = time.monotonic
+_poll_sleep = time.sleep
+_poll_jitter = random.uniform
+
+_POLL_BUDGET_DEFAULT = 120
+_POLL_BUDGET_MAX = 150  # the APS hard limit for GET workitems/:id
+_POLL_429_MIN_WAIT_S = 1.0
+_POLL_429_MAX_WAIT_S = 60.0
+_POLL_429_BACKOFF_BASE_S = 2.0
+_POLL_429_JITTER = 0.10
+_POLL_INTERVAL_JITTER = (0.85, 1.15)
+
+
+def _poll_budget_per_min() -> int:
+    """APS_POLL_BUDGET_PER_MIN clamped to 1..150; unset or unparsable is 120."""
+    try:
+        value = int(os.environ.get("APS_POLL_BUDGET_PER_MIN", str(_POLL_BUDGET_DEFAULT)))
+    except ValueError:
+        value = _POLL_BUDGET_DEFAULT
+    return max(1, min(value, _POLL_BUDGET_MAX))
+
+
+class _PollPacer:
+    """Process-wide slot reservation: one timestamp under a lock, no queue, no thread.
+
+    acquire() reserves the next slot under the lock and sleeps OUTSIDE it, so
+    reservations are spaced 60/budget seconds apart whatever the thread count.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._next_slot: float | None = None
+
+    def acquire(self, deadline: float | None = None) -> bool:
+        """Wait for a slot. Returns False (reserving nothing) if the slot is past deadline."""
+        spacing = 60.0 / _poll_budget_per_min()
+        with self._lock:
+            now = _poll_clock()
+            slot = now if self._next_slot is None or self._next_slot <= now else self._next_slot
+            if deadline is not None and slot > deadline:
+                return False
+            self._next_slot = slot + spacing
+        wait = slot - now
+        if wait > 0:
+            _poll_sleep(wait)
+        return True
+
+    def push_out(self, until: float) -> None:
+        """Hold every poller in the process until `until` (a 429 throttles the app, not one item)."""
+        with self._lock:
+            if self._next_slot is None or self._next_slot < until:
+                self._next_slot = until
+
+    def reset(self) -> None:
+        with self._lock:
+            self._next_slot = None
+
+
+_POLL_PACER = _PollPacer()
+
+
+def _reset_poll_pacer() -> None:
+    """Forget the shared pacer's reservation state (tests only)."""
+    _POLL_PACER.reset()
+
+
+def _retry_after_seconds(response) -> float | None:
+    """Retry-After as non-negative finite seconds, or None (missing, HTTP-date, junk)."""
+    headers = getattr(response, "headers", None) or {}
+    try:
+        raw = headers.get("Retry-After")
+    except Exception:  # noqa: BLE001  (a malformed headers object is just "missing")
+        return None
+    if raw is None:
+        return None
+    try:
+        value = float(str(raw).strip())
+    except ValueError:
+        return None
+    if not math.isfinite(value) or value < 0:
+        return None
+    return value
+
+
+def _throttle_wait_s(response, streak: int) -> float:
+    """Wait after the `streak`th consecutive 429: Retry-After or 2s doubling, clamped to [1, 60], plus up to 10% jitter."""
+    base = _retry_after_seconds(response)
+    if base is None:
+        base = _POLL_429_BACKOFF_BASE_S * (2 ** (min(max(streak, 1), 7) - 1))
+    base = max(_POLL_429_MIN_WAIT_S, min(base, _POLL_429_MAX_WAIT_S))
+    jitter = max(0.0, min(float(_poll_jitter(0.0, _POLL_429_JITTER)), _POLL_429_JITTER))
+    return base * (1.0 + jitter)
+
+
 def _poll_workitem(workitem_id: str, timeout_s: int = 900, interval_s: float = 2.0) -> dict:
-    t0 = time.time()
+    """Poll a WorkItem to a terminal status.
+
+    Every GET goes through the shared pacer, keeping the process under the APS
+    150/min limit. HTTP 429 honours Retry-After and never raises (it also holds
+    sibling pollers). The timeout_s budget (900 s) bounds everything, throttled or not.
+    """
+    t0 = _poll_clock()
+    deadline = t0 + timeout_s
+    last: dict | None = None
+    throttled_streak = 0
+
+    def _expired() -> dict:
+        out = dict(last) if last is not None else {"id": workitem_id, "status": "pending"}
+        out["_timeout"] = True
+        if throttled_streak:
+            out["_throttled"] = True
+        return out
+
     while True:
+        if not _POLL_PACER.acquire(deadline):
+            return _expired()
         r = requests.get(f"{DA}/workitems/{workitem_id}",
                          headers=_auth_headers(), timeout=_HTTP_TIMEOUT)
+        if getattr(r, "status_code", None) == 429:
+            throttled_streak += 1
+            now = _poll_clock()
+            remaining = deadline - now
+            if remaining <= 0:
+                return _expired()
+            _POLL_PACER.push_out(now + min(_throttle_wait_s(r, throttled_streak), remaining))
+            continue
+        throttled_streak = 0
         r.raise_for_status()
         st = r.json()
         status = st.get("status", "")
         if status not in ("pending", "inprogress"):
             return st
-        if time.time() - t0 > timeout_s:
+        if _poll_clock() - t0 > timeout_s:
             st["_timeout"] = True
             return st
-        time.sleep(interval_s)
+        last = st
+        lo, hi = _POLL_INTERVAL_JITTER
+        _poll_sleep(interval_s * _poll_jitter(lo, hi))
 
 
 def _engine_seconds(status: dict) -> float | None:
