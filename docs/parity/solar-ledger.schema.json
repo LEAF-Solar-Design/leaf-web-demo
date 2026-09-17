@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leafdesign.ai/schemas/leaf.solar-parity-ledger.v1.json",
+  "title": "Leaf solar parity ledger v1",
+  "description": "Every Branch2025 command surface registration, classified once, with the wave that owes it parity. The status script enforces the rules this schema cannot express (row count against registrations_expected, alias targets, receipt duty).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "registrations_expected", "source", "rows"],
+  "properties": {
+    "schema": {
+      "const": "leaf.solar-parity-ledger.v1"
+    },
+    "registrations_expected": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 5000,
+      "description": "The registration count the ledger must account for, row for row."
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1,
+      "description": "How the expected count was produced, so it can be reproduced."
+    },
+    "rows": {
+      "type": "array",
+      "maxItems": 5000,
+      "items": { "$ref": "#/$defs/row" }
+    }
+  },
+  "$defs": {
+    "row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["global", "class", "maturity", "capability", "status"],
+      "properties": {
+        "global": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The registration's global identifier. Unique across the ledger."
+        },
+        "class": {
+          "enum": ["T", "F", "P", "V", "H", "A"],
+          "description": "T tool, F feature, P platform-only, V view-only, H host-bound, A alias."
+        },
+        "maturity": {
+          "enum": ["production", "preview", "tutorial", "internal"]
+        },
+        "capability": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+          "description": "Kebab-case capability name. Several rows may share one capability; it is proven once."
+        },
+        "capability_version": {
+          "type": "string",
+          "default": "0",
+          "description": "Bumped when the capability's observable behaviour changes, which stales every older receipt."
+        },
+        "family": { "type": "string" },
+        "interaction": { "type": "string" },
+        "engine": {
+          "enum": [
+            "browser",
+            "cloud-service",
+            "server-builtin",
+            "dotnet-worker",
+            "autocad-lane",
+            "platform",
+            "none"
+          ]
+        },
+        "wave": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 5,
+          "description": "The delivery wave that owes this row parity. Null means out of scope, which V, H and P rows must justify."
+        },
+        "status": {
+          "enum": ["resolved", "unresolved"],
+          "description": "Unresolved means the classification itself is still open."
+        },
+        "exclusion_rationale": {
+          "type": "string",
+          "description": "Why this row owes no wave. Required, non-empty, for a V, H or P row with a null wave."
+        },
+        "alias_of": {
+          "type": "string",
+          "description": "For class A only: the global of the row this one aliases. The target must exist and must not itself be an alias."
+        },
+        "evidence": {
+          "type": "string",
+          "description": "Where the classification came from: file, line, command output."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "class": { "enum": ["P", "V", "H"] },
+              "wave": { "const": null }
+            },
+            "required": ["class"]
+          },
+          "then": {
+            "required": ["exclusion_rationale"],
+            "properties": {
+              "exclusion_rationale": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "class": { "const": "A" } },
+            "required": ["class"]
+          },
+          "then": {
+            "required": ["alias_of"],
+            "properties": {
+              "alias_of": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "class": { "enum": ["T", "F"] },
+              "maturity": { "const": "production" }
+            },
+            "required": ["class", "maturity"]
+          },
+          "then": {
+            "properties": { "wave": { "type": "integer" } },
+            "required": ["wave"]
+          }
+        }
+      ]
+    }
+  }
+}
