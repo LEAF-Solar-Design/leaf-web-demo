@@ -109,7 +109,7 @@ export default class ErrorBoundary extends React.Component {
       <div style={WRAP} role="alert">
         <div style={CARD}>
           <div style={DIAMOND} />
-          <h1 style={TITLE}>Something went wrong — reload</h1>
+          <h1 style={TITLE}>Something went wrong. Reload</h1>
           <p style={BODY}>
             The workspace hit an unexpected problem. Reloading usually clears it;
             your sample drawing is untouched.

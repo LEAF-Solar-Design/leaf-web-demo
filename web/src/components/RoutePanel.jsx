@@ -141,7 +141,7 @@ export default function RoutePanel({
       <div className={`strip-decision ${motion}`}>
         <span className="dot square" aria-hidden="true" />
         <span className="strip-sentence">
-          Build — <span className="route-title">author a new capability</span>. Your description is
+          Build: <span className="route-title">author a new capability</span>. Your description is
           prefilled in “Author a tool”.
         </span>
         <button type="button" className="chip-act" onClick={onOpenAuthor}>Open author flow</button>
@@ -157,7 +157,7 @@ export default function RoutePanel({
       <div className={`strip-decision ${motion}`}>
         <span className="dot square" aria-hidden="true" />
         <span className="strip-sentence">
-          <span className="route-title">Solve lane</span> — string / combiner / route jobs run on
+          <span className="route-title">Solve lane</span>: string / combiner / route jobs run on
           the cloud solver, which is not connected in this demo. Nothing was
           executed.
         </span>
@@ -221,7 +221,7 @@ export default function RoutePanel({
           ? <>Catalog match · {conf}% match</>
           : route.slash
             ? <>“/{route.tool}” isn’t a tool in this catalog. Pick an alternative:</>
-            : <>“{route.tool}” is live-only — not in this catalog. Pick an alternative:</>}
+            : <>“{route.tool}” is live-only, not in this catalog. Pick an alternative:</>}
       </div>
       {rows.map((row, i) => (
         <button

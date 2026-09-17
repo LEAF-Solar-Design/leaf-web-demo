@@ -125,7 +125,7 @@ export default function ExportDialog({
       </div>
 
       <p className="export-dialog-copy">
-        Exports a sanitized copy of this project&apos;s artifact — no draft or working-file
+        Exports a sanitized copy of this project&apos;s artifact, with no draft or working-file
         state included.
       </p>
 

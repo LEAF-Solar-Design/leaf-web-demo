@@ -145,7 +145,7 @@ export default function ToolsPanel({ tools, error, running, selectedTool, onRequ
       <p className="panel-sub">{subtitle || 'The classic catalog — click one, set params, run on Leaf. The prompt box above is the primary path.'}</p>
       {error && (
         <div className="inline-error">
-          <span>Couldn’t load tools — {error}</span>
+          <span>Couldn’t load tools: {error}</span>
           <button className="chip-act" onClick={onRetry || (() => window.location.reload())}>Retry</button>
           {retryKey && <span className="key" aria-hidden="true">R</span>}
         </div>
@@ -226,7 +226,7 @@ export default function ToolsPanel({ tools, error, running, selectedTool, onRequ
                   ) : (
                     <>
                       {entBlocked && !locked && (
-                        <p className="lock-note">Your plan doesn’t include editing tools — upgrade to run write tools. Read tools still run.</p>
+                        <p className="lock-note">Your plan doesn’t include editing tools. Upgrade to run write tools. Read tools still run.</p>
                       )}
                       {/* A disabled run chip with no reason is the gap this closes.
                           The note is written mid-sentence for RoutePanel, so lift

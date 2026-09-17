@@ -112,7 +112,7 @@ export default function ProjectSwitcher({
             <div className="proj-empty">
               <div className="proj-note">{formatProjectsUnavailable(unavailable)}</div>
               <div className="proj-sub">
-                Showing the current drawing — <b>{projectName}</b>. The demo keeps working without workspace projects.
+                Showing the current drawing: <b>{projectName}</b>. The demo keeps working without workspace projects.
               </div>
             </div>
           ) : !orgId ? (

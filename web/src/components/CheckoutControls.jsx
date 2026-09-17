@@ -38,7 +38,7 @@ export default function CheckoutControls({
     return (
       <span className="checkout-controls" role="status">
         <span className="checkout-unknown">
-          Could not read the edit lock — writes paused
+          Could not read the edit lock, so writes are paused
         </span>
         {failure !== null && typeof failure === 'object' && (
           <span className="checkout-code" data-testid="checkout-failure-code">

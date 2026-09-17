@@ -114,7 +114,7 @@ export default function ApprovalCard({
 
       {!canExecute && (
         <p className="operator-approval-blocked" role="status">
-          Cannot render an Execute control — missing {missing.map(fieldLabel).join(', ')}.
+          Cannot render an Execute control: missing {missing.map(fieldLabel).join(', ')}.
         </p>
       )}
 

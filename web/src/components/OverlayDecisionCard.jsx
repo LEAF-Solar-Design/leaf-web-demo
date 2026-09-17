@@ -133,7 +133,7 @@ export default function OverlayDecisionCard({
       </ul>
 
       {entries.length === 0 && (
-        <p className="dim">This proposal carries no tokens — deny it.</p>
+        <p className="dim">This proposal carries no tokens, so deny it.</p>
       )}
 
       <div className="overlay-card-actions">

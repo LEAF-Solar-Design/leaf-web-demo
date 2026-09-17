@@ -58,7 +58,7 @@ export default function CheckoutChip({ checkout }) {
     <span className="checkout-chip" role="status" title={until?.abs || undefined}>
       Editing locked by <b>{checkout.holder}</b>
       {until?.rel ? <> until <b className="t-rel">{until.rel}</b></> : null}
-      <span className="dim"> — read tools still run</span>
+      <span className="dim">. Read tools still run</span>
     </span>
   )
 }
