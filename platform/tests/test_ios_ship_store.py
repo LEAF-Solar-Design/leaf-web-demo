@@ -1,6 +1,8 @@
 """PostgreSQL integration tests for the migrated Wave D iOS authority."""
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -313,17 +315,36 @@ def test_terminal_controller_receipt_rejects_identity_and_proof_drift(
         org.org_id, project.project_id, execution["execution_id"])["status"] == "dispatched"
 
 
-def test_valid_controller_receipt_projects_stable_browser_receipt_and_replays(make_org):
+@pytest.mark.parametrize("kind", ["v1", "ec2-mac", "mac-mini"])
+def test_valid_controller_receipt_projects_stable_browser_receipt_and_replays(make_org, kind):
     org, project, tenant, principal, approval_id = _seed(make_org)
     execution = _launch(org, project, tenant, principal, approval_id,
                         lambda _: {"status": "dispatched", "provider_run_id": "run-1"})
     raw = _controller_receipt(project.project_id)
+    if kind != "v1":
+        raw["schema"] = "leaf.ios-testflight-receipt.v2"
+        ec2 = {name: raw.pop(name) for name in (
+            "instance_id", "availability_zone", "instance_type", "minimum_allocation_hours",
+            "estimated_cost_usd", "mac_instance_state", "dedicated_host_state")}
+        raw["executor"] = {"kind": kind, "host": "mini.invalid" if kind == "mac-mini" else "h-1",
+                           "run_lock_released": True, "run_material_removed": True}
+        if kind == "ec2-mac":
+            raw["ec2"] = ec2
+        else:
+            raw.update(host_id="mini.invalid", image_id=None, image_digest=None)
     first = ios_ship.record_provider_receipt(
         org.org_id, tenant, project.project_id, execution["execution_id"], "run-1", raw)
     replay = ios_ship.record_provider_receipt(
         org.org_id, tenant, project.project_id, execution["execution_id"], "run-1", raw)
     assert replay == first
-    assert first["image_identity"] == "ami-0123456789abcdef0@sha256:" + "c" * 64
+    assert first["image_identity"] == (
+        "mac-mini (no EC2 image)" if kind == "mac-mini"
+        else "ami-0123456789abcdef0@sha256:" + "c" * 64)
+    # Normalization must not change an existing v1 receipt's replay identity.
+    wire_digest = hashlib.sha256(json.dumps(
+        raw, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    assert first["receipt_id"] == str(uuid.uuid5(
+        ios_ship._RECEIPT_NAMESPACE, f"{execution['execution_id']}:{wire_digest}"))
     assert first["toolchain_identity"] == "Xcode 26.3 (17C529)"
     assert first["app_store_connect_result"] == {
         "status": "testflight_available", "build_id": "asc-build-19",
