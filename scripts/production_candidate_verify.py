@@ -254,13 +254,32 @@ def report(manifest, directory, live=True):
         production = statuses(data["ladder"])
         return data["pass"] is True and production == [401, 200, 403], f"production={production}; staging=[401, 200, 403]"
 
+    # Mirrors staging leaf_platform.tf's authored-activation comment and
+    # leaf_platform_runtime_posture.py _assert_broker: idle or coherent active.
     def hardening_check():
         data = manifest["hardening"]
         window = path(data["aps_window_receipt"]).is_file()
+        staging = data.get("authored_execution_staging")
+        activation = data.get("staging_authored_activation")
+        idle = type(staging) is int and staging == 0
+        active = (type(staging) is int and staging == 1 and isinstance(activation, dict)
+                  and activation.get("tool_sandbox_provider") == "e2b"
+                  and activation.get("customization_r5_mode") == "all"
+                  and activation.get("customization_r6_mode") == "all"
+                  and activation.get("customization_store") == "postgres"
+                  and activation.get("e2b_api_key_secret") is True
+                  and type(activation.get("tenant_cap_usd")) in (int, float)
+                  and activation["tenant_cap_usd"] > 0)
+        posture = "idle" if idle else f"invalid ({staging})"
+        if active:
+            posture = (f"active ({activation['tool_sandbox_provider']}, "
+                       f"r5 {activation['customization_r5_mode']}, "
+                       f"r6 {activation['customization_r6_mode']}, "
+                       f"{activation['customization_store']}, cap {activation['tenant_cap_usd']})")
         ok = data["enforcement_fail_closed_pr"]["merged"] is True
-        ok = ok and all(type(data[key]) is int and data[key] == 0 for key in ("authored_execution_staging", "authored_execution_production"))
+        ok = ok and (idle or active) and type(data["authored_execution_production"]) is int and data["authored_execution_production"] == 0
         ok = ok and type(data["aps_max_concurrency_staging"]) is int and data["aps_max_concurrency_staging"] == 10 and window
-        return ok, f"PR={data['enforcement_fail_closed_pr']['number']} merged={data['enforcement_fail_closed_pr']['merged']}; authored staging={data['authored_execution_staging']} production={data['authored_execution_production']}; APS staging={data['aps_max_concurrency_staging']} production={data['aps_max_concurrency_production']}; window_exists={window}"
+        return ok, f"PR={data['enforcement_fail_closed_pr']['number']} merged={data['enforcement_fail_closed_pr']['merged']}; authored staging={posture} production={data['authored_execution_production']}; APS staging={data['aps_max_concurrency_staging']} production={data['aps_max_concurrency_production']}; window_exists={window}"
 
     def door_check():
         data = manifest["door_pr"]

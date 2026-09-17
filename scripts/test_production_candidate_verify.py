@@ -79,6 +79,92 @@ def test_row1_full_fixture(candidate, capsys):
         candidate[0][section][field] = original
 
 
+@pytest.fixture
+def active_candidate(candidate):
+    candidate[0]["hardening"].update({
+        "authored_execution_staging": 1,
+        "staging_authored_activation": {
+            "tool_sandbox_provider": "e2b",
+            "customization_r5_mode": "all",
+            "customization_r6_mode": "all",
+            "customization_store": "postgres",
+            "e2b_api_key_secret": True,
+            "tenant_cap_usd": 10,
+        },
+    })
+    return candidate
+
+
+@pytest.mark.parametrize("cap", [10, 2.5])
+def test_row12_active_authored_posture(active_candidate, cap):
+    active_candidate[0]["hardening"]["staging_authored_activation"]["tenant_cap_usd"] = cap
+    result = cli(active_candidate)
+    assert result.returncode == 0, result.stdout + result.stderr
+    evidence = line(result.stdout, 12)
+    assert evidence.startswith("12 PASS ")
+    assert f"authored staging=active (e2b, r5 all, r6 all, postgres, cap {cap}) production=0" in evidence
+
+
+@pytest.mark.parametrize("activation", [None, [], "active"])
+def test_row12_missing_or_invalid_activation(active_candidate, activation):
+    hardening = active_candidate[0]["hardening"]
+    if activation is None:
+        del hardening["staging_authored_activation"]
+    else:
+        hardening["staging_authored_activation"] = activation
+    result = cli(active_candidate)
+    assert result.returncode == 1
+    assert line(result.stdout, 12).startswith("12 FAIL ")
+
+
+@pytest.mark.parametrize("field, value", [
+    ("tool_sandbox_provider", "local"),
+    ("customization_r5_mode", "off"),
+    ("customization_r6_mode", "off"),
+    ("customization_store", "memory"),
+    ("e2b_api_key_secret", False),
+    ("e2b_api_key_secret", 1),
+    ("tenant_cap_usd", 0),
+    ("tenant_cap_usd", -1),
+    ("tenant_cap_usd", "10"),
+    ("tenant_cap_usd", True),
+])
+def test_row12_broken_activation_member(active_candidate, field, value):
+    active_candidate[0]["hardening"]["staging_authored_activation"][field] = value
+    result = cli(active_candidate)
+    assert result.returncode == 1
+    assert line(result.stdout, 12).startswith("12 FAIL ")
+
+
+@pytest.mark.parametrize("field", [
+    "tool_sandbox_provider", "customization_r5_mode", "customization_r6_mode",
+    "customization_store", "e2b_api_key_secret", "tenant_cap_usd",
+])
+def test_row12_missing_activation_member(active_candidate, field):
+    del active_candidate[0]["hardening"]["staging_authored_activation"][field]
+    result = cli(active_candidate)
+    assert result.returncode == 1
+    assert line(result.stdout, 12).startswith("12 FAIL ")
+
+
+def test_row12_idle_authored_posture(candidate):
+    candidate[0]["hardening"]["authored_execution_staging"] = 0
+    candidate[0]["hardening"].pop("staging_authored_activation", None)
+    result = cli(candidate)
+    assert result.returncode == 0
+    evidence = line(result.stdout, 12)
+    assert evidence.startswith("12 PASS ")
+    assert "authored staging=idle production=0" in evidence
+
+
+@pytest.mark.parametrize("staging", ["0", None, 2, False, True])
+def test_row12_invalid_staging_value(active_candidate, staging):
+    active_candidate[0]["hardening"]["authored_execution_staging"] = staging
+    result = cli(active_candidate)
+    assert result.returncode == 1
+    assert line(result.stdout, 12).startswith("12 FAIL ")
+
+
 def test_row2_identity_probe_path(monkeypatch):
     urls = []
     sha = "a" * 40
