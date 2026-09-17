@@ -433,6 +433,64 @@ export async function createProject(name, orgId) {
 
 // GET /api/projects/{id} -> {project, drawing_versions[], jobs[], built_tools[]}.
 // The workspace hydration payload the summary card renders. X-Org-Id scoped.
+export async function importUploadedDrawingVersion(projectId, { drawingId, version, name }, { idempotencyKey }) {
+  const path = `/api/projects/${encodeURIComponent(projectId)}/drawing-versions/import`
+  const controller = new AbortController()
+  let timer
+  const request = async () => {
+    const headers = { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...orgHeaders(), ...authHeaders(), 'Idempotency-Key': idempotencyKey }
+    const res = await apiFetch(`${API_BASE}${path}`, {
+      method: 'POST', headers, signal: controller.signal,
+      body: JSON.stringify({ source: { drawing_id: drawingId, version }, name }),
+    }, path)
+    const invalid = () => Object.assign(new Error('invalid_response'), { status: res.status, code: 'invalid_response' })
+    const successful = res.status >= 200 && res.status < 300
+    let text = ''
+    let body
+    try {
+      if (Number(res.headers.get('content-length')) > 1024 * 1024) throw invalid()
+      if (res.body?.getReader) {
+        const reader = res.body.getReader()
+        const decoder = new TextDecoder()
+        let bytes = 0
+        try {
+          while (true) {
+            const chunk = await reader.read()
+            if (chunk.done) break
+            bytes += chunk.value.byteLength
+            if (bytes > 1024 * 1024) { void reader.cancel(); throw invalid() }
+            text += decoder.decode(chunk.value, { stream: true })
+          }
+          text += decoder.decode()
+        } finally { reader.releaseLock() }
+      } else {
+        text = await res.text()
+        if (new TextEncoder().encode(text).byteLength > 1024 * 1024) throw invalid()
+      }
+    } catch {
+      if (successful) throw invalid()
+      throw Object.assign(new Error(`HTTP ${res.status}`), { status: res.status })
+    }
+    try { body = JSON.parse(text) } catch { if (successful) throw invalid() }
+    if (!successful) {
+      throw Object.assign(new Error(typeof body?.detail === 'string' ? body.detail : `HTTP ${res.status}`), { status: res.status })
+    }
+    if (!body?.drawing_version || typeof body.replayed !== 'boolean') throw invalid()
+    return { drawingVersion: body.drawing_version, replayed: body.replayed }
+  }
+  try {
+    return await Promise.race([
+      request(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          controller.abort()
+          reject(new Error('The service did not respond within 30000 ms.'))
+        }, 30000)
+      }),
+    ])
+  } finally { clearTimeout(timer) }
+}
+
 export async function openProject(projectId, orgId) {
   return http(`/api/projects/${encodeURIComponent(projectId)}`, { headers: { ...orgHeaders(orgId) } })
 }

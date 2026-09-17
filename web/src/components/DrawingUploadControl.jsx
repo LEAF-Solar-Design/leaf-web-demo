@@ -13,14 +13,14 @@ function presentError(error) {
   return TRANSPORT_ERROR.test(raw) ? { text: UPLOADS_UNAVAILABLE, title: raw } : { text: raw, title: undefined }
 }
 
-export default function DrawingUploadControl({ policy, policyLoading, busy, phase, error, engine, onEngineChange, onUpload, onCancel }) {
+export default function DrawingUploadControl({ policy, policyLoading, busy, phase, error, engine, onEngineChange, onUpload, onCancel, disabled = false }) {
   const inputRef = useRef(null)
   const accepted = (policy?.accepted || ['.dwg', '.dxf']).join(',')
   const maxMb = policy?.max_bytes ? Math.ceil(policy.max_bytes / 1024 / 1024) : null
   const choose = () => inputRef.current?.click()
   const selected = (event) => {
     const file = event.target.files?.[0]
-    if (file) onUpload(file)
+    if (file && !disabled) onUpload(file)
     event.target.value = ''
   }
   // The DWG extraction-engine toggle (operator mandate 2026-08-10): plainly
@@ -59,8 +59,8 @@ export default function DrawingUploadControl({ policy, policyLoading, busy, phas
           </button>
         </div>
       )}
-      <input ref={inputRef} type="file" accept={accepted} onChange={selected} aria-label="Drawing file" />
-      <button type="button" className="chip-act" onClick={choose} disabled={policyLoading || busy || policy?.enabled === false}>
+      <input ref={inputRef} type="file" accept={accepted} onChange={selected} aria-label="Drawing file" disabled={disabled} />
+      <button type="button" className="chip-act" onClick={choose} disabled={disabled || policyLoading || busy || policy?.enabled === false}>
         {busy ? (phase === 'uploading' ? 'Uploading drawing' : 'Extracting drawing') : 'Upload DWG or DXF'}
       </button>
       {busy && <button type="button" className="tc-bar-chip" onClick={onCancel}>Cancel</button>}
