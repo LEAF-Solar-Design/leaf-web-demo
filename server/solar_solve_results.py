@@ -232,6 +232,11 @@ def accept_candidate(graph, candidate, *, expected_rev):
     if any(not set(s["ordered_panel_refs"]) <= members for s in previous):
         raise GraphValidationError("CROSS_FRAME_STRING_REQUIRES_CORRECTION")
     previous_ids = {s["id"] for s in previous}
+    # Two nesting levels on purpose. The result envelope's top-level visited_path is
+    # ALREADY mapped back to ORIGINAL grid indices by the client
+    # (leaf_cloud_client.StringerResponse.original_visited_path), so it indexes
+    # frame["matrix"] directly. The nested ["proposal"] below is the raw service
+    # response, whose own coordinates are truncated-grid and must never be used here.
     path = verified["proposal"]["visited_path"]
     refs = [frame["matrix"][r][c]["panel_ref"] for r, c in path]
     panels = {p["id"]: p for p in result["panels"]}
