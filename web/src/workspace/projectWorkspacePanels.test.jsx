@@ -20,6 +20,9 @@ it('B2 row4 renders the controlled pane for the current project and returns to i
   expect(onBack).toHaveBeenCalledTimes(PANE_NAMES.length)
   rerender(<ProjectWorkspacePanels pane="versions" project={{ name: 'South Yard' }} />)
   expect(screen.getByText('South Yard')).toBeInTheDocument()
+  // onBack absent: React attaches no listener for an undefined event prop, so the click is inert, never a throw.
+  expect(() => fireEvent.click(screen.getByRole('button', { name: 'Back to board' }))).not.toThrow()
+  expect(onBack).toHaveBeenCalledTimes(PANE_NAMES.length)
   expect(screen.queryByText('North Yard')).toBeNull()
 })
 
