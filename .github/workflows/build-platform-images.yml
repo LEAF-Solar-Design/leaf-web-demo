@@ -2316,11 +2316,11 @@ jobs:
             --body "$RUNNER_TEMP/staging-supply-set.json" --if-none-match '*' --checksum-algorithm SHA256 \
             --metadata "run-id=$GITHUB_RUN_ID,run-attempt=$GITHUB_RUN_ATTEMPT,workflow-ref=$GITHUB_WORKFLOW_REF,repository-id=$GITHUB_REPOSITORY_ID,head-sha=$SOURCE_SHA,event=$GITHUB_EVENT_NAME"
 
-      # NOT best effort, unlike the adopted path's copy: dispatch-staging-deploys.yml
-      # still reads this supply set as an Actions artifact and has no S3 read. Until
-      # that relay moves to the transport bucket, a failed upload here must redden the
-      # run rather than strand the relay. cve-harvest no longer waits on it either way.
+      # Best effort compatibility copy. The staging relay reads and verifies
+      # the immutable S3 object above, so GitHub's shared artifact quota cannot
+      # block a release after the durable handoff already exists.
       - name: Upload immutable staging supply-set manifest
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: staging-supply-set-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}
@@ -2329,6 +2329,9 @@ jobs:
           retention-days: 3
 
       - name: Upload deterministic web deployment artifact
+        # The exact web archive is stored in S3 by the web producer and release
+        # paths. Keep this copy for convenience, never as a release gate.
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: web-dist-${{ needs.prepare.outputs.source_sha }}-attempt-${{ github.run_attempt }}

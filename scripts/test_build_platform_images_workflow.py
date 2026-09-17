@@ -3532,7 +3532,9 @@ def check_docs_noop_filter(text: str) -> None:
     # workflow's own token is pinned read-only, so an assembled command in
     # an unguarded script has nothing to dispatch WITH. The token-denial
     # scan below is only a tripwire on top of this.
-    assert relay_wf["permissions"] == {"actions": "read", "contents": "read"}
+    assert relay_wf["permissions"] == {
+        "actions": "read", "contents": "read", "id-token": "write",
+    }
     assert set(relay_wf["jobs"]) == {"dispatch"}
     dispatch_job = relay_wf["jobs"]["dispatch"]
     assert set(dispatch_job) == {"if", "runs-on", "timeout-minutes", "env", "steps"}
@@ -3558,6 +3560,9 @@ def check_docs_noop_filter(text: str) -> None:
     # supply set and marker with it, and the receipt publish step names the
     # RECEIPT with it; one definition keeps those names on the same key.
     assert dispatch_job["env"] == {
+        "AWS_REGION": "us-east-1",
+        "MQ_TRANSPORT_BUCKET": "leaf-mq-transport-807034087062-us-east-1",
+        "MQ_TRANSPORT_PREFIX": "mq/leaf-web-demo/",
         "INFRA_REPO": "LEAF-Solar-Design/leaf-automation-aws-terraform",
         "DEPLOY_WORKFLOW": "deploy-leaf-platform-staging.yml",
         "BUILD_RUN_ID": "${{ github.event.workflow_run.id }}",
@@ -3574,7 +3579,7 @@ def check_docs_noop_filter(text: str) -> None:
         "github.event.workflow_run.head_branch == 'main'"
     )
     relay_steps = dispatch_job["steps"]
-    # Six steps: tip check, manifest read, provider contract read, guarded
+    # Eight steps: tip check, AWS transport identity, manifest read, provider contract read, guarded
     # dispatch, receipt publish, and supply-evidence publish. The last two are
     # the only steps with `uses:`. Reordering must break this harness and force
     # a co-review.
@@ -3586,8 +3591,8 @@ def check_docs_noop_filter(text: str) -> None:
     # relay.workflow_path is not this file, so a downstream lane can dispatch a
     # finalizable deploy only by reusing this one verbatim. It is a PURE UPLOAD
     # with no `run:` and no `env:`, exactly like the receipt step beside it, so
-    # the secret-reference wall further down still finds its two references on
-    # steps[2] and steps[3] and this step cannot hold a token or smuggle a
+    # the secret-reference wall further down stays closed and this step cannot
+    # hold a token or smuggle a
     # dispatch.
     # 6 -> 7 on 2026-09-03, co-review again. The seventh publishes the CONSUMER
     # CONTRACT envelope, the other half of the pair the sixth publishes. The
@@ -3597,9 +3602,10 @@ def check_docs_noop_filter(text: str) -> None:
     # job skipped, nothing mutated). Publishing one without the other lets a
     # consumer get exactly halfway. Same pure-upload shape, no run: and no env:.
     assert [s.get("id") for s in relay_steps] == [
-        "tip", "manifest", "consumer_contract", "deploy", None, None, None]
+        "tip", None, "manifest", "consumer_contract", "deploy", None, None, None]
     (
         tip_step,
+        aws_step,
         manifest_step,
         contract_step,
         dispatch_step,
@@ -3614,6 +3620,14 @@ def check_docs_noop_filter(text: str) -> None:
     # Step KEY SETS are exact: no shell:, no working-directory:,
     # no continue-on-error: may appear on any step without breaking this.
     assert set(tip_step) == {"name", "id", "env", "run"}
+    assert set(aws_step) == {"name", "if", "uses", "with"}
+    assert aws_step["uses"] == "aws-actions/configure-aws-credentials@v6.1.0"
+    assert aws_step["if"] == "steps.tip.outputs.current == 'true'"
+    assert aws_step["with"] == {
+        "role-to-assume": "${{ secrets.AWS_ECR_PUSH_ROLE }}",
+        "aws-region": "${{ env.AWS_REGION }}",
+        "role-session-name": "GHA-RelayPlatform-${{ github.run_id }}",
+    }
     assert set(manifest_step) == {"name", "id", "if", "env", "run"}
     assert set(contract_step) == {"name", "id", "if", "env", "run"}
     assert set(dispatch_step) == {"name", "id", "if", "env", "run"}
@@ -3679,7 +3693,9 @@ def check_docs_noop_filter(text: str) -> None:
         "steps.manifest.outputs.deploy == 'true'"
     ), "without this exact guard a docs-only run dispatches an empty tag"
 
-    # The PAT appears only in the provider read and guarded dispatch steps.
+    # The infra PAT appears only in the provider read and guarded dispatch
+    # steps. The third secret reference is the narrow OIDC role name used for
+    # immutable S3 transport reads.
     def _walk_strings(node, path=""):
         if isinstance(node, dict):
             for key, value in node.items():
@@ -3695,13 +3711,17 @@ def check_docs_noop_filter(text: str) -> None:
         for path, value in _walk_strings(relay_wf)
         if "secrets." in value
     ]
-    assert len(secret_refs) == 2, (
-        f"exactly two scoped secret references may exist in the relay: {secret_refs}"
+    assert len(secret_refs) == 3, (
+        f"exactly three scoped secret references may exist in the relay: {secret_refs}"
     )
-    assert all(value == "${{ secrets.TERRAFORM_REPO_TOKEN }}" for _, value in secret_refs)
-    assert {path.rsplit(".", 2)[-2] for path, _ in secret_refs} == {"env"}
-    assert any(".steps[2].env.GH_TOKEN" in path for path, _ in secret_refs)
+    assert sorted(value for _, value in secret_refs) == sorted([
+        "${{ secrets.AWS_ECR_PUSH_ROLE }}",
+        "${{ secrets.TERRAFORM_REPO_TOKEN }}",
+        "${{ secrets.TERRAFORM_REPO_TOKEN }}",
+    ])
+    assert any(".steps[1].with.role-to-assume" in path for path, _ in secret_refs)
     assert any(".steps[3].env.GH_TOKEN" in path for path, _ in secret_refs)
+    assert any(".steps[4].env.GH_TOKEN" in path for path, _ in secret_refs)
 
     tip_code = _executable_bash(tip_step["run"])
     manifest_code = _executable_bash(manifest_step["run"])
@@ -4040,8 +4060,7 @@ def check_docs_noop_filter(text: str) -> None:
         # `printf` of an EXISTING shell variable to a local file, guarded on
         # that variable being non-empty because a v1 supply set mints none.
         # No new `gh workflow run` site (still exactly one, in the dispatch
-        # step, asserted above), no new secret reference (the count assertion
-        # still finds two, on steps[2] and steps[3]), no new token, no new
+        # step, asserted above), no new secret reference at that revision, no new
         # endpoint or network call of any class, and no live mutation. The
         # published bytes are the SAME $evidence the dispatch output is
         # written from, on the adjacent line, so the artifact cannot drift
@@ -4060,13 +4079,18 @@ def check_docs_noop_filter(text: str) -> None:
         # consumer_contract_b64 output is written from on the line above, so
         # the artifact cannot drift from what this relay sends. No new
         # `gh workflow run` site (still exactly one), no new secret reference
-        # (still two, on steps[2] and steps[3]), no new token, no new endpoint
+        # at that revision, no new token, no new endpoint
         # class, no live mutation. Not a secret: Actions already prints this
         # envelope in the relay log the same way it prints the supply one.
         # Hash updated 2026-09-05: remove the final contract freshness read
         # after both exact child results passed. Dispatch sites, inputs,
         # secrets and pre-dispatch binding are unchanged; no mutation added.
-        "7cead6d4d8a11a68b6f176c461651abad0897d76192c7d8120e548c72552673c"
+        # Hash updated 2026-09-17: fetch the producer-bound release manifest
+        # from its immutable S3 key before the legacy Actions-artifact fallback.
+        # One OIDC role reference and read-only S3 GetObject were added. The
+        # dispatch site, infra PAT uses, service selectors, and mutation path
+        # are unchanged.
+        "ecfaff8b99464112ed210fc6435446f1889c3e46a11021139ecd46b8156899e7"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -4878,7 +4902,11 @@ def check_staging_relay_convergence(text: str) -> None:
     # Identified by what it PUBLISHES, not by lacking an id: since 2026-09-03
     # a sixth step publishes the supply evidence envelope, and it is id-less
     # too. Matching on the payload keeps this guard aimed at the receipt.
-    publish_steps = [s for s in job["steps"] if s.get("id") is None]
+    publish_steps = [
+        s for s in job["steps"]
+        if s.get("id") is None
+        and s.get("uses") == "actions/upload-artifact@v4"
+    ]
     receipt_steps = [
         s
         for s in publish_steps
@@ -5930,6 +5958,10 @@ def _rehearse_relay_manifest(*, rows, supply_sets, relations, markers=None,
         bindir.mkdir()
         (bindir / "gh").write_text(_MANIFEST_FAKE_GH, encoding="utf-8", newline="\n")
         (bindir / "gh").chmod(0o755)
+        (bindir / "aws").write_text(
+            "#!/usr/bin/env bash\nexit 1\n", encoding="utf-8", newline="\n"
+        )
+        (bindir / "aws").chmod(0o755)
         out = tmp / "github_output"
         out.write_text("", encoding="utf-8")
         script = tmp / "manifest.sh"
@@ -5943,6 +5975,8 @@ def _rehearse_relay_manifest(*, rows, supply_sets, relations, markers=None,
             GITHUB_RUN_ATTEMPT="1",
             INFRA_REPO="LEAF-Solar-Design/leaf-automation-aws-terraform",
             DEPLOY_WORKFLOW="deploy-leaf-platform-staging.yml",
+            MQ_TRANSPORT_BUCKET="fake-transport",
+            MQ_TRANSPORT_PREFIX="mq/leaf-web-demo/",
             BUILD_RUN_ID=build_run_id,
             BUILD_HEAD_SHA=build_head_sha,
             BUILD_RUN_ATTEMPT=build_attempt,
@@ -8101,9 +8135,10 @@ def test_mq_release_supply_set_is_published_by_both_producers() -> None:
         assert job["env"]["SOURCE_SHA"] == "${{ needs.prepare.outputs.source_sha }}"
         if producer == "verify":
             assert set(put) == {"name", "run"}
-            # The staging relay still reads the artifact and has no S3 path,
-            # so a failed upload must redden the run rather than strand it.
-            assert "continue-on-error" not in upload
+        # The immutable S3 release object is authoritative. The redundant
+        # Actions artifact must not fail the producer when the shared quota is
+        # full, and remains available as a compatibility fallback when stored.
+        assert upload["continue-on-error"] is True
     assert puts[0]["run"] == puts[1]["run"]
 
 
@@ -8208,6 +8243,38 @@ def test_mq_release_s3_precedes_each_best_effort_artifact_upload() -> None:
     for _, filename, _, _, _ in _mq_release_pairs(_strict_yaml(text)):
         assert ("Native staging deploy hand-off: "
                 f"release/<sha40>/<run_id>-<attempt>/{filename}.") in text
+
+
+def test_staging_relay_prefers_checked_s3_release_transport() -> None:
+    relay = _strict_yaml(
+        (WORKFLOW.parent / "dispatch-staging-deploys.yml").read_text(encoding="utf-8")
+    )
+    assert relay["permissions"]["id-token"] == "write"
+    steps = relay["jobs"]["dispatch"]["steps"]
+    credentials = next(
+        step for step in steps
+        if step.get("name") == "Configure AWS credentials for the immutable release transport"
+    )
+    manifest = next(step for step in steps if step.get("id") == "manifest")
+    assert steps.index(credentials) < steps.index(manifest)
+    code = _executable_bash(manifest["run"])
+    get_at = code.index("aws s3api get-object")
+    legacy_at = code.index("actions/runs/$run_id/artifacts?per_page=100")
+    assert get_at < legacy_at
+    assert "release/$producer_source/$run_id-$producer_attempt/staging-supply-set.json" in code
+    assert '.ChecksumType == "FULL_OBJECT"' in code
+    assert '.ChecksumSHA256 == $checksum' in code
+    for field in ('["run-id"]', '["run-attempt"]', '["head-sha"]', '["workflow-ref"]'):
+        assert field in code
+
+    build = _strict_yaml(WORKFLOW.read_text(encoding="utf-8"))
+    verify_steps = build["jobs"]["verify"]["steps"]
+    for name in (
+        "Upload immutable staging supply-set manifest",
+        "Upload deterministic web deployment artifact",
+    ):
+        upload = next(step for step in verify_steps if step.get("name") == name)
+        assert upload["continue-on-error"] is True
 
 
 if __name__ == "__main__":
