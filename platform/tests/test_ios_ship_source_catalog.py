@@ -132,6 +132,15 @@ def test_latest_execution_crosses_revisions_but_not_tenants(make_org):
     assert latest["execution_id"] == second["execution_id"] and latest["revision"] == "r2"
     assert set(latest) == {"execution_id", "revision", "status", "failed_stage",
                            "receipt_id", "dispatch_result", "updated_at"}
+    tied = sorted((first, second), key=lambda row: uuid.UUID(row["execution_id"]))
+    with ios_ship.connection() as conn, conn.cursor() as cur:
+        for execution in tied:
+            cur.execute("UPDATE ios_ship_executions SET created_at='2026-01-01T00:00:00Z' "
+                        "WHERE execution_id=%s", (uuid.UUID(execution["execution_id"]),))
+        cur.execute("UPDATE ios_ship_executions SET created_at='2026-01-02T00:00:00Z' "
+                    "WHERE execution_id=%s", (uuid.UUID(other["execution_id"]),))
+    latest = ios_ship.latest_execution_for_project(org.org_id, tenant, project.project_id)
+    assert latest["execution_id"] == tied[-1]["execution_id"]
     assert ios_ship.latest_execution_for_project(org.org_id, "no-launch", project.project_id) is None
     assert ios_ship.latest_execution_for_project(make_org().org_id, tenant, project.project_id) is None
 
@@ -139,17 +148,18 @@ def test_latest_execution_crosses_revisions_but_not_tenants(make_org):
 # S1 row6
 def test_only_current_project_owner_resolves(make_org):
     org, project = _project(make_org)
-    for role in ("owner", "editor"):
+    for binding_role, membership_role in (("owner", "owner"), ("editor", "editor"),
+                                          ("owner", "editor"), ("editor", "owner")):
         subject = f"auth0|catalog-{uuid.uuid4()}"
-        binding = store.create_identity_binding(org, "auth0", subject, role=role)
+        binding = store.create_identity_binding(org, "auth0", subject, role=binding_role)
         with ios_ship.connection() as conn, conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO project_member_bindings "
                 "(membership_id, org_id, project_id, binding_id, role, invited_by_binding_id) "
                 "VALUES (%s, %s, %s, %s, %s, %s)",
-                (uuid.uuid4(), org, project, binding.binding_id, role, binding.binding_id))
+                (uuid.uuid4(), org, project, binding.binding_id, membership_role, binding.binding_id))
         assert ios_ship.resolve_ship_owner(org, project, subject) == (
-            str(binding.binding_id) if role == "owner" else None)
+            str(binding.binding_id) if membership_role == "owner" else None)
     outsider = f"auth0|catalog-{uuid.uuid4()}"
     store.create_identity_binding(org, "auth0", outsider, role="owner")
     assert ios_ship.resolve_ship_owner(org, project, outsider) is None

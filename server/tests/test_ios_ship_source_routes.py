@@ -111,6 +111,14 @@ def test_provider_catalog_requires_auth_and_exact_body(monkeypatch):
     assert client.post(url, json=body, headers={
         **headers, "X-Leaf-Ios-Ship-Provider": "wrong-provider"}).status_code == 401
     assert store.registrations == []
+    registration_count = len(store.registrations)
+    response = client.post(url, json=body, headers={
+        **headers, "Authorization": "Bearer wrong-provider-bearer"})
+    assert response.status_code == 401
+    assert response.json() == {"ok": False, "error": {
+        "error_code": "provider_unauthorized", "message": "provider authentication failed",
+        "retryable": False}}
+    assert len(store.registrations) == registration_count
     response = client.post(url, json=body, headers=headers)
     assert response.status_code == 200
     assert response.json() == {"ok": True, "entry": {"catalog_id": "catalog-1", **ENTRY}}
