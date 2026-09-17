@@ -81,7 +81,11 @@ describe('ErrorBoundary telemetry', () => {
   it('renders the calm card instead of a white screen', async () => {
     await postedAfterCrash({})
     expect(screen.getByRole('alert')).toBeInTheDocument()
-    expect(screen.getByText(/Something went wrong/i)).toBeInTheDocument()
+    // The heading states what happened and the Reload button carries the
+    // action, so the heading is pinned EXACTLY: a substring match is also
+    // satisfied by a heading that repeats the button's imperative.
+    expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Something went wrong')
+    expect(screen.getByRole('button', { name: 'Reload' })).toBeInTheDocument()
   })
 
   it('records the boundary row for a React crash, uncapped and independent of the global handler', async () => {

@@ -9,7 +9,7 @@ export const SHEET_CODES = ['l-000', 'g-000', 'a-101', 'a-102', 'e-401', 'c-201'
 
 const TRIAL_NOTE = '14-day trial · $299 / mo per daily active user';
 const DEPLOYED = 'Deployed at Black & Veatch and 40+ commercial EPCs';
-const BRANCH_DISCIPLINE = 'Branch — solar stringing for AutoCAD';
+const BRANCH_DISCIPLINE = 'Branch · solar stringing for AutoCAD';
 const DRAWN_BY = 'Drawn by Leaf · reviewed by you';
 
 // G-000 nav doubles as the interior sheets' nav — every entry is a set anchor.
@@ -190,7 +190,7 @@ export function liveDemoLines(solve) {
   const st = solve?.stats;
   if (!st || !st.string_count) {
     return {
-      liveLine: 'Strung live in the demo — press T on the cover to watch it run',
+      liveLine: 'Strung live in the demo · press T on the cover to watch it run',
       receipt: 'NEC 690.7',
     };
   }
@@ -200,7 +200,7 @@ export function liveDemoLines(solve) {
   const sha = (solve?.intake_sha256 || '').slice(0, 8);
   const solver = solve?.solver;
   return {
-    liveLine: `Strung live in the demo — ${st.string_count} strings` +
+    liveLine: `Strung live in the demo · ${st.string_count} strings` +
       (maxMod ? ` · ${maxMod} modules max` : '') + wire,
     receipt: `NEC 690.7 ${pass ? '✓' : '✗'}` +
       (sha ? ` · solve #${sha}` : '') +
@@ -230,7 +230,7 @@ export function G000Sheet({ solve } = {}) {
           <div className="sheet-bignum-row">
             <span className="sheet-bignum">25 h → 3 min</span>
             <span className="sheet-bignum-cap">
-              stringing a 3.2 MW rooftop · internal EPC survey, n = 18
+              stringing a 3.2 MW rooftop · internal survey of 18 EPC firms
             </span>
           </div>
           <div className="sheet-cta-row">
@@ -295,16 +295,16 @@ export function A101Sheet() {
             <div className="sheet-row">
               <span className="num">40%</span>
               <span className="txt">
-                of projects require rework, because a panel layout shift means re-doing everything
-                downstream of it
+                of projects require rework (a panel layout shift means re-doing everything
+                downstream of it)
               </span>
-              <span className="cap">internal EPC survey, n = 18</span>
+              <span className="cap">internal survey of 18 EPC firms</span>
             </div>
             <div className="sheet-row">
               <span className="num">15 / 15</span>
               <span className="txt">
-                engineering firms refused to share building plans to train generic AI, because
-                proprietary IP isn’t training data
+                engineering firms refused to share building plans to train generic AI
+                (proprietary IP is not training data)
               </span>
               <span className="cap">Leaf Automation research</span>
             </div>
@@ -345,13 +345,13 @@ const STEPS = [
   {
     code: '03',
     title: 'Run the solver',
-    desc: 'Strings, homeruns, tags, cable lengths — placed on the drawing in your standard layers and block conventions. NEC voltage-window compliance by construction.',
+    desc: 'Strings, homeruns, tags, cable lengths: placed on the drawing in your standard layers and block conventions. NEC voltage-window compliance by construction.',
     timing: '~2 min · 3.2 MW rooftop',
   },
   {
     code: '04',
     title: 'Hand off the CDs',
-    desc: 'Circuit length CSV for the BOM, tagged DWG for the stamped set, PDF for the AHJ. Rerun on any layout change — the whole cycle is disposable.',
+    desc: 'Circuit length CSV for the BOM, tagged DWG for the stamped set, PDF for the AHJ. Rerun on any layout change: the whole cycle is disposable.',
     timing: '~15 sec · reruns just as fast',
   },
 ];
@@ -411,7 +411,7 @@ const E401_DEFAULT_STATS = {
   payback: '1 proj',
   paybackNote: 'typical recoup at $299 / mo',
   // Neutral no-number fallback — live numbers arrive via <SheetsSet solve>.
-  liveLine: 'Strung live in the demo — press T on the cover to watch it run',
+  liveLine: 'Strung live in the demo · press T on the cover to watch it run',
 };
 const E401_DEFAULT_RECEIPT = 'NEC 690.7';
 
@@ -448,12 +448,12 @@ export function E401Sheet({ stats, receipt } = {}) {
             <div className="sheet-row">
               <span className="num">{s.timePerMw}</span>
               <span className="txt">{s.timePerMwNote}</span>
-              <span className="cap">internal EPC survey, n = 18</span>
+              <span className="cap">internal survey of 18 EPC firms</span>
             </div>
             <div className="sheet-row">
               <span className="num">{s.reworkDelta}</span>
               <span className="txt">{s.reworkNote}</span>
-              <span className="cap">internal EPC survey, n = 18</span>
+              <span className="cap">internal survey of 18 EPC firms</span>
             </div>
             <div className="sheet-row">
               <span className="num">{s.payback}</span>
@@ -521,7 +521,7 @@ export function C201Sheet() {
             </div>
             <div className="sheet-row">
               <span className="txt">Typical payback: one project at $299 / mo</span>
-              <span className="cap">internal EPC survey, n = 18</span>
+              <span className="cap">internal survey of 18 EPC firms</span>
             </div>
           </div>
           <div className="sheet-cta-row">

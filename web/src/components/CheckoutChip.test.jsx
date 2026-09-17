@@ -47,6 +47,11 @@ describe('CheckoutChip expiry horizon', () => {
     const chip = screen.getByRole('status')
     expect(chip.textContent).toContain(`Editing locked by ${HOLDER}`)
     expect(chip.textContent).toContain('until ~4 h')
+    // The chip is inline-flex with a gap, so every child is its own flex item
+    // and a fragment that OPENS with punctuation renders that mark floating
+    // clear of the value before it. Pinned on the note's own node, because
+    // textContent joins the items and hides exactly this defect.
+    expect(chip.querySelector('.dim').textContent).toBe('Read tools still run')
   })
 
   it('names no horizon once the lease has elapsed, and never a negative one', () => {
