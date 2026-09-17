@@ -11,8 +11,9 @@ const setup = () => {
 }
 const deferred = () => {
   let resolve
-  const promise = new Promise((done) => { resolve = done })
-  return { promise, resolve }
+  let reject
+  const promise = new Promise((done, fail) => { resolve = done; reject = fail })
+  return { promise, resolve, reject }
 }
 const uploadServices = () => ({
   policy: vi.fn().mockResolvedValue({ enabled: true }),
@@ -63,6 +64,12 @@ it('B3 row3 leaves a failed extraction pending without importing and resets', as
   expect(importUpload).not.toHaveBeenCalled()
   controller.reset()
   expect(controller.getSnapshot()).toMatchObject({ phase: 'idle', target: null })
+  services.upload.mockResolvedValue({ ...ready.receipt, ...ready.status })
+  controller.begin(target)
+  await upload.upload({ name: 'site.dwg', size: 1 })
+  expect(importUpload).toHaveBeenCalledTimes(1)
+  expect(controller.getSnapshot()).toMatchObject({ phase: 'attached', drawing: drawingVersion })
+  expect(workspace.drawing).not.toBe(original)
 })
 
 it('B3 row10 refuses to replace the target until the upload settles', async () => {
@@ -84,10 +91,19 @@ it('B3 row10 refuses to replace the target until the upload settles', async () =
   expect(controller.getSnapshot()).toMatchObject({ phase: 'pending', target, beginRefused: 'Wait for the current upload to finish.' })
   receipt.resolve({ ...ready.receipt, ...ready.status })
   await pending
+  expect(controller.getSnapshot().beginRefused).toBeNull()
   expect(importUpload).toHaveBeenCalledExactlyOnceWith('p1', { drawingId: ready.receipt.drawing_id, version: 2, name: target.fileName }, { idempotencyKey: 'b3:p1:u-0123456789:2' })
   expect(controller.begin(next)).toBe(true)
   expect(controller.getSnapshot()).toMatchObject({ target: next, beginRefused: null })
+  const nextReceipt = deferred()
+  services.upload.mockReturnValueOnce(nextReceipt.promise)
+  const nextPending = upload.upload({ name: next.fileName, size: 1 })
+  expect(controller.begin(target)).toBe(false)
+  expect(controller.getSnapshot().beginRefused).toBe('Wait for the current upload to finish.')
   controller.reset()
+  expect(controller.getSnapshot().beginRefused).toBeNull()
+  nextReceipt.resolve({ ...ready.receipt, ...ready.status })
+  await nextPending
   expect(controller.getSnapshot().beginRefused).toBeNull()
 })
 
@@ -125,11 +141,11 @@ it('B3 row12 keeps single flight across begin and reset and retries failed keys'
   const first = controller.onUploadReady(ready)
   controller.begin(target)
   const second = controller.onUploadReady(ready)
-  expect(second).toBe(first)
+  expect(second).not.toBe(first)
   await Promise.resolve()
   expect(importUpload).toHaveBeenCalledTimes(1)
   result.resolve({ drawingVersion, replayed: false })
-  await first
+  expect(await second).toEqual(await first)
   controller.reset()
   controller.begin(target)
   await controller.onUploadReady(ready)
@@ -161,13 +177,13 @@ it('B3 row14 clears ready listeners when a disposed controller starts again', as
 it('B3 row4 retries an unavailable import with its original key', async () => {
   const { controller, importUpload } = setup()
   importUpload.mockRejectedValueOnce(Object.assign(new Error('Import is temporarily disabled.'), { status: 503 }))
-    .mockResolvedValueOnce({ drawingVersion, replayed: true })
+    .mockResolvedValueOnce({ drawingVersion, replayed: false })
   controller.begin(target)
   await controller.onUploadReady(ready)
   expect(controller.getSnapshot()).toMatchObject({ phase: 'attach-failed', error: 'Import is temporarily disabled.' })
   await controller.retry()
   expect(importUpload.mock.calls[1]).toEqual(importUpload.mock.calls[0])
-  expect(controller.getSnapshot()).toMatchObject({ phase: 'attached', replayed: true })
+  expect(controller.getSnapshot()).toMatchObject({ phase: 'attached', replayed: false })
 })
 
 it('B3 row5 ignores unclaimed, duplicate and reset ready events', async () => {
@@ -179,15 +195,145 @@ it('B3 row5 ignores unclaimed, duplicate and reset ready events', async () => {
   controller.begin(target)
   const first = controller.onUploadReady(ready)
   const second = controller.onUploadReady(ready)
-  expect(first).toBe(second)
+  expect(first).not.toBe(second)
   await Promise.resolve()
   finish({ drawingVersion, replayed: false })
-  await first
+  expect(await second).toEqual(await first)
   await controller.onUploadReady(ready)
   expect(importUpload).toHaveBeenCalledTimes(1)
   controller.reset()
   await controller.onUploadReady(ready)
   expect(importUpload).toHaveBeenCalledTimes(1)
+})
+
+it('B3 row15 refuses a new target after reset during an upload', async () => {
+  const services = uploadServices()
+  const receipt = deferred()
+  services.upload.mockReturnValueOnce(receipt.promise)
+  const upload = createDrawingUploadController({ services })
+  const importUpload = vi.fn()
+  const controller = createMaterialIntakeController({ services: { importUpload }, isUploadInFlight: () => upload.getSnapshot().busy })
+  upload.subscribeReady(controller.onUploadReady)
+  await upload.loadPolicy()
+  controller.begin(target)
+  const pending = upload.upload({ name: target.fileName, size: 1 })
+  controller.reset()
+  expect(controller.begin({ ...target, projectId: 'p2' })).toBe(false)
+  expect(controller.getSnapshot().beginRefused).toBe('Wait for the current upload to finish.')
+  receipt.resolve({ ...ready.receipt, ...ready.status })
+  await pending
+  expect(controller.getSnapshot()).toMatchObject({ phase: 'idle', target: null, beginRefused: null })
+  expect(importUpload).not.toHaveBeenCalled()
+})
+
+it('B3 row16 refuses an empty second intake sharing an active upload', async () => {
+  const services = uploadServices()
+  const receipt = deferred()
+  services.upload.mockReturnValueOnce(receipt.promise)
+  const upload = createDrawingUploadController({ services })
+  const importUpload = vi.fn().mockResolvedValue({ drawingVersion, replayed: false })
+  const options = { services: { importUpload }, isUploadInFlight: () => upload.getSnapshot().busy }
+  const first = createMaterialIntakeController(options)
+  const second = createMaterialIntakeController(options)
+  upload.subscribeReady(first.onUploadReady)
+  upload.subscribeReady(second.onUploadReady)
+  await upload.loadPolicy()
+  first.begin(target)
+  const pending = upload.upload({ name: target.fileName, size: 1 })
+  expect(second.begin({ ...target, projectId: 'p2' })).toBe(false)
+  expect(second.getSnapshot().target).toBeNull()
+  receipt.resolve({ ...ready.receipt, ...ready.status })
+  await pending
+  expect(importUpload).toHaveBeenCalledTimes(1)
+  expect(importUpload.mock.calls[0][0]).toBe('p1')
+})
+
+it('B3 row17 policy refresh cannot strand the upload awaiting attachment', async () => {
+  const services = uploadServices()
+  const result = deferred()
+  const started = deferred()
+  const importUpload = vi.fn(() => { started.resolve(); return result.promise })
+  const controller = createMaterialIntakeController({ services: { importUpload } })
+  const upload = createDrawingUploadController({ services })
+  upload.subscribeReady(controller.onUploadReady)
+  await upload.loadPolicy()
+  controller.begin(target)
+  const pending = upload.upload({ name: target.fileName, size: 1 })
+  await started.promise
+  expect(upload.getSnapshot()).toMatchObject({ busy: true, phase: 'loading' })
+  await upload.loadPolicy()
+  result.resolve({ drawingVersion, replayed: false })
+  expect(await pending).toMatchObject(ready)
+  expect(upload.getSnapshot()).toMatchObject({ busy: false, phase: 'ready' })
+})
+
+it('B3 row17 only the last overlapping policy load publishes', async () => {
+  const services = uploadServices()
+  const first = deferred()
+  const second = deferred()
+  services.policy.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise)
+  const upload = createDrawingUploadController({ services })
+  const older = upload.loadPolicy()
+  const newer = upload.loadPolicy()
+  second.resolve({ enabled: true, max_bytes: 200 })
+  await newer
+  const snapshot = upload.getSnapshot()
+  first.resolve({ enabled: false, max_bytes: 100 })
+  await older
+  expect(upload.getSnapshot()).toBe(snapshot)
+  expect(snapshot.policy).toMatchObject({ enabled: true, max_bytes: 200 })
+})
+
+it('B3 row18 replacement generations restore pending and settled attachment outcomes', async () => {
+  const { controller, importUpload } = setup()
+  const result = deferred()
+  importUpload.mockReturnValueOnce(result.promise)
+  controller.begin(target)
+  const first = controller.onUploadReady(ready)
+  controller.begin({ ...target, projectName: 'Renamed roof' })
+  const second = controller.onUploadReady(ready)
+  result.resolve({ drawingVersion, replayed: false })
+  expect(await second).toEqual(await first)
+  expect(controller.getSnapshot()).toMatchObject({ phase: 'attached', drawing: drawingVersion })
+  controller.begin(target)
+  expect(await controller.onUploadReady(ready)).toEqual({ drawingVersion, replayed: false })
+  expect(controller.getSnapshot()).toMatchObject({ phase: 'attached', drawing: drawingVersion })
+  expect(importUpload).toHaveBeenCalledTimes(1)
+})
+
+it('B3 row19 replacement generations see failure and can retry the same key', async () => {
+  const { controller, importUpload } = setup()
+  const result = deferred()
+  importUpload.mockReturnValueOnce(result.promise)
+  controller.begin(target)
+  const first = controller.onUploadReady(ready)
+  controller.begin({ ...target, projectName: 'Renamed roof' })
+  const second = controller.onUploadReady(ready)
+  await Promise.resolve()
+  result.reject(new Error('Import unavailable.'))
+  await Promise.all([first, second])
+  expect(controller.getSnapshot()).toMatchObject({ phase: 'attach-failed', error: 'Import unavailable.' })
+  expect(importUpload).toHaveBeenCalledTimes(1)
+  await controller.retry()
+  expect(importUpload).toHaveBeenCalledTimes(2)
+  expect(importUpload.mock.calls[1]).toEqual(importUpload.mock.calls[0])
+  expect(controller.getSnapshot()).toMatchObject({ phase: 'attached', drawing: drawingVersion })
+})
+
+it('B3 row20 ready clears refusal and clearing an absent refusal does not publish', async () => {
+  let busy = false
+  const importUpload = vi.fn().mockResolvedValue({ drawingVersion, replayed: false })
+  const controller = createMaterialIntakeController({ services: { importUpload }, isUploadInFlight: () => busy })
+  controller.begin(target)
+  busy = true
+  expect(controller.begin({ ...target, projectId: 'p2' })).toBe(false)
+  expect(controller.getSnapshot().beginRefused).toBe('Wait for the current upload to finish.')
+  await controller.onUploadReady(ready)
+  expect(controller.getSnapshot()).toMatchObject({ phase: 'attached', beginRefused: null })
+  const listener = vi.fn()
+  controller.subscribe(listener)
+  controller.clearRefusal()
+  expect(listener).not.toHaveBeenCalled()
 })
 
 it('does not publish an attachment after reset', async () => {

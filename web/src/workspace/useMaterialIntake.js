@@ -18,6 +18,10 @@ export default function useMaterialIntake({ upload, onAttached, onReady } = {}) 
   const controller = ref.current
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot)
   useEffect(() => {
+    const snapshot = upload?.getSnapshot?.() || upload
+    if (snapshot?.busy !== true && !['uploading', 'extracting', 'loading'].includes(snapshot?.phase)) controller.clearRefusal()
+  }, [controller, upload, state.beginRefused])
+  useEffect(() => {
     let notified = null
     return controller.subscribe(() => {
       const next = controller.getSnapshot()

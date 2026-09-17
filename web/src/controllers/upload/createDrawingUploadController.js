@@ -13,6 +13,7 @@ export function createDrawingUploadController({ services, onReady, pollMs = 500,
   let state = { policy: null, policyLoading: false, busy: false, phase: 'idle', error: null, receipt: null, engine: null }
   let snapshot = state
   let sequence = 0
+  let policySequence = 0
   let disposed = false
   const listeners = new Set()
   const readyListeners = new Set()
@@ -24,11 +25,11 @@ export function createDrawingUploadController({ services, onReady, pollMs = 500,
   }
 
   const loadPolicy = async () => {
-    const run = ++sequence
+    const run = ++policySequence
     publish({ policyLoading: true, error: null })
     try {
       const policy = await services.policy()
-      if (run === sequence) {
+      if (run === policySequence) {
         const merged = { ...DEFAULT_POLICY, ...policy }
         // Seed the DWG engine toggle from the server default once; a choice
         // the user already made survives policy refreshes.
@@ -37,7 +38,7 @@ export function createDrawingUploadController({ services, onReady, pollMs = 500,
       }
       return policy
     } catch (error) {
-      if (run === sequence) publish({ policy: DEFAULT_POLICY, policyLoading: false, error: message(error) })
+      if (run === policySequence) publish({ policy: DEFAULT_POLICY, policyLoading: false, error: message(error) })
       return null
     }
   }
@@ -91,7 +92,7 @@ export function createDrawingUploadController({ services, onReady, pollMs = 500,
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener) },
     subscribeReady(listener) { readyListeners.add(listener); return () => readyListeners.delete(listener) },
     start() { disposed = false },
-    dispose() { disposed = true; sequence += 1; readyListeners.clear() },
+    dispose() { disposed = true; sequence += 1; policySequence += 1; readyListeners.clear() },
     loadPolicy,
     upload,
     setEngine(engine) {

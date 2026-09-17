@@ -11,30 +11,40 @@ export function createMaterialIntakeController({ services: { importUpload }, isU
     listeners.forEach((listener) => listener())
   }
   const attach = (entry) => {
-    const existing = ledger.get(entry.key)
-    if (existing) return existing.promise
+    let record = ledger.get(entry.key)
+    if (!record) {
+      record = { key: entry.key, status: 'pending', result: null, error: null, request: null }
+      ledger.set(entry.key, record)
+      record.request = Promise.resolve().then(() => importUpload(entry.projectId, entry.source, { idempotencyKey: entry.key }))
+        .then((result) => {
+          record.status = 'attached'
+          record.result = result
+          return result
+        }, (error) => {
+          record.status = 'failed'
+          record.error = error
+          if (ledger.get(entry.key) === record) ledger.delete(entry.key)
+          throw error
+        })
+    }
     const run = generation
-    entry.status = 'pending'
-    ledger.set(entry.key, entry)
     publish({ phase: 'attaching', error: null })
-    entry.promise = Promise.resolve().then(() => importUpload(entry.projectId, entry.source, { idempotencyKey: entry.key }))
+    return record.request
       .then((result) => {
-        entry.status = 'attached'
         if (run === generation) publish({ phase: 'attached', drawing: result.drawingVersion, attached: true, replayed: result.replayed, error: null })
         return result
       }, (error) => {
-        if (ledger.get(entry.key) === entry) ledger.delete(entry.key)
         if (run === generation) publish({ phase: 'attach-failed', error: String(error?.message || error) })
         return null
-      }).finally(() => { entry.promise = null })
-    return entry.promise
+      })
   }
   const reset = () => { generation += 1; attachment = null; publish(idle()) }
+  const clearRefusal = () => { if (state.beginRefused) publish({ beginRefused: null }) }
   return {
     getSnapshot: () => state,
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener) },
     begin({ projectId, projectName, fileName }) {
-      if (state.target && isUploadInFlight()) {
+      if (isUploadInFlight()) {
         publish({ beginRefused: 'Wait for the current upload to finish.' })
         return false
       }
@@ -44,8 +54,9 @@ export function createMaterialIntakeController({ services: { importUpload }, isU
       return true
     },
     onUploadReady({ receipt, status }) {
+      clearRefusal()
       if (!state.target) return
-      if (attachment) return attachment.promise
+      if (attachment) return attach(attachment)
       const drawingId = receipt?.drawing_id
       const version = status?.extracted_version
       if (!drawingId || !Number.isInteger(version) || version <= 0) {
@@ -53,11 +64,12 @@ export function createMaterialIntakeController({ services: { importUpload }, isU
         return
       }
       const { projectId, fileName } = state.target
-      attachment = { projectId, source: { drawingId, version, name: fileName }, key: `b3:${projectId}:${drawingId}:${version}`, promise: null }
+      attachment = { projectId, source: { drawingId, version, name: fileName }, key: `b3:${projectId}:${drawingId}:${version}` }
       return attach(attachment)
     },
     retry() { if (state.phase === 'attach-failed' && attachment) return attach(attachment) },
     reset,
+    clearRefusal,
     dispose() { reset(); ledger.clear(); listeners.clear() },
   }
 }

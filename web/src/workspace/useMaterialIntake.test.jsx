@@ -34,6 +34,32 @@ it('reads the live upload snapshot before React renders the busy state', async (
   expect(result.current.intake.target.fileName).toBe('site.dwg')
 })
 
+it.each(['failed', 'cancelled'])('B3 row20 clears a refused begin after a %s upload through the hook', async (outcome) => {
+  api.getGuestUploadPolicy.mockResolvedValue({ enabled: true, accepted: ['.dwg'], max_bytes: 100 })
+  let reject
+  api.uploadDrawing.mockImplementationOnce(() => new Promise((resolve, fail) => { reject = fail }))
+  const { result } = renderHook(() => {
+    const upload = useDrawingUploadController()
+    return { upload, intake: useMaterialIntake({ upload }) }
+  })
+  await waitFor(() => expect(result.current.upload.policy?.enabled).toBe(true))
+  let pending
+  act(() => {
+    result.current.intake.begin({ projectId: 'p1', projectName: 'Roof A', fileName: 'site.dwg' })
+    pending = result.current.upload.actions.upload(new File(['dwg'], 'site.dwg'))
+    expect(result.current.intake.begin({ projectId: 'p2', projectName: 'Roof B', fileName: 'other.dwg' })).toBe(false)
+  })
+  expect(result.current.intake.beginRefused).toBe('Wait for the current upload to finish.')
+  await act(async () => {
+    if (outcome === 'cancelled') result.current.upload.actions.cancel()
+    reject(new Error('Upload failed.'))
+    await pending
+  })
+  expect(result.current.upload.phase).toBe(outcome === 'failed' ? 'failed' : 'idle')
+  expect(result.current.intake.beginRefused).toBeNull()
+  expect(api.importUploadedDrawingVersion).not.toHaveBeenCalled()
+})
+
 it('B3 row7 composes the existing ready callback and notifies attachment once', async () => {
   const drawingVersion = { version: 1, name: 'site.dwg' }
   api.getGuestUploadPolicy.mockResolvedValue({ enabled: true, accepted: ['.dwg'], max_bytes: 100 })
