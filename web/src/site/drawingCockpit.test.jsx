@@ -136,12 +136,12 @@ describe('formatting', () => {
   it('coordinates are fixed two-decimal and never "-0.00"', () => {
     expect(formatCoordinate(12.3456)).toBe('12.35')
     expect(formatCoordinate(-0.001)).toBe('0.00')
-    expect(formatCoordinate(NaN)).toBe('—')
+    expect(formatCoordinate(NaN)).toBe('·')
   })
   it('scale reads as drawing units per pixel, three significant digits', () => {
     expect(formatScale(0.41876)).toBe('1px = 0.419u')
-    expect(formatScale(0)).toBe('—')
-    expect(formatScale(undefined)).toBe('—')
+    expect(formatScale(0)).toBe('·')
+    expect(formatScale(undefined)).toBe('·')
   })
 })
 
@@ -234,8 +234,8 @@ describe('CockpitStatus', () => {
       const board = ground.querySelector('.studio-ground-board')
       move(board, 100, 50)
       await nextFrame()
-      expect(x.textContent).toBe('—')
-      expect(y.textContent).toBe('—')
+      expect(x.textContent).toBe('·')
+      expect(y.textContent).toBe('·')
       expect(viewer.unproject).not.toHaveBeenCalled()
       move(canvas, 200, 80)
       await nextFrame()
@@ -245,8 +245,8 @@ describe('CockpitStatus', () => {
       move(board, 100, 50)
       move(board, 110, 60)
       await nextFrame()
-      expect(x.textContent).toBe('—')
-      expect(y.textContent).toBe('—')
+      expect(x.textContent).toBe('·')
+      expect(y.textContent).toBe('·')
       expect(viewer.unproject).toHaveBeenCalledTimes(1)
     } finally {
       unmount()
@@ -281,8 +281,8 @@ describe('CockpitStatus', () => {
     expect(status.querySelector('.cockpit-scale b').textContent).toBe('1px = 0.25u')
 
     leave(ground)
-    expect(x.textContent).toBe('—')
-    expect(y.textContent).toBe('—')
+    expect(x.textContent).toBe('·')
+    expect(y.textContent).toBe('·')
 
     unmount()
     move(ground, 1, 1)

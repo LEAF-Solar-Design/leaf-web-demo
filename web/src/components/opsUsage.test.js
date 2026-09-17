@@ -97,10 +97,10 @@ describe('ops usage formatting', () => {
     expect(formatUsageUsd(0)).toBe('$0.000')
   })
 
-  it('renders an unknown reading as an em dash, never as zero', () => {
-    expect(formatUsageCount(null)).toBe('—')
-    expect(formatUsageCount(undefined)).toBe('—')
-    expect(formatUsageUsd(null)).toBe('—')
-    expect(formatUsageUsd(undefined)).toBe('—')
+  it('renders an unknown reading as a middle dot, never as zero', () => {
+    expect(formatUsageCount(null)).toBe('·')
+    expect(formatUsageCount(undefined)).toBe('·')
+    expect(formatUsageUsd(null)).toBe('·')
+    expect(formatUsageUsd(undefined)).toBe('·')
   })
 })

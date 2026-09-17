@@ -50,15 +50,15 @@ describe('DrawingRows', () => {
     expect(button.closest('[role="status"]')).toHaveTextContent('New LINE is off-screen.')
   })
 
-  it('renders every fact as a label | field row and dashes for what is absent', () => {
+  it('renders every fact as a label | field row and middle dots for what is absent', () => {
     render(<DrawingRows drawing={{ name: 'roof.dwg', entities: 2345, polylines: 2345, inserts: 0, faces: 0, layers: 4, layersShown: 3, extents: null, source: 'sample data' }} />)
     const rows = screen.getByTestId('dock-drawing')
     expect(within(rows).getByText('roof.dwg')).toBeInTheDocument()
     // Entities and Polylines both read 2,345 on a polyline-only drawing.
     expect(within(rows).getAllByText('2,345', { selector: 'dd' })).toHaveLength(2)
     expect(within(rows).getByText('Layers shown').nextSibling).toHaveTextContent('3')
-    expect(within(rows).getByText('Width').nextSibling).toHaveTextContent('—')
-    expect(within(rows).getByText('Extents X').nextSibling).toHaveTextContent('—')
+    expect(within(rows).getByText('Width').nextSibling).toHaveTextContent('·')
+    expect(within(rows).getByText('Extents X').nextSibling).toHaveTextContent('·')
   })
 
   it('formats extents and derives width and height from them', () => {
