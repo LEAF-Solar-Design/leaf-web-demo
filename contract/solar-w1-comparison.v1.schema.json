@@ -1,0 +1,1126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leafdesign.ai/contract/solar-w1-comparison.v1.schema.json",
+  "title": "Solar W1 semantic comparison evidence",
+  "description": "Evidence adapter for the Solar parity program. Producers sanitize private payloads. output_sha256 hashes canonical after JSON (sorted keys, compact separators, UTF-8). Input hashes identify the same immutable input. Frames compare exactly. Entity mappings are injective and references explicit. Arrays are ordered. Untagged fields compare exactly. Coordinates and lengths use 1 mm, angles 0.01 degree, declared floats max(1e-6 declared units, 1e-8 magnitude). Safety, constraints, choices, validity and rounding remain exact. The explicit version label none means inapplicable. Runtime validation additionally enforces bounded depth, reference integrity, hashes and family record fields.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "capability",
+    "family",
+    "plugin",
+    "studio"
+  ],
+  "properties": {
+    "schema": {
+      "const": "leaf.solar-w1-comparison.v1"
+    },
+    "capability": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+    },
+    "family": {
+      "enum": [
+        "count",
+        "settings",
+        "zones",
+        "groups",
+        "panels",
+        "strings",
+        "devices",
+        "routing",
+        "imports",
+        "terrain",
+        "shade",
+        "solve",
+        "autofill",
+        "reoptimization",
+        "schedules",
+        "bom",
+        "exports"
+      ]
+    },
+    "plugin": {
+      "$ref": "#/$defs/evidence"
+    },
+    "studio": {
+      "$ref": "#/$defs/evidence"
+    },
+    "objective_bound": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1e+100,
+      "description": "Frozen absolute bound in parameters.objective_unit. Only objective and chosen_candidate may vary."
+    },
+    "prerequisites": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "$ref": "#"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "family": {
+            "const": "count"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "plugin": {
+            "properties": {
+              "after": {
+                "required": [
+                  "counts",
+                  "identities"
+                ]
+              }
+            }
+          },
+          "studio": {
+            "properties": {
+              "after": {
+                "required": [
+                  "counts",
+                  "identities"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "family": {
+            "const": "settings"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "plugin": {
+            "properties": {
+              "after": {
+                "required": [
+                  "settings"
+                ]
+              }
+            }
+          },
+          "studio": {
+            "properties": {
+              "after": {
+                "required": [
+                  "settings"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "family": {
+            "const": "zones"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "plugin": {
+            "properties": {
+              "after": {
+                "required": [
+                  "zones"
+                ]
+              }
+            }
+          },
+          "studio": {
+            "properties": {
+              "after": {
+                "required": [
+                  "zones"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "family": {
+            "const": "groups"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "plugin": {
+            "properties": {
+              "after": {
+                "required": [
+                  "groups"
+                ]
+              }
+            }
+          },
+          "studio": {
+            "properties": {
+              "after": {
+                "required": [
+                  "groups"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "family": {
+            "const": "panels"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "plugin": {
+            "properties": {
+              "after": {
+                "required": [
+                  "panels"
+                ]
+              }
+            }
+          },
+          "studio": {
+            "properties": {
+              "after": {
+                "required": [
+                  "panels"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "family": {
+            "const": "strings"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "plugin": {
+            "properties": {
+              "after": {
+                "required": [
+                  "strings",
+                  "unassigned_panels",
+                  "duplicate_panels",
+                  "length_distribution"
+                ]
+              }
+            }
+          },
+          "studio": {
+            "properties": {
+              "after": {
+                "required": [
+                  "strings",
+                  "unassigned_panels",
+                  "duplicate_panels",
+                  "length_distribution"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "family": {
+            "const": "devices"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "plugin": {
+            "properties": {
+              "after": {
+                "required": [
+                  "devices",
+                  "unassigned_circuits"
+                ]
+              }
+            }
+          },
+          "studio": {
+            "properties": {
+              "after": {
+                "required": [
+                  "devices",
+                  "unassigned_circuits"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "family": {
+            "const": "routing"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "plugin": {
+            "properties": {
+              "after": {
+                "required": [
+                  "connectivity",
+                  "routes",
+                  "conductor_choice",
+                  "constraints"
+                ]
+              }
+            }
+          },
+          "studio": {
+            "properties": {
+              "after": {
+                "required": [
+                  "connectivity",
+                  "routes",
+                  "conductor_choice",
+                  "constraints"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "family": {
+            "const": "imports"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "plugin": {
+            "properties": {
+              "after": {
+                "required": [
+                  "source_sha256",
+                  "objects",
+                  "transforms",
+                  "rejects",
+                  "provenance"
+                ]
+              }
+            }
+          },
+          "studio": {
+            "properties": {
+              "after": {
+                "required": [
+                  "source_sha256",
+                  "objects",
+                  "transforms",
+                  "rejects",
+                  "provenance"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "family": {
+            "const": "terrain"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "plugin": {
+            "properties": {
+              "after": {
+                "required": [
+                  "surface_inputs",
+                  "crs",
+                  "elevations",
+                  "sample_points",
+                  "result_units"
+                ]
+              }
+            }
+          },
+          "studio": {
+            "properties": {
+              "after": {
+                "required": [
+                  "surface_inputs",
+                  "crs",
+                  "elevations",
+                  "sample_points",
+                  "result_units"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "family": {
+            "const": "shade"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "plugin": {
+            "properties": {
+              "after": {
+                "required": [
+                  "surface_inputs",
+                  "crs",
+                  "elevations",
+                  "sun",
+                  "time",
+                  "sample_points",
+                  "result_units"
+                ]
+              }
+            }
+          },
+          "studio": {
+            "properties": {
+              "after": {
+                "required": [
+                  "surface_inputs",
+                  "crs",
+                  "elevations",
+                  "sun",
+                  "time",
+                  "sample_points",
+                  "result_units"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "family": {
+            "const": "solve"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "plugin": {
+            "properties": {
+              "after": {
+                "required": [
+                  "added_panels",
+                  "removed_panels",
+                  "feasible",
+                  "objective",
+                  "chosen_candidate",
+                  "accepted",
+                  "reverted",
+                  "constraints"
+                ]
+              }
+            }
+          },
+          "studio": {
+            "properties": {
+              "after": {
+                "required": [
+                  "added_panels",
+                  "removed_panels",
+                  "feasible",
+                  "objective",
+                  "chosen_candidate",
+                  "accepted",
+                  "reverted",
+                  "constraints"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "family": {
+            "const": "autofill"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "plugin": {
+            "properties": {
+              "after": {
+                "required": [
+                  "added_panels",
+                  "removed_panels",
+                  "feasible",
+                  "objective",
+                  "chosen_candidate",
+                  "accepted",
+                  "reverted",
+                  "constraints"
+                ]
+              }
+            }
+          },
+          "studio": {
+            "properties": {
+              "after": {
+                "required": [
+                  "added_panels",
+                  "removed_panels",
+                  "feasible",
+                  "objective",
+                  "chosen_candidate",
+                  "accepted",
+                  "reverted",
+                  "constraints"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "family": {
+            "const": "reoptimization"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "plugin": {
+            "properties": {
+              "after": {
+                "required": [
+                  "added_panels",
+                  "removed_panels",
+                  "feasible",
+                  "objective",
+                  "chosen_candidate",
+                  "accepted",
+                  "reverted",
+                  "constraints"
+                ]
+              }
+            }
+          },
+          "studio": {
+            "properties": {
+              "after": {
+                "required": [
+                  "added_panels",
+                  "removed_panels",
+                  "feasible",
+                  "objective",
+                  "chosen_candidate",
+                  "accepted",
+                  "reverted",
+                  "constraints"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "family": {
+            "const": "schedules"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "plugin": {
+            "properties": {
+              "after": {
+                "required": [
+                  "rows",
+                  "source_revision",
+                  "format"
+                ]
+              }
+            }
+          },
+          "studio": {
+            "properties": {
+              "after": {
+                "required": [
+                  "rows",
+                  "source_revision",
+                  "format"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "family": {
+            "const": "bom"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "plugin": {
+            "properties": {
+              "after": {
+                "required": [
+                  "rows",
+                  "source_revision",
+                  "format"
+                ]
+              }
+            }
+          },
+          "studio": {
+            "properties": {
+              "after": {
+                "required": [
+                  "rows",
+                  "source_revision",
+                  "format"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "family": {
+            "const": "exports"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "plugin": {
+            "properties": {
+              "after": {
+                "required": [
+                  "rows",
+                  "source_revision",
+                  "format"
+                ]
+              }
+            }
+          },
+          "studio": {
+            "properties": {
+              "after": {
+                "required": [
+                  "rows",
+                  "source_revision",
+                  "format"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fixture_sha256",
+        "input_sha256",
+        "output_sha256",
+        "revision",
+        "versions",
+        "parameters",
+        "units",
+        "frame",
+        "entity_mapping",
+        "before",
+        "after",
+        "changes",
+        "warnings",
+        "rejected_inputs",
+        "synthetic_fields",
+        "fallback_fields",
+        "provenance",
+        "elapsed_ms",
+        "execution_mode",
+        "state",
+        "survived_reopen",
+        "synthetic_flagged"
+      ],
+      "properties": {
+        "fixture_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "input_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "output_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "revision": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        },
+        "versions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema",
+            "producer",
+            "capability",
+            "engine",
+            "catalog",
+            "solver"
+          ],
+          "properties": {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16384
+            },
+            "producer": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16384
+            },
+            "capability": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16384
+            },
+            "engine": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16384
+            },
+            "catalog": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16384
+            },
+            "solver": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16384
+            }
+          }
+        },
+        "parameters": {
+          "type": "object"
+        },
+        "units": {
+          "enum": [
+            "mm",
+            "cm",
+            "m",
+            "in",
+            "ft"
+          ]
+        },
+        "frame": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "coordinate_system",
+            "transform",
+            "elevation_datum",
+            "crs"
+          ],
+          "properties": {
+            "coordinate_system": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16384
+            },
+            "transform": {
+              "type": "array",
+              "minItems": 16,
+              "maxItems": 16,
+              "items": {
+                "type": "number"
+              }
+            },
+            "elevation_datum": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16384
+            },
+            "crs": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16384
+            }
+          }
+        },
+        "entity_mapping": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16384
+          }
+        },
+        "before": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "$ref": "#/$defs/value"
+          }
+        },
+        "after": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "$ref": "#/$defs/value"
+          }
+        },
+        "changes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "created",
+            "modified",
+            "deleted"
+          ],
+          "properties": {
+            "created": {
+              "type": "array",
+              "maxItems": 100000,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 16384
+              },
+              "uniqueItems": true
+            },
+            "modified": {
+              "type": "array",
+              "maxItems": 100000,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 16384
+              },
+              "uniqueItems": true
+            },
+            "deleted": {
+              "type": "array",
+              "maxItems": 100000,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 16384
+              },
+              "uniqueItems": true
+            }
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "maxItems": 100000,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16384
+          }
+        },
+        "rejected_inputs": {
+          "type": "array",
+          "maxItems": 100000,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16384
+          }
+        },
+        "synthetic_fields": {
+          "type": "array",
+          "maxItems": 100000,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16384
+          }
+        },
+        "fallback_fields": {
+          "type": "array",
+          "maxItems": 100000,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16384
+          }
+        },
+        "provenance": {
+          "type": "object",
+          "minProperties": 1
+        },
+        "elapsed_ms": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1e+100
+        },
+        "execution_mode": {
+          "enum": [
+            "live",
+            "recorded",
+            "synthetic",
+            "fallback"
+          ]
+        },
+        "state": {
+          "enum": [
+            "committed",
+            "pending",
+            "failed"
+          ]
+        },
+        "survived_reopen": {
+          "type": "boolean"
+        },
+        "synthetic_flagged": {
+          "type": "boolean"
+        }
+      }
+    },
+    "entity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entity_id"
+      ],
+      "properties": {
+        "entity_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        }
+      }
+    },
+    "quantity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "value",
+        "unit"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "coordinate",
+            "length",
+            "angle",
+            "float"
+          ]
+        },
+        "unit": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        },
+        "value": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 3,
+              "items": {
+                "type": "number"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "value": {
+      "oneOf": [
+        {
+          "type": [
+            "null",
+            "boolean",
+            "string",
+            "number"
+          ]
+        },
+        {
+          "type": "array",
+          "maxItems": 100000,
+          "items": {
+            "$ref": "#/$defs/value"
+          }
+        },
+        {
+          "$ref": "#/$defs/entity"
+        },
+        {
+          "$ref": "#/$defs/quantity"
+        },
+        {
+          "type": "object",
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "entity_id"
+                ]
+              },
+              {
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/value"
+          }
+        }
+      ]
+    },
+    "comparator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "verdict",
+        "diffs"
+      ],
+      "properties": {
+        "name": {
+          "const": "solar-w1-semantic"
+        },
+        "version": {
+          "const": "1"
+        },
+        "verdict": {
+          "enum": [
+            "pass",
+            "fail"
+          ]
+        },
+        "diffs": {
+          "type": "array",
+          "maxItems": 200,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16384
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "verdict": {
+                "const": "pass"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "diffs": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "verdict": {
+                "const": "fail"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "diffs": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

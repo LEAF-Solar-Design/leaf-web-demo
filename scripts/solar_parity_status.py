@@ -19,6 +19,7 @@ Contract, stated here so every reader and every future edit conditions on it:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 import sys
@@ -84,6 +85,7 @@ RECEIPT_KEYS = (
     "synthetic_flagged",
     "survived_reopen",
     "produced_at",
+    "comparison",
 )
 
 
@@ -278,6 +280,34 @@ def parse_receipt(path, capability):
         "survived_reopen": _bool_field(doc, "survived_reopen", where),
         "produced_at": _str_field(doc, "produced_at", where, required=True, allow_empty=False),
     }
+    if receipt["comparator"]["verdict"] == "pass" and receipt["comparator"]["diffs"]:
+        raise InputError(f"{where}: passing comparator must have no diffs")
+    if "comparison" in doc:
+        # Load the sibling explicitly: PYTHONSAFEPATH excludes the script directory.
+        spec = importlib.util.spec_from_file_location(
+            "solar_w1_compare", Path(__file__).with_name("solar_w1_compare.py")
+        )
+        module = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(module)
+            comparison = doc["comparison"]
+            actual = module.compare_document(comparison)
+            if comparison["capability"] != declared:
+                raise ValueError("comparison capability disagrees with receipt")
+            for side in ("plugin", "studio"):
+                evidence = comparison[side]
+                if evidence["fixture_sha256"] != receipt["fixture"]["sha256"]:
+                    raise ValueError("comparison fixture disagrees with receipt")
+                if evidence["survived_reopen"] != receipt["survived_reopen"]:
+                    raise ValueError("comparison reopen state disagrees with receipt")
+            if comparison["studio"]["versions"]["capability"] != receipt["capability_version"]:
+                raise ValueError("comparison capability version disagrees with receipt")
+            if actual != receipt["comparator"]:
+                raise ValueError("comparator block disagrees with executable comparison")
+        except (OSError, ValueError, TypeError, KeyError, RecursionError) as exc:
+            raise InputError(f"{where}: invalid comparison: {exc}") from exc
+    elif receipt["comparator"]["name"] == "solar-w1-semantic":
+        raise InputError(f"{where}: solar-w1-semantic requires comparison evidence")
     return receipt
 
 
