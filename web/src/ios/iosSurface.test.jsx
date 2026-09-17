@@ -15,8 +15,50 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
 
 import IosSurface from './IosSurface.jsx'
+import { DeviceGround } from './DeviceGround.jsx'
 
 afterEach(cleanup)
+
+it('I1 row8 absent ship preserves the existing surface and device render', () => {
+  const contract = contractWith({ healthy: true, launchable: false }, 'MAC_ALLOCATED')
+  const view = render(<IosSurface enabled contract={contract} />)
+  const html = view.container.innerHTML
+  expect(screen.getByText('Setting up — Mac allocated')).toBeInTheDocument()
+  expect(screen.queryByTestId('ios-stage-ladder')).not.toBeInTheDocument()
+  view.rerender(<IosSurface enabled contract={contract} ship={undefined} />)
+  expect(view.container.innerHTML).toBe(html)
+  view.unmount()
+  const ground = render(<DeviceGround active enabled contract={contract} revision="r1" />)
+  const groundHtml = ground.container.innerHTML
+  expect(screen.getByText('TestFlight lane')).toBeInTheDocument()
+  expect(screen.getByText('Mounted Apple readiness')).toBeInTheDocument()
+  expect(screen.queryByTestId('ios-stage-ladder')).not.toBeInTheDocument()
+  ground.rerender(<DeviceGround active enabled contract={contract} revision="r1" ship={undefined} />)
+  expect(ground.container.innerHTML).toBe(groundHtml)
+})
+
+it('I1 row9 renders setup, provider progress, receipt and launch reason from ship', () => {
+  const ship = { phase: 'setup-required', readiness: { setupState: 'no-approved-revision', setupAction: 'Approve revision r1' }, execution: null, receipt: null }
+  const view = render(<IosSurface enabled ship={ship} onLaunch={() => {}} />)
+  expect(view.container.querySelector('[data-rung="source"]')).toHaveAttribute('data-state', 'missing')
+  expect(screen.getByText('Setup required: Approve revision r1')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Launch TestFlight build' })).toBeDisabled()
+  expect(screen.getByText('Complete the reported setup action before launching.')).toBeInTheDocument()
+  const running = { ...ship, phase: 'running', readiness: { setupState: 'none' }, execution: { status: 'running', stage: 'BUILT', updated_at: '2026-09-17T12:00:00Z' } }
+  view.rerender(<IosSurface enabled ship={running} />)
+  expect(screen.getByText('BUILT')).toBeInTheDocument()
+  expect(screen.getByText('2026-09-17T12:00:00Z')).toBeInTheDocument()
+  expect(screen.queryByRole('button')).not.toBeInTheDocument()
+  const succeeded = { ...running, phase: 'succeeded', execution: { status: 'succeeded' }, receipt: { kind: 'leaf.ios-testflight-receipt.v1', receipt_id: 'receipt1', bundle_identifier: 'com.leaf.test' } }
+  view.rerender(<IosSurface enabled ship={succeeded} />)
+  expect(screen.getByText('succeeded')).toBeInTheDocument()
+  expect(screen.getByText('com.leaf.test')).toBeInTheDocument()
+  view.unmount()
+  const ground = render(<DeviceGround active enabled ship={ship} onLaunch={() => {}} />)
+  expect(screen.getByText('Build and delivery status')).toBeInTheDocument()
+  expect(screen.getByTestId('ios-stage-ladder')).toBeInTheDocument()
+  expect(ground.container.querySelector('[data-rung="source"]')).toHaveAttribute('data-state', 'missing')
+})
 
 function contractWith(readiness, buildStage = null) {
   return {
