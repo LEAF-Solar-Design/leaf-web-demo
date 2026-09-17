@@ -470,6 +470,19 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
     params = dict(tool.get("default_params", {}))
     params.update(req.params or {})
 
+    if tool.get("name") == "solar-solve-proposal":
+        from leaf_cloud_client import validate_params as validate_cloud_params
+        from leaf_cloud_grants import CloudError
+
+        if not deps.auth_live() or not getattr(tenant_id, "subject", None):
+            return error_response(ErrorCode.UNAUTHENTICATED, "cloud_auth_missing",
+                                  retryable=False, status_code=401)
+        try:
+            validate_cloud_params(params)
+        except CloudError as exc:
+            return error_response(ErrorCode.BAD_PARAMS, exc.classification,
+                                  retryable=False, status_code=400)
+
     # Exchange the capability for the lock's OWN (holder, fence) before anything
     # is submitted, so the identity that reaches the store was read from the
     # manifest rather than chosen by the caller.
