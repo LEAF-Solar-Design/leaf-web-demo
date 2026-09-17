@@ -3542,7 +3542,10 @@ def check_docs_noop_filter(text: str) -> None:
     }
     assert set(relay_wf["jobs"]) == {"dispatch"}
     dispatch_job = relay_wf["jobs"]["dispatch"]
-    assert set(dispatch_job) == {"if", "runs-on", "timeout-minutes", "env", "steps"}
+    assert set(dispatch_job) == {
+        "if", "runs-on", "environment", "timeout-minutes", "env", "steps",
+    }
+    assert dispatch_job["environment"] == "ecr-release"
     # Pinned VALUES, not just keys: on a persistent self-hosted runner the
     # PAT-backed step would execute on infrastructure outside GitHub's
     # ephemeral VMs. #1091 moved this job from GitHub-hosted ubuntu-latest to
@@ -6756,6 +6759,9 @@ def test_relay_binds_provider_archive_and_dispatches_one_unchanged_envelope() ->
         )
     )
     job = relay["jobs"]["dispatch"]
+    assert job["environment"] == "ecr-release", (
+        "the S3 reader role trusts only the ecr-release environment subject"
+    )
     manifest_code = _executable_bash(
         next(step for step in job["steps"] if step.get("id") == "manifest")["run"]
     )
