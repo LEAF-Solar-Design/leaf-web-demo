@@ -24,6 +24,7 @@ extracts through APS.
 """
 from __future__ import annotations
 
+import hashlib
 import math
 import re
 from pathlib import Path
@@ -287,7 +288,9 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             resolved_inserts.append(entity)
             if entity.get("handle") in insert_properties:
                 properties[entity["handle"]] = insert_properties[entity["handle"]]
-    out: Dict[str, Any] = {"dwg": source_name, "layers": layers, "polylines": polylines}
+    out: Dict[str, Any] = {"dwg": source_name, "layers": layers, "polylines": polylines,
+                           "intake_schema": "v2", "source_sha256": hashlib.sha256(raw).hexdigest(),
+                           "source_byte_length": len(raw), "source_format": "dxf"}
     mlstyles = {}
     for handle, (kind, record) in objects.items():
         if kind == "MLEADERSTYLE":

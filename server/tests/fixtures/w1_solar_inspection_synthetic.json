@@ -1,0 +1,196 @@
+{
+  "schema": "leaf.solar-inspection.v1",
+  "dwg_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "units": {
+    "drawing_units": "m",
+    "meters_per_unit": 1
+  },
+  "stores": [
+    {
+      "key": "SYNTH-PROJECT",
+      "scope": "named-dictionary",
+      "entity_handle": null,
+      "app": null,
+      "payload": {
+        "name": "Synthetic roof",
+        "zip_code": "",
+        "latitude": null,
+        "longitude": null,
+        "installation_design": "Roof",
+        "units": {
+          "drawing_units": "m",
+          "meters_per_unit": 1,
+          "source": "insunits",
+          "compute_units": "m",
+          "wcs_to_ucs": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            1
+          ],
+          "elevation_datum": "synthetic",
+          "crs": null,
+          "drawing_unit_is_feet": false,
+          "warnings": []
+        },
+        "graph_schema_version": 1,
+        "site_revision": "synthetic-1",
+        "future_project_field": {
+          "keep": true
+        }
+      }
+    },
+    {
+      "key": "SYNTH-SETTINGS",
+      "scope": "named-dictionary",
+      "entity_handle": null,
+      "app": null,
+      "payload": {
+        "panel_layer_contains": "SYNTH-PANELS",
+        "panel_group_layer": "SYNTH-FRAMES",
+        "string_layer": "SYNTH-STRINGS",
+        "home_run_layer": "SYNTH-ROUTES",
+        "panels_in_sequence": 0,
+        "num_mppt": 0,
+        "strings_per_mppt": 0,
+        "optimizer_ratio": 1,
+        "use_l2_collectors": false,
+        "panel_group_number": 0,
+        "string_number": 0,
+        "inverter_number": 0,
+        "mppt_letter": "A",
+        "global_string_sizing_confirmed": false,
+        "voc_cold": {
+          "passes": null,
+          "override_accepted": false,
+          "suggested_string_length": null,
+          "per_module": null,
+          "string_voltage": null,
+          "max_dc_voltage": null
+        }
+      }
+    },
+    {
+      "key": "SYNTH-UNKNOWN",
+      "scope": "named-dictionary",
+      "entity_handle": null,
+      "app": null,
+      "payload": "opaque|%\\\ntext"
+    },
+    {
+      "key": "SYNTH-PANEL",
+      "scope": "entity-xdata",
+      "entity_handle": "A1",
+      "app": "SYNTH-PANEL",
+      "payload": {
+        "frame_ref": null,
+        "matrix_cell": null,
+        "centre": [
+          1,
+          1
+        ],
+        "angle": 0,
+        "assignment": {
+          "string_ref": null,
+          "seq": null
+        },
+        "future_panel_field": [
+          "keep",
+          "this"
+        ]
+      }
+    },
+    {
+      "key": "SYNTH-PANEL",
+      "scope": "entity-xdata",
+      "entity_handle": "A2",
+      "app": "SYNTH-PANEL",
+      "payload": {
+        "frame_ref": null,
+        "matrix_cell": null,
+        "centre": [
+          4,
+          1
+        ],
+        "angle": 0,
+        "assignment": {
+          "string_ref": null,
+          "seq": null
+        },
+        "future_panel_field": [
+          "keep",
+          "this"
+        ]
+      }
+    },
+    {
+      "key": "SYNTH-FUTURE",
+      "scope": "extension-dictionary",
+      "entity_handle": "A1",
+      "app": null,
+      "payload": {
+        "unknown": {
+          "v": [
+            1,
+            2,
+            3
+          ]
+        }
+      }
+    }
+  ],
+  "entities": [
+    {
+      "handle": "A1",
+      "layer": "SYNTH-PANELS",
+      "kind": "INSERT",
+      "block_name": "SYNTH-MODULE",
+      "geometry": {
+        "bbox": [
+          0,
+          0,
+          2,
+          2
+        ],
+        "points": [
+          [
+            1,
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "handle": "A2",
+      "layer": "SYNTH-PANELS",
+      "kind": "INSERT",
+      "block_name": "SYNTH-MODULE",
+      "geometry": {
+        "bbox": [
+          3,
+          0,
+          5,
+          2
+        ],
+        "points": [
+          [
+            4,
+            1
+          ]
+        ]
+      }
+    }
+  ]
+}

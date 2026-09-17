@@ -72,6 +72,23 @@ CONTRACTS = {
 }
 
 
+def inspection_activity_spec() -> dict[str, Any]:
+    """Use the existing tool Activity rail for the closed solar READ operation."""
+    from apply_lisp import build_inspect_solar_scr
+    return {
+        "id": f"{client.TOOL_ACTIVITY_PREFIX}inspect_solar_state",
+        "engine": ENGINE,
+        "commandLine": [COMMAND_LINE],
+        "parameters": {
+            "HostDwg": {"verb": "get", "required": True, "localName": HOST_DWG_LOCALNAME},
+            "Params": {"verb": "get", "required": False, "localName": "params.json"},
+            "Result": {"verb": "put", "required": True, "localName": "result.json"},
+        },
+        "settings": {"script": {"value": build_inspect_solar_scr()}},
+        "description": "Leaf Automation neutral solar inspection, read only.",
+    }
+
+
 def activity_spec(contract: int = 2) -> dict[str, Any]:
     """Return the complete fixed Activity definition."""
     target = CONTRACTS[contract]

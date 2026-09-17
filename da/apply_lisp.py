@@ -27,6 +27,12 @@ PLAN_LOCALNAME = "mutation-plan.txt"
 OUT_LOCALNAME = "output.dwg"
 INTAKE_LOCALNAME = "output-intake.txt"
 
+
+def build_inspect_solar_scr() -> str:
+    """Expose the fixed read script beside the existing apply/inspect builders."""
+    from lisp import build_inspect_solar_scr as build
+    return build()
+
 _LISP_LINES = (
     '(setvar "CMDECHO" 0)',
     '(setvar "FILEDIA" 0)',
