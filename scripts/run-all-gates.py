@@ -1306,13 +1306,13 @@ def build_suites() -> List[Suite]:
         # "platform DB unreachable" before any executed-count check runs.
         Suite("platform", "platform/tests (Postgres)", "pytest", REPO_PARENT,
               _py_pytest(f"{repo_name}/platform/tests"), 247, db_gated=True),
-        # W4h S1 frozen cases: seven store, four router, one static.
+        # W4h S1 rows: eight store (rows 1-7 and 13), five router (rows 8-11 and 14), one static.
         # Execution counts are verified by the paired planner.
         Suite("platform-ios-ship-source-catalog", "platform iOS source catalog", "pytest",
               REPO_PARENT, _py_pytest(f"{repo_name}/platform/tests/test_ios_ship_source_catalog.py"),
-              7, db_gated=True),
+              8, db_gated=True),
         Suite("server-ios-ship-source-routes", "server iOS source routes", "pytest",
-              SERVER, _py_pytest("tests/test_ios_ship_source_routes.py"), 4),
+              SERVER, _py_pytest("tests/test_ios_ship_source_routes.py"), 5),
         Suite("platform-ios-ship-source-catalog-static", "platform iOS source catalog static", "pytest",
               REPO_PARENT, _py_pytest(f"{repo_name}/platform/tests/test_ios_ship_source_catalog_static.py"), 1),
         # Dependency-free *_static proofs must run even with NO Postgres: the
