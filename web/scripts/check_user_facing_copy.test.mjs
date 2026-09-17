@@ -3,9 +3,11 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { scanSource, main } from './check_user_facing_copy.mjs';
+import { scanSource, main, MAX_FILE_BYTES } from './check_user_facing_copy.mjs';
 
 const markersOf = (source, rel = 'src/X.jsx') => scanSource(source, rel).map((h) => h.marker);
+const strictMarkersOf = (source, rel = 'src/X.jsx') =>
+  scanSource(source, rel, { strict: true }).map((h) => h.marker);
 
 test('each marker in JSX text is a hit', () => {
   const cases = [
@@ -27,6 +29,13 @@ test('each marker in JSX text is a hit', () => {
 
 test('clean JSX text is not a hit, and a word containing a marker is not either', () => {
   assert.deepEqual(markersOf('const A = () => <p>Wipe the todos list, then n=x</p>;\n'), []);
+});
+
+test('statistics notation is a hit with spaces around the equals sign', () => {
+  // The live shape on the marketing sheets was "internal EPC survey, n = 18",
+  // which the tight `n=\d` marker walked straight past.
+  assert.deepEqual(markersOf('const A = () => <p>internal EPC survey, n = 18</p>;\n'), ['n=']);
+  assert.deepEqual(markersOf('const A = () => <p>internal EPC survey, n =18</p>;\n'), ['n=']);
 });
 
 test('placeholder attribute value is a hit, the attribute name alone is not', () => {
@@ -54,6 +63,37 @@ test('an expression-only child is not a hit', () => {
 test('a template literal with ${ is skipped', () => {
   assert.deepEqual(markersOf('<div title={`TODO ${name}`} />\n'), []);
   assert.deepEqual(markersOf('<div title={`TODO name`} />\n'), ['todo']);
+});
+
+test('strict mode reads a ternary branch inside a JSX expression container', () => {
+  const source = "const A = () => <p>{ok ? 'fine' : 'broken \u2014 sorry'}</p>;\n";
+  assert.deepEqual(markersOf(source), []);
+  assert.deepEqual(strictMarkersOf(source), ['em dash']);
+});
+
+test('strict mode reads the literal segments of a template literal', () => {
+  const source = 'const M = (n) => `Saved ${n} files \u2014 check the log`;\n';
+  assert.deepEqual(markersOf(source), []);
+  assert.deepEqual(strictMarkersOf(source), ['em dash']);
+});
+
+test('strict mode reads a message helper argument and an assigned literal', () => {
+  assert.deepEqual(strictMarkersOf("notify('Run failed \u2013 retry when ready');\n"), ['en dash']);
+  assert.deepEqual(strictMarkersOf("const LEDE = 'Fast \u2014 and honest';\n"), ['em dash']);
+});
+
+test('strict mode runs the dash markers only, so code strings stay clean', () => {
+  // The widened set is every literal in the file, so a marker that is an
+  // ordinary word would flag internal state values on sight.
+  assert.deepEqual(strictMarkersOf("const S = 'wip';\nconst T = 'xxx';\nconst U = 'n=1';\n"), []);
+});
+
+test('strict mode skips imports, class names, ids and URLs', () => {
+  assert.deepEqual(strictMarkersOf("import x from 'a \u2014 b';\n"), []);
+  assert.deepEqual(strictMarkersOf('const A = () => <div className="a \u2014 b" />;\n'), []);
+  assert.deepEqual(strictMarkersOf("const A = () => <div id={'a \u2014 b'} />;\n"), []);
+  assert.deepEqual(strictMarkersOf("fetch('https://x.test/a\u2014b');\n"), []);
+  assert.deepEqual(strictMarkersOf("document.querySelector('.a \u2014 b');\n"), []);
 });
 
 test('code comments are not copy', () => {
@@ -115,6 +155,15 @@ test('a stale allowlist entry is a failure', () => {
   );
   assert.equal(result.code, 1);
   assert.ok(result.lines.some((line) => line.includes('stale allowlist entry')));
+});
+
+test('an oversize file fails closed instead of dropping out of the scan', () => {
+  // The size guard used to `continue` before the file was read or counted, so
+  // a generated or concatenated copy file would leave the tree unscanned while
+  // the summary still said clean.
+  const result = run({ 'src/Huge.jsx': `const H = '${'x'.repeat(MAX_FILE_BYTES)}';\n` }, []);
+  assert.equal(result.code, 1);
+  assert.ok(result.lines.some((line) => line.includes('oversize') && line.includes('src/Huge.jsx')));
 });
 
 test('a non-UTF-8 file fails closed', () => {

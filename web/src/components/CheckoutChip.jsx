@@ -58,7 +58,10 @@ export default function CheckoutChip({ checkout }) {
     <span className="checkout-chip" role="status" title={until?.abs || undefined}>
       Editing locked by <b>{checkout.holder}</b>
       {until?.rel ? <> until <b className="t-rel">{until.rel}</b></> : null}
-      <span className="dim">. Read tools still run</span>
+      {/* No leading punctuation: .checkout-chip is inline-flex with a 6px gap
+          (styles.css), so this note is its own flex item and a leading "." or
+          "," renders as a mark floating clear of the value before it. */}
+      <span className="dim">Read tools still run</span>
     </span>
   )
 }

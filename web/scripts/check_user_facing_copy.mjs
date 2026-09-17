@@ -1,10 +1,15 @@
 #!/usr/bin/env node
 // User-facing copy lint (learning UI-L7). Fails CI when copy that reaches a
 // customer carries a placeholder marker, a TODO, lorem ipsum, statistics
-// notation (n=18) or an em or en dash. No parser and no dependency: bounded
+// notation (n = 18) or an em or en dash. No parser and no dependency: bounded
 // regular expressions over web/src and web/index.html, deterministic order.
-// Fails closed: an unreadable or non-UTF-8 file counts as a hit, and an
-// allowlist entry that matches nothing is itself a failure.
+// Fails closed: an unreadable, non-UTF-8 or oversize file counts as a hit, and
+// an allowlist entry that matches nothing is itself a failure.
+//
+// `--strict` widens the extractor to every quoted literal (template literal
+// segments, ternary branches inside JSX expression containers, arguments to the
+// UI's own message helpers) and runs the dash markers over that set. It is a
+// reporting mode, not the gate: `check:copy` runs the default passes.
 import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
 import { join, relative, dirname, extname, sep, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -45,10 +50,34 @@ const MARKERS = [
   { name: 'lorem', re: /\blorem\b/i },
   { name: 'xxx', re: /\bxxx\b/i },
   { name: 'wip', re: /\bwip\b/i },
-  { name: 'n=', re: /\bn=\d/i },
+  // Spaces around the `=` are the live shape ("internal EPC survey, n = 18"),
+  // so the marker cannot require the tight one.
+  { name: 'n=', re: /\bn\s*=\s*\d/i },
   { name: 'em dash', re: /—|&mdash;|&#8212;|&#x2014;|\\u2014/i },
   { name: 'en dash', re: /–|&ndash;|&#8211;|&#x2013;|\\u2013/i },
 ];
+
+// Only these markers run over the strict pass's widened set. A dash cannot
+// appear in an identifier, a state value, a CSS token or a hyphenated word, so
+// the pass cannot false-positive on code; `todo`, `wip`, `xxx` and `n=` are
+// ordinary words and numbers that would flag internal strings on sight.
+const STRICT_MARKERS = MARKERS.filter((m) => m.name === 'em dash' || m.name === 'en dash');
+
+// Contexts whose literal is never customer copy, tested against the 80 source
+// characters immediately before it, so the check is O(1) per literal and the
+// strict pass stays linear in file length.
+const STRICT_SKIP_BEFORE = new RegExp(
+  String.raw`(?:\b(?:from|import|require)\s*\(?\s*` +
+    String.raw`|\b(?:className|class|classList|htmlFor|href|src|srcSet|to|id|key|type|role|name|testId)\s*=\s*\{?\s*` +
+    String.raw`|(?<![\w$.-])(["']?)(?:className|class|id|key|type|href|src|path|url|uri|selector|testId|event|kind|variant)\1\s*:\s*` +
+    String.raw`|\.(?:querySelector|querySelectorAll|getElementById|getElementsByClassName|closest|matches|setAttribute|getAttribute|removeAttribute|add|remove|toggle)\s*\(\s*` +
+    String.raw`)$`,
+);
+// A path, a URL, a filename or a bare selector is not prose either.
+const STRICT_SKIP_VALUE = /^(?:[#./?]|https?:|mailto:|data:|[A-Za-z][\w+.-]*:\/\/)|^[\w.-]+\.(?:css|js|jsx|mjs|cjs|json|html|png|jpe?g|svg|webp|woff2?)$/;
+// One `${...}` hole, one nesting level deep (enough for `${a ? b : c}`).
+const TEMPLATE_HOLE_RE = /\$\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g;
+const ALL_LITERALS_RE = new RegExp(LITERAL, 'g');
 
 // Blank comments to spaces (newlines kept) so offsets, lines and columns stay
 // true and a `// TODO` in code is never read as JSX text.
@@ -81,7 +110,7 @@ function position(starts, offset) {
 }
 
 /** Candidate user-facing strings in one source text: [{offset, text}], sorted, one per offset. */
-export function extractStrings(text, relPath = '') {
+export function extractStrings(text, relPath = '', { strict = false } = {}) {
   const isHtml = relPath.endsWith('.html');
   const source = blankComments(text, isHtml);
   const found = new Map();
@@ -102,11 +131,33 @@ export function extractStrings(text, relPath = '') {
     re.lastIndex = 0;
     for (const m of source.matchAll(re)) {
       const literal = m[m.length - 1];
-      if (literal.startsWith('`') && literal.includes('${')) continue;
+      const isTemplate = literal.startsWith('`');
+      // A `${}` template mixes copy with code. The bounded passes cannot tell
+      // the halves apart, so default mode skips it; strict mode reads the
+      // literal segments around every hole.
+      if (isTemplate && literal.includes('${') && !strict) continue;
       const value = literal.slice(1, -1);
-      if (!/[A-Za-z–—]/.test(value) && !/&[mn]dash;|\\u201[34]/i.test(value)) continue;
+      const prose = isTemplate ? value.replace(TEMPLATE_HOLE_RE, ' ') : value;
+      if (!/[A-Za-z\u2013\u2014]/.test(prose) && !/&[mn]dash;|\\u201[34]/i.test(prose)) continue;
       const offset = m.index + m[0].length - literal.length;
-      if (!found.has(offset)) found.set(offset, { text: value, prose: value });
+      if (!found.has(offset)) found.set(offset, { text: value, prose });
+    }
+  }
+
+  // Strict: every remaining quoted literal, dash markers only. This is what
+  // sees a ternary branch inside a JSX expression container, a template
+  // literal's segments, and a string handed to the UI's own message helpers.
+  if (strict) {
+    ALL_LITERALS_RE.lastIndex = 0;
+    for (const m of source.matchAll(ALL_LITERALS_RE)) {
+      const literal = m[0];
+      const offset = m.index;
+      if (found.has(offset)) continue;
+      if (STRICT_SKIP_BEFORE.test(source.slice(Math.max(0, offset - 80), offset))) continue;
+      const value = literal.slice(1, -1);
+      if (STRICT_SKIP_VALUE.test(value)) continue;
+      const prose = literal.startsWith('`') ? value.replace(TEMPLATE_HOLE_RE, ' ') : value;
+      found.set(offset, { text: value, prose, strict: true });
     }
   }
 
@@ -127,11 +178,11 @@ function stripExpressions(raw) {
 }
 
 /** Lint hits in one source text: [{file, line, col, marker, text}]. */
-export function scanSource(text, relPath = '') {
+export function scanSource(text, relPath = '', { strict = false } = {}) {
   const starts = lineStarts(text);
   const hits = [];
-  for (const { offset, text: value, prose } of extractStrings(text, relPath)) {
-    for (const marker of MARKERS) {
+  for (const { offset, text: value, prose, strict: widened } of extractStrings(text, relPath, { strict })) {
+    for (const marker of widened ? STRICT_MARKERS : MARKERS) {
       if (!marker.re.test(prose)) continue;
       hits.push({ file: relPath, ...position(starts, offset), marker: marker.name, text: value });
     }
@@ -193,7 +244,7 @@ function clip(value) {
 }
 
 /** Scan root/src and root/index.html against the allowlist. Returns the exit code (0 clean, 1 failure). */
-export function main({ root = WEB_ROOT, allowlistPath = DEFAULT_ALLOWLIST, log = console.log } = {}) {
+export function main({ root = WEB_ROOT, allowlistPath = DEFAULT_ALLOWLIST, log = console.log, strict = false } = {}) {
   let allowlist;
   try {
     allowlist = loadAllowlist(allowlistPath);
@@ -217,15 +268,23 @@ export function main({ root = WEB_ROOT, allowlistPath = DEFAULT_ALLOWLIST, log =
     const rel = relative(root, full).split(sep).join('/');
     let text;
     try {
-      if (statSync(full).size > MAX_FILE_BYTES) continue;
+      // Fails closed like the unreadable branch below: skipping an oversize
+      // file silently left the summary claiming a clean tree over copy that
+      // nothing had read.
+      const { size } = statSync(full);
+      if (size > MAX_FILE_BYTES) {
+        log(`${rel}:1:1  oversize  "${size} bytes, over the ${MAX_FILE_BYTES} byte scan limit"`);
+        failures += 1;
+        continue;
+      }
       text = decoder.decode(readFileSync(full));
     } catch (error) {
       log(`${rel}:1:1  unreadable  "${clip(String(error.message))}"`);
       failures += 1;
       continue;
     }
-    stringCount += extractStrings(text, rel).length;
-    for (const hit of scanSource(text, rel)) {
+    stringCount += extractStrings(text, rel, { strict }).length;
+    for (const hit of scanSource(text, rel, { strict })) {
       const entry = allowlist.find((e) => e.file === hit.file && e.text === hit.text);
       if (entry) {
         entry.used = true;
@@ -243,10 +302,10 @@ export function main({ root = WEB_ROOT, allowlistPath = DEFAULT_ALLOWLIST, log =
     failures += 1;
   }
 
-  log(`check:copy: ${files.length} files, ${stringCount} strings, ${failures} hits (${suppressed} allowlisted)`);
+  log(`check:copy${strict ? ' --strict' : ''}: ${files.length} files, ${stringCount} strings, ${failures} hits (${suppressed} allowlisted)`);
   return failures > 0 ? 1 : 0;
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
-  process.exitCode = main();
+  process.exitCode = main({ strict: process.argv.includes('--strict') });
 }
