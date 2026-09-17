@@ -1,0 +1,1427 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:leaf:solar-design-graph:v1",
+  "title": "Leaf Automation solar design graph v1",
+  "type": "object",
+  "properties": {
+    "graph_schema_version": {
+      "const": 1
+    },
+    "rev": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000000
+    },
+    "parent_rev": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "source_hash": {
+      "$ref": "#/$defs/hash"
+    },
+    "catalog_versions": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 4096
+      }
+    },
+    "project": {
+      "$ref": "#/$defs/project"
+    },
+    "settings": {
+      "$ref": "#/$defs/settings"
+    },
+    "electrical_zones": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/electrical_zone"
+      },
+      "maxItems": 100000
+    },
+    "frames": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/frame"
+      },
+      "maxItems": 100000
+    },
+    "panels": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/panel"
+      },
+      "maxItems": 100000
+    },
+    "strings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/string"
+      },
+      "maxItems": 100000
+    },
+    "inverters": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/inverter"
+      },
+      "maxItems": 100000
+    },
+    "routes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/route"
+      },
+      "maxItems": 100000
+    },
+    "schedules": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/schedule"
+      },
+      "maxItems": 100000
+    },
+    "opaque_stores": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/opaque"
+      }
+    },
+    "orphaned_xdata": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/opaque"
+      },
+      "maxItems": 100000
+    },
+    "extra": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "graph_schema_version",
+    "rev",
+    "parent_rev",
+    "source_hash",
+    "catalog_versions",
+    "project",
+    "settings",
+    "electrical_zones",
+    "frames",
+    "panels",
+    "strings",
+    "inverters",
+    "routes",
+    "schedules",
+    "opaque_stores",
+    "orphaned_xdata",
+    "extra"
+  ],
+  "additionalProperties": true,
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^leaf:[a-z][a-z0-9-]*:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "maxLength": 100
+    },
+    "ref": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "refs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/id"
+      },
+      "maxItems": 100000,
+      "uniqueItems": true
+    },
+    "point": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "minItems": 2,
+      "maxItems": 3
+    },
+    "points": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/point"
+      },
+      "maxItems": 100000
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "validity": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "enum": [
+            "valid",
+            "invalid",
+            "stale",
+            "unknown"
+          ]
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          },
+          "maxItems": 100
+        }
+      },
+      "required": [
+        "state",
+        "reasons"
+      ],
+      "additionalProperties": true
+    },
+    "provenance": {
+      "type": "object",
+      "properties": {
+        "created_by": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "created_at": {
+          "type": "string",
+          "maxLength": 4096,
+          "format": "date-time"
+        },
+        "last_writer": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "source_rev": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "source_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "catalog_versions": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 4096
+          }
+        },
+        "source_handle": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "tool_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "parameters": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "created_by",
+        "created_at",
+        "last_writer",
+        "source_rev"
+      ],
+      "additionalProperties": true
+    },
+    "opaque": {
+      "type": "object",
+      "properties": {
+        "payload_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "byte_length": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "media_type": {
+          "type": "string",
+          "maxLength": 4096
+        }
+      },
+      "required": [
+        "payload_ref",
+        "sha256",
+        "byte_length"
+      ],
+      "additionalProperties": true
+    },
+    "units": {
+      "type": "object",
+      "properties": {
+        "drawing_units": {
+          "enum": [
+            "m",
+            "mm",
+            "cm",
+            "km",
+            "in",
+            "ft",
+            "yd"
+          ]
+        },
+        "meters_per_unit": {
+          "type": "number",
+          "exclusiveMinimum": 1e-12
+        },
+        "source": {
+          "enum": [
+            "drawing_marker",
+            "geo_map",
+            "insunits",
+            "explicit"
+          ]
+        },
+        "compute_units": {
+          "const": "m"
+        },
+        "wcs_to_ucs": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 16,
+          "maxItems": 16
+        },
+        "elevation_datum": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "crs": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "drawing_unit_is_feet": {
+          "type": "boolean"
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          },
+          "maxItems": 100
+        }
+      },
+      "required": [
+        "drawing_units",
+        "meters_per_unit",
+        "source",
+        "compute_units",
+        "wcs_to_ucs",
+        "elevation_datum",
+        "crs",
+        "drawing_unit_is_feet",
+        "warnings"
+      ],
+      "additionalProperties": true
+    },
+    "voc_cold": {
+      "type": "object",
+      "properties": {
+        "passes": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "override_accepted": {
+          "type": "boolean"
+        },
+        "suggested_string_length": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "per_module": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "string_voltage": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_dc_voltage": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "passes",
+        "override_accepted",
+        "suggested_string_length",
+        "per_module",
+        "string_voltage",
+        "max_dc_voltage"
+      ],
+      "additionalProperties": true
+    },
+    "assignment": {
+      "type": "object",
+      "properties": {
+        "string_ref": {
+          "$ref": "#/$defs/ref"
+        },
+        "seq": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "l2_number": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "string_ref",
+        "seq"
+      ],
+      "additionalProperties": true
+    },
+    "matrix_cell": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "panel_ref": {
+          "$ref": "#/$defs/ref"
+        },
+        "seq": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "inverter_id": {
+          "$ref": "#/$defs/ref"
+        },
+        "string_input_number": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        },
+        "angle": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "code",
+        "panel_ref",
+        "seq",
+        "inverter_id",
+        "string_input_number",
+        "x",
+        "y",
+        "angle"
+      ],
+      "additionalProperties": true
+    },
+    "panel_assignment": {
+      "type": "object",
+      "properties": {
+        "panel_ref": {
+          "$ref": "#/$defs/id"
+        },
+        "string_ref": {
+          "$ref": "#/$defs/ref"
+        },
+        "seq": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "inverter_id": {
+          "$ref": "#/$defs/ref"
+        },
+        "string_input_number": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "panel_ref",
+        "string_ref",
+        "seq",
+        "inverter_id",
+        "string_input_number"
+      ],
+      "additionalProperties": true
+    },
+    "sequence": {
+      "type": "object",
+      "properties": {
+        "string_ref": {
+          "$ref": "#/$defs/ref"
+        },
+        "ordered_panel_refs": {
+          "$ref": "#/$defs/refs"
+        }
+      },
+      "required": [
+        "string_ref",
+        "ordered_panel_refs"
+      ],
+      "additionalProperties": true
+    },
+    "input_assignment": {
+      "type": "object",
+      "properties": {
+        "string_ref": {
+          "$ref": "#/$defs/id"
+        },
+        "mppt_letter": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "input_number": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        }
+      },
+      "required": [
+        "string_ref",
+        "mppt_letter",
+        "input_number"
+      ],
+      "additionalProperties": true
+    },
+    "project": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "kind": {
+          "const": "project"
+        },
+        "rev": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "extra": {
+          "type": "object"
+        },
+        "validity": {
+          "$ref": "#/$defs/validity"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "zip_code": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "latitude": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": -90,
+              "maximum": 90
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "longitude": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": -180,
+              "maximum": 180
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "installation_design": {
+          "const": "Roof"
+        },
+        "units": {
+          "$ref": "#/$defs/units"
+        },
+        "graph_schema_version": {
+          "const": 1
+        },
+        "site_revision": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "rev",
+        "provenance",
+        "extra",
+        "validity",
+        "name",
+        "zip_code",
+        "latitude",
+        "longitude",
+        "installation_design",
+        "units",
+        "graph_schema_version",
+        "site_revision"
+      ],
+      "additionalProperties": true
+    },
+    "settings": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "kind": {
+          "const": "settings"
+        },
+        "rev": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "extra": {
+          "type": "object"
+        },
+        "validity": {
+          "$ref": "#/$defs/validity"
+        },
+        "panel_layer_contains": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "panel_group_layer": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "string_layer": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "home_run_layer": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "panels_in_sequence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "num_mppt": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "strings_per_mppt": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "optimizer_ratio": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "use_l2_collectors": {
+          "const": false
+        },
+        "panel_group_number": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "string_number": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "inverter_number": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "mppt_letter": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "global_string_sizing_confirmed": {
+          "type": "boolean"
+        },
+        "voc_cold": {
+          "$ref": "#/$defs/voc_cold"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "rev",
+        "provenance",
+        "extra",
+        "validity",
+        "panel_layer_contains",
+        "panel_group_layer",
+        "string_layer",
+        "home_run_layer",
+        "panels_in_sequence",
+        "num_mppt",
+        "strings_per_mppt",
+        "optimizer_ratio",
+        "use_l2_collectors",
+        "panel_group_number",
+        "string_number",
+        "inverter_number",
+        "mppt_letter",
+        "global_string_sizing_confirmed",
+        "voc_cold"
+      ],
+      "additionalProperties": true
+    },
+    "electrical_zone": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "kind": {
+          "const": "zone-el"
+        },
+        "rev": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "extra": {
+          "type": "object"
+        },
+        "validity": {
+          "$ref": "#/$defs/validity"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "color_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 256
+        },
+        "panel_refs": {
+          "$ref": "#/$defs/refs"
+        },
+        "module_model": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "inverter_model_a": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "inverter_count_a": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "panels_in_sequence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "dc_ac_ratio": {
+          "type": "number",
+          "minimum": 0
+        },
+        "voc_cold": {
+          "$ref": "#/$defs/voc_cold"
+        },
+        "boundary_ref": {
+          "$ref": "#/$defs/ref"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "rev",
+        "provenance",
+        "extra",
+        "validity",
+        "name",
+        "color_index",
+        "panel_refs",
+        "module_model",
+        "inverter_model_a",
+        "inverter_count_a",
+        "panels_in_sequence",
+        "dc_ac_ratio",
+        "voc_cold",
+        "boundary_ref"
+      ],
+      "additionalProperties": true
+    },
+    "frame": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "kind": {
+          "const": "frame"
+        },
+        "rev": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "extra": {
+          "type": "object"
+        },
+        "validity": {
+          "$ref": "#/$defs/validity"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 4096,
+          "pattern": "^[^\\[]*$"
+        },
+        "insertion_point": {
+          "$ref": "#/$defs/point"
+        },
+        "installation_design": {
+          "const": "Roof"
+        },
+        "panel_refs": {
+          "$ref": "#/$defs/refs"
+        },
+        "module_rows": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "module_columns": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "module_slots": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "module_power_watts": {
+          "type": "number",
+          "minimum": 0
+        },
+        "module_width_along_row": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "module_height_across_row": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "electrical_zone_ref": {
+          "$ref": "#/$defs/ref"
+        },
+        "matrix": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/matrix_cell"
+            },
+            "maxItems": 10000
+          },
+          "maxItems": 10000
+        },
+        "sequences": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/sequence"
+          },
+          "maxItems": 100000
+        },
+        "panel_assignments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/panel_assignment"
+          },
+          "maxItems": 100000
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "rev",
+        "provenance",
+        "extra",
+        "validity",
+        "name",
+        "insertion_point",
+        "installation_design",
+        "panel_refs",
+        "module_rows",
+        "module_columns",
+        "module_slots",
+        "module_power_watts",
+        "module_width_along_row",
+        "module_height_across_row",
+        "electrical_zone_ref",
+        "matrix",
+        "sequences",
+        "panel_assignments"
+      ],
+      "additionalProperties": true
+    },
+    "panel": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "kind": {
+          "const": "panel"
+        },
+        "rev": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "extra": {
+          "type": "object"
+        },
+        "validity": {
+          "$ref": "#/$defs/validity"
+        },
+        "frame_ref": {
+          "$ref": "#/$defs/ref"
+        },
+        "matrix_cell": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "row": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1000000
+                },
+                "col": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1000000
+                }
+              },
+              "required": [
+                "row",
+                "col"
+              ],
+              "additionalProperties": true
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "centre": {
+          "$ref": "#/$defs/point"
+        },
+        "angle": {
+          "type": "number"
+        },
+        "assignment": {
+          "$ref": "#/$defs/assignment"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "rev",
+        "provenance",
+        "extra",
+        "validity",
+        "frame_ref",
+        "matrix_cell",
+        "centre",
+        "angle",
+        "assignment"
+      ],
+      "additionalProperties": true
+    },
+    "string": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "kind": {
+          "const": "string"
+        },
+        "rev": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "extra": {
+          "type": "object"
+        },
+        "validity": {
+          "$ref": "#/$defs/validity"
+        },
+        "circuit_tag": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "circuit_kind": {
+          "const": "String"
+        },
+        "ordered_panel_refs": {
+          "$ref": "#/$defs/refs"
+        },
+        "module_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "from_ref": {
+          "$ref": "#/$defs/ref"
+        },
+        "to_ref": {
+          "$ref": "#/$defs/ref"
+        },
+        "tag_text_ref": {
+          "$ref": "#/$defs/ref"
+        },
+        "wire_gauge": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "length_ft": {
+          "type": "number",
+          "minimum": 0
+        },
+        "route": {
+          "$ref": "#/$defs/points"
+        },
+        "inverter_ref": {
+          "$ref": "#/$defs/ref"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "rev",
+        "provenance",
+        "extra",
+        "validity",
+        "circuit_tag",
+        "circuit_kind",
+        "ordered_panel_refs",
+        "module_count",
+        "from_ref",
+        "to_ref",
+        "tag_text_ref",
+        "wire_gauge",
+        "length_ft",
+        "route",
+        "inverter_ref"
+      ],
+      "additionalProperties": true
+    },
+    "inverter": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "kind": {
+          "const": "inverter"
+        },
+        "rev": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "extra": {
+          "type": "object"
+        },
+        "validity": {
+          "$ref": "#/$defs/validity"
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "type_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16
+        },
+        "is_l2": {
+          "const": false
+        },
+        "position": {
+          "$ref": "#/$defs/point"
+        },
+        "model": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "mppt_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "total_dc_inputs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "max_dc_voltage": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "max_ac_power_kw": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "is_solaredge": {
+          "type": "boolean"
+        },
+        "input_assignments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/input_assignment"
+          },
+          "maxItems": 100000
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "rev",
+        "provenance",
+        "extra",
+        "validity",
+        "number",
+        "type_key",
+        "is_l2",
+        "position",
+        "model",
+        "mppt_count",
+        "total_dc_inputs",
+        "max_dc_voltage",
+        "max_ac_power_kw",
+        "is_solaredge",
+        "input_assignments"
+      ],
+      "additionalProperties": true
+    },
+    "route": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "kind": {
+          "const": "route"
+        },
+        "rev": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "extra": {
+          "type": "object"
+        },
+        "validity": {
+          "$ref": "#/$defs/validity"
+        },
+        "route_kind": {
+          "enum": [
+            "start homerun",
+            "end homerun"
+          ]
+        },
+        "points": {
+          "$ref": "#/$defs/points"
+        },
+        "from_ref": {
+          "$ref": "#/$defs/ref"
+        },
+        "to_ref": {
+          "$ref": "#/$defs/ref"
+        },
+        "wire_gauge": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "length_ft": {
+          "type": "number",
+          "minimum": 0
+        },
+        "point_units": {
+          "const": "m"
+        },
+        "length_units": {
+          "const": "ft"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "rev",
+        "provenance",
+        "extra",
+        "validity",
+        "route_kind",
+        "points",
+        "from_ref",
+        "to_ref",
+        "wire_gauge",
+        "length_ft",
+        "point_units",
+        "length_units"
+      ],
+      "additionalProperties": true
+    },
+    "schedule_cell": {
+      "type": [
+        "string",
+        "number",
+        "boolean",
+        "null"
+      ],
+      "maxLength": 4096
+    },
+    "schedule": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "kind": {
+          "const": "schedule"
+        },
+        "rev": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "extra": {
+          "type": "object"
+        },
+        "validity": {
+          "$ref": "#/$defs/validity"
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/schedule_cell"
+            },
+            "maxItems": 256
+          },
+          "maxItems": 100000
+        },
+        "headers": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          },
+          "maxItems": 256
+        },
+        "insertion_point": {
+          "$ref": "#/$defs/point"
+        },
+        "layer": {
+          "const": "LEAF-SCHEDULES"
+        },
+        "source_rev": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "source_refs": {
+          "$ref": "#/$defs/refs"
+        },
+        "column_units": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 4096
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "maxItems": 256
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "rev",
+        "provenance",
+        "extra",
+        "validity",
+        "rows",
+        "headers",
+        "insertion_point",
+        "layer",
+        "source_rev",
+        "source_refs",
+        "column_units"
+      ],
+      "additionalProperties": true
+    }
+  }
+}
