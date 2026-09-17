@@ -26,6 +26,146 @@ const API_BASE = process.env.LEAF_E2E_API_BASE || 'http://127.0.0.1:8230'
 
 const STUDIO = '.studio-shell[data-scene="app"][data-mode="console"]'
 
+test('J1 row1, J1 row2, J1 row4, J1 row5, J1 row8: served Browser panes, first run, material and drawing-profile continuity', async ({ page, request }) => {
+  test.setTimeout(120_000)
+  await requireLocalReady(request, test, API_BASE)
+  await setRail(page, '1')
+  await page.setViewportSize({ width: 1920, height: 1080 })
+  // A local presentation fixture, never a credential. Workspace and upload
+  // writes are intercepted; the rest of the managed stack keeps its real IO.
+  await page.addInitScript(() => {
+    localStorage.setItem('leaf.jwt', 'j1-presentation-fixture')
+    if (!sessionStorage.getItem('j1-initialized')) {
+      localStorage.removeItem('leaf.org_id')
+      sessionStorage.setItem('j1-initialized', 'true')
+    }
+  })
+  const calls = []
+  const project = { project_id: 'j1-project', name: 'J1 roof' }
+  const workspace = {
+    project,
+    drawing_versions: [{ version_id: 'j1-version', drawing_id: 'roof', seq: 1 }],
+    jobs: [{ job_id: 'j1-job', tool_name: 'Measure roof', status: 'succeeded' }],
+    built_tools: [{ tool_id: 'j1-tool', name: 'Roof count' }],
+    drawing_artifacts: [],
+  }
+  let bound = false
+  await page.route('**/api/**', async (route) => {
+    const req = route.request()
+    const path = new URL(req.url()).pathname
+    const json = (body, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
+    if (path === '/api/orgs' && req.method() === 'POST') {
+      calls.push(['org', req.postDataJSON()])
+      bound = true
+      return json({ org: { org_id: 'j1-org', name: 'J1 workspace' } })
+    }
+    if (path === '/api/projects' && req.method() === 'GET') {
+      return bound ? json({ projects: [project] })
+        : json({ detail: 'verified subject has no active platform identity binding' }, 403)
+    }
+    if (path === '/api/projects' && req.method() === 'POST') {
+      calls.push(['create', req.postDataJSON()])
+      return json({ project })
+    }
+    if (path === '/api/projects/j1-project') {
+      calls.push(['open', path])
+      return json(workspace)
+    }
+    if (path === '/api/site/guest-upload-policy') return json({ enabled: true, accepted: ['.dxf'], max_bytes: 1024 * 1024 })
+    if (path === '/api/drawings/upload') {
+      calls.push(['upload'])
+      return json({ drawing_id: 'j1-upload', status: 'ready', extracted_version: 1 })
+    }
+    if (path.startsWith('/api/drawings/j1-upload')) return json({ dwg: 'roof.dxf', polylines: [], layers: [] })
+    if (path === '/api/projects/j1-project/drawing-versions/import') {
+      calls.push(['attach', req.postDataJSON()])
+      workspace.drawing_artifacts = [{ drawing_id: 'j1-upload', name: 'roof.dxf', status: 'ready', created_at: '2026-09-17T00:00:00Z' }]
+      return json({ drawing_version: { drawing_id: 'j1-upload', version: 1, name: 'roof.dxf' }, replayed: false })
+    }
+    // Do not send the presentation sentinel to the real local service.
+    const headers = { ...req.headers() }
+    delete headers.authorization
+    return route.continue({ headers })
+  })
+  await page.goto('/app?surface=browser')
+  const board = page.locator('[data-ground="browser"]')
+  await expect(board).toBeVisible()
+  const createWorkspace = board.getByRole('region', { name: 'Create your workspace' })
+  await createWorkspace.getByLabel('Workspace name').fill('J1 workspace')
+  await createWorkspace.getByRole('button', { name: 'Create workspace', exact: true }).click()
+  const start = board.getByRole('region', { name: 'Workspace projects', exact: true })
+  await expect(start.getByRole('button', { name: 'J1 roof', exact: true })).toBeVisible()
+  await start.getByLabel('Project name').fill('J1 roof')
+  await start.getByRole('button', { name: 'Create project', exact: true }).click()
+  await expect(board).toHaveAttribute('data-project-state', 'project')
+  expect(calls).toContainEqual(['org', { name: 'J1 workspace' }])
+  expect(calls).toContainEqual(['create', { name: 'J1 roof' }])
+  // Reload clears the open-project controller state, then use its open handler.
+  // The fixture bootstrap is now bound, including on an auth-configured stack.
+  await page.reload()
+  const openStart = board.getByRole('region', { name: 'Workspace projects', exact: true })
+  await openStart.getByRole('button', { name: 'J1 roof', exact: true }).click()
+  await expect(board).toHaveAttribute('data-project-state', 'project')
+  for (const [action, pane] of [['version', 'versions'], ['job', 'jobs'], ['tool', 'tools']]) {
+    await board.locator(`[data-action="${action}"]`).click()
+    const panel = board.locator(`[data-pane="${pane}"]`)
+    await expect(panel).toBeVisible()
+    await expect(panel.locator('.ground-pane-head')).toContainText('J1 roof')
+    await panel.getByRole('button', { name: 'Back to board' }).click()
+    await expect(board.locator('[data-pane]')).toHaveCount(0)
+    await expect(board).toHaveAttribute('data-project-state', 'project')
+  }
+  await page.locator('[data-tool="files:upload"]').click()
+  const material = board.locator('[data-pane="material-intake"]')
+  await expect(material).toContainText('Material attaches to J1 roof')
+  await expect(material.getByRole('button', { name: 'Upload DWG or DXF' })).toBeEnabled()
+  await material.getByLabel('Drawing file').setInputFiles({ name: 'roof.dxf', mimeType: 'application/dxf', buffer: Buffer.from('0\nEOF\n') })
+  await expect(material).toContainText('Attached roof.dxf as version 1 to J1 roof')
+  expect(calls).toContainEqual(['attach', { source: { drawing_id: 'j1-upload', version: 1 }, name: 'roof.dxf' }])
+  expect(calls.findIndex(([kind]) => kind === 'upload')).toBeLessThan(calls.findIndex(([kind]) => kind === 'attach'))
+  await board.getByRole('button', { name: 'Back to board' }).click()
+
+  // Same served drawing nodes and profile chrome before/after visiting the
+  // newly mounted Browser panes. The unit fixture pins the 85ef8090 slots.
+  for (const label of ['CAD', 'Solar CAD']) {
+    await page.getByRole('tab', { name: label, exact: true }).click()
+    await expectOneCanvasIn(page, '.studio-ground')
+    const viewer = page.locator('.studio-ground-viewer')
+    await expect(viewer).toBeVisible()
+    const node = await viewer.elementHandle()
+    await expectSharedChrome(page)
+    await expect(page.getByTestId('properties-dock')).toBeVisible()
+    await expect(page.locator('[data-pane]')).toHaveCount(0)
+    await page.getByRole('tab', { name: 'Browser', exact: true }).click()
+    await board.locator('[data-action="version"]').click()
+    await expect(board.locator('[data-pane="versions"]')).toBeVisible()
+    await page.getByRole('tab', { name: label, exact: true }).click()
+    await expect(viewer).toBeVisible()
+    expect(await viewer.evaluate((current, before) => current === before, node)).toBe(true)
+    await expect(page.locator('[data-pane]')).toHaveCount(0)
+    await expectSharedChrome(page)
+  }
+})
+
+test('J1 row6: served demo material stays disabled and makes no project mutation', async ({ page, request }) => {
+  await requireLocalReady(request, test, API_BASE)
+  await setRail(page, '1')
+  const mutations = []
+  page.on('request', (req) => {
+    const path = new URL(req.url()).pathname
+    if (req.method() !== 'GET' && (path.startsWith('/api/projects') || path === '/api/drawings/upload')) mutations.push(path)
+  })
+  await page.goto('/app?surface=browser&demo=1')
+  const board = page.locator('[data-ground="browser"]')
+  await board.locator('[data-action="drawing"]').click()
+  const intake = board.locator('[data-pane="material-intake"]')
+  await expect(intake).toBeVisible()
+  await expect(intake.getByLabel('Drawing file')).toBeDisabled()
+  await expect(intake.getByRole('button', { name: 'Upload DWG or DXF' })).toBeDisabled()
+  await expect(intake).toContainText('Uploads are unavailable in this demo.')
+  expect(mutations).toEqual([])
+})
+
 async function expectSharedChrome(page) {
   await expect(page.locator('.app[data-studio-shell="cockpit"]')).toHaveCount(1)
   await expect(page.getByTestId('cockpit-band')).toHaveCount(1)

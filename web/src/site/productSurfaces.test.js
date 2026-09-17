@@ -461,6 +461,25 @@ describe('Surface Contract — schema', () => {
 })
 
 describe('Surface Contract — equals today', () => {
+  it('J1 row8 the Browser mount leaves the CAD and Solar contracts and drawing seats unchanged', () => {
+    for (const id of ['cad', 'solar']) {
+      expect(surfaceContract(id)).toEqual(CONTRACT_FIXTURE[id])
+      expect(surfaceGround(id)).toBe('drawing')
+      expect(surfaceContract(id).versions).toBe('drawing')
+      expect(surfaceContract(id).rails.dock).toEqual(['layers', 'drawing', 'selection', 'plan'])
+    }
+    const app = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
+    // J1 adds board-only actions and panels. CAD's Start board keeps its old
+    // tiles, and neither drawing profile starts the material upload hook.
+    expect(app).toContain("actions={surfaceSlots.ground === 'board' ? {")
+    expect(app).toContain("panel={surfaceSlots.ground === 'board' ? <>")
+    expect(app).toContain('<ProjectWorkspacePanels')
+    expect(app).toContain('<ProjectStartPanel')
+    const appBody = app.slice(app.indexOf('export default function App()'))
+    expect(appBody).not.toMatch(/useDrawingUploadController\(/)
+    expect(appBody).not.toMatch(/useMaterialIntake\(/)
+  })
+
   for (const id of SURFACE_IDS) {
     it(`${id} matches the hand-written fixture of today's behaviour`, () => {
       expect(surfaceContract(id)).toEqual(CONTRACT_FIXTURE[id])

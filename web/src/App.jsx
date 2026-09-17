@@ -154,6 +154,11 @@ import useAuthorStageController from './controllers/useAuthorStageController.js'
 import useDrawingVersionController from './controllers/useDrawingVersionController.js'
 import usePlatformTrustController from './controllers/platform/usePlatformTrustController.js'
 import useWorkspaceController from './controllers/workspace/useWorkspaceController.js'
+import useDrawingUploadController from './controllers/upload/useDrawingUploadController.js'
+import ProjectWorkspacePanels, { paneForCapability } from './workspace/ProjectWorkspacePanels.jsx'
+import ProjectMaterialIntake from './workspace/ProjectMaterialIntake.jsx'
+import useMaterialIntake from './workspace/useMaterialIntake.js'
+import ProjectStartPanel from './workspace/ProjectStartPanel.jsx'
 import useCatalogController from './controllers/catalog/useCatalogController.js'
 import useSessionController from './controllers/session/useSessionController.js'
 import { consoleAuthRequired, consoleSignedOut } from './controllers/session/consoleGate.js'
@@ -262,6 +267,22 @@ function SignedOutGate({ onDemo, onSignIn }) {
   )
 }
 
+
+// Mount the upload controller only on the live material pane. Its policy
+// request must not run when the drawing profiles or offline demo boot.
+function LiveProjectMaterialIntake({ project, artifacts, onAttached }) {
+  const projectUpload = useDrawingUploadController()
+  const materialIntake = useMaterialIntake({ upload: projectUpload, onAttached })
+  const startMaterialUpload = (file) => {
+    if (!project?.project_id) return
+    if (!materialIntake.begin({ projectId: project.project_id, projectName: project.name,
+      fileName: file?.name })) return
+    return projectUpload.actions.upload(file)
+  }
+  return <ProjectMaterialIntake project={project} upload={projectUpload}
+    intake={materialIntake} artifacts={artifacts} onStartUpload={startMaterialUpload}
+    onRetry={materialIntake.retry} mock={false} />
+}
 
 export default function App() {
   // W1 (convergence): the console's drawing identity is now owned by
@@ -683,6 +704,12 @@ export default function App() {
     closeProject: onCloseProject,
     selectCanonicalVersion,
   } = workspaceController
+  const [projectPane, setProjectPane] = useState(null)
+  const [boardJob, setBoardJob] = useState(null)
+  useEffect(() => {
+    setProjectPane(null)
+    setBoardJob(null)
+  }, [openProjectId])
   const annotationEnabled = Boolean(
     !mock && signedIn && openProjectId && drawingState?.drawing_id && agentSessionId,
   )
@@ -2865,8 +2892,7 @@ export default function App() {
         onChange: !mock && signedIn && !projectsErr ? openProjects : null,
         onCreate: !mock && signedIn && orgId && !projectsErr && !projectBusy ? onCreateProject : null,
       },
-      // This console has no DrawingUploadControl mount or upload controller.
-      files: { onUpload: null },
+      files: { onUpload: !mock && signedIn && openProjectId ? () => setProjectPane('material') : null },
       conversation: {
         onNew: !agentDisabled && signedIn && !running && !routing
           ? () => { clearAgentSession(); openAgentMode(); barInputRef.current?.focus() } : null,
@@ -2880,7 +2906,7 @@ export default function App() {
     })
   }, [surfaceSlots.toolbar.profile, railFamilies, onRequestCatalogRun, setFamilyOpen,
     running, previewing, writeLocked, canRunWrite, engineDirty, mock, signedIn, projectsErr,
-    orgId, projectBusy, onCreateProject, agentDisabled, routing, clearAgentSession,
+    orgId, openProjectId, projectBusy, onCreateProject, agentDisabled, routing, clearAgentSession,
     openAgentMode, jobs.length, iosContract, canonicalVersionId, setNavExpanded, setJobRailExpanded,
     solarRoutesStatus, showSolarStrings, selectedHandle])
   const previousRibbonProfile = useRef(null)
@@ -3582,6 +3608,56 @@ export default function App() {
             onCreateProject={onCreateProject}
             headingRef={boardHeadingRef}
             workspaceProject={workspaceProjectState}
+            actions={surfaceSlots.ground === 'board' ? {
+              onOpenDrawing: () => setProjectPane('material'),
+              onOpenVersion: () => setProjectPane('versions'),
+              onOpenJob: (job) => { setBoardJob(job); setProjectPane('jobs') },
+              onOpenTool: () => setProjectPane('tools'),
+              onOpenFamily: (family) => { setFamilyOpen(family.family_id, true); setNavExpanded(true); setProjectPane('catalog') },
+              onOpenCapability: (capability) => setProjectPane(paneForCapability(capability)),
+            } : undefined}
+            panel={surfaceSlots.ground === 'board' ? <>
+              {!mock && signedIn && !openProjectId && <ProjectStartPanel
+                bootstrapState={workspaceController.bootstrapState}
+                projects={projects}
+                projectsLoaded={workspaceController.projectsLoaded}
+                projectsLoading={projectsLoading}
+                openProjectId={openProjectId}
+                projectsError={projectsErr}
+                orgBusy={orgBusy}
+                projectBusy={projectBusy}
+                orgDraftError={workspaceController.orgDraftError}
+                projectDraftError={workspaceController.projectDraftError}
+                orgConflict={workspaceController.orgConflict}
+                drawingMounted={Boolean(shown)}
+                onCreateOrg={createWorkspaceOrg}
+                onCreateProject={createWorkspaceProject}
+                onOpenProject={onOpenProject}
+                onLoadProjects={workspaceController.loadProjects}
+              />}
+              <ProjectWorkspacePanels
+                project={workspace?.project}
+                workspace={workspace}
+                pane={projectPane}
+                onSelectPane={setProjectPane}
+                onBack={() => setProjectPane(null)}
+                receipts={workspace?.receipts}
+                shipReceipts={workspace?.ship_receipts}
+                slots={{ catalog: <ul>{railFamilies.map((family) => <li key={family.family_id}>{family.label}</li>)}</ul> }}
+                onOpenVersion={(version) => selectCanonicalVersion(version.version_id)}
+                onSelectJob={setBoardJob}
+                currentJob={boardJob}
+                mock={mock}
+              />
+              {projectPane === 'material' && (mock || !signedIn || !openProjectId
+                ? <ProjectMaterialIntake project={null} mock={mock} artifacts={[]} />
+                : <LiveProjectMaterialIntake
+                  key={openProjectId}
+                  project={{ ...workspace?.project, project_id: openProjectId, name: currentProjectName }}
+                  artifacts={workspace?.drawing_artifacts || []}
+                  onAttached={rehydrate}
+                />)}
+            </> : undefined}
             workspace={!mock && openProjectId ? workspace : null}
             drawing={shown ? { name: projectName, polylines: shown.polylines.length, layers: shown.layers.length } : null}
             catalog={catalog}
