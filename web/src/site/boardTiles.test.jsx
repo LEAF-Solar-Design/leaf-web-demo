@@ -17,8 +17,11 @@ const props = {
 const makeActions = () => Object.fromEntries(['onOpenDrawing', 'onOpenVersion', 'onOpenJob', 'onOpenTool', 'onOpenFamily', 'onOpenCapability'].map((name) => [name, vi.fn()]))
 
 it('B2 row1 preserves the markup without callbacks', () => {
-  const { container, rerender } = render(<BoardTiles {...props} />)
+  const { container, rerender } = render(<BoardTiles {...props} actions={makeActions()} />)
+  expect(container.querySelectorAll('button.ground-row-action').length).toBeGreaterThan(0)
+  rerender(<BoardTiles {...props} />)
   const html = container.innerHTML
+  expect(container.querySelector('.ground-row-action')).toBeNull()
   rerender(<BoardTiles {...props} actions={{}} />)
   expect(container.innerHTML).toBe(html)
   expect(container.querySelector('.ground-row-action')).toBeNull()
@@ -49,10 +52,13 @@ it('B2 row3 keeps renderTile markup equal with actions', () => {
   const actions = makeActions()
   const { container, rerender } = render(<BoardTiles {...props} actions={actions} />)
   const html = container.innerHTML
+  const buttonCount = container.querySelectorAll('button.ground-row-action').length
   const names = []
   rerender(<BoardTiles {...props} actions={actions} renderTile={(name, tile) => { names.push(name); return tile }} />)
   expect(names).toEqual(['drawing', 'versions', 'jobs', 'tools', 'catalog', 'shared'])
   expect(container.innerHTML).toBe(html)
+  expect(container.querySelectorAll('button.ground-row-action')).toHaveLength(buttonCount)
+  expect(buttonCount).toBeGreaterThan(0)
 })
 
 it('B2 row9 seats the panel above the tiles inside the same desk', () => {
@@ -65,4 +71,15 @@ it('B2 row9 seats the panel above the tiles inside the same desk', () => {
   expect(panel.nextElementSibling).toHaveClass('ground-tiles')
   rerender(<ProjectBoardGround active worldSpace={false} {...props} />)
   expect(container.innerHTML).toBe(html)
+})
+
+it('B2 row10 forwards board actions to version and job tiles in flat mode', () => {
+  const actions = makeActions()
+  const { container } = render(<ProjectBoardGround active worldSpace={false} {...props} actions={actions} />)
+  fireEvent.click(container.querySelector('button[data-action="version"]'))
+  expect(actions.onOpenVersion).toHaveBeenCalledTimes(1)
+  expect(actions.onOpenVersion).toHaveBeenCalledWith(version)
+  fireEvent.click(container.querySelector('button[data-action="job"]'))
+  expect(actions.onOpenJob).toHaveBeenCalledTimes(1)
+  expect(actions.onOpenJob).toHaveBeenCalledWith(job)
 })

@@ -44,7 +44,7 @@ it('B2 row6 orders versions and preserves honest material and tool empties', () 
   const old = { version_id: 'old', seq: 1, created_at: '2026-09-01' }
   const recent = { version_id: 'recent', seq: 2, created_at: '2026-09-02' }
   const onOpenVersion = vi.fn()
-  const { rerender } = render(<ProjectWorkspacePanels project={project} pane="versions" workspace={{ drawing_versions: [recent, old] }} onOpenVersion={onOpenVersion} />)
+  const { rerender } = render(<ProjectWorkspacePanels project={project} pane="versions" workspace={{ drawing_versions: [old, recent] }} onOpenVersion={onOpenVersion} />)
   expect(screen.getAllByRole('listitem').map((row) => row.textContent)).toEqual(['v2 · recent', 'v1 · old'])
   fireEvent.click(screen.getByRole('button', { name: 'v2 · recent' }))
   expect(onOpenVersion).toHaveBeenCalledWith(recent)
