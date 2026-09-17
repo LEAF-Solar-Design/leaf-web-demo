@@ -23,6 +23,7 @@ it('I1 row8 absent ship preserves the existing surface and device render', () =>
   const contract = contractWith({ healthy: true, launchable: false }, 'MAC_ALLOCATED')
   const view = render(<IosSurface enabled contract={contract} />)
   const html = view.container.innerHTML
+  expect(screen.getByText('iOS app')).toBeInTheDocument()
   expect(screen.getByText('Setting up — Mac allocated')).toBeInTheDocument()
   expect(screen.queryByTestId('ios-stage-ladder')).not.toBeInTheDocument()
   view.rerender(<IosSurface enabled contract={contract} ship={undefined} />)
@@ -32,6 +33,8 @@ it('I1 row8 absent ship preserves the existing surface and device render', () =>
   const groundHtml = ground.container.innerHTML
   expect(screen.getByText('TestFlight lane')).toBeInTheDocument()
   expect(screen.getByText('Mounted Apple readiness')).toBeInTheDocument()
+  expect(screen.getByText('Approved revision')).toBeInTheDocument()
+  expect(screen.getByTestId('device-state')).toHaveTextContent(/^Setting up$/)
   expect(screen.queryByTestId('ios-stage-ladder')).not.toBeInTheDocument()
   ground.rerender(<DeviceGround active enabled contract={contract} revision="r1" ship={undefined} />)
   expect(ground.container.innerHTML).toBe(groundHtml)

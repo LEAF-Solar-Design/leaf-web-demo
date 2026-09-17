@@ -120,7 +120,7 @@ describe('product navigation state', () => {
 // live transport and a dozen controllers.
 const toolCastSource = readFileSync(resolve(process.cwd(), 'src', 'site', 'ToolCast.jsx'), 'utf8')
 
-it('I1 row10 delegates the ship lane to the controller without duplicate local state', () => {
+it('delegates the ship lane to the controller without duplicate local state', () => {
   const codeOnly = toolCastSource.replace(/\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/g, match => match.replace(/[^\r\n]/g, ' '))
   expect(codeOnly).toMatch(/const\s+iosShipController\s*=\s*useIosShipController\(\{\s*projectId:\s*workspace\.openProjectId,\s*revision:\s*workspace\.canonicalVersionId,\s*sessionActive:\s*platformSession\.status\s*===\s*'active',\s*enabled:\s*stageBranch\s*===\s*'ios'\s*&&\s*platformSession\.status\s*===\s*'active',\s*tenantKey:\s*config\.tenant,?\s*\}\)/)
   for (const name of ['iosShip', 'iosShipBusy', 'iosShipError', 'iosShipExecution', 'iosShipReceipt']) {

@@ -1818,6 +1818,7 @@ export default function ToolCast({
           {iosShipError && <p className="tc-rail-note" data-testid="ios-ship-error">{iosShipError}</p>}
         </div>
       </aside>
+      <SurfaceFrame.Toast />
       </>
       ) : authoringOnStage ? (
       <>

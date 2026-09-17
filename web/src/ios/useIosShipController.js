@@ -31,12 +31,17 @@ function storage(key, action, value) {
 }
 
 export function useIosShipController({ projectId, revision, sessionActive, enabled = true, tenantKey }) {
-  const owner = JSON.stringify([tenantKey, projectId])
+  const owner = JSON.stringify([tenantKey, projectId, revision])
+  const ownership = useMemo(() => ({}), [owner])
+  const currentOwnership = useRef(ownership)
+  currentOwnership.current = ownership
   const scope = useMemo(() => ({}), [owner, revision, sessionActive, enabled])
   const current = useRef(scope)
   current.current = scope
   const mounted = useRef(false)
   const flight = useRef(null)
+  const receiptReads = useRef(new Map())
+  const following = useRef(false)
   const executionGeneration = useRef(0)
   const readGeneration = useRef(0)
   const [follow, setFollow] = useState(0)
@@ -56,7 +61,7 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
   const refresh = useCallback(async () => {
     if (!live()) return
     const generation = ++readGeneration.current
-    setFollow((n) => n + 1)
+    if (!following.current) setFollow((n) => n + 1)
     if (!enabled || !sessionActive || !projectId || !revision) {
       update({ readiness: decorate(emptyIosShipReadiness('no_approved_project_revision', null, projectId)), loading: false, launching: false, error: null })
       return
@@ -82,7 +87,7 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
     let cancelled = false
     const generation = executionGeneration.current
     const pointer = storage(pointerKey, 'read')
-    if (typeof pointer?.execution_id !== 'string' || !pointer.execution_id) return undefined
+    if (typeof pointer?.execution_id !== 'string' || !pointer.execution_id || pointer.revision !== revision) return undefined
     getIosShipExecution({ projectId, executionId: pointer.execution_id }).then((response) => {
       if (!cancelled && live() && executionGeneration.current === generation) update({ execution: response.execution })
     }).catch((cause) => {
@@ -91,7 +96,7 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
       else update({ error: message(cause) })
     })
     return () => { cancelled = true }
-  }, [enabled, sessionActive, projectId, pointerKey, live, update])
+  }, [enabled, sessionActive, projectId, revision, pointerKey, live, update])
 
   const executionId = visible.execution?.execution_id
   useEffect(() => {
@@ -101,16 +106,28 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
     let deadlineTimer
     const generation = executionGeneration.current
     const valid = () => !cancelled && live() && executionGeneration.current === generation
-    const stop = () => { clearTimeout(timer); clearTimeout(deadlineTimer) }
+    following.current = true
+    const stop = () => { clearTimeout(timer); clearTimeout(deadlineTimer); following.current = false }
     const settle = async (execution) => {
       if (!terminal(execution)) return false
-      stop()
+      clearTimeout(timer)
+      clearTimeout(deadlineTimer)
       if (execution.receipt_id && visible.receipt?.receipt_id !== execution.receipt_id) {
-        const response = await getIosShipReceipt({ projectId, receiptId: execution.receipt_id })
-        if (!valid()) return true
-        update({ receipt: response.receipt })
+        const receiptKey = JSON.stringify([owner, execution.receipt_id])
+        let read = receiptReads.current.get(receiptKey)
+        if (!read) {
+          read = getIosShipReceipt({ projectId, receiptId: execution.receipt_id })
+          receiptReads.current.set(receiptKey, read)
+        }
+        const response = await read
+        if (!mounted.current || currentOwnership.current !== ownership || executionGeneration.current !== generation) return true
+        setState((old) => mounted.current && currentOwnership.current === ownership
+          && executionGeneration.current === generation && old.owner === owner ? { ...old, receipt: response.receipt } : old)
       }
-      if (valid()) storage(pointerKey, 'remove')
+      if (valid()) {
+        storage(pointerKey, 'remove')
+        stop()
+      }
       return true
     }
     const poll = async () => {
@@ -125,7 +142,7 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
       }
     }
     if (terminal(visible.execution)) {
-      settle(visible.execution).catch((cause) => { if (valid()) update({ error: message(cause) }) })
+      settle(visible.execution).catch((cause) => { if (valid()) update({ error: message(cause) }); stop() })
     } else {
       deadlineTimer = setTimeout(() => {
         if (valid()) update({ error: 'still running; refresh to keep following' })
@@ -140,7 +157,8 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
   }, [enabled, sessionActive, projectId, pointerKey, executionId, live, update, follow])
 
   const launch = useCallback(async () => {
-    if (!live() || !enabled || flight.current === scope || (visible.execution && !terminal(visible.execution))
+    if (flight.current !== null) return null
+    if (!live() || !enabled
       || !iosShipLaunchAffordance(visible.readiness, { projectId, revision, sessionActive })) return undefined
     flight.current = scope
     executionGeneration.current += 1
@@ -148,8 +166,8 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
     try {
       const response = await requestIosShipLaunch({ projectId, approvedLaunch: visible.readiness.approvedLaunch,
         idempotencyKey: makeIosShipLaunchKey(projectId, visible.readiness.approvedLaunch) })
-      storage(pointerKey, 'write', { execution_id: response.execution.execution_id, revision, at: new Date().toISOString() })
       if (!live()) return undefined
+      storage(pointerKey, 'write', { execution_id: response.execution.execution_id, revision, at: new Date().toISOString() })
       update({ execution: response.execution, launching: false })
       setFollow((n) => n + 1)
       return response
@@ -170,7 +188,7 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
             : /^(http_|unreachable$|readiness_unavailable$|provider_unavailable$)/.test(readiness.reason || '') ? 'unavailable'
               : readiness.setupState !== 'none' ? 'setup-required' : 'unavailable'
   return Object.freeze({ readiness, execution: visible.execution, receipt: visible.receipt, error: visible.error,
-    busy: phase === 'launching' || phase === 'running', phase, launch, refresh })
+    busy: phase === 'launching', phase, launch, refresh })
 }
 
 export default useIosShipController

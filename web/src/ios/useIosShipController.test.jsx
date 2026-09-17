@@ -1,18 +1,43 @@
 import { act, cleanup, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { useIosShipController, shipSetupState } from './useIosShipController.js'
-import { emptyIosShipReadiness, fetchIosShipReadiness, getIosShipExecution, getIosShipReceipt, requestIosShipLaunch, validateIosShipReadiness } from '../site/iosShipReadiness.js'
+import { validateIosShipReadiness } from '../site/iosShipReadiness.js'
 
-vi.mock('../site/iosShipReadiness.js', async (original) => ({
-  ...await original(),
-  fetchIosShipReadiness: vi.fn(), getIosShipExecution: vi.fn(),
-  getIosShipReceipt: vi.fn(), requestIosShipLaunch: vi.fn(),
-}))
+// Transport spies: the hook still calls every real fetch helper and validator.
+const fetchIosShipReadiness = vi.fn()
+const getIosShipExecution = vi.fn()
+const getIosShipReceipt = vi.fn()
+const requestIosShipLaunch = vi.fn()
 
 const props = { projectId: 'p1', revision: 'r1', tenantKey: 'tenant1', sessionActive: true }
 const key = 'leaf.ios-ship.pointer:tenant1:p1'
-const ready = (projectId = 'p1') => ({ ...emptyIosShipReadiness(), projectId, launchable: true, healthy: true,
-  grantStatus: 'healthy', dispatchAvailable: true, approvedLaunch: { approval_id: 'a1', revision: 'r1' } })
+const approvedReadiness = ({ projectId = 'p1', revision = 'r1', ...overrides } = {}) => validateIosShipReadiness({
+  record_kind: 'leaf.ios-ship-readiness.v1', project_id: projectId,
+  launchable: true, healthy: true, grant_status: 'healthy', dispatch_available: true,
+  approved_launch: { approval_id: 'a1', revision, source_revision: 'source1', source_sha256: 'a'.repeat(64),
+    bundle_identifier: 'com.leaf.test', marketing_version: '1.0', build_number: '12' },
+  ...overrides,
+}, { projectId, revision })
+const emptyIosShipReadiness = (reason) => approvedReadiness({ launchable: false, healthy: false, reason })
+const transport = async (url, init) => {
+  const path = new URL(url, 'http://localhost')
+  let data
+  if (path.pathname.endsWith('/readiness')) {
+    const readiness = await fetchIosShipReadiness({ projectId: path.searchParams.get('project_id'), revision: path.searchParams.get('revision') })
+    data = { readiness: { record_kind: readiness.kind, project_id: readiness.projectId,
+      launchable: readiness.launchable, healthy: readiness.healthy, grant_status: readiness.grantStatus,
+      dispatch_available: readiness.dispatchAvailable, approved_launch: readiness.approvedLaunch,
+      reason: readiness.reason, setup_action: readiness.setupAction } }
+  } else if (path.pathname.endsWith('/launch')) {
+    const { project_id: projectId, ...approvedLaunch } = JSON.parse(init.body)
+    data = { ok: true, ...await requestIosShipLaunch({ projectId, approvedLaunch, idempotencyKey: init.headers['Idempotency-Key'] }) }
+  } else if (path.pathname.includes('/executions/')) {
+    data = { ok: true, ...await getIosShipExecution({ projectId: path.searchParams.get('project_id'), executionId: decodeURIComponent(path.pathname.split('/').pop()) }) }
+  } else if (path.pathname.includes('/receipts/')) {
+    data = { ok: true, ...await getIosShipReceipt({ projectId: path.searchParams.get('project_id'), receiptId: decodeURIComponent(path.pathname.split('/').pop()) }) }
+  } else throw new Error(`Unexpected request: ${path.pathname}`)
+  return { ok: true, status: path.pathname.endsWith('/launch') ? 202 : 200, json: async () => data }
+}
 const queued = { execution_id: 'e1', status: 'queued' }
 const receipt = { kind: 'leaf.ios-testflight-receipt.v1', receipt_id: 'receipt1', build_number: '12' }
 const flush = async () => { await act(async () => { await Promise.resolve() }) }
@@ -24,12 +49,13 @@ beforeEach(() => {
   vi.useFakeTimers()
   vi.resetAllMocks()
   sessionStorage.clear()
-  fetchIosShipReadiness.mockResolvedValue(ready())
+  vi.stubGlobal('fetch', vi.fn(transport))
+  fetchIosShipReadiness.mockResolvedValue(approvedReadiness())
   requestIosShipLaunch.mockResolvedValue({ ok: true, execution: queued })
   getIosShipExecution.mockResolvedValue({ execution: queued })
   getIosShipReceipt.mockResolvedValue({ receipt })
 })
-afterEach(() => { cleanup(); vi.useRealTimers(); sessionStorage.clear() })
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); sessionStorage.clear() })
 
 it('I1 row1 maps named setup states and transport failures', async () => {
   for (const [record, phase, setupState] of [
@@ -77,12 +103,12 @@ it('I1 row3 a slow old project cannot replace the new project or retain its exec
   let resolveOld
   fetchIosShipReadiness.mockReturnValueOnce(new Promise((resolve) => { resolveOld = resolve }))
   act(() => { result.current.refresh() })
-  fetchIosShipReadiness.mockResolvedValue(ready('p2'))
+  fetchIosShipReadiness.mockResolvedValue(approvedReadiness({ projectId: 'p2' }))
   rerender({ ...props, projectId: 'p2' })
   expect(result.current.execution).toBeNull()
   expect(result.current.receipt).toBeNull()
   await flush()
-  await act(async () => { resolveOld(ready('p1')) })
+  await act(async () => { resolveOld(approvedReadiness()) })
   expect(result.current.readiness.projectId).toBe('p2')
   expect(result.current.phase).toBe('ready')
 })
@@ -162,4 +188,83 @@ it('I1 row7 stops following at thirty minutes and refresh resumes it', async () 
   await act(async () => { await result.current.refresh() })
   await tick()
   expect(getIosShipExecution).toHaveBeenCalledTimes(calls + 1)
+})
+
+it('I1 row11 revision ownership clears execution and receipt and ignores old pointers and polls', async () => {
+  const { result, rerender } = mount()
+  await flush()
+  requestIosShipLaunch.mockResolvedValueOnce({ execution: { ...queued, status: 'succeeded', receipt_id: 'receipt1' } })
+  await launch(result)
+  await flush()
+  expect(result.current.receipt).toEqual(receipt)
+  fetchIosShipReadiness.mockResolvedValue(approvedReadiness({ revision: 'r2' }))
+  rerender({ ...props, revision: 'r2' })
+  expect(result.current.execution).toBeNull()
+  expect(result.current.receipt).toBeNull()
+  await flush()
+  fetchIosShipReadiness.mockResolvedValue(approvedReadiness())
+  rerender(props)
+  await flush()
+  await launch(result)
+  let resolvePoll
+  getIosShipExecution.mockReturnValueOnce(new Promise((resolve) => { resolvePoll = resolve }))
+  await tick()
+  const pointer = sessionStorage.getItem(key)
+  const calls = getIosShipExecution.mock.calls.length
+  fetchIosShipReadiness.mockResolvedValue(approvedReadiness({ revision: 'r2' }))
+  rerender({ ...props, revision: 'r2' })
+  expect(result.current.execution).toBeNull()
+  expect(result.current.receipt).toBeNull()
+  await flush()
+  expect(getIosShipExecution).toHaveBeenCalledTimes(calls)
+  expect(sessionStorage.getItem(key)).toBe(pointer)
+  await act(async () => { resolvePoll({ execution: { ...queued, status: 'succeeded', receipt_id: 'receipt1' } }) })
+  expect(result.current.execution).toBeNull()
+  expect(result.current.receipt).toBeNull()
+  expect(sessionStorage.getItem(key)).toBe(pointer)
+})
+
+it('I1 row12 pending launch locks across disable and reenable until settlement', async () => {
+  let resolveLaunch
+  requestIosShipLaunch.mockReturnValueOnce(new Promise((resolve) => { resolveLaunch = resolve }))
+  const { result, rerender } = mount()
+  await flush()
+  let first
+  act(() => { first = result.current.launch() })
+  rerender({ ...props, enabled: false })
+  rerender({ ...props, enabled: true })
+  await flush()
+  expect(result.current.readiness.launchable).toBe(true)
+  await act(async () => { expect(await result.current.launch()).toBeNull() })
+  expect(requestIosShipLaunch).toHaveBeenCalledTimes(1)
+  await act(async () => { resolveLaunch({ execution: queued }); await first })
+  expect(result.current.execution).toBeNull()
+  await launch(result)
+  expect(requestIosShipLaunch).toHaveBeenCalledTimes(2)
+  expect(result.current.execution).toEqual(queued)
+})
+
+it('I1 row13 refresh during a receipt read does not request it twice or discard its result', async () => {
+  let resolveReceipt
+  getIosShipReceipt.mockReturnValueOnce(new Promise((resolve) => { resolveReceipt = resolve }))
+  const { result } = mount()
+  await flush()
+  await launch(result)
+  getIosShipExecution.mockResolvedValueOnce({ execution: { ...queued, status: 'succeeded', receipt_id: 'receipt1' } })
+  await tick()
+  expect(getIosShipReceipt).toHaveBeenCalledTimes(1)
+  await act(async () => { await result.current.refresh() })
+  expect(getIosShipReceipt).toHaveBeenCalledTimes(1)
+  await act(async () => { resolveReceipt({ receipt }) })
+  expect(result.current.receipt).toEqual(receipt)
+  await act(async () => { await result.current.refresh() })
+  expect(getIosShipReceipt).toHaveBeenCalledTimes(1)
+})
+
+it('I1 row14 busy ends with the launch response while execution is running', async () => {
+  const { result } = mount()
+  await flush()
+  await launch(result)
+  expect(result.current.phase).toBe('running')
+  expect(result.current.busy).toBe(false)
 })
