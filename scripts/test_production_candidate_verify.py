@@ -79,6 +79,23 @@ def test_row1_full_fixture(candidate, capsys):
         candidate[0][section][field] = original
 
 
+def test_row2_identity_probe_path(monkeypatch):
+    urls = []
+    sha = "a" * 40
+
+    def get_json(url):
+        urls.append(url)
+        if url == verifier.STAGING + "/api/health":
+            return {"source_sha": sha}
+        raise urllib.error.HTTPError(url, 401, "Unauthorized", {}, None)
+
+    monkeypatch.setattr(verifier, "get_json", get_json)
+    assert verifier.probe_health_sha(verifier.STAGING) == {
+        "source_sha": sha, "identity_status": 401}
+    assert urls == [verifier.STAGING + "/api/health",
+                    verifier.STAGING + "/api/deployment-identity"]
+
+
 def test_row2_new_red(candidate):
     candidate[0]["candidate_proof"]["reds"].append("new.mjs:10:2 › newly broken row")
     result = cli(candidate)
@@ -189,7 +206,7 @@ def test_row7_live_probe_error(candidate, monkeypatch, capsys, failure):
         assert request.get_header("User-agent") == verifier.USER_AGENT
         if failure == "URLError":
             raise urllib.error.URLError("Bearer abc eyJhbGciOi... should never print")
-        if request.full_url.endswith("/api/identity"):
+        if request.full_url.endswith("/api/deployment-identity"):
             if failure in ("HTTP 503", "401"):
                 code = 503 if failure == "HTTP 503" else 401
                 raise urllib.error.HTTPError(request.full_url, code, "private error", {}, None)

@@ -67,7 +67,7 @@ def probe_health_sha(origin):
     result = {"source_sha": health["source_sha"]}
     if origin == STAGING:
         try:
-            get_json(origin + "/api/identity")
+            get_json(origin + "/api/deployment-identity")
             result["identity_status"] = "HTTP 200"
         except urllib.error.HTTPError as error:
             result["identity_status"] = 401 if error.code == 401 else f"HTTP {error.code}"
