@@ -1986,12 +1986,18 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
 
 def resolve_version_entry(backend: StorageBackend, tenant_id: str, drawing_id: str,
                           version="head") -> tuple[int, str, dict]:
-    """Resolve `version` to (version_int, object_key, manifest_row) in ONE manifest read.
+    """Resolve through `resolve_version`, then read that version's manifest row."""
+    v, key = resolve_version(backend, tenant_id, drawing_id, version)
+    m = load_manifest(backend, tenant_id, drawing_id)
+    entry = next((e for e in m["versions"] if int(e["v"]) == v), None)
+    if entry is None:
+        raise ValueError(f"version {v} not in manifest for {tenant_id}/{drawing_id}")
+    return v, key, dict(entry)
 
-    The row is a copy of the manifest's own entry for that version, so a caller
-    that needs its metadata (restore reads `source_ref`) does not load the
-    manifest a second time to find what this call already proved is there.
-    """
+
+def resolve_version(backend: StorageBackend, tenant_id: str, drawing_id: str,
+                    version="head") -> tuple[int, str]:
+    """Resolve `version` (an int, "head", or "latest") to (version_int, object_key)."""
     tid = sanitize_id(tenant_id)
     did = sanitize_id(drawing_id)
     m = load_manifest(backend, tid, did)
@@ -2007,14 +2013,7 @@ def resolve_version_entry(backend: StorageBackend, tenant_id: str, drawing_id: s
     if entry is None:
         known = sorted(int(e["v"]) for e in m["versions"])
         raise ValueError(f"version {v} not in manifest for {tid}/{did} (known={known})")
-    return v, drawing_version_key(tid, did, v), dict(entry)
-
-
-def resolve_version(backend: StorageBackend, tenant_id: str, drawing_id: str,
-                    version="head") -> tuple[int, str]:
-    """Resolve `version` (an int, "head", or "latest") to (version_int, object_key)."""
-    v, key, _entry = resolve_version_entry(backend, tenant_id, drawing_id, version)
-    return v, key
+    return v, drawing_version_key(tid, did, v)
 
 
 def _verify_selected_bundle(backend, tid, did, version):

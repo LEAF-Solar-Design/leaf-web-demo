@@ -728,7 +728,12 @@ def read_intake(backend, tenant_id: str, drawing_id: str,
     binds that cache to the exact immutable source bytes. Raises KeyError or
     ValueError on a missing, corrupt, or unbound representation."""
     import store
-    v, vkey, entry = store.resolve_version_entry(backend, tenant_id, drawing_id, version)
+    v, vkey = store.resolve_version(backend, tenant_id, drawing_id, version)
+    try:
+        manifest = store.load_manifest(backend, tenant_id, drawing_id)
+        entry = next((e for e in manifest["versions"] if int(e["v"]) == v), {})
+    except Exception:  # Optional metadata; source/cache proofs still apply below.
+        entry = {}
     if (entry.get("note") or "").startswith("solar-bundle:"):
         return v, store.read_graph_bundle(backend, tenant_id, drawing_id, v)["intake"]
     ckey = intake_cache_key(tenant_id, drawing_id, v)
