@@ -41,7 +41,7 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
   const mounted = useRef(false)
   const flight = useRef(null)
   const receiptReads = useRef(new Map())
-  const following = useRef(false)
+  const following = useRef(null)
   const executionGeneration = useRef(0)
   const readGeneration = useRef(0)
   const [follow, setFollow] = useState(0)
@@ -106,8 +106,13 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
     let deadlineTimer
     const generation = executionGeneration.current
     const valid = () => !cancelled && live() && executionGeneration.current === generation
-    following.current = true
-    const stop = () => { clearTimeout(timer); clearTimeout(deadlineTimer); following.current = false }
+    const token = {}
+    following.current = token
+    const stop = () => {
+      clearTimeout(timer)
+      clearTimeout(deadlineTimer)
+      if (following.current === token) following.current = null
+    }
     const settle = async (execution) => {
       if (!terminal(execution)) return false
       clearTimeout(timer)
@@ -116,7 +121,10 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
         const receiptKey = JSON.stringify([owner, execution.receipt_id])
         let read = receiptReads.current.get(receiptKey)
         if (!read) {
-          read = getIosShipReceipt({ projectId, receiptId: execution.receipt_id })
+          read = getIosShipReceipt({ projectId, receiptId: execution.receipt_id }).catch((cause) => {
+            if (receiptReads.current.get(receiptKey) === read) receiptReads.current.delete(receiptKey)
+            throw cause
+          })
           receiptReads.current.set(receiptKey, read)
         }
         const response = await read
@@ -162,13 +170,13 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
       || !iosShipLaunchAffordance(visible.readiness, { projectId, revision, sessionActive })) return undefined
     flight.current = scope
     executionGeneration.current += 1
-    update({ launching: true, error: null, receipt: null, execution: null })
+    update({ launching: true, error: null })
     try {
       const response = await requestIosShipLaunch({ projectId, approvedLaunch: visible.readiness.approvedLaunch,
         idempotencyKey: makeIosShipLaunchKey(projectId, visible.readiness.approvedLaunch) })
       if (!live()) return undefined
       storage(pointerKey, 'write', { execution_id: response.execution.execution_id, revision, at: new Date().toISOString() })
-      update({ execution: response.execution, launching: false })
+      update({ execution: response.execution, receipt: null, launching: false })
       setFollow((n) => n + 1)
       return response
     } catch (cause) {
