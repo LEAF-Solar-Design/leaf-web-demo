@@ -50,6 +50,12 @@ def _project_session() -> dict:
     }
 
 
+def _stored_project_session() -> dict:
+    session = _project_session()
+    session["tenant_id"] = f"project:{ORG_ID}:{PROJECT_ID}"
+    return session
+
+
 def test_legacy_session_keeps_tenant_only_authority(monkeypatch):
     called = []
     monkeypatch.setattr(
@@ -81,6 +87,41 @@ def test_project_session_rechecks_current_membership(monkeypatch, write):
         session, _tenant(), write=write,
     ) is session
     assert calls == [(ORG_ID, PROJECT_ID, write)]
+
+
+@pytest.mark.parametrize("write", [False, True])
+def test_stored_project_tenant_rechecks_current_membership(monkeypatch, write):
+    calls = []
+    monkeypatch.setattr(
+        platform_link,
+        "require_project_access",
+        lambda tenant, project_id, *, write: calls.append(
+            (str(tenant), project_id, write)
+        ) or ORG_ID,
+    )
+    session = _stored_project_session()
+
+    assert platform_link.require_project_session_access(
+        session, _tenant(), write=write,
+    ) is session
+    assert calls == [(ORG_ID, PROJECT_ID, write)]
+
+
+def test_other_project_storage_tenant_is_rejected_before_membership(monkeypatch):
+    monkeypatch.setattr(
+        platform_link,
+        "require_project_access",
+        lambda *args, **kwargs: pytest.fail("foreign storage marker reached membership"),
+    )
+    session = _stored_project_session()
+    session["tenant_id"] = (
+        "project:11111111-1111-4111-8111-111111111111:"
+        "33333333-3333-4333-8333-333333333333"
+    )
+
+    assert platform_link.require_project_session_access(
+        session, _tenant(), write=True,
+    ) is None
 
 
 def test_project_create_derives_org_and_binds_project(monkeypatch):
