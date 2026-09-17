@@ -121,8 +121,20 @@ def test_e2e_readiness_then_every_published_stage_then_receipt_render_via_real_r
     assert receipt_body["contract"]["receipt_id"] == "receipt-ship-1"
 
     FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
+    # Keep the shared fixture LF-only so Windows verification leaves it unchanged.
     (FIXTURE_DIR / "ios_surface_contract.receipt.json").write_text(
-        json.dumps(receipt_body["contract"], indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        json.dumps(receipt_body["contract"], indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+
+
+def test_s2_row11_receipt_fixture_is_lf_only(tmp_path, monkeypatch):
+    """S2 row11: the generated receipt fixture contains no carriage return."""
+    # Removing newline="\n" is detected only on Windows; Linux writes the same
+    # LF bytes either way. Exercise the writer without simulating another platform.
+    monkeypatch.setitem(globals(), "FIXTURE_DIR", tmp_path)
+    test_e2e_readiness_then_every_published_stage_then_receipt_render_via_real_route()
+    fixture_bytes = (tmp_path / "ios_surface_contract.receipt.json").read_bytes()
+    assert fixture_bytes.endswith(b"\n")
+    assert b"\r" not in fixture_bytes
 
 
 def test_a_prior_success_is_never_served_stale_via_real_route_when_upstream_later_fails():

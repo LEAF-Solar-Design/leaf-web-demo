@@ -236,7 +236,9 @@ def test_callback_rejects_ungrammatical_provider_controlled_scope(tmp_path, monk
     assert store.progress == []
 
 
-def test_authenticated_callbacks_forward_only_fixed_scope(tmp_path, monkeypatch):
+@pytest.mark.parametrize("schema", ["leaf.ios-testflight-receipt.v1",
+                                    "leaf.ios-testflight-receipt.v2"])
+def test_authenticated_callbacks_forward_only_fixed_scope(tmp_path, monkeypatch, schema):
     callback.set_config(_config(tmp_path, monkeypatch))
     store = Store()
     monkeypatch.setattr(callback, "_store", lambda: store)
@@ -251,7 +253,7 @@ def test_authenticated_callbacks_forward_only_fixed_scope(tmp_path, monkeypatch)
     assert response.status_code == 200
     assert store.progress == [((ORG, "tenant-a", PROJECT, EXECUTION, "run-1"),
                                {"status": "PENDING_RELEASE", "stage": "MAC_RELEASED"})]
-    raw = {"schema": "leaf.ios-testflight-receipt.v1"}
+    raw = {"schema": schema}
     receipt = client.post(
         f"/internal/v1/ios-ship/executions/{EXECUTION}/receipt",
         json={"org_id": ORG, "tenant_id": "tenant-a", "project_id": PROJECT,
@@ -259,6 +261,20 @@ def test_authenticated_callbacks_forward_only_fixed_scope(tmp_path, monkeypatch)
         headers=headers)
     assert receipt.status_code == 200
     assert store.receipts == [(ORG, "tenant-a", PROJECT, EXECUTION, "run-1", raw)]
+
+
+@pytest.mark.parametrize("receipt", [None, [], "receipt", 1, True])
+def test_callback_refuses_non_dict_receipt_before_store(tmp_path, monkeypatch, receipt):
+    callback.set_config(_config(tmp_path, monkeypatch))
+    store = Store()
+    monkeypatch.setattr(callback, "_store", lambda: store)
+    response = _client().post(
+        f"/internal/v1/ios-ship/executions/{EXECUTION}/receipt",
+        json={"org_id": ORG, "tenant_id": "tenant-a", "project_id": PROJECT,
+              "execution_id": EXECUTION, "provider_run_id": "run-1", "receipt": receipt},
+        headers={"Authorization": f"Bearer {TOKEN}", "X-Leaf-Ios-Ship-Provider": PROVIDER_ID})
+    assert response.status_code == 400
+    assert store.receipts == []
 
 
 def test_production_composition_mounts_dispatch_and_callback_together(monkeypatch):
