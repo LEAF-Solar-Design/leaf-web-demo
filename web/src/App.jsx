@@ -4359,7 +4359,8 @@ export default function App() {
         ) : (
           <span className="foot-stat"><span className="dot" aria-hidden="true" />local solver · <span className="ok-txt">ready</span></span>
         )}
-        <span className="dim">{plural(capCount, 'cap')} · {catalog.families.length} famil{catalog.families.length === 1 ? 'y' : 'ies'} · tier {gateTier}</span>
+        {/* One census per surface: under the studio the footer counts the same surface-scoped families the rail shows. */}
+        <span className="dim">{plural(studioGround ? railFamilies.reduce((n, f) => n + f.capabilities.length, 0) : capCount, 'cap')} · {railFamilies.length} famil{railFamilies.length === 1 ? 'y' : 'ies'} · tier {gateTier}</span>
         {!mock && usage && (
           <span className="dim">${Number(usage.today?.usd_est || 0).toFixed(3)} today</span>
         )}
