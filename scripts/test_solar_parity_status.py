@@ -60,7 +60,7 @@ def receipt(capability, **overrides):
         "fixture": {"id": "fx-1", "sha256": "a" * 64},
         "plugin": {"build": "2026.9.1", "state": "committed", "receipt_sha256": "b" * 64},
         "studio": {"capability_version": "1", "engine": "browser"},
-        "comparator": {"name": "geometry", "version": "1", "verdict": "pass", "diffs": []},
+        "comparator": {"name": "exact-counts-by-layer", "version": "1", "verdict": "pass", "diffs": []},
         "synthetic_fields": [],
         "fallback_fields": [],
         "synthetic_flagged": False,
@@ -554,3 +554,70 @@ def test_json_mode_prints_nothing_else(tmp_path, capsys):
     assert code == 0
     assert json.loads(captured.out)["ok"] is True
     assert captured.err == ""
+
+
+@pytest.mark.parametrize("name", ["exact-counts-by-layer", "solar-w1-semantic"])
+def test_pass_with_diffs_is_not_a_passing_receipt(tmp_path, capsys, name):
+    ledger = write_ledger(tmp_path, [row("LEAFARRAY")])
+    doc = comparison_receipt() if name == "solar-w1-semantic" else receipt("draw-array")
+    doc["comparator"]["diffs"] = ["membership differs"]
+    write_receipt(tmp_path, "draw-array", doc)
+    assert run(ledger, receipts_dir(tmp_path)) == 2
+    assert "passing comparator must have no diffs" in capsys.readouterr().err
+
+
+def comparison_receipt():
+    # Share the adapter fixtures without relying on the script directory in sys.path.
+    spec = importlib.util.spec_from_file_location(
+        "comparison_test_fixtures", SCRIPT.with_name("test_solar_w1_compare.py")
+    )
+    fixtures = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fixtures)
+    comparison = fixtures.document()
+    comparison["capability"] = "draw-array"
+    doc = receipt("draw-array", comparison=comparison)
+    doc["comparator"] = fixtures.compare.compare_document(comparison)
+    return doc
+
+
+def test_executable_comparison_receipt_passes(tmp_path, capsys):
+    ledger = write_ledger(tmp_path, [row("LEAFARRAY")])
+    write_receipt(tmp_path, "draw-array", comparison_receipt())
+    code, result = json_result(capsys, ledger, receipts_dir(tmp_path))
+    assert code == 0, result["findings"]
+
+
+def test_forged_comparator_verdict_is_rejected(tmp_path, capsys):
+    ledger = write_ledger(tmp_path, [row("LEAFARRAY")])
+    doc = comparison_receipt()
+    doc["comparison"]["studio"]["revision"] = "2"
+    write_receipt(tmp_path, "draw-array", doc)
+    assert run(ledger, receipts_dir(tmp_path)) == 2
+    assert "disagrees with executable comparison" in capsys.readouterr().err
+
+
+def test_unknown_comparator_name_exits_2(tmp_path, capsys):
+    ledger = write_ledger(tmp_path, [row("LEAFARRAY")])
+    doc = receipt("draw-array")
+    doc["comparator"]["name"] = "geometry"
+    write_receipt(tmp_path, "draw-array", doc)
+    assert run(ledger, receipts_dir(tmp_path)) == 2
+    assert "unknown value 'geometry'" in capsys.readouterr().err
+
+
+def test_solar_w1_semantic_without_comparison_evidence_exits_2(tmp_path, capsys):
+    ledger = write_ledger(tmp_path, [row("LEAFARRAY")])
+    doc = comparison_receipt()
+    del doc["comparison"]
+    write_receipt(tmp_path, "draw-array", doc)
+    assert run(ledger, receipts_dir(tmp_path)) == 2
+    assert "requires comparison evidence" in capsys.readouterr().err
+
+
+def test_comparison_cannot_relabel_its_fixture(tmp_path, capsys):
+    ledger = write_ledger(tmp_path, [row("LEAFARRAY")])
+    doc = comparison_receipt()
+    doc["fixture"]["sha256"] = "c" * 64
+    write_receipt(tmp_path, "draw-array", doc)
+    assert run(ledger, receipts_dir(tmp_path)) == 2
+    assert "fixture disagrees" in capsys.readouterr().err
