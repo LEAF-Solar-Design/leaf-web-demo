@@ -21,6 +21,7 @@ import {
   layersCluster,
   profileRibbonTabs,
   shipStatusRows,
+  shipLaunchReason,
   solarRouteDisplay,
   solarRouteStatus,
   solarStringsControl,
@@ -46,6 +47,75 @@ const FAMS = [
     ],
   },
 ]
+
+it('J2 row2 a real ready launch is callable and non-ready phases disable the TestFlight tool', () => {
+  const launch = vi.fn()
+  for (const phase of ['ready', 'idle', 'loading', 'setup-required', 'unavailable', 'launching', 'running', 'succeeded', 'failed']) {
+    const ship = { phase, onLaunch: phase === 'ready' ? launch : null }
+    ship.launchReason = shipLaunchReason(ship)
+    const tool = profileRibbonTabs('ship', { ship })[0].clusters.flatMap((group) => group.tools).find((item) => item.id === 'ship:launch')
+    expect(tool.disabled).toBe(phase !== 'ready')
+    if (phase === 'ready') {
+      expect(tool.onClick).toBe(launch)
+      tool.onClick()
+    } else {
+      expect(tool.onClick).toBeUndefined()
+      expect(tool.reason.length).toBeGreaterThan(0)
+    }
+  }
+  expect(launch).toHaveBeenCalledOnce()
+})
+
+it('J2 row4 the Ship tab rows follow running and terminal controller status', () => {
+  for (const phase of ['running', 'succeeded', 'failed']) {
+    const ship = { phase, execution: { status: phase, stage: 'archive' } }
+    const row = profileRibbonTabs('ship', { ship })[0].clusters.flatMap((group) => group.tools).find((item) => item.id === 'ship:readiness')
+    expect(row.state).toBe(phase)
+    expect(row.label).toBe(`Ship status: ${phase} (archive)`)
+  }
+})
+
+it('J2 row10 an invented launch reason reaches neither Ship reason site', () => {
+  const ship = { phase: 'setup-required', readiness: { setupState: 'grant-not-ready' }, launchReason: 'anything at all' }
+  const tools = profileRibbonTabs('ship', { ship })[0].clusters.flatMap((group) => group.tools)
+  for (const id of ['ship:readiness', 'ship:launch']) {
+    const tool = tools.find((item) => item.id === id)
+    expect(tool.reason).toBe(PROFILE_REASONS.shipGrant)
+    expect(tool.reason).not.toBe(ship.launchReason)
+  }
+})
+
+it('J2 row11 every legitimate launch reason renders verbatim at both Ship reason sites', () => {
+  for (const launchReason of Object.values(PROFILE_REASONS)) {
+    const ship = { phase: 'running', launchReason }
+    const tools = profileRibbonTabs('ship', { ship })[0].clusters.flatMap((group) => group.tools)
+    for (const id of ['ship:readiness', 'ship:launch']) {
+      expect(tools.find((item) => item.id === id).reason).toBe(launchReason)
+    }
+  }
+})
+
+it('J2 row12 every rendered Ship reason sentence belongs to the profile ladder', () => {
+  const sentences = Object.values(PROFILE_REASONS)
+  for (const phase of [undefined, 'ready', 'idle', 'loading', 'setup-required', 'unavailable', 'launching', 'running', 'succeeded', 'failed', 'unknown']) {
+    for (const setupState of [undefined, 'no-approved-revision', 'grant-not-ready', 'executor-busy', 'executor-unavailable', 'unknown']) {
+      for (const launchReason of [undefined, '', 'anything at all', ...sentences]) {
+        const ship = { phase, readiness: { setupState }, launchReason, onLaunch: phase === 'ready' ? vi.fn() : null }
+        const tools = profileRibbonTabs('ship', { ship })[0].clusters.flatMap((group) => group.tools)
+        for (const id of ['ship:readiness', 'ship:launch']) {
+          const tool = tools.find((item) => item.id === id)
+          if (id === 'ship:launch' && phase === 'ready' && !sentences.includes(launchReason)) {
+            // A ready launch has no disabled sentence; keep that existing contract.
+            expect(tool.disabled).toBe(false)
+            expect(tool.reason).toBe('')
+          } else {
+            expect(sentences).toContain(tool.reason)
+          }
+        }
+      }
+    }
+  }
+})
 
 it('J1 row7 mounted Project upload is enabled while absent handlers retain honest reasons', () => {
   const onUpload = vi.fn()

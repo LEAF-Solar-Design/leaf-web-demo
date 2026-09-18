@@ -77,6 +77,8 @@ import DemoBanner from './components/DemoBanner.jsx'
 import { AccountSignOut } from './components/ProductSurfaceTabs.jsx'
 import { deriveWorkspaceProjectState } from './site/workspaceProjectState.js'
 import IosSurface from './ios/IosSurface.jsx'
+import { useIosShipController } from './ios/useIosShipController.js'
+import { shipLaunchReason, shipErrorSentence } from './lib/ribbonClusters.js'
 import { ENV_IOS_SURFACE } from './ios/flag.js'
 import CadEditSurface from './cadedit/CadEditSurface.jsx'
 import EngineSessionProvider from './cadedit/EngineSessionProvider.jsx'
@@ -2815,6 +2817,25 @@ export default function App() {
       .catch(() => { if (live) setIosContract(null) })
     return () => { live = false }
   }, [mock, openProjectId, canonicalVersionId])
+  const iosShipController = useIosShipController({
+    projectId: openProjectId,
+    revision: canonicalVersionId || null,
+    sessionActive: !mock && signedIn,
+    enabled: ENV_IOS_SURFACE && surfaceSlots.toolbar.profile === 'ship',
+    tenantKey: tenant || config.tenant,
+  })
+  const ship = useMemo(() => ({
+    ...iosShipController,
+    contract: iosContract,
+    revision: canonicalVersionId || null,
+    error: shipErrorSentence(iosShipController.error),
+    onLaunch: iosShipController.phase === 'ready' ? iosShipController.launch : null,
+    launchReason: shipLaunchReason(iosShipController),
+    onReceipts: iosContract?.receipt_id ? () => {
+      const details = document.querySelector('.studio-profile-info details')
+      if (details) { details.open = true; details.querySelector('summary')?.focus() }
+    } : null,
+  }), [iosShipController, iosContract, canonicalVersionId])
   // Readiness follows the engine projection that reached the canvas, not openBytes.
   const solarReady = surfaceSlots.toolbar.profile === 'solar' && !!activeIntake
     && engineDocument?.documentId === activeIntake.documentId
@@ -2823,9 +2844,9 @@ export default function App() {
     sessionActive: mock || !signedOut,
     hasDrawing: !!shown,
     apsLive: health ? !!health.aps_live : undefined,
-    iosReady: !!(iosContract?.readiness?.healthy && iosContract?.readiness?.launchable),
+    iosReady: iosShipController.phase === 'ready',
     solarReady,
-  }), [mock, signedOut, shown, health, iosContract, solarReady])
+  }), [mock, signedOut, shown, health, iosShipController.phase, solarReady])
 
   const advisories = [
     quotaShown && 'spend cap',
@@ -2898,16 +2919,12 @@ export default function App() {
           ? () => { clearAgentSession(); openAgentMode(); barInputRef.current?.focus() } : null,
       },
       activity: { onJobs: openJobs, onReceipts: jobs.length ? openJobs : null },
-      // IosSurface is readiness-only here; launching belongs to the ship host.
-      ship: { contract: iosContract, revision: canonicalVersionId || null, onLaunch: null, onReceipts: iosContract?.receipt_id ? () => {
-        const details = document.querySelector('.studio-profile-info details')
-        if (details) { details.open = true; details.querySelector('summary')?.focus() }
-      } : null },
+      ship,
     })
   }, [surfaceSlots.toolbar.profile, railFamilies, onRequestCatalogRun, setFamilyOpen,
     running, previewing, writeLocked, canRunWrite, engineDirty, mock, signedIn, projectsErr,
     orgId, openProjectId, projectBusy, onCreateProject, agentDisabled, routing, clearAgentSession,
-    openAgentMode, jobs.length, iosContract, canonicalVersionId, setNavExpanded, setJobRailExpanded,
+    openAgentMode, jobs.length, ship, setNavExpanded, setJobRailExpanded,
     solarRoutesStatus, showSolarStrings, selectedHandle])
   const previousRibbonProfile = useRef(null)
   const entryRibbonTab = profileEntryTab(previousRibbonProfile.current, surfaceSlots.toolbar.profile, ribbonTab, surfaceSlots.toolbar.home)
@@ -3252,7 +3269,7 @@ export default function App() {
       onSelect={onSelectSurface}
       onCreateProject={onCreateProject}
       projectSlot={surfaceSlots.chrome.projectSlot === 'ios-surface'
-        ? <IosSurface enabled={ENV_IOS_SURFACE} contract={iosContract} />
+        ? <IosSurface enabled={ENV_IOS_SURFACE} contract={iosContract} ship={ship} onLaunch={ship.onLaunch} />
         : null}
       session={session}
       // Slice 9b: the ladder fields the console can supply today. Entity-kind
@@ -3665,6 +3682,8 @@ export default function App() {
             iosEnabled={ENV_IOS_SURFACE}
             iosContract={iosContract}
             revision={canonicalVersionId}
+            ship={ship}
+            onLaunch={ship.onLaunch}
           />,
           studioGround,
         )}

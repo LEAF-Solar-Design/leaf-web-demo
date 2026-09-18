@@ -509,7 +509,19 @@ export function reasonlessDisabled(src, mapsByName = new Map()) {
 // W4g-7b-03c-g F5 (receipt): 15 -> 18 for the Properties panel's three combos (Color / Linetype /
 // Lineweight in EngineRibbonClusters.jsx), whose `reason` is the property ladder's own sentence, the
 // same computed shape the engine tools already carry inside the budget.
-const UNVERIFIABLE_REASON_BUDGET = 18
+// W4h-J2-c (receipt): 18 -> 21 for three sites in web/src/lib/ribbonClusters.js:
+// the approved revision row, the readiness row, and the launch tool. These are
+// data-dependent by design: the Ship tab's disabled reason follows controller
+// runtime state, including no-approved-revision, grant-not-ready, executor-busy,
+// executor-unavailable and the idle/loading/ready/setup-required/unavailable/
+// launching/running/succeeded/failed phases. Static reading cannot resolve that
+// state. The readiness row and launch tool use profileReason at runtime to admit
+// only the ladder's own values, with shipLaunchReason selecting ladder fallbacks
+// (ready has no launch sentence). The approved revision conditional has two
+// resolvable PROFILE_REASONS branches: shipReceipts and approvedRevision.
+// ribbonClusters.test.js J2 rows 10-12 pin rejection, verbatim values and the
+// runtime phase/setup-state vocabulary for both guarded sites.
+const UNVERIFIABLE_REASON_BUDGET = 21
 
 /**
  * Whether an "unverifiable reason expressions" count holds against its
