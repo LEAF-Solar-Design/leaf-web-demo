@@ -40,7 +40,7 @@ it('J2 row3 all four setup states reach the disabled tool and device stage', () 
     ['executor-unavailable', PROFILE_REASONS.shipExecutorUnavailable, 'executor', 'unavailable'],
   ]
   for (const [setupState, sentence, rung, state] of states) {
-    const ship = { phase: 'setup-required', readiness: { setupState, setupAction: sentence }, onLaunch: null }
+    const ship = { controllerLive: true, phase: 'setup-required', readiness: { setupState, setupAction: sentence }, onLaunch: null }
     ship.launchReason = shipLaunchReason(ship)
     const tool = profileRibbonTabs('ship', { ship })[0].clusters.flatMap((group) => group.tools).find((item) => item.id === 'ship:launch')
     expect(tool).toMatchObject({ disabled: true, reason: sentence })

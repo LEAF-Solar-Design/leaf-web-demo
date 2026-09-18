@@ -2817,15 +2817,17 @@ export default function App() {
       .catch(() => { if (live) setIosContract(null) })
     return () => { live = false }
   }, [mock, openProjectId, canonicalVersionId])
+  const shipControllerLive = ENV_IOS_SURFACE && surfaceSlots.toolbar.profile === 'ship' && !mock && signedIn
   const iosShipController = useIosShipController({
     projectId: openProjectId,
     revision: canonicalVersionId || null,
     sessionActive: !mock && signedIn,
-    enabled: ENV_IOS_SURFACE && surfaceSlots.toolbar.profile === 'ship',
+    enabled: shipControllerLive,
     tenantKey: tenant || config.tenant,
   })
   const ship = useMemo(() => ({
     ...iosShipController,
+    controllerLive: shipControllerLive,
     contract: iosContract,
     revision: canonicalVersionId || null,
     error: shipErrorSentence(iosShipController.error),
@@ -2835,7 +2837,7 @@ export default function App() {
       const details = document.querySelector('.studio-profile-info details')
       if (details) { details.open = true; details.querySelector('summary')?.focus() }
     } : null,
-  }), [iosShipController, iosContract, canonicalVersionId])
+  }), [iosShipController, shipControllerLive, iosContract, canonicalVersionId])
   // Readiness follows the engine projection that reached the canvas, not openBytes.
   const solarReady = surfaceSlots.toolbar.profile === 'solar' && !!activeIntake
     && engineDocument?.documentId === activeIntake.documentId

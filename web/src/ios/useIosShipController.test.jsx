@@ -48,7 +48,8 @@ const launch = async (result) => { await act(async () => { await result.current.
 
 it('J2 row6 switching the served profile preserves execution ownership and resumes following', async () => {
   const app = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
-  expect(app).toContain("enabled: ENV_IOS_SURFACE && surfaceSlots.toolbar.profile === 'ship'")
+  expect(app).toContain("const shipControllerLive = ENV_IOS_SURFACE && surfaceSlots.toolbar.profile === 'ship' && !mock && signedIn")
+  expect(app).toContain('enabled: shipControllerLive')
   expect(app).toContain('ship={ship}')
   const { result, rerender } = renderHook((input) => useIosShipController(input), { initialProps: { ...props, enabled: true } })
   await flush()

@@ -129,7 +129,7 @@ function wellFormedShipContract(contract) {
 }
 
 export function shipStatusRows(contract, revision, onReceipts, ship) {
-  if (ship?.phase) {
+  if (ship?.controllerLive === true) {
     const state = ship.phase
     const stage = ship.execution?.failed_stage || ship.execution?.stage
     const approved = revision && ship.readiness?.approvedLaunch?.revision === revision
@@ -299,7 +299,7 @@ export function profileRibbonTabs(profile, ctx = {}) {
   }
   const ship = profileRecord(context.ship)
   const onLaunch = profileHandler(ship.onLaunch)
-  const launchReason = profileReason(ship.launchReason, ship.phase ? shipLaunchReason(ship) : PROFILE_REASONS.testflightBuild)
+  const launchReason = ship.controllerLive === true ? profileReason(ship.launchReason, shipLaunchReason(ship)) : PROFILE_REASONS.testflightBuild
   const onShipReceipts = profileHandler(ship.onReceipts)
   const [revision, readiness] = shipStatusRows(ship.contract, ship.revision, onShipReceipts, ship)
   return [{ id: 'ship', label: 'Ship', clusters: [

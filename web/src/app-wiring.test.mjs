@@ -139,24 +139,30 @@ describe('C-05 ship context wiring', () => {
   const start = appSource.indexOf('  const ship = useMemo(')
   const end = appSource.indexOf('  // Readiness follows', start)
   const projection = appSource.slice(start, end)
-  const project = (iosShipController, iosContract = null) => new Function(
-    'iosShipController', 'iosContract', 'canonicalVersionId', 'useMemo', 'shipLaunchReason', 'shipErrorSentence', 'document',
+  const project = (iosShipController, iosContract = null, shipControllerLive = true) => new Function(
+    'iosShipController', 'iosContract', 'canonicalVersionId', 'useMemo', 'shipLaunchReason', 'shipErrorSentence', 'document', 'shipControllerLive',
     projection + '\nreturn ship',
   )(iosShipController, iosContract, 'revision-j2', (fn) => fn(), () => 'Setup required.', (error) => error, {
     querySelector: () => null,
-  })
+  }, shipControllerLive)
 
   it('J2 row1 mounts one controller and exposes its real launch only when ready', () => {
     const compiled = esbuild.transformSync(appSource, { loader: 'jsx' }).code
     assert.equal((compiled.match(/= useIosShipController\(/g) || []).length, 1)
     assert.match(compiled, /projectId: openProjectId/)
     assert.match(compiled, /sessionActive: !mock && signedIn/)
-    assert.match(compiled, /enabled: ENV_IOS_SURFACE && surfaceSlots.toolbar.profile === "ship"/)
+    assert.match(compiled, /enabled: shipControllerLive/)
+    assert.match(compiled, /const shipControllerLive = ENV_IOS_SURFACE && surfaceSlots.toolbar.profile === "ship" && !mock && signedIn/)
     assert.match(compiled, /tenantKey: tenant \|\| config.tenant/)
     const launch = () => 'launched'
     assert.equal(project({ phase: 'ready', launch }).onLaunch, launch)
     assert.match(compiled, /profileRibbonTabs\([\s\S]*?\bship\s*[,}]/)
     assert.match(compiled, /onLaunch: ship.onLaunch/)
+  })
+
+  it('J2 row16 the ship record carries explicit liveness even at idle', () => {
+    assert.equal(project({ phase: 'idle' }, null, false).controllerLive, false)
+    assert.equal(project({ phase: 'idle' }, null, true).controllerLive, true)
   })
 
   it('J2 row2 every non-ready controller phase has an absent launch handler', () => {
