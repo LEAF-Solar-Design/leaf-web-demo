@@ -40,7 +40,10 @@ def _catalog_error(exc: customization_service.CustomizationServiceError) -> JSON
 @router.get("/api/capabilities")
 def capabilities(x_internal_role: Optional[str] = Header(default=None),
                  x_ops_secret: Optional[str] = Header(default=None),
-                 tenant=Depends(deps.require_tenant)) -> Any:
+                 tenant=Depends(deps.require_tenant),
+                 drawing_id: Optional[str] = None,
+                 project_id: Optional[str] = None,
+                 drawing_version: str = "head") -> Any:
     """Capability catalog, TENANT-SCOPED for the folded portion (wave 4): globals for
     everyone, only the requesting tenant's OWN repo tools folded in."""
     include_internal = (x_internal_role or "").strip().lower() == "qa"
@@ -114,6 +117,10 @@ def capabilities(x_internal_role: Optional[str] = Header(default=None),
     families = catalog.build_catalog(
         tools,
         include_internal=include_internal,
+        tenant=tenant,
+        drawing_id=drawing_id,
+        project_id=project_id,
+        drawing_version=drawing_version,
     )
     return with_envelope_fields({
         "families": families,

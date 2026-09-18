@@ -3,6 +3,7 @@
   "tools": [
     {
       "name": "solar-solve-proposal",
+      "family_id": "stringing",
       "version": "1.0.0",
       "description": "Leaf Automation cloud stringer proposal. Provisional wire schema; never changes the drawing.",
       "kind": "script",

@@ -1,0 +1,189 @@
+"""W1 catalog admission uses persisted producer state, with no network."""
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+SERVER = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(SERVER))
+sys.path.insert(0, str(SERVER / "tests"))
+
+import catalog
+import deps
+import entitlements
+import product_capability_availability as availability
+import write_loop
+from test_w1_design_graph import graph  # noqa: F401
+from test_w1_equipment import case, equipment, licensed  # noqa: F401
+from test_w1_graph_versions import drawing, commit, request_for, TENANT, DRAWING  # noqa: F401
+from solar_design_graph import deserialize_graph, serialize_graph
+from solar_wiring_client import local_routes
+
+
+@pytest.fixture(autouse=True)
+def offline(monkeypatch):
+    import requests
+
+    def refuse(*args, **kwargs):
+        pytest.fail("catalog gates must not use the network")
+
+    monkeypatch.setattr(requests.sessions.Session, "request", refuse)
+    monkeypatch.setattr(deps, "load_tenant_repo_tools", lambda tenant: [])
+    monkeypatch.setattr(deps, "_AUTHORED", [])
+    monkeypatch.delenv("LEAF_ENTITLEMENTS_FILE", raising=False)
+
+
+def rows(tenant=TENANT, **context):
+    return {row["name"]: row for family in catalog.build_catalog(
+        deps.all_tools(TENANT), tenant=tenant, **context)
+        for row in family["capabilities"]}
+
+
+def test_all_nine_resolve_once_through_normal_catalog():
+    tools = deps.all_tools(TENANT)
+    families = catalog.build_catalog(tools)
+    flattened = [row for family in families for row in family["capabilities"]]
+    for name in availability.W1_CAPABILITIES:
+        matches = [row for row in flattened if row["name"] == name]
+        assert len(matches) == 1
+        assert deps.find_tool(name, TENANT)["entry"] == "builtins/" + name.replace("-", "_") + ".py"
+        state = matches[0]["availability"]
+        assert state["implemented"] is True
+        assert state["entitled"] is True
+        assert state["engine_ready"] is (name == "solar-solve-proposal")
+        if name == "solar-solve-proposal":
+            assert state["input_ready"] is True
+            assert state["input_reason"] is None
+            assert state["runnable"] is True
+            assert state["refusal_reasons"] == []
+        else:
+            assert state["input_ready"] is False
+            assert "drawing_context_required" in state["refusal_reasons"]
+    assert len(flattened) == sum(len(f["capabilities"]) for f in families)
+    assert len(flattened) == len({row["name"] for row in flattened})
+
+
+def test_no_new_entitlement_grant():
+    starter = SimpleNamespace(tier="hosted_starter")
+    restricted = SimpleNamespace(tier="restricted")
+    assert rows(starter)["solar-solve-proposal"]["availability"]["entitled"] is False
+    assert rows(starter)["solar-settings"]["availability"]["entitled"] is True
+    assert all(not rows(restricted)[name]["availability"]["entitled"]
+               for name in availability.W1_CAPABILITIES)
+    assert entitlements.tool_required_capability({"name": "solar-settings"}) == "run_write"
+
+
+def test_completed_flags_and_confirmation_boolean_are_not_evidence(graph):
+    graph["extra"]["completed_steps"] = list(availability.W1_CAPABILITIES)
+    result = availability.w1_graph_readiness(graph)
+    assert result["solar-size-strings"]["input_ready"] is True
+    assert result["solar-panel-groups"] == {
+        "input_ready": False, "input_reason": "sizing_confirmation_required"}
+    assert result["solar-schedule"]["input_ready"] is False
+
+
+def test_producer_state_survives_reopen_and_stale_inputs_disable(case):
+    graph, params, intake = case
+    result = availability.w1_graph_readiness(graph)
+    assert result["solar-panel-groups"]["input_ready"]
+    assert result["solar-solve-proposal"]["input_ready"]
+    assert result["solar-assign-equipment"]["input_ready"]
+    assert not result["solar-homeruns"]["input_ready"]
+    assigned = equipment.assign_equipment(
+        graph, params, drawing_intake=intake, licensed_equipment=licensed)["graph"]
+    assert availability.w1_graph_readiness(assigned)["solar-homeruns"]["input_ready"]
+    assigned["routes"] = local_routes(assigned)
+    reopened = deserialize_graph(serialize_graph(assigned))
+    assert availability.w1_graph_readiness(reopened)["solar-schedule"]["input_ready"]
+    reopened["routes"].pop()
+    assert not availability.w1_graph_readiness(reopened)["solar-schedule"]["input_ready"]
+    assigned["strings"][0]["validity"] = {"state": "stale", "reasons": ["upstream_corrected"]}
+    result = availability.w1_graph_readiness(assigned)
+    assert not result["solar-assign-equipment"]["input_ready"]
+    assert result["solar-correct-string"]["input_ready"]
+    graph["panels"][0]["centre"][0] += 1
+    assert not availability.w1_graph_readiness(graph)["solar-panel-groups"]["input_ready"]
+
+
+def test_persisted_bundle_is_tenant_drawing_and_version_scoped(drawing, case, monkeypatch):
+    graph, _, _ = case
+    backend, _ = drawing
+    request = request_for(backend, graph)
+    commit(drawing, request)
+    monkeypatch.setattr(write_loop, "backend_for_tenant", lambda *a, **k: backend)
+    context = {"drawing_id": DRAWING, "project_id": graph["project"]["id"]}
+    row = rows(**context)["solar-solve-proposal"]
+    assert row["availability"]["runnable"] is True
+    assert not rows(**context)["solar-settings"]["availability"]["engine_ready"]
+    for tenant, drawing_id, project, version in (
+        ("another-tenant", DRAWING, context["project_id"], "head"),
+        (TENANT, "another-drawing", context["project_id"], "head"),
+        (TENANT, DRAWING, "wrong-project", "head"),
+        (TENANT, DRAWING, context["project_id"], 1),
+    ):
+        state = availability.w1_input_readiness(tenant, drawing_id, project_id=project, version=version)
+        assert not any(item["input_ready"] for item in state.values())
+
+
+@pytest.mark.parametrize("drawing_id,version", [("../other", "head"), ([], "head"),
+                                               (DRAWING, True), (DRAWING, "0")])
+def test_malformed_context_refuses_before_storage(monkeypatch, drawing_id, version):
+    monkeypatch.setattr(write_loop, "backend_for_tenant", lambda *a, **k: pytest.fail("invalid context read"))
+    result = availability.w1_input_readiness(TENANT, drawing_id, version=version)
+    assert not any(item["input_ready"] for item in result.values())
+
+
+@pytest.mark.parametrize("name", [
+    name for name, record in availability.W1_CAPABILITIES.items()
+    if record["requires_persisted_graph"]
+])
+def test_api_run_refuses_unavailable_capability_before_submission(monkeypatch, name):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from routers import jobs as route
+
+    app = FastAPI()
+    app.include_router(route.router)
+    app.dependency_overrides[deps.require_tenant] = lambda: TENANT
+    monkeypatch.setattr(deps, "backedge_run_identity", lambda tenant, *a: tenant)
+    monkeypatch.setattr(deps, "effective_tools_with_provenance", lambda tenant: [])
+    monkeypatch.setattr(route.jobs, "submit_job", lambda *a, **k: pytest.fail("unavailable tool submitted"))
+    tool = deps.find_tool(name, TENANT)
+    response = TestClient(app).post("/api/run", json={
+        "tool": tool["name"], "dwg": DRAWING, "params": {"expected_rev": 0},
+        "catalog_digest": deps.catalog_tool_digest(tool),
+    })
+    assert response.status_code == 409
+    assert response.json()["reason_code"] == "broker_adapter_unavailable"
+    assert response.json()["availability"]["input_ready"] is False
+    assert response.json()["availability"]["input_reason"] == "persisted_graph_unavailable"
+    assert "persisted_graph_unavailable" in response.json()["availability"]["refusal_reasons"]
+    assert response.json()["availability"]["implemented"] is True
+
+
+def test_capabilities_route_passes_authenticated_context(monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from routers import capabilities as route
+
+    app = FastAPI()
+    app.include_router(route.router)
+    tenant = deps.TenantContext(TENANT, tier="restricted")
+    app.dependency_overrides[deps.require_tenant] = lambda: tenant
+    monkeypatch.setattr(deps, "effective_tools_with_provenance", lambda tenant: [])
+    monkeypatch.setattr(route.customization_service, "effective_catalog_pin", lambda tenant: None)
+    captured = {}
+
+    def build(tools, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(catalog, "build_catalog", build)
+    response = TestClient(app).get("/api/capabilities", params={
+        "drawing_id": DRAWING, "project_id": "project-1", "drawing_version": "2"})
+    assert response.status_code == 200
+    assert captured["tenant"] is tenant
+    assert captured["drawing_id"] == DRAWING
+    assert captured["project_id"] == "project-1"
+    assert captured["drawing_version"] == "2"

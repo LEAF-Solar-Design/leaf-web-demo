@@ -31,7 +31,7 @@ import jobs
 import write_loop
 import product_capability_availability as capability_catalog
 import customization_service
-from envelopes import DEFAULT_HTTP_STATUS, ErrorCode, error_response, with_envelope_fields
+from envelopes import DEFAULT_HTTP_STATUS, ErrorCode, error_obj, error_response, with_envelope_fields
 
 try:  # APS domain metrics (CloudWatch EMF); best-effort, optional — mirrors jobs.py
     import emf_metrics
@@ -464,11 +464,32 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
         # 503, never an unstructured 500 (and never an allow).
         return entitlements.policy_unavailable_response(required, tier)
     if not allowed:
-        return entitlements.entitlement_denied_response(required, tier)
+        response = entitlements.entitlement_denied_response(required, tier)
+        availability = entitlements.w1_tool_availability(
+            tool, tenant_id, (req.params or {}).get("drawing_id") or req.dwg,
+            project_id=x_project_id, version=req.dwg_version if req.dwg_version is not None else "head")
+        if availability is not None:
+            return JSONResponse(status_code=response.status_code, content={
+                **json.loads(response.body), "availability": availability,
+                "reason_code": "entitlement_required",
+            })
+        return response
 
     # merge authored default_params under caller params
     params = dict(tool.get("default_params", {}))
     params.update(req.params or {})
+
+    availability = entitlements.w1_tool_availability(
+        tool, tenant_id, params.get("drawing_id") or req.dwg,
+        project_id=x_project_id, version=req.dwg_version if req.dwg_version is not None else "head")
+    if availability is not None and not availability["runnable"]:
+        return JSONResponse(status_code=409, content=with_envelope_fields({
+            "error": error_obj(ErrorCode.BAD_PARAMS,
+                               "; ".join(availability["refusal_reasons"]),
+                               retryable=False),
+            "availability": availability,
+            "reason_code": availability["refusal_reasons"][0],
+        }))
 
     if tool.get("name") == "solar-solve-proposal":
         from leaf_cloud_client import validate_params as validate_cloud_params
