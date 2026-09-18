@@ -186,7 +186,7 @@ def _capability_entry(tool: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def build_catalog(tools: List[Dict[str, Any]], include_internal: bool = False) -> List[Dict[str, Any]]:
+def build_catalog(tools, include_internal=False):
     """Group tools (+ catalog seed tools) into families; drop empty families.
 
     include_internal=False (default) filters internal/QA tools SERVER-SIDE.
@@ -199,7 +199,8 @@ def build_catalog(tools: List[Dict[str, Any]], include_internal: bool = False) -
     for tool in source:
         if not include_internal and is_internal(tool, rules):
             continue
-        grouped.setdefault(_family_for(tool, cfg, rules), []).append(_capability_entry(tool))
+        entry = _capability_entry(tool)
+        grouped.setdefault(_family_for(tool, cfg, rules), []).append(entry)
 
     families: List[Dict[str, Any]] = []
     for fam in cfg.get("families", []):

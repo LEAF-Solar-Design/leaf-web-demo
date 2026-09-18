@@ -295,6 +295,9 @@ def tool_required_capability(tool: Dict[str, Any]) -> str:
     # read-only one: we cannot tell what the tool does, so it takes the
     # MORE-restrictive capability. Absent is still legitimately read-only.
     record = tool or {}
+    from product_capability_availability import W1_CAPABILITIES
+    if record.get("name") in W1_CAPABILITIES:
+        return "solve" if record["name"] == "solar-solve-proposal" else "run_write"
     if "capabilities" not in record:
         return "run_read"
     caps = record["capabilities"]
@@ -303,6 +306,35 @@ def tool_required_capability(tool: Dict[str, Any]) -> str:
     if "solve" in caps:
         return "solve"
     return "run_write" if "drawing.write" in caps else "run_read"
+
+
+def w1_tool_availability(tool, tenant, drawing_id=None, *, project_id=None,
+                         version="head", inputs=None):
+    """Shared catalog/run projection, using the existing tier and role policy."""
+    from product_capability_availability import (
+        W1_CAPABILITIES, w1_availability, w1_input_readiness,
+    )
+    name = tool.get("name")
+    if name not in W1_CAPABILITIES:
+        return None
+    roles, elevated = resolve_roles(tenant)
+    try:
+        entitled = entitlements_for(resolve_tier(tenant), roles, elevated).get(
+            tool_required_capability(tool), False)
+    except EntitlementsError:
+        entitled = False
+        policy_unavailable = True
+    else:
+        policy_unavailable = False
+    if not W1_CAPABILITIES[name]["requires_persisted_graph"]:
+        inputs = {name: {"input_ready": True, "input_reason": None}}
+    elif inputs is None:
+        inputs = w1_input_readiness(tenant, drawing_id, project_id=project_id, version=version)
+    state = w1_availability(name, entitled=entitled, inputs=inputs[name])
+    if policy_unavailable:
+        state["entitlement_reason"] = "entitlement_policy_unavailable"
+        state["refusal_reasons"][0] = "entitlement_policy_unavailable"
+    return state
 
 
 def _denied_message(required: str, tier: str) -> str:

@@ -32,6 +32,15 @@
     }
   ],
   "tool_families": {
+    "solar-solve-proposal": "stringing",
+    "solar-settings": "stringing",
+    "solar-size-strings": "stringing",
+    "solar-panel-groups": "stringing",
+    "solar-commit-solve": "stringing",
+    "solar-correct-string": "stringing",
+    "solar-assign-equipment": "stringing",
+    "solar-homeruns": "stringing",
+    "solar-schedule": "stringing",
     "count-by-layer": "measurement",
     "measure-panel-area": "measurement",
     "highlight-panels-near-edge": "selection",

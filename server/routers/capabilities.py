@@ -19,6 +19,7 @@ import converse_registry
 import customization_service
 import deps
 import mcp_tool_projection
+import product_capability_availability as availability
 from envelopes import ErrorCode, error_obj, with_envelope_fields
 from routers import ops as ops_router
 from routers import platform_customize as platform_customize_router
@@ -40,7 +41,10 @@ def _catalog_error(exc: customization_service.CustomizationServiceError) -> JSON
 @router.get("/api/capabilities")
 def capabilities(x_internal_role: Optional[str] = Header(default=None),
                  x_ops_secret: Optional[str] = Header(default=None),
-                 tenant=Depends(deps.require_tenant)) -> Any:
+                 tenant=Depends(deps.require_tenant),
+                 drawing_id: Optional[str] = None,
+                 project_id: Optional[str] = None,
+                 drawing_version: str = "head") -> Any:
     """Capability catalog, TENANT-SCOPED for the folded portion (wave 4): globals for
     everyone, only the requesting tenant's OWN repo tools folded in."""
     include_internal = (x_internal_role or "").strip().lower() == "qa"
@@ -111,9 +115,11 @@ def capabilities(x_internal_role: Optional[str] = Header(default=None),
         tool_sources=tool_sources,
         operator_owned_engine_source=operator_owned_engine_source,
     )
-    families = catalog.build_catalog(
-        tools,
-        include_internal=include_internal,
+    families = catalog.build_catalog(tools, include_internal=include_internal)
+    families = availability.annotate_w1_availability(
+        families, tenant, drawing_id,
+        project_id=project_id,
+        version=drawing_version,
     )
     return with_envelope_fields({
         "families": families,

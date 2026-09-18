@@ -90,11 +90,167 @@ Run:  cd server && python -m pytest tests/test_product_capability_availability.p
 from __future__ import annotations
 
 import copy
+import math
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 CONTRACT_VERSION = "leaf.platform.v1alpha1"
+
+# W1 uses the ordinary tool catalog, independently of the platform lease catalog.
+W1_CAPABILITIES = {
+    "solar-settings": {"requires_persisted_graph": True},
+    "solar-size-strings": {"requires_persisted_graph": True},
+    "solar-panel-groups": {"requires_persisted_graph": True},
+    "solar-solve-proposal": {"requires_persisted_graph": False},
+    "solar-commit-solve": {"requires_persisted_graph": True},
+    "solar-correct-string": {"requires_persisted_graph": True},
+    "solar-assign-equipment": {"requires_persisted_graph": True},
+    "solar-homeruns": {"requires_persisted_graph": True},
+    "solar-schedule": {"requires_persisted_graph": True},
+}
+
+
+def annotate_w1_availability(families, tenant, drawing_id=None, *,
+                             project_id=None, version="head"):
+    """Annotate W1 rows, resolving shared drawing readiness only when needed."""
+    import entitlements
+
+    inputs = None
+    resolved = False
+    for family in families:
+        for row in family.get("capabilities") or []:
+            if row.get("name") not in W1_CAPABILITIES:
+                continue
+            if not resolved:
+                inputs = w1_input_readiness(
+                    tenant, drawing_id, project_id=project_id, version=version)
+                resolved = True
+            row["availability"] = entitlements.w1_tool_availability(
+                row, tenant, drawing_id, project_id=project_id,
+                version=version, inputs=inputs)
+    return families
+
+
+def w1_input_readiness(tenant, drawing_id=None, *, project_id=None, version="head"):
+    """Read only the selected tenant's persisted drawing bundle, never UI steps."""
+    def unavailable(reason):
+        return {name: {"input_ready": False, "input_reason": reason}
+                for name in W1_CAPABILITIES}
+
+    if drawing_id is None:
+        return unavailable("drawing_context_required")
+    from tenant_id_validator import validate_tenant_id
+    try:
+        validate_tenant_id(str(tenant))
+        validate_tenant_id(drawing_id, kind="drawing id")
+        if (project_id is not None and
+                (type(project_id) is not str or not 1 <= len(project_id) <= 100)):
+            return unavailable("invalid_drawing_context")
+        if not ((type(version) is int and version >= 1) or
+                (type(version) is str and (version == "head" or
+                 (version.isascii() and version.isdigit() and 1 <= len(version) <= 10
+                  and int(version) >= 1)))):
+            return unavailable("invalid_drawing_context")
+        import write_loop
+        import store
+        backend = write_loop.backend_for_tenant(str(tenant), aps_live=False, da=None)
+        bundle = store.read_graph_bundle(backend, str(tenant), drawing_id,
+                                         version, project_id=project_id)
+        return w1_graph_readiness(bundle["graph"])
+    except (KeyError, ValueError, TypeError, OSError):
+        return unavailable("persisted_graph_unavailable")
+
+
+def w1_graph_readiness(graph):
+    """Project persisted producer contracts without making a mutation or a call."""
+    from solar_design_graph import validate_graph
+    from solar_sizing_client import require_sizing
+    from solar_equipment import equipment_ready
+    from solar_solve_results import coverage, upstream_basis
+    from solar_wiring_client import local_routes
+
+    graph = validate_graph(graph)
+    result = {}
+
+    def mark(names, ready, reason):
+        for name in names:
+            result[name] = {"input_ready": bool(ready),
+                            "input_reason": None if ready else reason}
+
+    mark(["solar-settings"], True, None)
+    settings_ready = all(item["validity"]["state"] == "valid"
+                         for item in (graph["project"], graph["settings"]))
+    mark(["solar-size-strings"], settings_ready, "valid_settings_required")
+    sized = False
+    if settings_ready:
+        try:
+            require_sizing(graph)
+            sized = True
+        except (KeyError, ValueError, TypeError):
+            pass
+    mark(["solar-panel-groups"], sized, "sizing_confirmation_required")
+    grouped = sized and bool(graph["frames"]) and bool(graph["panels"]) and all(
+        item["validity"]["state"] == "valid"
+        for item in graph["frames"] + graph["panels"] + graph["electrical_zones"]
+    ) and all(panel["frame_ref"] is not None for panel in graph["panels"])
+    mark(["solar-solve-proposal", "solar-commit-solve"], grouped,
+         "sized_panel_groups_required")
+    # Corrections must remain possible when an existing string is stale.
+    mark(["solar-correct-string"], bool(graph["strings"]), "strings_required")
+    basis = upstream_basis(graph)
+    strings_valid = grouped and bool(graph["strings"]) and all(
+        item["validity"]["state"] == "valid" and item["module_count"] > 0
+        for item in graph["strings"]
+    ) and not any(coverage(graph).values()) and all(
+        isinstance(frame["extra"].get("solve", {}), dict) and
+        frame["extra"].get("solve", {}).get("upstream_sha256", basis) == basis
+        for frame in graph["frames"])
+    mark(["solar-assign-equipment"], strings_valid, "valid_strings_required")
+    assigned = strings_valid and equipment_ready(graph)
+    mark(["solar-homeruns"], assigned, "equipment_assignment_required")
+    routed = False
+    if assigned:
+        try:
+            expected = local_routes(graph)
+            actual = {(r["from_ref"], r["route_kind"]): r for r in graph["routes"]}
+            routed = len(actual) == len(expected) == len(graph["routes"])
+            for route in expected:
+                found = actual.get((route["from_ref"], route["route_kind"]))
+                routed = routed and found is not None and found["validity"]["state"] == "valid" and all(
+                    found[key] == route[key] for key in
+                    ("to_ref", "points", "wire_gauge", "point_units", "length_units")
+                ) and math.isclose(found["length_ft"], route["length_ft"], rel_tol=1e-9) and all(
+                    found["extra"].get(key) == route["extra"][key]
+                    for key in ("terminal_panel_ref", "mppt_letter", "input_number"))
+        except (KeyError, ValueError, TypeError):
+            routed = False
+    mark(["solar-schedule"], routed, "complete_routing_required")
+    return result
+
+
+def w1_availability(name, *, entitled, inputs):
+    """Implementation presence does not imply a reachable broker engine."""
+    if not W1_CAPABILITIES[name]["requires_persisted_graph"]:
+        # Params are validated on submission by the capability's own validator.
+        inputs = {"input_ready": True, "input_reason": None}
+    engine_ready = name == "solar-solve-proposal"
+    state = {
+        "entitled": entitled is True,
+        "engine_ready": engine_ready,
+        "implemented": True,
+        **inputs,
+        "entitlement_reason": None if entitled else "entitlement_required",
+        "engine_reason": None if engine_ready else "broker_adapter_unavailable",
+        "implementation_reason": None,
+    }
+    state["refusal_reasons"] = [reason for reason in (
+        state["entitlement_reason"], state["implementation_reason"],
+        state["engine_reason"], state["input_reason"],
+    ) if reason]
+    state["runnable"] = all(state[key] is True for key in
+                            ("entitled", "implemented", "engine_ready", "input_ready"))
+    return state
 AUTHORITY = "leaf-platform-registry"
 
 # Must equal leaf_website lib/leaf-platform/projection.ts SERVER_AVAILABILITY_TTL_MS.

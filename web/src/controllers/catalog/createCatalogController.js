@@ -9,6 +9,12 @@ import { track } from '../../telemetry.js'
 import { isSecretRefused } from '../../lib/secretGuardTransport.js'
 
 const DEFAULT_THRESHOLDS = { CHIP_ONLY: 0.8, RACE_MIN: 0.55 }
+const SOLAR_TOOLS = new Set([
+  'solar-settings', 'solar-size-strings', 'solar-panel-groups', 'solar-solve-proposal',
+  'solar-commit-solve', 'solar-correct-string', 'solar-assign-equipment',
+  'solar-homeruns', 'solar-schedule',
+])
+const AVAILABILITY_KEYS = ['entitled', 'engine_ready', 'input_ready', 'implemented']
 
 const initialState = Object.freeze({
   tools: [],
@@ -82,18 +88,38 @@ export function createCatalogController({ services, adapters = {}, context = {} 
 
   const getSnapshot = () => {
     if (!snapshot) {
+      const capabilities = (state.catalog.families || []).flatMap((family) => family.capabilities || [])
+      const runnableCapabilities = runnableCatalogTools(capabilities, current.entitlements)
+        .filter((tool) => !solarRefusal(tool.name))
       snapshot = {
         ...state,
         canRunWrite: entitlementAllows(current.entitlements, 'run_write'),
-        runnableTools: runnableCatalogTools(state.tools, current.entitlements),
+        runnableTools: runnableCatalogTools(state.tools, current.entitlements)
+          .filter((tool) => !solarRefusal(tool.name)),
         hintLane: adapters.previewRoute
           ? previewLane(state.prompt, state.tools, adapters.previewRoute)
           : null,
         capabilityCount: (state.catalog.families || [])
           .reduce((count, family) => count + (family.capabilities || []).length, 0),
+        runnableCapabilityCount: runnableCapabilities.length,
+        unavailableCapabilityCount: capabilities.length - runnableCapabilities.length,
       }
     }
     return snapshot
+  }
+
+  const solarRefusal = (name) => {
+    if (!SOLAR_TOOLS.has(name)) return null
+    const entry = (state.catalog.families || [])
+      .flatMap((family) => family.capabilities || []).find((tool) => tool.name === name)
+    const availability = entry?.availability
+    if (!availability) return 'capability_availability_unavailable'
+    const required = name === 'solar-solve-proposal' ? 'solve' : 'run_write'
+    if (!entitlementAllows(current.entitlements, required)) return 'entitlement_required'
+    if (AVAILABILITY_KEYS.every((key) => availability[key] === true)) return null
+    const reasons = availability.refusal_reasons
+    return Array.isArray(reasons) && reasons.length
+      ? reasons.join('; ') : 'capability_not_ready'
   }
 
   // P2 wave C-2 (shape from review #428 round 1): route.outcome fires ONLY
@@ -109,6 +135,12 @@ export function createCatalogController({ services, adapters = {}, context = {} 
   }
 
   const commitDecision = (decision, { routeOutcome = 'invalidated', requestText = null } = {}) => {
+    const reason = decision?.lane === 'run' && solarRefusal(decision.tool)
+    if (reason) {
+      adapters.dismissDecision?.()
+      publish({ route: null, routeError: reason })
+      return undefined
+    }
     const refused = requestText !== null && decision?.lane === 'run' && decision.stubKind !== 'outage' &&
       (typeof decision.tool !== 'string' || !decision.tool.trim())
     const count = refused ? (requestText === lastRefusedText ? refusedCount + 1 : 1) : 0
@@ -142,7 +174,11 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     const request = ++catalogRequest
     publish({ catalogError: null })
     try {
-      const catalog = await services.getCapabilities(current.mock)
+      const catalog = await services.getCapabilities(current.mock, {
+        drawing_id: current.drawingId ?? current.drawing_id,
+        project_id: current.projectId ?? current.project_id,
+        drawing_version: current.drawingVersion ?? current.drawing_version ?? 'head',
+      })
       if (request !== catalogRequest) return catalog
       const openFamilies = { ...state.openFamilies }
       for (const family of catalog.families || []) {
@@ -258,6 +294,9 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     publish({ routing: true, route: null, routeError: null })
     try {
       const decision = await services.routePrompt(current.mock, text, state.tools, { allowSecretOnce })
+      if (decision.lane === 'run' && solarRefusal(decision.tool)) {
+        return commitDecision(decision, { requestText: text })
+      }
       const confidence = Number(decision.confidence) || 0
       const chipOnly = current.agentDisabled ||
         (decision.lane === 'run' && !!decision.tool && confidence >= thresholds.CHIP_ONLY)
@@ -388,15 +427,25 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     },
     setContext(next) {
       const modeChanged = Object.prototype.hasOwnProperty.call(next, 'mock') && next.mock !== current.mock
+      const drawingChanged = ['drawingId', 'drawing_id', 'projectId', 'project_id',
+        'drawingVersion', 'drawing_version'].some((key) =>
+        Object.prototype.hasOwnProperty.call(next, key) && next[key] !== current[key])
       const derivedChanged = Object.prototype.hasOwnProperty.call(next, 'entitlements') &&
         next.entitlements !== current.entitlements
       current = { ...current, ...next }
+      if (drawingChanged) {
+        catalogRequest += 1
+        adapters.dismissDecision?.()
+        publish({ catalog: { families: [], source: null }, route: null, routeError: null })
+      }
       if (derivedChanged) {
         snapshot = null
         for (const listener of listeners) listener()
       }
       if (started && modeChanged) {
         void loadTools()
+        void loadCatalog()
+      } else if (started && (drawingChanged || derivedChanged)) {
         void loadCatalog()
       }
     },
