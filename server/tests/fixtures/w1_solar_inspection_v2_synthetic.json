@@ -1,0 +1,202 @@
+{
+  "schema": "leaf.solar-inspection.v2",
+  "dwg_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "byte_length": 4096,
+  "units": {
+    "drawing_units": "m",
+    "meters_per_unit": 1
+  },
+  "stores": [
+    {
+      "scope": "named-dictionary",
+      "dictionary_path": [],
+      "key": "TEST_UNKNOWN",
+      "app": null,
+      "entity_handle": null,
+      "payload": "opaque",
+      "raw_records": [
+        {
+          "code": 1,
+          "type": "string",
+          "value": "unknown | keep\\nraw"
+        },
+        {
+          "code": 90,
+          "type": "int32",
+          "value": 7
+        },
+        {
+          "code": 310,
+          "type": "binary",
+          "value": "AAH/"
+        }
+      ],
+      "payload_ref": "sha256:e0da11bc6cf731ccba783df7c94ad44eecde0d44f76d222e635a23b0e40fcef3",
+      "sha256": "e0da11bc6cf731ccba783df7c94ad44eecde0d44f76d222e635a23b0e40fcef3",
+      "byte_length": 186
+    },
+    {
+      "scope": "entity-xdata",
+      "dictionary_path": [],
+      "key": null,
+      "app": "TEST_FUTURE",
+      "entity_handle": "A1",
+      "payload": "opaque",
+      "raw_records": [
+        {
+          "code": 1001,
+          "type": "string",
+          "value": "TEST_FUTURE"
+        },
+        {
+          "code": 1000,
+          "type": "string",
+          "value": "never rewrite"
+        }
+      ],
+      "payload_ref": "sha256:7456ec09de5f6bada98dc48a32006ff2f100fa16a6a24db38b22212ea108ed08",
+      "sha256": "7456ec09de5f6bada98dc48a32006ff2f100fa16a6a24db38b22212ea108ed08",
+      "byte_length": 153
+    }
+  ],
+  "entities": [
+    {
+      "handle": "A1",
+      "kind": "block_reference",
+      "layer": "SYNTH-PANELS",
+      "block_name": "TEST_MODULE",
+      "geometry": {
+        "bbox": [
+          1,
+          0,
+          2,
+          2
+        ],
+        "points": [
+          [
+            1,
+            1
+          ]
+        ]
+      },
+      "native_geometry": {
+        "kind": "block_reference",
+        "position": [
+          1,
+          1,
+          0
+        ],
+        "rotation": 0,
+        "scale": [
+          1,
+          1,
+          1
+        ],
+        "normal": [
+          0,
+          0,
+          1
+        ],
+        "definition": {
+          "mode": "existing",
+          "name": "TEST_MODULE",
+          "expected_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "attributes": [],
+      "sha256": "4b0db6e0695b9d641813da8e9a5bf27c4731531b8f92db85e5870fd490c1e172"
+    },
+    {
+      "handle": "A2",
+      "kind": "block_reference",
+      "layer": "SYNTH-PANELS",
+      "block_name": "TEST_MODULE",
+      "geometry": {
+        "bbox": [
+          4,
+          0,
+          5,
+          2
+        ],
+        "points": [
+          [
+            4,
+            1
+          ]
+        ]
+      },
+      "native_geometry": {
+        "kind": "block_reference",
+        "position": [
+          4,
+          1,
+          0
+        ],
+        "rotation": 0,
+        "scale": [
+          1,
+          1,
+          1
+        ],
+        "normal": [
+          0,
+          0,
+          1
+        ],
+        "definition": {
+          "mode": "existing",
+          "name": "TEST_MODULE",
+          "expected_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "attributes": [],
+      "sha256": "3e6eda2e5a23f08a0e4621810110b1e2a0d2c0e93b97dba49661ddb9924a1b70"
+    },
+    {
+      "handle": "A3",
+      "kind": "block_reference",
+      "layer": "TEST_INVERTERS",
+      "block_name": "TEST_INVERTER",
+      "geometry": {
+        "bbox": [
+          8,
+          0,
+          9,
+          2
+        ],
+        "points": [
+          [
+            8,
+            1
+          ]
+        ]
+      },
+      "native_geometry": {
+        "kind": "block_reference",
+        "position": [
+          8,
+          1,
+          0
+        ],
+        "rotation": 0,
+        "scale": [
+          1,
+          1,
+          1
+        ],
+        "normal": [
+          0,
+          0,
+          1
+        ],
+        "definition": {
+          "mode": "existing",
+          "name": "TEST_INVERTER",
+          "expected_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "attributes": [],
+      "sha256": "71133c063f5956c3c4fd78836bb3ea2e2c5e7ab625fe0f17e234381c707c26e4"
+    }
+  ]
+}

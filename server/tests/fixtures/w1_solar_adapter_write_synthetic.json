@@ -1,0 +1,1019 @@
+{
+  "schema": "leaf.solar-adapter.v1",
+  "version": 1,
+  "write_version": 1,
+  "entity_kinds": {
+    "project": {
+      "select": {
+        "scope": "named-dictionary",
+        "key": "SYNTH-PROJECT"
+      },
+      "fields": {
+        "name": {
+          "path": "name",
+          "status": "preserved"
+        },
+        "zip_code": {
+          "path": "zip_code",
+          "status": "preserved"
+        },
+        "latitude": {
+          "path": "latitude",
+          "status": "not_represented"
+        },
+        "longitude": {
+          "path": "longitude",
+          "status": "not_represented"
+        },
+        "installation_design": {
+          "path": "installation_design",
+          "status": "preserved"
+        },
+        "units": {
+          "path": "units",
+          "status": "preserved"
+        },
+        "graph_schema_version": {
+          "path": "graph_schema_version",
+          "status": "preserved"
+        },
+        "site_revision": {
+          "path": "site_revision",
+          "status": "preserved"
+        }
+      }
+    },
+    "settings": {
+      "select": {
+        "scope": "named-dictionary",
+        "key": "SYNTH-SETTINGS"
+      },
+      "fields": {
+        "panel_layer_contains": {
+          "path": "panel_layer_contains",
+          "status": "preserved"
+        },
+        "panel_group_layer": {
+          "path": "panel_group_layer",
+          "status": "preserved"
+        },
+        "string_layer": {
+          "path": "string_layer",
+          "status": "preserved"
+        },
+        "home_run_layer": {
+          "path": "home_run_layer",
+          "status": "preserved"
+        },
+        "panels_in_sequence": {
+          "path": "panels_in_sequence",
+          "status": "preserved"
+        },
+        "num_mppt": {
+          "path": "num_mppt",
+          "status": "preserved"
+        },
+        "strings_per_mppt": {
+          "path": "strings_per_mppt",
+          "status": "preserved"
+        },
+        "optimizer_ratio": {
+          "path": "optimizer_ratio",
+          "status": "preserved"
+        },
+        "use_l2_collectors": {
+          "path": "use_l2_collectors",
+          "status": "preserved"
+        },
+        "panel_group_number": {
+          "path": "panel_group_number",
+          "status": "preserved"
+        },
+        "string_number": {
+          "path": "string_number",
+          "status": "preserved"
+        },
+        "inverter_number": {
+          "path": "inverter_number",
+          "status": "preserved"
+        },
+        "mppt_letter": {
+          "path": "mppt_letter",
+          "status": "preserved"
+        },
+        "global_string_sizing_confirmed": {
+          "path": "global_string_sizing_confirmed",
+          "status": "preserved"
+        },
+        "voc_cold": {
+          "path": "voc_cold",
+          "status": "preserved"
+        }
+      }
+    },
+    "panel": {
+      "select": {
+        "scope": "entity-xdata",
+        "app": "SYNTH-PANEL"
+      },
+      "fields": {
+        "frame_ref": {
+          "path": "frame_ref",
+          "status": "preserved"
+        },
+        "matrix_cell": {
+          "path": "matrix_cell",
+          "status": "preserved"
+        },
+        "centre": {
+          "path": "centre",
+          "status": "preserved"
+        },
+        "angle": {
+          "path": "angle",
+          "status": "preserved"
+        },
+        "assignment": {
+          "path": "assignment",
+          "status": "preserved"
+        }
+      }
+    }
+  },
+  "native_templates": {
+    "frame": {
+      "carriers": [
+        {
+          "role": "primary",
+          "kind": "block_reference",
+          "layer_source": "/graph/settings/panel_group_layer",
+          "geometry": {
+            "kind": "block_reference",
+            "position": [
+              0,
+              0,
+              0
+            ],
+            "rotation": 0,
+            "scale": [
+              1,
+              1,
+              1
+            ],
+            "normal": [
+              0,
+              0,
+              1
+            ],
+            "definition": {
+              "mode": "new",
+              "name": "*U",
+              "origin": [
+                0,
+                0,
+                0
+              ],
+              "polylines": [
+                {
+                  "kind": "polyline",
+                  "vertices": [
+                    [
+                      0,
+                      0,
+                      0
+                    ],
+                    [
+                      1,
+                      0,
+                      0
+                    ],
+                    [
+                      1,
+                      1,
+                      0
+                    ],
+                    [
+                      0,
+                      1,
+                      0
+                    ]
+                  ],
+                  "bulges": [
+                    0,
+                    0,
+                    0,
+                    0
+                  ],
+                  "start_widths": [
+                    0,
+                    0,
+                    0,
+                    0
+                  ],
+                  "end_widths": [
+                    0,
+                    0,
+                    0,
+                    0
+                  ],
+                  "closed": true,
+                  "elevation": 0,
+                  "normal": [
+                    0,
+                    0,
+                    1
+                  ]
+                }
+              ],
+              "attribute_definitions": [
+                {
+                  "tag": "TEST_NAME",
+                  "text": "",
+                  "position": [
+                    0,
+                    0,
+                    0
+                  ],
+                  "alignment": [
+                    0,
+                    0,
+                    0
+                  ],
+                  "height": 1,
+                  "rotation": 0,
+                  "text_style": "TEST_TEXT"
+                },
+                {
+                  "tag": "TEST_DETAIL",
+                  "text": "",
+                  "position": [
+                    0,
+                    0,
+                    0
+                  ],
+                  "alignment": [
+                    0,
+                    0,
+                    0
+                  ],
+                  "height": 1,
+                  "rotation": 0,
+                  "text_style": "TEST_TEXT"
+                }
+              ]
+            }
+          },
+          "attributes": [
+            {
+              "tag": "TEST_NAME",
+              "text": "",
+              "position": [
+                0,
+                0,
+                0
+              ],
+              "alignment": [
+                0,
+                0,
+                0
+              ],
+              "height": 1,
+              "rotation": 0,
+              "text_style": "TEST_TEXT"
+            },
+            {
+              "tag": "TEST_DETAIL",
+              "text": "",
+              "position": [
+                0,
+                0,
+                0
+              ],
+              "alignment": [
+                0,
+                0,
+                0
+              ],
+              "height": 1,
+              "rotation": 0,
+              "text_style": "TEST_TEXT"
+            }
+          ],
+          "fields": "frame_geometry"
+        }
+      ],
+      "stores": [
+        {
+          "role": "primary",
+          "codec": "group",
+          "fields": "frame_store"
+        }
+      ]
+    },
+    "string": {
+      "carriers": [
+        {
+          "role": "primary",
+          "kind": "polyline",
+          "layer_source": "/graph/settings/string_layer",
+          "geometry": {
+            "kind": "polyline",
+            "vertices": [],
+            "bulges": [],
+            "start_widths": [],
+            "end_widths": [],
+            "closed": false,
+            "elevation": 0,
+            "normal": [
+              0,
+              0,
+              1
+            ]
+          },
+          "attributes": [],
+          "fields": "string_geometry"
+        },
+        {
+          "role": "tag",
+          "kind": "mtext",
+          "layer_source": "/graph/settings/string_layer",
+          "geometry": {
+            "kind": "mtext",
+            "position": [
+              0,
+              0,
+              0
+            ],
+            "contents": "",
+            "text_height": 1,
+            "width": 10,
+            "attachment": 1,
+            "rotation": 0,
+            "text_style": "TEST_TEXT"
+          },
+          "attributes": [],
+          "fields": "tag_geometry"
+        },
+        {
+          "role": "start",
+          "kind": "block_reference",
+          "layer_source": "/graph/settings/string_layer",
+          "geometry": {
+            "kind": "block_reference",
+            "position": [
+              0,
+              0,
+              0
+            ],
+            "rotation": 0,
+            "scale": [
+              1,
+              1,
+              1
+            ],
+            "normal": [
+              0,
+              0,
+              1
+            ],
+            "definition": {
+              "mode": "existing",
+              "name": "TEST_ENDPOINT",
+              "expected_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            }
+          },
+          "attributes": [],
+          "fields": "start_geometry"
+        },
+        {
+          "role": "end",
+          "kind": "block_reference",
+          "layer_source": "/graph/settings/string_layer",
+          "geometry": {
+            "kind": "block_reference",
+            "position": [
+              0,
+              0,
+              0
+            ],
+            "rotation": 0,
+            "scale": [
+              1,
+              1,
+              1
+            ],
+            "normal": [
+              0,
+              0,
+              1
+            ],
+            "definition": {
+              "mode": "existing",
+              "name": "TEST_ENDPOINT",
+              "expected_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            }
+          },
+          "attributes": [],
+          "fields": "end_geometry"
+        }
+      ],
+      "stores": [
+        {
+          "role": "primary",
+          "codec": "cable",
+          "fields": "cable_store"
+        },
+        {
+          "role": "tag",
+          "codec": "tag",
+          "fields": "tag_store"
+        }
+      ],
+      "circuit": {
+        "parts": [
+          "/resolved/assignment/inverter_number",
+          "/resolved/assignment/mppt_letter",
+          "/resolved/assignment/string_number"
+        ],
+        "separator": ".",
+        "inverter_number_source": "/resolved/assignment/inverter_number",
+        "input_number_source": "/resolved/assignment/terminal_number",
+        "input_number_offset": 1
+      }
+    }
+  },
+  "store_codecs": {
+    "group": {
+      "scope": "extension-dictionary",
+      "dictionary_path": [],
+      "key": "TEST_GROUP",
+      "app": null,
+      "encoding": "chunked-ascii(240)",
+      "document_count": 2,
+      "count_code": 90,
+      "string_code": 1000,
+      "chunk_size": 240,
+      "legacy_encodings": [
+        "json",
+        "chunked-ascii(240)"
+      ],
+      "defaults": {
+        "documents": [
+          {
+            "Rows": []
+          },
+          {
+            "Title": "",
+            "Installation": "",
+            "RowCount": 0,
+            "ColumnCount": 0,
+            "SlotCount": 0,
+            "Power": 0,
+            "Width": 0,
+            "Height": 0,
+            "ZoneName": null,
+            "Sequences": []
+          }
+        ]
+      }
+    },
+    "cable": {
+      "scope": "entity-xdata",
+      "dictionary_path": [],
+      "key": null,
+      "app": "TEST_APP",
+      "encoding": "xdata-typed",
+      "document_count": 0,
+      "count_code": 90,
+      "string_code": 1000,
+      "chunk_size": 240,
+      "legacy_encodings": [
+        "xdata-typed"
+      ],
+      "defaults": {
+        "records": [
+          {
+            "code": 1001,
+            "value": "TEST_APP"
+          },
+          {
+            "code": 1000,
+            "value": "TEST_STRING"
+          },
+          {
+            "code": 1000,
+            "value": ""
+          },
+          {
+            "code": 1005,
+            "value": "@role:start"
+          },
+          {
+            "code": 1005,
+            "value": "@role:end"
+          },
+          {
+            "code": 1005,
+            "value": "@role:tag"
+          },
+          {
+            "code": 1000,
+            "value": ""
+          },
+          {
+            "code": 1000,
+            "value": ""
+          },
+          {
+            "code": 1000,
+            "value": ""
+          },
+          {
+            "code": 1040,
+            "value": 0
+          }
+        ]
+      }
+    },
+    "tag": {
+      "scope": "entity-xdata",
+      "dictionary_path": [],
+      "key": null,
+      "app": "TEST_APP",
+      "encoding": "xdata-typed",
+      "document_count": 0,
+      "count_code": 90,
+      "string_code": 1000,
+      "chunk_size": 240,
+      "legacy_encodings": [
+        "xdata-typed"
+      ],
+      "defaults": {
+        "records": [
+          {
+            "code": 1001,
+            "value": "TEST_APP"
+          },
+          {
+            "code": 1070,
+            "value": 0
+          },
+          {
+            "code": 1070,
+            "value": 0
+          },
+          {
+            "code": 1070,
+            "value": 0
+          },
+          {
+            "code": 1070,
+            "value": 0
+          },
+          {
+            "code": 1000,
+            "value": ""
+          },
+          {
+            "code": 1070,
+            "value": 0
+          },
+          {
+            "code": 1070,
+            "value": 0
+          },
+          {
+            "code": 1070,
+            "value": 0
+          }
+        ]
+      }
+    }
+  },
+  "write_fields": {
+    "frame_geometry": [
+      {
+        "source": "/node/insertion_point",
+        "destination": "/geometry/position",
+        "conversion": "point",
+        "null": "reject",
+        "default": null
+      },
+      {
+        "source": "/resolved/outline",
+        "destination": "/geometry/definition/polylines/0/vertices",
+        "conversion": "points",
+        "null": "reject",
+        "default": null
+      },
+      {
+        "source": "/node/name",
+        "destination": "/attributes/0/text",
+        "conversion": "identity",
+        "null": "reject",
+        "default": null
+      },
+      {
+        "source": "/node/insertion_point",
+        "destination": "/attributes/0/position",
+        "conversion": "point",
+        "null": "reject",
+        "default": null
+      },
+      {
+        "source": "/node/insertion_point",
+        "destination": "/attributes/0/alignment",
+        "conversion": "point",
+        "null": "reject",
+        "default": null
+      },
+      {
+        "source": "/node/installation_design",
+        "destination": "/attributes/1/text",
+        "conversion": "identity",
+        "null": "reject",
+        "default": null
+      },
+      {
+        "source": "/node/insertion_point",
+        "destination": "/attributes/1/position",
+        "conversion": "point",
+        "null": "reject",
+        "default": null
+      },
+      {
+        "source": "/node/insertion_point",
+        "destination": "/attributes/1/alignment",
+        "conversion": "point",
+        "null": "reject",
+        "default": null
+      }
+    ],
+    "string_geometry": [
+      {
+        "source": "/node/route",
+        "destination": "/geometry/vertices",
+        "conversion": "points",
+        "null": "reject",
+        "default": null
+      }
+    ],
+    "tag_geometry": [
+      {
+        "source": "/resolved/tag_position",
+        "destination": "/geometry/position",
+        "conversion": "point",
+        "null": "reject",
+        "default": null
+      },
+      {
+        "source": "/node/circuit_tag",
+        "destination": "/geometry/contents",
+        "conversion": "identity",
+        "null": "reject",
+        "default": null
+      }
+    ],
+    "start_geometry": [
+      {
+        "source": "/resolved/start_position",
+        "destination": "/geometry/position",
+        "conversion": "point",
+        "null": "reject",
+        "default": null
+      }
+    ],
+    "end_geometry": [
+      {
+        "source": "/resolved/end_position",
+        "destination": "/geometry/position",
+        "conversion": "point",
+        "null": "reject",
+        "default": null
+      }
+    ],
+    "frame_store": [
+      {
+        "source": "/node/name",
+        "destination": "/documents/1/Title",
+        "conversion": "identity",
+        "null": "reject",
+        "default": null
+      },
+      {
+        "source": "/node/installation_design",
+        "destination": "/documents/1/Installation",
+        "conversion": "identity",
+        "null": "reject",
+        "default": null
+      },
+      {
+        "source": "/node/module_rows",
+        "destination": "/documents/1/RowCount",
+        "conversion": "identity",
+        "null": "reject",
+        "default": null
+      },
+      {
+        "source": "/node/module_columns",
+        "destination": "/documents/1/ColumnCount",
+        "conversion": "identity",
+        "null": "reject",
+        "default": null
+      },
+      {
+        "source": "/node/module_slots",
+        "destination": "/documents/1/SlotCount",
+        "conversion": "identity",
+        "null": "reject",
+        "default": null
+      },
+      {
+        "source": "/node/module_power_watts",
+        "destination": "/documents/1/Power",
+        "conversion": "identity",
+        "null": "reject",
+        "default": null
+      },
+      {
+        "source": "/node/module_width_along_row",
+        "destination": "/documents/1/Width",
+        "conversion": "metres",
+        "null": "reject",
+        "default": null
+      },
+      {
+        "source": "/node/module_height_across_row",
+        "destination": "/documents/1/Height",
+        "conversion": "metres",
+        "null": "reject",
+        "default": null
+      },
+      {
+        "source": "/node/electrical_zone_ref",
+        "destination": "/documents/1/ZoneName",
+        "conversion": "native-name",
+        "null": "preserve",
+        "default": null
+      },
+      {
+        "source": "/node/sequences",
+        "destination": "/documents/1/Sequences",
+        "conversion": "sequence-lengths",
+        "null": "reject",
+        "default": null
+      },
+      {
+        "source": "/node/matrix/*/*/code",
+        "destination": "/documents/0/Rows/{0}/Panels/{1}/Code",
+        "conversion": "enum",
+        "null": "reject",
+        "default": null,
+        "values": {
+          "panel": 1,
+          "empty": 0
+        }
+      },
+      {
+        "source": "/node/matrix/*/*/panel_ref",
+        "destination": "/documents/0/Rows/{0}/Panels/{1}/Handle",
+        "conversion": "handle",
+        "null": "preserve",
+        "default": null
+      },
+      {
+        "source": "/node/matrix/*/*/seq",
+        "destination": "/documents/0/Rows/{0}/Panels/{1}/Sequence",
+        "conversion": "identity",
+        "null": "preserve",
+        "default": null
+      },
+      {
+        "source": "/node/matrix/*/*/inverter_id",
+        "destination": "/documents/0/Rows/{0}/Panels/{1}/InverterNumber",
+        "conversion": "native-number",
+        "null": "preserve",
+        "default": null
+      },
+      {
+        "source": "/node/matrix/*/*/string_input_number",
+        "destination": "/documents/0/Rows/{0}/Panels/{1}/InputNumber",
+        "conversion": "identity",
+        "null": "preserve",
+        "default": null
+      },
+      {
+        "source": "/node/matrix/*/*/x",
+        "destination": "/documents/0/Rows/{0}/Panels/{1}/X",
+        "conversion": "metres",
+        "null": "reject",
+        "default": null
+      },
+      {
+        "source": "/node/matrix/*/*/y",
+        "destination": "/documents/0/Rows/{0}/Panels/{1}/Y",
+        "conversion": "metres",
+        "null": "reject",
+        "default": null
+      },
+      {
+        "source": "/node/matrix/*/*/angle",
+        "destination": "/documents/0/Rows/{0}/Panels/{1}/Angle",
+        "conversion": "identity",
+        "null": "reject",
+        "default": null
+      }
+    ],
+    "cable_store": [
+      {
+        "source": "/node/circuit_tag",
+        "destination": "/records/2/value",
+        "conversion": "identity",
+        "null": "reject",
+        "default": null
+      },
+      {
+        "source": "/node/module_count",
+        "destination": "/records/6/value",
+        "conversion": "decimal",
+        "null": "reject",
+        "default": null
+      },
+      {
+        "source": "/node/ordered_panel_refs",
+        "destination": "/records/7/value",
+        "conversion": "handles-csv",
+        "null": "reject",
+        "default": null
+      },
+      {
+        "source": "/node/wire_gauge",
+        "destination": "/records/8/value",
+        "conversion": "identity",
+        "null": "reject",
+        "default": null
+      },
+      {
+        "source": "/node/length_ft",
+        "destination": "/records/9/value",
+        "conversion": "identity",
+        "null": "reject",
+        "default": null
+      }
+    ],
+    "tag_store": [
+      {
+        "source": "/resolved/assignment/num_mppt",
+        "destination": "/records/1/value",
+        "conversion": "identity",
+        "null": "reject",
+        "default": null
+      },
+      {
+        "source": "/resolved/assignment/strings_per_mppt",
+        "destination": "/records/2/value",
+        "conversion": "identity",
+        "null": "reject",
+        "default": null
+      },
+      {
+        "source": "/resolved/assignment/string_number",
+        "destination": "/records/3/value",
+        "conversion": "identity",
+        "null": "reject",
+        "default": null
+      },
+      {
+        "source": "/resolved/assignment/inverter_number",
+        "destination": "/records/4/value",
+        "conversion": "identity",
+        "null": "reject",
+        "default": null
+      },
+      {
+        "source": "/resolved/assignment/mppt_letter",
+        "destination": "/records/5/value",
+        "conversion": "identity",
+        "null": "reject",
+        "default": null
+      },
+      {
+        "source": "/resolved/assignment/strings_on_inverter",
+        "destination": "/records/6/value",
+        "conversion": "identity",
+        "null": "reject",
+        "default": null
+      },
+      {
+        "source": "/resolved/assignment/terminal_number",
+        "destination": "/records/7/value",
+        "conversion": "identity",
+        "null": "reject",
+        "default": null
+      },
+      {
+        "source": "/resolved/assignment/colour_counter",
+        "destination": "/records/8/value",
+        "conversion": "identity",
+        "null": "reject",
+        "default": null
+      }
+    ]
+  },
+  "identity": {
+    "frame": {
+      "roles": [
+        "primary"
+      ],
+      "map_key": "drawing-key/handle",
+      "discriminators": {
+        "primary": {
+          "kind": "block_reference",
+          "codec": "group"
+        }
+      }
+    },
+    "string": {
+      "roles": [
+        "primary",
+        "tag",
+        "start",
+        "end"
+      ],
+      "map_key": "drawing-key/handle",
+      "discriminators": {
+        "primary": {
+          "kind": "polyline",
+          "codec": "cable"
+        },
+        "tag": {
+          "kind": "mtext",
+          "codec": "tag"
+        },
+        "start": {
+          "kind": "block_reference",
+          "codec": null
+        },
+        "end": {
+          "kind": "block_reference",
+          "codec": null
+        }
+      }
+    }
+  },
+  "preservation": {
+    "allowed_changed_paths": {
+      "group": [
+        "/documents/1/Title",
+        "/documents/1/Installation",
+        "/documents/1/RowCount",
+        "/documents/1/ColumnCount",
+        "/documents/1/SlotCount",
+        "/documents/1/Power",
+        "/documents/1/Width",
+        "/documents/1/Height",
+        "/documents/1/ZoneName",
+        "/documents/1/Sequences",
+        "/documents/0/Rows/{0}/Panels/{1}/Code",
+        "/documents/0/Rows/{0}/Panels/{1}/Handle",
+        "/documents/0/Rows/{0}/Panels/{1}/Sequence",
+        "/documents/0/Rows/{0}/Panels/{1}/InverterNumber",
+        "/documents/0/Rows/{0}/Panels/{1}/InputNumber",
+        "/documents/0/Rows/{0}/Panels/{1}/X",
+        "/documents/0/Rows/{0}/Panels/{1}/Y",
+        "/documents/0/Rows/{0}/Panels/{1}/Angle"
+      ],
+      "cable": [
+        "/records/2/value",
+        "/records/6/value",
+        "/records/7/value",
+        "/records/8/value",
+        "/records/9/value"
+      ],
+      "tag": [
+        "/records/1/value",
+        "/records/2/value",
+        "/records/3/value",
+        "/records/4/value",
+        "/records/5/value",
+        "/records/6/value",
+        "/records/7/value",
+        "/records/8/value"
+      ]
+    },
+    "read_only_codecs": []
+  },
+  "evidence": {
+    "source_revision": "synthetic-write-v1",
+    "rules": {
+      "native_templates": "synthetic:1",
+      "store_codecs": "synthetic:2",
+      "write_fields": "synthetic:3",
+      "identity": "synthetic:4",
+      "preservation": "synthetic:5"
+    },
+    "compatibility_notes": [
+      "The existing public graph schema fixes a private schedule layer. Moving that literal to the private adapter requires a separately owned compatibility change; this slice does not repeat it."
+    ]
+  }
+}
