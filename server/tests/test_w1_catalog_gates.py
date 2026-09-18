@@ -35,14 +35,18 @@ def offline(monkeypatch):
 
 
 def rows(tenant=TENANT, **context):
-    return {row["name"]: row for family in catalog.build_catalog(
-        deps.all_tools(TENANT), tenant=tenant, **context)
+    families = catalog.build_catalog(deps.all_tools(TENANT))
+    if "drawing_version" in context:
+        context["version"] = context.pop("drawing_version")
+    families = availability.annotate_w1_availability(families, tenant, **context)
+    return {row["name"]: row for family in families
         for row in family["capabilities"]}
 
 
 def test_all_nine_resolve_once_through_normal_catalog():
     tools = deps.all_tools(TENANT)
     families = catalog.build_catalog(tools)
+    families = availability.annotate_w1_availability(families, TENANT)
     flattened = [row for family in families for row in family["capabilities"]]
     for name in availability.W1_CAPABILITIES:
         matches = [row for row in flattened if row["name"] == name]
@@ -174,16 +178,24 @@ def test_capabilities_route_passes_authenticated_context(monkeypatch):
     monkeypatch.setattr(deps, "effective_tools_with_provenance", lambda tenant: [])
     monkeypatch.setattr(route.customization_service, "effective_catalog_pin", lambda tenant: None)
     captured = {}
+    build_calls = []
 
-    def build(tools, **kwargs):
-        captured.update(kwargs)
+    def build(tools, *, include_internal):
+        build_calls.append((tools, include_internal))
         return []
 
+    def annotate(families, tenant, drawing_id, *, project_id, version):
+        captured.update(tenant=tenant, drawing_id=drawing_id,
+                        project_id=project_id, version=version)
+        return families
+
     monkeypatch.setattr(catalog, "build_catalog", build)
+    monkeypatch.setattr(route.availability, "annotate_w1_availability", annotate)
     response = TestClient(app).get("/api/capabilities", params={
         "drawing_id": DRAWING, "project_id": "project-1", "drawing_version": "2"})
     assert response.status_code == 200
+    assert build_calls == [([], False)]
     assert captured["tenant"] is tenant
     assert captured["drawing_id"] == DRAWING
     assert captured["project_id"] == "project-1"
-    assert captured["drawing_version"] == "2"
+    assert captured["version"] == "2"

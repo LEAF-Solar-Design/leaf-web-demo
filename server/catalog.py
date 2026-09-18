@@ -186,9 +186,7 @@ def _capability_entry(tool: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def build_catalog(tools: List[Dict[str, Any]], include_internal: bool = False,
-                  tenant=None, drawing_id=None, *, project_id=None,
-                  drawing_version="head") -> List[Dict[str, Any]]:
+def build_catalog(tools, include_internal=False):
     """Group tools (+ catalog seed tools) into families; drop empty families.
 
     include_internal=False (default) filters internal/QA tools SERVER-SIDE.
@@ -196,23 +194,12 @@ def build_catalog(tools: List[Dict[str, Any]], include_internal: bool = False,
     cfg = _load_config()
     rules = cfg.get("filter_rules", {})
     source = list(tools) + seed_tools()
-    import entitlements
-    from product_capability_availability import W1_CAPABILITIES, w1_input_readiness
-    inputs = None
-    if any(tool.get("name") in W1_CAPABILITIES for tool in source):
-        inputs = w1_input_readiness(tenant, drawing_id, project_id=project_id,
-                                   version=drawing_version)
 
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     for tool in source:
         if not include_internal and is_internal(tool, rules):
             continue
         entry = _capability_entry(tool)
-        availability = entitlements.w1_tool_availability(
-            tool, tenant, drawing_id, project_id=project_id,
-            version=drawing_version, inputs=inputs)
-        if availability is not None:
-            entry["availability"] = availability
         grouped.setdefault(_family_for(tool, cfg, rules), []).append(entry)
 
     families: List[Dict[str, Any]] = []

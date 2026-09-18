@@ -111,6 +111,27 @@ W1_CAPABILITIES = {
 }
 
 
+def annotate_w1_availability(families, tenant, drawing_id=None, *,
+                             project_id=None, version="head"):
+    """Annotate W1 rows, resolving shared drawing readiness only when needed."""
+    import entitlements
+
+    inputs = None
+    resolved = False
+    for family in families:
+        for row in family.get("capabilities") or []:
+            if row.get("name") not in W1_CAPABILITIES:
+                continue
+            if not resolved:
+                inputs = w1_input_readiness(
+                    tenant, drawing_id, project_id=project_id, version=version)
+                resolved = True
+            row["availability"] = entitlements.w1_tool_availability(
+                row, tenant, drawing_id, project_id=project_id,
+                version=version, inputs=inputs)
+    return families
+
+
 def w1_input_readiness(tenant, drawing_id=None, *, project_id=None, version="head"):
     """Read only the selected tenant's persisted drawing bundle, never UI steps."""
     def unavailable(reason):

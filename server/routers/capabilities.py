@@ -19,6 +19,7 @@ import converse_registry
 import customization_service
 import deps
 import mcp_tool_projection
+import product_capability_availability as availability
 from envelopes import ErrorCode, error_obj, with_envelope_fields
 from routers import ops as ops_router
 from routers import platform_customize as platform_customize_router
@@ -114,13 +115,11 @@ def capabilities(x_internal_role: Optional[str] = Header(default=None),
         tool_sources=tool_sources,
         operator_owned_engine_source=operator_owned_engine_source,
     )
-    families = catalog.build_catalog(
-        tools,
-        include_internal=include_internal,
-        tenant=tenant,
-        drawing_id=drawing_id,
+    families = catalog.build_catalog(tools, include_internal=include_internal)
+    families = availability.annotate_w1_availability(
+        families, tenant, drawing_id,
         project_id=project_id,
-        drawing_version=drawing_version,
+        version=drawing_version,
     )
     return with_envelope_fields({
         "families": families,
