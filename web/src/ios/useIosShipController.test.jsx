@@ -2,6 +2,7 @@ import { act, cleanup, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { useIosShipController, shipSetupState } from './useIosShipController.js'
 import { validateIosShipReadiness } from '../site/iosShipReadiness.js'
+import { readFileSync } from 'node:fs'
 
 // Transport spies: the hook still calls every real fetch helper and validator.
 const fetchIosShipReadiness = vi.fn()
@@ -44,6 +45,32 @@ const flush = async () => { await act(async () => { await Promise.resolve() }) }
 const tick = async (ms = 2000) => { await act(async () => { await vi.advanceTimersByTimeAsync(ms) }) }
 const mount = () => renderHook((input) => useIosShipController(input), { initialProps: props })
 const launch = async (result) => { await act(async () => { await result.current.launch() }) }
+
+it('J2 row6 switching the served profile preserves execution ownership and resumes following', async () => {
+  const app = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
+  expect(app).toContain("const shipControllerLive = ENV_IOS_SURFACE && surfaceSlots.toolbar.profile === 'ship' && !mock && signedIn")
+  expect(app).toContain('enabled: shipControllerLive')
+  expect(app).toContain('ship={ship}')
+  const { result, rerender } = renderHook((input) => useIosShipController(input), { initialProps: { ...props, enabled: true } })
+  await flush()
+  await launch(result)
+  const execution = result.current.execution
+  expect(execution.execution_id).toBe('e1')
+  rerender({ ...props, enabled: false })
+  await flush()
+  expect(result.current.phase).toBe('idle')
+  expect(result.current.execution).toBe(execution)
+  const reads = getIosShipExecution.mock.calls.length
+  await tick(4000)
+  expect(getIosShipExecution).toHaveBeenCalledTimes(reads)
+  rerender({ ...props, enabled: true })
+  await flush()
+  expect(result.current.phase).toBe('running')
+  expect(result.current.execution.execution_id).toBe('e1')
+  getIosShipExecution.mockResolvedValue({ execution: { ...queued, status: 'succeeded' } })
+  await tick()
+  expect(result.current.phase).toBe('succeeded')
+})
 
 beforeEach(() => {
   vi.useFakeTimers()

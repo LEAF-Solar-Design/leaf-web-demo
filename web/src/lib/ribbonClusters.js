@@ -43,10 +43,8 @@ export const MAX_LAYER_TOOLS = 10
 // it did — that equality is pinned in ribbonClusters.test.js.
 export const CATALOG_TOOL_NOTE_ALL_PLACED = 'Every catalog tool sits on its own ribbon tab.'
 
-// One fixed sentence per profile tool for its unavailable state. The caller
-// passes a handler or null, never reason text: a null handler renders the
-// tool disabled with the sentence below, so every profile record keeps a
-// literal `PROFILE_REASONS.key` the honesty-ladder gate can resolve.
+// Profile reasons share one vocabulary. Ship reasons are selected from the
+// mounted controller's phase and setup state, not inferred from a handler.
 export const PROFILE_REASONS = Object.freeze({
   openProject: 'Sign in to open a project',
   changeProject: 'Sign in to change projects',
@@ -58,6 +56,17 @@ export const PROFILE_REASONS = Object.freeze({
   approvedRevision: 'No approved revision for this project yet',
   appleReadiness: 'Apple readiness is not mounted',
   testflightBuild: 'The ship lane is not ready; no launch control is available',
+  shipNoRevision: 'Select an approved project revision before launching.',
+  shipGrant: 'The Apple grant is not ready. Complete Apple grant setup.',
+  shipExecutorBusy: 'The executor is busy. Wait for its current build to finish.',
+  shipExecutorUnavailable: 'The executor is unavailable. Connect the ship executor.',
+  shipIdle: 'Sign in and select the iOS profile to check ship readiness.',
+  shipLoading: 'Checking ship readiness.',
+  shipLaunching: 'The ship launch is being submitted.',
+  shipRunning: 'A build is already running.',
+  shipSucceeded: 'This build has succeeded.',
+  shipFailed: 'This build has failed.',
+  shipUnavailable: 'The ship lane is unavailable.',
   shipReceipts: 'No ship receipts yet',
   stringingEmpty: 'No stringing tools in this catalog yet',
   placementEmpty: 'No placement tools in this catalog yet',
@@ -66,6 +75,32 @@ export const PROFILE_REASONS = Object.freeze({
 })
 
 const profileRecord = (value) => value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+
+export function profileReason(value, fallback) {
+  return Object.values(PROFILE_REASONS).includes(value) ? value : fallback
+}
+
+export function shipLaunchReason({ phase, readiness } = {}) {
+  const phaseReason = {
+    idle: PROFILE_REASONS.shipIdle, loading: PROFILE_REASONS.shipLoading,
+    launching: PROFILE_REASONS.shipLaunching, running: PROFILE_REASONS.shipRunning,
+    succeeded: PROFILE_REASONS.shipSucceeded, failed: PROFILE_REASONS.shipFailed,
+  }[phase]
+  if (phase === 'ready') return ''
+  if (phaseReason) return phaseReason
+  return {
+    'no-approved-revision': PROFILE_REASONS.shipNoRevision,
+    'grant-not-ready': PROFILE_REASONS.shipGrant,
+    'executor-busy': PROFILE_REASONS.shipExecutorBusy,
+    'executor-unavailable': PROFILE_REASONS.shipExecutorUnavailable,
+  }[readiness?.setupState] || PROFILE_REASONS.shipUnavailable
+}
+
+export function shipErrorSentence(error) {
+  if (!error) return null
+  const detail = String(error).trim().replace(/_/g, ' ')
+  return detail ? `${detail.startsWith('Ship status: ') ? '' : 'Ship status: '}${detail}${/[.!?]$/.test(detail) ? '' : '.'}` : null
+}
 // A handler is a function or nothing; any other value is treated as absent.
 const profileHandler = (value) => (typeof value === 'function' ? value : null)
 const PROFILE_ICONS = Object.freeze({
@@ -93,7 +128,23 @@ function wellFormedShipContract(contract) {
     && (contract.build_stage == null || typeof contract.build_stage === 'string')
 }
 
-export function shipStatusRows(contract, revision, onReceipts) {
+export function shipStatusRows(contract, revision, onReceipts, ship) {
+  if (ship?.controllerLive === true) {
+    const state = ship.phase
+    const stage = ship.execution?.failed_stage || ship.execution?.stage
+    const approved = revision && ship.readiness?.approvedLaunch?.revision === revision
+    const openReceipts = profileHandler(onReceipts)
+    return [
+      { ...profileBase('ship:revision', approved ? `Approved revision ${revision}`.slice(0, 64) : 'Approved revision'),
+        disabled: !approved || !openReceipts,
+        reason: approved ? PROFILE_REASONS.shipReceipts : PROFILE_REASONS.approvedRevision,
+        onClick: approved ? openReceipts ?? undefined : undefined },
+      { ...profileBase('ship:readiness', `Ship status: ${state}${stage ? ` (${stage})` : ''}`),
+        state, pressed: state === 'ready', disabled: !openReceipts,
+        reason: profileReason(ship.launchReason, shipLaunchReason(ship) || PROFILE_REASONS.shipReceipts),
+        onClick: openReceipts ?? undefined },
+    ]
+  }
   const valid = wellFormedShipContract(contract) && typeof onReceipts === 'function'
   const state = valid ? deriveIosState(contract) : null
   const stage = valid ? contract.build_stage || '' : ''
@@ -248,8 +299,9 @@ export function profileRibbonTabs(profile, ctx = {}) {
   }
   const ship = profileRecord(context.ship)
   const onLaunch = profileHandler(ship.onLaunch)
+  const launchReason = ship.controllerLive === true ? profileReason(ship.launchReason, shipLaunchReason(ship)) : PROFILE_REASONS.testflightBuild
   const onShipReceipts = profileHandler(ship.onReceipts)
-  const [revision, readiness] = shipStatusRows(ship.contract, ship.revision, onShipReceipts)
+  const [revision, readiness] = shipStatusRows(ship.contract, ship.revision, onShipReceipts, ship)
   return [{ id: 'ship', label: 'Ship', clusters: [
     profileGroup('revision', 'Revision', [
       revision,
@@ -257,9 +309,10 @@ export function profileRibbonTabs(profile, ctx = {}) {
     profileGroup('readiness', 'Readiness', [
       readiness,
     ]),
+    ...(ship.error ? [{ ...profileGroup('ship-error', 'Ship status', []), note: shipErrorSentence(ship.error) }] : []),
     // Without a launch handler there is no launch path, and the tool never implies one.
     profileGroup('ship', 'Ship', [
-      { ...profileBase('ship:launch', 'TestFlight build'), disabled: !onLaunch, reason: PROFILE_REASONS.testflightBuild, onClick: onLaunch ?? undefined },
+      { ...profileBase('ship:launch', 'TestFlight build'), disabled: !onLaunch, reason: launchReason, onClick: onLaunch ?? undefined },
     ]),
     profileGroup('receipts', 'Receipts', [
       { ...profileBase('ship:receipts', 'Open ship receipts'), disabled: !onShipReceipts, reason: PROFILE_REASONS.shipReceipts, onClick: onShipReceipts ?? undefined },

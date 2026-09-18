@@ -53,7 +53,7 @@ export default function SurfaceGrounds({
   onCreateProject, actions, panel,
   occluders = NO_OCCLUDERS,
   studioPresentation = false, studioShell = false,
-  iosEnabled, iosContract, revision,
+  iosEnabled, iosContract, revision, ship, onLaunch,
 }) {
   const projectLabel = workspaceProject?.kind === 'project'
     ? workspaceProject.label
@@ -93,6 +93,8 @@ export default function SurfaceGrounds({
         contract={iosContract}
         projectLabel={projectLabel}
         revision={revision}
+        ship={ship}
+        onLaunch={onLaunch}
       />
     </>
   )

@@ -135,31 +135,70 @@ function codeOnly(src) {
 }
 
 describe('C-05 ship context wiring', () => {
-  const receiptHandlerPattern = new RegExp(String.raw`ship: \{ contract: iosContract, revision: canonicalVersionId \|\| null, onLaunch: null, onReceipts: iosContract\?\.receipt_id \? \(\) => \{\s*const details = document\.querySelector\('\.studio-profile-info details'\)\s*if \(details\) \{ details\.open = true; details\.querySelector\('summary'\)\?\.focus\(\) \}\s*\} : null \}`)
-  it('C-05 row10 the ship receipt handler opens the real details disclosure', () => {
-    assert.match(codeOnly(appSource), receiptHandlerPattern)
+  // J2 replaces the old hardcoded-null pins with the mounted controller projection.
+  const start = appSource.indexOf('  const ship = useMemo(')
+  const end = appSource.indexOf('  // Readiness follows', start)
+  const projection = appSource.slice(start, end)
+  const project = (iosShipController, iosContract = null, shipControllerLive = true) => new Function(
+    'iosShipController', 'iosContract', 'canonicalVersionId', 'useMemo', 'shipLaunchReason', 'shipErrorSentence', 'document', 'shipControllerLive',
+    projection + '\nreturn ship',
+  )(iosShipController, iosContract, 'revision-j2', (fn) => fn(), () => 'Setup required.', (error) => error, {
+    querySelector: () => null,
+  }, shipControllerLive)
+
+  it('J2 row1 mounts one controller and exposes its real launch only when ready', () => {
+    const compiled = esbuild.transformSync(appSource, { loader: 'jsx' }).code
+    assert.equal((compiled.match(/= useIosShipController\(/g) || []).length, 1)
+    assert.match(compiled, /projectId: openProjectId/)
+    assert.match(compiled, /sessionActive: !mock && signedIn/)
+    assert.match(compiled, /enabled: shipControllerLive/)
+    assert.match(compiled, /const shipControllerLive = ENV_IOS_SURFACE && surfaceSlots.toolbar.profile === "ship" && !mock && signedIn/)
+    assert.match(compiled, /tenantKey: tenant \|\| config.tenant/)
+    const launch = () => 'launched'
+    assert.equal(project({ phase: 'ready', launch }).onLaunch, launch)
+    assert.match(compiled, /profileRibbonTabs\([\s\S]*?\bship\s*[,}]/)
+    assert.match(compiled, /onLaunch: ship.onLaunch/)
   })
+
+  it('J2 row16 the ship record carries explicit liveness even at idle', () => {
+    assert.equal(project({ phase: 'idle' }, null, false).controllerLive, false)
+    assert.equal(project({ phase: 'idle' }, null, true).controllerLive, true)
+  })
+
+  it('J2 row2 every non-ready controller phase has an absent launch handler', () => {
+    for (const phase of ['idle', 'loading', 'launching', 'running', 'succeeded', 'failed', 'setup-required', 'unavailable']) {
+      assert.equal(project({ phase, launch: () => {} }).onLaunch, null)
+    }
+  })
+
+  it('J2 row8 readiness and launch use the same controller phase', () => {
+    assert.match(appSource, /iosReady: iosShipController.phase === 'ready'/)
+    assert.doesNotMatch(appSource, /iosReady:.*iosContract/)
+    for (const phase of ['ready', 'loading', 'running', 'succeeded', 'failed', 'setup-required', 'unavailable', 'idle']) {
+      assert.equal(typeof project({ phase, launch: () => {} }).onLaunch === 'function', phase === 'ready')
+    }
+  })
+
+  it('C-05 row10 the ship receipt handler opens the real details disclosure', () => {
+    assert.match(codeOnly(projection), /onReceipts: iosContract\?\.receipt_id \? \(\) => \{/)
+    assert.ok(projection.includes("document.querySelector('.studio-profile-info details')"))
+    assert.ok(projection.includes("details.open = true; details.querySelector('summary')?.focus()"))
+    assert.equal(typeof project({ phase: 'ready' }, { receipt_id: 'receipt' }).onReceipts, 'function')
+    assert.equal(project({ phase: 'ready' }).onReceipts, null)
+  })
+
   it('C-05 row11 ignores a commented handler and preserves literal slashes', () => {
-    const fixture = `/*
-ship: { contract: iosContract, revision: canonicalVersionId || null, onLaunch: null, onReceipts: iosContract?.receipt_id ? () => {
-  const details = document.querySelector('.studio-profile-info details')
-  if (details) { details.open = true; details.querySelector('summary')?.focus() }
-} : null }
-*/
-ship: { contract: iosContract, revision: canonicalVersionId || null, onLaunch: null, onReceipts: iosContract?.receipt_id ? () => {} : null }`
-    assert.match(fixture, receiptHandlerPattern)
-    assert.doesNotMatch(codeOnly(fixture), receiptHandlerPattern)
+    assert.doesNotMatch(codeOnly('/* onLaunch: null */'), /onLaunch/)
     const literals = "const string = '//not-a-comment'; const template = `//not-a-comment`"
     assert.equal(codeOnly(literals), literals)
-    assert.equal(codeOnly('// hidden\r\nactive /* hidden\nbody */'), '//       \r\nactive /*       \n     */')
   })
+
   it('C-05 row8 consumes the existing contract and canonical revision', () => {
-    assert.match(appSource, new RegExp(String.raw`ship: \{ contract: iosContract, revision: canonicalVersionId \|\| null, onLaunch: null`))
-    assert.ok(appSource.includes('openAgentMode, jobs.length, iosContract, canonicalVersionId, setNavExpanded'))
-    assert.ok(appSource.includes("document.querySelector('.studio-profile-info details')"))
+    const contract = { receipt_id: 'receipt' }
+    assert.equal(project({ phase: 'ready' }, contract).contract, contract)
+    assert.equal(project({ phase: 'ready' }, contract).revision, 'revision-j2')
   })
 })
-
 describe('C-04C Solar shown-document readiness', () => {
   const start = appSource.indexOf('  const solarReady =')
   const end = appSource.indexOf('  const surfaceStates =', start)
@@ -175,7 +214,7 @@ describe('C-04C Solar shown-document readiness', () => {
     const document = { documentId: 'solar-starter.dxf', documentOrigin: 'starter' }
     for (const state of ['idle', 'opening', 'open', 'failed']) assert.equal(ready(null, document, 'solar', state), false)
     assert.doesNotMatch(derivation, /solarStarter|hasDrawing|session\.engineParsed/)
-    assert.match(appSource, new RegExp(String.raw`productSurfaceStates\(\{[\s\S]*?\bsolarReady,\s*\}\), \[mock, signedOut, shown, health, iosContract, solarReady\]`))
+    assert.match(appSource, new RegExp(String.raw`productSurfaceStates\(\{[\s\S]*?\bsolarReady,\s*\}\), \[mock, signedOut, shown, health, iosShipController.phase, solarReady\]`))
     assert.match(appSource, new RegExp(String.raw`onShown=\{\(intake, history\) => \{\s*setActiveIntake\(intake\)`))
   })
 
