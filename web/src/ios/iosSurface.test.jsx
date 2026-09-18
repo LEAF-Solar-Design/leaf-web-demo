@@ -24,7 +24,7 @@ it('I1 row8 absent ship preserves the existing surface and device render', () =>
   const view = render(<IosSurface enabled contract={contract} />)
   const html = view.container.innerHTML
   expect(screen.getByText('iOS app')).toBeInTheDocument()
-  expect(screen.getByText('Setting up — Mac allocated')).toBeInTheDocument()
+  expect(screen.getByText('Setting up: Mac allocated')).toBeInTheDocument()
   expect(screen.queryByTestId('ios-stage-ladder')).not.toBeInTheDocument()
   view.rerender(<IosSurface enabled contract={contract} ship={undefined} />)
   expect(view.container.innerHTML).toBe(html)
@@ -100,7 +100,7 @@ describe('each derived state has a distinct truthful view', () => {
     render(<IosSurface enabled contract={contractWith({ healthy: true, launchable: false }, 'MAC_ALLOCATED')} />)
     const el = screen.getByLabelText('iOS readiness')
     expect(el).toHaveAttribute('data-state', 'in-progress')
-    expect(screen.getByText(/Setting up — Mac allocated/)).toBeInTheDocument()
+    expect(screen.getByText(/Setting up: Mac allocated/)).toBeInTheDocument()
   })
 
   it('in-progress with a null build_stage: plain label, no invented stage text', () => {

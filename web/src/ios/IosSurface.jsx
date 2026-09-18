@@ -122,7 +122,7 @@ export default function IosSurface({ enabled, contract, ship, onLaunch }) {
         <span className="ios-state-k">iOS app</span>
         <span className="ios-state-v ios-in-progress">
           {STATE_LABEL['in-progress']}
-          {stageLabel ? ` — ${stageLabel}` : ''}
+          {stageLabel ? `: ${stageLabel}` : ''}
         </span>
       </section>
     )
