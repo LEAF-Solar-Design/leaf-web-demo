@@ -4,7 +4,7 @@
   "rewrites": [
     {
       "source": "/(.*)",
-      "destination": "https://platform-staging.leafdesign.ai/$1"
+      "destination": "https://platform.leafdesign.ai/$1"
     }
   ],
   "headers": [
