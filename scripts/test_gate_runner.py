@@ -65,7 +65,9 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
         assert suite.expected == expected
         assert suite.kind == "pytest"
         assert suite.cwd == g.SERVER
-        assert f"tests/test_w1_{name.replace('-', '_')}.py" in suite.argv
+        # Pin the WHOLE command, not membership: a replaced executable or an
+        # added selection argument must fail here (Astra read of #1313, item 4).
+        assert suite.argv == g._py_pytest(f"tests/test_w1_{name.replace('-', '_')}.py")
         assert suite.allowed_skip_reasons == (
             (r"live staging probe is opt-in",) if name == "cloud-solve-probe" else ()
         )
