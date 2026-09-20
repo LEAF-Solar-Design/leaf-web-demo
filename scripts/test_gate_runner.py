@@ -47,6 +47,29 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
     g = _load_runner()
     suites = {suite.id: suite for suite in g.build_suites()}
 
+    # Solar W1 floors measured by the planner for W5-A0, skips excluded.
+    w1_floors = {
+        "design-graph": 23,
+        "cloud-solve-probe": 58,
+        "graph-versions": 18,
+        "sizing-groups": 52,
+        "solar-interchange": 19,
+        "solve-commit": 42,
+        "routes-schedule": 21,
+        "equipment": 24,
+        "catalog-gates": 18,
+        "solar-apply-plan": 39,
+    }
+    for name, expected in w1_floors.items():
+        suite = suites[f"server-w1-{name}"]
+        assert suite.expected == expected
+        assert suite.kind == "pytest"
+        assert suite.cwd == g.SERVER
+        assert f"tests/test_w1_{name.replace('-', '_')}.py" in suite.argv
+        assert suite.allowed_skip_reasons == (
+            (r"live staging probe is opt-in",) if name == "cloud-solve-probe" else ()
+        )
+
     inventory = suites["server-postgres-authority-inventory"]
     # 9 after the annotation authority record was added (was 8). Mirrors
     # the floor in run-all-gates.py; BOTH must move together when the contract
