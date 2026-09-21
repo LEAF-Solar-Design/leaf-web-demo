@@ -112,6 +112,11 @@ def resolve_base(repo, base_ref, head_ref, head):
         except Exception:
             # Network errors may carry request details. Do not print them.
             return None, "merge-queue-entry"
+    # A plain push (a merge landing on the default branch, or a manual build) carries no
+    # webhook base ref; its change is what the head added over its first parent.
+    parent = git_sha(repo, head + "^")
+    if parent and parent != head:
+        return parent, "push-first-parent"
     return None, None
 
 
