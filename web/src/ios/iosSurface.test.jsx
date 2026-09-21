@@ -11,13 +11,85 @@
  * receipt_id, reported_at. The four views are derivations of those fields —
  * no invented state/detail/progress fields exist anywhere in this suite.
  */
-import { afterEach, describe, expect, it } from 'vitest'
-import { cleanup, render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 
 import IosSurface from './IosSurface.jsx'
 import { DeviceGround } from './DeviceGround.jsx'
 
 afterEach(cleanup)
+
+const importedSources = ['a', 'b'].map((letter) => ({ source_revision: letter.repeat(40), source_sha256: 'c'.repeat(64),
+  bundle_identifier: 'com.example.app', marketing_version: '1.0', build_number: '12' }))
+const importedShip = (overrides = {}) => ({ phase: 'setup-required', readiness: { setupState: 'no-approved-revision' },
+  revision: 'r1', sources: importedSources, approvals: [], canApprove: false, ...overrides })
+
+it('B4D row16 catalog metadata without sources leaves both legacy renders byte identical', () => {
+  const ship = { phase: 'setup-required', readiness: { setupState: 'no-approved-revision' } }
+  const metadata = { ...ship, approvals: [], sync: { status: 'unavailable' }, canApprove: true }
+  const view = render(<IosSurface enabled ship={ship} />)
+  const html = view.container.innerHTML
+  view.rerender(<IosSurface enabled ship={metadata} />)
+  expect(view.container.innerHTML).toBe(html)
+  view.unmount()
+  const ground = render(<DeviceGround active enabled ship={ship} />)
+  const groundHtml = ground.container.innerHTML
+  ground.rerender(<DeviceGround active enabled ship={metadata} />)
+  expect(ground.container.innerHTML).toBe(groundHtml)
+  expect(screen.queryByTestId('ios-ship-sources')).not.toBeInTheDocument()
+})
+
+it('B4D row17 shows catalog tuples states sync trouble and the empty list', () => {
+  const ship = importedShip({ approvals: [{ revision: 'r1', source_revision: importedSources[0].source_revision, consumed_at: null }],
+    sync: { status: 'provider_unavailable' } })
+  const view = render(<IosSurface enabled ship={ship} />)
+  const items = screen.getAllByTestId('ios-ship-source')
+  expect(items).toHaveLength(2)
+  expect(items[0]).toHaveTextContent('com.example.app · 1.0 (12) · aaaaaaaaaaaa')
+  expect(items[1]).toHaveTextContent('com.example.app · 1.0 (12) · bbbbbbbbbbbb')
+  expect(items[0]).toHaveAttribute('data-state', 'approved')
+  expect(items[1]).toHaveAttribute('data-state', 'unapproved')
+  expect(items[0]).toHaveAttribute('data-revision', importedSources[0].source_revision)
+  expect(screen.getByTestId('ios-ship-sync')).toHaveTextContent('Provider catalog: provider_unavailable. Showing the stored sources.')
+  view.rerender(<IosSurface enabled ship={{ ...ship, sync: { status: 'ok' } }} />)
+  expect(screen.queryByTestId('ios-ship-sync')).not.toBeInTheDocument()
+  view.rerender(<IosSurface enabled ship={{ ...ship, sources: [] }} />)
+  expect(screen.getByText('No imported source revision yet.')).toBeInTheDocument()
+})
+
+it('B4D row18 owner controls use the source revision and explain busy or missing authority', () => {
+  const approve = vi.fn()
+  const ship = importedShip({ sources: [importedSources[0]], canApprove: true, approve })
+  const view = render(<IosSurface enabled ship={ship} />)
+  fireEvent.click(screen.getByTestId('ios-ship-approve'))
+  expect(approve).toHaveBeenCalledTimes(1)
+  expect(approve).toHaveBeenCalledWith(importedSources[0].source_revision)
+  view.rerender(<IosSurface enabled ship={{ ...ship, approving: true }} />)
+  expect(screen.getByTestId('ios-ship-approve')).toBeDisabled()
+  expect(screen.getByTestId('ios-ship-approve')).toHaveAttribute('title', 'The approval is being recorded.')
+  view.rerender(<IosSurface enabled ship={{ ...ship, canApprove: false }} />)
+  expect(screen.queryByTestId('ios-ship-approve')).not.toBeInTheDocument()
+  expect(screen.getByText('Only the project owner can approve a source revision')).toBeInTheDocument()
+  view.rerender(<IosSurface enabled ship={{ ...ship, revision: null }} />)
+  expect(screen.queryByTestId('ios-ship-approve')).not.toBeInTheDocument()
+  expect(screen.getByText('Select a canonical drawing version before approving')).toBeInTheDocument()
+})
+
+it('B4D row19 approved and consumed sources have status text and no approval button', () => {
+  render(<IosSurface enabled ship={importedShip({ canApprove: true, approve: vi.fn(), approvals: importedSources.map((source, index) => ({
+    revision: 'r1', source_revision: source.source_revision, consumed_at: index ? '2026-01-01' : null,
+  })) })} />)
+  expect(screen.getByText('approved for the selected version')).toBeInTheDocument()
+  expect(screen.getByText('approval consumed')).toBeInTheDocument()
+  expect(screen.getAllByTestId('ios-ship-source')[1]).toHaveAttribute('data-state', 'consumed')
+  expect(screen.queryByTestId('ios-ship-approve')).not.toBeInTheDocument()
+})
+
+it('B4D row20 reports catalog errors in an alert', () => {
+  render(<IosSurface enabled ship={importedShip({ sourcesError: 'catalog unavailable' })} />)
+  expect(screen.getByTestId('ios-ship-sources-error')).toHaveAttribute('role', 'alert')
+  expect(screen.getByRole('alert')).toHaveTextContent('catalog unavailable')
+})
 
 it('I1 row8 absent ship preserves the existing surface and device render', () => {
   const contract = contractWith({ healthy: true, launchable: false }, 'MAC_ALLOCATED')

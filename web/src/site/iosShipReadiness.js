@@ -5,6 +5,94 @@ export const IOS_SHIP_READINESS_KIND = 'leaf.ios-ship-readiness.v1'
 export const IOS_TESTFLIGHT_RECEIPT_KIND = 'leaf.ios-testflight-receipt.v1'
 export const IOS_SHIP_SETUP_ACTION = 'mount-apple-ship-dispatch'
 
+export const IOS_SOURCE_FIELDS = Object.freeze([
+  'source_revision', 'source_sha256', 'bundle_identifier', 'marketing_version', 'build_number',
+])
+
+export function validateIosShipSources(data) {
+  const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
+  const invalid = (field) => { throw new Error(`source catalog field invalid: ${field}`) }
+  const string = (value, field, limit = 512) => {
+    if (typeof value !== 'string' || !value.length || value.length > limit) invalid(field)
+    return value
+  }
+  if (!object(data) || data.ok !== true) invalid('ok')
+  const secret = hasSecretShapedField(data)
+  if (secret) invalid(typeof secret === 'string' ? secret : 'secret-shaped field')
+  const list = (field, project) => {
+    if (!Array.isArray(data[field]) || data[field].length > 50) invalid(field)
+    return Object.freeze(data[field].map((entry) => {
+      if (!object(entry)) invalid(field)
+      return Object.freeze(project(entry))
+    }))
+  }
+  const sources = list('sources', (entry) => {
+    const source = Object.fromEntries(IOS_SOURCE_FIELDS.map((field) => [field, string(entry[field], field)]))
+    for (const field of ['catalog_key', 'repository', 'imported_at']) {
+      if (typeof entry[field] === 'string' && entry[field].length <= 512) source[field] = entry[field]
+    }
+    return source
+  })
+  const approvals = list('approvals', (entry) => {
+    const approval = Object.fromEntries(['approval_id', 'revision', 'source_revision'].map((field) => [field, string(entry[field], field)]))
+    if (entry.consumed_at != null && (typeof entry.consumed_at !== 'string' || entry.consumed_at.length > 64)) invalid('consumed_at')
+    return { ...approval, consumed_at: entry.consumed_at ?? null }
+  })
+  let sync = null
+  if (data.sync !== undefined) {
+    if (!object(data.sync)) invalid('sync')
+    if (typeof data.sync.status !== 'string' || !/^[a-z_]{1,32}$/.test(data.sync.status)) invalid('sync.status')
+    if (!Number.isInteger(data.sync.registered) || data.sync.registered < 0) invalid('sync.registered')
+    sync = { status: data.sync.status, registered: data.sync.registered }
+    for (const field of ['conflicts', 'unpinned', 'refused']) {
+      if (data.sync[field] !== undefined && !Array.isArray(data.sync[field])) invalid(`sync.${field}`)
+      sync[field] = data.sync[field]?.length || 0
+    }
+    Object.freeze(sync)
+  }
+  return Object.freeze({ sources, approvals, sync, canApprove: data.can_approve === true })
+}
+
+export function iosSourceApprovalState(source, approvals, revision) {
+  if (!revision) return 'unapproved'
+  const matches = approvals.filter((approval) => approval.revision === revision && approval.source_revision === source.source_revision)
+  if (matches.some((approval) => approval.consumed_at != null)) return 'consumed'
+  return matches.length ? 'approved' : 'unapproved'
+}
+
+export async function fetchIosShipSources({ projectId, fetchImpl = globalThis.fetch }) {
+  const path = `/api/projects/${encodeURIComponent(projectId)}/ios/sources`
+  const res = await iosFetch(path, { headers: { accept: 'application/json' } }, fetchImpl)
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    const error = new Error(data?.error?.message || `sources unavailable (${res.status})`)
+    error.status = res.status
+    error.envelope = data?.error || null
+    throw error
+  }
+  return validateIosShipSources(data)
+}
+
+export async function requestIosShipApproval({ projectId, revision, source, fetchImpl = globalThis.fetch }) {
+  const body = { revision }
+  for (const field of IOS_SOURCE_FIELDS) body[field] = source?.[field]
+  for (const [field, value] of Object.entries(body)) {
+    if (typeof value !== 'string' || !value.length || value.length > 512) throw new Error(`approval request field invalid: ${field}`)
+  }
+  const res = await iosFetch(`/api/projects/${encodeURIComponent(projectId)}/ios/approvals`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+  }, fetchImpl)
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok || data.ok !== true || hasSecretShapedField(data)) {
+    const error = new Error(data?.error?.message || `approval unavailable (${res.status})`)
+    error.status = res.status
+    error.code = data?.error?.code
+    error.envelope = data?.error || null
+    throw error
+  }
+  return data.approval
+}
+
 const SHA256 = /^[0-9a-f]{64}$/
 const SECRET_KEY_RE = /(password|passwd|two.?factor|2fa|otp|p8|\.p8|private[_ -]?key|certificate|provisioning|profile|credential|secret|keychain|authkey|token|session|cookie|api[_ -]?key|signing[_ -]?(key|cert))/i
 const APPROVED_FIELDS = [

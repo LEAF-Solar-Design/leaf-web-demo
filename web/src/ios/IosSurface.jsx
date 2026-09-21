@@ -23,6 +23,13 @@
 // placeholder revealing no readiness detail at all.
 
 import ShipReceipts from './ShipReceipts.jsx'
+import { iosSourceApprovalState } from '../site/iosShipReadiness.js'
+
+const SHIP_APPROVE_REASONS = Object.freeze({
+  owner: 'Only the project owner can approve a source revision',
+  noRevision: 'Select a canonical drawing version before approving',
+  busy: 'The approval is being recorded.',
+})
 
 const SHIP_PHASE_REASONS = Object.freeze({
   idle: 'Sign in and select an approved revision to launch.',
@@ -56,6 +63,31 @@ export function ShipStage({ ship, onLaunch }) {
         ))}
       </ol>
       {setup && setup !== 'none' && readiness?.setupAction && <p>Setup required: {readiness.setupAction}</p>}
+      {Array.isArray(ship.sources) && (
+        <section className="ios-ship-sources" data-testid="ios-ship-sources" aria-label="Imported source revisions">
+          {ship.sync && ship.sync.status !== 'ok' && <p data-testid="ios-ship-sync">Provider catalog: {ship.sync.status}. Showing the stored sources.</p>}
+          {ship.sources.length === 0 ? <p>No imported source revision yet.</p> : (
+            <ul>
+              {ship.sources.map((source) => {
+                const state = iosSourceApprovalState(source, ship.approvals || [], ship.revision)
+                return (
+                  <li key={source.source_revision} data-testid="ios-ship-source" data-revision={source.source_revision} data-state={state}>
+                    {source.bundle_identifier} · {source.marketing_version} ({source.build_number}) · {source.source_revision.slice(0, 12)}
+                    {state === 'approved' ? <span>approved for the selected version</span>
+                      : state === 'consumed' ? <span>approval consumed</span>
+                        : ship.canApprove === true && typeof ship.approve === 'function' && ship.revision ? (
+                          <button type="button" data-testid="ios-ship-approve" disabled={ship.approving === true}
+                            title={ship.approving ? SHIP_APPROVE_REASONS.busy : 'Approve for the selected version'}
+                            onClick={() => ship.approve(source.source_revision)}>Approve for the selected version</button>
+                        ) : <p>{!ship.revision ? SHIP_APPROVE_REASONS.noRevision : SHIP_APPROVE_REASONS.owner}</p>}
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+          {ship.sourcesError && <p role="alert" data-testid="ios-ship-sources-error">{ship.sourcesError}</p>}
+        </section>
+      )}
       {execution && (
         <p className="ios-execution-status">
           {execution.failed_stage || execution.stage}

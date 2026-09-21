@@ -21,6 +21,7 @@
 // reference's eight Draw-tab panels).
 import { zoomViewer } from '../site/DrawingCockpit.jsx'
 import { deriveIosState } from '../ios/IosSurface.jsx'
+import { iosSourceApprovalState } from '../site/iosShipReadiness.js'
 import { RIBBON_TABS } from '../site/CockpitTopBand.jsx'
 import { DEFERRED_REASONS, REASONS, forCluster, ribbonTool } from './actionRegistry.js'
 import { DEFAULT_TOOL_ICON, isWriteTool, toolIcon, toolMcpSource, toolPlacementSize, toolPlacementTab } from './toolRecord.js'
@@ -68,6 +69,12 @@ export const PROFILE_REASONS = Object.freeze({
   shipFailed: 'This build has failed.',
   shipUnavailable: 'The ship lane is unavailable.',
   shipReceipts: 'No ship receipts yet',
+  shipApproveOwner: 'Only the project owner can approve a source revision',
+  shipApproveNoRevision: 'Select a canonical drawing version before approving',
+  shipApproveNoSource: 'No imported source revision to approve yet',
+  shipApproveApproved: 'Every imported source revision is already approved for the selected version',
+  shipApproveBusy: 'The approval is being recorded.',
+  shipApproveReady: 'Record the owner approval of this source revision for the selected version',
   stringingEmpty: 'No stringing tools in this catalog yet',
   placementEmpty: 'No placement tools in this catalog yet',
   measurementEmpty: 'No measurement tools in this catalog yet',
@@ -113,10 +120,28 @@ const PROFILE_ICONS = Object.freeze({
   'activity:receipts': 'save',
   'ship:revision': 'save',
   'ship:readiness': 'match',
+  'ship:approve': 'match',
   'ship:launch': 'new-file',
   'ship:receipts': 'history',
 })
 const profileBase = (id, label) => ({ id, label, icon: PROFILE_ICONS[id] || DEFAULT_TOOL_ICON, title: label })
+
+export function shipApproveRow(ship) {
+  if (ship?.controllerLive !== true) return null
+  const sources = Array.isArray(ship.sources) ? ship.sources : []
+  const approvals = Array.isArray(ship.approvals) ? ship.approvals : []
+  const candidate = sources.find((source) => iosSourceApprovalState(source, approvals, ship.revision) === 'unapproved')
+  const availability = ship.canApprove !== true ? { disabled: true, reason: PROFILE_REASONS.shipApproveOwner }
+    : !ship.revision ? { disabled: true, reason: PROFILE_REASONS.shipApproveNoRevision }
+      : sources.length === 0 ? { disabled: true, reason: PROFILE_REASONS.shipApproveNoSource }
+        : !candidate ? { disabled: true, reason: PROFILE_REASONS.shipApproveApproved }
+          : ship.approving === true ? { disabled: true, reason: PROFILE_REASONS.shipApproveBusy }
+            : typeof ship.approve !== 'function' ? { disabled: true, reason: PROFILE_REASONS.shipApproveOwner }
+              : { disabled: false, reason: PROFILE_REASONS.shipApproveReady }
+  const label = candidate ? `Approve ${candidate.source_revision.slice(0, 8)}` : 'Approve revision'
+  return { ...profileBase('ship:approve', label), ...availability,
+    onClick: availability.disabled ? undefined : () => ship.approve(candidate.source_revision), title: label }
+}
 
 function wellFormedShipContract(contract) {
   return contract !== null && typeof contract === 'object' && !Array.isArray(contract)
@@ -302,6 +327,7 @@ export function profileRibbonTabs(profile, ctx = {}) {
   const launchReason = ship.controllerLive === true ? profileReason(ship.launchReason, shipLaunchReason(ship)) : PROFILE_REASONS.testflightBuild
   const onShipReceipts = profileHandler(ship.onReceipts)
   const [revision, readiness] = shipStatusRows(ship.contract, ship.revision, onShipReceipts, ship)
+  const approveRow = shipApproveRow(ship)
   return [{ id: 'ship', label: 'Ship', clusters: [
     profileGroup('revision', 'Revision', [
       revision,
@@ -309,6 +335,7 @@ export function profileRibbonTabs(profile, ctx = {}) {
     profileGroup('readiness', 'Readiness', [
       readiness,
     ]),
+    ...(approveRow ? [profileGroup('approve', 'Approve', [approveRow])] : []),
     ...(ship.error ? [{ ...profileGroup('ship-error', 'Ship status', []), note: shipErrorSentence(ship.error) }] : []),
     // Without a launch handler there is no launch path, and the tool never implies one.
     profileGroup('ship', 'Ship', [
