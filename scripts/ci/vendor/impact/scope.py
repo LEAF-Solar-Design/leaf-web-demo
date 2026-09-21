@@ -23,6 +23,7 @@ class Scope:
     targets: list[str] = field(default_factory=list)
     companions: list[tuple[str, list[str]]] = field(default_factory=list)
     required: list[RequiredRow] = field(default_factory=list)
+    manifest_changed: bool = False
 
 
 def ordered(rows):
@@ -66,6 +67,7 @@ def impact_scope(paths, manifest, families):
     paths = sorted(set(paths))
     hit = lambda patterns: any(match_path(patterns, path) for path in paths)
     result = Scope(
+        manifest_changed="ASPECTS.yaml" in paths,
         components=sorted(item["id"] for item in manifest["components"] if hit(item["paths"])),
         contracts_producer=sorted(item["id"] for item in manifest["contracts"]
                                   if item["producer"]["repo"] == "self" and hit(item["producer"]["paths"])),

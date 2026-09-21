@@ -94,6 +94,8 @@ def reconcile(data, expected):
             row = existing[desired["id"]]
             row["required"] = desired["required"]
             row["family"] = desired["family"]
+            if row["subject"] == "monitor" and not row["required"]:
+                row["reason"] = desired["reason"]
         else:
             existing[desired["id"]] = desired
     data["rows"] = record.sort_rows(existing.values())
@@ -203,6 +205,7 @@ def run(args, version):
     else:
         data = record.new_record(args.change_id, manifest, digest, version)
     reconcile(data, expected)
+    data["carried"] = plan.carried_rows(data["repository"], args.change_id)
     receipt_head = f"worktree:{head}" if worktree else head
     apply_evidence(data["rows"], [manifest, previous], args.workdir, receipt_head)
     data.update(base=base, head="worktree" if worktree else head, touched=touched,

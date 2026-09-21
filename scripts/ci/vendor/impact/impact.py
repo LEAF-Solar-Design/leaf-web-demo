@@ -63,6 +63,14 @@ def _selftest(args):
     return run(args, IMPACT_VERSION)
 
 
+def _proven(args):
+    if __package__:
+        from .proven import run
+    else:
+        from proven import run
+    return run(args, IMPACT_VERSION)
+
+
 def _json(data):
     print(json.dumps(data, sort_keys=True, ensure_ascii=True))
 
@@ -219,6 +227,14 @@ def parser():
     command.add_argument("--json", action="store_true")
     command.add_argument("--only")
     command.set_defaults(handler=_selftest)
+    command = verbs.add_parser("proven")
+    command.add_argument("--out", required=True)
+    command.add_argument("--studio-workdir", default="C:/tmp/ci-s1-lwd")
+    command.add_argument("--pair-runs")
+    command.add_argument("--merge-group-build")
+    command.add_argument("--since")
+    command.add_argument("--json", action="store_true")
+    command.set_defaults(handler=_proven)
     command = verbs.add_parser("plan")
     command.add_argument("--workdir", required=True)
     command.add_argument("--change-id", required=True)
