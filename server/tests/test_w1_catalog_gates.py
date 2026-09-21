@@ -215,14 +215,38 @@ def test_adapter_table_is_the_single_engine_ready_source(monkeypatch, drawing, c
     assert availability.is_cloud_proposal({"name": "solar-solve-proposal"}) is True
     assert availability.is_cloud_proposal({"name": "no-such-tool"}) is False
     assert availability.capability_adapter(None) is None
+    assert all("adapter" in row for row in availability.W1_CAPABILITIES.values())
+    with pytest.raises(TypeError):
+        availability.is_cloud_proposal(["solar-solve-proposal"])
+
+
+def test_malformed_tool_record_fails_terminal_validation():
+    import jobs
+
+    for tool in (["solar-solve-proposal"], "other"):
+        with pytest.raises(TypeError):
+            jobs._validate_terminal_context(
+                "complete", {"ok": True, "result": {}},
+                {"attempt": 1, "execution_path": "local"}, 1,
+                {"tool": tool, "aps_live": False})
+    jobs._validate_terminal_context(
+        "complete", {"ok": True, "result": {}},
+        {"attempt": 1, "execution_path": "local"}, 1,
+        {"tool": {"name": "other"}, "aps_live": False})
 
 
 def test_no_routing_literal_outside_the_table():
     # A routing literal outside the table is the defect this slice removes.
     # This row stops it coming back.
-    for relative in ("routers/jobs.py", "jobs.py", "broker_client.py", "broker.py",
-                     "product_capability_availability.py"):
+    call_sites = 0
+    for relative in ("routers/jobs.py", "jobs.py", "broker_client.py", "broker.py"):
         source = (SERVER / relative).read_text(encoding="utf-8")
-        for comparison in ('== "solar-solve-proposal"', '!= "solar-solve-proposal"',
-                           'is "solar-solve-proposal"'):
-            assert comparison not in source, relative
+        assert "solar-solve-proposal" not in source, relative
+        call_sites += sum(line.count("is_cloud_proposal(")
+                          for line in source.splitlines()
+                          if not line.lstrip().startswith("from "))
+    assert call_sites == 12
+    source = (SERVER / "product_capability_availability.py").read_text(encoding="utf-8")
+    for comparison in ('== "solar-solve-proposal"', '!= "solar-solve-proposal"',
+                       'is "solar-solve-proposal"'):
+        assert comparison not in source, "product_capability_availability.py"

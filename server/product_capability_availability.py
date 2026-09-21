@@ -124,14 +124,17 @@ def capability_adapter(name):
     return row.get("adapter") if isinstance(row, dict) else None
 
 
-def is_cloud_proposal(tool_or_name):
+def is_cloud_proposal(tool):
     """True only for the capability whose adapter is the cloud-proposal kind.
 
-    Accepts a tool record (reads its "name") or a bare name. Compares adapter KINDS,
-    never the tool name, so a second adapter of another kind can never route here.
+    Accepts a mapping tool record and reads its "name". A malformed record fails
+    closed with an exception, as every routing site did before the table existed.
+    Compares adapter KINDS, never the tool name, so a second adapter of another
+    kind can never route here.
     """
-    name = tool_or_name.get("name") if isinstance(tool_or_name, dict) else tool_or_name
-    return capability_adapter(name) == CLOUD_PROPOSAL_ADAPTER
+    if not isinstance(tool, Mapping):
+        raise TypeError("tool record must be a mapping")
+    return capability_adapter(tool.get("name")) == CLOUD_PROPOSAL_ADAPTER
 
 
 def annotate_w1_availability(families, tenant, drawing_id=None, *,
