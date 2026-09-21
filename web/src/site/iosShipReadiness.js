@@ -9,6 +9,27 @@ export const IOS_SOURCE_FIELDS = Object.freeze([
   'source_revision', 'source_sha256', 'bundle_identifier', 'marketing_version', 'build_number',
 ])
 
+const SOURCE_GRAMMARS = Object.freeze({
+  source_revision: /^[0-9a-f]{40}$/, source_sha256: /^[0-9a-f]{64}$/,
+  bundle_identifier: /^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/,
+  marketing_version: /^[0-9]{1,18}(\.[0-9]{1,18}){1,2}$/, build_number: /^[0-9]{1,18}$/,
+  catalog_key: /^[a-z0-9][a-z0-9_-]{0,63}$/, repository: /^https:\/\/\S+$/,
+})
+const fullMatch = (pattern, value) => pattern.exec(value)?.[0] === value
+
+function validateSourceApproval(entry, invalid) {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) invalid('approval')
+  const approval = {}
+  for (const field of ['approval_id', 'revision', 'source_revision']) {
+    const value = entry[field]
+    if (typeof value !== 'string' || !value.length || value.length > 512 || /[\x00-\x1f\x7f-\x9f]/.test(value)) invalid(field)
+    if (field === 'source_revision' && !fullMatch(SOURCE_GRAMMARS.source_revision, value)) invalid(field)
+    approval[field] = value
+  }
+  if (entry.consumed_at != null && (typeof entry.consumed_at !== 'string' || entry.consumed_at.length > 64)) invalid('consumed_at')
+  return Object.freeze({ ...approval, consumed_at: entry.consumed_at ?? null })
+}
+
 export function validateIosShipSources(data) {
   const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
   const invalid = (field) => { throw new Error(`source catalog field invalid: ${field}`) }
@@ -28,16 +49,20 @@ export function validateIosShipSources(data) {
   }
   const sources = list('sources', (entry) => {
     const source = Object.fromEntries(IOS_SOURCE_FIELDS.map((field) => [field, string(entry[field], field)]))
+    for (const field of IOS_SOURCE_FIELDS) {
+      if (!fullMatch(SOURCE_GRAMMARS[field], source[field])) invalid(field)
+    }
+    if (source.bundle_identifier.length > 255) invalid('bundle_identifier')
     for (const field of ['catalog_key', 'repository', 'imported_at']) {
-      if (typeof entry[field] === 'string' && entry[field].length <= 512) source[field] = entry[field]
+      if (entry[field] === undefined) continue
+      const value = entry[field]
+      if (typeof value !== 'string' || value.length > (field === 'imported_at' ? 64 : 512)) invalid(field)
+      if (SOURCE_GRAMMARS[field] && !fullMatch(SOURCE_GRAMMARS[field], value)) invalid(field)
+      source[field] = value
     }
     return source
   })
-  const approvals = list('approvals', (entry) => {
-    const approval = Object.fromEntries(['approval_id', 'revision', 'source_revision'].map((field) => [field, string(entry[field], field)]))
-    if (entry.consumed_at != null && (typeof entry.consumed_at !== 'string' || entry.consumed_at.length > 64)) invalid('consumed_at')
-    return { ...approval, consumed_at: entry.consumed_at ?? null }
-  })
+  const approvals = list('approvals', (entry) => validateSourceApproval(entry, invalid))
   let sync = null
   if (data.sync !== undefined) {
     if (!object(data.sync)) invalid('sync')
@@ -90,7 +115,7 @@ export async function requestIosShipApproval({ projectId, revision, source, fetc
     error.envelope = data?.error || null
     throw error
   }
-  return data.approval
+  return validateSourceApproval(data.approval, (field) => { throw new Error(`approval response field invalid: ${field}`) })
 }
 
 const SHA256 = /^[0-9a-f]{64}$/

@@ -9,9 +9,11 @@ const terminal = (execution) => ['succeeded', 'failed'].includes(execution?.stat
 const message = (cause) => cause?.envelope?.message || cause?.message || 'The iOS ship status is unavailable.'
 const FOLLOW_LIMIT = 30 * 60 * 1000
 const SOURCE_DEFAULTS = Object.freeze({ sources: [], approvals: [], sync: null, canApprove: false, sourcesError: null })
+const UNKNOWN_APPROVAL = "The last approval's outcome is unknown. Refresh the sources to confirm it before approving again."
 
 // Catalog reads belong to the project, while approval writes belong to a drawing version.
 function useShipSources({ projectId, tenantKey, enabled, sessionActive }) {
+  const pendingApproval = useMemo(() => ({ current: null }), [projectId, tenantKey])
   const scope = useMemo(() => ({}), [projectId, tenantKey, enabled, sessionActive])
   const current = useRef(scope)
   current.current = scope
@@ -36,6 +38,7 @@ function useShipSources({ projectId, tenantKey, enabled, sessionActive }) {
     try {
       const next = await fetchIosShipSources({ projectId })
       if (!live() || generation !== sourcesGeneration.current) return null
+      pendingApproval.current = null
       update({ ...next, sourcesError: null })
       return next
     } catch (cause) {
@@ -45,7 +48,7 @@ function useShipSources({ projectId, tenantKey, enabled, sessionActive }) {
     }
   }, [enabled, sessionActive, projectId, live, update])
   useEffect(() => { refreshSources() }, [refreshSources])
-  return { ...(state.scope === scope ? state : SOURCE_DEFAULTS), refreshSources, update }
+  return { ...(state.scope === scope ? state : SOURCE_DEFAULTS), refreshSources, update, pendingApproval }
 }
 
 export function shipSetupState(readiness) {
@@ -71,7 +74,7 @@ function storage(key, action, value) {
 
 export function useIosShipController({ projectId, revision, sessionActive, enabled = true, tenantKey }) {
   const catalog = useShipSources({ projectId, tenantKey, enabled, sessionActive })
-  const { refreshSources, update: updateSources } = catalog
+  const { refreshSources, update: updateSources, pendingApproval } = catalog
   const owner = JSON.stringify([tenantKey, projectId, revision])
   const ownership = useMemo(() => ({}), [owner])
   const currentOwnership = useRef(ownership)
@@ -237,6 +240,10 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
     if (!live() || !enabled || !sessionActive || catalog.canApprove !== true || !revision) return undefined
     const source = catalog.sources.find((item) => item.source_revision === sourceRevision)
     if (!source || iosSourceApprovalState(source, catalog.approvals, revision) !== 'unapproved') return undefined
+    if (pendingApproval.current?.revision === revision && pendingApproval.current.sourceRevision === sourceRevision) {
+      update({ sourcesError: UNKNOWN_APPROVAL })
+      return undefined
+    }
     approveFlight.current = scope
     update({ approving: true, sourcesError: null })
     try {
@@ -255,6 +262,7 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
         update({ sourcesError: message(cause), approving: false })
         return undefined
       }
+      update({ sourcesError: message(cause) })
       const fresh = await refreshSources()
       if (!live()) return undefined
       if (fresh && iosSourceApprovalState(source, fresh.approvals, revision) !== 'unapproved') {
@@ -262,12 +270,13 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
         update({ approving: false })
         return { approval: null, readBack: true }
       }
+      if (!fresh) pendingApproval.current = { revision, sourceRevision }
       update({ sourcesError: message(cause), approving: false })
       return undefined
     } finally {
       if (approveFlight.current === scope) approveFlight.current = null
     }
-  }, [live, enabled, sessionActive, catalog.canApprove, catalog.sources, catalog.approvals, revision, scope, update, projectId, refreshSources, refresh])
+  }, [live, enabled, sessionActive, catalog.canApprove, catalog.sources, catalog.approvals, revision, scope, update, projectId, refreshSources, refresh, pendingApproval])
 
   const readiness = visible.readiness || decorate(emptyIosShipReadiness())
   const phase = !enabled || !sessionActive ? 'idle'

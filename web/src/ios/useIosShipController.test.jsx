@@ -1,7 +1,7 @@
 import { act, cleanup, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { useIosShipController, shipSetupState } from './useIosShipController.js'
-import { validateIosShipReadiness } from '../site/iosShipReadiness.js'
+import { validateIosShipReadiness, fetchIosShipSources as readSources, requestIosShipApproval as postApproval } from '../site/iosShipReadiness.js'
 import { readFileSync } from 'node:fs'
 
 // Transport spies: the hook still calls every real fetch helper and validator.
@@ -244,6 +244,87 @@ it('B4D row10 accepts the original catalog shape without granting approval', asy
   const { result } = mount()
   await flush()
   expect(result.current).toMatchObject({ sources: [sourceOne], approvals: [], sync: null, canApprove: false, sourcesError: null })
+})
+
+it.each([false, true])('B4D row21 holds an unknown approval until a successful readback, recorded %s', async (recorded) => {
+  const { result } = mount()
+  await flush()
+  requestIosShipApproval.mockRejectedValueOnce(new Error('connection lost'))
+  fetchIosShipSources.mockRejectedValueOnce(new Error('catalog unavailable'))
+  await act(async () => { await result.current.approve(sourceOne.source_revision) })
+  expect(result.current.approving).toBe(false)
+  await act(async () => { expect(await result.current.approve(sourceOne.source_revision)).toBeUndefined() })
+  expect(requestIosShipApproval).toHaveBeenCalledTimes(1)
+  expect(result.current.sourcesError).toBe("The last approval's outcome is unknown. Refresh the sources to confirm it before approving again.")
+  fetchIosShipSources.mockResolvedValueOnce(sourceCatalog({ approvals: recorded ? [sourceApproval()] : [] }))
+  await act(async () => { await result.current.refreshSources() })
+  expect(result.current.sourcesError).toBeNull()
+  expect(result.current.approvals).toEqual(recorded ? [sourceApproval()] : [])
+  await act(async () => { await result.current.approve(sourceOne.source_revision) })
+  expect(requestIosShipApproval).toHaveBeenCalledTimes(recorded ? 1 : 2)
+})
+
+it('B4D row22 rejects invalid source grammars by field and retains the previous catalog', async () => {
+  const { result } = mount()
+  await flush()
+  const previousSources = result.current.sources
+  const previousApprovals = result.current.approvals
+  for (const [field, value] of [
+    ['bundle_identifier', '/tmp/build/Example.app'], ['catalog_key', '../../x'],
+    ['repository', 'ftp://x'], ['source_revision', 'a'.repeat(41)],
+    ['source_sha256', 'g'.repeat(64)], ['marketing_version', '1.0-beta'],
+    ['build_number', '12x'], ['imported_at', 'x'.repeat(65)],
+    ['source_revision', `${'a'.repeat(40)}\n`], ['repository', 'https://example.test/ bad'],
+  ]) {
+    const data = sourceCatalog({ sources: [{ ...sourceOne, [field]: value }] })
+    fetchIosShipSources.mockResolvedValueOnce(data)
+    let failure
+    try { await readSources({ projectId: 'p1' }) } catch (cause) { failure = cause }
+    expect(failure).toBeInstanceOf(Error)
+    expect(failure.message).toContain(field)
+    expect(failure.message).not.toContain(value)
+    fetchIosShipSources.mockResolvedValueOnce(data)
+    await act(async () => { expect(await result.current.refreshSources()).toBeNull() })
+    expect(result.current.sourcesError).toContain(field)
+    expect(result.current.sourcesError).not.toContain(value)
+    expect(result.current.sources).toBe(previousSources)
+    expect(result.current.approvals).toBe(previousApprovals)
+  }
+  await expect(readSources({ projectId: 'p1' })).resolves.toMatchObject({ sources: [sourceOne, sourceTwo] })
+})
+
+it('B4D row23 validates approval responses and holds retry while their outcome is unknown', async () => {
+  const malformed = { ok: true, approval: sourceApproval(sourceOne, { approval_id: 'x'.repeat(4096) }) }
+  requestIosShipApproval.mockResolvedValueOnce(malformed)
+  let failure
+  try { await postApproval({ projectId: 'p1', revision: 'r1', source: sourceOne }) } catch (cause) { failure = cause }
+  expect(failure).toBeInstanceOf(Error)
+  expect(failure.message).toContain('approval_id')
+  expect(failure.message).not.toContain(malformed.approval.approval_id)
+  expect(failure.status).toBeUndefined()
+  requestIosShipApproval.mockClear()
+  const { result } = mount()
+  await flush()
+  requestIosShipApproval.mockResolvedValueOnce(malformed)
+  let rejectReadBack
+  fetchIosShipSources.mockReturnValueOnce(new Promise((resolve, reject) => { rejectReadBack = reject }))
+  let pending
+  act(() => { pending = result.current.approve(sourceOne.source_revision) })
+  await flush()
+  expect(fetchIosShipSources).toHaveBeenCalledTimes(2)
+  await act(async () => { expect(await result.current.approve(sourceOne.source_revision)).toBeNull() })
+  expect(requestIosShipApproval).toHaveBeenCalledTimes(1)
+  await act(async () => { rejectReadBack(new Error('catalog unavailable')); await pending })
+  expect(result.current.sourcesError).toContain('approval_id')
+  await act(async () => { expect(await result.current.approve(sourceOne.source_revision)).toBeUndefined() })
+  expect(requestIosShipApproval).toHaveBeenCalledTimes(1)
+  fetchIosShipSources.mockResolvedValueOnce(sourceCatalog({ approvals: [sourceApproval()] }))
+  await act(async () => { await result.current.refreshSources() })
+  await act(async () => { expect(await result.current.approve(sourceOne.source_revision)).toBeUndefined() })
+  expect(result.current.sourcesError).toBeNull()
+  expect(requestIosShipApproval).toHaveBeenCalledTimes(1)
+  requestIosShipApproval.mockResolvedValueOnce({ ok: true, approval: { ...sourceApproval(), extra: 'discard' } })
+  await expect(postApproval({ projectId: 'p1', revision: 'r1', source: sourceOne })).resolves.toEqual(sourceApproval())
 })
 
 it('I1 row1 maps named setup states and transport failures', async () => {
