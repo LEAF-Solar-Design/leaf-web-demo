@@ -2758,7 +2758,8 @@ def _broker_run_request(req: Union[BrokerRunRequest, BrokerPlanRunRequest]) -> J
         "usd_est": None,
         "status": "unknown",
     }
-    if tool.get("name") == "solar-solve-proposal":
+    from product_capability_availability import is_cloud_proposal
+    if is_cloud_proposal(tool):
         entry["aps_endpoint"] = None
         entry["aps_live"] = False
         entry["cloud_endpoint"] = "https://api.leafdesign.ai/api/ml/"
@@ -3147,11 +3148,12 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
                 tool=tool.get("name"),
             ), DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
 
-    cloud_proposal = tool.get("name") == "solar-solve-proposal"
+    from product_capability_availability import is_cloud_proposal
+    cloud_proposal = is_cloud_proposal(tool)
     if cloud_proposal:
         with (SERVER_DIR / "catalog_tools.json").open(encoding="utf-8") as stream:
             canonical = next(row for row in json.load(stream)["tools"]
-                             if row["name"] == "solar-solve-proposal")
+                             if row["name"] == tool.get("name"))
         if tool != canonical or req.aps_live or req.test_source is not None or req.file_only:
             return _classified_bad_params(
                 "cloud_capability_invalid", "cloud proposal requires its trusted catalog capability",
@@ -3193,7 +3195,7 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
             retryable=False, tool=tool.get("name")),
             DEFAULT_HTTP_STATUS[ErrorCode.ENTITLEMENT_REQUIRED])
 
-    if tool.get("name") == "solar-solve-proposal":
+    if is_cloud_proposal(tool):
         from leaf_cloud_client import proposal, validate_params as validate_cloud_params
         from leaf_cloud_grants import CloudError
 

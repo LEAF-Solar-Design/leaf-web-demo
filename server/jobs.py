@@ -600,7 +600,8 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
     is a key-reuse question, not a different run input.
     """
     _reject_oversized_params(params)
-    if tool.get("name") == "solar-solve-proposal":
+    from product_capability_availability import is_cloud_proposal
+    if is_cloud_proposal(tool):
         from leaf_cloud_client import validate_params as validate_cloud_params
 
         validate_cloud_params(params)
@@ -689,7 +690,8 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
     now = time.time()
     execution = {"tool": tool, "aps_live": bool(aps_live), "dwg_version": dwg_version,
                  "checkout_holder": checkout_holder, "checkout_fence": checkout_fence}
-    if tool.get("name") == "solar-solve-proposal":
+    from product_capability_availability import is_cloud_proposal
+    if is_cloud_proposal(tool):
         execution["cloud_service"] = {"tenant_id": str(tenant_id)}
     if plan is not None:
         execution["plan"] = plan
@@ -947,7 +949,8 @@ def _validate_terminal_context(
     if aps_live and execution_path == "cloud" and fallback:
         raise ValueError("cloud success cannot declare local fallback")
     cloud_service = execution.get("cloud_service")
-    if (execution.get("tool") or {}).get("name") == "solar-solve-proposal":
+    from product_capability_availability import is_cloud_proposal
+    if is_cloud_proposal(execution.get("tool") or {}):
         from leaf_cloud_client import proposal_provenance
 
         if (aps_live or execution_path != "cloud" or fallback
@@ -1419,10 +1422,11 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
         return
 
     env = holder.get("env") or {}
+    from product_capability_availability import is_cloud_proposal
     if env.get("ok"):
         provenance = {"attempt": attempt, "execution_path": "cloud" if (
-            aps_live or tool.get("name") == "solar-solve-proposal") else "local"}
-        if tool.get("name") == "solar-solve-proposal":
+            aps_live or is_cloud_proposal(tool)) else "local"}
+        if is_cloud_proposal(tool):
             from leaf_cloud_client import proposal_provenance
 
             try:
@@ -1446,7 +1450,7 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
         err = env.get("error") or error_obj(ErrorCode.INTERNAL, "broker returned no error detail",
                                             retryable=False)
         provenance = {"attempt": attempt, "execution_path": "cloud" if (
-            aps_live or tool.get("name") == "solar-solve-proposal") else "local",
+            aps_live or is_cloud_proposal(tool)) else "local",
                       "failure": {"code": err.get("error_code"), "message": err.get("message")}}
         if (
             aps_live
@@ -1464,7 +1468,8 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
 
 def _allows_local_fallback(tool: Dict[str, Any]) -> bool:
     """Fallback is opt-in only in trusted authored tool policy, never by callers."""
-    if tool.get("name") == "solar-solve-proposal":
+    from product_capability_availability import is_cloud_proposal
+    if is_cloud_proposal(tool):
         return False
     policy = tool.get("marathon") if isinstance(tool.get("marathon"), dict) else {}
     return bool(policy.get("allow_local_fallback") or tool.get("allow_local_fallback"))

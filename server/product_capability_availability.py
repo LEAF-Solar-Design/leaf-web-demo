@@ -99,16 +99,39 @@ CONTRACT_VERSION = "leaf.platform.v1alpha1"
 
 # W1 uses the ordinary tool catalog, independently of the platform lease catalog.
 W1_CAPABILITIES = {
-    "solar-settings": {"requires_persisted_graph": True},
-    "solar-size-strings": {"requires_persisted_graph": True},
-    "solar-panel-groups": {"requires_persisted_graph": True},
-    "solar-solve-proposal": {"requires_persisted_graph": False},
-    "solar-commit-solve": {"requires_persisted_graph": True},
-    "solar-correct-string": {"requires_persisted_graph": True},
-    "solar-assign-equipment": {"requires_persisted_graph": True},
-    "solar-homeruns": {"requires_persisted_graph": True},
-    "solar-schedule": {"requires_persisted_graph": True},
+    "solar-settings": {"requires_persisted_graph": True, "adapter": None},
+    "solar-size-strings": {"requires_persisted_graph": True, "adapter": None},
+    "solar-panel-groups": {"requires_persisted_graph": True, "adapter": None},
+    "solar-solve-proposal": {"requires_persisted_graph": False, "adapter": "cloud-proposal"},
+    "solar-commit-solve": {"requires_persisted_graph": True, "adapter": None},
+    "solar-correct-string": {"requires_persisted_graph": True, "adapter": None},
+    "solar-assign-equipment": {"requires_persisted_graph": True, "adapter": None},
+    "solar-homeruns": {"requires_persisted_graph": True, "adapter": None},
+    "solar-schedule": {"requires_persisted_graph": True, "adapter": None},
 }
+
+CLOUD_PROPOSAL_ADAPTER = "cloud-proposal"
+
+
+def capability_adapter(name):
+    """The adapter kind a W1 capability executes through, or None when it has none yet.
+
+    This is the ONE place engine readiness and cloud-proposal routing are decided from.
+    An unknown or non-string name answers None (never raises): routing sites hand it
+    arbitrary tool records.
+    """
+    row = W1_CAPABILITIES.get(name) if isinstance(name, str) else None
+    return row.get("adapter") if isinstance(row, dict) else None
+
+
+def is_cloud_proposal(tool_or_name):
+    """True only for the capability whose adapter is the cloud-proposal kind.
+
+    Accepts a tool record (reads its "name") or a bare name. Compares adapter KINDS,
+    never the tool name, so a second adapter of another kind can never route here.
+    """
+    name = tool_or_name.get("name") if isinstance(tool_or_name, dict) else tool_or_name
+    return capability_adapter(name) == CLOUD_PROPOSAL_ADAPTER
 
 
 def annotate_w1_availability(families, tenant, drawing_id=None, *,
@@ -234,7 +257,7 @@ def w1_availability(name, *, entitled, inputs):
     if not W1_CAPABILITIES[name]["requires_persisted_graph"]:
         # Params are validated on submission by the capability's own validator.
         inputs = {"input_ready": True, "input_reason": None}
-    engine_ready = name == "solar-solve-proposal"
+    engine_ready = capability_adapter(name) is not None
     state = {
         "entitled": entitled is True,
         "engine_ready": engine_ready,

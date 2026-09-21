@@ -199,3 +199,30 @@ def test_capabilities_route_passes_authenticated_context(monkeypatch):
     assert captured["drawing_id"] == DRAWING
     assert captured["project_id"] == "project-1"
     assert captured["version"] == "2"
+
+
+def test_adapter_table_is_the_single_engine_ready_source(monkeypatch, drawing, case):
+    graph, _, _ = case
+    backend, _ = drawing
+    commit(drawing, request_for(backend, graph))
+    monkeypatch.setattr(write_loop, "backend_for_tenant", lambda *a, **k: backend)
+    monkeypatch.setitem(availability.W1_CAPABILITIES["solar-settings"], "adapter", "test-adapter")
+    state = rows(drawing_id=DRAWING, project_id=graph["project"]["id"])["solar-settings"]["availability"]
+    assert state["input_ready"] is True
+    assert state["engine_ready"] is True
+    assert "broker_adapter_unavailable" not in state["refusal_reasons"]
+    assert availability.is_cloud_proposal({"name": "solar-settings"}) is False
+    assert availability.is_cloud_proposal({"name": "solar-solve-proposal"}) is True
+    assert availability.is_cloud_proposal({"name": "no-such-tool"}) is False
+    assert availability.capability_adapter(None) is None
+
+
+def test_no_routing_literal_outside_the_table():
+    # A routing literal outside the table is the defect this slice removes.
+    # This row stops it coming back.
+    for relative in ("routers/jobs.py", "jobs.py", "broker_client.py", "broker.py",
+                     "product_capability_availability.py"):
+        source = (SERVER / relative).read_text(encoding="utf-8")
+        for comparison in ('== "solar-solve-proposal"', '!= "solar-solve-proposal"',
+                           'is "solar-solve-proposal"'):
+            assert comparison not in source, relative

@@ -491,7 +491,8 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
             "reason_code": availability["refusal_reasons"][0],
         }))
 
-    if tool.get("name") == "solar-solve-proposal":
+    from product_capability_availability import is_cloud_proposal
+    if is_cloud_proposal(tool):
         from leaf_cloud_client import validate_params as validate_cloud_params
         from leaf_cloud_grants import CloudError
 

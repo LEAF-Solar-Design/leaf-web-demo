@@ -115,7 +115,8 @@ def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
     ``file_only`` and ``test_source`` are server-owned completion inputs. Omit
     them for ordinary requests to preserve their existing wire identity.
     """
-    if tool.get("name") == "solar-solve-proposal":
+    from product_capability_availability import is_cloud_proposal
+    if is_cloud_proposal(tool):
         from leaf_cloud_client import validate_params as validate_cloud_params
 
         validate_cloud_params(params)
