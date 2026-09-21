@@ -2,13 +2,13 @@
  "schema_version": 1,
  "source_repo": "Evan-Haug/claude-config",
  "source_path": "scripts/impact",
- "source_revision": "cd473c799a9c5e65e17dcf2f5389ad06d6b5ab7e",
+ "source_revision": "8246b3e2d57b6e1d2c98c51aa73f105417b588e1",
  "vendored_on": "2026-09-21",
  "entries": [
   {
    "path": "README.md",
-   "sha256": "233ac9e23b5743b0f9f6d29bc078d26c9c8afdaf9c9f04184f770ace7ae97c51",
-   "bytes": 9555
+   "sha256": "794382730cf36343941523b001b82b5008d8e81781a22904badc06a201772941",
+   "bytes": 10138
   },
   {
    "path": "__init__.py",
@@ -27,8 +27,8 @@
   },
   {
    "path": "gitio.py",
-   "sha256": "aad82bb50e350a2d61007b23d889b653d500673b29304f3e98f139bd5cc1b555",
-   "bytes": 2138
+   "sha256": "1abf454940115c4a49065f50049085e29908eaf6b00deec436fd9d637d12b26f",
+   "bytes": 2504
   },
   {
    "path": "impact.py",
@@ -42,13 +42,13 @@
   },
   {
    "path": "manifest.py",
-   "sha256": "5b1ef323825ef9fa2fdd6f9b13827e6874482e7a35371bc86a7e7f5b5b4fcde1",
-   "bytes": 12121
+   "sha256": "d269ac79403a5884d854bf90ae015348ee206d1175fc1d8f7f1b1c53d1cfeca2",
+   "bytes": 12919
   },
   {
    "path": "plan.py",
-   "sha256": "4ecdfe5c3d3fb6e9e5829b691b2a5674e3a17e2c4ada397ce419740b6feb90df",
-   "bytes": 6178
+   "sha256": "9018b63668ad27ebc0089a22285eb59011f5c2a8db5d2aa734a283677536ed8b",
+   "bytes": 6278
   },
   {
    "path": "record.py",
@@ -67,8 +67,8 @@
   },
   {
    "path": "schema/aspects.schema.json",
-   "sha256": "3b3a49af7b1383a28b98d0348e74a5c7ef51d352ae8629c6e40000ae8bc5aeb9",
-   "bytes": 8198
+   "sha256": "bff6c2c3f8177fd78be6a67bbad09269e12beed05f93882b8ab73d33b16bc955",
+   "bytes": 8879
   },
   {
    "path": "schema/change.schema.json",
@@ -77,8 +77,8 @@
   },
   {
    "path": "scope.py",
-   "sha256": "a9b3883f031167e0b75b538ff7bc35c092acca550173eb6a791f2fdcf7efd61f",
-   "bytes": 4732
+   "sha256": "1428de1e41f9520bfb7725c7d474ce4cef6b38d4b3aaa5a0fc560f3cb65ef02b",
+   "bytes": 5633
   },
   {
    "path": "selftest.py",

@@ -157,7 +157,7 @@ def endpoint(value, path, consumer=False):
 
 def validate_manifest(data):
     # Fails closed on unknown keys; only schema version 1 is accepted.
-    mapping(data, "manifest", REQUIRED, ("unmapped", "targets", "contracts", "companions", "concerns"))
+    mapping(data, "manifest", REQUIRED, ("unmapped", "targets", "contracts", "companions", "concerns", "repos", "integration_branch"))
     data = deepcopy(data)
     if type(data["schema_version"]) is not int or data["schema_version"] != 1:
         raise ManifestError("schema_version: expected integer 1")
@@ -172,6 +172,17 @@ def validate_manifest(data):
         for i, facet in enumerate(sequence(component["facets"], f"{path}.facets", 0, 12)):
             choice(facet, f"{path}.facets[{i}]", FACETS)
     globs(data["unmapped"], "unmapped", 0, 500)
+    repos = data.setdefault("repos", {})
+    if not isinstance(repos, dict) or len(repos) > 100:
+        raise ManifestError("repos: expected mapping of at most 100 entries")
+    for key, value in repos.items():
+        string(key, f"repos.{key}", 201, REPOSITORY_PATTERN)
+        if not isinstance(value, str) or not 1 <= len(value) <= 260 or any(char in value for char in "\0\n\r"):
+            raise ManifestError(f"repos.{key}: expected path string of 1 to 260 characters")
+    if "integration_branch" in data:
+        branch = string(data["integration_branch"], "integration_branch", 100, r"[A-Za-z0-9_][A-Za-z0-9_./-]{0,99}")
+        if ".." in branch or branch.endswith(("/", ".lock")):
+            raise ManifestError("integration_branch: not a branch name")
     target_text = ("manifest", "dockerfile", "deploy_command", "note", "gap")
     for target, path in identified(data["targets"], "targets", 0, 50):
         mapping(target, path, ("id", "exposure", "deploy_shape"), (*target_text, "paths", "restart_semantics", "evidence", "companions"))

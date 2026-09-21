@@ -8,11 +8,13 @@ try:
     from . import record, scope
     from .manifest import CONCERNS, ManifestError, load_manifest, manifest_digest
     from .rules import load_families
+    from .scope import companion_subject
 except ImportError:
     import record
     import scope
     from manifest import CONCERNS, ManifestError, load_manifest, manifest_digest
     from rules import load_families
+    from scope import companion_subject
 
 
 def enabled_manifest(workdir):
@@ -53,7 +55,7 @@ def rows_for_scope(result, manifest, digest, added_reason=None):
             concern = "tests" if any(part in ("test", "tests", "__tests__") for part in entry.split("/")[:-1]) else "contracts"
             groups.setdefault(concern, []).append(entry)
         for concern, entries in groups.items():
-            rows.append(record.new_row(concern, f"companion:{path}", digest,
+            rows.append(record.new_row(concern, f"companion:{companion_subject(path)}", digest,
                                        reason="moves with " + ", ".join(entries)))
     for name in CONCERNS:
         if not any(row["concern"] == name for row in rows):

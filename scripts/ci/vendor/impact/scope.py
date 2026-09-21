@@ -1,6 +1,7 @@
 """The shared path-to-obligation predicate for plan and check."""
 
 from dataclasses import dataclass, field
+import re
 
 try:
     from .manifest import CONCERNS, ManifestError, match_path
@@ -34,7 +35,28 @@ def ordered(rows):
     return sorted(unique.values(), key=lambda row: (CONCERNS.index(row.concern), row.subject))
 
 
+def companion_subject(path):
+    """A companion's row subject: its path with every character outside the record's
+    subject grammar replaced by '-', so a glob such as rules/*.md becomes rules/-.md and
+    scripts/impact/** becomes scripts/impact/--. Deterministic; never contains * or ?."""
+    return "".join(ch if re.fullmatch(r"[A-Za-z0-9._/@+:-]", ch) else "-" for ch in path)[:200]
+
+
 def _required(scope, paths, manifest, families):
+    companion_subjects = set()
+    used = set()
+    touched_companions = {path for path, _ in scope.companions}
+    for companion in manifest["companions"]:
+        base = companion_subject(companion["path"])
+        subject = base
+        number = 2
+        while subject in used:
+            suffix = f"+{number}"
+            subject = base[:200 - len(suffix)] + suffix
+            number += 1
+        used.add(subject)
+        if companion["path"] in touched_companions:
+            companion_subjects.add(subject)
     rows = []
     for family in sorted(families, key=lambda item: item.id):
         trigger = family.trigger
@@ -56,7 +78,7 @@ def _required(scope, paths, manifest, families):
         elif entity == "target":
             subjects.update(scope.targets)
         elif entity == "companion":
-            subjects.update(path for path, _ in scope.companions)
+            subjects.update(companion_subjects)
         rows.extend(RequiredRow(concern, subject, family.id)
                     for subject in sorted(subjects) for concern in family.concerns)
     return ordered(rows)
