@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const EVIDENCE_TIERS = new Set(['contract', 'local-e2e', 'staging'])
@@ -159,12 +159,29 @@ export function makeProofReceipt(input) {
   return receipt
 }
 
-export function writeProofReceipt(path, input) {
+function proofArtifactCandidates(artifact, receiptPath, { cwd = process.cwd() } = {}) {
+  if (typeof artifact !== 'string') return []
+  if (isAbsolute(artifact)) return [artifact]
+  // Receipt-relative: cat-operator-proof.spec.mjs:79, reduced-motion.spec.mjs:77,
+  // cat-standards-surface.spec.mjs:304. Repo-relative: local/standards-surface.spec.mjs:112,136.
+  return [join(dirname(receiptPath), artifact), join(cwd, '..', artifact), join(cwd, artifact)]
+}
+
+export function resolveProofArtifact(artifact, receiptPath, options = {}) {
+  for (const candidate of proofArtifactCandidates(artifact, receiptPath, options)) {
+    // Playwright saves video at teardown (lib/index.js:413,426); outputPath prepares its dir (lib/worker/workerProcessEntry.js:2609-2611).
+    if (existsSync(basename(artifact) === 'video.webm' ? dirname(candidate) : candidate)) return candidate
+  }
+  return null
+}
+
+export function writeProofReceipt(path, input, options = {}) {
   mkdirSync(dirname(path), { recursive: true })
   const receipt = makeProofReceipt(input)
   for (const artifact of receipt.artifacts) {
-    if (typeof artifact !== 'string' || !existsSync(artifact)) {
-      throw new Error(`${receipt.evidence_tier} proof receipt artifact does not exist: ${artifact}`)
+    if (typeof artifact !== 'string' || resolveProofArtifact(artifact, path, options) === null) {
+      const tried = proofArtifactCandidates(artifact, path, options).join('; ')
+      throw new Error(`${receipt.evidence_tier} proof receipt artifact does not exist: ${artifact} (tried: ${tried})`)
     }
   }
   writeFileSync(path, `${JSON.stringify(receipt, null, 2)}\n`)
