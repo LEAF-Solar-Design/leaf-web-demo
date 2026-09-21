@@ -351,7 +351,8 @@ def test_render_comment_required_rows(comment_receipt, monkeypatch):
                          "--row <id>; kill switch C:/tmp/gates/CHANGE_IMPACT_OFF.")
 
 
-@pytest.mark.parametrize("evidence, shown", [("run:77", 40), ("x" * 60000, 0)])
+@pytest.mark.parametrize("evidence, shown", [("run:77", 40), ("x" * 60000, 0)],
+                         ids=["row-limit", "character-limit"])
 def test_render_comment_bounds_table(comment_receipt, evidence, shown):
     row = dict(comment_receipt["rows"][0], evidence=evidence)
     comment_receipt["rows"] = [row] * 45
