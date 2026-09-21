@@ -1,4 +1,5 @@
 """W1 catalog admission uses persisted producer state, with no network."""
+import ast
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -220,32 +221,67 @@ def test_adapter_table_is_the_single_engine_ready_source(monkeypatch, drawing, c
         availability.is_cloud_proposal(["solar-solve-proposal"])
 
 
-def test_malformed_tool_record_fails_terminal_validation():
+def test_every_w1_row_is_a_dict_with_an_adapter_key():
+    table = availability.W1_CAPABILITIES
+    assert len(table) == 9
+    for name, row in table.items():
+        assert isinstance(row, dict), name
+        assert "adapter" in row, name
+        assert row["adapter"] is None or isinstance(row["adapter"], str), name
+    # Re-pin these two lines when a later slice gives a second row an adapter.
+    kinds = [row["adapter"] for row in table.values() if row["adapter"] is not None]
+    assert kinds == [availability.CLOUD_PROPOSAL_ADAPTER]
+
+
+@pytest.mark.parametrize("tool", [
+    ["solar-solve-proposal"], "other", 1, 1.5, True, ("a",), b"x", {"name"},
+], ids=["list", "string", "int", "float", "bool", "tuple", "bytes", "set"])
+def test_malformed_tool_record_fails_terminal_validation(tool):
     import jobs
 
-    for tool in (["solar-solve-proposal"], "other"):
-        with pytest.raises(TypeError):
-            jobs._validate_terminal_context(
-                "complete", {"ok": True, "result": {}},
-                {"attempt": 1, "execution_path": "local"}, 1,
-                {"tool": tool, "aps_live": False})
+    # Falsy malformed tools become {} through execution["tool"] or {} before the predicate.
+    with pytest.raises(TypeError):
+        jobs._validate_terminal_context(
+            "complete", {"ok": True, "result": {}},
+            {"attempt": 1, "execution_path": "local"}, 1,
+            {"tool": tool, "aps_live": False})
     jobs._validate_terminal_context(
         "complete", {"ok": True, "result": {}},
         {"attempt": 1, "execution_path": "local"}, 1,
         {"tool": {"name": "other"}, "aps_live": False})
 
 
+def _folded_strings(tree):
+    # Every string a file can spell: constants, plus `+` chains of constants folded together.
+    # The parser already joins adjacent literals, so "a" "b" arrives as one constant.
+    def fold(node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left, right = fold(node.left), fold(node.right)
+            if left is not None and right is not None:
+                return left + right
+        return None
+    return [value for value in (fold(node) for node in ast.walk(tree)) if value is not None]
+
+
 def test_no_routing_literal_outside_the_table():
     # A routing literal outside the table is the defect this slice removes.
     # This row stops it coming back.
-    call_sites = 0
+    call_sites = {}
     for relative in ("routers/jobs.py", "jobs.py", "broker_client.py", "broker.py"):
         source = (SERVER / relative).read_text(encoding="utf-8")
         assert "solar-solve-proposal" not in source, relative
-        call_sites += sum(line.count("is_cloud_proposal(")
-                          for line in source.splitlines()
-                          if not line.lstrip().startswith("from "))
-    assert call_sites == 12
+        tree = ast.parse(source)
+        assert not any("solar-solve" in value for value in _folded_strings(tree)), relative
+        call_sites[relative] = sum(
+            isinstance(node, ast.Call) and (
+                isinstance(node.func, ast.Name) and node.func.id == "is_cloud_proposal"
+                or isinstance(node.func, ast.Attribute) and node.func.attr == "is_cloud_proposal"
+            )
+            for node in ast.walk(tree)
+        )
+    assert call_sites == {"routers/jobs.py": 1, "jobs.py": 7, "broker_client.py": 1, "broker.py": 3}
     source = (SERVER / "product_capability_availability.py").read_text(encoding="utf-8")
     for comparison in ('== "solar-solve-proposal"', '!= "solar-solve-proposal"',
                        'is "solar-solve-proposal"'):
