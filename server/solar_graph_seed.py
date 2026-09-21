@@ -18,6 +18,11 @@ UNIT_SCALE = {"m": 1, "mm": .001, "cm": .01, "km": 1000,
 def seed_entity_id(tenant_id, drawing_id, kind):
     if kind not in ("project", "settings"):
         raise GraphValidationError("UNKNOWN_ENTITY_KIND")
+    try:
+        validate_tenant_id(tenant_id)
+        validate_tenant_id(drawing_id, kind="drawing id")
+    except ValueError:
+        raise GraphValidationError("INVALID_SEED_REQUEST") from None
     value = list(hashlib.sha256(
         ("leaf-solar-seed\0" + tenant_id + "\0" + drawing_id + "\0" + kind)
         .encode("utf-8")).hexdigest()[:32])
@@ -39,6 +44,7 @@ def seed_units(units):
     if (not isinstance(name, str) or name not in UNIT_SCALE
             or not isinstance(matrix, list) or len(matrix) != 16
             or any(type(v) not in (int, float) or
+                   (type(v) is int and v.bit_length() > 64) or
                    (type(v) is float and not math.isfinite(v)) for v in matrix)
             or not isinstance(datum, str) or not 1 <= len(datum) <= 4096
             or not (crs is None or isinstance(crs, str) and len(crs) <= 4096)):

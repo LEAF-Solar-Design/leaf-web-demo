@@ -79,6 +79,14 @@ def test_unknown_entity_kind():
         seed_entity_id("fixture-tenant", "solar", "panel")
 
 
+@pytest.mark.parametrize("tenant,drawing_id", [
+    ("a\0b", "c"), ("a", "b\0c"), ("Fixture", "solar"), ("fixture-tenant", ""),
+])
+def test_entity_id_invalid_identifiers(tenant, drawing_id):
+    with refused("INVALID_SEED_REQUEST"):
+        seed_entity_id(tenant, drawing_id, "project")
+
+
 def test_complete_empty_graph_and_determinism():
     value = empty_graph()
     provenance = {"created_by": "solar-seed", "created_at": "2026-09-21T00:00:00Z",
@@ -180,6 +188,22 @@ def test_invalid_units(defect):
         seed_units(request)
 
 
+@pytest.mark.parametrize("value", [2**64, -(2**64)])
+def test_units_refuse_oversized_integer(value):
+    request = units()
+    request["wcs_to_ucs"][0] = value
+    with refused("INVALID_SEED_REQUEST"):
+        seed_units(request)
+
+
+def test_units_accept_integer_boundary_in_graph():
+    request = units()
+    request["wcs_to_ucs"][0] = 2**64 - 1
+    assert seed_units(request)["wcs_to_ucs"][0] == 2**64 - 1
+    value = empty_graph(units=request)
+    assert value["project"]["units"]["wcs_to_ucs"][0] == 2**64 - 1
+
+
 def test_units_are_isolated():
     request = units()
     before = copy.deepcopy(request)
@@ -247,6 +271,17 @@ def test_graphless_current_parent(tmp_path, monkeypatch):
     assert result == {"resolved_version": 1, "current_head": 1, "intake": intake,
                       "intake_sha256": entry["sha256"], "created": entry["created"],
                       "seed_ready": True, "refusal_reason": None}
+
+
+def test_bundle_note_refuses_valid_graphless_parent(tmp_path, monkeypatch):
+    backend, _ = graphless_seed(tmp_path, monkeypatch)
+    digest = parent_entry(backend)["sha256"]
+    assert read_context(backend, source_hash=digest)["seed_ready"] is True
+    manifest = store.load_manifest(backend, "fixture-tenant", "solar")
+    manifest["versions"][0]["note"] = "solar-bundle:fixture"
+    store.save_manifest(backend, "fixture-tenant", "solar", manifest)
+    with refused("INVALID_SEED_PARENT"):
+        read_context(backend, source_hash=digest)
 
 
 def test_old_graphless_parent(tmp_path, monkeypatch):
