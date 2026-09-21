@@ -47,7 +47,7 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
     g = _load_runner()
     suites = {suite.id: suite for suite in g.build_suites()}
 
-    # Solar W1 floors measured by the planner for W5-A0 (the last two for W5-A2), skips excluded.
+    # Solar W1 floors measured by the planner for W5-A0 (the last four for W5-A2), skips excluded.
     w1_floors = {
         "design-graph": 23,
         "cloud-solve-probe": 58,
@@ -60,6 +60,8 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
         "catalog-gates": 18,
         "solar-apply-plan": 39,
         "local-graph-adapter": 41,
+        "local-graph-jobs": 119,
+        "local-graph-broker": 49,
     }
     for name, expected in w1_floors.items():
         suite = suites[f"server-w1-{name}"]
