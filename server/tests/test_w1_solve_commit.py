@@ -457,6 +457,171 @@ def test_replay_with_a_missing_parent_is_a_reused_binding(graph, tmp_path, monke
     assert "fixture-tenant" not in str(exc.value)
 
 
+def test_a_second_request_under_one_job_is_refused_after_the_head_read(graph, tmp_path, monkeypatch):
+    import write_loop
+    import store
+    g0 = graph
+    g1 = correct.run(g0, transfer(g0))
+    g2 = correct.run(g1, {"expected_rev": g1["rev"], "settings_changes": {"panels_in_sequence": 3}})
+    backend, _ = seed(tmp_path, monkeypatch, g0)
+    fence = store.acquire_checkout_fence(backend, "fixture-tenant", "solar", "fixture-owner", 300)
+    real_read_intake = write_loop.read_intake
+    state = {"injected": False}
+
+    def paused_read_intake(*args, **kwargs):
+        if not state["injected"]:
+            state["injected"] = True
+            monkeypatch.setattr(write_loop, "read_intake", real_read_intake)
+            publish(backend, 1, g0, g1, job_id="job-j", request_sha256="a" * 64,
+                    acquire=False, fence=fence)
+            monkeypatch.setattr(write_loop, "read_intake", paused_read_intake)
+        return real_read_intake(*args, **kwargs)
+
+    monkeypatch.setattr(write_loop, "read_intake", paused_read_intake)
+    try:
+        with pytest.raises(GraphValidationError, match="JOB_BINDING_REUSED"):
+            publish(backend, 2, g1, g2, job_id="job-j", request_sha256="b" * 64,
+                    acquire=False, fence=fence)
+        manifest = store.load_manifest(backend, "fixture-tenant", "solar")
+        entries = [e for e in manifest["versions"] if e.get("workitem_id") == "solar-graph:job-j"]
+        assert len(entries) == 1 and entries[0]["v"] == 2
+        assert manifest["latest"] == 2
+    finally:
+        store.release_checkout(backend, "fixture-tenant", "solar", "fixture-owner")
+
+
+def test_the_same_request_racing_itself_is_a_replay(graph, tmp_path, monkeypatch):
+    import write_loop
+    import store
+    g0 = graph
+    g1 = correct.run(g0, transfer(g0))
+    backend, _ = seed(tmp_path, monkeypatch, g0)
+    fence = store.acquire_checkout_fence(backend, "fixture-tenant", "solar", "fixture-owner", 300)
+    real_read_intake = write_loop.read_intake
+    state = {"injected": False}
+
+    def paused_read_intake(*args, **kwargs):
+        if not state["injected"]:
+            state["injected"] = True
+            monkeypatch.setattr(write_loop, "read_intake", real_read_intake)
+            publish(backend, 1, g0, g1, job_id="job-j", request_sha256="a" * 64,
+                    acquire=False, fence=fence)
+            monkeypatch.setattr(write_loop, "read_intake", paused_read_intake)
+        return real_read_intake(*args, **kwargs)
+
+    monkeypatch.setattr(write_loop, "read_intake", paused_read_intake)
+    try:
+        receipt = publish(backend, 1, g0, g1, job_id="job-j", request_sha256="a" * 64,
+                          acquire=False, fence=fence)
+        assert receipt["version"] == 2 and receipt["parent_version"] == 1
+        assert receipt["replayed"] is True
+        manifest = store.load_manifest(backend, "fixture-tenant", "solar")
+        entries = [e for e in manifest["versions"] if e.get("workitem_id") == "solar-graph:job-j"]
+        assert len(entries) == 1 and entries[0]["v"] == 2
+        assert manifest["latest"] == 2
+    finally:
+        store.release_checkout(backend, "fixture-tenant", "solar", "fixture-owner")
+
+
+def test_replay_with_a_matching_parent_whose_payload_is_missing_is_a_reused_binding(
+        graph, tmp_path, monkeypatch):
+    import write_loop
+    import store
+    backend, _ = seed(tmp_path, monkeypatch, graph)
+    after = correct.run(graph, transfer(graph))
+    publish(backend, 1, graph, after, job_id="job-a")
+    _, parent_key = store.resolve_version(backend, "fixture-tenant", "solar", 1)
+    real_get = backend.get
+
+    def missing_parent(key):
+        if key == parent_key:
+            raise KeyError(key)
+        return real_get(key)
+
+    monkeypatch.setattr(backend, "get", missing_parent)
+    with pytest.raises(GraphValidationError, match="JOB_BINDING_REUSED") as exc:
+        publish(backend, 1, graph, after, job_id="job-a", acquire=False, fence=1)
+    assert type(exc.value) is GraphValidationError
+    assert store.load_manifest(backend, "fixture-tenant", "solar")["latest"] == 2
+
+
+def test_a_replay_read_failure_is_a_path_free_oserror(graph, tmp_path, monkeypatch):
+    import write_loop
+    import store
+    backend, _ = seed(tmp_path, monkeypatch, graph)
+    after = correct.run(graph, transfer(graph))
+    publish(backend, 1, graph, after, job_id="job-a")
+    _, parent_key = store.resolve_version(backend, "fixture-tenant", "solar", 1)
+    real_get = backend.get
+
+    def denied_parent(key):
+        if key == parent_key:
+            raise PermissionError(13, "Permission denied", str(tmp_path / "secret-location" / "00000001.dwg"))
+        return real_get(key)
+
+    monkeypatch.setattr(backend, "get", denied_parent)
+    with pytest.raises(OSError) as exc:
+        publish(backend, 1, graph, after, job_id="job-a", acquire=False, fence=1)
+    assert not isinstance(exc.value, GraphValidationError)
+    assert exc.value.errno == 13
+    assert isinstance(exc.value, PermissionError)
+    assert exc.value.filename is None
+    assert "secret-location" not in str(exc.value)
+    assert "secret-location" not in repr(exc.value)
+    assert "solar graph store access failed" in str(exc.value)
+    assert exc.value.__suppress_context__ is True
+
+
+def test_a_fresh_publish_read_failure_is_a_path_free_oserror(graph, tmp_path, monkeypatch):
+    import write_loop
+    import store
+    backend, _ = seed(tmp_path, monkeypatch, graph)
+    after = correct.run(graph, transfer(graph))
+    _, parent_key = store.resolve_version(backend, "fixture-tenant", "solar", 1)
+    real_get = backend.get
+
+    def denied_parent(key):
+        if key == parent_key:
+            raise PermissionError(13, "Permission denied", str(tmp_path / "secret-location" / "00000001.dwg"))
+        return real_get(key)
+
+    monkeypatch.setattr(backend, "get", denied_parent)
+    with pytest.raises(OSError) as exc:
+        publish(backend, 1, graph, after, job_id="job-p")
+    assert not isinstance(exc.value, GraphValidationError)
+    assert exc.value.errno == 13
+    assert isinstance(exc.value, PermissionError)
+    assert exc.value.filename is None
+    assert "secret-location" not in str(exc.value)
+    assert "secret-location" not in repr(exc.value)
+    assert "solar graph store access failed" in str(exc.value)
+    assert exc.value.__suppress_context__ is True
+    monkeypatch.setattr(backend, "get", real_get)
+    assert store.load_manifest(backend, "fixture-tenant", "solar")["latest"] == 1
+
+
+def test_an_oserror_without_errno_is_a_path_free_oserror(graph, tmp_path, monkeypatch):
+    import write_loop
+    import store
+    backend, _ = seed(tmp_path, monkeypatch, graph)
+    after = correct.run(graph, transfer(graph))
+    publish(backend, 1, graph, after, job_id="job-a")
+    _, parent_key = store.resolve_version(backend, "fixture-tenant", "solar", 1)
+    real_get = backend.get
+
+    def failed_parent(key):
+        if key == parent_key:
+            raise OSError("cannot read " + str(tmp_path / "secret-location"))
+        return real_get(key)
+
+    monkeypatch.setattr(backend, "get", failed_parent)
+    with pytest.raises(OSError) as exc:
+        publish(backend, 1, graph, after, job_id="job-a", acquire=False, fence=1)
+    assert exc.value.errno is None
+    assert str(exc.value) == "solar graph store access failed"
+    assert "secret-location" not in repr(exc.value)
+
+
 def test_replay_with_an_undecodable_parent_is_a_reused_binding(graph, tmp_path, monkeypatch):
     import write_loop
     import store

@@ -169,6 +169,7 @@ def test_settings_commit(graph, tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("field,value", [
     ("graph_sha256", "0" * 64), ("representation", "dwg-bundle"),
+    ("resolved_version", 99),
 ])
 def test_commit_readback_failed(graph, tmp_path, monkeypatch, field, value):
     backend, _ = seed(tmp_path, monkeypatch, graph)

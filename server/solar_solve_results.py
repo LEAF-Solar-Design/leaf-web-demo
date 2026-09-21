@@ -383,7 +383,33 @@ def publish_version(backend, tenant_id, drawing_id, *, parent_version, before, a
     session's lease cannot authorize this write. A legacy lease can expire
     between these checks without a new owner, preserving single-writer safety;
     the postgres authority refuses that expired lease too.
+
+    The job binding is checked twice outside the store's lock: at entry so a
+    replay needs no checkout, and again after the head read. This is not atomic
+    with the store's commit: a second request under the same job with an undo or
+    redo moving the head back between the second scan and the locked commit is
+    not excluded. The jobs path mints one identifier per request, so its caller
+    never presents two requests under one job id.
+
+    Broker-only names the intended caller; this function performs no access
+    check of its own. A store read or write failure is re-raised as a path-free
+    OSError.
     """
+    try:
+        return _publish_version(
+            backend, tenant_id, drawing_id, parent_version=parent_version,
+            before=before, after=after, holder=holder, fence=fence,
+            job_id=job_id, request_sha256=request_sha256,
+        )
+    except OSError as exc:
+        message = "solar graph store access failed"
+        if exc.errno is not None:
+            raise OSError(exc.errno, message) from None
+        raise OSError(message) from None
+
+
+def _publish_version(backend, tenant_id, drawing_id, *, parent_version, before, after,
+                     holder, fence, job_id, request_sha256):
     import json
     import write_loop
     import store
@@ -406,33 +432,44 @@ def publish_version(backend, tenant_id, drawing_id, *, parent_version, before, a
         backend, store.sanitize_id(tenant_id), store.sanitize_id(drawing_id))
     workitem_id = "solar-graph:" + job_id
     note = "solar-graph-commit:" + request_sha256
-    for entry in manifest["versions"]:
-        if entry.get("workitem_id") != workitem_id:
-            continue
-        if entry.get("note") != note:
-            raise GraphValidationError("JOB_BINDING_REUSED")
-        if entry.get("parent") != parent_version:
-            raise GraphValidationError("JOB_BINDING_REUSED")
-        # A successful intake-backed commit has an immutable JSON parent.
-        # Read its bytes directly so replay cannot mint an intake cache proof.
-        try:
-            _, parent_key = store.resolve_version(backend, tenant_id, drawing_id, parent_version)
-            payload = version_companion(json.loads(backend.get(parent_key)), before, after)
-            if entry.get("sha256") != hashlib.sha256(canonical_bytes(payload)).hexdigest():
+    def _replay(manifest):
+        for entry in manifest["versions"]:
+            if entry.get("workitem_id") != workitem_id:
+                continue
+            if entry.get("note") != note:
                 raise GraphValidationError("JOB_BINDING_REUSED")
-        except GraphValidationError:
-            raise
-        except (KeyError, ValueError, UnicodeError, TypeError, RecursionError):
-            raise GraphValidationError("JOB_BINDING_REUSED") from None
-        return {"version": entry["v"], "parent_version": entry["parent"],
-                "graph_sha256": digest(after), "intake_sha256": entry["sha256"],
-                "job_id": job_id, "request_sha256": request_sha256, "replayed": True}
+            if entry.get("parent") != parent_version:
+                raise GraphValidationError("JOB_BINDING_REUSED")
+            # A successful intake-backed commit has an immutable JSON parent.
+            # Read its bytes directly so replay cannot mint an intake cache proof.
+            try:
+                _, parent_key = store.resolve_version(backend, tenant_id, drawing_id, parent_version)
+                payload = version_companion(json.loads(backend.get(parent_key)), before, after)
+                if entry.get("sha256") != hashlib.sha256(canonical_bytes(payload)).hexdigest():
+                    raise GraphValidationError("JOB_BINDING_REUSED")
+            except GraphValidationError:
+                raise
+            except (KeyError, ValueError, UnicodeError, TypeError, RecursionError):
+                raise GraphValidationError("JOB_BINDING_REUSED") from None
+            return {"version": entry["v"], "parent_version": entry["parent"],
+                    "graph_sha256": digest(after), "intake_sha256": entry["sha256"],
+                    "job_id": job_id, "request_sha256": request_sha256, "replayed": True}
+        return None
+
+    replay = _replay(manifest)
+    if replay is not None:
+        return replay
     checkout = manifest.get("checkout")
     if not store.checkout_active(checkout):
         raise GraphValidationError("CHECKOUT_REQUIRED")
     if checkout.get("holder") != holder or checkout.get("fence") != fence:
         raise GraphValidationError("CHECKOUT_DENIED")
     version, intake = write_loop.read_intake(backend, tenant_id, drawing_id, "head")
+    # One extra manifest read per fresh publish checks bindings after the head read.
+    replay = _replay(store.load_manifest(
+        backend, store.sanitize_id(tenant_id), store.sanitize_id(drawing_id)))
+    if replay is not None:
+        return replay
     if version != parent_version:
         raise GraphValidationError("STALE_GRAPH_REVISION")
     payload = version_companion(intake, before, after)
