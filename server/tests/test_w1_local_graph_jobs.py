@@ -273,6 +273,20 @@ def test_broker_refuses_before_post(enabled, monkeypatch, override):
         broker_client.run_via_broker(**args)
 
 
+@pytest.mark.parametrize("schema,accepted", [
+    ("leaf.solar-graph-seed.v1", True), ("leaf.solar-graph-other.v1", False),
+])
+def test_broker_seed_receipt_schema(enabled, committed, monkeypatch, schema, accepted):
+    _, result = committed
+    body = {"ok": True, "result": dict(result, schema_version=schema)}
+    monkeypatch.setattr(broker_client.requests, "post", lambda *a, **k: Reply(body))
+    if accepted:
+        assert broker_client.run_via_broker(**broker_args()) is body
+    else:
+        with pytest.raises(broker_client.BrokerReceiptRejected):
+            broker_client.run_via_broker(**broker_args())
+
+
 class Reply:
     def __init__(self, body, status=200):
         self.body = body

@@ -11,7 +11,7 @@ import write_loop
 import store
 from solar_design_graph import GraphValidationError, _bounded_json
 from solar_graph_context import resolve_graph_context
-from solar_graph_seed import new_empty_graph, resolve_seed_context
+from solar_graph_seed import new_empty_graph, resolve_seed_context, validate_seed_request
 from solar_sizing_client import digest
 from solar_solve_results import publish_version
 
@@ -118,15 +118,6 @@ def graph_commit_provenance(result, params, tenant_id, job_id, tool, source_vers
         raise ValueError("graph commit terminal proof rejected") from None
 
 
-def _seed_initialize(initialize):
-    if (not isinstance(initialize, dict)
-            or set(initialize) != {"schema_version", "source_intake_sha256", "units"}
-            or type(initialize["schema_version"]) is not int
-            or initialize["schema_version"] != 1):
-        raise GraphValidationError("INVALID_SEED_REQUEST")
-    return initialize
-
-
 def _seed_provenance(result, params, tenant_id, job_id, tool, source_version, *, backend):
     if (result["adapter"] != ADAPTER_KIND or tool != "solar-settings"
             or result["tool"] != tool or result["tenant_id"] != tenant_id
@@ -137,7 +128,7 @@ def _seed_provenance(result, params, tenant_id, job_id, tool, source_version, *,
         raise ValueError()
     builtin_params = copy.deepcopy(params)
     drawing_id = builtin_params.pop("drawing_id")
-    initialize = _seed_initialize(builtin_params["initialize"])
+    initialize = validate_seed_request(builtin_params["initialize"])
     request_sha256 = request_digest(tool, drawing_id, source_version, builtin_params)
     builtin_params.pop("initialize")
     version = result["new_version"]["version"]
@@ -217,7 +208,7 @@ def run_local_graph_commit(backend, tenant_id, tool, params, *, drawing_id, sour
         if project_id is not None:
             raise GraphValidationError("SEED_PROJECT_SCOPE_UNSUPPORTED")
         request_sha256 = request_digest(tool, drawing_id, source_version, builtin_params)
-        initialize = _seed_initialize(builtin_params.pop("initialize"))
+        initialize = validate_seed_request(builtin_params.pop("initialize"))
         ctx = resolve_seed_context(backend, tenant_id, drawing_id, source_version,
                                    source_intake_sha256=initialize["source_intake_sha256"])
         base = new_empty_graph(tenant_id=tenant_id, drawing_id=drawing_id,

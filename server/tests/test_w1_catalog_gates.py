@@ -15,12 +15,20 @@ import deps
 import entitlements
 import product_capability_availability as availability
 import solar_local_graph
+import solar_graph_seed
+import store
 import write_loop
+from test_w1_solve_commit import seed, seed_graphless
+from test_w1_local_graph_seed import request as seed_params
 from test_w1_design_graph import graph  # noqa: F401
 from test_w1_equipment import case, equipment, licensed  # noqa: F401
 from test_w1_graph_versions import drawing, commit, request_for, TENANT, DRAWING  # noqa: F401
-from solar_design_graph import deserialize_graph, serialize_graph
+from solar_design_graph import GraphValidationError, deserialize_graph, serialize_graph
 from solar_wiring_client import local_routes
+
+
+class DriverError(Exception):
+    pass
 
 
 @pytest.fixture(autouse=True)
@@ -308,6 +316,181 @@ def test_malformed_tool_record_fails_terminal_validation(tool):
         "complete", {"ok": True, "result": {}},
         {"attempt": 1, "execution_path": "local"}, 1,
         {"tool": {"name": "other"}, "aps_live": False})
+
+
+@pytest.fixture
+def seed_parent(tmp_path, monkeypatch):
+    backend, intake = seed_graphless(tmp_path, monkeypatch)
+    monkeypatch.setattr(write_loop, "backend_for_tenant", lambda *a, **k: backend)
+    return backend, intake, seed_params(backend)["initialize"]
+
+
+def seed_readiness(**kwargs):
+    return availability.w1_input_readiness("fixture-tenant", "solar", **kwargs)
+
+
+def test_graphless_catalog_requires_seed(seed_parent):
+    actual = seed_readiness()
+    assert actual["solar-settings"] == {
+        "input_ready": False, "input_reason": "graph_seed_required"}
+    assert all(value == {"input_ready": False, "input_reason": "persisted_graph_unavailable"}
+               for name, value in actual.items() if name != "solar-settings")
+
+
+def test_graphless_catalog_project_scope_unavailable(seed_parent):
+    assert seed_readiness(project_id="project")["solar-settings"] == {
+        "input_ready": False, "input_reason": "persisted_graph_unavailable"}
+
+
+def test_seed_request_ready_only_for_settings(seed_parent):
+    actual = seed_readiness(seed_request=seed_parent[2])
+    assert actual["solar-settings"] == {"input_ready": True, "input_reason": None}
+    assert actual["solar-correct-string"] == {
+        "input_ready": False, "input_reason": "invalid_seed_request"}
+    ordinary = seed_readiness()
+    for name in availability.W1_CAPABILITIES:
+        if availability.capability_adapter(name) != availability.LOCAL_GRAPH_COMMIT_ADAPTER:
+            assert actual[name] == ordinary[name] == {
+                "input_ready": False, "input_reason": "persisted_graph_unavailable"}
+
+
+def test_seed_request_project_scope_refused(seed_parent):
+    assert seed_readiness(seed_request=seed_parent[2], project_id="project")["solar-settings"] == {
+        "input_ready": False, "input_reason": "seed_project_scope_unsupported"}
+
+
+def test_seed_request_hash_mismatch(seed_parent):
+    request = dict(seed_parent[2], source_intake_sha256="0" * 64)
+    assert seed_readiness(seed_request=request)["solar-settings"] == {
+        "input_ready": False, "input_reason": "source_hash_mismatch"}
+
+
+@pytest.mark.parametrize("defect", ["null", "list", "version", "units"])
+def test_seed_gate_malformed_request(seed_parent, defect):
+    request = seed_parent[2]
+    if defect == "null":
+        request = None
+    elif defect == "list":
+        request = []
+    elif defect == "version":
+        request["schema_version"] = 2
+    else:
+        request["units"]["drawing_units"] = "parsec"
+    assert seed_readiness(seed_request=request)["solar-settings"] == {
+        "input_ready": False, "input_reason": "invalid_seed_request"}
+
+
+@pytest.mark.parametrize("with_request", [False, True])
+def test_seed_gate_old_parent(seed_parent, with_request):
+    import json
+    from test_w1_local_graph_seed import held
+
+    backend, intake, request = seed_parent
+    with held(backend) as fence:
+        write_loop._put_bytes_version(
+            backend, "fixture-tenant", "solar", json.dumps(intake).encode(),
+            1, {}, holder="fixture-owner", fence=fence, require_parent_is_head=True)
+    kwargs = {"seed_request": request} if with_request else {}
+    assert seed_readiness(version=1, **kwargs)["solar-settings"] == {
+        "input_ready": False, "input_reason": "not_current_head"}
+
+
+def test_seed_gate_embedded_graph(graph, tmp_path, monkeypatch):
+    backend, _ = seed(tmp_path, monkeypatch, graph)
+    monkeypatch.setattr(write_loop, "backend_for_tenant", lambda *a, **k: backend)
+    actual = seed_readiness(seed_request=seed_params(backend)["initialize"])
+    assert actual["solar-settings"] == {
+        "input_ready": False, "input_reason": "graph_already_embedded"}
+    assert actual["solar-correct-string"] == {
+        "input_ready": False, "input_reason": "invalid_seed_request"}
+
+
+def test_ordinary_embedded_graph_readiness_unchanged(graph, tmp_path, monkeypatch):
+    backend, _ = seed(tmp_path, monkeypatch, graph)
+    monkeypatch.setattr(write_loop, "backend_for_tenant", lambda *a, **k: backend)
+    expected = {name: {"input_ready": False, "input_reason": "persisted_graph_unavailable"}
+                for name in availability.W1_CAPABILITIES}
+    expected.update({name: {"input_ready": True, "input_reason": None}
+                     for name in ("solar-settings", "solar-correct-string")})
+    assert seed_readiness() == expected
+
+
+def test_seed_gate_bundle_requires_licensed_commit(drawing, case, monkeypatch):
+    graph, _, _ = case
+    backend, _ = drawing
+    commit(drawing, request_for(backend, graph))
+    monkeypatch.setattr(write_loop, "backend_for_tenant", lambda *a, **k: backend)
+    from test_w1_graph_seed import seed_request
+    actual = availability.w1_input_readiness(TENANT, DRAWING, seed_request=seed_request())
+    assert actual["solar-settings"] == {
+        "input_ready": False, "input_reason": "licensed_graph_commit_required"}
+
+
+@pytest.mark.parametrize("error", [RuntimeError, RecursionError, LookupError, ArithmeticError])
+@pytest.mark.parametrize("with_request", [False, True])
+def test_seed_probe_errors_are_contained(seed_parent, monkeypatch, error, with_request):
+    def unavailable(*a, **k):
+        raise error("boom")
+    monkeypatch.setattr(solar_graph_seed, "resolve_seed_context", unavailable)
+    kwargs = {"seed_request": seed_parent[2]} if with_request else {}
+    assert seed_readiness(**kwargs)["solar-settings"] == {
+        "input_ready": False, "input_reason": "persisted_graph_unavailable"}
+
+
+@pytest.mark.parametrize("where", ["seed_context", "second_store_read"])
+@pytest.mark.parametrize("with_request", [False, True])
+def test_seed_probe_contains_any_exception_class(seed_parent, monkeypatch, where, with_request):
+    calls = 0
+    resolve_version_entry = store.resolve_version_entry
+
+    def unavailable(*args, **kwargs):
+        raise DriverError("driver down")
+
+    def second_read(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return resolve_version_entry(*args, **kwargs)
+        raise DriverError("driver down")
+
+    if where == "seed_context":
+        monkeypatch.setattr(solar_graph_seed, "resolve_seed_context", unavailable)
+    else:
+        monkeypatch.setattr(store, "resolve_version_entry", second_read)
+    kwargs = {"seed_request": seed_parent[2]} if with_request else {}
+    assert seed_readiness(**kwargs)["solar-settings"] == {
+        "input_ready": False, "input_reason": "persisted_graph_unavailable"}
+    if where == "second_store_read":
+        assert calls == 2
+
+
+def test_seed_gate_invokes_the_shared_validator(seed_parent, monkeypatch):
+    calls = []
+
+    def validate(request):
+        calls.append(request)
+        raise GraphValidationError("INVALID_SEED_REQUEST")
+
+    monkeypatch.setattr(solar_graph_seed, "validate_seed_request", validate)
+    assert seed_readiness(seed_request=seed_parent[2])["solar-settings"] == {
+        "input_ready": False, "input_reason": "invalid_seed_request"}
+    assert len(calls) == 1
+    assert calls[0] is seed_parent[2]
+    calls.clear()
+    assert seed_readiness()["solar-settings"] == {
+        "input_ready": False, "input_reason": "graph_seed_required"}
+    assert calls == []
+
+
+@pytest.mark.parametrize("with_request", [False, True])
+def test_seed_gate_keeps_an_unavailable_context_generic(seed_parent, monkeypatch, with_request):
+    def unavailable(*args, **kwargs):
+        raise GraphValidationError("GRAPH_CONTEXT_UNAVAILABLE")
+
+    monkeypatch.setattr(solar_graph_seed, "resolve_seed_context", unavailable)
+    kwargs = {"seed_request": seed_parent[2]} if with_request else {}
+    assert seed_readiness(**kwargs)["solar-settings"] == {
+        "input_ready": False, "input_reason": "persisted_graph_unavailable"}
 
 
 def _folded_strings(tree):

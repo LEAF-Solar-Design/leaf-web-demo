@@ -166,11 +166,22 @@ def annotate_w1_availability(families, tenant, drawing_id=None, *,
     return families
 
 
-def w1_input_readiness(tenant, drawing_id=None, *, project_id=None, version="head"):
+NO_SEED_REQUEST = object()
+
+
+def w1_input_readiness(tenant, drawing_id=None, *, project_id=None, version="head",
+                       seed_request=NO_SEED_REQUEST):
     """Read persisted drawing context and apply each adapter's format contract."""
+    def seed_overrides(readiness):
+        if seed_request is not NO_SEED_REQUEST:
+            for name in W1_CAPABILITIES:
+                if name != "solar-settings" and capability_adapter(name) == LOCAL_GRAPH_COMMIT_ADAPTER:
+                    readiness[name] = {"input_ready": False, "input_reason": "invalid_seed_request"}
+        return readiness
+
     def unavailable(reason):
-        return {name: {"input_ready": False, "input_reason": reason}
-                for name in W1_CAPABILITIES}
+        return seed_overrides({name: {"input_ready": False, "input_reason": reason}
+                               for name in W1_CAPABILITIES})
 
     if drawing_id is None:
         return unavailable("drawing_context_required")
@@ -188,12 +199,52 @@ def w1_input_readiness(tenant, drawing_id=None, *, project_id=None, version="hea
             return unavailable("invalid_drawing_context")
         import write_loop
         import store
+        import solar_graph_seed
+        from solar_design_graph import GraphValidationError
         from solar_graph_context import resolve_graph_context
         if type(version) is str and version != "head":
             version = int(version)
         backend = write_loop.backend_for_tenant(str(tenant), aps_live=False, da=None)
-        context = resolve_graph_context(backend, str(tenant), drawing_id,
-                                        version, project_id=project_id)
+        try:
+            context = resolve_graph_context(backend, str(tenant), drawing_id,
+                                            version, project_id=project_id)
+        except GraphValidationError as exc:
+            if exc.code != "GRAPH_NOT_EMBEDDED":
+                raise
+            readiness = unavailable("persisted_graph_unavailable")
+            reason = "persisted_graph_unavailable"
+            ready = False
+            if project_id is not None:
+                if seed_request is not NO_SEED_REQUEST:
+                    reason = "seed_project_scope_unsupported"
+            else:
+                # The seed probe is advisory: it may only IMPROVE on the answer this function gave before a seed existed.
+                # Any failure inside it, of any class (a storage driver's own exception included), leaves that answer
+                # and never becomes a 500. Fails closed.
+                try:
+                    if seed_request is not NO_SEED_REQUEST:
+                        solar_graph_seed.validate_seed_request(seed_request)
+                    resolved, _, entry = store.resolve_version_entry(
+                        backend, str(tenant), drawing_id, version)
+                    source_hash = (entry["sha256"] if seed_request is NO_SEED_REQUEST
+                                   else seed_request["source_intake_sha256"])
+                    seed = solar_graph_seed.resolve_seed_context(
+                        backend, str(tenant), drawing_id, resolved,
+                        source_intake_sha256=source_hash)
+                    if not seed["seed_ready"]:
+                        reason = "not_current_head"
+                    elif seed_request is NO_SEED_REQUEST:
+                        reason = "graph_seed_required"
+                    else:
+                        ready, reason = True, None
+                except GraphValidationError as seed_error:
+                    if (seed_request is not NO_SEED_REQUEST
+                            and seed_error.code != "GRAPH_CONTEXT_UNAVAILABLE"):
+                        reason = seed_error.code.lower()
+                except Exception:
+                    pass
+            readiness["solar-settings"] = {"input_ready": ready, "input_reason": reason}
+            return readiness
         graph = context["graph"]
         try:
             readiness = w1_graph_readiness(graph)
@@ -208,7 +259,10 @@ def w1_input_readiness(tenant, drawing_id=None, *, project_id=None, version="hea
             elif context["representation"] == "intake":
                 readiness[name] = {"input_ready": False,
                                    "input_reason": "persisted_graph_unavailable"}
-        return readiness
+        if seed_request is not NO_SEED_REQUEST and context["representation"] == "intake":
+            readiness["solar-settings"] = {
+                "input_ready": False, "input_reason": "graph_already_embedded"}
+        return seed_overrides(readiness)
     except (KeyError, ValueError, TypeError, OSError):
         return unavailable("persisted_graph_unavailable")
 
