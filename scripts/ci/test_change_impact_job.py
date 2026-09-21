@@ -97,6 +97,22 @@ def test_pr_base_ref(sandbox, tmp_path, capsys, base_ref):
     assert "IMPACT: COMPLETE" in output
 
 
+def test_pr_base_is_the_merge_base_not_the_tip(sandbox, capsys):
+    """main advances after the branch point; the base must stay at the fork point."""
+    repo, base, head, call, _, args, git = sandbox
+    git("checkout", "main")
+    (repo / "landed-later.txt").write_text("on main after the fork\n", encoding="utf-8")
+    git("add", "landed-later.txt")
+    git("commit", "-m", "main moves on")
+    tip = git("rev-parse", "HEAD")
+    git("checkout", "feature")
+    assert tip != base
+    assert job.main(args + ["--base-ref", "main"]) == 0
+    command = json.loads(call.read_text(encoding="utf-8"))
+    assert command[command.index("--base") + 1] == base
+    assert f"base={base}" in capsys.readouterr().out
+
+
 def test_pr_local_fallback(sandbox):
     _, base, _, call, _, args, git = sandbox
     git("remote", "remove", "origin")

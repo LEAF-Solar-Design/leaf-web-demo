@@ -72,6 +72,20 @@ def queue_base(target, head):
         seen.add(cursor)
 
 
+def merge_base(repo, ref, head):
+    """The fork point of the change, never the base ref's tip: commits that landed on
+    the base branch after the branch point are not this change's work."""
+    try:
+        result = subprocess.run(
+            ["git", "merge-base", ref, head], cwd=repo,
+            capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    sha = result.stdout.strip().lower()
+    return sha if result.returncode == 0 and SHA40.fullmatch(sha) else None
+
+
 def resolve_base(repo, base_ref, head_ref, head):
     if base_ref:
         ref = base_ref.removeprefix("refs/heads/")
@@ -80,13 +94,14 @@ def resolve_base(repo, base_ref, head_ref, head):
                 ["git", "fetch", "origin", "--", ref], cwd=repo,
                 capture_output=True, text=True, timeout=60,
             )
-            if fetched.returncode == 0:
-                base = git_sha(repo, "origin/" + ref)
+            if fetched.returncode == 0 and git_sha(repo, "origin/" + ref):
+                base = merge_base(repo, "origin/" + ref, head)
                 if base:
                     return base, "pr-base-ref"
         except (OSError, subprocess.SubprocessError):
             pass
-        return git_sha(repo, base_ref), "pr-base-ref"
+        base = merge_base(repo, base_ref, head)
+        return (base if base else git_sha(repo, base_ref)), "pr-base-ref"
     match = QUEUE_REF.fullmatch(head_ref)
     if match:
         target, embedded = match.groups()
