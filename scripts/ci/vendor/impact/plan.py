@@ -35,13 +35,17 @@ def enabled_manifest(workdir):
 def rows_for_scope(result, manifest, digest, added_reason=None):
     rows = [record.new_row(item.concern, item.subject, digest, family=item.family,
                            reason=added_reason) for item in result.required]
+    monitors_required = bool(result.targets) or result.manifest_changed
     for name in CONCERNS:
         entry = manifest["concerns"][name]
         if entry["monitor_obligation"]:
             evidence = next(iter(entry["evidence"]), None)
             rows.append(record.new_row(name, "monitor", digest,
+                                       required=monitors_required,
                                        outcome=entry["outcome_default"] if evidence else "unresolved",
-                                       evidence=evidence, reason="monitor obligation, assessed per target"))
+                                       evidence=evidence,
+                                       reason="monitor obligation, assessed per target" if monitors_required else
+                                       "monitor obligation; assessed when a target or the manifest changes"))
     for path, missing in result.companions:
         # One suggestion per concern avoids duplicate row ids for several companions.
         groups = {}
@@ -75,6 +79,10 @@ def render(data, families, result=None):
         if row["required"]:
             expectation = evidence.get(row["family"], "evidence reference")
             lines.append(f"| {row['id']} | {row['concern']} | {row['subject']} | {row['outcome']} | {expectation} |")
+    monitors = [f"{row['concern']}={row['outcome']}" for row in record.sort_rows(data["rows"])
+                if row["subject"] == "monitor" and not row["required"]]
+    if monitors:
+        lines.append("monitor obligations (informational): " + ", ".join(monitors))
     if result is not None:
         for path, missing in result.companions:
             if missing:
@@ -82,6 +90,18 @@ def render(data, families, result=None):
     for item in data["carried"]:
         lines.append(f"carried forward (unresolved in earlier records): {item['row']} from {item['from_change_id']}")
     return "\n".join(lines)
+
+
+def carried_rows(repository, change_id):
+    from heapq import nsmallest
+    entries = (
+        {"row": row["id"], "from_change_id": previous["change_id"], "outcome": "unresolved"}
+        for _, previous in record.prior_records()
+        if previous["repository"] == repository and previous["change_id"] != change_id
+        for row in previous["rows"]
+        if row["required"] and row["outcome"] == "unresolved" and row["superseded_by"] is None
+    )
+    return nsmallest(200, entries, key=lambda item: (item["from_change_id"], item["row"]))
 
 
 def run(args, version):
@@ -98,7 +118,7 @@ def run(args, version):
     data = record.new_record(args.change_id, manifest, digest, version)
     data["touched"] = scope.touched(result, paths)
     data["rows"] = rows_for_scope(result, manifest, digest)
-    data["carried"] = record.carried_rows(data["repository"], args.change_id)
+    data["carried"] = carried_rows(data["repository"], args.change_id)
     record.save_record(args.record, data)
     print(json.dumps(data, sort_keys=True, ensure_ascii=True) if args.json else render(data, families, result))
     return 0

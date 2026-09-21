@@ -3,7 +3,7 @@
 schema_version: 1
 project_id: leaf-web-demo
 repository: LEAF-Solar-Design/leaf-web-demo
-authored_at_revision: fbd07d233d482c13855821d6bb1643391e341371
+authored_at_revision: 139a3c35087b20849330eacaf576b21af655f977
 
 components:
   - id: server
