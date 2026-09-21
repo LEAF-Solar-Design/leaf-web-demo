@@ -180,6 +180,33 @@ def test_receipt_committed_by_another_job(graph, tmp_path, monkeypatch):
         proof(result, backend, job_id="job-a")
 
 
+def test_provenance_rejects_a_rewritten_manifest_note(committed):
+    # The receipt, the workitem binding, the stored bytes and the graph all still agree: only the
+    # manifest entry's request binding was rewritten, so only the note comparison can refuse it.
+    backend, result = committed
+    manifest = store.load_manifest(backend, TENANT, "solar")
+    entry = next(row for row in manifest["versions"] if row["v"] == 2)
+    assert entry["note"] == "solar-graph-commit:" + result["request_sha256"]
+    entry["note"] = "solar-graph-commit:" + "0" * 64
+    store.save_manifest(backend, TENANT, "solar", manifest)
+    with pytest.raises(ValueError, match="^graph commit terminal proof rejected$"):
+        proof(result, backend)
+
+
+def test_provenance_rejects_rewritten_stored_bytes_that_keep_the_graph(committed):
+    # The manifest's digest and the embedded graph are untouched, so neither the entry comparison nor
+    # the graph read-back can see this: only hashing the stored bytes themselves refuses it.
+    backend, result = committed
+    _, key = store.resolve_version(backend, TENANT, "solar", 2)
+    stored = json.loads(backend.get(key))
+    stored["unrelated"] = 1
+    backend.put(key, json.dumps(stored).encode("utf-8"))
+    reopened = local.resolve_graph_context(backend, TENANT, "solar", 2)
+    assert reopened["graph_sha256"] == result["graph_sha256"]
+    with pytest.raises(ValueError, match="^graph commit terminal proof rejected$"):
+        proof(result, backend)
+
+
 @pytest.mark.parametrize("mutation", [
     "none", "aps", "cloud", "fallback", "job", "context", "provenance", "version",
 ])
