@@ -411,12 +411,19 @@ def publish_version(backend, tenant_id, drawing_id, *, parent_version, before, a
             continue
         if entry.get("note") != note:
             raise GraphValidationError("JOB_BINDING_REUSED")
+        if entry.get("parent") != parent_version:
+            raise GraphValidationError("JOB_BINDING_REUSED")
         # A successful intake-backed commit has an immutable JSON parent.
         # Read its bytes directly so replay cannot mint an intake cache proof.
-        _, parent_key = store.resolve_version(backend, tenant_id, drawing_id, parent_version)
-        payload = version_companion(json.loads(backend.get(parent_key)), before, after)
-        if entry.get("sha256") != hashlib.sha256(canonical_bytes(payload)).hexdigest():
-            raise GraphValidationError("JOB_BINDING_REUSED")
+        try:
+            _, parent_key = store.resolve_version(backend, tenant_id, drawing_id, parent_version)
+            payload = version_companion(json.loads(backend.get(parent_key)), before, after)
+            if entry.get("sha256") != hashlib.sha256(canonical_bytes(payload)).hexdigest():
+                raise GraphValidationError("JOB_BINDING_REUSED")
+        except GraphValidationError:
+            raise
+        except (KeyError, ValueError, UnicodeError, TypeError, RecursionError):
+            raise GraphValidationError("JOB_BINDING_REUSED") from None
         return {"version": entry["v"], "parent_version": entry["parent"],
                 "graph_sha256": digest(after), "intake_sha256": entry["sha256"],
                 "job_id": job_id, "request_sha256": request_sha256, "replayed": True}

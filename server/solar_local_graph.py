@@ -1,9 +1,12 @@
 """Packaged solar edits published through the existing graph commit rail."""
 import copy
+import hashlib
 import importlib.util
 from functools import lru_cache
 from pathlib import Path
 
+import write_loop
+import store
 from solar_design_graph import GraphValidationError, _bounded_json
 from solar_graph_context import resolve_graph_context
 from solar_sizing_client import digest
@@ -59,10 +62,17 @@ def run_local_graph_commit(backend, tenant_id, tool, params, *, drawing_id, sour
         backend, tenant_id, drawing_id, parent_version=source_version,
         before=context["graph"], after=after, holder=holder, fence=fence,
         job_id=job_id, request_sha256=request_sha256)
-    reopened = resolve_graph_context(backend, tenant_id, drawing_id, receipt["version"])
-    if (reopened["representation"] != "intake"
-            or reopened["graph_sha256"] != receipt["graph_sha256"]):
-        raise GraphValidationError("GRAPH_COMMIT_READBACK_FAILED")
+    try:
+        reopened = resolve_graph_context(backend, tenant_id, drawing_id, receipt["version"])
+        _, key = store.resolve_version(backend, tenant_id, drawing_id, receipt["version"])
+        stored_sha = hashlib.sha256(backend.get(key)).hexdigest()
+        if (reopened["representation"] != "intake"
+                or reopened["graph_sha256"] != receipt["graph_sha256"]
+                or reopened["resolved_version"] != receipt["version"]
+                or stored_sha != receipt["intake_sha256"]):
+            raise GraphValidationError("GRAPH_COMMIT_READBACK_FAILED")
+    except (GraphValidationError, KeyError, ValueError, TypeError, OSError, RecursionError):
+        raise GraphValidationError("GRAPH_COMMIT_READBACK_FAILED") from None
     return {"schema_version": RESULT_SCHEMA, "adapter": ADAPTER_KIND,
             "tenant_id": tenant_id, "job_id": job_id, "tool": tool,
             "project_id": context["project_id"], "drawing_id": drawing_id,

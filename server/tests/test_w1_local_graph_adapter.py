@@ -113,6 +113,7 @@ def test_bundle_project_mismatch(drawing, graph):
 
 @pytest.mark.parametrize("defect,code", [
     ("digest", "GRAPH_DIGEST_MISMATCH"), ("missing", "GRAPH_NOT_EMBEDDED"),
+    ("deep", "GRAPH_NOT_EMBEDDED"),
 ])
 def test_bad_intake(graph, tmp_path, monkeypatch, defect, code):
     backend, intake = seed(tmp_path, monkeypatch, graph)
@@ -121,7 +122,8 @@ def test_bad_intake(graph, tmp_path, monkeypatch, defect, code):
     else:
         del intake["solar_design_graph"]
     _, key, _ = store.resolve_version_entry(backend, "fixture-tenant", "solar", 1)
-    backend.put(key, json.dumps(intake).encode("utf-8"))
+    data = b"[" * 5000 + b"0" + b"]" * 5000 if defect == "deep" else json.dumps(intake).encode("utf-8")
+    backend.put(key, data)
     with refused(code):
         resolve_graph_context(backend, "fixture-tenant", "solar")
 
@@ -187,6 +189,43 @@ def test_commit_readback_failed(graph, tmp_path, monkeypatch, field, value):
         with refused("GRAPH_COMMIT_READBACK_FAILED"):
             run(backend, fence=fence)
     assert calls == 2
+
+
+def test_commit_readback_exception_is_a_readback_failure(graph, tmp_path, monkeypatch):
+    backend, _ = seed(tmp_path, monkeypatch, graph)
+    real_resolve = local.resolve_graph_context
+    calls = 0
+
+    def failed_readback(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise GraphValidationError("GRAPH_CONTEXT_UNAVAILABLE")
+        return real_resolve(*args, **kwargs)
+
+    monkeypatch.setattr(local, "resolve_graph_context", failed_readback)
+    with held(backend) as fence:
+        with refused("GRAPH_COMMIT_READBACK_FAILED"):
+            run(backend, fence=fence)
+    assert latest(backend) == 2
+
+
+def test_commit_readback_compares_stored_bytes(graph, tmp_path, monkeypatch):
+    backend, _ = seed(tmp_path, monkeypatch, graph)
+    real_publish = local.publish_version
+
+    def changed_bytes(*args, **kwargs):
+        receipt = real_publish(*args, **kwargs)
+        _, key = store.resolve_version(backend, "fixture-tenant", "solar", receipt["version"])
+        intake = json.loads(backend.get(key))
+        intake["layers"] = ["changed"]
+        backend.put(key, json.dumps(intake).encode("utf-8"))
+        return receipt
+
+    monkeypatch.setattr(local, "publish_version", changed_bytes)
+    with held(backend) as fence:
+        with refused("GRAPH_COMMIT_READBACK_FAILED"):
+            run(backend, fence=fence)
 
 
 def test_builtin_receives_graph_copy(graph, tmp_path, monkeypatch):
@@ -323,7 +362,16 @@ def test_request_digest():
         assert local.request_digest(*changed) != value
 
 
-def test_packaged_source_only():
+def test_packaged_source_only(tmp_path, monkeypatch):
     source = (SERVER / "solar_local_graph.py").read_text(encoding="utf-8")
     assert all(word not in source for word in ("tool_loader", "import_module", "exec("))
     assert "spec_from_file_location" in source
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "builtins").mkdir()
+    (tmp_path / "builtins" / "solar_settings.py").write_text('raise RuntimeError("decoy loaded")\n')
+    local._load_builtin.cache_clear()
+    try:
+        module = local._load_builtin("solar-settings")
+        assert Path(module.__file__).resolve().parent == (SERVER / "builtins").resolve()
+    finally:
+        local._load_builtin.cache_clear()

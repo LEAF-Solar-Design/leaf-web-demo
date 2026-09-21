@@ -65,7 +65,7 @@ def resolve_graph_context(backend, tenant_id, drawing_id, version="head", *, pro
             intake = json.loads(data.decode("utf-8"))
         except GraphValidationError:
             raise
-        except (ValueError, UnicodeError, TypeError):
+        except (ValueError, UnicodeError, TypeError, RecursionError):
             raise GraphValidationError("GRAPH_NOT_EMBEDDED") from None
         if type(intake) is not dict or type(intake.get("solar_design_graph")) is not dict:
             raise GraphValidationError("GRAPH_NOT_EMBEDDED")

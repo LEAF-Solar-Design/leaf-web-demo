@@ -339,6 +339,7 @@ def publish(backend, parent, before, after, *, holder="fixture-owner", fence=_de
 @pytest.mark.parametrize("overrides", [
     {"holder": None}, {"holder": ""}, {"holder": "anonymous:unnamed-writer"},
     {"fence": None}, {"fence": 0}, {"fence": -1}, {"fence": True}, {"fence": "1"},
+    {"fence": 1.0},
 ])
 def test_publish_requires_named_identity_and_positive_integer_fence(graph, tmp_path, monkeypatch, overrides):
     import write_loop
@@ -423,6 +424,49 @@ def test_publish_replays_before_head_check_with_or_without_lease(graph, tmp_path
     assert not store.checkout_active(store.load_manifest(backend, "fixture-tenant", "solar")["checkout"])
     replay = publish(backend, 1, graph, after, job_id="job-a", acquire=acquire, fence=1)
     assert replay == dict(receipt, replayed=True)
+    assert store.load_manifest(backend, "fixture-tenant", "solar")["latest"] == 2
+
+
+def test_replay_refuses_a_different_parent_with_identical_bytes(graph, tmp_path, monkeypatch):
+    import write_loop
+    import store
+    backend, _ = seed(tmp_path, monkeypatch, graph)
+    _, key = store.resolve_version(backend, "fixture-tenant", "solar", 1)
+    same = backend.get(key)
+    version = write_loop._put_bytes_version(
+        backend, "fixture-tenant", "solar", same, parent_version=1,
+        meta={"tool": "fixture", "note": "fixture-noop"}, require_parent_is_head=True)
+    assert version == 2
+    after = correct.run(graph, transfer(graph))
+    receipt = publish(backend, 2, graph, after, job_id="job-a")
+    assert receipt["version"] == 3 and receipt["parent_version"] == 2
+    with pytest.raises(GraphValidationError, match="JOB_BINDING_REUSED"):
+        publish(backend, 1, graph, after, job_id="job-a", acquire=False, fence=1)
+    assert store.load_manifest(backend, "fixture-tenant", "solar")["latest"] == 3
+    replay = publish(backend, 2, graph, after, job_id="job-a", acquire=False, fence=1)
+    assert replay == dict(receipt, replayed=True)
+
+
+def test_replay_with_a_missing_parent_is_a_reused_binding(graph, tmp_path, monkeypatch):
+    backend, _ = seed(tmp_path, monkeypatch, graph)
+    after = correct.run(graph, transfer(graph))
+    publish(backend, 1, graph, after, job_id="job-a")
+    with pytest.raises(GraphValidationError, match="JOB_BINDING_REUSED") as exc:
+        publish(backend, 77, graph, after, job_id="job-a", acquire=False, fence=1)
+    assert type(exc.value) is GraphValidationError
+    assert "fixture-tenant" not in str(exc.value)
+
+
+def test_replay_with_an_undecodable_parent_is_a_reused_binding(graph, tmp_path, monkeypatch):
+    import write_loop
+    import store
+    backend, _ = seed(tmp_path, monkeypatch, graph)
+    after = correct.run(graph, transfer(graph))
+    publish(backend, 1, graph, after, job_id="job-a")
+    _, key = store.resolve_version(backend, "fixture-tenant", "solar", 1)
+    backend.put(key, b"not json")
+    with pytest.raises(GraphValidationError, match="JOB_BINDING_REUSED"):
+        publish(backend, 1, graph, after, job_id="job-a", acquire=False, fence=1)
     assert store.load_manifest(backend, "fixture-tenant", "solar")["latest"] == 2
 
 
