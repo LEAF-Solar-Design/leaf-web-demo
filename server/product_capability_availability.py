@@ -167,7 +167,7 @@ def annotate_w1_availability(families, tenant, drawing_id=None, *,
 
 
 def w1_input_readiness(tenant, drawing_id=None, *, project_id=None, version="head"):
-    """Read only the selected tenant's persisted drawing bundle, never UI steps."""
+    """Read persisted drawing context and apply each adapter's format contract."""
     def unavailable(reason):
         return {name: {"input_ready": False, "input_reason": reason}
                 for name in W1_CAPABILITIES}
@@ -188,10 +188,22 @@ def w1_input_readiness(tenant, drawing_id=None, *, project_id=None, version="hea
             return unavailable("invalid_drawing_context")
         import write_loop
         import store
+        from solar_graph_context import resolve_graph_context
+        if type(version) is str and version != "head":
+            version = int(version)
         backend = write_loop.backend_for_tenant(str(tenant), aps_live=False, da=None)
-        bundle = store.read_graph_bundle(backend, str(tenant), drawing_id,
-                                         version, project_id=project_id)
-        return w1_graph_readiness(bundle["graph"])
+        context = resolve_graph_context(backend, str(tenant), drawing_id,
+                                        version, project_id=project_id)
+        readiness = w1_graph_readiness(context["graph"])
+        for name in W1_CAPABILITIES:
+            if capability_adapter(name) == LOCAL_GRAPH_COMMIT_ADAPTER:
+                if not context["local_commit_ready"]:
+                    readiness[name] = {"input_ready": False,
+                                       "input_reason": context["refusal_reason"]}
+            elif context["representation"] == "intake":
+                readiness[name] = {"input_ready": False,
+                                   "input_reason": "persisted_graph_unavailable"}
+        return readiness
     except (KeyError, ValueError, TypeError, OSError):
         return unavailable("persisted_graph_unavailable")
 

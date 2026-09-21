@@ -14,14 +14,16 @@ sys.path.insert(0, str(SERVER / "tests"))
 import broker_client
 import catalog
 import deps
-import entitlements
 import jobs
 import product_capability_availability as availability
 import solar_local_graph as local
 import store
 import write_loop
 from solar_graph_context import resolve_graph_context
+from solar_sizing_client import digest
 from test_w1_design_graph import graph  # noqa: F401
+from test_w1_equipment import case  # noqa: F401
+from test_w1_graph_versions import drawing, commit, request_for, TENANT as BUNDLE_TENANT, DRAWING  # noqa: F401
 from test_w1_local_graph_adapter import seed, held
 from test_w1_local_graph_jobs import isolated_jobs, no_network  # noqa: F401
 from test_w1_solve_commit import transfer
@@ -64,8 +66,6 @@ def api(isolated_jobs, no_network, graph, tmp_path, monkeypatch):
     monkeypatch.setattr(route.deps, "effective_tools_with_provenance", lambda *a: [])
     monkeypatch.setattr(route.deps, "backedge_run_identity", lambda tenant, *a: tenant)
     monkeypatch.setattr(route.deps, "auth_live", lambda: False)
-    real_availability = entitlements.w1_tool_availability
-    monkeypatch.setattr(entitlements, "w1_tool_availability", lambda *a, **k: None)
     monkeypatch.setattr(jobs.platform_link, "resolve_submission_context", lambda *a: None)
     monkeypatch.setattr(write_loop, "backend_for_tenant", lambda *a, **k: backend)
     monkeypatch.setattr(route.catalog, "live_aps_runtime_authorized", lambda *a, **k: True)
@@ -96,7 +96,7 @@ def api(isolated_jobs, no_network, graph, tmp_path, monkeypatch):
     with held(backend) as fence:
         monkeypatch.setattr(route, "_checkout_identity", lambda *a: ("fixture-owner", fence))
         with TestClient(app) as client:
-            yield client, backend, tools, route, broker, tenant, real_availability
+            yield client, backend, tools, route, broker, tenant
 
 
 def body(api, name="solar-settings", params=None):
@@ -159,14 +159,15 @@ def test_stale_parent_fails_without_commit(api, committed):
     request["params"]["changes"]["panels_in_sequence"] = 4
     request["dwg_version"] = 1
     response = api[0].post("/api/run?wait=1", json=request)
-    assert response.json()["ok"] is False
-    assert response.json()["reason_code"] == "STALE_GRAPH_REVISION"
+    assert response.status_code == 409, response.text
+    assert response.json()["reason_code"] == "not_current_head"
+    assert response.json()["availability"]["input_ready"] is False
     assert store.load_manifest(api[1], TENANT, "solar")["head"] == 2
     rows = jobs._query("SELECT job_id FROM jobs")
-    assert len(rows) == 2
-    failed = [jobs.get_job(row["job_id"]) for row in rows
-              if row["job_id"] != committed[1]["job_id"]]
-    assert len(failed) == 1 and failed[0]["status"] == "failed"
+    assert len(rows) == 1
+    assert rows[0]["job_id"] == committed[1]["job_id"]
+    # The adapter and broker suites still prove STALE_GRAPH_REVISION for races
+    # that reach the adapter after admission.
 
 
 def test_correction_commit(api, graph):
@@ -196,8 +197,7 @@ def test_mutation_gate_prevents_commit(api, monkeypatch):
 
 
 @pytest.mark.parametrize("name", UNWIRED)
-def test_other_persisted_capabilities_refuse_before_submission(api, monkeypatch, name):
-    monkeypatch.setattr(entitlements, "w1_tool_availability", api[6])
+def test_other_persisted_capabilities_refuse_before_submission(api, name):
     response = api[0].post("/api/run?wait=1", json=body(api, name))
     assert response.status_code == 409, response.text
     assert "broker_adapter_unavailable" in response.json()["availability"]["refusal_reasons"]
@@ -205,8 +205,7 @@ def test_other_persisted_capabilities_refuse_before_submission(api, monkeypatch,
     assert store.load_manifest(api[1], TENANT, "solar")["head"] == 1
 
 
-def test_catalog_engine_readiness(api, graph, monkeypatch):
-    monkeypatch.setattr(entitlements, "w1_tool_availability", api[6])
+def test_catalog_engine_readiness(api, graph):
     families = catalog.build_catalog(deps.all_tools(TENANT))
     availability.annotate_w1_availability(
         families, api[5], "solar", project_id=graph["project"]["id"])
@@ -215,3 +214,78 @@ def test_catalog_engine_readiness(api, graph, monkeypatch):
     assert states["solar-settings"]["engine_ready"] is True
     assert states["solar-correct-string"]["engine_ready"] is True
     assert sum(state["engine_ready"] is True for state in states.values()) == 3
+
+
+def test_intake_catalog_uses_adapter_format(api, graph):
+    families = catalog.build_catalog(deps.all_tools(TENANT))
+    availability.annotate_w1_availability(
+        families, api[5], "solar", project_id=graph["project"]["id"])
+    states = {row["name"]: row["availability"] for family in families
+              for row in family["capabilities"] if row["name"] in availability.W1_CAPABILITIES}
+    settings = states["solar-settings"]
+    assert settings["engine_ready"] is True
+    assert settings["input_ready"] is True
+    assert settings["runnable"] is True
+    sizing = states["solar-size-strings"]
+    assert sizing["input_ready"] is False
+    assert sizing["input_reason"] == "persisted_graph_unavailable"
+    assert sizing["refusal_reasons"][0] == "broker_adapter_unavailable"
+
+
+@pytest.mark.parametrize("name", ["solar-settings", "solar-correct-string"])
+def test_bundle_refuses_before_submission(api, drawing, case, monkeypatch, name):
+    backend, _ = drawing
+    graph, _, _ = case
+    commit(drawing, request_for(backend, graph))
+    monkeypatch.setattr(write_loop, "backend_for_tenant", lambda *a, **k: backend)
+    tenant = deps.TenantContext(
+        BUNDLE_TENANT, tier="demo", subject="fixture-subject", authority_resolved=True)
+    api[0].app.dependency_overrides[deps.require_tenant] = lambda: tenant
+    request = body(api, name)
+    request["dwg"] = DRAWING
+    head = store.load_manifest(backend, BUNDLE_TENANT, DRAWING)["head"]
+    response = api[0].post("/api/run?wait=1", json=request)
+    assert response.status_code == 409, response.text
+    assert response.json()["reason_code"] == "licensed_graph_commit_required"
+    assert response.json()["availability"]["engine_ready"] is True
+    assert response.json()["availability"]["input_ready"] is False
+    assert not jobs._query("SELECT job_id FROM jobs")
+    assert store.load_manifest(backend, BUNDLE_TENANT, DRAWING)["head"] == head
+
+
+def test_plain_intake_refuses_before_submission(api):
+    holder, fence = api[3]._checkout_identity()
+    write_loop._put_bytes_version(
+        api[1], TENANT, "solar", json.dumps({"layers": [], "polylines": []}).encode(),
+        1, {}, holder=holder, fence=fence, require_parent_is_head=True)
+    response = api[0].post("/api/run?wait=1", json=body(api))
+    assert response.status_code == 409, response.text
+    assert response.json()["reason_code"] == "persisted_graph_unavailable"
+    assert not jobs._query("SELECT job_id FROM jobs")
+
+
+def test_correction_requires_strings(api, graph):
+    params = transfer(graph)
+    empty = copy.deepcopy(graph)
+    empty.update(strings=[], routes=[], schedules=[])
+    for panel in empty["panels"]:
+        panel["assignment"] = {"string_ref": None, "seq": None}
+    for frame in empty["frames"]:
+        frame["sequences"] = []
+        for record in frame["panel_assignments"]:
+            record.update(string_ref=None, seq=None, inverter_id=None, string_input_number=None)
+        for row in frame["matrix"]:
+            for cell in row:
+                cell.update(seq=None, inverter_id=None, string_input_number=None)
+    for inverter in empty["inverters"]:
+        inverter["input_assignments"] = []
+    intake = {"layers": [], "polylines": [], "solar_design_graph": empty,
+              "solar_design_graph_sha256": digest(empty)}
+    holder, fence = api[3]._checkout_identity()
+    write_loop._put_bytes_version(
+        api[1], TENANT, "solar", json.dumps(intake).encode(),
+        1, {}, holder=holder, fence=fence, require_parent_is_head=True)
+    response = api[0].post("/api/run?wait=1", json=body(api, "solar-correct-string", params))
+    assert response.status_code == 409, response.text
+    assert response.json()["reason_code"] == "strings_required"
+    assert not jobs._query("SELECT job_id FROM jobs")

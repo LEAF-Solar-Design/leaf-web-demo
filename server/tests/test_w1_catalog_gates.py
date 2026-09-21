@@ -126,7 +126,9 @@ def test_persisted_bundle_is_tenant_drawing_and_version_scoped(drawing, case, mo
     assert row["availability"]["runnable"] is True
     settings = rows(**context)["solar-settings"]["availability"]
     assert settings["engine_ready"] is True
-    assert settings["runnable"] == settings["input_ready"]
+    assert settings["input_ready"] is False
+    assert settings["input_reason"] == "licensed_graph_commit_required"
+    assert settings["runnable"] is False
     assert rows(**context)["solar-size-strings"]["availability"]["engine_ready"] is False
     for tenant, drawing_id, project, version in (
         ("another-tenant", DRAWING, context["project_id"], "head"),
@@ -136,6 +138,23 @@ def test_persisted_bundle_is_tenant_drawing_and_version_scoped(drawing, case, mo
     ):
         state = availability.w1_input_readiness(tenant, drawing_id, project_id=project, version=version)
         assert not any(item["input_ready"] for item in state.values())
+
+
+def test_input_readiness_follows_the_adapter_format(drawing, case, monkeypatch):
+    graph, _, _ = case
+    backend, _ = drawing
+    request = request_for(backend, graph)
+    commit(drawing, request)
+    monkeypatch.setattr(write_loop, "backend_for_tenant", lambda *a, **k: backend)
+    expected = availability.w1_graph_readiness(request["graph"])
+    actual = availability.w1_input_readiness(
+        TENANT, DRAWING, project_id=graph["project"]["id"])
+    for name in availability.W1_CAPABILITIES:
+        if availability.capability_adapter(name) == availability.LOCAL_GRAPH_COMMIT_ADAPTER:
+            assert actual[name] == {
+                "input_ready": False, "input_reason": "licensed_graph_commit_required"}
+        else:
+            assert actual[name] == expected[name]
 
 
 @pytest.mark.parametrize("drawing_id,version", [("../other", "head"), ([], "head"),
