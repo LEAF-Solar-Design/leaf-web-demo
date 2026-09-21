@@ -346,6 +346,7 @@ def _checkout_identity(tenant_id: Any, drawing_id: str,
     when its state cannot be read at all: the run then publishes freely on an
     unlocked drawing and is refused against any live lease, which is the
     fail-closed answer for a caller that has proven nothing.
+    A local graph commit is the exception: it requires a held checkout.
 
     A REJECTED capability is deliberately not an error here. The gate that
     matters runs in the store, under the row lock, at the moment of publish
@@ -538,7 +539,7 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
                 dwg_version = store.load_manifest(backend, str(tenant_id), target_drawing_id)["head"]
                 if type(dwg_version) is not int or dwg_version < 1:
                     raise ValueError()
-            except (KeyError, AttributeError, TypeError, ValueError, OSError, RecursionError):
+            except (KeyError, AttributeError, TypeError, ValueError, OSError, RecursionError, RuntimeError):
                 return JSONResponse(status_code=409, content=with_envelope_fields({
                     "error": error_obj(ErrorCode.BAD_PARAMS, "GRAPH_CONTEXT_UNAVAILABLE", retryable=False),
                     "reason_code": "GRAPH_CONTEXT_UNAVAILABLE",
@@ -631,8 +632,16 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
                     raise ValueError(
                         "effective catalog changed after approval; refresh tools and confirm again")
                 if is_local_graph_commit(tool):
-                    backend = write_loop.backend_for_tenant(str(tenant_id), aps_live=False, da=None)
-                    current_head = _store().load_manifest(backend, str(tenant_id), target_drawing_id)["head"]
+                    try:
+                        backend = write_loop.backend_for_tenant(str(tenant_id), aps_live=False, da=None)
+                        current_head = _store().load_manifest(backend, str(tenant_id), target_drawing_id)["head"]
+                        if type(current_head) is not int or current_head < 1:
+                            raise TypeError()
+                    except (KeyError, AttributeError, TypeError, OSError, RecursionError, RuntimeError):
+                        return JSONResponse(status_code=409, content=with_envelope_fields({
+                            "error": error_obj(ErrorCode.BAD_PARAMS, "GRAPH_CONTEXT_UNAVAILABLE", retryable=False),
+                            "reason_code": "GRAPH_CONTEXT_UNAVAILABLE",
+                        }))
                 else:
                     current_head = _legacy_drawing_head(str(tenant_id), req.dwg)
                 if current_head != req.expected_drawing_head:
@@ -683,6 +692,7 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
                 # id, which no lock can ever hold (store.acquire_checkout refuses
                 # it), so its run is refused against every active lock and still
                 # publishes freely on an unlocked drawing.
+                # A local graph commit is the exception: it requires a held checkout.
                 checkout_holder=checkout_holder,
                 checkout_fence=checkout_fence,
             )

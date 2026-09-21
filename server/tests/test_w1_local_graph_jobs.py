@@ -421,3 +421,221 @@ def test_worker_rejects_unproven_receipt(api, mutation):
     assert len(rows) == 1
     rec = jobs.get_job(rows[0]["job_id"])
     assert rec["status"] == "failed" and rec["error"]["error_code"] == ErrorCode.INTERNAL
+
+
+@pytest.mark.parametrize("changes", [
+    {"before_rev": 100, "after_rev": 101},
+    {"before_rev": 1, "after_rev": 2},
+    {"before_graph_sha256": "0" * 64},
+])
+def test_provenance_reads_revisions_and_parent_digest(committed, changes):
+    backend, original = committed
+    result = copy.deepcopy(original)
+    result.update(changes)
+    with pytest.raises(ValueError, match="^graph commit terminal proof rejected$"):
+        proof(result, backend)
+
+
+def test_provenance_runtime_error_is_sanitized(committed, monkeypatch):
+    _, result = committed
+
+    def unavailable(*a, **k):
+        raise RuntimeError("no client")
+
+    monkeypatch.setattr(write_loop, "backend_for_tenant", unavailable)
+    with pytest.raises(ValueError, match="^graph commit terminal proof rejected$") as exc:
+        proof(result, None)
+    assert "no client" not in str(exc.value)
+
+
+@pytest.mark.parametrize("value", [
+    1e18, -0.0, float(10**15), {"changes": {"optimizer_ratio": [1e300]}},
+    float("inf"), float("-inf"), float("nan"),
+])
+def test_unstable_numbers(value):
+    assert local.stable_numbers(value) is False
+
+
+@pytest.mark.parametrize("value", [
+    0.5, 3, True, 1e-7, 999999999999999.0, None, "text", {"empty": [(), {}]},
+])
+def test_stable_numbers_control(value):
+    assert local.stable_numbers(value) is True
+
+
+@pytest.mark.parametrize("value", [1e18, -0.0, float(10**15), [1e300]])
+def test_adapter_refuses_unstable_numbers_before_read(graph, tmp_path, monkeypatch, value):
+    backend, _ = seed(tmp_path, monkeypatch, graph)
+    request = params()
+    request["changes"] = {"optimizer_ratio": value}
+    monkeypatch.setattr(local, "_load_builtin", lambda *a: pytest.fail("builtin loaded"))
+    with held(backend) as fence:
+        with monkeypatch.context() as patch:
+            patch.setattr(local, "resolve_graph_context",
+                          lambda *a, **k: pytest.fail("store read"))
+            with pytest.raises(local.GraphValidationError) as exc:
+                run(backend, request, fence=fence)
+        assert exc.value.code == "INVALID_NUMERIC_PARAM"
+        assert store.load_manifest(backend, TENANT, "solar")["latest"] == 1
+
+
+@pytest.mark.parametrize("mutation,message", [
+    ("number", "local graph commit requires stable numeric parameters"),
+    ("drawing", "local graph commit drawing id must equal the drawing"),
+])
+def test_submission_rejects_numeric_or_drawing_mismatch(enabled, isolated_jobs, mutation, message):
+    args = broker_args()
+    args.pop("job_id")
+    if mutation == "number":
+        args["params"]["changes"]["optimizer_ratio"] = 1e18
+    else:
+        args["params"]["drawing_id"] = "other"
+    with pytest.raises(ValueError, match="^" + message + "$"):
+        jobs.submit_job(**args)
+    assert not jobs._query("SELECT job_id FROM jobs")
+
+
+def test_broker_rejects_drawing_mismatch_before_post(enabled, monkeypatch):
+    monkeypatch.setattr(broker_client.requests, "post",
+                        lambda *a, **k: pytest.fail("unexpected POST"))
+    args = broker_args()
+    args["params"]["drawing_id"] = "other"
+    with pytest.raises(ValueError, match="^local graph commit drawing id must equal the drawing$"):
+        broker_client.run_via_broker(**args)
+
+
+@pytest.mark.parametrize("ok,status,missing", [
+    (1, 200, False), ("true", 200, False), (None, 200, False),
+    (None, 200, True), (1, 500, False),
+])
+def test_broker_rejects_non_boolean_ok(enabled, committed, monkeypatch, ok, status, missing):
+    _, result = committed
+    body = {"result": result}
+    if not missing:
+        body["ok"] = ok
+    monkeypatch.setattr(broker_client.requests, "post", lambda *a, **k: Reply(body, status))
+    with pytest.raises(broker_client.BrokerReceiptRejected):
+        broker_client.run_via_broker(**broker_args())
+
+
+@pytest.mark.parametrize("mutation,message", [
+    ("runtime", "graph commit terminal proof rejected"),
+    ("truthy", "graph commit receipt rejected"),
+    ("durable", "graph commit terminal proof rejected"),
+])
+def test_worker_records_terminal_rejection(api, monkeypatch, mutation, message):
+    client, backend, body, _, _ = api
+    real_broker = broker_client.run_via_broker
+    real_validate = jobs._validate_terminal_context
+    completing = []
+
+    def unavailable(*a, **k):
+        raise RuntimeError("no client")
+
+    def broker_reply(*a, **k):
+        env = real_broker(*a, **k)
+        if mutation == "runtime":
+            monkeypatch.setattr(write_loop, "backend_for_tenant", unavailable)
+        elif mutation == "truthy":
+            env["ok"] = 1
+        return env
+
+    def validate(status, *a, **k):
+        if mutation == "durable" and status == "complete":
+            completing.append(True)
+            raise ValueError("x")
+        return real_validate(status, *a, **k)
+
+    monkeypatch.setattr(broker_client, "run_via_broker", broker_reply)
+    monkeypatch.setattr(jobs, "_validate_terminal_context", validate)
+    response = client.post("/api/run?wait=1", json=body)
+    assert response.status_code == DEFAULT_HTTP_STATUS[ErrorCode.INTERNAL], response.text
+    rows = jobs._query("SELECT job_id FROM jobs")
+    assert len(rows) == 1
+    rec = jobs.get_job(rows[0]["job_id"])
+    assert rec["status"] == "failed"
+    assert rec["error"]["message"] == message
+    assert "no client" not in json.dumps(rec)
+    assert store.load_manifest(backend, TENANT, "solar")["head"] == 2
+    if mutation == "durable":
+        assert completing == [True]
+        assert rec["provenance"]["new_version"] == 2
+
+
+def test_durable_completion_validates_graph_provenance(api, monkeypatch):
+    client, backend, body, _, route = api
+
+    class QueuedExecutor:
+        def submit(self, *a, **k):
+            pass
+
+    monkeypatch.setattr(jobs, "_executors",
+                        {jobs.LANE_FAST: QueuedExecutor(), jobs.LANE_SLOW: QueuedExecutor()})
+    response = client.post("/api/run", json=body)
+    assert response.status_code == 202, response.text
+    rows = jobs._query("SELECT job_id FROM jobs")
+    assert len(rows) == 1
+    job_id = rows[0]["job_id"]
+    worker = "fixture-worker"
+    attempt = jobs.claim_lease(job_id, worker)
+    assert attempt == 1
+    _, fence = route._checkout_identity(TENANT, "solar", None)
+    result = run(backend, fence=fence, job_id=job_id)
+    provenance = {"attempt": attempt, "execution_path": "local",
+                  **proof(result, backend, job_id=job_id)}
+    provenance["graph_sha256"] = "0" * 64
+    env = {"ok": True, "result": result, "execution_provenance": provenance}
+    with pytest.raises(ValueError):
+        jobs.complete_callback(job_id, "complete", result_env=env, worker_id=worker,
+                               provenance=provenance)
+    assert jobs.get_job(job_id)["status"] != "complete"
+
+
+@pytest.mark.parametrize("mutation", ["missing", "no_head", "invalid_head"])
+def test_approved_run_context_disappears_after_checkout(api, monkeypatch, mutation):
+    client, _, body, _, route = api
+    pin = {"catalog_commit": "a" * 40, "effective_catalog_digest": "b" * 64}
+    monkeypatch.setattr(route.customization_service, "effective_catalog_pin", lambda *a: pin)
+    body.update(pin)
+    body.update(dwg_version=1, expected_drawing_head=1,
+                tool_manifest_sha256=body["catalog_digest"])
+    real_identity = route._checkout_identity
+    reads = []
+
+    def unavailable(*a, **k):
+        reads.append(True)
+        if mutation == "missing":
+            raise FileNotFoundError("unavailable")
+        return {} if mutation == "no_head" else {"head": True}
+
+    def exchange(*a, **k):
+        identity = real_identity(*a, **k)
+        monkeypatch.setattr(store, "load_manifest", unavailable)
+        return identity
+
+    with monkeypatch.context() as patch:
+        patch.setattr(route, "_checkout_identity", exchange)
+        # Restore the store before the held-checkout fixture releases its lease.
+        original_load = store.load_manifest
+        try:
+            response = client.post("/api/run", json=body)
+        finally:
+            monkeypatch.setattr(store, "load_manifest", original_load)
+    assert reads == [True]
+    assert response.status_code == 409, response.text
+    assert response.json()["reason_code"] == "GRAPH_CONTEXT_UNAVAILABLE"
+    assert not jobs._query("SELECT job_id FROM jobs")
+
+
+def test_unpinned_run_runtime_context_unavailable(api, monkeypatch):
+    client, _, body, _, _ = api
+
+    def unavailable(*a, **k):
+        raise RuntimeError("no client")
+
+    monkeypatch.setattr(write_loop, "backend_for_tenant", unavailable)
+    response = client.post("/api/run", json=body)
+    assert response.status_code == 409, response.text
+    assert response.json()["reason_code"] == "GRAPH_CONTEXT_UNAVAILABLE"
+    assert "no client" not in response.text
+    assert not jobs._query("SELECT job_id FROM jobs")

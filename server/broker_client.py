@@ -108,7 +108,8 @@ def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
 
     ``dwg_version`` (None -> head, unchanged behaviour) pins the run to a specific
     immutable drawing version; carried straight through as an extra JSON field so
-    an older broker (that ignores unknown fields) stays compatible.
+    an older broker (that ignores unknown fields) stays compatible. A local graph
+    commit must arrive pinned.
     ``ledger_event_key`` is the durable job-execution identity used by a
     PostgreSQL broker to prevent duplicate paid execution across task retries.
     ``checkout_holder``/``checkout_fence`` carry the submitting session's
@@ -140,6 +141,8 @@ def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
                 or checkout_holder == store.ANONYMOUS_HOLDER
                 or type(checkout_fence) is not int or checkout_fence < 1):
             raise ValueError("local graph commit requires a job, a pinned version and a checkout")
+        if params.get("drawing_id") != dwg:
+            raise ValueError("local graph commit drawing id must equal the drawing")
     payload = {"tenant_id": tenant_id, "tool": tool, "params": params,
                   "dwg": dwg, "aps_live": bool(aps_live), "dwg_version": dwg_version,
                   "ledger_event_key": ledger_event_key,
@@ -166,7 +169,8 @@ def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
             body = resp.json()
             if not isinstance(body, dict):
                 raise BrokerReceiptRejected()
-            if body.get("ok") is True:
+            ok = body.get("ok")
+            if ok is True:
                 result = body.get("result")
                 if (type(status) is not int or not 200 <= status <= 299
                         or not isinstance(result, dict)
@@ -177,6 +181,8 @@ def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
                         or not isinstance(result.get("new_version"), dict)
                         or result["new_version"].get("parent") != dwg_version):
                     raise BrokerReceiptRejected()
+            elif ok is not False:
+                raise BrokerReceiptRejected()
             return body
         return resp.json()
     except (requests.ConnectionError, requests.Timeout) as exc:

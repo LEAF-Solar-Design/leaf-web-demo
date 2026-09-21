@@ -581,7 +581,8 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
     a no-op and the spine is byte-identical to before.
 
     ``dwg_version`` (None -> head, unchanged behaviour) pins the run to a specific
-    immutable drawing version (da/store.py resolve_version). It is threaded to the
+    immutable drawing version (da/store.py resolve_version). A local graph commit
+    must arrive pinned. It is threaded to the
     broker call AND persisted on the job row as an additive ``dwg_version`` column
     (resolved 2026-07-22, closing the follow-up recorded at the pinning merge), so
     ``GET /api/jobs/{id}`` shows which version a past run was pinned to. Already-
@@ -610,6 +611,7 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
     if is_local_graph_commit(tool):
         import write_loop
         import store
+        from solar_local_graph import stable_numbers
 
         if aps_live:
             raise ValueError("local graph commit does not use APS execution")
@@ -621,6 +623,10 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
             raise ValueError("local graph commit requires a checkout")
         if not isinstance(params.get("drawing_id"), str):
             raise ValueError("local graph commit requires a drawing id")
+        if params["drawing_id"] != dwg:
+            raise ValueError("local graph commit drawing id must equal the drawing")
+        if not stable_numbers(params):
+            raise ValueError("local graph commit requires stable numeric parameters")
     return _submit_job(
         tenant_id, tool, params, dwg, aps_live, org_id, project_id, dwg_version,
         idempotency_key=idempotency_key, authority_mode=authority_mode,
@@ -1452,6 +1458,11 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
 
     env = holder.get("env") or {}
     from product_capability_availability import is_cloud_proposal, is_local_graph_commit
+    if is_local_graph_commit(tool) and env.get("ok") and env.get("ok") is not True:
+        _finish(job_id, "failed", started, worker_id=worker_id,
+                error=error_obj(ErrorCode.INTERNAL, "graph commit receipt rejected", False),
+                provenance={"attempt": attempt, "execution_path": "local"})
+        return
     if env.get("ok"):
         provenance = {"attempt": attempt, "execution_path": "cloud" if (
             aps_live or is_cloud_proposal(tool)) else "local"}
@@ -1484,6 +1495,15 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
             provenance["cad_timing"] = cad_timing
         env = dict(env)
         env["execution_provenance"] = provenance
+        if is_local_graph_commit(tool):
+            try:
+                _finish(job_id, "complete", started, result_env=env, worker_id=worker_id,
+                        provenance=provenance)
+            except ValueError:
+                _finish(job_id, "failed", started, worker_id=worker_id,
+                        error=error_obj(ErrorCode.INTERNAL, "graph commit terminal proof rejected", False),
+                        provenance=provenance)
+            return
         _finish(job_id, "complete", started, result_env=env, worker_id=worker_id,
                 provenance=provenance)
     else:
