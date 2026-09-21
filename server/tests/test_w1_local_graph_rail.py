@@ -26,7 +26,8 @@ from test_w1_equipment import case  # noqa: F401
 from test_w1_graph_versions import drawing, commit, request_for, TENANT as BUNDLE_TENANT, DRAWING  # noqa: F401
 from test_w1_local_graph_adapter import seed, held
 from test_w1_local_graph_jobs import isolated_jobs, no_network  # noqa: F401
-from test_w1_solve_commit import transfer
+from test_w1_solve_commit import transfer, seed_graphless
+from test_w1_local_graph_seed import request as seed_params
 
 TENANT = "fixture-tenant"
 UNWIRED = (
@@ -37,6 +38,17 @@ UNWIRED = (
 
 @pytest.fixture
 def api(isolated_jobs, no_network, graph, tmp_path, monkeypatch):
+    backend, _ = seed(tmp_path, monkeypatch, graph)
+    yield from _api(backend, tmp_path, monkeypatch)
+
+
+@pytest.fixture
+def seed_api(isolated_jobs, no_network, tmp_path, monkeypatch):
+    backend, _ = seed_graphless(tmp_path, monkeypatch)
+    yield from _api(backend, tmp_path, monkeypatch)
+
+
+def _api(backend, tmp_path, monkeypatch):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     from routers import jobs as route
@@ -52,7 +64,6 @@ def api(isolated_jobs, no_network, graph, tmp_path, monkeypatch):
     monkeypatch.setattr(broker, "_cap_preflight", lambda *a: None)
     monkeypatch.setattr(broker, "_emit_aps_metric", lambda *a: None)
     monkeypatch.setattr(broker, "_get_da", lambda: pytest.fail("APS must not execute"))
-    backend, _ = seed(tmp_path, monkeypatch, graph)
     tools = {tool["name"]: tool for tool in
              json.loads((SERVER / "write_tools.json").read_text())["tools"]}
 
@@ -260,7 +271,7 @@ def test_plain_intake_refuses_before_submission(api):
         1, {}, holder=holder, fence=fence, require_parent_is_head=True)
     response = api[0].post("/api/run?wait=1", json=body(api))
     assert response.status_code == 409, response.text
-    assert response.json()["reason_code"] == "persisted_graph_unavailable"
+    assert response.json()["reason_code"] == "graph_seed_required"
     assert not jobs._query("SELECT job_id FROM jobs")
 
 
@@ -363,3 +374,149 @@ def test_digit_string_version_reads_like_its_integer(api, graph):
     assert by_text["solar-settings"]["input_ready"] is True
     assert by_text["solar-size-strings"] == {
         "input_ready": False, "input_reason": "persisted_graph_unavailable"}
+
+
+def seed_body(api):
+    params = seed_params(api[1])
+    params.pop("drawing_id")
+    return body(api, params=params)
+
+
+@pytest.fixture
+def seeded(seed_api):
+    response = seed_api[0].post("/api/run?wait=1", json=seed_body(seed_api))
+    assert response.status_code == 200, response.text
+    env = response.json()
+    assert env["ok"] is True
+    return env, jobs.get_job(env["result"]["job_id"])
+
+
+def seed_catalog(api):
+    families = catalog.build_catalog(deps.all_tools(TENANT))
+    availability.annotate_w1_availability(families, api[5], "solar")
+    return {row["name"]: row["availability"] for family in families
+            for row in family["capabilities"] if row["name"] in availability.W1_CAPABILITIES}
+
+
+def test_seed_run_receipt_proof_graph_and_ledger(seed_api, seeded):
+    env, rec = seeded
+    result = env["result"]
+    assert result["schema_version"] == local.SEED_RESULT_SCHEMA
+    assert result["initialized"] is True
+    assert result["before_rev"] is None
+    assert result["after_rev"] == 1
+    assert result["new_version"] == {"drawing_id": "solar", "version": 2, "parent": 1}
+    assert rec["status"] == "complete"
+    assert rec["dwg_version"] == 1
+    for key, value in {"seeded": True, "execution_mode": "local_graph_commit",
+                       "source_version": 1, "new_version": 2}.items():
+        assert rec["provenance"][key] == value
+    assert rec["provenance"] == env["execution_provenance"]
+    assert store.load_manifest(seed_api[1], TENANT, "solar")["head"] == 2
+    graph = resolve_graph_context(seed_api[1], TENANT, "solar", "head")["graph"]
+    assert graph["rev"] == 1
+    assert graph["settings"]["panels_in_sequence"] == 3
+    assert graph["panels"] == []
+    assert graph["strings"] == []
+    entries = [json.loads(line) for line in seed_api[4].LEDGER_PATH.read_text().splitlines()]
+    assert len(entries) == 1
+    assert entries[0]["tool"] == "solar-settings"
+
+
+def test_seed_then_ordinary_settings(seed_api, seeded):
+    response = seed_api[0].post("/api/run?wait=1", json=body(seed_api, params={
+        "expected_rev": 1, "changes": {"num_mppt": 2}}))
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["schema_version"] == local.RESULT_SCHEMA
+    assert result["new_version"] == {"drawing_id": "solar", "version": 3, "parent": 2}
+    assert result["before_rev"] == 1
+    assert result["after_rev"] == 2
+
+
+def test_seed_then_catalog(seed_api, seeded):
+    states = seed_catalog(seed_api)
+    assert states["solar-settings"]["input_ready"] is True
+    assert states["solar-settings"]["runnable"] is True
+    assert states["solar-correct-string"]["input_ready"] is False
+    assert states["solar-correct-string"]["input_reason"] == "strings_required"
+
+
+@pytest.mark.parametrize("version,reason", [
+    (None, "graph_already_embedded"), (1, "not_current_head"),
+])
+def test_new_seed_submission_after_seed_refuses(seed_api, seeded, version, reason):
+    request = seed_body(seed_api)
+    if version is not None:
+        request["dwg_version"] = version
+    before = jobs._query("SELECT job_id FROM jobs")
+    response = seed_api[0].post("/api/run?wait=1", json=request)
+    assert response.status_code == 409, response.text
+    assert response.json()["reason_code"] == reason
+    assert jobs._query("SELECT job_id FROM jobs") == before
+    assert store.load_manifest(seed_api[1], TENANT, "solar")["head"] == 2
+
+
+def test_graphless_ordinary_run_requires_seed(seed_api):
+    response = seed_api[0].post("/api/run?wait=1", json=body(seed_api))
+    assert response.status_code == 409, response.text
+    env = response.json()
+    assert env["reason_code"] == "graph_seed_required"
+    assert env["availability"]["engine_ready"] is True
+    assert env["availability"]["input_ready"] is False
+    assert not jobs._query("SELECT job_id FROM jobs")
+
+
+@pytest.mark.parametrize("defect,reason", [
+    ("hash", "source_hash_mismatch"), ("units", "invalid_seed_request"),
+    ("correction", "invalid_seed_request"),
+])
+def test_seed_refusals_before_submission(seed_api, defect, reason):
+    request = seed_body(seed_api)
+    if defect == "hash":
+        request["params"]["initialize"]["source_intake_sha256"] = "0" * 64
+    elif defect == "units":
+        request["params"]["initialize"]["units"]["drawing_units"] = "parsec"
+    else:
+        request = body(seed_api, "solar-correct-string", request["params"])
+    response = seed_api[0].post("/api/run?wait=1", json=request)
+    assert response.status_code == 409, response.text
+    assert response.json()["reason_code"] == reason
+    assert not jobs._query("SELECT job_id FROM jobs")
+    manifest = store.load_manifest(seed_api[1], TENANT, "solar")
+    assert manifest["head"] == 1
+    assert len(manifest["versions"]) == 1
+
+
+def test_seed_on_embedded_graph_refuses_before_submission(api):
+    response = api[0].post("/api/run?wait=1", json=seed_body(api))
+    assert response.status_code == 409, response.text
+    assert response.json()["reason_code"] == "graph_already_embedded"
+    assert not jobs._query("SELECT job_id FROM jobs")
+    assert store.load_manifest(api[1], TENANT, "solar")["head"] == 1
+
+
+def test_graphless_catalog_advertises_seed(seed_api):
+    state = seed_catalog(seed_api)["solar-settings"]
+    assert state["engine_ready"] is True
+    assert state["input_ready"] is False
+    assert state["input_reason"] == "graph_seed_required"
+    assert state["runnable"] is False
+
+
+def test_seed_builtin_stale_revision_is_admitted_then_fails(seed_api):
+    request = seed_body(seed_api)
+    request["params"]["expected_rev"] = 1
+    response = seed_api[0].post("/api/run?wait=1", json=request)
+    assert response.status_code == 400, response.text
+    env = response.json()
+    assert env["ok"] is False
+    assert env["error"]["error_code"] == "BAD_PARAMS"
+    assert env["error"]["message"] == "STALE_GRAPH_REVISION"
+    assert env["reason_code"] == "STALE_GRAPH_REVISION"
+    rows = jobs._query("SELECT job_id FROM jobs")
+    assert len(rows) == 1
+    assert jobs.get_job(rows[0]["job_id"])["status"] == "failed"
+    manifest = store.load_manifest(seed_api[1], TENANT, "solar")
+    assert manifest["head"] == 1
+    assert len(manifest["versions"]) == 1

@@ -17,7 +17,8 @@ import write_loop
 import store
 import leaf_cloud_client as cloud
 from solar_design_graph import GraphValidationError, serialize_graph, validate_graph
-from solar_graph_seed import new_empty_graph, resolve_seed_context, seed_entity_id, seed_units
+from solar_graph_seed import (new_empty_graph, resolve_seed_context, seed_entity_id,
+                             seed_units, validate_seed_request)
 from solar_sizing_client import checked_graph
 from test_w1_design_graph import graph  # noqa: F401
 from test_w1_solve_commit import seed
@@ -58,6 +59,84 @@ def empty_graph(**overrides):
             "units": units(), "created_at": "2026-09-21T00:00:00Z"}
     args.update(overrides)
     return new_empty_graph(**args)
+
+
+def seed_request():
+    return {"schema_version": 1, "source_intake_sha256": "b" * 64, "units": units()}
+
+
+def test_validate_seed_request_identity():
+    request = seed_request()
+    assert validate_seed_request(request) is request
+
+
+@pytest.mark.parametrize("defect", [
+    "list", "null", "extra", "missing_units", "version_2", "version_bool", "version_text",
+    "hash_text", "hash_short", "hash_upper", "hash_int", "unknown_units", "short_matrix",
+])
+def test_validate_seed_request_refuses_malformed(defect):
+    request = seed_request()
+    if defect == "list":
+        request = []
+    elif defect == "null":
+        request = None
+    elif defect == "extra":
+        request["extra"] = None
+    elif defect == "missing_units":
+        del request["units"]
+    elif defect.startswith("version_"):
+        request["schema_version"] = {"version_2": 2, "version_bool": True,
+                                     "version_text": "1"}[defect]
+    elif defect.startswith("hash_"):
+        request["source_intake_sha256"] = {
+            "hash_text": "xyz", "hash_short": "b" * 63,
+            "hash_upper": "B" * 64, "hash_int": 1}[defect]
+    elif defect == "unknown_units":
+        request["units"]["drawing_units"] = "parsec"
+    else:
+        request["units"]["wcs_to_ucs"].pop()
+    with refused("INVALID_SEED_REQUEST"):
+        validate_seed_request(request)
+
+
+class SeedString(str):
+    pass
+
+
+class SeedList(list):
+    pass
+
+
+class SeedDict(dict):
+    pass
+
+
+@pytest.mark.parametrize("field", [
+    "elevation_datum", "crs", "drawing_units", "wcs_to_ucs", "units",
+])
+def test_seed_units_refuses_subclasses(field):
+    request = units()
+    request["crs"] = "local"
+    assert seed_units(request)["crs"] == "local"
+    if field == "units":
+        request = SeedDict(request)
+    elif field == "wcs_to_ucs":
+        request[field] = SeedList(request[field])
+    else:
+        request[field] = SeedString(request[field])
+    with refused("INVALID_SEED_REQUEST"):
+        seed_units(request)
+
+
+@pytest.mark.parametrize("field", ["request", "source_intake_sha256"])
+def test_seed_request_refuses_subclasses(field):
+    request = seed_request()
+    if field == "request":
+        request = SeedDict(request)
+    else:
+        request[field] = SeedString(request[field])
+    with refused("INVALID_SEED_REQUEST"):
+        validate_seed_request(request)
 
 
 @pytest.mark.parametrize("tenant,drawing_id,kind,expected", [
