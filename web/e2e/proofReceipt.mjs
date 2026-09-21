@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
+import * as path from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const EVIDENCE_TIERS = new Set(['contract', 'local-e2e', 'staging'])
@@ -159,12 +160,13 @@ export function makeProofReceipt(input) {
   return receipt
 }
 
-function proofArtifactCandidates(artifact, receiptPath, { cwd = process.cwd() } = {}) {
+export function proofArtifactCandidates(artifact, receiptPath, { cwd = process.cwd(), pathApi = path } = {}) {
   if (typeof artifact !== 'string') return []
-  if (isAbsolute(artifact)) return [artifact]
+  if (pathApi.isAbsolute(artifact)) return [artifact]
+  if (/^[A-Za-z]:(?![\\/])/.test(artifact)) return [pathApi.resolve(cwd, artifact)]
   // Receipt-relative: cat-operator-proof.spec.mjs:79, reduced-motion.spec.mjs:77,
   // cat-standards-surface.spec.mjs:304. Repo-relative: local/standards-surface.spec.mjs:112,136.
-  return [join(dirname(receiptPath), artifact), join(cwd, '..', artifact), join(cwd, artifact)]
+  return [pathApi.join(pathApi.dirname(receiptPath), artifact), pathApi.join(cwd, '..', artifact), pathApi.join(cwd, artifact)]
 }
 
 export function resolveProofArtifact(artifact, receiptPath, options = {}) {

@@ -6,9 +6,10 @@
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import * as path from 'node:path'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { makeProofReceipt, resolveProofArtifact, writeProofReceipt } from './proofReceipt.mjs'
+import { makeProofReceipt, proofArtifactCandidates, resolveProofArtifact, writeProofReceipt } from './proofReceipt.mjs'
 
 const nonStagingBaseInput = {
   evidence_tier: 'local-e2e',
@@ -136,6 +137,36 @@ test('the receipt stores the declared artifact string, never the resolved path',
     assert.deepEqual(receipt.artifacts, ['artifacts/x.png'])
     assert.deepEqual(JSON.parse(readFileSync(receiptPath, 'utf8')).artifacts, ['artifacts/x.png'])
   })
+})
+
+test('a Windows drive-relative artifact resolves against cwd on its drive', () => {
+  const receiptPath = 'C:\\tmp\\r\\receipt.json'
+  const options = { cwd: 'C:\\tmp\\w', pathApi: path.win32 }
+  assert.deepEqual(proofArtifactCandidates('C:web\\e2e\\x.png', receiptPath, options), [
+    'C:\\tmp\\w\\web\\e2e\\x.png',
+  ])
+  assert.deepEqual(proofArtifactCandidates('web\\e2e\\x.png', receiptPath, options), [
+    'C:\\tmp\\r\\web\\e2e\\x.png',
+    'C:\\tmp\\web\\e2e\\x.png',
+    'C:\\tmp\\w\\web\\e2e\\x.png',
+  ])
+  assert.deepEqual(proofArtifactCandidates('C:web', receiptPath, options), ['C:\\tmp\\w\\web'])
+  assert.deepEqual(proofArtifactCandidates('C:\\web', receiptPath, options), ['C:\\web'])
+  assert.deepEqual(proofArtifactCandidates('C:/web', receiptPath, options), ['C:/web'])
+  assert.deepEqual(proofArtifactCandidates('web', receiptPath, options), [
+    'C:\\tmp\\r\\web', 'C:\\tmp\\web', 'C:\\tmp\\w\\web',
+  ])
+})
+
+test('the cat standards caller prepares its video directory before the receipt', () => {
+  const source = readFileSync(new URL('./cat-standards-surface.spec.mjs', import.meta.url), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '')
+  assert.match(source, /async\s*\(\s*\{\s*page\s*\}\s*,\s*testInfo\s*\)\s*=>/)
+  const prepareIndex = source.indexOf("testInfo.outputPath('video.webm')")
+  const receiptIndex = source.indexOf('writeProofReceipt(')
+  assert.ok(prepareIndex >= 0)
+  assert.ok(receiptIndex > prepareIndex)
 })
 
 test('accepts a plain two-letter/two-digit capability id', () => {
