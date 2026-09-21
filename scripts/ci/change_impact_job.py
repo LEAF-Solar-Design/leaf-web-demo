@@ -107,16 +107,34 @@ def print_output(value):
         print(value, end="" if value.endswith("\n") else "\n")
 
 
+VENDORED_CHECKER = Path("scripts") / "ci" / "vendor" / "impact" / "impact.py"
+
+
+def locate_checker(repo):
+    """Lookup order: CHANGE_IMPACT_CHECKER, the copy vendored in this repo (pinned by
+    scripts/ci/vendor/impact/VENDORED.json, so CI needs no network and no IAM change),
+    then a host install under ~/.claude. Returns (path, source) or (None, None)."""
+    override = os.environ.get("CHANGE_IMPACT_CHECKER")
+    if override:
+        path = Path(override).expanduser()
+        return (path, "env") if path.is_file() else (None, None)
+    vendored = Path(repo) / VENDORED_CHECKER
+    if vendored.is_file():
+        return vendored, "vendored"
+    home = Path.home() / ".claude" / "scripts" / "impact" / "impact.py"
+    if home.is_file():
+        return home, "home"
+    return None, None
+
+
 def run(args):
     started = time.monotonic()
-    override = os.environ.get("CHANGE_IMPACT_CHECKER")
-    checker = Path(override).expanduser() if override else (
-        Path.home() / ".claude" / "scripts" / "impact" / "impact.py"
-    )
-    if not checker.is_file():
+    repo = Path(args.repo).resolve()
+    checker, checker_source = locate_checker(repo)
+    if checker is None:
         print("change-impact: checker not installed on this runner, skipped")
         return 0
-    repo = Path(args.repo).resolve()
+    print(f"change-impact: checker={checker_source} {checker}", flush=True)
     head = git_sha(repo, args.head)
     if not head:
         print("change-impact: SKIP head could not be resolved to 40 hex")

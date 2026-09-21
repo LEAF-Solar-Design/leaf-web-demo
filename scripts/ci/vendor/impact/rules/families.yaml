@@ -1,0 +1,33 @@
+schema_version: 1
+families:
+  - id: contracts
+    trigger: {entity: contract, side: any}
+    relationship: producer-to-named-consumers
+    concerns: [contracts, tests, docs_runbooks]
+    evidence: consumer-compatibility-check
+    stage: both
+    note: a touched producer path requires one row per consumer; a prose reason never satisfies it
+  - id: persistence
+    trigger: {entity: component, facet: persistence}
+    relationship: schema-to-readers
+    concerns: [persistence, rollback, tests]
+    evidence: migration-compatibility-and-recovery
+    stage: both
+  - id: deployment_config
+    trigger: {entity: target}
+    relationship: deploy-to-running-version
+    concerns: [deployment, runtime_state, restart_rearm, rollback, alarms]
+    evidence: expected-vs-observed-runtime
+    stage: both
+  - id: background_execution
+    trigger: {entity: component, facet: backend}
+    relationship: process-to-monitor
+    concerns: [runtime_state, logging, telemetry, alarms]
+    evidence: process-health-and-signal
+    stage: check
+  - id: authorization
+    trigger: {entity: component, facet: web-api}
+    relationship: boundary-to-clients
+    concerns: [auth_tenancy, contracts, tests]
+    evidence: tenant-boundary-tests
+    stage: both

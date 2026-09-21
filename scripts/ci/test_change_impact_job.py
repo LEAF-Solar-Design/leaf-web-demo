@@ -3,6 +3,7 @@
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -189,6 +190,39 @@ def test_checker_timeout_is_advisory(sandbox, monkeypatch, capsys):
     assert "checker timed out (advisory)" in capsys.readouterr().out
     assert (receipt_dir / "ci.json").is_file()
     assert not call.exists()
+
+
+def test_vendored_checker_used_when_no_override(sandbox, monkeypatch, capsys):
+    repo, _, _, call, _, args, git = sandbox
+    monkeypatch.delenv("CHANGE_IMPACT_CHECKER")
+    vendored = repo / "scripts" / "ci" / "vendor" / "impact" / "impact.py"
+    vendored.parent.mkdir(parents=True)
+    # the same fake checker the env override uses, now found through the repo
+    vendored.write_text((Path(os.environ["CHECKER_CALL"]).parent / "checker.py").read_text(encoding="utf-8"),
+                        encoding="utf-8")
+    assert job.main(args + ["--base-ref", "main"]) == 0
+    out = capsys.readouterr().out
+    assert "checker=vendored" in out
+    assert call.exists()
+
+
+def test_vendored_pin_matches_tree():
+    """VENDORED.json is the pin: every listed file's sha256 matches, no extra files."""
+    import hashlib
+    root = HELPER.parent / "vendor" / "impact"
+    pin = json.loads((root / "VENDORED.json").read_text(encoding="utf-8"))
+    assert len(pin["source_revision"]) == 40
+    listed = {e["path"]: e["sha256"] for e in pin["entries"]}
+    assert listed, "pin lists no files"
+    for rel, digest in listed.items():
+        data = (root / rel).read_bytes()
+        assert hashlib.sha256(data).hexdigest() == digest, rel
+    on_disk = {
+        str(p.relative_to(root)).replace("\\", "/")
+        for p in root.rglob("*")
+        if p.is_file() and p.name != "VENDORED.json" and "__pycache__" not in p.parts
+    }
+    assert on_disk == set(listed), sorted(on_disk ^ set(listed))
 
 
 def test_ci_job_shape_and_shell_syntax():
