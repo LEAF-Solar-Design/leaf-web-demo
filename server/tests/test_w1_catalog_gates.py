@@ -14,6 +14,7 @@ import catalog
 import deps
 import entitlements
 import product_capability_availability as availability
+import solar_local_graph
 import write_loop
 from test_w1_design_graph import graph  # noqa: F401
 from test_w1_equipment import case, equipment, licensed  # noqa: F401
@@ -56,7 +57,10 @@ def test_all_nine_resolve_once_through_normal_catalog():
         state = matches[0]["availability"]
         assert state["implemented"] is True
         assert state["entitled"] is True
-        assert state["engine_ready"] is (name == "solar-solve-proposal")
+        assert state["engine_ready"] is (name in {
+            "solar-solve-proposal", "solar-settings", "solar-correct-string"})
+        if name in solar_local_graph.LOCAL_GRAPH_TOOLS:
+            assert "broker_adapter_unavailable" not in state["refusal_reasons"]
         if name == "solar-solve-proposal":
             assert state["input_ready"] is True
             assert state["input_reason"] is None
@@ -120,7 +124,10 @@ def test_persisted_bundle_is_tenant_drawing_and_version_scoped(drawing, case, mo
     context = {"drawing_id": DRAWING, "project_id": graph["project"]["id"]}
     row = rows(**context)["solar-solve-proposal"]
     assert row["availability"]["runnable"] is True
-    assert not rows(**context)["solar-settings"]["availability"]["engine_ready"]
+    settings = rows(**context)["solar-settings"]["availability"]
+    assert settings["engine_ready"] is True
+    assert settings["runnable"] == settings["input_ready"]
+    assert rows(**context)["solar-size-strings"]["availability"]["engine_ready"] is False
     for tenant, drawing_id, project, version in (
         ("another-tenant", DRAWING, context["project_id"], "head"),
         (TENANT, "another-drawing", context["project_id"], "head"),
@@ -160,7 +167,9 @@ def test_api_run_refuses_unavailable_capability_before_submission(monkeypatch, n
         "catalog_digest": deps.catalog_tool_digest(tool),
     })
     assert response.status_code == 409
-    assert response.json()["reason_code"] == "broker_adapter_unavailable"
+    assert response.json()["reason_code"] == (
+        "persisted_graph_unavailable" if name in solar_local_graph.LOCAL_GRAPH_TOOLS
+        else "broker_adapter_unavailable")
     assert response.json()["availability"]["input_ready"] is False
     assert response.json()["availability"]["input_reason"] == "persisted_graph_unavailable"
     assert "persisted_graph_unavailable" in response.json()["availability"]["refusal_reasons"]
@@ -228,9 +237,19 @@ def test_every_w1_row_is_a_dict_with_an_adapter_key():
         assert isinstance(row, dict), name
         assert "adapter" in row, name
         assert row["adapter"] is None or isinstance(row["adapter"], str), name
-    # Re-pin these two lines when a later slice gives a second row an adapter.
     kinds = [row["adapter"] for row in table.values() if row["adapter"] is not None]
-    assert kinds == [availability.CLOUD_PROPOSAL_ADAPTER]
+    assert kinds == [availability.LOCAL_GRAPH_COMMIT_ADAPTER,
+                     availability.CLOUD_PROPOSAL_ADAPTER,
+                     availability.LOCAL_GRAPH_COMMIT_ADAPTER]
+
+
+def test_exactly_three_capabilities_have_an_adapter():
+    assert {name for name, row in availability.W1_CAPABILITIES.items()
+            if row["adapter"] is not None} == {
+                "solar-solve-proposal", "solar-settings", "solar-correct-string"}
+    assert {name for name, row in availability.W1_CAPABILITIES.items()
+            if row["adapter"] == availability.LOCAL_GRAPH_COMMIT_ADAPTER} == set(
+                solar_local_graph.LOCAL_GRAPH_TOOLS)
 
 
 @pytest.mark.parametrize("tool", [

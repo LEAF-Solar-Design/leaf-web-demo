@@ -99,12 +99,12 @@ CONTRACT_VERSION = "leaf.platform.v1alpha1"
 
 # W1 uses the ordinary tool catalog, independently of the platform lease catalog.
 W1_CAPABILITIES = {
-    "solar-settings": {"requires_persisted_graph": True, "adapter": None},
+    "solar-settings": {"requires_persisted_graph": True, "adapter": "local-graph-commit"},
     "solar-size-strings": {"requires_persisted_graph": True, "adapter": None},
     "solar-panel-groups": {"requires_persisted_graph": True, "adapter": None},
     "solar-solve-proposal": {"requires_persisted_graph": False, "adapter": "cloud-proposal"},
     "solar-commit-solve": {"requires_persisted_graph": True, "adapter": None},
-    "solar-correct-string": {"requires_persisted_graph": True, "adapter": None},
+    "solar-correct-string": {"requires_persisted_graph": True, "adapter": "local-graph-commit"},
     "solar-assign-equipment": {"requires_persisted_graph": True, "adapter": None},
     "solar-homeruns": {"requires_persisted_graph": True, "adapter": None},
     "solar-schedule": {"requires_persisted_graph": True, "adapter": None},
