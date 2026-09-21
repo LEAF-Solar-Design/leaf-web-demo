@@ -99,12 +99,12 @@ CONTRACT_VERSION = "leaf.platform.v1alpha1"
 
 # W1 uses the ordinary tool catalog, independently of the platform lease catalog.
 W1_CAPABILITIES = {
-    "solar-settings": {"requires_persisted_graph": True, "adapter": None},
+    "solar-settings": {"requires_persisted_graph": True, "adapter": "local-graph-commit"},
     "solar-size-strings": {"requires_persisted_graph": True, "adapter": None},
     "solar-panel-groups": {"requires_persisted_graph": True, "adapter": None},
     "solar-solve-proposal": {"requires_persisted_graph": False, "adapter": "cloud-proposal"},
     "solar-commit-solve": {"requires_persisted_graph": True, "adapter": None},
-    "solar-correct-string": {"requires_persisted_graph": True, "adapter": None},
+    "solar-correct-string": {"requires_persisted_graph": True, "adapter": "local-graph-commit"},
     "solar-assign-equipment": {"requires_persisted_graph": True, "adapter": None},
     "solar-homeruns": {"requires_persisted_graph": True, "adapter": None},
     "solar-schedule": {"requires_persisted_graph": True, "adapter": None},
@@ -167,7 +167,7 @@ def annotate_w1_availability(families, tenant, drawing_id=None, *,
 
 
 def w1_input_readiness(tenant, drawing_id=None, *, project_id=None, version="head"):
-    """Read only the selected tenant's persisted drawing bundle, never UI steps."""
+    """Read persisted drawing context and apply each adapter's format contract."""
     def unavailable(reason):
         return {name: {"input_ready": False, "input_reason": reason}
                 for name in W1_CAPABILITIES}
@@ -188,12 +188,45 @@ def w1_input_readiness(tenant, drawing_id=None, *, project_id=None, version="hea
             return unavailable("invalid_drawing_context")
         import write_loop
         import store
+        from solar_graph_context import resolve_graph_context
+        if type(version) is str and version != "head":
+            version = int(version)
         backend = write_loop.backend_for_tenant(str(tenant), aps_live=False, da=None)
-        bundle = store.read_graph_bundle(backend, str(tenant), drawing_id,
-                                         version, project_id=project_id)
-        return w1_graph_readiness(bundle["graph"])
+        context = resolve_graph_context(backend, str(tenant), drawing_id,
+                                        version, project_id=project_id)
+        graph = context["graph"]
+        try:
+            readiness = w1_graph_readiness(graph)
+        except (KeyError, ValueError, TypeError):
+            readiness = unavailable("persisted_graph_unavailable")
+        readiness.update(w1_local_commit_inputs(graph))
+        for name in W1_CAPABILITIES:
+            if capability_adapter(name) == LOCAL_GRAPH_COMMIT_ADAPTER:
+                if not context["local_commit_ready"]:
+                    readiness[name] = {"input_ready": False,
+                                       "input_reason": context["refusal_reason"]}
+            elif context["representation"] == "intake":
+                readiness[name] = {"input_ready": False,
+                                   "input_reason": "persisted_graph_unavailable"}
+        return readiness
     except (KeyError, ValueError, TypeError, OSError):
         return unavailable("persisted_graph_unavailable")
+
+
+def w1_local_commit_inputs(graph):
+    """Input readiness of the local graph commit tools, read from the graph alone."""
+    from solar_sizing_client import units_resolved
+
+    if not units_resolved(graph):
+        return {name: {"input_ready": False, "input_reason": "unresolved_units"}
+                for name in ("solar-settings", "solar-correct-string")}
+    # Corrections must remain possible when an existing string is stale.
+    return {
+        "solar-settings": {"input_ready": True, "input_reason": None},
+        "solar-correct-string": {
+            "input_ready": bool(graph["strings"]),
+            "input_reason": None if graph["strings"] else "strings_required"},
+    }
 
 
 def w1_graph_readiness(graph):
@@ -212,7 +245,7 @@ def w1_graph_readiness(graph):
             result[name] = {"input_ready": bool(ready),
                             "input_reason": None if ready else reason}
 
-    mark(["solar-settings"], True, None)
+    result.update(w1_local_commit_inputs(graph))
     settings_ready = all(item["validity"]["state"] == "valid"
                          for item in (graph["project"], graph["settings"]))
     mark(["solar-size-strings"], settings_ready, "valid_settings_required")
@@ -230,8 +263,6 @@ def w1_graph_readiness(graph):
     ) and all(panel["frame_ref"] is not None for panel in graph["panels"])
     mark(["solar-solve-proposal", "solar-commit-solve"], grouped,
          "sized_panel_groups_required")
-    # Corrections must remain possible when an existing string is stale.
-    mark(["solar-correct-string"], bool(graph["strings"]), "strings_required")
     basis = upstream_basis(graph)
     strings_valid = grouped and bool(graph["strings"]) and all(
         item["validity"]["state"] == "valid" and item["module_count"] > 0

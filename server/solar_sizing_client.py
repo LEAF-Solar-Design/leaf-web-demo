@@ -153,13 +153,18 @@ def digest(value):
     return hashlib.sha256(canonical_bytes(value)).hexdigest()
 
 
-def checked_graph(graph, expected_rev):
-    result = require_revision(graph, expected_rev)
-    units = result["project"]["units"]
+def units_resolved(graph):
+    """True when the drawing's unit name and scale agree, so lengths convert without a guess."""
+    units = graph["project"]["units"]
     scale = {"m": 1, "mm": .001, "cm": .01, "km": 1000,
              "in": .0254, "ft": .3048, "yd": .9144}[units["drawing_units"]]
-    if (not math.isclose(units["meters_per_unit"], scale, rel_tol=1e-9)
-            or units["drawing_unit_is_feet"] != (units["drawing_units"] == "ft")):
+    return (math.isclose(units["meters_per_unit"], scale, rel_tol=1e-9)
+            and units["drawing_unit_is_feet"] == (units["drawing_units"] == "ft"))
+
+
+def checked_graph(graph, expected_rev):
+    result = require_revision(graph, expected_rev)
+    if not units_resolved(result):
         raise GraphValidationError("UNRESOLVED_UNITS")
     return result
 

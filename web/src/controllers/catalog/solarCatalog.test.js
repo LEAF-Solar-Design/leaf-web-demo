@@ -10,21 +10,25 @@ const names = [
   'solar-homeruns', 'solar-schedule',
 ]
 
+// The three capabilities the server's W1 table gives an adapter: the cloud proposal and the two local graph
+// commits. The other six keep refusing with broker_adapter_unavailable.
+const connected = new Set(['solar-settings', 'solar-solve-proposal', 'solar-correct-string'])
+
 function setup(overrides = {}) {
   const tools = names.map((name) => ({ name, capabilities: [name === 'solar-solve-proposal' ? 'solve' : 'drawing.write'] }))
   const capabilities = tools.map((tool) => ({
     ...tool,
     availability: {
       entitled: true, implemented: true, input_ready: true,
-      engine_ready: tool.name === 'solar-solve-proposal',
-      refusal_reasons: tool.name === 'solar-solve-proposal' ? [] : ['broker_adapter_unavailable'],
+      engine_ready: connected.has(tool.name),
+      refusal_reasons: connected.has(tool.name) ? [] : ['broker_adapter_unavailable'],
       ...overrides,
     },
   }))
   const services = {
     getTools: vi.fn(async () => tools),
     getCapabilities: vi.fn(async () => ({ families: [{ family_id: 'stringing', capabilities }] })),
-    routePrompt: vi.fn(async () => ({ lane: 'run', tool: 'solar-settings', confidence: 0.9 })),
+    routePrompt: vi.fn(async () => ({ lane: 'run', tool: 'solar-size-strings', confidence: 0.9 })),
   }
   const adapters = {
     commitDecision: vi.fn((decision) => decision), dismissDecision: vi.fn(),
@@ -44,12 +48,17 @@ describe('W1 catalog gates', () => {
     await load()
     const state = controller.getState()
     expect(state.capabilityCount).toBe(9)
-    expect(state.runnableCapabilityCount).toBe(1)
-    expect(state.unavailableCapabilityCount).toBe(8)
+    expect(state.runnableCapabilityCount).toBe(3)
+    expect(state.unavailableCapabilityCount).toBe(6)
     expect(state.runnableCapabilityCount + state.unavailableCapabilityCount).toBe(state.capabilityCount)
-    expect(state.runnableTools.map((tool) => tool.name)).toEqual(['solar-solve-proposal'])
-    expect(state.catalog.families[0].capabilities[0].availability).toMatchObject({
+    expect(state.runnableTools.map((tool) => tool.name))
+      .toEqual(['solar-settings', 'solar-solve-proposal', 'solar-correct-string'])
+    const byName = Object.fromEntries(state.catalog.families[0].capabilities.map((tool) => [tool.name, tool]))
+    expect(byName['solar-size-strings'].availability).toMatchObject({
       entitled: true, implemented: true, input_ready: true, engine_ready: false,
+    })
+    expect(byName['solar-settings'].availability).toMatchObject({
+      entitled: true, implemented: true, input_ready: true, engine_ready: true,
     })
   })
 
@@ -65,13 +74,21 @@ describe('W1 catalog gates', () => {
   it('blocks direct picks, slash picks, alternatives, and prompt routes with the same reason', async () => {
     const { controller, adapters, load } = setup()
     await load()
-    controller.actions.commitDecision({ lane: 'run', tool: 'solar-settings' })
-    await controller.actions.dispatchSlash('solar-settings')
-    controller.actions.pickAlternative('solar-settings')
-    await controller.actions.dispatch('edit settings')
+    controller.actions.commitDecision({ lane: 'run', tool: 'solar-size-strings' })
+    await controller.actions.dispatchSlash('solar-size-strings')
+    controller.actions.pickAlternative('solar-size-strings')
+    await controller.actions.dispatch('size the strings')
     expect(adapters.commitDecision).not.toHaveBeenCalled()
     expect(adapters.startAgentTurn).not.toHaveBeenCalled()
     expect(controller.getState().routeError).toBe('broker_adapter_unavailable')
+  })
+
+  it.each(['solar-settings', 'solar-correct-string'])('allows the local graph commit %s', async (name) => {
+    const { controller, adapters, load } = setup()
+    await load()
+    await controller.actions.dispatchSlash(name)
+    expect(adapters.commitDecision).toHaveBeenCalledWith(expect.objectContaining({ tool: name }))
+    expect(controller.getState().routeError).toBeFalsy()
   })
 
   it('allows the reachable proposal and keeps identity when the profile changes', async () => {
@@ -105,7 +122,8 @@ describe('W1 catalog gates', () => {
     const { controller, capabilities, load } = setup()
     delete capabilities.find((tool) => tool.name === 'solar-solve-proposal').availability
     await load()
-    expect(controller.getState().runnableTools).toEqual([])
+    expect(controller.getState().runnableTools.map((tool) => tool.name))
+      .toEqual(['solar-settings', 'solar-correct-string'])
     await controller.actions.dispatchSlash('solar-solve-proposal')
     expect(controller.getState().routeError).toBe('capability_availability_unavailable')
   })

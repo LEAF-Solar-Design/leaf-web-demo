@@ -73,6 +73,8 @@ def proof(result, backend, **overrides):
 
 
 def test_kind_is_inert_until_enabled(monkeypatch):
+    for name in local.LOCAL_GRAPH_TOOLS:
+        monkeypatch.setitem(W1_CAPABILITIES[name], "adapter", None)
     assert LOCAL_GRAPH_COMMIT_ADAPTER == local.ADAPTER_KIND
     for name in local.LOCAL_GRAPH_TOOLS:
         assert not is_local_graph_commit({"name": name})
@@ -105,9 +107,21 @@ def test_shipped_submission_unchanged(isolated_jobs, monkeypatch):
         def submit(self, *a, **k):
             pass
     monkeypatch.setattr(jobs, "_executors", {jobs.lane_for(TOOL, False): QueuedExecutor()})
+    monkeypatch.setitem(W1_CAPABILITIES[TOOL["name"]], "adapter", None)
     job_id = jobs.submit_job(TENANT, TOOL, {}, "solar", False,
                              checkout_holder=store.ANONYMOUS_HOLDER)
     assert jobs.get_job(job_id)["status"] == "submitted"
+
+
+def test_shipped_table_refuses_an_unpinned_submission(isolated_jobs, monkeypatch):
+    class QueuedExecutor:
+        def submit(self, *a, **k):
+            pass
+    monkeypatch.setattr(jobs, "_executors", {jobs.lane_for(TOOL, False): QueuedExecutor()})
+    with pytest.raises(ValueError, match="pinned source version"):
+        jobs.submit_job(TENANT, TOOL, {}, "solar", False,
+                        checkout_holder=store.ANONYMOUS_HOLDER)
+    assert not jobs._query("SELECT job_id FROM jobs")
 
 
 def test_provenance(committed):

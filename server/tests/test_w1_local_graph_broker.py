@@ -111,6 +111,8 @@ def test_wire_identity_accepts_int_and_none(enabled, field, value):
 
 
 def test_shipped_kind_is_off(rails, monkeypatch):
+    for name in local.LOCAL_GRAPH_TOOLS:
+        monkeypatch.setitem(W1_CAPABILITIES[name], "adapter", None)
     assert W1_CAPABILITIES["solar-settings"]["adapter"] is None
     monkeypatch.setattr(local, "run_local_graph_commit", forbidden)
     monkeypatch.setattr(write_loop, "default_backend", lambda *a, **k: rails[1])

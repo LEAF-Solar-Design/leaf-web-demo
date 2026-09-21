@@ -14,6 +14,7 @@ import catalog
 import deps
 import entitlements
 import product_capability_availability as availability
+import solar_local_graph
 import write_loop
 from test_w1_design_graph import graph  # noqa: F401
 from test_w1_equipment import case, equipment, licensed  # noqa: F401
@@ -56,7 +57,10 @@ def test_all_nine_resolve_once_through_normal_catalog():
         state = matches[0]["availability"]
         assert state["implemented"] is True
         assert state["entitled"] is True
-        assert state["engine_ready"] is (name == "solar-solve-proposal")
+        assert state["engine_ready"] is (name in {
+            "solar-solve-proposal", "solar-settings", "solar-correct-string"})
+        if name in solar_local_graph.LOCAL_GRAPH_TOOLS:
+            assert "broker_adapter_unavailable" not in state["refusal_reasons"]
         if name == "solar-solve-proposal":
             assert state["input_ready"] is True
             assert state["input_reason"] is None
@@ -77,6 +81,27 @@ def test_no_new_entitlement_grant():
     assert all(not rows(restricted)[name]["availability"]["entitled"]
                for name in availability.W1_CAPABILITIES)
     assert entitlements.tool_required_capability({"name": "solar-settings"}) == "run_write"
+
+
+def test_local_commit_inputs_follow_the_builtin_units_rule(graph):
+    from solar_design_graph import GraphValidationError
+    from solar_sizing_client import checked_graph
+
+    local_inputs = availability.w1_local_commit_inputs(graph)
+    assert local_inputs["solar-settings"] == {"input_ready": True, "input_reason": None}
+    readiness = availability.w1_graph_readiness(graph)
+    for name in ("solar-settings", "solar-correct-string"):
+        assert readiness[name] == local_inputs[name]
+    graph["project"]["units"]["meters_per_unit"] = 1
+    local_inputs = availability.w1_local_commit_inputs(graph)
+    readiness = availability.w1_graph_readiness(graph)
+    for name in ("solar-settings", "solar-correct-string"):
+        expected = {"input_ready": False, "input_reason": "unresolved_units"}
+        assert local_inputs[name] == expected
+        assert readiness[name] == expected
+    with pytest.raises(GraphValidationError) as error:
+        checked_graph(graph, graph["rev"])
+    assert error.value.code == "UNRESOLVED_UNITS"
 
 
 def test_completed_flags_and_confirmation_boolean_are_not_evidence(graph):
@@ -120,7 +145,12 @@ def test_persisted_bundle_is_tenant_drawing_and_version_scoped(drawing, case, mo
     context = {"drawing_id": DRAWING, "project_id": graph["project"]["id"]}
     row = rows(**context)["solar-solve-proposal"]
     assert row["availability"]["runnable"] is True
-    assert not rows(**context)["solar-settings"]["availability"]["engine_ready"]
+    settings = rows(**context)["solar-settings"]["availability"]
+    assert settings["engine_ready"] is True
+    assert settings["input_ready"] is False
+    assert settings["input_reason"] == "licensed_graph_commit_required"
+    assert settings["runnable"] is False
+    assert rows(**context)["solar-size-strings"]["availability"]["engine_ready"] is False
     for tenant, drawing_id, project, version in (
         ("another-tenant", DRAWING, context["project_id"], "head"),
         (TENANT, "another-drawing", context["project_id"], "head"),
@@ -129,6 +159,23 @@ def test_persisted_bundle_is_tenant_drawing_and_version_scoped(drawing, case, mo
     ):
         state = availability.w1_input_readiness(tenant, drawing_id, project_id=project, version=version)
         assert not any(item["input_ready"] for item in state.values())
+
+
+def test_input_readiness_follows_the_adapter_format(drawing, case, monkeypatch):
+    graph, _, _ = case
+    backend, _ = drawing
+    request = request_for(backend, graph)
+    commit(drawing, request)
+    monkeypatch.setattr(write_loop, "backend_for_tenant", lambda *a, **k: backend)
+    expected = availability.w1_graph_readiness(request["graph"])
+    actual = availability.w1_input_readiness(
+        TENANT, DRAWING, project_id=graph["project"]["id"])
+    for name in availability.W1_CAPABILITIES:
+        if availability.capability_adapter(name) == availability.LOCAL_GRAPH_COMMIT_ADAPTER:
+            assert actual[name] == {
+                "input_ready": False, "input_reason": "licensed_graph_commit_required"}
+        else:
+            assert actual[name] == expected[name]
 
 
 @pytest.mark.parametrize("drawing_id,version", [("../other", "head"), ([], "head"),
@@ -160,7 +207,9 @@ def test_api_run_refuses_unavailable_capability_before_submission(monkeypatch, n
         "catalog_digest": deps.catalog_tool_digest(tool),
     })
     assert response.status_code == 409
-    assert response.json()["reason_code"] == "broker_adapter_unavailable"
+    assert response.json()["reason_code"] == (
+        "persisted_graph_unavailable" if name in solar_local_graph.LOCAL_GRAPH_TOOLS
+        else "broker_adapter_unavailable")
     assert response.json()["availability"]["input_ready"] is False
     assert response.json()["availability"]["input_reason"] == "persisted_graph_unavailable"
     assert "persisted_graph_unavailable" in response.json()["availability"]["refusal_reasons"]
@@ -228,9 +277,19 @@ def test_every_w1_row_is_a_dict_with_an_adapter_key():
         assert isinstance(row, dict), name
         assert "adapter" in row, name
         assert row["adapter"] is None or isinstance(row["adapter"], str), name
-    # Re-pin these two lines when a later slice gives a second row an adapter.
     kinds = [row["adapter"] for row in table.values() if row["adapter"] is not None]
-    assert kinds == [availability.CLOUD_PROPOSAL_ADAPTER]
+    assert kinds == [availability.LOCAL_GRAPH_COMMIT_ADAPTER,
+                     availability.CLOUD_PROPOSAL_ADAPTER,
+                     availability.LOCAL_GRAPH_COMMIT_ADAPTER]
+
+
+def test_exactly_three_capabilities_have_an_adapter():
+    assert {name for name, row in availability.W1_CAPABILITIES.items()
+            if row["adapter"] is not None} == {
+                "solar-solve-proposal", "solar-settings", "solar-correct-string"}
+    assert {name for name, row in availability.W1_CAPABILITIES.items()
+            if row["adapter"] == availability.LOCAL_GRAPH_COMMIT_ADAPTER} == set(
+                solar_local_graph.LOCAL_GRAPH_TOOLS)
 
 
 @pytest.mark.parametrize("tool", [
