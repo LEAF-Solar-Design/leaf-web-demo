@@ -293,6 +293,7 @@ def test_production_composition_mounts_dispatch_and_callback_together(monkeypatc
             assert value is config
             self.dispatch = object()
             self.readiness = object()
+            self.source_catalog = object()
 
     monkeypatch.setattr(composition.ios_ship_provider_client, "ProviderConfig", FakeConfig)
     monkeypatch.setattr(composition.ios_ship_provider_client, "HttpProviderDispatch", FakeAdapter)
@@ -302,9 +303,12 @@ def test_production_composition_mounts_dispatch_and_callback_together(monkeypatc
                         lambda value: mounted.append(("readiness", value)))
     monkeypatch.setattr(composition.ios_ship_provider_router, "set_config",
                         lambda value: mounted.append(("callback", value)))
+    monkeypatch.setattr(composition.ios_ship, "set_provider_catalog",
+                        lambda value: mounted.append(("catalog", value)))
     composition.initialize_ios_ship_provider()
-    assert [name for name, _value in mounted] == ["dispatch", "readiness", "callback"]
-    assert mounted[2][1] is config
+    assert [name for name, _value in mounted] == ["dispatch", "readiness", "catalog", "callback"]
+    assert all(value is not None for _name, value in mounted)
+    assert mounted[3][1] is config
 
 
 def test_production_composition_leaves_both_boundaries_fail_closed(monkeypatch):
@@ -324,5 +328,154 @@ def test_production_composition_leaves_both_boundaries_fail_closed(monkeypatch):
                         lambda value: mounted.append(("readiness", value)))
     monkeypatch.setattr(composition.ios_ship_provider_router, "set_config",
                         lambda value: mounted.append(("callback", value)))
+    monkeypatch.setattr(composition.ios_ship, "set_provider_catalog",
+                        lambda value: mounted.append(("catalog", value)))
     composition.initialize_ios_ship_provider()
-    assert mounted == [("dispatch", None), ("readiness", None), ("callback", None)]
+    assert mounted == [("dispatch", None), ("readiness", None), ("catalog", None), ("callback", None)]
+
+
+B4A_PROJECT = "c6dbda41-f9bf-4f0f-984c-45f3199f4ca1"
+
+
+def _b4a_catalog():
+    return {"schema": "leaf.ios-ship-source-catalog.v1", "project_id": B4A_PROJECT,
+            "catalog_key": "exzachly", "status": "ok", "sources": [{
+                "source_revision": "c76380846278cdfa4ffcb71b031dce33c7f139f0",
+                "source_sha256": "41f1cd4e5bee84238973ea785c23e49888edd5154f385254c7781813bc6065c6",
+                "producer_receipt_digest": "ce8186d075b4ca8877560442dba99777558e1385f5b5ae52256f8102fed193b3",
+                "bundle_identifier": "com.exzachly.app", "marketing_version": "0.2.0",
+                "build_number": "12", "repository": "https://github.com/Evan-Haug/ExZachly.git"}],
+            "unpinned": [], "refused": []}
+
+
+def test_b4a_catalog_get_contract(tmp_path, monkeypatch):
+    config = _config(tmp_path, monkeypatch)
+    calls = []
+    payload = _b4a_catalog()
+
+    def get(*args, **kwargs):
+        calls.append((args, kwargs))
+        return Response(payload)
+
+    assert provider.HttpProviderDispatch(config, get=get).source_catalog(B4A_PROJECT) == payload
+    assert calls == [((config.base_url + provider.SOURCE_CATALOG_PATH,), {
+        "headers": {"Authorization": f"Bearer {TOKEN}"}, "params": {"project_id": B4A_PROJECT},
+        "timeout": 3.5, "verify": str(config.ca_file)})]
+
+
+def test_b4a_version_and_build_bounds():
+    payload = _b4a_catalog()
+    source = payload["sources"][0]
+    source["marketing_version"] = ".".join(["1" * 18] * 3)
+    source["build_number"] = "2" * 18
+    assert provider._validate_source_catalog(payload, B4A_PROJECT) is payload
+
+    for index in range(3):
+        valid = source["marketing_version"]
+        components = valid.split(".")
+        components[index] = "1" * 19
+        value = ".".join(components)
+        source["marketing_version"] = value
+        with pytest.raises(provider.ProviderCatalogError) as exc:
+            provider._validate_source_catalog(payload, B4A_PROJECT)
+        assert "marketing_version" in str(exc.value)
+        assert value not in str(exc.value)
+        source["marketing_version"] = valid
+
+    value = "2" * 19
+    source["build_number"] = value
+    with pytest.raises(provider.ProviderCatalogError) as exc:
+        provider._validate_source_catalog(payload, B4A_PROJECT)
+    assert "build_number" in str(exc.value)
+    assert value not in str(exc.value)
+
+
+def test_b4a_catalog_key_grammar():
+    payload = _b4a_catalog()
+    for value in ("exzachly", "bakery_stock", "a-b1", "x"):
+        payload["catalog_key"] = value
+        assert provider._validate_source_catalog(payload, B4A_PROJECT) is payload
+
+    for value in ("../../other-project/catalog", "Exzachly", "", "a" * 65, "a/b", "a b"):
+        payload["catalog_key"] = value
+        with pytest.raises(provider.ProviderCatalogError) as exc:
+            provider._validate_source_catalog(payload, B4A_PROJECT)
+        assert str(exc.value) == "catalog_key is invalid."
+        if value:
+            assert value not in str(exc.value)
+
+
+def test_b4a_catalog_scope_mismatch(tmp_path, monkeypatch):
+    payload = _b4a_catalog()
+    payload["project_id"] = "5ec5345a-0d85-4c3f-80e2-8ab99ae25c32"
+    adapter = provider.HttpProviderDispatch(_config(tmp_path, monkeypatch),
+                                           get=lambda *a, **k: Response(payload))
+    with pytest.raises(provider.ProviderCatalogError):
+        adapter.source_catalog(B4A_PROJECT)
+
+
+@pytest.mark.parametrize("change", ["missing", "extra", "source_extra", "status"])
+def test_b4a_catalog_exact_shape(tmp_path, monkeypatch, change):
+    payload = _b4a_catalog()
+    if change == "missing":
+        del payload["refused"]
+    elif change == "extra":
+        payload["extra"] = "no"
+    elif change == "source_extra":
+        payload["sources"][0]["extra"] = "no"
+    else:
+        payload["status"] = "ready"
+    adapter = provider.HttpProviderDispatch(_config(tmp_path, monkeypatch),
+                                           get=lambda *a, **k: Response(payload))
+    with pytest.raises(provider.ProviderCatalogError):
+        adapter.source_catalog(B4A_PROJECT)
+
+
+@pytest.mark.parametrize("key,value", [("repository", "https://host/-----BEGIN material"),
+                                       ("Authorization", "private")])
+def test_b4a_catalog_secret_refusal(tmp_path, monkeypatch, key, value):
+    payload = _b4a_catalog()
+    payload["sources"][0][key] = value
+    adapter = provider.HttpProviderDispatch(_config(tmp_path, monkeypatch),
+                                           get=lambda *a, **k: Response(payload))
+    with pytest.raises(provider.ProviderCatalogError) as exc:
+        adapter.source_catalog(B4A_PROJECT)
+    assert str(exc.value) == ""
+
+
+@pytest.mark.parametrize("failure", ["get", "503", "json"])
+def test_b4a_catalog_transport_is_sanitized(tmp_path, monkeypatch, failure):
+    class BrokenResponse(Response):
+        def json(self):
+            raise ValueError(TOKEN)
+
+    def get(*a, **k):
+        if failure == "get":
+            raise RuntimeError(TOKEN)
+        return Response({}, 503) if failure == "503" else BrokenResponse(None)
+
+    adapter = provider.HttpProviderDispatch(_config(tmp_path, monkeypatch), get=get)
+    with pytest.raises(provider.ProviderCatalogError) as exc:
+        adapter.source_catalog(B4A_PROJECT)
+    assert str(exc.value) == ""
+
+
+@pytest.mark.parametrize("project", ["not-a-uuid", None, 12])
+def test_b4a_catalog_invalid_project_never_calls_provider(tmp_path, monkeypatch, project):
+    calls = []
+    adapter = provider.HttpProviderDispatch(_config(tmp_path, monkeypatch),
+                                           get=lambda *a, **k: calls.append(True))
+    with pytest.raises(provider.ProviderCatalogError):
+        adapter.source_catalog(project)
+    assert calls == []
+
+
+def test_b4a_composition_missing_catalog_fails_closed(monkeypatch):
+    import app as composition
+
+    monkeypatch.setattr(composition.ios_ship_provider_client.ProviderConfig,
+                        "from_environment", lambda: None)
+    mounted = []
+    monkeypatch.setattr(composition.ios_ship, "set_provider_catalog", mounted.append)
+    composition.initialize_ios_ship_provider()
+    assert mounted == [None]

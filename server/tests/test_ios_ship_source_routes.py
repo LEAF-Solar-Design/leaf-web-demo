@@ -137,11 +137,15 @@ def test_provider_catalog_requires_auth_and_exact_body(monkeypatch):
 def test_sources_allow_members_and_auth_off_but_hide_foreign_projects(monkeypatch):
     store = FakeStore()
     monkeypatch.setattr(router, "_store", lambda: store)
+    router.set_provider_catalog(None)
     for subject in ("owner", "editor", None):
         response = _client(subject).get(BASE + "/sources")
         assert response.status_code == 200
         assert response.json() == {"ok": True, "sources": [ENTRY],
-                                   "approvals": [{"approval_id": "approval-1", **APPROVAL}]}
+                                   "approvals": [{"approval_id": "approval-1", **APPROVAL}],
+                                   "sync": {"status": "provider_unavailable" if subject else "auth_off",
+                                            "registered": 0, "conflicts": [], "unpinned": [], "refused": []},
+                                   "can_approve": subject == "owner"}
     response = _client("outsider").get(BASE + "/sources", headers={"X-Org-Id": ORG})
     assert response.status_code == 404 and _code(response) == "project_unavailable"
 
@@ -211,3 +215,177 @@ def test_consumed_approval_returns_conflict_and_refused_event(monkeypatch):
     assert response.status_code == 409 and _code(response) == "approval_consumed"
     assert response.json()["error"]["setup_action"] == "approve-new-revision"
     assert events == [("tenant-1", "account", "approval.refused", "approval", "approval_consumed")]
+
+
+def _b4a_projection():
+    return {"schema": "leaf.ios-ship-source-catalog.v1", "project_id": PROJECT,
+            "catalog_key": "exzachly", "status": "ok", "sources": [{
+                "source_revision": "c76380846278cdfa4ffcb71b031dce33c7f139f0",
+                "source_sha256": "41f1cd4e5bee84238973ea785c23e49888edd5154f385254c7781813bc6065c6",
+                "producer_receipt_digest": "ce8186d075b4ca8877560442dba99777558e1385f5b5ae52256f8102fed193b3",
+                "bundle_identifier": "com.exzachly.app", "marketing_version": "0.2.0",
+                "build_number": "12", "repository": "https://github.com/Evan-Haug/ExZachly.git"}],
+            "unpinned": [], "refused": []}
+
+
+class B4aStore(FakeStore):
+    def __init__(self):
+        super().__init__()
+        self.rows = []
+        self.errors = {}
+
+    def register_source_catalog_entry(self, org, project, entry):
+        self.registrations.append((org, project, entry))
+        error = self.errors.get(entry["source_revision"])
+        if error:
+            raise error
+        for row in self.rows:
+            if row["source_revision"] == entry["source_revision"]:
+                if row != entry:
+                    raise CatalogConflict()
+                return row
+        self.rows.append(dict(entry))
+        return entry
+
+    def list_source_catalog(self, org, project):
+        assert (org, project) == (ORG, PROJECT)
+        return list(self.rows)
+
+
+def _b4a_setup(monkeypatch):
+    project = "c6dbda41-f9bf-4f0f-984c-45f3199f4ca1"
+    monkeypatch.setitem(globals(), "PROJECT", project)
+    monkeypatch.setitem(globals(), "BASE", f"/api/projects/{project}/ios")
+    store = B4aStore()
+    projection = _b4a_projection()
+    calls, events = [], []
+
+    def catalog(project):
+        calls.append(project)
+        return projection
+
+    monkeypatch.setattr(router, "_store", lambda: store)
+    monkeypatch.setattr(router, "_PROVIDER_CATALOG", catalog)
+    monkeypatch.setattr(router, "_ship_event", lambda *args: events.append(args))
+    return store, projection, calls, events
+
+
+def test_b4a_member_reconciles_exact_tuple(monkeypatch):
+    store, projection, calls, events = _b4a_setup(monkeypatch)
+    response = _client().get(BASE + "/sources")
+    entry = {"catalog_key": projection["catalog_key"], **projection["sources"][0]}
+    assert response.status_code == 200
+    assert store.registrations == [(ORG, PROJECT, entry)]
+    assert calls == [PROJECT]
+    assert response.json()["sources"] == [entry]
+    assert response.json()["sync"] == {"status": "ok", "registered": 1, "conflicts": [],
+                                       "unpinned": [], "refused": []}
+    assert response.json()["can_approve"] is True
+    assert events == [("tenant-1", "account", "catalog.reconciled", "ok", None)]
+    assert _client("editor").get(BASE + "/sources").json()["can_approve"] is False
+
+
+def test_b4a_exact_replay_counts_without_duplicate(monkeypatch):
+    store, projection, calls, events = _b4a_setup(monkeypatch)
+    client = _client()
+    client.get(BASE + "/sources")
+    body = client.get(BASE + "/sources").json()
+    assert len(store.registrations) == 2
+    assert len(body["sources"]) == 1
+    assert body["sync"]["registered"] == 1 and body["sync"]["conflicts"] == []
+
+
+def test_b4a_tuple_conflict_preserves_stored_row(monkeypatch):
+    store, projection, calls, events = _b4a_setup(monkeypatch)
+    client = _client()
+    client.get(BASE + "/sources")
+    projection["sources"][0]["build_number"] = "13"
+    body = client.get(BASE + "/sources").json()
+    assert body["sync"]["registered"] == 0
+    assert body["sync"]["conflicts"] == [projection["sources"][0]["source_revision"]]
+    assert body["sources"][0]["build_number"] == "12"
+
+
+def test_b4a_foreign_member_never_contacts_provider(monkeypatch):
+    store, projection, calls, events = _b4a_setup(monkeypatch)
+    response = _client("outsider").get(BASE + "/sources")
+    assert response.status_code == 404 and _code(response) == "project_unavailable"
+    assert calls == [] and store.registrations == []
+
+
+def test_b4a_scope_mismatch_preserves_stored_sources(monkeypatch):
+    store, projection, calls, events = _b4a_setup(monkeypatch)
+    store.rows = [ENTRY]
+    projection["project_id"] = "5ec5345a-0d85-4c3f-80e2-8ab99ae25c32"
+    response = _client().get(BASE + "/sources")
+    assert response.status_code == 200
+    assert response.json()["sync"]["status"] == "unavailable"
+    assert response.json()["sources"] == [ENTRY]
+    assert store.registrations == [] and events == []
+
+
+def test_b4a_provider_failure_keeps_stored_sources(monkeypatch):
+    store, projection, calls, events = _b4a_setup(monkeypatch)
+    store.rows = [ENTRY]
+
+    def unavailable(project):
+        raise RuntimeError("private provider failure")
+
+    monkeypatch.setattr(router, "_PROVIDER_CATALOG", unavailable)
+    response = _client().get(BASE + "/sources")
+    assert response.status_code == 200
+    assert response.json()["sync"]["status"] == "unavailable"
+    assert response.json()["sources"] == [ENTRY]
+    assert store.registrations == []
+    assert "private" not in response.text
+
+
+def test_b4a_missing_provider_keeps_stored_sources(monkeypatch):
+    store, projection, calls, events = _b4a_setup(monkeypatch)
+    store.rows = [ENTRY]
+    router.set_provider_catalog(None)
+    response = _client().get(BASE + "/sources")
+    assert response.status_code == 200
+    assert response.json()["sync"] == {"status": "provider_unavailable", "registered": 0,
+                                       "conflicts": [], "unpinned": [], "refused": []}
+    assert response.json()["sources"] == [ENTRY]
+    assert calls == [] and store.registrations == []
+
+
+def test_b4a_auth_off_never_contacts_provider(monkeypatch):
+    store, projection, calls, events = _b4a_setup(monkeypatch)
+    body = _client(None).get(BASE + "/sources").json()
+    assert body["sync"]["status"] == "auth_off"
+    assert body["can_approve"] is False
+    assert calls == [] and store.registrations == []
+
+
+def test_b4a_registration_project_loss_returns_404(monkeypatch):
+    store, projection, calls, events = _b4a_setup(monkeypatch)
+    store.errors[projection["sources"][0]["source_revision"]] = ProjectUnavailable()
+    response = _client().get(BASE + "/sources")
+    assert response.status_code == 404 and _code(response) == "project_unavailable"
+
+
+def test_b4a_conflict_continues_other_revisions(monkeypatch):
+    store, projection, calls, events = _b4a_setup(monkeypatch)
+    revision = projection["sources"][0]["source_revision"]
+    store.errors[revision] = CatalogConflict()
+    projection["sources"].append({**projection["sources"][0], "source_revision": "a" * 40})
+    projection["unpinned"] = ["b" * 40]
+    projection["refused"] = [{"source_revision": "c" * 40, "reason": "invalid_metadata"}]
+    body = _client().get(BASE + "/sources").json()
+    assert len(store.registrations) == 2
+    assert body["sync"] == {"status": "ok", "registered": 1, "conflicts": [revision],
+                            "unpinned": projection["unpinned"], "refused": projection["refused"]}
+
+
+def test_b4a_store_outage_stops_without_conflict(monkeypatch):
+    store, projection, calls, events = _b4a_setup(monkeypatch)
+    store.errors[projection["sources"][0]["source_revision"]] = RuntimeError("store offline")
+    projection["sources"].append({**projection["sources"][0], "source_revision": "a" * 40})
+    response = _client().get(BASE + "/sources")
+    assert response.status_code == 200
+    assert len(store.registrations) == 1
+    assert response.json()["sync"]["status"] == "unavailable"
+    assert response.json()["sync"]["conflicts"] == []

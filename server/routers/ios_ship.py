@@ -18,10 +18,12 @@ from .ios_ship_provider import _authorized
 import deps
 import entitlements
 import telemetry_sink
+from ios_ship_provider import _validate_source_catalog
 
 router = APIRouter()
 _DISPATCH: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None
 _PROVIDER_READINESS: Optional[Callable[[Dict[str, str]], Dict[str, Any]]] = None
+_PROVIDER_CATALOG: Optional[Callable[[str], Dict[str, Any]]] = None
 _SETUP_ACTION = "mount-apple-ship-dispatch"
 _READINESS_KIND = "leaf.ios-ship-readiness.v1"
 _SECRET_KEY_RE = re.compile(
@@ -39,6 +41,11 @@ def set_dispatch(callable_: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]]
 def set_provider_readiness(callable_: Optional[Callable[[Dict[str, str]], Dict[str, Any]]]) -> None:
     global _PROVIDER_READINESS
     _PROVIDER_READINESS = callable_
+
+
+def set_provider_catalog(callable_: Optional[Callable[[str], Dict[str, Any]]]) -> None:
+    global _PROVIDER_CATALOG
+    _PROVIDER_CATALOG = callable_
 
 
 def _app_color() -> Optional[str]:
@@ -135,9 +142,19 @@ def project_sources(project_id: str,
         org_id = _caller_org(store, tenant, project_id)
         if org_id is None:
             return _failure(404, "project_unavailable", "project is unavailable")
+        try:
+            sync = _reconcile_catalog(store, tenant, org_id, project_id)
+        except Exception as exc:
+            if getattr(exc, "code", None) == "project_unavailable":
+                return _failure(404, "project_unavailable", "project is unavailable")
+            raise
+        subject = getattr(tenant, "subject", None)
+        can_approve = bool(getattr(tenant, "org_id", None) and subject
+                           and store.resolve_ship_owner(org_id, project_id, subject) is not None)
         return JSONResponse(status_code=200, content={
             "ok": True, "sources": store.list_source_catalog(org_id, project_id),
-            "approvals": store.list_revision_approvals(org_id, project_id)})
+            "approvals": store.list_revision_approvals(org_id, project_id),
+            "sync": sync, "can_approve": can_approve})
     except Exception:
         return _failure(503, "catalog_unavailable", "source catalog is unavailable")
 
@@ -225,6 +242,39 @@ def _caller_org(store: Any, tenant: Any, project_id: str) -> Any:
         return (verified if subject and store.project_accessible(
             verified, project_id, subject) else None)
     return store.project_org(project_id)
+
+
+def _reconcile_catalog(store: Any, tenant: Any, org_id: Any, project_id: str) -> dict:
+    result = {"status": "auth_off", "registered": 0, "conflicts": [],
+              "unpinned": [], "refused": []}
+    if not getattr(tenant, "org_id", None):
+        return result
+    if _PROVIDER_CATALOG is None:
+        return {**result, "status": "provider_unavailable"}
+    try:
+        projection = _validate_source_catalog(_PROVIDER_CATALOG(project_id), project_id)
+    except Exception:
+        return {**result, "status": "unavailable"}
+    tid = _tenant_id(tenant)
+    kind = "guest" if tid.startswith("guest-") else "account"
+    _ship_event(tid, kind, "catalog.reconciled", projection["status"], None)
+    result.update(status=projection["status"], unpinned=projection["unpinned"],
+                  refused=projection["refused"])
+    for entry in projection["sources"]:
+        try:
+            store.register_source_catalog_entry(
+                org_id, project_id, {"catalog_key": projection["catalog_key"], **entry})
+            result["registered"] += 1
+        except Exception as exc:
+            code = getattr(exc, "code", None)
+            if code == "project_unavailable":
+                raise
+            if code == "catalog_conflict":
+                result["conflicts"].append(entry["source_revision"])
+                continue
+            result["status"] = "unavailable"
+            break
+    return result
 
 
 def _launch_principal(store: Any, tenant: Any, org_id: Any,

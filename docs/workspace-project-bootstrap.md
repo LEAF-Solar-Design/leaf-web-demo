@@ -26,7 +26,7 @@ the verified session and ignores client-supplied tenant identity.
 
 ## iOS source and approval
 
-1. The importer registers the immutable source catalog entry through the provider rail.
+1. The platform reconciles its copy from the provider's catalog projection when a member reads the project's sources. The internal POST remains an authenticated compatibility route.
 2. A project member reads sources and approvals through `GET /api/projects/{id}/ios/sources`.
 3. A project owner approves the exact catalog tuple through `POST /api/projects/{id}/ios/approvals`.
 4. Readiness and launch consume that approval as before.
