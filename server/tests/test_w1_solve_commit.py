@@ -185,7 +185,8 @@ def test_accept_candidate_rejects_out_of_bounds_mapped_path(case, monkeypatch, a
         -1 if negative else frame["module_rows" if axis == 0 else "module_columns"])
     # Exercise acceptance's own guard after the completion validation boundary.
     monkeypatch.setattr(solve, "complete_search", lambda *args: proposal)
-    with pytest.raises(GraphValidationError, match="^INVALID_PATH_INDICES$"):
+    # GraphValidationError carries ": <path>"; anchor the code, admit the path.
+    with pytest.raises(GraphValidationError, match="^INVALID_PATH_INDICES: "):
         solve.accept_candidate(graph, proposal, expected_rev=0)
     assert graph == before
 
@@ -199,7 +200,8 @@ def test_accept_candidate_rejects_invalid_sequence_lengths(case, monkeypatch, le
     proposal["proposal"]["proposal"]["data"]["best_result"]["info"]["sequence_length"] = lengths
     # Exercise acceptance's own guard after the completion validation boundary.
     monkeypatch.setattr(solve, "complete_search", lambda *args: proposal)
-    with pytest.raises(GraphValidationError, match="^TRUNCATED_SEQUENCE_LENGTH$"):
+    # GraphValidationError carries ": <path>"; anchor the code, admit the path.
+    with pytest.raises(GraphValidationError, match="^TRUNCATED_SEQUENCE_LENGTH: "):
         solve.accept_candidate(graph, proposal, expected_rev=0)
     assert graph == before
 

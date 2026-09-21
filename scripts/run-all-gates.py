@@ -308,6 +308,28 @@ def build_suites() -> List[Suite]:
         # in its numbers -- Windows measured 21 executed, 2 skipped, on
         # 2026-08-13 -- but not in its conclusion, so its floor still stands.)
         # --- server/ (cwd=server): each file is its OWN pytest process --- #
+        # Solar W1 parity corpus, thirteen merges 2026-09-17..18; unregistered until W5-A0.
+        Suite("server-w1-design-graph", "server tests/test_w1_design_graph.py", "pytest", SERVER,
+              _py_pytest("tests/test_w1_design_graph.py"), 23),
+        Suite("server-w1-cloud-solve-probe", "server tests/test_w1_cloud_solve_probe.py", "pytest", SERVER,
+              _py_pytest("tests/test_w1_cloud_solve_probe.py"), 58,
+              allowed_skip_reasons=(r"live staging probe is opt-in",)),
+        Suite("server-w1-graph-versions", "server tests/test_w1_graph_versions.py", "pytest", SERVER,
+              _py_pytest("tests/test_w1_graph_versions.py"), 18),
+        Suite("server-w1-sizing-groups", "server tests/test_w1_sizing_groups.py", "pytest", SERVER,
+              _py_pytest("tests/test_w1_sizing_groups.py"), 52),
+        Suite("server-w1-solar-interchange", "server tests/test_w1_solar_interchange.py", "pytest", SERVER,
+              _py_pytest("tests/test_w1_solar_interchange.py"), 19),
+        Suite("server-w1-solve-commit", "server tests/test_w1_solve_commit.py", "pytest", SERVER,
+              _py_pytest("tests/test_w1_solve_commit.py"), 42),
+        Suite("server-w1-routes-schedule", "server tests/test_w1_routes_schedule.py", "pytest", SERVER,
+              _py_pytest("tests/test_w1_routes_schedule.py"), 21),
+        Suite("server-w1-equipment", "server tests/test_w1_equipment.py", "pytest", SERVER,
+              _py_pytest("tests/test_w1_equipment.py"), 24),
+        Suite("server-w1-catalog-gates", "server tests/test_w1_catalog_gates.py", "pytest", SERVER,
+              _py_pytest("tests/test_w1_catalog_gates.py"), 18),
+        Suite("server-w1-solar-apply-plan", "server tests/test_w1_solar_apply_plan.py", "pytest", SERVER,
+              _py_pytest("tests/test_w1_solar_apply_plan.py"), 39),
         Suite("server-backbone", "server tests/test_backbone.py", "pytest", SERVER,
               _py_pytest("tests/test_backbone.py"), 15),
         Suite("server-campaigns", "server tests/test_campaigns_router.py", "pytest", SERVER,
