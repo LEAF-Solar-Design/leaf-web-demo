@@ -83,6 +83,27 @@ def test_no_new_entitlement_grant():
     assert entitlements.tool_required_capability({"name": "solar-settings"}) == "run_write"
 
 
+def test_local_commit_inputs_follow_the_builtin_units_rule(graph):
+    from solar_design_graph import GraphValidationError
+    from solar_sizing_client import checked_graph
+
+    local_inputs = availability.w1_local_commit_inputs(graph)
+    assert local_inputs["solar-settings"] == {"input_ready": True, "input_reason": None}
+    readiness = availability.w1_graph_readiness(graph)
+    for name in ("solar-settings", "solar-correct-string"):
+        assert readiness[name] == local_inputs[name]
+    graph["project"]["units"]["meters_per_unit"] = 1
+    local_inputs = availability.w1_local_commit_inputs(graph)
+    readiness = availability.w1_graph_readiness(graph)
+    for name in ("solar-settings", "solar-correct-string"):
+        expected = {"input_ready": False, "input_reason": "unresolved_units"}
+        assert local_inputs[name] == expected
+        assert readiness[name] == expected
+    with pytest.raises(GraphValidationError) as error:
+        checked_graph(graph, graph["rev"])
+    assert error.value.code == "UNRESOLVED_UNITS"
+
+
 def test_completed_flags_and_confirmation_boolean_are_not_evidence(graph):
     graph["extra"]["completed_steps"] = list(availability.W1_CAPABILITIES)
     result = availability.w1_graph_readiness(graph)

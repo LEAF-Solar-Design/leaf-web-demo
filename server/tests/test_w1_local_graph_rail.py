@@ -291,6 +291,69 @@ def test_correction_requires_strings(api, graph):
     assert not jobs._query("SELECT job_id FROM jobs")
 
 
+@pytest.mark.parametrize("name", ["solar-settings", "solar-correct-string"])
+def test_unresolved_units_refuse_before_submission(api, graph, name):
+    params = transfer(graph) if name == "solar-correct-string" else None
+    graph["project"]["units"]["meters_per_unit"] = 1
+    intake = {"layers": [], "polylines": [], "solar_design_graph": graph,
+              "solar_design_graph_sha256": digest(graph)}
+    holder, fence = api[3]._checkout_identity()
+    write_loop._put_bytes_version(
+        api[1], TENANT, "solar", json.dumps(intake).encode(),
+        1, {}, holder=holder, fence=fence, require_parent_is_head=True)
+    request = body(api, name, params)
+    request["dwg_version"] = 2
+    response = api[0].post("/api/run?wait=1", json=request)
+    assert response.status_code == 409, response.text
+    assert response.json()["reason_code"] == "unresolved_units"
+    assert response.json()["availability"]["engine_ready"] is True
+    assert response.json()["availability"]["input_ready"] is False
+    assert not jobs._query("SELECT job_id FROM jobs")
+    assert store.load_manifest(api[1], TENANT, "solar")["head"] == 2
+
+
+def test_settings_commit_survives_malformed_equipment(api, case):
+    graph, _, _ = case
+    graph["extra"]["equipment"] = None
+    previous_rev = graph["rev"]
+    intake = {"layers": [], "polylines": [], "solar_design_graph": graph,
+              "solar_design_graph_sha256": digest(graph)}
+    holder, fence = api[3]._checkout_identity()
+    write_loop._put_bytes_version(
+        api[1], TENANT, "solar", json.dumps(intake).encode(),
+        1, {}, holder=holder, fence=fence, require_parent_is_head=True)
+    request = body(api, params={
+        "expected_rev": previous_rev, "changes": {"panels_in_sequence": 3}})
+    request["dwg_version"] = 2
+    response = api[0].post("/api/run?wait=1", json=request)
+    assert response.status_code == 200, response.text
+    assert response.json()["ok"] is True
+    assert store.load_manifest(api[1], TENANT, "solar")["head"] == 3
+    stored = resolve_graph_context(api[1], TENANT, "solar", "head")["graph"]
+    assert stored["settings"]["panels_in_sequence"] == 3
+    assert stored["rev"] == previous_rev + 1
+
+
+def test_intake_catalog_survives_malformed_equipment(api, case):
+    graph, _, _ = case
+    graph["extra"]["equipment"] = None
+    intake = {"layers": [], "polylines": [], "solar_design_graph": graph,
+              "solar_design_graph_sha256": digest(graph)}
+    holder, fence = api[3]._checkout_identity()
+    write_loop._put_bytes_version(
+        api[1], TENANT, "solar", json.dumps(intake).encode(),
+        1, {}, holder=holder, fence=fence, require_parent_is_head=True)
+    families = catalog.build_catalog(deps.all_tools(TENANT))
+    availability.annotate_w1_availability(
+        families, api[5], "solar", project_id=graph["project"]["id"])
+    states = {row["name"]: row["availability"] for family in families
+              for row in family["capabilities"] if row["name"] in availability.W1_CAPABILITIES}
+    assert states["solar-settings"]["input_ready"] is True
+    assert states["solar-settings"]["runnable"] is True
+    assert states["solar-homeruns"]["input_ready"] is False
+    assert states["solar-homeruns"]["input_reason"] == "persisted_graph_unavailable"
+
+
 def test_digit_string_version_reads_like_its_integer(api, graph):
     # The capabilities route hands the gate the request's version as text; the resolver takes "head" or an int.
     project = graph["project"]["id"]
