@@ -294,8 +294,26 @@ def test_seed_needs_the_real_checkout(product):
     assert_jobs_and_head(backend, drawing_id, 0, 1)
     response = run(client, tools, drawing_id, seed_params(digest),
                    capability="not-a-capability")
-    assert response.status_code in {401, 403, 409}, response.text
+    assert_refusal(response, "CHECKOUT_REQUIRED", status=403)
     assert_jobs_and_head(backend, drawing_id, 0, 1)
+
+
+@pytest.mark.parametrize("case", ["wrong", "truncated", "missing"])
+def test_a_live_checkout_admits_only_its_own_capability(product, case):
+    client, backend, tools = product
+    drawing_id, digest = upload(client)
+    capability = checkout(client, drawing_id)
+    sent_capability = {
+        "wrong": "not-a-capability",
+        "truncated": capability[:-1],
+        "missing": None,
+    }[case]
+    response = run(client, tools, drawing_id, seed_params(digest),
+                   capability=sent_capability)
+    assert_refusal(response, "CHECKOUT_REQUIRED", status=403)
+    assert_jobs_and_head(backend, drawing_id, 0, 1)
+    seed(client, tools, drawing_id, digest, capability)
+    assert_jobs_and_head(backend, drawing_id, 1, 2)
 
 
 def test_seed_through_the_product_path(product):
@@ -383,4 +401,3 @@ def test_the_whole_walk_leaves_two_jobs_and_releases(product):
     assert len(rows) == 2
     assert all(row["tool"] == "solar-settings" and row["status"] == "complete"
                for row in rows)
-
