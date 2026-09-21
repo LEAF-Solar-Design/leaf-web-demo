@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import jsonschema
 import pytest
 
 SERVER = Path(__file__).resolve().parents[1]
@@ -92,8 +93,23 @@ def test_recorded_proposal_and_ledger(rails, params, recorded, monkeypatch):
     assert len(entries) == 1
     entry = json.loads(entries[0])
     assert entry["status"] == "ok" and entry["aps_live"] is False
-    assert entry["aps_endpoint"] is None
+    assert entry["aps_endpoint"] == rails[0].APS_ENDPOINT
     assert "grant_ref" not in entry and "params" not in entry
+
+
+def test_cloud_proposal_ledger_line_is_schema_valid(rails, params, recorded, monkeypatch):
+    raw = cloud.canonical_bytes(recorded["response"])
+    monkeypatch.setattr(cloud, "resolve_grant", lambda *a: grants.CloudGrant("w1-tenant", ""))
+    monkeypatch.setattr(cloud, "post_stringer", lambda request, grant: raw)
+    status, env = broker_call(rails, params)
+    assert status == 200 and env["ok"] is True
+    entries = rails[0].LEDGER_PATH.read_text().splitlines()
+    assert len(entries) == 1
+    entry = json.loads(entries[0])
+    schema = json.loads((SERVER / "broker_ledger.schema.json").read_text())
+    jsonschema.validate(entry, schema)
+    assert type(entry["aps_endpoint"]) is str
+    assert entry["aps_endpoint"]
 
 
 @pytest.mark.parametrize("classification,status", [

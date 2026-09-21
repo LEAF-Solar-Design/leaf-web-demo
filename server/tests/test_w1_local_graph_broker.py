@@ -4,6 +4,7 @@ import json
 import sys
 from pathlib import Path
 
+import jsonschema
 import pytest
 from pydantic import ValidationError
 
@@ -294,7 +295,7 @@ def test_adapter_runtime_error_is_not_store_failure(enabled, monkeypatch):
 def test_ledger(enabled):
     assert call(enabled)[0] == 200
     entry = json.loads(enabled[0].LEDGER_PATH.read_text().splitlines()[-1])
-    assert entry["aps_live"] is False and entry["aps_endpoint"] is None
+    assert entry["aps_live"] is False and entry["aps_endpoint"] == enabled[0].APS_ENDPOINT
     assert entry["tool"] == "solar-settings"
 
 
@@ -304,7 +305,23 @@ def test_refused_live_ledger_is_local(enabled, monkeypatch):
     assert env["ok"] is False
     assert env["error"]["reason_code"] == "local_graph_commit_invalid"
     entry = json.loads(enabled[0].LEDGER_PATH.read_text().splitlines()[-1])
-    assert entry["aps_live"] is False and entry["aps_endpoint"] is None
+    assert entry["aps_live"] is False and entry["aps_endpoint"] == enabled[0].APS_ENDPOINT
+
+
+@pytest.mark.parametrize("outcome", ["committed", "refused"])
+def test_ledger_line_is_schema_valid(enabled, monkeypatch, outcome):
+    if outcome == "committed":
+        assert call(enabled)[0] == 200
+    else:
+        monkeypatch.setattr(local, "run_local_graph_commit", forbidden)
+        _, env = call(enabled, aps_live=True)
+        assert env["ok"] is False
+        assert env["error"]["reason_code"] == "local_graph_commit_invalid"
+    entry = json.loads(enabled[0].LEDGER_PATH.read_text().splitlines()[-1])
+    schema = json.loads((SERVER / "broker_ledger.schema.json").read_text())
+    jsonschema.validate(entry, schema)
+    assert type(entry["aps_endpoint"]) is str
+    assert entry["aps_endpoint"]
 
 
 def test_packaged_builtin_ignores_decoy(enabled, tmp_path, monkeypatch):

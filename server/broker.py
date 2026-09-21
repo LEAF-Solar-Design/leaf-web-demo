@@ -2775,12 +2775,12 @@ def _broker_run_request(req: Union[BrokerRunRequest, BrokerPlanRunRequest]) -> J
         "status": "unknown",
     }
     from product_capability_availability import is_cloud_proposal, is_local_graph_commit
+    # aps_endpoint stays the process's APS base URL for every kind: the frozen ledger line requires a string
+    # and the PostgreSQL column is NOT NULL. aps_live False is what says APS was not used.
     if is_cloud_proposal(tool):
-        entry["aps_endpoint"] = None
         entry["aps_live"] = False
         entry["cloud_endpoint"] = "https://api.leafdesign.ai/api/ml/"
     if is_local_graph_commit(tool):
-        entry["aps_endpoint"] = None
         entry["aps_live"] = False
     postgres_mode = _broker_store_mode() == "postgres"
     ledger_event_key = req.ledger_event_key or str(uuid.uuid4())
