@@ -1282,7 +1282,8 @@ class BrokerRunRequest(BaseModel):
     test_source: Optional[str] = None
     file_only: bool = False
     # None -> head (unchanged); otherwise pin to an immutable drawing version.
-    dwg_version: Optional[int] = None
+    # A bool, a float or a string is refused at the wire.
+    dwg_version: Optional[int] = Field(default=None, strict=True)
     # Required in PostgreSQL mode. Use one durable key across job redeliveries.
     ledger_event_key: Optional[str] = None
     # Single-writer identity of the caller that submitted this run, carried from
@@ -1295,7 +1296,8 @@ class BrokerRunRequest(BaseModel):
     # two sessions asking for the same tool+params are the same work even when
     # only one of them is authorized to publish the result.
     checkout_holder: Optional[str] = None
-    checkout_fence: Optional[int] = None
+    # A bool, a float or a string is refused at the wire.
+    checkout_fence: Optional[int] = Field(default=None, strict=True)
     # Optional durable job identity. When present, this run's live WorkItem id is
     # registered against it so /broker/reap can cancel it on tab close. Omitting
     # it leaves behaviour and the response shape byte-for-byte unchanged. It is
@@ -1702,6 +1704,20 @@ def _classified_bad_params(
     )
     env["error"]["reason_code"] = reason_code
     return env, DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS]
+
+
+def _graph_commit_refused(
+    reason_code: str, *, tool: Optional[str] = None,
+) -> tuple[Dict[str, Any], int]:
+    if not isinstance(reason_code, str) or not re.fullmatch(r"[A-Z][A-Z0-9_]{2,63}", reason_code):
+        reason_code = "GRAPH_COMMIT_REFUSED"
+    code = (ErrorCode.FORBIDDEN if reason_code in {"CHECKOUT_REQUIRED", "CHECKOUT_DENIED"}
+            else ErrorCode.INTERNAL if reason_code == "GRAPH_COMMIT_READBACK_FAILED"
+            else ErrorCode.BAD_PARAMS)
+    env = err_envelope(code, reason_code, retryable=False, tool=tool)
+    env["error"]["reason_code"] = reason_code
+    env["degraded_mode"] = False
+    return env, DEFAULT_HTTP_STATUS[code]
 
 
 _RUN_REFUSED = "broker_run_refused"
@@ -2758,11 +2774,14 @@ def _broker_run_request(req: Union[BrokerRunRequest, BrokerPlanRunRequest]) -> J
         "usd_est": None,
         "status": "unknown",
     }
-    from product_capability_availability import is_cloud_proposal
+    from product_capability_availability import is_cloud_proposal, is_local_graph_commit
+    # aps_endpoint stays the process's APS base URL for every kind: the frozen ledger line requires a string
+    # and the PostgreSQL column is NOT NULL. aps_live False is what says APS was not used.
     if is_cloud_proposal(tool):
-        entry["aps_endpoint"] = None
         entry["aps_live"] = False
         entry["cloud_endpoint"] = "https://api.leafdesign.ai/api/ml/"
+    if is_local_graph_commit(tool):
+        entry["aps_live"] = False
     postgres_mode = _broker_store_mode() == "postgres"
     ledger_event_key = req.ledger_event_key or str(uuid.uuid4())
     # Identifies THIS invocation as the owner of any WorkItem correlation it
@@ -3148,7 +3167,7 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
                 tool=tool.get("name"),
             ), DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
 
-    from product_capability_availability import is_cloud_proposal
+    from product_capability_availability import is_cloud_proposal, is_local_graph_commit
     cloud_proposal = is_cloud_proposal(tool)
     if cloud_proposal:
         with (SERVER_DIR / "catalog_tools.json").open(encoding="utf-8") as stream:
@@ -3157,6 +3176,16 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
         if tool != canonical or req.aps_live or req.test_source is not None or req.file_only:
             return _classified_bad_params(
                 "cloud_capability_invalid", "cloud proposal requires its trusted catalog capability",
+                tool=tool.get("name"))
+
+    local_graph = is_local_graph_commit(tool)
+    if local_graph:
+        with (SERVER_DIR / "write_tools.json").open(encoding="utf-8") as stream:
+            canonical = next((row for row in json.load(stream)["tools"]
+                              if row["name"] == tool.get("name")), None)
+        if canonical is None or tool != canonical or req.aps_live or req.test_source is not None or req.file_only:
+            return _classified_bad_params(
+                "local_graph_commit_invalid", "local graph commit requires its trusted catalog capability",
                 tool=tool.get("name"))
 
     # Phase 0 deployed-posture gate: tracked builtins and APS-only tools remain
@@ -3169,6 +3198,7 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
     if (
         _deployed_runtime()
         and not cloud_proposal
+        and not local_graph  # The proven tracked record loads its packaged builtin by file path, never through the tenant repository.
         and not _is_blank_dwg_request(req, tool)
         and not is_trusted_builtin_tool(tool, req.tenant_id)
     ):
@@ -3310,7 +3340,10 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
     # reaches the tool or the schema check. F12: it is HONORED only when QA hooks are
     # enabled (LEAF_QA_HOOKS; non-live default ON) — otherwise it is IGNORED ENTIRELY
     # so a tenant can't starve the shared worker pool with a large sleep in prod.
-    qa_sleep = params.pop("_qa_sleep_s", None)
+    # A local graph commit never honours the QA key, because its params are bound to the terminal proof.
+    qa_sleep = None
+    if not local_graph:
+        qa_sleep = params.pop("_qa_sleep_s", None)
     if qa_sleep is not None and not _qa_hooks_enabled():
         qa_sleep = None
 
@@ -3333,6 +3366,49 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
             code = (env.get("error") or {}).get("error_code", ErrorCode.INTERNAL)
             return env, DEFAULT_HTTP_STATUS.get(code, 500)
         return env, 200
+
+    if local_graph:
+        import store
+        from solar_design_graph import GraphValidationError
+        from solar_local_graph import run_local_graph_commit
+
+        if not isinstance(req.job_id, str) or not req.job_id:
+            return _graph_commit_refused("JOB_IDENTITY_MISSING", tool=tool["name"])
+        if type(req.dwg_version) is not int or req.dwg_version < 1:
+            return _graph_commit_refused("INVALID_PARENT_VERSION", tool=tool["name"])
+        if (not isinstance(req.checkout_holder, str) or not req.checkout_holder
+                or req.checkout_holder == store.ANONYMOUS_HOLDER
+                or type(req.checkout_fence) is not int or req.checkout_fence < 1):
+            return _graph_commit_refused("CHECKOUT_REQUIRED", tool=tool["name"])
+        if (not isinstance(req.dwg, str) or not req.dwg
+                or ("drawing_id" in params and params["drawing_id"] != req.dwg)):
+            return _graph_commit_refused("DRAWING_ID_CONFLICT", tool=tool["name"])
+
+        def graph_store_unavailable():
+            env = err_envelope(ErrorCode.INTERNAL, "graph store unavailable",
+                               retryable=True, tool=tool["name"])
+            env["error"]["reason_code"] = "GRAPH_STORE_UNAVAILABLE"
+            env["degraded_mode"] = False
+            return env, DEFAULT_HTTP_STATUS[ErrorCode.INTERNAL]
+
+        try:
+            _start_admitted_execution(req, admission, aps_submission=False)
+            try:
+                backend = write_loop.backend_for_tenant(req.tenant_id, aps_live=False, da=None)
+            except RuntimeError:
+                return graph_store_unavailable()
+            result = run_local_graph_commit(
+                backend, req.tenant_id, tool["name"], params,
+                drawing_id=req.dwg, source_version=req.dwg_version,
+                holder=req.checkout_holder, fence=req.checkout_fence, job_id=req.job_id)
+            env = ok_envelope(tool["name"], tool["version"], result, None,
+                              int((time.perf_counter() - t0) * 1000))
+            env["degraded_mode"] = False
+            return env, 200
+        except GraphValidationError as exc:
+            return _graph_commit_refused(exc.code, tool=tool["name"])
+        except OSError:
+            return graph_store_unavailable()
 
     # 1c) WRITE BRANCH (M2): a drawing.write tool produces a NEW immutable store
     #     version (undo/redo-able). Read tools do NOT match here and take the

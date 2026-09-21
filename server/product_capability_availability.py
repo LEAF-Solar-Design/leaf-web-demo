@@ -111,6 +111,7 @@ W1_CAPABILITIES = {
 }
 
 CLOUD_PROPOSAL_ADAPTER = "cloud-proposal"
+LOCAL_GRAPH_COMMIT_ADAPTER = "local-graph-commit"
 
 
 def capability_adapter(name):
@@ -135,6 +136,13 @@ def is_cloud_proposal(tool):
     if not isinstance(tool, Mapping):
         raise TypeError("tool record must be a mapping")
     return capability_adapter(tool.get("name")) == CLOUD_PROPOSAL_ADAPTER
+
+
+def is_local_graph_commit(tool):
+    """True only for a mapping tool record with the local graph adapter kind."""
+    if not isinstance(tool, Mapping):
+        raise TypeError("tool record must be a mapping")
+    return capability_adapter(tool.get("name")) == LOCAL_GRAPH_COMMIT_ADAPTER
 
 
 def annotate_w1_availability(families, tenant, drawing_id=None, *,

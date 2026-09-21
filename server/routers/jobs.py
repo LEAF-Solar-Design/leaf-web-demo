@@ -346,6 +346,7 @@ def _checkout_identity(tenant_id: Any, drawing_id: str,
     when its state cannot be read at all: the run then publishes freely on an
     unlocked drawing and is refused against any live lease, which is the
     fail-closed answer for a caller that has proven nothing.
+    A local graph commit is the exception: it requires a held checkout.
 
     A REJECTED capability is deliberately not an error here. The gate that
     matters runs in the store, under the row lock, at the moment of publish
@@ -491,7 +492,7 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
             "reason_code": availability["refusal_reasons"][0],
         }))
 
-    from product_capability_availability import is_cloud_proposal
+    from product_capability_availability import is_cloud_proposal, is_local_graph_commit
     if is_cloud_proposal(tool):
         from leaf_cloud_client import validate_params as validate_cloud_params
         from leaf_cloud_grants import CloudError
@@ -505,6 +506,15 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
             return error_response(ErrorCode.BAD_PARAMS, exc.classification,
                                   retryable=False, status_code=400)
 
+    if is_local_graph_commit(tool):
+        if "drawing_id" not in params:
+            params["drawing_id"] = req.dwg
+        elif not isinstance(params["drawing_id"], str) or params["drawing_id"] != req.dwg:
+            return JSONResponse(status_code=409, content=with_envelope_fields({
+                "error": error_obj(ErrorCode.BAD_PARAMS, "DRAWING_ID_CONFLICT", retryable=False),
+                "reason_code": "DRAWING_ID_CONFLICT",
+            }))
+
     # Exchange the capability for the lock's OWN (holder, fence) before anything
     # is submitted, so the identity that reaches the store was read from the
     # manifest rather than chosen by the caller.
@@ -514,6 +524,26 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
     target_drawing_id = write_loop.target_drawing_id(params)
     checkout_holder, checkout_fence = _checkout_identity(
         tenant_id, target_drawing_id, x_checkout_capability)
+
+    dwg_version = req.dwg_version
+    if is_local_graph_commit(tool):
+        store = _store()
+        if checkout_holder == store.ANONYMOUS_HOLDER or checkout_fence is None:
+            return JSONResponse(status_code=403, content=with_envelope_fields({
+                "error": error_obj(ErrorCode.FORBIDDEN, "CHECKOUT_REQUIRED", retryable=False),
+                "reason_code": "CHECKOUT_REQUIRED",
+            }))
+        if dwg_version is None:
+            try:
+                backend = write_loop.backend_for_tenant(str(tenant_id), aps_live=False, da=None)
+                dwg_version = store.load_manifest(backend, str(tenant_id), target_drawing_id)["head"]
+                if type(dwg_version) is not int or dwg_version < 1:
+                    raise ValueError()
+            except (KeyError, AttributeError, TypeError, ValueError, OSError, RecursionError, RuntimeError):
+                return JSONResponse(status_code=409, content=with_envelope_fields({
+                    "error": error_obj(ErrorCode.BAD_PARAMS, "GRAPH_CONTEXT_UNAVAILABLE", retryable=False),
+                    "reason_code": "GRAPH_CONTEXT_UNAVAILABLE",
+                }))
 
     aps_live_authorized = False
     try:
@@ -601,7 +631,19 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
                 ):
                     raise ValueError(
                         "effective catalog changed after approval; refresh tools and confirm again")
-                current_head = _legacy_drawing_head(str(tenant_id), req.dwg)
+                if is_local_graph_commit(tool):
+                    try:
+                        backend = write_loop.backend_for_tenant(str(tenant_id), aps_live=False, da=None)
+                        current_head = _store().load_manifest(backend, str(tenant_id), target_drawing_id)["head"]
+                        if type(current_head) is not int or current_head < 1:
+                            raise TypeError()
+                    except (KeyError, AttributeError, TypeError, ValueError, OSError, RecursionError, RuntimeError):
+                        return JSONResponse(status_code=409, content=with_envelope_fields({
+                            "error": error_obj(ErrorCode.BAD_PARAMS, "GRAPH_CONTEXT_UNAVAILABLE", retryable=False),
+                            "reason_code": "GRAPH_CONTEXT_UNAVAILABLE",
+                        }))
+                else:
+                    current_head = _legacy_drawing_head(str(tenant_id), req.dwg)
                 if current_head != req.expected_drawing_head:
                     raise ValueError(
                         "drawing head changed after approval; refresh drawing state and confirm again")
@@ -636,11 +678,13 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
                     deps.TOOL_SOURCE_OPERATOR_OWNED_ENGINE
                 ),
             )
+            if is_local_graph_commit(tool):
+                aps_live_authorized = False
             job_id = jobs.submit_job(
                 tenant_id, tool, params, req.dwg,
                 aps_live=aps_live_authorized,
                 org_id=resolved_org, project_id=resolved_project,
-                dwg_version=req.dwg_version,
+                dwg_version=dwg_version,
                 idempotency_key=idempotency_key, authority_mode=authority_mode,
                 platform_context=platform_context,
                 # Derived from the VERIFIED capability, never from the request
@@ -648,6 +692,7 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
                 # id, which no lock can ever hold (store.acquire_checkout refuses
                 # it), so its run is refused against every active lock and still
                 # publishes freely on an unlocked drawing.
+                # A local graph commit is the exception: it requires a held checkout.
                 checkout_holder=checkout_holder,
                 checkout_fence=checkout_fence,
             )
