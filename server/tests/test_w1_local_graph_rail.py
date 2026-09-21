@@ -289,3 +289,14 @@ def test_correction_requires_strings(api, graph):
     assert response.status_code == 409, response.text
     assert response.json()["reason_code"] == "strings_required"
     assert not jobs._query("SELECT job_id FROM jobs")
+
+
+def test_digit_string_version_reads_like_its_integer(api, graph):
+    # The capabilities route hands the gate the request's version as text; the resolver takes "head" or an int.
+    project = graph["project"]["id"]
+    by_int = availability.w1_input_readiness(api[5], "solar", project_id=project, version=1)
+    by_text = availability.w1_input_readiness(api[5], "solar", project_id=project, version="1")
+    assert by_text == by_int
+    assert by_text["solar-settings"]["input_ready"] is True
+    assert by_text["solar-size-strings"] == {
+        "input_ready": False, "input_reason": "persisted_graph_unavailable"}
