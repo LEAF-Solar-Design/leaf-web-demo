@@ -9,6 +9,12 @@
     "schema_version": {"type": "integer", "const": 1},
     "project_id": {"$ref": "#/definitions/id"},
     "repository": {"$ref": "#/definitions/repository"},
+    "integration_branch": {"type": "string", "minLength": 1, "maxLength": 100, "pattern": "^[A-Za-z0-9_][A-Za-z0-9_./-]{0,99}$", "description": "The branch this repository integrates on when it is not the remote default (leaf_website: staging). plan and check derive the base from it."},
+    "repos": {
+      "type": "object", "additionalProperties": false, "default": {}, "maxProperties": 100,
+      "description": "Path-to-repo map for the host index: repository id to an absolute checkout path. Read by discovery; never required.",
+      "patternProperties": {"^(local|[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100})$": {"type": "string", "minLength": 1, "maxLength": 260}}
+    },
     "authored_at_revision": {"$ref": "#/definitions/sha"},
     "components": {"type": "array", "minItems": 1, "maxItems": 200, "items": {"$ref": "#/definitions/component"}},
     "unmapped": {"type": "array", "minItems": 0, "maxItems": 500, "default": [], "items": {"$ref": "#/definitions/glob"}},

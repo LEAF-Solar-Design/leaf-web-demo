@@ -60,6 +60,17 @@ def default_head(repo):
     return None
 
 
+def integration_head(repo, branch):
+    """The tip of the declared integration branch: origin/<branch> first, then the local
+    branch; None when neither resolves (the caller falls back to default_head)."""
+    for ref in (f"origin/{branch}", branch):
+        try:
+            return rev_parse(repo, ref)
+        except GitError:
+            pass
+    return None
+
+
 def remote_url(repo):
     try:
         return _run(repo, "remote", "get-url", "origin").strip() or None

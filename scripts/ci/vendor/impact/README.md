@@ -30,7 +30,7 @@ manifest's glob grammar or size limits cause refusal before writing.
 out-of-range values. Only schema_version, project_id, repository,
 authored_at_revision, and components are required. Missing list fields become
 empty lists. Missing concern fields get empty evidence, false monitor obligation,
-and unresolved outcome. These defaults affect the SHA-256 digest, but do not
+and unresolved outcome. An optional `repos` mapping (repository id to absolute checkout path, at most 100 entries) is the host's path-to-repo map; it defaults to empty and is read by discovery. An optional `integration_branch` names the branch the repository integrates on when that is not the remote default; plan and check derive their base from it. These defaults affect the SHA-256 digest, but do not
 rewrite the file. The draft-07 schema documents the contract; validation is
 hand-written and does not depend on jsonschema.
 
@@ -78,6 +78,8 @@ The shipped slice 1 family file still uses producer-side triggers. Explicit
 targets add the same target-family obligations used for matched paths.
 `impact.impact_scope` also exposes the predicate for callers using the package
 directory on `sys.path`.
+
+A manifest with `integration_branch` uses that branch's tip (origin first) as the merge-base target.
 
 `check` resolves immutable base and head revisions and assesses the actual git
 diff. `--head worktree` adds tracked edits and untracked files and reads local
@@ -134,6 +136,8 @@ evidence, reason, task, and superseded_by. Evidence is at most 512 characters;
 reasons are at most 1,000. Task IDs use `[A-Za-z0-9._#/-]{1,128}`. Contract
 subjects name the contract and consumer repository. Monitor rows use `monitor`;
 untriggered concerns use `-` and are not required.
+
+A companion row's subject is its path with characters outside the subject grammar replaced by `-`, so globs never reach a row id or a `--row` argument.
 
 Disposition commands require an existing row and append the action, session,
 UTC time, and detail. Missing row IDs return 1; missing CLI arguments return 2.

@@ -3,7 +3,7 @@
 schema_version: 1
 project_id: leaf-web-demo
 repository: LEAF-Solar-Design/leaf-web-demo
-authored_at_revision: 139a3c35087b20849330eacaf576b21af655f977
+authored_at_revision: b31bafebea4e3d51181eb0deaf4ae08029340ade
 
 components:
   - id: server
@@ -334,7 +334,9 @@ concerns:
   telemetry:
     evidence: [server/telemetry_sink.py, server/tests/test_client_exception_vocab_freeze.py]
   alarms:
-    evidence: []
+    evidence:
+      - "repo:leaf-automation-aws-terraform terraform/environments/production/us-east-1/cloudwatch.tf (leaf-alb-5xx-errors, leaf-alb-unhealthy-hosts, leaf-alb-latency-high, leaf-ai-manager-no-healthy-targets, leaf-ai-manager-cpu-high, leaf-ai-manager-memory-high, leaf-ai-engine-memory-high)"
+      - "repo:leaf-automation-aws-terraform terraform/environments/production/us-east-1/cloudwatch_aps.tf (the APS EMF alarms; SubmitLatency known blind, contract aps-emf-alarm-dimensions)"
     monitor_obligation: true
   deployment:
     evidence: [server/deployment_identity.py, server/tests/test_deployment_source_identity.py]
