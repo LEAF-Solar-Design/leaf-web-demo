@@ -214,8 +214,8 @@ def _validate_source_catalog(payload: Any, project_id: str) -> Dict[str, Any]:
             "source_sha256": r"[0-9a-f]{64}",
             "producer_receipt_digest": r"[0-9a-f]{64}",
             "bundle_identifier": r"[A-Za-z0-9.-]{3,255}",
-            "marketing_version": r"[0-9]+(?:\.[0-9]+){1,2}",
-            "build_number": r"[0-9]{1,20}",
+            "marketing_version": r"[0-9]{1,18}(?:\.[0-9]{1,18}){1,2}",
+            "build_number": r"[0-9]{1,18}",
         }
 
         def matches(value, pattern):
@@ -224,16 +224,19 @@ def _validate_source_catalog(payload: Any, project_id: str) -> Dict[str, Any]:
         if not isinstance(payload, dict) or set(payload) != fields:
             raise ProviderCatalogError()
         if (payload["schema"] != _CATALOG_SCHEMA or payload["project_id"] != project_id
-                or payload["status"] not in {"ok", "metadata_unavailable", "unconfigured"}
-                or not isinstance(payload["catalog_key"], str)
-                or not 1 <= len(payload["catalog_key"]) <= 128):
+                or payload["status"] not in {"ok", "metadata_unavailable", "unconfigured"}):
             raise ProviderCatalogError()
+        if not matches(payload["catalog_key"], r"[a-z0-9][a-z0-9_-]{0,63}"):
+            raise ProviderCatalogError("catalog_key is invalid.")
         for name in ("sources", "unpinned", "refused"):
             if not isinstance(payload[name], list) or len(payload[name]) > _MAX_CATALOG_SOURCES:
                 raise ProviderCatalogError()
         for entry in payload["sources"]:
             if not isinstance(entry, dict) or set(entry) != set(patterns) | {"repository"}:
                 raise ProviderCatalogError()
+            for name in ("marketing_version", "build_number"):
+                if not matches(entry[name], patterns[name]):
+                    raise ProviderCatalogError(f"{name} is invalid.")
             if any(not matches(entry[key], pattern) for key, pattern in patterns.items()):
                 raise ProviderCatalogError()
             repository = entry["repository"]

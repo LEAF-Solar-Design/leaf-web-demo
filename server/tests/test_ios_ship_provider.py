@@ -363,6 +363,48 @@ def test_b4a_catalog_get_contract(tmp_path, monkeypatch):
         "timeout": 3.5, "verify": str(config.ca_file)})]
 
 
+def test_b4a_version_and_build_bounds():
+    payload = _b4a_catalog()
+    source = payload["sources"][0]
+    source["marketing_version"] = ".".join(["1" * 18] * 3)
+    source["build_number"] = "2" * 18
+    assert provider._validate_source_catalog(payload, B4A_PROJECT) is payload
+
+    for index in range(3):
+        valid = source["marketing_version"]
+        components = valid.split(".")
+        components[index] = "1" * 19
+        value = ".".join(components)
+        source["marketing_version"] = value
+        with pytest.raises(provider.ProviderCatalogError) as exc:
+            provider._validate_source_catalog(payload, B4A_PROJECT)
+        assert "marketing_version" in str(exc.value)
+        assert value not in str(exc.value)
+        source["marketing_version"] = valid
+
+    value = "2" * 19
+    source["build_number"] = value
+    with pytest.raises(provider.ProviderCatalogError) as exc:
+        provider._validate_source_catalog(payload, B4A_PROJECT)
+    assert "build_number" in str(exc.value)
+    assert value not in str(exc.value)
+
+
+def test_b4a_catalog_key_grammar():
+    payload = _b4a_catalog()
+    for value in ("exzachly", "bakery_stock", "a-b1", "x"):
+        payload["catalog_key"] = value
+        assert provider._validate_source_catalog(payload, B4A_PROJECT) is payload
+
+    for value in ("../../other-project/catalog", "Exzachly", "", "a" * 65, "a/b", "a b"):
+        payload["catalog_key"] = value
+        with pytest.raises(provider.ProviderCatalogError) as exc:
+            provider._validate_source_catalog(payload, B4A_PROJECT)
+        assert str(exc.value) == "catalog_key is invalid."
+        if value:
+            assert value not in str(exc.value)
+
+
 def test_b4a_catalog_scope_mismatch(tmp_path, monkeypatch):
     payload = _b4a_catalog()
     payload["project_id"] = "5ec5345a-0d85-4c3f-80e2-8ab99ae25c32"
