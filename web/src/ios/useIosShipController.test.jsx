@@ -1,7 +1,7 @@
 import { act, cleanup, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { useIosShipController, shipSetupState } from './useIosShipController.js'
-import { validateIosShipReadiness } from '../site/iosShipReadiness.js'
+import { validateIosShipReadiness, fetchIosShipSources as readSources, requestIosShipApproval as postApproval } from '../site/iosShipReadiness.js'
 import { readFileSync } from 'node:fs'
 
 // Transport spies: the hook still calls every real fetch helper and validator.
@@ -9,6 +9,16 @@ const fetchIosShipReadiness = vi.fn()
 const getIosShipExecution = vi.fn()
 const getIosShipReceipt = vi.fn()
 const requestIosShipLaunch = vi.fn()
+const fetchIosShipSources = vi.fn()
+const requestIosShipApproval = vi.fn()
+
+const sourceOne = { source_revision: 'a'.repeat(40), source_sha256: 'b'.repeat(64),
+  bundle_identifier: 'com.example.app', marketing_version: '1.0', build_number: '12', catalog_key: 'catalog-one' }
+const sourceTwo = { ...sourceOne, source_revision: 'c'.repeat(40), build_number: '11' }
+const sourceApproval = (source = sourceOne, overrides = {}) => ({ approval_id: 'approval-one', revision: 'r1',
+  source_revision: source.source_revision, consumed_at: null, ...overrides })
+const sourceCatalog = (overrides = {}) => ({ ok: true, sources: [sourceOne, sourceTwo], approvals: [sourceApproval(sourceTwo)],
+  sync: { status: 'ok', registered: 2, conflicts: [], unpinned: [], refused: [] }, can_approve: true, ...overrides })
 
 const props = { projectId: 'p1', revision: 'r1', tenantKey: 'tenant1', sessionActive: true }
 const key = 'leaf.ios-ship.pointer:tenant1:p1'
@@ -23,7 +33,12 @@ const emptyIosShipReadiness = (reason) => approvedReadiness({ launchable: false,
 const transport = async (url, init) => {
   const path = new URL(url, 'http://localhost')
   let data
-  if (path.pathname.endsWith('/readiness')) {
+  if (path.pathname.endsWith('/ios/sources')) {
+    data = await fetchIosShipSources({ projectId: decodeURIComponent(path.pathname.split('/')[3]) })
+  } else if (path.pathname.endsWith('/ios/approvals')) {
+    data = await requestIosShipApproval(JSON.parse(init.body))
+    if (data?.error) return { ok: false, status: data.status || 409, json: async () => data }
+  } else if (path.pathname.endsWith('/readiness')) {
     const readiness = await fetchIosShipReadiness({ projectId: path.searchParams.get('project_id'), revision: path.searchParams.get('revision') })
     data = { readiness: { record_kind: readiness.kind, project_id: readiness.projectId,
       launchable: readiness.launchable, healthy: readiness.healthy, grant_status: readiness.grantStatus,
@@ -81,8 +96,348 @@ beforeEach(() => {
   requestIosShipLaunch.mockResolvedValue({ ok: true, execution: queued })
   getIosShipExecution.mockResolvedValue({ execution: queued })
   getIosShipReceipt.mockResolvedValue({ receipt })
+  fetchIosShipSources.mockResolvedValue(sourceCatalog())
+  requestIosShipApproval.mockResolvedValue({ ok: true, approval: sourceApproval() })
 })
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); sessionStorage.clear() })
+
+it('B4D row1 reads the project catalog once across drawing version changes', async () => {
+  const { result, rerender } = mount()
+  await flush()
+  expect(fetchIosShipSources).toHaveBeenCalledTimes(1)
+  expect(result.current.sources).toEqual([sourceOne, sourceTwo])
+  expect(result.current.approvals).toEqual([sourceApproval(sourceTwo)])
+  expect(result.current.sync.status).toBe('ok')
+  expect(result.current.canApprove).toBe(true)
+  rerender({ ...props, revision: 'r2' })
+  await flush()
+  expect(fetchIosShipSources).toHaveBeenCalledTimes(1)
+  expect(result.current.sources).toEqual([sourceOne, sourceTwo])
+})
+
+it('B4D row2 inactive or missing project scopes never read the catalog', async () => {
+  for (const patch of [{ enabled: false }, { sessionActive: false }, { projectId: null }]) {
+    const hook = renderHook(() => useIosShipController({ ...props, ...patch }))
+    await flush()
+    expect(hook.result.current).toMatchObject({ sources: [], approvals: [], sync: null, canApprove: false, sourcesError: null })
+    hook.unmount()
+  }
+  expect(fetchIosShipSources).not.toHaveBeenCalled()
+})
+
+it('B4D row3 submits only the catalog tuple and refreshes sources and readiness', async () => {
+  let resolveApproval
+  requestIosShipApproval.mockReturnValueOnce(new Promise((resolve) => { resolveApproval = resolve }))
+  const { result } = mount()
+  await flush()
+  let pending
+  act(() => { pending = result.current.approve(sourceOne.source_revision) })
+  expect(result.current.approving).toBe(true)
+  expect(result.current.busy).toBe(false)
+  expect(requestIosShipApproval).toHaveBeenCalledTimes(1)
+  expect(requestIosShipApproval).toHaveBeenCalledWith({ revision: 'r1', source_revision: sourceOne.source_revision,
+    source_sha256: sourceOne.source_sha256, bundle_identifier: sourceOne.bundle_identifier,
+    marketing_version: sourceOne.marketing_version, build_number: sourceOne.build_number })
+  await act(async () => {
+    resolveApproval({ ok: true, approval: sourceApproval() })
+    expect(await pending).toEqual({ approval: sourceApproval(), readBack: false })
+  })
+  expect(result.current.approving).toBe(false)
+  expect(fetchIosShipSources).toHaveBeenCalledTimes(2)
+  expect(fetchIosShipReadiness).toHaveBeenCalledTimes(2)
+})
+
+it('B4D row4 locks a second synchronous approval before the request settles', async () => {
+  let resolveApproval
+  requestIosShipApproval.mockReturnValueOnce(new Promise((resolve) => { resolveApproval = resolve }))
+  const { result } = mount()
+  await flush()
+  let first
+  let second
+  act(() => { first = result.current.approve(sourceOne.source_revision); second = result.current.approve(sourceOne.source_revision) })
+  expect(await second).toBeNull()
+  expect(requestIosShipApproval).toHaveBeenCalledTimes(1)
+  await act(async () => { resolveApproval({ ok: true, approval: sourceApproval() }); await first })
+})
+
+it('B4D row5 owner version and catalog membership are required for approval', async () => {
+  for (const [canApprove, revision, selected] of [[false, 'r1', sourceOne.source_revision], [true, null, sourceOne.source_revision], [true, 'r1', 'unknown']]) {
+    fetchIosShipSources.mockResolvedValue(sourceCatalog({ can_approve: canApprove }))
+    const hook = renderHook(() => useIosShipController({ ...props, revision }))
+    await flush()
+    await act(async () => { expect(await hook.result.current.approve(selected)).toBeUndefined() })
+    expect(hook.result.current.approving).toBe(false)
+    hook.unmount()
+  }
+  expect(requestIosShipApproval).not.toHaveBeenCalled()
+})
+
+it.each(['approval_consumed', 'approval_tuple_mismatch'])('B4D row6 preserves the %s refusal and rereads sources', async (code) => {
+  requestIosShipApproval.mockResolvedValueOnce({ error: { code, message: `Approval refused: ${code}` } })
+  const { result } = mount()
+  await flush()
+  await act(async () => { expect(await result.current.approve(sourceOne.source_revision)).toBeUndefined() })
+  expect(result.current.sourcesError).toBe(`Approval refused: ${code}`)
+  expect(result.current.approving).toBe(false)
+  expect(fetchIosShipSources).toHaveBeenCalledTimes(2)
+})
+
+it('B4D row7 reads back a lost approval response before allowing another write', async () => {
+  requestIosShipApproval.mockRejectedValueOnce(new Error('connection lost'))
+  const { result } = mount()
+  await flush()
+  fetchIosShipSources.mockResolvedValue(sourceCatalog({ approvals: [sourceApproval()] }))
+  await act(async () => { expect(await result.current.approve(sourceOne.source_revision)).toEqual({ approval: null, readBack: true }) })
+  expect(result.current.sourcesError).toBeNull()
+  expect(result.current.approvals).toEqual([sourceApproval()])
+  expect(result.current.approving).toBe(false)
+  expect(fetchIosShipReadiness).toHaveBeenCalledTimes(2)
+  await act(async () => { expect(await result.current.approve(sourceOne.source_revision)).toBeUndefined() })
+  expect(requestIosShipApproval).toHaveBeenCalledTimes(1)
+})
+
+it('B4D row7b permits a retry only after a readback with no matching approval', async () => {
+  requestIosShipApproval.mockRejectedValueOnce(new Error('connection lost'))
+  const { result } = mount()
+  await flush()
+  await act(async () => { await result.current.approve(sourceOne.source_revision) })
+  expect(result.current.sourcesError).toBe('connection lost')
+  expect(result.current.approving).toBe(false)
+  expect(fetchIosShipSources).toHaveBeenCalledTimes(2)
+  await act(async () => { await result.current.approve(sourceOne.source_revision) })
+  expect(requestIosShipApproval).toHaveBeenCalledTimes(2)
+})
+
+it('B4D row8 an old approval reply cannot write into the next project', async () => {
+  let rejectApproval
+  requestIosShipApproval.mockReturnValueOnce(new Promise((resolve, reject) => { rejectApproval = reject }))
+  const { result, rerender } = mount()
+  await flush()
+  let pending
+  act(() => { pending = result.current.approve(sourceOne.source_revision) })
+  fetchIosShipSources.mockResolvedValue(sourceCatalog({ sources: [], approvals: [], can_approve: false }))
+  rerender({ ...props, projectId: 'p2' })
+  await flush()
+  await act(async () => { rejectApproval(new Error('old connection lost')); await pending })
+  expect(result.current).toMatchObject({ sources: [], approvals: [], canApprove: false, sourcesError: null, approving: false })
+  expect(fetchIosShipSources).toHaveBeenCalledTimes(2)
+})
+
+it('B4D row9 rejects secret fields and incomplete tuples without exposing their values', async () => {
+  const { result } = mount()
+  await flush()
+  const previous = result.current.sources
+  for (const [data, field] of [
+    [sourceCatalog({ extra: { api_key: 'do-not-display' } }), 'api_key'],
+    [sourceCatalog({ sources: [{ ...sourceOne, build_number: undefined }] }), 'build_number'],
+  ]) {
+    fetchIosShipSources.mockResolvedValueOnce(data)
+    await act(async () => { expect(await result.current.refreshSources()).toBeNull() })
+    expect(result.current.sourcesError).toContain(field)
+    expect(result.current.sourcesError).not.toContain('do-not-display')
+    expect(result.current.sources).toBe(previous)
+  }
+})
+
+it('B4D row10 accepts the original catalog shape without granting approval', async () => {
+  fetchIosShipSources.mockResolvedValue({ ok: true, sources: [sourceOne], approvals: [] })
+  const { result } = mount()
+  await flush()
+  expect(result.current).toMatchObject({ sources: [sourceOne], approvals: [], sync: null, canApprove: false, sourcesError: null })
+})
+
+it.each([false, true])('B4D row21 holds an unknown approval until a successful readback, recorded %s', async (recorded) => {
+  const { result } = mount()
+  await flush()
+  requestIosShipApproval.mockRejectedValueOnce(new Error('connection lost'))
+  fetchIosShipSources.mockRejectedValueOnce(new Error('catalog unavailable'))
+  await act(async () => { await result.current.approve(sourceOne.source_revision) })
+  expect(result.current.approving).toBe(false)
+  await act(async () => { expect(await result.current.approve(sourceOne.source_revision)).toBeUndefined() })
+  expect(requestIosShipApproval).toHaveBeenCalledTimes(1)
+  expect(result.current.sourcesError).toBe("The last approval's outcome is unknown. Refresh the sources to confirm it before approving again.")
+  fetchIosShipSources.mockResolvedValueOnce(sourceCatalog({ approvals: recorded ? [sourceApproval()] : [] }))
+  await act(async () => { await result.current.refreshSources() })
+  expect(result.current.sourcesError).toBeNull()
+  expect(result.current.approvals).toEqual(recorded ? [sourceApproval()] : [])
+  await act(async () => { await result.current.approve(sourceOne.source_revision) })
+  expect(requestIosShipApproval).toHaveBeenCalledTimes(recorded ? 1 : 2)
+})
+
+it('B4D row22 rejects invalid source grammars by field and retains the previous catalog', async () => {
+  const { result } = mount()
+  await flush()
+  const previousSources = result.current.sources
+  const previousApprovals = result.current.approvals
+  for (const [field, value] of [
+    ['bundle_identifier', '/tmp/build/Example.app'], ['catalog_key', '../../x'],
+    ['repository', 'ftp://x'], ['source_revision', 'a'.repeat(41)],
+    ['source_sha256', 'g'.repeat(64)], ['marketing_version', '1.0-beta'],
+    ['build_number', '12x'], ['imported_at', 'x'.repeat(65)],
+    ['source_revision', `${'a'.repeat(40)}\n`], ['repository', 'https://example.test/ bad'],
+  ]) {
+    const data = sourceCatalog({ sources: [{ ...sourceOne, [field]: value }] })
+    fetchIosShipSources.mockResolvedValueOnce(data)
+    let failure
+    try { await readSources({ projectId: 'p1' }) } catch (cause) { failure = cause }
+    expect(failure).toBeInstanceOf(Error)
+    expect(failure.message).toContain(field)
+    expect(failure.message).not.toContain(value)
+    fetchIosShipSources.mockResolvedValueOnce(data)
+    await act(async () => { expect(await result.current.refreshSources()).toBeNull() })
+    expect(result.current.sourcesError).toContain(field)
+    expect(result.current.sourcesError).not.toContain(value)
+    expect(result.current.sources).toBe(previousSources)
+    expect(result.current.approvals).toBe(previousApprovals)
+  }
+  await expect(readSources({ projectId: 'p1' })).resolves.toMatchObject({ sources: [sourceOne, sourceTwo] })
+})
+
+it('B4D row24 a successful POST with failed readback holds retry until sources are confirmed', async () => {
+  const { result } = mount()
+  await flush()
+  fetchIosShipSources.mockRejectedValueOnce(new Error('catalog unavailable'))
+  await act(async () => {
+    expect(await result.current.approve(sourceOne.source_revision)).toEqual({ approval: sourceApproval(), readBack: false })
+  })
+  expect(result.current.approving).toBe(false)
+  await act(async () => { expect(await result.current.approve(sourceOne.source_revision)).toBeUndefined() })
+  expect(requestIosShipApproval).toHaveBeenCalledTimes(1)
+  expect(result.current.sourcesError).toBe("The last approval's outcome is unknown. Refresh the sources to confirm it before approving again.")
+  await act(async () => { await result.current.refreshSources() })
+  await act(async () => { await result.current.approve(sourceOne.source_revision) })
+  expect(requestIosShipApproval).toHaveBeenCalledTimes(2)
+})
+
+it('B4D row25 holds two unknown source tuples independently until a project readback', async () => {
+  fetchIosShipSources.mockResolvedValue(sourceCatalog({ approvals: [] }))
+  const { result } = mount()
+  await flush()
+  for (const source of [sourceOne, sourceTwo]) {
+    requestIosShipApproval.mockRejectedValueOnce(new Error('connection lost'))
+    fetchIosShipSources.mockRejectedValueOnce(new Error('catalog unavailable'))
+    await act(async () => { await result.current.approve(source.source_revision) })
+  }
+  for (const source of [sourceOne, sourceTwo]) {
+    await act(async () => { expect(await result.current.approve(source.source_revision)).toBeUndefined() })
+    expect(result.current.sourcesError).toBe("The last approval's outcome is unknown. Refresh the sources to confirm it before approving again.")
+  }
+  expect(requestIosShipApproval).toHaveBeenCalledTimes(2)
+  await act(async () => { await result.current.refreshSources() })
+  for (const source of [sourceOne, sourceTwo]) {
+    await act(async () => { await result.current.approve(source.source_revision) })
+  }
+  expect(requestIosShipApproval).toHaveBeenCalledTimes(4)
+})
+
+it('B4D row26 retains the request revision hold when a pending POST loses its scope', async () => {
+  let rejectApproval
+  requestIosShipApproval.mockReturnValueOnce(new Promise((resolve, reject) => { rejectApproval = reject }))
+  const { result, rerender } = mount()
+  await flush()
+  let pending
+  act(() => { pending = result.current.approve(sourceOne.source_revision) })
+  rerender({ ...props, revision: 'r2' })
+  await flush()
+  await act(async () => { rejectApproval(new Error('connection lost')); await pending })
+  rerender(props)
+  await flush()
+  await act(async () => { expect(await result.current.approve(sourceOne.source_revision)).toBeUndefined() })
+  expect(requestIosShipApproval).toHaveBeenCalledTimes(1)
+  expect(result.current.sourcesError).toBe("The last approval's outcome is unknown. Refresh the sources to confirm it before approving again.")
+  await act(async () => { await result.current.refreshSources() })
+  await act(async () => { await result.current.approve(sourceOne.source_revision) })
+  expect(requestIosShipApproval).toHaveBeenCalledTimes(2)
+})
+
+it('B4D row27 holds a 503 outcome but permits retry after a 409 refusal', async () => {
+  for (const status of [503, 409]) {
+    requestIosShipApproval.mockClear()
+    const { result, unmount } = mount()
+    await flush()
+    requestIosShipApproval.mockResolvedValue({ status, error: { code: 'approval_unavailable', message: `Approval refused (${status})` } })
+    fetchIosShipSources.mockRejectedValueOnce(new Error('catalog unavailable'))
+    await act(async () => { await result.current.approve(sourceOne.source_revision) })
+    expect(result.current.sourcesError).toBe(`Approval refused (${status})`)
+    fetchIosShipSources.mockRejectedValueOnce(new Error('catalog unavailable'))
+    await act(async () => { await result.current.approve(sourceOne.source_revision) })
+    expect(requestIosShipApproval).toHaveBeenCalledTimes(status === 503 ? 1 : 2)
+    expect(result.current.sourcesError).toBe(status === 503
+      ? "The last approval's outcome is unknown. Refresh the sources to confirm it before approving again."
+      : 'Approval refused (409)')
+    unmount()
+    fetchIosShipSources.mockReset().mockResolvedValue(sourceCatalog())
+  }
+})
+
+it('B4D row28 rejects malformed approval request fields before fetching', async () => {
+  const fetchImpl = vi.fn()
+  for (const [field, value] of [
+    ['build_number', '12x'], ['marketing_version', '1'], ['bundle_identifier', '/tmp/x'],
+    ['source_revision', 'a'.repeat(39)], ['source_sha256', 'b'.repeat(63)],
+    ['bundle_identifier', `com.${'a'.repeat(252)}`], ['marketing_version', `${'1'.repeat(19)}.0`],
+    ['build_number', '1'.repeat(19)], ['source_revision', `${sourceOne.source_revision}\n`],
+    ['revision', 'r1\n'],
+  ]) {
+    await expect(postApproval({ projectId: 'p1', revision: field === 'revision' ? value : 'r1',
+      source: { ...sourceOne, [field]: value }, fetchImpl })).rejects.toThrow(`approval request field invalid: ${field}`)
+  }
+  expect(fetchImpl).not.toHaveBeenCalled()
+})
+
+it('B4D row29 refuses a trailing newline in sync status and accepts its full match', async () => {
+  fetchIosShipSources.mockResolvedValueOnce(sourceCatalog({ sync: { status: 'ok\n', registered: 2 } }))
+  await expect(readSources({ projectId: 'p1' })).rejects.toThrow('source catalog field invalid: sync.status')
+  await expect(readSources({ projectId: 'p1' })).resolves.toMatchObject({ sync: { status: 'ok' } })
+})
+
+it('B4D row30 bounds server error text and preserves short messages', async () => {
+  const { result } = mount()
+  await flush()
+  for (const length of [5000, 100]) {
+    const text = 'x'.repeat(length)
+    requestIosShipApproval.mockResolvedValueOnce({ status: 409, error: { code: 'approval_unavailable', message: text } })
+    await act(async () => { await result.current.approve(sourceOne.source_revision) })
+    if (length > 300) {
+      expect(result.current.sourcesError.length).toBeLessThanOrEqual(300)
+      expect(result.current.sourcesError.endsWith('…')).toBe(true)
+    } else expect(result.current.sourcesError).toBe(text)
+  }
+})
+
+it('B4D row23 validates approval responses and holds retry while their outcome is unknown', async () => {
+  const malformed = { ok: true, approval: sourceApproval(sourceOne, { approval_id: 'x'.repeat(4096) }) }
+  requestIosShipApproval.mockResolvedValueOnce(malformed)
+  let failure
+  try { await postApproval({ projectId: 'p1', revision: 'r1', source: sourceOne }) } catch (cause) { failure = cause }
+  expect(failure).toBeInstanceOf(Error)
+  expect(failure.message).toContain('approval_id')
+  expect(failure.message).not.toContain(malformed.approval.approval_id)
+  expect(failure.status).toBeUndefined()
+  requestIosShipApproval.mockClear()
+  const { result } = mount()
+  await flush()
+  requestIosShipApproval.mockResolvedValueOnce(malformed)
+  let rejectReadBack
+  fetchIosShipSources.mockReturnValueOnce(new Promise((resolve, reject) => { rejectReadBack = reject }))
+  let pending
+  act(() => { pending = result.current.approve(sourceOne.source_revision) })
+  await flush()
+  expect(fetchIosShipSources).toHaveBeenCalledTimes(2)
+  await act(async () => { expect(await result.current.approve(sourceOne.source_revision)).toBeNull() })
+  expect(requestIosShipApproval).toHaveBeenCalledTimes(1)
+  await act(async () => { rejectReadBack(new Error('catalog unavailable')); await pending })
+  expect(result.current.sourcesError).toContain('approval_id')
+  await act(async () => { expect(await result.current.approve(sourceOne.source_revision)).toBeUndefined() })
+  expect(requestIosShipApproval).toHaveBeenCalledTimes(1)
+  fetchIosShipSources.mockResolvedValueOnce(sourceCatalog({ approvals: [sourceApproval()] }))
+  await act(async () => { await result.current.refreshSources() })
+  await act(async () => { expect(await result.current.approve(sourceOne.source_revision)).toBeUndefined() })
+  expect(result.current.sourcesError).toBeNull()
+  expect(requestIosShipApproval).toHaveBeenCalledTimes(1)
+  requestIosShipApproval.mockResolvedValueOnce({ ok: true, approval: { ...sourceApproval(), extra: 'discard' } })
+  await expect(postApproval({ projectId: 'p1', revision: 'r1', source: sourceOne })).resolves.toEqual(sourceApproval())
+})
 
 it('I1 row1 maps named setup states and transport failures', async () => {
   for (const [record, phase, setupState] of [

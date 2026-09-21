@@ -20,6 +20,8 @@ import {
   catalogTabClusters,
   layersCluster,
   profileRibbonTabs,
+  profileReason,
+  shipApproveRow,
   shipStatusRows,
   shipLaunchReason,
   solarRouteDisplay,
@@ -30,6 +32,76 @@ import {
   versionCluster,
   viewCluster,
 } from './ribbonClusters.js'
+
+const approvalSources = ['a', 'b', 'c'].map((letter) => ({ source_revision: letter.repeat(40) }))
+const approvalShip = (overrides = {}) => ({ controllerLive: true, revision: 'r1', canApprove: true,
+  sources: approvalSources, approvals: [], approve: vi.fn(), ...overrides })
+
+it('B4D row11 legacy Ship tabs have no approval row or cluster', () => {
+  expect(shipApproveRow()).toBeNull()
+  expect(shipApproveRow({ controllerLive: false })).toBeNull()
+  const ship = { revision: 'r1' }
+  expect(profileRibbonTabs('ship', { ship: { ...ship, controllerLive: false, sources: approvalSources, canApprove: true } }))
+    .toEqual(profileRibbonTabs('ship', { ship }))
+  expect(profileRibbonTabs('ship', { ship })[0].clusters.map((group) => group.id)).toEqual(['revision', 'readiness', 'ship', 'receipts'])
+})
+
+it('B4D row31 a live ship without sources preserves the original Ship clusters', () => {
+  const ship = { controllerLive: true, revision: 'r1', canApprove: true }
+  expect(shipApproveRow(ship)).toBeNull()
+  expect(profileRibbonTabs('ship', { ship })[0].clusters.map((group) => group.id))
+    .toEqual(['revision', 'readiness', 'ship', 'receipts'])
+})
+
+it('B4D row12 approval reasons follow the owner version source approval and busy ladder', () => {
+  const approvals = approvalSources.map((source, index) => ({ revision: 'r1', source_revision: source.source_revision,
+    consumed_at: index ? '2026-01-01' : null }))
+  for (const [overrides, reason] of [
+    [{ canApprove: false, revision: null, sources: [], approving: true }, PROFILE_REASONS.shipApproveOwner],
+    [{ revision: null, sources: [], approving: true }, PROFILE_REASONS.shipApproveNoRevision],
+    [{ sources: [], approving: true }, PROFILE_REASONS.shipApproveNoSource],
+    [{ approvals, approving: true }, PROFILE_REASONS.shipApproveApproved],
+    [{ approving: true }, PROFILE_REASONS.shipApproveBusy],
+    [{ approve: null }, PROFILE_REASONS.shipApproveOwner],
+  ]) {
+    const row = shipApproveRow(approvalShip(overrides))
+    expect(row).toMatchObject({ disabled: true, reason })
+    expect(row.onClick).toBeUndefined()
+    expect(Object.values(PROFILE_REASONS)).toContain(row.reason)
+  }
+})
+
+it('B4D row13 selects the first unapproved source in served order', () => {
+  const ship = approvalShip({ approvals: [{ revision: 'r1', source_revision: approvalSources[0].source_revision, consumed_at: null }] })
+  const row = shipApproveRow(ship)
+  expect(row).toMatchObject({ disabled: false, label: 'Approve bbbbbbbb', title: 'Approve bbbbbbbb', reason: PROFILE_REASONS.shipApproveReady })
+  row.onClick()
+  expect(ship.approve).toHaveBeenCalledTimes(1)
+  expect(ship.approve).toHaveBeenCalledWith(approvalSources[1].source_revision)
+})
+
+it('B4D row14 live Ship tabs insert approval after readiness with an existing icon', () => {
+  const clusters = profileRibbonTabs('ship', { ship: approvalShip() })[0].clusters
+  expect(clusters.map((group) => group.id)).toEqual(['revision', 'readiness', 'approve', 'ship', 'receipts'])
+  expect(clusters[2].tools).toHaveLength(1)
+  expect(clusters[2].tools[0].id).toBe('ship:approve')
+  expect(clusters[2].tools[0].icon).toBe(clusters[1].tools[0].icon)
+  expect(hasIcon(clusters[2].tools[0].icon)).toBe(true)
+})
+
+it('B4D row15 every approval reason survives the profile reason guard', () => {
+  const reasons = new Set()
+  for (const overrides of [
+    { canApprove: false }, { revision: null }, { sources: [] }, { approving: true }, { approve: null }, {},
+    { approvals: approvalSources.map((source) => ({ revision: 'r1', source_revision: source.source_revision, consumed_at: null })) },
+  ]) {
+    const row = shipApproveRow(approvalShip(overrides))
+    expect(profileReason(row.reason, 'fallback')).toBe(row.reason)
+    reasons.add(row.reason)
+  }
+  expect(reasons).toEqual(new Set([PROFILE_REASONS.shipApproveOwner, PROFILE_REASONS.shipApproveNoRevision,
+    PROFILE_REASONS.shipApproveNoSource, PROFILE_REASONS.shipApproveApproved, PROFILE_REASONS.shipApproveBusy, PROFILE_REASONS.shipApproveReady]))
+})
 
 const FAMS = [
   {

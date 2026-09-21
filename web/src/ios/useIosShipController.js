@@ -2,12 +2,60 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   emptyIosShipReadiness, fetchIosShipReadiness, getIosShipExecution,
   getIosShipReceipt, iosShipLaunchAffordance, makeIosShipLaunchKey,
-  requestIosShipLaunch,
+  requestIosShipLaunch, fetchIosShipSources, requestIosShipApproval, iosSourceApprovalState,
 } from '../site/iosShipReadiness.js'
 
 const terminal = (execution) => ['succeeded', 'failed'].includes(execution?.status)
-const message = (cause) => cause?.envelope?.message || cause?.message || 'The iOS ship status is unavailable.'
+const MAX_ERROR_CHARS = 300
+const message = (cause) => {
+  const text = String(cause?.envelope?.message || cause?.message || 'The iOS ship status is unavailable.')
+  return text.length > MAX_ERROR_CHARS ? `${text.slice(0, MAX_ERROR_CHARS - 1)}…` : text
+}
 const FOLLOW_LIMIT = 30 * 60 * 1000
+const SOURCE_DEFAULTS = Object.freeze({ sources: [], approvals: [], sync: null, canApprove: false, sourcesError: null })
+const UNKNOWN_APPROVAL = "The last approval's outcome is unknown. Refresh the sources to confirm it before approving again."
+
+// Catalog reads belong to the project, while approval writes belong to a drawing version.
+function useShipSources({ projectId, tenantKey, enabled, sessionActive }) {
+  const pendingApproval = useMemo(() => new Map(), [projectId, tenantKey])
+  const scope = useMemo(() => ({}), [projectId, tenantKey, enabled, sessionActive])
+  const current = useRef(scope)
+  current.current = scope
+  const mounted = useRef(false)
+  const sourcesGeneration = useRef(0)
+  const [state, setState] = useState(() => ({ scope, ...SOURCE_DEFAULTS }))
+  const live = useCallback(() => mounted.current && current.current === scope, [scope])
+  const update = useCallback((patch) => {
+    if (live()) setState((old) => live() ? { ...(old.scope === scope ? old : SOURCE_DEFAULTS), scope, ...patch } : old)
+  }, [live, scope])
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false }
+  }, [])
+  const refreshSources = useCallback(async () => {
+    if (!live()) return null
+    const generation = ++sourcesGeneration.current
+    if (!enabled || !sessionActive || !projectId) {
+      update(SOURCE_DEFAULTS)
+      return null
+    }
+    try {
+      const next = await fetchIosShipSources({ projectId })
+      if (!live() || generation !== sourcesGeneration.current) return null
+      for (const key of pendingApproval.keys()) {
+        if (key.startsWith(`${projectId}\n`)) pendingApproval.delete(key)
+      }
+      update({ ...next, sourcesError: null })
+      return next
+    } catch (cause) {
+      if (!live() || generation !== sourcesGeneration.current) return null
+      update({ sourcesError: message(cause) })
+      return null
+    }
+  }, [enabled, sessionActive, projectId, live, update])
+  useEffect(() => { refreshSources() }, [refreshSources])
+  return { ...(state.scope === scope ? state : SOURCE_DEFAULTS), refreshSources, update, pendingApproval }
+}
 
 export function shipSetupState(readiness) {
   const reason = readiness?.reason
@@ -31,6 +79,8 @@ function storage(key, action, value) {
 }
 
 export function useIosShipController({ projectId, revision, sessionActive, enabled = true, tenantKey }) {
+  const catalog = useShipSources({ projectId, tenantKey, enabled, sessionActive })
+  const { refreshSources, update: updateSources, pendingApproval } = catalog
   const owner = JSON.stringify([tenantKey, projectId, revision])
   const ownership = useMemo(() => ({}), [owner])
   const currentOwnership = useRef(ownership)
@@ -40,18 +90,25 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
   current.current = scope
   const mounted = useRef(false)
   const flight = useRef(null)
+  const approveFlight = useRef(null)
   const receiptReads = useRef(new Map())
   const following = useRef(null)
   const executionGeneration = useRef(0)
   const readGeneration = useRef(0)
   const [follow, setFollow] = useState(0)
-  const [state, setState] = useState(() => ({ owner, readiness: decorate(emptyIosShipReadiness()), execution: null, receipt: null, error: null, loading: false, launching: false }))
-  const visible = state.owner === owner ? state : { readiness: decorate(emptyIosShipReadiness()), execution: null, receipt: null, error: null, loading: false, launching: false }
+  const [state, setState] = useState(() => ({ owner, ...SOURCE_DEFAULTS, approving: false, readiness: decorate(emptyIosShipReadiness()), execution: null, receipt: null, error: null, loading: false, launching: false }))
+  const visible = state.owner === owner ? state : { ...SOURCE_DEFAULTS, approving: false, readiness: decorate(emptyIosShipReadiness()), execution: null, receipt: null, error: null, loading: false, launching: false }
   const pointerKey = tenantKey && projectId ? `leaf.ios-ship.pointer:${tenantKey}:${projectId}` : null
   const live = useCallback(() => mounted.current && current.current === scope, [scope])
   const update = useCallback((patch) => {
-    if (live()) setState((old) => live() ? ({ ...(old.owner === owner ? old : { execution: null, receipt: null }), owner, ...patch }) : old)
-  }, [live, owner])
+    if (live()) {
+      for (const field of ['error', 'sourcesError']) {
+        if (patch[field] != null) patch = { ...patch, [field]: message({ message: patch[field] }) }
+      }
+      if (Object.hasOwn(patch, 'sourcesError')) updateSources({ sourcesError: patch.sourcesError })
+      setState((old) => live() ? ({ ...(old.owner === owner ? old : { ...SOURCE_DEFAULTS, approving: false, execution: null, receipt: null }), owner, ...patch }) : old)
+    }
+  }, [live, owner, updateSources])
 
   useEffect(() => {
     mounted.current = true
@@ -187,6 +244,52 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
     }
   }, [live, enabled, scope, visible.execution, visible.readiness, projectId, revision, sessionActive, update, pointerKey])
 
+  const approve = useCallback(async (sourceRevision) => {
+    if (approveFlight.current !== null) return null
+    if (!live() || !enabled || !sessionActive || catalog.canApprove !== true || !revision) return undefined
+    const source = catalog.sources.find((item) => item.source_revision === sourceRevision)
+    if (!source || iosSourceApprovalState(source, catalog.approvals, revision) !== 'unapproved') return undefined
+    const tuple = `${projectId}\n${revision}\n${sourceRevision}`
+    if (pendingApproval.has(tuple)) {
+      update({ sourcesError: UNKNOWN_APPROVAL })
+      return undefined
+    }
+    approveFlight.current = scope
+    update({ approving: true, sourcesError: null })
+    try {
+      const approval = await requestIosShipApproval({ projectId, revision, source })
+      pendingApproval.set(tuple, true)
+      if (!live()) return undefined
+      await refreshSources()
+      if (!live()) return undefined
+      await refresh()
+      update({ approving: false })
+      return { approval, readBack: false }
+    } catch (cause) {
+      const unknown = cause?.status == null || cause.status >= 500
+      if (unknown) pendingApproval.set(tuple, true)
+      if (!live()) return undefined
+      if (!unknown) {
+        update({ sourcesError: message(cause), approving: false })
+        await refreshSources()
+        update({ sourcesError: message(cause), approving: false })
+        return undefined
+      }
+      update({ sourcesError: message(cause) })
+      const fresh = await refreshSources()
+      if (!live()) return undefined
+      if (fresh && iosSourceApprovalState(source, fresh.approvals, revision) !== 'unapproved') {
+        await refresh()
+        update({ approving: false })
+        return { approval: null, readBack: true }
+      }
+      update({ sourcesError: message(cause), approving: false })
+      return undefined
+    } finally {
+      if (approveFlight.current === scope) approveFlight.current = null
+    }
+  }, [live, enabled, sessionActive, catalog.canApprove, catalog.sources, catalog.approvals, revision, scope, update, projectId, refreshSources, refresh, pendingApproval])
+
   const readiness = visible.readiness || decorate(emptyIosShipReadiness())
   const phase = !enabled || !sessionActive ? 'idle'
     : visible.launching ? 'launching'
@@ -196,7 +299,9 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
             : /^(http_|unreachable$|readiness_unavailable$|provider_unavailable$)/.test(readiness.reason || '') ? 'unavailable'
               : readiness.setupState !== 'none' ? 'setup-required' : 'unavailable'
   return Object.freeze({ readiness, execution: visible.execution, receipt: visible.receipt, error: visible.error,
-    busy: phase === 'launching', phase, launch, refresh })
+    busy: phase === 'launching', phase, launch, refresh,
+    sources: catalog.sources, approvals: catalog.approvals, sync: catalog.sync, canApprove: catalog.canApprove,
+    sourcesError: catalog.sourcesError, approving: visible.approving, approve, refreshSources })
 }
 
 export default useIosShipController
