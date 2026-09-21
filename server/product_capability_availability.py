@@ -218,6 +218,9 @@ def w1_input_readiness(tenant, drawing_id=None, *, project_id=None, version="hea
                 if seed_request is not NO_SEED_REQUEST:
                     reason = "seed_project_scope_unsupported"
             else:
+                # The seed probe is advisory: it may only IMPROVE on the answer this function gave before a seed existed.
+                # Any failure inside it, of any class (a storage driver's own exception included), leaves that answer
+                # and never becomes a 500. Fails closed.
                 try:
                     if seed_request is not NO_SEED_REQUEST:
                         solar_graph_seed.validate_seed_request(seed_request)
@@ -238,8 +241,7 @@ def w1_input_readiness(tenant, drawing_id=None, *, project_id=None, version="hea
                     if (seed_request is not NO_SEED_REQUEST
                             and seed_error.code != "GRAPH_CONTEXT_UNAVAILABLE"):
                         reason = seed_error.code.lower()
-                except (KeyError, ValueError, TypeError, OSError, AttributeError, RuntimeError,
-                        RecursionError, LookupError, ArithmeticError):
+                except Exception:
                     pass
             readiness["solar-settings"] = {"input_ready": ready, "input_reason": reason}
             return readiness

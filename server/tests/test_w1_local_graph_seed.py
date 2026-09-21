@@ -35,9 +35,22 @@ SEED_KEYS = ORDINARY_KEYS | {"initialized", "seed_base_rev", "seed_base_graph_sh
                              "parent_intake_sha256"}
 
 
-def test_adapter_uses_shared_seed_request_validator():
+def test_adapter_uses_shared_seed_request_validator(graphless, monkeypatch):
     assert not hasattr(local, "_seed_initialize")
     assert local.validate_seed_request is solar_graph_seed.validate_seed_request
+    backend, _, params = graphless
+    calls = []
+
+    def validate(request):
+        calls.append(copy.deepcopy(request))
+        raise GraphValidationError("INVALID_SEED_REQUEST")
+
+    monkeypatch.setattr(local, "validate_seed_request", validate)
+    with held(backend) as fence, refused("INVALID_SEED_REQUEST"):
+        run(backend, params, fence=fence)
+    assert calls == [params["initialize"]]
+    assert store.load_manifest(backend, TENANT, DRAWING)["head"] == 1
+    versions(backend, 1)
 
 
 @pytest.fixture(autouse=True)
@@ -298,6 +311,21 @@ def test_ordinary_successor_keeps_ordinary_receipt(committed):
 def test_seed_terminal_proof(committed):
     backend, _, params, result = committed
     assert proof(backend, result, params) == expected_proof(result)
+
+
+def test_seed_proof_invokes_the_shared_validator(committed, monkeypatch):
+    backend, _, params, result = committed
+    calls = []
+
+    def validate(request):
+        calls.append(copy.deepcopy(request))
+        raise GraphValidationError("INVALID_SEED_REQUEST")
+
+    monkeypatch.setattr(local, "validate_seed_request", validate)
+    with pytest.raises(ValueError) as excinfo:
+        proof(backend, result, params)
+    assert str(excinfo.value) == "graph commit terminal proof rejected"
+    assert calls
 
 
 def test_seed_terminal_proof_survives_head_advance(committed):

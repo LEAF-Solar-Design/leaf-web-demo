@@ -391,6 +391,49 @@ def seeded(seed_api):
     return env, jobs.get_job(env["result"]["job_id"])
 
 
+def test_seed_unstable_number_is_refused_at_submission(seed_api):
+    request = seed_body(seed_api)
+    request["params"]["initialize"]["units"]["wcs_to_ucs"][1] = -0.0
+    response = seed_api[0].post("/api/run?wait=1", json=request)
+    assert response.status_code == 409, response.text
+    env = response.json()
+    assert env["ok"] is False
+    assert env["error"]["error_code"] == "BAD_PARAMS"
+    assert env["error"]["message"] == "local graph commit requires stable numeric parameters"
+    assert "reason_code" not in env
+    assert "availability" not in env
+    assert not jobs._query("SELECT job_id FROM jobs")
+    assert store.load_manifest(seed_api[1], TENANT, "solar")["head"] == 1
+
+    response = seed_api[0].post("/api/run?wait=1", json=seed_body(seed_api))
+    assert response.status_code == 200, response.text
+    assert response.json()["ok"] is True
+    assert len(jobs._query("SELECT job_id FROM jobs")) == 1
+
+
+@pytest.mark.parametrize("name,params,reason", [
+    ("solar-settings", {"expected_rev": 0, "changes": {"num_mppt": 2},
+                        "initialize": None}, "graph_already_embedded"),
+    ("solar-correct-string", {"expected_rev": 0, "memberships": [],
+                              "initialize": None}, "invalid_seed_request"),
+])
+def test_initialize_null_on_an_embedded_head_is_a_seed_request(api, name, params, reason):
+    response = api[0].post("/api/run?wait=1", json=body(api, name=name, params=params))
+    assert response.status_code == 409, response.text
+    assert response.json()["reason_code"] == reason
+    assert not jobs._query("SELECT job_id FROM jobs")
+    assert store.load_manifest(api[1], TENANT, "solar")["head"] == 1
+
+
+def test_initialize_null_on_a_graphless_head_is_a_seed_request(seed_api):
+    response = seed_api[0].post("/api/run?wait=1", json=body(seed_api, params={
+        "expected_rev": 0, "changes": {"panels_in_sequence": 3}, "initialize": None}))
+    assert response.status_code == 409, response.text
+    assert response.json()["reason_code"] == "invalid_seed_request"
+    assert not jobs._query("SELECT job_id FROM jobs")
+    assert store.load_manifest(seed_api[1], TENANT, "solar")["head"] == 1
+
+
 def seed_catalog(api):
     families = catalog.build_catalog(deps.all_tools(TENANT))
     availability.annotate_w1_availability(families, api[5], "solar")
