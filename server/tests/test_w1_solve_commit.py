@@ -312,6 +312,31 @@ def seed(tmp_path, monkeypatch, graph):
     return backend, intake
 
 
+def seed_graphless(tmp_path, monkeypatch):
+    import store
+    monkeypatch.setenv("LEAF_DRAWING_STORE", "legacy")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    monkeypatch.delenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", raising=False)
+    monkeypatch.setenv("LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED", "1")
+    backend = store.FilesystemBackend(str(tmp_path / "drawings"))
+    intake = {"dwg": {}, "layers": [], "polylines": [], "inserts": [],
+              "faces3d": [], "blockdefs": [], "geodata": None,
+              "custom": {"keep": [1, 2, 3]}}
+    path = tmp_path / "seed.json"
+    path.write_text(json.dumps(intake))
+    store.ingest_drawing(backend, "fixture-tenant", str(path), drawing_id="solar")
+    return backend, intake
+
+
+def first_graph(backend, graph):
+    import hashlib
+    import store
+    _, key = store.resolve_version(backend, "fixture-tenant", "solar", 1)
+    first = copy.deepcopy(graph)
+    first.update(rev=1, parent_rev=0, source_hash=hashlib.sha256(backend.get(key)).hexdigest())
+    return first
+
+
 _publish_jobs = itertools.count()
 _default = object()
 
@@ -716,6 +741,178 @@ def test_companion_rejects_moved_basis_and_keeps_unknown_intake(graph):
     intake["solar_design_graph_sha256"] = "0" * 64
     with pytest.raises(GraphValidationError, match="STALE_GRAPH_COMPANION"):
         solve.version_companion(intake, graph, after)
+
+
+def test_seed_publish_receipt_payload_and_replay(graph, tmp_path, monkeypatch):
+    import hashlib
+    import store
+    backend, intake = seed_graphless(tmp_path, monkeypatch)
+    first = first_graph(backend, graph)
+    receipt = publish(backend, 1, None, first, job_id="seed-job")
+    _, key = store.resolve_version(backend, "fixture-tenant", "solar", 2)
+    data = backend.get(key)
+    assert receipt == {
+        "version": 2, "parent_version": 1, "replayed": False, "seeded": True,
+        "graph_sha256": solve.digest(first), "intake_sha256": hashlib.sha256(data).hexdigest(),
+        "job_id": "seed-job", "request_sha256": "a" * 64,
+    }
+    assert json.loads(data) == dict(intake, solar_design_graph=first,
+                                    solar_design_graph_sha256=solve.digest(first))
+    manifest = store.load_manifest(backend, "fixture-tenant", "solar")
+    entry = next(e for e in manifest["versions"] if e["v"] == 2)
+    assert entry["parent"] == 1
+    assert entry["workitem_id"] == "solar-graph:seed-job"
+    assert entry["note"] == "solar-graph-seed:" + "a" * 64
+    assert entry["tool"] == "solar-graph"
+    replay = publish(backend, 1, None, first, job_id="seed-job", acquire=False, fence=1)
+    assert replay == dict(receipt, replayed=True)
+    assert len(store.load_manifest(backend, "fixture-tenant", "solar")["versions"]) == 2
+
+
+@pytest.mark.parametrize("different", ["request", "mode"])
+def test_seed_job_binding_cannot_be_reused(graph, tmp_path, monkeypatch, different):
+    import store
+    backend, _ = seed_graphless(tmp_path, monkeypatch)
+    first = first_graph(backend, graph)
+    publish(backend, 1, None, first, job_id="seed-job")
+    before, after, request = None, first, "b" * 64
+    if different == "mode":
+        before, request = first, "a" * 64
+        after = correct.run(first, {"expected_rev": 1,
+                                    "settings_changes": {"panels_in_sequence": 3}})
+    with pytest.raises(GraphValidationError, match="JOB_BINDING_REUSED"):
+        publish(backend, 1, before, after, job_id="seed-job", request_sha256=request)
+    assert len(store.load_manifest(backend, "fixture-tenant", "solar")["versions"]) == 2
+
+
+def test_ordinary_job_cannot_replay_as_seed(graph, tmp_path, monkeypatch):
+    import store
+    backend, _ = seed(tmp_path, monkeypatch, graph)
+    publish(backend, 1, graph, correct.run(graph, transfer(graph)), job_id="edit-job")
+    with pytest.raises(GraphValidationError, match="JOB_BINDING_REUSED"):
+        publish(backend, 1, None, first_graph(backend, graph), job_id="edit-job")
+    assert len(store.load_manifest(backend, "fixture-tenant", "solar")["versions"]) == 2
+
+
+def test_seed_refuses_moved_head(graph, tmp_path, monkeypatch):
+    import store
+    import write_loop
+    backend, intake = seed_graphless(tmp_path, monkeypatch)
+    first = first_graph(backend, graph)
+    data = cloud.canonical_bytes(dict(intake, competitor=True))
+    fence = store.acquire_checkout_fence(backend, "fixture-tenant", "solar", "fixture-owner", 300)
+    try:
+        assert write_loop._put_bytes_version(
+            backend, "fixture-tenant", "solar", data, parent_version=1,
+            meta={"tool": "fixture"}, holder="fixture-owner", fence=fence,
+            require_parent_is_head=True) == 2
+    finally:
+        store.release_checkout(backend, "fixture-tenant", "solar", "fixture-owner")
+    with pytest.raises(GraphValidationError, match="STALE_GRAPH_REVISION"):
+        publish(backend, 1, None, first)
+    version, key = store.resolve_version(backend, "fixture-tenant", "solar", "head")
+    assert version == 2 and backend.get(key) == data
+
+
+def test_seed_refuses_existing_graph(graph, tmp_path, monkeypatch):
+    import store
+    backend, _ = seed(tmp_path, monkeypatch, graph)
+    with pytest.raises(GraphValidationError, match="GRAPH_ALREADY_EMBEDDED"):
+        publish(backend, 1, None, first_graph(backend, graph))
+    assert len(store.load_manifest(backend, "fixture-tenant", "solar")["versions"]) == 1
+
+
+@pytest.mark.parametrize("companion", ["solar_design_graph", "solar_design_graph_sha256"])
+def test_seed_refuses_partial_parent(graph, tmp_path, monkeypatch, companion):
+    import store
+    backend, intake = seed_graphless(tmp_path, monkeypatch)
+    intake[companion] = graph if companion == "solar_design_graph" else solve.digest(graph)
+    # Install the partial parent as the initial fixture, before publication.
+    _, key = store.resolve_version(backend, "fixture-tenant", "solar", 1)
+    backend.put(key, cloud.canonical_bytes(intake))
+    with pytest.raises(GraphValidationError, match="INVALID_SEED_PARENT"):
+        publish(backend, 1, None, first_graph(backend, graph))
+    assert len(store.load_manifest(backend, "fixture-tenant", "solar")["versions"]) == 1
+
+
+@pytest.mark.parametrize("rev,parent_rev", [(0, None), (2, 1)])
+def test_seed_requires_first_revision(graph, tmp_path, monkeypatch, rev, parent_rev):
+    import store
+    backend, _ = seed_graphless(tmp_path, monkeypatch)
+    first = first_graph(backend, graph)
+    first.update(rev=rev, parent_rev=parent_rev)
+    with pytest.raises(GraphValidationError, match="INVALID_SEED_GRAPH"):
+        publish(backend, 1, None, first)
+    assert len(store.load_manifest(backend, "fixture-tenant", "solar")["versions"]) == 1
+
+
+def test_seed_requires_source_bytes_hash(graph, tmp_path, monkeypatch):
+    import store
+    backend, _ = seed_graphless(tmp_path, monkeypatch)
+    first = first_graph(backend, graph)
+    first["source_hash"] = "0" * 64
+    with pytest.raises(GraphValidationError, match="SOURCE_HASH_MISMATCH"):
+        publish(backend, 1, None, first)
+    assert len(store.load_manifest(backend, "fixture-tenant", "solar")["versions"]) == 1
+
+
+@pytest.mark.parametrize("wrong", ["missing", "holder", "fence"])
+def test_seed_requires_own_checkout(graph, tmp_path, monkeypatch, wrong):
+    import store
+    backend, _ = seed_graphless(tmp_path, monkeypatch)
+    first = first_graph(backend, graph)
+    fence = 1
+    if wrong != "missing":
+        fence = store.acquire_checkout_fence(backend, "fixture-tenant", "solar", "fixture-owner", 300)
+    try:
+        code = "CHECKOUT_REQUIRED" if wrong == "missing" else "CHECKOUT_DENIED"
+        with pytest.raises(GraphValidationError, match=code):
+            publish(backend, 1, None, first, acquire=False,
+                    holder="intruder" if wrong == "holder" else "fixture-owner",
+                    fence=fence + 1 if wrong == "fence" else fence)
+        assert len(store.load_manifest(backend, "fixture-tenant", "solar")["versions"]) == 1
+    finally:
+        if wrong != "missing":
+            store.release_checkout(backend, "fixture-tenant", "solar", "fixture-owner")
+
+
+def test_seed_respects_mutation_guard(graph, tmp_path, monkeypatch):
+    import store
+    backend, _ = seed_graphless(tmp_path, monkeypatch)
+    first = first_graph(backend, graph)
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
+    with pytest.raises(GraphValidationError, match="DRAWING_MUTATION_REFUSED"):
+        publish(backend, 1, None, first)
+    assert len(store.load_manifest(backend, "fixture-tenant", "solar")["versions"]) == 1
+
+
+def test_seeded_graph_accepts_ordinary_successor(graph, tmp_path, monkeypatch):
+    import store
+    backend, _ = seed_graphless(tmp_path, monkeypatch)
+    first = first_graph(backend, graph)
+    publish(backend, 1, None, first, job_id="seed-job")
+    second = correct.run(first, {"expected_rev": 1,
+                                 "settings_changes": {"panels_in_sequence": 3}})
+    receipt = publish(backend, 2, first, second)
+    assert receipt["version"] == 3 and receipt["parent_version"] == 2
+    assert set(receipt) == {"version", "parent_version", "graph_sha256", "intake_sha256",
+                            "job_id", "request_sha256", "replayed"}
+    entry = next(e for e in store.load_manifest(backend, "fixture-tenant", "solar")["versions"]
+                 if e["v"] == 3)
+    assert entry["note"] == "solar-graph-commit:" + "a" * 64
+
+
+def test_seed_companion_preserves_parent_and_rejects_non_object(graph, tmp_path, monkeypatch):
+    backend, intake = seed_graphless(tmp_path, monkeypatch)
+    first = first_graph(backend, graph)
+    original = copy.deepcopy(intake)
+    result = solve.version_companion(intake, None, first)
+    assert result == dict(intake, solar_design_graph=first,
+                          solar_design_graph_sha256=solve.digest(first))
+    result["custom"]["keep"].append(4)
+    assert intake == original
+    with pytest.raises(GraphValidationError, match="STALE_GRAPH_COMPANION"):
+        solve.version_companion([], None, first)
 
 
 def test_export_rechecks_upstream_edits_from_existing_settings_builtin(case):
