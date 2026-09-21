@@ -65,7 +65,7 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
         "local-graph-rail": 40,
         "graph-seed": 85,
         "local-graph-seed": 66,
-        "seed-product-path": 9,
+        "seed-product-path": 12,
     }
     for name, expected in w1_floors.items():
         suite = suites[f"server-w1-{name}"]

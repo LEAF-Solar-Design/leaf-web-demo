@@ -343,7 +343,7 @@ def build_suites() -> List[Suite]:
         Suite("server-w1-local-graph-seed", "server tests/test_w1_local_graph_seed.py", "pytest", SERVER,
               _py_pytest("tests/test_w1_local_graph_seed.py"), 66),
         Suite("server-w1-seed-product-path", "server tests/test_w1_seed_product_path.py", "pytest", SERVER,
-              _py_pytest("tests/test_w1_seed_product_path.py"), 9),
+              _py_pytest("tests/test_w1_seed_product_path.py"), 12),
         Suite("server-backbone", "server tests/test_backbone.py", "pytest", SERVER,
               _py_pytest("tests/test_backbone.py"), 15),
         Suite("server-campaigns", "server tests/test_campaigns_router.py", "pytest", SERVER,
