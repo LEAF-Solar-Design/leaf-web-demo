@@ -160,13 +160,36 @@ def test_merge_queue_fallback_matches_head(sandbox, monkeypatch):
     assert call.exists()
 
 
-@pytest.mark.parametrize("head_ref", ["", "refs/heads/gh-readonly-queue/main/pr-12"])
-def test_unresolved_base_skips(sandbox, capsys, head_ref):
+def test_queue_ref_without_entry_skips(sandbox, capsys):
+    """A queue ref with no embedded sha and no readable queue entry never guesses a base."""
     _, _, head, call, receipt_dir, args, _ = sandbox
+    head_ref = "refs/heads/gh-readonly-queue/main/pr-12"
     assert job.main(args + ["--event", "PUSH", "--head-ref", head_ref]) == 0
     assert f"change-impact: SKIP no base for event=PUSH head={head}" in capsys.readouterr().out
     assert not call.exists()
     assert not receipt_dir.exists()
+
+
+def test_push_without_base_ref_uses_first_parent(sandbox, capsys):
+    """A merge landing on main, or a manual build: the base is the head's first parent."""
+    _, base, head, call, _, args, _ = sandbox
+    assert job.main(args + ["--event", "PUSH", "--head-ref", ""]) == 0
+    command = json.loads(call.read_text(encoding="utf-8"))
+    assert command[command.index("--base") + 1] == base
+    out = capsys.readouterr().out
+    assert "base_rule=push-first-parent" in out
+    assert f"assessment executed base={base} head={head}" in out
+
+
+def test_root_commit_push_skips(sandbox, capsys):
+    """A head with no parent has nothing to diff against and SKIPs."""
+    repo, _, _, call, receipt_dir, args, git = sandbox
+    root = git("rev-list", "--max-parents=0", "HEAD").splitlines()[0]
+    root_args = [a for a in args]
+    root_args[root_args.index("--head") + 1] = root
+    assert job.main(root_args + ["--event", "PUSH", "--head-ref", ""]) == 0
+    assert f"change-impact: SKIP no base for event=PUSH head={root}" in capsys.readouterr().out
+    assert not call.exists()
 
 
 def test_kill_switch(sandbox, monkeypatch, capsys):
