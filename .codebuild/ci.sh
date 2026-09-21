@@ -173,4 +173,10 @@ if [[ -f /tmp/gate-results/gate-result.json ]]; then
 else
   echo "No gate result JSON was written (runner exit $gate_status)"
 fi
+echo "=== job change-impact ==="
+# Advisory in S1: prints the assessment, never changes gate_status. Kill switch honoured.
+python scripts/ci/change_impact_job.py --repo . --head "${CODEBUILD_RESOLVED_SOURCE_VERSION:-HEAD}" \
+  --base-ref "${CODEBUILD_WEBHOOK_BASE_REF:-}" --head-ref "${CODEBUILD_WEBHOOK_HEAD_REF:-}" \
+  --event "${CODEBUILD_WEBHOOK_EVENT:-manual}" --gate-result /tmp/gate-results/gate-result.json \
+  --receipt-dir /tmp/impact || echo "change-impact: helper exit $? (advisory)"
 exit "$gate_status"

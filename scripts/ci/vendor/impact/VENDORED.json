@@ -1,0 +1,90 @@
+{
+ "schema_version": 1,
+ "source_repo": "Evan-Haug/claude-config",
+ "source_path": "scripts/impact",
+ "source_revision": "f9dbf6cb898712466a21acff44d5d000fb20dfe6",
+ "vendored_on": "2026-09-21",
+ "entries": [
+  {
+   "path": "README.md",
+   "sha256": "233ac9e23b5743b0f9f6d29bc078d26c9c8afdaf9c9f04184f770ace7ae97c51",
+   "bytes": 9555
+  },
+  {
+   "path": "__init__.py",
+   "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "bytes": 0
+  },
+  {
+   "path": "check.py",
+   "sha256": "1a6431b195a4ef81e73ce4cedfc4575a6c0b1891e5e59ad0417c63b4bfd92216",
+   "bytes": 10976
+  },
+  {
+   "path": "extractors.py",
+   "sha256": "aab72dda7ea75d6a6715f591d1af848e8fe7f82f159e0029bbac189877570399",
+   "bytes": 10729
+  },
+  {
+   "path": "gitio.py",
+   "sha256": "aad82bb50e350a2d61007b23d889b653d500673b29304f3e98f139bd5cc1b555",
+   "bytes": 2138
+  },
+  {
+   "path": "impact.py",
+   "sha256": "5ac10c27de5d576c02808a0b8bc9bc406736a42efa4f7173a2d2b67e6b7c773e",
+   "bytes": 11327
+  },
+  {
+   "path": "index.py",
+   "sha256": "a45d50972db077d707083260fd674c307bdac5b044c366c3269ab51445833410",
+   "bytes": 8131
+  },
+  {
+   "path": "manifest.py",
+   "sha256": "5b1ef323825ef9fa2fdd6f9b13827e6874482e7a35371bc86a7e7f5b5b4fcde1",
+   "bytes": 12121
+  },
+  {
+   "path": "plan.py",
+   "sha256": "d574f133d4f2513295682bfa4d17dc580bae3614ffcb246ab7cf7eacd13eb2ba",
+   "bytes": 5056
+  },
+  {
+   "path": "record.py",
+   "sha256": "cc344ba33715704f07e98728f8323c01583137da977f60ec6335bc0eb660c766",
+   "bytes": 10946
+  },
+  {
+   "path": "rules.py",
+   "sha256": "124550cfe1eb6f49e5f046b93832b3dd6400e24256af60c2842859797e6f8c17",
+   "bytes": 2763
+  },
+  {
+   "path": "rules/families.yaml",
+   "sha256": "5a09500f72f4b33c595eba2d9e74ac5dfc4d3452b7903ac10e3e8f6ed6a3422b",
+   "bytes": 1234
+  },
+  {
+   "path": "schema/aspects.schema.json",
+   "sha256": "3b3a49af7b1383a28b98d0348e74a5c7ef51d352ae8629c6e40000ae8bc5aeb9",
+   "bytes": 8198
+  },
+  {
+   "path": "schema/change.schema.json",
+   "sha256": "32549c8f0959217a282a62707c7792bf7fe8b70c2c99aadeee8e9b7601e31a87",
+   "bytes": 4353
+  },
+  {
+   "path": "scope.py",
+   "sha256": "3466350ca48942aba03defe64f9addf8043656cd334f04fbfae436e42a31b397",
+   "bytes": 4647
+  },
+  {
+   "path": "selftest.py",
+   "sha256": "56afad8b866ead315e2113a19ee777621a08302d146eb7e2b8a0ea029938500e",
+   "bytes": 13579
+  }
+ ],
+ "note": "Refresh with impact.py pack --vendor (claude-config); the drift test there compares this pin to the source."
+}
