@@ -8,8 +8,8 @@
 //
 // `--strict` widens the extractor to every quoted literal (template literal
 // segments, ternary branches inside JSX expression containers, arguments to the
-// UI's own message helpers) and runs the dash markers over that set. It is a
-// reporting mode, not the gate: `check:copy` runs the default passes.
+// UI's own message helpers) and runs the dash markers over that set.
+// `check:copy` runs the strict pass as the gate (since #1308).
 import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
 import { join, relative, dirname, extname, sep, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';

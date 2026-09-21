@@ -162,11 +162,9 @@ export function makeProofReceipt(input) {
 export function writeProofReceipt(path, input) {
   mkdirSync(dirname(path), { recursive: true })
   const receipt = makeProofReceipt(input)
-  if (receipt.evidence_tier === 'staging') {
-    for (const artifact of receipt.artifacts) {
-      if (typeof artifact !== 'string' || !existsSync(artifact)) {
-        throw new Error(`staging proof receipt artifact does not exist: ${artifact}`)
-      }
+  for (const artifact of receipt.artifacts) {
+    if (typeof artifact !== 'string' || !existsSync(artifact)) {
+      throw new Error(`${receipt.evidence_tier} proof receipt artifact does not exist: ${artifact}`)
     }
   }
   writeFileSync(path, `${JSON.stringify(receipt, null, 2)}\n`)
