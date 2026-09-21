@@ -637,7 +637,7 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
                         current_head = _store().load_manifest(backend, str(tenant_id), target_drawing_id)["head"]
                         if type(current_head) is not int or current_head < 1:
                             raise TypeError()
-                    except (KeyError, AttributeError, TypeError, OSError, RecursionError, RuntimeError):
+                    except (KeyError, AttributeError, TypeError, ValueError, OSError, RecursionError, RuntimeError):
                         return JSONResponse(status_code=409, content=with_envelope_fields({
                             "error": error_obj(ErrorCode.BAD_PARAMS, "GRAPH_CONTEXT_UNAVAILABLE", retryable=False),
                             "reason_code": "GRAPH_CONTEXT_UNAVAILABLE",

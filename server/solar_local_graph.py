@@ -37,18 +37,22 @@ def request_digest(tool, drawing_id, source_version, builtin_params):
 
 
 def stable_numbers(value):
-    """True when every float in a JSON value survives a JSONB round trip with the same spelling."""
+    """True when every float in a JSON value survives a JSONB round trip with the same spelling.
+
+    Each container is walked once, so a cyclic or shared value terminates."""
     pending = [value]
+    seen = set()
     while pending:
         item = pending.pop()
         if isinstance(item, float):
             if (not math.isfinite(item) or abs(item) >= 1e15
                     or (item == 0 and math.copysign(1, item) < 0)):
                 return False
-        elif isinstance(item, dict):
-            pending.extend(item.values())
-        elif isinstance(item, (list, tuple)):
-            pending.extend(item)
+        elif isinstance(item, (dict, list, tuple)):
+            if id(item) in seen:
+                continue
+            seen.add(id(item))
+            pending.extend(item.values() if isinstance(item, dict) else item)
     return True
 
 
@@ -93,7 +97,8 @@ def graph_commit_provenance(result, params, tenant_id, job_id, tool, source_vers
         if context["graph"]["rev"] != result["after_rev"]:
             raise ValueError()
         parent = resolve_graph_context(backend, tenant_id, drawing_id, source_version)
-        if (parent["graph"]["rev"] != result["before_rev"]
+        if (parent["representation"] != "intake"
+                or parent["graph"]["rev"] != result["before_rev"]
                 or parent["graph_sha256"] != result["before_graph_sha256"]):
             raise ValueError()
         return {"execution_mode": "local_graph_commit", "adapter": ADAPTER_KIND,

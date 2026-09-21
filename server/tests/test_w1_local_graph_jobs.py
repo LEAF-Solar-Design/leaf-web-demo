@@ -436,6 +436,20 @@ def test_provenance_reads_revisions_and_parent_digest(committed, changes):
         proof(result, backend)
 
 
+def test_provenance_rejects_a_dwg_bundle_parent(committed, monkeypatch):
+    backend, result = committed
+    real = local.resolve_graph_context
+    assert proof(result, backend)["source_version"] == 1  # the untouched receipt is accepted
+
+    def bundle_parent(backend_, tenant_id, drawing_id, version, **kwargs):
+        context = real(backend_, tenant_id, drawing_id, version, **kwargs)
+        return dict(context, representation="dwg-bundle") if version == 1 else context
+
+    monkeypatch.setattr(local, "resolve_graph_context", bundle_parent)
+    with pytest.raises(ValueError, match="^graph commit terminal proof rejected$"):
+        proof(result, backend)
+
+
 def test_provenance_runtime_error_is_sanitized(committed, monkeypatch):
     _, result = committed
 
@@ -591,7 +605,7 @@ def test_durable_completion_validates_graph_provenance(api, monkeypatch):
     assert jobs.get_job(job_id)["status"] != "complete"
 
 
-@pytest.mark.parametrize("mutation", ["missing", "no_head", "invalid_head"])
+@pytest.mark.parametrize("mutation", ["missing", "no_head", "invalid_head", "malformed"])
 def test_approved_run_context_disappears_after_checkout(api, monkeypatch, mutation):
     client, _, body, _, route = api
     pin = {"catalog_commit": "a" * 40, "effective_catalog_digest": "b" * 64}
@@ -606,6 +620,8 @@ def test_approved_run_context_disappears_after_checkout(api, monkeypatch, mutati
         reads.append(True)
         if mutation == "missing":
             raise FileNotFoundError("unavailable")
+        if mutation == "malformed":
+            raise json.JSONDecodeError("Expecting value", "{", 1)
         return {} if mutation == "no_head" else {"head": True}
 
     def exchange(*a, **k):
@@ -624,7 +640,61 @@ def test_approved_run_context_disappears_after_checkout(api, monkeypatch, mutati
     assert reads == [True]
     assert response.status_code == 409, response.text
     assert response.json()["reason_code"] == "GRAPH_CONTEXT_UNAVAILABLE"
+    assert "Expecting value" not in response.text
     assert not jobs._query("SELECT job_id FROM jobs")
+
+
+class _Walked(AssertionError):
+    pass
+
+
+def _counting(base):
+    calls = [0]
+
+    class Counting(base):
+        def _hit(self):
+            calls[0] += 1
+            if calls[0] > 3:
+                raise _Walked("one container was walked more than once")
+
+        def __iter__(self):
+            self._hit()
+            return super().__iter__()
+
+    if base is dict:
+        def values(self):
+            self._hit()
+            return dict.values(self)
+
+        def items(self):
+            self._hit()
+            return dict.items(self)
+
+        Counting.values = values
+        Counting.items = items
+    return Counting
+
+
+@pytest.mark.parametrize("shape, expected", [
+    ("dict_cycle", True), ("list_cycle", True), ("cycle_with_unstable", False), ("shared", True),
+])
+def test_stable_numbers_walks_each_container_once(shape, expected):
+    if shape == "dict_cycle":
+        value = _counting(dict)(drawing_id="solar")
+        value["changes"] = value
+    elif shape == "list_cycle":
+        inner = _counting(list)()
+        inner.append(inner)
+        inner.append(1.5)
+        value = {"changes": inner}
+    elif shape == "cycle_with_unstable":
+        value = _counting(dict)()
+        value["self"] = value
+        value["ratio"] = 1e18
+    else:
+        shared = {"ratio": 1.25}
+        value = {"a": shared, "b": shared, "c": [shared, shared]}
+    assert local.stable_numbers(value) is expected
 
 
 def test_unpinned_run_runtime_context_unavailable(api, monkeypatch):
