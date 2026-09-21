@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import itertools
 import json
 import sys
 from pathlib import Path
@@ -311,9 +312,159 @@ def seed(tmp_path, monkeypatch, graph):
     return backend, intake
 
 
-def publish(backend, parent, before, after):
-    return solve.publish_version(backend, "fixture-tenant", "solar", parent_version=parent,
-                                 before=before, after=after, holder=None, fence=None)
+_publish_jobs = itertools.count()
+_default = object()
+
+
+def publish(backend, parent, before, after, *, holder="fixture-owner", fence=_default,
+            job_id=_default, request_sha256="a" * 64, acquire=True):
+    import write_loop
+    import store
+    acquired_fence = None
+    if acquire:
+        acquired_fence = store.acquire_checkout_fence(
+            backend, "fixture-tenant", "solar", "fixture-owner", 300)
+    try:
+        return solve.publish_version(
+            backend, "fixture-tenant", "solar", parent_version=parent,
+            before=before, after=after, holder=holder,
+            fence=acquired_fence if fence is _default else fence,
+            job_id=f"fixture-job-{next(_publish_jobs)}" if job_id is _default else job_id,
+            request_sha256=request_sha256)
+    finally:
+        if acquire:
+            store.release_checkout(backend, "fixture-tenant", "solar", "fixture-owner")
+
+
+@pytest.mark.parametrize("overrides", [
+    {"holder": None}, {"holder": ""}, {"holder": "anonymous:unnamed-writer"},
+    {"fence": None}, {"fence": 0}, {"fence": -1}, {"fence": True}, {"fence": "1"},
+])
+def test_publish_requires_named_identity_and_positive_integer_fence(graph, tmp_path, monkeypatch, overrides):
+    import write_loop
+    import store
+    backend, _ = seed(tmp_path, monkeypatch, graph)
+    with pytest.raises(GraphValidationError, match="CHECKOUT_REQUIRED"):
+        publish(backend, 1, graph, correct.run(graph, transfer(graph)), **overrides)
+    assert store.load_manifest(backend, "fixture-tenant", "solar")["latest"] == 1
+
+
+def test_publish_requires_checkout(graph, tmp_path, monkeypatch):
+    import write_loop
+    import store
+    backend, _ = seed(tmp_path, monkeypatch, graph)
+    def refuse_commit(*args, **kwargs):
+        raise AssertionError("commit attempted")
+    monkeypatch.setattr(write_loop, "_put_bytes_version", refuse_commit)
+    with pytest.raises(GraphValidationError, match="CHECKOUT_REQUIRED"):
+        publish(backend, 1, graph, correct.run(graph, transfer(graph)), acquire=False, fence=1)
+    assert store.load_manifest(backend, "fixture-tenant", "solar")["latest"] == 1
+
+
+@pytest.mark.parametrize("wrong", ["holder", "fence"])
+def test_publish_requires_own_checkout(graph, tmp_path, monkeypatch, wrong):
+    import write_loop
+    import store
+    backend, _ = seed(tmp_path, monkeypatch, graph)
+    fence = store.acquire_checkout_fence(backend, "fixture-tenant", "solar", "fixture-owner", 300)
+    def refuse_commit(*args, **kwargs):
+        raise AssertionError("commit attempted")
+    monkeypatch.setattr(write_loop, "_put_bytes_version", refuse_commit)
+    try:
+        with pytest.raises(GraphValidationError, match="CHECKOUT_DENIED"):
+            publish(backend, 1, graph, correct.run(graph, transfer(graph)), acquire=False,
+                    holder="intruder" if wrong == "holder" else "fixture-owner",
+                    fence=fence + 1 if wrong == "fence" else fence)
+        assert store.load_manifest(backend, "fixture-tenant", "solar")["latest"] == 1
+    finally:
+        store.release_checkout(backend, "fixture-tenant", "solar", "fixture-owner")
+
+
+def test_publish_requires_unexpired_checkout(graph, tmp_path, monkeypatch):
+    import write_loop
+    import store
+    import time
+    backend, _ = seed(tmp_path, monkeypatch, graph)
+    fence = store.acquire_checkout_fence(backend, "fixture-tenant", "solar", "fixture-owner", .05)
+    time.sleep(.2)
+    def refuse_commit(*args, **kwargs):
+        raise AssertionError("commit attempted")
+    monkeypatch.setattr(write_loop, "_put_bytes_version", refuse_commit)
+    with pytest.raises(GraphValidationError, match="CHECKOUT_REQUIRED"):
+        publish(backend, 1, graph, correct.run(graph, transfer(graph)), acquire=False, fence=fence)
+    assert store.load_manifest(backend, "fixture-tenant", "solar")["latest"] == 1
+
+
+def test_publish_persists_job_binding_and_exact_receipt(graph, tmp_path, monkeypatch):
+    import hashlib
+    import write_loop
+    import store
+    backend, intake = seed(tmp_path, monkeypatch, graph)
+    after = correct.run(graph, transfer(graph))
+    receipt = publish(backend, 1, graph, after, job_id="job-a")
+    intake_sha = hashlib.sha256(cloud.canonical_bytes(solve.version_companion(intake, graph, after))).hexdigest()
+    assert receipt == {"version": 2, "parent_version": 1, "graph_sha256": solve.digest(after),
+                       "intake_sha256": intake_sha, "job_id": "job-a",
+                       "request_sha256": "a" * 64, "replayed": False}
+    entry = next(e for e in store.load_manifest(backend, "fixture-tenant", "solar")["versions"]
+                 if e["v"] == 2)
+    assert entry["workitem_id"] == "solar-graph:job-a"
+    assert entry["tool"] == "solar-graph"
+    assert entry["note"] == "solar-graph-commit:" + "a" * 64
+
+
+@pytest.mark.parametrize("acquire", [True, False])
+def test_publish_replays_before_head_check_with_or_without_lease(graph, tmp_path, monkeypatch, acquire):
+    import write_loop
+    import store
+    backend, _ = seed(tmp_path, monkeypatch, graph)
+    after = correct.run(graph, transfer(graph))
+    receipt = publish(backend, 1, graph, after, job_id="job-a")
+    assert not store.checkout_active(store.load_manifest(backend, "fixture-tenant", "solar")["checkout"])
+    replay = publish(backend, 1, graph, after, job_id="job-a", acquire=acquire, fence=1)
+    assert replay == dict(receipt, replayed=True)
+    assert store.load_manifest(backend, "fixture-tenant", "solar")["latest"] == 2
+
+
+@pytest.mark.parametrize("different", ["request", "content"])
+def test_publish_refuses_reused_job_binding(graph, tmp_path, monkeypatch, different):
+    import write_loop
+    import store
+    backend, _ = seed(tmp_path, monkeypatch, graph)
+    after = correct.run(graph, transfer(graph))
+    publish(backend, 1, graph, after, job_id="job-a")
+    request_sha = "a" * 64
+    if different == "request":
+        request_sha = "b" * 64
+    else:
+        after = copy.deepcopy(after)
+        after["extra"]["different_content"] = True
+    with pytest.raises(GraphValidationError, match="JOB_BINDING_REUSED"):
+        publish(backend, 1, graph, after, job_id="job-a", request_sha256=request_sha)
+    assert store.load_manifest(backend, "fixture-tenant", "solar")["latest"] == 2
+
+
+@pytest.mark.parametrize("overrides", [
+    {"job_id": ""}, {"job_id": "x" * 129}, {"job_id": "job a"}, {"job_id": "job/a"},
+    {"request_sha256": "A" * 64}, {"request_sha256": "a" * 63}, {"request_sha256": "g" * 64},
+])
+def test_publish_refuses_invalid_job_binding(graph, tmp_path, monkeypatch, overrides):
+    import write_loop
+    import store
+    backend, _ = seed(tmp_path, monkeypatch, graph)
+    with pytest.raises(GraphValidationError, match="INVALID_JOB_BINDING"):
+        publish(backend, 1, graph, correct.run(graph, transfer(graph)), **overrides)
+    assert store.load_manifest(backend, "fixture-tenant", "solar")["latest"] == 1
+
+
+def test_publish_respects_mutation_guard_with_valid_checkout(graph, tmp_path, monkeypatch):
+    import write_loop
+    import store
+    backend, _ = seed(tmp_path, monkeypatch, graph)
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
+    with pytest.raises(GraphValidationError, match="DRAWING_MUTATION_REFUSED"):
+        publish(backend, 1, graph, correct.run(graph, transfer(graph)))
+    assert store.load_manifest(backend, "fixture-tenant", "solar")["latest"] == 1
 
 
 def test_correction_version_and_existing_restore_recover_graph_and_validity(graph, tmp_path, monkeypatch):
