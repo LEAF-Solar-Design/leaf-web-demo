@@ -357,8 +357,21 @@ def require_current_export(graph):
 def version_companion(intake, before, after):
     """Embed graph and digest in the existing intake, without dropping CAD data."""
     _bounded_json(intake)
-    before, after = validate_graph(before), validate_graph(after)
-    if (type(intake) is not dict or intake.get("solar_design_graph") != before
+    if before is None:
+        after = validate_graph(after)
+        if type(intake) is not dict:
+            raise GraphValidationError("STALE_GRAPH_COMPANION")
+        has_graph = "solar_design_graph" in intake
+        has_digest = "solar_design_graph_sha256" in intake
+        if has_graph and has_digest:
+            raise GraphValidationError("GRAPH_ALREADY_EMBEDDED")
+        if has_graph or has_digest:
+            raise GraphValidationError("INVALID_SEED_PARENT")
+        if after["rev"] != 1 or after["parent_rev"] != 0:
+            raise GraphValidationError("INVALID_SEED_GRAPH")
+    else:
+        before, after = validate_graph(before), validate_graph(after)
+    if before is not None and (type(intake) is not dict or intake.get("solar_design_graph") != before
             or intake.get("solar_design_graph_sha256") != digest(before)
             or after["rev"] != before["rev"] + 1
             or after["project"]["id"] != before["project"]["id"]):
@@ -374,6 +387,7 @@ def publish_version(backend, tenant_id, drawing_id, *, parent_version, before, a
     """Broker-only adapter to the existing fenced, compare-and-set write lane.
 
     Intake-backed versions carry the graph atomically in the version payload.
+    With before=None, seed mode publishes the graphless parent's first graph.
     Raw DWG publication must use the licensed writer's companion transaction;
     this adapter refuses to replace DWG bytes with JSON. No caller-selected
     backend, identity or fencing value belongs in tool parameters.
@@ -431,7 +445,7 @@ def _publish_version(backend, tenant_id, drawing_id, *, parent_version, before, 
     manifest = store.load_manifest(
         backend, store.sanitize_id(tenant_id), store.sanitize_id(drawing_id))
     workitem_id = "solar-graph:" + job_id
-    note = "solar-graph-commit:" + request_sha256
+    note = ("solar-graph-seed:" if before is None else "solar-graph-commit:") + request_sha256
     def _replay(manifest):
         for entry in manifest["versions"]:
             if entry.get("workitem_id") != workitem_id:
@@ -444,7 +458,10 @@ def _publish_version(backend, tenant_id, drawing_id, *, parent_version, before, 
             # Read its bytes directly so replay cannot mint an intake cache proof.
             try:
                 _, parent_key = store.resolve_version(backend, tenant_id, drawing_id, parent_version)
-                payload = version_companion(json.loads(backend.get(parent_key)), before, after)
+                parent_bytes = backend.get(parent_key)
+                payload = version_companion(json.loads(parent_bytes), before, after)
+                if before is None and hashlib.sha256(parent_bytes).hexdigest() != after["source_hash"]:
+                    raise GraphValidationError("SOURCE_HASH_MISMATCH")
                 if entry.get("sha256") != hashlib.sha256(canonical_bytes(payload)).hexdigest():
                     raise GraphValidationError("JOB_BINDING_REUSED")
             except GraphValidationError:
@@ -453,7 +470,8 @@ def _publish_version(backend, tenant_id, drawing_id, *, parent_version, before, 
                 raise GraphValidationError("JOB_BINDING_REUSED") from None
             return {"version": entry["v"], "parent_version": entry["parent"],
                     "graph_sha256": digest(after), "intake_sha256": entry["sha256"],
-                    "job_id": job_id, "request_sha256": request_sha256, "replayed": True}
+                    "job_id": job_id, "request_sha256": request_sha256, "replayed": True,
+                    **({"seeded": True} if before is None else {})}
         return None
 
     replay = _replay(manifest)
@@ -475,10 +493,13 @@ def _publish_version(backend, tenant_id, drawing_id, *, parent_version, before, 
     payload = version_companion(intake, before, after)
     _, key = store.resolve_version(backend, tenant_id, drawing_id, version)
     try:
-        if json.loads(backend.get(key)) != intake:
+        parent_bytes = backend.get(key)
+        if json.loads(parent_bytes) != intake:
             raise ValueError()
     except (ValueError, UnicodeError):
         raise GraphValidationError("LICENSED_GRAPH_COMMIT_REQUIRED") from None
+    if before is None and hashlib.sha256(parent_bytes).hexdigest() != after["source_hash"]:
+        raise GraphValidationError("SOURCE_HASH_MISMATCH")
     data = canonical_bytes(payload)
     with write_loop.drawing_mutation_refusal_guard() as refusal:
         if refusal is not None:
@@ -497,4 +518,5 @@ def _publish_version(backend, tenant_id, drawing_id, *, parent_version, before, 
             raise
     return {"version": new_version, "parent_version": parent_version,
             "graph_sha256": digest(after), "intake_sha256": hashlib.sha256(data).hexdigest(),
-            "job_id": job_id, "request_sha256": request_sha256, "replayed": False}
+            "job_id": job_id, "request_sha256": request_sha256, "replayed": False,
+            **({"seeded": True} if before is None else {})}
