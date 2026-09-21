@@ -34,20 +34,20 @@ def seed_entity_id(tenant_id, drawing_id, kind):
 
 
 def seed_units(units):
-    if (not isinstance(units, dict) or set(units) != {
+    if (type(units) is not dict or set(units) != {
             "drawing_units", "wcs_to_ucs", "elevation_datum", "crs"}):
         raise GraphValidationError("INVALID_SEED_REQUEST")
     name = units["drawing_units"]
     matrix = units["wcs_to_ucs"]
     datum = units["elevation_datum"]
     crs = units["crs"]
-    if (not isinstance(name, str) or name not in UNIT_SCALE
-            or not isinstance(matrix, list) or len(matrix) != 16
+    if (type(name) is not str or name not in UNIT_SCALE
+            or type(matrix) is not list or len(matrix) != 16
             or any(type(v) not in (int, float) or
                    (type(v) is int and v.bit_length() > 64) or
                    (type(v) is float and not math.isfinite(v)) for v in matrix)
-            or not isinstance(datum, str) or not 1 <= len(datum) <= 4096
-            or not (crs is None or isinstance(crs, str) and len(crs) <= 4096)):
+            or type(datum) is not str or not 1 <= len(datum) <= 4096
+            or not (crs is None or type(crs) is str and len(crs) <= 4096)):
         raise GraphValidationError("INVALID_SEED_REQUEST")
     try:
         datum.encode("utf-8")
@@ -59,6 +59,18 @@ def seed_units(units):
             "source": "explicit", "compute_units": "m", "wcs_to_ucs": matrix[:],
             "elevation_datum": datum, "crs": crs,
             "drawing_unit_is_feet": name == "ft", "warnings": []}
+
+
+def validate_seed_request(initialize):
+    if (type(initialize) is not dict
+            or set(initialize) != {"schema_version", "source_intake_sha256", "units"}
+            or type(initialize["schema_version"]) is not int
+            or initialize["schema_version"] != 1
+            or type(initialize["source_intake_sha256"]) is not str
+            or not re.fullmatch("[0-9a-f]{64}", initialize["source_intake_sha256"])):
+        raise GraphValidationError("INVALID_SEED_REQUEST")
+    seed_units(initialize["units"])
+    return initialize
 
 
 def new_empty_graph(*, tenant_id, drawing_id, source_hash, units, created_at):

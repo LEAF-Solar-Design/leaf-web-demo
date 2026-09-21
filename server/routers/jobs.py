@@ -480,9 +480,11 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
     params = dict(tool.get("default_params", {}))
     params.update(req.params or {})
 
+    from product_capability_availability import NO_SEED_REQUEST
     availability = entitlements.w1_tool_availability(
         tool, tenant_id, params.get("drawing_id") or req.dwg,
-        project_id=x_project_id, version=req.dwg_version if req.dwg_version is not None else "head")
+        project_id=x_project_id, version=req.dwg_version if req.dwg_version is not None else "head",
+        seed_request=params["initialize"] if "initialize" in params else NO_SEED_REQUEST)
     if availability is not None and not availability["runnable"]:
         return JSONResponse(status_code=409, content=with_envelope_fields({
             "error": error_obj(ErrorCode.BAD_PARAMS,

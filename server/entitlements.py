@@ -308,8 +308,11 @@ def tool_required_capability(tool: Dict[str, Any]) -> str:
     return "run_write" if "drawing.write" in caps else "run_read"
 
 
+from product_capability_availability import NO_SEED_REQUEST
+
+
 def w1_tool_availability(tool, tenant, drawing_id=None, *, project_id=None,
-                         version="head", inputs=None):
+                         version="head", inputs=None, seed_request=NO_SEED_REQUEST):
     """Shared catalog/run projection, using the existing tier and role policy."""
     from product_capability_availability import (
         W1_CAPABILITIES, w1_availability, w1_input_readiness,
@@ -329,7 +332,8 @@ def w1_tool_availability(tool, tenant, drawing_id=None, *, project_id=None,
     if not W1_CAPABILITIES[name]["requires_persisted_graph"]:
         inputs = {name: {"input_ready": True, "input_reason": None}}
     elif inputs is None:
-        inputs = w1_input_readiness(tenant, drawing_id, project_id=project_id, version=version)
+        inputs = w1_input_readiness(tenant, drawing_id, project_id=project_id, version=version,
+                                   seed_request=seed_request)
     state = w1_availability(name, entitled=entitled, inputs=inputs[name])
     if policy_unavailable:
         state["entitlement_reason"] = "entitlement_policy_unavailable"

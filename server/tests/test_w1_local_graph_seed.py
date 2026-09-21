@@ -16,6 +16,7 @@ import write_loop
 import store
 import leaf_cloud_client as cloud
 import solar_local_graph as local
+import solar_graph_seed
 from solar_design_graph import GraphValidationError
 from solar_graph_seed import new_empty_graph
 from solar_sizing_client import digest
@@ -32,6 +33,11 @@ ORDINARY_KEYS = {"schema_version", "adapter", "tenant_id", "job_id", "tool",
                  "before_rev", "after_rev", "drawing_changed", "replayed"}
 SEED_KEYS = ORDINARY_KEYS | {"initialized", "seed_base_rev", "seed_base_graph_sha256",
                              "parent_intake_sha256"}
+
+
+def test_adapter_uses_shared_seed_request_validator():
+    assert not hasattr(local, "_seed_initialize")
+    assert local.validate_seed_request is solar_graph_seed.validate_seed_request
 
 
 @pytest.fixture(autouse=True)

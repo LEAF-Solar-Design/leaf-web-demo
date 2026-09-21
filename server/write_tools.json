@@ -27,6 +27,26 @@
             "type": "object",
             "minProperties": 1,
             "maxProperties": 14
+          },
+          "initialize": {
+            "type": "object",
+            "properties": {
+              "schema_version": {"type": "integer", "enum": [1]},
+              "source_intake_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "units": {
+                "type": "object",
+                "properties": {
+                  "drawing_units": {"type": "string", "enum": ["m", "mm", "cm", "km", "in", "ft", "yd"]},
+                  "wcs_to_ucs": {"type": "array", "minItems": 16, "maxItems": 16, "items": {"type": "number"}},
+                  "elevation_datum": {"type": "string", "minLength": 1, "maxLength": 4096},
+                  "crs": {"type": ["string", "null"], "maxLength": 4096}
+                },
+                "required": ["drawing_units", "wcs_to_ucs", "elevation_datum", "crs"],
+                "additionalProperties": false
+              }
+            },
+            "required": ["schema_version", "source_intake_sha256", "units"],
+            "additionalProperties": false
           }
         },
         "required": [

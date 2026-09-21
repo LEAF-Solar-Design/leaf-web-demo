@@ -174,7 +174,8 @@ def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
                 result = body.get("result")
                 if (type(status) is not int or not 200 <= status <= 299
                         or not isinstance(result, dict)
-                        or result.get("schema_version") != "leaf.solar-graph-commit.v1"
+                        or result.get("schema_version") not in (
+                            "leaf.solar-graph-commit.v1", "leaf.solar-graph-seed.v1")
                         or result.get("adapter") != "local-graph-commit"
                         or result.get("tenant_id") != tenant_id or result.get("job_id") != job_id
                         or result.get("tool") != tool["name"]
