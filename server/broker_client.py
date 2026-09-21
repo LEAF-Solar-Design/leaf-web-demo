@@ -54,6 +54,13 @@ class BrokerHTTPRejected(BrokerUnreachable):
         self.status_code = status_code if type(status_code) is int and 100 <= status_code <= 599 else None
 
 
+class BrokerReceiptRejected(ValueError):
+    """The broker returned no acceptable local graph commit receipt."""
+
+    def __init__(self):
+        super().__init__("graph commit receipt rejected")
+
+
 class BrokerReapRejected(Exception):
     """The broker was reached but refused the reap (auth, 5xx, malformed body).
 
@@ -115,13 +122,24 @@ def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
     ``file_only`` and ``test_source`` are server-owned completion inputs. Omit
     them for ordinary requests to preserve their existing wire identity.
     """
-    from product_capability_availability import is_cloud_proposal
+    from product_capability_availability import is_cloud_proposal, is_local_graph_commit
     if is_cloud_proposal(tool):
         from leaf_cloud_client import validate_params as validate_cloud_params
 
         validate_cloud_params(params)
         if aps_live or file_only or test_source is not None:
             raise ValueError("cloud proposal requires ordinary broker execution without APS")
+    if is_local_graph_commit(tool):
+        import write_loop
+        import store
+
+        if aps_live or file_only or test_source is not None:
+            raise ValueError("local graph commit requires ordinary broker execution without APS")
+        if (not job_id or type(dwg_version) is not int or dwg_version < 1
+                or not isinstance(checkout_holder, str) or not checkout_holder
+                or checkout_holder == store.ANONYMOUS_HOLDER
+                or type(checkout_fence) is not int or checkout_fence < 1):
+            raise ValueError("local graph commit requires a job, a pinned version and a checkout")
     payload = {"tenant_id": tenant_id, "tool": tool, "params": params,
                   "dwg": dwg, "aps_live": bool(aps_live), "dwg_version": dwg_version,
                   "ledger_event_key": ledger_event_key,
@@ -143,6 +161,23 @@ def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
             status = resp.status_code
             if type(status) is not int or not 200 <= status < 300:
                 raise BrokerHTTPRejected(status)
+        if is_local_graph_commit(tool):
+            status = getattr(resp, "status_code", None)
+            body = resp.json()
+            if not isinstance(body, dict):
+                raise BrokerReceiptRejected()
+            if body.get("ok") is True:
+                result = body.get("result")
+                if (type(status) is not int or not 200 <= status <= 299
+                        or not isinstance(result, dict)
+                        or result.get("schema_version") != "leaf.solar-graph-commit.v1"
+                        or result.get("adapter") != "local-graph-commit"
+                        or result.get("tenant_id") != tenant_id or result.get("job_id") != job_id
+                        or result.get("tool") != tool["name"]
+                        or not isinstance(result.get("new_version"), dict)
+                        or result["new_version"].get("parent") != dwg_version):
+                    raise BrokerReceiptRejected()
+            return body
         return resp.json()
     except (requests.ConnectionError, requests.Timeout) as exc:
         if file_only:
@@ -150,6 +185,8 @@ def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
             raise BrokerUnreachable("file-only broker request unavailable", reason=reason) from None
         raise BrokerUnreachable(f"broker at {broker_url()} unreachable: {exc}") from exc
     except ValueError as exc:  # non-JSON body
+        if is_local_graph_commit(tool):
+            raise BrokerReceiptRejected() from None
         if file_only:
             raise BrokerUnreachable("file-only broker response invalid", reason="nonjson") from None
         raise BrokerUnreachable(f"broker at {broker_url()} returned non-JSON: {exc}") from exc

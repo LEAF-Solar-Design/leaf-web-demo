@@ -35,6 +35,50 @@ def request_digest(tool, drawing_id, source_version, builtin_params):
                    "source_version": source_version, "params": builtin_params})
 
 
+def graph_commit_provenance(result, params, tenant_id, job_id, tool, source_version, *, backend=None):
+    """Bind a terminal receipt to its durable request and immutable stored version."""
+    try:
+        if (not isinstance(result, dict) or result["schema_version"] != RESULT_SCHEMA
+                or result["adapter"] != ADAPTER_KIND or tool not in LOCAL_GRAPH_TOOLS
+                or result["tool"] != tool or result["tenant_id"] != tenant_id
+                or not isinstance(job_id, str) or not job_id or result["job_id"] != job_id
+                or not isinstance(params, dict) or not isinstance(params["drawing_id"], str)
+                or result["drawing_id"] != params["drawing_id"]
+                or type(source_version) is not int or source_version < 1):
+            raise ValueError()
+        builtin_params = copy.deepcopy(params)
+        drawing_id = builtin_params.pop("drawing_id")
+        request_sha256 = request_digest(tool, drawing_id, source_version, builtin_params)
+        version = result["new_version"]["version"]
+        if (result["request_sha256"] != request_sha256
+                or type(version) is not int or version <= source_version
+                or result["new_version"] != {"drawing_id": drawing_id, "version": version,
+                                             "parent": source_version}
+                or result["drawing_changed"] is not True
+                or type(result["before_rev"]) is not int or type(result["after_rev"]) is not int
+                or result["after_rev"] != result["before_rev"] + 1):
+            raise ValueError()
+        if backend is None:
+            backend = write_loop.backend_for_tenant(tenant_id, aps_live=False, da=None)
+        _, key, entry = store.resolve_version_entry(backend, tenant_id, drawing_id, version)
+        if (entry["v"] != version or entry["parent"] != source_version
+                or entry["workitem_id"] != "solar-graph:" + job_id
+                or entry["note"] != "solar-graph-commit:" + request_sha256
+                or entry["sha256"] != result["intake_sha256"]
+                or hashlib.sha256(backend.get(key)).hexdigest() != result["intake_sha256"]):
+            raise ValueError()
+        context = resolve_graph_context(backend, tenant_id, drawing_id, version)
+        if (context["representation"] != "intake"
+                or context["graph_sha256"] != result["graph_sha256"]):
+            raise ValueError()
+        return {"execution_mode": "local_graph_commit", "adapter": ADAPTER_KIND,
+                "request_sha256": request_sha256, "graph_sha256": result["graph_sha256"],
+                "intake_sha256": result["intake_sha256"], "source_version": source_version,
+                "new_version": version}
+    except (KeyError, AttributeError, TypeError, ValueError, OSError, RecursionError):
+        raise ValueError("graph commit terminal proof rejected") from None
+
+
 def run_local_graph_commit(backend, tenant_id, tool, params, *, drawing_id, source_version,
                            holder, fence, job_id, project_id=None):
     if tool not in LOCAL_GRAPH_TOOLS:
