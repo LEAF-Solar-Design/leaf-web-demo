@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 SERVER = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SERVER))
@@ -43,7 +44,11 @@ def rails(tmp_path, monkeypatch, graph):
     monkeypatch.setattr(broker, "_get_da", forbidden)
     monkeypatch.setattr(requests.sessions.Session, "request", forbidden)
     backend, _ = seed(tmp_path, monkeypatch, graph)
-    monkeypatch.setattr(write_loop, "backend_for_tenant", lambda *a, **k: backend)
+    def backend_for_tenant(*args, **kwargs):
+        assert args == (TENANT,)
+        assert kwargs == {"aps_live": False, "da": None}
+        return backend
+    monkeypatch.setattr(write_loop, "backend_for_tenant", backend_for_tenant)
     tool = next(t for t in json.loads((SERVER / "write_tools.json").read_text())["tools"]
                 if t["name"] == "solar-settings")
     with held(backend) as fence:
@@ -65,13 +70,43 @@ def call(rails, **overrides):
                   dwg="solar", dwg_version=1, job_id=JOB, aps_live=False,
                   checkout_holder="fixture-owner", checkout_fence=fence)
     fields.update(overrides)
-    # Preserve explicit bool identity defects instead of Pydantic coercing them to 1.
-    request = broker.BrokerRunRequest(**fields)
+    # Prove the branch's own check as defence in depth, because the wire already refuses bools.
+    parsed_fields = fields.copy()
+    for field in ("dwg_version", "checkout_fence"):
+        if type(fields[field]) is bool:
+            parsed_fields[field] = 1
+    request = broker.BrokerRunRequest(**parsed_fields)
     for field in ("dwg_version", "checkout_fence"):
         if type(fields[field]) is bool:
             setattr(request, field, fields[field])
     response = broker._broker_run(request)
     return response.status_code, json.loads(response.body)
+
+
+@pytest.mark.parametrize("field", ["dwg_version", "checkout_fence"])
+@pytest.mark.parametrize("value", [True, 1.0, "1"])
+def test_wire_identity_refuses_coercion(enabled, monkeypatch, field, value):
+    broker, _, tool, fence = enabled
+    monkeypatch.setattr(broker, "_broker_run", forbidden)
+    monkeypatch.setattr(local, "run_local_graph_commit", forbidden)
+    fields = dict(tenant_id=TENANT, tool=copy.deepcopy(tool), params=settings(),
+                  dwg="solar", dwg_version=1, job_id=JOB, aps_live=False,
+                  checkout_holder="fixture-owner", checkout_fence=fence)
+    fields[field] = value
+    with pytest.raises(ValidationError):
+        broker.BrokerRunRequest.model_validate(fields)
+
+
+@pytest.mark.parametrize("field", ["dwg_version", "checkout_fence"])
+@pytest.mark.parametrize("value", [1, None])
+def test_wire_identity_accepts_int_and_none(enabled, field, value):
+    broker, _, tool, fence = enabled
+    fields = dict(tenant_id=TENANT, tool=copy.deepcopy(tool), params=settings(),
+                  dwg="solar", dwg_version=1, job_id=JOB, aps_live=False,
+                  checkout_holder="fixture-owner", checkout_fence=fence)
+    fields[field] = value
+    request = broker.BrokerRunRequest.model_validate(fields)
+    assert getattr(request, field) is value
 
 
 def test_shipped_kind_is_off(rails, monkeypatch):
@@ -227,11 +262,49 @@ def test_mutation_gate(enabled, monkeypatch):
     assert latest(enabled[1]) == 1
 
 
+def test_backend_acquisition_runtime_error(enabled, monkeypatch):
+    def refuse(*args, **kwargs):
+        raise RuntimeError("no client")
+    monkeypatch.setattr(write_loop, "backend_for_tenant", refuse)
+    monkeypatch.setattr(local, "run_local_graph_commit", forbidden)
+    status, env = call(enabled)
+    assert status == DEFAULT_HTTP_STATUS[ErrorCode.INTERNAL]
+    assert env["ok"] is False and env["degraded_mode"] is False
+    assert env["error"]["error_code"] == ErrorCode.INTERNAL
+    assert env["error"]["retryable"] is True
+    assert env["error"]["reason_code"] == "GRAPH_STORE_UNAVAILABLE"
+    assert env["error"]["message"] == "graph store unavailable"
+    assert "no client" not in json.dumps(env)
+    assert latest(enabled[1]) == 1
+
+
+def test_adapter_runtime_error_is_not_store_failure(enabled, monkeypatch):
+    def refuse(*args, **kwargs):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(local, "run_local_graph_commit", refuse)
+    status, env = call(enabled)
+    assert status == DEFAULT_HTTP_STATUS[ErrorCode.INTERNAL]
+    assert env["ok"] is False
+    assert env["error"]["error_code"] == ErrorCode.INTERNAL
+    assert env["error"].get("reason_code") != "GRAPH_STORE_UNAVAILABLE"
+    assert "boom" not in env["error"]["message"]
+    assert latest(enabled[1]) == 1
+
+
 def test_ledger(enabled):
     assert call(enabled)[0] == 200
     entry = json.loads(enabled[0].LEDGER_PATH.read_text().splitlines()[-1])
     assert entry["aps_live"] is False and entry["aps_endpoint"] is None
     assert entry["tool"] == "solar-settings"
+
+
+def test_refused_live_ledger_is_local(enabled, monkeypatch):
+    monkeypatch.setattr(local, "run_local_graph_commit", forbidden)
+    _, env = call(enabled, aps_live=True)
+    assert env["ok"] is False
+    assert env["error"]["reason_code"] == "local_graph_commit_invalid"
+    entry = json.loads(enabled[0].LEDGER_PATH.read_text().splitlines()[-1])
+    assert entry["aps_live"] is False and entry["aps_endpoint"] is None
 
 
 def test_packaged_builtin_ignores_decoy(enabled, tmp_path, monkeypatch):
@@ -252,3 +325,18 @@ def test_params_schema_refuses_first(enabled, monkeypatch):
     _, env = call(enabled, params={"expected_rev": 0, "nope": 1})
     assert env["ok"] is False and env["error"]["reason_code"] == "tool_params_invalid"
     assert latest(enabled[1]) == 1
+
+
+@pytest.mark.parametrize("qa_hooks", ["1", "0"])
+def test_qa_key_is_refused(enabled, monkeypatch, qa_hooks):
+    monkeypatch.setenv("LEAF_QA_HOOKS", qa_hooks)
+    monkeypatch.setattr(local, "run_local_graph_commit", forbidden)
+    _, env = call(enabled, params={**settings(), "_qa_sleep_s": 0})
+    assert env["ok"] is False
+    assert env["error"]["reason_code"] == "tool_params_invalid"
+    assert latest(enabled[1]) == 1
+
+
+def test_other_kinds_still_pop_qa_key():
+    source = (SERVER / "broker.py").read_text(encoding="utf-8")
+    assert '    if not local_graph:\n        qa_sleep = params.pop("_qa_sleep_s", None)\n' in source

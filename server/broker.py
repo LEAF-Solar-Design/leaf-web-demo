@@ -1282,7 +1282,8 @@ class BrokerRunRequest(BaseModel):
     test_source: Optional[str] = None
     file_only: bool = False
     # None -> head (unchanged); otherwise pin to an immutable drawing version.
-    dwg_version: Optional[int] = None
+    # A bool, a float or a string is refused at the wire.
+    dwg_version: Optional[int] = Field(default=None, strict=True)
     # Required in PostgreSQL mode. Use one durable key across job redeliveries.
     ledger_event_key: Optional[str] = None
     # Single-writer identity of the caller that submitted this run, carried from
@@ -1295,7 +1296,8 @@ class BrokerRunRequest(BaseModel):
     # two sessions asking for the same tool+params are the same work even when
     # only one of them is authorized to publish the result.
     checkout_holder: Optional[str] = None
-    checkout_fence: Optional[int] = None
+    # A bool, a float or a string is refused at the wire.
+    checkout_fence: Optional[int] = Field(default=None, strict=True)
     # Optional durable job identity. When present, this run's live WorkItem id is
     # registered against it so /broker/reap can cancel it on tab close. Omitting
     # it leaves behaviour and the response shape byte-for-byte unchanged. It is
@@ -3338,7 +3340,10 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
     # reaches the tool or the schema check. F12: it is HONORED only when QA hooks are
     # enabled (LEAF_QA_HOOKS; non-live default ON) — otherwise it is IGNORED ENTIRELY
     # so a tenant can't starve the shared worker pool with a large sleep in prod.
-    qa_sleep = params.pop("_qa_sleep_s", None)
+    # A local graph commit never honours the QA key, because its params are bound to the terminal proof.
+    qa_sleep = None
+    if not local_graph:
+        qa_sleep = params.pop("_qa_sleep_s", None)
     if qa_sleep is not None and not _qa_hooks_enabled():
         qa_sleep = None
 
@@ -3378,9 +3383,20 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
         if (not isinstance(req.dwg, str) or not req.dwg
                 or ("drawing_id" in params and params["drawing_id"] != req.dwg)):
             return _graph_commit_refused("DRAWING_ID_CONFLICT", tool=tool["name"])
+
+        def graph_store_unavailable():
+            env = err_envelope(ErrorCode.INTERNAL, "graph store unavailable",
+                               retryable=True, tool=tool["name"])
+            env["error"]["reason_code"] = "GRAPH_STORE_UNAVAILABLE"
+            env["degraded_mode"] = False
+            return env, DEFAULT_HTTP_STATUS[ErrorCode.INTERNAL]
+
         try:
             _start_admitted_execution(req, admission, aps_submission=False)
-            backend = write_loop.backend_for_tenant(req.tenant_id, aps_live=False, da=None)
+            try:
+                backend = write_loop.backend_for_tenant(req.tenant_id, aps_live=False, da=None)
+            except RuntimeError:
+                return graph_store_unavailable()
             result = run_local_graph_commit(
                 backend, req.tenant_id, tool["name"], params,
                 drawing_id=req.dwg, source_version=req.dwg_version,
@@ -3392,11 +3408,7 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
         except GraphValidationError as exc:
             return _graph_commit_refused(exc.code, tool=tool["name"])
         except OSError:
-            env = err_envelope(ErrorCode.INTERNAL, "graph store unavailable",
-                               retryable=True, tool=tool["name"])
-            env["error"]["reason_code"] = "GRAPH_STORE_UNAVAILABLE"
-            env["degraded_mode"] = False
-            return env, DEFAULT_HTTP_STATUS[ErrorCode.INTERNAL]
+            return graph_store_unavailable()
 
     # 1c) WRITE BRANCH (M2): a drawing.write tool produces a NEW immutable store
     #     version (undo/redo-able). Read tools do NOT match here and take the
