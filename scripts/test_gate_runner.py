@@ -54,12 +54,12 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
         "graph-versions": 18,
         "sizing-groups": 52,
         "solar-interchange": 19,
-        "solve-commit": 67,
+        "solve-commit": 71,
         "routes-schedule": 21,
         "equipment": 24,
         "catalog-gates": 18,
         "solar-apply-plan": 39,
-        "local-graph-adapter": 37,
+        "local-graph-adapter": 40,
     }
     for name, expected in w1_floors.items():
         suite = suites[f"server-w1-{name}"]
