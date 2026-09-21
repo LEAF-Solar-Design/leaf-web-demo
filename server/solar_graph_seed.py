@@ -49,6 +49,12 @@ def seed_units(units):
             or not isinstance(datum, str) or not 1 <= len(datum) <= 4096
             or not (crs is None or isinstance(crs, str) and len(crs) <= 4096)):
         raise GraphValidationError("INVALID_SEED_REQUEST")
+    try:
+        datum.encode("utf-8")
+        if isinstance(crs, str):
+            crs.encode("utf-8")
+    except UnicodeError:
+        raise GraphValidationError("INVALID_SEED_REQUEST") from None
     return {"drawing_units": name, "meters_per_unit": UNIT_SCALE[name],
             "source": "explicit", "compute_units": "m", "wcs_to_ucs": matrix[:],
             "elevation_datum": datum, "crs": crs,

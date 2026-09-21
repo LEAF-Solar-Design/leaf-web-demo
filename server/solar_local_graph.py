@@ -113,7 +113,8 @@ def graph_commit_provenance(result, params, tenant_id, job_id, tool, source_vers
                 "request_sha256": request_sha256, "graph_sha256": result["graph_sha256"],
                 "intake_sha256": result["intake_sha256"], "source_version": source_version,
                 "new_version": version}
-    except (KeyError, AttributeError, TypeError, ValueError, OSError, RecursionError, RuntimeError):
+    except (LookupError, ArithmeticError, AttributeError, TypeError, ValueError, OSError,
+            RecursionError, RuntimeError):
         raise ValueError("graph commit terminal proof rejected") from None
 
 
@@ -145,6 +146,7 @@ def _seed_provenance(result, params, tenant_id, job_id, tool, source_version, *,
             or result["new_version"] != {"drawing_id": drawing_id, "version": version,
                                          "parent": source_version}
             or result["drawing_changed"] is not True or result["initialized"] is not True
+            or type(result["replayed"]) is not bool
             or result["before_rev"] is not None or result["before_graph_sha256"] is not None
             or type(result["seed_base_rev"]) is not int or result["seed_base_rev"] != 0
             or type(result["after_rev"]) is not int or result["after_rev"] != 1):
@@ -162,6 +164,7 @@ def _seed_provenance(result, params, tenant_id, job_id, tool, source_version, *,
     context = resolve_graph_context(backend, tenant_id, drawing_id, version)
     if (context["representation"] != "intake"
             or context["graph_sha256"] != result["graph_sha256"]
+            or context["graph"]["project"]["id"] != result["project_id"]
             or context["graph"]["rev"] != 1 or context["graph"]["parent_rev"] != 0):
         raise ValueError()
     ctx = resolve_seed_context(backend, tenant_id, drawing_id, source_version,
@@ -179,7 +182,10 @@ def _seed_provenance(result, params, tenant_id, job_id, tool, source_version, *,
     intake = json.loads(data)
     del intake["solar_design_graph"]
     del intake["solar_design_graph_sha256"]
-    if intake != ctx["intake"]:
+    def canonical(value):
+        return json.dumps(value, sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=False, allow_nan=False)
+    if canonical(intake) != canonical(ctx["intake"]):
         raise ValueError()
     return {"execution_mode": "local_graph_commit", "adapter": ADAPTER_KIND,
             "request_sha256": request_sha256, "graph_sha256": result["graph_sha256"],

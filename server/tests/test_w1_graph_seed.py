@@ -204,6 +204,14 @@ def test_units_accept_integer_boundary_in_graph():
     assert value["project"]["units"]["wcs_to_ucs"][0] == 2**64 - 1
 
 
+@pytest.mark.parametrize("field", ["elevation_datum", "crs"])
+def test_units_refuse_invalid_utf8(field):
+    request = units()
+    request[field] = "\ud800"
+    with refused("INVALID_SEED_REQUEST"):
+        seed_units(request)
+
+
 def test_units_are_isolated():
     request = units()
     before = copy.deepcopy(request)

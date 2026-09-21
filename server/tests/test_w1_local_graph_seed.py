@@ -19,6 +19,7 @@ import solar_local_graph as local
 from solar_design_graph import GraphValidationError
 from solar_graph_seed import new_empty_graph
 from solar_sizing_client import digest
+from solar_solve_results import publish_version
 from test_w1_design_graph import graph  # noqa: F401
 from test_w1_solve_commit import seed_graphless, seed
 
@@ -306,6 +307,8 @@ def test_seed_terminal_proof_survives_head_advance(committed):
     ("params", ("drawing_id",), "other"),
     ("call", ("source_version",), 2),
     ("result", ("request_sha256",), "0" * 64),
+    ("result", ("project_id",), "leaf:project:00000000-0000-4000-8000-000000000001"),
+    ("result", ("replayed",), "not-a-boolean"),
     ("result", ("initialized",), False),
     ("result", ("before_rev",), 0),
     ("result", ("before_graph_sha256",), "0" * 64),
@@ -337,12 +340,32 @@ def test_seed_proof_rejects_alterations(committed, target, path, value):
         proof(backend, result, params, **overrides)
 
 
-def test_ordinary_proof_refuses_initialize(committed):
-    backend, _, seed_params, _ = committed
-    params, result = edit(backend)
-    params["initialize"] = copy.deepcopy(seed_params["initialize"])
+def test_ordinary_proof_refuses_initialize(graph, tmp_path, monkeypatch):
+    backend, _ = seed(tmp_path, monkeypatch, graph)
+    parent = local.resolve_graph_context(backend, TENANT, DRAWING, 1)
+    builtin_params = {"expected_rev": parent["graph"]["rev"], "changes": {"num_mppt": 2}}
+    after = local._load_builtin("solar-settings").run(copy.deepcopy(parent["graph"]), builtin_params)
+    builtin_params["initialize"] = request(backend)["initialize"]
+    params = dict(builtin_params, drawing_id=DRAWING)
+    request_sha256 = local.request_digest("solar-settings", DRAWING, 1, builtin_params)
+    with held(backend) as fence:
+        receipt = publish_version(
+            backend, TENANT, DRAWING, parent_version=1, before=parent["graph"], after=after,
+            holder="fixture-owner", fence=fence, job_id="local-job", request_sha256=request_sha256)
+    context = local.resolve_graph_context(backend, TENANT, DRAWING, receipt["version"])
+    result = {
+        "schema_version": local.RESULT_SCHEMA, "adapter": local.ADAPTER_KIND,
+        "tenant_id": TENANT, "job_id": "local-job", "tool": "solar-settings",
+        "project_id": parent["project_id"], "drawing_id": DRAWING,
+        "request_sha256": receipt["request_sha256"],
+        "new_version": {"drawing_id": DRAWING, "version": receipt["version"],
+                        "parent": receipt["parent_version"]},
+        "before_graph_sha256": parent["graph_sha256"],
+        "graph_sha256": context["graph_sha256"], "intake_sha256": receipt["intake_sha256"],
+        "before_rev": parent["graph"]["rev"], "after_rev": context["graph"]["rev"],
+        "drawing_changed": True, "replayed": receipt["replayed"]}
     with pytest.raises(ValueError, match="^graph commit terminal proof rejected$"):
-        proof(backend, result, params, source_version=2, job_id="edit-job")
+        proof(backend, result, params)
 
 
 def test_seed_proof_rejects_rewritten_manifest_note(committed):
@@ -368,7 +391,8 @@ def rewrite_intake(backend, version, intake):
 
 
 @pytest.mark.parametrize("companion", ["solar_design_graph", "solar_design_graph_sha256"])
-def test_seed_proof_rejects_parent_companion(committed, graph, companion):
+def test_seed_proof_rejects_a_rewritten_parent(committed, graph, companion):
+    # Rewriting the parent makes source_intake_sha256 stale; companion rules live in test_w1_graph_seed.py.
     backend, intake, params, result = committed
     intake[companion] = graph if companion == "solar_design_graph" else digest(graph)
     rewrite_intake(backend, 1, intake)
@@ -385,6 +409,52 @@ def test_seed_proof_rejects_changed_parent_content(committed):
     assert local.resolve_graph_context(backend, TENANT, DRAWING, 2)["graph_sha256"] == result["graph_sha256"]
     with pytest.raises(ValueError, match="^graph commit terminal proof rejected$"):
         proof(backend, result, params)
+
+
+@pytest.mark.parametrize("value", [True, 1.0])
+def test_seed_proof_rejects_json_type_change_in_preserved_content(committed, value):
+    backend, _, params, result = committed
+    _, key = store.resolve_version(backend, TENANT, DRAWING, 2)
+    intake = json.loads(backend.get(key))
+    intake["custom"]["keep"][0] = value
+    result["intake_sha256"] = rewrite_intake(backend, 2, intake)
+    with pytest.raises(ValueError, match="^graph commit terminal proof rejected$"):
+        proof(backend, result, params)
+
+
+def test_seed_proof_rederives_the_stored_graph(committed):
+    backend, _, params, result = committed
+    _, key = store.resolve_version(backend, TENANT, DRAWING, 2)
+    intake = json.loads(backend.get(key))
+    intake["solar_design_graph"]["settings"]["num_mppt"] = 9
+    intake["solar_design_graph_sha256"] = digest(intake["solar_design_graph"])
+    result["graph_sha256"] = intake["solar_design_graph_sha256"]
+    result["intake_sha256"] = rewrite_intake(backend, 2, intake)
+    context = local.resolve_graph_context(backend, TENANT, DRAWING, 2)
+    assert context["graph_sha256"] == result["graph_sha256"]
+    with pytest.raises(ValueError, match="^graph commit terminal proof rejected$"):
+        proof(backend, result, params)
+
+
+@pytest.mark.parametrize("error", [IndexError("private-store-detail"),
+                                 OverflowError("private-store-detail")])
+@pytest.mark.parametrize("ordinary", [False, True])
+def test_seed_proof_contains_unexpected_exceptions(committed, monkeypatch, error, ordinary):
+    backend, _, params, result = committed
+    overrides = {}
+    resolver = "resolve_seed_context"
+    if ordinary:
+        params, result = edit(backend)
+        overrides = {"source_version": 2, "job_id": "edit-job"}
+        resolver = "resolve_graph_context"
+
+    def boom(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(local, resolver, boom)
+    with pytest.raises(ValueError, match="^graph commit terminal proof rejected$") as excinfo:
+        proof(backend, result, params, **overrides)
+    assert "private-store-detail" not in str(excinfo.value)
 
 
 def test_seed_proof_hides_context_runtime_failure(committed, monkeypatch):
