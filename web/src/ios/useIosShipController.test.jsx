@@ -293,6 +293,118 @@ it('B4D row22 rejects invalid source grammars by field and retains the previous 
   await expect(readSources({ projectId: 'p1' })).resolves.toMatchObject({ sources: [sourceOne, sourceTwo] })
 })
 
+it('B4D row24 a successful POST with failed readback holds retry until sources are confirmed', async () => {
+  const { result } = mount()
+  await flush()
+  fetchIosShipSources.mockRejectedValueOnce(new Error('catalog unavailable'))
+  await act(async () => {
+    expect(await result.current.approve(sourceOne.source_revision)).toEqual({ approval: sourceApproval(), readBack: false })
+  })
+  expect(result.current.approving).toBe(false)
+  await act(async () => { expect(await result.current.approve(sourceOne.source_revision)).toBeUndefined() })
+  expect(requestIosShipApproval).toHaveBeenCalledTimes(1)
+  expect(result.current.sourcesError).toBe("The last approval's outcome is unknown. Refresh the sources to confirm it before approving again.")
+  await act(async () => { await result.current.refreshSources() })
+  await act(async () => { await result.current.approve(sourceOne.source_revision) })
+  expect(requestIosShipApproval).toHaveBeenCalledTimes(2)
+})
+
+it('B4D row25 holds two unknown source tuples independently until a project readback', async () => {
+  fetchIosShipSources.mockResolvedValue(sourceCatalog({ approvals: [] }))
+  const { result } = mount()
+  await flush()
+  for (const source of [sourceOne, sourceTwo]) {
+    requestIosShipApproval.mockRejectedValueOnce(new Error('connection lost'))
+    fetchIosShipSources.mockRejectedValueOnce(new Error('catalog unavailable'))
+    await act(async () => { await result.current.approve(source.source_revision) })
+  }
+  for (const source of [sourceOne, sourceTwo]) {
+    await act(async () => { expect(await result.current.approve(source.source_revision)).toBeUndefined() })
+    expect(result.current.sourcesError).toBe("The last approval's outcome is unknown. Refresh the sources to confirm it before approving again.")
+  }
+  expect(requestIosShipApproval).toHaveBeenCalledTimes(2)
+  await act(async () => { await result.current.refreshSources() })
+  for (const source of [sourceOne, sourceTwo]) {
+    await act(async () => { await result.current.approve(source.source_revision) })
+  }
+  expect(requestIosShipApproval).toHaveBeenCalledTimes(4)
+})
+
+it('B4D row26 retains the request revision hold when a pending POST loses its scope', async () => {
+  let rejectApproval
+  requestIosShipApproval.mockReturnValueOnce(new Promise((resolve, reject) => { rejectApproval = reject }))
+  const { result, rerender } = mount()
+  await flush()
+  let pending
+  act(() => { pending = result.current.approve(sourceOne.source_revision) })
+  rerender({ ...props, revision: 'r2' })
+  await flush()
+  await act(async () => { rejectApproval(new Error('connection lost')); await pending })
+  rerender(props)
+  await flush()
+  await act(async () => { expect(await result.current.approve(sourceOne.source_revision)).toBeUndefined() })
+  expect(requestIosShipApproval).toHaveBeenCalledTimes(1)
+  expect(result.current.sourcesError).toBe("The last approval's outcome is unknown. Refresh the sources to confirm it before approving again.")
+  await act(async () => { await result.current.refreshSources() })
+  await act(async () => { await result.current.approve(sourceOne.source_revision) })
+  expect(requestIosShipApproval).toHaveBeenCalledTimes(2)
+})
+
+it('B4D row27 holds a 503 outcome but permits retry after a 409 refusal', async () => {
+  for (const status of [503, 409]) {
+    requestIosShipApproval.mockClear()
+    const { result, unmount } = mount()
+    await flush()
+    requestIosShipApproval.mockResolvedValue({ status, error: { code: 'approval_unavailable', message: `Approval refused (${status})` } })
+    fetchIosShipSources.mockRejectedValueOnce(new Error('catalog unavailable'))
+    await act(async () => { await result.current.approve(sourceOne.source_revision) })
+    expect(result.current.sourcesError).toBe(`Approval refused (${status})`)
+    fetchIosShipSources.mockRejectedValueOnce(new Error('catalog unavailable'))
+    await act(async () => { await result.current.approve(sourceOne.source_revision) })
+    expect(requestIosShipApproval).toHaveBeenCalledTimes(status === 503 ? 1 : 2)
+    expect(result.current.sourcesError).toBe(status === 503
+      ? "The last approval's outcome is unknown. Refresh the sources to confirm it before approving again."
+      : 'Approval refused (409)')
+    unmount()
+    fetchIosShipSources.mockReset().mockResolvedValue(sourceCatalog())
+  }
+})
+
+it('B4D row28 rejects malformed approval request fields before fetching', async () => {
+  const fetchImpl = vi.fn()
+  for (const [field, value] of [
+    ['build_number', '12x'], ['marketing_version', '1'], ['bundle_identifier', '/tmp/x'],
+    ['source_revision', 'a'.repeat(39)], ['source_sha256', 'b'.repeat(63)],
+    ['bundle_identifier', `com.${'a'.repeat(252)}`], ['marketing_version', `${'1'.repeat(19)}.0`],
+    ['build_number', '1'.repeat(19)], ['source_revision', `${sourceOne.source_revision}\n`],
+    ['revision', 'r1\n'],
+  ]) {
+    await expect(postApproval({ projectId: 'p1', revision: field === 'revision' ? value : 'r1',
+      source: { ...sourceOne, [field]: value }, fetchImpl })).rejects.toThrow(`approval request field invalid: ${field}`)
+  }
+  expect(fetchImpl).not.toHaveBeenCalled()
+})
+
+it('B4D row29 refuses a trailing newline in sync status and accepts its full match', async () => {
+  fetchIosShipSources.mockResolvedValueOnce(sourceCatalog({ sync: { status: 'ok\n', registered: 2 } }))
+  await expect(readSources({ projectId: 'p1' })).rejects.toThrow('source catalog field invalid: sync.status')
+  await expect(readSources({ projectId: 'p1' })).resolves.toMatchObject({ sync: { status: 'ok' } })
+})
+
+it('B4D row30 bounds server error text and preserves short messages', async () => {
+  const { result } = mount()
+  await flush()
+  for (const length of [5000, 100]) {
+    const text = 'x'.repeat(length)
+    requestIosShipApproval.mockResolvedValueOnce({ status: 409, error: { code: 'approval_unavailable', message: text } })
+    await act(async () => { await result.current.approve(sourceOne.source_revision) })
+    if (length > 300) {
+      expect(result.current.sourcesError.length).toBeLessThanOrEqual(300)
+      expect(result.current.sourcesError.endsWith('…')).toBe(true)
+    } else expect(result.current.sourcesError).toBe(text)
+  }
+})
+
 it('B4D row23 validates approval responses and holds retry while their outcome is unknown', async () => {
   const malformed = { ok: true, approval: sourceApproval(sourceOne, { approval_id: 'x'.repeat(4096) }) }
   requestIosShipApproval.mockResolvedValueOnce(malformed)

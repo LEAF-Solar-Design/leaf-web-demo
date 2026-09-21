@@ -6,14 +6,18 @@ import {
 } from '../site/iosShipReadiness.js'
 
 const terminal = (execution) => ['succeeded', 'failed'].includes(execution?.status)
-const message = (cause) => cause?.envelope?.message || cause?.message || 'The iOS ship status is unavailable.'
+const MAX_ERROR_CHARS = 300
+const message = (cause) => {
+  const text = String(cause?.envelope?.message || cause?.message || 'The iOS ship status is unavailable.')
+  return text.length > MAX_ERROR_CHARS ? `${text.slice(0, MAX_ERROR_CHARS - 1)}…` : text
+}
 const FOLLOW_LIMIT = 30 * 60 * 1000
 const SOURCE_DEFAULTS = Object.freeze({ sources: [], approvals: [], sync: null, canApprove: false, sourcesError: null })
 const UNKNOWN_APPROVAL = "The last approval's outcome is unknown. Refresh the sources to confirm it before approving again."
 
 // Catalog reads belong to the project, while approval writes belong to a drawing version.
 function useShipSources({ projectId, tenantKey, enabled, sessionActive }) {
-  const pendingApproval = useMemo(() => ({ current: null }), [projectId, tenantKey])
+  const pendingApproval = useMemo(() => new Map(), [projectId, tenantKey])
   const scope = useMemo(() => ({}), [projectId, tenantKey, enabled, sessionActive])
   const current = useRef(scope)
   current.current = scope
@@ -38,7 +42,9 @@ function useShipSources({ projectId, tenantKey, enabled, sessionActive }) {
     try {
       const next = await fetchIosShipSources({ projectId })
       if (!live() || generation !== sourcesGeneration.current) return null
-      pendingApproval.current = null
+      for (const key of pendingApproval.keys()) {
+        if (key.startsWith(`${projectId}\n`)) pendingApproval.delete(key)
+      }
       update({ ...next, sourcesError: null })
       return next
     } catch (cause) {
@@ -96,6 +102,9 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
   const live = useCallback(() => mounted.current && current.current === scope, [scope])
   const update = useCallback((patch) => {
     if (live()) {
+      for (const field of ['error', 'sourcesError']) {
+        if (patch[field] != null) patch = { ...patch, [field]: message({ message: patch[field] }) }
+      }
       if (Object.hasOwn(patch, 'sourcesError')) updateSources({ sourcesError: patch.sourcesError })
       setState((old) => live() ? ({ ...(old.owner === owner ? old : { ...SOURCE_DEFAULTS, approving: false, execution: null, receipt: null }), owner, ...patch }) : old)
     }
@@ -240,7 +249,8 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
     if (!live() || !enabled || !sessionActive || catalog.canApprove !== true || !revision) return undefined
     const source = catalog.sources.find((item) => item.source_revision === sourceRevision)
     if (!source || iosSourceApprovalState(source, catalog.approvals, revision) !== 'unapproved') return undefined
-    if (pendingApproval.current?.revision === revision && pendingApproval.current.sourceRevision === sourceRevision) {
+    const tuple = `${projectId}\n${revision}\n${sourceRevision}`
+    if (pendingApproval.has(tuple)) {
       update({ sourcesError: UNKNOWN_APPROVAL })
       return undefined
     }
@@ -248,6 +258,7 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
     update({ approving: true, sourcesError: null })
     try {
       const approval = await requestIosShipApproval({ projectId, revision, source })
+      pendingApproval.set(tuple, true)
       if (!live()) return undefined
       await refreshSources()
       if (!live()) return undefined
@@ -255,8 +266,10 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
       update({ approving: false })
       return { approval, readBack: false }
     } catch (cause) {
+      const unknown = cause?.status == null || cause.status >= 500
+      if (unknown) pendingApproval.set(tuple, true)
       if (!live()) return undefined
-      if (cause?.status != null) {
+      if (!unknown) {
         update({ sourcesError: message(cause), approving: false })
         await refreshSources()
         update({ sourcesError: message(cause), approving: false })
@@ -270,7 +283,6 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
         update({ approving: false })
         return { approval: null, readBack: true }
       }
-      if (!fresh) pendingApproval.current = { revision, sourceRevision }
       update({ sourcesError: message(cause), approving: false })
       return undefined
     } finally {

@@ -127,7 +127,7 @@ const PROFILE_ICONS = Object.freeze({
 const profileBase = (id, label) => ({ id, label, icon: PROFILE_ICONS[id] || DEFAULT_TOOL_ICON, title: label })
 
 export function shipApproveRow(ship) {
-  if (ship?.controllerLive !== true) return null
+  if (ship?.controllerLive !== true || !Array.isArray(ship.sources)) return null
   const sources = Array.isArray(ship.sources) ? ship.sources : []
   const approvals = Array.isArray(ship.approvals) ? ship.approvals : []
   const candidate = sources.find((source) => iosSourceApprovalState(source, approvals, ship.revision) === 'unapproved')

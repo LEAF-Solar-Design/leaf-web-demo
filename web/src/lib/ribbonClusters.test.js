@@ -46,6 +46,13 @@ it('B4D row11 legacy Ship tabs have no approval row or cluster', () => {
   expect(profileRibbonTabs('ship', { ship })[0].clusters.map((group) => group.id)).toEqual(['revision', 'readiness', 'ship', 'receipts'])
 })
 
+it('B4D row31 a live ship without sources preserves the original Ship clusters', () => {
+  const ship = { controllerLive: true, revision: 'r1', canApprove: true }
+  expect(shipApproveRow(ship)).toBeNull()
+  expect(profileRibbonTabs('ship', { ship })[0].clusters.map((group) => group.id))
+    .toEqual(['revision', 'readiness', 'ship', 'receipts'])
+})
+
 it('B4D row12 approval reasons follow the owner version source approval and busy ladder', () => {
   const approvals = approvalSources.map((source, index) => ({ revision: 'r1', source_revision: source.source_revision,
     consumed_at: index ? '2026-01-01' : null }))
