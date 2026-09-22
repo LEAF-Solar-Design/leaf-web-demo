@@ -343,6 +343,24 @@ def build_suites() -> List[Suite]:
         # requests = 23.
         Suite("server-w2-panel-remove", "server tests/test_w2_panel_remove.py", "pytest", SERVER,
               _py_pytest("tests/test_w2_panel_remove.py"), 23),
+        # S21 string-delete (2026-09-22): the scoped circuit delete builtin, the panels
+        # and groups it leaves in place, the solve coverage it recomputes for the panels
+        # it unwires, deleting every circuit at once, and the references it refuses to
+        # leave dangling. Hermetic (a graph seeded in the test, no network, no fixture),
+        # so the floor is the exact count on every runner: 12 unparametrized tests + one
+        # parametrization over 8 literal malformed requests = 20.
+        Suite("server-w2-string-delete", "server tests/test_w2_string_delete.py", "pytest", SERVER,
+              _py_pytest("tests/test_w2_string_delete.py"), 20),
+        # S23 string-single-add (2026-09-22): the single-circuit add builtin, the named
+        # ORDER it commits, the circuit shorter than every solved one it accepts, the
+        # existing circuits and groups it leaves byte-identical, the solve coverage it
+        # recomputes for the panels it wires, and the four refusals (unknown panel,
+        # already wired, repeated panel, longer than the drawing's sized length).
+        # Hermetic (a graph seeded in the test, no network, no fixture), so the floor is
+        # the exact count on every runner: 17 unparametrized tests + one parametrization
+        # over 8 literal malformed requests = 25.
+        Suite("server-w2-string-add", "server tests/test_w2_string_add.py", "pytest", SERVER,
+              _py_pytest("tests/test_w2_string_add.py"), 25),
         Suite("server-w1-sizing-groups", "server tests/test_w1_sizing_groups.py", "pytest", SERVER,
               _py_pytest("tests/test_w1_sizing_groups.py"), 52),
         Suite("server-w1-solar-interchange", "server tests/test_w1_solar_interchange.py", "pytest", SERVER,
@@ -1519,6 +1537,39 @@ def build_suites() -> List[Suite]:
         # over 4 literal refusals + one over 5 literal parameter overrides = 17.
         Suite("scripts-solar-w1-studio-panel-remove", "scripts test_solar_w1_studio_panel_remove.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_panel_remove.py"), 17),
+        # S21 (2026-09-22): the string-delete producer on the committed rooftop capture.
+        # The solve half is the solve producer, so the 66 circuits it deletes from are
+        # the plugin's own, and that same capture is the baseline for what survived.
+        # Covers the delete, the panels it leaves unwired, rule G8 (every panel mapped,
+        # no deleted circuit), the strings evidence in both the partial and the
+        # everything-deleted case, and the refusals. Hermetic (the committed rooftop
+        # fixture, intake, placement, sizing and solve capture only; no network), so the
+        # floor is the exact count on every runner: 9 tests + one parametrization over
+        # 3 literal malformed ids = 12.
+        Suite("scripts-solar-w1-studio-string-delete", "scripts test_solar_w1_studio_string_delete.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_string_delete.py"), 12),
+        # S23 (2026-09-22): the single-string-add producer on the committed rooftop
+        # capture. The solve half is the solve producer and the delete half is the
+        # string-delete producer, so the circuits it adds beside are the plugin's own 66
+        # and the panels it wires are ones a real delete freed. Covers the named order
+        # (the capability's output, never sorted), the three-panel circuit no solve on
+        # this drawing can cut (its shortest is 12), the panels left over, rule G8 (the
+        # added circuit mapped, the deleted ones gone), the strings evidence, and the
+        # refusals. Hermetic (the committed rooftop fixture, intake, placement, sizing
+        # and solve capture only; no network), so the floor is the exact count on every
+        # runner: 9 tests + one parametrization over 3 literal malformed handles = 12.
+        Suite("scripts-solar-w1-studio-string-add", "scripts test_solar_w1_studio_string_add.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_string_add.py"), 12),
+        # S22 (2026-09-22): contract rule G9 on the Studio evidence adapter, the first
+        # test file it has. A set-valued list (unassigned_panels, duplicate_panels) is
+        # emitted in ascending neutral-id order, so the same set recorded in two orders
+        # compares equal; a string's ordered_membership is the capability's output and
+        # keeps its order, which the comparator still reports as a diff when reversed.
+        # Every graph is authored in the file (no capture, no fixture, no network), so
+        # the floor is the exact count on every runner: 7 tests + one parametrization
+        # over 4 literal malformed sets = 11.
+        Suite("scripts-solar-studio-evidence", "scripts test_solar_studio_evidence.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_studio_evidence.py"), 11),
         # Registered per the #29 fix-then-register rule (shipped without a
         # gate entry; measured 1 passed on this tree 2026-07-23).
         # 1 -> 2 on 2026-08-07: the staging relay's convergence contract
