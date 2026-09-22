@@ -16,6 +16,7 @@ import requests
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from leaf_cloud_grants import CloudError, CloudGrant, resolve_grant
+from solar_grid_restitch import is_response_failed
 
 TOOL_NAME = "solar-solve-proposal"
 SOLVER_URL = "https://api.leafdesign.ai/api/ml/"
@@ -185,6 +186,11 @@ class StringerResponse(StrictModel):
                             for _ in range(count)]
         if sorted(info.sequence_length) != sorted(expected_lengths):
             raise ValueError("unexpected string lengths")
+        self.check_echo(request)
+        return path
+
+    def check_echo(self, request: StringerRequest) -> None:
+        """The final_grid must echo the sent (cropped) grid apart from Seq."""
         sent = request.wire_payload()["grid"]
         final = self.data.final_grid.model_dump()
         for row in final["Rows"]:
@@ -195,7 +201,62 @@ class StringerResponse(StrictModel):
                 panel["Seq"] = 0
         if final != sent or self.data.best_result.grid_id != self.job_id:
             raise ValueError("response grid does not match request")
-        return path
+
+
+class PiecePanelRow(StrictModel):
+    Panels: list[Panel] = Field(min_length=1, max_length=300)
+
+
+class PieceMatrixJson(MatrixJson):
+    """A split piece keeps its frame's raw rows and width; only the wire grid is capped at 30."""
+    Rows: list[PiecePanelRow] = Field(min_length=1, max_length=300)
+
+
+class PieceStringerRequest(StringerRequest):
+    grid: PieceMatrixJson
+
+    @model_validator(mode="after")
+    def wire_grid_within_limits(self):
+        try:
+            StringerRequest.model_validate(self.wire_payload())
+        except ValidationError:
+            raise ValueError("piece wire grid exceeds the stringer limits") from None
+        return self
+
+
+class PieceProposalParams(StrictModel):
+    grant_ref: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,64}$")
+    request: PieceStringerRequest
+
+
+class PartialBeamInfo(StrictModel):
+    """The service's partial-beam fallback: no path or lengths. The plugin commits it
+    (GridSplitHelper.IsResponseFailed tests presence only), so a piece accepts it."""
+    distance_total: float = Field(ge=0, le=1e15)
+
+
+class PieceBestResult(BestResult):
+    info: StringerInfo | PartialBeamInfo
+
+
+class PieceStringerData(StringerData):
+    best_result: PieceBestResult
+    message: Annotated[str, Field(max_length=256)] | None = None
+
+
+class PieceStringerResponse(StringerResponse):
+    data: PieceStringerData
+
+    @property
+    def partial_beam(self) -> bool:
+        return isinstance(self.data.best_result.info, PartialBeamInfo)
+
+    def original_visited_path(self, request: StringerRequest) -> list[list[int]]:
+        """Full answers keep every single-frame check; a partial beam keeps the echo and job id."""
+        if self.partial_beam:
+            self.check_echo(request)
+            return []
+        return super().original_visited_path(request)
 
 
 def validate_params(params: dict) -> ProposalParams:
@@ -229,6 +290,69 @@ def proposal_provenance(result: dict, params: dict, tenant_id: str, job_id: str)
                 "request_sha256": request_hash, "response_sha256": result["response_sha256"]}
     except (KeyError, AttributeError, TypeError, ValueError, CloudError):
         raise ValueError("cloud proposal terminal proof rejected") from None
+
+
+def validate_piece_params(params: dict) -> PieceProposalParams:
+    try:
+        return PieceProposalParams.model_validate(params)
+    except (ValidationError, ValueError, TypeError):
+        raise CloudError("cloud_request_invalid", 400) from None
+
+
+def _piece_response(raw_or_object, request: PieceStringerRequest) -> tuple[PieceStringerResponse, list]:
+    """Refuse what the plugin would retry, then apply the piece contract. Fails closed."""
+    probe = raw_or_object.decode("utf-8") if isinstance(raw_or_object, bytes) else raw_or_object
+    if is_response_failed(probe):
+        raise CloudError("cloud_piece_failed", 502)
+    if isinstance(raw_or_object, bytes):
+        response = PieceStringerResponse.model_validate_json(raw_or_object)
+    else:
+        response = PieceStringerResponse.model_validate(raw_or_object)
+    return response, response.original_visited_path(request)
+
+
+def piece_proposal_provenance(result: dict, params: dict, tenant_id: str, job_id: str) -> dict:
+    """proposal_provenance for one split piece; adds the partial-beam flag."""
+    try:
+        parsed = validate_piece_params(params)
+        response, path = _piece_response(result["proposal"], parsed.request)
+        request_hash = hashlib.sha256(canonical_bytes(parsed.request.wire_payload())).hexdigest()
+        if (result.get("schema_version") != "leaf.solar-proposal.v1"
+                or result.get("job_id") != job_id or result.get("tenant_id") != tenant_id
+                or result.get("drawing_changed") is not False
+                or result.get("request_sha256") != request_hash
+                or result.get("solver") != {"endpoint": SOLVER_URL, "adapter_version": "1.0.0"}
+                or not isinstance(result.get("response_sha256"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", result["response_sha256"])
+                or result.get("visited_path") != path):
+            raise ValueError()
+        return {"execution_mode": "leaf_cloud_service", "solver": result["solver"],
+                "request_sha256": request_hash, "response_sha256": result["response_sha256"],
+                "partial_beam": response.partial_beam}
+    except (KeyError, AttributeError, TypeError, ValueError, CloudError):
+        raise ValueError("cloud piece proposal terminal proof rejected") from None
+
+
+def piece_proposal(params: dict, tenant_id: str, job_id: str) -> dict:
+    """One stringer call for one split piece. A plugin-failed answer raises
+    cloud_piece_failed so the split retry loop can escalate; nothing else is retried."""
+    parsed = validate_piece_params(params)
+    grant = resolve_grant(parsed.grant_ref, tenant_id)
+    raw = post_stringer(parsed.request, grant)
+    if not isinstance(raw, bytes) or len(raw) > MAX_RESPONSE_BYTES:
+        raise CloudError("cloud_response_invalid", 502)
+    try:
+        result, path = _piece_response(raw, parsed.request)
+    except CloudError:
+        raise
+    except (ValidationError, ValueError, TypeError):
+        raise CloudError("cloud_response_invalid", 502) from None
+    return {"schema_version": "leaf.solar-proposal.v1", "job_id": job_id,
+            "tenant_id": tenant_id, "drawing_changed": False,
+            "request_sha256": hashlib.sha256(canonical_bytes(parsed.request.wire_payload())).hexdigest(),
+            "response_sha256": hashlib.sha256(raw).hexdigest(),
+            "solver": {"endpoint": SOLVER_URL, "adapter_version": "1.0.0"},
+            "proposal": result.model_dump(exclude_none=False), "visited_path": path}
 
 
 def post_stringer(request: StringerRequest, grant: CloudGrant) -> bytes:
