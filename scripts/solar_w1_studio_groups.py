@@ -252,7 +252,7 @@ def produce(args):
                        "branch_max_offset": float(args.branch_max_offset),
                        "alignment_tolerance": float(args.alignment_tolerance),
                        "installation_design": design},
-        "versions": {"schema": SCHEMA, "producer": PRODUCER, "capability": "panel-group-create",
+        "versions": {"schema": SCHEMA, "producer": PRODUCER, "capability": "0",
                      "engine": "server-builtin", "catalog": "none", "solver": "none"},
         "coordinate_system": "world", "geometry_units": "in", "angle_units": "deg",
         "entity_mapping": mapping, "before": {"recorded": False},

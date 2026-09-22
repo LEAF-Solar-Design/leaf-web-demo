@@ -1,0 +1,216 @@
+{
+ "schema": "leaf.solar-parity-receipt.v1",
+ "capability": "unit-sync",
+ "capability_version": "0",
+ "fixture": {
+  "id": "rooftop-demo",
+  "sha256": "16390e082b6c73d835f21199e7777ae3a60680deae612f81d92048fd26544d21"
+ },
+ "plugin": {
+  "build": "Branch2025 LeafSolarDesign 1.1.4.4 (c0f45f41) LEAFUNITSYNC on licensed AutoCAD 2025, saved; INSUNITS read back by accoreconsole; evidence by tools/parity/plugin_evidence.py at 0bf581ff",
+  "state": "committed",
+  "receipt_sha256": "1823605dffb698950f07a4ef759f48b1298a583776df49ee058068ee9b10de1b"
+ },
+ "studio": {
+  "capability_version": "0",
+  "engine": "server-builtin"
+ },
+ "comparator": {
+  "name": "solar-w1-semantic",
+  "version": "1",
+  "verdict": "pass",
+  "diffs": []
+ },
+ "synthetic_fields": [
+  "plugin:before",
+  "plugin:changes",
+  "plugin:rejected_inputs",
+  "plugin:versions.catalog",
+  "plugin:versions.solver",
+  "studio:before",
+  "studio:changes"
+ ],
+ "fallback_fields": [
+  "plugin:after/settings/insunits/read-by-accoreconsole",
+  "plugin:elapsed_ms",
+  "plugin:frame",
+  "plugin:units",
+  "studio:after/settings/insunits/derived-from-drawing-units",
+  "studio:frame/crs",
+  "studio:panels/producer-built-from-intake",
+  "studio:units/before-sync/producer-seeded-in"
+ ],
+ "synthetic_flagged": true,
+ "survived_reopen": true,
+ "produced_at": "2026-09-22T14:35:43Z",
+ "comparison": {
+  "schema": "leaf.solar-w1-comparison.v1",
+  "capability": "unit-sync",
+  "family": "settings",
+  "plugin": {
+   "fixture_sha256": "16390e082b6c73d835f21199e7777ae3a60680deae612f81d92048fd26544d21",
+   "input_sha256": "b5fc308a5324534b8eda142e44bcad0288ac735ace5bd515cad240098248fd3f",
+   "output_sha256": "200d46f602e010df365ee2dea3f8e9fdc27cdc8fa02af0aae2e3c440df5aff40",
+   "revision": "7e74df3db70d1f6ce0f7e6048a6e3e3acbd90c42",
+   "versions": {
+    "schema": "leaf.solar-w1-comparison.v1",
+    "producer": "plugin_evidence.v1",
+    "capability": "unit-sync",
+    "engine": "platform",
+    "catalog": "none",
+    "solver": "none"
+   },
+   "parameters": {
+    "family": "settings",
+    "distance_unit": "Meters"
+   },
+   "units": "in",
+   "frame": {
+    "coordinate_system": "world",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ],
+    "elevation_datum": "unrecorded",
+    "crs": "none"
+   },
+   "entity_mapping": {},
+   "before": {
+    "recorded": false
+   },
+   "after": {
+    "settings": {
+     "insunits": 6
+    }
+   },
+   "changes": {
+    "created": [],
+    "modified": [],
+    "deleted": []
+   },
+   "warnings": [],
+   "rejected_inputs": [],
+   "provenance": {
+    "revision": "7e74df3db70d1f6ce0f7e6048a6e3e3acbd90c42",
+    "source": "accore-insunits",
+    "run_dwg_sha256": "ceacf453200a6dbd114df21e829064ec2ea3690087d342904bb616c31d4ef6ec",
+    "insunits_log_sha256": "4ab71b2aa86c12d50085209573f3f6db7ce53ee919448ff88450f360f59aceb2"
+   },
+   "elapsed_ms": 0,
+   "execution_mode": "recorded",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before",
+    "changes",
+    "versions.catalog",
+    "versions.solver",
+    "rejected_inputs"
+   ],
+   "fallback_fields": [
+    "elapsed_ms",
+    "units",
+    "frame",
+    "after/settings/insunits/read-by-accoreconsole"
+   ],
+   "synthetic_flagged": true
+  },
+  "studio": {
+   "after": {
+    "settings": {
+     "insunits": 6
+    }
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 4987.5354999967385,
+   "entity_mapping": {},
+   "execution_mode": "recorded",
+   "fallback_fields": [
+    "panels/producer-built-from-intake",
+    "units/before-sync/producer-seeded-in",
+    "frame/crs",
+    "after/settings/insunits/derived-from-drawing-units"
+   ],
+   "fixture_sha256": "16390e082b6c73d835f21199e7777ae3a60680deae612f81d92048fd26544d21",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "b5fc308a5324534b8eda142e44bcad0288ac735ace5bd515cad240098248fd3f",
+   "output_sha256": "200d46f602e010df365ee2dea3f8e9fdc27cdc8fa02af0aae2e3c440df5aff40",
+   "parameters": {
+    "distance_unit": "Meters",
+    "family": "settings"
+   },
+   "provenance": {
+    "intake_sha256": "c9ac110b939cb91b2027a0a57f0f32495a51e9ae74f1f1ed2b53e0129b23d19a",
+    "studio_graph_rev": 1,
+    "studio_graph_sha256": "480c31af1314f0a1adbe6c209dfaa83ecfa37aa42d4e5e7ed1729281d221193f",
+    "unit_sync": {
+     "changed": true,
+     "drawing_units": "m",
+     "seed_units": "in"
+    }
+   },
+   "rejected_inputs": [],
+   "revision": "7e74df3db70d1f6ce0f7e6048a6e3e3acbd90c42",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before",
+    "changes"
+   ],
+   "synthetic_flagged": true,
+   "units": "m",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "server-builtin",
+    "producer": "solar_w1_studio_unitsync.v1",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  }
+ }
+}

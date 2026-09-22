@@ -112,7 +112,8 @@ def test_metadata_records_contract_v2_parameters_and_identities(grouped):
     assert type(metadata["parameters"]["branch_max_offset"]) is float
     assert metadata["versions"] == {
         "schema": "leaf.solar-w1-comparison.v1", "producer": "solar_w1_studio_groups.v1",
-        "capability": "panel-group-create", "engine": "server-builtin", "catalog": "none", "solver": "none"}
+        # The LEDGER's capability_version for panel-group-create, which the gate compares.
+        "capability": "0", "engine": "server-builtin", "catalog": "none", "solver": "none"}
     assert metadata["coordinate_system"] == "world"
     assert metadata["geometry_units"] == "in" and metadata["angle_units"] == "deg"
     assert metadata["before"] == {"recorded": False}
