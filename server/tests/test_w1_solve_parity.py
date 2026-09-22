@@ -155,6 +155,17 @@ def test_fixture_discriminates_path_from_final_grid():
     assert sum(len(group["plugin_strings"]) for group in GROUPS) == 66
 
 
+def test_request_wire_model_failure_has_graph_error(graph):
+    frame = graph["frames"][0]
+    frame["matrix"] = [[{"panel_ref": None}] for _ in range(31)]
+    frame["matrix"][0][0]["panel_ref"] = graph["panels"][0]["id"]
+    before = copy.deepcopy(graph)
+    with pytest.raises(GraphValidationError, match="^SOLVE_REQUEST_INVALID: "):
+        build_stringer_request(graph, frame["id"], max_string_length=14,
+                               dwgname="oversized.dwg")
+    assert graph == before
+
+
 @pytest.mark.parametrize("defect", ["repeated", "gap"])
 def test_final_grid_order_fails_closed(graph, monkeypatch, defect):
     case = rooftop_case(graph, GROUPS[0], monkeypatch)

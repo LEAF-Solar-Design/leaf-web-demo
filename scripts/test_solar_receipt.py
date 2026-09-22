@@ -49,7 +49,7 @@ def graph():
 
 def metadata():
     return {
-        "fixture_sha256": "a" * 64, "input_sha256": "b" * 64,
+        "fixture_sha256": "a" * 64, "revision": "b" * 40,
         "versions": {"schema": "1", "producer": "test-only", "capability": "1",
                      "engine": "test-only", "catalog": "none", "solver": "none"},
         "parameters": {}, "entity_mapping": {"frame-1": "group-one", "panel-1": "panel-one"},
@@ -123,6 +123,63 @@ def test_strings_polarity_requires_matching_endpoints():
     source["strings"][0]["extra"]["polarity"]["negative_panel_ref"] = "panel-2"
     with pytest.raises(adapter.compare.InputError, match="polarity"):
         adapter.build_evidence(source, "strings", context)
+
+
+@pytest.mark.parametrize("family", ["groups", "panels", "strings"])
+def test_shared_identity_is_derived_and_graph_identity_is_provenance(family):
+    source, context = strings_case()
+    evidence = adapter.build_evidence(source, family, context)
+    assert evidence["revision"] == context["revision"]
+    assert evidence["provenance"]["studio_graph_rev"] == source["rev"]
+    assert evidence["provenance"]["studio_graph_sha256"] == compare.semantic_hash(source)
+    assert evidence["input_sha256"] == compare.semantic_hash({
+        "fixture_sha256": context["fixture_sha256"], "parameters": context["parameters"]})
+    source["rev"] += 1
+    changed = adapter.build_evidence(source, family, context)
+    assert changed["revision"] == evidence["revision"]
+    assert changed["input_sha256"] == evidence["input_sha256"]
+    assert changed["provenance"] != evidence["provenance"]
+    context["parameters"]["changed"] = True
+    assert adapter.build_evidence(source, family, context)["input_sha256"] != evidence["input_sha256"]
+
+
+@pytest.mark.parametrize("family", ["groups", "panels", "strings"])
+def test_caller_cannot_supply_input_hash(family):
+    source, context = strings_case()
+    context["input_sha256"] = compare.semantic_hash({
+        "fixture_sha256": context["fixture_sha256"], "parameters": context["parameters"]})
+    with pytest.raises(adapter.compare.InputError, match="input_sha256"):
+        adapter.build_evidence(source, family, context)
+
+
+def test_revision_is_required_lowercase_full_git_commit():
+    for revision in (None, 1, "1", "A" * 40, "a" * 39, "a" * 41, "g" * 40):
+        context = metadata()
+        context["revision"] = revision
+        with pytest.raises(adapter.compare.InputError, match="revision"):
+            adapter.build_evidence(graph(), "panels", context)
+    context = metadata()
+    del context["revision"]
+    with pytest.raises(adapter.compare.InputError, match="missing measured"):
+        adapter.build_evidence(graph(), "groups", context)
+
+
+def test_strings_sort_by_neutral_id_without_reordering_members():
+    source, context = strings_case()
+    context["entity_mapping"].update({"string-1": "string:Z", "string-2": "string:A"})
+    originals = deepcopy((source, context))
+    evidence = adapter.build_evidence(source, "strings", context)
+    assert [s["id"]["entity_id"] for s in evidence["after"]["strings"]] == ["string-2", "string-1"]
+    assert evidence["after"]["strings"][1]["ordered_membership"] == [
+        {"entity_id": ref} for ref in source["strings"][0]["ordered_panel_refs"]]
+    assert (source, context) == originals
+
+
+def test_replay_uses_frozen_comparator_recorded_mode():
+    source, context = strings_case()
+    context["execution_mode"] = "replay"
+    assert adapter.build_evidence(source, "strings", context)["execution_mode"] == "recorded"
+    assert context["execution_mode"] == "replay"
 
 
 def test_strings_missing_polarity_is_flagged():
