@@ -316,6 +316,8 @@ def build_suites() -> List[Suite]:
               allowed_skip_reasons=(r"live staging probe is opt-in",)),
         Suite("server-w1-graph-versions", "server tests/test_w1_graph_versions.py", "pytest", SERVER,
               _py_pytest("tests/test_w1_graph_versions.py"), 18),
+        Suite("server-w1-panel-group-kernel", "server tests/test_w1_panel_group_kernel.py", "pytest", SERVER,
+              _py_pytest("tests/test_w1_panel_group_kernel.py"), 31),
         Suite("server-w1-sizing-groups", "server tests/test_w1_sizing_groups.py", "pytest", SERVER,
               _py_pytest("tests/test_w1_sizing_groups.py"), 52),
         Suite("server-w1-solar-interchange", "server tests/test_w1_solar_interchange.py", "pytest", SERVER,
