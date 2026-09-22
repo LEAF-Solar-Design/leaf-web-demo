@@ -176,7 +176,9 @@ def test_producer_metadata_carries_the_settings_identity(synced):
     assert metadata["parameters"] == {"family": "settings", "distance_unit": "Meters"}
     assert metadata["versions"] == {
         "schema": "leaf.solar-w1-comparison.v1", "producer": "solar_w1_studio_unitsync.v1",
-        "capability": "unit-sync", "engine": "server-builtin", "catalog": "none", "solver": "none"}
+        # The LEDGER's capability_version for unit-sync, which the gate compares; the
+        # capability itself is named by the receipt directory, not by this field.
+        "capability": "0", "engine": "server-builtin", "catalog": "none", "solver": "none"}
     assert metadata["coordinate_system"] == "world"
     assert metadata["geometry_units"] == "m" and metadata["angle_units"] == "deg"
     assert metadata["before"] == {"recorded": False}
@@ -190,8 +192,9 @@ def test_producer_metadata_carries_the_settings_identity(synced):
     assert "units/before-sync/producer-seeded-in" in metadata["fallback_fields"]
     assert metadata["provenance"]["intake_sha256"] == hashlib.sha256((folder / "intake.json").read_bytes()).hexdigest()
     assert metadata["provenance"]["unit_sync"] == {"changed": True, "drawing_units": "m", "seed_units": "in"}
-    assert metadata["entity_mapping"] == {
-        p["id"]: solve.normalized_handle(p["provenance"]["source_handle"]) for p in graph["panels"]}
+    # A settings receipt compares a drawing-wide declaration: no entity appears in `after`, and
+    # the plugin's own settings evidence maps nothing, so this run maps nothing either.
+    assert metadata["entity_mapping"] == {}
 
 
 def test_producer_feet_records_the_feet_declaration(tmp_path):
@@ -250,7 +253,7 @@ def test_settings_evidence_emits_the_insunits_code(synced):
     assert evidence["output_sha256"] == adapter.compare.semantic_hash(evidence["after"])
     assert evidence["units"] == "m"
     assert evidence["parameters"] == {"family": "settings", "distance_unit": "Meters"}
-    assert evidence["versions"]["solver"] == "none" and evidence["versions"]["capability"] == "unit-sync"
+    assert evidence["versions"]["solver"] == "none" and evidence["versions"]["capability"] == "0"
     assert evidence["frame"] == {"coordinate_system": "world", "transform": IDENTITY,
                                  "elevation_datum": "unrecorded", "crs": "none"}
     assert "after/settings/insunits/derived-from-drawing-units" in evidence["fallback_fields"]
@@ -293,10 +296,12 @@ def test_other_families_still_refuse_and_unknown_family_is_named(synced):
     graph, metadata, _ = synced
     with pytest.raises(adapter.compare.InputError, match="groups, panels, settings and strings"):
         adapter.build_evidence(graph, "zones", metadata)
-    panels = adapter.build_evidence(graph, "panels", metadata)
-    assert [record["geometry"]["centre"]["value"] for record in panels["after"]["panels"]] == [
-        p["centre"] for p in graph["panels"]]
-    assert "after/settings/insunits/derived-from-drawing-units" not in panels["fallback_fields"]
+    # A settings run's metadata describes no entities, so a family that needs them refuses
+    # rather than inventing a mapping. The panels family is exercised by its own producer.
+    with pytest.raises(adapter.compare.InputError, match="explicit neutral mapping"):
+        adapter.build_evidence(graph, "panels", metadata)
+    settings = adapter.build_evidence(graph, "settings", metadata)
+    assert "after/settings/insunits/derived-from-drawing-units" in settings["fallback_fields"]
 
 
 def test_evidence_cli_writes_the_settings_family(synced, tmp_path):
