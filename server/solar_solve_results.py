@@ -232,21 +232,29 @@ def accept_candidate(graph, candidate, *, expected_rev):
     if any(not set(s["ordered_panel_refs"]) <= members for s in previous):
         raise GraphValidationError("CROSS_FRAME_STRING_REQUIRES_CORRECTION")
     previous_ids = {s["id"] for s in previous}
-    # Two nesting levels on purpose. The result envelope's top-level visited_path is
-    # ALREADY mapped back to ORIGINAL grid indices by the client
-    # (leaf_cloud_client.StringerResponse.original_visited_path), so it indexes
-    # frame["matrix"] directly. The nested ["proposal"] below is the raw service
-    # response, whose own coordinates are truncated-grid and must never be used here.
+    # Keep validating the client's path in original matrix coordinates.
+    # String order comes from the raw service final_grid's global Seq values.
     path = verified["proposal"]["visited_path"]
     if any(not (0 <= r < frame["module_rows"] and 0 <= c < frame["module_columns"])
            for r, c in path):
         raise GraphValidationError("INVALID_PATH_INDICES")
-    refs = [frame["matrix"][r][c]["panel_ref"] for r, c in path]
     panels = {p["id"]: p for p in result["panels"]}
     lengths = verified["proposal"]["proposal"]["data"]["best_result"]["info"]["sequence_length"]
     if (any(type(length) is not int or length <= 0 for length in lengths)
             or sum(lengths) != len(path)):
         raise GraphValidationError("TRUNCATED_SEQUENCE_LENGTH")
+    final_grid = verified["proposal"]["proposal"]["data"]["final_grid"]
+    ordered_cells = [(cell["Seq"], cell["Id"])
+                     for row in final_grid["Rows"] for cell in row["Panels"]
+                     if cell["Code"] == 1]
+    if (any(type(seq) is not int or type(ref) is not str or ref not in members
+            for seq, ref in ordered_cells)
+            or sorted(seq for seq, _ in ordered_cells) != list(range(1, len(members) + 1))
+            or len({ref for _, ref in ordered_cells}) != len(ordered_cells)
+            or {ref for _, ref in ordered_cells} != members
+            or sum(lengths) != len(members)):
+        raise GraphValidationError("INVALID_FINAL_GRID_ORDER")
+    refs = [ref for _, ref in sorted(ordered_cells)]
     strings, offset = [], 0
     tags = {s["circuit_tag"] for s in result["strings"] if s["id"] not in previous_ids}
     number = result["settings"]["string_number"]
@@ -275,7 +283,7 @@ def accept_candidate(graph, candidate, *, expected_rev):
                       route=points, length_ft=length_m / 0.3048, inverter_ref=None,
                       validity={"state": "valid", "reasons": []})
         string["extra"]["polarity"] = {
-            "source": "derived", "rule": "ordered-path-first-negative-last-positive",
+            "source": "derived", "rule": "ordered-final-grid-first-negative-last-positive",
             "negative_panel_ref": ordered[0], "positive_panel_ref": ordered[-1],
             "source_rev": before["rev"], "response_sha256": verified["proof"]["response_sha256"],
         }

@@ -100,8 +100,10 @@ def test_commits_original_cells_sequences_endpoints_lengths_and_provenance(case)
     result = commit.commit_solve(graph, {"expected_rev": 0}, candidate=proposal)
     assert graph == before and proposal["accepted"] is False
     assert result["rev"] == 1 and result["parent_rev"] == 0
-    expected = [request["grid"]["Rows"][r]["Panels"][c]["Id"]
-                for r, c in response["data"]["best_result"]["info"]["visited_path"]]
+    expected = [ref for _, ref in sorted(
+        (cell["Seq"], cell["Id"])
+        for row in response["data"]["final_grid"]["Rows"] for cell in row["Panels"]
+        if cell["Code"] == 1)]
     assert [p for s in result["strings"] for p in s["ordered_panel_refs"]] == expected
     assert [s["module_count"] for s in result["strings"]] == [12, 12]
     assert [s["circuit_tag"] for s in result["strings"]] == ["S3", "S4"]
