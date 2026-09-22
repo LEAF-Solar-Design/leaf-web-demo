@@ -197,6 +197,61 @@ def test_zone_aware_grouping_commits_one_group_set_per_zone(tmp_path):
     assert adapter.build_evidence(graph, "zones", metadata)["after"]["zones"][0]["name"] == "Zone A"
 
 
+def test_a_zone_without_a_window_is_created_empty(tmp_path):
+    # LEAFADDZONE alone: two zones created, saved and reopened, nothing assigned.
+    assert producer.main(arguments(tmp_path, zones=["Zone A:1", "Zone B:3"])) == 0
+    graph, metadata = read(tmp_path)
+    assert producer.validate_graph(graph) == graph
+    # Two zone creations and no assignment, so two committed revisions.
+    assert graph["rev"] == 2
+    zones = graph["electrical_zones"]
+    assert [(zone["name"], zone["color_index"]) for zone in zones] == [("Zone A", 1), ("Zone B", 3)]
+    assert all(zone["panel_refs"] == [] for zone in zones)
+    assert graph["frames"] == []
+    provenance = metadata["provenance"]
+    assert provenance["zones_without_window"] == ["Zone A", "Zone B"]
+    assert [zone["window"] for zone in provenance["zone_selection"]] == [None, None]
+    assert metadata["entity_mapping"] == {zones[0]["id"]: "zone:Zone A", zones[1]["id"]: "zone:Zone B"}
+
+
+def test_a_windowed_zone_that_selects_nothing_is_still_refused_beside_a_windowless_one(tmp_path, capsys):
+    argv = arguments(tmp_path, zones=["Zone A:1", "Zone C:3:900000,900000,900100,900100"])
+    assert producer.main(argv) == 2
+    assert "zone window selected no panel" in capsys.readouterr().err
+    assert not (tmp_path / "graph.json").exists()
+
+
+def test_zone_aware_groups_metadata_builds_groups_evidence_with_one_group_per_zone(tmp_path):
+    out = tmp_path / "groups-metadata.json"
+    assert producer.main(arguments(tmp_path, group=True, extra=["--out-groups-metadata", str(out)])) == 0
+    graph, zones_metadata = read(tmp_path)
+    metadata = json.loads(out.read_text(encoding="utf-8"))
+    # Rule G1: the four grouping parameters, recorded as given; the ledger's version.
+    assert metadata["parameters"] == {"family": "groups", "layer_filter": "*Panel*",
+                                      "branch_max_offset": 120.0, "alignment_tolerance": 12.0,
+                                      "installation_design": "Roof"}
+    assert metadata["versions"]["capability"] == "0" and metadata["versions"]["solver"] == "none"
+    # Rule G8: every frame plus exactly the panels it grouped.
+    frames = graph["frames"]
+    assert set(metadata["entity_mapping"]) == {f["id"] for f in frames} | {
+        ref for f in frames for ref in f["panel_refs"]}
+    # The zones metadata is untouched by the groups run.
+    assert zones_metadata["parameters"] == {"family": "zones"}
+    evidence = adapter.build_evidence(graph, "groups", metadata)
+    adapter.compare.validate_evidence(evidence, "groups")
+    groups = evidence["after"]["groups"]
+    assert [group["name"] for group in groups] == ["group:1A", "group:2A"]
+    assert [[metadata["entity_mapping"][ref["entity_id"]] for ref in group["membership"]]
+            for group in groups] == [["1A", "1B", "1C", "1D"], ["2A", "2B", "2C"]]
+
+
+def test_groups_metadata_without_zone_aware_grouping_is_refused(tmp_path, capsys):
+    out = tmp_path / "groups-metadata.json"
+    assert producer.main(arguments(tmp_path, extra=["--out-groups-metadata", str(out)])) == 2
+    assert "groups metadata requires --group" in capsys.readouterr().err
+    assert not (tmp_path / "graph.json").exists() and not out.exists()
+
+
 def test_the_mapping_covers_the_zones_and_their_members_and_no_other_panel(tmp_path):
     # The licensed capture maps the zones and their assigned panels only. A panel
     # on the panel layer that no window covers is in the drawing and in the graph,
