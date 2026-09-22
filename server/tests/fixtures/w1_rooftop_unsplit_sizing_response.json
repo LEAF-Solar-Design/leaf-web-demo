@@ -1,0 +1,30 @@
+{
+ "source": "SYNTHETIC string-length response, computed 2026-09-22 with the standard cold-Voc formula for the plugin's own hardware on data/rooftop_unsplit.dwg. The live service now rejects Studio's pinned request shape (HTTP 400 'Missing module_name'), so no live response exists for this request; the sizing precondition is flagged synthetic wherever this is used.",
+ "synthetic": true,
+ "request": {
+  "schema_version": "leaf.string-length.v1",
+  "module": {
+   "model": "JA_Solar_JAM72D40-595/MB",
+   "voc": 52.58,
+   "temp_coeff_pct_per_c": -0.25
+  },
+  "inverter": {
+   "model": "Sungrow SG250HX",
+   "max_dc_voltage": 1500.0
+  },
+  "design_min_temp_c": -2.7,
+  "panels_in_sequence": 14,
+  "units": "SI"
+ },
+ "response": {
+  "panels_in_sequence": 14,
+  "voc_cold": {
+   "passes": true,
+   "override_accepted": false,
+   "suggested_string_length": 26,
+   "per_module": 56.221165,
+   "string_voltage": 787.09631,
+   "max_dc_voltage": 1500.0
+  }
+ }
+}
