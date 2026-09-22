@@ -19,6 +19,9 @@
 #               come from web/vendor/node_modules-linux-x64.tar.gz (built with
 #               `npm ci` from web/package-lock.json on amazonlinux:2023, the
 #               fleet worker OS) or an already-present web/node_modules.
+#   change-impact: advisory change-impact assessment from the CI helper.
+#                  Maps COMPLETE/INCOMPLETE receipts to PASS/FAIL and honours
+#                  helper SKIP output or missing receipts as SKIP offline.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -28,7 +31,7 @@ ONLY=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --only) ONLY="${2:-}"; shift 2 ;;
-    --list) echo "demo-gate"; exit 0 ;;
+    --list) printf '%s\n' demo-gate change-impact; exit 0 ;;
     *) shift ;;
   esac
 done
@@ -90,14 +93,47 @@ demo_gate() {
   return 0
 }
 
+change_impact_bucket() {
+  local output="" receipt_verdict="" verdict="SKIP"
+  output="$(mktemp /tmp/change-impact.XXXXXX)" || { emit change-impact SKIP; return 0; }
+  python scripts/ci/change_impact_job.py --repo . --head HEAD \
+    --base-ref "${CHANGE_IMPACT_BASE_REF:-refs/heads/main}" --event manual \
+    --receipt-dir /tmp/impact >"$output" 2>&1
+  cat "$output"
+  printf '\n'
+  if [ -f /tmp/impact/receipt.json ] \
+      && ! grep -Eq '^change-impact: SKIP|checker not installed|disabled' "$output"; then
+    receipt_verdict="$(python -c '
+import json
+try:
+    with open("/tmp/impact/receipt.json") as receipt:
+        data = json.loads(receipt.read(1048577))
+    print(data.get("verdict", "") if isinstance(data, dict) else "")
+except (OSError, ValueError, RecursionError):
+    print("")
+' 2>/dev/null)"
+    case "$receipt_verdict" in
+      COMPLETE) verdict="PASS" ;;
+      INCOMPLETE) verdict="FAIL" ;;
+    esac
+  fi
+  rm -f "$output"
+  emit change-impact "$verdict"
+  [ "$verdict" != "FAIL" ]
+}
+
 case "${ONLY:-demo-gate}" in
   demo-gate)
     if demo_gate; then emit demo-gate PASS; exit 0; else emit demo-gate FAIL; exit 1; fi
     ;;
+  change-impact)
+    change_impact_bucket
+    exit $?
+    ;;
   *)
     # Unknown bucket: say so, emit NO verdict line -> the worker records an
     # infra 'error' rather than a silent green.
-    echo "unknown bucket: ${ONLY} (available: demo-gate)"
+    echo "unknown bucket: ${ONLY} (available: demo-gate change-impact)"
     exit 2
     ;;
 esac
