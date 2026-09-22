@@ -3,7 +3,12 @@
 The customer-facing studio host. It is a Vercel project (`leaf-studio-door`) whose only
 job is to rewrite every request to the studio origin, so the browser sees one origin
 (`https://studio.leafautomation.ai`) while the app, its assets and its API are served
-by the Cloudflare-fronted ALB at `platform-staging.leafdesign.ai`.
+by the Cloudflare-fronted ALB at `platform.leafdesign.ai` (production). Until the
+production candidate is promoted the door pointed at `platform-staging.leafdesign.ai`;
+this repoint is the W4g alignment queue's R-07 and merges only on the operator's fresh
+yes after R-03 (the read-only production smoke driver) is green on the candidate.
+Rollback: set `destination` back to `https://platform-staging.leafdesign.ai/$1` and
+redeploy, or `vercel rollback` to the previous deployment.
 
 Why a rewrite and not DNS: the `leafautomation.ai` zone lives on Vercel DNS (mail,
 MTA-STS and the Auth0 login domain sit there, so the nameservers never move), and the
