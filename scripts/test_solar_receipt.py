@@ -324,6 +324,107 @@ def test_groups_follow_contract_v2_neutral_names_and_handle_order():
     assert "group_names" not in adapter.build_evidence(source, "panels", context)["provenance"]
 
 
+def zones_case():
+    """One zone the plugin has only named: no equipment, nothing sized yet."""
+    source, context = graph(), metadata()
+    source["panels"].append({"id": "panel-2", "centre": [1500, 1000, 10], "angle": 0})
+    source["electrical_zones"] = [{
+        "id": "zone-1", "name": "Zone A", "color_index": 1,
+        "panel_refs": ["panel-1", "panel-2"],
+        "module_model": "", "inverter_model_a": "", "inverter_count_a": 0,
+        "panels_in_sequence": 0, "dc_ac_ratio": 0,
+        "voc_cold": {"passes": None, "override_accepted": False, "suggested_string_length": None,
+                     "per_module": None, "string_voltage": None, "max_dc_voltage": None},
+        "boundary_ref": None,
+    }]
+    # "2F" sorts after "1F4" as a string and before it as a hex value.
+    context["entity_mapping"].update({"zone-1": "zone:Zone A", "panel-2": "2F"})
+    context["before"] = {"zones": []}
+    return source, context
+
+
+def test_zones_compare_the_zone_name_and_sort_membership_by_handle_value():
+    source, context = zones_case()
+    originals = deepcopy((source, context))
+    evidence = adapter.build_evidence(source, "zones", context)
+    compare.validate_evidence(evidence, "zones")
+    assert (source, context) == originals
+    zone = evidence["after"]["zones"][0]
+    assert zone["id"] == {"entity_id": "zone-1"}
+    # The name IS committed state the plugin chose, so it is compared as given.
+    assert zone["name"] == "Zone A"
+    assert zone["membership"] == [{"entity_id": "panel-2"}, {"entity_id": "panel-1"}]
+    for field in ("boundaries", "elevation"):
+        assert zone[field] is None
+    assert "zones/boundaries/unrecorded" in evidence["fallback_fields"]
+    assert evidence["synthetic_flagged"] is True
+    assert "group_names" not in evidence["provenance"]
+    assert "zone_fields" not in adapter.build_evidence(source, "panels", context)["provenance"]
+
+
+def test_zones_do_not_compare_equipment_or_sizing_and_name_them_as_fallbacks():
+    """Rule Z7: this capability commits identity and membership, nothing else."""
+    source, context = zones_case()
+    evidence = adapter.build_evidence(source, "zones", context)
+    compare.validate_evidence(evidence, "zones")
+    zone = evidence["after"]["zones"][0]
+    for field in ("equipment_config", "sizing_provenance"):
+        assert zone[field] is None
+        assert f"zones/{field}/not-part-of-this-capability" in evidence["fallback_fields"]
+    # Nothing is lost: an unconfigured zone's own raw fields still reach provenance
+    # exactly as the graph holds them, and a field it does not hold stays absent
+    # rather than becoming a null that would read as "not configured".
+    raw = evidence["provenance"]["zone_fields"]["zone:Zone A"]
+    assert raw["module_model"] == ""
+    assert raw["inverter_count_a"] == 0
+    assert "optimizer_model" not in raw and "inverter_count_b" not in raw
+
+
+def test_zones_keep_the_raw_equipment_and_sizing_fields_in_provenance():
+    source, context = zones_case()
+    source["electrical_zones"][0].update(
+        module_model="LEAF-400", inverter_model_a="INV-1", inverter_model_b="INV-2",
+        inverter_count_a=2, inverter_count_b=1, panels_in_sequence=12, dc_ac_ratio=1.25,
+        optimizer_model="OPT-9", string_sizer_response="{\"ok\": true}")
+    source["electrical_zones"][0]["voc_cold"].update(passes=True, per_module=48.5, string_voltage=582)
+    originals = deepcopy((source, context))
+    evidence = adapter.build_evidence(source, "zones", context)
+    compare.validate_evidence(evidence, "zones")
+    assert (source, context) == originals
+    zone = evidence["after"]["zones"][0]
+    # Setting them changes nothing in the compared record: other capabilities own them.
+    for field in ("equipment_config", "sizing_provenance"):
+        assert zone[field] is None
+    raw = evidence["provenance"]["zone_fields"]["zone:Zone A"]
+    assert raw["module_model"] == "LEAF-400"
+    assert raw["inverter_model_a"] == "INV-1" and raw["inverter_model_b"] == "INV-2"
+    assert raw["inverter_count_a"] == 2 and raw["inverter_count_b"] == 1
+    assert raw["optimizer_model"] == "OPT-9"
+    assert raw["panels_in_sequence"] == 12
+    assert raw["string_sizer_response"] == "{\"ok\": true}"
+    # Verbatim, never widened or normalized: that is what makes it the capture.
+    assert raw["dc_ac_ratio"] == 1.25
+    assert raw["voc_cold"]["passes"] is True and raw["voc_cold"]["per_module"] == 48.5
+    assert type(raw["voc_cold"]["string_voltage"]) is int
+
+
+@pytest.mark.parametrize("change,message", [
+    ({"panel_refs": []}, "nonempty"),
+    ({"panel_refs": "panel-1"}, "nonempty"),
+    ({"name": ""}, "zone name"),
+    ({"name": 7}, "zone name"),
+    ({"module_model": None}, "malformed"),
+    ({"inverter_count_a": "2"}, "malformed"),
+    ({"dc_ac_ratio": "1.25"}, "malformed"),
+    ({"voc_cold": None}, "malformed"),
+])
+def test_zones_refuse_a_malformed_zone(change, message):
+    source, context = zones_case()
+    source["electrical_zones"][0].update(change)
+    with pytest.raises(adapter.compare.InputError, match=message):
+        adapter.build_evidence(source, "zones", context)
+
+
 def test_groups_refuse_a_member_neutral_id_that_is_not_a_handle():
     source, context = two_groups_case()
     context["entity_mapping"]["panel-a"] = "panel-one"

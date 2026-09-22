@@ -11,6 +11,16 @@ The groups family follows the joint contract's v2 amendment: the compared name
 is the group's neutral id, membership sorts by handle value, the four group
 semantics the plugin capture cannot record are null and named in
 fallback_fields, and Studio's own frame labels go in provenance.group_names.
+The zones family differs from groups in exactly one way that matters: a zone's
+NAME is committed state the plugin chose (LEAFADDZONE prompts for it and writes
+it to the drawing), so it is compared as given rather than replaced by the
+neutral id, and the zones are compared in the drawing's own creation order.
+Membership still sorts by handle value. Creating a zone and assigning panels to
+it commits identity and membership only, so equipment_config and sizing_provenance
+are null and named as fallbacks (rule Z7) rather than compared: the equipment and
+sizing a zone later carries are set by other capabilities and proven by their own
+receipts. Nothing is lost, the zone's own raw fields go to provenance.zone_fields
+keyed by zone neutral id, so a later capability can compare them.
 This adapter does not execute a capability or claim a reopen occurred.
 """
 
@@ -36,13 +46,29 @@ compare = _sibling("solar_w1_compare")
 
 # AutoCAD INSUNITS codes for the graph's drawing_units; anything else is an error, never a default.
 INSUNITS = {"in": 1, "ft": 2, "mm": 4, "cm": 5, "m": 6, "km": 7, "yd": 10}
-FAMILIES = ("groups", "panels", "settings", "strings")
+FAMILIES = ("groups", "panels", "settings", "strings", "zones")
+# The graph collection each family reads; every other family is its own key.
+COLLECTIONS = {"groups": "frames", "zones": "electrical_zones"}
+# Contract v3 rule Z7 (revised): a zone's equipment and sizing fields are NOT
+# compared by this family, so nothing here is coerced into a neutral shape. They
+# are still preserved verbatim under provenance.zone_fields, because the capture
+# is the only record of them until the capability that sets them is receipted. A
+# field the zone does not hold is simply absent from that record; an invented null
+# would read as "not configured" and lose the difference.
+ZONE_RAW_FIELDS = ("module_model", "inverter_model_a", "inverter_model_b", "inverter_count_a",
+                   "inverter_count_b", "optimizer_model", "dc_ac_ratio", "panels_in_sequence",
+                   "string_sizer_response", "voc_cold")
+# The graph schema requires these on every zone, so a missing or wrong-typed one is
+# malformed input. Membership and identity depend on a well-formed zone record, so
+# this check stays even though the values themselves are no longer compared.
+ZONE_REQUIRED = (("module_model", str), ("inverter_model_a", str), ("inverter_count_a", int),
+                 ("panels_in_sequence", int), ("dc_ac_ratio", (int, float)), ("voc_cold", dict))
 
 
 def build_evidence(graph, family, metadata):
     """Build one 22-key evidence object, refusing absent measurement metadata."""
     if family not in FAMILIES:
-        raise compare.InputError("Studio adapter supports groups, panels, settings and strings")
+        raise compare.InputError("Studio adapter supports groups, panels, settings, strings and zones")
     # Input bounds, sized for a real drawing; the evidence built below is still
     # validated under the unchanged comparison bounds.
     graph_sha256 = compare.scan_input(graph)
@@ -91,6 +117,7 @@ def build_evidence(graph, family, metadata):
         return int(neutral, 16)
 
     group_names = {}
+    zone_fields = {}
     result["units"] = units["drawing_units"]
     result["frame"] = {
         "coordinate_system": metadata["coordinate_system"],
@@ -109,7 +136,7 @@ def build_evidence(graph, family, metadata):
         absent("after/settings/insunits/derived-from-drawing-units")
         collection = []
     else:
-        collection = graph["frames" if family == "groups" else family]
+        collection = graph[COLLECTIONS.get(family, family)]
     if not isinstance(collection, list):
         raise compare.InputError("graph collection must be an array")
     for index, item in enumerate(collection):
@@ -146,6 +173,30 @@ def build_evidence(graph, family, metadata):
                     record["polarity"] = "negative"
                 else:
                     raise compare.InputError("string polarity does not match membership endpoints")
+        elif family == "zones":
+            # A zone's name IS committed state (LEAFADDZONE wrote it), so it is
+            # compared as given; membership still sorts by handle value (rule G4).
+            members = item.get("panel_refs")
+            if not isinstance(members, list) or not members:
+                raise compare.InputError("zone panel_refs must be a nonempty array")
+            name = item.get("name")
+            if not isinstance(name, str) or not name.strip():
+                raise compare.InputError("zone name must be a nonempty string")
+            membership = [reference(identifier) for identifier in members]
+            membership.sort(key=lambda ref: handle_value(result["entity_mapping"][ref["entity_id"]]))
+            record.update({"name": name, "membership": membership})
+            for field, kind in ZONE_REQUIRED:
+                if type(item.get(field)) is bool or not isinstance(item.get(field), kind):
+                    raise compare.InputError("zone equipment and sizing fields are malformed")
+            # Rule Z7: this capability commits identity and membership only, so the
+            # equipment and sizing records are not compared here; the raw values are
+            # kept verbatim under provenance.zone_fields so nothing is lost.
+            zone_fields[result["entity_mapping"][item["id"]]] = {
+                field: deepcopy(item[field]) for field in ZONE_RAW_FIELDS if field in item}
+            for field in ("equipment_config", "sizing_provenance"):
+                record[field] = absent("zones/" + field + "/not-part-of-this-capability")
+            for field in ("boundaries", "elevation"):
+                record[field] = absent("zones/" + field + "/unrecorded")
         else:
             # Contract v2 (rules G3 to G7): the frame's own label is provenance,
             # the compared name is the neutral id, members sort by handle value.
@@ -170,6 +221,8 @@ def build_evidence(graph, family, metadata):
         result["after"] = {family: records}
     if family == "groups":
         result["provenance"]["group_names"] = group_names
+    if family == "zones":
+        result["provenance"]["zone_fields"] = zone_fields
     if family == "strings":
         extra = graph.get("extra", {})
         coverage = extra.get("solve_coverage") if isinstance(extra, dict) else None
