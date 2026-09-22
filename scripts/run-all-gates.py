@@ -1481,8 +1481,11 @@ def build_suites() -> List[Suite]:
         # no other panel. Hermetic (the committed schema file only for its hash and
         # revision), so the floor is the exact count on every runner: 10 tests +
         # one parametrization over 7 literal zone specifications = 17.
+        # 17 -> 21 on 2026-09-22 (S18): a window-less zone created empty, a windowed
+        # zone selecting nothing still refused, groups-family metadata building
+        # one-group-per-zone evidence, and that flag refused without --group.
         Suite("scripts-solar-w1-studio-zones", "scripts test_solar_w1_studio_zones.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_zones.py"), 17),
+              SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_zones.py"), 21),
         # Registered per the #29 fix-then-register rule (shipped without a
         # gate entry; measured 1 passed on this tree 2026-07-23).
         # 1 -> 2 on 2026-08-07: the staging relay's convergence contract

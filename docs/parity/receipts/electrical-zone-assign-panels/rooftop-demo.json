@@ -1,0 +1,4406 @@
+{
+ "schema": "leaf.solar-parity-receipt.v1",
+ "capability": "electrical-zone-assign-panels",
+ "capability_version": "0",
+ "fixture": {
+  "id": "rooftop-demo",
+  "sha256": "16390e082b6c73d835f21199e7777ae3a60680deae612f81d92048fd26544d21"
+ },
+ "plugin": {
+  "build": "LEAFZONEASSIGNPANELS x2 splitting the largest island: Branch2025 LeafSolarDesign 1.1.4.4 (c0f45f41) on licensed AutoCAD 2025 via BranchTestHost, committed, saved and reopened; evidence by tools/parity/plugin_evidence.py at e9835ad3",
+  "state": "committed",
+  "receipt_sha256": "f38c68096126049714d6a8deb4071fcaf61885bce3fb61795065e1a4e77006e9"
+ },
+ "studio": {
+  "capability_version": "0",
+  "engine": "server-builtin"
+ },
+ "comparator": {
+  "name": "solar-w1-semantic",
+  "version": "1",
+  "verdict": "pass",
+  "diffs": []
+ },
+ "synthetic_fields": [
+  "plugin:before",
+  "plugin:changes",
+  "plugin:rejected_inputs",
+  "plugin:versions.catalog",
+  "plugin:versions.solver",
+  "studio:before",
+  "studio:changes",
+  "studio:settings/string_sizing"
+ ],
+ "fallback_fields": [
+  "plugin:elapsed_ms",
+  "plugin:frame",
+  "plugin:units",
+  "plugin:zones/boundaries/entity-handle-carries-no-geometry",
+  "plugin:zones/elevation/unrecorded",
+  "plugin:zones/equipment_config/not-part-of-this-capability",
+  "plugin:zones/sizing_provenance/not-part-of-this-capability",
+  "studio:frame/crs",
+  "studio:panels/producer-built-from-intake",
+  "studio:zones/boundaries/unrecorded",
+  "studio:zones/boundary_ref/unrecorded",
+  "studio:zones/elevation/unrecorded",
+  "studio:zones/equipment_config/not-part-of-this-capability",
+  "studio:zones/panel-colour/not-in-graph",
+  "studio:zones/sizing_provenance/not-part-of-this-capability"
+ ],
+ "synthetic_flagged": true,
+ "survived_reopen": true,
+ "produced_at": "2026-09-22T16:52:56Z",
+ "comparison": {
+  "schema": "leaf.solar-w1-comparison.v1",
+  "capability": "electrical-zone-assign-panels",
+  "family": "zones",
+  "plugin": {
+   "fixture_sha256": "16390e082b6c73d835f21199e7777ae3a60680deae612f81d92048fd26544d21",
+   "input_sha256": "324072cd541489bbc7c45e9ff98a772f2e645e93fd5e007b3da6debdcf51ba31",
+   "output_sha256": "c18b049f1d3012af54d8447c28bf164634fdba8abc2ba5f1aa5c26b83fd4dfab",
+   "revision": "7e74df3db70d1f6ce0f7e6048a6e3e3acbd90c42",
+   "versions": {
+    "schema": "leaf.solar-w1-comparison.v1",
+    "producer": "plugin_evidence.v1",
+    "capability": "electrical-zone-add",
+    "engine": "platform",
+    "catalog": "none",
+    "solver": "none"
+   },
+   "parameters": {
+    "family": "zones"
+   },
+   "units": "in",
+   "frame": {
+    "coordinate_system": "world",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ],
+    "elevation_datum": "unrecorded",
+    "crs": "none"
+   },
+   "entity_mapping": {
+    "9462": "9462",
+    "9461": "9461",
+    "9460": "9460",
+    "945E": "945E",
+    "945B": "945B",
+    "945A": "945A",
+    "9459": "9459",
+    "9458": "9458",
+    "9445": "9445",
+    "9444": "9444",
+    "9443": "9443",
+    "9442": "9442",
+    "9441": "9441",
+    "9440": "9440",
+    "943F": "943F",
+    "943E": "943E",
+    "9435": "9435",
+    "9434": "9434",
+    "9433": "9433",
+    "942C": "942C",
+    "942B": "942B",
+    "942A": "942A",
+    "9429": "9429",
+    "9428": "9428",
+    "9427": "9427",
+    "9426": "9426",
+    "9425": "9425",
+    "941D": "941D",
+    "941C": "941C",
+    "941B": "941B",
+    "941A": "941A",
+    "9419": "9419",
+    "9418": "9418",
+    "9417": "9417",
+    "9416": "9416",
+    "940E": "940E",
+    "940D": "940D",
+    "940C": "940C",
+    "940B": "940B",
+    "940A": "940A",
+    "9409": "9409",
+    "9408": "9408",
+    "9407": "9407",
+    "93DE": "93DE",
+    "93DD": "93DD",
+    "93DC": "93DC",
+    "93DB": "93DB",
+    "93DA": "93DA",
+    "93D9": "93D9",
+    "93D8": "93D8",
+    "93D7": "93D7",
+    "93CB": "93CB",
+    "93CA": "93CA",
+    "93C9": "93C9",
+    "93C8": "93C8",
+    "93C7": "93C7",
+    "93C6": "93C6",
+    "93C5": "93C5",
+    "93C4": "93C4",
+    "93B8": "93B8",
+    "93B7": "93B7",
+    "93B6": "93B6",
+    "93B5": "93B5",
+    "93B4": "93B4",
+    "93B3": "93B3",
+    "93B2": "93B2",
+    "93B1": "93B1",
+    "93A5": "93A5",
+    "93A4": "93A4",
+    "93A3": "93A3",
+    "93A2": "93A2",
+    "93A1": "93A1",
+    "93A0": "93A0",
+    "939F": "939F",
+    "939E": "939E",
+    "9392": "9392",
+    "9391": "9391",
+    "9390": "9390",
+    "938F": "938F",
+    "938E": "938E",
+    "938D": "938D",
+    "938C": "938C",
+    "938B": "938B",
+    "937F": "937F",
+    "937E": "937E",
+    "937D": "937D",
+    "937C": "937C",
+    "937B": "937B",
+    "937A": "937A",
+    "9379": "9379",
+    "9378": "9378",
+    "936D": "936D",
+    "936C": "936C",
+    "936B": "936B",
+    "936A": "936A",
+    "9369": "9369",
+    "935E": "935E",
+    "935D": "935D",
+    "935C": "935C",
+    "935B": "935B",
+    "935A": "935A",
+    "9350": "9350",
+    "934F": "934F",
+    "934E": "934E",
+    "934D": "934D",
+    "934C": "934C",
+    "9342": "9342",
+    "9341": "9341",
+    "9340": "9340",
+    "933F": "933F",
+    "933E": "933E",
+    "9332": "9332",
+    "9331": "9331",
+    "9330": "9330",
+    "932F": "932F",
+    "932E": "932E",
+    "932D": "932D",
+    "932C": "932C",
+    "932B": "932B",
+    "931F": "931F",
+    "931E": "931E",
+    "931D": "931D",
+    "931C": "931C",
+    "931B": "931B",
+    "931A": "931A",
+    "9319": "9319",
+    "9318": "9318",
+    "930C": "930C",
+    "930B": "930B",
+    "930A": "930A",
+    "9309": "9309",
+    "9308": "9308",
+    "9307": "9307",
+    "92FB": "92FB",
+    "92FA": "92FA",
+    "92F9": "92F9",
+    "92F8": "92F8",
+    "92F7": "92F7",
+    "92F6": "92F6",
+    "92EA": "92EA",
+    "92E9": "92E9",
+    "92E8": "92E8",
+    "92E7": "92E7",
+    "92E6": "92E6",
+    "92E5": "92E5",
+    "92E4": "92E4",
+    "92E3": "92E3",
+    "92D7": "92D7",
+    "92D6": "92D6",
+    "92D5": "92D5",
+    "92D4": "92D4",
+    "92D3": "92D3",
+    "92D2": "92D2",
+    "92D1": "92D1",
+    "92D0": "92D0",
+    "92C4": "92C4",
+    "92C3": "92C3",
+    "92C2": "92C2",
+    "92C1": "92C1",
+    "92C0": "92C0",
+    "92BF": "92BF",
+    "92BE": "92BE",
+    "92BD": "92BD",
+    "92B1": "92B1",
+    "92B0": "92B0",
+    "92AF": "92AF",
+    "92AE": "92AE",
+    "92AD": "92AD",
+    "92AC": "92AC",
+    "92AB": "92AB",
+    "92AA": "92AA",
+    "929E": "929E",
+    "929D": "929D",
+    "929C": "929C",
+    "929B": "929B",
+    "929A": "929A",
+    "9299": "9299",
+    "9298": "9298",
+    "9297": "9297",
+    "928B": "928B",
+    "928A": "928A",
+    "9289": "9289",
+    "9288": "9288",
+    "9287": "9287",
+    "9286": "9286",
+    "9285": "9285",
+    "9284": "9284",
+    "9278": "9278",
+    "9277": "9277",
+    "9276": "9276",
+    "9275": "9275",
+    "9274": "9274",
+    "9273": "9273",
+    "9272": "9272",
+    "9271": "9271",
+    "9265": "9265",
+    "9264": "9264",
+    "9263": "9263",
+    "9262": "9262",
+    "9261": "9261",
+    "9260": "9260",
+    "925F": "925F",
+    "925E": "925E",
+    "9255": "9255",
+    "9254": "9254",
+    "9253": "9253",
+    "9252": "9252",
+    "9251": "9251",
+    "9250": "9250",
+    "924F": "924F",
+    "924E": "924E",
+    "9245": "9245",
+    "9244": "9244",
+    "9243": "9243",
+    "9242": "9242",
+    "9241": "9241",
+    "9240": "9240",
+    "923F": "923F",
+    "923E": "923E",
+    "923C": "923C",
+    "923B": "923B",
+    "923A": "923A",
+    "9239": "9239",
+    "9238": "9238",
+    "zone:Zone A": "zone:Zone A",
+    "945D": "945D",
+    "945C": "945C",
+    "9457": "9457",
+    "9456": "9456",
+    "9455": "9455",
+    "9454": "9454",
+    "9453": "9453",
+    "9452": "9452",
+    "9451": "9451",
+    "9450": "9450",
+    "944F": "944F",
+    "944E": "944E",
+    "944D": "944D",
+    "944C": "944C",
+    "944B": "944B",
+    "944A": "944A",
+    "9449": "9449",
+    "9448": "9448",
+    "9447": "9447",
+    "943C": "943C",
+    "943B": "943B",
+    "943A": "943A",
+    "9439": "9439",
+    "9438": "9438",
+    "9437": "9437",
+    "9432": "9432",
+    "9431": "9431",
+    "9430": "9430",
+    "942F": "942F",
+    "942E": "942E",
+    "942D": "942D",
+    "9423": "9423",
+    "9422": "9422",
+    "9421": "9421",
+    "9420": "9420",
+    "941F": "941F",
+    "941E": "941E",
+    "9414": "9414",
+    "9413": "9413",
+    "9412": "9412",
+    "9411": "9411",
+    "9410": "9410",
+    "940F": "940F",
+    "9405": "9405",
+    "9404": "9404",
+    "9403": "9403",
+    "9402": "9402",
+    "9401": "9401",
+    "9400": "9400",
+    "93FF": "93FF",
+    "93FE": "93FE",
+    "93FC": "93FC",
+    "93FB": "93FB",
+    "93FA": "93FA",
+    "93F9": "93F9",
+    "93F8": "93F8",
+    "93F7": "93F7",
+    "93F6": "93F6",
+    "93F5": "93F5",
+    "93F4": "93F4",
+    "93F3": "93F3",
+    "93F2": "93F2",
+    "93F1": "93F1",
+    "93F0": "93F0",
+    "93EF": "93EF",
+    "93EE": "93EE",
+    "93ED": "93ED",
+    "93EC": "93EC",
+    "93EB": "93EB",
+    "93EA": "93EA",
+    "93E9": "93E9",
+    "93E8": "93E8",
+    "93E7": "93E7",
+    "93E6": "93E6",
+    "93E5": "93E5",
+    "93E4": "93E4",
+    "93E3": "93E3",
+    "93E2": "93E2",
+    "93E1": "93E1",
+    "93E0": "93E0",
+    "93D5": "93D5",
+    "93D4": "93D4",
+    "93D3": "93D3",
+    "93D2": "93D2",
+    "93D1": "93D1",
+    "93D0": "93D0",
+    "93CF": "93CF",
+    "93CE": "93CE",
+    "93CD": "93CD",
+    "93C2": "93C2",
+    "93C1": "93C1",
+    "93C0": "93C0",
+    "93BF": "93BF",
+    "93BE": "93BE",
+    "93BD": "93BD",
+    "93BC": "93BC",
+    "93BB": "93BB",
+    "93BA": "93BA",
+    "93AF": "93AF",
+    "93AE": "93AE",
+    "93AD": "93AD",
+    "93AC": "93AC",
+    "93AB": "93AB",
+    "93AA": "93AA",
+    "93A9": "93A9",
+    "93A8": "93A8",
+    "93A7": "93A7",
+    "939C": "939C",
+    "939B": "939B",
+    "939A": "939A",
+    "9399": "9399",
+    "9398": "9398",
+    "9397": "9397",
+    "9396": "9396",
+    "9395": "9395",
+    "9394": "9394",
+    "9389": "9389",
+    "9388": "9388",
+    "9387": "9387",
+    "9386": "9386",
+    "9385": "9385",
+    "9384": "9384",
+    "9383": "9383",
+    "9382": "9382",
+    "9381": "9381",
+    "9376": "9376",
+    "9375": "9375",
+    "9374": "9374",
+    "9373": "9373",
+    "9372": "9372",
+    "9371": "9371",
+    "9370": "9370",
+    "936F": "936F",
+    "9367": "9367",
+    "9366": "9366",
+    "9365": "9365",
+    "9364": "9364",
+    "9363": "9363",
+    "9362": "9362",
+    "9361": "9361",
+    "9360": "9360",
+    "9359": "9359",
+    "9358": "9358",
+    "9357": "9357",
+    "9356": "9356",
+    "9355": "9355",
+    "9354": "9354",
+    "9353": "9353",
+    "9352": "9352",
+    "934B": "934B",
+    "934A": "934A",
+    "9349": "9349",
+    "9348": "9348",
+    "9347": "9347",
+    "9346": "9346",
+    "9345": "9345",
+    "9344": "9344",
+    "933C": "933C",
+    "933B": "933B",
+    "933A": "933A",
+    "9339": "9339",
+    "9338": "9338",
+    "9337": "9337",
+    "9336": "9336",
+    "9335": "9335",
+    "9334": "9334",
+    "9329": "9329",
+    "9328": "9328",
+    "9327": "9327",
+    "9326": "9326",
+    "9325": "9325",
+    "9324": "9324",
+    "9323": "9323",
+    "9322": "9322",
+    "9321": "9321",
+    "9316": "9316",
+    "9315": "9315",
+    "9314": "9314",
+    "9313": "9313",
+    "9312": "9312",
+    "9311": "9311",
+    "9310": "9310",
+    "930F": "930F",
+    "930E": "930E",
+    "9305": "9305",
+    "9304": "9304",
+    "9303": "9303",
+    "9302": "9302",
+    "9301": "9301",
+    "9300": "9300",
+    "92FF": "92FF",
+    "92FE": "92FE",
+    "92FD": "92FD",
+    "92F4": "92F4",
+    "92F3": "92F3",
+    "92F2": "92F2",
+    "92F1": "92F1",
+    "92F0": "92F0",
+    "92EF": "92EF",
+    "92EE": "92EE",
+    "92ED": "92ED",
+    "92EC": "92EC",
+    "92E1": "92E1",
+    "92E0": "92E0",
+    "92DF": "92DF",
+    "92DE": "92DE",
+    "92DD": "92DD",
+    "92DC": "92DC",
+    "92DB": "92DB",
+    "92DA": "92DA",
+    "92D9": "92D9",
+    "92CE": "92CE",
+    "92CD": "92CD",
+    "92CC": "92CC",
+    "92CB": "92CB",
+    "92CA": "92CA",
+    "92C9": "92C9",
+    "92C8": "92C8",
+    "92C7": "92C7",
+    "92C6": "92C6",
+    "92BB": "92BB",
+    "92BA": "92BA",
+    "92B9": "92B9",
+    "92B8": "92B8",
+    "92B7": "92B7",
+    "92B6": "92B6",
+    "92B5": "92B5",
+    "92B4": "92B4",
+    "92B3": "92B3",
+    "92A8": "92A8",
+    "92A7": "92A7",
+    "92A6": "92A6",
+    "92A5": "92A5",
+    "92A4": "92A4",
+    "92A3": "92A3",
+    "92A2": "92A2",
+    "92A1": "92A1",
+    "92A0": "92A0",
+    "9295": "9295",
+    "9294": "9294",
+    "9293": "9293",
+    "9292": "9292",
+    "9291": "9291",
+    "9290": "9290",
+    "928F": "928F",
+    "928E": "928E",
+    "928D": "928D",
+    "9282": "9282",
+    "9281": "9281",
+    "9280": "9280",
+    "927F": "927F",
+    "927E": "927E",
+    "927D": "927D",
+    "927C": "927C",
+    "927B": "927B",
+    "927A": "927A",
+    "926F": "926F",
+    "926E": "926E",
+    "926D": "926D",
+    "926C": "926C",
+    "926B": "926B",
+    "926A": "926A",
+    "9269": "9269",
+    "9268": "9268",
+    "9267": "9267",
+    "925C": "925C",
+    "925B": "925B",
+    "925A": "925A",
+    "9259": "9259",
+    "9258": "9258",
+    "9257": "9257",
+    "924C": "924C",
+    "924B": "924B",
+    "924A": "924A",
+    "9249": "9249",
+    "9248": "9248",
+    "9247": "9247",
+    "zone:Zone B": "zone:Zone B"
+   },
+   "before": {
+    "recorded": false
+   },
+   "after": {
+    "zones": [
+     {
+      "id": {
+       "entity_id": "zone:Zone A"
+      },
+      "name": "Zone A",
+      "membership": [
+       {
+        "entity_id": "9238"
+       },
+       {
+        "entity_id": "9239"
+       },
+       {
+        "entity_id": "923A"
+       },
+       {
+        "entity_id": "923B"
+       },
+       {
+        "entity_id": "923C"
+       },
+       {
+        "entity_id": "923E"
+       },
+       {
+        "entity_id": "923F"
+       },
+       {
+        "entity_id": "9240"
+       },
+       {
+        "entity_id": "9241"
+       },
+       {
+        "entity_id": "9242"
+       },
+       {
+        "entity_id": "9243"
+       },
+       {
+        "entity_id": "9244"
+       },
+       {
+        "entity_id": "9245"
+       },
+       {
+        "entity_id": "924E"
+       },
+       {
+        "entity_id": "924F"
+       },
+       {
+        "entity_id": "9250"
+       },
+       {
+        "entity_id": "9251"
+       },
+       {
+        "entity_id": "9252"
+       },
+       {
+        "entity_id": "9253"
+       },
+       {
+        "entity_id": "9254"
+       },
+       {
+        "entity_id": "9255"
+       },
+       {
+        "entity_id": "925E"
+       },
+       {
+        "entity_id": "925F"
+       },
+       {
+        "entity_id": "9260"
+       },
+       {
+        "entity_id": "9261"
+       },
+       {
+        "entity_id": "9262"
+       },
+       {
+        "entity_id": "9263"
+       },
+       {
+        "entity_id": "9264"
+       },
+       {
+        "entity_id": "9265"
+       },
+       {
+        "entity_id": "9271"
+       },
+       {
+        "entity_id": "9272"
+       },
+       {
+        "entity_id": "9273"
+       },
+       {
+        "entity_id": "9274"
+       },
+       {
+        "entity_id": "9275"
+       },
+       {
+        "entity_id": "9276"
+       },
+       {
+        "entity_id": "9277"
+       },
+       {
+        "entity_id": "9278"
+       },
+       {
+        "entity_id": "9284"
+       },
+       {
+        "entity_id": "9285"
+       },
+       {
+        "entity_id": "9286"
+       },
+       {
+        "entity_id": "9287"
+       },
+       {
+        "entity_id": "9288"
+       },
+       {
+        "entity_id": "9289"
+       },
+       {
+        "entity_id": "928A"
+       },
+       {
+        "entity_id": "928B"
+       },
+       {
+        "entity_id": "9297"
+       },
+       {
+        "entity_id": "9298"
+       },
+       {
+        "entity_id": "9299"
+       },
+       {
+        "entity_id": "929A"
+       },
+       {
+        "entity_id": "929B"
+       },
+       {
+        "entity_id": "929C"
+       },
+       {
+        "entity_id": "929D"
+       },
+       {
+        "entity_id": "929E"
+       },
+       {
+        "entity_id": "92AA"
+       },
+       {
+        "entity_id": "92AB"
+       },
+       {
+        "entity_id": "92AC"
+       },
+       {
+        "entity_id": "92AD"
+       },
+       {
+        "entity_id": "92AE"
+       },
+       {
+        "entity_id": "92AF"
+       },
+       {
+        "entity_id": "92B0"
+       },
+       {
+        "entity_id": "92B1"
+       },
+       {
+        "entity_id": "92BD"
+       },
+       {
+        "entity_id": "92BE"
+       },
+       {
+        "entity_id": "92BF"
+       },
+       {
+        "entity_id": "92C0"
+       },
+       {
+        "entity_id": "92C1"
+       },
+       {
+        "entity_id": "92C2"
+       },
+       {
+        "entity_id": "92C3"
+       },
+       {
+        "entity_id": "92C4"
+       },
+       {
+        "entity_id": "92D0"
+       },
+       {
+        "entity_id": "92D1"
+       },
+       {
+        "entity_id": "92D2"
+       },
+       {
+        "entity_id": "92D3"
+       },
+       {
+        "entity_id": "92D4"
+       },
+       {
+        "entity_id": "92D5"
+       },
+       {
+        "entity_id": "92D6"
+       },
+       {
+        "entity_id": "92D7"
+       },
+       {
+        "entity_id": "92E3"
+       },
+       {
+        "entity_id": "92E4"
+       },
+       {
+        "entity_id": "92E5"
+       },
+       {
+        "entity_id": "92E6"
+       },
+       {
+        "entity_id": "92E7"
+       },
+       {
+        "entity_id": "92E8"
+       },
+       {
+        "entity_id": "92E9"
+       },
+       {
+        "entity_id": "92EA"
+       },
+       {
+        "entity_id": "92F6"
+       },
+       {
+        "entity_id": "92F7"
+       },
+       {
+        "entity_id": "92F8"
+       },
+       {
+        "entity_id": "92F9"
+       },
+       {
+        "entity_id": "92FA"
+       },
+       {
+        "entity_id": "92FB"
+       },
+       {
+        "entity_id": "9307"
+       },
+       {
+        "entity_id": "9308"
+       },
+       {
+        "entity_id": "9309"
+       },
+       {
+        "entity_id": "930A"
+       },
+       {
+        "entity_id": "930B"
+       },
+       {
+        "entity_id": "930C"
+       },
+       {
+        "entity_id": "9318"
+       },
+       {
+        "entity_id": "9319"
+       },
+       {
+        "entity_id": "931A"
+       },
+       {
+        "entity_id": "931B"
+       },
+       {
+        "entity_id": "931C"
+       },
+       {
+        "entity_id": "931D"
+       },
+       {
+        "entity_id": "931E"
+       },
+       {
+        "entity_id": "931F"
+       },
+       {
+        "entity_id": "932B"
+       },
+       {
+        "entity_id": "932C"
+       },
+       {
+        "entity_id": "932D"
+       },
+       {
+        "entity_id": "932E"
+       },
+       {
+        "entity_id": "932F"
+       },
+       {
+        "entity_id": "9330"
+       },
+       {
+        "entity_id": "9331"
+       },
+       {
+        "entity_id": "9332"
+       },
+       {
+        "entity_id": "933E"
+       },
+       {
+        "entity_id": "933F"
+       },
+       {
+        "entity_id": "9340"
+       },
+       {
+        "entity_id": "9341"
+       },
+       {
+        "entity_id": "9342"
+       },
+       {
+        "entity_id": "934C"
+       },
+       {
+        "entity_id": "934D"
+       },
+       {
+        "entity_id": "934E"
+       },
+       {
+        "entity_id": "934F"
+       },
+       {
+        "entity_id": "9350"
+       },
+       {
+        "entity_id": "935A"
+       },
+       {
+        "entity_id": "935B"
+       },
+       {
+        "entity_id": "935C"
+       },
+       {
+        "entity_id": "935D"
+       },
+       {
+        "entity_id": "935E"
+       },
+       {
+        "entity_id": "9369"
+       },
+       {
+        "entity_id": "936A"
+       },
+       {
+        "entity_id": "936B"
+       },
+       {
+        "entity_id": "936C"
+       },
+       {
+        "entity_id": "936D"
+       },
+       {
+        "entity_id": "9378"
+       },
+       {
+        "entity_id": "9379"
+       },
+       {
+        "entity_id": "937A"
+       },
+       {
+        "entity_id": "937B"
+       },
+       {
+        "entity_id": "937C"
+       },
+       {
+        "entity_id": "937D"
+       },
+       {
+        "entity_id": "937E"
+       },
+       {
+        "entity_id": "937F"
+       },
+       {
+        "entity_id": "938B"
+       },
+       {
+        "entity_id": "938C"
+       },
+       {
+        "entity_id": "938D"
+       },
+       {
+        "entity_id": "938E"
+       },
+       {
+        "entity_id": "938F"
+       },
+       {
+        "entity_id": "9390"
+       },
+       {
+        "entity_id": "9391"
+       },
+       {
+        "entity_id": "9392"
+       },
+       {
+        "entity_id": "939E"
+       },
+       {
+        "entity_id": "939F"
+       },
+       {
+        "entity_id": "93A0"
+       },
+       {
+        "entity_id": "93A1"
+       },
+       {
+        "entity_id": "93A2"
+       },
+       {
+        "entity_id": "93A3"
+       },
+       {
+        "entity_id": "93A4"
+       },
+       {
+        "entity_id": "93A5"
+       },
+       {
+        "entity_id": "93B1"
+       },
+       {
+        "entity_id": "93B2"
+       },
+       {
+        "entity_id": "93B3"
+       },
+       {
+        "entity_id": "93B4"
+       },
+       {
+        "entity_id": "93B5"
+       },
+       {
+        "entity_id": "93B6"
+       },
+       {
+        "entity_id": "93B7"
+       },
+       {
+        "entity_id": "93B8"
+       },
+       {
+        "entity_id": "93C4"
+       },
+       {
+        "entity_id": "93C5"
+       },
+       {
+        "entity_id": "93C6"
+       },
+       {
+        "entity_id": "93C7"
+       },
+       {
+        "entity_id": "93C8"
+       },
+       {
+        "entity_id": "93C9"
+       },
+       {
+        "entity_id": "93CA"
+       },
+       {
+        "entity_id": "93CB"
+       },
+       {
+        "entity_id": "93D7"
+       },
+       {
+        "entity_id": "93D8"
+       },
+       {
+        "entity_id": "93D9"
+       },
+       {
+        "entity_id": "93DA"
+       },
+       {
+        "entity_id": "93DB"
+       },
+       {
+        "entity_id": "93DC"
+       },
+       {
+        "entity_id": "93DD"
+       },
+       {
+        "entity_id": "93DE"
+       },
+       {
+        "entity_id": "9407"
+       },
+       {
+        "entity_id": "9408"
+       },
+       {
+        "entity_id": "9409"
+       },
+       {
+        "entity_id": "940A"
+       },
+       {
+        "entity_id": "940B"
+       },
+       {
+        "entity_id": "940C"
+       },
+       {
+        "entity_id": "940D"
+       },
+       {
+        "entity_id": "940E"
+       },
+       {
+        "entity_id": "9416"
+       },
+       {
+        "entity_id": "9417"
+       },
+       {
+        "entity_id": "9418"
+       },
+       {
+        "entity_id": "9419"
+       },
+       {
+        "entity_id": "941A"
+       },
+       {
+        "entity_id": "941B"
+       },
+       {
+        "entity_id": "941C"
+       },
+       {
+        "entity_id": "941D"
+       },
+       {
+        "entity_id": "9425"
+       },
+       {
+        "entity_id": "9426"
+       },
+       {
+        "entity_id": "9427"
+       },
+       {
+        "entity_id": "9428"
+       },
+       {
+        "entity_id": "9429"
+       },
+       {
+        "entity_id": "942A"
+       },
+       {
+        "entity_id": "942B"
+       },
+       {
+        "entity_id": "942C"
+       },
+       {
+        "entity_id": "9433"
+       },
+       {
+        "entity_id": "9434"
+       },
+       {
+        "entity_id": "9435"
+       },
+       {
+        "entity_id": "943E"
+       },
+       {
+        "entity_id": "943F"
+       },
+       {
+        "entity_id": "9440"
+       },
+       {
+        "entity_id": "9441"
+       },
+       {
+        "entity_id": "9442"
+       },
+       {
+        "entity_id": "9443"
+       },
+       {
+        "entity_id": "9444"
+       },
+       {
+        "entity_id": "9445"
+       },
+       {
+        "entity_id": "9458"
+       },
+       {
+        "entity_id": "9459"
+       },
+       {
+        "entity_id": "945A"
+       },
+       {
+        "entity_id": "945B"
+       },
+       {
+        "entity_id": "945E"
+       },
+       {
+        "entity_id": "9460"
+       },
+       {
+        "entity_id": "9461"
+       },
+       {
+        "entity_id": "9462"
+       }
+      ],
+      "boundaries": null,
+      "elevation": null,
+      "equipment_config": null,
+      "sizing_provenance": null
+     },
+     {
+      "id": {
+       "entity_id": "zone:Zone B"
+      },
+      "name": "Zone B",
+      "membership": [
+       {
+        "entity_id": "9247"
+       },
+       {
+        "entity_id": "9248"
+       },
+       {
+        "entity_id": "9249"
+       },
+       {
+        "entity_id": "924A"
+       },
+       {
+        "entity_id": "924B"
+       },
+       {
+        "entity_id": "924C"
+       },
+       {
+        "entity_id": "9257"
+       },
+       {
+        "entity_id": "9258"
+       },
+       {
+        "entity_id": "9259"
+       },
+       {
+        "entity_id": "925A"
+       },
+       {
+        "entity_id": "925B"
+       },
+       {
+        "entity_id": "925C"
+       },
+       {
+        "entity_id": "9267"
+       },
+       {
+        "entity_id": "9268"
+       },
+       {
+        "entity_id": "9269"
+       },
+       {
+        "entity_id": "926A"
+       },
+       {
+        "entity_id": "926B"
+       },
+       {
+        "entity_id": "926C"
+       },
+       {
+        "entity_id": "926D"
+       },
+       {
+        "entity_id": "926E"
+       },
+       {
+        "entity_id": "926F"
+       },
+       {
+        "entity_id": "927A"
+       },
+       {
+        "entity_id": "927B"
+       },
+       {
+        "entity_id": "927C"
+       },
+       {
+        "entity_id": "927D"
+       },
+       {
+        "entity_id": "927E"
+       },
+       {
+        "entity_id": "927F"
+       },
+       {
+        "entity_id": "9280"
+       },
+       {
+        "entity_id": "9281"
+       },
+       {
+        "entity_id": "9282"
+       },
+       {
+        "entity_id": "928D"
+       },
+       {
+        "entity_id": "928E"
+       },
+       {
+        "entity_id": "928F"
+       },
+       {
+        "entity_id": "9290"
+       },
+       {
+        "entity_id": "9291"
+       },
+       {
+        "entity_id": "9292"
+       },
+       {
+        "entity_id": "9293"
+       },
+       {
+        "entity_id": "9294"
+       },
+       {
+        "entity_id": "9295"
+       },
+       {
+        "entity_id": "92A0"
+       },
+       {
+        "entity_id": "92A1"
+       },
+       {
+        "entity_id": "92A2"
+       },
+       {
+        "entity_id": "92A3"
+       },
+       {
+        "entity_id": "92A4"
+       },
+       {
+        "entity_id": "92A5"
+       },
+       {
+        "entity_id": "92A6"
+       },
+       {
+        "entity_id": "92A7"
+       },
+       {
+        "entity_id": "92A8"
+       },
+       {
+        "entity_id": "92B3"
+       },
+       {
+        "entity_id": "92B4"
+       },
+       {
+        "entity_id": "92B5"
+       },
+       {
+        "entity_id": "92B6"
+       },
+       {
+        "entity_id": "92B7"
+       },
+       {
+        "entity_id": "92B8"
+       },
+       {
+        "entity_id": "92B9"
+       },
+       {
+        "entity_id": "92BA"
+       },
+       {
+        "entity_id": "92BB"
+       },
+       {
+        "entity_id": "92C6"
+       },
+       {
+        "entity_id": "92C7"
+       },
+       {
+        "entity_id": "92C8"
+       },
+       {
+        "entity_id": "92C9"
+       },
+       {
+        "entity_id": "92CA"
+       },
+       {
+        "entity_id": "92CB"
+       },
+       {
+        "entity_id": "92CC"
+       },
+       {
+        "entity_id": "92CD"
+       },
+       {
+        "entity_id": "92CE"
+       },
+       {
+        "entity_id": "92D9"
+       },
+       {
+        "entity_id": "92DA"
+       },
+       {
+        "entity_id": "92DB"
+       },
+       {
+        "entity_id": "92DC"
+       },
+       {
+        "entity_id": "92DD"
+       },
+       {
+        "entity_id": "92DE"
+       },
+       {
+        "entity_id": "92DF"
+       },
+       {
+        "entity_id": "92E0"
+       },
+       {
+        "entity_id": "92E1"
+       },
+       {
+        "entity_id": "92EC"
+       },
+       {
+        "entity_id": "92ED"
+       },
+       {
+        "entity_id": "92EE"
+       },
+       {
+        "entity_id": "92EF"
+       },
+       {
+        "entity_id": "92F0"
+       },
+       {
+        "entity_id": "92F1"
+       },
+       {
+        "entity_id": "92F2"
+       },
+       {
+        "entity_id": "92F3"
+       },
+       {
+        "entity_id": "92F4"
+       },
+       {
+        "entity_id": "92FD"
+       },
+       {
+        "entity_id": "92FE"
+       },
+       {
+        "entity_id": "92FF"
+       },
+       {
+        "entity_id": "9300"
+       },
+       {
+        "entity_id": "9301"
+       },
+       {
+        "entity_id": "9302"
+       },
+       {
+        "entity_id": "9303"
+       },
+       {
+        "entity_id": "9304"
+       },
+       {
+        "entity_id": "9305"
+       },
+       {
+        "entity_id": "930E"
+       },
+       {
+        "entity_id": "930F"
+       },
+       {
+        "entity_id": "9310"
+       },
+       {
+        "entity_id": "9311"
+       },
+       {
+        "entity_id": "9312"
+       },
+       {
+        "entity_id": "9313"
+       },
+       {
+        "entity_id": "9314"
+       },
+       {
+        "entity_id": "9315"
+       },
+       {
+        "entity_id": "9316"
+       },
+       {
+        "entity_id": "9321"
+       },
+       {
+        "entity_id": "9322"
+       },
+       {
+        "entity_id": "9323"
+       },
+       {
+        "entity_id": "9324"
+       },
+       {
+        "entity_id": "9325"
+       },
+       {
+        "entity_id": "9326"
+       },
+       {
+        "entity_id": "9327"
+       },
+       {
+        "entity_id": "9328"
+       },
+       {
+        "entity_id": "9329"
+       },
+       {
+        "entity_id": "9334"
+       },
+       {
+        "entity_id": "9335"
+       },
+       {
+        "entity_id": "9336"
+       },
+       {
+        "entity_id": "9337"
+       },
+       {
+        "entity_id": "9338"
+       },
+       {
+        "entity_id": "9339"
+       },
+       {
+        "entity_id": "933A"
+       },
+       {
+        "entity_id": "933B"
+       },
+       {
+        "entity_id": "933C"
+       },
+       {
+        "entity_id": "9344"
+       },
+       {
+        "entity_id": "9345"
+       },
+       {
+        "entity_id": "9346"
+       },
+       {
+        "entity_id": "9347"
+       },
+       {
+        "entity_id": "9348"
+       },
+       {
+        "entity_id": "9349"
+       },
+       {
+        "entity_id": "934A"
+       },
+       {
+        "entity_id": "934B"
+       },
+       {
+        "entity_id": "9352"
+       },
+       {
+        "entity_id": "9353"
+       },
+       {
+        "entity_id": "9354"
+       },
+       {
+        "entity_id": "9355"
+       },
+       {
+        "entity_id": "9356"
+       },
+       {
+        "entity_id": "9357"
+       },
+       {
+        "entity_id": "9358"
+       },
+       {
+        "entity_id": "9359"
+       },
+       {
+        "entity_id": "9360"
+       },
+       {
+        "entity_id": "9361"
+       },
+       {
+        "entity_id": "9362"
+       },
+       {
+        "entity_id": "9363"
+       },
+       {
+        "entity_id": "9364"
+       },
+       {
+        "entity_id": "9365"
+       },
+       {
+        "entity_id": "9366"
+       },
+       {
+        "entity_id": "9367"
+       },
+       {
+        "entity_id": "936F"
+       },
+       {
+        "entity_id": "9370"
+       },
+       {
+        "entity_id": "9371"
+       },
+       {
+        "entity_id": "9372"
+       },
+       {
+        "entity_id": "9373"
+       },
+       {
+        "entity_id": "9374"
+       },
+       {
+        "entity_id": "9375"
+       },
+       {
+        "entity_id": "9376"
+       },
+       {
+        "entity_id": "9381"
+       },
+       {
+        "entity_id": "9382"
+       },
+       {
+        "entity_id": "9383"
+       },
+       {
+        "entity_id": "9384"
+       },
+       {
+        "entity_id": "9385"
+       },
+       {
+        "entity_id": "9386"
+       },
+       {
+        "entity_id": "9387"
+       },
+       {
+        "entity_id": "9388"
+       },
+       {
+        "entity_id": "9389"
+       },
+       {
+        "entity_id": "9394"
+       },
+       {
+        "entity_id": "9395"
+       },
+       {
+        "entity_id": "9396"
+       },
+       {
+        "entity_id": "9397"
+       },
+       {
+        "entity_id": "9398"
+       },
+       {
+        "entity_id": "9399"
+       },
+       {
+        "entity_id": "939A"
+       },
+       {
+        "entity_id": "939B"
+       },
+       {
+        "entity_id": "939C"
+       },
+       {
+        "entity_id": "93A7"
+       },
+       {
+        "entity_id": "93A8"
+       },
+       {
+        "entity_id": "93A9"
+       },
+       {
+        "entity_id": "93AA"
+       },
+       {
+        "entity_id": "93AB"
+       },
+       {
+        "entity_id": "93AC"
+       },
+       {
+        "entity_id": "93AD"
+       },
+       {
+        "entity_id": "93AE"
+       },
+       {
+        "entity_id": "93AF"
+       },
+       {
+        "entity_id": "93BA"
+       },
+       {
+        "entity_id": "93BB"
+       },
+       {
+        "entity_id": "93BC"
+       },
+       {
+        "entity_id": "93BD"
+       },
+       {
+        "entity_id": "93BE"
+       },
+       {
+        "entity_id": "93BF"
+       },
+       {
+        "entity_id": "93C0"
+       },
+       {
+        "entity_id": "93C1"
+       },
+       {
+        "entity_id": "93C2"
+       },
+       {
+        "entity_id": "93CD"
+       },
+       {
+        "entity_id": "93CE"
+       },
+       {
+        "entity_id": "93CF"
+       },
+       {
+        "entity_id": "93D0"
+       },
+       {
+        "entity_id": "93D1"
+       },
+       {
+        "entity_id": "93D2"
+       },
+       {
+        "entity_id": "93D3"
+       },
+       {
+        "entity_id": "93D4"
+       },
+       {
+        "entity_id": "93D5"
+       },
+       {
+        "entity_id": "93E0"
+       },
+       {
+        "entity_id": "93E1"
+       },
+       {
+        "entity_id": "93E2"
+       },
+       {
+        "entity_id": "93E3"
+       },
+       {
+        "entity_id": "93E4"
+       },
+       {
+        "entity_id": "93E5"
+       },
+       {
+        "entity_id": "93E6"
+       },
+       {
+        "entity_id": "93E7"
+       },
+       {
+        "entity_id": "93E8"
+       },
+       {
+        "entity_id": "93E9"
+       },
+       {
+        "entity_id": "93EA"
+       },
+       {
+        "entity_id": "93EB"
+       },
+       {
+        "entity_id": "93EC"
+       },
+       {
+        "entity_id": "93ED"
+       },
+       {
+        "entity_id": "93EE"
+       },
+       {
+        "entity_id": "93EF"
+       },
+       {
+        "entity_id": "93F0"
+       },
+       {
+        "entity_id": "93F1"
+       },
+       {
+        "entity_id": "93F2"
+       },
+       {
+        "entity_id": "93F3"
+       },
+       {
+        "entity_id": "93F4"
+       },
+       {
+        "entity_id": "93F5"
+       },
+       {
+        "entity_id": "93F6"
+       },
+       {
+        "entity_id": "93F7"
+       },
+       {
+        "entity_id": "93F8"
+       },
+       {
+        "entity_id": "93F9"
+       },
+       {
+        "entity_id": "93FA"
+       },
+       {
+        "entity_id": "93FB"
+       },
+       {
+        "entity_id": "93FC"
+       },
+       {
+        "entity_id": "93FE"
+       },
+       {
+        "entity_id": "93FF"
+       },
+       {
+        "entity_id": "9400"
+       },
+       {
+        "entity_id": "9401"
+       },
+       {
+        "entity_id": "9402"
+       },
+       {
+        "entity_id": "9403"
+       },
+       {
+        "entity_id": "9404"
+       },
+       {
+        "entity_id": "9405"
+       },
+       {
+        "entity_id": "940F"
+       },
+       {
+        "entity_id": "9410"
+       },
+       {
+        "entity_id": "9411"
+       },
+       {
+        "entity_id": "9412"
+       },
+       {
+        "entity_id": "9413"
+       },
+       {
+        "entity_id": "9414"
+       },
+       {
+        "entity_id": "941E"
+       },
+       {
+        "entity_id": "941F"
+       },
+       {
+        "entity_id": "9420"
+       },
+       {
+        "entity_id": "9421"
+       },
+       {
+        "entity_id": "9422"
+       },
+       {
+        "entity_id": "9423"
+       },
+       {
+        "entity_id": "942D"
+       },
+       {
+        "entity_id": "942E"
+       },
+       {
+        "entity_id": "942F"
+       },
+       {
+        "entity_id": "9430"
+       },
+       {
+        "entity_id": "9431"
+       },
+       {
+        "entity_id": "9432"
+       },
+       {
+        "entity_id": "9437"
+       },
+       {
+        "entity_id": "9438"
+       },
+       {
+        "entity_id": "9439"
+       },
+       {
+        "entity_id": "943A"
+       },
+       {
+        "entity_id": "943B"
+       },
+       {
+        "entity_id": "943C"
+       },
+       {
+        "entity_id": "9447"
+       },
+       {
+        "entity_id": "9448"
+       },
+       {
+        "entity_id": "9449"
+       },
+       {
+        "entity_id": "944A"
+       },
+       {
+        "entity_id": "944B"
+       },
+       {
+        "entity_id": "944C"
+       },
+       {
+        "entity_id": "944D"
+       },
+       {
+        "entity_id": "944E"
+       },
+       {
+        "entity_id": "944F"
+       },
+       {
+        "entity_id": "9450"
+       },
+       {
+        "entity_id": "9451"
+       },
+       {
+        "entity_id": "9452"
+       },
+       {
+        "entity_id": "9453"
+       },
+       {
+        "entity_id": "9454"
+       },
+       {
+        "entity_id": "9455"
+       },
+       {
+        "entity_id": "9456"
+       },
+       {
+        "entity_id": "9457"
+       },
+       {
+        "entity_id": "945C"
+       },
+       {
+        "entity_id": "945D"
+       }
+      ],
+      "boundaries": null,
+      "elevation": null,
+      "equipment_config": null,
+      "sizing_provenance": null
+     }
+    ]
+   },
+   "changes": {
+    "created": [],
+    "modified": [],
+    "deleted": []
+   },
+   "warnings": [],
+   "rejected_inputs": [],
+   "provenance": {
+    "revision": "7e74df3db70d1f6ce0f7e6048a6e3e3acbd90c42",
+    "source": "bthost-zones",
+    "capture_sha256": "1d9b8732ddb893fb6c06848732ec20a316efb9fed2b19a1b512febf02909e0b9",
+    "zone_colors": {
+     "Zone A": 1,
+     "Zone B": 3
+    },
+    "zone_fields": {
+     "zone:Zone A": {
+      "BoundaryHandle": "",
+      "DcAcRatio": 0.0,
+      "DcAcRatioA": 0.0,
+      "DcAcRatioB": 0.0,
+      "InverterCount": 0,
+      "InverterCountA": 0,
+      "InverterCountB": 0,
+      "InverterModelName": "",
+      "InverterModelNameB": "",
+      "ModuleName": "",
+      "ModulesForA": 0,
+      "ModulesForB": 0,
+      "OptimizerModelName": "",
+      "PanelsInSequence": 0,
+      "PanelsInSequenceB": 0,
+      "StringSizerInputLabel": "",
+      "StringSizerOutputLabel": "",
+      "StringSizerResponse": "",
+      "VocColdMaxDcVoltage": 0.0,
+      "VocColdOverrideAccepted": false,
+      "VocColdPasses": null,
+      "VocColdPerModule": 0.0,
+      "VocColdStringVoltage": 0.0,
+      "VocColdSuggestedStringLength": 0
+     },
+     "zone:Zone B": {
+      "BoundaryHandle": "",
+      "DcAcRatio": 0.0,
+      "DcAcRatioA": 0.0,
+      "DcAcRatioB": 0.0,
+      "InverterCount": 0,
+      "InverterCountA": 0,
+      "InverterCountB": 0,
+      "InverterModelName": "",
+      "InverterModelNameB": "",
+      "ModuleName": "",
+      "ModulesForA": 0,
+      "ModulesForB": 0,
+      "OptimizerModelName": "",
+      "PanelsInSequence": 0,
+      "PanelsInSequenceB": 0,
+      "StringSizerInputLabel": "",
+      "StringSizerOutputLabel": "",
+      "StringSizerResponse": "",
+      "VocColdMaxDcVoltage": 0.0,
+      "VocColdOverrideAccepted": false,
+      "VocColdPasses": null,
+      "VocColdPerModule": 0.0,
+      "VocColdStringVoltage": 0.0,
+      "VocColdSuggestedStringLength": 0
+     }
+    }
+   },
+   "elapsed_ms": 0,
+   "execution_mode": "recorded",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before",
+    "changes",
+    "versions.catalog",
+    "versions.solver",
+    "rejected_inputs"
+   ],
+   "fallback_fields": [
+    "elapsed_ms",
+    "units",
+    "frame",
+    "zones/boundaries/entity-handle-carries-no-geometry",
+    "zones/elevation/unrecorded",
+    "zones/equipment_config/not-part-of-this-capability",
+    "zones/sizing_provenance/not-part-of-this-capability"
+   ],
+   "synthetic_flagged": true
+  },
+  "studio": {
+   "after": {
+    "zones": [
+     {
+      "boundaries": null,
+      "elevation": null,
+      "equipment_config": null,
+      "id": {
+       "entity_id": "leaf:zone-el:d8e4b181-d9f2-4c61-a851-624280645514"
+      },
+      "membership": [
+       {
+        "entity_id": "leaf:panel:588f16fd-8922-4869-963f-949bafd1432c"
+       },
+       {
+        "entity_id": "leaf:panel:cfdc9e3e-96d2-482a-ad0f-e9f398e26de4"
+       },
+       {
+        "entity_id": "leaf:panel:4682ddee-cbe7-4ba6-bba4-62249892d044"
+       },
+       {
+        "entity_id": "leaf:panel:5f44ca71-cb06-41a1-8770-562779b3cb70"
+       },
+       {
+        "entity_id": "leaf:panel:cdb1bf3f-7a76-43a8-aa1c-8aae33ef6a79"
+       },
+       {
+        "entity_id": "leaf:panel:2e72989f-2292-482c-bc74-e28e999680ec"
+       },
+       {
+        "entity_id": "leaf:panel:a1d9afc1-1737-490b-9fb0-722cf3edb667"
+       },
+       {
+        "entity_id": "leaf:panel:12f18755-6174-45ca-8a23-4f935ecbe61e"
+       },
+       {
+        "entity_id": "leaf:panel:22459da2-4344-49e8-a0f0-4f77c5d59db5"
+       },
+       {
+        "entity_id": "leaf:panel:6a54f63a-339a-453f-8c91-e067d2434493"
+       },
+       {
+        "entity_id": "leaf:panel:7505e1fa-f9d8-4d68-af93-4f5629e9a4a9"
+       },
+       {
+        "entity_id": "leaf:panel:a859874c-41de-47b3-8688-f38847515b4b"
+       },
+       {
+        "entity_id": "leaf:panel:ab6087f5-8ced-4d1e-9361-aff50272ca86"
+       },
+       {
+        "entity_id": "leaf:panel:e4db281e-562b-48de-a1e6-63affbe6d7c9"
+       },
+       {
+        "entity_id": "leaf:panel:ae389b3f-6df6-4232-95b9-48a55624d659"
+       },
+       {
+        "entity_id": "leaf:panel:d26129f8-f390-4513-97c8-70da6abbbf1b"
+       },
+       {
+        "entity_id": "leaf:panel:83e8f255-0cd9-4f10-89c4-ffeb64b9b1d9"
+       },
+       {
+        "entity_id": "leaf:panel:faa5fd6f-a515-4ae3-bccc-172efce7c84c"
+       },
+       {
+        "entity_id": "leaf:panel:9f6dcfa5-b413-4dd4-8f32-0ab435712af7"
+       },
+       {
+        "entity_id": "leaf:panel:2c86a1dd-27f1-4401-a608-6acc875319b7"
+       },
+       {
+        "entity_id": "leaf:panel:98b37b96-9ce9-4054-b355-233133d03a5b"
+       },
+       {
+        "entity_id": "leaf:panel:93f88666-3551-4800-b702-b27b2ef313cf"
+       },
+       {
+        "entity_id": "leaf:panel:00b05597-08b5-470a-a41a-317859a53c45"
+       },
+       {
+        "entity_id": "leaf:panel:f48db598-d577-483e-8d3f-2aac0a971a54"
+       },
+       {
+        "entity_id": "leaf:panel:7567d93f-4543-4221-aa18-1729d4df5b26"
+       },
+       {
+        "entity_id": "leaf:panel:e16a3a40-2def-4f91-94fa-418becd7c726"
+       },
+       {
+        "entity_id": "leaf:panel:2696ae98-ea08-4741-b372-4470515b25b9"
+       },
+       {
+        "entity_id": "leaf:panel:54b922da-33f9-44c1-a0bd-9fa9b62aa266"
+       },
+       {
+        "entity_id": "leaf:panel:f80219fc-a648-4333-83a7-1ce1cb528c80"
+       },
+       {
+        "entity_id": "leaf:panel:fbc7f32c-5220-4c18-b680-9f8dbb754e62"
+       },
+       {
+        "entity_id": "leaf:panel:2d2103ee-fa7d-48f7-9c8a-1af65bc7cd08"
+       },
+       {
+        "entity_id": "leaf:panel:a9f3bcf9-0c81-40ad-8cb8-d3a8663d4c64"
+       },
+       {
+        "entity_id": "leaf:panel:39997d31-2d2a-4513-906a-fd0ef72764fe"
+       },
+       {
+        "entity_id": "leaf:panel:a6429a28-ef40-4eaf-bbcc-222c3ee48533"
+       },
+       {
+        "entity_id": "leaf:panel:db76d55c-a68b-4754-8aa2-e5d43d5486cd"
+       },
+       {
+        "entity_id": "leaf:panel:2904b4f5-6d23-47f3-94ca-cfd4a80a47e6"
+       },
+       {
+        "entity_id": "leaf:panel:78d20b13-3d77-4041-9865-829e2a72f084"
+       },
+       {
+        "entity_id": "leaf:panel:c2f065ba-a43a-4119-89a6-d652638f9622"
+       },
+       {
+        "entity_id": "leaf:panel:f70b7061-e839-4bf9-92ad-facd9e6c61e3"
+       },
+       {
+        "entity_id": "leaf:panel:c9bc2410-6ecf-4db3-b4da-9baac5c04867"
+       },
+       {
+        "entity_id": "leaf:panel:e958942a-02d7-4c11-b98f-399e4a158d2e"
+       },
+       {
+        "entity_id": "leaf:panel:8199390f-a3f5-46a6-9cae-a125814d69a1"
+       },
+       {
+        "entity_id": "leaf:panel:9f0c40ff-85d0-4337-ae4c-9fec0e8d4ddf"
+       },
+       {
+        "entity_id": "leaf:panel:90f81edd-4756-421e-914f-66ba0f190eb6"
+       },
+       {
+        "entity_id": "leaf:panel:ea5e1944-af97-4ef6-b8db-770b0fd29fb0"
+       },
+       {
+        "entity_id": "leaf:panel:81ad8930-0463-4478-8e08-2b68e5d16c30"
+       },
+       {
+        "entity_id": "leaf:panel:0fc4788f-03bc-48d7-939f-163fd12b0f92"
+       },
+       {
+        "entity_id": "leaf:panel:10c2aaaa-dcb6-456b-8480-1d8c62084a50"
+       },
+       {
+        "entity_id": "leaf:panel:d005c22f-0807-4b07-97a2-63a6b47bef63"
+       },
+       {
+        "entity_id": "leaf:panel:e8a36938-f7f7-4692-baff-208a5ed556ae"
+       },
+       {
+        "entity_id": "leaf:panel:ab8d6c6a-6d61-4a2c-aea2-7d9f26265576"
+       },
+       {
+        "entity_id": "leaf:panel:002a6486-0145-45c4-a3b7-51e6633ebc78"
+       },
+       {
+        "entity_id": "leaf:panel:22769408-7af4-4974-a464-634e8cefb775"
+       },
+       {
+        "entity_id": "leaf:panel:d46dc2fb-0ac8-469b-8cc6-a97b25181505"
+       },
+       {
+        "entity_id": "leaf:panel:6dbdfeaf-fda9-4bd6-9d39-bc71f54b9580"
+       },
+       {
+        "entity_id": "leaf:panel:0a057068-bbeb-45b2-b1bf-ad39a0d65aac"
+       },
+       {
+        "entity_id": "leaf:panel:18875ae7-6094-41eb-833d-0bfd40f892d4"
+       },
+       {
+        "entity_id": "leaf:panel:ca19ad0d-1bf3-4f73-8a78-12c0326972ed"
+       },
+       {
+        "entity_id": "leaf:panel:1fe44aa2-64c3-413e-84bd-3961db21cbaf"
+       },
+       {
+        "entity_id": "leaf:panel:4e2e12c3-24d0-4ed7-bc37-7415eab2aced"
+       },
+       {
+        "entity_id": "leaf:panel:0c9f7f18-b4ef-4688-b3af-fa4ac53fadfb"
+       },
+       {
+        "entity_id": "leaf:panel:352741cb-fad4-4e72-867d-874c667b9924"
+       },
+       {
+        "entity_id": "leaf:panel:39e802a9-43b1-45ec-b3a4-dd660f1e6ef4"
+       },
+       {
+        "entity_id": "leaf:panel:48d7949d-09e6-44a2-b7a0-acf958f4a801"
+       },
+       {
+        "entity_id": "leaf:panel:2ed9f9f4-0c48-431b-a0a8-82f498ccd101"
+       },
+       {
+        "entity_id": "leaf:panel:8ff4f7a8-3f07-4a19-8812-ffe446862ca9"
+       },
+       {
+        "entity_id": "leaf:panel:0a2b4f72-5ce9-4143-87eb-db7b07a3779a"
+       },
+       {
+        "entity_id": "leaf:panel:01f5d1f8-ecea-43ef-8b92-d28110c944fc"
+       },
+       {
+        "entity_id": "leaf:panel:04d8251a-9a7f-4f13-bf27-8fed7649f640"
+       },
+       {
+        "entity_id": "leaf:panel:22d6f7e0-7eb4-4d76-a5e1-2bd5e2baeb40"
+       },
+       {
+        "entity_id": "leaf:panel:096657e3-8b51-4e5d-9d4a-ca23c82a6888"
+       },
+       {
+        "entity_id": "leaf:panel:18f4b086-a5c9-44a4-9685-7adec0c28c04"
+       },
+       {
+        "entity_id": "leaf:panel:10ac22b9-cd42-4bfc-b1d5-4c8c752869de"
+       },
+       {
+        "entity_id": "leaf:panel:93f922de-fc2d-4491-8adf-846f80028915"
+       },
+       {
+        "entity_id": "leaf:panel:14bb7dad-99dd-4feb-8765-e7816f6f7df3"
+       },
+       {
+        "entity_id": "leaf:panel:4fa8b882-9d42-4938-a5f8-6074bb9e002f"
+       },
+       {
+        "entity_id": "leaf:panel:634bfaa4-068a-4245-aad1-032fcd701306"
+       },
+       {
+        "entity_id": "leaf:panel:9304a28f-6b64-47e9-8645-a30d8da3a3db"
+       },
+       {
+        "entity_id": "leaf:panel:7b044319-5c51-40d4-a4c3-d697c10155dc"
+       },
+       {
+        "entity_id": "leaf:panel:70edf90a-ed11-43be-bfbc-b3a75a8b88b9"
+       },
+       {
+        "entity_id": "leaf:panel:4cdf9f9c-6a84-43f7-aa56-82015265e113"
+       },
+       {
+        "entity_id": "leaf:panel:207ce00b-97d9-4279-8ecb-a36ba126f4e5"
+       },
+       {
+        "entity_id": "leaf:panel:2ef1b5d4-75bf-4fb3-9d64-64ead76fc1c3"
+       },
+       {
+        "entity_id": "leaf:panel:653dd02e-6f18-4616-a5b7-ba7f9d4a1ea1"
+       },
+       {
+        "entity_id": "leaf:panel:e4bb0e95-4b95-49a6-b020-1ebb291a4861"
+       },
+       {
+        "entity_id": "leaf:panel:42169482-325d-49a2-9177-6599d88b8509"
+       },
+       {
+        "entity_id": "leaf:panel:227c6b2d-216c-4915-96ac-e2e9874200b3"
+       },
+       {
+        "entity_id": "leaf:panel:58b541d4-e600-4d89-9f66-ab53f0fe374e"
+       },
+       {
+        "entity_id": "leaf:panel:adb49857-1f90-4218-8c7c-e6f01bd00bfc"
+       },
+       {
+        "entity_id": "leaf:panel:d3c3b179-9a11-4965-b1d8-67aaea1ca060"
+       },
+       {
+        "entity_id": "leaf:panel:e248b516-6b1a-4df4-9d4c-4d65641d7849"
+       },
+       {
+        "entity_id": "leaf:panel:abdead0c-190f-41e4-979e-5a698c7671dc"
+       },
+       {
+        "entity_id": "leaf:panel:b12f4d4d-6de9-49d0-a406-796fe84758d3"
+       },
+       {
+        "entity_id": "leaf:panel:679a672a-8f52-4c37-bf1a-4649f785260c"
+       },
+       {
+        "entity_id": "leaf:panel:30f0fc9a-efed-43b0-98c2-861ccbaf1444"
+       },
+       {
+        "entity_id": "leaf:panel:c1e40aa5-12a3-4b16-aab1-169627582667"
+       },
+       {
+        "entity_id": "leaf:panel:cd04be77-c992-43ec-a87f-389c2756503d"
+       },
+       {
+        "entity_id": "leaf:panel:71efb8a2-10c0-4cf6-8253-c4b17987d63b"
+       },
+       {
+        "entity_id": "leaf:panel:69323fcc-5e06-495d-b417-5fe8d33a247c"
+       },
+       {
+        "entity_id": "leaf:panel:6ebac2b9-2b6b-482a-8c2e-03c53520b55a"
+       },
+       {
+        "entity_id": "leaf:panel:1d468a02-b0de-40ae-8455-84363f65820c"
+       },
+       {
+        "entity_id": "leaf:panel:9b4c51e3-d8b2-4f3d-912b-7be312263fa9"
+       },
+       {
+        "entity_id": "leaf:panel:fe484d5d-dbcf-45c0-bdd3-21fef299d44a"
+       },
+       {
+        "entity_id": "leaf:panel:67b2e07d-f075-4b52-abd1-c98a6ebc689b"
+       },
+       {
+        "entity_id": "leaf:panel:b3e98ee8-bd31-4a3d-bcee-dc9ca664a95f"
+       },
+       {
+        "entity_id": "leaf:panel:6395e862-29ce-4b27-8e79-445a6a19db8f"
+       },
+       {
+        "entity_id": "leaf:panel:cbe4942c-214a-4e57-8ac1-81d01282e9ce"
+       },
+       {
+        "entity_id": "leaf:panel:b0f4b006-e522-4f17-b74c-37a38588f327"
+       },
+       {
+        "entity_id": "leaf:panel:a235d867-3754-4765-b90c-eee8d0658ffb"
+       },
+       {
+        "entity_id": "leaf:panel:6e1ad043-9ce5-411a-a92d-5f141e764ce8"
+       },
+       {
+        "entity_id": "leaf:panel:d6756a34-50d7-4692-856b-9975f32bb3f9"
+       },
+       {
+        "entity_id": "leaf:panel:fb14ebc2-15db-4097-84bf-1685fbe1f2fb"
+       },
+       {
+        "entity_id": "leaf:panel:46483d35-9a19-4592-8bf0-e0fb10c0a1d5"
+       },
+       {
+        "entity_id": "leaf:panel:2b50a6e8-d961-4ea1-be6e-a1c9cff7a7fe"
+       },
+       {
+        "entity_id": "leaf:panel:15aa355d-7985-4c08-9567-a052bf596243"
+       },
+       {
+        "entity_id": "leaf:panel:e4a6de96-6dcd-45f6-94d7-c491785720b9"
+       },
+       {
+        "entity_id": "leaf:panel:3df2685c-b789-4f8c-a775-a84ef3db2ade"
+       },
+       {
+        "entity_id": "leaf:panel:6c742700-b478-44c3-adbc-87baf1f4439a"
+       },
+       {
+        "entity_id": "leaf:panel:675851d1-5086-46c1-8331-459a4eccc43e"
+       },
+       {
+        "entity_id": "leaf:panel:2fccd0b4-46f6-4479-a755-9d79e970e3b9"
+       },
+       {
+        "entity_id": "leaf:panel:c9251326-b259-4c23-911c-d47b4da0585b"
+       },
+       {
+        "entity_id": "leaf:panel:203a415e-09cf-4379-ab03-3b0f6f72d510"
+       },
+       {
+        "entity_id": "leaf:panel:736127bc-c021-4442-8a58-17c1fd97561b"
+       },
+       {
+        "entity_id": "leaf:panel:b7ae7df8-5ad7-4f59-82d8-b1e71dafa1c6"
+       },
+       {
+        "entity_id": "leaf:panel:215a9213-f868-4743-ad00-327884da6233"
+       },
+       {
+        "entity_id": "leaf:panel:c29d9b74-e4e8-4a81-bd27-e5190949400b"
+       },
+       {
+        "entity_id": "leaf:panel:35324426-6d54-4e49-a52d-679a7de1532c"
+       },
+       {
+        "entity_id": "leaf:panel:4adc2fde-b304-446f-9f9a-16d9c8940c82"
+       },
+       {
+        "entity_id": "leaf:panel:c3e3320e-1cce-42d9-a257-80cc59539fcc"
+       },
+       {
+        "entity_id": "leaf:panel:250a41f5-b91c-4905-b2af-ebec00d58d44"
+       },
+       {
+        "entity_id": "leaf:panel:26f60c37-ecde-4376-a906-e763abeef939"
+       },
+       {
+        "entity_id": "leaf:panel:682b89a8-4a55-48e5-a24d-94ee4d1628f9"
+       },
+       {
+        "entity_id": "leaf:panel:339e14b1-ee6a-48ce-aab9-1a48f79a95b1"
+       },
+       {
+        "entity_id": "leaf:panel:05b77ebf-f863-4c13-ad94-cc99793f70ff"
+       },
+       {
+        "entity_id": "leaf:panel:f621e172-10f4-4c99-9e5e-7764c91393f8"
+       },
+       {
+        "entity_id": "leaf:panel:3e85d524-46fd-4ae9-832c-91e37bf57012"
+       },
+       {
+        "entity_id": "leaf:panel:76f4f58e-ada3-4878-a0e8-5d0e93dc12d7"
+       },
+       {
+        "entity_id": "leaf:panel:9bcfb5df-aea7-4c1f-a20b-f706312e7813"
+       },
+       {
+        "entity_id": "leaf:panel:009754cd-3472-4f9a-a56c-f775735ce8c6"
+       },
+       {
+        "entity_id": "leaf:panel:3c5497f4-0658-4737-8d09-0f3d86a611b4"
+       },
+       {
+        "entity_id": "leaf:panel:5970e63f-7ca6-4956-ab9d-911773c63199"
+       },
+       {
+        "entity_id": "leaf:panel:3aeb90f9-23c1-4620-b674-c1317f7c7c67"
+       },
+       {
+        "entity_id": "leaf:panel:11a87e4e-9078-4c64-bd3d-017f89686ea1"
+       },
+       {
+        "entity_id": "leaf:panel:1e403e3c-f0c1-4d90-abb0-e3368c81792c"
+       },
+       {
+        "entity_id": "leaf:panel:7110b35a-efa9-458b-88e4-84cf6c1a5ec1"
+       },
+       {
+        "entity_id": "leaf:panel:7897a581-5007-4bfd-ac9a-62151dd7699e"
+       },
+       {
+        "entity_id": "leaf:panel:0b9c4853-0c5b-42ee-8352-27fa32091fec"
+       },
+       {
+        "entity_id": "leaf:panel:1b451350-788d-4f35-a610-e94c89bec3ef"
+       },
+       {
+        "entity_id": "leaf:panel:9bbe90c1-a4cd-4f6c-ae6b-c2c07720a300"
+       },
+       {
+        "entity_id": "leaf:panel:86b07865-8c54-4ed8-a585-dd683cc389c1"
+       },
+       {
+        "entity_id": "leaf:panel:605d32e7-68b0-409e-893b-b5f7c3d4544d"
+       },
+       {
+        "entity_id": "leaf:panel:6a62dfff-e016-4e4a-ab14-032e4d16a53b"
+       },
+       {
+        "entity_id": "leaf:panel:2ddfc88a-aeb4-4170-8eb5-85bc9098283a"
+       },
+       {
+        "entity_id": "leaf:panel:8b55113c-5008-4eb2-a5a9-ebe80800bac9"
+       },
+       {
+        "entity_id": "leaf:panel:01658871-1e3f-4d8f-842c-ed7e050ba435"
+       },
+       {
+        "entity_id": "leaf:panel:9622a32b-8533-4d48-8e68-67b748226c63"
+       },
+       {
+        "entity_id": "leaf:panel:6f3caede-76a0-457e-a8d2-cf1bee5ddf68"
+       },
+       {
+        "entity_id": "leaf:panel:788aadc1-fa47-4dc4-aa08-2358524094fb"
+       },
+       {
+        "entity_id": "leaf:panel:80523751-d2d5-4976-891a-aa2615d9b724"
+       },
+       {
+        "entity_id": "leaf:panel:c086e636-df70-42dc-8e54-a78abb8ab749"
+       },
+       {
+        "entity_id": "leaf:panel:97d3f64f-2e24-41b8-b1b4-d13c3283d798"
+       },
+       {
+        "entity_id": "leaf:panel:283d0e16-4286-42c5-ad89-6698dd00813e"
+       },
+       {
+        "entity_id": "leaf:panel:05ca114b-181e-4a95-9744-592cafa25dec"
+       },
+       {
+        "entity_id": "leaf:panel:f9b1d88d-9b23-472e-a608-97636ddf55ad"
+       },
+       {
+        "entity_id": "leaf:panel:5b2b9d63-f6f3-4b50-8117-177cbb05bee5"
+       },
+       {
+        "entity_id": "leaf:panel:f58aa858-9212-4d4e-b290-f83b7a70a4a7"
+       },
+       {
+        "entity_id": "leaf:panel:9f57f43a-16aa-4641-94bb-923269b48185"
+       },
+       {
+        "entity_id": "leaf:panel:e31a45fa-4053-4552-a9f2-7258530a459c"
+       },
+       {
+        "entity_id": "leaf:panel:ec7ea70b-4f57-437c-839f-35b36e0879d2"
+       },
+       {
+        "entity_id": "leaf:panel:1fb2d08c-3b35-45cc-a37d-c6aab597f7de"
+       },
+       {
+        "entity_id": "leaf:panel:e36ca90e-7f28-43e4-97ca-2e3fda6dc709"
+       },
+       {
+        "entity_id": "leaf:panel:8af15d83-20be-47da-b000-7cf31998b315"
+       },
+       {
+        "entity_id": "leaf:panel:3f40bd7c-4b06-48f1-9630-36fc51367f3a"
+       },
+       {
+        "entity_id": "leaf:panel:a64754fa-8ac7-42c0-9f2f-62b86727f96b"
+       },
+       {
+        "entity_id": "leaf:panel:08afefd5-48fd-4022-8cb9-4b14759ff344"
+       },
+       {
+        "entity_id": "leaf:panel:737f24ca-d8cf-4b2e-8c0f-8f3a41661aaa"
+       },
+       {
+        "entity_id": "leaf:panel:1a9a6d1d-27d6-4914-8844-5ea90f70a195"
+       },
+       {
+        "entity_id": "leaf:panel:5a8c9d00-0152-42ad-a06e-6d5b852b9fef"
+       },
+       {
+        "entity_id": "leaf:panel:f0e8ad4f-12bf-470d-a301-b00074b67c57"
+       },
+       {
+        "entity_id": "leaf:panel:50f33304-2330-41de-900f-16d9d0f28a62"
+       },
+       {
+        "entity_id": "leaf:panel:0e459278-3096-418b-b0f8-b424837cf562"
+       },
+       {
+        "entity_id": "leaf:panel:e0a49141-51f6-4d50-b64d-e2176bdc6853"
+       },
+       {
+        "entity_id": "leaf:panel:c02924a8-e749-457b-b3c4-2f3f5dd8fdfb"
+       },
+       {
+        "entity_id": "leaf:panel:f5aa9772-588a-4c3f-a02d-8a0fe5e38934"
+       },
+       {
+        "entity_id": "leaf:panel:943390c4-ddd3-4d20-a2d9-ec554c305a4b"
+       },
+       {
+        "entity_id": "leaf:panel:b3f1af5d-1c12-4648-ae15-8a9eaee1998f"
+       },
+       {
+        "entity_id": "leaf:panel:4c18bf91-f0c2-4247-b82f-2df1558245f3"
+       },
+       {
+        "entity_id": "leaf:panel:2a3bde40-4baa-409c-81a9-0d78422dbd03"
+       },
+       {
+        "entity_id": "leaf:panel:936cc11f-7c9a-487b-b7c4-8c7bfddc4e83"
+       },
+       {
+        "entity_id": "leaf:panel:e12154cf-f026-451d-a02d-5f87d9a3b2db"
+       },
+       {
+        "entity_id": "leaf:panel:32f50228-5fe0-48f4-b2db-41f130d5f82a"
+       },
+       {
+        "entity_id": "leaf:panel:fbca1483-7ebf-4ef8-bcc1-f0fda30fc87a"
+       },
+       {
+        "entity_id": "leaf:panel:5d972155-e208-43a7-b985-29e31ac877d0"
+       },
+       {
+        "entity_id": "leaf:panel:4888bc36-4e70-4e63-957a-0c07f2658a16"
+       },
+       {
+        "entity_id": "leaf:panel:a0ecb242-9a99-4287-9ba7-50620a3a5075"
+       },
+       {
+        "entity_id": "leaf:panel:a1ff1e32-28b5-41ce-829b-4bb69f792fcb"
+       },
+       {
+        "entity_id": "leaf:panel:9902c73c-af38-40f1-bdce-e7bc349a7d69"
+       },
+       {
+        "entity_id": "leaf:panel:699229b3-39d9-4115-bd17-c0ace02729ce"
+       },
+       {
+        "entity_id": "leaf:panel:d949c781-1c4d-42db-a76c-f306315700b0"
+       },
+       {
+        "entity_id": "leaf:panel:8e517e2d-47d5-43e7-8a1e-5cfa295379dd"
+       },
+       {
+        "entity_id": "leaf:panel:eaff4709-f2bd-412a-b932-f78c4243c5ca"
+       },
+       {
+        "entity_id": "leaf:panel:11f430a1-9919-426f-a7fa-3d07d5fc0cad"
+       },
+       {
+        "entity_id": "leaf:panel:d43bc5f9-3b4e-4adc-a593-ecdc76153343"
+       },
+       {
+        "entity_id": "leaf:panel:134a28ab-af8e-4b7f-98b7-2bdc33cd0d6b"
+       },
+       {
+        "entity_id": "leaf:panel:4dcbbc44-04d3-4b6e-b32a-58f8ba39343f"
+       },
+       {
+        "entity_id": "leaf:panel:c3159cee-e98e-4cf4-9ff7-cd19a7a0f043"
+       },
+       {
+        "entity_id": "leaf:panel:20ab9dfa-989e-4a72-aad4-c38548cc81fb"
+       },
+       {
+        "entity_id": "leaf:panel:c4008d18-e7f9-4826-96ec-7b33a63c9811"
+       },
+       {
+        "entity_id": "leaf:panel:04f940ce-790d-4161-a312-ca7ed44051c9"
+       },
+       {
+        "entity_id": "leaf:panel:ca212da7-b00a-4550-a15b-8ca516ddcfae"
+       },
+       {
+        "entity_id": "leaf:panel:bd44b0fb-52a7-4c86-8e6c-d936dbccdced"
+       },
+       {
+        "entity_id": "leaf:panel:98ed2c78-6c3a-4f7a-845d-910c2ec0d4c0"
+       },
+       {
+        "entity_id": "leaf:panel:f4f6cc94-2e44-44db-b3fa-2314f4ce0cea"
+       },
+       {
+        "entity_id": "leaf:panel:f70f5704-c803-4e2e-a069-a742c5aea898"
+       },
+       {
+        "entity_id": "leaf:panel:28141b2d-75a4-47fa-954b-69d2cf603236"
+       },
+       {
+        "entity_id": "leaf:panel:097c6006-0eaf-4f7f-ad34-5874f292cc85"
+       },
+       {
+        "entity_id": "leaf:panel:fef5c729-c726-40da-beea-8eed6691a717"
+       },
+       {
+        "entity_id": "leaf:panel:b7e0b8dd-2180-408a-98cc-e3ec7e67c766"
+       },
+       {
+        "entity_id": "leaf:panel:e302d5d1-ef8d-4eb2-81f7-62055e69218c"
+       },
+       {
+        "entity_id": "leaf:panel:37e94d53-8334-41e3-8e09-a9464f3b1676"
+       },
+       {
+        "entity_id": "leaf:panel:6675e284-e2d2-46e3-95d7-fffb22700d8b"
+       },
+       {
+        "entity_id": "leaf:panel:a5b4b550-21a2-40ce-ba44-dc94251c4b8d"
+       },
+       {
+        "entity_id": "leaf:panel:ab06e1e2-d7ea-4736-b513-8e08927552bf"
+       },
+       {
+        "entity_id": "leaf:panel:6b969529-b7fa-4f9f-80f7-2e1f30d19d43"
+       }
+      ],
+      "name": "Zone A",
+      "sizing_provenance": null
+     },
+     {
+      "boundaries": null,
+      "elevation": null,
+      "equipment_config": null,
+      "id": {
+       "entity_id": "leaf:zone-el:2313b882-e326-4ae8-a7e4-ee49cbdbf85d"
+      },
+      "membership": [
+       {
+        "entity_id": "leaf:panel:aa6476aa-3aa1-49d0-bb8e-f24eb32a08f1"
+       },
+       {
+        "entity_id": "leaf:panel:e1e131ad-3a40-4295-8e44-db6d3e88fde1"
+       },
+       {
+        "entity_id": "leaf:panel:ecd16caa-e187-4798-b6a5-156ce9f15edf"
+       },
+       {
+        "entity_id": "leaf:panel:8dcc7728-9bfa-48e7-9583-ba908c7306c5"
+       },
+       {
+        "entity_id": "leaf:panel:39ab62af-e2c0-4cc2-826b-e6792487878e"
+       },
+       {
+        "entity_id": "leaf:panel:41dbdbe8-7dfa-4e00-93b5-d148ec5da7d6"
+       },
+       {
+        "entity_id": "leaf:panel:2c1eccac-10dd-4461-be95-7c7f6f77ed0f"
+       },
+       {
+        "entity_id": "leaf:panel:bd7cf786-c833-45f6-8149-d0a336afaf5b"
+       },
+       {
+        "entity_id": "leaf:panel:a478ca37-151a-4475-857a-ede43da1118a"
+       },
+       {
+        "entity_id": "leaf:panel:c3ce1b55-0335-475d-af18-9f884e78ec6b"
+       },
+       {
+        "entity_id": "leaf:panel:ccce6287-d6da-4ec3-8100-f6c05b70bffc"
+       },
+       {
+        "entity_id": "leaf:panel:77d63421-8094-4470-92b6-4000a90a67ce"
+       },
+       {
+        "entity_id": "leaf:panel:4b81f24d-88c1-4030-84b3-c9a8f94b8f08"
+       },
+       {
+        "entity_id": "leaf:panel:25286cf3-5d05-4384-94fe-ccd2b91c8611"
+       },
+       {
+        "entity_id": "leaf:panel:118dbd81-c249-4fd0-8ed6-4c3b2eefc305"
+       },
+       {
+        "entity_id": "leaf:panel:8e887208-f671-42b3-9666-9baf07a78799"
+       },
+       {
+        "entity_id": "leaf:panel:b8c2c7c9-da98-46f4-b606-7a172b6b3aab"
+       },
+       {
+        "entity_id": "leaf:panel:a6da8117-5b80-4741-ae02-769d9159b372"
+       },
+       {
+        "entity_id": "leaf:panel:cde62640-f142-43df-87f3-edd1c250d12d"
+       },
+       {
+        "entity_id": "leaf:panel:f78ad522-6531-465a-9d1e-5de1026c9213"
+       },
+       {
+        "entity_id": "leaf:panel:243a787b-cd95-4ea1-8dc0-f5cc9b833811"
+       },
+       {
+        "entity_id": "leaf:panel:3537f08b-59eb-4723-a886-ac80847f94be"
+       },
+       {
+        "entity_id": "leaf:panel:de0c141d-bc5a-442f-bd2d-e979e603e6c1"
+       },
+       {
+        "entity_id": "leaf:panel:b1250403-e159-4188-94e6-7a003f6953b4"
+       },
+       {
+        "entity_id": "leaf:panel:a8bff7a0-6126-49b0-a5a3-60b2dc3e4dda"
+       },
+       {
+        "entity_id": "leaf:panel:2777ecf9-a6d5-4abd-9b03-38c4c1f091ab"
+       },
+       {
+        "entity_id": "leaf:panel:d31996d7-d128-4988-8def-b4638d146d24"
+       },
+       {
+        "entity_id": "leaf:panel:26d927d7-8a45-453b-9e09-4e92ee4af6fd"
+       },
+       {
+        "entity_id": "leaf:panel:c1b136ab-6a7e-4aa3-90bc-d45673583173"
+       },
+       {
+        "entity_id": "leaf:panel:52feab89-ebf8-4854-a9b8-a70b4259e8c5"
+       },
+       {
+        "entity_id": "leaf:panel:71cad0a6-4322-4200-b7b3-04665d99bef7"
+       },
+       {
+        "entity_id": "leaf:panel:43eb361c-d500-41b0-b1cc-5a8db95b8b98"
+       },
+       {
+        "entity_id": "leaf:panel:d00756c4-fb2a-4a38-b141-52d3512c44b1"
+       },
+       {
+        "entity_id": "leaf:panel:dd43127e-c576-4e28-a663-9f47e3073a0d"
+       },
+       {
+        "entity_id": "leaf:panel:1e959343-94c0-44dd-b55a-ed14e20fd786"
+       },
+       {
+        "entity_id": "leaf:panel:23501369-4d5e-4d6b-9dca-1a23cd49abe4"
+       },
+       {
+        "entity_id": "leaf:panel:c1798f9a-3217-4f1b-8973-5acf0f6abd0c"
+       },
+       {
+        "entity_id": "leaf:panel:161c17b1-6ee9-4f32-ae55-0d1ef04f14c2"
+       },
+       {
+        "entity_id": "leaf:panel:75871e24-f543-4d8e-a59c-2fdd839d41e0"
+       },
+       {
+        "entity_id": "leaf:panel:6379bb32-e9d3-4007-9bdd-5a114f348f81"
+       },
+       {
+        "entity_id": "leaf:panel:a9ee5c15-c933-4d45-b9aa-d53ac2589f27"
+       },
+       {
+        "entity_id": "leaf:panel:cade440d-786e-46f4-b057-f92a45164e8c"
+       },
+       {
+        "entity_id": "leaf:panel:f2742912-eb95-4bd1-9496-893b7f95d7db"
+       },
+       {
+        "entity_id": "leaf:panel:88301c37-ee75-4ab7-9293-57f3e6b0ece1"
+       },
+       {
+        "entity_id": "leaf:panel:83716f71-2d99-4aca-8c47-0abb2054b335"
+       },
+       {
+        "entity_id": "leaf:panel:35020f76-8925-4821-b4c3-361c7481fb33"
+       },
+       {
+        "entity_id": "leaf:panel:0f707b6c-e19d-4ea0-93c6-1120f72afd0b"
+       },
+       {
+        "entity_id": "leaf:panel:8a2d7ef6-e8d0-400f-9ed3-40510f357825"
+       },
+       {
+        "entity_id": "leaf:panel:b87c5a8b-c6f2-4cee-9f89-1953c4672868"
+       },
+       {
+        "entity_id": "leaf:panel:7b2454e6-95c0-4448-a214-e555c92d97b9"
+       },
+       {
+        "entity_id": "leaf:panel:e21a2fca-d6d7-464e-a363-7ccf9a9d4304"
+       },
+       {
+        "entity_id": "leaf:panel:d0bc0e5c-5ec9-411d-aea7-beba898f7c53"
+       },
+       {
+        "entity_id": "leaf:panel:16ebc3d4-ae16-4495-b9db-89da2e7e0d27"
+       },
+       {
+        "entity_id": "leaf:panel:bcc5f7da-2f6d-45fb-a35a-ce961f3fa444"
+       },
+       {
+        "entity_id": "leaf:panel:787d6911-ad2c-49fc-8ed7-3a1ae336ff10"
+       },
+       {
+        "entity_id": "leaf:panel:3802de85-35f2-4053-b3e4-b6e38c964dfa"
+       },
+       {
+        "entity_id": "leaf:panel:9f2bf53e-2cbd-4a97-a0a8-fbdbf703d690"
+       },
+       {
+        "entity_id": "leaf:panel:8c60eb12-1f48-4027-8f9e-d66533393238"
+       },
+       {
+        "entity_id": "leaf:panel:8b8ec582-16c5-466f-9e3b-809ba04353e3"
+       },
+       {
+        "entity_id": "leaf:panel:38e7999d-3004-4b61-b3fb-a0f53350cf3d"
+       },
+       {
+        "entity_id": "leaf:panel:e013ade0-248a-4bbd-b0d4-1c34db34fc64"
+       },
+       {
+        "entity_id": "leaf:panel:5b0bb34c-e8d6-4b2d-9273-45c00b1d2849"
+       },
+       {
+        "entity_id": "leaf:panel:5904033f-b7e0-41d2-b3ca-1f8c56679d34"
+       },
+       {
+        "entity_id": "leaf:panel:8fd3261d-99f7-4223-b7dc-1221690e820f"
+       },
+       {
+        "entity_id": "leaf:panel:50fd584f-0420-49fd-b6bf-13ed1d5f20f9"
+       },
+       {
+        "entity_id": "leaf:panel:389c37b0-0df3-4125-9a62-7287ccc0f5e7"
+       },
+       {
+        "entity_id": "leaf:panel:fd7bafe7-ecb5-4b6a-a92d-264a2c8e143e"
+       },
+       {
+        "entity_id": "leaf:panel:99d71334-e8fd-4442-aec7-365fee0a4a90"
+       },
+       {
+        "entity_id": "leaf:panel:06ae4760-2400-4f66-9e50-afe27c6d094a"
+       },
+       {
+        "entity_id": "leaf:panel:d1b16db7-7a60-49e7-9074-ef91d5b62871"
+       },
+       {
+        "entity_id": "leaf:panel:e6898fe9-2ea6-4833-ac48-a99730255e55"
+       },
+       {
+        "entity_id": "leaf:panel:e7a0c356-943c-4a50-a0f0-94f4394da17a"
+       },
+       {
+        "entity_id": "leaf:panel:7a5c4f74-f3ca-482f-9a42-3882a2cc8e54"
+       },
+       {
+        "entity_id": "leaf:panel:77e69288-ee12-4373-a41a-6e14af213b46"
+       },
+       {
+        "entity_id": "leaf:panel:7dc3e4d5-82e6-4674-9ca0-9f440f0b9d0b"
+       },
+       {
+        "entity_id": "leaf:panel:83f0a742-5a88-4723-b3f1-4ce8692468a5"
+       },
+       {
+        "entity_id": "leaf:panel:3e7da083-47fc-456a-8d01-768280673143"
+       },
+       {
+        "entity_id": "leaf:panel:89ab7ac7-e67c-4c17-ba14-55de8932f3fc"
+       },
+       {
+        "entity_id": "leaf:panel:c370e087-c5e3-4cef-96a9-d5f088532a47"
+       },
+       {
+        "entity_id": "leaf:panel:67eb09de-8dbd-417c-936d-1d7d5c2bad36"
+       },
+       {
+        "entity_id": "leaf:panel:8c13cad4-4da2-4288-b5dc-5a81aaa603ce"
+       },
+       {
+        "entity_id": "leaf:panel:09956506-68e1-437f-b6d8-76104bddad56"
+       },
+       {
+        "entity_id": "leaf:panel:c78b3519-034d-4431-8284-27b36397144c"
+       },
+       {
+        "entity_id": "leaf:panel:71e6c802-3954-42e3-8573-580e59741cf0"
+       },
+       {
+        "entity_id": "leaf:panel:e208f51a-2a62-4d1f-90fd-0e7befdeadbe"
+       },
+       {
+        "entity_id": "leaf:panel:f4befced-19f9-4f0d-945e-90afca569667"
+       },
+       {
+        "entity_id": "leaf:panel:b668b782-d844-4b03-a3ac-c0732c0cb270"
+       },
+       {
+        "entity_id": "leaf:panel:b81cccae-3d93-41ab-a7a2-48c204d2c914"
+       },
+       {
+        "entity_id": "leaf:panel:c7dfec08-6db4-4c75-8db4-43b973da3155"
+       },
+       {
+        "entity_id": "leaf:panel:ca6db46f-6470-49b4-aa45-29de6c29a18f"
+       },
+       {
+        "entity_id": "leaf:panel:89fa706e-ff52-4dcd-9037-0e1d9db362eb"
+       },
+       {
+        "entity_id": "leaf:panel:1182ce34-d1aa-4bf7-91b3-59fe51b276e0"
+       },
+       {
+        "entity_id": "leaf:panel:0d989f9a-141f-47f3-be3e-f2a53d0e13dc"
+       },
+       {
+        "entity_id": "leaf:panel:acbd4561-a57d-4c0c-9376-6387721beaab"
+       },
+       {
+        "entity_id": "leaf:panel:73f3b4d8-d4ab-4077-9b09-c2f0c61d43f3"
+       },
+       {
+        "entity_id": "leaf:panel:fa4707c0-d60a-4a59-9f81-fa9b402b6097"
+       },
+       {
+        "entity_id": "leaf:panel:e60709f7-529e-4ec1-ab6b-3d2f56421c4f"
+       },
+       {
+        "entity_id": "leaf:panel:3ad167d3-79c1-4ae0-951c-ec3e0f415b97"
+       },
+       {
+        "entity_id": "leaf:panel:bb2a4372-a2bf-4a82-9698-888c2e1fdb58"
+       },
+       {
+        "entity_id": "leaf:panel:15be10d8-1451-4c8d-a4de-d9f8ab33369b"
+       },
+       {
+        "entity_id": "leaf:panel:6e1ceae2-5d77-4b15-9319-a7dcca736089"
+       },
+       {
+        "entity_id": "leaf:panel:09e5a886-8096-4c23-b598-ca24a6ecce67"
+       },
+       {
+        "entity_id": "leaf:panel:8e8a44df-5488-4f32-85ed-13421719aec2"
+       },
+       {
+        "entity_id": "leaf:panel:e3249409-8666-4802-b7ab-e7c73f46aade"
+       },
+       {
+        "entity_id": "leaf:panel:94d41432-79b7-42e4-9cbb-3071bea0f44b"
+       },
+       {
+        "entity_id": "leaf:panel:dda41bb8-a48f-4f5b-aecb-3e9ca8b509fe"
+       },
+       {
+        "entity_id": "leaf:panel:daa407e0-edd0-43d4-8dd4-1def43af9b8b"
+       },
+       {
+        "entity_id": "leaf:panel:aaffaff8-a1f1-4271-92dc-f4c6e7339a67"
+       },
+       {
+        "entity_id": "leaf:panel:9935d374-f706-4335-b315-7feb99962681"
+       },
+       {
+        "entity_id": "leaf:panel:201b207d-4152-4b8e-8a3a-1ae1c34eed9a"
+       },
+       {
+        "entity_id": "leaf:panel:7dfa9d12-3ad3-4476-94e8-e67a3669744f"
+       },
+       {
+        "entity_id": "leaf:panel:b923f6ef-97d2-455c-9a08-93ebbc563d9c"
+       },
+       {
+        "entity_id": "leaf:panel:51a89d03-257f-4037-bc9e-a31dc77b5d34"
+       },
+       {
+        "entity_id": "leaf:panel:39c67e97-c562-4151-971a-bde948362147"
+       },
+       {
+        "entity_id": "leaf:panel:09e010c4-f719-4c28-88da-bbdff5d836b8"
+       },
+       {
+        "entity_id": "leaf:panel:864e39ca-90f6-4176-9762-1245308aceb0"
+       },
+       {
+        "entity_id": "leaf:panel:7dafd704-462a-4975-a72a-1b83d0f5b9aa"
+       },
+       {
+        "entity_id": "leaf:panel:9157ae42-c518-4853-a31b-c1ff42594d6d"
+       },
+       {
+        "entity_id": "leaf:panel:8d893381-b85a-4081-88c8-5e8b2cf3c655"
+       },
+       {
+        "entity_id": "leaf:panel:1c3edaa0-82e8-4975-bd3b-0de6819b66a3"
+       },
+       {
+        "entity_id": "leaf:panel:36a0e5aa-fb1d-4459-a96b-f12e4b14eb15"
+       },
+       {
+        "entity_id": "leaf:panel:94095f44-3903-4a9b-8ccf-dcb8b41beac3"
+       },
+       {
+        "entity_id": "leaf:panel:fcd3a5fa-27b1-43a6-82d3-3cd13c5aeff7"
+       },
+       {
+        "entity_id": "leaf:panel:5c40ad13-03fb-49be-ab44-c85818418fbd"
+       },
+       {
+        "entity_id": "leaf:panel:31b366c8-e499-4d01-8515-764c69691c13"
+       },
+       {
+        "entity_id": "leaf:panel:23f44bd5-42e7-4ae4-be76-5eac17219f13"
+       },
+       {
+        "entity_id": "leaf:panel:a773a51f-4fc0-4114-8bd8-72a22b0f6abe"
+       },
+       {
+        "entity_id": "leaf:panel:0feb4ce2-c748-4296-9578-24e85d494e9d"
+       },
+       {
+        "entity_id": "leaf:panel:e87cb14b-a5ce-4dee-94f2-cd91dfbf33d0"
+       },
+       {
+        "entity_id": "leaf:panel:2587d880-b075-470f-ae8b-9be47418369b"
+       },
+       {
+        "entity_id": "leaf:panel:e76ddfda-0367-4dfb-b52a-f3d78a147868"
+       },
+       {
+        "entity_id": "leaf:panel:2a9b9b37-a2c8-48a4-a1b8-918c691fa313"
+       },
+       {
+        "entity_id": "leaf:panel:31aad9f8-b43d-4c3d-9df4-7d539a76bcf0"
+       },
+       {
+        "entity_id": "leaf:panel:fedb8075-beef-4b7e-a780-e3041f86431a"
+       },
+       {
+        "entity_id": "leaf:panel:42224faf-de7a-4d29-80e7-96b4b25e485e"
+       },
+       {
+        "entity_id": "leaf:panel:d20c08db-5e87-4270-a5ea-2b364668e4d2"
+       },
+       {
+        "entity_id": "leaf:panel:821ff86d-6d13-43e4-99aa-fc83130fa3ad"
+       },
+       {
+        "entity_id": "leaf:panel:8d351f60-dd18-4e84-bf4f-b96ac854ba64"
+       },
+       {
+        "entity_id": "leaf:panel:ac804ca7-cb19-4820-bfc2-f11d4ec64c89"
+       },
+       {
+        "entity_id": "leaf:panel:2d7ba490-ac4c-43f6-9ca9-08e80541004a"
+       },
+       {
+        "entity_id": "leaf:panel:f81eea8b-f794-424c-8b25-fc951f5eb1c8"
+       },
+       {
+        "entity_id": "leaf:panel:ba311a7f-e2cc-4669-93a1-e9e80265b051"
+       },
+       {
+        "entity_id": "leaf:panel:79cd380a-0afe-4132-abee-595abf29fafd"
+       },
+       {
+        "entity_id": "leaf:panel:317b7e1d-609a-4340-9f35-98df04e90518"
+       },
+       {
+        "entity_id": "leaf:panel:0aa702c1-792a-4645-aed6-2e1342aa4f17"
+       },
+       {
+        "entity_id": "leaf:panel:62ce877a-04d5-4dff-8714-ac94d4010890"
+       },
+       {
+        "entity_id": "leaf:panel:ffd9f845-7be7-4f01-8062-a647051ecf87"
+       },
+       {
+        "entity_id": "leaf:panel:330c9876-6c07-40f3-81d6-e2330cd48585"
+       },
+       {
+        "entity_id": "leaf:panel:ed16d3a1-a16f-420e-97c6-998d7a558e8a"
+       },
+       {
+        "entity_id": "leaf:panel:2801b6be-83aa-43c7-a3db-9dffbd1acd7f"
+       },
+       {
+        "entity_id": "leaf:panel:0903f12c-47cf-4dce-b627-d536fe41c5d4"
+       },
+       {
+        "entity_id": "leaf:panel:279edf5d-9834-4259-81e9-f213ce36d4c2"
+       },
+       {
+        "entity_id": "leaf:panel:79eecafc-a159-4fe1-82c7-26c711111dda"
+       },
+       {
+        "entity_id": "leaf:panel:38948914-ef1c-4e32-8214-df421d1bc8f9"
+       },
+       {
+        "entity_id": "leaf:panel:6c785044-e799-4cf7-b83a-0fe9540d43b6"
+       },
+       {
+        "entity_id": "leaf:panel:ac9942a4-f671-4380-b9e7-09cd50dc24ca"
+       },
+       {
+        "entity_id": "leaf:panel:cc6a9aa3-021f-4f57-be2b-15b3c8691278"
+       },
+       {
+        "entity_id": "leaf:panel:dafd81a4-c539-4c0e-a0ee-cd514e2aa0d9"
+       },
+       {
+        "entity_id": "leaf:panel:e89b6c22-6891-4b04-898b-61217700a40e"
+       },
+       {
+        "entity_id": "leaf:panel:1427d79b-679c-43a5-a599-91fcd4d359fd"
+       },
+       {
+        "entity_id": "leaf:panel:661eb5e6-3e83-4f7a-b3c0-b14ac10f5f66"
+       },
+       {
+        "entity_id": "leaf:panel:c2d08d7b-438a-4aa2-900f-88db156bf156"
+       },
+       {
+        "entity_id": "leaf:panel:8fe72311-ab34-49c3-8d68-11dbc33171ac"
+       },
+       {
+        "entity_id": "leaf:panel:8eb8c902-7abb-4af9-b45c-3163fca3cf7a"
+       },
+       {
+        "entity_id": "leaf:panel:8a53d1d0-0164-4df7-bbc6-35eeed906bfc"
+       },
+       {
+        "entity_id": "leaf:panel:ea2335fe-2ab2-4864-803c-e7403660720f"
+       },
+       {
+        "entity_id": "leaf:panel:fe637c90-02a5-4d24-88c5-63ea43fc51f6"
+       },
+       {
+        "entity_id": "leaf:panel:caeecbd8-3963-4db4-affc-bb6eccb89afb"
+       },
+       {
+        "entity_id": "leaf:panel:ca783614-308b-4b8b-8559-be6954755005"
+       },
+       {
+        "entity_id": "leaf:panel:9a246fa4-2511-48ba-9a41-491bf48569ba"
+       },
+       {
+        "entity_id": "leaf:panel:24c4e30e-234d-4ecb-bc17-f27ccb28ffb2"
+       },
+       {
+        "entity_id": "leaf:panel:cf485ac3-5a4d-48ab-9612-7eb68a295e49"
+       },
+       {
+        "entity_id": "leaf:panel:ec928388-29d3-4f40-b474-48cd39dd1a19"
+       },
+       {
+        "entity_id": "leaf:panel:d441c8a0-ab06-42d8-9f8b-703824ce8a9b"
+       },
+       {
+        "entity_id": "leaf:panel:12f6ce3a-a668-417b-afba-36c28901572f"
+       },
+       {
+        "entity_id": "leaf:panel:6a1e4910-75b8-444d-8dae-730305655830"
+       },
+       {
+        "entity_id": "leaf:panel:2cce41aa-bf0a-4fb1-bf61-1d27812aeb27"
+       },
+       {
+        "entity_id": "leaf:panel:640dd585-7c9a-4df2-8b4d-c0d4c7170119"
+       },
+       {
+        "entity_id": "leaf:panel:275a536c-328b-4d27-b080-861ef3bcd50a"
+       },
+       {
+        "entity_id": "leaf:panel:ba3b6ebe-cc25-46bb-9d25-946140d49f1c"
+       },
+       {
+        "entity_id": "leaf:panel:bea93c54-a975-4c98-a82c-4470b1ea755d"
+       },
+       {
+        "entity_id": "leaf:panel:58385750-1b01-44bc-9918-4ce1bdc5a0c8"
+       },
+       {
+        "entity_id": "leaf:panel:17db6052-5e71-494d-bee3-8604fd1ca38b"
+       },
+       {
+        "entity_id": "leaf:panel:b7effda8-6dd5-458e-97f2-e44bd2ab1b92"
+       },
+       {
+        "entity_id": "leaf:panel:df358d0b-915b-4144-992f-32c86ba4ddfe"
+       },
+       {
+        "entity_id": "leaf:panel:19e3ad3e-d4fa-4ec1-8b5e-9fd96b4ca611"
+       },
+       {
+        "entity_id": "leaf:panel:c414917e-031b-4cb9-83e3-a6bbfefffc0c"
+       },
+       {
+        "entity_id": "leaf:panel:647ae0e2-64e5-42b0-9abf-6a666f1957a4"
+       },
+       {
+        "entity_id": "leaf:panel:69e0655d-a7a5-4ee6-8e0b-9a3138d940d8"
+       },
+       {
+        "entity_id": "leaf:panel:59099013-8f88-448e-8539-fa3b539b9541"
+       },
+       {
+        "entity_id": "leaf:panel:134eb18e-f47d-4f99-8f22-4351f7033d2f"
+       },
+       {
+        "entity_id": "leaf:panel:41988b95-e7f5-4f8b-a39c-dd12d6cb854e"
+       },
+       {
+        "entity_id": "leaf:panel:fe1503fa-cd81-46b2-b8a6-fe94ffe2242a"
+       },
+       {
+        "entity_id": "leaf:panel:bfd77c30-42e1-4873-986d-63bad0375d8a"
+       },
+       {
+        "entity_id": "leaf:panel:b00e315d-4ffd-40d1-9f48-6d9e16651335"
+       },
+       {
+        "entity_id": "leaf:panel:d1052f84-2f87-4b2d-ad3b-d3b68f5e394a"
+       },
+       {
+        "entity_id": "leaf:panel:1bf952cd-37a0-453a-ad8a-8306e36674e1"
+       },
+       {
+        "entity_id": "leaf:panel:92a3998a-b5d2-4338-91f7-4d457e09d243"
+       },
+       {
+        "entity_id": "leaf:panel:e916a4fa-aee2-452f-a257-f2c4e79d47c4"
+       },
+       {
+        "entity_id": "leaf:panel:ae350d11-12ad-4659-b132-19438c5a61aa"
+       },
+       {
+        "entity_id": "leaf:panel:07f52e8e-0a5a-4226-b1d7-85042f4be699"
+       },
+       {
+        "entity_id": "leaf:panel:e8958b3e-99ae-4117-8164-6d98abd831d0"
+       },
+       {
+        "entity_id": "leaf:panel:8c3c5fca-3d79-49d1-8427-fcd80d38ac37"
+       },
+       {
+        "entity_id": "leaf:panel:e7003f66-6543-4676-8f9f-2b1cd1e7bc33"
+       },
+       {
+        "entity_id": "leaf:panel:eaf3b848-2e0a-4fbb-bf8c-63f195e28b6a"
+       },
+       {
+        "entity_id": "leaf:panel:3d857683-c956-4d71-b43f-6481eaf1cc98"
+       },
+       {
+        "entity_id": "leaf:panel:325b90f2-142b-4302-bfbf-a62dea7af90e"
+       },
+       {
+        "entity_id": "leaf:panel:5b927655-bfc3-49f2-a9b9-459ffadf2cf0"
+       },
+       {
+        "entity_id": "leaf:panel:39a4e3b3-b1cf-4d9f-a7d6-4e9277377653"
+       },
+       {
+        "entity_id": "leaf:panel:b3ea269d-aedb-414d-8cda-8dd2d4530669"
+       },
+       {
+        "entity_id": "leaf:panel:2f88ad1e-33f6-4fd1-9288-9ee809c1ea61"
+       },
+       {
+        "entity_id": "leaf:panel:e6c6cc56-e4f6-47e9-be32-de4d196c3042"
+       },
+       {
+        "entity_id": "leaf:panel:4ce9edb6-4676-4bc7-a3ef-48cb103b56e9"
+       },
+       {
+        "entity_id": "leaf:panel:a30022e1-aa5f-41ef-adbf-cfc8e1b026a7"
+       },
+       {
+        "entity_id": "leaf:panel:eeb93521-ce98-455f-9715-c054389ac02a"
+       },
+       {
+        "entity_id": "leaf:panel:2ee16e72-77f2-47e6-825d-4b7c5cc48153"
+       },
+       {
+        "entity_id": "leaf:panel:577cd55d-b784-47a0-8990-16ceace65d86"
+       },
+       {
+        "entity_id": "leaf:panel:29e5e94d-c8a3-4790-8895-10756bcd6fe9"
+       },
+       {
+        "entity_id": "leaf:panel:1464e354-7f6c-4fa0-a899-802ece41ad0b"
+       },
+       {
+        "entity_id": "leaf:panel:2eacdecb-056d-4465-a0bf-4324f83acaf2"
+       },
+       {
+        "entity_id": "leaf:panel:49aa1565-85fb-4607-bd80-236684f5e0ae"
+       },
+       {
+        "entity_id": "leaf:panel:4e92dc94-de6d-44f8-83ad-09c625b9fbc8"
+       },
+       {
+        "entity_id": "leaf:panel:c4d9b7e0-293e-43fb-8ed4-9c957caa49f9"
+       },
+       {
+        "entity_id": "leaf:panel:0f013266-e680-4b51-b052-dc50528ca5bd"
+       },
+       {
+        "entity_id": "leaf:panel:fdc91599-ab52-431a-8426-f937b401f476"
+       },
+       {
+        "entity_id": "leaf:panel:c1cac362-88b1-4487-9a05-9c9d6126342a"
+       },
+       {
+        "entity_id": "leaf:panel:591547c7-0810-4e7f-bf77-c47e3ecf9393"
+       },
+       {
+        "entity_id": "leaf:panel:071ba92b-8e81-487f-be72-b9c7640cd738"
+       },
+       {
+        "entity_id": "leaf:panel:121c95e9-de69-40dd-be25-d7a180e50d07"
+       },
+       {
+        "entity_id": "leaf:panel:f920431b-1432-4e68-8319-af5c25ba6b9c"
+       },
+       {
+        "entity_id": "leaf:panel:9d361b50-c0d7-404f-9600-06af57cf49cc"
+       },
+       {
+        "entity_id": "leaf:panel:c5a74239-e614-46ae-93f9-d4febed63c98"
+       },
+       {
+        "entity_id": "leaf:panel:f60b7bcc-2452-4603-a2d4-7f7c37fe1ffd"
+       },
+       {
+        "entity_id": "leaf:panel:7d07c6e7-fa29-444d-b2e3-6e71e59ca6a3"
+       },
+       {
+        "entity_id": "leaf:panel:b8383ff3-f4a8-458a-82b4-896106eed8aa"
+       },
+       {
+        "entity_id": "leaf:panel:62ff7939-d7ed-459c-83c4-e0f07af162fc"
+       },
+       {
+        "entity_id": "leaf:panel:32f03d9e-7c39-4dbc-b184-2553d25206df"
+       },
+       {
+        "entity_id": "leaf:panel:d1cec26c-527d-4fda-b7d2-8928eab074c9"
+       },
+       {
+        "entity_id": "leaf:panel:2f79d8bb-ab2d-44f1-9c51-7358d774b4c8"
+       },
+       {
+        "entity_id": "leaf:panel:8f6bcbf3-fdd8-4595-b30c-90c4591140ad"
+       },
+       {
+        "entity_id": "leaf:panel:83c75ac0-2b7d-468e-b2b0-e1da9d09754b"
+       },
+       {
+        "entity_id": "leaf:panel:2a301aad-ba9e-4ee3-8ec2-da8cbab72891"
+       },
+       {
+        "entity_id": "leaf:panel:32ded779-c25c-43ed-a015-35ff28c925f7"
+       },
+       {
+        "entity_id": "leaf:panel:1bb5740f-fb4c-46c2-a82e-d6efe7982989"
+       },
+       {
+        "entity_id": "leaf:panel:667e0c9e-b08c-4439-b17b-802168e1fd5f"
+       },
+       {
+        "entity_id": "leaf:panel:5995efb7-00ef-4462-98b1-d3aede886015"
+       },
+       {
+        "entity_id": "leaf:panel:197dc357-9074-4208-884e-3000410edea3"
+       },
+       {
+        "entity_id": "leaf:panel:f924031b-3965-4189-bdab-363db5dd2b7e"
+       },
+       {
+        "entity_id": "leaf:panel:c3cc3847-8774-4424-9db7-ec9f93cf6cc8"
+       },
+       {
+        "entity_id": "leaf:panel:17b4647a-9f21-4db7-80ec-09416d80e460"
+       },
+       {
+        "entity_id": "leaf:panel:76743072-d0b2-4408-a1f0-0dab1bfefb72"
+       },
+       {
+        "entity_id": "leaf:panel:db66477e-e6da-4f8d-9469-11bea39c5839"
+       },
+       {
+        "entity_id": "leaf:panel:55c87ac1-7d37-43c4-a720-111bfeedbbf5"
+       },
+       {
+        "entity_id": "leaf:panel:81e7f205-d60a-4fb0-97f7-d3a8c515fa60"
+       },
+       {
+        "entity_id": "leaf:panel:b1500653-e0a4-442e-b711-8a72db75d073"
+       },
+       {
+        "entity_id": "leaf:panel:864c9a89-ec06-45b2-8019-40700f51549f"
+       },
+       {
+        "entity_id": "leaf:panel:fd68ae68-0417-4cc3-9d13-4e1f238ffca9"
+       },
+       {
+        "entity_id": "leaf:panel:1d519240-6812-4970-a269-d5eb050c57ee"
+       },
+       {
+        "entity_id": "leaf:panel:a7ad46de-39fd-4f41-9683-fed94656a656"
+       },
+       {
+        "entity_id": "leaf:panel:11dcab14-d2d2-4e1c-87c9-d5f5871b13e6"
+       },
+       {
+        "entity_id": "leaf:panel:81543d93-f726-427f-bcce-6e88471b147d"
+       },
+       {
+        "entity_id": "leaf:panel:77d2040d-e1cd-46aa-bdc2-de520d3ec737"
+       },
+       {
+        "entity_id": "leaf:panel:80c4b8f1-cb65-4fc1-bed8-465d609692ef"
+       },
+       {
+        "entity_id": "leaf:panel:001b624f-689c-4370-9b10-3569bb737884"
+       },
+       {
+        "entity_id": "leaf:panel:b9136645-bd95-4136-af3a-f3ab2c3aa4d3"
+       },
+       {
+        "entity_id": "leaf:panel:78bbed25-cc97-4548-8355-b55c87cd4705"
+       },
+       {
+        "entity_id": "leaf:panel:9278aff6-b540-49ad-89cb-6104b6e78891"
+       },
+       {
+        "entity_id": "leaf:panel:031ce64e-65f7-4b07-9d7e-938ebe34f89f"
+       },
+       {
+        "entity_id": "leaf:panel:a2df8c26-04e0-4f40-9b3d-0973e91fb7dd"
+       },
+       {
+        "entity_id": "leaf:panel:58554842-a289-49d8-9c4c-c19fba5bcc8a"
+       },
+       {
+        "entity_id": "leaf:panel:f05e83f0-98e3-48ce-99fc-2cd381db3e1f"
+       },
+       {
+        "entity_id": "leaf:panel:698d1e19-b205-4dd6-91ce-a60c809c9ec0"
+       },
+       {
+        "entity_id": "leaf:panel:ee3eb803-48fa-4440-9ec1-700491e29c29"
+       },
+       {
+        "entity_id": "leaf:panel:8aabb0ad-061b-4fe5-8162-32186135e75f"
+       },
+       {
+        "entity_id": "leaf:panel:c472b50e-2bf5-4d62-8fe7-cb1d6ca7e0e4"
+       },
+       {
+        "entity_id": "leaf:panel:41e6fb82-679e-454d-8423-edd88b6f1a5d"
+       },
+       {
+        "entity_id": "leaf:panel:047a25a5-ec47-4d44-9f2b-6e46c9b2fec3"
+       }
+      ],
+      "name": "Zone B",
+      "sizing_provenance": null
+     }
+    ]
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 15566.947299994354,
+   "entity_mapping": {
+    "leaf:panel:001b624f-689c-4370-9b10-3569bb737884": "944C",
+    "leaf:panel:002a6486-0145-45c4-a3b7-51e6633ebc78": "929D",
+    "leaf:panel:009754cd-3472-4f9a-a56c-f775735ce8c6": "937D",
+    "leaf:panel:00b05597-08b5-470a-a41a-317859a53c45": "925F",
+    "leaf:panel:01658871-1e3f-4d8f-842c-ed7e050ba435": "93A3",
+    "leaf:panel:01f5d1f8-ecea-43ef-8b92-d28110c944fc": "92C3",
+    "leaf:panel:031ce64e-65f7-4b07-9d7e-938ebe34f89f": "9450",
+    "leaf:panel:047a25a5-ec47-4d44-9f2b-6e46c9b2fec3": "945D",
+    "leaf:panel:04d8251a-9a7f-4f13-bf27-8fed7649f640": "92C4",
+    "leaf:panel:04f940ce-790d-4161-a312-ca7ed44051c9": "943E",
+    "leaf:panel:05b77ebf-f863-4c13-ad94-cc99793f70ff": "9378",
+    "leaf:panel:05ca114b-181e-4a95-9744-592cafa25dec": "93B6",
+    "leaf:panel:06ae4760-2400-4f66-9e50-afe27c6d094a": "92DB",
+    "leaf:panel:071ba92b-8e81-487f-be72-b9c7640cd738": "93FF",
+    "leaf:panel:07f52e8e-0a5a-4226-b1d7-85042f4be699": "93E3",
+    "leaf:panel:08afefd5-48fd-4022-8cb9-4b14759ff344": "93D8",
+    "leaf:panel:0903f12c-47cf-4dce-b627-d536fe41c5d4": "9375",
+    "leaf:panel:096657e3-8b51-4e5d-9d4a-ca23c82a6888": "92D1",
+    "leaf:panel:097c6006-0eaf-4f7f-ad34-5874f292cc85": "9445",
+    "leaf:panel:09956506-68e1-437f-b6d8-76104bddad56": "92F2",
+    "leaf:panel:09e010c4-f719-4c28-88da-bbdff5d836b8": "9337",
+    "leaf:panel:09e5a886-8096-4c23-b598-ca24a6ecce67": "9316",
+    "leaf:panel:0a057068-bbeb-45b2-b1bf-ad39a0d65aac": "92AC",
+    "leaf:panel:0a2b4f72-5ce9-4143-87eb-db7b07a3779a": "92C2",
+    "leaf:panel:0aa702c1-792a-4645-aed6-2e1342aa4f17": "936F",
+    "leaf:panel:0b9c4853-0c5b-42ee-8352-27fa32091fec": "9390",
+    "leaf:panel:0c9f7f18-b4ef-4688-b3af-fa4ac53fadfb": "92B1",
+    "leaf:panel:0d989f9a-141f-47f3-be3e-f2a53d0e13dc": "9305",
+    "leaf:panel:0e459278-3096-418b-b0f8-b424837cf562": "93DE",
+    "leaf:panel:0f013266-e680-4b51-b052-dc50528ca5bd": "93FA",
+    "leaf:panel:0f707b6c-e19d-4ea0-93c6-1120f72afd0b": "92A7",
+    "leaf:panel:0fc4788f-03bc-48d7-939f-163fd12b0f92": "9298",
+    "leaf:panel:0feb4ce2-c748-4296-9578-24e85d494e9d": "934B",
+    "leaf:panel:10ac22b9-cd42-4bfc-b1d5-4c8c752869de": "92D3",
+    "leaf:panel:10c2aaaa-dcb6-456b-8480-1d8c62084a50": "9299",
+    "leaf:panel:1182ce34-d1aa-4bf7-91b3-59fe51b276e0": "9304",
+    "leaf:panel:118dbd81-c249-4fd0-8ed6-4c3b2eefc305": "9269",
+    "leaf:panel:11a87e4e-9078-4c64-bd3d-017f89686ea1": "938C",
+    "leaf:panel:11dcab14-d2d2-4e1c-87c9-d5f5871b13e6": "9448",
+    "leaf:panel:11f430a1-9919-426f-a7fa-3d07d5fc0cad": "9429",
+    "leaf:panel:121c95e9-de69-40dd-be25-d7a180e50d07": "9400",
+    "leaf:panel:12f18755-6174-45ca-8a23-4f935ecbe61e": "9240",
+    "leaf:panel:12f6ce3a-a668-417b-afba-36c28901572f": "93AB",
+    "leaf:panel:134a28ab-af8e-4b7f-98b7-2bdc33cd0d6b": "942B",
+    "leaf:panel:134eb18e-f47d-4f99-8f22-4351f7033d2f": "93CF",
+    "leaf:panel:1427d79b-679c-43a5-a599-91fcd4d359fd": "9388",
+    "leaf:panel:1464e354-7f6c-4fa0-a899-802ece41ad0b": "93F5",
+    "leaf:panel:14bb7dad-99dd-4feb-8765-e7816f6f7df3": "92D5",
+    "leaf:panel:15aa355d-7985-4c08-9567-a052bf596243": "933F",
+    "leaf:panel:15be10d8-1451-4c8d-a4de-d9f8ab33369b": "9314",
+    "leaf:panel:161c17b1-6ee9-4f32-ae55-0d1ef04f14c2": "9294",
+    "leaf:panel:16ebc3d4-ae16-4495-b9db-89da2e7e0d27": "92B7",
+    "leaf:panel:17b4647a-9f21-4db7-80ec-09416d80e460": "9430",
+    "leaf:panel:17db6052-5e71-494d-bee3-8604fd1ca38b": "93BD",
+    "leaf:panel:18875ae7-6094-41eb-833d-0bfd40f892d4": "92AD",
+    "leaf:panel:18f4b086-a5c9-44a4-9685-7adec0c28c04": "92D2",
+    "leaf:panel:197dc357-9074-4208-884e-3000410edea3": "942D",
+    "leaf:panel:19e3ad3e-d4fa-4ec1-8b5e-9fd96b4ca611": "93C0",
+    "leaf:panel:1a9a6d1d-27d6-4914-8844-5ea90f70a195": "93DA",
+    "leaf:panel:1b451350-788d-4f35-a610-e94c89bec3ef": "9391",
+    "leaf:panel:1bb5740f-fb4c-46c2-a82e-d6efe7982989": "9421",
+    "leaf:panel:1bf952cd-37a0-453a-ad8a-8306e36674e1": "93D5",
+    "leaf:panel:1c3edaa0-82e8-4975-bd3b-0de6819b66a3": "933C",
+    "leaf:panel:1d468a02-b0de-40ae-8455-84363f65820c": "931B",
+    "leaf:panel:1d519240-6812-4970-a269-d5eb050c57ee": "943C",
+    "leaf:panel:1e403e3c-f0c1-4d90-abb0-e3368c81792c": "938D",
+    "leaf:panel:1e959343-94c0-44dd-b55a-ed14e20fd786": "9291",
+    "leaf:panel:1fb2d08c-3b35-45cc-a37d-c6aab597f7de": "93C8",
+    "leaf:panel:1fe44aa2-64c3-413e-84bd-3961db21cbaf": "92AF",
+    "leaf:panel:201b207d-4152-4b8e-8a3a-1ae1c34eed9a": "9328",
+    "leaf:panel:203a415e-09cf-4379-ab03-3b0f6f72d510": "934F",
+    "leaf:panel:207ce00b-97d9-4279-8ecb-a36ba126f4e5": "92E7",
+    "leaf:panel:20ab9dfa-989e-4a72-aad4-c38548cc81fb": "9434",
+    "leaf:panel:215a9213-f868-4743-ad00-327884da6233": "935B",
+    "leaf:panel:22459da2-4344-49e8-a0f0-4f77c5d59db5": "9241",
+    "leaf:panel:22769408-7af4-4974-a464-634e8cefb775": "929E",
+    "leaf:panel:227c6b2d-216c-4915-96ac-e2e9874200b3": "92F7",
+    "leaf:panel:22d6f7e0-7eb4-4d76-a5e1-2bd5e2baeb40": "92D0",
+    "leaf:panel:23501369-4d5e-4d6b-9dca-1a23cd49abe4": "9292",
+    "leaf:panel:23f44bd5-42e7-4ae4-be76-5eac17219f13": "9349",
+    "leaf:panel:243a787b-cd95-4ea1-8dc0-f5cc9b833811": "926F",
+    "leaf:panel:24c4e30e-234d-4ecb-bc17-f27ccb28ffb2": "93A7",
+    "leaf:panel:250a41f5-b91c-4905-b2af-ebec00d58d44": "936A",
+    "leaf:panel:25286cf3-5d05-4384-94fe-ccd2b91c8611": "9268",
+    "leaf:panel:2587d880-b075-470f-ae8b-9be47418369b": "9353",
+    "leaf:panel:2696ae98-ea08-4741-b372-4470515b25b9": "9263",
+    "leaf:panel:26d927d7-8a45-453b-9e09-4e92ee4af6fd": "9280",
+    "leaf:panel:26f60c37-ecde-4376-a906-e763abeef939": "936B",
+    "leaf:panel:275a536c-328b-4d27-b080-861ef3bcd50a": "93AF",
+    "leaf:panel:2777ecf9-a6d5-4abd-9b03-38c4c1f091ab": "927E",
+    "leaf:panel:279edf5d-9834-4259-81e9-f213ce36d4c2": "9376",
+    "leaf:panel:2801b6be-83aa-43c7-a3db-9dffbd1acd7f": "9374",
+    "leaf:panel:28141b2d-75a4-47fa-954b-69d2cf603236": "9444",
+    "leaf:panel:283d0e16-4286-42c5-ad89-6698dd00813e": "93B5",
+    "leaf:panel:2904b4f5-6d23-47f3-94ca-cfd4a80a47e6": "9277",
+    "leaf:panel:29e5e94d-c8a3-4790-8895-10756bcd6fe9": "93F4",
+    "leaf:panel:2a301aad-ba9e-4ee3-8ec2-da8cbab72891": "941F",
+    "leaf:panel:2a3bde40-4baa-409c-81a9-0d78422dbd03": "940D",
+    "leaf:panel:2a9b9b37-a2c8-48a4-a1b8-918c691fa313": "9355",
+    "leaf:panel:2b50a6e8-d961-4ea1-be6e-a1c9cff7a7fe": "933E",
+    "leaf:panel:2c1eccac-10dd-4461-be95-7c7f6f77ed0f": "9257",
+    "leaf:panel:2c86a1dd-27f1-4401-a608-6acc875319b7": "9254",
+    "leaf:panel:2cce41aa-bf0a-4fb1-bf61-1d27812aeb27": "93AD",
+    "leaf:panel:2d2103ee-fa7d-48f7-9c8a-1af65bc7cd08": "9272",
+    "leaf:panel:2d7ba490-ac4c-43f6-9ca9-08e80541004a": "9363",
+    "leaf:panel:2ddfc88a-aeb4-4170-8eb5-85bc9098283a": "93A1",
+    "leaf:panel:2e72989f-2292-482c-bc74-e28e999680ec": "923E",
+    "leaf:panel:2eacdecb-056d-4465-a0bf-4324f83acaf2": "93F6",
+    "leaf:panel:2ed9f9f4-0c48-431b-a0a8-82f498ccd101": "92C0",
+    "leaf:panel:2ee16e72-77f2-47e6-825d-4b7c5cc48153": "93F2",
+    "leaf:panel:2ef1b5d4-75bf-4fb3-9d64-64ead76fc1c3": "92E8",
+    "leaf:panel:2f79d8bb-ab2d-44f1-9c51-7358d774b4c8": "9413",
+    "leaf:panel:2f88ad1e-33f6-4fd1-9288-9ee809c1ea61": "93ED",
+    "leaf:panel:2fccd0b4-46f6-4479-a755-9d79e970e3b9": "934D",
+    "leaf:panel:30f0fc9a-efed-43b0-98c2-861ccbaf1444": "930A",
+    "leaf:panel:317b7e1d-609a-4340-9f35-98df04e90518": "9367",
+    "leaf:panel:31aad9f8-b43d-4c3d-9df4-7d539a76bcf0": "9356",
+    "leaf:panel:31b366c8-e499-4d01-8515-764c69691c13": "9348",
+    "leaf:panel:325b90f2-142b-4302-bfbf-a62dea7af90e": "93E9",
+    "leaf:panel:32ded779-c25c-43ed-a015-35ff28c925f7": "9420",
+    "leaf:panel:32f03d9e-7c39-4dbc-b184-2553d25206df": "9411",
+    "leaf:panel:32f50228-5fe0-48f4-b2db-41f130d5f82a": "9417",
+    "leaf:panel:330c9876-6c07-40f3-81d6-e2330cd48585": "9372",
+    "leaf:panel:339e14b1-ee6a-48ce-aab9-1a48f79a95b1": "936D",
+    "leaf:panel:35020f76-8925-4821-b4c3-361c7481fb33": "92A6",
+    "leaf:panel:352741cb-fad4-4e72-867d-874c667b9924": "92BD",
+    "leaf:panel:35324426-6d54-4e49-a52d-679a7de1532c": "935D",
+    "leaf:panel:3537f08b-59eb-4723-a886-ac80847f94be": "927A",
+    "leaf:panel:36a0e5aa-fb1d-4459-a96b-f12e4b14eb15": "9344",
+    "leaf:panel:37e94d53-8334-41e3-8e09-a9464f3b1676": "945B",
+    "leaf:panel:3802de85-35f2-4053-b3e4-b6e38c964dfa": "92BA",
+    "leaf:panel:38948914-ef1c-4e32-8214-df421d1bc8f9": "9382",
+    "leaf:panel:389c37b0-0df3-4125-9a62-7287ccc0f5e7": "92CE",
+    "leaf:panel:38e7999d-3004-4b61-b3fb-a0f53350cf3d": "92C8",
+    "leaf:panel:39997d31-2d2a-4513-906a-fd0ef72764fe": "9274",
+    "leaf:panel:39a4e3b3-b1cf-4d9f-a7d6-4e9277377653": "93EB",
+    "leaf:panel:39ab62af-e2c0-4cc2-826b-e6792487878e": "924B",
+    "leaf:panel:39c67e97-c562-4151-971a-bde948362147": "9336",
+    "leaf:panel:39e802a9-43b1-45ec-b3a4-dd660f1e6ef4": "92BE",
+    "leaf:panel:3ad167d3-79c1-4ae0-951c-ec3e0f415b97": "9312",
+    "leaf:panel:3aeb90f9-23c1-4620-b674-c1317f7c7c67": "938B",
+    "leaf:panel:3c5497f4-0658-4737-8d09-0f3d86a611b4": "937E",
+    "leaf:panel:3d857683-c956-4d71-b43f-6481eaf1cc98": "93E8",
+    "leaf:panel:3df2685c-b789-4f8c-a775-a84ef3db2ade": "9341",
+    "leaf:panel:3e7da083-47fc-456a-8d01-768280673143": "92ED",
+    "leaf:panel:3e85d524-46fd-4ae9-832c-91e37bf57012": "937A",
+    "leaf:panel:3f40bd7c-4b06-48f1-9630-36fc51367f3a": "93CB",
+    "leaf:panel:41988b95-e7f5-4f8b-a39c-dd12d6cb854e": "93D0",
+    "leaf:panel:41dbdbe8-7dfa-4e00-93b5-d148ec5da7d6": "924C",
+    "leaf:panel:41e6fb82-679e-454d-8423-edd88b6f1a5d": "945C",
+    "leaf:panel:42169482-325d-49a2-9177-6599d88b8509": "92F6",
+    "leaf:panel:42224faf-de7a-4d29-80e7-96b4b25e485e": "9358",
+    "leaf:panel:43eb361c-d500-41b0-b1cc-5a8db95b8b98": "928E",
+    "leaf:panel:46483d35-9a19-4592-8bf0-e0fb10c0a1d5": "9332",
+    "leaf:panel:4682ddee-cbe7-4ba6-bba4-62249892d044": "923A",
+    "leaf:panel:4888bc36-4e70-4e63-957a-0c07f2658a16": "941A",
+    "leaf:panel:48d7949d-09e6-44a2-b7a0-acf958f4a801": "92BF",
+    "leaf:panel:49aa1565-85fb-4607-bd80-236684f5e0ae": "93F7",
+    "leaf:panel:4adc2fde-b304-446f-9f9a-16d9c8940c82": "935E",
+    "leaf:panel:4b81f24d-88c1-4030-84b3-c9a8f94b8f08": "9267",
+    "leaf:panel:4c18bf91-f0c2-4247-b82f-2df1558245f3": "940C",
+    "leaf:panel:4cdf9f9c-6a84-43f7-aa56-82015265e113": "92E6",
+    "leaf:panel:4ce9edb6-4676-4bc7-a3ef-48cb103b56e9": "93EF",
+    "leaf:panel:4dcbbc44-04d3-4b6e-b32a-58f8ba39343f": "942C",
+    "leaf:panel:4e2e12c3-24d0-4ed7-bc37-7415eab2aced": "92B0",
+    "leaf:panel:4e92dc94-de6d-44f8-83ad-09c625b9fbc8": "93F8",
+    "leaf:panel:4fa8b882-9d42-4938-a5f8-6074bb9e002f": "92D6",
+    "leaf:panel:50f33304-2330-41de-900f-16d9d0f28a62": "93DD",
+    "leaf:panel:50fd584f-0420-49fd-b6bf-13ed1d5f20f9": "92CD",
+    "leaf:panel:51a89d03-257f-4037-bc9e-a31dc77b5d34": "9335",
+    "leaf:panel:52feab89-ebf8-4854-a9b8-a70b4259e8c5": "9282",
+    "leaf:panel:54b922da-33f9-44c1-a0bd-9fa9b62aa266": "9264",
+    "leaf:panel:55c87ac1-7d37-43c4-a720-111bfeedbbf5": "9437",
+    "leaf:panel:577cd55d-b784-47a0-8990-16ceace65d86": "93F3",
+    "leaf:panel:58385750-1b01-44bc-9918-4ce1bdc5a0c8": "93BC",
+    "leaf:panel:58554842-a289-49d8-9c4c-c19fba5bcc8a": "9452",
+    "leaf:panel:588f16fd-8922-4869-963f-949bafd1432c": "9238",
+    "leaf:panel:58b541d4-e600-4d89-9f66-ab53f0fe374e": "92F8",
+    "leaf:panel:5904033f-b7e0-41d2-b3ca-1f8c56679d34": "92CB",
+    "leaf:panel:59099013-8f88-448e-8539-fa3b539b9541": "93CE",
+    "leaf:panel:591547c7-0810-4e7f-bf77-c47e3ecf9393": "93FE",
+    "leaf:panel:5970e63f-7ca6-4956-ab9d-911773c63199": "937F",
+    "leaf:panel:5995efb7-00ef-4462-98b1-d3aede886015": "9423",
+    "leaf:panel:5a8c9d00-0152-42ad-a06e-6d5b852b9fef": "93DB",
+    "leaf:panel:5b0bb34c-e8d6-4b2d-9273-45c00b1d2849": "92CA",
+    "leaf:panel:5b2b9d63-f6f3-4b50-8117-177cbb05bee5": "93B8",
+    "leaf:panel:5b927655-bfc3-49f2-a9b9-459ffadf2cf0": "93EA",
+    "leaf:panel:5c40ad13-03fb-49be-ab44-c85818418fbd": "9347",
+    "leaf:panel:5d972155-e208-43a7-b985-29e31ac877d0": "9419",
+    "leaf:panel:5f44ca71-cb06-41a1-8770-562779b3cb70": "923B",
+    "leaf:panel:605d32e7-68b0-409e-893b-b5f7c3d4544d": "939F",
+    "leaf:panel:62ce877a-04d5-4dff-8714-ac94d4010890": "9370",
+    "leaf:panel:62ff7939-d7ed-459c-83c4-e0f07af162fc": "9410",
+    "leaf:panel:634bfaa4-068a-4245-aad1-032fcd701306": "92D7",
+    "leaf:panel:6379bb32-e9d3-4007-9bdd-5a114f348f81": "92A0",
+    "leaf:panel:6395e862-29ce-4b27-8e79-445a6a19db8f": "932B",
+    "leaf:panel:640dd585-7c9a-4df2-8b4d-c0d4c7170119": "93AE",
+    "leaf:panel:647ae0e2-64e5-42b0-9abf-6a666f1957a4": "93C2",
+    "leaf:panel:653dd02e-6f18-4616-a5b7-ba7f9d4a1ea1": "92E9",
+    "leaf:panel:661eb5e6-3e83-4f7a-b3c0-b14ac10f5f66": "9389",
+    "leaf:panel:6675e284-e2d2-46e3-95d7-fffb22700d8b": "945E",
+    "leaf:panel:667e0c9e-b08c-4439-b17b-802168e1fd5f": "9422",
+    "leaf:panel:675851d1-5086-46c1-8331-459a4eccc43e": "934C",
+    "leaf:panel:679a672a-8f52-4c37-bf1a-4649f785260c": "9309",
+    "leaf:panel:67b2e07d-f075-4b52-abd1-c98a6ebc689b": "931E",
+    "leaf:panel:67eb09de-8dbd-417c-936d-1d7d5c2bad36": "92F0",
+    "leaf:panel:682b89a8-4a55-48e5-a24d-94ee4d1628f9": "936C",
+    "leaf:panel:69323fcc-5e06-495d-b417-5fe8d33a247c": "9319",
+    "leaf:panel:698d1e19-b205-4dd6-91ce-a60c809c9ec0": "9454",
+    "leaf:panel:699229b3-39d9-4115-bd17-c0ace02729ce": "9425",
+    "leaf:panel:69e0655d-a7a5-4ee6-8e0b-9a3138d940d8": "93CD",
+    "leaf:panel:6a1e4910-75b8-444d-8dae-730305655830": "93AC",
+    "leaf:panel:6a54f63a-339a-453f-8c91-e067d2434493": "9242",
+    "leaf:panel:6a62dfff-e016-4e4a-ab14-032e4d16a53b": "93A0",
+    "leaf:panel:6b969529-b7fa-4f9f-80f7-2e1f30d19d43": "9462",
+    "leaf:panel:6c742700-b478-44c3-adbc-87baf1f4439a": "9342",
+    "leaf:panel:6c785044-e799-4cf7-b83a-0fe9540d43b6": "9383",
+    "leaf:panel:6dbdfeaf-fda9-4bd6-9d39-bc71f54b9580": "92AB",
+    "leaf:panel:6e1ad043-9ce5-411a-a92d-5f141e764ce8": "932F",
+    "leaf:panel:6e1ceae2-5d77-4b15-9319-a7dcca736089": "9315",
+    "leaf:panel:6ebac2b9-2b6b-482a-8c2e-03c53520b55a": "931A",
+    "leaf:panel:6f3caede-76a0-457e-a8d2-cf1bee5ddf68": "93A5",
+    "leaf:panel:70edf90a-ed11-43be-bfbc-b3a75a8b88b9": "92E5",
+    "leaf:panel:7110b35a-efa9-458b-88e4-84cf6c1a5ec1": "938E",
+    "leaf:panel:71cad0a6-4322-4200-b7b3-04665d99bef7": "928D",
+    "leaf:panel:71e6c802-3954-42e3-8573-580e59741cf0": "92F4",
+    "leaf:panel:71efb8a2-10c0-4cf6-8253-c4b17987d63b": "9318",
+    "leaf:panel:736127bc-c021-4442-8a58-17c1fd97561b": "9350",
+    "leaf:panel:737f24ca-d8cf-4b2e-8c0f-8f3a41661aaa": "93D9",
+    "leaf:panel:73f3b4d8-d4ab-4077-9b09-c2f0c61d43f3": "930F",
+    "leaf:panel:7505e1fa-f9d8-4d68-af93-4f5629e9a4a9": "9243",
+    "leaf:panel:7567d93f-4543-4221-aa18-1729d4df5b26": "9261",
+    "leaf:panel:75871e24-f543-4d8e-a59c-2fdd839d41e0": "9295",
+    "leaf:panel:76743072-d0b2-4408-a1f0-0dab1bfefb72": "9431",
+    "leaf:panel:76f4f58e-ada3-4878-a0e8-5d0e93dc12d7": "937B",
+    "leaf:panel:77d2040d-e1cd-46aa-bdc2-de520d3ec737": "944A",
+    "leaf:panel:77d63421-8094-4470-92b6-4000a90a67ce": "925C",
+    "leaf:panel:77e69288-ee12-4373-a41a-6e14af213b46": "92E0",
+    "leaf:panel:787d6911-ad2c-49fc-8ed7-3a1ae336ff10": "92B9",
+    "leaf:panel:788aadc1-fa47-4dc4-aa08-2358524094fb": "93B1",
+    "leaf:panel:7897a581-5007-4bfd-ac9a-62151dd7699e": "938F",
+    "leaf:panel:78bbed25-cc97-4548-8355-b55c87cd4705": "944E",
+    "leaf:panel:78d20b13-3d77-4041-9865-829e2a72f084": "9278",
+    "leaf:panel:79cd380a-0afe-4132-abee-595abf29fafd": "9366",
+    "leaf:panel:79eecafc-a159-4fe1-82c7-26c711111dda": "9381",
+    "leaf:panel:7a5c4f74-f3ca-482f-9a42-3882a2cc8e54": "92DF",
+    "leaf:panel:7b044319-5c51-40d4-a4c3-d697c10155dc": "92E4",
+    "leaf:panel:7b2454e6-95c0-4448-a214-e555c92d97b9": "92B4",
+    "leaf:panel:7d07c6e7-fa29-444d-b2e3-6e71e59ca6a3": "9405",
+    "leaf:panel:7dafd704-462a-4975-a72a-1b83d0f5b9aa": "9339",
+    "leaf:panel:7dc3e4d5-82e6-4674-9ca0-9f440f0b9d0b": "92E1",
+    "leaf:panel:7dfa9d12-3ad3-4476-94e8-e67a3669744f": "9329",
+    "leaf:panel:80523751-d2d5-4976-891a-aa2615d9b724": "93B2",
+    "leaf:panel:80c4b8f1-cb65-4fc1-bed8-465d609692ef": "944B",
+    "leaf:panel:81543d93-f726-427f-bcce-6e88471b147d": "9449",
+    "leaf:panel:8199390f-a3f5-46a6-9cae-a125814d69a1": "9288",
+    "leaf:panel:81ad8930-0463-4478-8e08-2b68e5d16c30": "9297",
+    "leaf:panel:81e7f205-d60a-4fb0-97f7-d3a8c515fa60": "9438",
+    "leaf:panel:821ff86d-6d13-43e4-99aa-fc83130fa3ad": "9360",
+    "leaf:panel:83716f71-2d99-4aca-8c47-0abb2054b335": "92A5",
+    "leaf:panel:83c75ac0-2b7d-468e-b2b0-e1da9d09754b": "941E",
+    "leaf:panel:83e8f255-0cd9-4f10-89c4-ffeb64b9b1d9": "9251",
+    "leaf:panel:83f0a742-5a88-4723-b3f1-4ce8692468a5": "92EC",
+    "leaf:panel:864c9a89-ec06-45b2-8019-40700f51549f": "943A",
+    "leaf:panel:864e39ca-90f6-4176-9762-1245308aceb0": "9338",
+    "leaf:panel:86b07865-8c54-4ed8-a585-dd683cc389c1": "939E",
+    "leaf:panel:88301c37-ee75-4ab7-9293-57f3e6b0ece1": "92A4",
+    "leaf:panel:89ab7ac7-e67c-4c17-ba14-55de8932f3fc": "92EE",
+    "leaf:panel:89fa706e-ff52-4dcd-9037-0e1d9db362eb": "9303",
+    "leaf:panel:8a2d7ef6-e8d0-400f-9ed3-40510f357825": "92A8",
+    "leaf:panel:8a53d1d0-0164-4df7-bbc6-35eeed906bfc": "9397",
+    "leaf:panel:8aabb0ad-061b-4fe5-8162-32186135e75f": "9456",
+    "leaf:panel:8af15d83-20be-47da-b000-7cf31998b315": "93CA",
+    "leaf:panel:8b55113c-5008-4eb2-a5a9-ebe80800bac9": "93A2",
+    "leaf:panel:8b8ec582-16c5-466f-9e3b-809ba04353e3": "92C7",
+    "leaf:panel:8c13cad4-4da2-4288-b5dc-5a81aaa603ce": "92F1",
+    "leaf:panel:8c3c5fca-3d79-49d1-8427-fcd80d38ac37": "93E5",
+    "leaf:panel:8c60eb12-1f48-4027-8f9e-d66533393238": "92C6",
+    "leaf:panel:8d351f60-dd18-4e84-bf4f-b96ac854ba64": "9361",
+    "leaf:panel:8d893381-b85a-4081-88c8-5e8b2cf3c655": "933B",
+    "leaf:panel:8dcc7728-9bfa-48e7-9583-ba908c7306c5": "924A",
+    "leaf:panel:8e517e2d-47d5-43e7-8a1e-5cfa295379dd": "9427",
+    "leaf:panel:8e887208-f671-42b3-9666-9baf07a78799": "926A",
+    "leaf:panel:8e8a44df-5488-4f32-85ed-13421719aec2": "9321",
+    "leaf:panel:8eb8c902-7abb-4af9-b45c-3163fca3cf7a": "9396",
+    "leaf:panel:8f6bcbf3-fdd8-4595-b30c-90c4591140ad": "9414",
+    "leaf:panel:8fd3261d-99f7-4223-b7dc-1221690e820f": "92CC",
+    "leaf:panel:8fe72311-ab34-49c3-8d68-11dbc33171ac": "9395",
+    "leaf:panel:8ff4f7a8-3f07-4a19-8812-ffe446862ca9": "92C1",
+    "leaf:panel:90f81edd-4756-421e-914f-66ba0f190eb6": "928A",
+    "leaf:panel:9157ae42-c518-4853-a31b-c1ff42594d6d": "933A",
+    "leaf:panel:9278aff6-b540-49ad-89cb-6104b6e78891": "944F",
+    "leaf:panel:92a3998a-b5d2-4338-91f7-4d457e09d243": "93E0",
+    "leaf:panel:9304a28f-6b64-47e9-8645-a30d8da3a3db": "92E3",
+    "leaf:panel:936cc11f-7c9a-487b-b7c4-8c7bfddc4e83": "940E",
+    "leaf:panel:93f88666-3551-4800-b702-b27b2ef313cf": "925E",
+    "leaf:panel:93f922de-fc2d-4491-8adf-846f80028915": "92D4",
+    "leaf:panel:94095f44-3903-4a9b-8ccf-dcb8b41beac3": "9345",
+    "leaf:panel:943390c4-ddd3-4d20-a2d9-ec554c305a4b": "940A",
+    "leaf:panel:94d41432-79b7-42e4-9cbb-3071bea0f44b": "9323",
+    "leaf:panel:9622a32b-8533-4d48-8e68-67b748226c63": "93A4",
+    "leaf:panel:97d3f64f-2e24-41b8-b1b4-d13c3283d798": "93B4",
+    "leaf:panel:98b37b96-9ce9-4054-b355-233133d03a5b": "9255",
+    "leaf:panel:98ed2c78-6c3a-4f7a-845d-910c2ec0d4c0": "9441",
+    "leaf:panel:9902c73c-af38-40f1-bdce-e7bc349a7d69": "941D",
+    "leaf:panel:9935d374-f706-4335-b315-7feb99962681": "9327",
+    "leaf:panel:99d71334-e8fd-4442-aec7-365fee0a4a90": "92DA",
+    "leaf:panel:9a246fa4-2511-48ba-9a41-491bf48569ba": "939C",
+    "leaf:panel:9b4c51e3-d8b2-4f3d-912b-7be312263fa9": "931C",
+    "leaf:panel:9bbe90c1-a4cd-4f6c-ae6b-c2c07720a300": "9392",
+    "leaf:panel:9bcfb5df-aea7-4c1f-a20b-f706312e7813": "937C",
+    "leaf:panel:9d361b50-c0d7-404f-9600-06af57cf49cc": "9402",
+    "leaf:panel:9f0c40ff-85d0-4337-ae4c-9fec0e8d4ddf": "9289",
+    "leaf:panel:9f2bf53e-2cbd-4a97-a0a8-fbdbf703d690": "92BB",
+    "leaf:panel:9f57f43a-16aa-4641-94bb-923269b48185": "93C5",
+    "leaf:panel:9f6dcfa5-b413-4dd4-8f32-0ab435712af7": "9253",
+    "leaf:panel:a0ecb242-9a99-4287-9ba7-50620a3a5075": "941B",
+    "leaf:panel:a1d9afc1-1737-490b-9fb0-722cf3edb667": "923F",
+    "leaf:panel:a1ff1e32-28b5-41ce-829b-4bb69f792fcb": "941C",
+    "leaf:panel:a235d867-3754-4765-b90c-eee8d0658ffb": "932E",
+    "leaf:panel:a2df8c26-04e0-4f40-9b3d-0973e91fb7dd": "9451",
+    "leaf:panel:a30022e1-aa5f-41ef-adbf-cfc8e1b026a7": "93F0",
+    "leaf:panel:a478ca37-151a-4475-857a-ede43da1118a": "9259",
+    "leaf:panel:a5b4b550-21a2-40ce-ba44-dc94251c4b8d": "9460",
+    "leaf:panel:a6429a28-ef40-4eaf-bbcc-222c3ee48533": "9275",
+    "leaf:panel:a64754fa-8ac7-42c0-9f2f-62b86727f96b": "93D7",
+    "leaf:panel:a6da8117-5b80-4741-ae02-769d9159b372": "926C",
+    "leaf:panel:a773a51f-4fc0-4114-8bd8-72a22b0f6abe": "934A",
+    "leaf:panel:a7ad46de-39fd-4f41-9683-fed94656a656": "9447",
+    "leaf:panel:a859874c-41de-47b3-8688-f38847515b4b": "9244",
+    "leaf:panel:a8bff7a0-6126-49b0-a5a3-60b2dc3e4dda": "927D",
+    "leaf:panel:a9ee5c15-c933-4d45-b9aa-d53ac2589f27": "92A1",
+    "leaf:panel:a9f3bcf9-0c81-40ad-8cb8-d3a8663d4c64": "9273",
+    "leaf:panel:aa6476aa-3aa1-49d0-bb8e-f24eb32a08f1": "9247",
+    "leaf:panel:aaffaff8-a1f1-4271-92dc-f4c6e7339a67": "9326",
+    "leaf:panel:ab06e1e2-d7ea-4736-b513-8e08927552bf": "9461",
+    "leaf:panel:ab6087f5-8ced-4d1e-9361-aff50272ca86": "9245",
+    "leaf:panel:ab8d6c6a-6d61-4a2c-aea2-7d9f26265576": "929C",
+    "leaf:panel:abdead0c-190f-41e4-979e-5a698c7671dc": "9307",
+    "leaf:panel:ac804ca7-cb19-4820-bfc2-f11d4ec64c89": "9362",
+    "leaf:panel:ac9942a4-f671-4380-b9e7-09cd50dc24ca": "9384",
+    "leaf:panel:acbd4561-a57d-4c0c-9376-6387721beaab": "930E",
+    "leaf:panel:adb49857-1f90-4218-8c7c-e6f01bd00bfc": "92F9",
+    "leaf:panel:ae350d11-12ad-4659-b132-19438c5a61aa": "93E2",
+    "leaf:panel:ae389b3f-6df6-4232-95b9-48a55624d659": "924F",
+    "leaf:panel:b00e315d-4ffd-40d1-9f48-6d9e16651335": "93D3",
+    "leaf:panel:b0f4b006-e522-4f17-b74c-37a38588f327": "932D",
+    "leaf:panel:b1250403-e159-4188-94e6-7a003f6953b4": "927C",
+    "leaf:panel:b12f4d4d-6de9-49d0-a406-796fe84758d3": "9308",
+    "leaf:panel:b1500653-e0a4-442e-b711-8a72db75d073": "9439",
+    "leaf:panel:b3e98ee8-bd31-4a3d-bcee-dc9ca664a95f": "931F",
+    "leaf:panel:b3ea269d-aedb-414d-8cda-8dd2d4530669": "93EC",
+    "leaf:panel:b3f1af5d-1c12-4648-ae15-8a9eaee1998f": "940B",
+    "leaf:panel:b668b782-d844-4b03-a3ac-c0732c0cb270": "92FF",
+    "leaf:panel:b7ae7df8-5ad7-4f59-82d8-b1e71dafa1c6": "935A",
+    "leaf:panel:b7e0b8dd-2180-408a-98cc-e3ec7e67c766": "9459",
+    "leaf:panel:b7effda8-6dd5-458e-97f2-e44bd2ab1b92": "93BE",
+    "leaf:panel:b81cccae-3d93-41ab-a7a2-48c204d2c914": "9300",
+    "leaf:panel:b8383ff3-f4a8-458a-82b4-896106eed8aa": "940F",
+    "leaf:panel:b87c5a8b-c6f2-4cee-9f89-1953c4672868": "92B3",
+    "leaf:panel:b8c2c7c9-da98-46f4-b606-7a172b6b3aab": "926B",
+    "leaf:panel:b9136645-bd95-4136-af3a-f3ab2c3aa4d3": "944D",
+    "leaf:panel:b923f6ef-97d2-455c-9a08-93ebbc563d9c": "9334",
+    "leaf:panel:ba311a7f-e2cc-4669-93a1-e9e80265b051": "9365",
+    "leaf:panel:ba3b6ebe-cc25-46bb-9d25-946140d49f1c": "93BA",
+    "leaf:panel:bb2a4372-a2bf-4a82-9698-888c2e1fdb58": "9313",
+    "leaf:panel:bcc5f7da-2f6d-45fb-a35a-ce961f3fa444": "92B8",
+    "leaf:panel:bd44b0fb-52a7-4c86-8e6c-d936dbccdced": "9440",
+    "leaf:panel:bd7cf786-c833-45f6-8149-d0a336afaf5b": "9258",
+    "leaf:panel:bea93c54-a975-4c98-a82c-4470b1ea755d": "93BB",
+    "leaf:panel:bfd77c30-42e1-4873-986d-63bad0375d8a": "93D2",
+    "leaf:panel:c02924a8-e749-457b-b3c4-2f3f5dd8fdfb": "9408",
+    "leaf:panel:c086e636-df70-42dc-8e54-a78abb8ab749": "93B3",
+    "leaf:panel:c1798f9a-3217-4f1b-8973-5acf0f6abd0c": "9293",
+    "leaf:panel:c1b136ab-6a7e-4aa3-90bc-d45673583173": "9281",
+    "leaf:panel:c1cac362-88b1-4487-9a05-9c9d6126342a": "93FC",
+    "leaf:panel:c1e40aa5-12a3-4b16-aab1-169627582667": "930B",
+    "leaf:panel:c29d9b74-e4e8-4a81-bd27-e5190949400b": "935C",
+    "leaf:panel:c2d08d7b-438a-4aa2-900f-88db156bf156": "9394",
+    "leaf:panel:c2f065ba-a43a-4119-89a6-d652638f9622": "9284",
+    "leaf:panel:c3159cee-e98e-4cf4-9ff7-cd19a7a0f043": "9433",
+    "leaf:panel:c370e087-c5e3-4cef-96a9-d5f088532a47": "92EF",
+    "leaf:panel:c3cc3847-8774-4424-9db7-ec9f93cf6cc8": "942F",
+    "leaf:panel:c3ce1b55-0335-475d-af18-9f884e78ec6b": "925A",
+    "leaf:panel:c3e3320e-1cce-42d9-a257-80cc59539fcc": "9369",
+    "leaf:panel:c4008d18-e7f9-4826-96ec-7b33a63c9811": "9435",
+    "leaf:panel:c414917e-031b-4cb9-83e3-a6bbfefffc0c": "93C1",
+    "leaf:panel:c472b50e-2bf5-4d62-8fe7-cb1d6ca7e0e4": "9457",
+    "leaf:panel:c4d9b7e0-293e-43fb-8ed4-9c957caa49f9": "93F9",
+    "leaf:panel:c5a74239-e614-46ae-93f9-d4febed63c98": "9403",
+    "leaf:panel:c78b3519-034d-4431-8284-27b36397144c": "92F3",
+    "leaf:panel:c7dfec08-6db4-4c75-8db4-43b973da3155": "9301",
+    "leaf:panel:c9251326-b259-4c23-911c-d47b4da0585b": "934E",
+    "leaf:panel:c9bc2410-6ecf-4db3-b4da-9baac5c04867": "9286",
+    "leaf:panel:ca19ad0d-1bf3-4f73-8a78-12c0326972ed": "92AE",
+    "leaf:panel:ca212da7-b00a-4550-a15b-8ca516ddcfae": "943F",
+    "leaf:panel:ca6db46f-6470-49b4-aa45-29de6c29a18f": "9302",
+    "leaf:panel:ca783614-308b-4b8b-8559-be6954755005": "939B",
+    "leaf:panel:cade440d-786e-46f4-b057-f92a45164e8c": "92A2",
+    "leaf:panel:caeecbd8-3963-4db4-affc-bb6eccb89afb": "939A",
+    "leaf:panel:cbe4942c-214a-4e57-8ac1-81d01282e9ce": "932C",
+    "leaf:panel:cc6a9aa3-021f-4f57-be2b-15b3c8691278": "9385",
+    "leaf:panel:ccce6287-d6da-4ec3-8100-f6c05b70bffc": "925B",
+    "leaf:panel:cd04be77-c992-43ec-a87f-389c2756503d": "930C",
+    "leaf:panel:cdb1bf3f-7a76-43a8-aa1c-8aae33ef6a79": "923C",
+    "leaf:panel:cde62640-f142-43df-87f3-edd1c250d12d": "926D",
+    "leaf:panel:cf485ac3-5a4d-48ab-9612-7eb68a295e49": "93A8",
+    "leaf:panel:cfdc9e3e-96d2-482a-ad0f-e9f398e26de4": "9239",
+    "leaf:panel:d005c22f-0807-4b07-97a2-63a6b47bef63": "929A",
+    "leaf:panel:d00756c4-fb2a-4a38-b141-52d3512c44b1": "928F",
+    "leaf:panel:d0bc0e5c-5ec9-411d-aea7-beba898f7c53": "92B6",
+    "leaf:panel:d1052f84-2f87-4b2d-ad3b-d3b68f5e394a": "93D4",
+    "leaf:panel:d1b16db7-7a60-49e7-9074-ef91d5b62871": "92DC",
+    "leaf:panel:d1cec26c-527d-4fda-b7d2-8928eab074c9": "9412",
+    "leaf:panel:d20c08db-5e87-4270-a5ea-2b364668e4d2": "9359",
+    "leaf:panel:d26129f8-f390-4513-97c8-70da6abbbf1b": "9250",
+    "leaf:panel:d31996d7-d128-4988-8def-b4638d146d24": "927F",
+    "leaf:panel:d3c3b179-9a11-4965-b1d8-67aaea1ca060": "92FA",
+    "leaf:panel:d43bc5f9-3b4e-4adc-a593-ecdc76153343": "942A",
+    "leaf:panel:d441c8a0-ab06-42d8-9f8b-703824ce8a9b": "93AA",
+    "leaf:panel:d46dc2fb-0ac8-469b-8cc6-a97b25181505": "92AA",
+    "leaf:panel:d6756a34-50d7-4692-856b-9975f32bb3f9": "9330",
+    "leaf:panel:d949c781-1c4d-42db-a76c-f306315700b0": "9426",
+    "leaf:panel:daa407e0-edd0-43d4-8dd4-1def43af9b8b": "9325",
+    "leaf:panel:dafd81a4-c539-4c0e-a0ee-cd514e2aa0d9": "9386",
+    "leaf:panel:db66477e-e6da-4f8d-9469-11bea39c5839": "9432",
+    "leaf:panel:db76d55c-a68b-4754-8aa2-e5d43d5486cd": "9276",
+    "leaf:panel:dd43127e-c576-4e28-a663-9f47e3073a0d": "9290",
+    "leaf:panel:dda41bb8-a48f-4f5b-aecb-3e9ca8b509fe": "9324",
+    "leaf:panel:de0c141d-bc5a-442f-bd2d-e979e603e6c1": "927B",
+    "leaf:panel:df358d0b-915b-4144-992f-32c86ba4ddfe": "93BF",
+    "leaf:panel:e013ade0-248a-4bbd-b0d4-1c34db34fc64": "92C9",
+    "leaf:panel:e0a49141-51f6-4d50-b64d-e2176bdc6853": "9407",
+    "leaf:panel:e12154cf-f026-451d-a02d-5f87d9a3b2db": "9416",
+    "leaf:panel:e16a3a40-2def-4f91-94fa-418becd7c726": "9262",
+    "leaf:panel:e1e131ad-3a40-4295-8e44-db6d3e88fde1": "9248",
+    "leaf:panel:e208f51a-2a62-4d1f-90fd-0e7befdeadbe": "92FD",
+    "leaf:panel:e21a2fca-d6d7-464e-a363-7ccf9a9d4304": "92B5",
+    "leaf:panel:e248b516-6b1a-4df4-9d4c-4d65641d7849": "92FB",
+    "leaf:panel:e302d5d1-ef8d-4eb2-81f7-62055e69218c": "945A",
+    "leaf:panel:e31a45fa-4053-4552-a9f2-7258530a459c": "93C6",
+    "leaf:panel:e3249409-8666-4802-b7ab-e7c73f46aade": "9322",
+    "leaf:panel:e36ca90e-7f28-43e4-97ca-2e3fda6dc709": "93C9",
+    "leaf:panel:e4a6de96-6dcd-45f6-94d7-c491785720b9": "9340",
+    "leaf:panel:e4bb0e95-4b95-49a6-b020-1ebb291a4861": "92EA",
+    "leaf:panel:e4db281e-562b-48de-a1e6-63affbe6d7c9": "924E",
+    "leaf:panel:e60709f7-529e-4ec1-ab6b-3d2f56421c4f": "9311",
+    "leaf:panel:e6898fe9-2ea6-4833-ac48-a99730255e55": "92DD",
+    "leaf:panel:e6c6cc56-e4f6-47e9-be32-de4d196c3042": "93EE",
+    "leaf:panel:e7003f66-6543-4676-8f9f-2b1cd1e7bc33": "93E6",
+    "leaf:panel:e76ddfda-0367-4dfb-b52a-f3d78a147868": "9354",
+    "leaf:panel:e7a0c356-943c-4a50-a0f0-94f4394da17a": "92DE",
+    "leaf:panel:e87cb14b-a5ce-4dee-94f2-cd91dfbf33d0": "9352",
+    "leaf:panel:e8958b3e-99ae-4117-8164-6d98abd831d0": "93E4",
+    "leaf:panel:e89b6c22-6891-4b04-898b-61217700a40e": "9387",
+    "leaf:panel:e8a36938-f7f7-4692-baff-208a5ed556ae": "929B",
+    "leaf:panel:e916a4fa-aee2-452f-a257-f2c4e79d47c4": "93E1",
+    "leaf:panel:e958942a-02d7-4c11-b98f-399e4a158d2e": "9287",
+    "leaf:panel:ea2335fe-2ab2-4864-803c-e7403660720f": "9398",
+    "leaf:panel:ea5e1944-af97-4ef6-b8db-770b0fd29fb0": "928B",
+    "leaf:panel:eaf3b848-2e0a-4fbb-bf8c-63f195e28b6a": "93E7",
+    "leaf:panel:eaff4709-f2bd-412a-b932-f78c4243c5ca": "9428",
+    "leaf:panel:ec7ea70b-4f57-437c-839f-35b36e0879d2": "93C7",
+    "leaf:panel:ec928388-29d3-4f40-b474-48cd39dd1a19": "93A9",
+    "leaf:panel:ecd16caa-e187-4798-b6a5-156ce9f15edf": "9249",
+    "leaf:panel:ed16d3a1-a16f-420e-97c6-998d7a558e8a": "9373",
+    "leaf:panel:ee3eb803-48fa-4440-9ec1-700491e29c29": "9455",
+    "leaf:panel:eeb93521-ce98-455f-9715-c054389ac02a": "93F1",
+    "leaf:panel:f05e83f0-98e3-48ce-99fc-2cd381db3e1f": "9453",
+    "leaf:panel:f0e8ad4f-12bf-470d-a301-b00074b67c57": "93DC",
+    "leaf:panel:f2742912-eb95-4bd1-9496-893b7f95d7db": "92A3",
+    "leaf:panel:f48db598-d577-483e-8d3f-2aac0a971a54": "9260",
+    "leaf:panel:f4befced-19f9-4f0d-945e-90afca569667": "92FE",
+    "leaf:panel:f4f6cc94-2e44-44db-b3fa-2314f4ce0cea": "9442",
+    "leaf:panel:f58aa858-9212-4d4e-b290-f83b7a70a4a7": "93C4",
+    "leaf:panel:f5aa9772-588a-4c3f-a02d-8a0fe5e38934": "9409",
+    "leaf:panel:f60b7bcc-2452-4603-a2d4-7f7c37fe1ffd": "9404",
+    "leaf:panel:f621e172-10f4-4c99-9e5e-7764c91393f8": "9379",
+    "leaf:panel:f70b7061-e839-4bf9-92ad-facd9e6c61e3": "9285",
+    "leaf:panel:f70f5704-c803-4e2e-a069-a742c5aea898": "9443",
+    "leaf:panel:f78ad522-6531-465a-9d1e-5de1026c9213": "926E",
+    "leaf:panel:f80219fc-a648-4333-83a7-1ce1cb528c80": "9265",
+    "leaf:panel:f81eea8b-f794-424c-8b25-fc951f5eb1c8": "9364",
+    "leaf:panel:f920431b-1432-4e68-8319-af5c25ba6b9c": "9401",
+    "leaf:panel:f924031b-3965-4189-bdab-363db5dd2b7e": "942E",
+    "leaf:panel:f9b1d88d-9b23-472e-a608-97636ddf55ad": "93B7",
+    "leaf:panel:fa4707c0-d60a-4a59-9f81-fa9b402b6097": "9310",
+    "leaf:panel:faa5fd6f-a515-4ae3-bccc-172efce7c84c": "9252",
+    "leaf:panel:fb14ebc2-15db-4097-84bf-1685fbe1f2fb": "9331",
+    "leaf:panel:fbc7f32c-5220-4c18-b680-9f8dbb754e62": "9271",
+    "leaf:panel:fbca1483-7ebf-4ef8-bcc1-f0fda30fc87a": "9418",
+    "leaf:panel:fcd3a5fa-27b1-43a6-82d3-3cd13c5aeff7": "9346",
+    "leaf:panel:fd68ae68-0417-4cc3-9d13-4e1f238ffca9": "943B",
+    "leaf:panel:fd7bafe7-ecb5-4b6a-a92d-264a2c8e143e": "92D9",
+    "leaf:panel:fdc91599-ab52-431a-8426-f937b401f476": "93FB",
+    "leaf:panel:fe1503fa-cd81-46b2-b8a6-fe94ffe2242a": "93D1",
+    "leaf:panel:fe484d5d-dbcf-45c0-bdd3-21fef299d44a": "931D",
+    "leaf:panel:fe637c90-02a5-4d24-88c5-63ea43fc51f6": "9399",
+    "leaf:panel:fedb8075-beef-4b7e-a780-e3041f86431a": "9357",
+    "leaf:panel:fef5c729-c726-40da-beea-8eed6691a717": "9458",
+    "leaf:panel:ffd9f845-7be7-4f01-8062-a647051ecf87": "9371",
+    "leaf:zone-el:2313b882-e326-4ae8-a7e4-ee49cbdbf85d": "zone:Zone B",
+    "leaf:zone-el:d8e4b181-d9f2-4c61-a851-624280645514": "zone:Zone A"
+   },
+   "execution_mode": "live",
+   "fallback_fields": [
+    "panels/producer-built-from-intake",
+    "zones/panel-colour/not-in-graph",
+    "zones/boundary_ref/unrecorded",
+    "frame/crs",
+    "zones/equipment_config/not-part-of-this-capability",
+    "zones/sizing_provenance/not-part-of-this-capability",
+    "zones/boundaries/unrecorded",
+    "zones/elevation/unrecorded"
+   ],
+   "fixture_sha256": "16390e082b6c73d835f21199e7777ae3a60680deae612f81d92048fd26544d21",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "324072cd541489bbc7c45e9ff98a772f2e645e93fd5e007b3da6debdcf51ba31",
+   "output_sha256": "ffc205e9473a1f8553706305f13fea5e4552c034200ff226611b736d905d5032",
+   "parameters": {
+    "family": "zones"
+   },
+   "provenance": {
+    "alignment_tolerance": null,
+    "branch_max_offset": null,
+    "group_count": 0,
+    "installation_design": "Roof",
+    "intake_sha256": "c9ac110b939cb91b2027a0a57f0f32495a51e9ae74f1f1ed2b53e0129b23d19a",
+    "kernel": "solar_panel_group_kernel",
+    "layer_filter": "*Panels*",
+    "panel_count": 2345,
+    "studio_graph_rev": 4,
+    "studio_graph_sha256": "bd4f540e90bb312f346ddd4cfef2f6f644d51b5cf20ede5759d277a3a14b4b4f",
+    "zone_aware_grouping": false,
+    "zone_count": 2,
+    "zone_fields": {
+     "zone:Zone A": {
+      "dc_ac_ratio": 0,
+      "inverter_count_a": 0,
+      "inverter_model_a": "",
+      "module_model": "",
+      "panels_in_sequence": 0,
+      "voc_cold": {
+       "max_dc_voltage": null,
+       "override_accepted": false,
+       "passes": null,
+       "per_module": null,
+       "string_voltage": null,
+       "suggested_string_length": null
+      }
+     },
+     "zone:Zone B": {
+      "dc_ac_ratio": 0,
+      "inverter_count_a": 0,
+      "inverter_model_a": "",
+      "module_model": "",
+      "panels_in_sequence": 0,
+      "voc_cold": {
+       "max_dc_voltage": null,
+       "override_accepted": false,
+       "passes": null,
+       "per_module": null,
+       "string_voltage": null,
+       "suggested_string_length": null
+      }
+     }
+    },
+    "zone_selection": [
+     {
+      "color_index": 1,
+      "name": "Zone A",
+      "window": [
+       14100.0,
+       1150.0,
+       14860.0,
+       2950.0
+      ]
+     },
+     {
+      "color_index": 3,
+      "name": "Zone B",
+      "window": [
+       14860.0,
+       1150.0,
+       15650.0,
+       2950.0
+      ]
+     }
+    ],
+    "zones_without_window": []
+   },
+   "rejected_inputs": [],
+   "revision": "7e74df3db70d1f6ce0f7e6048a6e3e3acbd90c42",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before",
+    "changes",
+    "settings/string_sizing"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "server-builtin",
+    "producer": "solar_w1_studio_zones.v1",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  }
+ }
+}

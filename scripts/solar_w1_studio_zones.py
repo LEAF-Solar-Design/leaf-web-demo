@@ -9,12 +9,16 @@ ascending handle order, so the run reproduces the plugin's own selection rather
 than a rule invented here. Zones stay disjoint because the builtin removes an
 assigned panel from every other zone first, exactly as the plugin does; two
 overlapping windows therefore leave each shared panel in the LAST zone named.
+A ``--zone NAME:COLOR`` with no window is LEAFADDZONE alone: created, assigned
+nothing, and named under provenance.zones_without_window.
 
 With ``--group`` the pure kernel runs the ordinary grouping once per zone
 (group_panels_by_zone) and each group is committed as one frame through the
 existing solar_panel_groups builtin, stamped with its zone, so the graph takes
 that builtin's validation (including its zone-coverage check) and the same
-serialize/deserialize reopen path as every other Studio mutation.
+serialize/deserialize reopen path as every other Studio mutation. With
+``--out-groups-metadata`` the run also writes groups-family metadata (rules G1
+and G8), so the same graph can back a zone-aware groups receipt.
 
 The zone capabilities carry no string sizing, so the groups builtin's sizing
 recheck is bypassed for this run and the settings record says so; the metadata
@@ -90,10 +94,14 @@ def zone_neutral_id(name):
 
 
 def parse_zone(text):
-    """One ``--zone NAME:COLOR:x0,y0,x1,y1``, recorded exactly as it was typed."""
-    if not isinstance(text, str) or text.count(":") != 2:
-        raise ProducerError("zone must be NAME:COLOR:x0,y0,x1,y1")
-    name, colour, window = text.split(":")
+    """One ``--zone NAME:COLOR[:x0,y0,x1,y1]``, recorded exactly as it was typed.
+
+    Without a window the zone is created and assigned nothing, which is exactly
+    what LEAFADDZONE commits; the window is then None.
+    """
+    if not isinstance(text, str) or text.count(":") not in (1, 2):
+        raise ProducerError("zone must be NAME:COLOR or NAME:COLOR:x0,y0,x1,y1")
+    name, colour, *rest = text.split(":")
     if not name.strip() or len(name) > MAX_ZONE_NAME:
         raise ProducerError("zone name must be nonempty and carry no colon")
     try:
@@ -102,7 +110,9 @@ def parse_zone(text):
         raise ProducerError("zone colour must be an integer 0 to 256") from None
     if not 0 <= color_index <= MAX_COLOR_INDEX:
         raise ProducerError("zone colour must be an integer 0 to 256")
-    parts = window.split(",")
+    if not rest:
+        return {"name": name, "color_index": color_index, "window": None}
+    parts = rest[0].split(",")
     if len(parts) != 4:
         raise ProducerError("zone window must be x0,y0,x1,y1")
     try:
@@ -188,6 +198,9 @@ def commit_zones(graph, specs, kernel_panels, by_handle):
         graph = module.add_zone(graph, {
             "expected_rev": graph["rev"], "name": spec["name"],
             "color_index": spec["color_index"]})["graph"]
+        if spec["window"] is None:
+            # LEAFADDZONE alone: the zone is created and nothing is assigned.
+            continue
         chosen = window_panels(kernel_panels, spec["window"])
         if not chosen:
             raise ProducerError("zone window selected no panel")
@@ -282,6 +295,9 @@ def produce(args):
     names = [spec["name"].casefold() for spec in specs]
     if len(set(names)) != len(names):
         raise ProducerError("zone names must be unique")
+    groups_metadata_path = getattr(args, "out_groups_metadata", None)
+    if groups_metadata_path is not None and not args.group:
+        raise ProducerError("groups metadata requires --group: only zone-aware grouping builds groups")
     if args.group:
         for label, value in (("branch max offset", args.branch_max_offset),
                              ("alignment tolerance", args.alignment_tolerance)):
@@ -339,9 +355,11 @@ def produce(args):
     if [zone["name"] for zone in zones] != [spec["name"] for spec in specs]:
         raise ProducerError("committed zones do not match the requested zones")
     members = [ref for zone in zones for ref in zone["panel_refs"]]
-    if not members or len(members) != len(set(members)):
+    if len(members) != len(set(members)):
         raise ProducerError("zones must partition the panels they name")
-    if any(not zone["panel_refs"] for zone in zones):
+    # A zone created without a window is empty by design (LEAFADDZONE alone); a
+    # windowed zone must still hold at least one panel after every assignment.
+    if any(not zone["panel_refs"] for zone, spec in zip(zones, specs) if spec["window"] is not None):
         raise ProducerError("every committed zone must hold at least one panel")
     if len(reopened["frames"]) != len(kernel_groups):
         raise ProducerError("committed frames do not match the zone-aware groups")
@@ -384,15 +402,50 @@ def produce(args):
             "group_count": len(reopened["frames"]),
             "layer_filter": "*" + contains + "*", "installation_design": design,
             "zone_selection": [{"name": spec["name"], "color_index": spec["color_index"],
-                                "window": list(spec["window"])} for spec in specs],
+                                "window": None if spec["window"] is None else list(spec["window"])}
+                               for spec in specs],
+            "zones_without_window": [spec["name"] for spec in specs if spec["window"] is None],
             "zone_aware_grouping": bool(args.group),
             "branch_max_offset": args.branch_max_offset if args.group else None,
             "alignment_tolerance": args.alignment_tolerance if args.group else None,
         },
     }
+    groups_metadata = None
+    if groups_metadata_path is not None:
+        # A zone-aware GROUPS receipt references the groups and their members and
+        # nothing else (rule G8): every frame, plus exactly the panels it grouped.
+        group_mapping = {}
+        for frame in reopened["frames"]:
+            frame_handles = []
+            for ref in frame["panel_refs"]:
+                neutral = handle_of.get(ref)
+                if neutral is None:
+                    raise ProducerError("a group names a panel absent from the graph")
+                group_mapping[ref] = neutral
+                frame_handles.append(neutral)
+            group_mapping[frame["id"]] = group_neutral_id(frame_handles)
+        if len(set(group_mapping.values())) != len(group_mapping):
+            raise ProducerError("group entity mapping must be one-to-one")
+        groups_metadata = deepcopy(metadata)
+        groups_metadata.update({
+            # Rule G1: the four values come from the command line and are recorded as given.
+            "parameters": {"family": "groups", "layer_filter": "*" + contains + "*",
+                           "branch_max_offset": float(args.branch_max_offset),
+                           "alignment_tolerance": float(args.alignment_tolerance),
+                           "installation_design": design},
+            # docs/parity/solar-ledger.json: panel-group-create-zone-aware is version "0".
+            "versions": {"schema": SCHEMA, "producer": PRODUCER, "capability": CAPABILITY_VERSION,
+                         "engine": "server-builtin", "catalog": "none", "solver": "none"},
+            "entity_mapping": group_mapping,
+            "fallback_fields": ["panels/producer-built-from-intake", "frames/producer-derived-dimensions",
+                                "frames/module_power_watts/unrecorded"],
+        })
     args.out_graph.write_text(serialize_graph(reopened) + "\n", encoding="utf-8")
     args.out_metadata.write_text(json.dumps(metadata, indent=2, sort_keys=True,
                                             allow_nan=False) + "\n", encoding="utf-8")
+    if groups_metadata is not None:
+        groups_metadata_path.write_text(json.dumps(groups_metadata, indent=2, sort_keys=True,
+                                                   allow_nan=False) + "\n", encoding="utf-8")
     return reopened, metadata
 
 
@@ -401,12 +454,15 @@ def main(argv=None):
     for name in ("fixture", "intake", "out-graph", "out-metadata"):
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--zone", action="append", required=True,
-                        help="NAME:COLOR:x0,y0,x1,y1, repeatable, in the order the plugin created them")
+                        help="NAME:COLOR[:x0,y0,x1,y1], repeatable, in the order the plugin created them;"
+                             " without a window the zone is created and assigned nothing")
     parser.add_argument("--layer-contains", required=True)
     parser.add_argument("--installation-design", default="Roof")
     parser.add_argument("--group", action="store_true")
     parser.add_argument("--branch-max-offset", type=float)
     parser.add_argument("--alignment-tolerance", type=float)
+    parser.add_argument("--out-groups-metadata", type=Path,
+                        help="with --group, also write groups-family metadata for a zone-aware groups receipt")
     args = parser.parse_args(argv)
     try:
         produce(args)
