@@ -2,13 +2,13 @@
  "schema_version": 1,
  "source_repo": "Evan-Haug/claude-config",
  "source_path": "scripts/impact",
- "source_revision": "8246b3e2d57b6e1d2c98c51aa73f105417b588e1",
- "vendored_on": "2026-09-21",
+ "source_revision": "efd740117dc7c4a181ab204ffaacfeafb93c1879",
+ "vendored_on": "2026-09-22",
  "entries": [
   {
    "path": "README.md",
-   "sha256": "794382730cf36343941523b001b82b5008d8e81781a22904badc06a201772941",
-   "bytes": 10138
+   "sha256": "6ddba68d4320a0bfdc2e7fbca658add23e9571ecb9048dd817485f979183666b",
+   "bytes": 10969
   },
   {
    "path": "__init__.py",
@@ -32,8 +32,8 @@
   },
   {
    "path": "impact.py",
-   "sha256": "2000a919e7c09687b4d096f486a366e2a1245421ecec3b18087c563779bc3e9f",
-   "bytes": 11863
+   "sha256": "da6310acf5bcd6649d62dd03ed4bbb0d011d4b7667188bf89b7819d29cec731c",
+   "bytes": 12385
   },
   {
    "path": "index.py",
@@ -86,5 +86,5 @@
    "bytes": 13579
   }
  ],
- "note": "Refresh with impact.py pack --vendor (claude-config); the drift test there compares this pin to the source."
+ "note": "Refresh by copying these paths byte for byte from claude-config scripts/impact at source_revision and recomputing this pin; scripts/ci/test_change_impact_job.py::test_vendored_pin_matches_tree recomputes every sha256 against the tree and rejects extra files."
 }

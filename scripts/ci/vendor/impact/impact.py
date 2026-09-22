@@ -71,6 +71,14 @@ def _proven(args):
     return run(args, IMPACT_VERSION)
 
 
+def _report(args):
+    if __package__:
+        from .report import run
+    else:
+        from report import run
+    return run(args, IMPACT_VERSION)
+
+
 def _json(data):
     print(json.dumps(data, sort_keys=True, ensure_ascii=True))
 
@@ -235,6 +243,14 @@ def parser():
     command.add_argument("--since")
     command.add_argument("--json", action="store_true")
     command.set_defaults(handler=_proven)
+    command = verbs.add_parser("report")
+    command.add_argument("--since")
+    command.add_argument("--home")
+    command.add_argument("--out")
+    command.add_argument("--notify", action="store_true")
+    command.add_argument("--nightly", action="store_true")
+    command.add_argument("--json", action="store_true")
+    command.set_defaults(handler=_report)
     command = verbs.add_parser("plan")
     command.add_argument("--workdir", required=True)
     command.add_argument("--change-id", required=True)
@@ -277,7 +293,7 @@ def main(argv=None):
     except Exception as exc:
         # Host verbs never expose a traceback; all errors become one stderr line.
         location = f"{args.manifest}: " if args.verb == "validate" else ""
-        prefix = "impact: " if args.verb in ("plan", "check", "dismiss", "resolve", "defer") else "error: "
+        prefix = "impact: " if args.verb in ("plan", "check", "dismiss", "resolve", "defer", "report") else "error: "
         print(prefix + location + " ".join(str(exc).splitlines()), file=sys.stderr)
         return 1 if args.verb in ("init", "validate", "dismiss", "resolve", "defer") else 4
 
