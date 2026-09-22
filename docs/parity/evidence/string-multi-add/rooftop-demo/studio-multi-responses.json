@@ -1,0 +1,598 @@
+{
+  "responses": [
+    {
+      "status": "completed",
+      "data": {
+        "status": "completed",
+        "best_result": {
+          "last_action": 65,
+          "terminated": true,
+          "info": {
+            "steps_taken": 27,
+            "steps_taken_in_string": 13,
+            "horizontal_movements": 21,
+            "vertical_movements": 4,
+            "invalid_vertical_movements": 1,
+            "distance_total": 1,
+            "vertical_sequential": 1,
+            "diagonal_movements": 3,
+            "allow_one_gap_hops": false,
+            "max_gap_hop": 0,
+            "gap_hop_movements": 0,
+            "vertical_temp": -1,
+            "sequence_length": [
+              14,
+              13
+            ],
+            "remaining_string_length": 0,
+            "sequence_length_index": 1,
+            "num_panels": 27.0,
+            "visited_path": [
+              [
+                4,
+                10
+              ],
+              [
+                4,
+                9
+              ],
+              [
+                4,
+                8
+              ],
+              [
+                4,
+                7
+              ],
+              [
+                4,
+                6
+              ],
+              [
+                4,
+                5
+              ],
+              [
+                3,
+                4
+              ],
+              [
+                3,
+                5
+              ],
+              [
+                3,
+                6
+              ],
+              [
+                3,
+                7
+              ],
+              [
+                3,
+                8
+              ],
+              [
+                3,
+                9
+              ],
+              [
+                3,
+                10
+              ],
+              [
+                2,
+                10
+              ],
+              [
+                1,
+                7
+              ],
+              [
+                1,
+                8
+              ],
+              [
+                1,
+                9
+              ],
+              [
+                1,
+                10
+              ],
+              [
+                2,
+                9
+              ],
+              [
+                2,
+                8
+              ],
+              [
+                2,
+                7
+              ],
+              [
+                2,
+                6
+              ],
+              [
+                2,
+                5
+              ],
+              [
+                2,
+                4
+              ],
+              [
+                2,
+                3
+              ],
+              [
+                2,
+                2
+              ],
+              [
+                2,
+                1
+              ]
+            ],
+            "str_length_state_index": 27,
+            "terminated": true,
+            "last_agent_x": 1,
+            "last_agent_y": 2
+          },
+          "beam_idx": 2,
+          "grid_id": "05ed4af0-7525-4991-bf08-b8bc90f0b394",
+          "model_id": "unet_distil_hard_epoch1",
+          "gumbel_scale": 1.0,
+          "string_start_split_count": 1,
+          "model": "unet_distil_hard_epoch1"
+        },
+        "final_grid": {
+          "Dwgname": "rooftop_demo.dwg",
+          "Modify": [],
+          "Rows": [
+            {
+              "Panels": [
+                {
+                  "Angle": 0.0,
+                  "Code": 0,
+                  "Id": "",
+                  "InverterId": -1,
+                  "Seq": 0,
+                  "StringInputNumber": 0,
+                  "X": 0.0,
+                  "Y": 0.0
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 0,
+                  "Id": "",
+                  "InverterId": -1,
+                  "Seq": 0,
+                  "StringInputNumber": 0,
+                  "X": 0.0,
+                  "Y": 0.0
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 0,
+                  "Id": "",
+                  "InverterId": -1,
+                  "Seq": 0,
+                  "StringInputNumber": 0,
+                  "X": 0.0,
+                  "Y": 0.0
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 0,
+                  "Id": "",
+                  "InverterId": -1,
+                  "Seq": 0,
+                  "StringInputNumber": 0,
+                  "X": 0.0,
+                  "Y": 0.0
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 0,
+                  "Id": "",
+                  "InverterId": -1,
+                  "Seq": 0,
+                  "StringInputNumber": 0,
+                  "X": 0.0,
+                  "Y": 0.0
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 0,
+                  "Id": "",
+                  "InverterId": -1,
+                  "Seq": 0,
+                  "StringInputNumber": 0,
+                  "X": 0.0,
+                  "Y": 0.0
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 1,
+                  "Id": "leaf:panel:c086e636-df70-42dc-8e54-a78abb8ab749",
+                  "InverterId": -1,
+                  "Seq": 27,
+                  "StringInputNumber": 0,
+                  "X": 14362.316,
+                  "Y": 1294.5774999999999
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 1,
+                  "Id": "leaf:panel:80523751-d2d5-4976-891a-aa2615d9b724",
+                  "InverterId": -1,
+                  "Seq": 26,
+                  "StringInputNumber": 0,
+                  "X": 14285.066,
+                  "Y": 1294.5774999999999
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 1,
+                  "Id": "leaf:panel:788aadc1-fa47-4dc4-aa08-2358524094fb",
+                  "InverterId": -1,
+                  "Seq": 25,
+                  "StringInputNumber": 0,
+                  "X": 14207.816,
+                  "Y": 1294.5774999999999
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 1,
+                  "Id": "leaf:panel:d50b8214-6925-4b15-bed4-742e20548993",
+                  "InverterId": -1,
+                  "Seq": 24,
+                  "StringInputNumber": 0,
+                  "X": 14130.566,
+                  "Y": 1294.5774999999999
+                }
+              ]
+            },
+            {
+              "Panels": [
+                {
+                  "Angle": 0.0,
+                  "Code": 1,
+                  "Id": "leaf:panel:5c53971f-8f38-419d-9ca2-7b95908dbde6",
+                  "InverterId": -1,
+                  "Seq": 15,
+                  "StringInputNumber": 0,
+                  "X": 14825.816,
+                  "Y": 1352.3845000000001
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 1,
+                  "Id": "leaf:panel:6f3caede-76a0-457e-a8d2-cf1bee5ddf68",
+                  "InverterId": -1,
+                  "Seq": 16,
+                  "StringInputNumber": 0,
+                  "X": 14748.566,
+                  "Y": 1352.3845000000001
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 1,
+                  "Id": "leaf:panel:9622a32b-8533-4d48-8e68-67b748226c63",
+                  "InverterId": -1,
+                  "Seq": 17,
+                  "StringInputNumber": 0,
+                  "X": 14671.316,
+                  "Y": 1352.3845000000001
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 1,
+                  "Id": "leaf:panel:01658871-1e3f-4d8f-842c-ed7e050ba435",
+                  "InverterId": -1,
+                  "Seq": 18,
+                  "StringInputNumber": 0,
+                  "X": 14594.066,
+                  "Y": 1352.3845000000001
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 1,
+                  "Id": "leaf:panel:8b55113c-5008-4eb2-a5a9-ebe80800bac9",
+                  "InverterId": -1,
+                  "Seq": 19,
+                  "StringInputNumber": 0,
+                  "X": 14516.816,
+                  "Y": 1352.3845000000001
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 1,
+                  "Id": "leaf:panel:2ddfc88a-aeb4-4170-8eb5-85bc9098283a",
+                  "InverterId": -1,
+                  "Seq": 20,
+                  "StringInputNumber": 0,
+                  "X": 14439.566,
+                  "Y": 1352.3845000000001
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 1,
+                  "Id": "leaf:panel:6a62dfff-e016-4e4a-ab14-032e4d16a53b",
+                  "InverterId": -1,
+                  "Seq": 21,
+                  "StringInputNumber": 0,
+                  "X": 14362.316,
+                  "Y": 1352.3845000000001
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 1,
+                  "Id": "leaf:panel:605d32e7-68b0-409e-893b-b5f7c3d4544d",
+                  "InverterId": -1,
+                  "Seq": 22,
+                  "StringInputNumber": 0,
+                  "X": 14285.066,
+                  "Y": 1352.3845000000001
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 1,
+                  "Id": "leaf:panel:86b07865-8c54-4ed8-a585-dd683cc389c1",
+                  "InverterId": -1,
+                  "Seq": 23,
+                  "StringInputNumber": 0,
+                  "X": 14207.816,
+                  "Y": 1352.3845000000001
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 1,
+                  "Id": "leaf:panel:0a38479e-892e-42ae-8cc5-f5bddf7b2fd6",
+                  "InverterId": -1,
+                  "Seq": 14,
+                  "StringInputNumber": 0,
+                  "X": 14130.566,
+                  "Y": 1352.3845000000001
+                }
+              ]
+            },
+            {
+              "Panels": [
+                {
+                  "Angle": 0.0,
+                  "Code": 0,
+                  "Id": "",
+                  "InverterId": -1,
+                  "Seq": 0,
+                  "StringInputNumber": 0,
+                  "X": 0.0,
+                  "Y": 0.0
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 0,
+                  "Id": "",
+                  "InverterId": -1,
+                  "Seq": 0,
+                  "StringInputNumber": 0,
+                  "X": 0.0,
+                  "Y": 0.0
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 0,
+                  "Id": "",
+                  "InverterId": -1,
+                  "Seq": 0,
+                  "StringInputNumber": 0,
+                  "X": 0.0,
+                  "Y": 0.0
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 1,
+                  "Id": "leaf:panel:0a2b4f72-5ce9-4143-87eb-db7b07a3779a",
+                  "InverterId": -1,
+                  "Seq": 7,
+                  "StringInputNumber": 0,
+                  "X": 14594.066,
+                  "Y": 2103.8725
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 1,
+                  "Id": "leaf:panel:8ff4f7a8-3f07-4a19-8812-ffe446862ca9",
+                  "InverterId": -1,
+                  "Seq": 8,
+                  "StringInputNumber": 0,
+                  "X": 14516.816,
+                  "Y": 2103.8725
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 1,
+                  "Id": "leaf:panel:2ed9f9f4-0c48-431b-a0a8-82f498ccd101",
+                  "InverterId": -1,
+                  "Seq": 9,
+                  "StringInputNumber": 0,
+                  "X": 14439.566,
+                  "Y": 2103.8725
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 1,
+                  "Id": "leaf:panel:48d7949d-09e6-44a2-b7a0-acf958f4a801",
+                  "InverterId": -1,
+                  "Seq": 10,
+                  "StringInputNumber": 0,
+                  "X": 14362.316,
+                  "Y": 2103.8725
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 1,
+                  "Id": "leaf:panel:39e802a9-43b1-45ec-b3a4-dd660f1e6ef4",
+                  "InverterId": -1,
+                  "Seq": 11,
+                  "StringInputNumber": 0,
+                  "X": 14285.066,
+                  "Y": 2103.8725
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 1,
+                  "Id": "leaf:panel:352741cb-fad4-4e72-867d-874c667b9924",
+                  "InverterId": -1,
+                  "Seq": 12,
+                  "StringInputNumber": 0,
+                  "X": 14207.816,
+                  "Y": 2103.8725
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 1,
+                  "Id": "leaf:panel:01c89625-2aef-415a-b019-01fcfed2e3a3",
+                  "InverterId": -1,
+                  "Seq": 13,
+                  "StringInputNumber": 0,
+                  "X": 14130.566,
+                  "Y": 2103.8725
+                }
+              ]
+            },
+            {
+              "Panels": [
+                {
+                  "Angle": 0.0,
+                  "Code": 0,
+                  "Id": "",
+                  "InverterId": -1,
+                  "Seq": 0,
+                  "StringInputNumber": 0,
+                  "X": 0.0,
+                  "Y": 0.0
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 0,
+                  "Id": "",
+                  "InverterId": -1,
+                  "Seq": 0,
+                  "StringInputNumber": 0,
+                  "X": 0.0,
+                  "Y": 0.0
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 0,
+                  "Id": "",
+                  "InverterId": -1,
+                  "Seq": 0,
+                  "StringInputNumber": 0,
+                  "X": 0.0,
+                  "Y": 0.0
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 0,
+                  "Id": "",
+                  "InverterId": -1,
+                  "Seq": 0,
+                  "StringInputNumber": 0,
+                  "X": 0.0,
+                  "Y": 0.0
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 1,
+                  "Id": "leaf:panel:ca19ad0d-1bf3-4f73-8a78-12c0326972ed",
+                  "InverterId": -1,
+                  "Seq": 6,
+                  "StringInputNumber": 0,
+                  "X": 14516.816,
+                  "Y": 2161.6795
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 1,
+                  "Id": "leaf:panel:18875ae7-6094-41eb-833d-0bfd40f892d4",
+                  "InverterId": -1,
+                  "Seq": 5,
+                  "StringInputNumber": 0,
+                  "X": 14439.566,
+                  "Y": 2161.6795
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 1,
+                  "Id": "leaf:panel:0a057068-bbeb-45b2-b1bf-ad39a0d65aac",
+                  "InverterId": -1,
+                  "Seq": 4,
+                  "StringInputNumber": 0,
+                  "X": 14362.316,
+                  "Y": 2161.6795
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 1,
+                  "Id": "leaf:panel:6dbdfeaf-fda9-4bd6-9d39-bc71f54b9580",
+                  "InverterId": -1,
+                  "Seq": 3,
+                  "StringInputNumber": 0,
+                  "X": 14285.066,
+                  "Y": 2161.6795
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 1,
+                  "Id": "leaf:panel:d46dc2fb-0ac8-469b-8cc6-a97b25181505",
+                  "InverterId": -1,
+                  "Seq": 2,
+                  "StringInputNumber": 0,
+                  "X": 14207.816,
+                  "Y": 2161.6795
+                },
+                {
+                  "Angle": 0.0,
+                  "Code": 1,
+                  "Id": "leaf:panel:6c01cefe-ad65-4b1b-accd-fc81ea1a5e4c",
+                  "InverterId": -1,
+                  "Seq": 1,
+                  "StringInputNumber": 0,
+                  "X": 14130.566,
+                  "Y": 2161.6795
+                }
+              ]
+            }
+          ],
+          "Sequences": [
+            [
+              14,
+              13
+            ],
+            [
+              1,
+              1
+            ]
+          ]
+        },
+        "model_used": "unet_distil_hard_epoch1",
+        "gumbel_scale_used": 1.0,
+        "distance_total": 1,
+        "total_valid_solutions": 6,
+        "gumbel_summary": {
+          "1.0": 1
+        },
+        "first_pass_best_distance": 1.0,
+        "improvement": 0.0,
+        "second_pass_triggered": true
+      },
+      "job_id": "05ed4af0-7525-4991-bf08-b8bc90f0b394"
+    }
+  ]
+}

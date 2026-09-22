@@ -371,6 +371,16 @@ def build_suites() -> List[Suite]:
         # parametrization over 9 literal malformed requests = 26.
         Suite("server-w2-panel-add", "server tests/test_w2_panel_add.py", "pytest", SERVER,
               _py_pytest("tests/test_w2_panel_add.py"), 26),
+        # S25 string-combo (2026-09-22): the literal port of the licensed plugin's
+        # StringComboCalculator.StringComboFunc, run against the plugin's OWN NUnit
+        # cases (Tests/Tests/StringComboCalculatorTests.cs), the zero sentinel it
+        # returns when no two adjacent lengths fit the count, the flattened Sequences
+        # MULTISTRING sends to the solver, and the captured (14, 27) -> 14 + 13 case.
+        # Pure (no graph, no network, no fixture), so the floor is the exact count on
+        # every runner: 17 unparametrized tests + one parametrization over the 10 C#
+        # ConservationLaw rows + one over 8 literal out-of-range arguments = 35.
+        Suite("server-w2-string-combo", "server tests/test_solar_string_combo.py", "pytest", SERVER,
+              _py_pytest("tests/test_solar_string_combo.py"), 35),
         Suite("server-w1-sizing-groups", "server tests/test_w1_sizing_groups.py", "pytest", SERVER,
               _py_pytest("tests/test_w1_sizing_groups.py"), 52),
         Suite("server-w1-solar-interchange", "server tests/test_w1_solar_interchange.py", "pytest", SERVER,
@@ -1583,6 +1593,24 @@ def build_suites() -> List[Suite]:
         # overrides = 20.
         Suite("scripts-solar-w1-studio-panel-add", "scripts test_solar_w1_studio_panel_add.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_panel_add.py"), 20),
+        # S25 (2026-09-22): the MULTISTRING producer on the committed rooftop capture.
+        # The solve half is the solve producer and the delete half is the string-delete
+        # producer, so the circuits it re-strings beside are the plugin's own 66 and the
+        # panels it feeds the stringer are ones a real delete freed. MULTISTRING is a
+        # SOLVE over a sub-matrix, not the string-add builtin in a loop, so this covers
+        # the sub-matrix (exactly the selected panels, every row and column occupied),
+        # the Sequences the ported StringComboFunc computes, the cut the service returns
+        # committed circuit for circuit in the solver's order, the record-then-replay
+        # round trip, rule G8, and the refusals (unknown panel, already-wired panel,
+        # malformed handle, repeated handle, and the two flag combinations that would
+        # put a replayed run on the network). The sub-matrix answer is synthesized in
+        # the test against the exact grid sent, so the suite is hermetic (the committed
+        # rooftop fixture, intake, placement, sizing and solve capture only; no network)
+        # and the floor is the exact count on every runner: 14 tests + one
+        # parametrization over 3 literal malformed handles = 17.
+        Suite("scripts-solar-w1-studio-string-multi-add",
+              "scripts test_solar_w1_studio_string_multi_add.py", "pytest", SCRIPTS_DIR,
+              _py_pytest("test_solar_w1_studio_string_multi_add.py"), 17),
         # S22 (2026-09-22): contract rule G9 on the Studio evidence adapter, the first
         # test file it has. A set-valued list (unassigned_panels, duplicate_panels) is
         # emitted in ascending neutral-id order, so the same set recorded in two orders
