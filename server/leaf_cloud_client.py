@@ -190,7 +190,13 @@ class StringerResponse(StrictModel):
         return path
 
     def check_echo(self, request: StringerRequest) -> None:
-        """The final_grid must echo the sent (cropped) grid apart from Seq."""
+        """The final_grid must echo the sent (cropped) grid apart from Seq, under the job id."""
+        self.check_grid_echo(request)
+        if self.data.best_result.grid_id != self.job_id:
+            raise ValueError("response grid does not match request")
+
+    def check_grid_echo(self, request: StringerRequest) -> None:
+        """The final_grid alone: the one check a partial beam (no grid_id) can still keep."""
         sent = request.wire_payload()["grid"]
         final = self.data.final_grid.model_dump()
         for row in final["Rows"]:
@@ -199,7 +205,7 @@ class StringerResponse(StrictModel):
         for row in sent["Rows"]:
             for panel in row["Panels"]:
                 panel["Seq"] = 0
-        if final != sent or self.data.best_result.grid_id != self.job_id:
+        if final != sent:
             raise ValueError("response grid does not match request")
 
 
@@ -235,26 +241,45 @@ class PartialBeamInfo(StrictModel):
     distance_total: float = Field(ge=0, le=1e15)
 
 
-class PieceBestResult(BestResult):
-    info: StringerInfo | PartialBeamInfo
+class PartialBeamBestResult(StrictModel):
+    """Measured live 2026-09-22: the fallback's best_result carries ONLY info; last_action,
+    terminated, beam_idx, grid_id, model_id, gumbel_scale, string_start_split_count and
+    model are all absent, so this is a separate shape rather than a loosened BestResult."""
+    info: PartialBeamInfo
 
 
 class PieceStringerData(StringerData):
-    best_result: PieceBestResult
+    """A full piece answer: the whole-frame data, plus the message the service may add."""
     message: Annotated[str, Field(max_length=256)] | None = None
 
 
+class PartialBeamStringerData(StrictModel):
+    """The fallback's data as the service sends it: no gumbel_summary, first_pass_best_distance,
+    improvement or second_pass_triggered, and a message naming the finalizer fallback."""
+    status: Literal["completed"]
+    best_result: PartialBeamBestResult
+    final_grid: MatrixJson
+    model_used: ShortText
+    gumbel_scale_used: float = Field(ge=0, le=1e6)
+    distance_total: float = Field(ge=0, le=1e15)
+    total_valid_solutions: Count
+    message: Annotated[str, Field(min_length=1, max_length=256)]
+
+
 class PieceStringerResponse(StringerResponse):
-    data: PieceStringerData
+    # Full shape first, so a full answer is never read as the fallback; a full answer missing
+    # any field is refused by both members. Whole-frame StringerResponse never takes the fallback.
+    data: PieceStringerData | PartialBeamStringerData = Field(union_mode="left_to_right")
 
     @property
     def partial_beam(self) -> bool:
-        return isinstance(self.data.best_result.info, PartialBeamInfo)
+        return isinstance(self.data, PartialBeamStringerData)
 
     def original_visited_path(self, request: StringerRequest) -> list[list[int]]:
-        """Full answers keep every single-frame check; a partial beam keeps the echo and job id."""
+        """Full answers keep every single-frame check; a partial beam has no path, lengths or
+        grid_id, so it keeps the final_grid echo and yields no path."""
         if self.partial_beam:
-            self.check_echo(request)
+            self.check_grid_echo(request)
             return []
         return super().original_visited_path(request)
 
