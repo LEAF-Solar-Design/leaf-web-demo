@@ -71,6 +71,100 @@ def pair():
     return evidence, deepcopy(evidence)
 
 
+def strings_case():
+    source, context = graph(), metadata()
+    source["strings"] = [
+        {"id": "string-1", "ordered_panel_refs": ["panel-1", "panel-2", "panel-3"],
+         "module_count": 3, "extra": {"polarity": {
+             "source": "derived", "source_rev": 0,
+             "negative_panel_ref": "panel-1", "positive_panel_ref": "panel-3"}}},
+        {"id": "string-2", "ordered_panel_refs": ["panel-4", "panel-5"],
+         "module_count": 2, "extra": {"polarity": {
+             "source": "derived", "source_rev": 0,
+             "negative_panel_ref": "panel-4", "positive_panel_ref": "panel-5"}}},
+    ]
+    source["panels"] = [
+        {"id": f"panel-{i}", "centre": [i * 1000, 1000, 10], "angle": 0}
+        for i in range(1, 7)
+    ]
+    source["extra"] = {"solve_coverage": {
+        "unassigned_panel_refs": ["panel-6"], "duplicate_panel_refs": []}}
+    context["entity_mapping"].update({f"panel-{i}": f"panel-neutral-{i}" for i in range(2, 7)})
+    context["entity_mapping"].update({"string-1": "string-one", "string-2": "string-two"})
+    context["before"] = {"strings": [], "unassigned_panels": [],
+                         "duplicate_panels": [], "length_distribution": []}
+    return source, context
+
+
+def test_strings_evidence_validates_order_and_sorted_lengths():
+    source, context = strings_case()
+    originals = deepcopy((source, context))
+    evidence = adapter.build_evidence(source, "strings", context)
+    compare.validate_evidence(evidence, "strings")
+    assert (source, context) == originals
+    assert evidence["after"] == {
+        "strings": [
+            {"id": {"entity_id": "string-1"}, "ordered_membership": [
+                {"entity_id": "panel-1"}, {"entity_id": "panel-2"}, {"entity_id": "panel-3"}],
+             "polarity": "positive"},
+            {"id": {"entity_id": "string-2"}, "ordered_membership": [
+                {"entity_id": "panel-4"}, {"entity_id": "panel-5"}], "polarity": "positive"},
+        ],
+        "unassigned_panels": [{"entity_id": "panel-6"}],
+        "duplicate_panels": [], "length_distribution": [2, 3],
+    }
+
+
+def test_strings_polarity_requires_matching_endpoints():
+    source, context = strings_case()
+    source["strings"][1]["ordered_panel_refs"].reverse()
+    evidence = adapter.build_evidence(source, "strings", context)
+    assert [s["polarity"] for s in evidence["after"]["strings"]] == ["positive", "negative"]
+    source["strings"][0]["extra"]["polarity"]["negative_panel_ref"] = "panel-2"
+    with pytest.raises(adapter.compare.InputError, match="polarity"):
+        adapter.build_evidence(source, "strings", context)
+
+
+def test_strings_missing_polarity_is_flagged():
+    source, context = strings_case()
+    del source["strings"][0]["extra"]["polarity"]
+    evidence = adapter.build_evidence(source, "strings", context)
+    assert evidence["after"]["strings"][0]["polarity"] == "none"
+    assert "after/strings/0/polarity" in evidence["fallback_fields"]
+    assert evidence["synthetic_flagged"] is True
+
+
+def test_strings_require_committed_solve_coverage():
+    source, context = strings_case()
+    del source["extra"]["solve_coverage"]
+    with pytest.raises(adapter.compare.InputError, match="solve_coverage"):
+        adapter.build_evidence(source, "strings", context)
+
+
+def test_strings_reject_invalid_module_counts():
+    for count in (-1, 2.5, "3", True, None):
+        source, context = strings_case()
+        source["strings"][0]["module_count"] = count
+        with pytest.raises(adapter.compare.InputError, match="module_count"):
+            adapter.build_evidence(source, "strings", context)
+
+
+def test_strings_comparison_detects_reversed_membership():
+    source, context = strings_case()
+    plugin = adapter.build_evidence(source, "strings", context)
+    studio = deepcopy(plugin)
+    document = {"schema": compare.SCHEMA, "capability": "solve", "family": "strings",
+                "plugin": plugin, "studio": studio}
+    verdict = compare.compare_document(document)
+    assert verdict["verdict"] == "pass"
+    assert verdict["diffs"] == []
+    studio["after"]["strings"][0]["ordered_membership"].reverse()
+    studio["output_sha256"] = compare.semantic_hash(studio["after"])
+    verdict = compare.compare_document(document)
+    assert verdict["verdict"] == "fail"
+    assert any("after/strings/0/ordered_membership" in diff for diff in verdict["diffs"])
+
+
 def receipt_for(plugin, studio):
     return writer.build_receipt(plugin, studio, CAPABILITY, "1", "groups", produced_at="2026-09-17T00:00:00Z")
 
