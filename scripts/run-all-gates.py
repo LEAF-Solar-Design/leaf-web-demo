@@ -328,6 +328,13 @@ def build_suites() -> List[Suite]:
         # (2 + 9 + 5 = 16) = 23.
         Suite("server-w1-electrical-zones", "server tests/test_w1_electrical_zones.py", "pytest", SERVER,
               _py_pytest("tests/test_w1_electrical_zones.py"), 23),
+        # S19 panel-group delete-all (2026-09-22): the drawing-wide delete builtin, the
+        # panels and zones it leaves alone, and the references it refuses to leave
+        # dangling. Hermetic (a graph seeded in the test, no network, no fixture), so
+        # the floor is the exact count on every runner: 10 unparametrized tests + one
+        # parametrization over 7 literal malformed requests = 17.
+        Suite("server-w2-panel-group-delete", "server tests/test_w2_panel_group_delete.py", "pytest", SERVER,
+              _py_pytest("tests/test_w2_panel_group_delete.py"), 17),
         Suite("server-w1-sizing-groups", "server tests/test_w1_sizing_groups.py", "pytest", SERVER,
               _py_pytest("tests/test_w1_sizing_groups.py"), 52),
         Suite("server-w1-solar-interchange", "server tests/test_w1_solar_interchange.py", "pytest", SERVER,
@@ -1486,6 +1493,15 @@ def build_suites() -> List[Suite]:
         # one-group-per-zone evidence, and that flag refused without --group.
         Suite("scripts-solar-w1-studio-zones", "scripts test_solar_w1_studio_zones.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_zones.py"), 21),
+        # S19 (2026-09-22): the group-delete producer on a synthetic eleven-group intake
+        # (the count the captured plugin run printed), the same intake through the groups
+        # producer to prove the delete started from the committed grouped state, and the
+        # refusals, plus rule G8 from both sides (an emptied graph maps nothing, a grouped
+        # one maps its groups and their members). Hermetic (the committed schema file only
+        # for its hash and revision), so the floor is the exact count on every runner:
+        # 8 tests + one parametrization over 5 literal parameter overrides = 13.
+        Suite("scripts-solar-w1-studio-group-delete", "scripts test_solar_w1_studio_group_delete.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_group_delete.py"), 13),
         # Registered per the #29 fix-then-register rule (shipped without a
         # gate entry; measured 1 passed on this tree 2026-07-23).
         # 1 -> 2 on 2026-08-07: the staging relay's convergence contract
