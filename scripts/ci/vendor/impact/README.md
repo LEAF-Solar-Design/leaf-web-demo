@@ -19,6 +19,7 @@ python scripts/impact/impact.py check --workdir PATH --change-id ID --base REF -
 python scripts/impact/impact.py dismiss --record RECORD --row ROW_ID --reason TEXT
 python scripts/impact/impact.py resolve --record RECORD --row ROW_ID --evidence REF [--outcome changed|unchanged-compatible]
 python scripts/impact/impact.py defer --record RECORD --row ROW_ID --task TASK_ID
+python scripts/impact/impact.py report [--since UTC_TIMESTAMP] [--home PATH] [--out FILE] [--notify|--nightly] [--json]
 ```
 
 `init` groups tracked files by top-level directory and lists root files under
@@ -53,6 +54,16 @@ tree listings to 200,000 paths, and discovery to 5,000 status files. Git uses li
 argv with a 60-second timeout and no shell. Host verbs report one-line errors.
 Exit codes: **0** success, **1** invalid/refused or doctor needs sync, **2** usage,
 **3** clean absence, **4** unreadable/internal error.
+
+`report` writes `ops/impact-scorecard.json` and appends `ops/impact-scorecard.jsonl`
+under `IMPACT_HOME` (or `--home`). `--out` overrides the scorecard file. It joins
+the host index with pair receipts, status and dispositions since `--since`, or
+the last 30 days, and counts unreadable inputs. Regressions compare the previous
+scorecard: lost manifests, unresolved share rising by more than ten percentage
+points on at least five records, or more accepted INCOMPLETE records without
+dispositions. Exit 0 means no regressions, 1 means findings, and 4 means an
+internal error. `--notify` and `--nightly` send only regressions through
+`notify.py` with a daily dedupe key. The nightly step has a 60-second budget.
 
 Library surface: `manifest.load_manifest`, `validate_manifest`, `manifest_digest`,
 `glob_to_regex`, `match_path`, `coverage` (a `Coverage` dataclass), and
