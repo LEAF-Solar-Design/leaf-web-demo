@@ -26,6 +26,11 @@ INTAKE = ROOT / "data/rooftop_unsplit.intake.json"
 PLACEMENT = ROOT / "data/rooftop_unsplit.licensed-placement.json"
 CAPTURE = ROOT / "server/tests/fixtures/w1_rooftop_unsplit_solve.json"
 SIZING = ROOT / "server/tests/fixtures/w1_rooftop_unsplit_sizing_response.json"
+SPLIT_RECORD = ROOT / "server/tests/fixtures/w1_rooftop_split_groups.json"
+REAL_RESPONSE = ROOT / "server/tests/fixtures/w1_stringer_response_real.json"
+DEMO_FIXTURE = ROOT / "data/rooftop_demo.dwg"
+DEMO_INTAKE = ROOT / "data/rooftop_demo.v2.intake.json"
+DEMO_PLACEMENT = ROOT / "data/rooftop_demo.licensed-placement.json"
 
 
 def save(path, document):
@@ -199,5 +204,110 @@ def test_untracked_fixture_has_no_revision_and_is_refused(tmp_path, capsys):
     fixture.write_bytes(FIXTURE.read_bytes())
     assert run_offline(arguments(tmp_path, fixture=fixture)) == 2
     assert "fixture must be tracked in git" in capsys.readouterr().err
+    assert not (tmp_path / "graph.json").exists()
+    assert not (tmp_path / "metadata.json").exists()
+
+
+def split_scenario(folder):
+    """One recorded split group of the full rooftop as a one-frame run.
+
+    The intake and placement keep only that group's panels (still bound to the
+    rooftop fixture). Each replayed answer echoes the piece wire grid Studio
+    sends, carrying the plugin's recorded Seq values and string lengths.
+    """
+    record = json.loads(SPLIT_RECORD.read_text(encoding="utf-8"))
+    group = min(record["groups"], key=lambda g: g["panel_count"])
+    norm = lambda h: None if h is None else producer.normalized_handle(h)  # noqa: E731
+    wanted = [[norm(h) for h in row] for row in group["group_grid"]]
+    placement = json.loads(DEMO_PLACEMENT.read_text(encoding="utf-8"))
+    source = next(g for g in placement["groups"]
+                  if [[norm(h) for h in row] for row in g["matrix"]] == wanted)
+    placement["groups"] = [dict(source, name="Group 1")]
+    members = {h for row in wanted for h in row if h}
+    intake = json.loads(DEMO_INTAKE.read_text(encoding="utf-8"))
+    intake["polylines"] = [p for p in intake["polylines"] if norm(p["handle"]) in members]
+    by_handle, _ = producer.import_panels({"source_hash": "0" * 64, "rev": 0, "panels": []},
+                                          intake, "geometry-only")
+    template = json.loads(REAL_RESPONSE.read_text(encoding="utf-8"))
+    bodies = []
+    for piece, recorded in zip(group["pieces"], group["responses"]):
+        seqs = {norm(cell["Id"]): cell["Seq"] for row in recorded["data"]["final_grid"]["Rows"]
+                for cell in row["Panels"] if cell["Code"] == 1}
+        cells = piece["cells"]
+        kept_rows = [r for r, row in enumerate(cells) if any(row)]
+        kept_cols = [c for c in range(len(cells[0])) if any(cells[r][c] for r in kept_rows)]
+        rows = []
+        for r in kept_rows:
+            wires = []
+            for c in kept_cols:
+                handle = cells[r][c]
+                wire = {"Code": 0, "Id": "", "Seq": 0, "InverterId": -1,
+                        "StringInputNumber": 0, "X": 0.0, "Y": 0.0, "Angle": 0.0}
+                if handle:
+                    panel = by_handle[norm(handle)]
+                    wire.update(Code=1, Id=handle, Seq=seqs[norm(handle)], X=panel["centre"][0],
+                                Y=panel["centre"][1], Angle=panel["angle"])
+                wires.append(wire)
+            rows.append({"Panels": wires})
+        body = deepcopy(template)
+        data = body["data"]
+        sequences = piece["sequences"]
+        data["final_grid"] = {"Dwgname": "rooftop_demo.dwg", "Rows": rows, "Modify": [],
+                              "Sequences": [sequences[:2], sequences[2:]]}
+        data["total_valid_solutions"] = recorded["data"]["total_valid_solutions"]
+        data["message"] = recorded["data"].get("message")
+        info = recorded["data"]["best_result"]["info"]
+        if "sequence_length" in info:
+            order = sorted((wire["Seq"], r + 1, c + 1) for r, row in enumerate(rows)
+                           for c, wire in enumerate(row["Panels"]) if wire["Code"] == 1)
+            data["best_result"]["info"].update(
+                sequence_length=list(info["sequence_length"]),
+                visited_path=[[r, c] for _, r, c in order],
+                num_panels=float(len(order)), steps_taken=len(order))
+        else:
+            data["best_result"]["info"] = {"distance_total": 0.0}
+        bodies.append(body)
+    overrides = {"fixture": DEMO_FIXTURE, "intake": save(folder / "split-intake.json", intake),
+                 "placement": save(folder / "split-placement.json", placement)}
+    return group, bodies, overrides
+
+
+def test_split_frame_replays_piece_by_piece_and_commits_the_plugin_strings(tmp_path):
+    group, bodies, overrides = split_scenario(tmp_path)
+    replay = save(tmp_path / "split-replay.json", {"responses": bodies})
+    assert run_offline(arguments(tmp_path, replay=replay, **overrides)) == 0
+    graph = producer.deserialize_graph((tmp_path / "graph.json").read_bytes())
+    metadata = json.loads((tmp_path / "metadata.json").read_text(encoding="utf-8"))
+    handles = {panel["id"]: producer.normalized_handle(panel["provenance"]["source_handle"])
+               for panel in graph["panels"]}
+    actual = [[handles[ref] for ref in string["ordered_panel_refs"]] for string in graph["strings"]]
+    expected = [[producer.normalized_handle(h) for h in members] for members in group["plugin_strings"]]
+    assert len(actual) == len(expected)
+    assert sorted(actual) == sorted(expected)
+    assert len(handles) == group["panel_count"]
+    assert sum(map(len, actual)) == group["panel_count"]
+    assert graph["extra"]["solve_coverage"] == {"unassigned_panel_refs": [], "duplicate_panel_refs": []}
+    [frame] = graph["frames"]
+    assert frame["name"] == "Group 1"
+    split = frame["extra"]["solve"]["split"]
+    assert len(split["pieces"]) == len(group["pieces"])
+    assert [p["row_indices"] for p in split["pieces"]] == [p["row_indices"] for p in group["pieces"]]
+    provenance = metadata["provenance"]
+    assert provenance["split_frames"] == [{"frame": "Group 1", "pieces": len(group["pieces"]),
+                                           "split_state": {"jogs": 1, "depth": 10}}]
+    assert len(provenance["response_sha256s"]) == len(group["pieces"])
+    assert metadata["parameters"] == {"family": "strings", "max_string_length": 14}
+    assert metadata["fixture_sha256"] == hashlib.sha256(DEMO_FIXTURE.read_bytes()).hexdigest()
+    assert "grant_ref" not in json.dumps((graph, metadata))
+
+
+def test_split_replay_refuses_a_piece_echo_that_does_not_match(tmp_path, capsys):
+    _, bodies, overrides = split_scenario(tmp_path)
+    wire = next(w for row in bodies[-1]["data"]["final_grid"]["Rows"]
+                for w in row["Panels"] if w["Code"] == 1)
+    wire["X"] += 1.0
+    replay = save(tmp_path / "split-replay.json", {"responses": bodies})
+    assert run_offline(arguments(tmp_path, replay=replay, **overrides)) == 2
+    assert "exactly one matching response (found 0)" in capsys.readouterr().err
     assert not (tmp_path / "graph.json").exists()
     assert not (tmp_path / "metadata.json").exists()

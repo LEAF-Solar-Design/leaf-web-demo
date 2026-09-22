@@ -1443,7 +1443,7 @@ def build_suites() -> List[Suite]:
         Suite("scripts-solar-receipt", "scripts test_solar_receipt.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_solar_receipt.py"), 26),
         Suite("scripts-solar-w1-studio-solve", "scripts test_solar_w1_studio_solve.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_solve.py"), 9),
+              SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_solve.py"), 12),
         # S11 unit sync (2026-09-22): the declaration-only builtin, its producer on a
         # synthetic two-panel intake, and the settings evidence family. Every case is
         # hermetic (no skipif, no network, the committed fixture only for its hash and

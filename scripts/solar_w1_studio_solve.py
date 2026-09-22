@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Produce Studio's W1 committed solve through its own graph and solve builtins.
 
-Replay files contain {"responses": [<raw stringer response>, ...]}. CAD handles
+Replay files contain {"responses": [<raw stringer response>, ...]}, one per call
+(split pieces and retried calls included), each used at most once. CAD handles
 in recordings are remapped to the panels imported from the bound intake. Live
 recordings retain raw response bodies and use stable fixture-owned panel ids.
+Frames the plugin splits are solved piece by piece through its retry loop.
 Sizing always uses the supplied recording, including in live solve mode.
 """
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
@@ -28,13 +31,15 @@ SERVER = ROOT / "server"
 sys.path.insert(0, str(SERVER))
 
 import leaf_cloud_client as cloud
-from leaf_cloud_grants import CloudGrant
+from leaf_cloud_grants import CloudError, CloudGrant
 from mutation_plan import plan_sha256
 from solar_design_graph import deserialize_graph, serialize_graph, validate_graph
 from solar_graph_seed import new_empty_graph
 import solar_sizing_client as sizing_cloud
-from solar_solve_request import build_stringer_request
-from solar_solve_results import bind_request, complete_search
+from solar_solve_request import build_stringer_request, needs_split_solve, solve_split_frame
+from solar_solve_results import (
+    bind_request, bind_split_request, complete_search, complete_split_search, piece_job_id,
+)
 
 
 class ProducerError(ValueError):
@@ -191,19 +196,30 @@ def replay_responses(document, by_handle):
     return result
 
 
-def matching_response(request, responses):
+def matching_response(request, responses, used=None):
+    """The one unused recorded response echoing the sent (cropped) wire grid, Seq aside.
+
+    Works for whole-frame and piece requests alike; a piece echo may carry its
+    RowIndices, which the wire grid never sends. `used` marks consumed indices so
+    a retry that re-sends an identical piece takes the next recorded answer.
+    """
     sent = request.wire_payload()["grid"]
     matches = []
-    for response in responses:
+    for index, response in enumerate(responses):
+        if used is not None and index in used:
+            continue
         final = deepcopy(response["data"]["final_grid"])
+        final.pop("RowIndices", None)
         for row in final["Rows"]:
             for cell in row["Panels"]:
                 cell["Seq"] = 0
         if final == sent:
-            matches.append(response)
+            matches.append(index)
     if len(matches) != 1:
         raise ProducerError(f"replay requires exactly one matching response (found {len(matches)})")
-    return cloud.canonical_bytes(matches[0])
+    if used is not None:
+        used.add(matches[0])
+    return cloud.canonical_bytes(responses[matches[0]])
 
 
 def produce(args):
@@ -259,21 +275,51 @@ def produce(args):
     if args.replay:
         document, replay_hash = read_json(args.replay)
         responses = replay_responses(document, by_handle)
-    recorded_bodies, response_hashes = [], []
+    recorded_bodies, response_hashes, split_frames = [], [], []
+    used_responses = set()
     original_post = cloud.post_stringer
 
     def transport(request, grant):
-        raw = matching_response(request, responses) if args.replay else original_post(request, grant)
+        raw = (matching_response(request, responses, used_responses) if args.replay
+               else original_post(request, grant))
         recorded_bodies.append(json.loads(raw))
         response_hashes.append(sha256(raw))
         return raw
 
+    def replay_grant():
+        # Replay resolves the grant exactly as the unsplit path does; live uses the real one.
+        return (patch.object(cloud, "resolve_grant", lambda *a: CloudGrant(tenant, ""))
+                if args.replay else nullcontext())
+
     commit = builtin("solar_commit_solve")
     with patch.object(cloud, "post_stringer", transport):
         for number, frame in enumerate(frames, 1):
+            job = f"w1-solve-{number}"
+            if needs_split_solve(graph, frame["id"], max_string_length=maximum):
+                def solve_piece(index, piece, job=job):
+                    # One stringer call per piece; only a plugin-retried answer is None.
+                    try:
+                        return cloud.piece_proposal(
+                            {"grant_ref": args.grant_ref or "recorded-solve", "request": piece["request"]},
+                            tenant, piece_job_id(job, index))
+                    except CloudError as exc:
+                        if exc.classification == "cloud_piece_failed":
+                            return None
+                        raise
+
+                with replay_grant():
+                    out = solve_split_frame(graph, frame["id"], max_string_length=maximum,
+                                            dwgname=args.dwgname, solve_piece=solve_piece)
+                binding = bind_split_request(graph, out["pieces"], expected_rev=graph["rev"],
+                                             frame_ref=frame["id"], tenant_id=tenant, job_id=job,
+                                             split_state=out["split_state"])
+                candidate = complete_split_search(graph, binding, out["proposals"])
+                graph = commit.commit_solve(graph, {"expected_rev": graph["rev"]}, candidate=candidate)
+                split_frames.append({"frame": frame["name"], "pieces": len(out["pieces"]),
+                                     "split_state": dict(out["split_state"])})
+                continue
             request = build_stringer_request(graph, frame["id"], max_string_length=maximum,
                                              dwgname=args.dwgname)
-            job = f"w1-solve-{number}"
             binding = bind_request(graph, request, expected_rev=graph["rev"], frame_ref=frame["id"],
                                    tenant_id=tenant, job_id=job)
             params = {"grant_ref": args.grant_ref or "recorded-solve", "request": request}
@@ -309,7 +355,8 @@ def produce(args):
                             "frames/producer-derived-dimensions", "frames/module_power_watts/unrecorded"],
         "synthetic_flagged": True,
         "provenance": {"intake_sha256": intake_hash, "placement_sha256": placement_hash,
-                       "sizing_response_sha256": sizing_hash, "response_sha256s": response_hashes},
+                       "sizing_response_sha256": sizing_hash, "response_sha256s": response_hashes,
+                       "split_frames": split_frames},
     }
     if replay_hash:
         metadata["provenance"]["replay_sha256"] = replay_hash
