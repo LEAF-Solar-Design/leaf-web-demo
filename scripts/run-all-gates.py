@@ -361,6 +361,16 @@ def build_suites() -> List[Suite]:
         # over 8 literal malformed requests = 25.
         Suite("server-w2-string-add", "server tests/test_w2_string_add.py", "pytest", SERVER,
               _py_pytest("tests/test_w2_string_add.py"), 25),
+        # S24 panel-add (2026-09-22): the scoped claim builtin, the group that takes the
+        # named panels and the groups, panels and zones it leaves byte-identical, the
+        # emptied slot it reuses before the matrix grows by a whole row, the circuit
+        # order a wired panel brings into the frame sequence, and the four refusals
+        # (unknown group, unknown panel, a panel already in some group, a repeated
+        # panel). Hermetic (a graph seeded in the test, no network, no fixture), so the
+        # floor is the exact count on every runner: 17 unparametrized tests + one
+        # parametrization over 9 literal malformed requests = 26.
+        Suite("server-w2-panel-add", "server tests/test_w2_panel_add.py", "pytest", SERVER,
+              _py_pytest("tests/test_w2_panel_add.py"), 26),
         Suite("server-w1-sizing-groups", "server tests/test_w1_sizing_groups.py", "pytest", SERVER,
               _py_pytest("tests/test_w1_sizing_groups.py"), 52),
         Suite("server-w1-solar-interchange", "server tests/test_w1_solar_interchange.py", "pytest", SERVER,
@@ -1560,6 +1570,19 @@ def build_suites() -> List[Suite]:
         # runner: 9 tests + one parametrization over 3 literal malformed handles = 12.
         Suite("scripts-solar-w1-studio-string-add", "scripts test_solar_w1_studio_string_add.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_string_add.py"), 12),
+        # S24 (2026-09-22): the panel-add producer on the same synthetic eleven-group
+        # intake the panel-remove producer uses. The grouping half is the groups producer
+        # and the freeing half is the panel-remove builtin, so the claim starts from a
+        # committed grouped state; the receiving group is an island 5000 in away, which
+        # is a membership the kernel would never produce. Covers the claim, rule G3's
+        # rename when the claimed handle is the lowest, rule G8 (every group and every
+        # member mapped), the emptied slot a group reuses when it reclaims its own panel,
+        # and the refusals. Hermetic (the committed schema file only for its hash and
+        # revision), so the floor is the exact count on every runner: 9 tests + one
+        # parametrization over 6 literal refusals + one over 5 literal parameter
+        # overrides = 20.
+        Suite("scripts-solar-w1-studio-panel-add", "scripts test_solar_w1_studio_panel_add.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_panel_add.py"), 20),
         # S22 (2026-09-22): contract rule G9 on the Studio evidence adapter, the first
         # test file it has. A set-valued list (unassigned_panels, duplicate_panels) is
         # emitted in ascending neutral-id order, so the same set recorded in two orders
