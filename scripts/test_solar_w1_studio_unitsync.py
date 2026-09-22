@@ -294,8 +294,10 @@ def test_settings_evidence_refuses_units_the_comparator_cannot_scale(synced, nam
 
 def test_other_families_still_refuse_and_unknown_family_is_named(synced):
     graph, metadata, _ = synced
-    with pytest.raises(adapter.compare.InputError, match="groups, panels, settings and strings"):
-        adapter.build_evidence(graph, "zones", metadata)
+    # "devices" is a comparator family Studio has no adapter for yet; zones joined the adapter
+    # in the zones slice, so it is no longer the unknown-family example.
+    with pytest.raises(adapter.compare.InputError, match="groups, panels, settings, strings and zones"):
+        adapter.build_evidence(graph, "devices", metadata)
     # A settings run's metadata describes no entities, so a family that needs them refuses
     # rather than inventing a mapping. The panels family is exercised by its own producer.
     with pytest.raises(adapter.compare.InputError, match="explicit neutral mapping"):
