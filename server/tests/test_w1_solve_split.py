@@ -216,11 +216,21 @@ def real_piece():
     return {"grant_ref": "fixture-grant", "request": request}, response
 
 
+def as_partial_beam(response):
+    """Reduce a full answer to the fallback shape the service sends (measured live 2026-09-22):
+    best_result carries only info, and data drops its second-pass fields for a message."""
+    partial = copy.deepcopy(response)
+    data = partial["data"]
+    for field in ("gumbel_summary", "first_pass_best_distance", "improvement", "second_pass_triggered"):
+        data.pop(field, None)
+    data["best_result"] = {"info": {"distance_total": 0.0}}
+    data["message"] = "Used engine finalizer result (partial beam)"
+    return partial
+
+
 def test_client_accepts_the_partial_beam_only_for_pieces(monkeypatch):
     params, response = real_piece()
-    partial = copy.deepcopy(response)
-    partial["data"]["best_result"]["info"] = {"distance_total": 0.0}
-    partial["data"]["message"] = "Used engine finalizer result (partial beam)"
+    partial = as_partial_beam(response)
     answers = {"raw": cloud.canonical_bytes(partial)}
     monkeypatch.setattr(cloud, "resolve_grant", lambda *args: CloudGrant(TENANT, ""))
     monkeypatch.setattr(cloud, "post_stringer", lambda *args: answers["raw"])
@@ -240,8 +250,7 @@ def test_client_accepts_the_partial_beam_only_for_pieces(monkeypatch):
 
 def test_client_keeps_echo_and_refuses_plugin_failed_pieces(monkeypatch):
     params, response = real_piece()
-    partial = copy.deepcopy(response)
-    partial["data"]["best_result"]["info"] = {"distance_total": 0.0}
+    partial = as_partial_beam(response)
     answers = {}
     monkeypatch.setattr(cloud, "resolve_grant", lambda *args: CloudGrant(TENANT, ""))
     monkeypatch.setattr(cloud, "post_stringer", lambda *args: answers["raw"])
@@ -258,6 +267,86 @@ def test_client_keeps_echo_and_refuses_plugin_failed_pieces(monkeypatch):
         with pytest.raises(CloudError) as refused:
             cloud.piece_proposal(params, TENANT, "job")
         assert refused.value.classification == "cloud_piece_failed"
+
+
+LIVE = json.loads((FIXTURES / "w1_piece_live_responses.json").read_text(encoding="utf-8"))
+PARTIAL_BEAM_MESSAGE = "Used engine finalizer result (partial beam)"
+
+
+def live_piece(kind, monkeypatch, response=None):
+    """One live-run piece call (request and answer) served from the fixture, no network."""
+    raw = cloud.canonical_bytes(LIVE[kind]["response"] if response is None else response)
+    monkeypatch.setattr(cloud, "resolve_grant", lambda *args: CloudGrant(TENANT, ""))
+    monkeypatch.setattr(cloud, "post_stringer", lambda *args: raw)
+    return {"grant_ref": "fixture-grant", "request": LIVE[kind]["request"]}
+
+
+def test_live_fixture_is_the_measured_pair():
+    assert LIVE["source"].startswith("live stringer, 2026-09-22")
+    assert list(LIVE["partial"]["response"]["data"]["best_result"]) == ["info"]
+    assert LIVE["partial"]["response"]["data"]["best_result"]["info"] == {"distance_total": 0}
+    assert LIVE["partial"]["response"]["data"]["message"] == PARTIAL_BEAM_MESSAGE
+    assert len(LIVE["partial"]["request"]["grid"]["Rows"]) == 9
+    assert set(cloud.BestResult.model_fields) <= set(LIVE["full"]["response"]["data"]["best_result"])
+    assert "message" not in LIVE["full"]["response"]["data"]
+
+
+def test_live_partial_beam_piece_is_accepted_with_no_path(monkeypatch):
+    params = live_piece("partial", monkeypatch)
+    result = cloud.piece_proposal(params, TENANT, "job")
+    assert result["visited_path"] == []
+    assert result["proposal"]["data"]["best_result"] == {"info": {"distance_total": 0.0}}
+    assert result["proposal"]["data"]["message"] == PARTIAL_BEAM_MESSAGE
+    assert result["response_sha256"] == hashlib.sha256(
+        cloud.canonical_bytes(LIVE["partial"]["response"])).hexdigest()
+    proof = cloud.piece_proposal_provenance(result, params, TENANT, "job")
+    assert proof["partial_beam"] is True
+    with pytest.raises(ValueError):
+        cloud.piece_proposal_provenance(result, params, TENANT, "other-job")
+
+
+def test_live_full_piece_keeps_every_whole_frame_check(monkeypatch):
+    params = live_piece("full", monkeypatch)
+    result = cloud.piece_proposal(params, TENANT, "job")
+    panels = sum(p["Code"] == 1 for row in LIVE["full"]["request"]["grid"]["Rows"] for p in row["Panels"])
+    assert len(result["visited_path"]) == panels == 111
+    assert len({tuple(cell) for cell in result["visited_path"]}) == panels
+    assert result["proposal"]["data"]["message"] is None
+    proof = cloud.piece_proposal_provenance(result, params, TENANT, "job")
+    assert proof["partial_beam"] is False
+    assert result["visited_path"] == cloud.proposal(params, TENANT, "job")["visited_path"]
+
+
+def test_live_partial_beam_is_refused_for_a_whole_frame(monkeypatch):
+    params = live_piece("partial", monkeypatch)
+    with pytest.raises(CloudError) as refused:
+        cloud.proposal(params, TENANT, "job")
+    assert refused.value.classification == "cloud_response_invalid"
+    piece = cloud.piece_proposal(params, TENANT, "job")
+    with pytest.raises(ValueError):
+        cloud.proposal_provenance(piece, params, TENANT, "job")
+
+
+@pytest.mark.parametrize("best_result", [
+    {}, {"distance_total": 0}, {"info": {}}, {"info": {"distance_total": 0, "steps_taken": 1}},
+], ids=["empty", "no-info", "empty-info", "hybrid-info"])
+def test_best_result_with_neither_shape_is_refused(monkeypatch, best_result):
+    body = copy.deepcopy(LIVE["partial"]["response"])
+    body["data"]["best_result"] = best_result
+    params = live_piece("partial", monkeypatch, body)
+    with pytest.raises(CloudError) as refused:
+        cloud.piece_proposal(params, TENANT, "job")
+    assert refused.value.classification == "cloud_response_invalid"
+
+
+@pytest.mark.parametrize("field", sorted(cloud.BestResult.model_fields))
+def test_full_answer_missing_a_required_field_is_refused(monkeypatch, field):
+    body = copy.deepcopy(LIVE["full"]["response"])
+    del body["data"]["best_result"][field]
+    params = live_piece("full", monkeypatch, body)
+    with pytest.raises(CloudError) as refused:
+        cloud.piece_proposal(params, TENANT, "job")
+    assert refused.value.classification == "cloud_response_invalid"
 
 
 def test_piece_request_keeps_raw_rows_but_the_wire_grid_is_capped(graph):
