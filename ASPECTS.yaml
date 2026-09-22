@@ -126,7 +126,7 @@ targets:
     exposure: pre_ga
     deploy_shape: vercel
     deploy_command: scripts/deploy-web.py
-    gap: writes stdout READY / NOT-READY only; step 12 adds the receipt
+    evidence: ["scripts/deploy-web.py (receipt leaf.deploy-web.v1 under ~/.claude/state/deploy-web, impact id deploy-web-<sha12>)"]
   - id: native-release
     exposure: pre_ga
     deploy_shape: codebuild

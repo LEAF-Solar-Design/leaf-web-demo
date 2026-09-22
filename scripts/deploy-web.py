@@ -24,7 +24,9 @@ Exit code is 0 only when the deploy is live AND verified: every route returns
 from __future__ import annotations
 
 import argparse
+import errno
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -32,6 +34,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Windows consoles default to cp1252, which cannot encode every character this
@@ -56,6 +59,74 @@ DOMAIN = "https://leaf-platform-web.vercel.app"
 # Every route the SPA owns. These are the ones that 404 without the catch-all
 # rewrite, because only "/" exists as a real file on disk.
 ROUTES = ["/", "/app", "/try", "/sheets", "/sheets/01"]
+OBSERVED = []
+
+
+def git_head() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=REPO,
+            capture_output=True, text=True, timeout=30,
+        )
+        source = result.stdout.strip()
+        if result.returncode == 0 and re.fullmatch(r"[0-9a-fA-F]{40}", source):
+            return source
+    except Exception:
+        pass
+    return "unknown"
+
+
+def impact_assessment(receipt_dir: Path, source: str) -> dict:
+    try:
+        checker = REPO / "scripts" / "ci" / "vendor" / "impact" / "impact.py"
+        if not checker.exists():
+            reason = "checker-missing"
+        else:
+            receipt_dir.mkdir(parents=True, exist_ok=True)
+            if os.name == "posix":
+                receipt_dir.chmod(0o700)
+            change_id = "deploy-web-" + source[:12]
+            path = receipt_dir / f"{change_id}.impact.json"
+            result = subprocess.run(
+                [
+                    sys.executable, str(checker), "check", "--workdir", str(REPO),
+                    "--change-id", change_id, "--base", "HEAD", "--head", "HEAD",
+                    "--transaction", "deploy", "--target", "web-spa",
+                    "--record", str(receipt_dir / f"{change_id}.record.yaml"),
+                    "--receipt", str(path), "--json",
+                ],
+                capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode == 0:
+                assessment = json.loads(path.read_text(encoding="utf-8"))
+                return {
+                    "change_id": assessment["change_id"],
+                    "receipt": str(path),
+                    "verdict": assessment["verdict"],
+                    "unresolved": assessment["summary"]["unresolved"],
+                }
+            reason = f"exit-{result.returncode}"
+    except subprocess.TimeoutExpired:
+        reason = "timeout"
+    except Exception:
+        reason = "error"
+    print(f"impact: skipped ({reason})")
+    return {"skipped": reason}
+
+
+def write_receipt(receipt_dir: Path, data: dict) -> None:
+    try:
+        receipt_dir.mkdir(parents=True, exist_ok=True)
+        if os.name == "posix":
+            receipt_dir.chmod(0o700)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        path = receipt_dir / f"deploy-web-{stamp}-{data['source'][:12]}.json"
+        with path.open("w", encoding="utf-8", newline="\n") as receipt:
+            receipt.write(json.dumps(data, sort_keys=True, indent=1) + "\n")
+        print(f"RECEIPT {path}")
+    except Exception as error:
+        name = errno.errorcode.get(getattr(error, "errno", None), "error")
+        print(f"RECEIPT unavailable ({name})")
 
 
 def run(cmd, cwd=None, env_extra=None, capture=False):
@@ -183,6 +254,7 @@ def verify(entry: str) -> None:
     bad = []
     for route in ROUTES:
         status, _ = fetch(DOMAIN + route)
+        OBSERVED.append({"route": route, "status": status})
         mark = "ok" if status == 200 else f"HTTP {status}"
         print(f"  {route:<14} {mark}")
         if status != 200:
@@ -201,6 +273,11 @@ def main() -> None:
     ap.add_argument("--preview", action="store_true", help="preview deploy, not production")
     ap.add_argument("--no-build", action="store_true", help="deploy the existing dist")
     ap.add_argument("--dry-run", action="store_true", help="build + preflight, no deploy")
+    ap.add_argument(
+        "--receipt-dir", type=Path,
+        default=Path.home() / ".claude" / "state" / "deploy-web",
+        help="directory for deploy and impact receipts",
+    )
     args = ap.parse_args()
 
     if not args.no_build:
@@ -211,15 +288,38 @@ def main() -> None:
         print("READY: dry run — dist is deployable (nothing was deployed)")
         return
 
-    deploy(args.preview)
+    started_at = datetime.now(timezone.utc).isoformat()
+    source = git_head()
+    target = "preview" if args.preview else "production"
+    domain = DOMAIN
+    OBSERVED.clear()
+    impact = impact_assessment(args.receipt_dir, source)
+    outcome = "not-ready"
+    try:
+        deploy(args.preview)
 
-    if args.preview:
-        # A preview deploy never touches the production alias, so verifying the
-        # domain would just re-check whatever is already live.
-        print("READY: preview deployed (production alias untouched, not verified)")
-        return
+        if args.preview:
+            # A preview deploy never touches the production alias, so verifying the
+            # domain would just re-check whatever is already live.
+            print("READY: preview deployed (production alias untouched, not verified)")
+            outcome = "ready"
+            return
 
-    verify(entry)
+        verify(entry)
+        outcome = "ready"
+    finally:
+        write_receipt(args.receipt_dir, {
+            "schema": "leaf.deploy-web.v1",
+            "target": target,
+            "domain": domain,
+            "entry": entry,
+            "source": source,
+            "started_at": started_at,
+            "ended_at": datetime.now(timezone.utc).isoformat(),
+            "outcome": outcome,
+            "routes": list(OBSERVED),
+            "impact": impact,
+        })
 
 
 if __name__ == "__main__":
