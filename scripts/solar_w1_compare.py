@@ -26,6 +26,15 @@ MAX_BYTES = 2 * 1024 * 1024
 MAX_NODES = 100000
 MAX_DEPTH = 40
 MAX_DIFFS = 200
+# The bounds above judge a document under COMPARISON and never move. An adapter
+# instead scans its producer's OWN graph, which is far larger than the evidence
+# that graph yields. Measured on data/rooftop_demo.dwg (2345 panels, 11 groups):
+# the Studio graph is 107,135 nodes and 2,565,614 canonical bytes, while the
+# groups evidence it produces is 7,233 nodes and 288,503 bytes. These input
+# bounds hold a 10x drawing and still refuse a runaway producer; a bound that
+# cannot refuse is the defect they guard against.
+MAX_INPUT_NODES = 1200000
+MAX_INPUT_BYTES = 32 * 1024 * 1024
 IO_TIMEOUT = 5
 LENGTH_UNITS = {"mm": "1", "cm": "10", "m": "1000", "in": "25.4", "ft": "304.8"}
 ANGLE_UNITS = {"deg": "1", "rad": str(180 / math.pi)}
@@ -108,6 +117,20 @@ def semantic_hash(value):
     _bounded(value)
     data = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
     _require(len(data.encode("utf-8")) <= MAX_BYTES, "payload exceeds byte limit")
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()
+
+
+def scan_input(value):
+    """Bound a producer's own graph under the INPUT bounds and hash it canonically.
+
+    The input-scan path only; a document under comparison keeps MAX_NODES,
+    MAX_BYTES and MAX_DEPTH. Every other refusal is unchanged: depth,
+    non-finite and out-of-range numbers, oversized strings, invalid keys and
+    non-JSON values all fail closed here exactly as they do in semantic_hash.
+    """
+    _bounded(value, budget=[MAX_INPUT_NODES])
+    data = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    _require(len(data.encode("utf-8")) <= MAX_INPUT_BYTES, "input payload exceeds byte limit")
     return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
 
@@ -319,8 +342,12 @@ def _unique_object(pairs):
     return result
 
 
-def load_evidence(path):
-    """Isolate regular-file reads so stalled private storage has a hard deadline."""
+def load_evidence(path, *, max_bytes=MAX_BYTES, scan=None):
+    """Isolate regular-file reads so stalled private storage has a hard deadline.
+
+    Defaults are the comparison bounds; load_input_graph is the only caller
+    that widens them, and it widens both the read cap and the scan together.
+    """
     reader = (
         "import pathlib,sys; p=pathlib.Path(sys.argv[1]); "
         "assert p.is_file(); "
@@ -328,12 +355,17 @@ def load_evidence(path):
         "assert len(data)<=int(sys.argv[2]); sys.stdout.buffer.write(data)"
     )
     try:
-        proc = subprocess.run([sys.executable, "-I", "-c", reader, str(Path(path)), str(MAX_BYTES)], capture_output=True, timeout=IO_TIMEOUT, check=True)
+        proc = subprocess.run([sys.executable, "-I", "-c", reader, str(Path(path)), str(max_bytes)], capture_output=True, timeout=IO_TIMEOUT, check=True)
         value = json.loads(proc.stdout.decode("utf-8"), object_pairs_hook=_unique_object)
-        _bounded(value)
+        (scan or _bounded)(value)
         return value
     except (OSError, subprocess.SubprocessError, UnicodeError, ValueError, RecursionError) as exc:
         raise InputError("evidence unreadable or invalid") from exc
+
+
+def load_input_graph(path):
+    """Read a producer's own graph under the input bounds, never the comparison ones."""
+    return load_evidence(path, max_bytes=MAX_INPUT_BYTES, scan=scan_input)
 
 
 def main(argv=None):

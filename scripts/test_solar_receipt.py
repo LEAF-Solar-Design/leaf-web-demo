@@ -222,6 +222,42 @@ def test_strings_comparison_detects_reversed_membership():
     assert any("after/strings/0/ordered_membership" in diff for diff in verdict["diffs"])
 
 
+def real_scale_case(panel_count=3000, pad=700):
+    """A drawing-sized graph: past both comparison budgets, inside the input ones.
+
+    At the defaults it is about 114,000 nodes and 2.5 MiB, the shape measured on
+    data/rooftop_demo.dwg; the panels evidence it yields is an order of
+    magnitude smaller and stays inside the untouched comparison budget.
+    """
+    source, context = graph(), metadata()
+    source["panels"] = [
+        {"id": f"panel-{i}", "centre": [i * 10, 0, 0], "angle": 0,
+         "extra": {"metrics": [0] * 28, "pad": "x" * pad}}
+        for i in range(panel_count)
+    ]
+    context["entity_mapping"] = {f"panel-{i}": f"panel-neutral-{i}" for i in range(panel_count)}
+    context["before"] = {"panels": []}
+    context["changes"] = {"created": [], "modified": [], "deleted": []}
+    return source, context
+
+
+def test_drawing_sized_graph_scans_clean_and_yields_comparable_evidence():
+    source, context = real_scale_case()
+    with pytest.raises(compare.InputError, match="exceeds"):
+        compare.semantic_hash(source)
+    evidence = adapter.build_evidence(source, "panels", context)
+    compare.validate_evidence(evidence, "panels")
+    assert len(evidence["after"]["panels"]) == 3000
+    assert evidence["provenance"]["studio_graph_sha256"] == compare.scan_input(source)
+
+
+def test_input_budget_never_launders_an_oversized_evidence_document():
+    source, context = real_scale_case(panel_count=8000, pad=1)
+    assert compare.scan_input(source)
+    with pytest.raises(adapter.compare.InputError, match="exceeds"):
+        adapter.build_evidence(source, "panels", context)
+
+
 def receipt_for(plugin, studio):
     return writer.build_receipt(plugin, studio, CAPABILITY, "1", "groups", produced_at="2026-09-17T00:00:00Z")
 

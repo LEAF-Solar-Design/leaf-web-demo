@@ -43,7 +43,9 @@ def build_evidence(graph, family, metadata):
     """Build one 22-key evidence object, refusing absent measurement metadata."""
     if family not in FAMILIES:
         raise compare.InputError("Studio adapter supports groups, panels, settings and strings")
-    compare.semantic_hash(graph)  # Bound and reject non-JSON/nonfinite input.
+    # Input bounds, sized for a real drawing; the evidence built below is still
+    # validated under the unchanged comparison bounds.
+    graph_sha256 = compare.scan_input(graph)
     if type(graph.get("graph_schema_version")) is not int or graph["graph_schema_version"] != 1:
         raise compare.InputError("unsupported Studio graph version")
     if type(graph.get("rev")) is not int or graph["rev"] < 0:
@@ -180,7 +182,7 @@ def build_evidence(graph, family, metadata):
             result["after"][field + "_panels"] = [reference(identifier) for identifier in refs]
         result["after"]["length_distribution"] = sorted(item["module_count"] for item in collection)
     result["output_sha256"] = compare.semantic_hash(result["after"])
-    result["provenance"]["studio_graph_sha256"] = compare.semantic_hash(graph)
+    result["provenance"]["studio_graph_sha256"] = graph_sha256
     result["provenance"]["studio_graph_rev"] = graph["rev"]
     # The frozen comparator calls replayed observations "recorded".
     if result["execution_mode"] == "replay":
@@ -201,7 +203,7 @@ def main(argv=None):
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
-        evidence = build_evidence(compare.load_evidence(args.graph), args.family, compare.load_evidence(args.metadata))
+        evidence = build_evidence(compare.load_input_graph(args.graph), args.family, compare.load_evidence(args.metadata))
         payload = json.dumps(evidence, indent=2, sort_keys=True, allow_nan=False) + "\n"
         if len(payload.encode("utf-8")) > compare.MAX_BYTES:
             raise compare.InputError("evidence exceeds byte limit")
