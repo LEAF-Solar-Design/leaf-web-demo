@@ -220,9 +220,10 @@ def produce(args):
         raise ProducerError("fixture hash mismatch with intake or placement")
     revision = fixture_revision(fixture)
     sizing_record, sizing_hash = read_json(args.sizing_response)
-    if (sizing_record["request"]["panels_in_sequence"] != maximum
-            or sizing_record["response"]["panels_in_sequence"] != maximum):
-        raise ProducerError("sizing response must use the requested max string length")
+    # The committed length is the plugin's recommendation, standard.string_length.
+    standard = sizing_record["response"]["simulation_results"]["standard"]
+    if type(standard["string_length"]) not in (int, float) or int(standard["string_length"]) != maximum:
+        raise ProducerError("sizing response must recommend the requested max string length")
     tenant = args.tenant or "studio-replay"
     created_at = datetime.now(timezone.utc).isoformat()
     graph = new_empty_graph(
@@ -233,7 +234,7 @@ def produce(args):
     graph = validate_graph(graph)
 
     def recorded_sizing(request, grant):
-        if request.model_dump() != sizing_record["request"]:
+        if request.wire() != sizing_record["request"]:
             raise ProducerError("sizing request does not match its recording")
         return sizing_cloud.canonical_bytes(sizing_record["response"])
 

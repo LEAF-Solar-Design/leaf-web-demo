@@ -1,0 +1,101 @@
+{
+ "source": "REAL response: the Branch2025 plugin's cached LastStringSizerResponse on the licensed VMC AutoCAD (plugin 1.1.4.4), read through BranchTestHost get_settings on 2026-09-22, for module JA_Solar_JAM72D40-595/MB and inverter Sungrow SG-HX SG250HX (1500 V). The plugin caches module, inverter and the response, not the zip code, racking or thermal model; those request fields below are the StringSizer dialog values shown on that drawing (zip 44224, fixed tilt 5 deg, azimuth 180, close mount glass glass) and are an assumption.",
+ "request": {
+  "module_name": "JA_Solar_JAM72D40-595/MB",
+  "full_inverter_name": "Sungrow SG-HX SG250HX",
+  "bifacial": false,
+  "bifacial_coefficient": ".7",
+  "racking_params": {
+   "racking_type": "fixed_tilt",
+   "surface_tilt": "5",
+   "surface_azimuth": "180",
+   "albedo": ".25"
+  },
+  "max_voltage": "1500",
+  "thermal_model_type": "close mount glass glass",
+  "open_circuit_rise": false,
+  "zip_code": "44224"
+ },
+ "response": {
+  "cells": 81,
+  "voc": 52.58,
+  "isc": 13.996500000000001,
+  "pmp": 595.0,
+  "vmp": 44.64,
+  "imp": 13.33,
+  "bpmp": -1.4875,
+  "bvoc": -0.13145,
+  "alpha_sc": 0.006998250000000001,
+  "weather_mode": "tmy",
+  "min_temp": -2.700000047683716,
+  "mintemp": -2.700000047683716,
+  "simulation_results": {
+   "standard": {
+    "Conditions": "P99.5 Voc",
+    "max_module_voltage": 51.2558131874,
+    "string_design_voltage": 1500,
+    "safety_factor": 0.0195,
+    "string_length": 28.0,
+    "Cell Temperature": 50.0011844749,
+    "POA Irradiance": 1033.5126543505,
+    "long_note": "99.5 Percentile Voc<br>690.7(A)(3)-P99.5: 51.256 V<br>690.7(A)(3)-P99.5 + 1.9% SF: 52.255 V<br>Maximum String Length: 28<br>Recommended 690.7(A)(3) value for string length.",
+    "short_note": "Recommended 690.7(A)(3) value for string length."
+   },
+   "conservative": {
+    "Conditions": "Historical Maximum Voc",
+    "max_module_voltage": 54.518309065,
+    "string_design_voltage": 1500,
+    "safety_factor": 0.0195,
+    "string_length": 26.0,
+    "Cell Temperature": 48.3101151219,
+    "POA Irradiance": 1092.240458443,
+    "long_note": "Historical maximum Voc from 2018-2020<br>690.7(A)(3)-P100: 54.518<br>690.7(A)(3)-P100 + 1.9% SF: 55.581 V<br>Maximum String Length: 26<br>Conservative 690.7(A)(3) value for string length.",
+    "short_note": "Conservative 690.7(A)(3) value for string length."
+   },
+   "day": {
+    "Conditions": "Voc at 1 sun and mean yearly minimum daytime (GHI>150 W/m2) temperature",
+    "max_module_voltage": 55.2571982874,
+    "string_design_voltage": 1500,
+    "safety_factor": 0.0,
+    "string_length": 26.0,
+    "Cell Temperature": 4.633333683,
+    "POA Irradiance": 1000.0,
+    "long_note": "Traditional daytime Voc, using 1 sun irradiance and<br>mean yearly minimum daytime (GHI>150 W/m^2) dry bulb temperature of 4.6 C.<br>Day Voc: 55.257 V<br>Maximum String Length:26<br>Recommended 690.7(A)(1) Value",
+    "short_note": "Traditional design using daytime temp (GHI>150 W/m^2)"
+   },
+   "nsrdb": {
+    "Conditions": "Voc at 1 sun and mean yearly min ambient temperature from NSRDB",
+    "max_module_voltage": 56.0502799969,
+    "string_design_voltage": 1500,
+    "safety_factor": 0.0,
+    "string_length": 26.0,
+    "Cell Temperature": -1.3999999762,
+    "POA Irradiance": 1000.0,
+    "long_note": "Traditional 690.7(A)(1) value, using 1 sun irradiance and<br>mean yearly minimum dry bulb temperature of -1.4 C.<br>690.7(A)(1)-NSRDB: 56.050<br>Maximum String Length: 26",
+    "short_note": "Traditional design using NSRDB and temperature coefficient"
+   },
+   "ashrae_1": {
+    "Conditions": "Voc at 1 sun and mean yearly min ambient temperature from ASHRAE",
+    "max_module_voltage": 55.68222,
+    "string_design_voltage": 1500,
+    "safety_factor": 0.0,
+    "string_length": 26.0,
+    "Cell Temperature": 1.4,
+    "POA Irradiance": 1000.0,
+    "long_note": "Traditional 690.7(A)(1) value<br>using 1 sun irradiance and<br>mean yearly minimum dry bulb temperature of 1.4 C.<br>Trad-ASHRAE-690.7a1 Voc: 55.682<br>Maximum String Length: 26",
+    "short_note": "Traditional design using ASHRAE and temperature coefficient"
+   },
+   "ashrae_2": {
+    "Conditions": "NEC 690.7a2 Voc, corrected by correction factor",
+    "max_module_voltage": 57.838,
+    "string_design_voltage": 1500,
+    "safety_factor": 0.0,
+    "string_length": 25.0,
+    "Cell Temperature": 1.4,
+    "POA Irradiance": 1000.0,
+    "long_note": "Traditional 690.7(A)(2) value<br>using NEC derating table and<br>mean yearly minimum dry bulb temperature of 1.4 C.<br>Trad-ASHRAE-690.7(A)(2) Voc: 57.838<br>Maximum String Length: 25",
+    "short_note": "Traditional design using ASHRAE and standard derating."
+   }
+  }
+ }
+}
