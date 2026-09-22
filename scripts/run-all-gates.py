@@ -328,6 +328,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_w1_grid_split.py"), 34),
         Suite("server-w1-routes-schedule", "server tests/test_w1_routes_schedule.py", "pytest", SERVER,
               _py_pytest("tests/test_w1_routes_schedule.py"), 21),
+        Suite("server-w1-grid-restitch", "server tests/test_w1_grid_restitch.py", "pytest", SERVER,
+              _py_pytest("tests/test_w1_grid_restitch.py"), 18),
         Suite("server-w1-equipment", "server tests/test_w1_equipment.py", "pytest", SERVER,
               _py_pytest("tests/test_w1_equipment.py"), 24),
         Suite("server-w1-catalog-gates", "server tests/test_w1_catalog_gates.py", "pytest", SERVER,
