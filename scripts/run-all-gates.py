@@ -1440,8 +1440,10 @@ def build_suites() -> List[Suite]:
               SCRIPTS_DIR, _py_pytest("test_mq_review_codebuild.py"), 40),
         Suite("scripts-native-release-producer", "scripts test_native_release_producer.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_native_release_producer.py"), 32),
+        # 26 -> 28 on 2026-09-22: the groups family's contract v2 shape (neutral
+        # names, handle-value membership order, refused non-handle member ids).
         Suite("scripts-solar-receipt", "scripts test_solar_receipt.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_solar_receipt.py"), 26),
+              SCRIPTS_DIR, _py_pytest("test_solar_receipt.py"), 28),
         Suite("scripts-solar-w1-studio-solve", "scripts test_solar_w1_studio_solve.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_solve.py"), 9),
         # S11 unit sync (2026-09-22): the declaration-only builtin, its producer on a
@@ -1451,6 +1453,10 @@ def build_suites() -> List[Suite]:
         # functions, 9 parametrized over literal lists (2+2+7+5+5+2+5+4+2 = 34) + 11.
         Suite("scripts-solar-w1-studio-unitsync", "scripts test_solar_w1_studio_unitsync.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_unitsync.py"), 45),
+        # Studio's panel-group producer on a synthetic two-group intake: 3 graph and
+        # evidence checks + 8 refusals (5 parametrized). No skips, no host gating.
+        Suite("scripts-solar-w1-studio-groups", "scripts test_solar_w1_studio_groups.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_groups.py"), 11),
         # Registered per the #29 fix-then-register rule (shipped without a
         # gate entry; measured 1 passed on this tree 2026-07-23).
         # 1 -> 2 on 2026-08-07: the staging relay's convergence contract

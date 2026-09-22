@@ -7,7 +7,10 @@ than after, output_sha256, input_sha256, units and frame, plus coordinate_system
 geometry_units and angle_units. In particular before, changes, identity mapping
 and survived_reopen must come from the producer, not from this snapshot reader.
 geometry_units and angle_units declare the graph geometry's actual units.
-Missing group semantics are represented by null and named in fallback_fields.
+The groups family follows the joint contract's v2 amendment: the compared name
+is the group's neutral id, membership sorts by handle value, the four group
+semantics the plugin capture cannot record are null and named in
+fallback_fields, and Studio's own frame labels go in provenance.group_names.
 This adapter does not execute a capability or claim a reopen occurred.
 """
 
@@ -79,6 +82,13 @@ def build_evidence(graph, family, metadata):
             raise compare.InputError("graph entity requires an explicit neutral mapping")
         return {"entity_id": identifier}
 
+    def handle_value(neutral):
+        # Rule 8: a panel neutral id is its upper-case DWG handle; rule G4 sorts by its value.
+        if not isinstance(neutral, str) or not re.fullmatch(r"[0-9A-F]{1,32}", neutral):
+            raise compare.InputError("group member neutral id must be an upper-case hex handle")
+        return int(neutral, 16)
+
+    group_names = {}
     result["units"] = units["drawing_units"]
     result["frame"] = {
         "coordinate_system": metadata["coordinate_system"],
@@ -135,27 +145,29 @@ def build_evidence(graph, family, metadata):
                 else:
                     raise compare.InputError("string polarity does not match membership endpoints")
         else:
-            point = item["insertion_point"]
-            if not isinstance(point, list) or len(point) not in (2, 3):
-                raise compare.InputError("invalid group insertion point")
-            record.update({
-                "name": item["name"],
-                "membership": [reference(identifier) for identifier in item["panel_refs"]],
-                "boundaries": deepcopy(item["boundaries"]) if "boundaries" in item else absent(path + "/boundaries"),
-                "elevation": quantity("length", point[2], geometry_units) if len(point) == 3 else absent(path + "/elevation"),
-                "equipment_config": {key: deepcopy(item[key]) for key in (
-                    "installation_design", "module_rows", "module_columns", "module_slots",
-                    "module_power_watts", "module_width_along_row", "module_height_across_row",
-                )},
-                "sizing_provenance": deepcopy(item["sizing_provenance"]) if "sizing_provenance" in item else absent(path + "/sizing_provenance"),
-            })
+            # Contract v2 (rules G3 to G7): the frame's own label is provenance,
+            # the compared name is the neutral id, members sort by handle value.
+            members = item.get("panel_refs")
+            if not isinstance(members, list) or not members:
+                raise compare.InputError("group panel_refs must be a nonempty array")
+            if not isinstance(item.get("name"), str):
+                raise compare.InputError("group name must be a string")
+            neutral = result["entity_mapping"][item["id"]]
+            membership = [reference(identifier) for identifier in members]
+            membership.sort(key=lambda ref: handle_value(result["entity_mapping"][ref["entity_id"]]))
+            group_names[neutral] = item["name"]
+            record.update({"name": neutral, "membership": membership})
+            for field in ("boundaries", "elevation", "equipment_config", "sizing_provenance"):
+                record[field] = absent("groups/" + field + "/unrecorded")
         records.append(record)
-    if family == "strings":
+    if family in ("groups", "strings"):
         records.sort(key=lambda record: result["entity_mapping"][record["id"]["entity_id"]])
     if family == "settings":
         result["after"] = {"settings": {"insunits": INSUNITS[units["drawing_units"]]}}
     else:
         result["after"] = {family: records}
+    if family == "groups":
+        result["provenance"]["group_names"] = group_names
     if family == "strings":
         extra = graph.get("extra", {})
         coverage = extra.get("solve_coverage") if isinstance(extra, dict) else None

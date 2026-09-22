@@ -52,7 +52,7 @@ def metadata():
         "fixture_sha256": "a" * 64, "revision": "b" * 40,
         "versions": {"schema": "1", "producer": "test-only", "capability": "1",
                      "engine": "test-only", "catalog": "none", "solver": "none"},
-        "parameters": {}, "entity_mapping": {"frame-1": "group-one", "panel-1": "panel-one"},
+        "parameters": {}, "entity_mapping": {"frame-1": "group:1F4", "panel-1": "1F4"},
         "before": {"groups": []},
         "changes": {"created": ["frame-1", "panel-1"], "modified": [], "deleted": []},
         "warnings": [], "rejected_inputs": [],
@@ -244,13 +244,58 @@ def test_studio_evidence_validates(family):
     if family == "groups":
         group = evidence["after"]["groups"][0]
         assert group["membership"] == [{"entity_id": "panel-1"}]
-        assert group["boundaries"] is None
-        assert group["sizing_provenance"] is None
-        assert "after/groups/0/boundaries" in evidence["fallback_fields"]
-        assert "after/groups/0/sizing_provenance" in evidence["fallback_fields"]
+        assert group["name"] == "group:1F4"
+        for field in ("boundaries", "elevation", "equipment_config", "sizing_provenance"):
+            assert group[field] is None
+            assert "groups/" + field + "/unrecorded" in evidence["fallback_fields"]
+        assert evidence["provenance"]["group_names"] == {"group:1F4": "Group one"}
         assert evidence["synthetic_flagged"] is True
     else:
         assert evidence["after"]["panels"][0]["geometry"]["centre"]["value"] == [500, 1000, 10]
+
+
+def two_groups_case():
+    """Frame labels and listing order that disagree with the neutral order on purpose."""
+    source, context = graph(), metadata()
+    source["panels"] += [{"id": f"panel-{tag}", "centre": [i * 1000, 0, 10], "angle": 0}
+                         for i, tag in enumerate(("a", "b", "c"), 2)]
+    source["frames"].insert(0, {
+        "id": "frame-2", "name": "Second", "insertion_point": [0, 0],
+        "panel_refs": ["panel-b", "panel-a", "panel-c"], "installation_design": "Roof",
+        "module_rows": 1, "module_columns": 3, "module_slots": 3,
+        "module_power_watts": 400, "module_width_along_row": 1000,
+        "module_height_across_row": 2000,
+    })
+    # "1F" sorts before "2" as a string and after it as a hex value.
+    context["entity_mapping"].update({"frame-2": "group:2", "panel-a": "A", "panel-b": "1F", "panel-c": "2"})
+    return source, context
+
+
+def test_groups_follow_contract_v2_neutral_names_and_handle_order():
+    source, context = two_groups_case()
+    originals = deepcopy((source, context))
+    evidence = adapter.build_evidence(source, "groups", context)
+    compare.validate_evidence(evidence, "groups")
+    assert (source, context) == originals
+    assert [g["id"]["entity_id"] for g in evidence["after"]["groups"]] == ["frame-1", "frame-2"]
+    assert [g["name"] for g in evidence["after"]["groups"]] == ["group:1F4", "group:2"]
+    assert evidence["after"]["groups"][1]["membership"] == [
+        {"entity_id": "panel-c"}, {"entity_id": "panel-a"}, {"entity_id": "panel-b"}]
+    assert evidence["provenance"]["group_names"] == {"group:1F4": "Group one", "group:2": "Second"}
+    assert evidence["fallback_fields"] == [
+        "groups/boundaries/unrecorded", "groups/elevation/unrecorded",
+        "groups/equipment_config/unrecorded", "groups/sizing_provenance/unrecorded"]
+    assert "group_names" not in adapter.build_evidence(source, "panels", context)["provenance"]
+
+
+def test_groups_refuse_a_member_neutral_id_that_is_not_a_handle():
+    source, context = two_groups_case()
+    context["entity_mapping"]["panel-a"] = "panel-one"
+    with pytest.raises(adapter.compare.InputError, match="hex handle"):
+        adapter.build_evidence(source, "groups", context)
+    context["entity_mapping"]["panel-a"] = "a"
+    with pytest.raises(adapter.compare.InputError, match="hex handle"):
+        adapter.build_evidence(source, "groups", context)
 
 
 def test_identical_pair_passes_and_parser_accepts(tmp_path):
