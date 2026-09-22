@@ -1,0 +1,387 @@
+{
+ "schema": "leaf.solar-parity-receipt.v1",
+ "capability": "electrical-zone-add",
+ "capability_version": "0",
+ "fixture": {
+  "id": "rooftop-demo",
+  "sha256": "16390e082b6c73d835f21199e7777ae3a60680deae612f81d92048fd26544d21"
+ },
+ "plugin": {
+  "build": "LEAFADDZONE x2: Branch2025 LeafSolarDesign 1.1.4.4 (c0f45f41) on licensed AutoCAD 2025 via BranchTestHost, committed, saved and reopened; evidence by tools/parity/plugin_evidence.py at e9835ad3",
+  "state": "committed",
+  "receipt_sha256": "681ca4c51afde2dada7f3d9d4b55c6312234bdf0821c15545a1c2e829f7df7dd"
+ },
+ "studio": {
+  "capability_version": "0",
+  "engine": "server-builtin"
+ },
+ "comparator": {
+  "name": "solar-w1-semantic",
+  "version": "1",
+  "verdict": "pass",
+  "diffs": []
+ },
+ "synthetic_fields": [
+  "plugin:before",
+  "plugin:changes",
+  "plugin:rejected_inputs",
+  "plugin:versions.catalog",
+  "plugin:versions.solver",
+  "studio:before",
+  "studio:changes",
+  "studio:settings/string_sizing"
+ ],
+ "fallback_fields": [
+  "plugin:elapsed_ms",
+  "plugin:frame",
+  "plugin:units",
+  "plugin:zones/boundaries/entity-handle-carries-no-geometry",
+  "plugin:zones/elevation/unrecorded",
+  "plugin:zones/equipment_config/not-part-of-this-capability",
+  "plugin:zones/sizing_provenance/not-part-of-this-capability",
+  "studio:frame/crs",
+  "studio:panels/producer-built-from-intake",
+  "studio:zones/boundaries/unrecorded",
+  "studio:zones/boundary_ref/unrecorded",
+  "studio:zones/elevation/unrecorded",
+  "studio:zones/equipment_config/not-part-of-this-capability",
+  "studio:zones/panel-colour/not-in-graph",
+  "studio:zones/sizing_provenance/not-part-of-this-capability"
+ ],
+ "synthetic_flagged": true,
+ "survived_reopen": true,
+ "produced_at": "2026-09-22T16:52:56Z",
+ "comparison": {
+  "schema": "leaf.solar-w1-comparison.v1",
+  "capability": "electrical-zone-add",
+  "family": "zones",
+  "plugin": {
+   "fixture_sha256": "16390e082b6c73d835f21199e7777ae3a60680deae612f81d92048fd26544d21",
+   "input_sha256": "324072cd541489bbc7c45e9ff98a772f2e645e93fd5e007b3da6debdcf51ba31",
+   "output_sha256": "865f6bbab831c71ecb6442c7709ccdfdc60b975eb416d63b98b4963954c23736",
+   "revision": "7e74df3db70d1f6ce0f7e6048a6e3e3acbd90c42",
+   "versions": {
+    "schema": "leaf.solar-w1-comparison.v1",
+    "producer": "plugin_evidence.v1",
+    "capability": "electrical-zone-add",
+    "engine": "platform",
+    "catalog": "none",
+    "solver": "none"
+   },
+   "parameters": {
+    "family": "zones"
+   },
+   "units": "in",
+   "frame": {
+    "coordinate_system": "world",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ],
+    "elevation_datum": "unrecorded",
+    "crs": "none"
+   },
+   "entity_mapping": {
+    "zone:Zone A": "zone:Zone A",
+    "zone:Zone B": "zone:Zone B"
+   },
+   "before": {
+    "recorded": false
+   },
+   "after": {
+    "zones": [
+     {
+      "id": {
+       "entity_id": "zone:Zone A"
+      },
+      "name": "Zone A",
+      "membership": [],
+      "boundaries": null,
+      "elevation": null,
+      "equipment_config": null,
+      "sizing_provenance": null
+     },
+     {
+      "id": {
+       "entity_id": "zone:Zone B"
+      },
+      "name": "Zone B",
+      "membership": [],
+      "boundaries": null,
+      "elevation": null,
+      "equipment_config": null,
+      "sizing_provenance": null
+     }
+    ]
+   },
+   "changes": {
+    "created": [],
+    "modified": [],
+    "deleted": []
+   },
+   "warnings": [],
+   "rejected_inputs": [],
+   "provenance": {
+    "revision": "7e74df3db70d1f6ce0f7e6048a6e3e3acbd90c42",
+    "source": "bthost-zones",
+    "capture_sha256": "93189ae84715ca128092f048a5c560e6c007e59c0e163db03a40aaee25b67388",
+    "zone_colors": {
+     "Zone A": 1,
+     "Zone B": 3
+    },
+    "zone_fields": {
+     "zone:Zone A": {
+      "BoundaryHandle": "",
+      "DcAcRatio": 0.0,
+      "DcAcRatioA": 0.0,
+      "DcAcRatioB": 0.0,
+      "InverterCount": 0,
+      "InverterCountA": 0,
+      "InverterCountB": 0,
+      "InverterModelName": "",
+      "InverterModelNameB": "",
+      "ModuleName": "",
+      "ModulesForA": 0,
+      "ModulesForB": 0,
+      "OptimizerModelName": "",
+      "PanelsInSequence": 0,
+      "PanelsInSequenceB": 0,
+      "StringSizerInputLabel": "",
+      "StringSizerOutputLabel": "",
+      "StringSizerResponse": "",
+      "VocColdMaxDcVoltage": 0.0,
+      "VocColdOverrideAccepted": false,
+      "VocColdPasses": null,
+      "VocColdPerModule": 0.0,
+      "VocColdStringVoltage": 0.0,
+      "VocColdSuggestedStringLength": 0
+     },
+     "zone:Zone B": {
+      "BoundaryHandle": "",
+      "DcAcRatio": 0.0,
+      "DcAcRatioA": 0.0,
+      "DcAcRatioB": 0.0,
+      "InverterCount": 0,
+      "InverterCountA": 0,
+      "InverterCountB": 0,
+      "InverterModelName": "",
+      "InverterModelNameB": "",
+      "ModuleName": "",
+      "ModulesForA": 0,
+      "ModulesForB": 0,
+      "OptimizerModelName": "",
+      "PanelsInSequence": 0,
+      "PanelsInSequenceB": 0,
+      "StringSizerInputLabel": "",
+      "StringSizerOutputLabel": "",
+      "StringSizerResponse": "",
+      "VocColdMaxDcVoltage": 0.0,
+      "VocColdOverrideAccepted": false,
+      "VocColdPasses": null,
+      "VocColdPerModule": 0.0,
+      "VocColdStringVoltage": 0.0,
+      "VocColdSuggestedStringLength": 0
+     }
+    }
+   },
+   "elapsed_ms": 0,
+   "execution_mode": "recorded",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before",
+    "changes",
+    "versions.catalog",
+    "versions.solver",
+    "rejected_inputs"
+   ],
+   "fallback_fields": [
+    "elapsed_ms",
+    "units",
+    "frame",
+    "zones/boundaries/entity-handle-carries-no-geometry",
+    "zones/elevation/unrecorded",
+    "zones/equipment_config/not-part-of-this-capability",
+    "zones/sizing_provenance/not-part-of-this-capability"
+   ],
+   "synthetic_flagged": true
+  },
+  "studio": {
+   "after": {
+    "zones": [
+     {
+      "boundaries": null,
+      "elevation": null,
+      "equipment_config": null,
+      "id": {
+       "entity_id": "leaf:zone-el:8c36aecd-c1d4-47ad-aa29-bd3b2e3f7910"
+      },
+      "membership": [],
+      "name": "Zone A",
+      "sizing_provenance": null
+     },
+     {
+      "boundaries": null,
+      "elevation": null,
+      "equipment_config": null,
+      "id": {
+       "entity_id": "leaf:zone-el:b38a90d6-16f2-403f-a027-ce8eb216f14b"
+      },
+      "membership": [],
+      "name": "Zone B",
+      "sizing_provenance": null
+     }
+    ]
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 10937.46629999805,
+   "entity_mapping": {
+    "leaf:zone-el:8c36aecd-c1d4-47ad-aa29-bd3b2e3f7910": "zone:Zone A",
+    "leaf:zone-el:b38a90d6-16f2-403f-a027-ce8eb216f14b": "zone:Zone B"
+   },
+   "execution_mode": "live",
+   "fallback_fields": [
+    "panels/producer-built-from-intake",
+    "zones/panel-colour/not-in-graph",
+    "zones/boundary_ref/unrecorded",
+    "frame/crs",
+    "zones/equipment_config/not-part-of-this-capability",
+    "zones/sizing_provenance/not-part-of-this-capability",
+    "zones/boundaries/unrecorded",
+    "zones/elevation/unrecorded"
+   ],
+   "fixture_sha256": "16390e082b6c73d835f21199e7777ae3a60680deae612f81d92048fd26544d21",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "324072cd541489bbc7c45e9ff98a772f2e645e93fd5e007b3da6debdcf51ba31",
+   "output_sha256": "0a77ce52268439ccad55f40fa0b112f7d1406fc38e8ef0747baaaf8a71d4e4f8",
+   "parameters": {
+    "family": "zones"
+   },
+   "provenance": {
+    "alignment_tolerance": null,
+    "branch_max_offset": null,
+    "group_count": 0,
+    "installation_design": "Roof",
+    "intake_sha256": "c9ac110b939cb91b2027a0a57f0f32495a51e9ae74f1f1ed2b53e0129b23d19a",
+    "kernel": "solar_panel_group_kernel",
+    "layer_filter": "*Panels*",
+    "panel_count": 2345,
+    "studio_graph_rev": 2,
+    "studio_graph_sha256": "a282e912236ea1fbe0958d53fe3193a7ba287e941f7941a2b946ffa67f84ff11",
+    "zone_aware_grouping": false,
+    "zone_count": 2,
+    "zone_fields": {
+     "zone:Zone A": {
+      "dc_ac_ratio": 0,
+      "inverter_count_a": 0,
+      "inverter_model_a": "",
+      "module_model": "",
+      "panels_in_sequence": 0,
+      "voc_cold": {
+       "max_dc_voltage": null,
+       "override_accepted": false,
+       "passes": null,
+       "per_module": null,
+       "string_voltage": null,
+       "suggested_string_length": null
+      }
+     },
+     "zone:Zone B": {
+      "dc_ac_ratio": 0,
+      "inverter_count_a": 0,
+      "inverter_model_a": "",
+      "module_model": "",
+      "panels_in_sequence": 0,
+      "voc_cold": {
+       "max_dc_voltage": null,
+       "override_accepted": false,
+       "passes": null,
+       "per_module": null,
+       "string_voltage": null,
+       "suggested_string_length": null
+      }
+     }
+    },
+    "zone_selection": [
+     {
+      "color_index": 1,
+      "name": "Zone A",
+      "window": null
+     },
+     {
+      "color_index": 3,
+      "name": "Zone B",
+      "window": null
+     }
+    ],
+    "zones_without_window": [
+     "Zone A",
+     "Zone B"
+    ]
+   },
+   "rejected_inputs": [],
+   "revision": "7e74df3db70d1f6ce0f7e6048a6e3e3acbd90c42",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before",
+    "changes",
+    "settings/string_sizing"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "server-builtin",
+    "producer": "solar_w1_studio_zones.v1",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  }
+ }
+}
