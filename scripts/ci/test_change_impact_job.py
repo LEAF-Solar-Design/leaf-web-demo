@@ -275,3 +275,174 @@ def test_ci_job_shape_and_shell_syntax():
     result = subprocess.run(["bash", "-n", ".codebuild/ci.sh"], cwd=ROOT,
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.fixture
+def comment_receipt():
+    return {
+        "checker_version": "0.1.0", "manifest_digest": "d5a01e293a79" + "0" * 52,
+        "verdict": "INCOMPLETE",
+        "summary": {"required": 3, "unresolved": 1, "changed": 1,
+                    "unchanged-compatible": 1},
+        "rows": [
+            {"required": True, "concern": "security", "subject": "ci",
+             "outcome": "changed", "evidence": "review:77"},
+            {"required": True, "concern": "tests", "subject": "ci",
+             "outcome": "unchanged-compatible", "evidence": "run:77"},
+            {"required": True, "concern": "alarms", "subject": "monitor",
+             "outcome": "unresolved", "evidence": None},
+            {"required": False, "concern": "docs", "subject": "optional-subject",
+             "outcome": "unresolved", "evidence": None},
+        ],
+    }
+
+
+@pytest.fixture
+def comment_run(sandbox, monkeypatch, comment_receipt):
+    _, base, _, _, receipt_dir, args, _ = sandbox
+    monkeypatch.delenv("CHANGE_IMPACT_NO_COMMENT", raising=False)
+    checker = Path(os.environ["CHANGE_IMPACT_CHECKER"])
+    source = checker.read_text(encoding="utf-8")
+    source = source.replace(
+        "sys.exit(",
+        "Path(args[args.index('--receipt') + 1]).write_text("
+        + repr(json.dumps(comment_receipt)) + ", encoding='utf-8')\nsys.exit(",
+    )
+    checker.write_text(source, encoding="utf-8")
+    return args + ["--event", "PUSH", "--head-ref",
+                   f"refs/heads/gh-readonly-queue/main/pr-77-{base}"], receipt_dir
+
+
+@pytest.fixture
+def fake_comments(monkeypatch):
+    requests, responses = [], []
+
+    def urlopen(request, timeout):
+        assert timeout == 60
+        assert request.get_header("User-agent") == "leaf-change-impact-ci"
+        assert request.get_header("Authorization") == "Bearer fixture-comment-token"
+        requests.append((request.get_method(), request.selector,
+                         json.loads(request.data) if request.data else None))
+        response = responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return io.StringIO(json.dumps(response))
+
+    monkeypatch.setattr(job.urllib.request, "urlopen", urlopen)
+    return requests, responses
+
+
+def test_render_comment_required_rows(comment_receipt, monkeypatch):
+    monkeypatch.setenv("GH_TOKEN", "secret-token-must-not-appear")
+    context = {"base": "a" * 40, "head": "b" * 40, "base_rule": "merge-group-ref"}
+    body = job.render_comment(comment_receipt, context)
+    assert body.splitlines()[0] == "<!-- change-impact -->"
+    assert "### Change impact (advisory)" in body
+    assert ("base aaaaaaaaaaaa head bbbbbbbbbbbb rule merge-group-ref "
+            "checker 0.1.0 manifest d5a01e293a79") in body
+    assert ("verdict INCOMPLETE, required 3, unresolved 1, changed 1, "
+            "unchanged-compatible 1, deferred 0, not-applicable 0") in body
+    table = [line for line in body.splitlines() if line.startswith("| ")]
+    assert len(table[2:]) == 3
+    assert "| alarms | monitor | unresolved | - |" in table
+    assert "optional-subject" not in body
+    assert "secret-token-must-not-appear" not in body
+    assert body.endswith("Dispositions: impact.py resolve|defer|dismiss --record <record> "
+                         "--row <id>; kill switch C:/tmp/gates/CHANGE_IMPACT_OFF.")
+
+
+@pytest.mark.parametrize("evidence, shown", [("run:77", 40), ("x" * 60000, 0)],
+                         ids=["row-limit", "character-limit"])
+def test_render_comment_bounds_table(comment_receipt, evidence, shown):
+    row = dict(comment_receipt["rows"][0], evidence=evidence)
+    comment_receipt["rows"] = [row] * 45
+    body = job.render_comment(comment_receipt, {
+        "base": "a" * 40, "head": "b" * 40, "base_rule": "merge-group-ref",
+    })
+    assert len(body) <= 60000
+    assert len([line for line in body.splitlines() if line.startswith("| ")]) == shown + 2
+    assert f"... and {45 - shown} more" in body
+    assert body.endswith("kill switch C:/tmp/gates/CHANGE_IMPACT_OFF.")
+
+
+@pytest.mark.parametrize("existing, method, path, result", [
+    ([{"id": 42, "body": "<!-- change-impact -->\nold"}], "PATCH",
+     "/repos/LEAF-Solar-Design/leaf-web-demo/issues/comments/42", "updated"),
+    ([{"id": 41, "body": "unrelated comment"}], "POST",
+     "/repos/LEAF-Solar-Design/leaf-web-demo/issues/77/comments", "created"),
+])
+def test_merge_group_comment_upsert(comment_run, fake_comments, monkeypatch, capsys,
+                                   existing, method, path, result):
+    args, receipt_dir = comment_run
+    requests, responses = fake_comments
+    responses.extend([existing, {}])
+    monkeypatch.setenv("GH_TOKEN", "fixture-comment-token")
+    assert job.main(args) == 0
+    assert requests[0] == ("GET", "/repos/LEAF-Solar-Design/leaf-web-demo/issues/77/"
+                           "comments?per_page=100", None)
+    assert len(requests) == 2
+    assert requests[1][:2] == (method, path)
+    receipt = json.loads((receipt_dir / "receipt.json").read_text(encoding="utf-8"))
+    context = json.loads((receipt_dir / "ci.json").read_text(encoding="utf-8"))
+    assert requests[1][2] == {"body": job.render_comment(receipt, context)}
+    output = capsys.readouterr().out
+    assert f"change-impact: comment {result} pr=77" in output
+    assert "fixture-comment-token" not in output
+
+
+@pytest.mark.parametrize("token", [None, "bad\rtoken", "bad\ntoken"])
+def test_merge_group_comment_no_valid_token(comment_run, fake_comments, monkeypatch,
+                                          capsys, token):
+    args, receipt_dir = comment_run
+    requests, _ = fake_comments
+    if token is not None:
+        monkeypatch.setenv("GH_TOKEN", token)
+    assert job.main(args) == 0
+    assert requests == []
+    assert "change-impact: comment skipped pr=77" in capsys.readouterr().out
+    assert (receipt_dir / "receipt.json").is_file()
+
+
+def test_pr_comment_not_applicable(comment_run, fake_comments, monkeypatch, capsys):
+    args, _ = comment_run
+    requests, _ = fake_comments
+    monkeypatch.setenv("GH_TOKEN", "fixture-comment-token")
+    args[args.index("--event") + 1] = "PULL_REQUEST"
+    assert job.main(args) == 0
+    assert requests == []
+    assert "change-impact: comment not applicable (event=PULL_REQUEST)" in capsys.readouterr().out
+
+
+def test_merge_group_comment_disabled(comment_run, fake_comments, monkeypatch):
+    args, receipt_dir = comment_run
+    requests, _ = fake_comments
+    monkeypatch.setenv("GH_TOKEN", "fixture-comment-token")
+    monkeypatch.setenv("CHANGE_IMPACT_NO_COMMENT", "1")
+    assert job.main(args) == 0
+    assert requests == []
+    assert (receipt_dir / "receipt.json").is_file()
+
+
+@pytest.mark.parametrize("step", ["list", "create", "update"])
+def test_comment_http_failure_is_advisory(comment_run, fake_comments, monkeypatch,
+                                         capsys, step):
+    args, receipt_dir = comment_run
+    requests, responses = fake_comments
+    monkeypatch.setenv("GH_TOKEN", "fixture-comment-token")
+    if step != "list":
+        responses.append([{"id": 42, "body": "<!-- change-impact -->"}]
+                         if step == "update" else [])
+    responses.append(job.urllib.error.HTTPError(
+        "https://api.github.com/", 403, "sensitive-error-text", {},
+        io.BytesIO(b"sensitive-response-body"),
+    ))
+    assert job.main(args) == 0
+    output = capsys.readouterr().out
+    assert [line for line in output.splitlines() if line.startswith("change-impact: comment")] == [
+        f"change-impact: comment skipped ({step} http=403)",
+    ]
+    assert "sensitive" not in output
+    assert "fixture-comment-token" not in output
+    assert len(requests) == (1 if step == "list" else 2)
+    assert (receipt_dir / "receipt.json").is_file()
+    assert (receipt_dir / "ci.json").is_file()

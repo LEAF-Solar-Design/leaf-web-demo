@@ -9,11 +9,12 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 
 
 SHA40 = re.compile(r"[0-9a-fA-F]{40}")
-QUEUE_REF = re.compile(r"refs/heads/gh-readonly-queue/(.+)/pr-\d+(?:-(.*))?")
+QUEUE_REF = re.compile(r"refs/heads/gh-readonly-queue/(.+)/pr-(\d+)(?:-(.*))?")
 QUEUE_QUERY = """query($cursor: String, $branch: String!) {
   repository(owner: "LEAF-Solar-Design", name: "leaf-web-demo") {
     mergeQueue(branch: $branch) { entries(first: 100, after: $cursor) {
@@ -104,7 +105,7 @@ def resolve_base(repo, base_ref, head_ref, head):
         return (base if base else git_sha(repo, base_ref)), "pr-base-ref"
     match = QUEUE_REF.fullmatch(head_ref)
     if match:
-        target, embedded = match.groups()
+        target, number, embedded = match.groups()
         if embedded and SHA40.fullmatch(embedded):
             return embedded.lower(), "merge-group-ref"
         try:
@@ -118,6 +119,88 @@ def resolve_base(repo, base_ref, head_ref, head):
     if parent and parent != head:
         return parent, "push-first-parent"
     return None, None
+
+
+def render_comment(receipt, context):
+    def cell(value):
+        return " ".join(str(value).splitlines()).replace("&", "&amp;").replace(
+            "<", "&lt;").replace(">", "&gt;").replace("|", "&#124;")
+
+    summary = receipt.get("summary", {})
+    counts = ", ".join(f"{key} {int(summary.get(key, 0))}" for key in (
+        "required", "unresolved", "changed", "unchanged-compatible", "deferred",
+        "not-applicable",
+    ))
+    verdict = "COMPLETE" if receipt.get("verdict") == "COMPLETE" else "INCOMPLETE"
+    header = "\n".join([
+        "<!-- change-impact -->",
+        "### Change impact (advisory)",
+        f"base {cell(context['base'][:12])} head {cell(context['head'][:12])} "
+        f"rule {cell(context['base_rule'][:128])} "
+        f"checker {cell(receipt['checker_version'][:128])} "
+        f"manifest {cell(receipt['manifest_digest'][:12])}",
+        f"verdict {verdict}, {counts}",
+        "",
+        "| concern | subject | outcome | evidence |",
+        "| --- | --- | --- | --- |",
+    ])
+    footer = ("Dispositions: impact.py resolve|defer|dismiss --record <record> "
+              "--row <id>; kill switch C:/tmp/gates/CHANGE_IMPACT_OFF.")
+    required = [row for row in receipt.get("rows", []) if row.get("required")]
+    rows = ["| " + " | ".join(cell(row.get(key) if row.get(key) is not None else "-")
+                              for key in ("concern", "subject", "outcome", "evidence"))
+            + " |" for row in required[:40]]
+    while True:
+        omitted = len(required) - len(rows)
+        tail = [f"... and {omitted} more"] if omitted else []
+        body = "\n".join([header, *rows, *tail, footer])
+        if len(body) <= 60000:
+            return body
+        if not rows:
+            raise ValueError("comment header exceeds limit")
+        rows.pop()
+
+
+def sticky_comment(pr_number, body):
+    token = os.environ.get("GH_TOKEN", "")
+    if not token or any(c in token for c in "\r\n"):
+        print(f"change-impact: comment skipped pr={pr_number}")
+        return "skipped"
+    step = "list"
+    try:
+        root = "https://api.github.com/repos/LEAF-Solar-Design/leaf-web-demo"
+        comments = f"{root}/issues/{pr_number}/comments"
+        headers = {"Authorization": "Bearer " + token,
+                   "Accept": "application/vnd.github+json",
+                   "Content-Type": "application/json",
+                   "User-Agent": "leaf-change-impact-ci",
+                   "X-GitHub-Api-Version": "2022-11-28"}
+        target = None
+        for page in range(1, 4):
+            url = comments + "?per_page=100" + (f"&page={page}" if page > 1 else "")
+            request = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(request, timeout=60) as response:
+                entries = json.load(response)
+            target = next((entry for entry in entries
+                           if (entry.get("body") or "").startswith("<!-- change-impact -->")), None)
+            if target is not None or len(entries) < 100:
+                break
+        step = "update" if target is not None else "create"
+        url = f"{root}/issues/comments/{int(target['id'])}" if target is not None else comments
+        request = urllib.request.Request(
+            url, data=json.dumps({"body": body}).encode(), headers=headers,
+            method="PATCH" if target is not None else "POST",
+        )
+        with urllib.request.urlopen(request, timeout=60):
+            pass
+    except Exception as exc:
+        code = exc.code if isinstance(exc, urllib.error.HTTPError) else "unknown"
+        code = code if isinstance(code, int) else "unknown"
+        print(f"change-impact: comment skipped ({step} http={code})")
+        return "skipped"
+    result = "updated" if target is not None else "created"
+    print(f"change-impact: comment {result} pr={pr_number}")
+    return result
 
 
 def print_output(value):
@@ -188,6 +271,18 @@ def run(args):
                    "gate_result_present": bool(args.gate_result and
                                                Path(args.gate_result).is_file()),
                    "elapsed_s": round(time.monotonic() - started, 3)}
+        try:
+            match = QUEUE_REF.fullmatch(args.head_ref)
+            receipt_path = receipt_dir / "receipt.json"
+            if (args.event.startswith("PUSH") and match and receipt_path.is_file()
+                    and os.environ.get("CHANGE_IMPACT_NO_COMMENT") != "1"):
+                receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                sticky_comment(match.group(2), render_comment(receipt, context))
+            else:
+                print(f"change-impact: comment not applicable (event={args.event})")
+        except Exception:
+            # Receipt/render failures are advisory too, without exception diagnostics.
+            print("change-impact: comment skipped (list http=unknown)")
         try:
             (receipt_dir / "ci.json").write_text(
                 json.dumps(context, indent=2) + "\n", encoding="utf-8",
