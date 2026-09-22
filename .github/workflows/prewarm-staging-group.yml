@@ -62,7 +62,9 @@ jobs:
   guard-ref:
     name: Refuse dispatches outside main
     if: github.event_name == 'workflow_dispatch'
-    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
+    # small (2 vCPU / 3 GiB): this job only dispatches and polls other deploys.
+    # CodeBuild single-label size suffix; the project default stays LARGE.
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}-small
     permissions: {}
     steps:
       - name: Require the main workflow ref
@@ -76,7 +78,9 @@ jobs:
     name: Stage the idle colour with this merge group's exact head
     needs: guard-ref
     if: github.event_name == 'workflow_dispatch' && inputs.group_head_sha != '' && github.ref == 'refs/heads/main'
-    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
+    # small (2 vCPU / 3 GiB): this job only dispatches and polls other deploys.
+    # CodeBuild single-label size suffix; the project default stays LARGE.
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}-small
     timeout-minutes: 42
     # Satisfies OIDC sub repo:LEAF-Solar-Design@90289782/leaf-web-demo@1304548236:environment:ecr-release.
     environment: ecr-release
