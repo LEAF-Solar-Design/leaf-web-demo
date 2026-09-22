@@ -177,8 +177,10 @@ def build_evidence(graph, family, metadata):
             # A zone's name IS committed state (LEAFADDZONE wrote it), so it is
             # compared as given; membership still sorts by handle value (rule G4).
             members = item.get("panel_refs")
-            if not isinstance(members, list) or not members:
-                raise compare.InputError("zone panel_refs must be a nonempty array")
+            # An EMPTY list is a real zone: LEAFADDZONE commits a named zone with no panels
+            # until LEAFZONEASSIGNPANELS runs. Only a non-list is malformed.
+            if not isinstance(members, list):
+                raise compare.InputError("zone panel_refs must be an array")
             name = item.get("name")
             if not isinstance(name, str) or not name.strip():
                 raise compare.InputError("zone name must be a nonempty string")

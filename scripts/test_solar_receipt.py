@@ -408,9 +408,17 @@ def test_zones_keep_the_raw_equipment_and_sizing_fields_in_provenance():
     assert type(raw["voc_cold"]["string_voltage"]) is int
 
 
+def test_zones_accept_a_created_zone_with_no_panels():
+    """LEAFADDZONE commits a named zone with no panels; that is a real zone, not malformed."""
+    source, context = zones_case()
+    source["electrical_zones"][0]["panel_refs"] = []
+    evidence = adapter.build_evidence(source, "zones", context)
+    empty = [z for z in evidence["after"]["zones"] if z["membership"] == []]
+    assert len(empty) == 1
+
+
 @pytest.mark.parametrize("change,message", [
-    ({"panel_refs": []}, "nonempty"),
-    ({"panel_refs": "panel-1"}, "nonempty"),
+    ({"panel_refs": "panel-1"}, "must be an array"),
     ({"name": ""}, "zone name"),
     ({"name": 7}, "zone name"),
     ({"module_model": None}, "malformed"),
