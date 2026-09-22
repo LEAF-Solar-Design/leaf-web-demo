@@ -214,6 +214,65 @@ def test_duplicate_json_key_and_structure_bounds(tmp_path):
         compare.semantic_hash(value)
 
 
+def real_scale_payload():
+    """Past both comparison budgets (120,002 nodes, about 4 MiB), inside the input ones."""
+    return {"panels": ["y" * 32] * 120000}
+
+
+def test_comparison_bounds_are_unchanged_and_input_bounds_are_wider():
+    assert (compare.MAX_NODES, compare.MAX_BYTES, compare.MAX_DEPTH) == (100000, 2 * 1024 * 1024, 40)
+    assert compare.MAX_INPUT_NODES > compare.MAX_NODES
+    assert compare.MAX_INPUT_BYTES > compare.MAX_BYTES
+
+
+def test_input_scan_takes_a_graph_the_comparison_bounds_refuse():
+    payload = real_scale_payload()
+    with pytest.raises(compare.InputError, match="exceeds"):
+        compare.semantic_hash(payload)
+    digest = compare.scan_input(payload)
+    assert len(digest) == 64 and set(digest) <= set("0123456789abcdef")
+
+
+def test_a_comparison_document_never_gets_the_input_budget():
+    doc = document()
+    doc["plugin"]["parameters"]["pad"] = real_scale_payload()["panels"]
+    with pytest.raises(compare.InputError, match="exceeds"):
+        compare.compare_document(doc)
+    assert compare.scan_input(doc)
+
+
+def test_input_scan_refuses_beyond_its_own_node_budget():
+    with pytest.raises(compare.InputError, match="structural"):
+        compare.scan_input([None] * (compare.MAX_INPUT_NODES + 1))
+
+
+def test_input_scan_refuses_beyond_its_own_byte_budget():
+    # 2,100 maximum-length strings: about 33 MiB canonical from only 2,101 nodes.
+    with pytest.raises(compare.InputError, match="byte limit"):
+        compare.scan_input(["z" * 16384] * 2100)
+
+
+@pytest.mark.parametrize("hostile,message", [
+    ("depth", "structural"), ("nan", "numeric"), ("range", "numeric"),
+    ("string", "string exceeds"), ("non-json", "not a JSON value"),
+])
+def test_input_scan_keeps_every_other_refusal(hostile, message):
+    if hostile == "depth":
+        payload = {}
+        for _ in range(compare.MAX_DEPTH + 1):
+            payload = {"nested": payload}
+    elif hostile == "nan":
+        payload = {"angle": float("nan")}
+    elif hostile == "range":
+        payload = {"angle": 1e200}
+    elif hostile == "string":
+        payload = {"name": "x" * 16385}
+    else:
+        payload = {"when": object()}
+    with pytest.raises(compare.InputError, match=message):
+        compare.scan_input(payload)
+
+
 def test_schema_matches_executable_families_and_evidence_fields():
     path = Path(__file__).resolve().parents[1] / "contract" / "solar-w1-comparison.v1.schema.json"
     schema = json.loads(path.read_text(encoding="utf-8"))

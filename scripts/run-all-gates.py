@@ -1440,10 +1440,13 @@ def build_suites() -> List[Suite]:
               SCRIPTS_DIR, _py_pytest("test_mq_review_codebuild.py"), 40),
         Suite("scripts-native-release-producer", "scripts test_native_release_producer.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_native_release_producer.py"), 32),
-        # 26 -> 28 on 2026-09-22: the groups family's contract v2 shape (neutral
-        # names, handle-value membership order, refused non-handle member ids).
+        # 26 -> 30 on 2026-09-22: two changes landed together. The groups family took its
+        # contract v2 shape (neutral names, handle-value membership order, refused
+        # non-handle member ids), and the adapter's input scan got its own bounds sized for
+        # a real drawing (a drawing-sized graph now produces evidence, an oversized evidence
+        # document is still refused). All four tests are hermetic and unconditional.
         Suite("scripts-solar-receipt", "scripts test_solar_receipt.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_solar_receipt.py"), 28),
+              SCRIPTS_DIR, _py_pytest("test_solar_receipt.py"), 30),
         Suite("scripts-solar-w1-studio-solve", "scripts test_solar_w1_studio_solve.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_solve.py"), 9),
         # S11 unit sync (2026-09-22): the declaration-only builtin, its producer on a
