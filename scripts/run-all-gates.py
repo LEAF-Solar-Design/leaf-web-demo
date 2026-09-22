@@ -1442,6 +1442,13 @@ def build_suites() -> List[Suite]:
               SCRIPTS_DIR, _py_pytest("test_solar_receipt.py"), 26),
         Suite("scripts-solar-w1-studio-solve", "scripts test_solar_w1_studio_solve.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_solve.py"), 9),
+        # S11 unit sync (2026-09-22): the declaration-only builtin, its producer on a
+        # synthetic two-panel intake, and the settings evidence family. Every case is
+        # hermetic (no skipif, no network, the committed fixture only for its hash and
+        # revision), so the floor is the exact count on every runner: 20 test
+        # functions, 9 parametrized over literal lists (2+2+7+5+5+2+5+4+2 = 34) + 11.
+        Suite("scripts-solar-w1-studio-unitsync", "scripts test_solar_w1_studio_unitsync.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_unitsync.py"), 45),
         # Registered per the #29 fix-then-register rule (shipped without a
         # gate entry; measured 1 passed on this tree 2026-07-23).
         # 1 -> 2 on 2026-08-07: the staging relay's convergence contract

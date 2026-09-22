@@ -31,11 +31,15 @@ def _sibling(name):
 
 compare = _sibling("solar_w1_compare")
 
+# AutoCAD INSUNITS codes for the graph's drawing_units; anything else is an error, never a default.
+INSUNITS = {"in": 1, "ft": 2, "mm": 4, "cm": 5, "m": 6, "km": 7, "yd": 10}
+FAMILIES = ("groups", "panels", "settings", "strings")
+
 
 def build_evidence(graph, family, metadata):
     """Build one 22-key evidence object, refusing absent measurement metadata."""
-    if family not in ("groups", "panels", "strings"):
-        raise compare.InputError("Studio adapter supports groups, panels and strings")
+    if family not in FAMILIES:
+        raise compare.InputError("Studio adapter supports groups, panels, settings and strings")
     compare.semantic_hash(graph)  # Bound and reject non-JSON/nonfinite input.
     if type(graph.get("graph_schema_version")) is not int or graph["graph_schema_version"] != 1:
         raise compare.InputError("unsupported Studio graph version")
@@ -86,7 +90,14 @@ def build_evidence(graph, family, metadata):
         absent("frame/crs")
         result["frame"]["crs"] = "none"
     records = []
-    collection = graph["frames" if family == "groups" else family]
+    if family == "settings":
+        # The plugin's LEAFUNITSYNC writes only INSUNITS; Studio's declaration maps to that code.
+        if not isinstance(units["drawing_units"], str) or units["drawing_units"] not in INSUNITS:
+            raise compare.InputError("drawing units have no INSUNITS code")
+        absent("after/settings/insunits/derived-from-drawing-units")
+        collection = []
+    else:
+        collection = graph["frames" if family == "groups" else family]
     if not isinstance(collection, list):
         raise compare.InputError("graph collection must be an array")
     for index, item in enumerate(collection):
@@ -141,7 +152,10 @@ def build_evidence(graph, family, metadata):
         records.append(record)
     if family == "strings":
         records.sort(key=lambda record: result["entity_mapping"][record["id"]["entity_id"]])
-    result["after"] = {family: records}
+    if family == "settings":
+        result["after"] = {"settings": {"insunits": INSUNITS[units["drawing_units"]]}}
+    else:
+        result["after"] = {family: records}
     if family == "strings":
         extra = graph.get("extra", {})
         coverage = extra.get("solve_coverage") if isinstance(extra, dict) else None
@@ -171,7 +185,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--graph", type=Path, required=True)
     parser.add_argument("--metadata", type=Path, required=True)
-    parser.add_argument("--family", choices=("groups", "panels", "strings"), required=True)
+    parser.add_argument("--family", choices=FAMILIES, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
