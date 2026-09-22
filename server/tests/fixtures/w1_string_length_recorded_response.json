@@ -1,23 +1,102 @@
 {
-  "evidence_kind": "recorded-synthetic",
-  "description": "Public offline StringSizer adapter fixture. Not a plugin capture or live service parity proof.",
+  "evidence_kind": "synthetic",
+  "description": "SYNTHETIC passing variant of the real plugin response in w1_plugin_stringsizer_response.json: identical request and response except simulation_results.standard.string_length, lowered from 28 to 27 and its notes marked synthetic. The real response fails the plugin's own cold-Voc guard at 28 (28 x 54.49 V > 1500 V), so tests that must confirm use this variant. Not a plugin capture or live service parity proof.",
   "request": {
-    "schema_version": "leaf.string-length.v1",
-    "module": {"model": "fixture-module", "voc": 45.0, "temp_coeff_pct_per_c": -0.3},
-    "inverter": {"model": "fixture-inverter", "max_dc_voltage": 600.0},
-    "design_min_temp_c": -12.0,
-    "panels_in_sequence": 2,
-    "units": "SI"
+    "module_name": "JA_Solar_JAM72D40-595/MB",
+    "full_inverter_name": "Sungrow SG-HX SG250HX",
+    "bifacial": false,
+    "bifacial_coefficient": ".7",
+    "racking_params": {
+      "racking_type": "fixed_tilt",
+      "surface_tilt": "5",
+      "surface_azimuth": "180",
+      "albedo": ".25"
+    },
+    "max_voltage": "1500",
+    "thermal_model_type": "close mount glass glass",
+    "open_circuit_rise": false,
+    "zip_code": "44224"
   },
   "response": {
-    "panels_in_sequence": 2,
-    "voc_cold": {
-      "passes": true,
-      "override_accepted": false,
-      "suggested_string_length": 12,
-      "per_module": 49.995,
-      "string_voltage": 99.99,
-      "max_dc_voltage": 600.0
+    "cells": 81,
+    "voc": 52.58,
+    "isc": 13.996500000000001,
+    "pmp": 595.0,
+    "vmp": 44.64,
+    "imp": 13.33,
+    "bpmp": -1.4875,
+    "bvoc": -0.13145,
+    "alpha_sc": 0.006998250000000001,
+    "weather_mode": "tmy",
+    "min_temp": -2.700000047683716,
+    "mintemp": -2.700000047683716,
+    "simulation_results": {
+      "standard": {
+        "Conditions": "P99.5 Voc",
+        "max_module_voltage": 51.2558131874,
+        "string_design_voltage": 1500,
+        "safety_factor": 0.0195,
+        "string_length": 27.0,
+        "Cell Temperature": 50.0011844749,
+        "POA Irradiance": 1033.5126543505,
+        "long_note": "SYNTHETIC: standard string length lowered to 27 from the real response's 28.",
+        "short_note": "SYNTHETIC passing variant."
+      },
+      "conservative": {
+        "Conditions": "Historical Maximum Voc",
+        "max_module_voltage": 54.518309065,
+        "string_design_voltage": 1500,
+        "safety_factor": 0.0195,
+        "string_length": 26.0,
+        "Cell Temperature": 48.3101151219,
+        "POA Irradiance": 1092.240458443,
+        "long_note": "Historical maximum Voc from 2018-2020<br>690.7(A)(3)-P100: 54.518<br>690.7(A)(3)-P100 + 1.9% SF: 55.581 V<br>Maximum String Length: 26<br>Conservative 690.7(A)(3) value for string length.",
+        "short_note": "Conservative 690.7(A)(3) value for string length."
+      },
+      "day": {
+        "Conditions": "Voc at 1 sun and mean yearly minimum daytime (GHI>150 W/m2) temperature",
+        "max_module_voltage": 55.2571982874,
+        "string_design_voltage": 1500,
+        "safety_factor": 0.0,
+        "string_length": 26.0,
+        "Cell Temperature": 4.633333683,
+        "POA Irradiance": 1000.0,
+        "long_note": "Traditional daytime Voc, using 1 sun irradiance and<br>mean yearly minimum daytime (GHI>150 W/m^2) dry bulb temperature of 4.6 C.<br>Day Voc: 55.257 V<br>Maximum String Length:26<br>Recommended 690.7(A)(1) Value",
+        "short_note": "Traditional design using daytime temp (GHI>150 W/m^2)"
+      },
+      "nsrdb": {
+        "Conditions": "Voc at 1 sun and mean yearly min ambient temperature from NSRDB",
+        "max_module_voltage": 56.0502799969,
+        "string_design_voltage": 1500,
+        "safety_factor": 0.0,
+        "string_length": 26.0,
+        "Cell Temperature": -1.3999999762,
+        "POA Irradiance": 1000.0,
+        "long_note": "Traditional 690.7(A)(1) value, using 1 sun irradiance and<br>mean yearly minimum dry bulb temperature of -1.4 C.<br>690.7(A)(1)-NSRDB: 56.050<br>Maximum String Length: 26",
+        "short_note": "Traditional design using NSRDB and temperature coefficient"
+      },
+      "ashrae_1": {
+        "Conditions": "Voc at 1 sun and mean yearly min ambient temperature from ASHRAE",
+        "max_module_voltage": 55.68222,
+        "string_design_voltage": 1500,
+        "safety_factor": 0.0,
+        "string_length": 26.0,
+        "Cell Temperature": 1.4,
+        "POA Irradiance": 1000.0,
+        "long_note": "Traditional 690.7(A)(1) value<br>using 1 sun irradiance and<br>mean yearly minimum dry bulb temperature of 1.4 C.<br>Trad-ASHRAE-690.7a1 Voc: 55.682<br>Maximum String Length: 26",
+        "short_note": "Traditional design using ASHRAE and temperature coefficient"
+      },
+      "ashrae_2": {
+        "Conditions": "NEC 690.7a2 Voc, corrected by correction factor",
+        "max_module_voltage": 57.838,
+        "string_design_voltage": 1500,
+        "safety_factor": 0.0,
+        "string_length": 25.0,
+        "Cell Temperature": 1.4,
+        "POA Irradiance": 1000.0,
+        "long_note": "Traditional 690.7(A)(2) value<br>using NEC derating table and<br>mean yearly minimum dry bulb temperature of 1.4 C.<br>Trad-ASHRAE-690.7(A)(2) Voc: 57.838<br>Maximum String Length: 25",
+        "short_note": "Traditional design using ASHRAE and standard derating."
+      }
     }
   }
 }

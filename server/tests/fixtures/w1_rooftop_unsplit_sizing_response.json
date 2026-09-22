@@ -1,30 +1,47 @@
 {
- "source": "SYNTHETIC string-length response, computed 2026-09-22 with the standard cold-Voc formula for the plugin's own hardware on data/rooftop_unsplit.dwg. The live service now rejects Studio's pinned request shape (HTTP 400 'Missing module_name'), so no live response exists for this request; the sizing precondition is flagged synthetic wherever this is used.",
+ "source": "SYNTHETIC string-length response for the plugin's own hardware on data/rooftop_unsplit.dwg, re-expressed 2026-09-22 in the plugin's StringSizer request shape. The request is the plugin-shaped request of w1_plugin_stringsizer_response.json (JA_Solar_JAM72D40-595/MB, Sungrow SG-HX SG250HX, 1500 V). The response is that real plugin response with only simulation_results.standard.string_length set to 14 (the producer's max string length) and its notes marked synthetic. The live service cannot answer (it cannot reach NREL NSRDB), so the sizing precondition is flagged synthetic wherever this is used.",
  "synthetic": true,
  "request": {
-  "schema_version": "leaf.string-length.v1",
-  "module": {
-   "model": "JA_Solar_JAM72D40-595/MB",
-   "voc": 52.58,
-   "temp_coeff_pct_per_c": -0.25
+  "module_name": "JA_Solar_JAM72D40-595/MB",
+  "full_inverter_name": "Sungrow SG-HX SG250HX",
+  "bifacial": false,
+  "bifacial_coefficient": ".7",
+  "racking_params": {
+   "racking_type": "fixed_tilt",
+   "surface_tilt": "5",
+   "surface_azimuth": "180",
+   "albedo": ".25"
   },
-  "inverter": {
-   "model": "Sungrow SG250HX",
-   "max_dc_voltage": 1500.0
-  },
-  "design_min_temp_c": -2.7,
-  "panels_in_sequence": 14,
-  "units": "SI"
+  "max_voltage": "1500",
+  "thermal_model_type": "close mount glass glass",
+  "open_circuit_rise": false,
+  "zip_code": "44224"
  },
  "response": {
-  "panels_in_sequence": 14,
-  "voc_cold": {
-   "passes": true,
-   "override_accepted": false,
-   "suggested_string_length": 26,
-   "per_module": 56.221165,
-   "string_voltage": 787.09631,
-   "max_dc_voltage": 1500.0
+  "cells": 81,
+  "voc": 52.58,
+  "isc": 13.996500000000001,
+  "pmp": 595.0,
+  "vmp": 44.64,
+  "imp": 13.33,
+  "bpmp": -1.4875,
+  "bvoc": -0.13145,
+  "alpha_sc": 0.006998250000000001,
+  "weather_mode": "tmy",
+  "min_temp": -2.700000047683716,
+  "mintemp": -2.700000047683716,
+  "simulation_results": {
+   "standard": {
+    "Conditions": "P99.5 Voc",
+    "max_module_voltage": 51.2558131874,
+    "string_design_voltage": 1500,
+    "safety_factor": 0.0195,
+    "string_length": 14.0,
+    "Cell Temperature": 50.0011844749,
+    "POA Irradiance": 1033.5126543505,
+    "long_note": "SYNTHETIC: standard string length set to the producer's max string length, 14.",
+    "short_note": "SYNTHETIC producer sizing."
+   }
   }
  }
 }

@@ -125,6 +125,21 @@ def test_metadata_binds_shared_fixture_and_records_fallbacks(solved):
     assert "access_token" not in json.dumps((graph, metadata))
 
 
+def test_sizing_commits_the_plugin_recommendation_through_its_guard(solved):
+    graph, _, _ = solved
+    sizing = json.loads(SIZING.read_text(encoding="utf-8"))
+    evidence = producer.sizing_cloud.require_sizing(graph)
+    record = evidence["records"][graph["settings"]["id"]]
+    assert record["adapter_version"] == "2.0.0"
+    assert record["request"] == sizing["request"] and record["response"] == sizing["response"]
+    settings = graph["settings"]
+    assert settings["panels_in_sequence"] == 14 and settings["global_string_sizing_confirmed"] is True
+    per_module = 52.58 * (1.0 + -0.13145 / 100.0 * (-2.700000047683716 - 25.0))
+    assert settings["voc_cold"] == {
+        "passes": True, "override_accepted": False, "suggested_string_length": 0,
+        "per_module": per_module, "string_voltage": per_module * 14, "max_dc_voltage": 1500.0}
+
+
 def test_produced_evidence_validates_joint_identity_contract(solved):
     graph, metadata, _ = solved
     originals = deepcopy((graph, metadata))

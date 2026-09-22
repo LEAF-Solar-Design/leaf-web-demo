@@ -1,5 +1,8 @@
 """Sizing orchestration called by the authenticated cloud broker.
 
+Requests are the plugin's StringSizer requests. The committed length is the plugin's
+recommendation (standard.string_length) and commits only when its cold-Voc guard passes,
+as StringSizerInputForm does; confirm=True is the palette's explicit Confirm step.
 Returns a complete graph candidate for the existing drawing transaction. Neither
 preview, cancellation nor a partial zone response writes durable state here.
 """
@@ -28,18 +31,18 @@ def size_strings(graph, params, *, tenant_id, job_id):
     for target_id, target in targets.items():
         parsed = cloud.validate_params({"grant_ref": params.get("grant_ref"),
                                         "request": requests[target_id]})
-        if mode == "zones" and (parsed.request.module.model != target["module_model"]
-                                or parsed.request.inverter.model != target["inverter_model_a"]):
+        if mode == "zones" and (parsed.request.module_name != target["module_model"]
+                                or parsed.request.full_inverter_name != target["inverter_model_a"]):
             raise GraphValidationError("SIZING_MODEL_MISMATCH")
-        validated[target_id] = parsed.model_dump()
+        validated[target_id] = {"grant_ref": parsed.grant_ref, "request": parsed.request.wire()}
     records = {target_id: cloud.size(request, tenant_id, job_id)
                for target_id, request in validated.items()}
     if not params.get("confirm", False):
         return {"graph": result, "confirmed": False, "records": records}
-    if any(not record["response"]["voc_cold"]["passes"] for record in records.values()):
+    if any(not record["sizing"]["voc_cold"]["passes"] for record in records.values()):
         raise GraphValidationError("COLD_VOLTAGE_FAILED")
     for target_id, target in targets.items():
-        target.update(copy.deepcopy(records[target_id]["response"]))
+        target.update(copy.deepcopy(records[target_id]["sizing"]))
     settings = result["settings"]
     settings["global_string_sizing_confirmed"] = mode == "global"
     settings["extra"]["string_sizing"] = {
