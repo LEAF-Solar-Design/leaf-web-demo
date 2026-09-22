@@ -5,6 +5,8 @@ against both the wire contract and the solve binding before leaving this module.
 """
 from __future__ import annotations
 
+from pydantic import ValidationError
+
 from leaf_cloud_client import StringerRequest
 from solar_design_graph import GraphValidationError
 from solar_solve_results import _frame_request
@@ -46,6 +48,9 @@ def build_stringer_request(graph: dict, frame_ref: str, *,
     request = {"grid": {"Dwgname": dwgname,
                         "Sequences": plugin_sequences(count, max_string_length),
                         "Rows": rows, "Modify": []}}
-    StringerRequest.model_validate(request)
+    try:
+        StringerRequest.model_validate(request)
+    except ValidationError:
+        raise GraphValidationError("SOLVE_REQUEST_INVALID") from None
     _frame_request(graph, frame_ref, request)
     return request

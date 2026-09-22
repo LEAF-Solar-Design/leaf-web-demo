@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Project Studio graph snapshots into the Solar W1 neutral evidence contract.
 
-The graph supplies frames (groups), panels, revision and drawing frame. A
+The graph supplies frames (groups), panels and drawing frame. A
 separate --metadata JSON supplies measured run facts: the evidence keys other
-than after, output_sha256, revision, units and frame, plus coordinate_system,
+than after, output_sha256, input_sha256, units and frame, plus coordinate_system,
 geometry_units and angle_units. In particular before, changes, identity mapping
 and survived_reopen must come from the producer, not from this snapshot reader.
 geometry_units and angle_units declare the graph geometry's actual units.
@@ -18,6 +18,7 @@ from copy import deepcopy
 import importlib.util
 import json
 from pathlib import Path
+import re
 import sys
 
 
@@ -40,11 +41,18 @@ def build_evidence(graph, family, metadata):
         raise compare.InputError("unsupported Studio graph version")
     if type(graph.get("rev")) is not int or graph["rev"] < 0:
         raise compare.InputError("invalid Studio graph revision")
-    derived = {"after", "output_sha256", "revision", "units", "frame"}
+    derived = {"after", "output_sha256", "input_sha256", "units", "frame"}
     required = compare.EVIDENCE_KEYS - derived
     if not isinstance(metadata, dict) or not required <= metadata.keys():
         raise compare.InputError("missing measured evidence metadata")
+    if "input_sha256" in metadata:
+        raise compare.InputError("input_sha256 must be derived, not supplied")
+    if not isinstance(metadata["revision"], str) or not re.fullmatch(r"[0-9a-f]{40}", metadata["revision"]):
+        raise compare.InputError("revision must be a 40-character lowercase git commit")
     result = {key: deepcopy(metadata[key]) for key in required}
+    result["input_sha256"] = compare.semantic_hash({
+        "fixture_sha256": metadata["fixture_sha256"], "parameters": metadata["parameters"],
+    })
     if not isinstance(result["fallback_fields"], list):
         raise compare.InputError("fallback_fields must be an array")
     units = graph["project"]["units"]
@@ -67,7 +75,6 @@ def build_evidence(graph, family, metadata):
             raise compare.InputError("graph entity requires an explicit neutral mapping")
         return {"entity_id": identifier}
 
-    result["revision"] = str(graph["rev"])
     result["units"] = units["drawing_units"]
     result["frame"] = {
         "coordinate_system": metadata["coordinate_system"],
@@ -132,6 +139,8 @@ def build_evidence(graph, family, metadata):
                 "sizing_provenance": deepcopy(item["sizing_provenance"]) if "sizing_provenance" in item else absent(path + "/sizing_provenance"),
             })
         records.append(record)
+    if family == "strings":
+        records.sort(key=lambda record: result["entity_mapping"][record["id"]["entity_id"]])
     result["after"] = {family: records}
     if family == "strings":
         extra = graph.get("extra", {})
@@ -146,6 +155,10 @@ def build_evidence(graph, family, metadata):
         result["after"]["length_distribution"] = sorted(item["module_count"] for item in collection)
     result["output_sha256"] = compare.semantic_hash(result["after"])
     result["provenance"]["studio_graph_sha256"] = compare.semantic_hash(graph)
+    result["provenance"]["studio_graph_rev"] = graph["rev"]
+    # The frozen comparator calls replayed observations "recorded".
+    if result["execution_mode"] == "replay":
+        result["execution_mode"] = "recorded"
     compare.validate_evidence(result, family)
     # The evidence validator checks shape; normalization also checks references
     # and quantity declarations, including the caller's before snapshot.
