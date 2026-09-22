@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react'
 import { applyViewPose, cameraPose, nextFitState, pickLineThreshold, safeFitFrustum, safeCenterShift, safeRectCameraAction, unprojectClientToPlane } from './viewerMath.js'
+import { blockDefinitions } from './viewerIntake.js'
 import { expandBulgedPolylines, intakeRoundPolylines } from '../cadedit/engineIntake.js'
 import { formatElementId } from '../lib/elementIdentity.js'
 import * as THREE from 'three'
@@ -388,7 +389,7 @@ const Viewer = forwardRef(function Viewer(
     const insertGroup = new THREE.Group()
     const hs = dataSpan * 0.02 // base half-size of the glyph
     let nInserts = 0
-    const definitions = new Map((activeIntake.blocks || []).map((block) => [String(block.name).toUpperCase(), block]))
+    const definitions = blockDefinitions(activeIntake)
     for (const ins of inserts) {
       if (!ins.pt) continue
       const definition = definitions.get(String(ins.name).toUpperCase())
