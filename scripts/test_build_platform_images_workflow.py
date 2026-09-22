@@ -3551,8 +3551,10 @@ def check_docs_noop_filter(text: str) -> None:
     # ephemeral VMs. #1091 moved this job from GitHub-hosted ubuntu-latest to
     # the CodeBuild-hosted runner, which is fresh per run and attempt; the
     # rollback is the one-line runs-on change the workflow's own comment names.
+    # The -small suffix (2026-09-22) is CodeBuild's per-job size override on
+    # the same ephemeral project; it does not change where the step runs.
     assert dispatch_job["runs-on"] == (
-        "codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}"
+        "codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}-small"
     )
     assert dispatch_job["runs-on"] != "self-hosted"
     assert not dispatch_job["runs-on"].startswith("[")
