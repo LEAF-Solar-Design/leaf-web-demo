@@ -273,3 +273,54 @@ def test_duplicate_handles_and_bad_settings_fail_closed():
     with pytest.raises(kernel.PanelGroupKernelError):
         kernel.group_panels([_panel("1", 0, 0)], branch_max_offset=120, alignment_tolerance=12,
                             installation_design="Carport")
+
+
+# --------------------------------------------------------- zone-aware grouping
+
+
+def _zoned(panels, zones, **kw):
+    kw.setdefault("branch_max_offset", 120.0)
+    kw.setdefault("alignment_tolerance", 12.0)
+    return kernel.group_panels_by_zone(panels, zones, **kw)
+
+
+def test_zone_aware_grouping_runs_once_per_zone_in_zone_order():
+    panels = [_panel("1", 0, 0), _panel("2", 100, 0), _panel("3", 5000, 0), _panel("4", 5100, 0)]
+    zoned = _zoned(panels, [{"name": "B", "members": ["3", "4"]}, {"name": "A", "members": ["1", "2"]}])
+    assert [(g["zone"], g["members"]) for g in zoned] == [("B", ["3", "4"]), ("A", ["1", "2"])]
+    assert [g["matrix"] for g in zoned] == [[["4", "3"]], [["2", "1"]]]
+
+
+def test_zone_aware_grouping_splits_one_island_that_two_zones_share():
+    # The plugin groups a zone's OWN panels, so a zone boundary cuts an island
+    # that plain PanelGroupCreate keeps whole.
+    panels = [_panel("1", 0, 0), _panel("2", 100, 0)]
+    assert [g["members"] for g in _group(panels)] == [["1", "2"]]
+    zoned = _zoned(panels, [{"name": "A", "members": ["1"]}, {"name": "B", "members": ["2"]}])
+    assert [(g["zone"], g["members"]) for g in zoned] == [("A", ["1"]), ("B", ["2"])]
+
+
+def test_no_zones_falls_back_to_one_plain_pass():
+    panels = [_panel("1", 0, 0), _panel("2", 100, 0), _panel("3", 5000, 0)]
+    plain = _group(panels)
+    for zones in (None, [], ()):
+        zoned = _zoned(panels, zones)
+        assert [{k: v for k, v in g.items() if k != "zone"} for g in zoned] == plain
+        assert {g["zone"] for g in zoned} == {None}
+
+
+def test_zone_aware_grouping_fails_closed_and_never_mutates_its_inputs():
+    panels = [_panel("1", 0, 0), _panel("2", 100, 0)]
+    zones = [{"name": "A", "members": ["1"]}, {"name": "B", "members": ["2"]}]
+    before = copy.deepcopy((panels, zones))
+    _zoned(panels, zones)
+    assert (panels, zones) == before
+    for bad in ([{"name": "A", "members": ["9"]}],
+                [{"name": "A", "members": ["1"]}, {"name": "a", "members": ["2"]}],
+                [{"name": "A", "members": ["1"]}, {"name": "B", "members": ["1"]}],
+                [{"name": "", "members": ["1"]}],
+                [{"members": ["1"]}],
+                [{"name": "A", "members": "1"}],
+                {"name": "A", "members": ["1"]}):
+        with pytest.raises(kernel.PanelGroupKernelError):
+            _zoned(panels, bad)

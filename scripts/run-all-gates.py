@@ -316,8 +316,18 @@ def build_suites() -> List[Suite]:
               allowed_skip_reasons=(r"live staging probe is opt-in",)),
         Suite("server-w1-graph-versions", "server tests/test_w1_graph_versions.py", "pytest", SERVER,
               _py_pytest("tests/test_w1_graph_versions.py"), 18),
+        # 31 -> 35 on 2026-09-22: the zone-aware entry point (group_panels_by_zone,
+        # the port of BuildAndSaveGroupsForZone) added four hermetic, unparametrized
+        # tests. Nothing in this file skips, so the count is the same on every runner.
         Suite("server-w1-panel-group-kernel", "server tests/test_w1_panel_group_kernel.py", "pytest", SERVER,
-              _py_pytest("tests/test_w1_panel_group_kernel.py"), 31),
+              _py_pytest("tests/test_w1_panel_group_kernel.py"), 35),
+        # S16 electrical zones (2026-09-22): the create/assign builtin and the
+        # partition the plugin keeps. Hermetic (a graph seeded in the test, no
+        # network, no fixture), so the floor is the exact count on every runner:
+        # 7 unparametrized tests + 3 parametrizations over literal lists
+        # (2 + 9 + 5 = 16) = 23.
+        Suite("server-w1-electrical-zones", "server tests/test_w1_electrical_zones.py", "pytest", SERVER,
+              _py_pytest("tests/test_w1_electrical_zones.py"), 23),
         Suite("server-w1-sizing-groups", "server tests/test_w1_sizing_groups.py", "pytest", SERVER,
               _py_pytest("tests/test_w1_sizing_groups.py"), 52),
         Suite("server-w1-solar-interchange", "server tests/test_w1_solar_interchange.py", "pytest", SERVER,
@@ -1445,8 +1455,13 @@ def build_suites() -> List[Suite]:
         # non-handle member ids), and the adapter's input scan got its own bounds sized for
         # a real drawing (a drawing-sized graph now produces evidence, an oversized evidence
         # document is still refused). All four tests are hermetic and unconditional.
+        # 30 -> 41 on 2026-09-22: the zones family joined the adapter (the zone's own
+        # name compared as given, membership by handle value, and rule Z7's equipment
+        # and sizing records null and named as fallbacks with the raw values kept in
+        # provenance.zone_fields), as 3 tests plus one parametrization over 8 literal
+        # malformed zones. Every case is hermetic and unconditional.
         Suite("scripts-solar-receipt", "scripts test_solar_receipt.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_solar_receipt.py"), 30),
+              SCRIPTS_DIR, _py_pytest("test_solar_receipt.py"), 41),
         Suite("scripts-solar-w1-studio-solve", "scripts test_solar_w1_studio_solve.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_solve.py"), 12),
         # S11 unit sync (2026-09-22): the declaration-only builtin, its producer on a
@@ -1460,6 +1475,14 @@ def build_suites() -> List[Suite]:
         # evidence checks + 8 refusals (5 parametrized). No skips, no host gating.
         Suite("scripts-solar-w1-studio-groups", "scripts test_solar_w1_studio_groups.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_groups.py"), 11),
+        # S16 (2026-09-22): the zone producer on a synthetic two-block intake, its
+        # zone-aware grouping run, the overlapping-window partition and its
+        # refusals, and the identity map carrying the zones and their members and
+        # no other panel. Hermetic (the committed schema file only for its hash and
+        # revision), so the floor is the exact count on every runner: 10 tests +
+        # one parametrization over 7 literal zone specifications = 17.
+        Suite("scripts-solar-w1-studio-zones", "scripts test_solar_w1_studio_zones.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_zones.py"), 17),
         # Registered per the #29 fix-then-register rule (shipped without a
         # gate entry; measured 1 passed on this tree 2026-07-23).
         # 1 -> 2 on 2026-08-07: the staging relay's convergence contract

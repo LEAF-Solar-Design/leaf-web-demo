@@ -584,3 +584,73 @@ def group_panels(
             })
     groups.sort(key=lambda g: min(handle_sort_key(h) for h in g["members"]))
     return groups
+
+
+def group_panels_by_zone(
+    panels: Iterable[Mapping[str, Any]],
+    zones: Sequence[Mapping[str, Any]] | None,
+    *,
+    branch_max_offset: float,
+    alignment_tolerance: float,
+    installation_design: str = ROOF,
+) -> list[dict]:
+    """PanelGroupCreateZoneAware (BranchCmdCore.BuildAndSaveGroupsForZone).
+
+    The ordinary grouping runs ONCE PER ZONE over only that zone's panels, in the
+    zones' own order, and every group carries the zone name it came from. With no
+    zones the plugin falls back to plain PanelGroupCreate, so ``zones`` empty or
+    None returns exactly ``group_panels(panels, ...)`` with ``zone`` None on each
+    group. ``group_panels`` itself is untouched: within a zone the same island,
+    angle-key and matrix rules apply, so a zone's groups still come back in
+    ascending smallest member handle.
+
+    ``zones`` is ``[{"name": str, "members": [handle, ...]}, ...]``. Handles match
+    case-insensitively. A member that is not one of ``panels``, a duplicate zone
+    name and a panel claimed by two zones all fail closed: zones partition, and a
+    kernel that guessed here would silently group a panel twice. A zone whose
+    members select nothing contributes no group.
+    """
+    ordered = list(panels)
+    by_handle: dict[str, Mapping[str, Any]] = {}
+    for panel in ordered:
+        handle = panel["handle"]
+        if not isinstance(handle, str) or not handle:
+            raise PanelGroupKernelError("panel handle must be a nonempty string")
+        key = handle.upper()
+        if key in by_handle:
+            raise PanelGroupKernelError(f"duplicate panel handle {handle}")
+        by_handle[key] = panel
+    settings = {"branch_max_offset": branch_max_offset, "alignment_tolerance": alignment_tolerance,
+                "installation_design": installation_design}
+    if not zones:
+        return [{**group, "zone": None} for group in group_panels(ordered, **settings)]
+    if isinstance(zones, (str, bytes, Mapping)):
+        raise PanelGroupKernelError("zones must be a sequence of zone mappings")
+    grouped: list[dict] = []
+    names: set[str] = set()
+    claimed: set[str] = set()
+    for zone in zones:
+        if not isinstance(zone, Mapping) or not {"name", "members"} <= set(zone):
+            raise PanelGroupKernelError("a zone needs a name and a member list")
+        name, members = zone["name"], zone["members"]
+        if not isinstance(name, str) or not name.strip() or len(name) > 4096:
+            raise PanelGroupKernelError("zone name must be a nonempty string")
+        if name.casefold() in names:
+            raise PanelGroupKernelError(f"duplicate zone name {name}")
+        names.add(name.casefold())
+        if not isinstance(members, list):
+            raise PanelGroupKernelError("zone members must be a list of handles")
+        selected = []
+        for handle in members:
+            if not isinstance(handle, str) or not handle:
+                raise PanelGroupKernelError("zone member handle must be a nonempty string")
+            key = handle.upper()
+            panel = by_handle.get(key)
+            if panel is None:
+                raise PanelGroupKernelError(f"zone member {handle} is not one of the panels")
+            if key in claimed:
+                raise PanelGroupKernelError(f"panel {handle} belongs to more than one zone")
+            claimed.add(key)
+            selected.append(panel)
+        grouped.extend({**group, "zone": name} for group in group_panels(selected, **settings))
+    return grouped
