@@ -33,8 +33,8 @@ compare = _sibling("solar_w1_compare")
 
 def build_evidence(graph, family, metadata):
     """Build one 22-key evidence object, refusing absent measurement metadata."""
-    if family not in ("groups", "panels"):
-        raise compare.InputError("Studio adapter supports groups and panels")
+    if family not in ("groups", "panels", "strings"):
+        raise compare.InputError("Studio adapter supports groups, panels and strings")
     compare.semantic_hash(graph)  # Bound and reject non-JSON/nonfinite input.
     if type(graph.get("graph_schema_version")) is not int or graph["graph_schema_version"] != 1:
         raise compare.InputError("unsupported Studio graph version")
@@ -79,7 +79,7 @@ def build_evidence(graph, family, metadata):
         absent("frame/crs")
         result["frame"]["crs"] = "none"
     records = []
-    collection = graph["frames" if family == "groups" else "panels"]
+    collection = graph["frames" if family == "groups" else family]
     if not isinstance(collection, list):
         raise compare.InputError("graph collection must be an array")
     for index, item in enumerate(collection):
@@ -90,6 +90,32 @@ def build_evidence(graph, family, metadata):
                 "centre": quantity("coordinate", item["centre"], geometry_units),
                 "angle": quantity("angle", item["angle"], angle_units),
             }
+        elif family == "strings":
+            members = item.get("ordered_panel_refs")
+            if not isinstance(members, list) or not members:
+                raise compare.InputError("string ordered_panel_refs must be a nonempty array")
+            count = item.get("module_count")
+            if type(count) is not int or count < 0:
+                raise compare.InputError("string module_count must be a nonnegative integer")
+            record["ordered_membership"] = [reference(identifier) for identifier in members]
+            extra = item.get("extra", {})
+            if not isinstance(extra, dict):
+                raise compare.InputError("string extra must be an object")
+            if "polarity" not in extra:
+                absent(path + "/polarity")
+                record["polarity"] = "none"
+            else:
+                polarity = extra["polarity"]
+                if not isinstance(polarity, dict):
+                    raise compare.InputError("invalid string polarity")
+                ends = (polarity.get("negative_panel_ref"), polarity.get("positive_panel_ref"))
+                # Positive means membership runs from the negative to the positive terminal.
+                if ends == (members[0], members[-1]):
+                    record["polarity"] = "positive"
+                elif ends == (members[-1], members[0]):
+                    record["polarity"] = "negative"
+                else:
+                    raise compare.InputError("string polarity does not match membership endpoints")
         else:
             point = item["insertion_point"]
             if not isinstance(point, list) or len(point) not in (2, 3):
@@ -107,6 +133,17 @@ def build_evidence(graph, family, metadata):
             })
         records.append(record)
     result["after"] = {family: records}
+    if family == "strings":
+        extra = graph.get("extra", {})
+        coverage = extra.get("solve_coverage") if isinstance(extra, dict) else None
+        if not isinstance(coverage, dict):
+            raise compare.InputError("strings evidence requires committed solve_coverage")
+        for field in ("unassigned", "duplicate"):
+            refs = coverage.get(field + "_panel_refs")
+            if not isinstance(refs, list):
+                raise compare.InputError("solve_coverage requires panel reference arrays")
+            result["after"][field + "_panels"] = [reference(identifier) for identifier in refs]
+        result["after"]["length_distribution"] = sorted(item["module_count"] for item in collection)
     result["output_sha256"] = compare.semantic_hash(result["after"])
     result["provenance"]["studio_graph_sha256"] = compare.semantic_hash(graph)
     compare.validate_evidence(result, family)
@@ -121,7 +158,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--graph", type=Path, required=True)
     parser.add_argument("--metadata", type=Path, required=True)
-    parser.add_argument("--family", choices=("groups", "panels"), required=True)
+    parser.add_argument("--family", choices=("groups", "panels", "strings"), required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
