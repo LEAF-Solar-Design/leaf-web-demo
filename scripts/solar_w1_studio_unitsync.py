@@ -63,12 +63,15 @@ def produce(args):
         raise ProducerError("unit sync must not move geometry")
     if reopened["project"]["units"]["drawing_units"] != synced["drawing_units"]:
         raise ProducerError("reopened graph lost the synced unit declaration")
-    mapping = {p["id"]: solve.normalized_handle(p["provenance"]["source_handle"]) for p in reopened["panels"]}
+    # A settings receipt compares a drawing-wide declaration, not entities: no panel id
+    # appears in `after`, and the plugin's own settings evidence maps nothing, so a mapping
+    # here would differ from the plugin's for no semantic reason.
+    mapping = {}
     metadata = {
         "fixture_sha256": fixture_hash, "revision": revision,
         "parameters": {"family": "settings", "distance_unit": args.distance_unit},
         "versions": {"schema": "leaf.solar-w1-comparison.v1", "producer": "solar_w1_studio_unitsync.v1",
-                     "capability": "unit-sync", "engine": "server-builtin", "catalog": "none",
+                     "capability": "0", "engine": "server-builtin", "catalog": "none",
                      "solver": "none"},
         "coordinate_system": "world", "geometry_units": reopened["project"]["units"]["drawing_units"],
         "angle_units": "deg", "entity_mapping": mapping, "before": {"recorded": False},
