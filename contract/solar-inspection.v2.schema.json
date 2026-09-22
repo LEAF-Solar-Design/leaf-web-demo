@@ -1,0 +1,792 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:leaf:solar-inspection:v2",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "leaf.solar-inspection.v2"
+    },
+    "dwg_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "byte_length": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 268435456
+    },
+    "units": {
+      "type": "object",
+      "properties": {
+        "drawing_units": {
+          "enum": [
+            "m",
+            "mm",
+            "cm",
+            "km",
+            "in",
+            "ft",
+            "yd"
+          ]
+        },
+        "meters_per_unit": {
+          "type": "number",
+          "exclusiveMinimum": 1e-12
+        }
+      },
+      "required": [
+        "drawing_units",
+        "meters_per_unit"
+      ],
+      "additionalProperties": false
+    },
+    "stores": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/store"
+      },
+      "maxItems": 100000
+    },
+    "entities": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/entity"
+      },
+      "maxItems": 100000
+    }
+  },
+  "required": [
+    "schema",
+    "dwg_sha256",
+    "byte_length",
+    "units",
+    "stores",
+    "entities"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "handle": {
+      "type": "string",
+      "pattern": "^[0-9A-Fa-f]{1,32}$"
+    },
+    "point": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "attribute": {
+      "type": "object",
+      "properties": {
+        "tag": {
+          "type": "string",
+          "maxLength": 4096,
+          "minLength": 1
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "position": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "alignment": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "height": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "rotation": {
+          "type": "number"
+        },
+        "text_style": {
+          "type": "string",
+          "maxLength": 4096,
+          "minLength": 1
+        }
+      },
+      "required": [
+        "tag",
+        "text",
+        "position",
+        "alignment",
+        "height",
+        "rotation",
+        "text_style"
+      ],
+      "additionalProperties": false
+    },
+    "polyline": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "polyline"
+        },
+        "vertices": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            },
+            "minItems": 3,
+            "maxItems": 3
+          },
+          "maxItems": 100000,
+          "minItems": 2
+        },
+        "bulges": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 100000
+        },
+        "start_widths": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "minimum": 0
+          },
+          "maxItems": 100000
+        },
+        "end_widths": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "minimum": 0
+          },
+          "maxItems": 100000
+        },
+        "closed": {
+          "type": "boolean"
+        },
+        "elevation": {
+          "type": "number"
+        },
+        "normal": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 3,
+          "maxItems": 3
+        }
+      },
+      "required": [
+        "kind",
+        "vertices",
+        "bulges",
+        "start_widths",
+        "end_widths",
+        "closed",
+        "elevation",
+        "normal"
+      ],
+      "additionalProperties": false
+    },
+    "definition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "existing"
+            },
+            "name": {
+              "type": "string",
+              "maxLength": 4096,
+              "minLength": 1
+            },
+            "expected_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "mode",
+            "name",
+            "expected_sha256"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "new"
+            },
+            "name": {
+              "type": "string",
+              "maxLength": 4096,
+              "minLength": 1
+            },
+            "origin": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              },
+              "minItems": 3,
+              "maxItems": 3
+            },
+            "polylines": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/polyline"
+              },
+              "maxItems": 100000
+            },
+            "attribute_definitions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/attribute"
+              },
+              "maxItems": 100000
+            }
+          },
+          "required": [
+            "mode",
+            "name",
+            "origin",
+            "polylines",
+            "attribute_definitions"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "block_reference": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "block_reference"
+        },
+        "position": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "rotation": {
+          "type": "number"
+        },
+        "scale": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "normal": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "definition": {
+          "$ref": "#/$defs/definition"
+        }
+      },
+      "required": [
+        "kind",
+        "position",
+        "rotation",
+        "scale",
+        "normal",
+        "definition"
+      ],
+      "additionalProperties": false
+    },
+    "mtext": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "mtext"
+        },
+        "position": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "contents": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "text_height": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "width": {
+          "type": "number",
+          "minimum": 0
+        },
+        "attachment": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9
+        },
+        "rotation": {
+          "type": "number"
+        },
+        "text_style": {
+          "type": "string",
+          "maxLength": 4096,
+          "minLength": 1
+        }
+      },
+      "required": [
+        "kind",
+        "position",
+        "contents",
+        "text_height",
+        "width",
+        "attachment",
+        "rotation",
+        "text_style"
+      ],
+      "additionalProperties": false
+    },
+    "table": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "table"
+        },
+        "position": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "headers": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          },
+          "maxItems": 256
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "maxItems": 256
+          },
+          "maxItems": 100000
+        },
+        "row_heights": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "maxItems": 100002
+        },
+        "column_widths": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "maxItems": 256
+        },
+        "text_heights": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "maxItems": 100002
+        },
+        "table_style": {
+          "type": "string",
+          "maxLength": 4096,
+          "minLength": 1
+        }
+      },
+      "required": [
+        "kind",
+        "position",
+        "title",
+        "headers",
+        "rows",
+        "row_heights",
+        "column_widths",
+        "text_heights",
+        "table_style"
+      ],
+      "additionalProperties": false
+    },
+    "point_geometry": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "point"
+        },
+        "position": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "visible": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "position",
+        "visible"
+      ],
+      "additionalProperties": false
+    },
+    "geometry": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/polyline"
+        },
+        {
+          "$ref": "#/$defs/block_reference"
+        },
+        {
+          "$ref": "#/$defs/mtext"
+        },
+        {
+          "$ref": "#/$defs/table"
+        },
+        {
+          "$ref": "#/$defs/point_geometry"
+        }
+      ]
+    },
+    "record": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32767
+        },
+        "type": {
+          "enum": [
+            "string",
+            "handle",
+            "int16",
+            "int32",
+            "int64",
+            "double",
+            "binary",
+            "point3d"
+          ]
+        },
+        "value": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "number"
+              },
+              "minItems": 3,
+              "maxItems": 3
+            }
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "type",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "store": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "enum": [
+            "named-dictionary",
+            "extension-dictionary",
+            "entity-xdata"
+          ]
+        },
+        "dictionary_path": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 4096,
+            "minLength": 1
+          },
+          "maxItems": 32
+        },
+        "key": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4096,
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "app": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4096,
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "entity_handle": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9A-Fa-f]{1,32}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "payload": {},
+        "raw_records": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/record"
+          },
+          "maxItems": 100000
+        },
+        "payload_ref": {
+          "type": "string",
+          "maxLength": 4096,
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "byte_length": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 67108864
+        }
+      },
+      "required": [
+        "scope",
+        "dictionary_path",
+        "key",
+        "app",
+        "entity_handle",
+        "payload",
+        "raw_records",
+        "payload_ref",
+        "sha256",
+        "byte_length"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "scope": {
+                "const": "named-dictionary"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "entity_handle": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "scope": {
+                "const": "entity-xdata"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "key": {
+                "type": "null"
+              },
+              "app": {
+                "type": "string",
+                "maxLength": 4096,
+                "minLength": 1
+              },
+              "entity_handle": {
+                "type": "string",
+                "pattern": "^[0-9A-Fa-f]{1,32}$"
+              },
+              "dictionary_path": {
+                "maxItems": 0
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "key": {
+                "type": "string",
+                "maxLength": 4096,
+                "minLength": 1
+              },
+              "app": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "entity": {
+      "type": "object",
+      "properties": {
+        "handle": {
+          "type": "string",
+          "pattern": "^[0-9A-Fa-f]{1,32}$"
+        },
+        "layer": {
+          "type": "string",
+          "maxLength": 4096,
+          "minLength": 1
+        },
+        "kind": {
+          "enum": [
+            "block_reference",
+            "polyline",
+            "mtext",
+            "table",
+            "point"
+          ]
+        },
+        "block_name": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4096,
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "geometry": {
+          "type": "object",
+          "properties": {
+            "bbox": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              },
+              "minItems": 4,
+              "maxItems": 4
+            },
+            "points": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "type": "number"
+                    },
+                    "minItems": 2,
+                    "maxItems": 3
+                  },
+                  "maxItems": 100000
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "bbox",
+            "points"
+          ],
+          "additionalProperties": false
+        },
+        "native_geometry": {
+          "$ref": "#/$defs/geometry"
+        },
+        "attributes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/attribute"
+          },
+          "maxItems": 100000
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "handle",
+        "layer",
+        "kind",
+        "block_name",
+        "geometry",
+        "native_geometry",
+        "attributes",
+        "sha256"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

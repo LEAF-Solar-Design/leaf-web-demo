@@ -1,0 +1,74 @@
+{
+ "$schema": "http://json-schema.org/draft-07/schema#",
+ "title": "Change-impact record v1",
+ "type": "object",
+ "additionalProperties": false,
+ "required": ["schema_version", "change_id", "repository", "project_id", "manifest_digest", "checker_version", "base", "head", "touched", "rows", "dispositions", "carried"],
+ "properties": {
+  "schema_version": {"const": 1, "type": "integer"},
+  "change_id": {"$ref": "#/definitions/change_id"},
+  "repository": {"type": "string", "maxLength": 201, "pattern": "^(?:local|[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100})$"},
+  "project_id": {"$ref": "#/definitions/entity_id"},
+  "manifest_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+  "checker_version": {"type": "string", "maxLength": 64, "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+  "base": {"type": ["string", "null"], "pattern": "^[0-9a-f]{40}$"},
+  "head": {"type": ["string", "null"], "pattern": "^(?:[0-9a-f]{40}|worktree)$"},
+  "touched": {
+   "type": "object", "additionalProperties": false,
+   "required": ["paths", "components", "contracts", "targets", "companions"],
+   "properties": {
+    "paths": {"$ref": "#/definitions/paths"},
+    "components": {"$ref": "#/definitions/entity_ids"},
+    "contracts": {"$ref": "#/definitions/entity_ids"},
+    "targets": {"$ref": "#/definitions/entity_ids"},
+    "companions": {"$ref": "#/definitions/paths"}
+   }
+  },
+  "rows": {"type": "array", "maxItems": 500, "items": {"$ref": "#/definitions/row"}},
+  "dispositions": {"type": "array", "maxItems": 500, "items": {
+   "type": "object", "additionalProperties": false,
+   "required": ["row", "action", "by", "at", "detail"],
+   "properties": {
+    "row": {"$ref": "#/definitions/row_id"},
+    "action": {"enum": ["dismiss", "resolve", "defer"]},
+    "by": {"type": "string", "minLength": 1, "maxLength": 128},
+    "at": {"type": "string", "format": "date-time", "maxLength": 40, "pattern": "(?:Z|\\+00:00)$"},
+    "detail": {"type": "string", "minLength": 1, "maxLength": 1000}
+   }
+  }},
+  "carried": {"type": "array", "maxItems": 500, "items": {
+   "type": "object", "additionalProperties": false,
+   "required": ["row", "from_change_id", "outcome"],
+   "properties": {
+    "row": {"$ref": "#/definitions/row_id"},
+    "from_change_id": {"$ref": "#/definitions/change_id"},
+    "outcome": {"$ref": "#/definitions/outcome"}
+   }
+  }}
+ },
+ "definitions": {
+  "change_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+  "entity_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"},
+  "entity_ids": {"type": "array", "maxItems": 5000, "items": {"$ref": "#/definitions/entity_id"}},
+  "paths": {"type": "array", "maxItems": 5000, "items": {"type": "string", "minLength": 1, "maxLength": 512, "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"}},
+  "concern": {"enum": ["contracts", "persistence", "auth_tenancy", "logging", "telemetry", "alarms", "deployment", "runtime_state", "restart_rearm", "rollback", "tests", "docs_runbooks"]},
+  "outcome": {"enum": ["changed", "unchanged-compatible", "not-applicable", "deferred", "unresolved"]},
+  "row_id": {"type": "string", "maxLength": 256, "pattern": "^(?:contracts|persistence|auth_tenancy|logging|telemetry|alarms|deployment|runtime_state|restart_rearm|rollback|tests|docs_runbooks):[A-Za-z0-9._/@+:-]{1,200}@[0-9a-f]{12}$"},
+  "row": {
+   "type": "object", "additionalProperties": false,
+   "required": ["id", "concern", "subject", "family", "required", "outcome", "evidence", "reason", "task", "superseded_by"],
+   "properties": {
+    "id": {"$ref": "#/definitions/row_id"},
+    "concern": {"$ref": "#/definitions/concern"},
+    "subject": {"type": "string", "pattern": "^[A-Za-z0-9._/@+:-]{1,200}$"},
+    "family": {"type": ["string", "null"], "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"},
+    "required": {"type": "boolean"},
+    "outcome": {"$ref": "#/definitions/outcome"},
+    "evidence": {"type": ["string", "null"], "minLength": 1, "maxLength": 512},
+    "reason": {"type": ["string", "null"], "minLength": 1, "maxLength": 1000},
+    "task": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9._#/-]{1,128}$"},
+    "superseded_by": {"anyOf": [{"type": "null"}, {"$ref": "#/definitions/change_id"}, {"$ref": "#/definitions/row_id"}], "description": "The resolving change_id written by dispositions, or a legacy row-id link."}
+   }
+  }
+ }
+}

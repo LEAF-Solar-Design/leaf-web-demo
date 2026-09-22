@@ -93,7 +93,7 @@ export default function OverlayDecisionCard({
     } catch (e) {
       // Leave the card OPEN on failure. Clearing it would tell the operator
       // the decision landed when it did not.
-      setError(e?.message || 'The decision did not go through — nothing changed.')
+      setError(e?.message || 'The decision did not go through; nothing changed.')
       setDeciding(null)
     }
   }
@@ -133,7 +133,7 @@ export default function OverlayDecisionCard({
       </ul>
 
       {entries.length === 0 && (
-        <p className="dim">This proposal carries no tokens — deny it.</p>
+        <p className="dim">This proposal carries no tokens, so deny it.</p>
       )}
 
       <div className="overlay-card-actions">
@@ -143,7 +143,7 @@ export default function OverlayDecisionCard({
           disabled={!!deciding || busy || entries.length === 0}
           onClick={() => decide(true)}
         >
-          {deciding === 'approve' ? 'Applying…' : 'Approve — applies to this tenant'}
+          {deciding === 'approve' ? 'Applying…' : 'Approve: applies to this tenant'}
         </button>
         <button
           type="button"

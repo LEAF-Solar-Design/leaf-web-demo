@@ -262,3 +262,65 @@ Every server response body (app AND broker) carries at minimum:
   Validation errors (422) are also enveloped (`BAD_PARAMS`).
 - Machine-checkable schema: `server/envelope_schema.json` (does not touch
   Lane B's `engine/envelope_schema.json`).
+
+## Solar W1 design graph v1
+
+The Leaf Automation Rooftop parity lane uses
+`contract/solar-design-graph.v1.schema.json` (JSON Schema draft 2020-12).
+`server/solar_design_graph.py` validates and serializes this public graph.
+`server/solar_dependencies.py` computes memberships and transitive dependents.
+These are helpers for the existing capability, entitlement and job rails in
+sections 7 to 10, not a separate runtime or a saved-design claim for an overlay.
+
+The root contains `project`, `settings`, `electrical_zones`, `frames`, `panels`,
+`strings`, `inverters`, `routes` and `schedules`. All W1 fields are explicit in
+the schema, including the six cold-voltage values, sizing confirmation,
+counters, matrix cells, sequences, panel assignments, circuit endpoints,
+inverter input assignments, route units and schedule source revision.
+Every entity has `id`, `kind`, `rev`, `provenance`, `extra` and `validity`.
+Entity `kind` is the stable type; `circuit_kind` and `route_kind` hold subtypes.
+Assignments use zero-based `seq`, matrix row/column and input numbers. Null
+assignment fields represent an unassigned panel. Arrays preserve order.
+
+Application ids have the form `leaf:<kind>:<uuid4>` and are never derived from
+handles. Handles are source provenance only; import/export adapters own the
+separate drawing-scoped identity mapping. Geometry references may name objects
+preserved outside the W1 entity set. The private drawing storage mapping is not
+part of this public contract.
+
+`graph_schema_version` is 1. `rev` starts at 0 with `parent_rev: null`; each
+accepted batch advances it once and names the prior revision. Entity and
+schedule source revisions cannot exceed the graph revision. `require_revision`
+refuses a stale job result before apply. Actual atomic apply, undo, persistence
+and drawing transport remain the responsibility of the existing execution rails.
+
+Graph and provenance source hashes and catalog versions survive serialization.
+Unknown JSON properties at every level and `extra` contents survive unchanged.
+Adapters capture unmodeled source fields in `extra`, merge them before known
+fields on export, and report collisions. `opaque_stores` and `orphaned_xdata`
+carry bounded payload references, hashes and byte lengths, never raw service
+payloads. The adapter preserves referenced bytes and untouched drawing objects;
+the graph validator does not fetch or relocate them.
+
+Coordinates and geometry lengths use normalized metres; angles use degrees.
+`length_ft` remains feet and must never be rescaled as a drawing length.
+The units block records the original drawing units, scale, winning source,
+WCS-to-UCS matrix, elevation datum, optional CRS, user preference and warnings.
+The resolver wins over the feet preference and records any disagreement.
+Missing or unknown units, nonfinite numbers, malformed input and unsupported
+schema versions refuse mutation. The v1 transport rejects unsupported versions
+rather than attempting a lossy conversion. A separate opaque read-only viewer
+may retain future documents without passing them to these mutation helpers.
+
+A correction that transfers one panel between two distinct strings changes
+**both** ordered memberships and **both** module counts. Its panel assignment
+and affected matrix/sequence data must also agree. It does not mean exactly
+one string changed. Dependency calculations use both the prior and new edges
+to include strings, assigned equipment, connected routes and source-linked
+schedules. Callers record stale validity reasons or recompute those consumers
+before presenting them as valid. Unrelated payloads remain unchanged.
+
+Transport bounds are 16 MiB, 500,000 JSON nodes, depth 32 and at most 100,000
+items per collection. Unknown fields are subject to the same bounds. Validation
+errors expose named reasons, not input values. The contract uses the existing
+`jsonschema` dependency and performs no network access.

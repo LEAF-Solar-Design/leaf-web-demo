@@ -141,6 +141,97 @@ async function openDocument(session, file = fileOf()) {
   await act(async () => { await session.current.actions.open(file) })
 }
 
+describe('C-04C load provenance', () => {
+  it('C-04C row11 drops a superseded reply without changing state and accepts the head reply', () => {
+    const session = mountSession()
+    act(() => session.current.actions.openBytes(new Uint8Array([48, 10]), 'foreign.dxf'))
+    act(() => session.current.actions.openBytes(new Uint8Array([49, 10]), 'demo-v12.dxf', { committed: true, version: 12 }))
+    const pending = session.current
+    const worker = session.workers[0]
+
+    worker.emit(loadedMessage([LINE], 'foreign.dxf'))
+    expect(session.current).toBe(pending)
+    expect(session.current.entities).toEqual([])
+    expect(session.current.documentOrigin).toBeNull()
+    expect(session.current.busy).toBe(true)
+
+    worker.emit(loadedMessage([POLY], 'demo-v12.dxf'))
+    expect(session.current.entities).toEqual([POLY])
+    expect(session.current.documentId).toBe('demo-v12.dxf')
+    expect(session.current.documentOrigin).toBe('head')
+    expect(session.current.committedVersion).toBe(12)
+    expect(session.current.committedEntities).toEqual([POLY])
+    expect(session.current.busy).toBe(false)
+  })
+
+  it('C-04C row12 a failed same-name file read keeps the starter origin and entities', async () => {
+    const session = mountSession()
+    act(() => session.current.actions.openBytes(new Uint8Array([48, 10]), 'solar-starter.dxf', { starter: true }))
+    session.workers[0].emit(loadedMessage([LINE], 'solar-starter.dxf'))
+    const entities = session.current.entities
+    const postedCount = session.workers[0].posted.length
+    const file = fileOf('solar-starter.dxf')
+    file.arrayBuffer = async () => { throw new Error('read failed') }
+
+    await openDocument(session, file)
+
+    expect(session.current.documentId).toBe('solar-starter.dxf')
+    expect(session.current.documentOrigin).toBe('starter')
+    expect(session.current.entities).toBe(entities)
+    expect(session.current.engineParsed).toBe(true)
+    expect(session.current.busy).toBe(false)
+    expect(session.current.errorKind).toBe(SESSION_ERROR.READ)
+    expect(session.workers[0].posted).toHaveLength(postedCount)
+  })
+
+  it('C-04C row13 open(file) directly after a committed head completes as an import', async () => {
+    const session = mountSession()
+    act(() => session.current.actions.openBytes(new Uint8Array([48, 10]), 'demo-v12.dxf', { committed: true, version: 12 }))
+    session.workers[0].emit(loadedMessage([LINE], 'demo-v12.dxf'))
+    expect(session.current.documentOrigin).toBe('head')
+
+    await openDocument(session, fileOf('demo-v12.dxf'))
+    expect(session.current.documentOrigin).toBeNull()
+    session.workers[0].emit(loadedMessage([POLY], 'demo-v12.dxf'))
+
+    expect(session.current.documentId).toBe('demo-v12.dxf')
+    expect(session.current.documentOrigin).toBe('import')
+    expect(session.current.entities).toEqual([POLY])
+    expect(session.current.committedVersion).toBeNull()
+    expect(session.current.committedEntities).toBeNull()
+  })
+
+  it('C-04C row6 documentOrigin follows committed, starter and import loads and survives undo/redo reload', async () => {
+    const session = mountSession()
+    expect(session.current.documentOrigin).toBeNull()
+    for (const [name, opts, origin] of [
+      ['demo-v12.dxf', { committed: true, version: 12 }, 'head'],
+      ['solar-starter.dxf', { starter: true }, 'starter'],
+      ['demo-v1.dxf', null, 'import'],
+    ]) {
+      act(() => session.current.actions.openBytes(new Uint8Array([48, 10]), name, opts))
+      expect(session.current.documentOrigin).toBeNull()
+      const worker = session.workers[0]
+      worker.emit(loadedMessage([LINE], name))
+      expect(session.current.documentOrigin).toBe(origin)
+      act(() => session.current.actions.select('e1'))
+      act(() => session.current.actions.applyEdit('delete', {}))
+      worker.emit(editedMessage('delete', []))
+      act(() => session.current.actions.undo())
+      worker.emit(loadedMessage([LINE], name))
+      expect(session.current.documentOrigin).toBe(origin)
+      act(() => session.current.actions.redo())
+      worker.emit(loadedMessage([], name))
+      expect(session.current.documentOrigin).toBe(origin)
+    }
+    await openDocument(session, fileOf('solar-starter.dxf'))
+    session.workers[0].emit(loadedMessage([LINE], 'solar-starter.dxf'))
+    expect(session.current.documentOrigin).toBe('import')
+    act(() => session.current.actions.reset())
+    expect(session.current.documentOrigin).toBeNull()
+  })
+})
+
 describe('member gestures re-arm from empty operands', () => {
   it.each(['createLine', 'createBlock', 'group'])('keeps inputs and the focus target on a same-op %s update', async (op) => {
     const worker = new ScriptedWorker()
@@ -374,6 +465,8 @@ describe('selection identity across an edit', () => {
     await openDocument(session)
     session.workers[0].emit(loadedMessage([LINE]))
     act(() => session.current.actions.select('e1'))
+    // C-04C provenance accepts a load reply only for the requested document.
+    await openDocument(session, fileOf('two.dxf'))
     session.workers[0].emit(loadedMessage([LINE, POLY], 'two.dxf'))
     expect(session.current.selectedId).toBe('')
   })

@@ -5,6 +5,120 @@ export const IOS_SHIP_READINESS_KIND = 'leaf.ios-ship-readiness.v1'
 export const IOS_TESTFLIGHT_RECEIPT_KIND = 'leaf.ios-testflight-receipt.v1'
 export const IOS_SHIP_SETUP_ACTION = 'mount-apple-ship-dispatch'
 
+export const IOS_SOURCE_FIELDS = Object.freeze([
+  'source_revision', 'source_sha256', 'bundle_identifier', 'marketing_version', 'build_number',
+])
+
+const SOURCE_GRAMMARS = Object.freeze({
+  source_revision: /^[0-9a-f]{40}$/, source_sha256: /^[0-9a-f]{64}$/,
+  bundle_identifier: /^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/,
+  marketing_version: /^[0-9]{1,18}(\.[0-9]{1,18}){1,2}$/, build_number: /^[0-9]{1,18}$/,
+  catalog_key: /^[a-z0-9][a-z0-9_-]{0,63}$/, repository: /^https:\/\/\S+$/,
+})
+const fullMatch = (pattern, value) => pattern.exec(value)?.[0] === value
+
+function validateSourceField(value, field, invalid) {
+  if (typeof value !== 'string' || !value.length || value.length > 512 || /[\x00-\x1f\x7f-\x9f]/.test(value)) invalid(field)
+  if (SOURCE_GRAMMARS[field] && !fullMatch(SOURCE_GRAMMARS[field], value)) invalid(field)
+  if (field === 'bundle_identifier' && value.length > 255) invalid(field)
+  return value
+}
+
+function validateSourceApproval(entry, invalid) {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) invalid('approval')
+  const approval = {}
+  for (const field of ['approval_id', 'revision', 'source_revision']) {
+    const value = entry[field]
+    validateSourceField(value, field, invalid)
+    approval[field] = value
+  }
+  if (entry.consumed_at != null && (typeof entry.consumed_at !== 'string' || entry.consumed_at.length > 64)) invalid('consumed_at')
+  return Object.freeze({ ...approval, consumed_at: entry.consumed_at ?? null })
+}
+
+export function validateIosShipSources(data) {
+  const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
+  const invalid = (field) => { throw new Error(`source catalog field invalid: ${field}`) }
+  if (!object(data) || data.ok !== true) invalid('ok')
+  const secret = hasSecretShapedField(data)
+  if (secret) invalid(typeof secret === 'string' ? secret : 'secret-shaped field')
+  const list = (field, project) => {
+    if (!Array.isArray(data[field]) || data[field].length > 50) invalid(field)
+    return Object.freeze(data[field].map((entry) => {
+      if (!object(entry)) invalid(field)
+      return Object.freeze(project(entry))
+    }))
+  }
+  const sources = list('sources', (entry) => {
+    const source = Object.fromEntries(IOS_SOURCE_FIELDS.map((field) => [field, validateSourceField(entry[field], field, invalid)]))
+    for (const field of ['catalog_key', 'repository', 'imported_at']) {
+      if (entry[field] === undefined) continue
+      const value = entry[field]
+      if (typeof value !== 'string' || value.length > (field === 'imported_at' ? 64 : 512)) invalid(field)
+      if (SOURCE_GRAMMARS[field] && !fullMatch(SOURCE_GRAMMARS[field], value)) invalid(field)
+      source[field] = value
+    }
+    return source
+  })
+  const approvals = list('approvals', (entry) => validateSourceApproval(entry, invalid))
+  let sync = null
+  if (data.sync !== undefined) {
+    if (!object(data.sync)) invalid('sync')
+    if (typeof data.sync.status !== 'string' || !fullMatch(/^[a-z_]{1,32}$/, data.sync.status)) invalid('sync.status')
+    if (!Number.isInteger(data.sync.registered) || data.sync.registered < 0) invalid('sync.registered')
+    sync = { status: data.sync.status, registered: data.sync.registered }
+    for (const field of ['conflicts', 'unpinned', 'refused']) {
+      if (data.sync[field] !== undefined && !Array.isArray(data.sync[field])) invalid(`sync.${field}`)
+      sync[field] = data.sync[field]?.length || 0
+    }
+    Object.freeze(sync)
+  }
+  return Object.freeze({ sources, approvals, sync, canApprove: data.can_approve === true })
+}
+
+export function iosSourceApprovalState(source, approvals, revision) {
+  if (!revision) return 'unapproved'
+  const matches = approvals.filter((approval) => approval.revision === revision && approval.source_revision === source.source_revision)
+  if (matches.some((approval) => approval.consumed_at != null)) return 'consumed'
+  return matches.length ? 'approved' : 'unapproved'
+}
+
+export async function fetchIosShipSources({ projectId, fetchImpl = globalThis.fetch }) {
+  const path = `/api/projects/${encodeURIComponent(projectId)}/ios/sources`
+  const res = await iosFetch(path, { headers: { accept: 'application/json' } }, fetchImpl)
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    const error = new Error(data?.error?.message || `sources unavailable (${res.status})`)
+    error.status = res.status
+    error.envelope = data?.error || null
+    throw error
+  }
+  return validateIosShipSources(data)
+}
+
+export async function requestIosShipApproval({ projectId, revision, source, fetchImpl = globalThis.fetch }) {
+  const body = { revision }
+  for (const field of IOS_SOURCE_FIELDS) body[field] = source?.[field]
+  for (const [field, value] of Object.entries(body)) {
+    validateSourceField(value, field, (name) => { throw new Error(`approval request field invalid: ${name}`) })
+  }
+  const res = await iosFetch(`/api/projects/${encodeURIComponent(projectId)}/ios/approvals`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+  }, fetchImpl)
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    const error = new Error(data?.error?.message || `approval unavailable (${res.status})`)
+    error.status = res.status
+    error.code = data?.error?.code
+    error.envelope = data?.error || null
+    throw error
+  }
+  if (data?.ok !== true) throw new Error('approval response field invalid: ok')
+  const secret = hasSecretShapedField(data)
+  if (secret) throw new Error(`approval response field invalid: ${secret}`)
+  return validateSourceApproval(data.approval, (field) => { throw new Error(`approval response field invalid: ${field}`) })
+}
+
 const SHA256 = /^[0-9a-f]{64}$/
 const SECRET_KEY_RE = /(password|passwd|two.?factor|2fa|otp|p8|\.p8|private[_ -]?key|certificate|provisioning|profile|credential|secret|keychain|authkey|token|session|cookie|api[_ -]?key|signing[_ -]?(key|cert))/i
 const APPROVED_FIELDS = [
@@ -54,7 +168,7 @@ function validateApprovedLaunch(value) {
   for (const field of APPROVED_FIELDS) {
     if (typeof value[field] !== 'string' || !value[field]) return null
   }
-  if (!SHA256.test(value.source_sha256) || hasSecretShapedField(value)) return null
+  if (!fullMatch(SHA256, value.source_sha256) || hasSecretShapedField(value)) return null
   return Object.freeze({ ...value })
 }
 
@@ -66,15 +180,18 @@ export function validateIosShipReadiness(record, expected = {}) {
     return emptyIosShipReadiness('invalid_record', null, expected.projectId)
   }
   if (record.launchable !== true || record.healthy !== true) {
-    return emptyIosShipReadiness(
+    return Object.freeze({ ...emptyIosShipReadiness(
       typeof record.reason === 'string' ? record.reason : 'unhealthy',
       typeof record.setup_action === 'string' ? record.setup_action : null,
       typeof record.project_id === 'string' ? record.project_id : expected.projectId,
-    )
+    ), grantStatus: typeof record.grant_status === 'string' ? record.grant_status : null })
   }
   const approvedLaunch = validateApprovedLaunch(record.approved_launch)
   if (!approvedLaunch || record.dispatch_available !== true || record.grant_status !== 'healthy') {
-    return emptyIosShipReadiness('invalid_record', null, expected.projectId)
+    return Object.freeze({
+      ...emptyIosShipReadiness('invalid_record', null, expected.projectId),
+      grantStatus: typeof record.grant_status === 'string' ? record.grant_status : null,
+    })
   }
   if (typeof record.project_id !== 'string' || record.project_id !== expected.projectId) {
     return emptyIosShipReadiness('project_mismatch', null, expected.projectId)
@@ -159,6 +276,7 @@ export async function getIosShipExecution({ projectId, executionId, fetchImpl = 
   const data = await res.json().catch(() => ({}))
   if (!res.ok || data.ok !== true || hasSecretShapedField(data)) {
     const error = new Error(data?.error?.message || `execution unavailable (${res.status})`)
+    error.status = res.status
     error.envelope = data?.error || null
     throw error
   }

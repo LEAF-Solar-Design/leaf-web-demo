@@ -16,6 +16,30 @@ import {
 import { groundShowsDrawing } from './SurfaceGrounds.jsx'
 
 describe('product surface contract', () => {
+  it('C-04C row1 signed out still reads sign-in / Sign in', () => {
+    expect(productSurfaceStates({ sessionActive: false, solarReady: true }).solar)
+      .toEqual({ state: 'sign-in', label: 'Sign in' })
+  })
+
+  it('C-04C row2 no shown template and no drawing reads Template pending', () => {
+    expect(productSurfaceStates({ sessionActive: true, hasDrawing: false, solarReady: false }).solar)
+      .toEqual({ state: 'beta', label: 'Template pending' })
+    expect(productSurfaceStates({ sessionActive: true }).solar)
+      .toEqual({ state: 'beta', label: 'Template pending' })
+  })
+
+  it('C-04C row3 a console drawing alone still reads Beta', () => {
+    expect(productSurfaceStates({ sessionActive: true, hasDrawing: true, solarReady: false }).solar)
+      .toEqual({ state: 'beta', label: 'Beta' })
+  })
+
+  it('C-04C row4 solarReady reads available / Ready', () => {
+    for (const hasDrawing of [false, true]) {
+      expect(productSurfaceStates({ sessionActive: true, hasDrawing, solarReady: true }).solar)
+        .toEqual({ state: 'available', label: 'Ready' })
+    }
+  })
+
   it('defines the five profiles once over one shared capability substrate', () => {
     expect(PRODUCT_SURFACES.map(({ id }) => id)).toEqual(['browser', 'cad', 'solar', 'ios', 'sheets'])
     expect(new Set(PRODUCT_SURFACES.map(({ id }) => id)).size).toBe(5)
@@ -204,7 +228,7 @@ const CONTRACT_FIXTURE = {
     // fixed value. stageBranch stays 'frame': the stage genuinely diverges
     // from the console here (D1), and this pass did not touch the stage.
     chrome: { shell: 'cockpit', productFrame: false, workspaceCard: true, cockpit: true, stageBranch: 'frame', projectSlot: null, tab: true },
-    toolbar: { profile: 'solar', ribbon: true, home: 'draw', quick: null },
+    toolbar: { profile: 'solar', ribbon: true, home: 'solar', quick: null },
     rails: { left: 'spine', right: 'job-spine', dock: ['layers', 'drawing', 'selection', 'plan'] },
     groundMaterial: { layerAccent: 'solar', solarStrings: true },
     commandLine: true,
@@ -377,7 +401,7 @@ describe('Surface Contract — schema', () => {
     // A contract edit must never reshape the presentation record beside it.
     expect(Object.keys(productSurface('cad')).sort())
       .toEqual(['contract', 'description', 'eyebrow', 'familyIds', 'id', 'label', 'title'])
-    expect(productSurface('solar').familyIds).toEqual(['stringing', 'placement'])
+    expect(productSurface('solar').familyIds).toEqual(['stringing', 'placement', 'measurement', 'selection'])
     expect(productSurface('cad').familyIds).toBe(null)
   })
 
@@ -437,6 +461,25 @@ describe('Surface Contract — schema', () => {
 })
 
 describe('Surface Contract — equals today', () => {
+  it('J1 row8 the Browser mount leaves the CAD and Solar contracts and drawing seats unchanged', () => {
+    for (const id of ['cad', 'solar']) {
+      expect(surfaceContract(id)).toEqual(CONTRACT_FIXTURE[id])
+      expect(surfaceGround(id)).toBe('drawing')
+      expect(surfaceContract(id).versions).toBe('drawing')
+      expect(surfaceContract(id).rails.dock).toEqual(['layers', 'drawing', 'selection', 'plan'])
+    }
+    const app = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
+    // J1 adds board-only actions and panels. CAD's Start board keeps its old
+    // tiles, and neither drawing profile starts the material upload hook.
+    expect(app).toContain("actions={surfaceSlots.ground === 'board' ? {")
+    expect(app).toContain("panel={surfaceSlots.ground === 'board' ? <>")
+    expect(app).toContain('<ProjectWorkspacePanels')
+    expect(app).toContain('<ProjectStartPanel')
+    const appBody = app.slice(app.indexOf('export default function App()'))
+    expect(appBody).not.toMatch(/useDrawingUploadController\(/)
+    expect(appBody).not.toMatch(/useMaterialIntake\(/)
+  })
+
   for (const id of SURFACE_IDS) {
     it(`${id} matches the hand-written fixture of today's behaviour`, () => {
       expect(surfaceContract(id)).toEqual(CONTRACT_FIXTURE[id])

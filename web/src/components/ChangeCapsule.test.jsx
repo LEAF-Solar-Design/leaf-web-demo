@@ -236,7 +236,7 @@ describe('ChangeCapsule (mounted)', () => {
 
   it('shows the applying phase as unsettled while busy, then reconciles to the receipt', () => {
     const { rerender } = render(<Harness busy ann={annotation()} />)
-    expect(screen.getByTestId('change-capsule-status').textContent).toBe('Applying — not yet confirmed by the server.')
+    expect(screen.getByTestId('change-capsule-status').textContent).toBe('Applying, not yet confirmed by the server.')
     rerender(<Harness busy={false} ann={annotation({ state: 'accepted', targetVersion: 4 })}
       confirmation={{ kind: 'apply', revision: 2, targetVersion: 4 }} />)
     expect(screen.getByTestId('change-capsule-status').textContent).toBe('Accepted and confirmed by the server.')

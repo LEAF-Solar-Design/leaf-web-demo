@@ -581,7 +581,8 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
     a no-op and the spine is byte-identical to before.
 
     ``dwg_version`` (None -> head, unchanged behaviour) pins the run to a specific
-    immutable drawing version (da/store.py resolve_version). It is threaded to the
+    immutable drawing version (da/store.py resolve_version). A local graph commit
+    must arrive pinned. It is threaded to the
     broker call AND persisted on the job row as an additive ``dwg_version`` column
     (resolved 2026-07-22, closing the follow-up recorded at the pinning merge), so
     ``GET /api/jobs/{id}`` shows which version a past run was pinned to. Already-
@@ -600,6 +601,32 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
     is a key-reuse question, not a different run input.
     """
     _reject_oversized_params(params)
+    from product_capability_availability import is_cloud_proposal, is_local_graph_commit
+    if is_cloud_proposal(tool):
+        from leaf_cloud_client import validate_params as validate_cloud_params
+
+        validate_cloud_params(params)
+        if aps_live:
+            raise ValueError("cloud proposal does not use APS execution")
+    if is_local_graph_commit(tool):
+        import write_loop
+        import store
+        from solar_local_graph import stable_numbers
+
+        if aps_live:
+            raise ValueError("local graph commit does not use APS execution")
+        if type(dwg_version) is not int or dwg_version < 1:
+            raise ValueError("local graph commit requires a pinned source version")
+        if (not isinstance(checkout_holder, str) or not checkout_holder
+                or checkout_holder == store.ANONYMOUS_HOLDER
+                or type(checkout_fence) is not int or checkout_fence < 1):
+            raise ValueError("local graph commit requires a checkout")
+        if not isinstance(params.get("drawing_id"), str):
+            raise ValueError("local graph commit requires a drawing id")
+        if params["drawing_id"] != dwg:
+            raise ValueError("local graph commit drawing id must equal the drawing")
+        if not stable_numbers(params):
+            raise ValueError("local graph commit requires stable numeric parameters")
     return _submit_job(
         tenant_id, tool, params, dwg, aps_live, org_id, project_id, dwg_version,
         idempotency_key=idempotency_key, authority_mode=authority_mode,
@@ -683,6 +710,11 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
     now = time.time()
     execution = {"tool": tool, "aps_live": bool(aps_live), "dwg_version": dwg_version,
                  "checkout_holder": checkout_holder, "checkout_fence": checkout_fence}
+    from product_capability_availability import is_cloud_proposal, is_local_graph_commit
+    if is_cloud_proposal(tool):
+        execution["cloud_service"] = {"tenant_id": str(tenant_id)}
+    if is_local_graph_commit(tool):
+        execution["graph_commit"] = {"tenant_id": str(tenant_id)}
     if plan is not None:
         execution["plan"] = plan
     if capability_provenance is not None:
@@ -938,7 +970,34 @@ def _validate_terminal_context(
         raise ValueError("APS-live local success must declare fallback")
     if aps_live and execution_path == "cloud" and fallback:
         raise ValueError("cloud success cannot declare local fallback")
-    if not aps_live and (execution_path != "local" or fallback):
+    cloud_service = execution.get("cloud_service")
+    from product_capability_availability import is_cloud_proposal, is_local_graph_commit
+    if is_cloud_proposal(execution.get("tool") or {}):
+        from leaf_cloud_client import proposal_provenance
+
+        if (aps_live or execution_path != "cloud" or fallback
+                or not isinstance(cloud_service, dict)
+                or not cloud_service.get("tenant_id") or not job_id):
+            raise ValueError("cloud proposal requires non-APS cloud service execution")
+        receipt = proposal_provenance(
+            (result_env or {}).get("result"), durable_params,
+            cloud_service["tenant_id"], job_id)
+        if any(provenance.get(key) != value for key, value in receipt.items()):
+            raise ValueError("cloud proposal provenance does not match broker receipt")
+    elif is_local_graph_commit(execution.get("tool") or {}):
+        from solar_local_graph import graph_commit_provenance
+
+        graph_commit = execution.get("graph_commit")
+        if (aps_live or execution_path != "local" or fallback
+                or not isinstance(graph_commit, dict) or not graph_commit.get("tenant_id")
+                or not job_id or type(execution.get("dwg_version")) is not int):
+            raise ValueError("local graph commit requires non-APS local execution")
+        receipt = graph_commit_provenance(
+            (result_env or {}).get("result"), durable_params, graph_commit["tenant_id"],
+            job_id, execution["tool"]["name"], execution["dwg_version"])
+        if any(provenance.get(key) != value for key, value in receipt.items()):
+            raise ValueError("graph commit provenance does not match broker receipt")
+    elif not aps_live and (execution_path != "local" or fallback):
         raise ValueError("non-APS success requires a non-fallback local execution_path")
     if fallback:
         fallback_reason = provenance.get("fallback_reason")
@@ -1039,7 +1098,7 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
     with _lock:
         conn = _db()
         durable = conn.execute(
-            "SELECT attempt, execution_json, org_id, project_id, tenant_id, tool "
+            "SELECT attempt, execution_json, org_id, project_id, tenant_id, tool, params_json "
             "FROM jobs WHERE job_id = ?", (job_id,)
         ).fetchone()
         if durable is None:
@@ -1052,6 +1111,7 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
             status, result_env, provenance, durable_attempt,
             json.loads(durable["execution_json"] or "{}"),
             job_id=job_id,
+            durable_params=json.loads(durable["params_json"]),
         )
         fingerprint = _terminal_fingerprint(status, result_env, error, provenance)
         # The PostgreSQL mirror lives in a DIFFERENT database, so it cannot join
@@ -1397,8 +1457,36 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
         return
 
     env = holder.get("env") or {}
+    from product_capability_availability import is_cloud_proposal, is_local_graph_commit
+    if is_local_graph_commit(tool) and env.get("ok") and env.get("ok") is not True:
+        _finish(job_id, "failed", started, worker_id=worker_id,
+                error=error_obj(ErrorCode.INTERNAL, "graph commit receipt rejected", False),
+                provenance={"attempt": attempt, "execution_path": "local"})
+        return
     if env.get("ok"):
-        provenance = {"attempt": attempt, "execution_path": "cloud" if aps_live else "local"}
+        provenance = {"attempt": attempt, "execution_path": "cloud" if (
+            aps_live or is_cloud_proposal(tool)) else "local"}
+        if is_cloud_proposal(tool):
+            from leaf_cloud_client import proposal_provenance
+
+            try:
+                provenance.update(proposal_provenance(env.get("result"), params, str(tenant_id), job_id))
+            except ValueError:
+                _finish(job_id, "failed", started, worker_id=worker_id,
+                        error=error_obj(ErrorCode.INTERNAL, "cloud proposal terminal proof rejected", False),
+                        provenance=provenance)
+                return
+        if is_local_graph_commit(tool):
+            from solar_local_graph import graph_commit_provenance
+
+            try:
+                provenance.update(graph_commit_provenance(
+                    env.get("result"), params, str(tenant_id), job_id, tool["name"], dwg_version))
+            except ValueError:
+                _finish(job_id, "failed", started, worker_id=worker_id,
+                        error=error_obj(ErrorCode.INTERNAL, "graph commit terminal proof rejected", False),
+                        provenance=provenance)
+                return
         embedded = env.get("execution_provenance")
         cad_timing = embedded.get("cad_timing") if isinstance(embedded, dict) else None
         if (isinstance(cad_timing, dict)
@@ -1407,12 +1495,22 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
             provenance["cad_timing"] = cad_timing
         env = dict(env)
         env["execution_provenance"] = provenance
+        if is_local_graph_commit(tool):
+            try:
+                _finish(job_id, "complete", started, result_env=env, worker_id=worker_id,
+                        provenance=provenance)
+            except ValueError:
+                _finish(job_id, "failed", started, worker_id=worker_id,
+                        error=error_obj(ErrorCode.INTERNAL, "graph commit terminal proof rejected", False),
+                        provenance=provenance)
+            return
         _finish(job_id, "complete", started, result_env=env, worker_id=worker_id,
                 provenance=provenance)
     else:
         err = env.get("error") or error_obj(ErrorCode.INTERNAL, "broker returned no error detail",
                                             retryable=False)
-        provenance = {"attempt": attempt, "execution_path": "cloud" if aps_live else "local",
+        provenance = {"attempt": attempt, "execution_path": "cloud" if (
+            aps_live or is_cloud_proposal(tool)) else "local",
                       "failure": {"code": err.get("error_code"), "message": err.get("message")}}
         if (
             aps_live
@@ -1430,6 +1528,9 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
 
 def _allows_local_fallback(tool: Dict[str, Any]) -> bool:
     """Fallback is opt-in only in trusted authored tool policy, never by callers."""
+    from product_capability_availability import is_cloud_proposal, is_local_graph_commit
+    if is_cloud_proposal(tool) or is_local_graph_commit(tool):
+        return False
     policy = tool.get("marathon") if isinstance(tool.get("marathon"), dict) else {}
     return bool(policy.get("allow_local_fallback") or tool.get("allow_local_fallback"))
 
@@ -1499,9 +1600,14 @@ def _run_local_fallback(job_id: str, worker_id: str, tenant_id: str, tool: Dict[
 def failed_envelope_from(record: Dict[str, Any]) -> Dict[str, Any]:
     """Rebuild a section-3 err envelope from a failed job record (for ?wait=1)."""
     err = record.get("error") or error_obj(ErrorCode.INTERNAL, "unknown failure", False)
-    return err_envelope(err["error_code"], err["message"], err["retryable"],
-                        tool=record.get("tool"),
-                        timing_ms=record.get("elapsed_ms") or 0)
+    envelope = err_envelope(err["error_code"], err["message"], err["retryable"],
+                            tool=record.get("tool"),
+                            timing_ms=record.get("elapsed_ms") or 0)
+    import re
+    reason_code = err.get("reason_code")
+    if isinstance(reason_code, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{2,63}", reason_code):
+        envelope["reason_code"] = reason_code
+    return envelope
 
 
 # --------------------------------------------------------------------------- #

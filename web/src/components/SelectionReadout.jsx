@@ -37,7 +37,7 @@ export default function SelectionReadout({ selection, onDeselect }) {
         </div>
         <div className="sel-field">
           <dt>Layer</dt>
-          <dd>{selection.layer || '—'}</dd>
+          <dd>{selection.layer || '·'}</dd>
         </div>
         {selection.name && (
           <div className="sel-field">

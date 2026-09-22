@@ -22,6 +22,90 @@
 // While the ios_surface flag is off, the surface stays dormant: a neutral
 // placeholder revealing no readiness detail at all.
 
+import ShipReceipts from './ShipReceipts.jsx'
+import { iosSourceApprovalState } from '../site/iosShipReadiness.js'
+
+const SHIP_APPROVE_REASONS = Object.freeze({
+  owner: 'Only the project owner can approve a source revision',
+  noRevision: 'Select a canonical drawing version before approving',
+  busy: 'The approval is being recorded.',
+})
+
+const SHIP_PHASE_REASONS = Object.freeze({
+  idle: 'Sign in and select an approved revision to launch.',
+  loading: 'Checking ship readiness.',
+  'setup-required': 'Complete the reported setup action before launching.',
+  launching: 'The ship launch is being submitted.',
+  running: 'A build is already running.',
+  succeeded: 'This build has succeeded.',
+  failed: 'This build has failed.',
+  unavailable: 'The ship lane is unavailable.',
+  ready: 'Launch the approved revision.',
+})
+
+export function ShipStage({ ship, onLaunch }) {
+  const { readiness, execution, receipt, phase, error } = ship
+  const setup = readiness?.setupState
+  const launched = Boolean(execution)
+  const rungs = [
+    ['source', 'Source (approved revision)', setup === 'no-approved-revision' ? 'missing' : readiness?.approvedLaunch || launched ? 'ready' : 'missing'],
+    ['grant', 'Grant', setup === 'grant-not-ready' ? 'missing' : readiness?.grantStatus === 'healthy' || launched ? 'ready' : 'missing'],
+    ['executor', 'Executor', setup === 'executor-busy' ? 'busy' : setup === 'executor-unavailable' ? 'unavailable' : readiness?.dispatchAvailable || launched ? 'ready' : 'unavailable'],
+    ['build', 'Build', execution?.status === 'succeeded' ? 'ready' : execution?.status === 'failed' ? 'unavailable' : launched || phase === 'launching' ? 'busy' : 'missing'],
+    ['delivery', 'Delivery', receipt ? 'ready' : execution?.status === 'failed' ? 'unavailable' : launched ? 'busy' : 'missing'],
+  ]
+  return (
+    <div className="ios-ship-stage" data-state={phase}>
+      <p role="status">{phase}</p>
+      <ol className="ground-lane" aria-label="Ship stage ladder" data-testid="ios-stage-ladder">
+        {rungs.map(([id, label, state]) => (
+          <li key={id} data-rung={id} data-state={state}>{label}: {state}</li>
+        ))}
+      </ol>
+      {setup && setup !== 'none' && readiness?.setupAction && <p>Setup required: {readiness.setupAction}</p>}
+      {Array.isArray(ship.sources) && (
+        <section className="ios-ship-sources" data-testid="ios-ship-sources" aria-label="Imported source revisions">
+          {ship.sync && ship.sync.status !== 'ok' && <p data-testid="ios-ship-sync">Provider catalog: {ship.sync.status}. Showing the stored sources.</p>}
+          {ship.sources.length === 0 ? <p>No imported source revision yet.</p> : (
+            <ul>
+              {ship.sources.map((source) => {
+                const state = iosSourceApprovalState(source, ship.approvals || [], ship.revision)
+                return (
+                  <li key={source.source_revision} data-testid="ios-ship-source" data-revision={source.source_revision} data-state={state}>
+                    {source.bundle_identifier} · {source.marketing_version} ({source.build_number}) · {source.source_revision.slice(0, 12)}
+                    {state === 'approved' ? <span>approved for the selected version</span>
+                      : state === 'consumed' ? <span>approval consumed</span>
+                        : ship.canApprove === true && typeof ship.approve === 'function' && ship.revision ? (
+                          <button type="button" data-testid="ios-ship-approve" disabled={ship.approving === true}
+                            title={ship.approving ? SHIP_APPROVE_REASONS.busy : 'Approve for the selected version'}
+                            onClick={() => ship.approve(source.source_revision)}>Approve for the selected version</button>
+                        ) : <p>{!ship.revision ? SHIP_APPROVE_REASONS.noRevision : SHIP_APPROVE_REASONS.owner}</p>}
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+          {ship.sourcesError && <p role="alert" data-testid="ios-ship-sources-error">{ship.sourcesError}</p>}
+        </section>
+      )}
+      {execution && (
+        <p className="ios-execution-status">
+          {execution.failed_stage || execution.stage}
+          {execution.updated_at && <time dateTime={execution.updated_at}> {execution.updated_at}</time>}
+        </p>
+      )}
+      {receipt && <ShipReceipts receipts={[receipt]} />}
+      {error && <p role="alert">{error}</p>}
+      {onLaunch && (
+        <>
+          <button type="button" disabled={phase !== 'ready'} title={SHIP_PHASE_REASONS[phase]} onClick={onLaunch}>Launch TestFlight build</button>
+          {phase !== 'ready' && <p>{SHIP_PHASE_REASONS[phase]}</p>}
+        </>
+      )}
+    </div>
+  )
+}
+
 const STATE_LABEL = {
   ready: 'Ready',
   'in-progress': 'Setting up',
@@ -47,13 +131,17 @@ function deriveState(contract) {
   return readiness.launchable ? 'ready' : 'in-progress'
 }
 
-export default function IosSurface({ enabled, contract }) {
+export default function IosSurface({ enabled, contract, ship, onLaunch }) {
   if (!enabled) {
     return (
       <section className="ios-surface ios-surface-dormant" aria-label="iOS readiness" data-state="dormant">
         <p className="ios-dormant-note dim">iOS setup status isn’t available yet.</p>
       </section>
     )
+  }
+
+  if (ship) {
+    return <section className="ios-surface" aria-label="iOS readiness" data-state={ship.phase}><ShipStage ship={ship} onLaunch={onLaunch} /></section>
   }
 
   const state = deriveState(contract)
@@ -66,7 +154,7 @@ export default function IosSurface({ enabled, contract }) {
         <span className="ios-state-k">iOS app</span>
         <span className="ios-state-v ios-in-progress">
           {STATE_LABEL['in-progress']}
-          {stageLabel ? ` — ${stageLabel}` : ''}
+          {stageLabel ? `: ${stageLabel}` : ''}
         </span>
       </section>
     )

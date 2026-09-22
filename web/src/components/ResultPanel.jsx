@@ -155,7 +155,7 @@ function ErrorLine({ err, onRetry, retry, quota, toolName }) {
   return (
     <div className={`inline-error ${quota ? 'quota' : ''}`}>
       <span>
-        {quota ? message : `Couldn't run ${toolName || 'the tool'} — ${message}`}
+        {quota ? message : `Couldn't run ${toolName || 'the tool'}: ${message}`}
         {!quota && code && <> <code className="dim">{code}</code></>}
       </span>
       {nextAction && <span className="dim">Next: {nextAction}</span>}
@@ -226,7 +226,7 @@ export default function ResultPanel({ running, error, result, tool, onRetry, not
       {notices}
       {!running && !result && !error && (
         <p className="panel-sub">
-          Run a tool or type what you want in the bar below — the result and its
+          Run a tool or type what you want in the bar below, and the result and its
           drawing markup appear here.
           {' '}<span className="key">{modChord('K')}</span>
         </p>

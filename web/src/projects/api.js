@@ -102,7 +102,7 @@ const STATUS_MESSAGE = {
   401: 'Your session is not signed in for this project any more.',
   403: 'You do not have permission to do that in this project.',
   404: 'That project is no longer available to you.',
-  409: 'That change collided with another update — reload the project and try again.',
+  409: 'That change collided with another update. Reload the project and try again.',
   422: 'Some of that input was not accepted.',
 }
 
@@ -126,7 +126,7 @@ async function request(path, opts = {}) {
     const message =
       detailOf(body)
       || STATUS_MESSAGE[res.status]
-      || 'That project action did not go through — nothing changed.'
+      || 'That project action did not go through. Nothing changed.'
     const e = new Error(message)
     e.status = res.status // callers gate on status without string-matching
     e.body = body
@@ -163,6 +163,12 @@ export async function createBlankProject(name, orgId) {
   if (!trimmed) throw new Error('A project needs a name before it can be created.')
   const data = await request('/api/projects/blank', { ...mutation('POST', { name: trimmed }), orgId })
   return data.project
+}
+
+// GET /api/orgs/{id}/identities returns existing organization bindings.
+export async function getOrgIdentities(orgId) {
+  const id = requireUuid(orgId, 'organization')
+  return request(`/api/orgs/${id}/identities`, { orgId: id })
 }
 
 // GET /api/projects/{id}/lifecycle -> {project, members, files, receipts}.

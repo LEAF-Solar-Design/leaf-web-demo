@@ -212,8 +212,8 @@ export const PRODUCT_SURFACES = Object.freeze([
       //   divergence (D3): ToolCast.jsx's workspace rail now reads this same
       //   slot (`authoringOnStage`) instead of the old cad-only literal.
       authoring: true,
-      // versions: App.jsx:3041 VersionHistory lives inside the workspace card,
-      //   whose display gate (App.jsx:2859) hides it off cad/solar.
+      // J1: ProjectWorkspacePanels hosts the board's version list. This slot
+      // still excludes the drawing-card VersionHistory from the board profile.
       versions: 'none',
       conversations: {
         // scope: converse.js:129-134 caches ONE session per project+drawing pair
@@ -349,7 +349,7 @@ export const PRODUCT_SURFACES = Object.freeze([
     eyebrow: 'Leaf Automation template',
     title: 'Apply the Leaf Automation solar tool set',
     description: 'Start from a versioned solar template with standards, catalog tools, and project-owned versions.',
-    familyIds: Object.freeze(['stringing', 'placement']),
+    familyIds: Object.freeze(['stringing', 'placement', 'measurement', 'selection']),
     contract: deepFreeze({
       // ground: SurfaceGrounds.jsx:106 DRAWING_SURFACES includes 'solar'.
       ground: 'drawing',
@@ -384,7 +384,7 @@ export const PRODUCT_SURFACES = Object.freeze([
       toolbar: {
         profile: 'solar',
         ribbon: true, // App.jsx:2898
-        home: 'draw', // App.jsx:2234
+        home: 'solar', // Selected on profile entry; later tab choices stay local.
         quick: null,
       },
       rails: {
@@ -639,7 +639,7 @@ export function searchForProductSurface(search, surfaceId) {
   return encoded ? `?${encoded}` : ''
 }
 
-export function productSurfaceStates({ sessionActive, hasDrawing, apsLive, iosReady = false } = {}) {
+export function productSurfaceStates({ sessionActive, hasDrawing, apsLive, iosReady = false, solarReady = false } = {}) {
   return {
     browser: sessionActive
       ? { state: 'available', label: 'Ready' }
@@ -653,7 +653,9 @@ export function productSurfaceStates({ sessionActive, hasDrawing, apsLive, iosRe
           : { state: 'available', label: 'Ready' },
     solar: !sessionActive
       ? { state: 'sign-in', label: 'Sign in' }
-      : { state: 'beta', label: hasDrawing ? 'Beta' : 'Template pending' },
+      : solarReady
+        ? { state: 'available', label: 'Ready' }
+        : { state: 'beta', label: hasDrawing ? 'Beta' : 'Template pending' },
     ios: iosReady
       ? { state: 'available', label: 'Ready' }
       : { state: 'setup', label: 'Setup required' },

@@ -217,7 +217,7 @@ export default function EntitlementGate({
       </>}
       {studioPresentation && (!studioKnown || allOn) ? null : !known ? (
         <p className="ent-note">
-          demo tier · full access — entitlements apply once you sign in to a plan.
+          demo tier · full access. Entitlements apply once you sign in to a plan.
         </p>
       ) : allOn ? (
         <p className="ent-note">All capabilities are included on the {tierLabel} plan.</p>
@@ -246,9 +246,9 @@ export function EntitlementNotice({ required, tier, message }) {
     <div className="banner quota" role="status">
       <b>Plan</b>
       <span className="banner-rest">
-        {' — '}
+        {': '}
         {message || `your ${tier || 'current'} plan doesn’t include ${need}`}
-        {'; nothing ran — it was blocked before any billable work.'}
+        {'; nothing ran because it was blocked before any billable work.'}
       </span>
       <span className="banner-tail">
         <span className="banner-since">clears when the plan includes it</span>

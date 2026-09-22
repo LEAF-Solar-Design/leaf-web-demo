@@ -21,8 +21,9 @@ describe('familiesForSurface', () => {
   })
 
   it('solar folds to its families and is honestly EMPTY when none are registered', () => {
-    expect(familiesForSurface(FAMS, 'solar').map((f) => f.family_id)).toEqual(['stringing'])
-    expect(familiesForSurface(FAMS.slice(0, 3), 'solar')).toEqual([])
+    // C-04B adds measurement and selection to Solar; placement remains an unregistered reservation.
+    expect(familiesForSurface(FAMS, 'solar').map((f) => f.family_id)).toEqual(['stringing', 'measurement', 'selection'])
+    expect(familiesForSurface(FAMS.filter((f) => f.family_id === 'custom'), 'solar')).toEqual([])
   })
 
   it('an unknown surface fails OPEN to the whole catalog (a new tab must never boot with an empty rail)', () => {

@@ -4,11 +4,12 @@
 //
 // Run with: node --test web/e2e/proofReceipt.test.mjs
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import * as path from 'node:path'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { makeProofReceipt, writeProofReceipt } from './proofReceipt.mjs'
+import { makeProofReceipt, proofArtifactCandidates, resolveProofArtifact, writeProofReceipt } from './proofReceipt.mjs'
 
 const nonStagingBaseInput = {
   evidence_tier: 'local-e2e',
@@ -25,6 +26,148 @@ const stagingBaseInput = {
   source_commit: 'd6f548b',
   sub_cases: { proven: ['healthy'], not_proven: ['degraded', 'retry', 'recovery'] },
 }
+
+function withArtifactPaths(run) {
+  const root = mkdtempSync(join(tmpdir(), 'proof-artifact-'))
+  try {
+    const cwd = join(root, 'web')
+    const receiptDir = join(root, 'receipts')
+    mkdirSync(cwd)
+    mkdirSync(receiptDir)
+    run({ root, cwd, receiptDir, receiptPath: join(receiptDir, 'receipt.json') })
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+function artifactInput(artifact) {
+  return { ...nonStagingBaseInput, capability_ids: ['CA-01'], artifacts: [artifact] }
+}
+
+test("a receipt-dir-relative artifact resolves against the receipt's directory", () => {
+  withArtifactPaths(({ cwd, receiptDir, receiptPath }) => {
+    const artifact = 'beside-receipt.png'
+    writeFileSync(join(receiptDir, artifact), 'evidence')
+    writeProofReceipt(receiptPath, artifactInput(artifact), { cwd })
+    assert.ok(existsSync(receiptPath))
+    assert.ok(existsSync(resolveProofArtifact(artifact, receiptPath, { cwd })))
+  })
+})
+
+test('a repo-root-relative artifact resolves against the parent of cwd', () => {
+  withArtifactPaths(({ root, cwd, receiptPath }) => {
+    mkdirSync(join(root, 'artifacts'))
+    writeFileSync(join(root, 'artifacts', 'x.png'), 'evidence')
+    writeProofReceipt(receiptPath, artifactInput('artifacts/x.png'), { cwd })
+    assert.ok(existsSync(receiptPath))
+    assert.ok(existsSync(resolveProofArtifact('artifacts/x.png', receiptPath, { cwd })))
+  })
+})
+
+test('a cwd-relative artifact resolves against cwd', () => {
+  withArtifactPaths(({ cwd, receiptPath }) => {
+    writeFileSync(join(cwd, 'y.png'), 'evidence')
+    writeProofReceipt(receiptPath, artifactInput('y.png'), { cwd })
+    assert.ok(existsSync(receiptPath))
+    assert.ok(existsSync(resolveProofArtifact('y.png', receiptPath, { cwd })))
+  })
+})
+
+test('an absolute artifact resolves as given', () => {
+  withArtifactPaths(({ root, cwd, receiptPath }) => {
+    const artifact = join(root, 'absolute.png')
+    writeFileSync(artifact, 'evidence')
+    writeProofReceipt(receiptPath, artifactInput(artifact), { cwd })
+    assert.ok(existsSync(receiptPath))
+    assert.ok(existsSync(resolveProofArtifact(artifact, receiptPath, { cwd })))
+  })
+})
+
+test('a Playwright video resolves by its prepared directory before the file exists', () => {
+  withArtifactPaths(({ root, cwd, receiptPath }) => {
+    const preparedDir = join(root, 'prepared-output')
+    mkdirSync(preparedDir)
+    const artifact = join(preparedDir, 'video.webm')
+    assert.equal(existsSync(artifact), false)
+    writeProofReceipt(receiptPath, artifactInput(artifact), { cwd })
+    assert.ok(existsSync(receiptPath))
+    assert.notEqual(resolveProofArtifact(artifact, receiptPath, { cwd }), null)
+    assert.equal(existsSync(artifact), false)
+  })
+})
+
+test('a Playwright video whose directory was never prepared is refused', () => {
+  withArtifactPaths(({ root, cwd, receiptPath }) => {
+    const artifact = join(root, 'absent-output', 'video.webm')
+    assert.equal(resolveProofArtifact(artifact, receiptPath, { cwd }), null)
+    assert.throws(
+      () => writeProofReceipt(receiptPath, artifactInput(artifact), { cwd }),
+      /local-e2e proof receipt artifact does not exist/,
+    )
+    assert.equal(existsSync(receiptPath), false)
+  })
+})
+
+test('an artifact absent under every base is refused naming the tier and the bases', () => {
+  withArtifactPaths(({ cwd, receiptDir, receiptPath }) => {
+    const artifact = 'absent.png'
+    assert.equal(resolveProofArtifact(artifact, receiptPath, { cwd }), null)
+    assert.throws(
+      () => writeProofReceipt(receiptPath, artifactInput(artifact), { cwd }),
+      (error) => {
+        assert.match(error.message, /local-e2e proof receipt artifact does not exist: absent\.png/)
+        const tried = error.message.split('(tried: ')[1]
+        assert.ok(tried)
+        assert.equal(tried.slice(0, -1).split('; ').length, 3)
+        for (const candidate of [join(receiptDir, artifact), join(cwd, '..', artifact), join(cwd, artifact)]) {
+          assert.ok(tried.includes(candidate))
+        }
+        return true
+      },
+    )
+    assert.equal(existsSync(receiptPath), false)
+  })
+})
+
+test('the receipt stores the declared artifact string, never the resolved path', () => {
+  withArtifactPaths(({ root, cwd, receiptPath }) => {
+    mkdirSync(join(root, 'artifacts'))
+    writeFileSync(join(root, 'artifacts', 'x.png'), 'evidence')
+    const receipt = writeProofReceipt(receiptPath, artifactInput('artifacts/x.png'), { cwd })
+    assert.deepEqual(receipt.artifacts, ['artifacts/x.png'])
+    assert.deepEqual(JSON.parse(readFileSync(receiptPath, 'utf8')).artifacts, ['artifacts/x.png'])
+  })
+})
+
+test('a Windows drive-relative artifact resolves against cwd on its drive', () => {
+  const receiptPath = 'C:\\tmp\\r\\receipt.json'
+  const options = { cwd: 'C:\\tmp\\w', pathApi: path.win32 }
+  assert.deepEqual(proofArtifactCandidates('C:web\\e2e\\x.png', receiptPath, options), [
+    'C:\\tmp\\w\\web\\e2e\\x.png',
+  ])
+  assert.deepEqual(proofArtifactCandidates('web\\e2e\\x.png', receiptPath, options), [
+    'C:\\tmp\\r\\web\\e2e\\x.png',
+    'C:\\tmp\\web\\e2e\\x.png',
+    'C:\\tmp\\w\\web\\e2e\\x.png',
+  ])
+  assert.deepEqual(proofArtifactCandidates('C:web', receiptPath, options), ['C:\\tmp\\w\\web'])
+  assert.deepEqual(proofArtifactCandidates('C:\\web', receiptPath, options), ['C:\\web'])
+  assert.deepEqual(proofArtifactCandidates('C:/web', receiptPath, options), ['C:/web'])
+  assert.deepEqual(proofArtifactCandidates('web', receiptPath, options), [
+    'C:\\tmp\\r\\web', 'C:\\tmp\\web', 'C:\\tmp\\w\\web',
+  ])
+})
+
+test('the cat standards caller prepares its video directory before the receipt', () => {
+  const source = readFileSync(new URL('./cat-standards-surface.spec.mjs', import.meta.url), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '')
+  assert.match(source, /async\s*\(\s*\{\s*page\s*\}\s*,\s*testInfo\s*\)\s*=>/)
+  const prepareIndex = source.indexOf("testInfo.outputPath('video.webm')")
+  const receiptIndex = source.indexOf('writeProofReceipt(')
+  assert.ok(prepareIndex >= 0)
+  assert.ok(receiptIndex > prepareIndex)
+})
 
 test('accepts a plain two-letter/two-digit capability id', () => {
   const receipt = makeProofReceipt({ ...nonStagingBaseInput, capability_ids: ['CA-01'] })
@@ -210,6 +353,101 @@ test('requires every staging artifact to exist before writing the receipt', () =
       artifacts: [artifactPath],
     })
     assert.equal(receipt.sub_cases.row_complete, false)
+  } finally {
+    rmSync(receiptDir, { recursive: true, force: true })
+  }
+})
+
+test('a local-e2e receipt refuses a declared artifact that does not exist', () => {
+  const receiptDir = mkdtempSync(join(tmpdir(), 'proof-receipt-'))
+  try {
+    const receiptPath = join(receiptDir, 'receipt.json')
+    assert.throws(
+      () => writeProofReceipt(receiptPath, {
+        ...nonStagingBaseInput,
+        capability_ids: ['CA-01'],
+        artifacts: [join(receiptDir, 'missing.png')],
+      }),
+      /local-e2e proof receipt artifact does not exist/,
+    )
+    assert.equal(existsSync(receiptPath), false)
+  } finally {
+    rmSync(receiptDir, { recursive: true, force: true })
+  }
+})
+
+test('a local-e2e receipt with existing artifacts writes', () => {
+  const receiptDir = mkdtempSync(join(tmpdir(), 'proof-receipt-'))
+  try {
+    const artifactPath = join(receiptDir, 'evidence.png')
+    const receiptPath = join(receiptDir, 'receipt.json')
+    writeFileSync(artifactPath, 'evidence')
+    const receipt = writeProofReceipt(receiptPath, {
+      ...nonStagingBaseInput,
+      capability_ids: ['CA-01'],
+      artifacts: [artifactPath],
+    })
+    assert.deepEqual(receipt.artifacts, [artifactPath])
+    assert.deepEqual(JSON.parse(readFileSync(receiptPath, 'utf8')).artifacts, [artifactPath])
+  } finally {
+    rmSync(receiptDir, { recursive: true, force: true })
+  }
+})
+
+test('a contract receipt refuses a declared artifact that does not exist', () => {
+  const receiptDir = mkdtempSync(join(tmpdir(), 'proof-receipt-'))
+  try {
+    const receiptPath = join(receiptDir, 'receipt.json')
+    assert.throws(
+      () => writeProofReceipt(receiptPath, {
+        ...nonStagingBaseInput,
+        evidence_tier: 'contract',
+        capability_ids: ['CA-01'],
+        artifacts: [join(receiptDir, 'missing.png')],
+      }),
+      /contract proof receipt artifact does not exist/,
+    )
+    assert.equal(existsSync(receiptPath), false)
+  } finally {
+    rmSync(receiptDir, { recursive: true, force: true })
+  }
+})
+
+test('a receipt declaring no artifacts writes on every tier', () => {
+  const receiptDir = mkdtempSync(join(tmpdir(), 'proof-receipt-'))
+  try {
+    for (const evidenceTier of ['contract', 'local-e2e', 'staging']) {
+      const receiptPath = join(receiptDir, `${evidenceTier}.json`)
+      const receipt = writeProofReceipt(receiptPath, {
+        ...stagingBaseInput,
+        evidence_tier: evidenceTier,
+        capability_ids: ['HL-01'],
+        artifacts: [],
+      })
+      assert.deepEqual(receipt.artifacts, [])
+      assert.deepEqual(JSON.parse(readFileSync(receiptPath, 'utf8')).artifacts, [])
+    }
+  } finally {
+    rmSync(receiptDir, { recursive: true, force: true })
+  }
+})
+
+test('a non-string artifact is refused on every tier', () => {
+  const receiptDir = mkdtempSync(join(tmpdir(), 'proof-receipt-'))
+  try {
+    for (const evidenceTier of ['contract', 'local-e2e', 'staging']) {
+      const receiptPath = join(receiptDir, `${evidenceTier}.json`)
+      assert.throws(
+        () => writeProofReceipt(receiptPath, {
+          ...stagingBaseInput,
+          evidence_tier: evidenceTier,
+          capability_ids: ['HL-01'],
+          artifacts: [42],
+        }),
+        new RegExp(`${evidenceTier} proof receipt artifact does not exist`),
+      )
+      assert.equal(existsSync(receiptPath), false)
+    }
   } finally {
     rmSync(receiptDir, { recursive: true, force: true })
   }

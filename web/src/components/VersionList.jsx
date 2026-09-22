@@ -118,7 +118,7 @@ export function VersionPreviewStrip({ variant = 'drawer', version, latest, onBac
   }
   return (
     <div className="vh-previewing">
-      <span>Viewing v{version}{latest != null ? ` of ${latest}` : ''} — read-only preview</span>
+      <span>Viewing v{version}{latest != null ? ` of ${latest}` : ''}, read-only preview</span>
       <button className="chip-act" onClick={onBackToHead}>Back to head</button>
     </div>
   )

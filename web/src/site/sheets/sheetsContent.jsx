@@ -9,7 +9,7 @@ export const SHEET_CODES = ['l-000', 'g-000', 'a-101', 'a-102', 'e-401', 'c-201'
 
 const TRIAL_NOTE = '14-day trial · $299 / mo per daily active user';
 const DEPLOYED = 'Deployed at Black & Veatch and 40+ commercial EPCs';
-const BRANCH_DISCIPLINE = 'Branch — solar stringing for AutoCAD';
+const BRANCH_DISCIPLINE = 'Branch · solar stringing for AutoCAD';
 const DRAWN_BY = 'Drawn by Leaf · reviewed by you';
 
 // G-000 nav doubles as the interior sheets' nav — every entry is a set anchor.
@@ -105,14 +105,14 @@ export function L000Sheet() {
             </h1>
             <p className="sheet-sub">
               Three decades of manual drafting, dressed up as engineering. Leaf builds the
-              automation your discipline actually uses — custom tooling on one platform, inside
+              automation your discipline actually uses: custom tooling on one platform, inside
               your CAD, with evidence on every output. No engineering judgment, ever: you review,
               you stamp.
             </p>
           </div>
           <div className="sheet-cta-row">
             <TrialCta />
-            <Chip target="#g-000">See Branch — solar stringing ↓</Chip>
+            <Chip target="#g-000">See Branch for solar stringing ↓</Chip>
             <span className="sheet-cta-note">{TRIAL_NOTE}</span>
           </div>
           <DeployedRow />
@@ -131,15 +131,15 @@ export function L000Sheet() {
             </div>
             <div className="sheet-card-row">
               <Dot />
-              <span className="row-text">An evidence bundle on every output — cited, checkable</span>
+              <span className="row-text">An evidence bundle on every output, cited and checkable</span>
             </div>
             <div className="sheet-card-row">
               <Dot kind="hollow" />
-              <span className="row-text">Trust tiers — new tooling starts sandboxed, humans promote</span>
+              <span className="row-text">Trust tiers: new tooling starts sandboxed, humans promote</span>
             </div>
             <div className="sheet-card-row">
               <Dot />
-              <span className="row-text">Lives inside AutoCAD — your title block, your layers</span>
+              <span className="row-text">Lives inside AutoCAD, with your title block, your layers</span>
             </div>
           </div>
           <div className="sheet-card-foot">
@@ -163,7 +163,7 @@ export function L000Sheet() {
           <>
             <Dot kind="pulse" />
             <span className="strip-text">
-              This drawing strings itself live on the real site — marketing recasts into the
+              This drawing strings itself live on the real site, and marketing recasts into the
               tool, same surface
             </span>
             <button type="button" className="strip-ref" onClick={() => go('/try')}>
@@ -190,7 +190,7 @@ export function liveDemoLines(solve) {
   const st = solve?.stats;
   if (!st || !st.string_count) {
     return {
-      liveLine: 'Strung live in the demo — press T on the cover to watch it run',
+      liveLine: 'Strung live in the demo · press T on the cover to watch it run',
       receipt: 'NEC 690.7',
     };
   }
@@ -200,7 +200,7 @@ export function liveDemoLines(solve) {
   const sha = (solve?.intake_sha256 || '').slice(0, 8);
   const solver = solve?.solver;
   return {
-    liveLine: `Strung live in the demo — ${st.string_count} strings` +
+    liveLine: `Strung live in the demo · ${st.string_count} strings` +
       (maxMod ? ` · ${maxMod} modules max` : '') + wire,
     receipt: `NEC 690.7 ${pass ? '✓' : '✗'}` +
       (sha ? ` · solve #${sha}` : '') +
@@ -223,14 +223,14 @@ export function G000Sheet({ solve } = {}) {
             </h1>
             <p className="sheet-sub narrow">
               The first Leaf tool. Branch turns a site plan into strung, NEC-checked drafting
-              objects inside your AutoCAD — on your title block, against your code cycle. You
+              objects inside your AutoCAD, on your title block, against your code cycle. You
               review, you stamp.
             </p>
           </div>
           <div className="sheet-bignum-row">
             <span className="sheet-bignum">25 h → 3 min</span>
             <span className="sheet-bignum-cap">
-              stringing a 3.2 MW rooftop · internal EPC survey, n = 18
+              stringing a 3.2 MW rooftop · internal survey of 18 EPC firms
             </span>
           </div>
           <div className="sheet-cta-row">
@@ -280,7 +280,7 @@ export function A101Sheet() {
             </h1>
             <p className="sheet-sub">
               You still route conduit by hand. Still count panels onto strings. Still spend days
-              on work a computer should handle — while labor shortages tighten, code gets denser,
+              on work a computer should handle, while labor shortages tighten, code gets denser,
               and deadlines don’t move.
             </p>
             <p className="sheet-accent-line">It’s not engineering. It’s drafting.</p>
@@ -295,16 +295,16 @@ export function A101Sheet() {
             <div className="sheet-row">
               <span className="num">40%</span>
               <span className="txt">
-                of projects require rework — a panel layout shift means re-doing everything
-                downstream of it
+                of projects require rework (a panel layout shift means re-doing everything
+                downstream of it)
               </span>
-              <span className="cap">internal EPC survey, n = 18</span>
+              <span className="cap">internal survey of 18 EPC firms</span>
             </div>
             <div className="sheet-row">
               <span className="num">15 / 15</span>
               <span className="txt">
-                engineering firms refused to share building plans to train generic AI —
-                proprietary IP isn’t training data
+                engineering firms refused to share building plans to train generic AI
+                (proprietary IP is not training data)
               </span>
               <span className="cap">Leaf Automation research</span>
             </div>
@@ -345,13 +345,13 @@ const STEPS = [
   {
     code: '03',
     title: 'Run the solver',
-    desc: 'Strings, homeruns, tags, cable lengths — placed on the drawing in your standard layers and block conventions. NEC voltage-window compliance by construction.',
+    desc: 'Strings, homeruns, tags, cable lengths: placed on the drawing in your standard layers and block conventions. NEC voltage-window compliance by construction.',
     timing: '~2 min · 3.2 MW rooftop',
   },
   {
     code: '04',
     title: 'Hand off the CDs',
-    desc: 'Circuit length CSV for the BOM, tagged DWG for the stamped set, PDF for the AHJ. Rerun on any layout change — the whole cycle is disposable.',
+    desc: 'Circuit length CSV for the BOM, tagged DWG for the stamped set, PDF for the AHJ. Rerun on any layout change: the whole cycle is disposable.',
     timing: '~15 sec · reruns just as fast',
   },
 ];
@@ -411,7 +411,7 @@ const E401_DEFAULT_STATS = {
   payback: '1 proj',
   paybackNote: 'typical recoup at $299 / mo',
   // Neutral no-number fallback — live numbers arrive via <SheetsSet solve>.
-  liveLine: 'Strung live in the demo — press T on the cover to watch it run',
+  liveLine: 'Strung live in the demo · press T on the cover to watch it run',
 };
 const E401_DEFAULT_RECEIPT = 'NEC 690.7';
 
@@ -435,9 +435,9 @@ export function E401Sheet({ stats, receipt } = {}) {
               Not a research demo. <em>A shipping product.</em>
             </h1>
             <p className="sheet-sub">
-              Branch has been stringing real commercial projects since 2024 — at Fortune-500
+              Branch has been stringing real commercial projects since 2024 at Fortune-500
               engineering firms, regional EPCs, and multi-discipline subs. Every solve ships an
-              evidence bundle — cited, checkable, on the output itself.
+              evidence bundle: cited, checkable, on the output itself.
             </p>
           </div>
           <div className="sheet-bignum-row">
@@ -448,12 +448,12 @@ export function E401Sheet({ stats, receipt } = {}) {
             <div className="sheet-row">
               <span className="num">{s.timePerMw}</span>
               <span className="txt">{s.timePerMwNote}</span>
-              <span className="cap">internal EPC survey, n = 18</span>
+              <span className="cap">internal survey of 18 EPC firms</span>
             </div>
             <div className="sheet-row">
               <span className="num">{s.reworkDelta}</span>
               <span className="txt">{s.reworkNote}</span>
-              <span className="cap">internal EPC survey, n = 18</span>
+              <span className="cap">internal survey of 18 EPC firms</span>
             </div>
             <div className="sheet-row">
               <span className="num">{s.payback}</span>
@@ -464,7 +464,7 @@ export function E401Sheet({ stats, receipt } = {}) {
           <blockquote className="sheet-quote">
             <p>
               Stringing used to eat the first day of every project. Now it’s a coffee break. The
-              rework tolerance is the part I didn’t expect — if the layout shifts, we just rerun
+              rework tolerance is the part I didn’t expect. If the layout shifts, we just rerun
               it.
             </p>
             <footer>Senior PV designer · commercial EPC · 2,400+ modules per project</footer>
@@ -520,8 +520,8 @@ export function C201Sheet() {
               <span className="txt">14-day free trial · no credit card</span>
             </div>
             <div className="sheet-row">
-              <span className="txt">Typical payback — one project at $299 / mo</span>
-              <span className="cap">internal EPC survey, n = 18</span>
+              <span className="txt">Typical payback: one project at $299 / mo</span>
+              <span className="cap">internal survey of 18 EPC firms</span>
             </div>
           </div>
           <div className="sheet-cta-row">
@@ -545,7 +545,7 @@ export function C201Sheet() {
 /* ---------- S-501 · Docs & API (quiet rows, for your IT) ---------- */
 
 const S501_DEFAULT_CAPABILITIES = [
-  { label: 'AutoCAD 2018–2026', hint: 'Windows' },
+  { label: 'AutoCAD 2018 to 2026', hint: 'Windows' },
   { label: 'Getting-started docs', hint: 'install to first solve' },
   { label: 'API & entitlements overview', hint: 'for your IT' },
   { label: 'Evidence bundle on every output', hint: 'cited, checkable' },
@@ -563,7 +563,7 @@ export function S501Sheet({ capabilities } = {}) {
         <>
           <div className="sheet-lede">
             <h1 className="sheet-headline">
-              Docs & API — <em>for your IT.</em>
+              Docs & API <em>for your IT.</em>
             </h1>
             <p className="sheet-sub">
               What Branch needs, what it touches, and where the docs live. The short version,

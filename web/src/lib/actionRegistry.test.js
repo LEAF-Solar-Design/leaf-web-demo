@@ -245,6 +245,7 @@ describe('honest triggers', () => {
     // W4g-4: RECTANG joined Draw; COPY, MIRROR, ROTATE, SCALE, EXPLODE joined Modify.
     expect(forGroup('draw').map((a) => a.id)).toEqual([
       'draw:createLine', 'draw:createPolyline', 'draw:createCircle', 'draw:createArc', 'draw:createRectangle',
+      'solar-panels:createRectangle',
       // W4g-4b: the rest of the reference's small Draw column.
       'draw:createEllipse', 'draw:createPoint',
       // W4g-5d: TEXT is a draw create seated in the Annotation panel.
@@ -257,6 +258,7 @@ describe('honest triggers', () => {
       'draw:createBlock',
     ])
     expect(forGroup('modify').map((a) => a.id)).toEqual([
+      'solar-panels:arrayRect', 'solar-panels:move', 'solar-panels:rotate',
       'modify:delete', 'modify:move', 'modify:moveVertex',
       'modify:addVertex', 'modify:deleteVertex', 'modify:setLayer',
       // W4g-5: OFFSET joined the row (a parallel copy, computed here and
@@ -276,6 +278,23 @@ describe('honest triggers', () => {
   })
 
   // A ribbon cluster and an engine group are two fields. A future ribbon
+  it('row10 seats four Solar geometry records without changing their arming groups or ladders', () => {
+    const solar = ACTIONS.filter((action) => action.panel === 'solar-panels')
+    expect(solar.map(({ group, op, text }) => [group, op, text])).toEqual([
+      ['draw', 'createRectangle', 'Panel outline'], ['modify', 'arrayRect', 'Panel array'],
+      ['modify', 'move', 'Move panel'], ['modify', 'rotate', 'Rotate panel'],
+    ])
+    for (const action of solar) {
+      const original = byId(`${action.group}:${action.op}`)
+      for (const session of [null, { errorKind: 'crashed' }, { engineParsed: true, busy: true }, { engineParsed: true }, { engineParsed: true, selected: { editable: true } }]) {
+        expect(action.when({ session })).toBe(original.when({ session }))
+      }
+      const onActivate = vi.fn()
+      action.run({ onActivate })
+      expect(onActivate).toHaveBeenCalledWith(action.group, action.op)
+    }
+  })
+
   // cluster named draw or modify must not merge with the engine group.
   it('never conflates a ribbon cluster with an engine group of the same name', () => {
     expect(forCluster('draw')).toEqual([])

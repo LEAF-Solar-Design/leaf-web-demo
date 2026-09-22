@@ -20,6 +20,346 @@ import esbuild from 'esbuild'
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
 const viewerSource = readFileSync(new URL('./components/Viewer.jsx', import.meta.url), 'utf8')
 
+describe('J1 Browser composition', () => {
+  const compiled = esbuild.transformSync(appSource, { loader: 'jsx' }).code
+  const mount = (name) => {
+    const match = compiled.match(new RegExp('React\\.createElement\\(\\s*' + name + ',\\s*'))
+    assert.ok(match, name + ' must be mounted in executable App code')
+    return compiled.slice(match.index, match.index + 1800)
+  }
+
+  it('J1 row4 signed-in first run mounts the existing workspace controller entry', () => {
+    assert.match(compiled, /!mock && signedIn && !openProjectId &&.*React\.createElement\(\s*ProjectStartPanel,/s)
+    const start = mount('ProjectStartPanel')
+    for (const [prop, binding] of Object.entries({
+      bootstrapState: 'workspaceController.bootstrapState', projects: 'projects',
+      projectsLoaded: 'workspaceController.projectsLoaded', projectsLoading: 'projectsLoading',
+      openProjectId: 'openProjectId', projectsError: 'projectsErr', orgBusy: 'orgBusy',
+      projectBusy: 'projectBusy', orgDraftError: 'workspaceController.orgDraftError',
+      projectDraftError: 'workspaceController.projectDraftError', orgConflict: 'workspaceController.orgConflict',
+      onCreateOrg: 'createWorkspaceOrg', onCreateProject: 'createWorkspaceProject',
+      onOpenProject: 'onOpenProject', onLoadProjects: 'workspaceController.loadProjects',
+    })) {
+      // Controller fields are destructured in App; esbuild prints same-name props as shorthand.
+      const emitted = prop === binding ? prop : `${prop}: ${binding}`
+      assert.ok(start.split('\n').some((line) => line.trim().replace(/,$/, '') === emitted), `${prop} must reach the existing controller`)
+    }
+    assert.match(start, /drawingMounted:\s*Boolean\(shown\)/)
+    assert.equal((compiled.match(/= useWorkspaceController\(/g) || []).length, 1)
+    assert.match(compiled, /openProject:\s*onOpenProject/)
+    assert.match(compiled, /createProject:\s*createWorkspaceProject/)
+    assert.match(compiled, /createOrg:\s*createWorkspaceOrg/)
+  })
+
+  it('J1 row5 the mounted material intake binds the open project before upload', () => {
+    const live = mount('LiveProjectMaterialIntake')
+    assert.match(live, /key:\s*openProjectId/)
+    assert.match(live, /project_id:\s*openProjectId/)
+    assert.match(live, /onAttached:\s*rehydrate/)
+    assert.match(live, /artifacts:\s*workspace\?\.drawing_artifacts \|\| \[\]/)
+    assert.equal((compiled.match(/= useDrawingUploadController\(/g) || []).length, 1)
+    assert.equal((compiled.match(/= useMaterialIntake\(/g) || []).length, 1)
+
+    // Execute only the mounted adapter, with the two IO controllers replaced.
+    // This pins ordering and refusal without making an upload or a project write.
+    const begin = appSource.indexOf('function LiveProjectMaterialIntake(')
+    const end = appSource.indexOf('export default function App()', begin)
+    assert.ok(begin >= 0 && end > begin)
+    const adapter = esbuild.transformSync(appSource.slice(begin, end), { loader: 'jsx' }).code
+    const events = []
+    const project = { project_id: 'project-j1', name: 'J1 roof' }
+    const artifacts = [{ drawing_id: 'drawing-j1' }]
+    const file = { name: 'roof.dxf' }
+    const upload = { actions: { upload: (value) => events.push(['upload', value]) } }
+    let allowed = true
+    const intake = { begin: (target) => { events.push(['begin', target]); return allowed }, retry: () => {} }
+    const onAttached = () => {}
+    const renderAdapter = new Function('React', 'ProjectMaterialIntake', 'useDrawingUploadController', 'useMaterialIntake',
+      adapter + '\nreturn LiveProjectMaterialIntake')(
+      { createElement: (type, props) => ({ type, props }) }, 'ProjectMaterialIntake', () => upload,
+      (options) => { assert.equal(options.upload, upload); assert.equal(options.onAttached, onAttached); return intake },
+    )
+    const element = renderAdapter({ project, artifacts, onAttached })
+    assert.equal(element.type, 'ProjectMaterialIntake')
+    assert.equal(element.props.project, project)
+    assert.equal(element.props.upload, upload)
+    assert.equal(element.props.intake, intake)
+    assert.equal(element.props.artifacts, artifacts)
+    element.props.onStartUpload(file)
+    assert.deepEqual(events, [['begin', { projectId: 'project-j1', projectName: 'J1 roof', fileName: 'roof.dxf' }], ['upload', file]])
+    events.length = 0
+    allowed = false
+    element.props.onStartUpload(file)
+    assert.equal(events.length, 1)
+    assert.equal(events[0][0], 'begin')
+  })
+
+  it('J1 row6 demo material mounts the disabled component without an IO controller', () => {
+    const source = codeOnly(appSource)
+    assert.match(source, /projectPane === 'material' && \(mock \|\| !signedIn \|\| !openProjectId/)
+    assert.ok(source.includes('? <ProjectMaterialIntake project={null} mock={mock} artifacts={[]} />'))
+    assert.ok(source.includes(': <LiveProjectMaterialIntake'))
+    const appBody = source.slice(source.indexOf('export default function App()'))
+    assert.doesNotMatch(appBody, /useDrawingUploadController\(/)
+    assert.doesNotMatch(appBody, /useMaterialIntake\(/)
+    mount('ProjectMaterialIntake')
+  })
+})
+
+function codeOnly(src) {
+  const chars = src.split('')
+  let i = 0
+  while (i < src.length) {
+    const quote = src[i]
+    if (quote === "'" || quote === '"' || quote === '`') {
+      i++
+      while (i < src.length) {
+        if (src[i] === '\\') i += 2
+        else if (src[i++] === quote) break
+      }
+    } else if (src[i] === '/' && src[i + 1] === '/') {
+      i += 2
+      while (i < src.length && src[i] !== '\n' && src[i] !== '\r') chars[i++] = ' '
+    } else if (src[i] === '/' && src[i + 1] === '*') {
+      i += 2
+      while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) {
+        if (src[i] !== '\n' && src[i] !== '\r') chars[i] = ' '
+        i++
+      }
+      i += 2
+    } else {
+      i++
+    }
+  }
+  return chars.join('')
+}
+
+describe('C-05 ship context wiring', () => {
+  // J2 replaces the old hardcoded-null pins with the mounted controller projection.
+  const start = appSource.indexOf('  const ship = useMemo(')
+  const end = appSource.indexOf('  // Readiness follows', start)
+  const projection = appSource.slice(start, end)
+  const project = (iosShipController, iosContract = null, shipControllerLive = true) => new Function(
+    'iosShipController', 'iosContract', 'canonicalVersionId', 'useMemo', 'shipLaunchReason', 'shipErrorSentence', 'document', 'shipControllerLive',
+    projection + '\nreturn ship',
+  )(iosShipController, iosContract, 'revision-j2', (fn) => fn(), () => 'Setup required.', (error) => error, {
+    querySelector: () => null,
+  }, shipControllerLive)
+
+  it('J2 row1 mounts one controller and exposes its real launch only when ready', () => {
+    const compiled = esbuild.transformSync(appSource, { loader: 'jsx' }).code
+    assert.equal((compiled.match(/= useIosShipController\(/g) || []).length, 1)
+    assert.match(compiled, /projectId: openProjectId/)
+    assert.match(compiled, /sessionActive: !mock && signedIn/)
+    assert.match(compiled, /enabled: shipControllerLive/)
+    assert.match(compiled, /const shipControllerLive = ENV_IOS_SURFACE && surfaceSlots.toolbar.profile === "ship" && !mock && signedIn/)
+    assert.match(compiled, /tenantKey: tenant \|\| config.tenant/)
+    const launch = () => 'launched'
+    assert.equal(project({ phase: 'ready', launch }).onLaunch, launch)
+    assert.match(compiled, /profileRibbonTabs\([\s\S]*?\bship\s*[,}]/)
+    assert.match(compiled, /onLaunch: ship.onLaunch/)
+  })
+
+  it('J2 row16 the ship record carries explicit liveness even at idle', () => {
+    assert.equal(project({ phase: 'idle' }, null, false).controllerLive, false)
+    assert.equal(project({ phase: 'idle' }, null, true).controllerLive, true)
+  })
+
+  it('J2 row2 every non-ready controller phase has an absent launch handler', () => {
+    for (const phase of ['idle', 'loading', 'launching', 'running', 'succeeded', 'failed', 'setup-required', 'unavailable']) {
+      assert.equal(project({ phase, launch: () => {} }).onLaunch, null)
+    }
+  })
+
+  it('J2 row8 readiness and launch use the same controller phase', () => {
+    assert.match(appSource, /iosReady: iosShipController.phase === 'ready'/)
+    assert.doesNotMatch(appSource, /iosReady:.*iosContract/)
+    for (const phase of ['ready', 'loading', 'running', 'succeeded', 'failed', 'setup-required', 'unavailable', 'idle']) {
+      assert.equal(typeof project({ phase, launch: () => {} }).onLaunch === 'function', phase === 'ready')
+    }
+  })
+
+  it('C-05 row10 the ship receipt handler opens the real details disclosure', () => {
+    assert.match(codeOnly(projection), /onReceipts: iosContract\?\.receipt_id \? \(\) => \{/)
+    assert.ok(projection.includes("document.querySelector('.studio-profile-info details')"))
+    assert.ok(projection.includes("details.open = true; details.querySelector('summary')?.focus()"))
+    assert.equal(typeof project({ phase: 'ready' }, { receipt_id: 'receipt' }).onReceipts, 'function')
+    assert.equal(project({ phase: 'ready' }).onReceipts, null)
+  })
+
+  it('C-05 row11 ignores a commented handler and preserves literal slashes', () => {
+    assert.doesNotMatch(codeOnly('/* onLaunch: null */'), /onLaunch/)
+    const literals = "const string = '//not-a-comment'; const template = `//not-a-comment`"
+    assert.equal(codeOnly(literals), literals)
+  })
+
+  it('C-05 row8 consumes the existing contract and canonical revision', () => {
+    const contract = { receipt_id: 'receipt' }
+    assert.equal(project({ phase: 'ready' }, contract).contract, contract)
+    assert.equal(project({ phase: 'ready' }, contract).revision, 'revision-j2')
+  })
+})
+describe('C-04C Solar shown-document readiness', () => {
+  const start = appSource.indexOf('  const solarReady =')
+  const end = appSource.indexOf('  const surfaceStates =', start)
+  const derivation = appSource.slice(start, end)
+  const ready = (activeIntake, engineDocument = null, profile = 'solar', solarStarter = 'idle') => {
+    assert.ok(start >= 0 && end > start)
+    const surfaceSlots = { toolbar: { profile } }
+    return new Function('activeIntake', 'engineDocument', 'surfaceSlots', 'solarStarter',
+      `${derivation}\nreturn solarReady`)(activeIntake, engineDocument, surfaceSlots, solarStarter)
+  }
+
+  it('C-04C row5 opener open without onShown remains not ready', () => {
+    const document = { documentId: 'solar-starter.dxf', documentOrigin: 'starter' }
+    for (const state of ['idle', 'opening', 'open', 'failed']) assert.equal(ready(null, document, 'solar', state), false)
+    assert.doesNotMatch(derivation, /solarStarter|hasDrawing|session\.engineParsed/)
+    assert.match(appSource, new RegExp(String.raw`productSurfaceStates\(\{[\s\S]*?\bsolarReady,\s*\}\), \[mock, signedOut, shown, health, iosShipController.phase, solarReady\]`))
+    assert.match(appSource, new RegExp(String.raw`onShown=\{\(intake, history\) => \{\s*setActiveIntake\(intake\)`))
+  })
+
+  it('C-04C row6 shown starter requires surface, shown intake, matching document and load provenance', () => {
+    const intake = { documentId: 'solar-starter.dxf' }
+    const document = { ...intake, documentOrigin: 'starter' }
+    assert.equal(ready(intake, document), true)
+    assert.equal(ready(intake, document, 'cad'), false)
+    assert.equal(ready(intake, document), true)
+    assert.equal(ready(null, document), false)
+    assert.equal(ready(intake), false)
+    assert.equal(ready(intake, { ...document, documentId: 'other.dxf' }), false)
+    assert.equal(ready(intake, { ...document, documentOrigin: null }), false)
+    assert.match(derivation, new RegExp(String.raw`surfaceSlots\.toolbar\.profile === 'solar'`))
+    assert.doesNotMatch(derivation, /activeSurface/)
+    assert.match(derivation, /!!activeIntake/)
+    assert.ok(derivation.includes('engineDocument?.documentId === activeIntake.documentId'))
+    assert.ok(derivation.includes("engineDocument.documentOrigin === 'starter'"))
+    assert.ok(derivation.includes("engineDocument.documentOrigin === 'head'"))
+    assert.doesNotMatch(derivation, /SOLAR_STARTER_DOCUMENT_ID|headDocumentId|shownHeadVersion/)
+  })
+
+  it('C-04C row7 hand imports including reserved starter and head names are not Ready', () => {
+    for (const documentId of ['roof.dxf', 'other-v1.dxf', 'solar-starter.dxf', 'demo-v1.dxf']) {
+      assert.equal(ready({ documentId }, { documentId, documentOrigin: 'import' }), false)
+    }
+  })
+
+  it('C-04C row8 the displayed demo head makes Solar ready at any version', () => {
+    for (const documentId of ['demo-v1.dxf', 'demo-v12.dxf']) {
+      const document = { documentId, documentOrigin: 'head' }
+      assert.equal(ready({ documentId }, document), true)
+      assert.equal(ready({ documentId }, document, 'cad'), false)
+    }
+  })
+})
+
+describe('C-04B Solar ribbon wiring', () => {
+  it('row9 gates solved routes on mock rooftop identity, preview, head and dirty engine', () => {
+    assert.match(appSource, /solarStringsEligible = !!studioGround && surfaceSlots\.groundMaterial\.solarStrings && mock\s+&& !isEditFixture && DRAWING_SOURCE === 'rooftop_demo' && intakeIsRooftopSample/)
+    assert.match(appSource, new RegExp(String.raw`solarRouteStatus\(\{\s+eligible: solarStringsEligible, previewing, head: drawingState\?\.head \?\? 1,\s+engineDirty,`))
+    assert.match(appSource, new RegExp(String.raw`solarRouteDisplay\(\{\s+status: solarRoutesStatus, shown: showSolarStrings, routes: demoSolveRoutes`))
+    assert.ok(appSource.includes('selectedHandle, onClearSelection: () => setSelectedHandle(null)'))
+  })
+  it('row16 binds routes to the displayed document and records solve failure or emptiness', () => {
+    const assertRouteBinding = (source) => {
+      const block = source.match(new RegExp(String.raw`solarRouteStatus\(\{([\s\S]*?)\}\)`))?.[1]
+      assert.ok(block, 'the route status call exists')
+      for (const line of block.split(/\r?\n/)) {
+        assert.doesNotMatch(line, /^\s*\/\//, 'route status inputs must be executable')
+      }
+      assert.doesNotMatch(block, /\/\*|\*\//, 'route status inputs must not be block comments')
+      assert.match(block, /^\s*documentId: activeIntake\?\.documentId \?\? null,\s*$/m)
+      assert.match(block, /^\s*committedVersion: engineDocument\?\.committedVersion \?\? null,\s*$/m)
+      assert.ok(block.includes('headDocumentId: `${REQUESTED_DRAWING_ID}-v1.dxf`'))
+    }
+    assertRouteBinding(appSource)
+    const commented = appSource.replace('    documentId: activeIntake?.documentId ?? null,', '    // documentId: activeIntake?.documentId ?? null,')
+    assert.notEqual(commented, appSource, 'the comment mutation must apply')
+    assert.throws(() => assertRouteBinding(commented))
+    assert.ok(appSource.includes('const [engineDocument, setEngineDocument] = useState(null)'))
+    assert.match(stripped, /onDocumentChange:\s*setEngineDocument/)
+    assert.equal(appSource.includes('allowedDocumentIds'), false)
+    assert.ok(appSource.includes("const [demoSolveState, setDemoSolveState] = useState('pending')"))
+    assert.match(appSource, new RegExp(String.raw`\.catch\(\(\) => \{\s+if \(live\) setDemoSolveState\('failed'\)`))
+    assert.ok(appSource.includes("setDemoSolveState(routes.length ? 'loaded' : 'empty')"))
+    assert.ok(appSource.includes('solve: demoSolveState, routes: demoSolveRoutes'))
+    assert.ok(appSource.includes('solar: { status: solarRoutesStatus, shown: showSolarStrings'))
+  })
+  it('row12 profile entry changes only the selected ribbon tab', () => {
+    assert.ok(appSource.includes('profileEntryTab(previousRibbonProfile.current, surfaceSlots.toolbar.profile, ribbonTab, surfaceSlots.toolbar.home)'))
+    const start = appSource.indexOf('  const previousRibbonProfile = useRef(null)')
+    const end = appSource.indexOf('  const ribbon = useMemo', start)
+    const entryRule = appSource.slice(start, end)
+    assert.match(entryRule, /previousRibbonProfile.current = surfaceSlots.toolbar.profile/)
+    assert.match(entryRule, /setRibbonTab\(activeRibbonTab\)/)
+    assert.doesNotMatch(entryRule, /reset|setView|undo|openBytes|openFile/)
+    assert.ok(appSource.includes("activeRibbonTab === 'solar' ? ['solar-panels']"))
+    assert.ok(appSource.includes('id="cockpit-solar-panels-slot"'))
+  })
+})
+
+describe('Solar rooftop starter', () => {
+  it('mounts SolarStarterOpener only for a live empty Solar workspace', () => {
+    assert.match(appSource, /<SolarStarterOpener\s+enabled=\{!mock && drawingLoad.drawingId === REQUESTED_DRAWING_ID && drawingLoad.state === 'absent' && surfaceSlots\.toolbar\.profile === 'solar'\}\s+fetchDxf=\{fetchSampleDxf\}/)
+  })
+  it('row13 bootstraps only the Viewer with the empty starter intake', () => {
+    assert.match(appSource, /\(intake \|\| solarStarter === 'open'\) &&/)
+    assert.match(appSource, /<Viewer\s[\s\S]*?intake=\{intake \?\? SOLAR_STARTER_EMPTY_INTAKE\}/)
+    assert.match(appSource, /ref=\{intake \? viewerRef : solarStarterViewerRef\}/)
+  })
+  it('row16 drawingLoad distinguishes pending, seated, absent and failed session loads', () => {
+    assert.ok(appSource.includes("useState({ drawingId: REQUESTED_DRAWING_ID, state: 'pending' })"))
+    assert.ok(appSource.includes("resetDrawing(); setDrawingLoad({ drawingId: loadDrawingId, state: 'pending' })"))
+    assert.ok(appSource.includes("setDrawingLoad({ drawingId: loadDrawingId, state: d != null ? 'seated' : 'absent' })"))
+    assert.ok(appSource.includes("setDrawingLoad({ drawingId: loadDrawingId, state: e?.status === 404 ? 'absent' : 'failed' })"))
+  })
+  it('row19 pins drawing identity and drops superseded loader replies before cleanup', async () => {
+    assert.ok(appSource.includes('requestedDrawingIdRef.current = REQUESTED_DRAWING_ID'))
+    assert.ok(appSource.includes('alive && loadDrawingId === requestedDrawingIdRef.current'))
+    assert.match(appSource, /\[mock, isEditFixture, intakeRetryKey, REQUESTED_DRAWING_ID, DRAWING_SOURCE,/)
+    assert.equal(appSource.split("drawingLoad.drawingId === REQUESTED_DRAWING_ID && drawingLoad.state === 'absent'").length - 1, 2)
+    assert.ok(appSource.includes("drawingSeated={drawingLoad.drawingId === REQUESTED_DRAWING_ID && drawingLoad.state === 'seated'}"))
+    assert.ok(appSource.includes('consoleIntake={intake}'))
+    const start = appSource.indexOf('    let alive = true', appSource.indexOf('// load session (intake'))
+    const end = appSource.indexOf('  }, [mock, isEditFixture, intakeRetryKey', start)
+    assert.ok(start > 0 && end > start)
+    const body = appSource.slice(start, end)
+    for (const result of ['success', 'absent', 'failed']) {
+      const loads = [], seats = [], requests = []
+      const requestedDrawingIdRef = { current: 'A' }
+      const noop = () => {}
+      const context = {
+        REQUESTED_DRAWING_ID: 'A', DRAWING_SOURCE: 'A', requestedDrawingIdRef,
+        mock: false, isEditFixture: false, resetDrawing: noop,
+        setDrawingLoad: (value) => loads.push(value), setLoadErr: noop,
+        resetCatalogTransient: noop, clearToast: noop, setDrawer: noop,
+        setTenant: noop, setTier: noop, setOrg: noop, clearAgentSession: noop,
+        mockVersions: { reset: noop }, seatIntake: (value) => seats.push(value),
+        sessionActions: { checking: noop, activate: noop },
+        getSession: (_, source) => new Promise((resolve, reject) => requests.push({ source, resolve, reject })),
+        getDrawingVersions: async () => ({ head: 1 }), adoptOrgId: noop,
+        humanizeError: () => 'failed', is401: () => false,
+      }
+      const run = () => new Function(...Object.keys(context), body)(...Object.values(context))
+      const cleanA = run()
+      requestedDrawingIdRef.current = 'B'
+      context.REQUESTED_DRAWING_ID = 'B'
+      context.DRAWING_SOURCE = 'B'
+      const cleanB = run()
+      if (result === 'success') requests[0].resolve({ intake: { dwg: 'A' } })
+      else requests[0].reject({ status: result === 'absent' ? 404 : 503 })
+      await new Promise((done) => setImmediate(done))
+      assert.deepEqual(loads, [{ drawingId: 'A', state: 'pending' }, { drawingId: 'B', state: 'pending' }])
+      assert.deepEqual(seats, [])
+      assert.deepEqual(requests.map((request) => request.source), ['A', 'B'])
+      requests[1].resolve({ intake: { dwg: 'B' } })
+      await new Promise((done) => setImmediate(done))
+      assert.deepEqual(loads.at(-1), { drawingId: 'B', state: 'seated' })
+      assert.deepEqual(seats, [{ dwg: 'B' }])
+      cleanA(); cleanB()
+    }
+  })
+})
+
 describe('one-shell profile band', () => {
   it('mounts one band from the shell contract and retains unavailable quick actions', () => {
     assert.equal((appSource.match(/<CockpitTopBand\b/g) || []).length, 1)
@@ -597,13 +937,15 @@ describe('App.jsx wiring', () => {
   })
 
   it('seats live intake with the mapped store drawing and its durable version summary', () => {
+    // Bind the load to its starting identity so a later identity cannot receive its result.
+    assert.match(appSource, /\/\/ load session \(intake[^\n]*\n\s*useEffect[^\n]*\n\s*let alive = true\s*const loadDrawingId = REQUESTED_DRAWING_ID/)
     assert.match(
       stripped,
-      /drawingSummary\s*=\s*await getDrawingVersions\(false,\s*REQUESTED_DRAWING_ID\)/,
+      /drawingSummary\s*=\s*await getDrawingVersions\(false,\s*loadDrawingId\)/,
     )
     assert.match(
       stripped,
-      /drawingId:\s*REQUESTED_DRAWING_ID[\s\S]*drawingState:\s*drawingSummary/,
+      /drawingId:\s*loadDrawingId[\s\S]*drawingState:\s*drawingSummary/,
     )
     assert.match(stripped, /fallbackDrawingId:\s*REQUESTED_DRAWING_ID/)
   })
@@ -861,7 +1203,11 @@ describe('App.jsx wiring', () => {
     assert.match(grounds, /onCreateProject=\{onCreateProject\}/)
     for (const component of ['SurfaceFrame', 'SurfaceGrounds']) {
       const mount = new RegExp('<' + component + '\\s[\\s\\S]*?/>|<' + component + '\\s[\\s\\S]*?>')
-      const source = appNoComments.match(mount)?.[0]
+      // J1 gives the ground nested JSX panel props; its first /> now closes
+      // ProjectStartPanel, not SurfaceGrounds. Read through the portal argument.
+      const source = component === 'SurfaceGrounds'
+        ? appNoComments.match(/<SurfaceGrounds\s[\s\S]*?\/>,/)?.[0]
+        : appNoComments.match(mount)?.[0]
       assert.ok(source, component + ' mount exists')
       assert.match(source, new RegExp('studioPresentation=\\{Boolean\\(studioGround\\)\\}'))
       assert.match(source, new RegExp('mock=\\{mock\\}'))

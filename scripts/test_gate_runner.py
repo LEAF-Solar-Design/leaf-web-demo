@@ -47,6 +47,38 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
     g = _load_runner()
     suites = {suite.id: suite for suite in g.build_suites()}
 
+    # Solar W1 floors measured by the planner for W5-A0 (the last eight for W5-A2), skips excluded.
+    w1_floors = {
+        "design-graph": 23,
+        "cloud-solve-probe": 59,
+        "graph-versions": 18,
+        "sizing-groups": 52,
+        "solar-interchange": 19,
+        "solve-commit": 94,
+        "routes-schedule": 21,
+        "equipment": 24,
+        "catalog-gates": 61,
+        "solar-apply-plan": 39,
+        "local-graph-adapter": 41,
+        "local-graph-jobs": 122,
+        "local-graph-broker": 51,
+        "local-graph-rail": 40,
+        "graph-seed": 85,
+        "local-graph-seed": 66,
+        "seed-product-path": 12,
+    }
+    for name, expected in w1_floors.items():
+        suite = suites[f"server-w1-{name}"]
+        assert suite.expected == expected
+        assert suite.kind == "pytest"
+        assert suite.cwd == g.SERVER
+        # Pin the WHOLE command, not membership: a replaced executable or an
+        # added selection argument must fail here (Astra read of #1313, item 4).
+        assert suite.argv == g._py_pytest(f"tests/test_w1_{name.replace('-', '_')}.py")
+        assert suite.allowed_skip_reasons == (
+            (r"live staging probe is opt-in",) if name == "cloud-solve-probe" else ()
+        )
+
     inventory = suites["server-postgres-authority-inventory"]
     # 9 after the annotation authority record was added (was 8). Mirrors
     # the floor in run-all-gates.py; BOTH must move together when the contract
@@ -72,7 +104,7 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
     # the previous note left open). Mirrors the floor in run-all-gates.py; BOTH
     # must move together when a *_static.py file gains a test (#432's 96->102
     # history), and only alongside a re-measured run-all-gates.py floor.
-    assert static.expected == 181
+    assert static.expected == 182
     assert any(
         str(arg).endswith("platform/tests/test_soft_delete_guard_static.py")
         for arg in static.argv

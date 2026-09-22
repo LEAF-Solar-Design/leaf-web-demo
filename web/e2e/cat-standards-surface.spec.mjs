@@ -14,7 +14,7 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const PROOF_DIR = join(HERE, '..', '..', 'artifacts', 'cat-operator-proof')
 const UNIFIED_PROOF_DIR = join(HERE, '..', '..', 'artifacts', 'unified-surface-proof', 'wave0-route')
 
-test('standards surface keeps the complete cat operator flow in one scene', async ({ page }) => {
+test('standards surface keeps the complete cat operator flow in one scene', async ({ page }, testInfo) => {
   test.setTimeout(360_000)
   const walkStartedAt = Date.now()
   const mark = (label) => console.log(`[standards-walk] ${label}: ${Date.now() - walkStartedAt}ms`)
@@ -278,6 +278,10 @@ test('standards surface keeps the complete cat operator flow in one scene', asyn
   await page.screenshot({ path: join(PROOF_DIR, 'standards-04-redo.png'), fullPage: true })
   await expect(page).toHaveURL(/\/try\?proof=1$/)
 
+  // Playwright writes video.webm at fixture teardown (lib/index.js:411,426); outputPath()
+  // prepares its directory now (lib/worker/workerProcessEntry.js:2609-2611), which is what
+  // the receipt's video rule checks.
+  testInfo.outputPath('video.webm')
   writeProofReceipt(join(UNIFIED_PROOF_DIR, 'receipt.json'), {
     capability_ids: ['ID-01', 'ID-02', 'ID-03', 'ID-04', 'CA-01', 'CA-02', 'CV-01', 'CV-02', 'RN-01', 'AU-01', 'JB-01', 'JB-02', 'VW-01', 'VW-02', 'VR-01', 'VR-02', 'VR-03', 'EN-01', 'HL-01', 'AC-01', 'NT-01', 'AX-02', 'RS-02', 'DS-01'],
     evidence_tier: 'contract',

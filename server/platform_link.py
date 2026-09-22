@@ -196,13 +196,30 @@ def require_project_session_access(
 
     ``binding``: see ``require_project_access``.
     """
-    if session is None or str(session.get("tenant_id")) != str(tenant):
+    if session is None:
         return None
     org_id = session.get("org_id")
     project_id = session.get("project_id")
     if org_id is None and project_id is None:
-        return session
-    if org_id is None or project_id is None or str(org_id) != str(tenant):
+        return session if str(session.get("tenant_id")) == str(tenant) else None
+    if org_id is None or project_id is None:
+        return None
+    try:
+        canonical_org = str(uuid.UUID(str(org_id)))
+        canonical_project = str(uuid.UUID(str(project_id)))
+        canonical_tenant = str(uuid.UUID(str(tenant)))
+    except (ValueError, AttributeError, TypeError):
+        return None
+    if canonical_org != canonical_tenant:
+        return None
+    # Project-scoped PostgreSQL sessions use a reserved storage tenant so one
+    # project owns one durable conversation independently of drawing identity.
+    # Older project rows stored the organization UUID directly, so accept that
+    # exact legacy shape while rejecting every other marker.
+    storage_tenant = str(session.get("tenant_id"))
+    if storage_tenant not in {
+        canonical_org, f"project:{canonical_org}:{canonical_project}",
+    }:
         return None
     if binding is None:
         require_project_access(tenant, project_id, write=write)

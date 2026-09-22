@@ -1286,6 +1286,7 @@ def _pg_put(
     backend: StorageBackend, tenant_id: str, drawing_id: str, data: bytes,
     parent_version: Optional[int], meta: dict, *,
     holder: Optional[str] = None, fence: Optional[int] = None,
+    bundle: dict | None = None,
 ) -> int:
     db = _db()
     digest = _sha256(data)
@@ -1314,6 +1315,18 @@ def _pg_put(
         # comparison happens under the same FOR UPDATE row lock that the fenced
         # finalize below re-checks, so the holder cannot change underneath it.
         _authorize_checkout_row(row, holder, fence, action="publish a version")
+        if bundle is not None:
+            prior = conn.execute(
+                """SELECT version, note FROM drawing_store_versions
+                   WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
+                     AND workitem_id = %(operation)s AND state = 'ready'""",
+                {"tenant": tenant_id, "drawing": drawing_id,
+                 "operation": meta["workitem_id"]},
+            ).fetchone()
+            if prior is not None:
+                if prior["note"] != meta["note"]:
+                    raise ValueError("apply id was reused with different content")
+                return int(prior["version"])
         expected = int(parent_version) if parent_version is not None else None
         if int(row["head"]) != expected:
             raise ValueError(
@@ -1361,12 +1374,18 @@ def _pg_put(
             int(row["checkout_fence"]),
         )
 
-    version, vkey, expected, checkout_holder, checkout_fence = db.run_transaction(
-        reserve, isolation="serializable")
+    reservation = db.run_transaction(reserve, isolation="serializable")
+    if isinstance(reservation, int):
+        return reservation
+    version, vkey, expected, checkout_holder, checkout_fence = reservation
     try:
         if backend.exists(vkey):
             raise ValueError(f"refuse to overwrite immutable version key {vkey}")
         backend.put(vkey, data)
+        if bundle is not None:
+            _publish_graph_bundle(backend, tenant_id, drawing_id, bundle)
+            if _sha256(backend.get(vkey)) != digest:
+                raise ValueError("published DWG hash mismatch")
     except Exception:
         _pg_mark_version_state(tenant_id, drawing_id, version, "orphaned")
         raise
@@ -1417,6 +1436,15 @@ def _pg_put(
         return True
 
     if not db.run_transaction(finalize, isolation="serializable"):
+        if bundle is not None:
+            # A concurrent retry may have finalized the same apply while this
+            # reservation was uploading. It is a success only for exact bytes.
+            manifest = load_manifest(backend, tenant_id, drawing_id)
+            for entry in manifest["versions"]:
+                if (entry.get("workitem_id") == meta["workitem_id"]
+                        and entry.get("note") == meta["note"]):
+                    read_graph_bundle(backend, tenant_id, drawing_id, entry["v"])
+                    return int(entry["v"])
         raise ValueError("drawing head changed while the immutable version was stored")
     return version
 
@@ -1693,10 +1721,132 @@ def authorize_checkout(backend: StorageBackend, tenant_id: str, drawing_id: str,
     _authorize_checkout_view(m.get("checkout"), holder, fence)
 
 
+def _bundle_json(value: dict) -> bytes:
+    from solar_design_graph import _bounded_json
+    _bounded_json(value)
+    raw = json.dumps(value, sort_keys=True, ensure_ascii=False,
+                     allow_nan=False, separators=(",", ":")).encode("utf-8")
+    if len(raw) > 16 * 1024 * 1024:
+        raise ValueError("graph bundle exceeds size limit")
+    return raw
+
+
+def _graph_bundle_key(tenant_id: str, drawing_id: str, digest: str) -> str:
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise ValueError("invalid bundle digest")
+    return f"{drawing_prefix(tenant_id, drawing_id)}/bundles/{digest}.json"
+
+
+def _publish_graph_bundle(backend, tenant_id, drawing_id, bundle):
+    raw = _bundle_json(bundle)
+    digest = _sha256(raw)
+    _put_or_verify_blob(backend, _graph_bundle_key(tenant_id, drawing_id, digest),
+                        raw, digest)
+
+
+def read_graph_bundle(backend, tenant_id, drawing_id, version="head", *,
+                      project_id: str | None = None) -> dict:
+    """Read the complete bundle selected by the existing version authority.
+
+    The note is a content address in both configured persistence modes. Missing
+    or corrupt companions never fall back to another version's graph or mapping.
+    Callers exposing this data must supply their expected project identity.
+    """
+    if project_id is not None and (type(project_id) is not str or len(project_id) > 100):
+        raise ValueError("invalid project identity")
+    v, key, entry = resolve_version_entry(backend, tenant_id, drawing_id, version)
+    note = entry.get("note") or ""
+    if not note.startswith("solar-bundle:"):
+        raise ValueError("version has no graph bundle")
+    digest = note[len("solar-bundle:"):]
+    raw = backend.get(_graph_bundle_key(tenant_id, drawing_id, digest))
+    if len(raw) > 16 * 1024 * 1024 or _sha256(raw) != digest:
+        raise ValueError("graph bundle hash mismatch")
+    bundle = json.loads(raw)
+    from solar_design_graph import validate_graph
+    graph = validate_graph(bundle["graph"])
+    receipt = bundle["receipt"]
+    if (receipt["tenant_id"] != tenant_id or receipt["drawing_id"] != drawing_id
+            or receipt["project_id"] != graph["project"]["id"]
+            or (project_id is not None and receipt["project_id"] != project_id)):
+        raise ValueError("graph bundle scope mismatch")
+    if (receipt["hashes"]["dwg"] != entry["sha256"]
+            or _sha256(backend.get(key)) != entry["sha256"]
+            or graph["source_hash"] != entry["sha256"]):
+        raise ValueError("graph source binding mismatch")
+    for name in ("graph", "intake", "mapping"):
+        if _sha256(_bundle_json(bundle[name])) != receipt["hashes"][name]:
+            raise ValueError("graph companion hash mismatch")
+    source_v, _, source_entry = resolve_version_entry(
+        backend, tenant_id, drawing_id, receipt["source_version"])
+    if source_entry["sha256"] != receipt["source_sha256"]:
+        raise ValueError("graph source revision mismatch")
+    return dict(bundle, version=v)
+
+
+def _prepare_graph_bundle(backend, tid, did, data, parent_version, request):
+    """W1-04 adapter: graph, intake, mapping and explicit source preconditions.
+
+    The adapter produces bytes and data only. Publication stays on put_drawing.
+    A restore supplies restore_version to copy a verified historical bundle.
+    """
+    from solar_design_graph import validate_graph
+    request = json.loads(_bundle_json(request))
+    required = {"graph", "intake", "mapping", "project_id", "apply_id",
+                "source_version", "source_sha256", "source_rev"}
+    if not isinstance(request, dict) or not required.issubset(request):
+        raise ValueError("incomplete graph interchange result")
+    if set(request) - required - {"restore_version"}:
+        raise ValueError("unknown graph interchange field")
+    if (type(request["apply_id"]) is not str
+            or re.fullmatch(r"[a-zA-Z0-9_-]{1,96}", request["apply_id"]) is None):
+        raise ValueError("invalid apply id")
+    if (type(request["source_version"]) is not int
+            or request["source_version"] != parent_version):
+        raise ValueError("source version differs from parent")
+    graph = validate_graph(request["graph"])
+    if graph["project"]["id"] != request["project_id"]:
+        raise ValueError("graph project mismatch")
+    if graph["source_hash"] != _sha256(data):
+        raise ValueError("graph does not describe the published DWG")
+    if any(type(request[name]) is not dict for name in ("intake", "mapping")):
+        raise ValueError("graph companions must be objects")
+    _, source_key, source = resolve_version_entry(backend, tid, did, parent_version)
+    if (source["sha256"] != request["source_sha256"]
+            or _sha256(backend.get(source_key)) != source["sha256"]):
+        raise ValueError("stale source hash")
+    previous = None
+    if (source.get("note") or "").startswith("solar-bundle:"):
+        previous = read_graph_bundle(backend, tid, did, parent_version,
+                                     project_id=request["project_id"])
+    expected_rev = previous["graph"]["rev"] if previous else None
+    if (request["source_rev"] != expected_rev
+            or (request["source_rev"] is not None and type(request["source_rev"]) is not int)):
+        raise ValueError("stale graph source revision")
+    if "restore_version" in request:
+        restored = read_graph_bundle(backend, tid, did, request["restore_version"],
+                                     project_id=request["project_id"])
+        if any(request[name] != restored[name] for name in ("graph", "intake", "mapping")):
+            raise ValueError("restore must copy the complete graph bundle")
+    elif graph["rev"] != (expected_rev + 1 if expected_rev is not None else 0):
+        raise ValueError("graph revision must advance once")
+    bundle = {name: request[name] for name in ("graph", "intake", "mapping")}
+    receipt = {name: request[name] for name in
+               ("project_id", "apply_id", "source_version", "source_sha256", "source_rev")}
+    receipt.update(tenant_id=tid, drawing_id=did,
+                   hashes={name: _sha256(_bundle_json(bundle[name])) for name in bundle})
+    receipt["hashes"]["dwg"] = _sha256(data)
+    if "restore_version" in request:
+        receipt["restore_version"] = request["restore_version"]
+    bundle["receipt"] = receipt
+    return bundle
+
+
 def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_path: str,
                 parent_version, meta: dict | None = None, *,
                 holder: str | None = None, fence: int | None = None,
-                require_parent_is_head: bool = False) -> int:
+                require_parent_is_head: bool = False,
+                graph_bundle: dict | None = None) -> int:
     """Append a NEW immutable version (v = latest+1, parent = parent_version) and
     advance head + latest. This is the primitive the DWG write path calls.
 
@@ -1734,11 +1884,23 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
     """
     tid = sanitize_id(tenant_id)
     did = sanitize_id(drawing_id)
+    bundle = None
+    data = _read(local_path)
+    if graph_bundle is not None:
+        if holder is None or type(fence) is not int or fence < 1:
+            raise CheckoutDenied("graph commits require a holder and checkout fence")
+        if not data or len(data) > 256 * 1024 * 1024:
+            raise ValueError("invalid graph DWG payload")
+        bundle = _prepare_graph_bundle(backend, tid, did, data, parent_version,
+                                       graph_bundle)
+        meta = dict(meta or {}, note="solar-bundle:" + _sha256(_bundle_json(bundle)),
+                    workitem_id="solar:" + bundle["receipt"]["apply_id"])
+        require_parent_is_head = True
     if authority_mode() == "postgres":
         return _pg_put(
-            backend, tid, did, _read(local_path),
+            backend, tid, did, data,
             int(parent_version) if parent_version is not None else None,
-            meta or {}, holder=holder, fence=fence,
+            meta or {}, holder=holder, fence=fence, bundle=bundle,
         )
     # Under the SAME guard as acquire/release, because this is a load, edit,
     # save of the same one manifest document and `save_manifest` writes the
@@ -1753,10 +1915,19 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
     # Read the payload BEFORE taking the lock; see `ingest_drawing`. The blob
     # WRITE has to stay inside, because its key depends on the version number the
     # guarded manifest read produces.
-    data = _read(local_path)
     with _legacy_checkout_guard(backend, tid, did):
         m = load_manifest(backend, tid, did)
         _authorize_checkout_view(m.get("checkout"), holder, fence)
+        if bundle is not None:
+            if not _is_active(m.get("checkout"), datetime.now(timezone.utc)):
+                raise CheckoutDenied("an active checkout is required for a graph commit")
+            if holder is None or fence is None or m["checkout"].get("fence") != fence:
+                raise CheckoutDenied("graph commits require a holder and checkout fence")
+            for entry in m["versions"]:
+                if entry.get("workitem_id") == meta["workitem_id"]:
+                    if entry.get("note") != meta["note"]:
+                        raise ValueError("apply id was reused with different content")
+                    return int(entry["v"])
 
         # Opt-in compare-and-set for callers whose CONTRACT is "parent = the
         # current head" (restore): inside this guard the manifest is fresh, so
@@ -1772,10 +1943,26 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
 
         new_v = int(m["latest"]) + 1
         vkey = drawing_version_key(tid, did, new_v)
-        if backend.exists(vkey):  # immutability guard (monotonic latest => never true in practice)
+        if bundle is not None:
+            # Failed publications can leave immutable DWGs beyond latest.
+            # Adopt matching bytes, otherwise reserve a fresh bounded slot.
+            for _ in range(1000):
+                if not backend.exists(vkey) or _sha256(backend.get(vkey)) == _sha256(data):
+                    break
+                new_v += 1
+                vkey = drawing_version_key(tid, did, new_v)
+            else:
+                raise ValueError("too many abandoned version reservations")
+        if bundle is None and backend.exists(vkey):  # immutability guard
             raise ValueError(f"refuse to overwrite immutable version key {vkey}")
 
-        backend.put(vkey, data)
+        if bundle is None:
+            backend.put(vkey, data)
+        else:
+            _put_or_verify_blob(backend, vkey, data, _sha256(data))
+            _publish_graph_bundle(backend, tid, did, bundle)
+            if not _is_active(m.get("checkout"), datetime.now(timezone.utc)):
+                raise CheckoutDenied("checkout expired during graph publication")
 
         meta = meta or {}
         parent = int(parent_version) if parent_version is not None else None
@@ -1799,12 +1986,18 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
 
 def resolve_version_entry(backend: StorageBackend, tenant_id: str, drawing_id: str,
                           version="head") -> tuple[int, str, dict]:
-    """Resolve `version` to (version_int, object_key, manifest_row) in ONE manifest read.
+    """Resolve through `resolve_version`, then read that version's manifest row."""
+    v, key = resolve_version(backend, tenant_id, drawing_id, version)
+    m = load_manifest(backend, tenant_id, drawing_id)
+    entry = next((e for e in m["versions"] if int(e["v"]) == v), None)
+    if entry is None:
+        raise ValueError(f"version {v} not in manifest for {tenant_id}/{drawing_id}")
+    return v, key, dict(entry)
 
-    The row is a copy of the manifest's own entry for that version, so a caller
-    that needs its metadata (restore reads `source_ref`) does not load the
-    manifest a second time to find what this call already proved is there.
-    """
+
+def resolve_version(backend: StorageBackend, tenant_id: str, drawing_id: str,
+                    version="head") -> tuple[int, str]:
+    """Resolve `version` (an int, "head", or "latest") to (version_int, object_key)."""
     tid = sanitize_id(tenant_id)
     did = sanitize_id(drawing_id)
     m = load_manifest(backend, tid, did)
@@ -1820,14 +2013,13 @@ def resolve_version_entry(backend: StorageBackend, tenant_id: str, drawing_id: s
     if entry is None:
         known = sorted(int(e["v"]) for e in m["versions"])
         raise ValueError(f"version {v} not in manifest for {tid}/{did} (known={known})")
-    return v, drawing_version_key(tid, did, v), dict(entry)
+    return v, drawing_version_key(tid, did, v)
 
 
-def resolve_version(backend: StorageBackend, tenant_id: str, drawing_id: str,
-                    version="head") -> tuple[int, str]:
-    """Resolve `version` (an int, "head", or "latest") to (version_int, object_key)."""
-    v, key, _entry = resolve_version_entry(backend, tenant_id, drawing_id, version)
-    return v, key
+def _verify_selected_bundle(backend, tid, did, version):
+    _, _, entry = resolve_version_entry(backend, tid, did, version)
+    if (entry.get("note") or "").startswith("solar-bundle:"):
+        read_graph_bundle(backend, tid, did, version)
 
 
 def undo(backend: StorageBackend, tenant_id: str, drawing_id: str, *,
@@ -1872,6 +2064,7 @@ def undo(backend: StorageBackend, tenant_id: str, drawing_id: str, *,
             if row["parent_version"] is None:
                 raise ValueError("nothing to undo: head is the root version")
             parent = int(row["parent_version"])
+            _verify_selected_bundle(backend, tid, did, parent)
             updated = conn.execute(
                 """
                 UPDATE drawing_store_manifests
@@ -1905,6 +2098,7 @@ def undo(backend: StorageBackend, tenant_id: str, drawing_id: str, *,
         if parent is None:
             raise ValueError("nothing to undo: head is the root version")
 
+        _verify_selected_bundle(backend, tid, did, int(parent))
         m["head"] = int(parent)
         save_manifest(backend, tid, did, m)
         return int(parent)
@@ -1987,6 +2181,7 @@ def redo(backend: StorageBackend, tenant_id: str, drawing_id: str, *,
                 raise ValueError(
                     f"nothing to redo: no child of head {head} "
                     f"leads to latest {latest}")
+            _verify_selected_bundle(backend, tid, did, target)
             conn.execute(
                 """
                 UPDATE drawing_store_manifests
@@ -2026,6 +2221,7 @@ def redo(backend: StorageBackend, tenant_id: str, drawing_id: str, *,
         if target is None:
             raise ValueError(f"nothing to redo: no child of head {head} leads to latest {latest}")
 
+        _verify_selected_bundle(backend, tid, did, target)
         m["head"] = target
         save_manifest(backend, tid, did, m)
         return target

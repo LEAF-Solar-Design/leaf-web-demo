@@ -8,6 +8,7 @@ emits the same "families text"; this module turns that text into Intake JSON.
 """
 from __future__ import annotations
 
+import hashlib
 import math
 import sys
 
@@ -31,7 +32,28 @@ def o2w(p, n):
             p[0] * ax[2] + p[1] * ay[2] + p[2] * n[2])
 
 
-def parse(families_txt, dwg):
+def source_binding(source_bytes):
+    """Bind an intake to the actual drawing bytes, never its display name."""
+    if type(source_bytes) is not bytes or not 0 < len(source_bytes) <= 256 * 1024 * 1024:
+        raise ValueError("INVALID_INTAKE_SOURCE")
+    digest = hashlib.sha256(source_bytes).hexdigest()
+    return {"source": {"dwg_sha256": digest, "byte_length": len(source_bytes),
+                       "intake_schema": "v2"}}
+
+
+def _intake_source(source_bytes):
+    if source_bytes is None:
+        # Legacy text-only callers cannot prove the drawing bytes. Keep that
+        # absence explicit instead of hashing the display name or text dump.
+        return {"source": {"dwg_sha256": None, "byte_length": None,
+                           "intake_schema": "v2", "binding": "unavailable"}}
+    binding = source_binding(source_bytes)
+    # Keep the DWG intake's compatibility fields alongside its source record.
+    return {**binding, "source_sha256": binding["source"]["dwg_sha256"],
+            "source_byte_length": binding["source"]["byte_length"]}
+
+
+def parse(families_txt, dwg, *, source_bytes=None):
     """Parse a families text FILE PATH into Intake JSON (§1)."""
     out = {"dwg": dwg, "layers": [], "polylines": [], "inserts": [],
            "faces3d": [], "blockdefs": {}, "geodata": [], "images": [],
@@ -48,10 +70,11 @@ def parse(families_txt, dwg):
     with open(families_txt, errors="replace") as f:
         lines = f.readlines()
     out = _parse_lines(lines, out, close_pl, cur_bd, cur_pl)
+    out.update(_intake_source(source_bytes))
     return out
 
 
-def parse_text(families_text, dwg):
+def parse_text(families_text, dwg, *, source_bytes=None):
     """Parse families text CONTENT (str) into Intake JSON (§1).
 
     Used by the DA client after downloading the WorkItem's result file.
@@ -68,7 +91,9 @@ def parse_text(families_text, dwg):
             out["polylines"].append(cur_pl)
         cur_pl = None
 
-    return _parse_lines(families_text.splitlines(), out, close_pl, cur_bd, cur_pl)
+    result = _parse_lines(families_text.splitlines(), out, close_pl, cur_bd, cur_pl)
+    result.update(_intake_source(source_bytes))
+    return result
 
 
 _MTEXT_FORMAT_CODES = ("\\P", "\\p", "\\f", "\\F", "\\H", "\\W", "\\C", "\\c", "\\Q", "\\T", "\\A", "\\L", "\\l", "\\O", "\\o", "\\K", "\\k", "\\S")

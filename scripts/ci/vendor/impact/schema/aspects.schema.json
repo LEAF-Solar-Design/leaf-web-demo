@@ -1,0 +1,141 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ASPECTS schema version 1",
+  "description": "Change-impact manifest. The hand-written validator also enforces unique component, target and contract IDs and fills defaults. Inputs are limited to 1 MiB.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "project_id", "repository", "authored_at_revision", "components"],
+  "properties": {
+    "schema_version": {"type": "integer", "const": 1},
+    "project_id": {"$ref": "#/definitions/id"},
+    "repository": {"$ref": "#/definitions/repository"},
+    "integration_branch": {"type": "string", "minLength": 1, "maxLength": 100, "pattern": "^[A-Za-z0-9_][A-Za-z0-9_./-]{0,99}$", "description": "The branch this repository integrates on when it is not the remote default (leaf_website: staging). plan and check derive the base from it."},
+    "repos": {
+      "type": "object", "additionalProperties": false, "default": {}, "maxProperties": 100,
+      "description": "Path-to-repo map for the host index: repository id to an absolute checkout path. Read by discovery; never required.",
+      "patternProperties": {"^(local|[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100})$": {"type": "string", "minLength": 1, "maxLength": 260}}
+    },
+    "authored_at_revision": {"$ref": "#/definitions/sha"},
+    "components": {"type": "array", "minItems": 1, "maxItems": 200, "items": {"$ref": "#/definitions/component"}},
+    "unmapped": {"type": "array", "minItems": 0, "maxItems": 500, "default": [], "items": {"$ref": "#/definitions/glob"}},
+    "targets": {"type": "array", "minItems": 0, "maxItems": 50, "default": [], "items": {"$ref": "#/definitions/target"}},
+    "contracts": {"type": "array", "minItems": 0, "maxItems": 100, "default": [], "items": {"$ref": "#/definitions/contract"}},
+    "companions": {"type": "array", "minItems": 0, "maxItems": 200, "default": [], "items": {"$ref": "#/definitions/companion"}},
+    "concerns": {
+      "type": "object", "additionalProperties": false, "default": {},
+      "description": "Missing concern keys receive evidence=[], monitor_obligation=false, outcome_default=unresolved in the loaded object.",
+      "properties": {
+        "contracts": {"$ref": "#/definitions/concern"},
+        "persistence": {"$ref": "#/definitions/concern"},
+        "auth_tenancy": {"$ref": "#/definitions/concern"},
+        "logging": {"$ref": "#/definitions/concern"},
+        "telemetry": {"$ref": "#/definitions/concern"},
+        "alarms": {"$ref": "#/definitions/concern"},
+        "deployment": {"$ref": "#/definitions/concern"},
+        "runtime_state": {"$ref": "#/definitions/concern"},
+        "restart_rearm": {"$ref": "#/definitions/concern"},
+        "rollback": {"$ref": "#/definitions/concern"},
+        "tests": {"$ref": "#/definitions/concern"},
+        "docs_runbooks": {"$ref": "#/definitions/concern"}
+      }
+    }
+  },
+  "definitions": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"},
+    "repository": {"type": "string", "minLength": 1, "maxLength": 201, "pattern": "^(local|[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100})$"},
+    "endpointRepo": {"type": "string", "minLength": 1, "maxLength": 201, "pattern": "^(self|local|[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100})$"},
+    "sha": {"type": "string", "minLength": 40, "maxLength": 40, "pattern": "^[0-9a-f]{40}$"},
+    "revision": {"type": "string", "minLength": 1, "maxLength": 40, "pattern": "^(HEAD|unresolved|[0-9a-f]{40})$"},
+    "glob": {
+      "type": "string", "minLength": 1, "maxLength": 512,
+      "pattern": "^(?!/)(?!\\.\\.(?:/|$))(?!.*?/\\.\\.(?:/|$))[A-Za-z0-9_./*?@+\\-]+$",
+      "description": "Forward slashes only, no leading slash or .. segment. ** matches whole segments, * stays within a segment, ? matches one non-slash character. a/** requires at least one descendant. Patterns without wildcards are exact paths. Braces and backslashes are refused."
+    },
+    "paths": {"type": "array", "minItems": 1, "maxItems": 50, "items": {"$ref": "#/definitions/glob"}},
+    "string512": {"type": "string", "minLength": 1, "maxLength": 512},
+    "string256": {"type": "string", "minLength": 1, "maxLength": 256},
+    "strings": {"type": "array", "minItems": 0, "maxItems": 20, "items": {"$ref": "#/definitions/string512"}},
+    "outcome": {"type": "string", "enum": ["changed", "unchanged-compatible", "not-applicable", "deferred", "unresolved"]},
+    "facet": {"type": "string", "enum": ["web-api", "web-ui", "backend", "ios", "cad-engine", "deployment", "contracts", "ci", "release", "persistence", "integration", "agent", "control-plane", "runtime-host"]},
+    "component": {
+      "type": "object", "additionalProperties": false, "required": ["id", "paths", "facets"],
+      "properties": {
+        "id": {"$ref": "#/definitions/id"},
+        "paths": {"$ref": "#/definitions/paths"},
+        "facets": {"type": "array", "minItems": 0, "maxItems": 12, "items": {"$ref": "#/definitions/facet"}}
+      }
+    },
+    "target": {
+      "type": "object", "additionalProperties": false, "required": ["id", "exposure", "deploy_shape"],
+      "properties": {
+        "id": {"$ref": "#/definitions/id"},
+        "exposure": {"type": "string", "enum": ["ga_public", "pre_ga", "unknown"]},
+        "deploy_shape": {"type": "string", "enum": ["ecs-fargate", "vercel", "codebuild", "systemd", "installer", "e2b-template", "manual", "other"]},
+        "paths": {"type": "array", "minItems": 0, "maxItems": 50, "items": {"$ref": "#/definitions/glob"}},
+        "restart_semantics": {"type": "string", "minLength": 1, "maxLength": 500},
+        "evidence": {"$ref": "#/definitions/strings"},
+        "companions": {"$ref": "#/definitions/strings"},
+        "manifest": {"$ref": "#/definitions/string512"},
+        "dockerfile": {"$ref": "#/definitions/string512"},
+        "deploy_command": {"$ref": "#/definitions/string512"},
+        "note": {"$ref": "#/definitions/string512"},
+        "gap": {"$ref": "#/definitions/string512"}
+      }
+    },
+    "producer": {
+      "type": "object", "additionalProperties": false, "required": ["repo", "paths", "revision"],
+      "properties": {
+        "repo": {"$ref": "#/definitions/endpointRepo"},
+        "paths": {"$ref": "#/definitions/paths"},
+        "revision": {"$ref": "#/definitions/revision"},
+        "route": {"$ref": "#/definitions/string256"},
+        "extractor": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z0-9-]{1,64}$"}
+      }
+    },
+    "consumer": {
+      "type": "object", "additionalProperties": false, "required": ["repo", "paths", "revision"],
+      "properties": {
+        "repo": {"$ref": "#/definitions/endpointRepo"},
+        "paths": {"$ref": "#/definitions/paths"},
+        "revision": {"$ref": "#/definitions/revision"},
+        "route": {"$ref": "#/definitions/string256"},
+        "extractor": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z0-9-]{1,64}$"},
+        "status": {"type": "string", "enum": ["agrees", "mismatch", "unresolved"]}
+      }
+    },
+    "contract": {
+      "type": "object", "additionalProperties": false, "required": ["id", "kind", "producer", "consumers"],
+      "properties": {
+        "id": {"$ref": "#/definitions/id"},
+        "kind": {"type": "string", "enum": ["http", "data-schema", "metric-dimension-set", "file", "other"]},
+        "producer": {"$ref": "#/definitions/producer"},
+        "consumers": {"type": "array", "minItems": 1, "maxItems": 20, "items": {"$ref": "#/definitions/consumer"}},
+        "artifact": {"$ref": "#/definitions/strings"},
+        "evidence_producer": {"$ref": "#/definitions/string512"},
+        "adoption_law": {"$ref": "#/definitions/string512"},
+        "companions": {"$ref": "#/definitions/strings"},
+        "known_broken": {"$ref": "#/definitions/string256"},
+        "outcome": {"$ref": "#/definitions/outcome"},
+        "reason_source": {"$ref": "#/definitions/string512"},
+        "note": {"type": "string", "minLength": 1, "maxLength": 1000}
+      }
+    },
+    "companion": {
+      "type": "object", "additionalProperties": false, "required": ["path", "moves_with"],
+      "properties": {
+        "path": {"$ref": "#/definitions/glob"},
+        "moves_with": {"type": "array", "minItems": 1, "maxItems": 20, "items": {"$ref": "#/definitions/string512"}},
+        "enforced_by": {"$ref": "#/definitions/string512"},
+        "outcome": {"$ref": "#/definitions/outcome"}
+      }
+    },
+    "concern": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "evidence": {"$ref": "#/definitions/strings"},
+        "monitor_obligation": {"type": "boolean", "default": false},
+        "outcome_default": {"type": "string", "enum": ["changed", "unchanged-compatible", "not-applicable", "deferred", "unresolved"], "default": "unresolved"}
+      }
+    }
+  }
+}

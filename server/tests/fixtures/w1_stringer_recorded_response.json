@@ -1,0 +1,5 @@
+{
+  "source": "Recorded Leaf Automation service response, 2026-09-17. Synthetic request; real response; no customer data.",
+  "request_fixture": "w1_stringer_request_4x6.json",
+  "response_fixture": "w1_stringer_response_real.json"
+}

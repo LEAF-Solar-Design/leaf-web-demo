@@ -13,7 +13,7 @@ describe('agentBannerFor', () => {
   it('defaults to the console (App.jsx) copy', () => {
     expect(agentBannerFor({ errorCode: 'llm_quota_exhausted' })).toEqual({
       kind: 'quota',
-      message: 'AI paused — your built tools keep working.',
+      message: 'AI paused. Your built tools keep working.',
     })
     expect(agentBannerFor({ status: 401 })).toEqual({
       kind: 'grant',
@@ -21,11 +21,11 @@ describe('agentBannerFor', () => {
     })
     expect(agentBannerFor({ status: 403 })).toEqual({
       kind: 'entitlement',
-      message: 'Chat isn’t included in your plan — your built tools keep working.',
+      message: 'Chat isn’t included in your plan. Your built tools keep working.',
     })
     expect(agentBannerFor({ status: 409, errorCode: 'turn_in_progress' })).toEqual({
       kind: 'busy',
-      message: 'The assistant is mid-turn — routed deterministically instead.',
+      message: 'The assistant is mid-turn, routed deterministically instead.',
     })
   })
 

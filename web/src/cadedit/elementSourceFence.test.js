@@ -15,13 +15,16 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 const WEB_ROOT = process.cwd()
 const MARKERS = [/data-element-source/g, /src\/[\w./-]+\.jsx(?::[A-Z][\w$]*)?/g, /src\/site\//g]
 
-function buildWithMode(mode, fenceRoot) {
+function buildWithMode(mode, fenceRoot, envOverride = {}) {
   const outDir = join(fenceRoot, mode)
   const env = { ...process.env, VITE_CAD_EDIT: '1' }
   delete env.NODE_ENV
+  // Vite build defaults to production even with --mode development.
+  // Keep the dev runtime and its source variable names for the positive control.
+  Object.assign(env, envOverride)
   execFileSync(
     process.execPath,
-    [join(WEB_ROOT, 'node_modules', 'vite', 'bin', 'vite.js'), 'build', '--mode', mode, '--outDir', outDir, '--emptyOutDir'],
+    [join(WEB_ROOT, 'node_modules', 'vite', 'bin', 'vite.js'), 'build', '--mode', mode, '--outDir', outDir, '--emptyOutDir', ...(mode === 'development' ? ['--minify', 'false'] : [])],
     {
       cwd: WEB_ROOT,
       env,
@@ -93,8 +96,16 @@ describe('element source stamp build fence', () => {
   })
 
   it('ships no development JSX runtime markers in production', () => {
-    for (const marker of [/jsxDEV/g, /fileName:/g]) expect((allText(productionChunks).match(marker) ?? []).length).toBe(0)
+    // Planner measured 1078 jsxDEV hits in the development App chunk, zero in production.
+    // fileName: had 1143 development hits but also names ordinary production app properties.
+    // esbuild emits no Babel _jsxFileName token; MARKERS above still checks source paths.
+    for (const marker of [/jsxDEV/g]) expect((allText(productionChunks).match(marker) ?? []).length).toBe(0)
   })
+
+  it('J1 row9 development build retains the JSX development runtime marker', () => {
+    const developmentChunks = emittedJavaScript(buildWithMode('development', fenceRoot, { NODE_ENV: 'development' }))
+    for (const marker of [/jsxDEV/g]) expect((allText(developmentChunks).match(marker) ?? []).length).toBeGreaterThan(0)
+  }, 300_000)
 
   it('keeps the app positive control in both builds', () => {
     expect(allText(stagingChunks)).toContain('tc-rail-body')

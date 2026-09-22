@@ -2,6 +2,379 @@
   "_note": "Tracked, server-lane seed registry for drawing.write tools (M2). deps.all_tools() folds these in additively so /api/run resolves them by name. Read tools stay in engine/registry.json; authored tools stay in the gitignored authored_tools.json.",
   "tools": [
     {
+      "name": "solar-settings",
+      "version": "1.0.0",
+      "description": "Edit drawing-owned solar settings.",
+      "kind": "script",
+      "family_id": "stringing",
+      "engine_op": "solar_settings",
+      "entry": "builtins/solar_settings.py",
+      "params": {
+        "type": "object",
+        "properties": {
+          "drawing_id": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "expected_rev": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "cancel": {
+            "type": "boolean"
+          },
+          "changes": {
+            "type": "object",
+            "minProperties": 1,
+            "maxProperties": 14
+          },
+          "initialize": {
+            "type": "object",
+            "properties": {
+              "schema_version": {"type": "integer", "enum": [1]},
+              "source_intake_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "units": {
+                "type": "object",
+                "properties": {
+                  "drawing_units": {"type": "string", "enum": ["m", "mm", "cm", "km", "in", "ft", "yd"]},
+                  "wcs_to_ucs": {"type": "array", "minItems": 16, "maxItems": 16, "items": {"type": "number"}},
+                  "elevation_datum": {"type": "string", "minLength": 1, "maxLength": 4096},
+                  "crs": {"type": ["string", "null"], "maxLength": 4096}
+                },
+                "required": ["drawing_units", "wcs_to_ucs", "elevation_datum", "crs"],
+                "additionalProperties": false
+              }
+            },
+            "required": ["schema_version", "source_intake_sha256", "units"],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "expected_rev"
+        ],
+        "additionalProperties": false
+      },
+      "returns": {
+        "type": "object"
+      },
+      "capabilities": [
+        "drawing.write"
+      ],
+      "allow_local_fallback": false
+    },
+    {
+      "name": "solar-size-strings",
+      "version": "1.0.0",
+      "description": "Confirm cloud string sizing for this drawing.",
+      "kind": "script",
+      "family_id": "stringing",
+      "engine_op": "solar_size_strings",
+      "entry": "builtins/solar_size_strings.py",
+      "params": {
+        "type": "object",
+        "properties": {
+          "drawing_id": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "expected_rev": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "cancel": {
+            "type": "boolean"
+          },
+          "mode": {
+            "enum": [
+              "global",
+              "zones"
+            ]
+          },
+          "requests": {
+            "type": "object",
+            "maxProperties": 4096
+          },
+          "grant_ref": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9_-]{1,64}$"
+          },
+          "confirm": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "expected_rev"
+        ],
+        "additionalProperties": false
+      },
+      "returns": {
+        "type": "object"
+      },
+      "capabilities": [
+        "drawing.write"
+      ],
+      "allow_local_fallback": false
+    },
+    {
+      "name": "solar-panel-groups",
+      "version": "1.0.0",
+      "description": "Build panel groups with the licensed drawing engine.",
+      "kind": "script",
+      "family_id": "stringing",
+      "engine_op": "solar_panel_groups",
+      "entry": "builtins/solar_panel_groups.py",
+      "params": {
+        "type": "object",
+        "properties": {
+          "drawing_id": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "expected_rev": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "cancel": {
+            "type": "boolean"
+          },
+          "groups": {
+            "type": "array",
+            "maxItems": 128,
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "expected_rev"
+        ],
+        "additionalProperties": false
+      },
+      "returns": {
+        "type": "object"
+      },
+      "capabilities": [
+        "drawing.write"
+      ],
+      "allow_local_fallback": false
+    },
+    {
+      "name": "solar-commit-solve",
+      "version": "1.0.0",
+      "description": "Commit a broker-validated solar solve candidate.",
+      "kind": "script",
+      "family_id": "stringing",
+      "engine_op": "solar_commit_solve",
+      "entry": "builtins/solar_commit_solve.py",
+      "params": {
+        "type": "object",
+        "properties": {
+          "drawing_id": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "expected_rev": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "cancel": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "expected_rev"
+        ],
+        "additionalProperties": false
+      },
+      "returns": {
+        "type": "object"
+      },
+      "capabilities": [
+        "drawing.write"
+      ],
+      "allow_local_fallback": false
+    },
+    {
+      "name": "solar-correct-string",
+      "version": "1.0.0",
+      "description": "Correct persisted string membership or settings.",
+      "kind": "script",
+      "family_id": "stringing",
+      "engine_op": "solar_correct_string",
+      "entry": "builtins/solar_correct_string.py",
+      "params": {
+        "type": "object",
+        "properties": {
+          "drawing_id": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "expected_rev": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "cancel": {
+            "type": "boolean"
+          },
+          "memberships": {
+            "type": "array",
+            "maxItems": 1000,
+            "items": {
+              "type": "object"
+            }
+          },
+          "settings_changes": {
+            "type": "object",
+            "maxProperties": 4096
+          }
+        },
+        "required": [
+          "expected_rev"
+        ],
+        "additionalProperties": false
+      },
+      "returns": {
+        "type": "object"
+      },
+      "capabilities": [
+        "drawing.write"
+      ],
+      "allow_local_fallback": false
+    },
+    {
+      "name": "solar-assign-equipment",
+      "version": "1.0.0",
+      "description": "Place equipment and assign valid strings.",
+      "kind": "script",
+      "family_id": "stringing",
+      "engine_op": "solar_assign_equipment",
+      "entry": "builtins/solar_assign_equipment.py",
+      "params": {
+        "type": "object",
+        "properties": {
+          "drawing_id": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "expected_rev": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "cancel": {
+            "type": "boolean"
+          },
+          "equipment": {
+            "type": "array",
+            "maxItems": 4096,
+            "items": {
+              "type": "object"
+            }
+          },
+          "assignments": {
+            "type": "array",
+            "maxItems": 4096,
+            "items": {
+              "type": "object"
+            }
+          },
+          "preview": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "expected_rev"
+        ],
+        "additionalProperties": false
+      },
+      "returns": {
+        "type": "object"
+      },
+      "capabilities": [
+        "drawing.write"
+      ],
+      "allow_local_fallback": false
+    },
+    {
+      "name": "solar-homeruns",
+      "version": "1.0.0",
+      "description": "Route terminal leads for assigned strings.",
+      "kind": "script",
+      "family_id": "stringing",
+      "engine_op": "solar_homeruns",
+      "entry": "builtins/solar_homeruns.py",
+      "params": {
+        "type": "object",
+        "properties": {
+          "drawing_id": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "expected_rev": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "cancel": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "expected_rev"
+        ],
+        "additionalProperties": false
+      },
+      "returns": {
+        "type": "object"
+      },
+      "capabilities": [
+        "drawing.write"
+      ],
+      "allow_local_fallback": false
+    },
+    {
+      "name": "solar-schedule",
+      "version": "1.0.0",
+      "description": "Create a circuit schedule from complete routing.",
+      "kind": "script",
+      "family_id": "stringing",
+      "engine_op": "solar_schedule",
+      "entry": "builtins/solar_schedule.py",
+      "params": {
+        "type": "object",
+        "properties": {
+          "drawing_id": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "expected_rev": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "cancel": {
+            "type": "boolean"
+          },
+          "insertion_point": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 3,
+            "items": {
+              "type": "number"
+            }
+          }
+        },
+        "required": [
+          "expected_rev"
+        ],
+        "additionalProperties": false
+      },
+      "returns": {
+        "type": "object"
+      },
+      "capabilities": [
+        "drawing.write"
+      ],
+      "allow_local_fallback": false
+    },
+    {
       "name": "delete-marked-panel",
       "version": "1.0.0",
       "description": "Deletes one marked panel polyline (by handle; default = first on layer Panels) and adds a marker entity — produces a new immutable drawing version.",

@@ -16,9 +16,22 @@
  * what "next read" means here — if the viewer's own record is gone from it,
  * this component drops the whole project instead of rendering stale rows.
  */
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 
 export const ROLES = ['owner', 'editor', 'reviewer', 'read-only']
+
+export function memberLabel(member) {
+  return [member.label, member.display_name, member.name, member.email]
+    .find((value) => typeof value === 'string' && value.trim())?.trim()
+    || `Member ${String(member.binding_id || member.member_id || '').slice(0, 8)}`
+}
+
+function identityText(identity) {
+  const label = memberLabel(identity)
+  return identity.role && identity.created_at
+    ? `${label} · ${identity.role} · joined ${identity.created_at.slice(0, 10)}`
+    : label
+}
 
 function errorMessage(e, fallback) {
   return e?.body?.detail || e?.message || fallback
@@ -31,17 +44,13 @@ export default function Membership({
   onInvite,      // async (identifier, role) => void
   onChangeRole,  // async (memberId, role) => void
   onRevoke,      // async (memberId) => void
-  // What the invite field collects. Defaults to an email address, which is what
-  // an invite reads like; the live platform route takes a binding id instead
-  // (platform/api.py InviteProjectMemberBody has NO binding-by-email lookup),
-  // so the real caller overrides both. The identifier is passed to onInvite
-  // verbatim either way — this component never parses or validates it.
-  inviteLabel = 'Invite by email',
-  inviteInputType = 'email',
+  identities, // existing bindings in this organization only
 }) {
-  const [inviteEmail, setInviteEmail] = useState('')
+  const [inviteBinding, setInviteBinding] = useState('')
+  const [search, setSearch] = useState('')
   const [inviteRole, setInviteRole] = useState('read-only')
   const [inviting, setInviting] = useState(false)
+  const invitingRef = useRef(false)
   const [pendingRoleIds, setPendingRoleIds] = useState(() => new Set())
   const [pendingRevokeIds, setPendingRevokeIds] = useState(() => new Set())
   const [error, setError] = useState(null)
@@ -65,6 +74,10 @@ export default function Membership({
 
   const canInvite = authority.can_invite === true
   const canManage = authority.can_manage === true
+  const choices = identities || []
+  const filteredChoices = choices.filter((identity) =>
+    identityText(identity).toLowerCase().includes(search.trim().toLowerCase()))
+  const selected = filteredChoices.find((identity) => identity.binding_id === inviteBinding)
 
   const withPending = (setFn, id, fn) => async () => {
     setFn((prev) => new Set(prev).add(id))
@@ -72,7 +85,7 @@ export default function Membership({
     try {
       await fn()
     } catch (e) {
-      setError(errorMessage(e, 'That action did not go through — nothing changed.'))
+      setError(errorMessage(e, 'That action did not go through. Nothing changed.'))
     } finally {
       setFn((prev) => {
         const next = new Set(prev)
@@ -84,17 +97,19 @@ export default function Membership({
 
   const submitInvite = async (event) => {
     event.preventDefault()
-    const email = inviteEmail.trim()
-    if (!email || inviting) return
+    if (!selected || invitingRef.current) return
+    invitingRef.current = true
     setInviting(true)
     setError(null)
     try {
-      await onInvite(email, inviteRole)
-      setInviteEmail('')
+      await onInvite(selected.binding_id, inviteRole)
+      setInviteBinding('')
+      setSearch('')
       setInviteRole('read-only')
     } catch (e) {
-      setError(errorMessage(e, 'The invite did not go through — nothing changed.'))
+      setError(errorMessage(e, 'The invite did not go through. Nothing changed.'))
     } finally {
+      invitingRef.current = false
       setInviting(false)
     }
   }
@@ -112,18 +127,37 @@ export default function Membership({
         <span className="membership-role">your role: {authority.role || 'unknown'}</span>
       </div>
 
-      {canInvite && (
+      {canInvite && choices.length === 0 && (
+        <p role="status">{identities == null
+          ? 'Organization members are unavailable. No one can be invited yet.'
+          : 'No organization members are available to invite.'}</p>
+      )}
+      {canInvite && choices.length > 0 && (
         <form className="membership-invite" onSubmit={submitInvite}>
           <label>
-            {inviteLabel}
+            Search organization members
             <input
-              type={inviteInputType}
-              value={inviteEmail}
-              onChange={(event) => setInviteEmail(event.target.value)}
+              type="search"
+              value={search}
+              onChange={(event) => { setSearch(event.target.value); setInviteBinding('') }}
               disabled={inviting}
-              required
             />
           </label>
+          <label>
+            Invite member
+            <select
+              value={selected ? inviteBinding : ''}
+              onChange={(event) => setInviteBinding(event.target.value)}
+              disabled={inviting || filteredChoices.length === 0}
+              required
+            >
+              <option value="">Choose an organization member</option>
+              {filteredChoices.map((identity) => (
+                <option key={identity.binding_id} value={identity.binding_id}>{identityText(identity)}</option>
+              ))}
+            </select>
+          </label>
+          {filteredChoices.length === 0 && <p role="status">No organization members match your search.</p>}
           <label>
             Role
             <select
@@ -135,7 +169,7 @@ export default function Membership({
               {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
             </select>
           </label>
-          <button type="submit" className="chip-act" disabled={inviting || !inviteEmail.trim()}>
+          <button type="submit" className="chip-act" disabled={inviting || !selected}>
             {inviting ? 'Inviting…' : 'Invite'}
           </button>
         </form>
@@ -144,12 +178,13 @@ export default function Membership({
       <ul className="membership-roster">
         {roster.map((member) => {
           const id = member.member_id
-          const label = member.name || member.email || id
+          const label = memberLabel(member)
           const roleBusy = pendingRoleIds.has(id)
           const revokeBusy = pendingRevokeIds.has(id)
           return (
             <li key={id} className="membership-row">
-              <span className="membership-member">{label}</span>
+              <span className="membership-member">{label}{member.created_at && ` · joined ${member.created_at.slice(0, 10)}`}</span>
+              {id === viewerId && <span className="membership-self"> (you)</span>}
               {canManage ? (
                 <>
                   <select

@@ -88,6 +88,7 @@ export function RibbonTool({ tool }) {
       data-tool={id}
       data-element-id={formatElementId('tool', id) || undefined}
       data-size={size}
+      data-state={typeof tool.state === 'string' ? tool.state : undefined}
       disabled={disabled}
       title={unavailable ? reason : (title || label)}
       aria-label={accessibleName(label, unavailable ? reason : '')}

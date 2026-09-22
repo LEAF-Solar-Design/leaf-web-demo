@@ -4,6 +4,7 @@
 // command with honest gating — a disabled tool always carries its reason,
 // an unavailable group its note, and no cluster is ever fabricated.
 import { describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
 
 import { DEFERRED_REASONS } from './actionRegistry.js'
 import { RIBBON_TABS } from '../site/CockpitTopBand.jsx'
@@ -19,11 +20,88 @@ import {
   catalogTabClusters,
   layersCluster,
   profileRibbonTabs,
+  profileReason,
+  shipApproveRow,
+  shipStatusRows,
+  shipLaunchReason,
+  solarRouteDisplay,
+  solarRouteStatus,
+  solarStringsControl,
   railCluster,
   referencePanels,
   versionCluster,
   viewCluster,
 } from './ribbonClusters.js'
+
+const approvalSources = ['a', 'b', 'c'].map((letter) => ({ source_revision: letter.repeat(40) }))
+const approvalShip = (overrides = {}) => ({ controllerLive: true, revision: 'r1', canApprove: true,
+  sources: approvalSources, approvals: [], approve: vi.fn(), ...overrides })
+
+it('B4D row11 legacy Ship tabs have no approval row or cluster', () => {
+  expect(shipApproveRow()).toBeNull()
+  expect(shipApproveRow({ controllerLive: false })).toBeNull()
+  const ship = { revision: 'r1' }
+  expect(profileRibbonTabs('ship', { ship: { ...ship, controllerLive: false, sources: approvalSources, canApprove: true } }))
+    .toEqual(profileRibbonTabs('ship', { ship }))
+  expect(profileRibbonTabs('ship', { ship })[0].clusters.map((group) => group.id)).toEqual(['revision', 'readiness', 'ship', 'receipts'])
+})
+
+it('B4D row31 a live ship without sources preserves the original Ship clusters', () => {
+  const ship = { controllerLive: true, revision: 'r1', canApprove: true }
+  expect(shipApproveRow(ship)).toBeNull()
+  expect(profileRibbonTabs('ship', { ship })[0].clusters.map((group) => group.id))
+    .toEqual(['revision', 'readiness', 'ship', 'receipts'])
+})
+
+it('B4D row12 approval reasons follow the owner version source approval and busy ladder', () => {
+  const approvals = approvalSources.map((source, index) => ({ revision: 'r1', source_revision: source.source_revision,
+    consumed_at: index ? '2026-01-01' : null }))
+  for (const [overrides, reason] of [
+    [{ canApprove: false, revision: null, sources: [], approving: true }, PROFILE_REASONS.shipApproveOwner],
+    [{ revision: null, sources: [], approving: true }, PROFILE_REASONS.shipApproveNoRevision],
+    [{ sources: [], approving: true }, PROFILE_REASONS.shipApproveNoSource],
+    [{ approvals, approving: true }, PROFILE_REASONS.shipApproveApproved],
+    [{ approving: true }, PROFILE_REASONS.shipApproveBusy],
+    [{ approve: null }, PROFILE_REASONS.shipApproveOwner],
+  ]) {
+    const row = shipApproveRow(approvalShip(overrides))
+    expect(row).toMatchObject({ disabled: true, reason })
+    expect(row.onClick).toBeUndefined()
+    expect(Object.values(PROFILE_REASONS)).toContain(row.reason)
+  }
+})
+
+it('B4D row13 selects the first unapproved source in served order', () => {
+  const ship = approvalShip({ approvals: [{ revision: 'r1', source_revision: approvalSources[0].source_revision, consumed_at: null }] })
+  const row = shipApproveRow(ship)
+  expect(row).toMatchObject({ disabled: false, label: 'Approve bbbbbbbb', title: 'Approve bbbbbbbb', reason: PROFILE_REASONS.shipApproveReady })
+  row.onClick()
+  expect(ship.approve).toHaveBeenCalledTimes(1)
+  expect(ship.approve).toHaveBeenCalledWith(approvalSources[1].source_revision)
+})
+
+it('B4D row14 live Ship tabs insert approval after readiness with an existing icon', () => {
+  const clusters = profileRibbonTabs('ship', { ship: approvalShip() })[0].clusters
+  expect(clusters.map((group) => group.id)).toEqual(['revision', 'readiness', 'approve', 'ship', 'receipts'])
+  expect(clusters[2].tools).toHaveLength(1)
+  expect(clusters[2].tools[0].id).toBe('ship:approve')
+  expect(clusters[2].tools[0].icon).toBe(clusters[1].tools[0].icon)
+  expect(hasIcon(clusters[2].tools[0].icon)).toBe(true)
+})
+
+it('B4D row15 every approval reason survives the profile reason guard', () => {
+  const reasons = new Set()
+  for (const overrides of [
+    { canApprove: false }, { revision: null }, { sources: [] }, { approving: true }, { approve: null }, {},
+    { approvals: approvalSources.map((source) => ({ revision: 'r1', source_revision: source.source_revision, consumed_at: null })) },
+  ]) {
+    const row = shipApproveRow(approvalShip(overrides))
+    expect(profileReason(row.reason, 'fallback')).toBe(row.reason)
+    reasons.add(row.reason)
+  }
+  expect(reasons).toEqual(new Set([PROFILE_REASONS.shipApproveOwner, PROFILE_REASONS.shipApproveNoRevision,
+    PROFILE_REASONS.shipApproveNoSource, PROFILE_REASONS.shipApproveApproved, PROFILE_REASONS.shipApproveBusy, PROFILE_REASONS.shipApproveReady]))
+})
 
 const FAMS = [
   {
@@ -41,6 +119,223 @@ const FAMS = [
     ],
   },
 ]
+
+it('J2 row13 the disabled demo controller preserves every contract row and sentence', () => {
+  const baseline = profileRibbonTabs('ship', { ship: { contract: null, revision: null, onLaunch: null, onReceipts: null } })
+  for (const controllerLive of [false, undefined]) {
+    const ship = { controllerLive, phase: 'idle', contract: null, revision: null, onLaunch: null, onReceipts: null }
+    ship.launchReason = shipLaunchReason(ship)
+    const tabs = profileRibbonTabs('ship', { ship })
+    expect(tabs).toEqual(baseline)
+    const tools = tabs[0].clusters.flatMap((group) => group.tools)
+    expect(tools.find((tool) => tool.id === 'ship:readiness').reason).toBe('Apple readiness is not mounted')
+    expect(tools.find((tool) => tool.id === 'ship:launch').reason).toBe(PROFILE_REASONS.testflightBuild)
+  }
+})
+
+it('J2 row14 live setup controllers retain both reason sentences', () => {
+  for (const [setupState, reason] of [
+    ['no-approved-revision', PROFILE_REASONS.shipNoRevision],
+    ['grant-not-ready', PROFILE_REASONS.shipGrant],
+    ['executor-busy', PROFILE_REASONS.shipExecutorBusy],
+    ['executor-unavailable', PROFILE_REASONS.shipExecutorUnavailable],
+  ]) {
+    const ship = { controllerLive: true, phase: 'setup-required', readiness: { setupState } }
+    const tools = profileRibbonTabs('ship', { ship })[0].clusters.flatMap((group) => group.tools)
+    for (const id of ['ship:readiness', 'ship:launch']) {
+      expect(tools.find((tool) => tool.id === id).reason).toBe(reason)
+    }
+  }
+})
+
+it('J2 row15 a live idle controller still supplies both rows', () => {
+  const ship = { controllerLive: true, phase: 'idle' }
+  const tools = profileRibbonTabs('ship', { ship })[0].clusters.flatMap((group) => group.tools)
+  expect(tools.find((tool) => tool.id === 'ship:readiness')).toMatchObject({
+    label: 'Ship status: idle', state: 'idle', reason: PROFILE_REASONS.shipIdle,
+  })
+  expect(tools.find((tool) => tool.id === 'ship:launch').reason).toBe(PROFILE_REASONS.shipIdle)
+})
+
+it('J2 row2 a real ready launch is callable and non-ready phases disable the TestFlight tool', () => {
+  const launch = vi.fn()
+  for (const phase of ['ready', 'idle', 'loading', 'setup-required', 'unavailable', 'launching', 'running', 'succeeded', 'failed']) {
+    const ship = { controllerLive: true, phase, onLaunch: phase === 'ready' ? launch : null }
+    ship.launchReason = shipLaunchReason(ship)
+    const tool = profileRibbonTabs('ship', { ship })[0].clusters.flatMap((group) => group.tools).find((item) => item.id === 'ship:launch')
+    expect(tool.disabled).toBe(phase !== 'ready')
+    if (phase === 'ready') {
+      expect(tool.onClick).toBe(launch)
+      tool.onClick()
+    } else {
+      expect(tool.onClick).toBeUndefined()
+      expect(tool.reason.length).toBeGreaterThan(0)
+    }
+  }
+  expect(launch).toHaveBeenCalledOnce()
+})
+
+it('J2 row4 the Ship tab rows follow running and terminal controller status', () => {
+  for (const phase of ['running', 'succeeded', 'failed']) {
+    const ship = { controllerLive: true, phase, execution: { status: phase, stage: 'archive' } }
+    const row = profileRibbonTabs('ship', { ship })[0].clusters.flatMap((group) => group.tools).find((item) => item.id === 'ship:readiness')
+    expect(row.state).toBe(phase)
+    expect(row.label).toBe(`Ship status: ${phase} (archive)`)
+  }
+})
+
+it('J2 row10 an invented launch reason reaches neither Ship reason site', () => {
+  const ship = { controllerLive: true, phase: 'setup-required', readiness: { setupState: 'grant-not-ready' }, launchReason: 'anything at all' }
+  const tools = profileRibbonTabs('ship', { ship })[0].clusters.flatMap((group) => group.tools)
+  for (const id of ['ship:readiness', 'ship:launch']) {
+    const tool = tools.find((item) => item.id === id)
+    expect(tool.reason).toBe(PROFILE_REASONS.shipGrant)
+    expect(tool.reason).not.toBe(ship.launchReason)
+  }
+})
+
+it('J2 row11 every legitimate launch reason renders verbatim at both Ship reason sites', () => {
+  for (const launchReason of Object.values(PROFILE_REASONS)) {
+    const ship = { controllerLive: true, phase: 'running', launchReason }
+    const tools = profileRibbonTabs('ship', { ship })[0].clusters.flatMap((group) => group.tools)
+    for (const id of ['ship:readiness', 'ship:launch']) {
+      expect(tools.find((item) => item.id === id).reason).toBe(launchReason)
+    }
+  }
+})
+
+it('J2 row12 every rendered Ship reason sentence belongs to the profile ladder', () => {
+  const sentences = Object.values(PROFILE_REASONS)
+  for (const phase of [undefined, 'ready', 'idle', 'loading', 'setup-required', 'unavailable', 'launching', 'running', 'succeeded', 'failed', 'unknown']) {
+    for (const setupState of [undefined, 'no-approved-revision', 'grant-not-ready', 'executor-busy', 'executor-unavailable', 'unknown']) {
+      for (const launchReason of [undefined, '', 'anything at all', ...sentences]) {
+        const ship = { controllerLive: true, phase, readiness: { setupState }, launchReason, onLaunch: phase === 'ready' ? vi.fn() : null }
+        const tools = profileRibbonTabs('ship', { ship })[0].clusters.flatMap((group) => group.tools)
+        for (const id of ['ship:readiness', 'ship:launch']) {
+          const tool = tools.find((item) => item.id === id)
+          if (id === 'ship:launch' && phase === 'ready' && !sentences.includes(launchReason)) {
+            // A ready launch has no disabled sentence; keep that existing contract.
+            expect(tool.disabled).toBe(false)
+            expect(tool.reason).toBe('')
+          } else {
+            expect(sentences).toContain(tool.reason)
+          }
+        }
+      }
+    }
+  }
+})
+
+it('J1 row7 mounted Project upload is enabled while absent handlers retain honest reasons', () => {
+  const onUpload = vi.fn()
+  const tools = profileRibbonTabs('project', { files: { onUpload } })[0].clusters.flatMap((cluster) => cluster.tools)
+  const upload = tools.find((tool) => tool.id === 'files:upload')
+  expect(upload.disabled).toBe(false)
+  expect(upload.reason).toBe(PROFILE_REASONS.uploadDrawing)
+  upload.onClick()
+  expect(onUpload).toHaveBeenCalledOnce()
+  const create = tools.find((tool) => tool.id === 'project:create')
+  expect(create).toMatchObject({ disabled: true, reason: PROFILE_REASONS.createProject })
+  expect(create.onClick).toBeUndefined()
+  const absent = profileRibbonTabs('project')[0].clusters.flatMap((cluster) => cluster.tools)
+    .find((tool) => tool.id === 'files:upload')
+  expect(absent).toMatchObject({ disabled: true, reason: PROFILE_REASONS.uploadDrawing })
+  expect(absent.onClick).toBeUndefined()
+  // Availability comes from the served mount, not a test-only callback.
+  const app = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
+  expect(app).toContain("files: { onUpload: !mock && signedIn && openProjectId ? () => setProjectPane('material') : null }")
+  expect(app).toContain('<LiveProjectMaterialIntake')
+})
+
+describe('C-05 ship contract status rows', () => {
+  const contract = { readiness: { healthy: true, launchable: true }, receipt_id: 'r1', reported_at: '2026-09-16T10:00:00Z' }
+  const absent = (rows) => {
+    expect(rows.map((tool) => [tool.disabled, tool.reason, tool.onClick])).toEqual([
+      [true, PROFILE_REASONS.approvedRevision, undefined],
+      [true, PROFILE_REASONS.appleReadiness, undefined],
+    ])
+  }
+  it('C-05 row1 no contract or revision leaves both rows disabled', () => {
+    absent(shipStatusRows(null, null, vi.fn()))
+  })
+  it('C-05 row2 a revision alone is not approved', () => {
+    absent(shipStatusRows(null, 'v12', vi.fn()))
+  })
+  it('C-05 row3 a ready contract opens the same receipt details from both rows', () => {
+    const onReceipts = vi.fn()
+    const tools = profileRibbonTabs('ship', { ship: { contract, revision: 'v12', onReceipts } })[0].clusters.map((cluster) => cluster.tools[0])
+    expect(tools[0]).toMatchObject({ label: 'Approved revision v12', disabled: false, title: `reported ${contract.reported_at}` })
+    expect(tools[1]).toMatchObject({ label: 'Apple readiness: ready', disabled: false, state: 'ready', pressed: true })
+    for (const tool of tools.slice(0, 2)) {
+      expect(tool.reason).toBeUndefined()
+      expect(tool.onClick).toBe(tools[3].onClick)
+      tool.onClick()
+    }
+    expect(onReceipts).toHaveBeenCalledTimes(2)
+    expect(tools[2]).toMatchObject({ label: 'TestFlight build', disabled: true, reason: PROFILE_REASONS.testflightBuild })
+  })
+  it('C-05 row4 in progress echoes the reported build stage', () => {
+    const rows = shipStatusRows({ ...contract, readiness: { healthy: true, launchable: false }, build_stage: 'archive' }, 'v12', vi.fn())
+    expect(rows[1]).toMatchObject({ label: 'Apple readiness: in progress (archive)', disabled: false, state: 'in-progress' })
+    expect(shipStatusRows({ ...contract, readiness: { healthy: true, launchable: false } }, 'v12', vi.fn())[1].label).toBe('Apple readiness: in progress')
+  })
+  it('C-05 row5 an unhealthy device keeps the approved revision enabled', () => {
+    for (const launchable of [false, true]) {
+      const rows = shipStatusRows({ ...contract, readiness: { healthy: false, launchable } }, 'v12', vi.fn())
+      expect(rows[0].disabled).toBe(false)
+      expect(rows[1]).toMatchObject({ label: 'Apple readiness: unavailable', disabled: false, state: 'unavailable' })
+    }
+  })
+  it('C-05 row6 malformed readiness fails closed without guessing', () => {
+    for (const readiness of [undefined, {}, { healthy: 'yes' }, { healthy: true }, { launchable: true }, { healthy: true, launchable: 'false' }, { healthy: 'true', launchable: true }]) {
+      absent(shipStatusRows({ ...contract, readiness }, 'v12', vi.fn()))
+    }
+  })
+  it('C-05 row6 malformed receipt and report fields fail closed without throwing', () => {
+    const missingReceipt = { ...contract }
+    delete missingReceipt.receipt_id
+    for (const malformed of [
+      missingReceipt,
+      { ...contract, receipt_id: '' },
+      { ...contract, reported_at: '' },
+      { ...contract, reported_at: 42 },
+      { ...contract, reported_at: { toString: 42, valueOf: 42 } },
+      { ...contract, build_stage: 42 },
+    ]) {
+      expect(() => absent(shipStatusRows(malformed, 'v12', vi.fn()))).not.toThrow()
+    }
+  })
+  it('C-05 row6 absent or invalid details openers disable both rows', () => {
+    for (const onReceipts of [undefined, null, false, 'open']) {
+      absent(shipStatusRows(contract, 'v12', onReceipts))
+      const tools = profileRibbonTabs('ship', { ship: { contract, revision: 'v12', onReceipts } })[0].clusters.map((cluster) => cluster.tools[0])
+      absent(tools.slice(0, 2))
+    }
+  })
+  it('C-05 row7 long stage and revision labels stay within 64 characters', () => {
+    const rows = shipStatusRows({ ...contract, readiness: { healthy: true, launchable: false }, build_stage: 'a'.repeat(2000) }, 'v'.repeat(2000), vi.fn())
+    for (const row of rows) {
+      expect(row.label.length).toBeLessThanOrEqual(64)
+      expect(row.disabled).toBe(false)
+    }
+    const [revision] = shipStatusRows({ ...contract, reported_at: 'x'.repeat(2000) }, 'v12', vi.fn())
+    expect(revision.title.length).toBeLessThanOrEqual(64)
+    expect(revision.label).toBe('Approved revision v12')
+  })
+  it('C-05 row8 the mock context keeps the rows disabled even with a details handler', () => {
+    const tools = profileRibbonTabs('ship', { ship: { contract: null, revision: null, onReceipts: vi.fn() } })[0].clusters.map((cluster) => cluster.tools[0])
+    absent(tools.slice(0, 2))
+  })
+  it('C-05 row10 each status row invokes the injected details opener once with no arguments', () => {
+    for (const index of [0, 1]) {
+      const onReceipts = vi.fn()
+      const tools = profileRibbonTabs('ship', { ship: { contract, revision: 'v12', onReceipts } })[0].clusters.map((cluster) => cluster.tools[0])
+      tools[index].onClick()
+      expect(onReceipts).toHaveBeenCalledTimes(1)
+      expect(onReceipts).toHaveBeenCalledWith()
+    }
+  })
+})
 
 describe('profile command icons', () => {
   it('uses installed icons for every project and ship command while retaining reasons', () => {
@@ -62,6 +357,106 @@ function toolsOf(cluster) {
   return Object.fromEntries(cluster.tools.map((t) => [t.id, t]))
 }
 
+describe('row9 Solar solved-route eligibility', () => {
+  const bundle = JSON.parse(readFileSync(new URL('../../public/demo-solve.json', import.meta.url), 'utf8'))
+  const routes = bundle.solve.strings.filter((route) => Array.isArray(route.pts) && route.pts.length >= 2)
+  const clean = { eligible: true, head: 1, previewing: false, engineDirty: false, documentId: null, solve: 'loaded', shown: true, routes }
+  it('row7 shows the 134 drawable solved rooftop routes by default', () => {
+    expect(solarRouteDisplay({ ...clean, status: solarRouteStatus(clean) })).toHaveLength(134)
+    const onToggle = vi.fn()
+    const toggle = profileRibbonTabs('solar', { solar: { status: 'ready', onToggle } })[1].clusters[1].tools[0]
+    expect(toggle).toMatchObject({ pressed: true, disabled: false })
+    toggle.onClick()
+    expect(onToggle).toHaveBeenCalledOnce()
+  })
+  it('row8 turning the toggle off clears the overlay', () => {
+    expect(solarRouteDisplay({ ...clean, status: solarRouteStatus(clean), shown: false })).toBeUndefined()
+    expect(profileRibbonTabs('solar', { solar: { status: 'ready', shown: false, onToggle: vi.fn() } })[1].clusters[1].tools[0].pressed).toBe(false)
+  })
+  it.each([
+    ['live tenant', { eligible: false }], ['edit fixture', { eligible: false }],
+    ['version preview', { previewing: true }], ['mutated head', { head: 2 }], ['dirty engine', { engineDirty: true }],
+  ])('row9 %s has no routes and names the unavailable state', (_, gate) => {
+    const status = solarRouteStatus({ ...clean, ...gate })
+    expect(status).toBe(gate.eligible === false ? 'ineligible' : 'stale')
+    expect(solarRouteDisplay({ ...clean, status })).toBeUndefined()
+    const toggle = profileRibbonTabs('solar', { solar: { status, onToggle: vi.fn() } })[1].clusters[1].tools[0]
+    expect(toggle).toMatchObject({ disabled: true, pressed: false, reason: 'Solved routes are available only for the unchanged rooftop demo' })
+  })
+})
+
+describe('Solar displayed-document route states', () => {
+  const routes = [{ id: 'route', pts: [[0, 0], [2, 1]] }]
+  const clean = { eligible: true, head: 1, engineDirty: false, previewing: false,
+    documentId: null, committedVersion: null, headDocumentId: 'demo-v1.dxf', solve: 'loaded', routes }
+  it.each([
+    ['ineligible', { eligible: false }], ['stale', { previewing: true }],
+    ['stale', { head: 2 }], ['stale', { engineDirty: true }],
+    ['foreign', { documentId: 'other.dxf' }], ['loading', { solve: null }],
+    ['loading', { solve: 'pending' }], ['unavailable', { solve: 'failed' }],
+    ['unavailable', { solve: 'empty' }], ['unavailable', { routes: [] }],
+    ['ready', {}], ['ready', { documentId: 'demo-v1.dxf', committedVersion: 1 }],
+    ['foreign', { documentId: 'demo-v1.dxf', committedVersion: null }],
+    ['foreign', { documentId: 'demo-v1.dxf', committedVersion: 2 }],
+    ['foreign', { documentId: 'demo-v1.dxf', committedVersion: '1' }],
+    ['foreign', { documentId: undefined }], ['foreign', { documentId: 1 }],
+    ['foreign', { documentId: false }], ['foreign', { documentId: {} }],
+    ['foreign', { documentId: 'solar-starter.dxf', committedVersion: 1 }],
+  ])('row13 identifies %s from the displayed document and solve', (status, input) => {
+    expect(solarRouteStatus({ ...clean, ...input })).toBe(status)
+  })
+  it('row14 displays routes only while ready and shown', () => {
+    for (const status of ['ineligible', 'stale', 'foreign', 'loading', 'unavailable', 'ready']) {
+      for (const shown of [false, true]) {
+        expect(solarRouteDisplay({ status, shown, routes })).toBe(status === 'ready' && shown ? routes : undefined)
+      }
+    }
+  })
+  it('row15 enables and presses the toggle only with usable routes', () => {
+    const onToggle = vi.fn()
+    for (const status of ['ineligible', 'stale', 'foreign', 'loading', 'unavailable']) {
+      const control = solarStringsControl(status, true, onToggle)
+      expect(control).toMatchObject({ disabled: true, pressed: false })
+      expect(control.reason.length).toBeGreaterThanOrEqual(12)
+      expect(control.onClick).toBeUndefined()
+    }
+    expect(solarStringsControl('foreign', true, onToggle).reason).toContain('rooftop demo')
+    for (const shown of [false, true]) {
+      const control = solarStringsControl('ready', shown, onToggle)
+      expect(control).toMatchObject({ disabled: false, pressed: shown })
+      control.onClick()
+    }
+    expect(onToggle).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('row11 Solar catalog gate parity', () => {
+  it.each([
+    ['running', { running: true }], ['preview', { previewing: true }],
+    ['write lock', { writeLocked: true }], ['entitlement', { writeEntitled: false }],
+    ['dirty engine', { engineDirty: true }], ['unwired MCP', {}],
+  ])('row11 retains the Draw catalog reason for %s', (name, gate) => {
+    for (const family_id of ['stringing', 'placement', 'measurement', 'selection']) {
+      const capability = { name: 'catalog-member', capabilities: ['drawing.write'],
+        ...(name === 'unwired MCP' ? { mcp_source: { server_id: 'abcdef0123456789abcdef01', tool: 'list-items' } } : {}) }
+      const family = { family_id, label: family_id, capabilities: [capability] }
+      const draw = catalogClusters([family], gate)[0].tools[0]
+      const solar = profileRibbonTabs('solar', { families: [family], catalogOptions: gate })[1].clusters
+        .find((cluster) => cluster.id === family_id).tools.find((tool) => tool.id === capability.name)
+      expect(solar.disabled).toBe(true)
+      expect(solar.reason).toBe(draw.reason)
+      expect(solar.reason.length).toBeGreaterThan(0)
+    }
+  })
+  it('clears the console selection only when one exists', () => {
+    const onClearSelection = vi.fn()
+    const clear = profileRibbonTabs('solar', { selectedHandle: '9', onClearSelection })[1].clusters[4].tools.at(-1)
+    expect(clear.disabled).toBe(false)
+    clear.onClick()
+    expect(onClearSelection).toHaveBeenCalledOnce()
+  })
+})
+
 describe('profileRibbonTabs', () => {
   it('keeps the drafting tab order and reasons, with caller-owned clusters', () => {
     expect(profileRibbonTabs('drafting')).toEqual(RIBBON_TABS.map((tab) => ({ ...tab, clusters: [] })))
@@ -70,21 +465,26 @@ describe('profileRibbonTabs', () => {
     }
   })
 
-  it('inserts Solar after Draw with one honest disabled tool per empty family', () => {
+  it('row10 inserts Solar after Draw with four honest empty families and local seats', () => {
     for (const families of [undefined, [], [{ family_id: 'stringing', capabilities: [] }, { id: 'placement', capabilities: [] }]]) {
       const tabs = profileRibbonTabs('solar', { families })
       expect(tabs.map((tab) => tab.id)).toEqual(['draw', 'solar', 'model', 'insert', 'annotate', 'view', 'manage'])
       expect(tabs.filter((tab) => tab.id !== 'solar')).toEqual(profileRibbonTabs('drafting'))
       expect(tabs[1].clusters.map(({ id, label, kind }) => ({ id, label, kind }))).toEqual([
+        { id: 'solar-panels', label: 'Panel placement', kind: 'group' },
         { id: 'stringing', label: 'Stringing', kind: 'group' },
         { id: 'placement', label: 'Equipment placement', kind: 'group' },
+        { id: 'measurement', label: 'Measure', kind: 'group' },
+        { id: 'selection', label: 'Select', kind: 'group' },
       ])
-      for (const cluster of tabs[1].clusters) {
-        expect(cluster.tools).toHaveLength(1)
-        expect(cluster.tools[0]).toMatchObject({ id: `${cluster.id}:empty`, disabled: true, reason: `No ${cluster.id} tools in this catalog yet` })
-        expect(cluster.tools[0].onClick).toBeUndefined()
+      expect(tabs[1].clusters[0].tools).toEqual([]) // Filled by the engine consumer.
+      for (const cluster of tabs[1].clusters.slice(1)) {
+        const empty = cluster.tools.find((tool) => tool.id === `${cluster.id}:empty`)
+        expect(empty).toMatchObject({ disabled: true, reason: `No ${cluster.id} tools in this catalog yet` })
+        expect(empty.onClick).toBeUndefined()
       }
-      expect(tabs[1].clusters.map((cluster) => cluster.tools[0].reason)).toEqual([PROFILE_REASONS.stringingEmpty, PROFILE_REASONS.placementEmpty])
+      expect(tabs[1].clusters[1].tools[0].label).toBe('Show solved rooftop strings')
+      expect(tabs[1].clusters[4].tools.at(-1)).toMatchObject({ label: 'Clear selection', disabled: true })
     }
   })
 
@@ -97,19 +497,19 @@ describe('profileRibbonTabs', () => {
       { id: 'placement', label: 'Placement', capabilities: [write] },
     ]
     const ctx = { families, onRun, catalogOptions: { writeLocked: true, writeLockNote: 'Held by another editor' } }
-    const [stringing, placement] = profileRibbonTabs('solar', ctx)[1].clusters
-    expect(stringing.tools[0]).toMatchObject({ id: read.name, label: read.name, text: read.label, icon: 'layers', size: 'row', title: read.description, disabled: false, reason: '' })
-    stringing.tools[0].onClick()
+    const [, stringing, placement] = profileRibbonTabs('solar', ctx)[1].clusters
+    expect(stringing.tools[1]).toMatchObject({ id: read.name, label: read.name, text: read.label, icon: 'layers', size: 'row', title: read.description, disabled: false, reason: '' })
+    stringing.tools[1].onClick()
     expect(onRun).toHaveBeenCalledTimes(1)
     expect(onRun).toHaveBeenCalledWith(read)
     expect(placement.tools[0]).toMatchObject({ disabled: true, write: true, reason: 'Held by another editor' })
-    expect(profileRibbonTabs('solar', { ...ctx, catalogOptions: { running: true } })[1].clusters[0].tools[0].reason).toBe(REASONS.running)
+    expect(profileRibbonTabs('solar', { ...ctx, catalogOptions: { running: true } })[1].clusters[1].tools[1].reason).toBe(REASONS.running)
     // The records are the catalog projection's own: a tool that names its own
     // tab still seats on Solar (the family is the home), and a write tool is
     // gated by the same entitlement rung with the same reason.
     const unentitled = profileRibbonTabs('solar', { families, onRun, catalogOptions: { writeEntitled: false } })[1].clusters
-    expect(unentitled[0].tools[0]).toMatchObject({ id: read.name, disabled: false, reason: '' })
-    expect(unentitled[1].tools[0]).toMatchObject({ id: write.name, write: true, disabled: true, reason: REASONS.writeUnentitled })
+    expect(unentitled[1].tools[1]).toMatchObject({ id: read.name, disabled: false, reason: '' })
+    expect(unentitled[2].tools[0]).toMatchObject({ id: write.name, write: true, disabled: true, reason: REASONS.writeUnentitled })
   })
 
   it('wires project, file, conversation, activity and catalog handlers', () => {

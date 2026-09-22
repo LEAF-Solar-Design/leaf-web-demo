@@ -1,0 +1,31 @@
+{
+  "schema": "leaf.solar-parity-receipt.v1",
+  "capability": "count-by-layer",
+  "capability_version": "1.0.0",
+  "fixture": {
+    "id": "rooftop-demo",
+    "sha256": "16390e082b6c73d835f21199e7777ae3a60680deae612f81d92048fd26544d21"
+  },
+  "plugin": {
+    "build": "AutoCAD 2025 V.171.0.0 database via engine/tools/count_by_layer.lsp under accoreconsole; an AutoCAD-database oracle, not a Branch2025 command (the plugin has no count command)",
+    "state": "committed",
+    "receipt_sha256": "31d750d996f1909c456efe4563eb007d322dd6c281587f95e9858c6ebc5ed53a"
+  },
+  "studio": {
+    "capability_version": "1.0.0",
+    "engine": "server-builtin"
+  },
+  "comparator": {
+    "name": "exact-counts-by-layer",
+    "version": "1",
+    "verdict": "pass",
+    "diffs": []
+  },
+  "synthetic_fields": [],
+  "fallback_fields": [
+    "studio.intake_source_binding: data/rooftop_demo.intake.json carries no sha256 of the DWG it was derived from; the pairing is by repository convention"
+  ],
+  "synthetic_flagged": true,
+  "survived_reopen": true,
+  "produced_at": "2026-09-17T19:02:55Z"
+}

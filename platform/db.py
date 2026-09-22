@@ -371,6 +371,11 @@ _REQUIRED_COLUMNS = {
         "app_store_connect_result", "hash_algorithm", "hash_canonicalization",
         "hash_domain", "hash_value", "created_at",
     },
+    "ios_ship_source_catalog": {
+        "catalog_id", "org_id", "project_id", "catalog_key", "repository",
+        "source_revision", "source_sha256", "bundle_identifier",
+        "marketing_version", "build_number", "producer_receipt_digest", "imported_at",
+    },
 }
 
 # Each selector adds the tables its PostgreSQL implementation reads or writes.
@@ -700,6 +705,11 @@ _REQUIRED_CONSTRAINTS = {
         "REFERENCES ios_ship_receipts(receipt_id)"),
     "ios_ship_receipts_build_unique": _catalog_contract(
         "ios_ship_receipts", "UNIQUE (org_id, bundle_identifier, build_number)"),
+    "ios_ship_source_catalog_project_fk": _catalog_contract(
+        "ios_ship_source_catalog", "FOREIGN KEY (org_id, project_id)",
+        "REFERENCES projects(org_id, project_id) ON DELETE CASCADE"),
+    "ios_ship_source_catalog_scope_unique": _catalog_contract(
+        "ios_ship_source_catalog", "UNIQUE (org_id, project_id, source_revision)"),
     "identity_bindings_tenant_binding_unique": _catalog_contract(
         "identity_bindings", "UNIQUE (platform_tenant_id, binding_id)"),
     "project_member_bindings_pkey": _catalog_contract(
@@ -812,6 +822,9 @@ _REQUIRED_TRIGGERS = {
         "EXECUTE FUNCTION leaf_reject_ledger_mutation()"),
     "ios_ship_receipts_immutable": _catalog_contract(
         "ios_ship_receipts", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
+        "EXECUTE FUNCTION leaf_reject_ledger_mutation()"),
+    "ios_ship_source_catalog_immutable": _catalog_contract(
+        "ios_ship_source_catalog", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
         "EXECUTE FUNCTION leaf_reject_ledger_mutation()"),
     "project_lifecycle_receipts_immutable": _catalog_contract(
         "project_lifecycle_receipts", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",

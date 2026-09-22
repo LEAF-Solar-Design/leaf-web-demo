@@ -26,6 +26,146 @@ const API_BASE = process.env.LEAF_E2E_API_BASE || 'http://127.0.0.1:8230'
 
 const STUDIO = '.studio-shell[data-scene="app"][data-mode="console"]'
 
+test('J1 row1, J1 row2, J1 row4, J1 row5, J1 row8: served Browser panes, first run, material and drawing-profile continuity', async ({ page, request }) => {
+  test.setTimeout(120_000)
+  await requireLocalReady(request, test, API_BASE)
+  await setRail(page, '1')
+  await page.setViewportSize({ width: 1920, height: 1080 })
+  // A local presentation fixture, never a credential. Workspace and upload
+  // writes are intercepted; the rest of the managed stack keeps its real IO.
+  await page.addInitScript(() => {
+    localStorage.setItem('leaf.jwt', 'j1-presentation-fixture')
+    if (!sessionStorage.getItem('j1-initialized')) {
+      localStorage.removeItem('leaf.org_id')
+      sessionStorage.setItem('j1-initialized', 'true')
+    }
+  })
+  const calls = []
+  const project = { project_id: 'j1-project', name: 'J1 roof' }
+  const workspace = {
+    project,
+    drawing_versions: [{ version_id: 'j1-version', drawing_id: 'roof', seq: 1 }],
+    jobs: [{ job_id: 'j1-job', tool_name: 'Measure roof', status: 'succeeded' }],
+    built_tools: [{ tool_id: 'j1-tool', name: 'Roof count' }],
+    drawing_artifacts: [],
+  }
+  let bound = false
+  await page.route('**/api/**', async (route) => {
+    const req = route.request()
+    const path = new URL(req.url()).pathname
+    const json = (body, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
+    if (path === '/api/orgs' && req.method() === 'POST') {
+      calls.push(['org', req.postDataJSON()])
+      bound = true
+      return json({ org: { org_id: 'j1-org', name: 'J1 workspace' } })
+    }
+    if (path === '/api/projects' && req.method() === 'GET') {
+      return bound ? json({ projects: [project] })
+        : json({ detail: 'verified subject has no active platform identity binding' }, 403)
+    }
+    if (path === '/api/projects' && req.method() === 'POST') {
+      calls.push(['create', req.postDataJSON()])
+      return json({ project })
+    }
+    if (path === '/api/projects/j1-project') {
+      calls.push(['open', path])
+      return json(workspace)
+    }
+    if (path === '/api/site/guest-upload-policy') return json({ enabled: true, accepted: ['.dxf'], max_bytes: 1024 * 1024 })
+    if (path === '/api/drawings/upload') {
+      calls.push(['upload'])
+      return json({ drawing_id: 'j1-upload', status: 'ready', extracted_version: 1 })
+    }
+    if (path.startsWith('/api/drawings/j1-upload')) return json({ dwg: 'roof.dxf', polylines: [], layers: [] })
+    if (path === '/api/projects/j1-project/drawing-versions/import') {
+      calls.push(['attach', req.postDataJSON()])
+      workspace.drawing_artifacts = [{ drawing_id: 'j1-upload', name: 'roof.dxf', status: 'ready', created_at: '2026-09-17T00:00:00Z' }]
+      return json({ drawing_version: { drawing_id: 'j1-upload', version: 1, name: 'roof.dxf' }, replayed: false })
+    }
+    // Do not send the presentation sentinel to the real local service.
+    const headers = { ...req.headers() }
+    delete headers.authorization
+    return route.continue({ headers })
+  })
+  await page.goto('/app?surface=browser')
+  const board = page.locator('[data-ground="browser"]')
+  await expect(board).toBeVisible()
+  const createWorkspace = board.getByRole('region', { name: 'Create your workspace' })
+  await createWorkspace.getByLabel('Workspace name').fill('J1 workspace')
+  await createWorkspace.getByRole('button', { name: 'Create workspace', exact: true }).click()
+  const start = board.getByRole('region', { name: 'Workspace projects', exact: true })
+  await expect(start.getByRole('button', { name: 'J1 roof', exact: true })).toBeVisible()
+  await start.getByLabel('Project name').fill('J1 roof')
+  await start.getByRole('button', { name: 'Create project', exact: true }).click()
+  await expect(board).toHaveAttribute('data-project-state', 'project')
+  expect(calls).toContainEqual(['org', { name: 'J1 workspace' }])
+  expect(calls).toContainEqual(['create', { name: 'J1 roof' }])
+  // Reload clears the open-project controller state, then use its open handler.
+  // The fixture bootstrap is now bound, including on an auth-configured stack.
+  await page.reload()
+  const openStart = board.getByRole('region', { name: 'Workspace projects', exact: true })
+  await openStart.getByRole('button', { name: 'J1 roof', exact: true }).click()
+  await expect(board).toHaveAttribute('data-project-state', 'project')
+  for (const [action, pane] of [['version', 'versions'], ['job', 'jobs'], ['tool', 'tools']]) {
+    await board.locator(`[data-action="${action}"]`).click()
+    const panel = board.locator(`[data-pane="${pane}"]`)
+    await expect(panel).toBeVisible()
+    await expect(panel.locator('.ground-pane-head')).toContainText('J1 roof')
+    await panel.getByRole('button', { name: 'Back to board' }).click()
+    await expect(board.locator('[data-pane]')).toHaveCount(0)
+    await expect(board).toHaveAttribute('data-project-state', 'project')
+  }
+  await page.locator('[data-tool="files:upload"]').click()
+  const material = board.locator('[data-pane="material-intake"]')
+  await expect(material).toContainText('Material attaches to J1 roof')
+  await expect(material.getByRole('button', { name: 'Upload DWG or DXF' })).toBeEnabled()
+  await material.getByLabel('Drawing file').setInputFiles({ name: 'roof.dxf', mimeType: 'application/dxf', buffer: Buffer.from('0\nEOF\n') })
+  await expect(material).toContainText('Attached roof.dxf as version 1 to J1 roof')
+  expect(calls).toContainEqual(['attach', { source: { drawing_id: 'j1-upload', version: 1 }, name: 'roof.dxf' }])
+  expect(calls.findIndex(([kind]) => kind === 'upload')).toBeLessThan(calls.findIndex(([kind]) => kind === 'attach'))
+  await board.getByRole('button', { name: 'Back to board' }).click()
+
+  // Same served drawing nodes and profile chrome before/after visiting the
+  // newly mounted Browser panes. The unit fixture pins the 85ef8090 slots.
+  for (const label of ['CAD', 'Solar CAD']) {
+    await page.getByRole('tab', { name: label, exact: true }).click()
+    await expectOneCanvasIn(page, '.studio-ground')
+    const viewer = page.locator('.studio-ground-viewer')
+    await expect(viewer).toBeVisible()
+    const node = await viewer.elementHandle()
+    await expectSharedChrome(page)
+    await expect(page.getByTestId('properties-dock')).toBeVisible()
+    await expect(page.locator('[data-pane]')).toHaveCount(0)
+    await page.getByRole('tab', { name: 'Browser', exact: true }).click()
+    await board.locator('[data-action="version"]').click()
+    await expect(board.locator('[data-pane="versions"]')).toBeVisible()
+    await page.getByRole('tab', { name: label, exact: true }).click()
+    await expect(viewer).toBeVisible()
+    expect(await viewer.evaluate((current, before) => current === before, node)).toBe(true)
+    await expect(page.locator('[data-pane]')).toHaveCount(0)
+    await expectSharedChrome(page)
+  }
+})
+
+test('J1 row6: served demo material stays disabled and makes no project mutation', async ({ page, request }) => {
+  await requireLocalReady(request, test, API_BASE)
+  await setRail(page, '1')
+  const mutations = []
+  page.on('request', (req) => {
+    const path = new URL(req.url()).pathname
+    if (req.method() !== 'GET' && (path.startsWith('/api/projects') || path === '/api/drawings/upload')) mutations.push(path)
+  })
+  await page.goto('/app?surface=browser&demo=1')
+  const board = page.locator('[data-ground="browser"]')
+  await board.locator('[data-action="drawing"]').click()
+  const intake = board.locator('[data-pane="material-intake"]')
+  await expect(intake).toBeVisible()
+  await expect(intake.getByLabel('Drawing file')).toBeDisabled()
+  await expect(intake.getByRole('button', { name: 'Upload DWG or DXF' })).toBeDisabled()
+  await expect(intake).toContainText('Uploads are unavailable in this demo.')
+  expect(mutations).toEqual([])
+})
+
 async function expectSharedChrome(page) {
   await expect(page.locator('.app[data-studio-shell="cockpit"]')).toHaveCount(1)
   await expect(page.getByTestId('cockpit-band')).toHaveCount(1)
@@ -153,6 +293,8 @@ test.describe('route matrix, rail ON', () => {
       await setRail(page, '1')
       await page.goto(`/app?surface=${surface}`)
       await expectOneCanvasIn(page, '.studio-ground')
+      // C-04B (38e7568e): the solar profile opens on its Solar tab, so the Draw tools mount only after the Draw tab is clicked.
+      if (surface === 'solar') await page.getByRole('tab', { name: 'Draw', exact: true }).click()
       await expect(page.locator('[data-tool="draw:createLine"]')).toBeEnabled({ timeout: 30_000 })
       const viewer = page.locator('.studio-ground-viewer')
       const continuity = page.getByTestId('continuity-rail')
@@ -382,7 +524,7 @@ test.describe('route matrix, rail ON', () => {
     await expectOneCanvasIn(page, '.studio-ground')
 
     await expectSharedChrome(page)
-    await page.getByRole('tab', { name: 'Solar', exact: true }).click()
+    await expect(page.getByRole('tab', { name: 'Solar', exact: true })).toHaveAttribute('aria-selected', 'true')
     const solarRibbon = page.getByTestId('drafting-ribbon')
     await expect(solarRibbon.getByRole('group', { name: 'Stringing', exact: true })).toBeVisible()
     await expect(solarRibbon.getByRole('group', { name: 'Equipment placement', exact: true })).toBeVisible()
@@ -392,6 +534,81 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.locator(STUDIO)).toHaveCount(1)
     await expect(page.locator('.studio-ground [data-ground="browser"]')).toBeVisible()
     await expect(page.locator('.studio-ground .studio-ground-viewer')).toBeHidden()
+  })
+
+  test('C-05 row8 demo Ship status rows stay disabled with Setup required', async ({ page, request }) => {
+    test.setTimeout(120_000)
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    await page.setViewportSize({ width: 1600, height: 1000 })
+    await page.goto('/app?surface=ios&dev=1')
+    await page.getByLabel('Use mock data (off = live backend)').check()
+    await expect(page.getByRole('tab', { name: 'Ship', exact: true })).toHaveAttribute('aria-selected', 'true')
+    const ribbon = page.getByTestId('drafting-ribbon')
+    for (const [id, reason] of [
+      ['ship:revision', 'No approved revision for this project yet'],
+      ['ship:readiness', 'Apple readiness is not mounted'],
+    ]) {
+      const tool = ribbon.locator(`[data-tool="${id}"]`)
+      await expect(tool).toBeDisabled()
+      await expect(tool).toHaveAttribute('title', reason)
+      await expect(tool).toHaveAccessibleName(new RegExp(reason))
+    }
+    await expect(page.getByRole('tab', { name: 'iOS', exact: true }).locator('small')).toHaveText('Setup required')
+    // Contract-served rows are unit-proven only; the demo publishes no contract.
+  })
+
+  test('C-04 solar-starter opens locally in a live empty Solar workspace', async ({ page, request }) => {
+    test.setTimeout(120_000)
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    // On the local APS_LIVE=0 stack write_loop.ensure_demo_drawing bootstraps ANY
+    // slug-safe first-seen id with the demo intake (a 200 that seats a drawing), so
+    // the only honest 404 the session route gives is an id outside its slug rule:
+    // uppercase is refused as `drawing unavailable`. That 404 is the CONFIRMED
+    // absence App's drawingLoad needs before the starter may open (CORRECTION 2).
+    // No route is mocked or seeded.
+    const drawing = 'C04A-EMPTY-SOLAR-STARTER'
+    const writes = []
+    let sampleFetches = 0
+    page.on('request', (req) => {
+      const path = new URL(req.url()).pathname
+      if (req.method() === 'POST' && path.startsWith('/api/drawings/')) writes.push(path)
+      if (path === '/sample.dxf') sampleFetches += 1
+    })
+    const missing = page.waitForResponse((response) => {
+      const url = new URL(response.url())
+      return url.pathname === '/api/session' && url.searchParams.get('dwg') === drawing
+    })
+    await page.goto(`/app?surface=solar&drawing=${drawing}`)
+    expect((await missing).status()).toBe(404)
+    await expect(page.locator('.workspace-card')).toHaveAttribute('data-engine-document', 'solar-starter.dxf', { timeout: 60_000 })
+    await expectOneCanvasIn(page, '.studio-ground')
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('2345')
+    await page.getByRole('tab', { name: 'Draw', exact: true }).click()
+    await expect(page.locator('[data-tool="draw:createLine"]')).toBeEnabled()
+    await page.getByRole('tab', { name: 'Insert', exact: true }).click()
+    const save = page.locator('[data-tool="save-version"]')
+    await expect(save).toBeDisabled()
+    await expect(save).toHaveAttribute('title', /edit something first|download-only here: no project target/)
+    // Read the rendered canvas into 2D on a frame: nontransparent colored
+    // pixels prove the starter geometry reached WebGL, beyond its store count.
+    await expect.poll(() => page.locator('.studio-ground .viewer-canvas canvas').evaluate((canvas) => new Promise((resolve) => {
+      requestAnimationFrame(() => {
+        const copy = document.createElement('canvas')
+        copy.width = canvas.width; copy.height = canvas.height
+        const ctx = copy.getContext('2d')
+        ctx.drawImage(canvas, 0, 0)
+        const pixels = ctx.getImageData(0, 0, copy.width, copy.height).data
+        let painted = 0
+        for (let i = 0; i < pixels.length; i += 4) {
+          if (pixels[i + 3] && Math.max(pixels[i], pixels[i + 1], pixels[i + 2]) > 40) painted += 1
+        }
+        resolve(painted)
+      })
+    })), { timeout: 30_000 }).toBeGreaterThan(0)
+    expect(sampleFetches).toBe(1)
+    expect(writes).toEqual([])
   })
 
   test('floating rails, dark chrome, and the drawing cockpit (W4b)', async ({ page, request }) => {
@@ -566,7 +783,10 @@ test.describe('route matrix, rail ON', () => {
     await expectSharedChrome(page)
     await expect(page.getByTestId('drafting-ribbon')).toBeVisible()
     await expect(page.getByRole('tab', { name: 'Project', exact: true })).toHaveAttribute('aria-selected', 'true')
-    await expect(page.locator('aside.nav[data-spine]')).toHaveCount(0)
+    // productSurfaces.js gives Browser rails.left = 'spine' in the shared cockpit.
+    await expect(page.locator('aside.nav[data-spine]')).toHaveCount(1)
+    // Expand the shared spine before checking the catalog content it owns.
+    await page.getByTestId('cockpit-band').locator('[data-tool="rail-expand"]').click()
     await expect(page.locator('.fam-title')).toBeVisible()
   })
 
@@ -876,7 +1096,8 @@ test.describe('route matrix, rail ON', () => {
         outside: clusters.filter((c) => c.right > band.right + 1 || c.left < band.left - 1).length,
         rows: new Set(clusters.map((c) => Math.round(c.top))).size,
         bandHeight: Math.round(band.height),
-        published: getComputedStyle(el.closest('.workspace-card')).getPropertyValue('--cockpit-ribbon-h').trim(),
+        // The one-shell band publishes its height on the shared chrome host.
+        published: getComputedStyle(el.closest('.studio-chrome-host')).getPropertyValue('--cockpit-ribbon-h').trim(),
       }
     })
     expect(fit.overflow).toBeLessThanOrEqual(1)
@@ -2557,6 +2778,193 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.getByTestId('cockpit-prompt-run')).toBeDisabled()
   })
 
+  test('C-04C row9 Solar reads Ready only after the held demo DXF is shown', async ({ page, request }) => {
+    test.setTimeout(120_000)
+    await page.setViewportSize({ width: 1600, height: 1000 })
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    let releaseSample
+    let sawSample
+    const held = new Promise((resolve) => { releaseSample = resolve })
+    const requested = new Promise((resolve) => { sawSample = resolve })
+    const holdSample = async (route) => {
+      sawSample()
+      await held
+      await route.continue()
+    }
+    await page.route('**/sample.dxf', holdSample)
+    await page.goto('/app?surface=solar&dev=1')
+    await page.getByLabel('Use mock data (off = live backend)').check()
+    const solarStatus = page.getByRole('tab', { name: 'Solar CAD', exact: true }).locator('small')
+    try {
+      await requested
+      await expect(page.locator('.workspace-card[data-engine-document]')).toHaveCount(0)
+      await expect(solarStatus).toHaveText(/^(Template pending|Beta)$/)
+      await expect(solarStatus).toHaveAttribute('data-state', 'beta')
+    } finally {
+      releaseSample()
+    }
+    await expect(page.locator('.workspace-card[data-engine-document$="-v1.dxf"]')).toHaveCount(1, { timeout: 60_000 })
+    await expect(solarStatus).toHaveText('Ready')
+    await expect(solarStatus).toHaveAttribute('data-state', 'available')
+    await page.unroute('**/sample.dxf', holdSample)
+
+    // A new demo session must not inherit readiness from the previous parse.
+    await page.route('**/sample.dxf', (route) => route.fulfill({
+      status: 200, contentType: 'application/dxf', body: 'This is not a DXF document.\n',
+    }))
+    const malformedSample = page.waitForResponse('**/sample.dxf')
+    await page.reload()
+    await page.getByLabel('Use mock data (off = live backend)').check()
+    await (await malformedSample).finished()
+    // Let the engine consume the refused answer before checking readiness.
+    // The head opener's failure sentence is a separate follow-up.
+    await page.waitForTimeout(1000)
+    await expect(page.locator('.workspace-card[data-engine-document]')).toHaveCount(0)
+    await expect(solarStatus).toHaveText(/^(Template pending|Beta)$/)
+    await expect(solarStatus).toHaveAttribute('data-state', 'beta')
+  })
+
+  test('C-04C row10 Solar phone Tools reaches five clusters and preserves input and Escape focus', async ({ page, request }) => {
+    test.setTimeout(120_000)
+    await page.setViewportSize({ width: 390, height: 844 })
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    await page.goto('/app?surface=solar&dev=1')
+    await page.getByLabel('Use mock data (off = live backend)').check()
+    await expect(page.locator('.workspace-card[data-engine-document$="-v1.dxf"]')).toHaveCount(1, { timeout: 60_000 })
+    const ribbon = page.getByTestId('drafting-ribbon')
+    const tools = ribbon.getByRole('button', { name: 'More panels', exact: true })
+    await expect(tools).toBeVisible()
+    await expect(tools).toHaveAttribute('aria-expanded', 'false')
+    expect(await tools.evaluate((el) => getComputedStyle(el, '::before').content)).toContain('Tools')
+    await tools.click()
+    await expect(tools).toHaveAttribute('aria-expanded', 'true')
+    await expect(ribbon.locator('.ribbon-tool:not(:disabled)').first()).toBeFocused()
+    await expect(ribbon.locator('.ribbon-cluster')).toHaveCount(5)
+    for (const name of ['Panel placement', 'Stringing', 'Equipment placement', 'Measure', 'Select']) {
+      const cluster = ribbon.getByRole('group', { name, exact: true })
+      await cluster.scrollIntoViewIfNeeded()
+      await expect(cluster).toBeVisible()
+      const buttons = cluster.locator('.ribbon-tool:not(:disabled)')
+      for (const button of await buttons.all()) {
+        await button.scrollIntoViewIfNeeded()
+        await expect(button).toBeInViewport({ ratio: 1 })
+        await button.click({ trial: true })
+      }
+    }
+    // Escape from the disclosure returns to its opener and hides whole clusters.
+    await ribbon.locator('.ribbon-tool:not(:disabled)').last().focus()
+    await page.keyboard.press('Escape')
+    await expect(tools).toHaveAttribute('aria-expanded', 'false')
+    await expect(tools).toBeFocused()
+    await expect(ribbon.locator('.ribbon-cluster:visible')).toHaveCount(0)
+    await tools.click()
+    await ribbon.locator('[data-tool="solar-panels:createRectangle"]').click()
+    const operand = page.getByLabel('ribbon x', { exact: true })
+    await operand.fill('12')
+    await expect(operand).toHaveValue('12')
+    await expect(operand).toBeInViewport({ ratio: 1 })
+    // Focus left the disclosure for the operand; blur closes it as before.
+    await expect(tools).toHaveAttribute('aria-expanded', 'false')
+    await operand.press('Escape')
+    await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
+    await expect(tools).toBeFocused()
+    expect(await page.locator('.studio-shell').evaluate((el) => el.scrollHeight - el.clientHeight)).toBeLessThanOrEqual(1)
+  })
+
+  test('C-04B Solar census: five clusters, geometry tools, solved toggle and profile continuity; C-04C row7 reserved-name import is not Ready', async ({ page, request }) => {
+    test.setTimeout(120_000)
+    await page.setViewportSize({ width: 1600, height: 1000 })
+    await requireLocalReady(request, test, API_BASE)
+    await setRail(page, '1')
+    await page.goto('/app?surface=solar&dev=1')
+    await expect(page.getByRole('tab', { name: 'Solar', exact: true })).toHaveAttribute('aria-selected', 'true')
+    await page.getByLabel('Use mock data (off = live backend)').check()
+    await expectOneCanvasIn(page, '.studio-ground')
+    await expectSharedChrome(page)
+    const ribbon = page.getByTestId('drafting-ribbon')
+    await expect(ribbon.locator('.ribbon-cluster')).toHaveCount(5)
+    expect(await ribbon.locator('.ribbon-cluster').evaluateAll((groups) => groups.map((group) => group.getAttribute('aria-label'))))
+      .toEqual(['Panel placement', 'Stringing', 'Equipment placement', 'Measure', 'Select'])
+    const toggle = ribbon.locator('[data-tool="solar-strings"]')
+    await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+    await expect(page.locator('.viewer-canvas[data-string-routes="134"]')).toHaveCount(1, { timeout: 30_000 })
+    await toggle.click()
+    await expect(toggle).toHaveAttribute('aria-pressed', 'false')
+    await expect(page.locator('.viewer-canvas[data-string-routes]')).toHaveCount(0)
+    await toggle.click()
+    await expect(page.locator('.viewer-canvas[data-string-routes="134"]')).toHaveCount(1)
+    // A clean hand import cannot inherit the solve, even with the head's exact name.
+    const headDocument = page.locator('.workspace-card[data-engine-document$="-v1.dxf"]')
+    await expect(headDocument).toHaveCount(1, { timeout: 60_000 })
+    const headDocumentId = await headDocument.getAttribute('data-engine-document')
+    const foreignDxf = readFileSync(fileURLToPath(new URL('../fixtures/block-fixture.dxf', import.meta.url)))
+    for (const name of ['other.dxf', headDocumentId]) {
+      await page.getByRole('tab', { name: 'Insert', exact: true }).click()
+      await ribbon.locator('[data-tool="import-dxf"]').click()
+      await page.getByLabel('DXF file').setInputFiles({ name, mimeType: 'application/dxf', buffer: foreignDxf })
+      await expect(page.locator('.workspace-card[data-engine-document]')).toHaveAttribute('data-engine-document', name, { timeout: 60_000 })
+      // C-04C row7: even an import named after the head is not a ready template.
+      const solarStatus = page.getByRole('tab', { name: 'Solar CAD', exact: true }).locator('small')
+      await expect(solarStatus).toHaveText(/^(Template pending|Beta)$/)
+      await expect(solarStatus).toHaveAttribute('data-state', 'beta')
+      await page.getByRole('tab', { name: 'Solar', exact: true }).click()
+      await expect(toggle).toBeDisabled()
+      await expect(toggle).toHaveAttribute('aria-pressed', 'false')
+      await expect(toggle).toHaveAttribute('title', 'Solved routes cover the rooftop demo only')
+      await expect(page.locator('.viewer-canvas[data-string-routes]')).toHaveCount(0)
+      // A fresh visit clears the import and lets the head opener restore the sample.
+      await page.reload()
+      await expect(page.locator(STUDIO)).toHaveCount(1)
+      await page.getByRole('tab', { name: 'Solar CAD', exact: true }).click()
+      await expect(page.getByRole('tab', { name: 'Solar', exact: true })).toHaveAttribute('aria-selected', 'true')
+      await page.getByLabel('Use mock data (off = live backend)').check()
+      await expect(headDocument).toHaveCount(1, { timeout: 60_000 })
+      await expect(toggle).toBeEnabled({ timeout: 60_000 })
+      await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+      await expect(page.locator('.viewer-canvas[data-string-routes="134"]')).toHaveCount(1, { timeout: 30_000 })
+    }
+    const outline = ribbon.locator('[data-tool="solar-panels:createRectangle"]')
+    await expect(outline).toBeEnabled({ timeout: 60_000 })
+    const count = page.getByTestId('cad-edit-entity-count')
+    const before = Number(await count.textContent())
+    await outline.click()
+    for (const [field, value] of [['x', '0'], ['y', '0'], ['x2', '2'], ['y2', '1']]) {
+      await page.getByLabel(`ribbon ${field}`, { exact: true }).fill(value)
+    }
+    await page.getByTestId('cockpit-prompt-run').click()
+    await expect(count).toHaveText(String(before + 1), { timeout: 60_000 })
+    await expect(page.locator('.viewer-canvas[data-string-routes]')).toHaveCount(0)
+    await expect(toggle).toBeDisabled()
+    await expect(toggle).toHaveAttribute('title', 'Solved routes are available only for the unchanged rooftop demo')
+    await page.keyboard.press('Escape')
+    for (const op of ['arrayRect', 'move', 'rotate']) {
+      const tool = ribbon.locator(`[data-tool="solar-panels:${op}"]`)
+      await expect(tool).toBeEnabled()
+      await tool.click()
+      await expect(page.getByTestId('cockpit-prompt')).toHaveAttribute('data-op', op)
+      await page.keyboard.press('Escape')
+    }
+    const readState = () => page.evaluate(() => ({
+      document: document.querySelector('.workspace-card').getAttribute('data-engine-document'),
+      count: document.querySelector('[data-testid="cad-edit-entity-count"]').textContent,
+      undo: document.querySelector('[data-tool="quick-undo-edit"]').getAttribute('title'),
+      pose: document.querySelector('.studio-ground .viewer-canvas').__cadviewer.cameraPose(),
+    }))
+    const state = await readState()
+    for (const chooseView of [false, true]) {
+      await page.getByRole('tab', { name: 'CAD', exact: true }).click()
+      await expect(page.getByRole('tab', { name: 'Draw', exact: true })).toHaveAttribute('aria-selected', 'true')
+      if (chooseView) await page.getByRole('tab', { name: 'View', exact: true }).click()
+      await page.getByRole('tab', { name: 'Solar CAD', exact: true }).click()
+      await expect(page.getByRole('tab', { name: 'Solar', exact: true })).toHaveAttribute('aria-selected', 'true')
+      expect(await readState()).toEqual(state)
+    }
+    await expectOneCanvasIn(page, '.studio-ground')
+    await expectSharedChrome(page)
+  })
+
   test('solar depth: real solved strings on the Solar tab only, honesty-gated (W4c-V3)', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
@@ -2581,7 +2989,7 @@ test.describe('route matrix, rail ON', () => {
     await page.getByRole('tab', { name: 'Solar CAD' }).click()
     await expect(page.locator(`.viewer-canvas[data-string-routes="${expected}"]`)).toHaveCount(1, { timeout: 20_000 })
     await expectSharedChrome(page)
-    await page.getByRole('tab', { name: 'Solar', exact: true }).click()
+    await expect(page.getByRole('tab', { name: 'Solar', exact: true })).toHaveAttribute('aria-selected', 'true')
     await expect(page.getByTestId('drafting-ribbon').getByRole('group', { name: 'Stringing', exact: true })).toBeVisible()
     await expect(page.getByTestId('drafting-ribbon').getByRole('group', { name: 'Equipment placement', exact: true })).toBeVisible()
 

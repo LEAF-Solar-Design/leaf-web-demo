@@ -19,7 +19,7 @@ import DraftingRibbon from './site/DraftingRibbon.jsx'
 import PropertiesDock, { drawingExtents } from './site/PropertiesDock.jsx'
 import { familiesForSurface, familyMonogram } from './lib/surfaceRails.js'
 import { byId, ladderListener, slashCommandHandlers } from './lib/actionRegistry.js'
-import { REASONS, RIBBON_RATIONALE, profileRibbonTabs, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels } from './lib/ribbonClusters.js'
+import { REASONS, RIBBON_RATIONALE, profileRibbonTabs, profileEntryTab, solarRouteStatus, solarRouteDisplay, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels } from './lib/ribbonClusters.js'
 import { isWriteTool } from './lib/toolRecord.js'
 import { resolvePublishedCatalogTool } from './site/publishedCatalogTool.js'
 import { entityGeometry } from './lib/entityMetrics.js'
@@ -42,12 +42,12 @@ const WORKSPACE_QUICK_AFTER = Object.freeze([
   { id: 'quick-undo', label: 'Undo version', icon: 'undo', disabled: true, reason: REASONS.noVersions },
   { id: 'quick-redo', label: 'Redo version', icon: 'redo', disabled: true, reason: REASONS.noVersions },
 ])
-// The bottom occluder is the command line's fixed-height well plus a constant 50 px reserve for the prompt's two rows, so an armed prompt never covers fitted geometry and arming or disarming a command still never moves the drawing.
+// Bottom occluders include the footer, phone drawer headings, and command line's fixed-height well plus a constant 50 px reserve for the prompt's two rows, so an armed prompt never covers fitted geometry and arming or disarming a command still never moves the drawing.
 const STUDIO_DRAWING_OCCLUDERS = Object.freeze([
   ['header.top', 'top'], ['#drafting-ribbon', 'top'], ['.viewer-toolbar', 'top'],
   ['[data-testid="cockpit-view"]', 'top'], ['.properties-dock', 'left'],
   ['.bar.bar-command-line', 'bottom', Object.freeze({ reserve: 50 })],
-  ['footer.foot-bar', 'bottom'], ['.rail-stack', 'nearest'],
+  ['footer.foot-bar', 'bottom'], ['.studio-drawer-tabs', 'bottom'], ['.rail-stack', 'nearest'],
 ])
 import Legend from './components/Legend.jsx'
 import ResultPanel from './components/ResultPanel.jsx'
@@ -77,6 +77,8 @@ import DemoBanner from './components/DemoBanner.jsx'
 import { AccountSignOut } from './components/ProductSurfaceTabs.jsx'
 import { deriveWorkspaceProjectState } from './site/workspaceProjectState.js'
 import IosSurface from './ios/IosSurface.jsx'
+import { useIosShipController } from './ios/useIosShipController.js'
+import { shipLaunchReason, shipErrorSentence } from './lib/ribbonClusters.js'
 import { ENV_IOS_SURFACE } from './ios/flag.js'
 import CadEditSurface from './cadedit/CadEditSurface.jsx'
 import EngineSessionProvider from './cadedit/EngineSessionProvider.jsx'
@@ -90,6 +92,7 @@ import CommandLineArmer from './cadedit/CommandLineArmer.jsx'
 import StatusModesBridge from './cadedit/StatusModesBridge.jsx'
 import EngineDocumentView from './cadedit/EngineDocumentView.jsx'
 import EngineHeadOpener from './cadedit/EngineHeadOpener.jsx'
+import SolarStarterOpener, { SOLAR_STARTER_EMPTY_INTAKE } from './cadedit/SolarStarterOpener.jsx'
 import CanvasPointPicker from './cadedit/CanvasPointPicker.jsx'
 import { COCKPIT_COMMAND_EVENT, parseDrawingCommand } from './lib/commandWords.js'
 import { parsePointExpression } from './cadedit/pointExpression.js'
@@ -153,6 +156,11 @@ import useAuthorStageController from './controllers/useAuthorStageController.js'
 import useDrawingVersionController from './controllers/useDrawingVersionController.js'
 import usePlatformTrustController from './controllers/platform/usePlatformTrustController.js'
 import useWorkspaceController from './controllers/workspace/useWorkspaceController.js'
+import useDrawingUploadController from './controllers/upload/useDrawingUploadController.js'
+import ProjectWorkspacePanels, { paneForCapability } from './workspace/ProjectWorkspacePanels.jsx'
+import ProjectMaterialIntake from './workspace/ProjectMaterialIntake.jsx'
+import useMaterialIntake from './workspace/useMaterialIntake.js'
+import ProjectStartPanel from './workspace/ProjectStartPanel.jsx'
 import useCatalogController from './controllers/catalog/useCatalogController.js'
 import useSessionController from './controllers/session/useSessionController.js'
 import { consoleAuthRequired, consoleSignedOut } from './controllers/session/consoleGate.js'
@@ -249,7 +257,7 @@ function SignedOutGate({ onDemo, onSignIn }) {
         <p className="panel-sub" style={{ margin: 0 }}>
           {onSignIn
             ? 'Sign in to load your tools and drawings from the cloud workspace, or explore the interactive demo on sample data.'
-            : 'This is a live preview of Leaf against the cloud workspace. Sign-in for the live surface is coming soon — explore the interactive demo to try the prompt lanes, tool catalog, and viewer on a sample rooftop drawing.'}
+            : 'This is a live preview of Leaf against the cloud workspace. Sign-in for the live surface is coming soon. Explore the interactive demo to try the prompt lanes, tool catalog, and viewer on a sample rooftop drawing.'}
         </p>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
           {onSignIn && <button type="button" className="btn primary" onClick={onSignIn}>Sign in</button>}
@@ -261,6 +269,22 @@ function SignedOutGate({ onDemo, onSignIn }) {
   )
 }
 
+
+// Mount the upload controller only on the live material pane. Its policy
+// request must not run when the drawing profiles or offline demo boot.
+function LiveProjectMaterialIntake({ project, artifacts, onAttached }) {
+  const projectUpload = useDrawingUploadController()
+  const materialIntake = useMaterialIntake({ upload: projectUpload, onAttached })
+  const startMaterialUpload = (file) => {
+    if (!project?.project_id) return
+    if (!materialIntake.begin({ projectId: project.project_id, projectName: project.name,
+      fileName: file?.name })) return
+    return projectUpload.actions.upload(file)
+  }
+  return <ProjectMaterialIntake project={project} upload={projectUpload}
+    intake={materialIntake} artifacts={artifacts} onStartUpload={startMaterialUpload}
+    onRetry={materialIntake.retry} mock={false} />
+}
 
 export default function App() {
   // W1 (convergence): the console's drawing identity is now owned by
@@ -276,6 +300,8 @@ export default function App() {
   // module-const behavior — the seed is frozen at mount and nothing in this
   // shell promotes a new identity yet.
   const { drawingId: REQUESTED_DRAWING_ID, source: DRAWING_SOURCE } = useDrawingIdentity()
+  const requestedDrawingIdRef = useRef(REQUESTED_DRAWING_ID)
+  requestedDrawingIdRef.current = REQUESTED_DRAWING_ID
   // W3 one-shell: non-null ONLY under the studio shell (rail on). The sole
   // consumer is the Viewer render site, which portals into it; null renders
   // the old shell byte-for-byte (the rollback contract, studioGround.js).
@@ -332,6 +358,7 @@ export default function App() {
   const [mock, setMock] = useState(() => config.mockDefault
     || explicitDemo({ search: typeof window !== 'undefined' ? window.location.search : '', signedIn: isSignedIn() }))
   const [loadErr, setLoadErr] = useState(null)
+  const [drawingLoad, setDrawingLoad] = useState({ drawingId: REQUESTED_DRAWING_ID, state: 'pending' })
   const [intakeRetryKey, setIntakeRetryKey] = useState(0) // X3 Retry — bumping re-runs the intake load effect
   const [selectedTool, setSelectedTool] = useState(null)
   const [selectedHandle, setSelectedHandle] = useState(null)
@@ -516,6 +543,13 @@ export default function App() {
   }, [agentSessionId, mock])
 
   const viewerRef = useRef(null)
+  const [, setSolarStarterViewerMounted] = useState(false)
+  const solarStarterViewerRef = useCallback((viewer) => {
+    viewerRef.current = viewer
+    // A lazy Viewer can arrive after the engine parsed. Notify App once so
+    // EngineDocumentView's onShown effect sees the newly attached viewer.
+    if (viewer) setSolarStarterViewerMounted(true)
+  }, [])
   const drawingErrorRef = useRef(null)
   const catalogUiRef = useRef({})
   const authorSectionRef = useRef(null)
@@ -672,6 +706,12 @@ export default function App() {
     closeProject: onCloseProject,
     selectCanonicalVersion,
   } = workspaceController
+  const [projectPane, setProjectPane] = useState(null)
+  const [boardJob, setBoardJob] = useState(null)
+  useEffect(() => {
+    setProjectPane(null)
+    setBoardJob(null)
+  }, [openProjectId])
   const annotationEnabled = Boolean(
     !mock && signedIn && openProjectId && drawingState?.drawing_id && agentSessionId,
   )
@@ -687,7 +727,7 @@ export default function App() {
   // Honest identity: tenant id and tier are DISTINCT. tenant defaults to "demo"
   // off-auth; tier is only known when the session echo carries it (auth live).
   const tenantLabel = tenant || 'demo'
-  const tierDisplay = tier || '—'
+  const tierDisplay = tier || '·'
   // Entitlement tier prefers the policy read (authoritative) over the session echo.
   const entTier = entitlements?.tier || tier || 'demo'
   const gateTier = entTier
@@ -959,15 +999,19 @@ export default function App() {
   // load session (intake + tenant echo) + reset transient state on mode/fixture change
   useEffect(() => {
     let alive = true
-    resetDrawing(); setLoadErr(null)
+    const loadDrawingId = REQUESTED_DRAWING_ID
+    const current = () => alive && loadDrawingId === requestedDrawingIdRef.current
+    if (!current()) return undefined
+    resetDrawing(); setDrawingLoad({ drawingId: loadDrawingId, state: 'pending' }); setLoadErr(null)
     resetCatalogTransient()
     clearToast(); setDrawer(null); setTenant(null)
     setTier(null); setOrg(null)
     clearAgentSession()
     mockVersions.reset()
     const seat = (d, options = {}) => {
-      if (!alive) return
+      if (!current()) return
       seatIntake(d, options)
+      setDrawingLoad({ drawingId: loadDrawingId, state: d != null ? 'seated' : 'absent' })
       // MOCK write loop (M3): v1 of the 'demo' chain is the intake just seated,
       // so re-running the demo always starts from a clean v1.
       if (mock && !isEditFixture) mockVersions.seedBase(d)
@@ -982,7 +1026,7 @@ export default function App() {
     if (!mock) sessionActions.checking()
     getSession(mock, DRAWING_SOURCE)
       .then(async ({ intake: d, tenant: t, tier: ti, org: o }) => {
-        if (!alive) return
+        if (!current()) return
         // A 200 from /api/session IS the platform session, so publish it before
         // any secondary request can report a newer auth failure. In particular,
         // a /versions 401 must remain `required` instead of being overwritten by
@@ -991,15 +1035,15 @@ export default function App() {
         let drawingSummary = null
         if (!mock) {
           try {
-            drawingSummary = await getDrawingVersions(false, REQUESTED_DRAWING_ID)
+            drawingSummary = await getDrawingVersions(false, loadDrawingId)
           } catch {
             // Keep the intake readable, but leave its version unknown. The
             // run-intent gate below refuses live legacy writes in this state.
           }
         }
-        if (!alive) return
+        if (!current()) return
         seat(d, {
-          drawingId: REQUESTED_DRAWING_ID,
+          drawingId: loadDrawingId,
           ...(drawingSummary ? { drawingState: drawingSummary } : {}),
         })
         setTenant(t); setTier(ti); setOrg(o)
@@ -1009,7 +1053,8 @@ export default function App() {
         if (!mock && o) adoptOrgId(o)
       })
       .catch((e) => {
-        if (!alive) return
+        if (!current()) return
+        setDrawingLoad({ drawingId: loadDrawingId, state: e?.status === 404 ? 'absent' : 'failed' })
         setLoadErr(humanizeError(e))
         if (!mock && is401(e)) {
           // `tokenInvalidated` stays FALSE on purpose: this is render state
@@ -1034,7 +1079,7 @@ export default function App() {
     // is what re-runs getSession after a post-callback 401 instead of stranding
     // this page holding a valid token behind a signed-out surface. Identical
     // wiring to ToolCast's session effect.
-  }, [mock, isEditFixture, intakeRetryKey, resetCatalogTransient, resetDrawing, seatIntake,
+  }, [mock, isEditFixture, intakeRetryKey, REQUESTED_DRAWING_ID, DRAWING_SOURCE, resetCatalogTransient, resetDrawing, seatIntake,
       sessionActions, session.recoveries])
 
   // Auth0 return leg: if we came back from Universal Login (?code=&state=),
@@ -1123,6 +1168,9 @@ export default function App() {
   // would move the server head under them, so it is refused with the reason
   // until the drafter saves or discards.
   const [engineDirty, setEngineDirty] = useState(false)
+  const [engineDocument, setEngineDocument] = useState(null)
+  const [solarStarterRetryKey, setSolarStarterRetryKey] = useState(0)
+  const [solarStarter, setSolarStarter] = useState('idle')
   // The same fact as a ref, for the EXECUTION-time check in onRun: a confirm
   // that awaited the catalog refetch holds the onRun it started with, so a
   // closure read there could be older than the edit that made the engine
@@ -1943,7 +1991,7 @@ export default function App() {
         // Authoring is a ~1-2 min agent run — surface completion as an NT2 toast so
         // it is visible even when the author section is collapsed / scrolled away.
         showToast({
-          text: `Tool published — ${tool.name}`,
+          text: `Tool published: ${tool.name}`,
           action: {
             label: 'View',
             onClick: () => {
@@ -1983,7 +2031,7 @@ export default function App() {
     setLastAuthoredTool(runnableTool)
     commitCatalogDecision({
       lane: 'run', tool: runnableTool.name, params: {}, confidence: 0.99,
-      rationale: `Authored just now — confirm to run “${runnableTool.name}”.`,
+      rationale: `Authored just now. Confirm to run “${runnableTool.name}”.`,
       alternatives: [],
       // The refetched record, so armDecision snapshots what the catalog just
       // issued rather than this render's stale `tools`.
@@ -2231,8 +2279,8 @@ export default function App() {
         `version ${env?.result?.new_version
           ? (mockVersions.isSeeded() ? mockVersions.list().head : env.result.new_version.version)
           : (env?.version ?? '—')}`,
-        `timing ${rec.elapsed_ms != null ? `${rec.elapsed_ms} ms` : (env?.timing_ms != null ? `${env.timing_ms} ms` : '—')}`,
-        `cost ${env?.cost && env.cost.usd_est != null ? `$${Number(env.cost.usd_est).toFixed(4)}` : '—'}`,
+        `timing ${rec.elapsed_ms != null ? `${rec.elapsed_ms} ms` : (env?.timing_ms != null ? `${env.timing_ms} ms` : '·')}`,
+        `cost ${env?.cost && env.cost.usd_est != null ? `$${Number(env.cost.usd_est).toFixed(4)}` : '·'}`,
         `degraded ${(env?.degraded_mode || rec.degraded_mode) ? 'yes — local fallback' : 'no'}`,
       ]
       // A mock envelope can carry a bare string error — don't render a blank row.
@@ -2253,7 +2301,7 @@ export default function App() {
             setTimeout(() => resultBlockRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' }), 0)
           },
         },
-        foot: 'Esc closes — the rail behind never re-flows.',
+        foot: 'Esc closes. The rail behind never re-flows.',
       })
     } catch (e) {
       setRunErr(humanizeError(e))
@@ -2272,8 +2320,8 @@ export default function App() {
       `version ${env.result?.new_version
         ? (mockVersions.isSeeded() ? mockVersions.list().head : env.result.new_version.version)
         : (env.version ?? '—')}`,
-      `timing ${env.timing_ms != null ? `${env.timing_ms} ms` : '—'}`,
-      `cost ${env.cost && env.cost.usd_est != null ? `$${Number(env.cost.usd_est).toFixed(4)}` : '—'}`,
+      `timing ${env.timing_ms != null ? `${env.timing_ms} ms` : '·'}`,
+      `cost ${env.cost && env.cost.usd_est != null ? `$${Number(env.cost.usd_est).toFixed(4)}` : '·'}`,
       `degraded ${env.degraded_mode ? 'yes — local fallback' : 'no'}`,
     ]
     if (env.error) rows.push(typeof env.error === 'string'
@@ -2286,7 +2334,7 @@ export default function App() {
       action: currentJobId
         ? { label: 'Copy job id', onClick: () => navigator.clipboard?.writeText(String(currentJobId)) }
         : null,
-      foot: 'Esc closes — provenance is read-only.',
+      foot: 'Esc closes. Provenance is read-only.',
     })
   }, [result, currentJobId, selectedTool])
 
@@ -2722,24 +2770,37 @@ export default function App() {
   //  - never over a version preview or a mutated head (StageLayer:107
   //    precedent) - a delete-panel run makes v2 and the routes go stale.
   const [demoSolveRoutes, setDemoSolveRoutes] = useState(null)
+  const [demoSolveState, setDemoSolveState] = useState('pending')
+  const [showSolarStrings, setShowSolarStrings] = useState(true)
   const intakeIsRooftopSample = String(intake?.dwg || '').replace(/\\/g, '/').endsWith('/rooftop_demo.dwg')
   const solarStringsEligible = !!studioGround && surfaceSlots.groundMaterial.solarStrings && mock
     && !isEditFixture && DRAWING_SOURCE === 'rooftop_demo' && intakeIsRooftopSample
   useEffect(() => {
-    if (!solarStringsEligible || demoSolveRoutes) return undefined
+    if (!solarStringsEligible || demoSolveState !== 'pending') return undefined
     let live = true
     loadDemoSolve().then((solve) => {
-      if (!live || !Array.isArray(solve?.strings)) return
-      setDemoSolveRoutes(solve.strings
+      if (!live) return
+      const routes = (Array.isArray(solve?.strings) ? solve.strings : [])
         .filter((route) => Array.isArray(route.pts) && route.pts.length >= 2)
-        .map((route) => ({ id: route.id, pts: route.pts })))
-    }).catch(() => { /* no solve, no overlay - never a fabricated route */ })
+        .map((route) => ({ id: route.id, pts: route.pts }))
+      setDemoSolveRoutes(routes)
+      setDemoSolveState(routes.length ? 'loaded' : 'empty')
+    }).catch(() => {
+      if (live) setDemoSolveState('failed')
+    })
     return () => { live = false }
-  }, [solarStringsEligible, demoSolveRoutes])
-  const solarStringRoutes = useMemo(() => {
-    if (!solarStringsEligible || previewing || (drawingState?.head ?? 1) > 1) return undefined
-    return demoSolveRoutes || undefined
-  }, [solarStringsEligible, previewing, drawingState, demoSolveRoutes])
+  }, [solarStringsEligible, demoSolveState])
+  const solarRoutesStatus = solarRouteStatus({
+    eligible: solarStringsEligible, previewing, head: drawingState?.head ?? 1,
+    engineDirty,
+    documentId: activeIntake?.documentId ?? null,
+    committedVersion: engineDocument?.committedVersion ?? null,
+    headDocumentId: `${REQUESTED_DRAWING_ID}-v1.dxf`,
+    solve: demoSolveState, routes: demoSolveRoutes,
+  })
+  const solarStringRoutes = useMemo(() => solarRouteDisplay({
+    status: solarRoutesStatus, shown: showSolarStrings, routes: demoSolveRoutes,
+  }), [solarRoutesStatus, showSolarStrings, demoSolveRoutes])
   // iOS ship-lane readiness contract (leaf.ios-ship-surface.v1). Fetched only
   // with the surface flag baked on and a concrete project + revision; every
   // other case stays null, which IosSurface renders truthfully as
@@ -2756,12 +2817,38 @@ export default function App() {
       .catch(() => { if (live) setIosContract(null) })
     return () => { live = false }
   }, [mock, openProjectId, canonicalVersionId])
+  const shipControllerLive = ENV_IOS_SURFACE && surfaceSlots.toolbar.profile === 'ship' && !mock && signedIn
+  const iosShipController = useIosShipController({
+    projectId: openProjectId,
+    revision: canonicalVersionId || null,
+    sessionActive: !mock && signedIn,
+    enabled: shipControllerLive,
+    tenantKey: tenant || config.tenant,
+  })
+  const ship = useMemo(() => ({
+    ...iosShipController,
+    controllerLive: shipControllerLive,
+    contract: iosContract,
+    revision: canonicalVersionId || null,
+    error: shipErrorSentence(iosShipController.error),
+    onLaunch: iosShipController.phase === 'ready' ? iosShipController.launch : null,
+    launchReason: shipLaunchReason(iosShipController),
+    onReceipts: iosContract?.receipt_id ? () => {
+      const details = document.querySelector('.studio-profile-info details')
+      if (details) { details.open = true; details.querySelector('summary')?.focus() }
+    } : null,
+  }), [iosShipController, shipControllerLive, iosContract, canonicalVersionId])
+  // Readiness follows the engine projection that reached the canvas, not openBytes.
+  const solarReady = surfaceSlots.toolbar.profile === 'solar' && !!activeIntake
+    && engineDocument?.documentId === activeIntake.documentId
+    && (engineDocument.documentOrigin === 'starter' || engineDocument.documentOrigin === 'head')
   const surfaceStates = useMemo(() => productSurfaceStates({
     sessionActive: mock || !signedOut,
     hasDrawing: !!shown,
     apsLive: health ? !!health.aps_live : undefined,
-    iosReady: !!(iosContract?.readiness?.healthy && iosContract?.readiness?.launchable),
-  }), [mock, signedOut, shown, health, iosContract])
+    iosReady: iosShipController.phase === 'ready',
+    solarReady,
+  }), [mock, signedOut, shown, health, iosShipController.phase, solarReady])
 
   const advisories = [
     quotaShown && 'spend cap',
@@ -2814,6 +2901,8 @@ export default function App() {
     const openJobs = () => setJobRailExpanded(true)
     return profileRibbonTabs(surfaceSlots.toolbar.profile, {
       families: railFamilies,
+      solar: { status: solarRoutesStatus, shown: showSolarStrings, onToggle: () => setShowSolarStrings((shown) => !shown) },
+      selectedHandle, onClearSelection: () => setSelectedHandle(null),
       onRun: (tool) => onRequestCatalogRun(tool, null, RIBBON_RATIONALE, 'ribbon'),
       catalogOptions: {
         onRequestRun: onRequestCatalogRun,
@@ -2826,28 +2915,27 @@ export default function App() {
         onChange: !mock && signedIn && !projectsErr ? openProjects : null,
         onCreate: !mock && signedIn && orgId && !projectsErr && !projectBusy ? onCreateProject : null,
       },
-      // This console has no DrawingUploadControl mount or upload controller.
-      files: { onUpload: null },
+      files: { onUpload: !mock && signedIn && openProjectId ? () => setProjectPane('material') : null },
       conversation: {
         onNew: !agentDisabled && signedIn && !running && !routing
           ? () => { clearAgentSession(); openAgentMode(); barInputRef.current?.focus() } : null,
       },
       activity: { onJobs: openJobs, onReceipts: jobs.length ? openJobs : null },
-      // IosSurface is readiness-only here; launching belongs to the ship host.
-      ship: { onLaunch: null, onReceipts: iosContract?.receipt_id ? () => {
-        const details = document.querySelector('.studio-profile-info details')
-        if (details) { details.open = true; details.querySelector('summary')?.focus() }
-      } : null },
+      ship,
     })
   }, [surfaceSlots.toolbar.profile, railFamilies, onRequestCatalogRun, setFamilyOpen,
     running, previewing, writeLocked, canRunWrite, engineDirty, mock, signedIn, projectsErr,
-    orgId, projectBusy, onCreateProject, agentDisabled, routing, clearAgentSession,
-    openAgentMode, jobs.length, iosContract?.receipt_id, setNavExpanded, setJobRailExpanded])
-  const activeRibbonTab = profileTabs.some((tab) => tab.id === ribbonTab)
-    ? ribbonTab : surfaceSlots.toolbar.home
+    orgId, openProjectId, projectBusy, onCreateProject, agentDisabled, routing, clearAgentSession,
+    openAgentMode, jobs.length, ship, setNavExpanded, setJobRailExpanded,
+    solarRoutesStatus, showSolarStrings, selectedHandle])
+  const previousRibbonProfile = useRef(null)
+  const entryRibbonTab = profileEntryTab(previousRibbonProfile.current, surfaceSlots.toolbar.profile, ribbonTab, surfaceSlots.toolbar.home)
+  const activeRibbonTab = profileTabs.some((tab) => tab.id === entryRibbonTab)
+    ? entryRibbonTab : surfaceSlots.toolbar.home
   useEffect(() => {
+    previousRibbonProfile.current = surfaceSlots.toolbar.profile
     if (ribbonTab !== activeRibbonTab) setRibbonTab(activeRibbonTab)
-  }, [ribbonTab, activeRibbonTab])
+  }, [ribbonTab, activeRibbonTab, surfaceSlots.toolbar.profile])
 
   const ribbon = useMemo(() => {
     if (!studioShell) {
@@ -2968,6 +3056,10 @@ export default function App() {
     // the end without a portal; the deviation is deliberate and named in
     // the W4g-5c PR, with the parity re-measure owed.
     const byTab = {
+      solar: (profileTabs.find((tab) => tab.id === 'solar')?.clusters || []).map((cluster) => cluster.id === 'solar-panels'
+        ? { ...cluster, extra: ENV_CAD_EDIT ? <div id="cockpit-solar-panels-slot" className="ribbon-slot" /> : null,
+          note: ENV_CAD_EDIT ? null : 'Panel placement needs the browser engine' }
+        : cluster),
       // The Clipboard panel stays LAST, where the reference puts it. With
       // the flag ON it is an EMPTY cluster carrying a slot div, and the
       // engine consumer portals the real tools into it; with the flag off
@@ -3121,7 +3213,7 @@ export default function App() {
         if (!acquired.acquired) {
           const e = new Error('drawing is checked out by '
             + (acquired.locked_by || 'another session')
-            + ' — try again when the lock clears')
+            + '. Try again when the lock clears')
           e.status = 409
           throw e
         }
@@ -3155,7 +3247,7 @@ export default function App() {
     }
   }
   const engineScope = (node) => (ENV_CAD_EDIT ? (
-    <EngineSessionProvider saveTarget={engineSaveTarget} onSaved={onEngineSaved} onDirtyChange={onEngineDirtyChange} onBeforeEdit={closeStartForChange} onBeforeArm={onBeforeArm}>{node}</EngineSessionProvider>
+    <EngineSessionProvider saveTarget={engineSaveTarget} onSaved={onEngineSaved} onDirtyChange={onEngineDirtyChange} onDocumentChange={setEngineDocument} onBeforeEdit={closeStartForChange} onBeforeArm={onBeforeArm}>{node}</EngineSessionProvider>
   ) : node)
 
   return (
@@ -3179,7 +3271,7 @@ export default function App() {
       onSelect={onSelectSurface}
       onCreateProject={onCreateProject}
       projectSlot={surfaceSlots.chrome.projectSlot === 'ios-surface'
-        ? <IosSurface enabled={ENV_IOS_SURFACE} contract={iosContract} />
+        ? <IosSurface enabled={ENV_IOS_SURFACE} contract={iosContract} ship={ship} onLaunch={ship.onLaunch} />
         : null}
       session={session}
       // Slice 9b: the ladder fields the console can supply today. Entity-kind
@@ -3316,7 +3408,7 @@ export default function App() {
       }}
     >
       <header className="top">
-        <div className="mark"><span className="diamond" aria-hidden="true" /> Leaf — build CAD tools with AI</div>
+        <div className="mark"><span className="diamond" aria-hidden="true" /> Leaf: build CAD tools with AI</div>
         {/* W4e: on the studio's drafting surfaces the header IS the
             reference's top band: quick access, then the ribbon tabs. The
             engine's Open/Save portal into the band's slot. Rail OFF and
@@ -3496,8 +3588,8 @@ export default function App() {
         <div className="kicker">Home · one prompt, two lanes</div>
         <h1 className="home-q">What should Leaf do to <em>{projectName}</em>?</h1>
         <div className="hint">
-          Try <b>count panels per layer</b> — one prompt, routed across <b>Run</b> ·{' '}
-          <b>Build</b>. You confirm before anything runs — paid actions never auto-execute.
+          Try <b>count panels per layer</b>: one prompt, routed across <b>Run</b> ·{' '}
+          <b>Build</b>. You confirm before anything runs, and paid actions never auto-execute.
         </div>
 
         </>)}
@@ -3535,6 +3627,56 @@ export default function App() {
             onCreateProject={onCreateProject}
             headingRef={boardHeadingRef}
             workspaceProject={workspaceProjectState}
+            actions={surfaceSlots.ground === 'board' ? {
+              onOpenDrawing: () => setProjectPane('material'),
+              onOpenVersion: () => setProjectPane('versions'),
+              onOpenJob: (job) => { setBoardJob(job); setProjectPane('jobs') },
+              onOpenTool: () => setProjectPane('tools'),
+              onOpenFamily: (family) => { setFamilyOpen(family.family_id, true); setNavExpanded(true); setProjectPane('catalog') },
+              onOpenCapability: (capability) => setProjectPane(paneForCapability(capability)),
+            } : undefined}
+            panel={surfaceSlots.ground === 'board' ? <>
+              {!mock && signedIn && !openProjectId && <ProjectStartPanel
+                bootstrapState={workspaceController.bootstrapState}
+                projects={projects}
+                projectsLoaded={workspaceController.projectsLoaded}
+                projectsLoading={projectsLoading}
+                openProjectId={openProjectId}
+                projectsError={projectsErr}
+                orgBusy={orgBusy}
+                projectBusy={projectBusy}
+                orgDraftError={workspaceController.orgDraftError}
+                projectDraftError={workspaceController.projectDraftError}
+                orgConflict={workspaceController.orgConflict}
+                drawingMounted={Boolean(shown)}
+                onCreateOrg={createWorkspaceOrg}
+                onCreateProject={createWorkspaceProject}
+                onOpenProject={onOpenProject}
+                onLoadProjects={workspaceController.loadProjects}
+              />}
+              <ProjectWorkspacePanels
+                project={workspace?.project}
+                workspace={workspace}
+                pane={projectPane}
+                onSelectPane={setProjectPane}
+                onBack={() => setProjectPane(null)}
+                receipts={workspace?.receipts}
+                shipReceipts={workspace?.ship_receipts}
+                slots={{ catalog: <ul>{railFamilies.map((family) => <li key={family.family_id}>{family.label}</li>)}</ul> }}
+                onOpenVersion={(version) => selectCanonicalVersion(version.version_id)}
+                onSelectJob={setBoardJob}
+                currentJob={boardJob}
+                mock={mock}
+              />
+              {projectPane === 'material' && (mock || !signedIn || !openProjectId
+                ? <ProjectMaterialIntake project={null} mock={mock} artifacts={[]} />
+                : <LiveProjectMaterialIntake
+                  key={openProjectId}
+                  project={{ ...workspace?.project, project_id: openProjectId, name: currentProjectName }}
+                  artifacts={workspace?.drawing_artifacts || []}
+                  onAttached={rehydrate}
+                />)}
+            </> : undefined}
             workspace={!mock && openProjectId ? workspace : null}
             drawing={shown ? { name: projectName, polylines: shown.polylines.length, layers: shown.layers.length } : null}
             catalog={catalog}
@@ -3542,6 +3684,8 @@ export default function App() {
             iosEnabled={ENV_IOS_SURFACE}
             iosContract={iosContract}
             revision={canonicalVersionId}
+            ship={ship}
+            onLaunch={ship.onLaunch}
           />,
           studioGround,
         )}
@@ -3609,7 +3753,7 @@ export default function App() {
                 <EngineRibbonClusters
                   importOpen={importOpen}
                   onToggleImport={() => { returnToDrawing(); setImportOpen((o) => !o) }}
-                  panels={activeRibbonTab === 'insert' ? ['file'] : activeRibbonTab === 'draw' ? ['draw', 'modify', 'annotation', 'block', 'clipboard', 'properties', 'groups'] : activeRibbonTab === 'view' ? ['script'] : []}
+                  panels={activeRibbonTab === 'solar' ? ['solar-panels'] : activeRibbonTab === 'insert' ? ['file'] : activeRibbonTab === 'draw' ? ['draw', 'modify', 'annotation', 'block', 'clipboard', 'properties', 'groups'] : activeRibbonTab === 'view' ? ['script'] : []}
                 />
               )}
               {/* W4f slice B: the command line's typed words (LINE, C, MOVE ...)
@@ -3642,6 +3786,7 @@ export default function App() {
           {ENV_CAD_EDIT && studioGround && (
             <EngineDocumentView
               viewerRef={viewerRef}
+              consoleIntake={intake}
               selectedHandle={selectedHandle}
               onSelectedHandleChange={setSelectedHandle}
               onShown={(intake, history) => {
@@ -3684,6 +3829,15 @@ export default function App() {
               enabled={!!studioGround && !!drafting && !!intake}
               headKey={drawingState?.head ?? (mock ? 1 : null)}
               fetchDxf={mock ? fetchSampleDxf : fetchDrawingDxf}
+            />
+          )}
+          {ENV_CAD_EDIT && studioGround && (
+            <SolarStarterOpener
+              enabled={!mock && drawingLoad.drawingId === REQUESTED_DRAWING_ID && drawingLoad.state === 'absent' && surfaceSlots.toolbar.profile === 'solar'}
+              fetchDxf={fetchSampleDxf}
+              drawingSeated={drawingLoad.drawingId === REQUESTED_DRAWING_ID && drawingLoad.state === 'seated'}
+              retryKey={solarStarterRetryKey}
+              onStarterState={setSolarStarter}
             />
           )}
           <div className="viewer-toolbar">
@@ -3841,7 +3995,7 @@ export default function App() {
               fallback note (the completion itself already toasted plainly). */}
           {refreshFail && (
             <div className="inline-error" style={{ margin: '0 0 8px' }}>
-              Couldn’t refresh the viewer — showing the previous version
+              Couldn’t refresh the viewer, showing the previous version
               <button type="button" className="chip-act" onClick={onRetryViewerRefresh}>Retry</button>
               {rTarget === 'refresh' && <span className="key" aria-hidden="true">R</span>}
             </div>
@@ -3867,6 +4021,12 @@ export default function App() {
               further down, wherever propertyRowsEl sits. */}
           {ENV_CAD_EDIT && <EngineDockProperties />}
           <div className="viewer-wrap">
+            {!mock && drawingLoad.drawingId === REQUESTED_DRAWING_ID && drawingLoad.state === 'absent' && surfaceSlots.toolbar.profile === 'solar' && solarStarter === 'failed' && (
+              <div className="loading-line dim" role="status">
+                <span>The rooftop starter could not be opened. Retry or import a DXF.</span>
+                <button className="chip-act" onClick={() => setSolarStarterRetryKey((k) => k + 1)}>Retry rooftop starter</button>
+              </div>
+            )}
             {/* X3 whole-pane takeover: red dot + what failed + quiet reason + Retry. */}
             {loadErr && !signedOut && (
               <div className="pane-fail" role="alert" style={{ position: 'absolute', inset: 0 }}>
@@ -3889,7 +4049,7 @@ export default function App() {
                 <span className="dot live pulse" aria-hidden="true" /> Loading drawing
               </div>
             )}
-            {intake && (() => {
+            {(intake || solarStarter === 'open') && (() => {
               // W3 one-shell: the console OWNS this element — every prop, the
               // ref, the version/undo/redo imperative path — in BOTH shells.
               // Under the studio shell the element PORTALS into the ground
@@ -3900,8 +4060,8 @@ export default function App() {
               const viewerEl = (
                 <Suspense fallback={<ViewerSkeleton />}>
                 <Viewer
-                  ref={viewerRef}
-                  intake={intake}
+                  ref={intake ? viewerRef : solarStarterViewerRef}
+                  intake={intake ?? SOLAR_STARTER_EMPTY_INTAKE}
                   colorForLayer={studioGround ? studioColorForLayer : surfaceColorForLayer}
                   paletteRevision={studioGround ? (surfaceSlots.groundMaterial.layerAccent === 'solar' ? 'solar' : 'base') : undefined}
                   stringRoutes={solarStringRoutes}
@@ -4020,7 +4180,7 @@ export default function App() {
                  to one line with a count instead of stacking. */
               advisories.length >= 2 ? (
                 <div className="banner">
-                  <span>{advisories.length} advisories — {advisories.join(' · ')}</span>
+                  <span>{advisories.length} advisories: {advisories.join(' · ')}</span>
                 </div>
               ) : (
                 <>
@@ -4118,7 +4278,7 @@ export default function App() {
               <span className="dot live pulse" aria-hidden="true" />
               <span className="verb">
                 {(runProgress || runStatus || 'running')}
-                {selectedTool?.name ? ` — ${selectedTool.name}` : ''}
+                {selectedTool?.name ? `: ${selectedTool.name}` : ''}
                 {runElapsedMs != null ? ` · ${fmtElapsed(runElapsedMs)}` : ''}
               </span>
               <span className="key hot">Esc</span>
@@ -4130,8 +4290,8 @@ export default function App() {
               <span className="dot red" aria-hidden="true" />
               <span className="strip-sentence">
                 {routeErr
-                  ? `Couldn’t route the prompt — ${routeErr}`
-                  : `Couldn’t run ${selectedTool?.name || 'the tool'} — ${runErr}`}
+                  ? `Couldn’t route the prompt: ${routeErr}`
+                  : `Couldn’t run ${selectedTool?.name || 'the tool'}: ${runErr}`}
                 <span className="dim"> · your last good result is unchanged</span>
               </span>
               <button
@@ -4296,7 +4456,8 @@ export default function App() {
         ) : (
           <span className="foot-stat"><span className="dot" aria-hidden="true" />local solver · <span className="ok-txt">ready</span></span>
         )}
-        <span className="dim">{plural(capCount, 'cap')} · {catalog.families.length} famil{catalog.families.length === 1 ? 'y' : 'ies'} · tier {gateTier}</span>
+        {/* One census per surface: under the studio the footer counts the same surface-scoped families the rail shows. */}
+        <span className="dim">{plural(studioGround ? railFamilies.reduce((n, f) => n + f.capabilities.length, 0) : capCount, 'cap')} · {railFamilies.length} famil{railFamilies.length === 1 ? 'y' : 'ies'} · tier {gateTier}</span>
         {!mock && usage && (
           <span className="dim">${Number(usage.today?.usd_est || 0).toFixed(3)} today</span>
         )}

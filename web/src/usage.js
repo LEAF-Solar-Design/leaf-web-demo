@@ -53,7 +53,7 @@ export function usageCost(usage) {
 
 /** Render helper: a known reading, or the honest em dash. */
 export function orDash(value, format = (v) => String(v)) {
-  return value === null || value === undefined ? '—' : format(value)
+  return value === null || value === undefined ? '·' : format(value)
 }
 
 // Full tool args/result for an expanded chip. Objects pretty-print; strings

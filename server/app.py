@@ -137,6 +137,7 @@ def initialize_ios_ship_provider() -> None:
                if config is not None else None)
     ios_ship.set_dispatch(adapter.dispatch if adapter is not None else None)
     ios_ship.set_provider_readiness(adapter.readiness if adapter is not None else None)
+    ios_ship.set_provider_catalog(adapter.source_catalog if adapter is not None else None)
     ios_ship_provider_router.set_config(config)
 
 

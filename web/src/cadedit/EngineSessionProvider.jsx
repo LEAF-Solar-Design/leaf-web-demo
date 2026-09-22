@@ -141,6 +141,7 @@ export default function EngineSessionProvider({
   // server head under them can be refused with the reason. Called only on
   // a change, with a boolean.
   onDirtyChange = null,
+  onDocumentChange = null,
   onBeforeEdit = null,
   // Called once before a valid non-null command is stored; return false to refuse it (nothing is stored).
   onBeforeArm = null,
@@ -289,6 +290,18 @@ export default function EngineSessionProvider({
   useEffect(() => { onDirtyChangeRef.current?.(dirty) }, [dirty])
   // Unmount: the host must not keep a stale "dirty" over a provider that is gone.
   useEffect(() => () => { onDirtyChangeRef.current?.(false) }, [])
+
+  const onDocumentChangeRef = useRef(onDocumentChange)
+  onDocumentChangeRef.current = onDocumentChange
+  useEffect(() => {
+    onDocumentChangeRef.current?.({
+      documentId: session.documentId,
+      documentOrigin: session.documentOrigin,
+      committedVersion: session.committedVersion,
+      entityCount: session.entityCount,
+    })
+  }, [session.documentId, session.documentOrigin, session.committedVersion, session.entityCount])
+  useEffect(() => () => { onDocumentChangeRef.current?.(null) }, [])
 
   const canSave = saveTarget !== null && saveTarget !== undefined
   // A live refusal overrides only the status a consumer READS; every other

@@ -129,11 +129,11 @@ function CustomizeChipBody({ payload }) {
       {undisplayed > 0 && (
         <span className="customize-incomplete">
           {undisplayed} more file{undisplayed === 1 ? '' : 's'} would change and are NOT
-          listed here. Do not approve this — deny it and ask for a smaller change.
+          listed here. Do not approve this. Deny it and ask for a smaller change.
         </span>
       )}
       <span className="dim">
-        {' — '}this changes the code of the product itself. Landing pushes a review
+        {': '}this changes the code of the product itself. Landing pushes a review
         branch; nothing goes live until it is reviewed, merged and deployed.
       </span>
     </>
@@ -162,7 +162,7 @@ function fmtUsage(u) {
 const STOP_NOTES = {
   awaiting_approval: 'waiting on your decision above',
   cap_hit: 'turn hit its token cap',
-  llm_rate_limited: 'rate-limited — try again shortly',
+  llm_rate_limited: 'rate-limited. Try again shortly',
   error: 'the turn ended with an error',
   timeout: 'the turn timed out',
 }
@@ -171,16 +171,16 @@ const STOP_NOTES = {
 function bannerFor(e) {
   const kind = classifyAgentError(e)
   const fallbacks = {
-    quota: 'AI paused — your built tools keep working.',
-    rate_limited: 'AI rate-limited — retry shortly.',
+    quota: 'AI paused. Your built tools keep working.',
+    rate_limited: 'AI rate-limited. Retry shortly.',
     grant: 'Chat needs a linked Claude account.',
-    busy: 'A turn is already in flight — wait for it to finish.',
+    busy: 'A turn is already in flight. Wait for it to finish.',
     entitlement: 'Chat isn’t included in your plan.',
-    approval_stale: 'That request was already decided — ask the assistant to propose it again.',
-    confirmation_expired: 'That confirmation expired — ask the assistant to propose it again.',
-    too_large: 'That message is too large — try fewer or smaller images.',
+    approval_stale: 'That request was already decided. Ask the assistant to propose it again.',
+    confirmation_expired: 'That confirmation expired. Ask the assistant to propose it again.',
+    too_large: 'That message is too large. Try fewer or smaller images.',
   }
-  const fallback = fallbacks[kind] || 'Couldn’t reach the assistant — your built tools keep working.'
+  const fallback = fallbacks[kind] || 'Couldn’t reach the assistant. Your built tools keep working.'
   return { kind, ...errorPresentation(e, fallback), message: fallback }
 }
 
@@ -808,9 +808,9 @@ export default function ConversePanel({
                 {item.capability && <> <span className={`cap ${isWrite ? 'write' : 'read'}`}>{item.capability}</span></>}
                 {summary && <span className="dim"> · {summary}</span>}
                 <span className="dim">
-                  {' — '}
+                  {': '}
                   {item.rationale || (isWrite
-                    ? 'creates a new version — you confirm before it runs.'
+                    ? 'creates a new version; you confirm before it runs.'
                     : 'you confirm before it runs.')}
                 </span>
               </>
@@ -821,7 +821,7 @@ export default function ConversePanel({
               <>
                 <span className="route-title">{item.confirmKind || 'Confirmation'}</span>
                 {item.payload && <span className="dim"> · {paramsSummary(item.payload) || ''}</span>}
-                <span className="dim"> — the assistant is asking before it proceeds.</span>
+                <span className="dim">. The assistant is asking before it proceeds.</span>
               </>
               )
             )}
@@ -901,7 +901,7 @@ export default function ConversePanel({
       <div className="converse-head">
         <span className={model.active || busy ? 'dot live pulse' : 'dot'} aria-hidden="true" />
         <span className="converse-title">Assistant</span>
-        <span className="dim">plans and explains — deterministic tools do the work</span>
+        <span className="dim">plans and explains, deterministic tools do the work</span>
         <span className="converse-spacer" />
         {/* Status strip — the terminal client's persistent model/context/cost
             reading, as a component rather than a shell script. Every field is
@@ -991,7 +991,7 @@ export default function ConversePanel({
         {queuedTurn && (
           <div className="converse-note">
             <span className="dot square" aria-hidden="true" />
-            <span className="dim">Queued — will run when the current turn finishes</span>
+            <span className="dim">Queued: will run when the current turn finishes</span>
           </div>
         )}
         {pendingUserTurns.map((u) => (

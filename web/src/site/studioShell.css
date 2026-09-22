@@ -495,6 +495,8 @@
 }
 .studio-shell [data-studio-shell="cockpit"] :is(.ground-tile p, .ground-tile ul, .ground-board-header p, .ground-catalog-tool p) { color: var(--ck-ink-dim); }
 .studio-shell [data-studio-shell="cockpit"] .ground-empty { color: var(--ck-ink-dim) !important; }
+/* Keep a fully scrolled catalog row clear of fractional scrollport edges. */
+.studio-shell [data-studio-shell="cockpit"] .ground-catalog-tool { scroll-margin-block: 4px; }
 .studio-shell [data-studio-shell="cockpit"] :is(.ground-tile strong, .ground-board-header h1, .device-v) { color: var(--ck-ink); font-family: var(--ck-font); }
 .studio-shell [data-studio-shell="cockpit"] .ground-board-header h1 { font-size: 20px; }
 .studio-shell [data-studio-shell="cockpit"] .device-frame { background: var(--ck-glass-panel); border-color: var(--ck-edge); }

@@ -273,6 +273,7 @@ on:
 permissions:
   actions: read
   contents: read
+  id-token: write
 
 # Never cancels a running relay (see COALESCE ACROSS COMMITS above). The
 # predicate is the dispatch job's `if`, verbatim: a completion the job would
@@ -293,6 +294,7 @@ jobs:
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main'
     runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
+    environment: ecr-release
     # The relay now watches both deploys to completion (observed: ~8 min for
     # web, ~14 min for app, plus time queued behind the shared staging lock).
     # Comfortably above the step's own 95-minute deadline so the step reports
@@ -300,6 +302,9 @@ jobs:
     timeout-minutes: 105
 
     env:
+      AWS_REGION: us-east-1
+      MQ_TRANSPORT_BUCKET: leaf-mq-transport-807034087062-us-east-1
+      MQ_TRANSPORT_PREFIX: mq/leaf-web-demo/
       INFRA_REPO: LEAF-Solar-Design/leaf-automation-aws-terraform
       DEPLOY_WORKFLOW: deploy-leaf-platform-staging.yml
       # Relay-local consumer handshake. The build and adoption selectors stay
@@ -332,6 +337,14 @@ jobs:
             echo "current=true" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Configure AWS credentials for the immutable release transport
+        if: steps.tip.outputs.current == 'true'
+        uses: aws-actions/configure-aws-credentials@v6.1.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ECR_PUSH_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GHA-RelayPlatform-${{ github.run_id }}
+
       - name: Read the exact image tag from the build's supply-set manifest
         id: manifest
         if: steps.tip.outputs.current == 'true'
@@ -344,10 +357,13 @@ jobs:
           # published no such artifact, because the two callers below mean
           # opposite things by an absence: for THIS build it may be a
           # legitimate docs-only no-op, for a historical build it just means
-          # "keep looking". Leaves the run's artifact listing in artifacts.json
-          # either way, which the no-op marker check reads.
+          # "keep looking". The immutable S3 release object is authoritative;
+          # the Actions artifact path remains only for older producer runs.
+          # Leaves the run's artifact listing in artifacts.json on the fallback
+          # path, which the no-op marker check reads.
           fetch_supply_set() {
             local run_id=$1 name=$2 artifact_count artifact_id artifact_digest producer_source
+            local producer_attempt transport_key transport_hash transport_hash_b64
             SUPPLY_ARTIFACT_ID=""
             SUPPLY_ARTIFACT_NAME=""
             SUPPLY_ARTIFACT_PROVIDER_SHA256=""
@@ -356,6 +372,88 @@ jobs:
             SUPPLY_PRODUCER_EVENT=""
             SUPPLY_PRODUCER_SOURCE_REVISION=""
             SUPPLY_PRODUCER_SOURCE_TREE=""
+
+            # The release producer writes this object with If-None-Match '*',
+            # so the run/source/attempt key is immutable even when GitHub's
+            # shared artifact quota is full. Validate both provider metadata
+            # and the full-object checksum before using its bytes. The legacy
+            # evidence field names stay stable for the Terraform consumer:
+            # the positive association ID is the producer run, and the hash is
+            # the exact transported manifest rather than a zip wrapper.
+            [[ "$name" =~ ^staging-supply-set-([0-9a-f]{40})-attempt-([1-9][0-9]*)$ ]] || {
+              echo "::error::Supply set name $name has no exact source and attempt binding."
+              exit 1
+            }
+            producer_source="${BASH_REMATCH[1]}"
+            producer_attempt="${BASH_REMATCH[2]}"
+            transport_key="${MQ_TRANSPORT_PREFIX}release/$producer_source/$run_id-$producer_attempt/staging-supply-set.json"
+            rm -f staging-supply-set.json supply-s3-get.json
+            if aws s3api get-object \
+              --bucket "$MQ_TRANSPORT_BUCKET" \
+              --key "$transport_key" \
+              --checksum-mode ENABLED \
+              staging-supply-set.json > supply-s3-get.json 2>/dev/null; then
+              gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" > supply-producer-run.json
+              jq -e \
+                --arg repo "$GITHUB_REPOSITORY" \
+                --arg path ".github/workflows/build-platform-images.yml" \
+                --arg name "$name" '
+                .repository.full_name == $repo
+                and .head_repository.full_name == $repo
+                and .path == $path
+                and .event == "push"
+                and .head_branch == "main"
+                and .status == "completed"
+                and .conclusion == "success"
+                and (.id | type == "number" and . > 0)
+                and (.run_attempt | type == "number" and . > 0)
+                and (.head_sha | test("^[0-9a-f]{40}$"))
+                and ($name == ("staging-supply-set-" + .head_sha
+                  + "-attempt-" + (.run_attempt | tostring)))
+              ' supply-producer-run.json >/dev/null || {
+                echo "::error::Supply set $name is not bound to a successful canonical main build run."
+                exit 1
+              }
+              gh api "repos/$GITHUB_REPOSITORY/git/commits/$producer_source" \
+                > supply-producer-commit.json
+              jq -e --arg source "$producer_source" '
+                .sha == $source
+                and (.tree.sha | test("^[0-9a-f]{40}$"))
+              ' supply-producer-commit.json >/dev/null || {
+                echo "::error::Provider commit evidence for supply source $producer_source has no exact tree."
+                exit 1
+              }
+              transport_hash=$(sha256sum staging-supply-set.json | awk '{print $1}')
+              transport_hash_b64=$(openssl dgst -sha256 -binary staging-supply-set.json | base64 -w0)
+              jq -e \
+                --arg checksum "$transport_hash_b64" \
+                --arg run "$run_id" \
+                --arg attempt "$producer_attempt" \
+                --arg source "$producer_source" \
+                --arg workflow "$GITHUB_REPOSITORY/.github/workflows/build-platform-images.yml@refs/heads/main" '
+                .ChecksumType == "FULL_OBJECT"
+                and .ChecksumSHA256 == $checksum
+                and .Metadata["run-id"] == $run
+                and .Metadata["run-attempt"] == $attempt
+                and .Metadata["head-sha"] == $source
+                and .Metadata.event == "push"
+                and .Metadata["workflow-ref"] == $workflow
+              ' supply-s3-get.json >/dev/null || {
+                echo "::error::Immutable release transport metadata or checksum does not match producer $run_id attempt $producer_attempt."
+                exit 1
+              }
+              SUPPLY_ARTIFACT_ID="$run_id"
+              SUPPLY_ARTIFACT_NAME="$name"
+              SUPPLY_ARTIFACT_PROVIDER_SHA256="$transport_hash"
+              SUPPLY_PRODUCER_RUN_ID="$run_id"
+              SUPPLY_PRODUCER_RUN_ATTEMPT="$producer_attempt"
+              SUPPLY_PRODUCER_EVENT="push"
+              SUPPLY_PRODUCER_SOURCE_REVISION="$producer_source"
+              SUPPLY_PRODUCER_SOURCE_TREE=$(jq -er '.tree.sha' supply-producer-commit.json)
+              return 0
+            fi
+            rm -f staging-supply-set.json supply-s3-get.json
+
             gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?per_page=100" \
               > artifacts.json
             artifact_count=$(jq -er --arg name "$name" '

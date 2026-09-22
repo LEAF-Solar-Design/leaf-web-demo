@@ -20,6 +20,8 @@
 // present, disabled, and say so (operator decision, W4e plan: mirror the
 // reference's eight Draw-tab panels).
 import { zoomViewer } from '../site/DrawingCockpit.jsx'
+import { deriveIosState } from '../ios/IosSurface.jsx'
+import { iosSourceApprovalState } from '../site/iosShipReadiness.js'
 import { RIBBON_TABS } from '../site/CockpitTopBand.jsx'
 import { DEFERRED_REASONS, REASONS, forCluster, ribbonTool } from './actionRegistry.js'
 import { DEFAULT_TOOL_ICON, isWriteTool, toolIcon, toolMcpSource, toolPlacementSize, toolPlacementTab } from './toolRecord.js'
@@ -42,10 +44,8 @@ export const MAX_LAYER_TOOLS = 10
 // it did — that equality is pinned in ribbonClusters.test.js.
 export const CATALOG_TOOL_NOTE_ALL_PLACED = 'Every catalog tool sits on its own ribbon tab.'
 
-// One fixed sentence per profile tool for its unavailable state. The caller
-// passes a handler or null, never reason text: a null handler renders the
-// tool disabled with the sentence below, so every profile record keeps a
-// literal `PROFILE_REASONS.key` the honesty-ladder gate can resolve.
+// Profile reasons share one vocabulary. Ship reasons are selected from the
+// mounted controller's phase and setup state, not inferred from a handler.
 export const PROFILE_REASONS = Object.freeze({
   openProject: 'Sign in to open a project',
   changeProject: 'Sign in to change projects',
@@ -57,12 +57,57 @@ export const PROFILE_REASONS = Object.freeze({
   approvedRevision: 'No approved revision for this project yet',
   appleReadiness: 'Apple readiness is not mounted',
   testflightBuild: 'The ship lane is not ready; no launch control is available',
+  shipNoRevision: 'Select an approved project revision before launching.',
+  shipGrant: 'The Apple grant is not ready. Complete Apple grant setup.',
+  shipExecutorBusy: 'The executor is busy. Wait for its current build to finish.',
+  shipExecutorUnavailable: 'The executor is unavailable. Connect the ship executor.',
+  shipIdle: 'Sign in and select the iOS profile to check ship readiness.',
+  shipLoading: 'Checking ship readiness.',
+  shipLaunching: 'The ship launch is being submitted.',
+  shipRunning: 'A build is already running.',
+  shipSucceeded: 'This build has succeeded.',
+  shipFailed: 'This build has failed.',
+  shipUnavailable: 'The ship lane is unavailable.',
   shipReceipts: 'No ship receipts yet',
+  shipApproveOwner: 'Only the project owner can approve a source revision',
+  shipApproveNoRevision: 'Select a canonical drawing version before approving',
+  shipApproveNoSource: 'No imported source revision to approve yet',
+  shipApproveApproved: 'Every imported source revision is already approved for the selected version',
+  shipApproveBusy: 'The approval is being recorded.',
+  shipApproveReady: 'Record the owner approval of this source revision for the selected version',
   stringingEmpty: 'No stringing tools in this catalog yet',
   placementEmpty: 'No placement tools in this catalog yet',
+  measurementEmpty: 'No measurement tools in this catalog yet',
+  selectionEmpty: 'No selection tools in this catalog yet',
 })
 
 const profileRecord = (value) => value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+
+export function profileReason(value, fallback) {
+  return Object.values(PROFILE_REASONS).includes(value) ? value : fallback
+}
+
+export function shipLaunchReason({ phase, readiness } = {}) {
+  const phaseReason = {
+    idle: PROFILE_REASONS.shipIdle, loading: PROFILE_REASONS.shipLoading,
+    launching: PROFILE_REASONS.shipLaunching, running: PROFILE_REASONS.shipRunning,
+    succeeded: PROFILE_REASONS.shipSucceeded, failed: PROFILE_REASONS.shipFailed,
+  }[phase]
+  if (phase === 'ready') return ''
+  if (phaseReason) return phaseReason
+  return {
+    'no-approved-revision': PROFILE_REASONS.shipNoRevision,
+    'grant-not-ready': PROFILE_REASONS.shipGrant,
+    'executor-busy': PROFILE_REASONS.shipExecutorBusy,
+    'executor-unavailable': PROFILE_REASONS.shipExecutorUnavailable,
+  }[readiness?.setupState] || PROFILE_REASONS.shipUnavailable
+}
+
+export function shipErrorSentence(error) {
+  if (!error) return null
+  const detail = String(error).trim().replace(/_/g, ' ')
+  return detail ? `${detail.startsWith('Ship status: ') ? '' : 'Ship status: '}${detail}${/[.!?]$/.test(detail) ? '' : '.'}` : null
+}
 // A handler is a function or nothing; any other value is treated as absent.
 const profileHandler = (value) => (typeof value === 'function' ? value : null)
 const PROFILE_ICONS = Object.freeze({
@@ -75,13 +120,104 @@ const PROFILE_ICONS = Object.freeze({
   'activity:receipts': 'save',
   'ship:revision': 'save',
   'ship:readiness': 'match',
+  'ship:approve': 'match',
   'ship:launch': 'new-file',
   'ship:receipts': 'history',
 })
 const profileBase = (id, label) => ({ id, label, icon: PROFILE_ICONS[id] || DEFAULT_TOOL_ICON, title: label })
 
+export function shipApproveRow(ship) {
+  if (ship?.controllerLive !== true || !Array.isArray(ship.sources)) return null
+  const sources = Array.isArray(ship.sources) ? ship.sources : []
+  const approvals = Array.isArray(ship.approvals) ? ship.approvals : []
+  const candidate = sources.find((source) => iosSourceApprovalState(source, approvals, ship.revision) === 'unapproved')
+  const availability = ship.canApprove !== true ? { disabled: true, reason: PROFILE_REASONS.shipApproveOwner }
+    : !ship.revision ? { disabled: true, reason: PROFILE_REASONS.shipApproveNoRevision }
+      : sources.length === 0 ? { disabled: true, reason: PROFILE_REASONS.shipApproveNoSource }
+        : !candidate ? { disabled: true, reason: PROFILE_REASONS.shipApproveApproved }
+          : ship.approving === true ? { disabled: true, reason: PROFILE_REASONS.shipApproveBusy }
+            : typeof ship.approve !== 'function' ? { disabled: true, reason: PROFILE_REASONS.shipApproveOwner }
+              : { disabled: false, reason: PROFILE_REASONS.shipApproveReady }
+  const label = candidate ? `Approve ${candidate.source_revision.slice(0, 8)}` : 'Approve revision'
+  return { ...profileBase('ship:approve', label), ...availability,
+    onClick: availability.disabled ? undefined : () => ship.approve(candidate.source_revision), title: label }
+}
+
+function wellFormedShipContract(contract) {
+  return contract !== null && typeof contract === 'object' && !Array.isArray(contract)
+    && typeof contract.receipt_id === 'string' && contract.receipt_id.trim().length > 0
+    && typeof contract.reported_at === 'string' && contract.reported_at.trim().length > 0
+    && contract.readiness !== null && typeof contract.readiness === 'object' && !Array.isArray(contract.readiness)
+    && typeof contract.readiness.healthy === 'boolean'
+    && typeof contract.readiness.launchable === 'boolean'
+    && (contract.build_stage == null || typeof contract.build_stage === 'string')
+}
+
+export function shipStatusRows(contract, revision, onReceipts, ship) {
+  if (ship?.controllerLive === true) {
+    const state = ship.phase
+    const stage = ship.execution?.failed_stage || ship.execution?.stage
+    const approved = revision && ship.readiness?.approvedLaunch?.revision === revision
+    const openReceipts = profileHandler(onReceipts)
+    return [
+      { ...profileBase('ship:revision', approved ? `Approved revision ${revision}`.slice(0, 64) : 'Approved revision'),
+        disabled: !approved || !openReceipts,
+        reason: approved ? PROFILE_REASONS.shipReceipts : PROFILE_REASONS.approvedRevision,
+        onClick: approved ? openReceipts ?? undefined : undefined },
+      { ...profileBase('ship:readiness', `Ship status: ${state}${stage ? ` (${stage})` : ''}`),
+        state, pressed: state === 'ready', disabled: !openReceipts,
+        reason: profileReason(ship.launchReason, shipLaunchReason(ship) || PROFILE_REASONS.shipReceipts),
+        onClick: openReceipts ?? undefined },
+    ]
+  }
+  const valid = wellFormedShipContract(contract) && typeof onReceipts === 'function'
+  const state = valid ? deriveIosState(contract) : null
+  const stage = valid ? contract.build_stage || '' : ''
+  const readinessLabel = state === 'in-progress'
+    ? `Apple readiness: in progress${stage ? ` (${stage})` : ''}`
+    : `Apple readiness: ${state}`
+  return [
+    valid && revision
+      ? { ...profileBase('ship:revision', `Approved revision ${revision}`.slice(0, 64)), disabled: false, title: `reported ${contract.reported_at}`.slice(0, 64), onClick: onReceipts }
+      : { ...profileBase('ship:revision', 'Approved revision'), disabled: true, reason: PROFILE_REASONS.approvedRevision, onClick: undefined },
+    valid
+      ? { ...profileBase('ship:readiness', readinessLabel.slice(0, 64)), disabled: false, state, pressed: state === 'ready', onClick: onReceipts }
+      : { ...profileBase('ship:readiness', 'Mounted Apple readiness'), disabled: true, reason: PROFILE_REASONS.appleReadiness, onClick: undefined },
+  ]
+}
+
 function profileGroup(id, label, tools) {
   return { id, label, kind: 'group', tools }
+}
+
+export function solarRouteStatus({ eligible, previewing, head = 1, engineDirty, documentId, committedVersion, headDocumentId, solve, routes }) {
+  if (!eligible) return 'ineligible'
+  if (previewing || head !== 1 || engineDirty) return 'stale'
+  // The starter opener is disabled on mock, and solved routes are mock-only.
+  if (documentId !== null && !(typeof documentId === 'string' && documentId === headDocumentId && committedVersion === 1)) return 'foreign'
+  if (solve == null || solve === 'pending') return 'loading'
+  if (solve !== 'loaded' || !Array.isArray(routes) || routes.length === 0) return 'unavailable'
+  return 'ready'
+}
+
+export function solarRouteDisplay({ status, shown = true, routes }) {
+  return status === 'ready' && shown ? routes : undefined
+}
+
+export function solarStringsControl(status, shown, onToggle) {
+  const base = { ...profileBase('solar-strings', 'Show solved rooftop strings'), icon: 'layers' }
+  switch (status) {
+    case 'ready': return { ...base, disabled: false, pressed: shown, reason: 'Show or hide solved rooftop routes', onClick: onToggle }
+    case 'stale': return { ...base, disabled: true, pressed: false, reason: 'Solved routes are available only for the unchanged rooftop demo', onClick: undefined }
+    case 'foreign': return { ...base, disabled: true, pressed: false, reason: 'Solved routes cover the rooftop demo only', onClick: undefined }
+    case 'loading': return { ...base, disabled: true, pressed: false, reason: 'Solved routes are loading', onClick: undefined }
+    case 'unavailable': return { ...base, disabled: true, pressed: false, reason: 'No solved routes are available for this drawing', onClick: undefined }
+    default: return { ...base, disabled: true, pressed: false, reason: 'Solved routes are available only for the unchanged rooftop demo', onClick: undefined }
+  }
+}
+
+export function profileEntryTab(previousProfile, profile, selected, home) {
+  return profile === 'solar' && previousProfile !== profile ? home : selected
 }
 
 /** Tab strips for the shared workspace profiles; drafting keeps its caller's panels. */
@@ -124,10 +260,30 @@ export function profileRibbonTabs(profile, ctx = {}) {
     const placement = familyTools('placement') ?? [
       { ...profileBase('placement:empty', 'Equipment placement'), disabled: true, reason: PROFILE_REASONS.placementEmpty, onClick: undefined },
     ]
+    const measurement = familyTools('measurement') ?? [
+      { ...profileBase('measurement:empty', 'Measure'), disabled: true, reason: PROFILE_REASONS.measurementEmpty, onClick: undefined },
+    ]
+    const selection = familyTools('selection') ?? [
+      { ...profileBase('selection:empty', 'Select'), disabled: true, reason: PROFILE_REASONS.selectionEmpty, onClick: undefined },
+    ]
+    const solar = profileRecord(context.solar)
+    const onToggle = profileHandler(solar.onToggle)
+    const onClear = profileHandler(context.onClearSelection)
     const tabs = drafting()
     tabs.splice(1, 0, { id: 'solar', label: 'Solar', clusters: [
-      profileGroup('stringing', 'Stringing', stringing),
+      // The engine consumer fills this seat with its four registry records.
+      profileGroup('solar-panels', 'Panel placement', []),
+      profileGroup('stringing', 'Stringing', [
+        solarStringsControl(solar.status, solar.shown !== false, onToggle),
+        ...stringing,
+      ]),
       profileGroup('placement', 'Equipment placement', placement),
+      profileGroup('measurement', 'Measure', measurement),
+      profileGroup('selection', 'Select', [
+        ...selection,
+        { ...profileBase('solar-clear-selection', 'Clear selection'), icon: 'delete',
+          disabled: !context.selectedHandle || !onClear, reason: 'Select an entity first', onClick: onClear ?? undefined },
+      ]),
     ] })
     return tabs
   }
@@ -168,19 +324,22 @@ export function profileRibbonTabs(profile, ctx = {}) {
   }
   const ship = profileRecord(context.ship)
   const onLaunch = profileHandler(ship.onLaunch)
+  const launchReason = ship.controllerLive === true ? profileReason(ship.launchReason, shipLaunchReason(ship)) : PROFILE_REASONS.testflightBuild
   const onShipReceipts = profileHandler(ship.onReceipts)
+  const [revision, readiness] = shipStatusRows(ship.contract, ship.revision, onShipReceipts, ship)
+  const approveRow = shipApproveRow(ship)
   return [{ id: 'ship', label: 'Ship', clusters: [
-    // Revision and readiness are status rows: no handler exists for them yet,
-    // so they stay disabled and say so rather than pretend to open anything.
     profileGroup('revision', 'Revision', [
-      { ...profileBase('ship:revision', 'Approved revision'), disabled: true, reason: PROFILE_REASONS.approvedRevision, onClick: undefined },
+      revision,
     ]),
     profileGroup('readiness', 'Readiness', [
-      { ...profileBase('ship:readiness', 'Mounted Apple readiness'), disabled: true, reason: PROFILE_REASONS.appleReadiness, onClick: undefined },
+      readiness,
     ]),
+    ...(approveRow ? [profileGroup('approve', 'Approve', [approveRow])] : []),
+    ...(ship.error ? [{ ...profileGroup('ship-error', 'Ship status', []), note: shipErrorSentence(ship.error) }] : []),
     // Without a launch handler there is no launch path, and the tool never implies one.
     profileGroup('ship', 'Ship', [
-      { ...profileBase('ship:launch', 'TestFlight build'), disabled: !onLaunch, reason: PROFILE_REASONS.testflightBuild, onClick: onLaunch ?? undefined },
+      { ...profileBase('ship:launch', 'TestFlight build'), disabled: !onLaunch, reason: launchReason, onClick: onLaunch ?? undefined },
     ]),
     profileGroup('receipts', 'Receipts', [
       { ...profileBase('ship:receipts', 'Open ship receipts'), disabled: !onShipReceipts, reason: PROFILE_REASONS.shipReceipts, onClick: onShipReceipts ?? undefined },

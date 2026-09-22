@@ -26,7 +26,7 @@ export default function DegradedBanner({ reason, source = 'workspace' }) {
     <div className="banner" role="status">
       <b>Degraded</b>
       <span className="banner-rest">
-        {' — this result used the local solver; the cloud path was unavailable. '}
+        {': this result used the local solver; the cloud path was unavailable. '}
         The numbers are valid; a cloud pass would refine them.
       </span>
       <span className="banner-tail">

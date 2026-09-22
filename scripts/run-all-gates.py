@@ -308,6 +308,42 @@ def build_suites() -> List[Suite]:
         # in its numbers -- Windows measured 21 executed, 2 skipped, on
         # 2026-08-13 -- but not in its conclusion, so its floor still stands.)
         # --- server/ (cwd=server): each file is its OWN pytest process --- #
+        # Solar W1 parity corpus, thirteen merges 2026-09-17..18; unregistered until W5-A0.
+        Suite("server-w1-design-graph", "server tests/test_w1_design_graph.py", "pytest", SERVER,
+              _py_pytest("tests/test_w1_design_graph.py"), 23),
+        Suite("server-w1-cloud-solve-probe", "server tests/test_w1_cloud_solve_probe.py", "pytest", SERVER,
+              _py_pytest("tests/test_w1_cloud_solve_probe.py"), 59,
+              allowed_skip_reasons=(r"live staging probe is opt-in",)),
+        Suite("server-w1-graph-versions", "server tests/test_w1_graph_versions.py", "pytest", SERVER,
+              _py_pytest("tests/test_w1_graph_versions.py"), 18),
+        Suite("server-w1-sizing-groups", "server tests/test_w1_sizing_groups.py", "pytest", SERVER,
+              _py_pytest("tests/test_w1_sizing_groups.py"), 52),
+        Suite("server-w1-solar-interchange", "server tests/test_w1_solar_interchange.py", "pytest", SERVER,
+              _py_pytest("tests/test_w1_solar_interchange.py"), 19),
+        Suite("server-w1-solve-commit", "server tests/test_w1_solve_commit.py", "pytest", SERVER,
+              _py_pytest("tests/test_w1_solve_commit.py"), 94),
+        Suite("server-w1-routes-schedule", "server tests/test_w1_routes_schedule.py", "pytest", SERVER,
+              _py_pytest("tests/test_w1_routes_schedule.py"), 21),
+        Suite("server-w1-equipment", "server tests/test_w1_equipment.py", "pytest", SERVER,
+              _py_pytest("tests/test_w1_equipment.py"), 24),
+        Suite("server-w1-catalog-gates", "server tests/test_w1_catalog_gates.py", "pytest", SERVER,
+              _py_pytest("tests/test_w1_catalog_gates.py"), 61),
+        Suite("server-w1-solar-apply-plan", "server tests/test_w1_solar_apply_plan.py", "pytest", SERVER,
+              _py_pytest("tests/test_w1_solar_apply_plan.py"), 39),
+        Suite("server-w1-local-graph-adapter", "server tests/test_w1_local_graph_adapter.py", "pytest", SERVER,
+              _py_pytest("tests/test_w1_local_graph_adapter.py"), 41),
+        Suite("server-w1-local-graph-jobs", "server tests/test_w1_local_graph_jobs.py", "pytest", SERVER,
+              _py_pytest("tests/test_w1_local_graph_jobs.py"), 122),
+        Suite("server-w1-local-graph-broker", "server tests/test_w1_local_graph_broker.py", "pytest", SERVER,
+              _py_pytest("tests/test_w1_local_graph_broker.py"), 51),
+        Suite("server-w1-local-graph-rail", "server tests/test_w1_local_graph_rail.py", "pytest", SERVER,
+              _py_pytest("tests/test_w1_local_graph_rail.py"), 40),
+        Suite("server-w1-graph-seed", "server tests/test_w1_graph_seed.py", "pytest", SERVER,
+              _py_pytest("tests/test_w1_graph_seed.py"), 85),
+        Suite("server-w1-local-graph-seed", "server tests/test_w1_local_graph_seed.py", "pytest", SERVER,
+              _py_pytest("tests/test_w1_local_graph_seed.py"), 66),
+        Suite("server-w1-seed-product-path", "server tests/test_w1_seed_product_path.py", "pytest", SERVER,
+              _py_pytest("tests/test_w1_seed_product_path.py"), 12),
         Suite("server-backbone", "server tests/test_backbone.py", "pytest", SERVER,
               _py_pytest("tests/test_backbone.py"), 15),
         Suite("server-campaigns", "server tests/test_campaigns_router.py", "pytest", SERVER,
@@ -1306,6 +1342,15 @@ def build_suites() -> List[Suite]:
         # "platform DB unreachable" before any executed-count check runs.
         Suite("platform", "platform/tests (Postgres)", "pytest", REPO_PARENT,
               _py_pytest(f"{repo_name}/platform/tests"), 247, db_gated=True),
+        # W4h S1 rows: eight store (rows 1-7 and 13), five router (rows 8-11 and 14), one static.
+        # Execution counts are verified by the paired planner.
+        Suite("platform-ios-ship-source-catalog", "platform iOS source catalog", "pytest",
+              REPO_PARENT, _py_pytest(f"{repo_name}/platform/tests/test_ios_ship_source_catalog.py"),
+              8, db_gated=True),
+        Suite("server-ios-ship-source-routes", "server iOS source routes", "pytest",
+              SERVER, _py_pytest("tests/test_ios_ship_source_routes.py"), 5),
+        Suite("platform-ios-ship-source-catalog-static", "platform iOS source catalog static", "pytest",
+              REPO_PARENT, _py_pytest(f"{repo_name}/platform/tests/test_ios_ship_source_catalog_static.py"), 1),
         # Dependency-free *_static proofs must run even with NO Postgres: the
         # conftest's pytest_ignore_collect exempts them, so this un-gated suite
         # keeps them in the gate on a clean checkout.
@@ -1357,6 +1402,7 @@ def build_suites() -> List[Suite]:
                  f"{repo_name}/platform/tests/test_db_schema_proof_static.py",
                  f"{repo_name}/platform/tests/test_overlay_store_static.py",
                  f"{repo_name}/platform/tests/test_ios_ship_schema_static.py",
+                 f"{repo_name}/platform/tests/test_ios_ship_source_catalog_static.py",
                  f"{repo_name}/platform/tests/test_annotation_store_static.py",
                  # The soft-delete guard (migration 0050). Registered in the
                  # SAME change that adds the file, because
@@ -1364,7 +1410,7 @@ def build_suites() -> List[Suite]:
                  # pins this list against glob("*_static.py") -- an unregistered
                  # *_static.py runs nowhere, which is the exact vacuous-green
                  # this list exists to stop.
-                 f"{repo_name}/platform/tests/test_soft_delete_guard_static.py"], 181,
+                 f"{repo_name}/platform/tests/test_soft_delete_guard_static.py"], 182,
               allowed_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
         # The committed replay fixture is dependency-free and catches hash or
@@ -1384,6 +1430,8 @@ def build_suites() -> List[Suite]:
               SCRIPTS_DIR, _py_pytest("test_mq_review_codebuild.py"), 40),
         Suite("scripts-native-release-producer", "scripts test_native_release_producer.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_native_release_producer.py"), 32),
+        Suite("scripts-solar-receipt", "scripts test_solar_receipt.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("test_solar_receipt.py"), 17),
         # Registered per the #29 fix-then-register rule (shipped without a
         # gate entry; measured 1 passed on this tree 2026-07-23).
         # 1 -> 2 on 2026-08-07: the staging relay's convergence contract

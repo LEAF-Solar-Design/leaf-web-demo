@@ -2,6 +2,28 @@
   "_note": "Tracked, server-lane seed registry for GENERAL (non-drawing.write) catalog tools whose only reachable implementation is a server/builtins/*.py file that engine/registry.json (Lane B) does not itself carry. deps.all_tools() folds these in additively (same mechanism as write_tools.json) so a tenant POST /api/run resolves them by name via deps.find_tool. Kept separate from write_tools.json (drawing.write tools) and the gitignored authored_tools.json (harness-authored tools).",
   "tools": [
     {
+      "name": "solar-solve-proposal",
+      "family_id": "stringing",
+      "version": "1.0.0",
+      "description": "Leaf Automation cloud stringer proposal. Provisional wire schema; never changes the drawing.",
+      "kind": "script",
+      "engine_op": "solar_solve_proposal",
+      "entry": "builtins/solar_solve_proposal.py",
+      "capabilities": ["solve"],
+      "params": {
+        "type": "object",
+        "properties": {
+          "grant_ref": {"type": "string", "pattern": "^[a-zA-Z0-9_-]{1,64}$"},
+          "request": {"type": "object"}
+        },
+        "required": ["grant_ref", "request"],
+        "additionalProperties": false
+      },
+      "returns": {"type": "object"},
+      "default_params": {},
+      "allow_local_fallback": false
+    },
+    {
       "name": "autofill-string-targets",
       "version": "1.0.0",
       "description": "Derive string targets from the drawing's panel polylines: bank-clustered, rotation-aware serpentine DC string routing over the Panels layer with an NEC 690.7 cold-temperature string-size check. Read-only; runs server/builtins/string_panels.py against the intake.",

@@ -34,6 +34,7 @@ import {
   cloneProject,
   deleteProject,
   exportProject,
+  getOrgIdentities,
   getProjectLifecycle,
   inviteMember,
   resetProject,
@@ -52,7 +53,10 @@ function adaptMembers(members) {
   return (members || []).map((m) => ({
     member_id: m.membership_id,
     binding_id: m.binding_id,
-    name: m.binding_id, // the snapshot carries no display name or email
+    label: m.label,
+    name: m.display_name || m.name,
+    email: m.email,
+    created_at: m.created_at,
     role: toUiRole(m.role),
   }))
 }
@@ -81,7 +85,7 @@ function adaptAuthority(viewer) {
   }
 }
 
-const EMPTY = { project: null, members: [], receipts: [], authority: null, viewerId: null }
+const EMPTY = { project: null, members: [], files: [], receipts: [], authority: null, viewerId: null }
 
 /**
  * @param {string|null} projectId   the open project, or null for "no project"
@@ -93,6 +97,32 @@ export default function useProjectLifecycle(projectId, { enabled = true } = {}) 
   const [refreshing, setRefreshing] = useState(false) // post-mutation revalidation
   const [data, setData] = useState(EMPTY)
   const [error, setError] = useState(null)
+  const [identities, setIdentities] = useState(null)
+  const [identitiesStatus, setIdentitiesStatus] = useState('idle')
+  const identitiesGenerationRef = useRef(0)
+
+  useEffect(() => {
+    identitiesGenerationRef.current += 1
+    setIdentities(null)
+    setIdentitiesStatus('idle')
+    return () => { identitiesGenerationRef.current += 1 }
+  }, [enabled, projectId])
+
+  const loadIdentities = useCallback(async () => {
+    const generation = ++identitiesGenerationRef.current
+    setIdentitiesStatus('loading')
+    try {
+      const orgId = data.project?.project_id === projectId ? data.project.org_id : null
+      if (!enabled || !projectId || !orgId) throw new Error('Organization unavailable')
+      const response = await getOrgIdentities(orgId)
+      if (identitiesGenerationRef.current !== generation) return
+      setIdentities(response.identities)
+      setIdentitiesStatus('ready')
+    } catch {
+      if (identitiesGenerationRef.current !== generation) return
+      setIdentitiesStatus('error')
+    }
+  }, [data.project, enabled, projectId])
 
   // Bumped on every load and on unmount: a stale response must never overwrite
   // a newer one's state, and a resolved fetch after unmount must not set state.
@@ -132,6 +162,7 @@ export default function useProjectLifecycle(projectId, { enabled = true } = {}) 
       setData({
         project: snapshot.project || null,
         members,
+        files: snapshot.files || [], // read-only snapshot; no file mutation actions
         receipts: adaptReceipts(snapshot.receipts),
         authority: adaptAuthority(viewer),
         viewerId,
@@ -183,5 +214,5 @@ export default function useProjectLifecycle(projectId, { enabled = true } = {}) 
     remove: () => deleteProject(projectId), // no refetch: the project is gone
   }), [bindingFor, projectId, runThenRefetch])
 
-  return { status, refreshing, error, refetch: load, actions, ...data }
+  return { status, refreshing, error, refetch: load, actions, identities, identitiesStatus, loadIdentities, ...data }
 }

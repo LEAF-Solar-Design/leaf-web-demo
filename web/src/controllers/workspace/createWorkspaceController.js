@@ -17,6 +17,16 @@ export function writeStoredOrgId(id, storage = browserStorage()) {
 
 const defaultFormatError = (error) => String(error?.message || error)
 
+function defaultIsBootstrapRequired(error) {
+  const details = [
+    'verified subject has no active platform identity binding',
+    'verified subject has no active platform tenant authority',
+  ]
+  return error?.status === 403 && (
+    details.includes(error?.body?.detail) || details.includes(error?.body?.error?.message)
+  )
+}
+
 function invoke(callback, value) {
   try { callback?.(value) } catch { /* presentation callbacks do not own controller state */ }
 }
@@ -39,9 +49,11 @@ function orgIdOf(org) {
  */
 export function createWorkspaceController({
   mock = false,
+  authLive = false,
   services,
   storage = browserStorage(),
   formatError = defaultFormatError,
+  isBootstrapRequired = defaultIsBootstrapRequired,
   callbacks = {},
 } = {}) {
   if (!services) throw new TypeError('createWorkspaceController requires services')
@@ -52,6 +64,12 @@ export function createWorkspaceController({
   let state = {
     mock: !!mock,
     orgId: readStoredOrgId(storage),
+    bootstrapState: 'unknown',
+    bootstrapMessage: null,
+    projectsLoaded: false,
+    orgDraftError: null,
+    orgConflict: false,
+    projectDraftError: null,
     projects: [],
     projectsError: null,
     projectsLoading: false,
@@ -83,19 +101,33 @@ export function createWorkspaceController({
   async function loadProjects() {
     const request = nextGeneration('projects')
     const orgId = state.orgId
-    if (state.mock || !orgId) {
-      publish({ projects: [], projectsError: null, projectsLoading: false })
+    if (state.mock || (!authLive && !orgId)) {
+      publish({ projects: [], projectsError: null, projectsLoading: false, projectsLoaded: false, bootstrapState: orgId ? 'bound' : 'unbound', bootstrapMessage: null })
       return []
     }
     publish({ projectsLoading: true, projectsError: null })
     try {
-      const projects = await services.listProjects(orgId)
+      const response = await services.listProjects(orgId)
       if (!isCurrent('projects', request) || state.orgId !== orgId) return null
-      publish({ projects: projects || [], projectsLoading: false })
+      const projects = Array.isArray(response) ? response : response?.projects || []
+      publish({ projects, projectsLoading: false, projectsLoaded: true, bootstrapState: 'bound',
+        bootstrapMessage: null, orgConflict: false, orgDraftError: null })
       return projects || []
     } catch (error) {
       if (!isCurrent('projects', request) || state.orgId !== orgId) return null
-      publish({ projects: [], projectsError: explain(error), projectsLoading: false })
+      const message = explain(error)
+      const unbound = isBootstrapRequired(error)
+      if (unbound) {
+        invalidateAll()
+        writeStoredOrgId(null, storage)
+        publish({ projects: [], projectsError: null, projectsLoading: false, projectsLoaded: false,
+          bootstrapState: 'unbound', bootstrapMessage: message, orgId: null,
+          openProjectId: null, workspace: null, canonicalVersionId: null,
+          workspaceLoading: false, projectBusy: false, orgBusy: false })
+      } else {
+        publish({ projects: [], projectsError: message, projectsLoading: false, projectsLoaded: false,
+          bootstrapState: 'unavailable', bootstrapMessage: null })
+      }
       return null
     }
   }
@@ -164,6 +196,9 @@ export function createWorkspaceController({
     writeStoredOrgId(orgId, storage)
     publish({
       orgId,
+      bootstrapState: 'unknown',
+      bootstrapMessage: null,
+      projectsLoaded: false,
       projects: [],
       projectsError: null,
       projectsLoading: false,
@@ -178,12 +213,13 @@ export function createWorkspaceController({
   }
 
   async function createOrg(givenName) {
-    if (givenName == null) return null
+    if (state.orgBusy || givenName == null) return null
     const name = String(givenName).trim() || 'My workspace'
     const request = nextGeneration('org')
-    publish({ orgBusy: true, projectsError: null })
+    publish({ orgBusy: true, projectsError: null, orgDraftError: null, orgConflict: false })
     try {
-      const org = await services.createOrg(name)
+      const response = await services.createOrg(name)
+      const org = response?.org || response
       const orgId = orgIdOf(org)
       if (!orgId) throw new Error('The workspace service returned an org without an id.')
       if (!isCurrent('org', request)) return null
@@ -194,6 +230,13 @@ export function createWorkspaceController({
       writeStoredOrgId(orgId, storage)
       publish({
         orgId,
+        bootstrapState: 'bound',
+        bootstrapMessage: null,
+        projectsError: null,
+        orgDraftError: null,
+        orgConflict: false,
+        projectDraftError: null,
+        projectsLoaded: false,
         projects: [],
         projectsLoading: false,
         workspaceLoading: false,
@@ -204,17 +247,21 @@ export function createWorkspaceController({
       return org
     } catch (error) {
       if (!isCurrent('org', request)) return null
-      publish({ projectsError: explain(error), orgBusy: false })
+      const orgConflict = error?.status === 409
+      const message = orgConflict
+        ? error?.body?.detail || error?.body?.error?.message || explain(error)
+        : explain(error)
+      publish({ orgDraftError: message, projectsError: message, orgConflict, orgBusy: false })
       return null
     }
   }
 
   async function createProject(givenName) {
-    if (givenName == null || !String(givenName).trim()) return null
+    if (state.projectBusy || givenName == null || !String(givenName).trim()) return null
     const name = String(givenName).trim()
     const request = nextGeneration('project')
     const orgId = state.orgId
-    publish({ projectBusy: true, projectsError: null })
+    publish({ projectBusy: true, projectsError: null, projectDraftError: null })
     try {
       const project = await services.createProject(name, orgId)
       const projectId = projectIdOf(project)
@@ -224,7 +271,7 @@ export function createWorkspaceController({
       const nextProjects = state.projects.some((item) => projectIdOf(item) === projectId)
         ? state.projects.map((item) => projectIdOf(item) === projectId ? project : item)
         : [...state.projects, project]
-      publish({ projects: nextProjects })
+      publish({ projects: nextProjects, projectsError: null, projectDraftError: null })
       invoke(callbacks.onProjectCreated, project)
 
       const openRequest = nextGeneration('workspace')
@@ -250,7 +297,8 @@ export function createWorkspaceController({
       return project
     } catch (error) {
       if (!isCurrent('project', request)) return null
-      publish({ projectsError: explain(error), projectBusy: false })
+      const message = explain(error)
+      publish({ projectDraftError: message, projectsError: message, projectBusy: false })
       return null
     }
   }
@@ -266,6 +314,12 @@ export function createWorkspaceController({
     invalidateAll()
     publish({
       mock: value,
+      bootstrapState: 'unknown',
+      bootstrapMessage: null,
+      projectsLoaded: false,
+      orgDraftError: null,
+      orgConflict: false,
+      projectDraftError: null,
       projects: [],
       projectsError: null,
       projectsLoading: false,

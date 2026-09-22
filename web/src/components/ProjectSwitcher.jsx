@@ -24,9 +24,10 @@ import { EMPTY_WORKSPACE_PROJECT, formatProjectsUnavailable } from '../site/work
 //     right in muted, rows with a 2px accent left bar + tint + Enter cap on the
 //     active row, arrow-key + Enter selection.
 export default function ProjectSwitcher({
-  mock, projectName, orgId, projects, openProjectId,
+  mock, projectName, orgId, projects = [], openProjectId,
+  bootstrapState, projectsLoaded = false, orgDraftError, projectDraftError, orgConflict,
   unavailable, loading, orgBusy, projectBusy, workspaceProject = null,
-  onCreateOrg, onCreateProject, onOpenProject,
+  onCreateOrg, onCreateProject, onOpenProject, onLoadProjects,
 }) {
   const [open, setOpen] = useState(false)
   const [hi, setHi] = useState(0) // keyboard-highlighted row (resolver "active")
@@ -34,6 +35,25 @@ export default function ProjectSwitcher({
   const [projectDraft, setProjectDraft] = useState('')
   const rootRef = useRef(null)
   const menu = useExit(open) // 180 ms M1 exit fade on close
+  const hasBootstrapState = bootstrapState !== undefined
+  const bound = hasBootstrapState ? bootstrapState === 'bound' : !!orgId
+  const unbound = hasBootstrapState ? bootstrapState === 'unbound' : !orgId
+  const draftError = hasBootstrapState ? (unbound ? orgDraftError : projectDraftError) : null
+  const onOrgCreated = () => setOrgName('My workspace')
+  const onProjectCreated = () => setProjectDraft('')
+  const [submitError, setSubmitError] = useState(null)
+  const submitting = useRef(false)
+
+  const submit = async (kind, name) => {
+    if (!name.trim() || orgBusy || projectBusy || submitting.current) return
+    submitting.current = true
+    setSubmitError(null)
+    try {
+      const result = await (kind === 'org' ? onCreateOrg(name.trim()) : onCreateProject(name.trim()))
+      if (result) (kind === 'org' ? onOrgCreated : onProjectCreated)()
+    } catch (error) { setSubmitError(String(error?.message || error)) }
+    finally { submitting.current = false }
+  }
 
   // On open, start the highlight on the currently open project.
   useEffect(() => {
@@ -47,8 +67,16 @@ export default function ProjectSwitcher({
     const onDoc = (e) => { if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false) }
     const onKey = (e) => {
       if (e.key === 'Escape' && !document.querySelector('.drawer-layer .drawer')) { setOpen(false); return } // an open drawer owns Esc
+      if (e.target?.closest?.('input, textarea, select, [contenteditable="true"]')) {
+        if (e.key === 'Enter' && !e.isComposing && e.target.tagName === 'INPUT' && rootRef.current?.contains(e.target)) {
+          e.preventDefault()
+          e.target.form?.requestSubmit()
+        }
+        return
+      }
+      if (e.target?.closest?.('button') && e.key === 'Enter') return
       const n = (projects || []).length
-      if (unavailable || !orgId || n === 0) return
+      if (unavailable || !bound || n === 0) return
       if (e.key === 'ArrowDown') { e.preventDefault(); setHi((h) => (h + 1) % n) }
       else if (e.key === 'ArrowUp') { e.preventDefault(); setHi((h) => (h - 1 + n) % n) }
       else if (e.key === 'Enter') {
@@ -60,7 +88,7 @@ export default function ProjectSwitcher({
     document.addEventListener('mousedown', onDoc)
     document.addEventListener('keydown', onKey)
     return () => { document.removeEventListener('mousedown', onDoc); document.removeEventListener('keydown', onKey) }
-  }, [open, projects, hi, orgId, unavailable, openProjectId, onOpenProject])
+  }, [open, projects, hi, bound, unavailable, openProjectId, onOpenProject])
 
   // The chip reads the shared derivation and NOTHING else. sol-critic finding
   // 1: that pre-F-9 name fallback survived here as a
@@ -108,17 +136,17 @@ export default function ProjectSwitcher({
 
       {menu.shown && (
         <div className={`proj-menu resolver${menu.exiting ? ' exit' : ''}`} role="menu">
-          {unavailable ? (
+          {unavailable && (!hasBootstrapState || (!unbound && unavailable !== draftError)) ? (
             <div className="proj-empty">
               <div className="proj-note">{formatProjectsUnavailable(unavailable)}</div>
               <div className="proj-sub">
-                Showing the current drawing — <b>{projectName}</b>. The demo keeps working without workspace projects.
+                Showing the current drawing: <b>{projectName}</b>. The demo keeps working without workspace projects.
               </div>
             </div>
-          ) : !orgId ? (
+          ) : unbound ? (
             <div className="proj-empty">
               <div className="proj-sub">No workspace org yet. Create one to keep projects and jobs.</div>
-              <form className="proj-create" onSubmit={(event) => { event.preventDefault(); onCreateOrg(orgName) }}>
+              <form className="proj-create" onSubmit={(event) => { event.preventDefault(); submit('org', orgName) }}>
                 <label>
                   Workspace name
                   <input value={orgName} onChange={(event) => setOrgName(event.target.value)} disabled={orgBusy} />
@@ -127,7 +155,11 @@ export default function ProjectSwitcher({
                   {orgBusy ? 'Creating…' : 'Create workspace org'}
                 </button>
               </form>
+              {(draftError || submitError) && <p role="alert">{draftError || submitError}</p>}
+              {hasBootstrapState && orgConflict && <button type="button" onClick={onLoadProjects}>Use my existing workspace</button>}
             </div>
+          ) : !bound ? (
+            <div className="proj-note" role="status">Loading workspace projects…</div>
           ) : (
             <>
               <div className="resolver-header">
@@ -162,7 +194,7 @@ export default function ProjectSwitcher({
                       </li>
                     )
                   })}
-                  {projects.length === 0 && !loading && (
+                  {projects.length === 0 && !loading && (!hasBootstrapState || projectsLoaded) && (
                     <li className="proj-note-li">No projects yet.</li>
                   )}
                 </ul>
@@ -171,8 +203,7 @@ export default function ProjectSwitcher({
                 event.preventDefault()
                 const name = projectDraft.trim()
                 if (!name) return
-                onCreateProject(name)
-                setProjectDraft('')
+                submit('project', name)
               }}>
                 <label>
                   New project
@@ -182,6 +213,7 @@ export default function ProjectSwitcher({
                   {projectBusy ? 'Creating…' : 'Create project'}
                 </button>
               </form>
+              {(draftError || submitError) && <p role="alert">{draftError || submitError}</p>}
             </>
           )}
         </div>

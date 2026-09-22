@@ -341,3 +341,89 @@ def test_bridge_source_mentions_no_apple_credential_vocabulary():
     for forbidden in ("app_store_connect_app_id", "team_id", "issuer_id",
                       "AuthKey", "api_key", "app-specific"):
         assert forbidden not in source
+
+
+@pytest.mark.parametrize("readback", ["valid", "missing", "invalid"])
+def test_s2_row9_mini_receipt_still_requires_verified_readback(monkeypatch, readback):
+    """S2 row9: success alone cannot publish a mini receipt ID."""
+    # This is the stored browser projection, not the controller's wire receipt.
+    receipt = {"receipt_id": RECEIPT, "kind": "leaf.ios-testflight-receipt.v1",
+               "image_identity": "mac-mini (no EC2 image)"}
+    store = _use(monkeypatch, FakeStore(
+        readiness=_healthy_readiness(), execution=_succeeded_execution(),
+        receipt=None if readback == "missing" else receipt,
+        receipt_error=ValueError("invalid_provider_receipt") if readback == "invalid" else None))
+    assert bridge._terminal_receipt_id(store, ORG, PROJECT, _succeeded_execution()) == (
+        RECEIPT if readback == "valid" else None)
+    pending = {**_succeeded_execution(), "status": "running"}
+    assert bridge._terminal_receipt_id(store, ORG, PROJECT, pending) is None
+
+
+def test_s2_row10_mini_execution_surface_keeps_receipt_body_private(monkeypatch):
+    """S2 row10: the real route exposes only the published surface fields."""
+    from contextlib import contextmanager
+
+    monkeypatch.setenv("LEAF_IOS_SURFACE_ENABLED", "1")
+    # read_receipt returns the validated browser projection plus execution_id,
+    # hash and created_at metadata, never the controller's wire receipt.
+    projection = {
+        "kind": "leaf.ios-testflight-receipt.v1", "receipt_id": RECEIPT,
+        "org_id": ORG, "tenant_id": TENANT, "project_id": PROJECT,
+        "revision": REVISION, "source_revision": "source-1",
+        "source_sha256": "a" * 64, "bundle_identifier": "com.leaf.app",
+        "marketing_version": "1.0", "build_number": "1",
+        "image_identity": "mac-mini (no EC2 image)",
+        "toolchain_identity": "Xcode 26.3 (17C529)",
+        "app_store_connect_result": {
+            "status": "testflight_available", "build_id": "build-1",
+            "beta_group": "Internal Testers", "uploaded_at": "2026-08-13T16:20:00+00:00",
+        },
+    }
+    ship = bridge._store()
+    row = {
+        **projection, "execution_id": "44444444-4444-4444-8444-444444444444",
+        "hash_value": ship.canonical_hash(ship.RECEIPT_KIND, projection).value,
+        "created_at": "2026-08-13T16:20:00+00:00",
+    }
+
+    class ReceiptConnection:
+        @contextmanager
+        def cursor(self):
+            yield self
+
+        def execute(self, *_args):
+            pass
+
+        def fetchone(self):
+            return row
+
+    @contextmanager
+    def receipt_connection():
+        yield ReceiptConnection()
+
+    monkeypatch.setattr(ship, "connection", receipt_connection)
+    readback = ship.read_receipt(ORG, PROJECT, RECEIPT)
+    _use(monkeypatch, FakeStore(
+        readiness=_healthy_readiness(), execution=_succeeded_execution(),
+        receipt=readback))
+    app = FastAPI()
+    app.include_router(ios_surface.router)
+    app.dependency_overrides[deps.require_tenant] = lambda: TENANT
+    ios_surface.set_contract_source(bridge.contract_source)
+    try:
+        response = TestClient(app).get(
+            "/api/ios-surface/status", params={"project_id": PROJECT, "revision": REVISION})
+    finally:
+        ios_surface.set_contract_source(None)
+    assert response.status_code == 200
+    contract = response.json()["contract"]
+    assert set(contract) == {
+        "schema", "project_id", "revision", "reported_at", "readiness",
+        "build_stage", "receipt_id"}
+    assert contract["readiness"] == {"healthy": True, "launchable": True}
+    assert contract["build_stage"] == "RECEIPT"
+    assert contract["receipt_id"] == RECEIPT
+    for private in ("image_identity", "mac-mini", "toolchain_identity", "Xcode",
+                    "app_store_connect_result", "build-1", "bundle_identifier",
+                    "com.leaf.app", "source_sha256", "execution_id", "hash", "created_at"):
+        assert private not in response.text

@@ -50,7 +50,7 @@ export function matchPrompt(text, tools = []) {
       (buildVerb && has('tool', 'capability', 'detector', 'flag ', 'flags ', 'checker', 'check for'))) {
     return {
       lane: 'build', tool: null, params: {}, confidence: 0.86, alternatives: [],
-      rationale: 'Reads as a NEW capability request — routing to the author flow with your description prefilled.',
+      rationale: 'Reads as a NEW capability request, routing to the author flow with your description prefilled.',
     }
   }
 
@@ -73,14 +73,14 @@ export function matchPrompt(text, tools = []) {
       params: handle ? { handle: String(handle) } : {},
       confidence: 0.82,
       rationale: handle
-        ? `Delete one panel (handle ${handle}) — a versioned write you can undo.`
-        : 'Delete a marked panel — a versioned write you can undo.',
+        ? `Delete one panel (handle ${handle}): a versioned write you can undo.`
+        : 'Delete a marked panel: a versioned write you can undo.',
       alternatives: alternatives(tools, ['delete-marked-panel']),
     }
   }
   // count per layer
   if (has('count', 'how many', 'tally', 'number of', 'per layer') && find('count-by-layer')) {
-    return runMatch('count-by-layer', {}, 0.9, 'Count entities on every layer — a safe read-only pass.', tools)
+    return runMatch('count-by-layer', {}, 0.9, 'Count entities on every layer: a safe read-only pass.', tools)
   }
   // area / measure
   if (has('area', 'sqft', 'sq ft', 'square', 'coverage', 'measure', 'size of') && find('measure-panel-area')) {

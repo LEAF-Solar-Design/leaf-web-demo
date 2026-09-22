@@ -1,0 +1,274 @@
+{
+ "grid": {
+  "Dwgname": "w1-spike",
+  "Sequences": [
+   [
+    12,
+    12
+   ],
+   [
+    2,
+    0
+   ]
+  ],
+  "Rows": [
+   {
+    "Panels": [
+     {
+      "Code": 1,
+      "Id": "p0_0",
+      "Seq": 0,
+      "InverterId": -1,
+      "StringInputNumber": 0,
+      "X": 0.0,
+      "Y": 0.0,
+      "Angle": 0.0
+     },
+     {
+      "Code": 1,
+      "Id": "p0_1",
+      "Seq": 0,
+      "InverterId": -1,
+      "StringInputNumber": 0,
+      "X": 1.0,
+      "Y": 0.0,
+      "Angle": 0.0
+     },
+     {
+      "Code": 1,
+      "Id": "p0_2",
+      "Seq": 0,
+      "InverterId": -1,
+      "StringInputNumber": 0,
+      "X": 2.0,
+      "Y": 0.0,
+      "Angle": 0.0
+     },
+     {
+      "Code": 1,
+      "Id": "p0_3",
+      "Seq": 0,
+      "InverterId": -1,
+      "StringInputNumber": 0,
+      "X": 3.0,
+      "Y": 0.0,
+      "Angle": 0.0
+     },
+     {
+      "Code": 1,
+      "Id": "p0_4",
+      "Seq": 0,
+      "InverterId": -1,
+      "StringInputNumber": 0,
+      "X": 4.0,
+      "Y": 0.0,
+      "Angle": 0.0
+     },
+     {
+      "Code": 1,
+      "Id": "p0_5",
+      "Seq": 0,
+      "InverterId": -1,
+      "StringInputNumber": 0,
+      "X": 5.0,
+      "Y": 0.0,
+      "Angle": 0.0
+     }
+    ]
+   },
+   {
+    "Panels": [
+     {
+      "Code": 1,
+      "Id": "p1_0",
+      "Seq": 0,
+      "InverterId": -1,
+      "StringInputNumber": 0,
+      "X": 0.0,
+      "Y": 2.0,
+      "Angle": 0.0
+     },
+     {
+      "Code": 1,
+      "Id": "p1_1",
+      "Seq": 0,
+      "InverterId": -1,
+      "StringInputNumber": 0,
+      "X": 1.0,
+      "Y": 2.0,
+      "Angle": 0.0
+     },
+     {
+      "Code": 1,
+      "Id": "p1_2",
+      "Seq": 0,
+      "InverterId": -1,
+      "StringInputNumber": 0,
+      "X": 2.0,
+      "Y": 2.0,
+      "Angle": 0.0
+     },
+     {
+      "Code": 1,
+      "Id": "p1_3",
+      "Seq": 0,
+      "InverterId": -1,
+      "StringInputNumber": 0,
+      "X": 3.0,
+      "Y": 2.0,
+      "Angle": 0.0
+     },
+     {
+      "Code": 1,
+      "Id": "p1_4",
+      "Seq": 0,
+      "InverterId": -1,
+      "StringInputNumber": 0,
+      "X": 4.0,
+      "Y": 2.0,
+      "Angle": 0.0
+     },
+     {
+      "Code": 1,
+      "Id": "p1_5",
+      "Seq": 0,
+      "InverterId": -1,
+      "StringInputNumber": 0,
+      "X": 5.0,
+      "Y": 2.0,
+      "Angle": 0.0
+     }
+    ]
+   },
+   {
+    "Panels": [
+     {
+      "Code": 1,
+      "Id": "p2_0",
+      "Seq": 0,
+      "InverterId": -1,
+      "StringInputNumber": 0,
+      "X": 0.0,
+      "Y": 4.0,
+      "Angle": 0.0
+     },
+     {
+      "Code": 1,
+      "Id": "p2_1",
+      "Seq": 0,
+      "InverterId": -1,
+      "StringInputNumber": 0,
+      "X": 1.0,
+      "Y": 4.0,
+      "Angle": 0.0
+     },
+     {
+      "Code": 1,
+      "Id": "p2_2",
+      "Seq": 0,
+      "InverterId": -1,
+      "StringInputNumber": 0,
+      "X": 2.0,
+      "Y": 4.0,
+      "Angle": 0.0
+     },
+     {
+      "Code": 1,
+      "Id": "p2_3",
+      "Seq": 0,
+      "InverterId": -1,
+      "StringInputNumber": 0,
+      "X": 3.0,
+      "Y": 4.0,
+      "Angle": 0.0
+     },
+     {
+      "Code": 1,
+      "Id": "p2_4",
+      "Seq": 0,
+      "InverterId": -1,
+      "StringInputNumber": 0,
+      "X": 4.0,
+      "Y": 4.0,
+      "Angle": 0.0
+     },
+     {
+      "Code": 1,
+      "Id": "p2_5",
+      "Seq": 0,
+      "InverterId": -1,
+      "StringInputNumber": 0,
+      "X": 5.0,
+      "Y": 4.0,
+      "Angle": 0.0
+     }
+    ]
+   },
+   {
+    "Panels": [
+     {
+      "Code": 1,
+      "Id": "p3_0",
+      "Seq": 0,
+      "InverterId": -1,
+      "StringInputNumber": 0,
+      "X": 0.0,
+      "Y": 6.0,
+      "Angle": 0.0
+     },
+     {
+      "Code": 1,
+      "Id": "p3_1",
+      "Seq": 0,
+      "InverterId": -1,
+      "StringInputNumber": 0,
+      "X": 1.0,
+      "Y": 6.0,
+      "Angle": 0.0
+     },
+     {
+      "Code": 1,
+      "Id": "p3_2",
+      "Seq": 0,
+      "InverterId": -1,
+      "StringInputNumber": 0,
+      "X": 2.0,
+      "Y": 6.0,
+      "Angle": 0.0
+     },
+     {
+      "Code": 1,
+      "Id": "p3_3",
+      "Seq": 0,
+      "InverterId": -1,
+      "StringInputNumber": 0,
+      "X": 3.0,
+      "Y": 6.0,
+      "Angle": 0.0
+     },
+     {
+      "Code": 1,
+      "Id": "p3_4",
+      "Seq": 0,
+      "InverterId": -1,
+      "StringInputNumber": 0,
+      "X": 4.0,
+      "Y": 6.0,
+      "Angle": 0.0
+     },
+     {
+      "Code": 1,
+      "Id": "p3_5",
+      "Seq": 0,
+      "InverterId": -1,
+      "StringInputNumber": 0,
+      "X": 5.0,
+      "Y": 6.0,
+      "Angle": 0.0
+     }
+    ]
+   }
+  ],
+  "Modify": []
+ }
+}

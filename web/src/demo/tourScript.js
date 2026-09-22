@@ -24,7 +24,7 @@
 export const TOUR_STEPS = [
   {
     id: 'welcome',
-    title: 'Guided demo — sample rooftop',
+    title: 'Guided demo: sample rooftop',
     body:
       'This is a real solar rooftop drawing. Type plain English; Leaf picks a tool, ' +
       'shows you what it will do, and runs it on the drawing. Nothing runs until you confirm.',
@@ -35,7 +35,7 @@ export const TOUR_STEPS = [
     id: 'viewer',
     title: 'The sample rooftop, live',
     body:
-      'Here is the drawing itself — panels, roof edges and layers, drawn from the ' +
+      'Here is the drawing itself: panels, roof edges and layers, drawn from the ' +
       'real file. Every result you are about to see lands back on this canvas.',
     target: '.viewer-canvas, .workspace-card',
     action: null,
@@ -87,7 +87,7 @@ export const TOUR_STEPS = [
     title: 'The part that is different',
     body:
       'Ask for something that does not exist yet and Leaf writes a new reusable ' +
-      'tool — code you can read, keep and run again. Watch it write the code, ' +
+      'tool: code you can read, keep and run again. Watch it write the code, ' +
       'then Run it now.',
     target: '.author-section, .workspace-card',
     prompt: 'build a tool that flags panels within 24 in of the roof edge',
@@ -95,7 +95,7 @@ export const TOUR_STEPS = [
   },
   {
     id: 'version',
-    title: 'Edits are versioned — your call',
+    title: 'Edits are versioned, your call',
     body:
       'Deleting a panel is a real write, so nothing auto-runs. Click Run in the ' +
       'bar below to stage the next version, then press Undo to walk the drawing back.',
@@ -113,7 +113,7 @@ export const TOUR_STEPS = [
     title: 'Undo is one click',
     body:
       'History now lists both versions. Undo steps the drawing back and the panel ' +
-      'reappears — the write was staged, never destructive.',
+      'reappears. The write was staged, never destructive.',
     target: '.bar-dock, .workspace-card',
     action: null,
   },
@@ -122,7 +122,7 @@ export const TOUR_STEPS = [
     title: 'Your turn',
     body:
       'That is the loop: ask, confirm, run, version, undo. Leave the tour and try ' +
-      'your own question on the same drawing — everything stays in the demo.',
+      'your own question on the same drawing. Everything stays in the demo.',
     target: null,
     action: 'exit',
   },

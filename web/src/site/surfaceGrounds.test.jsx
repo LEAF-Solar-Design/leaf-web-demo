@@ -7,11 +7,217 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
+import { useState } from 'react'
+import ProjectWorkspacePanels from '../workspace/ProjectWorkspacePanels.jsx'
+import ProjectMaterialIntake from '../workspace/ProjectMaterialIntake.jsx'
 
 import SurfaceGrounds, { DeviceGround, ProjectBoardGround, groundShowsDrawing, measureContainedWindow } from './SurfaceGrounds.jsx'
+import { ProjectBoardGround as DirectProjectBoardGround } from './ProjectBoardGround.jsx'
+import { DeviceGround as DirectDeviceGround } from '../ios/DeviceGround.jsx'
+import { BoardTiles } from './BoardTiles.jsx'
 import { deriveWorkspaceProjectState } from './workspaceProjectState.js'
+import ProductSurfaceTabs from '../components/ProductSurfaceTabs.jsx'
+import { productSurfaceStates } from './productSurfaces.js'
+import { PROFILE_REASONS, profileRibbonTabs, shipLaunchReason, shipErrorSentence } from '../lib/ribbonClusters.js'
 
 afterEach(cleanup)
+
+it('J2 row1 the device stage receives and invokes the ready controller launch', () => {
+  const launch = vi.fn()
+  const ship = { phase: 'ready', onLaunch: launch }
+  render(<SurfaceGrounds surface="ios" iosEnabled ship={ship} onLaunch={ship.onLaunch} />)
+  const button = screen.getByRole('button', { name: 'Launch TestFlight build' })
+  expect(button.disabled).toBe(false)
+  fireEvent.click(button)
+  expect(launch).toHaveBeenCalledOnce()
+})
+
+it('J2 row3 all four setup states reach the disabled tool and device stage', () => {
+  const states = [
+    ['no-approved-revision', PROFILE_REASONS.shipNoRevision, 'source', 'missing'],
+    ['grant-not-ready', PROFILE_REASONS.shipGrant, 'grant', 'missing'],
+    ['executor-busy', PROFILE_REASONS.shipExecutorBusy, 'executor', 'busy'],
+    ['executor-unavailable', PROFILE_REASONS.shipExecutorUnavailable, 'executor', 'unavailable'],
+  ]
+  for (const [setupState, sentence, rung, state] of states) {
+    const ship = { controllerLive: true, phase: 'setup-required', readiness: { setupState, setupAction: sentence }, onLaunch: null }
+    ship.launchReason = shipLaunchReason(ship)
+    const tool = profileRibbonTabs('ship', { ship })[0].clusters.flatMap((group) => group.tools).find((item) => item.id === 'ship:launch')
+    expect(tool).toMatchObject({ disabled: true, reason: sentence })
+    expect(tool.reason).not.toBe(PROFILE_REASONS.testflightBuild)
+    const { container, unmount } = render(<SurfaceGrounds surface="ios" iosEnabled ship={ship} onLaunch={ship.onLaunch} />)
+    const device = container.querySelector('[data-ground="ios"]')
+    expect(device.hidden).toBe(false)
+    expect(device.textContent).toContain(`Setup required: ${sentence}`)
+    expect(device.querySelector(`[data-rung="${rung}"]`).dataset.state).toBe(state)
+    unmount()
+  }
+})
+
+it('J2 row4 running and terminal execution updates reach the device without a remount', () => {
+  const running = { phase: 'running', execution: { execution_id: 'j2', status: 'running', stage: 'archive' } }
+  const { container, rerender } = render(<SurfaceGrounds surface="ios" iosEnabled ship={running} />)
+  const device = container.querySelector('[data-ground="ios"]')
+  expect(device.dataset.state).toBe('running')
+  expect(device.textContent).toContain('archive')
+  for (const phase of ['succeeded', 'failed']) {
+    const ship = { phase, execution: { execution_id: 'j2', status: phase, stage: 'delivery' } }
+    rerender(<SurfaceGrounds surface="ios" iosEnabled ship={ship} />)
+    expect(container.querySelector('[data-ground="ios"]')).toBe(device)
+    expect(device.dataset.state).toBe(phase)
+    expect(device.textContent).toContain(phase)
+  }
+})
+
+it('J2 row5 a controller error renders as a sentence on the device and ribbon', () => {
+  const ship = { phase: 'unavailable', error: shipErrorSentence('readiness_unavailable') }
+  const { container } = render(<SurfaceGrounds surface="ios" iosEnabled ship={ship} />)
+  expect(within(container.querySelector('[data-ground="ios"]')).getByRole('alert').textContent)
+    .toBe('Ship status: readiness unavailable.')
+  const groups = profileRibbonTabs('ship', { ship })[0].clusters
+  expect(groups.find((group) => group.id === 'ship-error').note).toBe('Ship status: readiness unavailable.')
+})
+
+it('J2 row7 selecting iOS with no drawing shows the controller ladder', () => {
+  function Profiles() {
+    const [surface, setSurface] = useState('browser')
+    return <>
+      <ProductSurfaceTabs activeSurface={surface} states={productSurfaceStates({ sessionActive: true, hasDrawing: false })} onSelect={setSurface} />
+      <SurfaceGrounds surface={surface} drawing={null} iosEnabled ship={{ phase: 'setup-required', readiness: { setupState: 'no-approved-revision' } }} />
+    </>
+  }
+  const { container } = render(<Profiles />)
+  const tab = screen.getByRole('tab', { name: 'iOS' })
+  expect(tab.disabled).toBe(false)
+  fireEvent.click(tab)
+  expect(tab.getAttribute('aria-selected')).toBe('true')
+  const device = container.querySelector('[data-ground="ios"]')
+  expect(device.hidden).toBe(false)
+  expect(within(device).getByTestId('ios-stage-ladder').textContent).toContain('Source (approved revision): missing')
+})
+
+it('J2 row9 forwarding ship preserves every existing Browser and drawing-ground prop', () => {
+  const actions = { onOpenVersion: vi.fn() }
+  const panel = <p>Existing panel</p>
+  const ship = { phase: 'ready' }
+  const onLaunch = vi.fn()
+  for (const surface of ['cad', 'solar', 'browser']) {
+    const props = { surface, workspace: j1Workspace, actions, panel, mock: true }
+    const before = SurfaceGrounds(props).props.children
+    const after = SurfaceGrounds({ ...props, ship, onLaunch }).props.children
+    expect(after[0].type).toBe(before[0].type)
+    expect(after[0].props).toEqual(before[0].props)
+    expect(after[1].props.ship).toBe(ship)
+    expect(after[1].props.onLaunch).toBe(onLaunch)
+    expect(after[1].props.active).toBe(false)
+    const { ship: ignoredShip, onLaunch: ignoredLaunch, ...rest } = after[1].props
+    const { ship: oldShip, onLaunch: oldLaunch, ...oldRest } = before[1].props
+    expect(rest).toEqual(oldRest)
+  }
+})
+
+const j1Workspace = {
+  project: { project_id: 'j1-project', name: 'J1 roof' },
+  drawing_versions: [{ version_id: 'j1-version', drawing_id: 'roof', seq: 1 }],
+  jobs: [{ job_id: 'j1-job', tool_name: 'Measure roof', status: 'succeeded' }],
+  built_tools: [{ tool_id: 'j1-tool', name: 'Roof count' }],
+}
+
+function J1Board() {
+  const [pane, setPane] = useState(null)
+  return <SurfaceGrounds surface="browser" workspace={j1Workspace}
+    workspaceProject={{ kind: 'project', project_id: 'j1-project', label: 'J1 roof' }}
+    actions={{ onOpenVersion: () => setPane('versions'), onOpenJob: () => setPane('jobs'), onOpenTool: () => setPane('tools') }}
+    panel={<ProjectWorkspacePanels project={j1Workspace.project} workspace={j1Workspace}
+      pane={pane} onBack={() => setPane(null)} />} />
+}
+
+it('J1 row1 Browser board versions, jobs and tools open their mounted panes', () => {
+  const { container } = render(<J1Board />)
+  for (const [action, pane] of [['version', 'versions'], ['job', 'jobs'], ['tool', 'tools']]) {
+    fireEvent.click(container.querySelector(`[data-action="${action}"]`))
+    expect(container.querySelector(`[data-pane="${pane}"]`)).not.toBeNull()
+    expect(within(container.querySelector(`[data-pane="${pane}"]`)).getByRole('heading', { name: pane[0].toUpperCase() + pane.slice(1), exact: true })).toBeTruthy()
+  }
+  // Drive the real ground above, and pin the served App's matching callbacks.
+  const app = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
+  expect(app).toMatch(/onOpenVersion: \(\) => setProjectPane\('versions'\)/)
+  expect(app).toContain("setBoardJob(job); setProjectPane('jobs')")
+  expect(app).toMatch(/onOpenTool: \(\) => setProjectPane\('tools'\)/)
+  expect(app).toContain('<ProjectWorkspacePanels')
+})
+
+it('J1 row2 Back to board preserves the open project and its board objects', () => {
+  const { container } = render(<J1Board />)
+  const board = container.querySelector('[data-ground="browser"]')
+  const version = container.querySelector('[data-action="version"]')
+  fireEvent.click(version)
+  expect(container.querySelector('[data-pane="versions"]').textContent).toContain('J1 roof')
+  fireEvent.click(screen.getByRole('button', { name: 'Back to board' }))
+  expect(container.querySelector('[data-pane]')).toBeNull()
+  expect(container.querySelector('[data-ground="browser"]')).toBe(board)
+  expect(board.dataset.projectState).toBe('project')
+  expect(container.querySelector('[data-action="version"]')).toBe(version)
+  fireEvent.click(version)
+  expect(container.querySelector('[data-pane="versions"]').textContent).toContain('J1 roof')
+  const app = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
+  expect(app).toContain('onBack={() => setProjectPane(null)}')
+})
+
+it('J1 row3 SurfaceGrounds forwards only the two new board props', () => {
+  const actions = { onOpenVersion: vi.fn() }
+  const panel = <p>Mounted project pane</p>
+  const element = SurfaceGrounds({ surface: 'browser', actions, panel, unownedProp: 'must not leak' })
+  const board = element.props.children[0]
+  expect(board.type).toBe(DirectProjectBoardGround)
+  expect(board.props.actions).toBe(actions)
+  expect(board.props.panel).toBe(panel)
+  expect(Object.keys(board.props).sort()).toEqual([
+    'active', 'leavingGround', 'contained', 'occluders', 'onReturnToDrawing', 'onCreateProject',
+    'actions', 'panel', 'headingRef', 'startFocusRequest', 'studioPresentation', 'studioShell',
+    'workspaceProject', 'workspace', 'drawing', 'catalog', 'mock',
+  ].sort())
+  const device = element.props.children[1]
+  expect(device.props).not.toHaveProperty('actions')
+  expect(device.props).not.toHaveProperty('panel')
+})
+
+it('J1 row6 the demo ground mounts disabled material without a mutation', () => {
+  const onStartUpload = vi.fn()
+  render(<SurfaceGrounds surface="browser" mock
+    panel={<ProjectMaterialIntake project={null} mock artifacts={[]} onStartUpload={onStartUpload} />} />)
+  const input = screen.getByLabelText('Drawing file')
+  expect(input.disabled).toBe(true)
+  expect(screen.getByRole('button', { name: 'Upload DWG or DXF' }).disabled).toBe(true)
+  fireEvent.change(input, { target: { files: [new File(['0\nEOF\n'], 'roof.dxf')] } })
+  expect(onStartUpload).not.toHaveBeenCalled()
+  expect(screen.getByText('Uploads are unavailable in this demo.')).toBeTruthy()
+})
+
+describe('extracted ground exports', () => {
+  it('renders the same active board through either import', () => {
+    const { container, rerender } = render(<DirectProjectBoardGround active worldSpace={false} />)
+    const board = container.querySelector('[data-ground="browser"]')
+    const markup = board.outerHTML
+    rerender(<ProjectBoardGround active worldSpace={false} />)
+    expect(container.querySelector('[data-ground="browser"]')).toBe(board)
+    expect(board.outerHTML).toBe(markup)
+  })
+
+  it('renders the same active device stage through either import', () => {
+    const { container, rerender } = render(<DirectDeviceGround active enabled revision="rev-1" />)
+    const stage = container.querySelector('[data-ground="ios"]')
+    const markup = stage.outerHTML
+    rerender(<DeviceGround active enabled revision="rev-1" />)
+    expect(container.querySelector('[data-ground="ios"]')).toBe(stage)
+    expect(stage.outerHTML).toBe(markup)
+  })
+
+  it('exports the six board tiles', () => {
+    const { container } = render(<BoardTiles />)
+    expect(container.querySelectorAll('[data-tile]')).toHaveLength(6)
+  })
+})
 
 it('themes both persistent grounds through the shell contract without a paper frame measurement', () => {
   const { container, rerender } = render(<SurfaceGrounds surface="browser" studioShell studioPresentation />)
@@ -434,7 +640,7 @@ describe('ground window fallback geometry', () => {
   // actually keeps that guess invisible rather than painting it.
   it('hides the ground desk and device stage when the window could not be measured', () => {
     const css = readFileSync(`${process.cwd()}/src/site/landing.css`, 'utf8')
-    expect(css).toMatch(/\.ground-desk\[data-measured="false"\][^{]*\{[^}]*visibility:\s*hidden;/s)
-    expect(css).toMatch(/\.ground-device-stage\[data-measured="false"\][^{]*\{[^}]*visibility:\s*hidden;/s)
+    expect(css).toMatch(new RegExp('\\.ground-desk\\[data-measured="false"\\][^{]*\\{[^}]*visibility:\\s*hidden;', 's'))
+    expect(css).toMatch(new RegExp('\\.ground-device-stage\\[data-measured="false"\\][^{]*\\{[^}]*visibility:\\s*hidden;', 's'))
   })
 })

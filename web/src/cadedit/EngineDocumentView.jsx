@@ -19,7 +19,7 @@ import { engineIntake, hexHandle } from './engineIntake.js'
 import { SESSION_ERROR } from './engineSession.js'
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
 
-export default function EngineDocumentView({ viewerRef = null, onShown = null, onHidden = null, selectedHandle = null, onSelectedHandleChange = null }) {
+export default function EngineDocumentView({ viewerRef = null, consoleIntake = null, onShown = null, onHidden = null, selectedHandle = null, onSelectedHandleChange = null }) {
   const { session, highlightedIds } = useEngineSessionContext()
   const showing = session.engineParsed && session.errorKind !== SESSION_ERROR.CRASHED
   const entities = showing ? session.entities : null
@@ -135,6 +135,18 @@ export default function EngineDocumentView({ viewerRef = null, onShown = null, o
     onShown?.(intakeRef.current, { undoDepth: session.undoDepth, redoDepth: session.redoDepth, createdResult })
     return undefined
   }, [viewerRef, entities, documentId, onShown, highlightedIds, session.undoDepth, session.redoDepth, session.selectedId, session.status])
+  // Viewer clears its override when the console intake seats. Run after all
+  // passive effects so a retained engine document remains the visible drawing.
+  const consoleIntakeRef = useRef(consoleIntake)
+  useEffect(() => {
+    if (consoleIntakeRef.current === consoleIntake) return undefined
+    consoleIntakeRef.current = consoleIntake
+    let cancelled = false
+    Promise.resolve().then(() => {
+      if (!cancelled && intakeRef.current) viewerRef?.current?.applyVersion?.(intakeRef.current)
+    })
+    return () => { cancelled = true }
+  }, [consoleIntake, viewerRef])
   // Unmount (the surface leaves): the console drawing comes back.
   useEffect(() => () => {
     if (lastRef.current === null) return

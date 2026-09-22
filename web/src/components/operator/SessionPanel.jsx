@@ -107,7 +107,7 @@ export default function SessionPanel({ onSignedOut }) {
       setDraft('')
       setEvents(await operatorClient.getEvents(activeId))
     } catch (e) {
-      setError(e?.body?.detail || e?.message || 'The message did not go through — nothing changed.')
+      setError(e?.body?.detail || e?.message || 'The message did not go through; nothing changed.')
       if (operatorClient.isOperatorDenied(e)) onSignedOut?.()
     } finally {
       setSending(false)
@@ -153,7 +153,7 @@ export default function SessionPanel({ onSignedOut }) {
               return (
                 <li key={ev.seq}>
                   <div className="ledger-row">
-                    <span className="ledger-time">{when ? when.clock : '—'}</span>
+                    <span className="ledger-time">{when ? when.clock : '·'}</span>
                     <span className="ledger-event">
                       <code>{ev.type}</code>
                       {summary && <span className="dim"> · {summary}</span>}

@@ -50,7 +50,7 @@ export function slashDecision(text, tools) {
         tool: tool.name,
         params: {},
         confidence: 1,
-        rationale: `Explicit /${tool.name} — you picked this tool.`,
+        rationale: `Explicit /${tool.name}: you picked this tool.`,
         alternatives: [],
         slash: true,
       },

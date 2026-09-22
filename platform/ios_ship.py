@@ -47,8 +47,9 @@ _CONTROLLER_STAGES = frozenset({
     "XCODE_READY", "SIGNING_READY", "BUILT", "UPLOADED", "COMPLIANCE", "BETA_ASSIGNED",
     "CREDENTIALS_SCRUBBED", "MAC_RELEASED", "RECEIPT",
 })
-_CONTROLLER_RECEIPT_SCHEMA = "leaf.ios-testflight-receipt.v1"
-_CONTROLLER_RECEIPT_FIELDS = frozenset({
+_CONTROLLER_RECEIPT_SCHEMA_V1 = "leaf.ios-testflight-receipt.v1"
+_CONTROLLER_RECEIPT_SCHEMA_V2 = "leaf.ios-testflight-receipt.v2"
+_CONTROLLER_RECEIPT_FIELDS_V1 = frozenset({
     "schema", "run_id", "request_digest", "review_id", "tenant_id", "project_id",
     "source_revision", "source_artifact_digest", "bundle_id", "marketing_version",
     "build_number", "image_id", "image_digest", "host_id", "instance_id", "region",
@@ -57,6 +58,15 @@ _CONTROLLER_RECEIPT_FIELDS = frozenset({
     "app_store_connect_build_id", "status", "beta_group", "compliance_answered",
     "credentials_scrubbed", "mac_instance_state", "dedicated_host_state",
     "teardown_receipt_id", "completed_at",
+})
+_CONTROLLER_EC2_FIELDS = frozenset({
+    "instance_id", "availability_zone", "instance_type", "minimum_allocation_hours",
+    "estimated_cost_usd", "mac_instance_state", "dedicated_host_state",
+})
+_CONTROLLER_RECEIPT_FIELDS_V2 = (
+    _CONTROLLER_RECEIPT_FIELDS_V1 - _CONTROLLER_EC2_FIELDS) | {"executor"}
+_CONTROLLER_EXECUTOR_FIELDS = frozenset({
+    "kind", "host", "run_lock_released", "run_material_removed",
 })
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _RECEIPT_NAMESPACE = uuid.UUID("cf703adc-1149-52c0-a59e-f876729ab214")
@@ -88,6 +98,161 @@ class ProjectUnavailable(IosShipError):
 
 class RevisionNotApproved(IosShipError):
     pass
+
+
+class CatalogConflict(IosShipError):
+    def __init__(self):
+        super().__init__("catalog_conflict", "source catalog entry already differs")
+
+
+_CATALOG_FIELDS = (
+    "catalog_key", "repository", "source_revision", "source_sha256",
+    "bundle_identifier", "marketing_version", "build_number", "producer_receipt_digest",
+)
+
+
+def register_source_catalog_entry(org_id: Any, project_id: Any, entry: Any) -> dict:
+    reject_secret_shaped(entry)
+    if not isinstance(entry, dict) or set(entry) != set(_CATALOG_FIELDS):
+        raise IosShipError("invalid_catalog_entry", "catalog fields are required")
+    for name in _CATALOG_FIELDS:
+        value = entry[name]
+        if not isinstance(value, str) or not value.strip() or len(value) > 512:
+            raise IosShipError("invalid_catalog_entry", f"{name} is invalid")
+        if value.startswith("-----BEGIN"):
+            raise SecretShapedFieldRejected(name)
+    for name in ("source_sha256", "producer_receipt_digest"):
+        if not _HASH_RE.fullmatch(entry[name]):
+            raise IosShipError("invalid_catalog_entry", f"{name} is invalid")
+    if not re.fullmatch(r"[A-Za-z0-9.-]{3,255}", entry["bundle_identifier"]):
+        raise IosShipError("invalid_catalog_entry", "bundle_identifier is invalid")
+    scope = {"org": _as_uuid(org_id, "org_id"),
+             "project": _as_uuid(project_id, "project_id")}
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM projects WHERE org_id=%(org)s AND project_id=%(project)s "
+                    "AND deleted_at IS NULL AND status='active' FOR SHARE", scope)
+        if cur.fetchone() is None:
+            raise ProjectUnavailable("project_unavailable", "project is unavailable")
+        cur.execute(
+            "INSERT INTO ios_ship_source_catalog (catalog_id, org_id, project_id, "
+            + ", ".join(_CATALOG_FIELDS) + ") VALUES (%(id)s, %(org)s, %(project)s, "
+            + ", ".join(f"%({name})s" for name in _CATALOG_FIELDS) + ") "
+            "ON CONFLICT (org_id, project_id, source_revision) DO NOTHING RETURNING *",
+            {**scope, **entry, "id": new_uuid()})
+        row = _row_dict(cur.fetchone())
+        if row is None:
+            cur.execute("SELECT * FROM ios_ship_source_catalog WHERE org_id=%(org)s "
+                        "AND project_id=%(project)s AND source_revision=%(source_revision)s",
+                        {**scope, "source_revision": entry["source_revision"]})
+            row = _row_dict(cur.fetchone())
+            if row is None or any(row[name] != entry[name] for name in _CATALOG_FIELDS):
+                raise CatalogConflict()
+        return row
+
+
+def list_source_catalog(org_id: Any, project_id: Any) -> list[dict]:
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT * FROM ios_ship_source_catalog WHERE org_id=%(org)s "
+                    "AND project_id=%(project)s ORDER BY imported_at DESC, catalog_id DESC LIMIT 50",
+                    {"org": _as_uuid(org_id, "org_id"),
+                     "project": _as_uuid(project_id, "project_id")})
+        return [_row_dict(row) for row in cur.fetchall()]
+
+
+def get_source_catalog_entry(org_id: Any, project_id: Any,
+                             source_revision: str) -> Optional[dict]:
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT * FROM ios_ship_source_catalog WHERE org_id=%(org)s "
+                    "AND project_id=%(project)s AND source_revision=%(revision)s",
+                    {"org": _as_uuid(org_id, "org_id"),
+                     "project": _as_uuid(project_id, "project_id"), "revision": source_revision})
+        return _row_dict(cur.fetchone())
+
+
+def approve_catalog_revision(
+    org_id: Any, project_id: Any, *, revision: str, source_revision: str,
+    source_sha256: str, bundle_identifier: str, marketing_version: str,
+    build_number: str, approved_by: str,
+) -> dict:
+    """Approve catalog source fields under a distinct Studio revision label.
+
+    revision is the project revision (client canonicalVersionId), not source_revision.
+    """
+    if not isinstance(revision, str) or not revision.strip() or len(revision) > 512 \
+            or any(ord(char) < 32 or ord(char) == 127 for char in revision):
+        raise IosShipError("invalid_launch", "revision is invalid")
+    entry = get_source_catalog_entry(org_id, project_id, source_revision)
+    if entry is None:
+        raise RevisionNotApproved("catalog_entry_missing", "source catalog entry is missing",
+                                  setup_action="import-ios-source")
+    fields = {"source_sha256": source_sha256, "bundle_identifier": bundle_identifier,
+              "marketing_version": marketing_version, "build_number": build_number}
+    for name, value in fields.items():
+        if value != entry[name]:
+            raise IosShipError("approval_tuple_mismatch", name)
+    org, project = _as_uuid(org_id, "org_id"), _as_uuid(project_id, "project_id")
+    with connection() as conn, conn.cursor() as cur:
+        existing = _approval_record(cur, org, project, revision)
+    if existing is not None and existing["consumed_at"] is not None:
+        raise LaunchConflict(
+            "approval_consumed",
+            "that revision's approval was consumed by a launch; approve a new revision",
+            setup_action="approve-new-revision")
+    approval_id = record_approval(
+        org_id, project_id, revision, source_revision=source_revision,
+        approved_by=approved_by, **fields)
+    with connection() as conn, conn.cursor() as cur:
+        recorded = _approval_record(cur, org, project, revision)
+    if recorded is None or recorded["approval_id"] != approval_id:
+        raise IosShipError("approval_not_recorded", "the approval was not recorded")
+    return {"approval_id": approval_id, "revision": revision,
+            "source_revision": source_revision, **fields,
+            "approved_by": approved_by, "approved": True}
+
+
+def resolve_ship_owner(org_id: Any, project_id: Any,
+                       external_subject: str) -> Optional[str]:
+    if not external_subject:
+        return None
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT b.binding_id FROM identity_bindings b "
+            "JOIN project_member_bindings m ON m.org_id=b.platform_tenant_id "
+            "AND m.binding_id=b.binding_id "
+            "WHERE b.platform_tenant_id=%(org)s AND m.project_id=%(project)s "
+            "AND b.external_authority='auth0' AND b.external_subject=%(subject)s "
+            "AND b.status='active' AND m.status='active' AND m.role = 'owner'",
+            {"org": _as_uuid(org_id, "org_id"),
+             "project": _as_uuid(project_id, "project_id"), "subject": external_subject})
+        row = cur.fetchone()
+        return str(row["binding_id"]) if row else None
+
+
+def list_revision_approvals(org_id: Any, project_id: Any) -> list[dict]:
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT approval_id, revision, source_revision, source_sha256, bundle_identifier, "
+            "marketing_version, build_number, approved, approved_by, consumed_at, created_at "
+            "FROM ios_ship_revision_approvals WHERE org_id=%(org)s AND project_id=%(project)s "
+            "ORDER BY created_at DESC, approval_id DESC LIMIT 50",
+            {"org": _as_uuid(org_id, "org_id"),
+             "project": _as_uuid(project_id, "project_id")})
+        return [_row_dict(row) for row in cur.fetchall()]
+
+
+def latest_execution_for_project(org_id: Any, tenant_id: str,
+                                  project_id: Any) -> Optional[dict]:
+    if not tenant_id:
+        raise IosShipError("invalid_scope", "tenant_id is required")
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT execution_id, revision, status, failed_stage, receipt_id, dispatch_result, "
+            "updated_at FROM ios_ship_executions WHERE org_id=%(org)s "
+            "AND tenant_id=%(tenant)s AND project_id=%(project)s "
+            "ORDER BY created_at DESC, execution_id DESC LIMIT 1",
+            {"org": _as_uuid(org_id, "org_id"), "tenant": tenant_id,
+             "project": _as_uuid(project_id, "project_id")})
+        return _row_dict(cur.fetchone())
 
 
 class LaunchSetupRequired(IosShipError):
@@ -849,30 +1014,80 @@ def _clean_receipt(receipt: Any) -> Dict[str, Any]:
 
 
 def _controller_receipt(receipt: Any) -> Dict[str, Any]:
-    if not isinstance(receipt, dict) or set(receipt) != _CONTROLLER_RECEIPT_FIELDS:
+    if not isinstance(receipt, dict):
+        raise IosShipError("invalid_provider_receipt", "controller receipt must be an object")
+    schema = receipt.get("schema")
+    if schema not in (_CONTROLLER_RECEIPT_SCHEMA_V1, _CONTROLLER_RECEIPT_SCHEMA_V2):
+        raise IosShipError("invalid_provider_receipt", "controller receipt schema is invalid")
+    executor = receipt.get("executor")
+    if schema == _CONTROLLER_RECEIPT_SCHEMA_V2:
+        if not isinstance(executor, dict):
+            raise IosShipError("invalid_provider_receipt", "executor is required")
+        if executor.get("kind") == "mac-mini":
+            # Refuse EC2 claims even when hidden inside an otherwise invalid object.
+            pending = [receipt]
+            while pending:
+                value = pending.pop()
+                if isinstance(value, dict):
+                    for name, child in value.items():
+                        if name in {"ec2", "mac_instance_state", "dedicated_host_state"}:
+                            raise IosShipError("invalid_provider_receipt",
+                                               f"mac-mini cannot claim {name}")
+                        pending.append(child)
+                elif isinstance(value, list):
+                    pending.extend(value)
+        if set(executor) != _CONTROLLER_EXECUTOR_FIELDS \
+                or executor.get("kind") not in ("mac-mini", "ec2-mac") \
+                or not isinstance(executor.get("host"), str) or not executor["host"] \
+                or not isinstance(executor.get("run_lock_released"), bool) \
+                or not isinstance(executor.get("run_material_removed"), bool):
+            raise IosShipError("invalid_provider_receipt", "executor fields are invalid")
+    fields = (_CONTROLLER_RECEIPT_FIELDS_V1 if schema == _CONTROLLER_RECEIPT_SCHEMA_V1
+              else _CONTROLLER_RECEIPT_FIELDS_V2 | (
+                  {"ec2"} if executor["kind"] == "ec2-mac" else set()))
+    if set(receipt) != fields:
         raise IosShipError("invalid_provider_receipt",
                            "controller receipt must match its fixed schema")
     clean = dict(receipt)
-    string_fields = _CONTROLLER_RECEIPT_FIELDS - {
-        "minimum_allocation_hours", "compliance_answered",
-        "credentials_scrubbed",
-    }
+    if schema == _CONTROLLER_RECEIPT_SCHEMA_V1:
+        # V1 predates executor flags. Its released host and scrubbed credentials
+        # are the strongest evidence it carries for lock and material cleanup.
+        clean["executor"] = {
+            "kind": "ec2-mac", "host": clean["host_id"],
+            "run_lock_released": clean["dedicated_host_state"] == "released",
+            "run_material_removed": clean["credentials_scrubbed"],
+        }
+        clean["ec2"] = {name: clean.pop(name) for name in _CONTROLLER_EC2_FIELDS}
+    else:
+        clean["executor"] = dict(executor)
+    clean["schema"] = _CONTROLLER_RECEIPT_SCHEMA_V2
+    is_ec2 = clean["executor"]["kind"] == "ec2-mac"
+    string_fields = _CONTROLLER_RECEIPT_FIELDS_V2 - {
+        "executor", "compliance_answered", "credentials_scrubbed"}
+    if not is_ec2:
+        if clean["image_id"] is not None or clean["image_digest"] is not None:
+            raise IosShipError("invalid_provider_receipt", "mac-mini image fields must be null")
+        string_fields -= {"image_id", "image_digest"}
     if any(not isinstance(clean[name], str) or not clean[name]
            for name in string_fields):
         raise IosShipError("invalid_provider_receipt",
                            "controller receipt identifiers are required")
-    if clean["schema"] != _CONTROLLER_RECEIPT_SCHEMA:
-        raise IosShipError("invalid_provider_receipt", "controller receipt schema is invalid")
     if not _DIGEST_RE.fullmatch(clean["request_digest"]) \
             or not _DIGEST_RE.fullmatch(clean["source_artifact_digest"]) \
-            or not _DIGEST_RE.fullmatch(clean["image_digest"]):
+            or (is_ec2 and not _DIGEST_RE.fullmatch(clean["image_digest"])):
         raise IosShipError("invalid_provider_receipt", "controller receipt digest is invalid")
-    if not isinstance(clean["minimum_allocation_hours"], (int, float)) \
-            or isinstance(clean["minimum_allocation_hours"], bool) \
-            or not math.isfinite(clean["minimum_allocation_hours"]) \
-            or clean["minimum_allocation_hours"] <= 0 \
-            or not re.fullmatch(r"[0-9]+\.[0-9]{2}", clean["estimated_cost_usd"]):
-        raise IosShipError("invalid_provider_receipt", "controller allocation values are invalid")
+    if is_ec2:
+        ec2 = clean.get("ec2")
+        if not isinstance(ec2, dict) or set(ec2) != _CONTROLLER_EC2_FIELDS \
+                or any(not isinstance(ec2[name], str) or not ec2[name]
+                       for name in _CONTROLLER_EC2_FIELDS - {"minimum_allocation_hours"}):
+            raise IosShipError("invalid_provider_receipt", "ec2 fields are invalid")
+        clean["ec2"] = dict(ec2)
+        hours = ec2["minimum_allocation_hours"]
+        if not isinstance(hours, (int, float)) or isinstance(hours, bool) \
+                or not math.isfinite(hours) or hours <= 0 \
+                or not re.fullmatch(r"[0-9]+\.[0-9]{2}", ec2["estimated_cost_usd"]):
+            raise IosShipError("invalid_provider_receipt", "controller allocation values are invalid")
     try:
         completed = datetime.fromisoformat(clean["completed_at"].replace("Z", "+00:00"))
     except ValueError as exc:
@@ -886,17 +1101,21 @@ def _controller_receipt(receipt: Any) -> Dict[str, Any]:
     # tenant_material_remaining=false have both been validated per-stage.
     if clean["status"] != "VALID" or clean["compliance_answered"] is not True \
             or clean["credentials_scrubbed"] is not True \
-            or clean["mac_instance_state"] != "terminated" \
-            or clean["dedicated_host_state"] != "released":
+            or clean["executor"]["run_material_removed"] is not True \
+            or clean["executor"]["run_lock_released"] is not True \
+            or (is_ec2 and (clean["ec2"]["mac_instance_state"] != "terminated"
+                            or clean["ec2"]["dedicated_host_state"] != "released")):
         raise IosShipError("terminal_proof_missing",
                            "controller receipt does not prove terminal cleanup")
     return clean
 
 
 def _provider_projection(execution_row: Any, execution_id: uuid.UUID,
-                         raw: Dict[str, Any]) -> Dict[str, Any]:
+                         raw: Dict[str, Any], *, wire_receipt: Dict[str, Any]) -> Dict[str, Any]:
+    # Keep existing receipt IDs stable when a historical wire receipt is replayed.
+    # Only identity uses the wire payload; projection uses the normalized shape.
     raw_digest = hashlib.sha256(json.dumps(
-        raw, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+        wire_receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
     receipt_id = uuid.uuid5(_RECEIPT_NAMESPACE, f"{execution_id}:{raw_digest}")
     return {
         "kind": RECEIPT_KIND,
@@ -911,7 +1130,9 @@ def _provider_projection(execution_row: Any, execution_id: uuid.UUID,
         "marketing_version": execution_row["marketing_version"],
         "build_number": execution_row["build_number"],
         # Canonical provider identities are stable, lossless strings.
-        "image_identity": f"{raw['image_id']}@{raw['image_digest']}",
+        "image_identity": (f"{raw['image_id']}@{raw['image_digest']}"
+                           if raw["executor"]["kind"] == "ec2-mac"
+                           else "mac-mini (no EC2 image)"),
         "toolchain_identity": f"Xcode {raw['xcode_version']} ({raw['xcode_build']})",
         "app_store_connect_result": {
             "status": "testflight_available",
@@ -948,7 +1169,7 @@ def record_provider_receipt(org_id: Any, tenant_id: str, project_id: Any,
     if any(raw[name] != value for name, value in expected.items()):
         raise IosShipError("receipt_identity_mismatch",
                            "controller receipt identity differs from the admitted execution")
-    projected = _provider_projection(row, execution, raw)
+    projected = _provider_projection(row, execution, raw, wire_receipt=receipt)
     return record_receipt(org, project, execution, projected)
 
 

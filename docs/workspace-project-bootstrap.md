@@ -23,3 +23,19 @@ tenant and project identity that every app profile, including iOS, binds to.
 The two POSTs are safe to retry after a lost response. They are not a license to
 create a second tenant or project. In live mode the server derives tenancy from
 the verified session and ignores client-supplied tenant identity.
+
+## iOS source and approval
+
+1. The platform reconciles its copy from the provider's catalog projection when a member reads the project's sources. The internal POST remains an authenticated compatibility route.
+2. A project member reads sources and approvals through `GET /api/projects/{id}/ios/sources`.
+3. A project owner approves the exact catalog tuple through `POST /api/projects/{id}/ios/approvals`.
+4. Readiness and launch consume that approval as before.
+
+The platform refuses an absent source with `catalog_entry_missing` and a tuple
+that differs from the catalog with `approval_tuple_mismatch`. The latter names
+the first field that differs, without its value. No browser free text ever
+becomes an approval of source fields.
+The `revision` is the approval's bounded project revision label (Studio's
+`canonicalVersionId`), distinct from the catalog's `source_revision` key; only
+`source_sha256`, `bundle_identifier`, `marketing_version`, and `build_number`
+must equal the entry selected by that key.
