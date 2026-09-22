@@ -335,6 +335,14 @@ def build_suites() -> List[Suite]:
         # parametrization over 7 literal malformed requests = 17.
         Suite("server-w2-panel-group-delete", "server tests/test_w2_panel_group_delete.py", "pytest", SERVER,
               _py_pytest("tests/test_w2_panel_group_delete.py"), 17),
+        # S20 panel-remove (2026-09-22): the scoped removal builtin, the group and the
+        # panel it leaves intact, the rectangular matrix with an emptied cell, and the
+        # references it refuses to leave dangling. Hermetic (a graph seeded in the test,
+        # no network, no fixture), so the floor is the exact count on every runner:
+        # 14 unparametrized tests + one parametrization over 9 literal malformed
+        # requests = 23.
+        Suite("server-w2-panel-remove", "server tests/test_w2_panel_remove.py", "pytest", SERVER,
+              _py_pytest("tests/test_w2_panel_remove.py"), 23),
         Suite("server-w1-sizing-groups", "server tests/test_w1_sizing_groups.py", "pytest", SERVER,
               _py_pytest("tests/test_w1_sizing_groups.py"), 52),
         Suite("server-w1-solar-interchange", "server tests/test_w1_solar_interchange.py", "pytest", SERVER,
@@ -1502,6 +1510,15 @@ def build_suites() -> List[Suite]:
         # 8 tests + one parametrization over 5 literal parameter overrides = 13.
         Suite("scripts-solar-w1-studio-group-delete", "scripts test_solar_w1_studio_group_delete.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_group_delete.py"), 13),
+        # S20 (2026-09-22): the panel-remove producer on a synthetic eleven-group intake
+        # (the group count the captured plugin run left behind), the same intake through
+        # the groups producer to prove the removal started from the committed grouped
+        # state, the rename rule G3 forces when a group's lowest handle leaves, and the
+        # refusals. Hermetic (the committed schema file only for its hash and revision),
+        # so the floor is the exact count on every runner: 8 tests + one parametrization
+        # over 4 literal refusals + one over 5 literal parameter overrides = 17.
+        Suite("scripts-solar-w1-studio-panel-remove", "scripts test_solar_w1_studio_panel_remove.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_panel_remove.py"), 17),
         # Registered per the #29 fix-then-register rule (shipped without a
         # gate entry; measured 1 passed on this tree 2026-07-23).
         # 1 -> 2 on 2026-08-07: the staging relay's convergence contract
