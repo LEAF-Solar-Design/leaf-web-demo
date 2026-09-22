@@ -234,7 +234,13 @@ def build_evidence(graph, family, metadata):
             refs = coverage.get(field + "_panel_refs")
             if not isinstance(refs, list):
                 raise compare.InputError("solve_coverage requires panel reference arrays")
-            result["after"][field + "_panels"] = [reference(identifier) for identifier in refs]
+            panels = [reference(identifier) for identifier in refs]
+            # Rule G9: a SET-valued list is emitted in ascending neutral-id order on both
+            # sides, by the same key the records above sort by, so two equal sets recorded
+            # in different orders compare equal instead of reading as one diff per member.
+            # A string's ordered_membership is not a set and keeps the order it was given.
+            panels.sort(key=lambda ref: result["entity_mapping"][ref["entity_id"]])
+            result["after"][field + "_panels"] = panels
         result["after"]["length_distribution"] = sorted(item["module_count"] for item in collection)
     result["output_sha256"] = compare.semantic_hash(result["after"])
     result["provenance"]["studio_graph_sha256"] = graph_sha256
