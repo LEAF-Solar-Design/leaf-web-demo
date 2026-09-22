@@ -11,11 +11,15 @@ import copy
 import hashlib
 import math
 
-from leaf_cloud_client import StringerRequest, canonical_bytes, proposal_provenance
+from leaf_cloud_client import (
+    PieceStringerRequest, StringerRequest, canonical_bytes, piece_proposal_provenance,
+    proposal_provenance,
+)
 from solar_dependencies import affected_entities
 from solar_design_graph import (
     GraphValidationError, _bounded_json, entities, new_id, validate_graph,
 )
+from solar_grid_restitch import failed_group_indices, ordered_strings, restitch
 from solar_sizing_client import advance, checked_graph
 
 
@@ -228,17 +232,13 @@ def accept_candidate(graph, candidate, *, expected_rev):
     binding = verified["binding"]
     frame, _ = _frame_request(result, binding["frame_ref"], binding["request"])
     members = set(frame["panel_refs"])
-    previous = [s for s in result["strings"] if members.intersection(s["ordered_panel_refs"])]
-    if any(not set(s["ordered_panel_refs"]) <= members for s in previous):
-        raise GraphValidationError("CROSS_FRAME_STRING_REQUIRES_CORRECTION")
-    previous_ids = {s["id"] for s in previous}
+    previous = _previous_frame_strings(result, frame)
     # Keep validating the client's path in original matrix coordinates.
     # String order comes from the raw service final_grid's global Seq values.
     path = verified["proposal"]["visited_path"]
     if any(not (0 <= r < frame["module_rows"] and 0 <= c < frame["module_columns"])
            for r, c in path):
         raise GraphValidationError("INVALID_PATH_INDICES")
-    panels = {p["id"]: p for p in result["panels"]}
     lengths = verified["proposal"]["proposal"]["data"]["best_result"]["info"]["sequence_length"]
     if (any(type(length) is not int or length <= 0 for length in lengths)
             or sum(lengths) != len(path)):
@@ -255,12 +255,39 @@ def accept_candidate(graph, candidate, *, expected_rev):
             or sum(lengths) != len(members)):
         raise GraphValidationError("INVALID_FINAL_GRID_ORDER")
     refs = [ref for _, ref in sorted(ordered_cells)]
-    strings, offset = [], 0
+    ordered_lists, offset = [], 0
+    for length in lengths:
+        ordered_lists.append(refs[offset:offset + length])
+        offset += length
+    _replace_frame_strings(before, result, frame, previous, ordered_lists,
+                           verified["proof"]["response_sha256"])
+    frame["extra"]["solve"] = {
+        "initial_complete": True, "background_complete": verified["background_complete"],
+        "accepted_phase": binding["phase"], "source_rev": before["rev"],
+        "job_id": binding["job_id"], **verified["proof"],
+        "upstream_sha256": upstream_basis(result),
+    }
+    return finish_mutation(before, result, "solar-commit-solve")
+
+
+def _previous_frame_strings(result, frame):
+    members = set(frame["panel_refs"])
+    previous = [s for s in result["strings"] if members.intersection(s["ordered_panel_refs"])]
+    if any(not set(s["ordered_panel_refs"]) <= members for s in previous):
+        raise GraphValidationError("CROSS_FRAME_STRING_REQUIRES_CORRECTION")
+    return previous
+
+
+def _replace_frame_strings(before, result, frame, previous, ordered_lists, response_sha256):
+    """Replace the frame's strings with ordered panel lists; shared by both commit paths."""
+    members = set(frame["panel_refs"])
+    previous_ids = {s["id"] for s in previous}
+    panels = {p["id"]: p for p in result["panels"]}
+    strings = []
     tags = {s["circuit_tag"] for s in result["strings"] if s["id"] not in previous_ids}
     number = result["settings"]["string_number"]
-    for i, length in enumerate(lengths):
-        ordered = refs[offset:offset + length]
-        offset += length
+    for i, ordered in enumerate(ordered_lists):
+        length = len(ordered)
         string = copy.deepcopy(previous[i]) if i < len(previous) else {
             "id": new_id("string"), "kind": "string", "rev": result["rev"],
             "provenance": copy.deepcopy(frame["provenance"]), "extra": {},
@@ -285,7 +312,7 @@ def accept_candidate(graph, candidate, *, expected_rev):
         string["extra"]["polarity"] = {
             "source": "derived", "rule": "ordered-final-grid-first-negative-last-positive",
             "negative_panel_ref": ordered[0], "positive_panel_ref": ordered[-1],
-            "source_rev": before["rev"], "response_sha256": verified["proof"]["response_sha256"],
+            "source_rev": before["rev"], "response_sha256": response_sha256,
         }
         string["extra"]["length_provenance"] = {
             "source": "derived", "rule": "panel-centre-path", "point_units": "m",
@@ -302,10 +329,184 @@ def accept_candidate(graph, candidate, *, expected_rev):
     sync_assignments(result)
     invalidate_dependents(before, result, list(members | previous_ids),
                           solved_ids={s["id"] for s in strings})
+
+
+MAX_SPLIT_PIECES = 64
+
+
+def piece_job_id(job_id, index):
+    """Broker job id for one piece's stringer call under the frame's job."""
+    return f"{job_id}:piece-{index}"
+
+
+def _frame_pieces(graph, frame_ref, pieces):
+    """Prove every piece cell is the frame's panel at frame row RowIndices[r],
+    column piece column plus the piece's one column offset, with Studio geometry,
+    and that the pieces cover each frame panel exactly once. Fails closed."""
+    try:
+        frame = next(f for f in graph["frames"] if f["id"] == frame_ref)
+        panels = {p["id"]: p for p in graph["panels"]}
+        where = {cell["panel_ref"]: (r, c) for r, row in enumerate(frame["matrix"])
+                 for c, cell in enumerate(row) if cell["panel_ref"] is not None}
+        if type(pieces) is not list or not 1 <= len(pieces) <= MAX_SPLIT_PIECES:
+            raise ValueError()
+        seen, parsed = set(), []
+        for piece in pieces:
+            if type(piece) is not dict or set(piece) != {"request", "row_indices"}:
+                raise ValueError()
+            request = PieceStringerRequest.model_validate(piece["request"])
+            rows = piece["row_indices"]
+            if (type(rows) is not list or len(rows) != len(request.grid.Rows)
+                    or len(set(rows)) != len(rows)
+                    or any(type(i) is not int or not 0 <= i < frame["module_rows"] for i in rows)):
+                raise ValueError()
+            offset = None
+            for r, row in enumerate(request.grid.Rows):
+                for c, wire in enumerate(row.Panels):
+                    if wire.Code != 1:
+                        if wire.Code != 0 or wire.Id:
+                            raise ValueError()
+                        continue
+                    ref = wire.Id
+                    if ref in seen or ref not in where:
+                        raise ValueError()
+                    frame_row, frame_col = where[ref]
+                    if offset is None:
+                        offset = frame_col - c
+                    if (frame_row, frame_col) != (rows[r], c + offset):
+                        raise ValueError()
+                    panel = panels[ref]
+                    if any(not math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-9)
+                           for a, b in ((wire.X, panel["centre"][0]),
+                                        (wire.Y, panel["centre"][1]),
+                                        (wire.Angle, panel["angle"]))):
+                        raise ValueError()
+                    seen.add(ref)
+            parsed.append(request)
+        if seen != set(frame["panel_refs"]):
+            raise ValueError()
+        return frame, parsed
+    except (ValueError, TypeError, KeyError, IndexError, StopIteration):
+        raise GraphValidationError("SOLVE_GRID_MISMATCH") from None
+
+
+def bind_split_request(graph, pieces, *, expected_rev, frame_ref, tenant_id, job_id,
+                       split_state, phase="initial"):
+    """bind_request for a frame the plugin splits: one bound request per piece."""
+    graph = checked_graph(graph, expected_rev)
+    _bounded_json(pieces)
+    _bounded_json(split_state)
+    if (phase not in ("initial", "background")
+            or any(type(v) is not str or not 1 <= len(v) <= 200
+                   for v in (tenant_id, job_id))
+            or type(split_state) is not dict or set(split_state) != {"jogs", "depth"}
+            or type(split_state["jogs"]) is not int or split_state["jogs"] not in (1, 2)
+            or type(split_state["depth"]) is not int or split_state["depth"] not in (0, 1, 10)):
+        raise GraphValidationError("INVALID_SOLVE_BINDING")
+    frame, parsed = _frame_pieces(graph, frame_ref, pieces)
+    if phase == "background" and not frame["extra"].get("solve", {}).get("initial_complete"):
+        raise GraphValidationError("INITIAL_SOLVE_REQUIRED")
+    return {"source_rev": graph["rev"], "source_hash": graph["source_hash"],
+            "graph_sha256": digest(graph), "frame_ref": frame["id"],
+            "pieces": [{"request": request.model_dump(), "row_indices": list(piece["row_indices"])}
+                       for request, piece in zip(parsed, pieces)],
+            "split_state": dict(split_state), "tenant_id": tenant_id,
+            "job_id": job_id, "phase": phase}
+
+
+def _check_split_binding(graph, binding):
+    _bounded_json(binding)
+    if type(binding) is not dict or set(binding) != {
+        "source_rev", "source_hash", "graph_sha256", "frame_ref", "pieces",
+        "split_state", "tenant_id", "job_id", "phase",
+    }:
+        raise GraphValidationError("INVALID_SOLVE_BINDING")
+    if (type(binding["source_rev"]) is not int
+            or binding["source_rev"] != graph["rev"]
+            or binding["source_hash"] != graph["source_hash"]
+            or binding["graph_sha256"] != digest(graph)):
+        raise GraphValidationError("STALE_SOLVE_RESULT")
+    expected = bind_split_request(
+        graph, binding["pieces"], expected_rev=graph["rev"],
+        frame_ref=binding["frame_ref"], tenant_id=binding["tenant_id"],
+        job_id=binding["job_id"], split_state=binding["split_state"],
+        phase=binding["phase"],
+    )
+    if binding != expected:
+        raise GraphValidationError("INVALID_SOLVE_BINDING")
+
+
+def complete_split_search(graph, binding, proposals):
+    """complete_search for a split frame: every piece proven by the client, none accepted."""
+    graph = validate_graph(graph)
+    _check_split_binding(graph, binding)
+    _bounded_json(proposals)
+    if type(proposals) is not list or len(proposals) != len(binding["pieces"]):
+        raise GraphValidationError("INVALID_SOLVE_PROPOSAL")
+    proofs = []
+    try:
+        for index, (piece, proposal) in enumerate(zip(binding["pieces"], proposals)):
+            proofs.append(piece_proposal_provenance(
+                proposal, {"grant_ref": "receipt-validation", "request": piece["request"]},
+                binding["tenant_id"], piece_job_id(binding["job_id"], index)))
+    except (ValueError, KeyError, TypeError):
+        raise GraphValidationError("INVALID_SOLVE_PROPOSAL") from None
+    return {"binding": copy.deepcopy(binding), "proposals": copy.deepcopy(proposals),
+            "proofs": proofs, "status": "completed", "accepted": False,
+            "initial_complete": binding["phase"] == "initial",
+            "background_complete": binding["phase"] == "background"}
+
+
+def accept_split_candidate(graph, candidate, *, expected_rev):
+    """The plugin's split commit: restitch the pieces, cut strings in final-grid Seq
+    order (StringPlacement), then the same graph mutation as accept_candidate."""
+    before = checked_graph(graph, expected_rev)
+    _bounded_json(candidate)
+    if type(candidate) is not dict or "binding" not in candidate or "proposals" not in candidate:
+        raise GraphValidationError("INVALID_SOLVE_CANDIDATE")
+    verified = complete_split_search(before, candidate["binding"], candidate["proposals"])
+    if candidate != verified:
+        raise GraphValidationError("INVALID_SOLVE_CANDIDATE")
+    result = copy.deepcopy(before)
+    binding = verified["binding"]
+    frame, _ = _frame_pieces(result, binding["frame_ref"], binding["pieces"])
+    previous = _previous_frame_strings(result, frame)
+    responses = [proposal["proposal"] for proposal in verified["proposals"]]
+    if failed_group_indices(responses, [list(range(len(responses)))]):
+        raise GraphValidationError("SPLIT_PIECE_FAILED")
+    try:
+        merged = restitch(responses, [piece["row_indices"] for piece in binding["pieces"]])
+        cut = ordered_strings(merged)
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
+        raise GraphValidationError("INVALID_FINAL_GRID_ORDER") from None
+    members = set(frame["panel_refs"])
+    # StringPlacement commits upper-cased handles; map them back to panel ids.
+    by_upper = {ref.upper(): ref for ref in members}
+    if len(by_upper) != len(members):
+        raise GraphValidationError("AMBIGUOUS_PANEL_IDENTITY")
+    ordered_lists = [[by_upper.get(identity) for identity in string] for string in cut]
+    flat = [ref for string in ordered_lists for ref in string]
+    if (not ordered_lists or any(not string for string in ordered_lists)
+            or None in flat or len(set(flat)) != len(flat) or set(flat) != members):
+        raise GraphValidationError("INVALID_FINAL_GRID_ORDER")
+    proofs = verified["proofs"]
+    response_sha256 = digest([proof["response_sha256"] for proof in proofs])
+    _replace_frame_strings(before, result, frame, previous, ordered_lists, response_sha256)
     frame["extra"]["solve"] = {
         "initial_complete": True, "background_complete": verified["background_complete"],
         "accepted_phase": binding["phase"], "source_rev": before["rev"],
-        "job_id": binding["job_id"], **verified["proof"],
+        "job_id": binding["job_id"], "execution_mode": proofs[0]["execution_mode"],
+        "solver": copy.deepcopy(proofs[0]["solver"]),
+        "request_sha256": digest([proof["request_sha256"] for proof in proofs]),
+        "response_sha256": response_sha256,
+        "split": {
+            "jogs": binding["split_state"]["jogs"], "depth": binding["split_state"]["depth"],
+            "pieces": [{"row_indices": list(piece["row_indices"]),
+                        "request_sha256": proof["request_sha256"],
+                        "response_sha256": proof["response_sha256"],
+                        "partial_beam": proof["partial_beam"]}
+                       for piece, proof in zip(binding["pieces"], proofs)],
+        },
         "upstream_sha256": upstream_basis(result),
     }
     return finish_mutation(before, result, "solar-commit-solve")
