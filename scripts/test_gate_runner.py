@@ -2871,20 +2871,66 @@ UNREGISTERED_SERVER_TESTS = {
     "test_published_source_containment.py": "skips 1 when run alone: needs its skip reasons allowlisted",
     "test_request_journal_activation_postgres.py": "skips 11 when run alone: needs its skip reasons allowlisted",
     "test_rewind.py": "red on main: 5 of 12 fail when run alone",
+    "test_skills_catalog.py": "order-dependent on a case-sensitive filesystem: discovery keeps the first of "
+                              "SAFE and safe from an unsorted os.scandir, and the case-duplicate row expects safe",
     "test_solar_cad_template_manifest.py": "imports server.* as a package: needs a repo-root row",
     "test_template_store.py": "red on main: 3 fail when run alone",
     "test_uploaded_live_read_production_contract.py": "red on main: 2 of 19 fail when run alone",
 }
 
 
+_PYTEST_PATH_OPTIONS = frozenset({"--ignore", "--ignore-glob", "--deselect"})
+
+
+def _server_test_targets(suites, tests_dir):
+    """Server test files the suites actually run.
+
+    A target is a plain argument, never an option such as --ignore=... nor the
+    value that follows a path option, resolved against the suite's own cwd and
+    landing directly in tests_dir. A file named only in an exclusion, or a
+    same-named file under another directory, is not coverage.
+    """
+    tests_dir = Path(tests_dir).resolve()
+    targets = set()
+    for suite in suites:
+        skip_next = False
+        for arg in suite.argv:
+            text = str(arg)
+            if skip_next:
+                skip_next = False
+                continue
+            if text.startswith("-"):
+                skip_next = text in _PYTEST_PATH_OPTIONS
+                continue
+            path = Path(text)
+            if not path.is_absolute():
+                path = Path(suite.cwd) / path
+            path = path.resolve()
+            if path.parent == tests_dir and re.fullmatch(r"test_[A-Za-z0-9_]+\.py", path.name):
+                targets.add(path.name)
+    return targets
+
+
+def test_server_test_targets_count_only_real_targets(tmp_path):
+    server = tmp_path / "server"
+    tests = server / "tests"
+    tests.mkdir(parents=True)
+    other = tmp_path / "harness"
+    other.mkdir()
+    suites = [
+        SimpleNamespace(cwd=server, argv=["python", "-m", "pytest", "tests/test_a.py",
+                                          "--ignore=tests/test_b.py"]),
+        SimpleNamespace(cwd=server, argv=["python", "-m", "pytest", "--ignore", "tests/test_c.py",
+                                          "--deselect", "tests/test_d.py"]),
+        SimpleNamespace(cwd=other, argv=["python", "-m", "pytest", "tests/test_e.py"]),
+        SimpleNamespace(cwd=server, argv=["python", "-m", "pytest", "tests/test_f.py::test_one"]),
+    ]
+    assert _server_test_targets(suites, tests) == {"test_a.py"}
+
+
 def test_every_server_test_file_is_registered_or_named():
     g = _load_runner()
-    registered = set()
-    for suite in g.build_suites():
-        for arg in suite.argv:
-            m = re.search(r"tests/(test_[A-Za-z0-9_]+\.py)$", str(arg).replace("\\", "/"))
-            if m:
-                registered.add(m.group(1))
+    registered = _server_test_targets(g.build_suites(), REPO / "server" / "tests")
     files = {p.name for p in (REPO / "server" / "tests").glob("test_*.py")}
     named = set(UNREGISTERED_SERVER_TESTS)
     assert not files - registered - named, (
