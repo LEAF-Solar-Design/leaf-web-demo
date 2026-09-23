@@ -662,3 +662,64 @@ def test_c1_job_other_failures_still_fall_back(job_lane, monkeypatch):
     fallback.assert_called_once()
     assert calls == [True, False]
     assert jobs.get_job(jid)["status"] == "complete"
+
+
+def _c1c_refusal_tool(tool, received, params, **kwargs):
+    class Mutations(dict):
+        def get(self, key, default=None):
+            if key == "transforms":
+                raise scope.uncheckable()
+            return super().get(key, default)
+
+    return {"ok": True, "result": {"mutations": Mutations(transforms=[])}}
+
+
+def test_c1c_mock_unscoped_refusal_class_is_not_a_scope_refusal(drawing):
+    d = drawing()
+    saved = snapshot(d)
+    env, status = mock_run(d, scoped=False, run=_c1c_refusal_tool)
+    assert status == 500
+    assert env["error"]["error_code"] == "INTERNAL"
+    assert "reason_code" not in env["error"]
+    unchanged(d, saved)
+
+
+def test_c1c_mock_scoped_refusal_class_is_still_refused(drawing):
+    d = drawing()
+    saved = snapshot(d)
+    env, status = mock_run(d, run=_c1c_refusal_tool)
+    assert status == 409
+    assert env["error"]["reason_code"].startswith("ENTITY_SCOPE_")
+    unchanged(d, saved)
+
+
+def test_c1c_mock_unscoped_read_refusal_propagates(drawing, monkeypatch):
+    d = drawing()
+    saved = snapshot(d)
+    read = Mock(side_effect=scope.uncheckable())
+    monkeypatch.setattr(write_loop, "read_intake", read)
+    with pytest.raises(scope.ContainmentRefusal):
+        mock_run(d, scoped=False, run=_c1c_refusal_tool)
+    read.assert_called_once()
+    unchanged(d, saved)
+
+
+def test_c1c_live_unscoped_refusal_matches_a_plain_exception(drawing, monkeypatch):
+    d = drawing(live=True)
+    saved = snapshot(d)
+    responses = []
+    for exc in (scope.uncheckable(), RuntimeError("boom")):
+        # The unscoped live try calls this after read_intake and before APS.
+        bridge = Mock(side_effect=exc)
+        monkeypatch.setattr(write_loop, "_live_execution_source_bytes", bridge)
+        responses.append(write_loop.run_write_live(
+            TOOL, {"drawing_id": "demo"}, TENANT, backend=d.backend,
+            da=NoAPS(), t0=time.perf_counter(), version=2,
+            run_tool_dynamic_fn=planner(transform())))
+        bridge.assert_called_once_with(d.source)
+        unchanged(d, saved)
+    (refusal_env, refusal_status), (plain_env, plain_status) = responses
+    assert refusal_status == plain_status
+    assert refusal_env["error"]["error_code"] == plain_env["error"]["error_code"]
+    assert "reason_code" not in refusal_env["error"]
+    assert "reason_code" not in plain_env["error"]

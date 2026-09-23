@@ -1633,6 +1633,8 @@ def run_write_mock(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
             containment.require_payload_intake(stored_source, cur_intake)
             parent_intake = json.loads(stored_source.decode("utf-8"))
     except containment.ContainmentRefusal as exc:
+        if entity_scope is None:
+            raise
         return containment.refusal_envelope(exc, tool=name, version=tool_version)
     except ProofStateUnreadable as exc:
         # The base version exists; its proof state is unreachable right now.
@@ -1704,9 +1706,9 @@ def run_write_mock(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
         # session's lock is an authorization answer (403), not a persist fault
         # (500). The tool already ran, but nothing was written.
         return _checkout_denied(exc, name, tool_version)
-    except containment.ContainmentRefusal as exc:
-        return containment.refusal_envelope(exc, tool=name, version=tool_version)
     except Exception as exc:  # noqa: BLE001
+        if entity_scope is not None and isinstance(exc, containment.ContainmentRefusal):
+            return containment.refusal_envelope(exc, tool=name, version=tool_version)
         if (entity_scope is not None and isinstance(exc, ValueError)
                 and str(exc).startswith(("stale parent ", "stale drawing head:"))):
             return containment.refusal_envelope(containment.ContainmentRefusal(
@@ -3472,8 +3474,6 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
             planner_ms=planner_ms, drawing_fetch_ms=drawing_fetch_ms,
             scratch_keys=scratch_keys,
         )
-    except containment.ContainmentRefusal as exc:
-        return containment.refusal_envelope(exc, tool=name, version=tool_version)
     except store.CheckoutDenied as exc:
         return _checkout_denied(exc, name, tool_version)
     except ProofStateUnreadable as exc:
@@ -3494,6 +3494,8 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
             retryable=False, tool=name, version=tool_version,
         ), DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
     except Exception as exc:  # noqa: BLE001
+        if entity_scope is not None and isinstance(exc, containment.ContainmentRefusal):
+            return containment.refusal_envelope(exc, tool=name, version=tool_version)
         # Transport exceptions can contain signed APS or object-store URLs.
         # Keep their text out of the client envelope. The exception class is
         # enough to group the failure without persisting credential-shaped data.
