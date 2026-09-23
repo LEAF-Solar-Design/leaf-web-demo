@@ -427,6 +427,33 @@ def build_suites() -> List[Suite]:
         # 6 literal malformed plans = 34.
         Suite("server-w2-autofill", "server tests/test_solar_autofill.py", "pytest", SERVER,
               _py_pytest("tests/test_solar_autofill.py"), 34),
+        # S31 harness and BOM ports (2026-09-22): server/solar_harness_bom.py, the
+        # literal port of three more licensed engines (HarnessCablePlanner, the
+        # harness BOM builder, and the tracker BOM builder with the empty and
+        # null-input variants the EMPTY demo exercises). Three layers: the harness
+        # planner's own arithmetic, the plugin's OWN NUnit cases where they exist
+        # under Tests/Tests/, and every probe in the four licensed DEMO captures
+        # reproduced by COMPUTING it through Studio's ported scenario lists. The
+        # capture IS committed here (docs/parity/evidence/probes/demo-probes-20260923),
+        # so the suite reads the artifact rather than a transcription and never
+        # skips; the XLSX halves go through server/solar_xlsx.py, which compares
+        # cell VALUES per contract rule E5 and not styling. Floor MEASURED at 155
+        # on the first green run (2026-09-22, 0.8 s).
+        Suite("server-solar-harness-bom", "server tests/test_solar_harness_bom.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_harness_bom.py"), 155),
+        # S31 XLSX codec (2026-09-22): server/solar_xlsx.py, a small standard-library
+        # reader and writer (zipfile plus xml.etree only, NO openpyxl, because this
+        # repo declares no such dependency). Covers the round trip, the four
+        # committed licensed workbooks read back cell for cell, shared-string and
+        # inline-string resolution, numeric versus text cells, sheet order, and the
+        # bounds that make a hostile workbook a refusal rather than an allocation:
+        # file size, entry count, cells per sheet, plus the malformed and
+        # zip-bomb-shaped documents refused outright. Hermetic (no fixture beyond
+        # the committed capture, no network), so the floor is the exact count on
+        # every runner. Floor MEASURED at 114 on the first green run (2026-09-22,
+        # 1.1 s).
+        Suite("server-solar-xlsx", "server tests/test_solar_xlsx.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_xlsx.py"), 114),
         Suite("server-w1-sizing-groups", "server tests/test_w1_sizing_groups.py", "pytest", SERVER,
               _py_pytest("tests/test_w1_sizing_groups.py"), 52),
         Suite("server-w1-solar-interchange", "server tests/test_w1_solar_interchange.py", "pytest", SERVER,
@@ -1691,11 +1718,18 @@ def build_suites() -> List[Suite]:
         # translated on checkout, so a verdict must not depend on a git setting), the
         # headerless, blank-named, repeated-name and ragged files refused, and the
         # declared non-numeric quantity applying only where a section declares it.
-        # Floor MEASURED at 118 on the first green run after S28 (2026-09-22, 3.2 s);
-        # it was 61 before. 26 test functions, 15 parametrized over the six NEC demos,
-        # the nine committed S28 files, or literal malformed inputs.
+        # The floor was 118 after S28 (26 test functions, 15 parametrized over the
+        # six NEC demos, the nine committed S28 files, or literal malformed inputs).
+        # S31 (2026-09-22) added rule E5's XLSX projection through
+        # server/solar_xlsx.py: one row record per non-empty sheet row, keyed
+        # `<sheet>:<row index>`, cells as a list, `format` naming the sheet list, and
+        # the three new probe types (harness-cable-plan, harness-bom-export,
+        # tracker-bom-xlsx-export). Its half compares Studio against the four new
+        # committed licensed files, and adds the comparator pass on each of them.
+        # Floor MEASURED at 151 on the first green run after S31 (2026-09-22, 2.6 s);
+        # it was 118 after S28 and 61 before that.
         Suite("scripts-solar-probe-evidence", "scripts test_solar_probe_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_probe_evidence.py"), 118),
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_probe_evidence.py"), 151),
         # S22 (2026-09-22): contract rule G9 on the Studio evidence adapter, the first
         # test file it has. A set-valued list (unassigned_panels, duplicate_panels) is
         # emitted in ascending neutral-id order, so the same set recorded in two orders

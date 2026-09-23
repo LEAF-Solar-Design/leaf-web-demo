@@ -1,0 +1,1151 @@
+{
+ "schema": "leaf.solar-parity-receipt.v1",
+ "capability": "tracker-bom-xlsx-export",
+ "capability_version": "0",
+ "fixture": {
+  "id": "demo-empty-f1",
+  "sha256": "ca9e1baf4ef9917ed119405b59b73f4d31af0a8bb805ba35e3da609452983cb8"
+ },
+ "plugin": {
+  "build": "LeafSolarDesign 2025 licensed 2026-09-23",
+  "state": "committed",
+  "receipt_sha256": "091f49152387593c433fa8c3f6e9cf63342d5b87321e2364e58de96ea16f85f0"
+ },
+ "studio": {
+  "capability_version": "0",
+  "engine": "server-builtin"
+ },
+ "comparator": {
+  "name": "solar-w1-semantic",
+  "version": "1",
+  "verdict": "pass",
+  "diffs": []
+ },
+ "synthetic_fields": [
+  "plugin:before/recorded",
+  "plugin:changes/unrecorded",
+  "studio:before/recorded",
+  "studio:changes/unrecorded"
+ ],
+ "fallback_fields": [],
+ "synthetic_flagged": true,
+ "survived_reopen": true,
+ "produced_at": "2026-09-23T03:46:01Z",
+ "comparison": {
+  "schema": "leaf.solar-w1-comparison.v1",
+  "capability": "tracker-bom-xlsx-export",
+  "family": "exports",
+  "plugin": {
+   "after": {
+    "format": "xlsx:Overview|By Area|Modules|Cable Tray|Layout|Electrical|Piling",
+    "rows": [
+     {
+      "fields": {
+       "Cells": [
+        "Metric",
+        "Value",
+        "Unit"
+       ],
+       "Key": "Overview:1"
+      },
+      "id": {
+       "entity_id": "Overview:1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Total rows (sections)",
+        1,
+        "ea"
+       ],
+       "Key": "Overview:2"
+      },
+      "id": {
+       "entity_id": "Overview:2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Total modules",
+        10,
+        "ea"
+       ],
+       "Key": "Overview:3"
+      },
+      "id": {
+       "entity_id": "Overview:3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Total tube length",
+        20,
+        "m"
+       ],
+       "Key": "Overview:4"
+      },
+      "id": {
+       "entity_id": "Overview:4"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Total piles",
+        4,
+        "ea"
+       ],
+       "Key": "Overview:5"
+      },
+      "id": {
+       "entity_id": "Overview:5"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Total drive units",
+        1,
+        "ea"
+       ],
+       "Key": "Overview:6"
+      },
+      "id": {
+       "entity_id": "Overview:6"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "DC nameplate capacity",
+        0,
+        "kWp"
+       ],
+       "Key": "Overview:7"
+      },
+      "id": {
+       "entity_id": "Overview:7"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Category",
+        "Description",
+        "Unit",
+        "Quantity"
+       ],
+       "Key": "By Area:1"
+      },
+      "id": {
+       "entity_id": "By Area:1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Module",
+        "PV Module \u2014 2.000 m \u00d7 1.000 m portrait",
+        "ea",
+        10
+       ],
+       "Key": "By Area:2"
+      },
+      "id": {
+       "entity_id": "By Area:2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Torque Tube",
+        "Torque tube / tracker rail (1 sections, 20.0 m total)",
+        "m",
+        20
+       ],
+       "Key": "By Area:3"
+      },
+      "id": {
+       "entity_id": "By Area:3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Torque Tube",
+        "Torque tube section count",
+        "ea",
+        1
+       ],
+       "Key": "By Area:4"
+      },
+      "id": {
+       "entity_id": "By Area:4"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Pile",
+        "Ground pile / foundation (at 5.0 m c/c spacing, estimated)",
+        "ea",
+        4
+       ],
+       "Key": "By Area:5"
+      },
+      "id": {
+       "entity_id": "By Area:5"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Drive Unit",
+        "Single-axis tracker drive unit (one per table section)",
+        "ea",
+        1
+       ],
+       "Key": "By Area:6"
+      },
+      "id": {
+       "entity_id": "By Area:6"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Category",
+        "Description",
+        "Unit",
+        "Quantity"
+       ],
+       "Key": "Modules:1"
+      },
+      "id": {
+       "entity_id": "Modules:1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Module",
+        "PV Module \u2014 2.000 m \u00d7 1.000 m portrait",
+        "ea",
+        10
+       ],
+       "Key": "Modules:2"
+      },
+      "id": {
+       "entity_id": "Modules:2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Cable / harness detail will be populated when Q27 (Harness Manager) ships. Placeholder tab for parity."
+       ],
+       "Key": "Cable Tray:1"
+      },
+      "id": {
+       "entity_id": "Cable Tray:1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 1
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "RowIndex",
+        "AxisStartX",
+        "AxisStartY",
+        "AxisEndX",
+        "AxisEndY",
+        "LengthMeters",
+        "RailOverhangM",
+        "PhysicalLengthMeters",
+        "ModuleSlots"
+       ],
+       "Key": "Layout:1"
+      },
+      "id": {
+       "entity_id": "Layout:1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 9
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        0,
+        0,
+        0,
+        0,
+        20,
+        20,
+        0,
+        20,
+        10
+       ],
+       "Key": "Layout:2"
+      },
+      "id": {
+       "entity_id": "Layout:2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 9
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Category",
+        "Description",
+        "Unit",
+        "Quantity"
+       ],
+       "Key": "Electrical:1"
+      },
+      "id": {
+       "entity_id": "Electrical:1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "No electrical line items. Provide module.PmaxW to populate."
+       ],
+       "Key": "Electrical:2"
+      },
+      "id": {
+       "entity_id": "Electrical:2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 1
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "PileIndex",
+        "RowIndex",
+        "X",
+        "Y",
+        "TerrainZ",
+        "PileHeightAboveGrade"
+       ],
+       "Key": "Piling:1"
+      },
+      "id": {
+       "entity_id": "Piling:1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Pile coordinates not provided. Call GeneratePileCoordinates or supply a pile list to populate."
+       ],
+       "Key": "Piling:2"
+      },
+      "id": {
+       "entity_id": "Piling:2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 1
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "By Area:1": "By Area:1",
+    "By Area:2": "By Area:2",
+    "By Area:3": "By Area:3",
+    "By Area:4": "By Area:4",
+    "By Area:5": "By Area:5",
+    "By Area:6": "By Area:6",
+    "Cable Tray:1": "Cable Tray:1",
+    "Electrical:1": "Electrical:1",
+    "Electrical:2": "Electrical:2",
+    "Layout:1": "Layout:1",
+    "Layout:2": "Layout:2",
+    "Modules:1": "Modules:1",
+    "Modules:2": "Modules:2",
+    "Overview:1": "Overview:1",
+    "Overview:2": "Overview:2",
+    "Overview:3": "Overview:3",
+    "Overview:4": "Overview:4",
+    "Overview:5": "Overview:5",
+    "Overview:6": "Overview:6",
+    "Overview:7": "Overview:7",
+    "Piling:1": "Piling:1",
+    "Piling:2": "Piling:2"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "ca9e1baf4ef9917ed119405b59b73f4d31af0a8bb805ba35e3da609452983cb8",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "1916cf7a20ffdb3370c997854af53dd4ed0d932b5f8a731e34ec882762226ba9",
+   "output_sha256": "e4e0f577f24c5929023f96bd7c0187a74756a7848d47571b8961941117e7afb1",
+   "parameters": {
+    "capability": "tracker-bom-xlsx-export",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafbomxlsxempty_demo_f1.xlsx",
+    "probe_file_sha256": "f969b4194dfe913548e14c76de985c6cb54aa3f626e94991187abf0eb7383e4d",
+    "probe_type": "tracker-bom-xlsx",
+    "side": "plugin"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "none",
+    "producer": "plugin",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  },
+  "studio": {
+   "after": {
+    "format": "xlsx:Overview|By Area|Modules|Cable Tray|Layout|Electrical|Piling",
+    "rows": [
+     {
+      "fields": {
+       "Cells": [
+        "Metric",
+        "Value",
+        "Unit"
+       ],
+       "Key": "Overview:1"
+      },
+      "id": {
+       "entity_id": "Overview:1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Total rows (sections)",
+        1,
+        "ea"
+       ],
+       "Key": "Overview:2"
+      },
+      "id": {
+       "entity_id": "Overview:2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Total modules",
+        10,
+        "ea"
+       ],
+       "Key": "Overview:3"
+      },
+      "id": {
+       "entity_id": "Overview:3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Total tube length",
+        20,
+        "m"
+       ],
+       "Key": "Overview:4"
+      },
+      "id": {
+       "entity_id": "Overview:4"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Total piles",
+        4,
+        "ea"
+       ],
+       "Key": "Overview:5"
+      },
+      "id": {
+       "entity_id": "Overview:5"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Total drive units",
+        1,
+        "ea"
+       ],
+       "Key": "Overview:6"
+      },
+      "id": {
+       "entity_id": "Overview:6"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "DC nameplate capacity",
+        0,
+        "kWp"
+       ],
+       "Key": "Overview:7"
+      },
+      "id": {
+       "entity_id": "Overview:7"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Category",
+        "Description",
+        "Unit",
+        "Quantity"
+       ],
+       "Key": "By Area:1"
+      },
+      "id": {
+       "entity_id": "By Area:1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Module",
+        "PV Module \u2014 2.000 m \u00d7 1.000 m portrait",
+        "ea",
+        10
+       ],
+       "Key": "By Area:2"
+      },
+      "id": {
+       "entity_id": "By Area:2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Torque Tube",
+        "Torque tube / tracker rail (1 sections, 20.0 m total)",
+        "m",
+        20
+       ],
+       "Key": "By Area:3"
+      },
+      "id": {
+       "entity_id": "By Area:3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Torque Tube",
+        "Torque tube section count",
+        "ea",
+        1
+       ],
+       "Key": "By Area:4"
+      },
+      "id": {
+       "entity_id": "By Area:4"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Pile",
+        "Ground pile / foundation (at 5.0 m c/c spacing, estimated)",
+        "ea",
+        4
+       ],
+       "Key": "By Area:5"
+      },
+      "id": {
+       "entity_id": "By Area:5"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Drive Unit",
+        "Single-axis tracker drive unit (one per table section)",
+        "ea",
+        1
+       ],
+       "Key": "By Area:6"
+      },
+      "id": {
+       "entity_id": "By Area:6"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Category",
+        "Description",
+        "Unit",
+        "Quantity"
+       ],
+       "Key": "Modules:1"
+      },
+      "id": {
+       "entity_id": "Modules:1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Module",
+        "PV Module \u2014 2.000 m \u00d7 1.000 m portrait",
+        "ea",
+        10
+       ],
+       "Key": "Modules:2"
+      },
+      "id": {
+       "entity_id": "Modules:2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Cable / harness detail will be populated when Q27 (Harness Manager) ships. Placeholder tab for parity."
+       ],
+       "Key": "Cable Tray:1"
+      },
+      "id": {
+       "entity_id": "Cable Tray:1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 1
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "RowIndex",
+        "AxisStartX",
+        "AxisStartY",
+        "AxisEndX",
+        "AxisEndY",
+        "LengthMeters",
+        "RailOverhangM",
+        "PhysicalLengthMeters",
+        "ModuleSlots"
+       ],
+       "Key": "Layout:1"
+      },
+      "id": {
+       "entity_id": "Layout:1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 9
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        0,
+        0,
+        0,
+        0,
+        20,
+        20,
+        0,
+        20,
+        10
+       ],
+       "Key": "Layout:2"
+      },
+      "id": {
+       "entity_id": "Layout:2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 9
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Category",
+        "Description",
+        "Unit",
+        "Quantity"
+       ],
+       "Key": "Electrical:1"
+      },
+      "id": {
+       "entity_id": "Electrical:1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "No electrical line items. Provide module.PmaxW to populate."
+       ],
+       "Key": "Electrical:2"
+      },
+      "id": {
+       "entity_id": "Electrical:2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 1
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "PileIndex",
+        "RowIndex",
+        "X",
+        "Y",
+        "TerrainZ",
+        "PileHeightAboveGrade"
+       ],
+       "Key": "Piling:1"
+      },
+      "id": {
+       "entity_id": "Piling:1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Pile coordinates not provided. Call GeneratePileCoordinates or supply a pile list to populate."
+       ],
+       "Key": "Piling:2"
+      },
+      "id": {
+       "entity_id": "Piling:2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 1
+      },
+      "type": "tracker-bom-sheet-row",
+      "unit": "none"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "By Area:1": "By Area:1",
+    "By Area:2": "By Area:2",
+    "By Area:3": "By Area:3",
+    "By Area:4": "By Area:4",
+    "By Area:5": "By Area:5",
+    "By Area:6": "By Area:6",
+    "Cable Tray:1": "Cable Tray:1",
+    "Electrical:1": "Electrical:1",
+    "Electrical:2": "Electrical:2",
+    "Layout:1": "Layout:1",
+    "Layout:2": "Layout:2",
+    "Modules:1": "Modules:1",
+    "Modules:2": "Modules:2",
+    "Overview:1": "Overview:1",
+    "Overview:2": "Overview:2",
+    "Overview:3": "Overview:3",
+    "Overview:4": "Overview:4",
+    "Overview:5": "Overview:5",
+    "Overview:6": "Overview:6",
+    "Overview:7": "Overview:7",
+    "Piling:1": "Piling:1",
+    "Piling:2": "Piling:2"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "ca9e1baf4ef9917ed119405b59b73f4d31af0a8bb805ba35e3da609452983cb8",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "1916cf7a20ffdb3370c997854af53dd4ed0d932b5f8a731e34ec882762226ba9",
+   "output_sha256": "e4e0f577f24c5929023f96bd7c0187a74756a7848d47571b8961941117e7afb1",
+   "parameters": {
+    "capability": "tracker-bom-xlsx-export",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafbomxlsxempty_demo_f1.xlsx",
+    "probe_file_sha256": "015a93f8226420214b2c24e1d0245299c8740a5f65c0327dd4a8d8fb49c66ffe",
+    "probe_type": "tracker-bom-xlsx",
+    "side": "studio"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "server-builtin",
+    "producer": "studio",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  }
+ }
+}

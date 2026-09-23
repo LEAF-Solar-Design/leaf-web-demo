@@ -1,0 +1,24 @@
+Label|Type|ModuleCount|ModulePitchM|TrunkTapFromStartM|StringMaxAmps|IsTrackerRow|ResultType|CableGaugeAwg|Connectors|TotalCableLengthM|Drops
+S0|EndOfRow|1|1|0|0|True|OK|10|1|0|0
+S1|EndOfRow|1|1|0|30|True|OK|10|1|0|0
+S2|EndOfRow|1|1|0|30.001|True|OK|8|1|0|0
+S3|EndOfRow|1|1|0|55|True|OK|8|1|0|0
+S4|EndOfRow|1|1|0|55.001|True|OK|6|1|0|0
+S5|EndOfRow|1|1|0|75|True|OK|6|1|0|0
+S6|EndOfRow|1|1|0|75.001|True|OK|4|1|0|0
+S7|EndOfRow|1|1|0|95|True|OK|4|1|0|0
+S8|EndOfRow|1|1|0|95.001|True|OK|2|1|0|0
+S9|EndOfRow|1|1|0|130|True|OK|2|1|0|0
+A1|EndOfRow|10|1|0|10|True|OK|10|10|45|0;1;2;3;4;5;6;7;8;9
+A2|EndOfRow|10|1|3|20|True|OK|10|10|27|3;2;1;0;1;2;3;4;5;6
+A3|EndOfRow|10|1.5|4.5|30|True|OK|10|10|40.5|4.5;3;1.5;0;1.5;3;4.5;6;7.5;9
+A4|EndOfRow|8|2|7|40|False|OK|8|8|32|7;5;3;1;1;3;5;7
+B1|ParallelTrunk|10|1|4.5|40|True|OK|8|10|25|4.5;3.5;2.5;1.5;0.5;0.5;1.5;2.5;3.5;4.5
+B2|ParallelTrunk|10|1|3|20|True|OK|10|10|27|3;2;1;0;1;2;3;4;5;6
+C1|Motor|10|1|0|60|True|OK|6|1|4.5|4.5
+C2|Motor|10|1|4.5|75|True|OK|6|1|0|0
+C3|Motor|8|2|7|75.001|True|OK|4|1|0|0
+C4|Motor|10|1|0|120|True|OK|2|1|4.5|4.5
+E1|ParallelTrunk|10|1|4.5|40|False|ERROR_SUPPORT||||Parallel trunk harness requires a tracker row  fixed-tilt rows lack the interior conduit path for in-row parallel taps.
+E2|Motor|10|1|0|60|False|ERROR_SUPPORT||||Motor harness only applies to tracker rows (no slew drive on a fixed-tilt system).
+E3|EndOfRow|10|1|0|150|True|ERROR_AMPS||||String current 150.0 A exceeds the largest supported PV-wire gauge in the ampacity ladder (130 A). Split the string or use a combiner.
