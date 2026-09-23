@@ -104,6 +104,9 @@ export default function useConverseSessionController({ drawingId, retryNotFound 
       if (requireImmediateTurn && (!response.turn_id || response.status === 'queued')) {
         throw new Error('The conversation has not started this request. Wait for the current turn to finish, then try again.')
       }
+      if (requireImmediateTurn && response.status === 'completed') {
+        throw new Error('The conversation already finished this request, so it cannot authorize this step. Try again.')
+      }
       if (response.active_requests && typeof response.active_requests === 'object') {
         setActiveRequests(projectActivityProjection(response.active_requests))
       }

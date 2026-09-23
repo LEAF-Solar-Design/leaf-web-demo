@@ -20,6 +20,26 @@ function projectController() {
 }
 
 describe('author immediate-turn contract', () => {
+  it('records a completed journaled answer as a completed turn', async () => {
+    postMessage.mockResolvedValue({ status: 'completed', turn_id: 'turn-a', request_id: 'request-a' })
+    const { result } = projectController()
+    let response
+    await act(async () => { response = await result.current.startTurn('hello') })
+    expect(response).toMatchObject({ session_id: 'session-a', turn_id: 'turn-a', status: 'completed' })
+    expect(result.current.turns).toHaveLength(1)
+    expect(result.current.turns[0]).toMatchObject({ turnId: 'turn-a', status: 'completed' })
+    expect(result.current.requestStatus).toBe('completed')
+  })
+
+  it('an immediate turn refuses a completed answer without reposting', async () => {
+    postMessage.mockResolvedValue({ status: 'completed', turn_id: 'turn-a', request_id: 'request-a' })
+    const { result } = projectController()
+    await act(async () => {
+      await expect(result.current.startTurn('hello', {}, { requireImmediateTurn: true })).rejects.toThrow('already finished')
+    })
+    expect(postMessage).toHaveBeenCalledTimes(1)
+  })
+
   it('keeps ordinary project chat queued with a request identity', async () => {
     postMessage.mockResolvedValue({ status: 'queued', request_id: 'request-a' })
     const { result } = projectController()

@@ -282,10 +282,22 @@ export async function listSessions({ scope = null, limit = 20, cursor = null } =
   }
 }
 
+function isCompletedJournalReply(res, body, requestId) {
+  if (res.status !== 200 || body === null || typeof body !== 'object') return false
+  if (body.status !== 'completed') return false
+  if (typeof body.turn_id !== 'string' || body.turn_id === '') return false
+  // A caller-supplied request_id must come back exactly; without one the
+  // server mints the id, so the stored answer must carry a non-empty one.
+  if (requestId != null) return body.request_id === requestId
+  return typeof body.request_id === 'string' && body.request_id !== ''
+}
+
 // --- Start a turn ---------------------------------------------------------
 // POST /api/sessions/{id}/messages — exactly one of a user message (text
 // and/or images) or confirm (wire §2).
-// 202 {turn_id, status:"started"}; everything else throws tagged (409
+// 202 {turn_id, status:"started"}, or 200 completed for a journaled request
+// whether the caller or the server supplied the request_id, with a non-empty
+// string turn_id; everything else throws tagged (409
 // turn_in_progress · 401 grant_required · 429 llm_quota_exhausted /
 // llm_rate_limited · 404 session_not_found).
 export async function postMessage(sessionId, {
@@ -330,6 +342,10 @@ export async function postMessage(sessionId, {
     `/api/sessions/${encodeURIComponent(sessionId)}/messages`, payload,
   )
   if (res.status === 202 && body && (body.turn_id || body.status === 'queued')) return body
+  // The stored completed answer of this journaled request is its answer,
+  // not a failure. Require the same request identity and a turn identity;
+  // anything else stays a tagged error.
+  if (isCompletedJournalReply(res, body, request_id)) return body
   throw tagged(res, body, `POST /api/sessions/${sessionId}/messages -> ${res.status}`)
 }
 

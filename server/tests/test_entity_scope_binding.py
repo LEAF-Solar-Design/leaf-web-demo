@@ -295,13 +295,37 @@ def test_drawing_refusals(lane, monkeypatch, failure, status):
     assert lane.stub.LAST_BODY is None
 
 
-def test_request_id_distinguishes_entity_scope(lane, monkeypatch):
+@pytest.mark.parametrize("order", ["route_first", "turn_first"])
+def test_request_id_distinguishes_entity_scope(lane, monkeypatch, order):
     journal = sessions_router.request_journal
     rows = {}
     digests = []
     original_digest = journal.payload_digest
     monkeypatch.setattr(journal, "enabled", lambda: True)
     monkeypatch.setattr(journal, "get_request", lambda rid: deepcopy(rows.get(rid)))
+    if order == "route_first":
+        import threading
+
+        route_read = threading.Event()
+
+        def get_request(rid):
+            row = deepcopy(rows.get(rid))
+            route_read.set()
+            return row
+
+        monkeypatch.setattr(journal, "get_request", get_request)
+    if order == "turn_first":
+        import time
+
+        def get_request(rid):
+            deadline = time.monotonic() + 5
+            row = rows.get(rid)
+            while row is not None and row["state"] == "executing" and time.monotonic() < deadline:
+                time.sleep(0.01)
+                row = rows.get(rid)
+            return deepcopy(row)
+
+        monkeypatch.setattr(journal, "get_request", get_request)
     monkeypatch.setattr(journal, "active_counts", lambda *a, **k: {"executing": 0, "queued": 0})
     monkeypatch.setattr(journal, "claim_next_queued_and_turn", lambda **k: None)
 
@@ -326,6 +350,8 @@ def test_request_id_distinguishes_entity_scope(lane, monkeypatch):
         return True
 
     def finish(rid, tid, **kw):
+        if order == "route_first":
+            route_read.wait(5)
         rows[rid].update(state=kw["state"], response_status=kw["response_status"], response_json=kw["response"])
 
     monkeypatch.setattr(journal, "payload_digest", digest)
@@ -334,7 +360,13 @@ def test_request_id_distinguishes_entity_scope(lane, monkeypatch):
     monkeypatch.setattr(journal, "finish_request", finish)
     rid = "11111111-1111-4111-8111-111111111111"
     body = {"text": "move", "request_id": rid, "entity_scope": E}
-    assert lane.post(body).status_code == 202
+    response = lane.post(body)
+    assert (response.status_code, response.json()["status"]) in ((202, "started"), (200, "completed"))
+    assert response.json()["request_id"] == rid
+    if order == "route_first":
+        assert (response.status_code, response.json()["status"]) == (202, "started")
+    if order == "turn_first":
+        assert (response.status_code, response.json()["status"]) == (200, "completed")
     lane.drain()
     for altered in [dict(body, entity_scope=dict(E, handle="CD34")), {"text": "move", "request_id": rid}]:
         response = lane.post(altered)

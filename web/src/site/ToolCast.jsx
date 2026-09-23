@@ -695,7 +695,7 @@ export default function ToolCast({
       // re-stage with credential-shaped text would otherwise have its
       // authority mint refused here and silently fall back to
       // null-authority — a refusal the click never saw or overrode.
-      const response = await startTurnRef.current(description, { source: 'author_panel', purpose: 'stage_authority' }, { allowSecretOnce })
+      const response = await startTurnRef.current(description, { source: 'author_panel', purpose: 'stage_authority' }, { allowSecretOnce, requireImmediateTurn: true })
       const mintedSession = response?.session_id
       if (!mintedSession || !response?.turn_id) return null
       authorAuthorityRef.current = { sessionId: mintedSession, turnId: response.turn_id, mintedAt: Date.now() }
