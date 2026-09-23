@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -2850,3 +2851,44 @@ def test_jobs_fail_fast_stops_new_suites_and_waits_for_in_flight_children(
     assert "suites: 3 PASS  1 FAIL" in output
     rows = [line for line in output.splitlines() if line.startswith("pool suite")]
     assert [line.split("  ")[0] for line in rows] == [s.label for s in suites if s.id in ran]
+
+# Server test files no gate Suite runs, each with the reason it is not registered yet. An entry
+# is a known gap, never an exemption: register the file when its reason clears (#213).
+UNREGISTERED_SERVER_TESTS = {
+    "test_acadrust_adapter.py": "skips 2 when run alone: needs its skip reasons allowlisted",
+    "test_active_session_authority.py": "red on main: 1 of 3 fails when run alone",
+    "test_arlo_design_adapter.py": "skips 1 when run alone: needs its skip reasons allowlisted",
+    "test_campaign_capability_api_postgres.py": "needs an explicit DATABASE_URL: a db_gated row",
+    "test_conversation_model.py": "red on main: 1 fails when run alone",
+    "test_conversation_poison.py": "skips 4 when run alone: needs its skip reasons allowlisted",
+    "test_conversation_recovery.py": "skips 5 when run alone: needs its skip reasons allowlisted",
+    "test_conversation_retention.py": "skips 1 when run alone: needs its skip reasons allowlisted",
+    "test_conversation_write.py": "skips 6 when run alone: needs its skip reasons allowlisted",
+    "test_count_by_layer_lsp_json.py": "skips 1 when run alone: needs its skip reasons allowlisted",
+    "test_customization_postgres_integration.py": "imports scripts.* as a package: needs a repo-root row that avoids the platform/ shadowing",
+    "test_demand.py": "skips 1 when run alone: needs its skip reasons allowlisted",
+    "test_project_repository_edit_coordination.py": "imports leaf_platform: needs a repo-root row",
+    "test_published_source_containment.py": "skips 1 when run alone: needs its skip reasons allowlisted",
+    "test_request_journal_activation_postgres.py": "skips 11 when run alone: needs its skip reasons allowlisted",
+    "test_rewind.py": "red on main: 5 of 12 fail when run alone",
+    "test_solar_cad_template_manifest.py": "imports server.* as a package: needs a repo-root row",
+    "test_template_store.py": "red on main: 3 fail when run alone",
+    "test_uploaded_live_read_production_contract.py": "red on main: 2 of 19 fail when run alone",
+}
+
+
+def test_every_server_test_file_is_registered_or_named():
+    g = _load_runner()
+    registered = set()
+    for suite in g.build_suites():
+        for arg in suite.argv:
+            m = re.search(r"tests/(test_[A-Za-z0-9_]+\.py)$", str(arg).replace("\\", "/"))
+            if m:
+                registered.add(m.group(1))
+    files = {p.name for p in (REPO / "server" / "tests").glob("test_*.py")}
+    named = set(UNREGISTERED_SERVER_TESTS)
+    assert not files - registered - named, (
+        "server test files no Suite runs and no entry names: "
+        f"{sorted(files - registered - named)}")
+    assert not named & registered, f"registered files still listed as gaps: {sorted(named & registered)}"
+    assert not named - files, f"gap entries for files that no longer exist: {sorted(named - files)}"
