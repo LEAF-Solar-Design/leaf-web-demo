@@ -397,3 +397,124 @@ def test_cli_refusal_exits_2(tmp_path, monkeypatch):
     path.write_text(json.dumps({"units": "in"}), encoding="utf-8")
     monkeypatch.setattr(rev.ev, "fixture_revision", lambda p: REVISION)
     assert rev.main(["--intake", str(path), "--out-dir", str(tmp_path / "out")]) == 2
+
+
+# ------------------------------------------------------------ G31 select-by-zone --
+
+def zones_intake():
+    """A synthetic zones intake of the G31 shape (the committed one replaces it once captured)."""
+    return {"units": "in",
+            "zones": [{"name": "Zone A", "panels": ["a3f", "a10", "0a2", "a10"]},
+                      {"name": "Zone B", "panels": ["b1", "b2"]}]}
+
+
+@pytest.fixture(scope="module")
+def zone_run():
+    return rev.run_zone_steps(zones_intake(), REVISION)
+
+
+def test_z1_selects_the_named_zone_panels_sorted(zone_run):
+    docs, _ = zone_run
+    assert list(docs) == ["z1"]
+    doc = docs["z1"]
+    assert doc["provenance"]["capability"] == "select-by-zone" and doc["provenance"]["operation"] == "zone-select"
+    assert doc["parameters"] == {"answers": ["Zone A"]}
+    assert doc["versions"]["engine"] == "server-builtin" and doc["versions"]["capability"] == "0"
+    assert doc["units"] == "in" and doc["after"]["source_revision"] == "z1"
+    # Hex value order (0xA2=162 < 0xA10=2576 < 0xA3F=2623), not string order ("A10" < "A2" < "A3F").
+    assert [plain(r) for r in rows_of(doc)] == [
+        {"id": "selection-1", "type": "selection", "quantity": 1, "unit": "each", "handles": ["A2", "A10", "A3F"]}]
+
+
+def test_z1_passes_the_comparator_and_serializes_compact(zone_run):
+    docs, _ = zone_run
+    doc = docs["z1"]
+    result = compare.compare(doc, copy.deepcopy(doc), "exports", capability="select-by-zone")
+    assert result["verdict"] == "pass" and result["diffs"] == []
+    text = rev.ev._serialize(doc)
+    assert text.count("\n") == 1 and text.endswith("\n") and '": ' not in text
+    assert not re.search(r"xrecord|regapp|leaf-properties|\"LEAF\"", text, re.IGNORECASE)
+
+
+def test_z1_is_deterministic_and_units_default_to_inches(zone_run):
+    docs, _ = zone_run
+    assert rev.run_zone_steps(zones_intake(), REVISION, only="z1")[0] == docs
+    data = zones_intake()
+    data.pop("units")
+    assert rev.run_zone_steps(data, REVISION)[0]["z1"]["units"] == "in"
+
+
+def test_z1_matches_case_insensitively_and_an_unknown_zone_selects_nothing():
+    state = rev.initial_zone_state(zones_intake())
+    assert rev.step_rows("z1", state, [" zone b "])[0]["handles"] == ["B1", "B2"]
+    rows = rev.step_rows("z1", rev.initial_zone_state(zones_intake()), ["Zone C"])
+    assert [(r["type"], r["handles"]) for r in rows] == [("selection", [])]
+
+
+def test_z1_is_read_only(monkeypatch):
+    def mutating(state, answers):
+        state["selection"].append("A1")
+        return []
+    monkeypatch.setitem(rev.STEPS, "z1", mutating)
+    rows = rev.step_rows("z1", rev.initial_zone_state(zones_intake()))
+    assert [r["type"] for r in rows] == ["unexpected-change"]
+
+
+def _bad_zones(mutate):
+    data = zones_intake()
+    mutate(data)
+    return data
+
+
+@pytest.mark.parametrize("data", [
+    [],
+    {"units": "in"},
+    _bad_zones(lambda d: d.update(zones="x")),
+    _bad_zones(lambda d: d.update(extra=1)),
+    _bad_zones(lambda d: d.update(units="furlong")),
+    _bad_zones(lambda d: d["zones"].append(None)),
+    _bad_zones(lambda d: d["zones"][0].update(name=None)),
+    _bad_zones(lambda d: d["zones"][0].update(panels=None)),
+    _bad_zones(lambda d: d["zones"][0].pop("panels")),
+    _bad_zones(lambda d: d["zones"][0]["panels"].append(7)),
+])
+def test_malformed_zones_intakes_are_refused(data):
+    with pytest.raises(rev.EvidenceError):
+        rev.run_zone_steps(data, REVISION)
+
+
+def test_zone_and_chain_steps_do_not_cross():
+    with pytest.raises(rev.EvidenceError):
+        rev.run_steps(intake(), REVISION, only="z1")
+    with pytest.raises(rev.EvidenceError):
+        rev.run_zone_steps(zones_intake(), REVISION, only="c6")
+    assert rev.STEP_IDS == ("c1", "c2", "c3", "c4", "c5", "c6", "c7", "c9", "c10", "c11")
+
+
+def test_cli_writes_z1_from_a_zones_intake(tmp_path, monkeypatch):
+    path = tmp_path / "intake.json"
+    path.write_text(json.dumps(zones_intake()), encoding="utf-8")
+    monkeypatch.setattr(rev.ev, "fixture_revision", lambda p: REVISION)
+    assert rev.main(["--intake", str(path), "--out-dir", str(tmp_path / "out")]) == 0
+    assert sorted(p.name for p in (tmp_path / "out").iterdir()) == ["z1.json"]
+    doc = json.loads((tmp_path / "out" / "z1.json").read_text(encoding="utf-8"))
+    assert doc["after"]["rows"][0]["handles"] == ["A2", "A10", "A3F"]
+    assert rev.main(["--intake", str(path), "--out-dir", str(tmp_path / "o2"), "--step", "c1"]) == 2
+
+
+COMMITTED_ZONES_INTAKE = Path(__file__).resolve().parent.parent / "docs" / "parity" / "evidence" / "rooftop" / \
+    "zones-select" / "intake.json"
+
+
+@pytest.mark.skipif(not COMMITTED_ZONES_INTAKE.is_file(), reason="the G31 zones intake is not committed yet")
+def test_the_committed_zones_intake_selects_zone_a():
+    data = json.loads(COMMITTED_ZONES_INTAKE.read_text(encoding="utf-8"))
+    docs, _ = rev.run_zone_steps(data, REVISION)
+    (zone_a,) = [z for z in data["zones"] if z["name"] == "Zone A"]
+    assert len(zone_a["panels"]) == 224   # G31: "Zone A" 224 panels
+    expected = sorted({rev.chain.neutral_handle(h.split(":", 1)[0]) for h in zone_a["panels"]},
+                      key=rev.chain.handle_order)
+    (row,) = rows_of(docs["z1"])
+    assert row["type"] == "selection" and row["handles"] == expected
+    assert compare.compare(docs["z1"], copy.deepcopy(docs["z1"]), "exports",
+                           capability="select-by-zone")["verdict"] == "pass"

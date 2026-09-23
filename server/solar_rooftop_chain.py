@@ -1,6 +1,6 @@
 """Studio ports of the plugin's rooftop-chain engines: string flip, string swap, the frame-group
-operations (create, rename, list, select, delete), the export-settings prompt, the string-data
-export and the string rebuild.
+operations (create, rename, list, select, delete), select-by-zone, the export-settings prompt,
+the string-data export and the string rebuild.
 
 Literal ports of Branch2025 (read 2026-09-23 at C:/tmp/solar-parity/wt-b25-s51):
 
@@ -25,6 +25,13 @@ Literal ports of Branch2025 (read 2026-09-23 at C:/tmp/solar-parity/wt-b25-s51):
   LeafSelectByFrameGroupCommand.cs:43-154
                                       LEAFSELECTBYFRAMEGROUP: handles resolved, stale ones skipped
   LeafFrameGroupRenameCommand.cs:40-134, LeafFrameGroupDeleteCommand.cs:40-108
+  LeafSelectByZoneCommand.cs:45-173   LEAFSELECTBYZONE (read 2026-09-23 at wt-b25-s60): the trimmed
+                                      name, an unknown name selects nothing (:85-93), composite
+                                      handles by their root, stale handles skipped
+  LeafSolarDesign.Core/PanelGrouping.cs:136-177
+                                      ByZoneNameSelector.Select: the first case-insensitive match
+  LeafSolarDesign.Core/HandleResolver.cs:112-125
+                                      IsCompositeHandle and GetRootHandle
   Pvcase/LeafExportSupportCommands.cs:31-43, :160-181, :348-374
                                       the export settings: ten fields, their declared defaults,
                                       the prompt order, PromptDouble and PromptString
@@ -50,6 +57,7 @@ Pure functions over plain data. No CAD host, no I/O, no network. The neutral sha
                 committed rooftop intake carries {handle, name} only
   frame group  {"Name": str, "FrameHandles": [str, ...], "ColorIndex": int,
                 "LastModifiedTicks": int}, the plugin's own field names (it is a drawing setting)
+  zone         {"name": str, "panels": [panel handle, ...] (stored order)} (G31 intake)
   export settings  the ten neutral names of EXPORT_SETTINGS_FIELDS
 
 Every input is bounded and every malformed input fails closed with RooftopInputError (a
@@ -75,6 +83,7 @@ MAX_OUTLINE_VERTICES = 100_000
 MAX_OUTLINE_VERTICES_TOTAL = 1_000_000   # across every group's outlines in one call
 MAX_FRAME_GROUPS = 10_000
 MAX_FRAMES_PER_GROUP = 100_000
+MAX_ZONES = 10_000
 MAX_LABEL_FIELDS = 64
 MAX_NAME_CHARS = 1_024
 MAX_VERTICES_PER_STRING = 10_000
@@ -436,6 +445,114 @@ def frame_group_select(groups, name_answer, existing_handles):
     if not resolved:
         return {"status": "stale", "handles": [], "stale": stale}
     return {"status": "selected", "handles": resolved, "stale": stale}
+
+
+# ---------------------------------------------------------- electrical zones --
+
+def validate_zones(zones):
+    """The electrical zones as the G31 intake records them: [{"name", "panels"}] in stored order,
+    neutral names only; None (absent) is the plugin's default, no zones. A null zone is kept (the
+    selector skips it, PanelGrouping.cs:167); a null name or panel list is the plugin's own null."""
+    if zones is None:
+        return []
+    _bounded_list(zones, MAX_ZONES, "electrical zones")
+    out = []
+    for z in zones:
+        if z is None:
+            out.append(None)
+            continue
+        if not isinstance(z, dict) or set(z) != {"name", "panels"}:
+            raise RooftopInputError("an electrical zone is {name, panels}")
+        name = z["name"]
+        if name is not None:
+            _text(name, "zone name")
+        panels = z["panels"]
+        if panels is not None:
+            for h in _bounded_list(panels, MAX_PANELS, "zone panels"):
+                if h is not None:
+                    _text(h, "zone panel handle")
+        out.append({"name": name, "panels": None if panels is None else list(panels)})
+    return out
+
+
+def by_zone_name_select(zones, zone_name):
+    """ByZoneNameSelector.Select (PanelGrouping.cs:136-177): (the first zone whose name matches
+    case-insensitively, :165-170, gives a NEW list of its panel handles, :171-172; missing).
+    missing is True when no zone matched (:162, :175); a matched zone with no panel list gives []."""
+    if _is_blank(zone_name):
+        raise RooftopInputError("zone name must be non-empty")   # the constructor refuses (:152-154)
+    zones = validate_zones(zones)
+    for z in zones:
+        if z is None:
+            continue
+        if _same_name(z["name"], zone_name):
+            return ([] if z["panels"] is None else list(z["panels"])), False
+    return [], True
+
+
+def _root_handle(handle):
+    """HandleResolver.IsCompositeHandle and GetRootHandle (HandleResolver.cs:112-125): a
+    composite "root:child[:...]" handle resolves to its root."""
+    return handle.split(":", 1)[0] if ":" in handle else handle
+
+
+def zone_select(zones, name_answer, existing_handles):
+    """LEAFSELECTBYZONE (LeafSelectByZoneCommand.cs:45-173) over ByZoneNameSelector.
+
+    Returns {"status", "handles", "stale"}: status "no-zones" (no zone defined, :54-62),
+    "cancelled" (a blank answer, :74-80), "missing" (an unknown name, :85-93: nothing is
+    selected and the implied selection stands), "empty" (the zone lists no panel, :94-101),
+    "stale" (no listed handle resolved, :147-156) or "selected" (:158-159). The answer is trimmed
+    (:83) and matched case-insensitively (PanelGrouping.cs:168). `handles` is the implied
+    selection in listed order (:106-143): an empty handle is stale (:113-117); a composite
+    handle resolves through its root, and a root already seen is skipped without counting
+    (:119-125); a handle that does not parse or names no entity in `existing_handles` is stale
+    (:127-141). A plain handle is not deduplicated by the command; the selection set is."""
+    zones = validate_zones(zones)
+    if not zones:
+        return {"status": "no-zones", "handles": [], "stale": 0}
+    if _is_blank(name_answer):
+        return {"status": "cancelled", "handles": [], "stale": 0}
+    listed, missing_zone = by_zone_name_select(zones, _net_trim(_text(name_answer, "zone name")))
+    if missing_zone:
+        return {"status": "missing", "handles": [], "stale": 0}
+    if not listed:
+        return {"status": "empty", "handles": [], "stale": 0}
+    existing = {neutral_handle(h, "drawing handle") for h in existing_handles}
+    resolved, stale, seen_roots = [], 0, set()
+    for h in listed:
+        if h is None or h == "":
+            stale += 1
+            continue
+        resolve = h
+        if ":" in h:
+            resolve = _root_handle(h)
+            key = resolve.upper()   # seenRoots is OrdinalIgnoreCase (:108)
+            if key in seen_roots:
+                continue
+            seen_roots.add(key)
+        if not _HANDLE_RE.fullmatch(resolve) or neutral_handle(resolve) not in existing:
+            stale += 1
+            continue
+        resolved.append(neutral_handle(resolve))
+    if not resolved:
+        return {"status": "stale", "handles": [], "stale": stale}
+    return {"status": "selected", "handles": resolved, "stale": stale}
+
+
+def zone_panel_handles(zones):
+    """Every handle the zones name, neutral, composite handles by their root: the entity
+    inventory the G31 intake carries (it records the zones and nothing else of the drawing)."""
+    out = set()
+    for z in validate_zones(zones):
+        if z is None or z["panels"] is None:
+            continue
+        for h in z["panels"]:
+            if h:
+                root = _root_handle(h)
+                if _HANDLE_RE.fullmatch(root):
+                    out.add(neutral_handle(root))
+    return out
 
 
 # -------------------------------------------------------- export settings --
