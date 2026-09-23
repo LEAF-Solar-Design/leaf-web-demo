@@ -1,9 +1,68 @@
-import { expect, it } from 'vitest'
-import { BOARD_TRANSFER_TYPE, MAX_TRANSFER_CHARS, encodeVersionRef, resolveVersionTransfer } from './boardTransfer.js'
+import { expect, it, vi } from 'vitest'
+import { BOARD_TRANSFER_TYPE, MAX_TRANSFER_CHARS, createPreviewRunner, describePreviewOutcome, encodeVersionRef, resolveVersionTransfer } from './boardTransfer.js'
 
 const ref = { projectId: 'project1', drawingId: 'drawing1', versionId: 'version1', seq: 2 }
 const payload = { kind: 'version', ...ref }
 const context = { projectId: ref.projectId, drawingId: ref.drawingId, versions: [{ version_id: ref.versionId, drawing_id: ref.drawingId, seq: ref.seq }] }
+
+it('SSD1-24D caps an encoded reference at the transfer limit', () => {
+  const escaped = '\\'.repeat(200)
+  expect(encodeVersionRef({ projectId: escaped, drawingId: escaped, versionId: escaped, seq: 2 })).toBeNull()
+  const plain = 'x'.repeat(200)
+  const raw = encodeVersionRef({ projectId: plain, drawingId: plain, versionId: plain, seq: 2 })
+  expect(raw).not.toBeNull()
+  expect(raw.length).toBeLessThanOrEqual(MAX_TRANSFER_CHARS)
+  expect(resolveVersionTransfer(raw, {
+    projectId: plain, drawingId: plain, versions: [{ version_id: plain, drawing_id: plain, seq: 2 }],
+  }).ok).toBe(true)
+})
+
+it('SSD1-24D names the version in an unreadable reference', () => {
+  const result = resolveVersionTransfer(JSON.stringify({ ...payload, extra: true }), context)
+  expect(result.reason).toBe('unreadable')
+  expect(result.message).toBe('Drag v2 from the Versions card again.')
+})
+
+it('SSD1-24D describes the version actually shown', () => {
+  expect(describePreviewOutcome(2, null)).toBe('Could not preview v2. Try again.')
+  expect(describePreviewOutcome(2, undefined)).toBe('Could not preview v2. Try again.')
+  expect(describePreviewOutcome(2, { version: 2 })).toBe('Previewing v2 in the drawing')
+  expect(describePreviewOutcome(2, { version: 3 })).toBe('Showing v3, the latest version. v2 is no longer the latest.')
+  expect(describePreviewOutcome(2, { head: 3 })).toBe('Showing v3, the latest version. v2 is no longer the latest.')
+  expect(describePreviewOutcome(2, {})).toBe('Previewing v2 in the drawing')
+})
+
+it('SSD1-24D runs one preview at a time', async () => {
+  const run = createPreviewRunner()
+  let finish
+  const preview = vi.fn(() => new Promise((resolve) => { finish = resolve }))
+  const setStatus = vi.fn()
+  expect(run(1, preview, setStatus)).toBe(true)
+  expect(setStatus).toHaveBeenLastCalledWith('Loading v1 in the drawing')
+  expect(run(2, preview, setStatus)).toBe(false)
+  expect(setStatus).toHaveBeenLastCalledWith('Wait for v1 to finish loading.')
+  await Promise.resolve()
+  expect(preview).toHaveBeenCalledTimes(1)
+  expect(preview).toHaveBeenCalledWith(1)
+  finish({ version: 3 })
+  await vi.waitFor(() => expect(setStatus).toHaveBeenLastCalledWith('Showing v3, the latest version. v1 is no longer the latest.'))
+  expect(run(2, preview, setStatus)).toBe(true)
+  await Promise.resolve()
+  expect(preview).toHaveBeenCalledTimes(2)
+  finish({ version: 2 })
+  await vi.waitFor(() => expect(setStatus).toHaveBeenLastCalledWith('Previewing v2 in the drawing'))
+})
+
+it('SSD1-24D reports a failed preview', async () => {
+  for (const preview of [() => null, () => Promise.reject(new Error('load failed')), () => { throw new Error('load failed') }]) {
+    const run = createPreviewRunner()
+    const setStatus = vi.fn()
+    expect(run(1, preview, setStatus)).toBe(true)
+    await vi.waitFor(() => expect(setStatus).toHaveBeenLastCalledWith('Could not preview v1. Try again.'))
+    expect(run(1, () => ({ version: 1 }), setStatus)).toBe(true)
+    await vi.waitFor(() => expect(setStatus).toHaveBeenLastCalledWith('Previewing v1 in the drawing'))
+  }
+})
 
 it('SSD1-24D round trips a version reference into a frozen result', () => {
   expect(BOARD_TRANSFER_TYPE).toBe('application/x-leaf-board-ref')

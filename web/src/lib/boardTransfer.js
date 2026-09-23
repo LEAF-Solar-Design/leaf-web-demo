@@ -8,11 +8,12 @@ const refuse = (reason, message) => Object.freeze({ ok: false, reason, message }
 
 export function encodeVersionRef({ projectId, drawingId, versionId, seq }) {
   if (![projectId, drawingId, versionId].every(validId) || !validSeq(seq)) return null
-  return JSON.stringify({ kind: 'version', projectId, drawingId, versionId, seq })
+  const raw = JSON.stringify({ kind: 'version', projectId, drawingId, versionId, seq })
+  return raw.length <= MAX_TRANSFER_CHARS ? raw : null
 }
 
 export function resolveVersionTransfer(raw, { projectId, drawingId, versions }) {
-  const unreadable = () => refuse('unreadable', 'Drag a version from the Versions card again.')
+  const unreadable = (seq) => refuse('unreadable', `Drag ${validSeq(seq) ? `v${seq}` : 'a version'} from the Versions card again.`)
   if (typeof raw !== 'string' || raw.length > MAX_TRANSFER_CHARS) return unreadable()
   let ref
   try {
@@ -20,9 +21,9 @@ export function resolveVersionTransfer(raw, { projectId, drawingId, versions }) 
   } catch {
     return unreadable()
   }
-  if (!ref || Object.getPrototypeOf(ref) !== Object.prototype
-    || Object.keys(ref).length !== keys.length
-    || !keys.every((key) => Object.prototype.hasOwnProperty.call(ref, key))) return unreadable()
+  if (!ref || Object.getPrototypeOf(ref) !== Object.prototype) return unreadable()
+  if (Object.keys(ref).length !== keys.length
+    || !keys.every((key) => Object.prototype.hasOwnProperty.call(ref, key))) return unreadable(ref.seq)
   const name = validSeq(ref.seq) ? `v${ref.seq}` : 'this version'
   if (ref.kind !== 'version') return refuse('unsupported-kind', `Choose ${name} from the Versions card to preview it in the drawing.`)
   if (!drawingId) return refuse('no-drawing', `Open a drawing before previewing ${name}.`)
@@ -33,4 +34,36 @@ export function resolveVersionTransfer(raw, { projectId, drawingId, versions }) 
     return refuse('stale-version', `Refresh the Versions card and choose ${name} again.`)
   }
   return Object.freeze({ ok: true, seq: ref.seq, versionId: ref.versionId })
+}
+
+export function describePreviewOutcome(seq, view) {
+  if (view == null) return `Could not preview v${seq}. Try again.`
+  const shown = Number.isSafeInteger(view.version) ? view.version
+    : Number.isSafeInteger(view.head) ? view.head : null
+  return shown === null || shown === seq
+    ? `Previewing v${seq} in the drawing`
+    : `Showing v${shown}, the latest version. v${seq} is no longer the latest.`
+}
+
+export function createPreviewRunner() {
+  let pending = null
+  return (seq, preview, setStatus) => {
+    if (pending !== null) {
+      setStatus(`Wait for v${pending} to finish loading.`)
+      return false
+    }
+    pending = seq
+    setStatus(`Loading v${seq} in the drawing`)
+    Promise.resolve().then(() => preview(seq)).then(
+      (view) => {
+        setStatus(describePreviewOutcome(seq, view))
+        pending = null
+      },
+      () => {
+        setStatus(`Could not preview v${seq}. Try again.`)
+        pending = null
+      },
+    )
+    return true
+  }
 }

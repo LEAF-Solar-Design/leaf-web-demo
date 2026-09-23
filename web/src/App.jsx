@@ -13,7 +13,7 @@ import { CockpitStatus, FootRegion, StatusTabs, ViewCluster } from './site/Drawi
 // rail it used to spell inline. Every shared chrome gate lives there now.
 import SurfaceFrame from './site/SurfaceFrame.jsx'
 import { useToastBus } from './lib/notifications.js'
-import { resolveVersionTransfer } from './lib/boardTransfer.js'
+import { createPreviewRunner, resolveVersionTransfer } from './lib/boardTransfer.js'
 import NavRail from './site/NavRail.jsx'
 import CockpitTopBand from './site/CockpitTopBand.jsx'
 import DraftingRibbon from './site/DraftingRibbon.jsx'
@@ -714,6 +714,7 @@ export default function App() {
   const [projectPane, setProjectPane] = useState(null)
   const [boardJob, setBoardJob] = useState(null)
   const [boardTransferStatus, setBoardTransferStatus] = useState('')
+  const boardPreviewRunRef = useRef(null)
   useEffect(() => {
     setProjectPane(null)
     setBoardJob(null)
@@ -3643,8 +3644,8 @@ export default function App() {
                   versions: workspace.drawing_versions || [],
                 })
                 if (result.ok) {
-                  setBoardTransferStatus(`Previewing v${result.seq} in the drawing`)
-                  onPreviewVersionTracked(result.seq)
+                  boardPreviewRunRef.current ??= createPreviewRunner()
+                  boardPreviewRunRef.current(result.seq, onPreviewVersionTracked, setBoardTransferStatus)
                 } else {
                   setBoardTransferStatus(result.message)
                 }

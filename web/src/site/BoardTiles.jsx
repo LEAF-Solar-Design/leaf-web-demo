@@ -33,6 +33,7 @@ export function BoardTiles({ workspace, drawing, catalog, renderTile, studioPres
       }
     },
     onDrop: (event) => {
+      if (!Array.from(event.dataTransfer.types).includes(BOARD_TRANSFER_TYPE)) return
       event.preventDefault()
       actions.onTransferVersion(event.dataTransfer.getData(BOARD_TRANSFER_TYPE))
     },
