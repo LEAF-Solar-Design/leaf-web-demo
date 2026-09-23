@@ -11,6 +11,11 @@ and their licensed capture IS committed, at
 docs/parity/evidence/probes/demo-probes-20260923, so their half of these checks
 reads the artifact rather than a copy of Studio's own output.
 
+The six terrain and irradiance capabilities added in S32 come from
+scripts/solar_terrain_probes.py and their licensed CSVs are committed in the same
+folder. Four of them start with the byte order mark Encoding.UTF8 writes, which
+the CSV reader drops as encoding before it looks for the `#` preamble.
+
 What these prove:
   * the evidence a probe file yields is exactly what the frozen comparator
     accepts for family `exports`, with the E4 identity mapping and an observed,
@@ -48,6 +53,7 @@ normalizer = load_module("solar_probe_evidence")
 probes = load_module("solar_nec_probes")
 calc_probes = load_module("solar_probe_calcs_probes")
 harness_probes = load_module("solar_harness_bom_probes")
+terrain_probes = load_module("solar_terrain_probes")
 # The XLSX reader comes from the module under test for the same reason the
 # comparator does: one module object, one exception identity.
 xlsx = normalizer.xlsx
@@ -215,6 +221,55 @@ def harness_altered_file(folder, name):
             rows.append((row.index, cells))
         altered.append((sheet.name, rows))
     path.write_bytes(xlsx.write_workbook(altered))
+    return path
+
+
+# --------------------------------------------------------------------------- #
+# S32 helpers: the six terrain and irradiance CSVs, four of them carrying the
+# byte order mark Encoding.UTF8 writes.
+# --------------------------------------------------------------------------- #
+TERRAIN_FILES = sorted(terrain_probes.FILE_PROBE_TYPES)
+# The one OUTPUT column each alteration moves in the first data row: the
+# section's quantity, which no declared input names, so the fixture hash must
+# stay put while the output hash moves.
+TERRAIN_ALTERED = {name: normalizer.PROBE_SPECS[probe_type].sections[0].quantity_field
+                   for name, probe_type in terrain_probes.FILE_PROBE_TYPES.items()}
+
+
+def terrain_studio_file(folder, name):
+    """Write Studio's own copy of one S32 file and return its path."""
+    for path in terrain_probes.write(terrain_probes.FILE_DEMOS[name], folder):
+        if path.name == name:
+            return path
+    raise AssertionError("demo did not write " + name)
+
+
+def terrain_evidence_for(path, name, side):
+    return normalizer.build_evidence_from_file(
+        path, capability=terrain_probes.FILE_CAPABILITIES[name],
+        probe_type=terrain_probes.FILE_PROBE_TYPES[name], side=side, revision=REVISION)
+
+
+def terrain_verdict(plugin, studio, name):
+    return compare.compare(plugin, studio, "exports",
+                           capability=terrain_probes.FILE_CAPABILITIES[name])
+
+
+def terrain_altered_file(folder, name):
+    """Studio's file with ONE OUTPUT changed; its BOM, preamble and CRLFs kept."""
+    text = (folder / name).read_bytes().decode("utf-8")
+    bom = "﻿" if text.startswith("﻿") else ""
+    lines = text[len(bom):].replace("\r\n", "\n").split("\n")
+    start = 0
+    while lines[start].startswith("#"):
+        start += 1
+    header = lines[start].split(",")
+    cells = lines[start + 1].split(",")
+    column = header.index(TERRAIN_ALTERED[name])
+    cells[column] = "0.25" if cells[column] != "0.25" else "0.75"
+    lines[start + 1] = ",".join(cells)
+    path = folder / ("altered_" + name)
+    path.write_bytes((bom + "\r\n".join(lines)).encode("utf-8"))
     return path
 
 
@@ -831,3 +886,93 @@ def test_cli_refuses_a_missing_file(tmp_path, capsys):
                             "--revision", REVISION, "--output", str(tmp_path / "out.json")])
     assert code == 2
     assert "solar-probe-evidence" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# S32: the six terrain and irradiance capabilities, licensed captures COMMITTED
+# --------------------------------------------------------------------------- #
+def test_terrain_captures_are_committed():
+    """A subset check: this block's own six files, never the folder's whole list."""
+    for name in TERRAIN_FILES:
+        assert (CALC_REFERENCE_DIR / name).is_file(), name
+
+
+@pytest.mark.parametrize("name", TERRAIN_FILES)
+def test_terrain_evidence_is_comparator_valid(tmp_path, name):
+    evidence = terrain_evidence_for(terrain_studio_file(tmp_path, name), name, "studio")
+    compare.validate_evidence(evidence, "exports")
+    assert set(evidence) == compare.EVIDENCE_KEYS
+    assert evidence["parameters"] == {"family": "exports",
+                                      "capability": terrain_probes.FILE_CAPABILITIES[name]}
+    assert evidence["after"]["format"] == "csv"
+    assert evidence["survived_reopen"] is True
+    ids = [row["id"]["entity_id"] for row in evidence["after"]["rows"]]
+    assert evidence["entity_mapping"] == {identifier: identifier for identifier in ids}
+    assert len(set(ids)) == len(ids)
+
+
+@pytest.mark.parametrize("name", TERRAIN_FILES)
+def test_terrain_studio_compares_pass_against_the_committed_capture(tmp_path, name):
+    """The licensed capture is committed here, so this is the real comparison."""
+    studio = terrain_evidence_for(terrain_studio_file(tmp_path, name), name, "studio")
+    licensed = terrain_evidence_for(CALC_REFERENCE_DIR / name, name, "plugin")
+    result = terrain_verdict(licensed, studio, name)
+    assert result["verdict"] == "pass", result["diffs"][:5]
+
+
+@pytest.mark.parametrize("name", TERRAIN_FILES)
+def test_terrain_fixture_hash_is_inputs_only(tmp_path, name):
+    terrain_studio_file(tmp_path, name)
+    original = terrain_evidence_for(tmp_path / name, name, "studio")
+    changed = terrain_evidence_for(terrain_altered_file(tmp_path, name), name, "studio")
+    assert original["fixture_sha256"] == changed["fixture_sha256"]
+    assert original["input_sha256"] == changed["input_sha256"]
+    assert original["output_sha256"] != changed["output_sha256"]
+
+
+@pytest.mark.parametrize("name", TERRAIN_FILES)
+def test_terrain_one_altered_result_is_a_diff(tmp_path, name):
+    terrain_studio_file(tmp_path, name)
+    good = terrain_evidence_for(tmp_path / name, name, "studio")
+    bad = terrain_evidence_for(terrain_altered_file(tmp_path, name), name, "plugin")
+    result = terrain_verdict(bad, good, name)
+    assert result["verdict"] == "fail"
+    assert all(path.startswith("after/rows/") for path in result["diffs"]), result["diffs"]
+    assert len({path.split("/")[2] for path in result["diffs"]}) == 1, result["diffs"]
+
+
+def test_a_byte_order_mark_is_encoding_not_content(tmp_path):
+    """Encoding.UTF8's BOM must neither hide the `#` preamble nor rename a column."""
+    path = terrain_studio_file(tmp_path, "leafcapacity_demo.csv")
+    assert path.read_bytes().startswith(b"\xef\xbb\xbf# LEAFCAPACITYITERATEDEMO")
+    rows = terrain_evidence_for(path, "leafcapacity_demo.csv", "studio")["after"]["rows"]
+    assert len(rows) == 10
+    assert sorted(rows[0]["fields"]) == sorted(["gcr", "tilt_deg", "pitch_m", "row_count",
+                                                "module_count", "dc_kwp", "acres_used"])
+    assert rows[0]["fields"]["gcr"] == "0.5000"
+    assert rows[0]["quantity"] == {"kind": "float", "value": 705.6, "unit": "kWp"}
+
+
+def test_terrain_rows_keep_the_files_own_order(tmp_path):
+    """Rule E3: the horizon rows are its azimuths, in the file's order."""
+    path = terrain_studio_file(tmp_path, "leafhorizon_demo.csv")
+    rows = terrain_evidence_for(path, "leafhorizon_demo.csv", "studio")["after"]["rows"]
+    assert [row["id"]["entity_id"] for row in rows] == \
+        ["%d.000" % (10 * index) for index in range(36)]
+    assert rows[0]["fields"]["horizon_elevation_deg"] == "2.862405"
+
+
+def test_terrain_row_types_name_the_calculation(tmp_path):
+    expected = {
+        "leafheatmap_demo.csv": ("cut-fill-heatmap-cell", 49),
+        "leafhorizon_demo.csv": ("horizon-profile-sample", 36),
+        "leafpoa_demo.csv": ("plane-of-array-irradiance", 18),
+        "leafgradingpad_demo.csv": ("grading-pad-toe-corner", 8),
+        "leafcrosssection_demo.csv": ("terrain-cross-section-sample", 100),
+        "leafcapacity_demo.csv": ("capacity-iteration-scenario", 10),
+    }
+    for name, (row_type, count) in expected.items():
+        rows = terrain_evidence_for(terrain_studio_file(tmp_path, name), name,
+                                    "studio")["after"]["rows"]
+        assert {row["type"] for row in rows} == {row_type}, name
+        assert len(rows) == count, name

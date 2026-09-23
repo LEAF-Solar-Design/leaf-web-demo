@@ -1,0 +1,4391 @@
+{
+ "schema": "leaf.solar-parity-receipt.v1",
+ "capability": "terrain-cross-section",
+ "capability_version": "0",
+ "fixture": {
+  "id": "demo-probes",
+  "sha256": "a7a2f83023517e14144db9703914140656035f1833fadef05f56f9cdc3c269f8"
+ },
+ "plugin": {
+  "build": "LeafSolarDesign 2025 licensed 2026-09-23",
+  "state": "committed",
+  "receipt_sha256": "bf5f33aa6629b669e1af102ed52cfcca745b399600cc726653c00c75e2e1b7d5"
+ },
+ "studio": {
+  "capability_version": "0",
+  "engine": "server-builtin"
+ },
+ "comparator": {
+  "name": "solar-w1-semantic",
+  "version": "1",
+  "verdict": "pass",
+  "diffs": []
+ },
+ "synthetic_fields": [
+  "plugin:before/recorded",
+  "plugin:changes/unrecorded",
+  "studio:before/recorded",
+  "studio:changes/unrecorded"
+ ],
+ "fallback_fields": [],
+ "synthetic_flagged": true,
+ "survived_reopen": true,
+ "produced_at": "2026-09-23T06:02:46Z",
+ "comparison": {
+  "schema": "leaf.solar-w1-comparison.v1",
+  "capability": "terrain-cross-section",
+  "family": "exports",
+  "plugin": {
+   "after": {
+    "format": "csv",
+    "rows": [
+     {
+      "fields": {
+       "abs_error_m": "0.000000",
+       "distance_m": "0.000000",
+       "x": "-190.000000",
+       "y": "-150.000000",
+       "z_closed_form": "-0.000000",
+       "z_sampled": "-0.000000"
+      },
+      "id": {
+       "entity_id": "1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.0
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001142",
+       "distance_m": "5.018078",
+       "x": "-186.161616",
+       "y": "-146.767677",
+       "z_closed_form": "-0.042696",
+       "z_sampled": "-0.041554"
+      },
+      "id": {
+       "entity_id": "2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.041554
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001858",
+       "distance_m": "10.036155",
+       "x": "-182.323232",
+       "y": "-143.535354",
+       "z_closed_form": "-0.106341",
+       "z_sampled": "-0.104483"
+      },
+      "id": {
+       "entity_id": "3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.104483
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001476",
+       "distance_m": "15.054233",
+       "x": "-178.484848",
+       "y": "-140.303030",
+       "z_closed_form": "-0.187652",
+       "z_sampled": "-0.186176"
+      },
+      "id": {
+       "entity_id": "4"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.186176
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.006565",
+       "distance_m": "20.072311",
+       "x": "-174.646465",
+       "y": "-137.070707",
+       "z_closed_form": "-0.282469",
+       "z_sampled": "-0.275904"
+      },
+      "id": {
+       "entity_id": "5"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.275904
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.005594",
+       "distance_m": "25.090389",
+       "x": "-170.808081",
+       "y": "-133.838384",
+       "z_closed_form": "-0.385960",
+       "z_sampled": "-0.380367"
+      },
+      "id": {
+       "entity_id": "6"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.380367
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.006427",
+       "distance_m": "30.108466",
+       "x": "-166.969697",
+       "y": "-130.606061",
+       "z_closed_form": "-0.492859",
+       "z_sampled": "-0.486432"
+      },
+      "id": {
+       "entity_id": "7"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.486432
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.012176",
+       "distance_m": "35.126544",
+       "x": "-163.131313",
+       "y": "-127.373737",
+       "z_closed_form": "-0.597723",
+       "z_sampled": "-0.585547"
+      },
+      "id": {
+       "entity_id": "8"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.585547
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.010437",
+       "distance_m": "40.144622",
+       "x": "-159.292929",
+       "y": "-124.141414",
+       "z_closed_form": "-0.695203",
+       "z_sampled": "-0.684767"
+      },
+      "id": {
+       "entity_id": "9"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.684767
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.012460",
+       "distance_m": "45.162699",
+       "x": "-155.454545",
+       "y": "-120.909091",
+       "z_closed_form": "-0.780304",
+       "z_sampled": "-0.767844"
+      },
+      "id": {
+       "entity_id": "10"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.767844
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.013275",
+       "distance_m": "50.180777",
+       "x": "-151.616162",
+       "y": "-117.676768",
+       "z_closed_form": "-0.848630",
+       "z_sampled": "-0.835356"
+      },
+      "id": {
+       "entity_id": "11"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.835356
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.018334",
+       "distance_m": "55.198855",
+       "x": "-147.777778",
+       "y": "-114.444444",
+       "z_closed_form": "-0.896605",
+       "z_sampled": "-0.878270"
+      },
+      "id": {
+       "entity_id": "12"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.87827
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.015501",
+       "distance_m": "60.216933",
+       "x": "-143.939394",
+       "y": "-111.212121",
+       "z_closed_form": "-0.921641",
+       "z_sampled": "-0.906139"
+      },
+      "id": {
+       "entity_id": "13"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.906139
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.007885",
+       "distance_m": "65.235010",
+       "x": "-140.101010",
+       "y": "-107.979798",
+       "z_closed_form": "-0.922273",
+       "z_sampled": "-0.914387"
+      },
+      "id": {
+       "entity_id": "14"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.914387
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.021119",
+       "distance_m": "70.253088",
+       "x": "-136.262626",
+       "y": "-104.747475",
+       "z_closed_form": "-0.898225",
+       "z_sampled": "-0.877106"
+      },
+      "id": {
+       "entity_id": "15"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.877106
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.013234",
+       "distance_m": "75.271166",
+       "x": "-132.424242",
+       "y": "-101.515152",
+       "z_closed_form": "-0.850430",
+       "z_sampled": "-0.837196"
+      },
+      "id": {
+       "entity_id": "16"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.837196
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.009781",
+       "distance_m": "80.289243",
+       "x": "-128.585859",
+       "y": "-98.282828",
+       "z_closed_form": "-0.780976",
+       "z_sampled": "-0.771195"
+      },
+      "id": {
+       "entity_id": "17"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.771195
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.016980",
+       "distance_m": "85.307321",
+       "x": "-124.747475",
+       "y": "-95.050505",
+       "z_closed_form": "-0.693012",
+       "z_sampled": "-0.676031"
+      },
+      "id": {
+       "entity_id": "18"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.676031
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.007032",
+       "distance_m": "90.325399",
+       "x": "-120.909091",
+       "y": "-91.818182",
+       "z_closed_form": "-0.590586",
+       "z_sampled": "-0.583554"
+      },
+      "id": {
+       "entity_id": "19"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.583554
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.007265",
+       "distance_m": "95.343477",
+       "x": "-117.070707",
+       "y": "-88.585859",
+       "z_closed_form": "-0.478453",
+       "z_sampled": "-0.471188"
+      },
+      "id": {
+       "entity_id": "20"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.471188
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.008586",
+       "distance_m": "100.361554",
+       "x": "-113.232323",
+       "y": "-85.353535",
+       "z_closed_form": "-0.361834",
+       "z_sampled": "-0.353248"
+      },
+      "id": {
+       "entity_id": "21"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.353248
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.002573",
+       "distance_m": "105.379632",
+       "x": "-109.393939",
+       "y": "-82.121212",
+       "z_closed_form": "-0.246168",
+       "z_sampled": "-0.243595"
+      },
+      "id": {
+       "entity_id": "22"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.243595
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.002168",
+       "distance_m": "110.397710",
+       "x": "-105.555556",
+       "y": "-78.888889",
+       "z_closed_form": "-0.136837",
+       "z_sampled": "-0.134669"
+      },
+      "id": {
+       "entity_id": "23"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.134669
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001075",
+       "distance_m": "115.415787",
+       "x": "-101.717172",
+       "y": "-75.656566",
+       "z_closed_form": "-0.038906",
+       "z_sampled": "-0.037830"
+      },
+      "id": {
+       "entity_id": "24"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.03783
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001082",
+       "distance_m": "120.433865",
+       "x": "-97.878788",
+       "y": "-72.424242",
+       "z_closed_form": "0.043126",
+       "z_sampled": "0.042044"
+      },
+      "id": {
+       "entity_id": "25"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.042044
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001450",
+       "distance_m": "125.451943",
+       "x": "-94.040404",
+       "y": "-69.191919",
+       "z_closed_form": "0.105549",
+       "z_sampled": "0.104099"
+      },
+      "id": {
+       "entity_id": "26"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.104099
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001758",
+       "distance_m": "130.470021",
+       "x": "-90.202020",
+       "y": "-65.959596",
+       "z_closed_form": "0.145622",
+       "z_sampled": "0.143864"
+      },
+      "id": {
+       "entity_id": "27"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.143864
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.003691",
+       "distance_m": "135.488098",
+       "x": "-86.363636",
+       "y": "-62.727273",
+       "z_closed_form": "0.161709",
+       "z_sampled": "0.158017"
+      },
+      "id": {
+       "entity_id": "28"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.158017
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001550",
+       "distance_m": "140.506176",
+       "x": "-82.525253",
+       "y": "-59.494949",
+       "z_closed_form": "0.153358",
+       "z_sampled": "0.151807"
+      },
+      "id": {
+       "entity_id": "29"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.151807
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001951",
+       "distance_m": "145.524254",
+       "x": "-78.686869",
+       "y": "-56.262626",
+       "z_closed_form": "0.121324",
+       "z_sampled": "0.119374"
+      },
+      "id": {
+       "entity_id": "30"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.119374
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001821",
+       "distance_m": "150.542331",
+       "x": "-74.848485",
+       "y": "-53.030303",
+       "z_closed_form": "0.067534",
+       "z_sampled": "0.065713"
+      },
+      "id": {
+       "entity_id": "31"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.065713
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.000103",
+       "distance_m": "155.560409",
+       "x": "-71.010101",
+       "y": "-49.797980",
+       "z_closed_form": "-0.005014",
+       "z_sampled": "-0.004911"
+      },
+      "id": {
+       "entity_id": "32"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.004911
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.002269",
+       "distance_m": "160.578487",
+       "x": "-67.171717",
+       "y": "-46.565657",
+       "z_closed_form": "-0.092391",
+       "z_sampled": "-0.090122"
+      },
+      "id": {
+       "entity_id": "33"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.090122
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.003762",
+       "distance_m": "165.596565",
+       "x": "-63.333333",
+       "y": "-43.333333",
+       "z_closed_form": "-0.189937",
+       "z_sampled": "-0.186175"
+      },
+      "id": {
+       "entity_id": "34"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.186175
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.000804",
+       "distance_m": "170.614642",
+       "x": "-59.494949",
+       "y": "-40.101010",
+       "z_closed_form": "-0.292484",
+       "z_sampled": "-0.291680"
+      },
+      "id": {
+       "entity_id": "35"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.29168
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.009280",
+       "distance_m": "175.632720",
+       "x": "-55.656566",
+       "y": "-36.868687",
+       "z_closed_form": "-0.394617",
+       "z_sampled": "-0.385336"
+      },
+      "id": {
+       "entity_id": "36"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.385336
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.008844",
+       "distance_m": "180.650798",
+       "x": "-51.818182",
+       "y": "-33.636364",
+       "z_closed_form": "-0.490931",
+       "z_sampled": "-0.482086"
+      },
+      "id": {
+       "entity_id": "37"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.482086
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.005485",
+       "distance_m": "185.668876",
+       "x": "-47.979798",
+       "y": "-30.404040",
+       "z_closed_form": "-0.576306",
+       "z_sampled": "-0.570821"
+      },
+      "id": {
+       "entity_id": "38"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.570821
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.014447",
+       "distance_m": "190.686953",
+       "x": "-44.141414",
+       "y": "-27.171717",
+       "z_closed_form": "-0.646155",
+       "z_sampled": "-0.631708"
+      },
+      "id": {
+       "entity_id": "39"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.631708
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.009040",
+       "distance_m": "195.705031",
+       "x": "-40.303030",
+       "y": "-23.939394",
+       "z_closed_form": "-0.696646",
+       "z_sampled": "-0.687605"
+      },
+      "id": {
+       "entity_id": "40"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.687605
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.010192",
+       "distance_m": "200.723109",
+       "x": "-36.464646",
+       "y": "-20.707071",
+       "z_closed_form": "-0.724896",
+       "z_sampled": "-0.714704"
+      },
+      "id": {
+       "entity_id": "41"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.714704
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.014067",
+       "distance_m": "205.741186",
+       "x": "-32.626263",
+       "y": "-17.474747",
+       "z_closed_form": "-0.729111",
+       "z_sampled": "-0.715044"
+      },
+      "id": {
+       "entity_id": "42"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.715044
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.011890",
+       "distance_m": "210.759264",
+       "x": "-28.787879",
+       "y": "-14.242424",
+       "z_closed_form": "-0.708673",
+       "z_sampled": "-0.696783"
+      },
+      "id": {
+       "entity_id": "43"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.696783
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.011019",
+       "distance_m": "215.777342",
+       "x": "-24.949495",
+       "y": "-11.010101",
+       "z_closed_form": "-0.664171",
+       "z_sampled": "-0.653152"
+      },
+      "id": {
+       "entity_id": "44"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.653152
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.008318",
+       "distance_m": "220.795420",
+       "x": "-21.111111",
+       "y": "-7.777778",
+       "z_closed_form": "-0.597374",
+       "z_sampled": "-0.589056"
+      },
+      "id": {
+       "entity_id": "45"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.589056
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.010769",
+       "distance_m": "225.813497",
+       "x": "-17.272727",
+       "y": "-4.545455",
+       "z_closed_form": "-0.511141",
+       "z_sampled": "-0.500372"
+      },
+      "id": {
+       "entity_id": "46"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.500372
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.007131",
+       "distance_m": "230.831575",
+       "x": "-13.434343",
+       "y": "-1.313131",
+       "z_closed_form": "-0.409285",
+       "z_sampled": "-0.402154"
+      },
+      "id": {
+       "entity_id": "47"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.402154
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.002635",
+       "distance_m": "235.849653",
+       "x": "-9.595960",
+       "y": "1.919192",
+       "z_closed_form": "-0.296381",
+       "z_sampled": "-0.293746"
+      },
+      "id": {
+       "entity_id": "48"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.293746
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.004111",
+       "distance_m": "240.867730",
+       "x": "-5.757576",
+       "y": "5.151515",
+       "z_closed_form": "-0.177544",
+       "z_sampled": "-0.173433"
+      },
+      "id": {
+       "entity_id": "49"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.173433
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001306",
+       "distance_m": "245.885808",
+       "x": "-1.919192",
+       "y": "8.383838",
+       "z_closed_form": "-0.058179",
+       "z_sampled": "-0.056873"
+      },
+      "id": {
+       "entity_id": "50"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.056873
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001246",
+       "distance_m": "250.903886",
+       "x": "1.919192",
+       "y": "11.616162",
+       "z_closed_form": "0.056289",
+       "z_sampled": "0.055042"
+      },
+      "id": {
+       "entity_id": "51"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.055042
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.003716",
+       "distance_m": "255.921964",
+       "x": "5.757576",
+       "y": "14.848485",
+       "z_closed_form": "0.160674",
+       "z_sampled": "0.156958"
+      },
+      "id": {
+       "entity_id": "52"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.156958
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.002311",
+       "distance_m": "260.940041",
+       "x": "9.595960",
+       "y": "18.080808",
+       "z_closed_form": "0.250293",
+       "z_sampled": "0.247982"
+      },
+      "id": {
+       "entity_id": "53"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.247982
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.005493",
+       "distance_m": "265.958119",
+       "x": "13.434343",
+       "y": "21.313131",
+       "z_closed_form": "0.321189",
+       "z_sampled": "0.315696"
+      },
+      "id": {
+       "entity_id": "54"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.315696
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.007767",
+       "distance_m": "270.976197",
+       "x": "17.272727",
+       "y": "24.545455",
+       "z_closed_form": "0.370325",
+       "z_sampled": "0.362558"
+      },
+      "id": {
+       "entity_id": "55"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.362558
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.005694",
+       "distance_m": "275.994274",
+       "x": "21.111111",
+       "y": "27.777778",
+       "z_closed_form": "0.395740",
+       "z_sampled": "0.390046"
+      },
+      "id": {
+       "entity_id": "56"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.390046
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.006418",
+       "distance_m": "281.012352",
+       "x": "24.949495",
+       "y": "31.010101",
+       "z_closed_form": "0.396637",
+       "z_sampled": "0.390219"
+      },
+      "id": {
+       "entity_id": "57"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.390219
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.006168",
+       "distance_m": "286.030430",
+       "x": "28.787879",
+       "y": "34.242424",
+       "z_closed_form": "0.373427",
+       "z_sampled": "0.367259"
+      },
+      "id": {
+       "entity_id": "58"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.367259
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.006603",
+       "distance_m": "291.048508",
+       "x": "32.626263",
+       "y": "37.474747",
+       "z_closed_form": "0.327708",
+       "z_sampled": "0.321105"
+      },
+      "id": {
+       "entity_id": "59"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.321105
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.003493",
+       "distance_m": "296.066585",
+       "x": "36.464646",
+       "y": "40.707071",
+       "z_closed_form": "0.262185",
+       "z_sampled": "0.258692"
+      },
+      "id": {
+       "entity_id": "60"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.258692
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.002143",
+       "distance_m": "301.084663",
+       "x": "40.303030",
+       "y": "43.939394",
+       "z_closed_form": "0.180537",
+       "z_sampled": "0.178395"
+      },
+      "id": {
+       "entity_id": "61"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.178395
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.002345",
+       "distance_m": "306.102741",
+       "x": "44.141414",
+       "y": "47.171717",
+       "z_closed_form": "0.087238",
+       "z_sampled": "0.084893"
+      },
+      "id": {
+       "entity_id": "62"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.084893
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.000305",
+       "distance_m": "311.120818",
+       "x": "47.979798",
+       "y": "50.404040",
+       "z_closed_form": "-0.012667",
+       "z_sampled": "-0.012362"
+      },
+      "id": {
+       "entity_id": "63"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.012362
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.002436",
+       "distance_m": "316.138896",
+       "x": "51.818182",
+       "y": "53.636364",
+       "z_closed_form": "-0.113806",
+       "z_sampled": "-0.111370"
+      },
+      "id": {
+       "entity_id": "64"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.11137
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.004366",
+       "distance_m": "321.156974",
+       "x": "55.656566",
+       "y": "56.868687",
+       "z_closed_form": "-0.210743",
+       "z_sampled": "-0.206378"
+      },
+      "id": {
+       "entity_id": "65"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.206378
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.000912",
+       "distance_m": "326.175052",
+       "x": "59.494949",
+       "y": "60.101010",
+       "z_closed_form": "-0.298254",
+       "z_sampled": "-0.297341"
+      },
+      "id": {
+       "entity_id": "66"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.297341
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.008335",
+       "distance_m": "331.193129",
+       "x": "63.333333",
+       "y": "63.333333",
+       "z_closed_form": "-0.371572",
+       "z_sampled": "-0.363237"
+      },
+      "id": {
+       "entity_id": "67"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.363237
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.008791",
+       "distance_m": "336.211207",
+       "x": "67.171717",
+       "y": "66.565657",
+       "z_closed_form": "-0.426632",
+       "z_sampled": "-0.417841"
+      },
+      "id": {
+       "entity_id": "68"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.417841
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.002299",
+       "distance_m": "341.229285",
+       "x": "71.010101",
+       "y": "69.797980",
+       "z_closed_form": "-0.460262",
+       "z_sampled": "-0.457963"
+      },
+      "id": {
+       "entity_id": "69"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.457963
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.010820",
+       "distance_m": "346.247362",
+       "x": "74.848485",
+       "y": "73.030303",
+       "z_closed_form": "-0.470346",
+       "z_sampled": "-0.459526"
+      },
+      "id": {
+       "entity_id": "70"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.459526
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.007895",
+       "distance_m": "351.265440",
+       "x": "78.686869",
+       "y": "76.262626",
+       "z_closed_form": "-0.455925",
+       "z_sampled": "-0.448029"
+      },
+      "id": {
+       "entity_id": "71"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.448029
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.004448",
+       "distance_m": "356.283518",
+       "x": "82.525253",
+       "y": "79.494949",
+       "z_closed_form": "-0.417243",
+       "z_sampled": "-0.412796"
+      },
+      "id": {
+       "entity_id": "72"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.412796
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.007832",
+       "distance_m": "361.301596",
+       "x": "86.363636",
+       "y": "82.727273",
+       "z_closed_form": "-0.355740",
+       "z_sampled": "-0.347908"
+      },
+      "id": {
+       "entity_id": "73"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.347908
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.003397",
+       "distance_m": "366.319673",
+       "x": "90.202020",
+       "y": "85.959596",
+       "z_closed_form": "-0.273976",
+       "z_sampled": "-0.270579"
+      },
+      "id": {
+       "entity_id": "74"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.270579
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.002473",
+       "distance_m": "371.337751",
+       "x": "94.040404",
+       "y": "89.191919",
+       "z_closed_form": "-0.175507",
+       "z_sampled": "-0.173034"
+      },
+      "id": {
+       "entity_id": "75"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.173034
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001595",
+       "distance_m": "376.355829",
+       "x": "97.878788",
+       "y": "92.424242",
+       "z_closed_form": "-0.064713",
+       "z_sampled": "-0.063119"
+      },
+      "id": {
+       "entity_id": "76"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.063119
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001484",
+       "distance_m": "381.373906",
+       "x": "101.717172",
+       "y": "95.656566",
+       "z_closed_form": "0.053419",
+       "z_sampled": "0.051935"
+      },
+      "id": {
+       "entity_id": "77"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.051935
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.002800",
+       "distance_m": "386.391984",
+       "x": "105.555556",
+       "y": "98.888889",
+       "z_closed_form": "0.173542",
+       "z_sampled": "0.170743"
+      },
+      "id": {
+       "entity_id": "78"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.170743
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.002933",
+       "distance_m": "391.410062",
+       "x": "109.393939",
+       "y": "102.121212",
+       "z_closed_form": "0.290208",
+       "z_sampled": "0.287275"
+      },
+      "id": {
+       "entity_id": "79"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.287275
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.009471",
+       "distance_m": "396.428140",
+       "x": "113.232323",
+       "y": "105.353535",
+       "z_closed_form": "0.398138",
+       "z_sampled": "0.388666"
+      },
+      "id": {
+       "entity_id": "80"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.388666
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.007620",
+       "distance_m": "401.446217",
+       "x": "117.070707",
+       "y": "108.585859",
+       "z_closed_form": "0.492477",
+       "z_sampled": "0.484857"
+      },
+      "id": {
+       "entity_id": "81"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.484857
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.006595",
+       "distance_m": "406.464295",
+       "x": "120.909091",
+       "y": "111.818182",
+       "z_closed_form": "0.569041",
+       "z_sampled": "0.562445"
+      },
+      "id": {
+       "entity_id": "82"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.562445
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.015307",
+       "distance_m": "411.482373",
+       "x": "124.747475",
+       "y": "115.050505",
+       "z_closed_form": "0.624513",
+       "z_sampled": "0.609205"
+      },
+      "id": {
+       "entity_id": "83"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.609205
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.008444",
+       "distance_m": "416.500450",
+       "x": "128.585859",
+       "y": "118.282828",
+       "z_closed_form": "0.656611",
+       "z_sampled": "0.648168"
+      },
+      "id": {
+       "entity_id": "84"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.648168
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.010107",
+       "distance_m": "421.518528",
+       "x": "132.424242",
+       "y": "121.515152",
+       "z_closed_form": "0.664200",
+       "z_sampled": "0.654094"
+      },
+      "id": {
+       "entity_id": "85"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.654094
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.015186",
+       "distance_m": "426.536606",
+       "x": "136.262626",
+       "y": "124.747475",
+       "z_closed_form": "0.647347",
+       "z_sampled": "0.632161"
+      },
+      "id": {
+       "entity_id": "86"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.632161
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.005478",
+       "distance_m": "431.554684",
+       "x": "140.101010",
+       "y": "127.979798",
+       "z_closed_form": "0.607314",
+       "z_sampled": "0.601836"
+      },
+      "id": {
+       "entity_id": "87"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.601836
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.008939",
+       "distance_m": "436.572761",
+       "x": "143.939394",
+       "y": "131.212121",
+       "z_closed_form": "0.546502",
+       "z_sampled": "0.537562"
+      },
+      "id": {
+       "entity_id": "88"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.537562
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.009485",
+       "distance_m": "441.590839",
+       "x": "147.777778",
+       "y": "134.444444",
+       "z_closed_form": "0.468328",
+       "z_sampled": "0.458843"
+      },
+      "id": {
+       "entity_id": "89"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.458843
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.006236",
+       "distance_m": "446.608917",
+       "x": "151.616162",
+       "y": "137.676768",
+       "z_closed_form": "0.377060",
+       "z_sampled": "0.370825"
+      },
+      "id": {
+       "entity_id": "90"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.370825
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.004181",
+       "distance_m": "451.626994",
+       "x": "155.454545",
+       "y": "140.909091",
+       "z_closed_form": "0.277606",
+       "z_sampled": "0.273425"
+      },
+      "id": {
+       "entity_id": "91"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.273425
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.002465",
+       "distance_m": "456.645072",
+       "x": "159.292929",
+       "y": "144.141414",
+       "z_closed_form": "0.175271",
+       "z_sampled": "0.172806"
+      },
+      "id": {
+       "entity_id": "92"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.172806
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001925",
+       "distance_m": "461.663150",
+       "x": "163.131313",
+       "y": "147.373737",
+       "z_closed_form": "0.075499",
+       "z_sampled": "0.073574"
+      },
+      "id": {
+       "entity_id": "93"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.073574
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.000439",
+       "distance_m": "466.681228",
+       "x": "166.969697",
+       "y": "150.606061",
+       "z_closed_form": "-0.016397",
+       "z_sampled": "-0.015958"
+      },
+      "id": {
+       "entity_id": "94"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.015958
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001655",
+       "distance_m": "471.699305",
+       "x": "170.808081",
+       "y": "153.838384",
+       "z_closed_form": "-0.095494",
+       "z_sampled": "-0.093839"
+      },
+      "id": {
+       "entity_id": "95"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.093839
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.003196",
+       "distance_m": "476.717383",
+       "x": "174.646465",
+       "y": "157.070707",
+       "z_closed_form": "-0.157504",
+       "z_sampled": "-0.154307"
+      },
+      "id": {
+       "entity_id": "96"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.154307
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001739",
+       "distance_m": "481.735461",
+       "x": "178.484848",
+       "y": "160.303030",
+       "z_closed_form": "-0.198981",
+       "z_sampled": "-0.197242"
+      },
+      "id": {
+       "entity_id": "97"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.197242
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.004326",
+       "distance_m": "486.753539",
+       "x": "182.323232",
+       "y": "163.535354",
+       "z_closed_form": "-0.217494",
+       "z_sampled": "-0.213168"
+      },
+      "id": {
+       "entity_id": "98"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.213168
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.004703",
+       "distance_m": "491.771616",
+       "x": "186.161616",
+       "y": "166.767677",
+       "z_closed_form": "-0.211746",
+       "z_sampled": "-0.207044"
+      },
+      "id": {
+       "entity_id": "99"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.207044
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.000000",
+       "distance_m": "496.789694",
+       "x": "190.000000",
+       "y": "170.000000",
+       "z_closed_form": "-0.181636",
+       "z_sampled": "-0.181636"
+      },
+      "id": {
+       "entity_id": "100"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.181636
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "1": "1",
+    "10": "10",
+    "100": "100",
+    "11": "11",
+    "12": "12",
+    "13": "13",
+    "14": "14",
+    "15": "15",
+    "16": "16",
+    "17": "17",
+    "18": "18",
+    "19": "19",
+    "2": "2",
+    "20": "20",
+    "21": "21",
+    "22": "22",
+    "23": "23",
+    "24": "24",
+    "25": "25",
+    "26": "26",
+    "27": "27",
+    "28": "28",
+    "29": "29",
+    "3": "3",
+    "30": "30",
+    "31": "31",
+    "32": "32",
+    "33": "33",
+    "34": "34",
+    "35": "35",
+    "36": "36",
+    "37": "37",
+    "38": "38",
+    "39": "39",
+    "4": "4",
+    "40": "40",
+    "41": "41",
+    "42": "42",
+    "43": "43",
+    "44": "44",
+    "45": "45",
+    "46": "46",
+    "47": "47",
+    "48": "48",
+    "49": "49",
+    "5": "5",
+    "50": "50",
+    "51": "51",
+    "52": "52",
+    "53": "53",
+    "54": "54",
+    "55": "55",
+    "56": "56",
+    "57": "57",
+    "58": "58",
+    "59": "59",
+    "6": "6",
+    "60": "60",
+    "61": "61",
+    "62": "62",
+    "63": "63",
+    "64": "64",
+    "65": "65",
+    "66": "66",
+    "67": "67",
+    "68": "68",
+    "69": "69",
+    "7": "7",
+    "70": "70",
+    "71": "71",
+    "72": "72",
+    "73": "73",
+    "74": "74",
+    "75": "75",
+    "76": "76",
+    "77": "77",
+    "78": "78",
+    "79": "79",
+    "8": "8",
+    "80": "80",
+    "81": "81",
+    "82": "82",
+    "83": "83",
+    "84": "84",
+    "85": "85",
+    "86": "86",
+    "87": "87",
+    "88": "88",
+    "89": "89",
+    "9": "9",
+    "90": "90",
+    "91": "91",
+    "92": "92",
+    "93": "93",
+    "94": "94",
+    "95": "95",
+    "96": "96",
+    "97": "97",
+    "98": "98",
+    "99": "99"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "a7a2f83023517e14144db9703914140656035f1833fadef05f56f9cdc3c269f8",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "f1073eef4bb4be5c447fea5d2c24857515b3da7d0b12a34286d487e70e9b712a",
+   "output_sha256": "927a010377540f12ceaafbb5c1d817c6510fecdc664c8c8106372e0a41f6984a",
+   "parameters": {
+    "capability": "terrain-cross-section",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafcrosssection_demo.csv",
+    "probe_file_sha256": "484b889ebed50593c4f676e4becb74d452bdfa99454a3e58e2380d78c14c9ecc",
+    "probe_type": "terrain-cross-section",
+    "side": "plugin"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "none",
+    "producer": "plugin",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  },
+  "studio": {
+   "after": {
+    "format": "csv",
+    "rows": [
+     {
+      "fields": {
+       "abs_error_m": "0.000000",
+       "distance_m": "0.000000",
+       "x": "-190.000000",
+       "y": "-150.000000",
+       "z_closed_form": "-0.000000",
+       "z_sampled": "-0.000000"
+      },
+      "id": {
+       "entity_id": "1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.0
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001142",
+       "distance_m": "5.018078",
+       "x": "-186.161616",
+       "y": "-146.767677",
+       "z_closed_form": "-0.042696",
+       "z_sampled": "-0.041554"
+      },
+      "id": {
+       "entity_id": "2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.041554
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001858",
+       "distance_m": "10.036155",
+       "x": "-182.323232",
+       "y": "-143.535354",
+       "z_closed_form": "-0.106341",
+       "z_sampled": "-0.104483"
+      },
+      "id": {
+       "entity_id": "3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.104483
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001476",
+       "distance_m": "15.054233",
+       "x": "-178.484848",
+       "y": "-140.303030",
+       "z_closed_form": "-0.187652",
+       "z_sampled": "-0.186176"
+      },
+      "id": {
+       "entity_id": "4"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.186176
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.006565",
+       "distance_m": "20.072311",
+       "x": "-174.646465",
+       "y": "-137.070707",
+       "z_closed_form": "-0.282469",
+       "z_sampled": "-0.275904"
+      },
+      "id": {
+       "entity_id": "5"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.275904
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.005594",
+       "distance_m": "25.090389",
+       "x": "-170.808081",
+       "y": "-133.838384",
+       "z_closed_form": "-0.385960",
+       "z_sampled": "-0.380367"
+      },
+      "id": {
+       "entity_id": "6"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.380367
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.006427",
+       "distance_m": "30.108466",
+       "x": "-166.969697",
+       "y": "-130.606061",
+       "z_closed_form": "-0.492859",
+       "z_sampled": "-0.486432"
+      },
+      "id": {
+       "entity_id": "7"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.486432
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.012176",
+       "distance_m": "35.126544",
+       "x": "-163.131313",
+       "y": "-127.373737",
+       "z_closed_form": "-0.597723",
+       "z_sampled": "-0.585547"
+      },
+      "id": {
+       "entity_id": "8"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.585547
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.010437",
+       "distance_m": "40.144622",
+       "x": "-159.292929",
+       "y": "-124.141414",
+       "z_closed_form": "-0.695203",
+       "z_sampled": "-0.684767"
+      },
+      "id": {
+       "entity_id": "9"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.684767
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.012460",
+       "distance_m": "45.162699",
+       "x": "-155.454545",
+       "y": "-120.909091",
+       "z_closed_form": "-0.780304",
+       "z_sampled": "-0.767844"
+      },
+      "id": {
+       "entity_id": "10"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.767844
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.013275",
+       "distance_m": "50.180777",
+       "x": "-151.616162",
+       "y": "-117.676768",
+       "z_closed_form": "-0.848630",
+       "z_sampled": "-0.835356"
+      },
+      "id": {
+       "entity_id": "11"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.835356
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.018334",
+       "distance_m": "55.198855",
+       "x": "-147.777778",
+       "y": "-114.444444",
+       "z_closed_form": "-0.896605",
+       "z_sampled": "-0.878270"
+      },
+      "id": {
+       "entity_id": "12"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.87827
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.015501",
+       "distance_m": "60.216933",
+       "x": "-143.939394",
+       "y": "-111.212121",
+       "z_closed_form": "-0.921641",
+       "z_sampled": "-0.906139"
+      },
+      "id": {
+       "entity_id": "13"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.906139
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.007885",
+       "distance_m": "65.235010",
+       "x": "-140.101010",
+       "y": "-107.979798",
+       "z_closed_form": "-0.922273",
+       "z_sampled": "-0.914387"
+      },
+      "id": {
+       "entity_id": "14"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.914387
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.021119",
+       "distance_m": "70.253088",
+       "x": "-136.262626",
+       "y": "-104.747475",
+       "z_closed_form": "-0.898225",
+       "z_sampled": "-0.877106"
+      },
+      "id": {
+       "entity_id": "15"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.877106
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.013234",
+       "distance_m": "75.271166",
+       "x": "-132.424242",
+       "y": "-101.515152",
+       "z_closed_form": "-0.850430",
+       "z_sampled": "-0.837196"
+      },
+      "id": {
+       "entity_id": "16"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.837196
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.009781",
+       "distance_m": "80.289243",
+       "x": "-128.585859",
+       "y": "-98.282828",
+       "z_closed_form": "-0.780976",
+       "z_sampled": "-0.771195"
+      },
+      "id": {
+       "entity_id": "17"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.771195
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.016980",
+       "distance_m": "85.307321",
+       "x": "-124.747475",
+       "y": "-95.050505",
+       "z_closed_form": "-0.693012",
+       "z_sampled": "-0.676031"
+      },
+      "id": {
+       "entity_id": "18"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.676031
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.007032",
+       "distance_m": "90.325399",
+       "x": "-120.909091",
+       "y": "-91.818182",
+       "z_closed_form": "-0.590586",
+       "z_sampled": "-0.583554"
+      },
+      "id": {
+       "entity_id": "19"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.583554
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.007265",
+       "distance_m": "95.343477",
+       "x": "-117.070707",
+       "y": "-88.585859",
+       "z_closed_form": "-0.478453",
+       "z_sampled": "-0.471188"
+      },
+      "id": {
+       "entity_id": "20"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.471188
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.008586",
+       "distance_m": "100.361554",
+       "x": "-113.232323",
+       "y": "-85.353535",
+       "z_closed_form": "-0.361834",
+       "z_sampled": "-0.353248"
+      },
+      "id": {
+       "entity_id": "21"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.353248
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.002573",
+       "distance_m": "105.379632",
+       "x": "-109.393939",
+       "y": "-82.121212",
+       "z_closed_form": "-0.246168",
+       "z_sampled": "-0.243595"
+      },
+      "id": {
+       "entity_id": "22"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.243595
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.002168",
+       "distance_m": "110.397710",
+       "x": "-105.555556",
+       "y": "-78.888889",
+       "z_closed_form": "-0.136837",
+       "z_sampled": "-0.134669"
+      },
+      "id": {
+       "entity_id": "23"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.134669
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001075",
+       "distance_m": "115.415787",
+       "x": "-101.717172",
+       "y": "-75.656566",
+       "z_closed_form": "-0.038906",
+       "z_sampled": "-0.037830"
+      },
+      "id": {
+       "entity_id": "24"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.03783
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001082",
+       "distance_m": "120.433865",
+       "x": "-97.878788",
+       "y": "-72.424242",
+       "z_closed_form": "0.043126",
+       "z_sampled": "0.042044"
+      },
+      "id": {
+       "entity_id": "25"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.042044
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001450",
+       "distance_m": "125.451943",
+       "x": "-94.040404",
+       "y": "-69.191919",
+       "z_closed_form": "0.105549",
+       "z_sampled": "0.104099"
+      },
+      "id": {
+       "entity_id": "26"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.104099
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001758",
+       "distance_m": "130.470021",
+       "x": "-90.202020",
+       "y": "-65.959596",
+       "z_closed_form": "0.145622",
+       "z_sampled": "0.143864"
+      },
+      "id": {
+       "entity_id": "27"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.143864
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.003691",
+       "distance_m": "135.488098",
+       "x": "-86.363636",
+       "y": "-62.727273",
+       "z_closed_form": "0.161709",
+       "z_sampled": "0.158017"
+      },
+      "id": {
+       "entity_id": "28"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.158017
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001550",
+       "distance_m": "140.506176",
+       "x": "-82.525253",
+       "y": "-59.494949",
+       "z_closed_form": "0.153358",
+       "z_sampled": "0.151807"
+      },
+      "id": {
+       "entity_id": "29"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.151807
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001951",
+       "distance_m": "145.524254",
+       "x": "-78.686869",
+       "y": "-56.262626",
+       "z_closed_form": "0.121324",
+       "z_sampled": "0.119374"
+      },
+      "id": {
+       "entity_id": "30"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.119374
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001821",
+       "distance_m": "150.542331",
+       "x": "-74.848485",
+       "y": "-53.030303",
+       "z_closed_form": "0.067534",
+       "z_sampled": "0.065713"
+      },
+      "id": {
+       "entity_id": "31"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.065713
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.000103",
+       "distance_m": "155.560409",
+       "x": "-71.010101",
+       "y": "-49.797980",
+       "z_closed_form": "-0.005014",
+       "z_sampled": "-0.004911"
+      },
+      "id": {
+       "entity_id": "32"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.004911
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.002269",
+       "distance_m": "160.578487",
+       "x": "-67.171717",
+       "y": "-46.565657",
+       "z_closed_form": "-0.092391",
+       "z_sampled": "-0.090122"
+      },
+      "id": {
+       "entity_id": "33"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.090122
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.003762",
+       "distance_m": "165.596565",
+       "x": "-63.333333",
+       "y": "-43.333333",
+       "z_closed_form": "-0.189937",
+       "z_sampled": "-0.186175"
+      },
+      "id": {
+       "entity_id": "34"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.186175
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.000804",
+       "distance_m": "170.614642",
+       "x": "-59.494949",
+       "y": "-40.101010",
+       "z_closed_form": "-0.292484",
+       "z_sampled": "-0.291680"
+      },
+      "id": {
+       "entity_id": "35"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.29168
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.009280",
+       "distance_m": "175.632720",
+       "x": "-55.656566",
+       "y": "-36.868687",
+       "z_closed_form": "-0.394617",
+       "z_sampled": "-0.385336"
+      },
+      "id": {
+       "entity_id": "36"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.385336
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.008844",
+       "distance_m": "180.650798",
+       "x": "-51.818182",
+       "y": "-33.636364",
+       "z_closed_form": "-0.490931",
+       "z_sampled": "-0.482086"
+      },
+      "id": {
+       "entity_id": "37"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.482086
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.005485",
+       "distance_m": "185.668876",
+       "x": "-47.979798",
+       "y": "-30.404040",
+       "z_closed_form": "-0.576306",
+       "z_sampled": "-0.570821"
+      },
+      "id": {
+       "entity_id": "38"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.570821
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.014447",
+       "distance_m": "190.686953",
+       "x": "-44.141414",
+       "y": "-27.171717",
+       "z_closed_form": "-0.646155",
+       "z_sampled": "-0.631708"
+      },
+      "id": {
+       "entity_id": "39"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.631708
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.009040",
+       "distance_m": "195.705031",
+       "x": "-40.303030",
+       "y": "-23.939394",
+       "z_closed_form": "-0.696646",
+       "z_sampled": "-0.687605"
+      },
+      "id": {
+       "entity_id": "40"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.687605
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.010192",
+       "distance_m": "200.723109",
+       "x": "-36.464646",
+       "y": "-20.707071",
+       "z_closed_form": "-0.724896",
+       "z_sampled": "-0.714704"
+      },
+      "id": {
+       "entity_id": "41"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.714704
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.014067",
+       "distance_m": "205.741186",
+       "x": "-32.626263",
+       "y": "-17.474747",
+       "z_closed_form": "-0.729111",
+       "z_sampled": "-0.715044"
+      },
+      "id": {
+       "entity_id": "42"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.715044
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.011890",
+       "distance_m": "210.759264",
+       "x": "-28.787879",
+       "y": "-14.242424",
+       "z_closed_form": "-0.708673",
+       "z_sampled": "-0.696783"
+      },
+      "id": {
+       "entity_id": "43"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.696783
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.011019",
+       "distance_m": "215.777342",
+       "x": "-24.949495",
+       "y": "-11.010101",
+       "z_closed_form": "-0.664171",
+       "z_sampled": "-0.653152"
+      },
+      "id": {
+       "entity_id": "44"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.653152
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.008318",
+       "distance_m": "220.795420",
+       "x": "-21.111111",
+       "y": "-7.777778",
+       "z_closed_form": "-0.597374",
+       "z_sampled": "-0.589056"
+      },
+      "id": {
+       "entity_id": "45"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.589056
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.010769",
+       "distance_m": "225.813497",
+       "x": "-17.272727",
+       "y": "-4.545455",
+       "z_closed_form": "-0.511141",
+       "z_sampled": "-0.500372"
+      },
+      "id": {
+       "entity_id": "46"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.500372
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.007131",
+       "distance_m": "230.831575",
+       "x": "-13.434343",
+       "y": "-1.313131",
+       "z_closed_form": "-0.409285",
+       "z_sampled": "-0.402154"
+      },
+      "id": {
+       "entity_id": "47"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.402154
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.002635",
+       "distance_m": "235.849653",
+       "x": "-9.595960",
+       "y": "1.919192",
+       "z_closed_form": "-0.296381",
+       "z_sampled": "-0.293746"
+      },
+      "id": {
+       "entity_id": "48"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.293746
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.004111",
+       "distance_m": "240.867730",
+       "x": "-5.757576",
+       "y": "5.151515",
+       "z_closed_form": "-0.177544",
+       "z_sampled": "-0.173433"
+      },
+      "id": {
+       "entity_id": "49"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.173433
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001306",
+       "distance_m": "245.885808",
+       "x": "-1.919192",
+       "y": "8.383838",
+       "z_closed_form": "-0.058179",
+       "z_sampled": "-0.056873"
+      },
+      "id": {
+       "entity_id": "50"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.056873
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001246",
+       "distance_m": "250.903886",
+       "x": "1.919192",
+       "y": "11.616162",
+       "z_closed_form": "0.056289",
+       "z_sampled": "0.055042"
+      },
+      "id": {
+       "entity_id": "51"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.055042
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.003716",
+       "distance_m": "255.921964",
+       "x": "5.757576",
+       "y": "14.848485",
+       "z_closed_form": "0.160674",
+       "z_sampled": "0.156958"
+      },
+      "id": {
+       "entity_id": "52"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.156958
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.002311",
+       "distance_m": "260.940041",
+       "x": "9.595960",
+       "y": "18.080808",
+       "z_closed_form": "0.250293",
+       "z_sampled": "0.247982"
+      },
+      "id": {
+       "entity_id": "53"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.247982
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.005493",
+       "distance_m": "265.958119",
+       "x": "13.434343",
+       "y": "21.313131",
+       "z_closed_form": "0.321189",
+       "z_sampled": "0.315696"
+      },
+      "id": {
+       "entity_id": "54"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.315696
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.007767",
+       "distance_m": "270.976197",
+       "x": "17.272727",
+       "y": "24.545455",
+       "z_closed_form": "0.370325",
+       "z_sampled": "0.362558"
+      },
+      "id": {
+       "entity_id": "55"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.362558
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.005694",
+       "distance_m": "275.994274",
+       "x": "21.111111",
+       "y": "27.777778",
+       "z_closed_form": "0.395740",
+       "z_sampled": "0.390046"
+      },
+      "id": {
+       "entity_id": "56"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.390046
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.006418",
+       "distance_m": "281.012352",
+       "x": "24.949495",
+       "y": "31.010101",
+       "z_closed_form": "0.396637",
+       "z_sampled": "0.390219"
+      },
+      "id": {
+       "entity_id": "57"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.390219
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.006168",
+       "distance_m": "286.030430",
+       "x": "28.787879",
+       "y": "34.242424",
+       "z_closed_form": "0.373427",
+       "z_sampled": "0.367259"
+      },
+      "id": {
+       "entity_id": "58"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.367259
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.006603",
+       "distance_m": "291.048508",
+       "x": "32.626263",
+       "y": "37.474747",
+       "z_closed_form": "0.327708",
+       "z_sampled": "0.321105"
+      },
+      "id": {
+       "entity_id": "59"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.321105
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.003493",
+       "distance_m": "296.066585",
+       "x": "36.464646",
+       "y": "40.707071",
+       "z_closed_form": "0.262185",
+       "z_sampled": "0.258692"
+      },
+      "id": {
+       "entity_id": "60"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.258692
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.002143",
+       "distance_m": "301.084663",
+       "x": "40.303030",
+       "y": "43.939394",
+       "z_closed_form": "0.180537",
+       "z_sampled": "0.178395"
+      },
+      "id": {
+       "entity_id": "61"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.178395
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.002345",
+       "distance_m": "306.102741",
+       "x": "44.141414",
+       "y": "47.171717",
+       "z_closed_form": "0.087238",
+       "z_sampled": "0.084893"
+      },
+      "id": {
+       "entity_id": "62"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.084893
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.000305",
+       "distance_m": "311.120818",
+       "x": "47.979798",
+       "y": "50.404040",
+       "z_closed_form": "-0.012667",
+       "z_sampled": "-0.012362"
+      },
+      "id": {
+       "entity_id": "63"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.012362
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.002436",
+       "distance_m": "316.138896",
+       "x": "51.818182",
+       "y": "53.636364",
+       "z_closed_form": "-0.113806",
+       "z_sampled": "-0.111370"
+      },
+      "id": {
+       "entity_id": "64"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.11137
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.004366",
+       "distance_m": "321.156974",
+       "x": "55.656566",
+       "y": "56.868687",
+       "z_closed_form": "-0.210743",
+       "z_sampled": "-0.206378"
+      },
+      "id": {
+       "entity_id": "65"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.206378
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.000912",
+       "distance_m": "326.175052",
+       "x": "59.494949",
+       "y": "60.101010",
+       "z_closed_form": "-0.298254",
+       "z_sampled": "-0.297341"
+      },
+      "id": {
+       "entity_id": "66"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.297341
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.008335",
+       "distance_m": "331.193129",
+       "x": "63.333333",
+       "y": "63.333333",
+       "z_closed_form": "-0.371572",
+       "z_sampled": "-0.363237"
+      },
+      "id": {
+       "entity_id": "67"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.363237
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.008791",
+       "distance_m": "336.211207",
+       "x": "67.171717",
+       "y": "66.565657",
+       "z_closed_form": "-0.426632",
+       "z_sampled": "-0.417841"
+      },
+      "id": {
+       "entity_id": "68"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.417841
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.002299",
+       "distance_m": "341.229285",
+       "x": "71.010101",
+       "y": "69.797980",
+       "z_closed_form": "-0.460262",
+       "z_sampled": "-0.457963"
+      },
+      "id": {
+       "entity_id": "69"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.457963
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.010820",
+       "distance_m": "346.247362",
+       "x": "74.848485",
+       "y": "73.030303",
+       "z_closed_form": "-0.470346",
+       "z_sampled": "-0.459526"
+      },
+      "id": {
+       "entity_id": "70"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.459526
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.007895",
+       "distance_m": "351.265440",
+       "x": "78.686869",
+       "y": "76.262626",
+       "z_closed_form": "-0.455925",
+       "z_sampled": "-0.448029"
+      },
+      "id": {
+       "entity_id": "71"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.448029
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.004448",
+       "distance_m": "356.283518",
+       "x": "82.525253",
+       "y": "79.494949",
+       "z_closed_form": "-0.417243",
+       "z_sampled": "-0.412796"
+      },
+      "id": {
+       "entity_id": "72"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.412796
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.007832",
+       "distance_m": "361.301596",
+       "x": "86.363636",
+       "y": "82.727273",
+       "z_closed_form": "-0.355740",
+       "z_sampled": "-0.347908"
+      },
+      "id": {
+       "entity_id": "73"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.347908
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.003397",
+       "distance_m": "366.319673",
+       "x": "90.202020",
+       "y": "85.959596",
+       "z_closed_form": "-0.273976",
+       "z_sampled": "-0.270579"
+      },
+      "id": {
+       "entity_id": "74"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.270579
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.002473",
+       "distance_m": "371.337751",
+       "x": "94.040404",
+       "y": "89.191919",
+       "z_closed_form": "-0.175507",
+       "z_sampled": "-0.173034"
+      },
+      "id": {
+       "entity_id": "75"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.173034
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001595",
+       "distance_m": "376.355829",
+       "x": "97.878788",
+       "y": "92.424242",
+       "z_closed_form": "-0.064713",
+       "z_sampled": "-0.063119"
+      },
+      "id": {
+       "entity_id": "76"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.063119
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001484",
+       "distance_m": "381.373906",
+       "x": "101.717172",
+       "y": "95.656566",
+       "z_closed_form": "0.053419",
+       "z_sampled": "0.051935"
+      },
+      "id": {
+       "entity_id": "77"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.051935
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.002800",
+       "distance_m": "386.391984",
+       "x": "105.555556",
+       "y": "98.888889",
+       "z_closed_form": "0.173542",
+       "z_sampled": "0.170743"
+      },
+      "id": {
+       "entity_id": "78"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.170743
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.002933",
+       "distance_m": "391.410062",
+       "x": "109.393939",
+       "y": "102.121212",
+       "z_closed_form": "0.290208",
+       "z_sampled": "0.287275"
+      },
+      "id": {
+       "entity_id": "79"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.287275
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.009471",
+       "distance_m": "396.428140",
+       "x": "113.232323",
+       "y": "105.353535",
+       "z_closed_form": "0.398138",
+       "z_sampled": "0.388666"
+      },
+      "id": {
+       "entity_id": "80"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.388666
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.007620",
+       "distance_m": "401.446217",
+       "x": "117.070707",
+       "y": "108.585859",
+       "z_closed_form": "0.492477",
+       "z_sampled": "0.484857"
+      },
+      "id": {
+       "entity_id": "81"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.484857
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.006595",
+       "distance_m": "406.464295",
+       "x": "120.909091",
+       "y": "111.818182",
+       "z_closed_form": "0.569041",
+       "z_sampled": "0.562445"
+      },
+      "id": {
+       "entity_id": "82"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.562445
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.015307",
+       "distance_m": "411.482373",
+       "x": "124.747475",
+       "y": "115.050505",
+       "z_closed_form": "0.624513",
+       "z_sampled": "0.609205"
+      },
+      "id": {
+       "entity_id": "83"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.609205
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.008444",
+       "distance_m": "416.500450",
+       "x": "128.585859",
+       "y": "118.282828",
+       "z_closed_form": "0.656611",
+       "z_sampled": "0.648168"
+      },
+      "id": {
+       "entity_id": "84"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.648168
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.010107",
+       "distance_m": "421.518528",
+       "x": "132.424242",
+       "y": "121.515152",
+       "z_closed_form": "0.664200",
+       "z_sampled": "0.654094"
+      },
+      "id": {
+       "entity_id": "85"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.654094
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.015186",
+       "distance_m": "426.536606",
+       "x": "136.262626",
+       "y": "124.747475",
+       "z_closed_form": "0.647347",
+       "z_sampled": "0.632161"
+      },
+      "id": {
+       "entity_id": "86"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.632161
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.005478",
+       "distance_m": "431.554684",
+       "x": "140.101010",
+       "y": "127.979798",
+       "z_closed_form": "0.607314",
+       "z_sampled": "0.601836"
+      },
+      "id": {
+       "entity_id": "87"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.601836
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.008939",
+       "distance_m": "436.572761",
+       "x": "143.939394",
+       "y": "131.212121",
+       "z_closed_form": "0.546502",
+       "z_sampled": "0.537562"
+      },
+      "id": {
+       "entity_id": "88"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.537562
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.009485",
+       "distance_m": "441.590839",
+       "x": "147.777778",
+       "y": "134.444444",
+       "z_closed_form": "0.468328",
+       "z_sampled": "0.458843"
+      },
+      "id": {
+       "entity_id": "89"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.458843
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.006236",
+       "distance_m": "446.608917",
+       "x": "151.616162",
+       "y": "137.676768",
+       "z_closed_form": "0.377060",
+       "z_sampled": "0.370825"
+      },
+      "id": {
+       "entity_id": "90"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.370825
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.004181",
+       "distance_m": "451.626994",
+       "x": "155.454545",
+       "y": "140.909091",
+       "z_closed_form": "0.277606",
+       "z_sampled": "0.273425"
+      },
+      "id": {
+       "entity_id": "91"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.273425
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.002465",
+       "distance_m": "456.645072",
+       "x": "159.292929",
+       "y": "144.141414",
+       "z_closed_form": "0.175271",
+       "z_sampled": "0.172806"
+      },
+      "id": {
+       "entity_id": "92"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.172806
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001925",
+       "distance_m": "461.663150",
+       "x": "163.131313",
+       "y": "147.373737",
+       "z_closed_form": "0.075499",
+       "z_sampled": "0.073574"
+      },
+      "id": {
+       "entity_id": "93"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.073574
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.000439",
+       "distance_m": "466.681228",
+       "x": "166.969697",
+       "y": "150.606061",
+       "z_closed_form": "-0.016397",
+       "z_sampled": "-0.015958"
+      },
+      "id": {
+       "entity_id": "94"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.015958
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001655",
+       "distance_m": "471.699305",
+       "x": "170.808081",
+       "y": "153.838384",
+       "z_closed_form": "-0.095494",
+       "z_sampled": "-0.093839"
+      },
+      "id": {
+       "entity_id": "95"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.093839
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.003196",
+       "distance_m": "476.717383",
+       "x": "174.646465",
+       "y": "157.070707",
+       "z_closed_form": "-0.157504",
+       "z_sampled": "-0.154307"
+      },
+      "id": {
+       "entity_id": "96"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.154307
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.001739",
+       "distance_m": "481.735461",
+       "x": "178.484848",
+       "y": "160.303030",
+       "z_closed_form": "-0.198981",
+       "z_sampled": "-0.197242"
+      },
+      "id": {
+       "entity_id": "97"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.197242
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.004326",
+       "distance_m": "486.753539",
+       "x": "182.323232",
+       "y": "163.535354",
+       "z_closed_form": "-0.217494",
+       "z_sampled": "-0.213168"
+      },
+      "id": {
+       "entity_id": "98"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.213168
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.004703",
+       "distance_m": "491.771616",
+       "x": "186.161616",
+       "y": "166.767677",
+       "z_closed_form": "-0.211746",
+       "z_sampled": "-0.207044"
+      },
+      "id": {
+       "entity_id": "99"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.207044
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "abs_error_m": "0.000000",
+       "distance_m": "496.789694",
+       "x": "190.000000",
+       "y": "170.000000",
+       "z_closed_form": "-0.181636",
+       "z_sampled": "-0.181636"
+      },
+      "id": {
+       "entity_id": "100"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.181636
+      },
+      "type": "terrain-cross-section-sample",
+      "unit": "m"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "1": "1",
+    "10": "10",
+    "100": "100",
+    "11": "11",
+    "12": "12",
+    "13": "13",
+    "14": "14",
+    "15": "15",
+    "16": "16",
+    "17": "17",
+    "18": "18",
+    "19": "19",
+    "2": "2",
+    "20": "20",
+    "21": "21",
+    "22": "22",
+    "23": "23",
+    "24": "24",
+    "25": "25",
+    "26": "26",
+    "27": "27",
+    "28": "28",
+    "29": "29",
+    "3": "3",
+    "30": "30",
+    "31": "31",
+    "32": "32",
+    "33": "33",
+    "34": "34",
+    "35": "35",
+    "36": "36",
+    "37": "37",
+    "38": "38",
+    "39": "39",
+    "4": "4",
+    "40": "40",
+    "41": "41",
+    "42": "42",
+    "43": "43",
+    "44": "44",
+    "45": "45",
+    "46": "46",
+    "47": "47",
+    "48": "48",
+    "49": "49",
+    "5": "5",
+    "50": "50",
+    "51": "51",
+    "52": "52",
+    "53": "53",
+    "54": "54",
+    "55": "55",
+    "56": "56",
+    "57": "57",
+    "58": "58",
+    "59": "59",
+    "6": "6",
+    "60": "60",
+    "61": "61",
+    "62": "62",
+    "63": "63",
+    "64": "64",
+    "65": "65",
+    "66": "66",
+    "67": "67",
+    "68": "68",
+    "69": "69",
+    "7": "7",
+    "70": "70",
+    "71": "71",
+    "72": "72",
+    "73": "73",
+    "74": "74",
+    "75": "75",
+    "76": "76",
+    "77": "77",
+    "78": "78",
+    "79": "79",
+    "8": "8",
+    "80": "80",
+    "81": "81",
+    "82": "82",
+    "83": "83",
+    "84": "84",
+    "85": "85",
+    "86": "86",
+    "87": "87",
+    "88": "88",
+    "89": "89",
+    "9": "9",
+    "90": "90",
+    "91": "91",
+    "92": "92",
+    "93": "93",
+    "94": "94",
+    "95": "95",
+    "96": "96",
+    "97": "97",
+    "98": "98",
+    "99": "99"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "a7a2f83023517e14144db9703914140656035f1833fadef05f56f9cdc3c269f8",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "f1073eef4bb4be5c447fea5d2c24857515b3da7d0b12a34286d487e70e9b712a",
+   "output_sha256": "927a010377540f12ceaafbb5c1d817c6510fecdc664c8c8106372e0a41f6984a",
+   "parameters": {
+    "capability": "terrain-cross-section",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafcrosssection_demo.csv",
+    "probe_file_sha256": "484b889ebed50593c4f676e4becb74d452bdfa99454a3e58e2380d78c14c9ecc",
+    "probe_type": "terrain-cross-section",
+    "side": "studio"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "server-builtin",
+    "producer": "studio",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  }
+ }
+}

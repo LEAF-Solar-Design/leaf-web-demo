@@ -1,0 +1,947 @@
+{
+ "schema": "leaf.solar-parity-receipt.v1",
+ "capability": "plane-of-array-irradiance",
+ "capability_version": "0",
+ "fixture": {
+  "id": "demo-probes",
+  "sha256": "f3a39cfbc91d57a059f54991cc7f5cd9aa55f578a15dd16e48c7c5595f92917a"
+ },
+ "plugin": {
+  "build": "LeafSolarDesign 2025 licensed 2026-09-23",
+  "state": "committed",
+  "receipt_sha256": "6996518f458e7ce4f0b3f9146ff56be62bef507804c46ada9f4929eb6168fda3"
+ },
+ "studio": {
+  "capability_version": "0",
+  "engine": "server-builtin"
+ },
+ "comparator": {
+  "name": "solar-w1-semantic",
+  "version": "1",
+  "verdict": "pass",
+  "diffs": []
+ },
+ "synthetic_fields": [
+  "plugin:before/recorded",
+  "plugin:changes/unrecorded",
+  "studio:before/recorded",
+  "studio:changes/unrecorded"
+ ],
+ "fallback_fields": [],
+ "synthetic_flagged": true,
+ "survived_reopen": true,
+ "produced_at": "2026-09-23T06:02:43Z",
+ "comparison": {
+  "schema": "leaf.solar-w1-comparison.v1",
+  "capability": "plane-of-array-irradiance",
+  "family": "exports",
+  "plugin": {
+   "after": {
+    "format": "csv",
+    "rows": [
+     {
+      "fields": {
+       "Direct": "900",
+       "Fixture": "F1_CLEAR_NOON",
+       "Global": "1005.083302491977",
+       "GroundDiffuse": "11.782032302755086",
+       "Model": "Isotropic",
+       "SkyDiffuse": "93.30127018922194"
+      },
+      "id": {
+       "entity_id": "1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 1005.083302491977
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "900",
+       "Fixture": "F1_CLEAR_NOON",
+       "Global": "1020.120664784501",
+       "GroundDiffuse": "11.782032302755086",
+       "Model": "HDKR",
+       "SkyDiffuse": "108.33863248174592"
+      },
+      "id": {
+       "entity_id": "2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 1020.120664784501
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "900",
+       "Fixture": "F1_CLEAR_NOON",
+       "Global": "1025.195881725198",
+       "GroundDiffuse": "11.782032302755086",
+       "Model": "Perez",
+       "SkyDiffuse": "113.41384942244291"
+      },
+      "id": {
+       "entity_id": "3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 1025.195881725198
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "0",
+       "Fixture": "F2_OVERCAST",
+       "Global": "283.92304845413264",
+       "GroundDiffuse": "4.019237886466839",
+       "Model": "Isotropic",
+       "SkyDiffuse": "279.9038105676658"
+      },
+      "id": {
+       "entity_id": "4"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 283.92304845413264
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "0",
+       "Fixture": "F2_OVERCAST",
+       "Global": "283.92304845413264",
+       "GroundDiffuse": "4.019237886466839",
+       "Model": "HDKR",
+       "SkyDiffuse": "279.9038105676658"
+      },
+      "id": {
+       "entity_id": "5"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 283.92304845413264
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "0",
+       "Fixture": "F2_OVERCAST",
+       "Global": "283.07013545677654",
+       "GroundDiffuse": "4.019237886466839",
+       "Model": "Perez",
+       "SkyDiffuse": "279.0508975703097"
+      },
+      "id": {
+       "entity_id": "6"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 283.07013545677654
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "60.15349327217415",
+       "Fixture": "F3_LOW_SUN",
+       "Global": "203.0455952787003",
+       "GroundDiffuse": "2.9401967226932215",
+       "Model": "Isotropic",
+       "SkyDiffuse": "139.9519052838329"
+      },
+      "id": {
+       "entity_id": "7"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 203.0455952787003
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "60.15349327217415",
+       "Fixture": "F3_LOW_SUN",
+       "Global": "200.95899333604504",
+       "GroundDiffuse": "2.9401967226932215",
+       "Model": "HDKR",
+       "SkyDiffuse": "137.86530334117765"
+      },
+      "id": {
+       "entity_id": "8"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 200.95899333604504
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "60.15349327217415",
+       "Fixture": "F3_LOW_SUN",
+       "Global": "199.7735131299871",
+       "GroundDiffuse": "2.9401967226932215",
+       "Model": "Perez",
+       "SkyDiffuse": "136.6798231351197"
+      },
+      "id": {
+       "entity_id": "9"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 199.7735131299871
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "636.3961030678927",
+       "Fixture": "F4_STEEP_TILT",
+       "Global": "764.5182030888118",
+       "GroundDiffuse": "65.18114776579307",
+       "Model": "Isotropic",
+       "SkyDiffuse": "62.940952255126035"
+      },
+      "id": {
+       "entity_id": "10"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 764.5182030888118
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "636.3961030678927",
+       "Fixture": "F4_STEEP_TILT",
+       "Global": "781.3821022267072",
+       "GroundDiffuse": "65.18114776579307",
+       "Model": "HDKR",
+       "SkyDiffuse": "79.80485139302142"
+      },
+      "id": {
+       "entity_id": "11"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 781.3821022267072
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "636.3961030678927",
+       "Fixture": "F4_STEEP_TILT",
+       "Global": "790.8396421955881",
+       "GroundDiffuse": "65.18114776579307",
+       "Model": "Perez",
+       "SkyDiffuse": "89.26239136190233"
+      },
+      "id": {
+       "entity_id": "12"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 790.8396421955881
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "472.3019739450659",
+       "Fixture": "F5_PARTLY",
+       "Global": "666.3207235223587",
+       "GroundDiffuse": "7.416209198848874",
+       "Model": "Isotropic",
+       "SkyDiffuse": "186.60254037844388"
+      },
+      "id": {
+       "entity_id": "13"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 666.3207235223587
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "472.3019739450659",
+       "Fixture": "F5_PARTLY",
+       "Global": "698.387921069365",
+       "GroundDiffuse": "7.416209198848874",
+       "Model": "HDKR",
+       "SkyDiffuse": "218.66973792545022"
+      },
+      "id": {
+       "entity_id": "14"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 698.387921069365
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "472.3019739450659",
+       "Fixture": "F5_PARTLY",
+       "Global": "719.8156634312566",
+       "GroundDiffuse": "7.416209198848874",
+       "Model": "Perez",
+       "SkyDiffuse": "240.09748028734177"
+      },
+      "id": {
+       "entity_id": "15"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 719.8156634312566
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "900",
+       "Fixture": "F6_DHI_ZERO",
+       "Global": "910.4422863405995",
+       "GroundDiffuse": "10.442286340599473",
+       "Model": "Isotropic",
+       "SkyDiffuse": "0"
+      },
+      "id": {
+       "entity_id": "16"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 910.4422863405995
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "900",
+       "Fixture": "F6_DHI_ZERO",
+       "Global": "910.4422863405995",
+       "GroundDiffuse": "10.442286340599473",
+       "Model": "HDKR",
+       "SkyDiffuse": "0"
+      },
+      "id": {
+       "entity_id": "17"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 910.4422863405995
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "900",
+       "Fixture": "F6_DHI_ZERO",
+       "Global": "910.4422863405995",
+       "GroundDiffuse": "10.442286340599473",
+       "Model": "Perez",
+       "SkyDiffuse": "0"
+      },
+      "id": {
+       "entity_id": "18"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 910.4422863405995
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "1": "1",
+    "10": "10",
+    "11": "11",
+    "12": "12",
+    "13": "13",
+    "14": "14",
+    "15": "15",
+    "16": "16",
+    "17": "17",
+    "18": "18",
+    "2": "2",
+    "3": "3",
+    "4": "4",
+    "5": "5",
+    "6": "6",
+    "7": "7",
+    "8": "8",
+    "9": "9"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "f3a39cfbc91d57a059f54991cc7f5cd9aa55f578a15dd16e48c7c5595f92917a",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "3b796f689c4b5dacfab655888d1cd63296af6b6c0d4773aa2fa384bd6ca11608",
+   "output_sha256": "e39be1ef5cf4fc3f8b5084b8162e01b89cd619809e0e1e5fab20ea9548a0a8e0",
+   "parameters": {
+    "capability": "plane-of-array-irradiance",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafpoa_demo.csv",
+    "probe_file_sha256": "604cd025df73fc9fa1f9f47be1c12b6073743da86eada50ae4d86bb8a0dfd70e",
+    "probe_type": "plane-of-array-irradiance",
+    "side": "plugin"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "none",
+    "producer": "plugin",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  },
+  "studio": {
+   "after": {
+    "format": "csv",
+    "rows": [
+     {
+      "fields": {
+       "Direct": "900",
+       "Fixture": "F1_CLEAR_NOON",
+       "Global": "1005.083302491977",
+       "GroundDiffuse": "11.782032302755086",
+       "Model": "Isotropic",
+       "SkyDiffuse": "93.30127018922194"
+      },
+      "id": {
+       "entity_id": "1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 1005.083302491977
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "900",
+       "Fixture": "F1_CLEAR_NOON",
+       "Global": "1020.120664784501",
+       "GroundDiffuse": "11.782032302755086",
+       "Model": "HDKR",
+       "SkyDiffuse": "108.33863248174592"
+      },
+      "id": {
+       "entity_id": "2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 1020.120664784501
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "900",
+       "Fixture": "F1_CLEAR_NOON",
+       "Global": "1025.195881725198",
+       "GroundDiffuse": "11.782032302755086",
+       "Model": "Perez",
+       "SkyDiffuse": "113.41384942244291"
+      },
+      "id": {
+       "entity_id": "3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 1025.195881725198
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "0",
+       "Fixture": "F2_OVERCAST",
+       "Global": "283.92304845413264",
+       "GroundDiffuse": "4.019237886466839",
+       "Model": "Isotropic",
+       "SkyDiffuse": "279.9038105676658"
+      },
+      "id": {
+       "entity_id": "4"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 283.92304845413264
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "0",
+       "Fixture": "F2_OVERCAST",
+       "Global": "283.92304845413264",
+       "GroundDiffuse": "4.019237886466839",
+       "Model": "HDKR",
+       "SkyDiffuse": "279.9038105676658"
+      },
+      "id": {
+       "entity_id": "5"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 283.92304845413264
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "0",
+       "Fixture": "F2_OVERCAST",
+       "Global": "283.07013545677654",
+       "GroundDiffuse": "4.019237886466839",
+       "Model": "Perez",
+       "SkyDiffuse": "279.0508975703097"
+      },
+      "id": {
+       "entity_id": "6"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 283.07013545677654
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "60.15349327217415",
+       "Fixture": "F3_LOW_SUN",
+       "Global": "203.0455952787003",
+       "GroundDiffuse": "2.9401967226932215",
+       "Model": "Isotropic",
+       "SkyDiffuse": "139.9519052838329"
+      },
+      "id": {
+       "entity_id": "7"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 203.0455952787003
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "60.15349327217415",
+       "Fixture": "F3_LOW_SUN",
+       "Global": "200.95899333604504",
+       "GroundDiffuse": "2.9401967226932215",
+       "Model": "HDKR",
+       "SkyDiffuse": "137.86530334117765"
+      },
+      "id": {
+       "entity_id": "8"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 200.95899333604504
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "60.15349327217415",
+       "Fixture": "F3_LOW_SUN",
+       "Global": "199.7735131299871",
+       "GroundDiffuse": "2.9401967226932215",
+       "Model": "Perez",
+       "SkyDiffuse": "136.6798231351197"
+      },
+      "id": {
+       "entity_id": "9"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 199.7735131299871
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "636.3961030678927",
+       "Fixture": "F4_STEEP_TILT",
+       "Global": "764.5182030888118",
+       "GroundDiffuse": "65.18114776579307",
+       "Model": "Isotropic",
+       "SkyDiffuse": "62.940952255126035"
+      },
+      "id": {
+       "entity_id": "10"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 764.5182030888118
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "636.3961030678927",
+       "Fixture": "F4_STEEP_TILT",
+       "Global": "781.3821022267072",
+       "GroundDiffuse": "65.18114776579307",
+       "Model": "HDKR",
+       "SkyDiffuse": "79.80485139302142"
+      },
+      "id": {
+       "entity_id": "11"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 781.3821022267072
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "636.3961030678927",
+       "Fixture": "F4_STEEP_TILT",
+       "Global": "790.8396421955881",
+       "GroundDiffuse": "65.18114776579307",
+       "Model": "Perez",
+       "SkyDiffuse": "89.26239136190233"
+      },
+      "id": {
+       "entity_id": "12"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 790.8396421955881
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "472.3019739450659",
+       "Fixture": "F5_PARTLY",
+       "Global": "666.3207235223587",
+       "GroundDiffuse": "7.416209198848874",
+       "Model": "Isotropic",
+       "SkyDiffuse": "186.60254037844388"
+      },
+      "id": {
+       "entity_id": "13"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 666.3207235223587
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "472.3019739450659",
+       "Fixture": "F5_PARTLY",
+       "Global": "698.387921069365",
+       "GroundDiffuse": "7.416209198848874",
+       "Model": "HDKR",
+       "SkyDiffuse": "218.66973792545022"
+      },
+      "id": {
+       "entity_id": "14"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 698.387921069365
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "472.3019739450659",
+       "Fixture": "F5_PARTLY",
+       "Global": "719.8156634312566",
+       "GroundDiffuse": "7.416209198848874",
+       "Model": "Perez",
+       "SkyDiffuse": "240.09748028734177"
+      },
+      "id": {
+       "entity_id": "15"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 719.8156634312566
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "900",
+       "Fixture": "F6_DHI_ZERO",
+       "Global": "910.4422863405995",
+       "GroundDiffuse": "10.442286340599473",
+       "Model": "Isotropic",
+       "SkyDiffuse": "0"
+      },
+      "id": {
+       "entity_id": "16"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 910.4422863405995
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "900",
+       "Fixture": "F6_DHI_ZERO",
+       "Global": "910.4422863405995",
+       "GroundDiffuse": "10.442286340599473",
+       "Model": "HDKR",
+       "SkyDiffuse": "0"
+      },
+      "id": {
+       "entity_id": "17"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 910.4422863405995
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     },
+     {
+      "fields": {
+       "Direct": "900",
+       "Fixture": "F6_DHI_ZERO",
+       "Global": "910.4422863405995",
+       "GroundDiffuse": "10.442286340599473",
+       "Model": "Perez",
+       "SkyDiffuse": "0"
+      },
+      "id": {
+       "entity_id": "18"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "W/m2",
+       "value": 910.4422863405995
+      },
+      "type": "plane-of-array-irradiance",
+      "unit": "W/m2"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "1": "1",
+    "10": "10",
+    "11": "11",
+    "12": "12",
+    "13": "13",
+    "14": "14",
+    "15": "15",
+    "16": "16",
+    "17": "17",
+    "18": "18",
+    "2": "2",
+    "3": "3",
+    "4": "4",
+    "5": "5",
+    "6": "6",
+    "7": "7",
+    "8": "8",
+    "9": "9"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "f3a39cfbc91d57a059f54991cc7f5cd9aa55f578a15dd16e48c7c5595f92917a",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "3b796f689c4b5dacfab655888d1cd63296af6b6c0d4773aa2fa384bd6ca11608",
+   "output_sha256": "e39be1ef5cf4fc3f8b5084b8162e01b89cd619809e0e1e5fab20ea9548a0a8e0",
+   "parameters": {
+    "capability": "plane-of-array-irradiance",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafpoa_demo.csv",
+    "probe_file_sha256": "604cd025df73fc9fa1f9f47be1c12b6073743da86eada50ae4d86bb8a0dfd70e",
+    "probe_type": "plane-of-array-irradiance",
+    "side": "studio"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "server-builtin",
+    "producer": "studio",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  }
+ }
+}
