@@ -78,6 +78,20 @@ def values(points):
     return [p["value"] for p in points]
 
 
+def text_of(row):
+    """G21: a file row's normalized text is its chunks concatenated."""
+    assert "text" not in row
+    return "".join(row["chunks"])
+
+
+def assert_g21_chunks(chunks):
+    """G21: a non-empty list of strings, each at most 16,000 characters, every one but the
+    last ending in a line feed."""
+    assert isinstance(chunks, list) and chunks and all(isinstance(c, str) for c in chunks)
+    assert all(len(c) <= 16000 for c in chunks)
+    assert all(c.endswith("\n") for c in chunks[:-1])
+
+
 # ------------------------------------------------------------ synthetic rows --
 
 def test_every_owned_step_emits_its_g20_rows(rows):
@@ -107,13 +121,15 @@ def test_a1_slope_map_is_one_row_over_studios_own_grid(rows):
 def test_a2_file_row_is_the_csv_text_normalized(rows):
     row = one(rows["a2"], "file")
     assert (row["id"], row["role"]) == ("file-1", "terrain-csv")
-    assert "\r" not in row["text"] and not row["text"].startswith("﻿")
-    lines = row["text"].split("\n")
+    assert_g21_chunks(row["chunks"])
+    text = text_of(row)
+    assert "\r" not in text and not text.startswith("﻿")
+    lines = text.split("\n")
     assert lines[0] == "X,Y,Z" and lines[-1] == ""
     assert row["lines"] == 45 * 150 + 1 == len(lines) - 1
     grid = ev.terrain_state(terrain_intake())["grid"]
     raw = analysis.terrain_csv_file_bytes(grid, 1.0)
-    assert raw == analysis.UTF8_BOM + row["text"].replace("\n", "\r\n").encode("utf-8")
+    assert raw == analysis.UTF8_BOM + text.replace("\n", "\r\n").encode("utf-8")
 
 
 def test_a10_grade_pad_and_the_grading_setting(rows):
@@ -220,20 +236,44 @@ def test_rows_are_emitted_in_type_then_number_order(rows):
 def test_a_small_csv_builds_a_file_document():
     state = small_state()
     rows_ = ev.step_rows("a2", state, terrain_intake())
-    assert rows_[0]["text"] == ("X,Y,Z\n0.000,0.000,1.000\n100.000,0.000,2.000\n200.000,0.000,3.000\n"
-                                "0.000,100.000,4.000\n100.000,100.000,5.000\n200.000,100.000,6.000\n")
+    assert rows_[0]["chunks"] == ["X,Y,Z\n0.000,0.000,1.000\n100.000,0.000,2.000\n200.000,0.000,3.000\n"
+                                  "0.000,100.000,4.000\n100.000,100.000,5.000\n200.000,100.000,6.000\n"]
     assert rows_[0]["lines"] == 7
     doc = ev.build_document(terrain_intake(), "a2", rows_, REVISION)
     assert compare.compare(doc, doc, "exports", capability="terrain-csv-export")["verdict"] == "pass"
 
 
-def test_a_csv_over_the_comparator_string_bound_is_refused_by_name(rows):
-    assert len(one(rows["a2"], "file")["text"]) > ev.COMPARATOR_MAX_STRING
-    with pytest.raises(ev.EvidenceError, match="16384"):
-        ev.build_document(terrain_intake(), "a2", rows["a2"], REVISION)
+def test_a_csv_over_the_comparator_string_bound_builds_in_chunks(rows):
+    row = one(rows["a2"], "file")
+    text = text_of(row)
+    assert len(text) > ev.COMPARATOR_MAX_STRING and len(row["chunks"]) > 1
+    assert_g21_chunks(row["chunks"])
+    doc = ev.build_document(terrain_intake(), "a2", rows["a2"], REVISION)
+    assert "".join(one(doc["after"]["rows"], "file")["chunks"]) == text
+    assert compare.compare(doc, doc, "exports", capability="terrain-csv-export")["verdict"] == "pass"
     docs = ev.run_documents(terrain_intake(), REVISION)
-    assert isinstance(docs["a2"], ev.EvidenceError)
-    assert all(isinstance(docs[s], dict) for s in ("a1", "a10", "a12"))
+    assert all(isinstance(docs[s], dict) for s in ev.STEP_IDS)
+
+
+def test_a_file_chunk_over_the_comparator_string_bound_is_refused_by_name():
+    row = ev.file_row(1, "terrain-csv", b"X,Y,Z\n")
+    row["chunks"] = ["x" * (ev.COMPARATOR_MAX_STRING + 1)]
+    with pytest.raises(ev.EvidenceError, match="16384"):
+        ev.build_document(terrain_intake(), "a2", [row], REVISION)
+
+
+def test_file_rows_split_only_after_line_feeds_and_refuse_a_long_line():
+    text = "".join(f"{i:07d},{'y' * 90}\n" for i in range(400))   # 39,600 characters
+    row = ev.file_row(1, "terrain-csv", ev.analysis.UTF8_BOM + text.replace("\n", "\r\n").encode("utf-8"))
+    assert_g21_chunks(row["chunks"])
+    assert text_of(row) == text and row["lines"] == 400
+    assert ev.file_row(1, "terrain-csv", b"")["chunks"] == [""]
+    assert ev.file_row(1, "terrain-csv", b"x" * 16000)["chunks"] == ["x" * 16000]
+    with pytest.raises(ev.EvidenceError, match="16000"):
+        ev.file_row(1, "terrain-csv", b"X\n" + b"x" * 16001 + b"\n")
+    # U+2028 is a str.splitlines boundary but not a line feed: the line stays whole.
+    with pytest.raises(ev.EvidenceError, match="16000"):
+        ev.file_row(1, "terrain-csv", ("x" * 9000 + " " + "y" * 9000 + "\n").encode("utf-8"))
 
 
 def test_build_document_refuses_a_bad_revision(rows):
@@ -252,7 +292,7 @@ def test_cli_refuses_an_untracked_intake(tmp_path):
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="needs a git executable to commit the intake")
-def test_cli_writes_the_documents_it_can_and_names_the_refusal(tmp_path, capsys):
+def test_cli_writes_every_document(tmp_path, capsys):
     repo = tmp_path / "repo"
     repo.mkdir()
     intake = repo / "intake.json"
@@ -271,9 +311,12 @@ def test_cli_writes_the_documents_it_can_and_names_the_refusal(tmp_path, capsys)
     a1 = json.loads((one_step / "a1.json").read_text(encoding="utf-8"))
     assert len(a1["revision"]) == 40 and a1["fixture_sha256"] == compare.semantic_hash(terrain_intake())
     out = tmp_path / "out"
-    assert ev.main(["--intake", str(intake), "--out-dir", str(out)]) == 2
-    assert sorted(p.name for p in out.iterdir()) == ["a1.json", "a10.json", "a12.json"]
-    assert "16384" in capsys.readouterr().err
+    assert ev.main(["--intake", str(intake), "--out-dir", str(out)]) == 0
+    assert sorted(p.name for p in out.iterdir()) == ["a1.json", "a10.json", "a12.json", "a2.json"]
+    assert capsys.readouterr().err == ""
+    a2 = json.loads((out / "a2.json").read_text(encoding="utf-8"))
+    [row] = a2["after"]["rows"]
+    assert_g21_chunks(row["chunks"])
 
 
 # ---------------------------------------------------- the terrain fixture --
@@ -288,7 +331,8 @@ def test_fixture_a1_reproduces_the_captured_slope_counts(fixture_rows):
 def test_fixture_a2_reproduces_the_licensed_csv_byte_for_byte(fixture_rows):
     row = one(fixture_rows["a2"], "file")
     assert row["lines"] == 13501
-    raw = analysis.UTF8_BOM + row["text"].replace("\n", "\r\n").encode("utf-8")
+    assert_g21_chunks(row["chunks"])
+    raw = analysis.UTF8_BOM + text_of(row).replace("\n", "\r\n").encode("utf-8")
     assert hashlib.sha256(raw).hexdigest() == A2_CSV_SHA256
 
 
@@ -308,8 +352,23 @@ def test_fixture_a12_colours_all_700_faces_green(fixture_rows):
 
 def test_fixture_documents_fit_the_comparator(fixture_rows):
     intake = json.loads(FIXTURE.read_text(encoding="utf-8"))
-    for step_id in ("a1", "a10", "a12"):
+    for step_id in ("a1", "a2", "a10", "a12"):
         doc = ev.build_document(intake, step_id, fixture_rows[step_id], REVISION)
         assert compare.compare(doc, doc, "exports", capability=doc["provenance"]["capability"])["verdict"] == "pass"
-    with pytest.raises(ev.EvidenceError, match="16384"):
-        ev.build_document(intake, "a2", fixture_rows["a2"], REVISION)
+
+
+def test_fixture_a2_document_carries_the_whole_csv_in_chunks(fixture_rows):
+    """G21: the a2 text (13,501 lines, many times the comparator's string bound), once
+    refused, now builds; its chunks rebuild the exact normalized text and every string
+    fits the comparator's own bound."""
+    intake = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    text = text_of(one(fixture_rows["a2"], "file"))
+    assert len(text) > 10 * ev.COMPARATOR_MAX_STRING
+    doc = ev.build_document(intake, "a2", fixture_rows["a2"], REVISION)
+    [row] = doc["after"]["rows"]
+    assert_g21_chunks(row["chunks"])
+    assert "".join(row["chunks"]) == text
+    assert all(len(c) <= ev.COMPARATOR_MAX_STRING for c in row["chunks"])
+    compare.validate_evidence(doc, "exports")
+    assert doc["output_sha256"] == compare.semantic_hash(doc["after"])
+    assert len(json.dumps(doc).encode("utf-8")) <= compare.MAX_BYTES

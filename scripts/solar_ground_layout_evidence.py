@@ -26,7 +26,7 @@ Evidence, family `exports`, after = {rows, source_revision: <step id>, format:
   tracker-row   block, insert ([x, y]), rotation (deg), scale_x, scale_y (lengths),
                 row_index, slots, axis_start, axis_end ([x, y]), cross_axis_width
                 (length), source_command, tracker_model; ids in (row_index, slots) order.
-  setback-ring  kind (array | fence | collection), vertices ([x, y] points from the
+  setback-ring  setback_kind (array | fence | collection; G21), vertices ([x, y] points from the
                 smallest rounded (y, x), counter-clockwise), distance (length); ids in
                 ascending (centroid y, centroid x) order.
 Rows are emitted sorted by type, then by id order within the type (G9).
@@ -139,7 +139,7 @@ def tracker_rows(placements):
 def setback_rows(kind, distance, rings):
     ordered = sorted(rings, key=lambda ring: producer._key(*producer._centroid(ring)))
     return [{"id": f"setback-ring-{n}", "type": "setback-ring", "quantity": 1, "unit": "each",
-             "kind": kind, "vertices": [producer.point(p) for p in producer.canonical_corners(ring)],
+             "setback_kind": kind, "vertices": [producer.point(p) for p in producer.canonical_corners(ring)],
              "distance": _length(distance)}
             for n, ring in enumerate(ordered, 1)]
 

@@ -17,17 +17,38 @@ Rows (family exports, G12/G17/G20; every row {id, type, quantity: 1, unit: "each
   array   key, centre (point), modules_x, modules_y, orientation, module_w, module_h,
           spacing_x, spacing_y (lengths), tilt, azimuth (angles, deg), size_x, size_y
           (lengths), outline (four points, G12 rotation); ids array-<n> ordered by key
-  file    role (scene-dae | scene-pvc), text (LF line ends, no BOM, the DAE's <created> and
-          <modified> contents emptied), lines; ids file-<n> ordered by role
+  file    role (scene-dae | scene-pvc), chunks (G21: the text with LF line ends, no BOM, the
+          DAE's <created> and <modified> contents emptied, split after line feeds into strings
+          of at most 16,000 characters), lines; ids file-<n> ordered by role
   removed of "array", count
   unexpected-change   a read-only step whose committed state changed (G20, a6)
 a5 emits the array it adds, a6 the arrays it reports, a7 the two files, a13 the removal.
 Parameters are the terrain producer's plus `answers`, the step's ordered non-default answers.
 
-Fails closed: a malformed intake or state, an unknown step, a file text over the
-comparator's string bound, or a document the comparator refuses is a named error.
+Fails closed: a malformed intake or state, an unknown step, a file line over the G21
+chunk bound, or a document the comparator refuses is a named error.
 """
 from __future__ import annotations
+
+def g21_chunks(text, limit=16000):
+    """G21: split normalized file text only after line feeds ("\\n", never the other
+    str.splitlines boundaries) into strings of at most `limit` characters that concatenate
+    to the text; a single line longer than `limit` refuses. One linear pass."""
+    lines = text.split("\n")
+    pieces = [line + "\n" for line in lines[:-1]] + ([lines[-1]] if lines[-1] else [])
+    chunks, current, size = [], [], 0
+    for piece in pieces:
+        if len(piece) > limit:
+            raise ValueError(f"a single line of {len(piece)} characters exceeds the G21 chunk limit {limit}")
+        if size + len(piece) > limit:
+            chunks.append("".join(current))
+            current, size = [], 0
+        current.append(piece)
+        size += len(piece)
+    if current or not chunks:
+        chunks.append("".join(current))
+    return chunks
+
 
 import argparse
 import importlib.util
@@ -66,7 +87,7 @@ ANSWERS = {"a5": ("250", "250"), "a6": (), "a7": (), "a13": ("array_0",)}
 # The LEAFDEFINEARRAY prompts a5's answers fill, in prompt order (the centre X and Y).
 DEFINE_ANSWERED = ("centre_x", "centre_y")
 FILE_ROLES = ("scene-dae", "scene-pvc")
-MAX_FILE_TEXT = 16384            # the comparator's string bound (solar_w1_compare._bounded)
+MAX_CHUNK = 16000                # G21: a file chunk's bound, under the comparator's 16384 (solar_w1_compare._bounded)
 ANGLE_UNIT = "deg"
 _STAMP = re.compile(r"<(created|modified)>[^<]*</\1>|<(created|modified) />")
 
@@ -161,10 +182,12 @@ def file_rows(files):
     rows = []
     for n, role in enumerate(sorted(files), 1):
         text = normalize_file_text(files[role], role)
-        if len(text) > MAX_FILE_TEXT:
-            raise EvidenceError(f"the {role} text is {len(text)} characters; a row holds at most {MAX_FILE_TEXT}")
+        try:
+            chunks = g21_chunks(text, MAX_CHUNK)
+        except ValueError as exc:
+            raise EvidenceError(f"the {role} file is refused: {exc}") from None
         rows.append({"id": f"file-{n}", "type": "file", "quantity": 1, "unit": "each",
-                     "role": role, "text": text, "lines": line_count(text)})
+                     "role": role, "chunks": chunks, "lines": line_count(text)})
     return rows
 
 

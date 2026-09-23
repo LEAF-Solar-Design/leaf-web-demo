@@ -20,7 +20,8 @@ unchanged. Nothing here reads plugin output.
 Rows (G12/G17 conventions: one point per coordinate, lengths in m, ids <type>-<n>):
   slope-map      rows, cols, extent {min, max}, cell_colors (row-major, one ACI per cell:
                  LEAFSLOPE colours its solids by index, never by true colour)
-  file           role, text (the file's text, BOM removed, line endings LF), lines
+  file           role, chunks (G21: the file's text, BOM removed, line endings LF, split
+                 after line feeds into strings of at most 16,000 characters), lines
   grade-pad      boundary (points, G12 rotation), elevation (length), label (text),
                  label_at (point)
   setting        id setting-<name>, name, value (a length when the name ends in M, an
@@ -42,6 +43,26 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+
+
+def g21_chunks(text, limit=16000):
+    """G21: split normalized file text only after line feeds ("\\n", never the other
+    str.splitlines boundaries) into strings of at most `limit` characters that concatenate
+    to the text; a single line longer than `limit` refuses. One linear pass."""
+    lines = text.split("\n")
+    pieces = [line + "\n" for line in lines[:-1]] + ([lines[-1]] if lines[-1] else [])
+    chunks, current, size = [], [], 0
+    for piece in pieces:
+        if len(piece) > limit:
+            raise ValueError(f"a single line of {len(piece)} characters exceeds the G21 chunk limit {limit}")
+        if size + len(piece) > limit:
+            chunks.append("".join(current))
+            current, size = [], 0
+        current.append(piece)
+        size += len(piece)
+    if current or not chunks:
+        chunks.append("".join(current))
+    return chunks
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -132,7 +153,11 @@ def normalize_file_text(raw):
 def file_row(n, role, raw):
     text = normalize_file_text(raw)
     lines = text.count("\n") + (1 if text and not text.endswith("\n") else 0)
-    return _row(f"file-{n}", "file", role=role, text=text, lines=lines)
+    try:
+        chunks = g21_chunks(text)
+    except ValueError as exc:
+        raise EvidenceError(f"the {role} file is refused: {exc}") from None
+    return _row(f"file-{n}", "file", role=role, chunks=chunks, lines=lines)
 
 
 def grade_pad_row(n, result):
@@ -253,11 +278,10 @@ def build_document(intake, step_id, rows, revision):
     if not isinstance(revision, str) or len(revision) != 40 or any(c not in "0123456789abcdef" for c in revision):
         raise EvidenceError("revision must be a 40-character lowercase git commit")
     for row in rows:
-        if row["type"] == "file" and len(row["text"]) > COMPARATOR_MAX_STRING:
+        if row["type"] == "file" and any(len(c) > COMPARATOR_MAX_STRING for c in row["chunks"]):
             raise EvidenceError(
-                f"step {step_id} evidence refused: its {row['role']} file text is {len(row['text'])} "
-                f"characters and the frozen comparator bounds a string at {COMPARATOR_MAX_STRING}; "
-                "G20's single-string `text` needs a contract amendment to carry it")
+                f"step {step_id} evidence refused: a {row['role']} chunk exceeds "
+                f"the frozen comparator's string bound of {COMPARATOR_MAX_STRING} characters")
     rows = sorted(rows, key=_row_order)
     parameters = parameters_for(intake, step_id)
     after = {"rows": [dict(row, id={"entity_id": row["id"]}) for row in rows],

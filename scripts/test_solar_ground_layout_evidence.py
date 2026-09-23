@@ -144,9 +144,21 @@ def test_a11_setback_ring_on_the_site_boundary():
     rows = ev.step_rows("a11", {}, {"boundary": deepcopy(SITE)})
     assert len(rows) == 1
     ring = rows[0]
-    assert (ring["id"], ring["type"], ring["kind"]) == ("setback-ring-1", "setback-ring", "array")
+    assert (ring["id"], ring["type"], ring["setback_kind"]) == ("setback-ring-1", "setback-ring", "array")
+    # G21: no row field is named `kind`, which the comparator reads as a quantity.
+    assert "kind" not in ring
     assert [v["value"] for v in ring["vertices"]] == [[5.0, 5.0], [495.0, 5.0], [495.0, 295.0], [5.0, 295.0]]
     assert ring["distance"] == {"kind": "length", "value": 5.0, "unit": "m"}
+
+
+def test_a11_setback_ring_document_passes_the_comparator():
+    intake = dict(terrain_intake(), boundary=deepcopy(SITE))
+    rows = ev.step_rows("a11", {}, intake)
+    doc = ev.build_document(intake, "a11", rows, REVISION)
+    [ring] = rows_of(doc, "setback-ring")
+    assert ring["setback_kind"] == "array"
+    result = compare.compare(doc, doc, "exports", capability="setback-boundary")
+    assert result["verdict"] == "pass", result["diffs"]
 
 
 def test_tracker_rows_order_by_row_index_then_slots():

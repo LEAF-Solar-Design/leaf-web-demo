@@ -68,6 +68,14 @@ def rows_of(doc, row_type=None):
     return [r for r in doc["after"]["rows"] if row_type is None or r["type"] == row_type]
 
 
+def assert_g21_chunks(chunks):
+    """G21: a non-empty list of strings, each at most 16,000 characters, every one but the
+    last ending in a line feed."""
+    assert isinstance(chunks, list) and chunks and all(isinstance(c, str) for c in chunks)
+    assert all(len(c) <= 16000 for c in chunks)
+    assert all(c.endswith("\n") for c in chunks[:-1])
+
+
 def a5_state():
     """Studio's t1 state of the synthetic intake with the a5 array defined."""
     intake = terrain_intake()
@@ -127,10 +135,14 @@ def test_a7_writes_one_file_row_per_role_normalized(run):
     assert (dae["id"], dae["role"], pvc["id"], pvc["role"]) == \
         ({"entity_id": "file-1"}, "scene-dae", {"entity_id": "file-2"}, "scene-pvc")
     for row in (dae, pvc):
-        assert "\r" not in row["text"] and not row["text"].startswith("﻿")
-        assert row["lines"] == row["text"].count("\n") + 1
-    assert "<created></created>" in dae["text"] and "<modified></modified>" in dae["text"]
-    assert '<geometry id="Frame0">' in pvc["text"] and '<geometry id="ground">' in dae["text"]
+        assert "text" not in row
+        assert_g21_chunks(row["chunks"])
+        text = "".join(row["chunks"])
+        assert "\r" not in text and not text.startswith("﻿")
+        assert row["lines"] == text.count("\n") + 1
+    dae_text, pvc_text = "".join(dae["chunks"]), "".join(pvc["chunks"])
+    assert "<created></created>" in dae_text and "<modified></modified>" in dae_text
+    assert '<geometry id="Frame0">' in pvc_text and '<geometry id="ground">' in dae_text
 
 
 def test_a13_removes_the_array_and_its_outline(run):
@@ -165,10 +177,36 @@ def test_line_count_counts_a_last_line_without_a_newline():
     assert (sev.line_count(""), sev.line_count("a"), sev.line_count("a\n"), sev.line_count("a\nb")) == (0, 1, 1, 2)
 
 
-def test_file_text_over_the_comparator_string_bound_is_refused():
-    assert sev.file_rows({"scene-pvc": "x" * sev.MAX_FILE_TEXT})[0]["lines"] == 1
-    with pytest.raises(sev.EvidenceError):
-        sev.file_rows({"scene-pvc": "x" * (sev.MAX_FILE_TEXT + 1)})
+def test_a_file_over_the_comparator_string_bound_is_carried_in_chunks():
+    line = "x" * 99 + "\n"
+    text = line * 400                      # 40,000 characters, over the comparator's 16384
+    (row,) = sev.file_rows({"scene-pvc": text})
+    assert "text" not in row and row["lines"] == 400
+    assert_g21_chunks(row["chunks"])
+    assert "".join(row["chunks"]) == text and len(row["chunks"]) == 3
+    assert [len(c) for c in row["chunks"]] == [16000, 16000, 8000]
+
+
+def test_a_single_line_over_the_chunk_bound_is_refused():
+    (row,) = sev.file_rows({"scene-pvc": "x" * sev.MAX_CHUNK})
+    assert row["chunks"] == ["x" * sev.MAX_CHUNK] and row["lines"] == 1
+    with pytest.raises(sev.EvidenceError, match="16000"):
+        sev.file_rows({"scene-pvc": "x" * (sev.MAX_CHUNK + 1)})
+    with pytest.raises(sev.EvidenceError, match="16000"):
+        sev.file_rows({"scene-pvc": "a\n" + "x" * (sev.MAX_CHUNK + 1) + "\nb\n"})
+
+
+def test_g21_chunks_split_only_after_line_feeds():
+    assert sev.g21_chunks("") == [""]
+    assert sev.g21_chunks("a\nb") == ["a\nb"]
+    assert sev.g21_chunks("ab\ncd\nef", limit=5) == ["ab\n", "cd\nef"]
+    # Form feeds and U+2028 are not line feeds: a line holding them is still one line.
+    with pytest.raises(ValueError):
+        sev.g21_chunks("x" * 9000 + " " + "y" * 9000 + "\n")
+    first, second = "a" * 5000 + "\n", "p" * 5000 + "\x0c" + "q" * 7000 + "\n"
+    chunks = sev.g21_chunks(first + second)
+    assert chunks == [first, second]
+    assert_g21_chunks(chunks)
 
 
 # --------------------------------------------------------- documents --
@@ -236,4 +274,6 @@ def test_a7_file_rows_from_the_committed_intake_match_the_plugin():
     assert [r["role"] for r in rows] == ["scene-dae", "scene-pvc"]
     for row in rows:
         assert row["lines"] == A7_LINES[row["role"]]
-        assert hashlib.sha256(row["text"].encode("utf-8")).hexdigest() == A7_SHA256[row["role"]], row["role"]
+        assert_g21_chunks(row["chunks"])
+        text = "".join(row["chunks"])
+        assert hashlib.sha256(text.encode("utf-8")).hexdigest() == A7_SHA256[row["role"]], row["role"]
