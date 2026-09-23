@@ -68,7 +68,9 @@ test('SSD1-24B canvas selection: Shift adds, Shift again removes, a blank click 
   await expect(start).toHaveText('0.00, 20.00')
   await shiftClickWorld(5, 0)
   await expect(setCount).toHaveText('2 objects selected')
-  await clickWorld(5, 50)
+  // The view fits the two lines with a 1.08 margin, so a point far beyond y=20 sits under
+  // the chrome; (5,10) is on the drawing and ten units from either line.
+  await clickWorld(5, 10)
   await expect(setCount).toHaveCount(0)
   await expect(engineProps).toHaveCount(0)
   await expect(geometry).toHaveCount(0)
