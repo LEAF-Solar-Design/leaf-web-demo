@@ -498,8 +498,12 @@ def test_committed_intake_runs_every_engine(intake):
     strings = {s["handle"]: chain.validate_string(s) for s in intake["strings"]}
     assert len(strings) == len(intake["strings"])
     assert all(set(s["label"]) == LABEL_FIELDS for s in strings.values())
+    # G29: every group carries its outlines, each a closed ring of [x, y] points.
+    for raw in intake["panel_groups"]:
+        assert set(raw) == {"handle", "name", "outlines"} and raw["outlines"], raw["handle"]
+        assert all(len(o) >= 3 and all(len(p) == 2 for p in o) for o in raw["outlines"]), raw["handle"]
     groups = chain.validate_panel_groups(intake["panel_groups"])
-    assert all(set(g) == {"handle", "name"} for g in groups)
+    assert all(set(g) == {"handle", "name", "outlines"} and g["outlines"] for g in groups)
 
     # c1: the flip reverses A67A's panels and trades its markers' positions.
     before = strings["A67A"]
@@ -532,11 +536,18 @@ def test_committed_intake_runs_every_engine(intake):
                                          ["1.134", "2.278", "0.025", "0.03", "1", "12.5", "185", "0.6", "ACME", "P440"])
     assert saved["orientation"] == 1 and saved["product"] == "P440"
 
-    # c10: every group is listed, sorted by name; with no outlines no string end lies in one.
+    # c10: every group is listed, sorted by name; both strings' ends lie in Group 11's outlines.
     text = chain.string_data(intake["panel_groups"], [strings["A912"], strings["A90E"]])
     data = json.loads(text)
     assert [g["name"] for g in data["groups"]][:4] == ["Group 1", "Group 10", "Group 11", "Group 2"]
     assert len(data["groups"]) == len(groups) and "\r\n" in text
+    assert [(g["handle"], [s["handle"] for s in g["strings"]]) for g in data["groups"] if g["strings"]] == \
+        [("A646", ["A912", "A90E"])]
+    assert data["groups"][2]["strings"] == [
+        {"handle": "A912", "startPoint": {"handle": "A913", "coordinate": "15993.47,3179.76"},
+         "endPoint": {"handle": "A914", "coordinate": "16920.47,3179.76"}},
+        {"handle": "A90E", "startPoint": {"handle": "A90F", "coordinate": "15993.47,3237.56"},
+         "endPoint": {"handle": "A910", "coordinate": "16920.47,3237.56"}}]
 
     # c11: every string counts once and, with no vertices, keeps its association.
     rebuilt, count = chain.string_rebuild(list(strings.values()))
