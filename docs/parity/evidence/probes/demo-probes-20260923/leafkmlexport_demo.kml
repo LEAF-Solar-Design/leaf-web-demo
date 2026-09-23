@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>LEAFKMLEXPORTDEMO</name>
+    <Placemark>
+      <name>Site Boundary</name>
+      <Polygon>
+        <outerBoundaryIs>
+          <LinearRing>
+            <coordinates>-105.0005880213015,39.999549549549549 -104.9994119786985,39.999549549549549 -104.9994119786985,40.000450450450451 -105.0005880213015,40.000450450450451 -105.0005880213015,39.999549549549549</coordinates>
+          </LinearRing>
+        </outerBoundaryIs>
+      </Polygon>
+    </Placemark>
+    <Placemark>
+      <name>Tracker Row 1</name>
+      <Polygon>
+        <outerBoundaryIs>
+          <LinearRing>
+            <coordinates>-105.00005880213016,40.000175675675678 -104.99994119786984,40.000175675675678 -104.99994119786984,40.000184684684683 -105.00005880213016,40.000184684684683 -105.00005880213016,40.000175675675678</coordinates>
+          </LinearRing>
+        </outerBoundaryIs>
+      </Polygon>
+    </Placemark>
+    <Placemark>
+      <name>Tracker Row 2</name>
+      <Polygon>
+        <outerBoundaryIs>
+          <LinearRing>
+            <coordinates>-105.00005880213016,39.999815315315317 -104.99994119786984,39.999815315315317 -104.99994119786984,39.999824324324322 -105.00005880213016,39.999824324324322 -105.00005880213016,39.999815315315317</coordinates>
+          </LinearRing>
+        </outerBoundaryIs>
+      </Polygon>
+    </Placemark>
+  </Document>
+</kml>

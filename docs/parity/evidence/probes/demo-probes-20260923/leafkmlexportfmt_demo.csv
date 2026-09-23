@@ -1,0 +1,14 @@
+Fixture,KmlFile,CenterLat,CenterLon,Error
+F1_ALT_ZERO_OMIT,leafkmlexportfmt_demo_F1_ALT_ZERO_OMIT.xml,,,
+F2_ALT_NONZERO,leafkmlexportfmt_demo_F2_ALT_NONZERO.xml,,,
+F3_MIXED_ALT,leafkmlexportfmt_demo_F3_MIXED_ALT.xml,,,
+F4_EXPLICIT_CLOSED,leafkmlexportfmt_demo_F4_EXPLICIT_CLOSED.xml,,,
+F5_IMPLICIT_OPEN,leafkmlexportfmt_demo_F5_IMPLICIT_OPEN.xml,,,
+F6_PROJECTED_ROUNDTRIP,leafkmlexportfmt_demo_F6_PROJECTED_ROUNDTRIP.xml,40,-105,
+F7_NO_DOC_NAME,leafkmlexportfmt_demo_F7_NO_DOC_NAME.xml,,,
+F8_NO_PM_NAME,leafkmlexportfmt_demo_F8_NO_PM_NAME.xml,,,
+F9_NULL_POLYGON_SKIP,leafkmlexportfmt_demo_F9_NULL_POLYGON_SKIP.xml,,,
+F10_G17_PRECISION,leafkmlexportfmt_demo_F10_G17_PRECISION.xml,,,
+F11_IS_CLOSED_EPS,leafkmlexportfmt_demo_F11_IS_CLOSED_EPS.xml,,,
+F12_UTF8_DECL,leafkmlexportfmt_demo_F12_UTF8_DECL.xml,,,
+F13_POLE_GUARD,,,,centerLatDeg too close to ±90° (pole) — longitude degenerate. (Parameter 'centerLatDeg')

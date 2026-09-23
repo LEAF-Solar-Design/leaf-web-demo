@@ -44,6 +44,17 @@ What the rules mean here:
       reader refuses a workbook whose sheets are not exactly that list, so the
       format string is a checked claim rather than a label. READERS below stays
       the single extension point and an unknown format still fails closed.
+      An XML or KML document is ONE probe: one row per file, keyed by the file
+      NAME, with the file's canonical text carried verbatim under `fields` as
+      its list of lines. Canonical means exactly two normalizations, both
+      encoding rather than content: a leading byte order mark is dropped and
+      CRLF becomes LF, so the lines compare byte-exact and nothing else moves.
+      The text is a list because the comparator bounds any one string, and a
+      LandXML surface is far longer than that bound while none of its lines
+      is. The document is parsed through server/solar_geo_formats.py's safe
+      reader (no DTD, no entities, bounded size), its root element is CHECKED
+      against the kind the format names, and `quantity` is a structural count
+      the format names: KML placemarks, LandXML faces.
 
 Two contract details that the frozen comparator, not this module, decides:
 
@@ -114,6 +125,10 @@ compare = _sibling("solar_w1_compare")
 # writes these workbooks does, and both halves must read cells the same way.
 xlsx = _by_path("solar_xlsx",
                 Path(__file__).resolve().parents[1] / "server" / "solar_xlsx.py")
+# The hardened XML reader. It lives with the KML and LandXML ports so the probe
+# files and the importers under test are parsed by the same refusal rules.
+geo = _by_path("solar_geo_formats",
+               Path(__file__).resolve().parents[1] / "server" / "solar_geo_formats.py")
 
 
 class Section:
@@ -162,6 +177,13 @@ class ProbeSpec:
 XLSX_BOM_SHEETS = ("Overview", "By Area", "Modules", "Cable Tray", "Layout",
                    "Electrical", "Piling")
 XLSX_BOM_FORMAT = "xlsx:" + "|".join(XLSX_BOM_SHEETS)
+
+# The two XML document kinds (S33). Each format NAMES the root element its
+# reader then checks, and the element whose count is the row's quantity.
+KML_FORMAT = "xml:kml"
+LANDXML_FORMAT = "xml:LandXML"
+XML_DOCUMENT_KINDS = {KML_FORMAT: ("kml", "Placemark"),
+                      LANDXML_FORMAT: ("LandXML", "F")}
 
 
 # The licensed DEMO probe files. Each row's `type` is the CALCULATION, which is
@@ -324,6 +346,35 @@ PROBE_SPECS = {
         Section(None, "capacity-iteration-scenario", None, ("gcr", "tilt_deg"),
                 "dc_kwp", unit_literal="kWp"),
     ]),
+    # S33, the KML and LandXML DEMOs. A written document is one row keyed by its
+    # file name; every line of it is OUTPUT, so `inputs` is empty and the file
+    # name alone is the fixture identity. The quantity is the structural count
+    # the format names, and the lines ride verbatim under fields.
+    "kml-document": ProbeSpec(KML_FORMAT, [
+        Section(None, "kml-document", "File", (), "Count", unit_literal="placemarks"),
+    ]),
+    "landxml-surface": ProbeSpec(LANDXML_FORMAT, [
+        Section(None, "landxml-surface", "File", (), "Count", unit_literal="faces"),
+    ]),
+    # The format demo's manifest: one row per fixture. The projected fixture's
+    # anchor is its declared input. Its result is TEXT, the file it wrote or the
+    # refusal it recorded, which is the declared non-numeric case; both ride
+    # verbatim under fields and compare byte-exact there.
+    "kml-export-format-manifest": ProbeSpec("csv", [
+        Section(None, "kml-export-format-fixture", "Fixture", ("CenterLat", "CenterLon"),
+                "Error", non_numeric_quantity=0.0),
+    ]),
+    # One row per re-parsed vertex. The parser decides how many polygons and
+    # vertices exist, so no column is an input; lon_deg, KML's first
+    # coordinate, is the quantity and the rest ride under fields.
+    "kml-import-vertices": ProbeSpec("csv", [
+        Section(None, "kml-import-vertex", None, (), "lon_deg", unit_literal="deg"),
+    ]),
+    # One row per parsed point. The fixture name is the input; which points
+    # survive, and their order, are the parser's output. Z is the quantity.
+    "landxml-import-points": ProbeSpec("csv", [
+        Section(None, "landxml-import-point", None, ("Fixture",), "Z", unit_literal="m"),
+    ]),
 }
 
 
@@ -422,13 +473,51 @@ def _read_xlsx_probes(data, sheet_names):
     return probes
 
 
+# The comparator's own per-string bound (solar_w1_compare._bounded). A line past
+# it is refused HERE, naming the reason, rather than failing later as a bare
+# structural limit.
+_MAX_LINE_CHARS = 16384
+
+
+def _read_xml_document(text, file_name, file_format):
+    """Rule E5 for XML: ONE probe, keyed by the file name, its lines verbatim.
+
+    The document is parsed through the hardened reader first, so a file this
+    module describes is always well-formed XML with no DTD, and its root element
+    must be the one `file_format` names: a KML file handed in as LandXML is a
+    refusal, never a quietly miscounted row. The two normalizations are the
+    ones the module docstring names (BOM dropped, CRLF to LF) and nothing else.
+    """
+    root_name, counted = XML_DOCUMENT_KINDS[file_format]
+    if not isinstance(file_name, str) or not file_name:
+        raise compare.InputError("an XML probe needs its file name")
+    if text.startswith("﻿"):
+        text = text[1:]
+    try:
+        root = geo.parse_xml(text)
+    except (geo.GeoFormatError, TypeError) as error:
+        raise compare.InputError("probe XML is unreadable: %s" % error)
+    if root.local_name != root_name:
+        raise compare.InputError("probe XML root is <%s>, expected <%s>"
+                                 % (root.local_name, root_name))
+    lines = text.replace("\r\n", "\n").split("\n")
+    if any(len(line) > _MAX_LINE_CHARS for line in lines):
+        raise compare.InputError("probe XML has a line longer than %d characters"
+                                 % _MAX_LINE_CHARS)
+    return [{"File": file_name,
+             "Count": geo.count_local_names(root, counted),
+             "Lines": lines}]
+
+
 # The single extension point for the rest of contract v5: one entry per file
 # kind, and an unknown format fails closed rather than guessing a projection.
 READERS = {"json-probes": _read_json_probes,
            "json-metrics": _read_json_metrics,
            "csv": _read_csv_probes,
            "csv-pipe": lambda text: _read_csv_probes(text, delimiter="|"),
-           XLSX_BOM_FORMAT: lambda data: _read_xlsx_probes(data, XLSX_BOM_SHEETS)}
+           XLSX_BOM_FORMAT: lambda data: _read_xlsx_probes(data, XLSX_BOM_SHEETS),
+           KML_FORMAT: lambda text, name: _read_xml_document(text, name, KML_FORMAT),
+           LANDXML_FORMAT: lambda text, name: _read_xml_document(text, name, LANDXML_FORMAT)}
 
 # Formats whose CELLS are text, so `_quantity_value` parses the number back out
 # of the plugin's own digits instead of trusting a value type the file did not
@@ -437,6 +526,8 @@ TEXT_CELL_FORMATS = frozenset({"csv", "csv-pipe"})
 # Formats read from BYTES. A zip container has no text decoding at all, so
 # decoding it before the reader would corrupt it rather than fail.
 BINARY_FORMATS = frozenset({XLSX_BOM_FORMAT})
+# Formats whose reader also takes the FILE NAME, because the name is the row id.
+NAMED_FORMATS = frozenset(XML_DOCUMENT_KINDS)
 
 
 def _sections(document, spec):
@@ -645,8 +736,14 @@ def build_evidence_from_file(path, *, capability, probe_type, side, revision, el
     raw = path.read_bytes()
     if len(raw) > compare.MAX_INPUT_BYTES:
         raise compare.InputError("probe file exceeds byte limit")
-    # A zip container has no text decoding, so a binary format reads the bytes.
-    document = reader(raw) if spec.file_format in BINARY_FORMATS else reader(raw.decode("utf-8"))
+    # A zip container has no text decoding, so a binary format reads the bytes;
+    # an XML document's row id is its file name, so a named format gets it too.
+    if spec.file_format in BINARY_FORMATS:
+        document = reader(raw)
+    elif spec.file_format in NAMED_FORMATS:
+        document = reader(raw.decode("utf-8"), path.name)
+    else:
+        document = reader(raw.decode("utf-8"))
     compare.scan_input(document)
     reopened = path.read_bytes()
     return build_evidence(document, capability=capability, probe_type=probe_type, side=side,

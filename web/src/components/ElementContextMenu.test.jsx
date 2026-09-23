@@ -203,7 +203,7 @@ describe('the scoped prompt posts through the ONE guarded transport (source pin)
   })
 
   it('calls postMessage, not some other transport, to send the typed text', () => {
-    expect(source).toMatch(/await postMessage\(created\.session_id, \{ text: trimmed \}\)/)
+    expect(source).toContain('await postMessage(created.session_id, { text: trimmed, entity_scope: { drawing_id: drawingId, handle: identity.id } })')
   })
 })
 
@@ -244,7 +244,7 @@ describe('the scoped "Ask Claude to…" flow (mounted)', () => {
     expect(ask.getAttribute('data-reason')).toBe(CONTEXT_MENU_REASONS.askClaudeScoped)
   })
 
-  it('posts through ensureSession + converse.postMessage with the entity scope envelope', async () => {
+  it('test_context_prompt_sends_explicit_binding', async () => {
     ensureSessionMock.mockResolvedValue({ session_id: 'sess-1' })
     postMessageMock.mockResolvedValue({ turn_id: 't1', status: 'started' })
     render(<Scene ctx={{ drawingId: 'demo' }} />)
@@ -255,7 +255,22 @@ describe('the scoped "Ask Claude to…" flow (mounted)', () => {
     fireEvent.click(screen.getByTestId('ask-claude-send'))
     await waitFor(() => expect(postMessageMock).toHaveBeenCalled())
     expect(ensureSessionMock).toHaveBeenCalledWith({ kind: 'entity', handle: 'AB12', drawingId: 'demo' })
-    expect(postMessageMock).toHaveBeenCalledWith('sess-1', { text: 'move this panel left' })
+    expect(postMessageMock).toHaveBeenCalledWith('sess-1', { text: 'move this panel left', entity_scope: { drawing_id: 'demo', handle: 'AB12' } })
+  })
+
+  it('test_production_scoped_prompt_stays_disabled', async () => {
+    const app = readFileSync(resolve(process.cwd(), 'src/App.jsx'), 'utf8')
+    const mount = app.match(/contextMenuCtx=\{\{([\s\S]*?)\}\}/)[1]
+    expect(mount).not.toMatch(/drawingId|resolveScopedIntakes/)
+    render(<Scene ctx={{ hasVersions: true, canUndo: true, canRedo: false, versionBusy: false, running: false, previewing: false, mutationsBlocked: false }} />)
+    fireEvent.contextMenu(screen.getByTestId('canvas'))
+    const ask = await screen.findByTestId('element-context-menu-ask-claude')
+    expect(ask.getAttribute('aria-disabled')).toBe('true')
+    expect(ask.getAttribute('data-reason')).toBe(CONTEXT_MENU_REASONS.askClaudeNoDrawing)
+    fireEvent.click(ask)
+    expect(screen.queryByTestId('ask-claude-panel')).toBeNull()
+    expect(ensureSessionMock).not.toHaveBeenCalled()
+    expect(postMessageMock).not.toHaveBeenCalled()
   })
 
   it('shows the secret guard refusal inline and never silently clears the input', async () => {
