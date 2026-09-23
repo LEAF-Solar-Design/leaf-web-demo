@@ -19,7 +19,7 @@ import { engineIntake, hexHandle } from './engineIntake.js'
 import { SESSION_ERROR } from './engineSession.js'
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
 
-export default function EngineDocumentView({ viewerRef = null, consoleIntake = null, onShown = null, onHidden = null, selectedHandle = null, onSelectedHandleChange = null }) {
+export default function EngineDocumentView({ viewerRef = null, consoleIntake = null, onShown = null, onHidden = null, selectedHandle = null, onSelectedHandleChange = null, registerCanvasPick = null }) {
   const { session, highlightedIds } = useEngineSessionContext()
   const showing = session.engineParsed && session.errorKind !== SESSION_ERROR.CRASHED
   const entities = showing ? session.entities : null
@@ -32,6 +32,26 @@ export default function EngineDocumentView({ viewerRef = null, consoleIntake = n
   const lastSelectedHandleRef = useRef(undefined)
   const lastEngineSelectionRef = useRef(undefined)
   const wasShownRef = useRef(false)
+  const canvasSessionRef = useRef({ session, entities })
+  canvasSessionRef.current = { session, entities }
+  const canvasShown = entities !== null
+  useEffect(() => {
+    if (!canvasShown || typeof registerCanvasPick !== 'function') return undefined
+    registerCanvasPick((handle, { additive } = {}) => {
+      const { session: current, entities: currentEntities } = canvasSessionRef.current
+      if (additive) {
+        const entity = currentEntities?.find((item) => hexHandle(item.id) === handle)
+        if (entity) current.actions.selectToggle(entity.id)
+        return true
+      }
+      if (handle === null && current.selectedIds.length > 1) {
+        current.actions.selectClear()
+        return true
+      }
+      return false
+    })
+    return () => registerCanvasPick(null)
+  }, [canvasShown, registerCanvasPick])
   /** one-way: console handle -> engine selection, on change */
   useEffect(() => {
     const previous = lastSelectedHandleRef.current

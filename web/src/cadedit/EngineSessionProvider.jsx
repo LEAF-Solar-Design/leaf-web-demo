@@ -164,7 +164,8 @@ export default function EngineSessionProvider({
     : null
   const highlightedIds = useMemo(() => new Set(armed?.op === 'createBlock'
     ? [session.selectedId, ...String(inputs.members || '').split(/\s+/)].filter(Boolean)
-    : currentGroup?.memberIds || []), [currentGroup, armed, session.selectedId, inputs.members])
+    : session.selectedIds.length > 1 ? session.selectedIds
+      : currentGroup?.memberIds || []), [currentGroup, armed, session.selectedId, session.selectedIds, inputs.members])
   const selectGroup = useCallback((name) => {
     const group = (session.entities.groups || []).find((item) => item.name.toUpperCase() === String(name).trim().toUpperCase())
     const ids = group?.memberIds || []
