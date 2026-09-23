@@ -410,9 +410,11 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
         )
     tenant_id = resolved_tenant
 
+    session_id = authority_session_id if isinstance(authority_session_id, str) else None
+    turn_id = authority_turn_id if isinstance(authority_turn_id, str) else None
     binding = None
-    if authority_session_id is not None or authority_turn_id is not None:
-        if authority_session_id is None or authority_turn_id is None:
+    if session_id is not None or turn_id is not None:
+        if session_id is None or turn_id is None:
             return error_response(
                 ErrorCode.FORBIDDEN,
                 "active same-account turn authority is required for conversational runs",
@@ -420,7 +422,7 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
             )
         try:
             binding = entity_scope.resolve_turn_binding(
-                authority_session_id, authority_turn_id, str(tenant_id))
+                session_id, turn_id, str(tenant_id))
         except entity_scope.ScopeError as exc:
             if exc.status_code == 409:
                 return JSONResponse(status_code=409, content=with_envelope_fields({

@@ -224,6 +224,34 @@ def refused(env, response, status, reason=None):
     assert env.submissions == {"job": [], "plan": [], "canonical": []}
 
 
+def test_run_direct_call_without_authority_headers_reads_as_unscoped(monkeypatch):
+    submissions = []
+    scope_calls = []
+
+    def submit(*args, **kwargs):
+        submissions.append((args, kwargs))
+        return "direct-call-job"
+
+    def unexpected(*args, **kwargs):
+        scope_calls.append((args, kwargs))
+        raise RuntimeError("unexpected scope lookup")
+
+    monkeypatch.setattr(jobs_router.jobs, "submit_job", submit)
+    monkeypatch.setattr(entity_scope, "resolve_turn_binding", unexpected)
+    tool = deps.find_tool("count-by-layer")
+    req = jobs_router.RunRequest(
+        tool="count-by-layer", params={}, dwg="rooftop_demo",
+        catalog_digest=deps.catalog_tool_digest(tool))
+    response = jobs_router.run(
+        req, wait=0, tenant_id="demo-tenant",
+        x_org_id=None, x_project_id=None,
+        idempotency_key=None, authorization=None)
+
+    assert response.status_code == 202
+    assert len(submissions) == 1
+    assert scope_calls == []
+
+
 def test_run_without_authority_headers_never_resolves_scope(run_env, monkeypatch):
     before = run_env.run()
     calls = []
