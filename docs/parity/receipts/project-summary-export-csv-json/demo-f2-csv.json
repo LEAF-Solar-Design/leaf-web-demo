@@ -1,0 +1,769 @@
+{
+ "schema": "leaf.solar-parity-receipt.v1",
+ "capability": "project-summary-export-csv-json",
+ "capability_version": "0",
+ "fixture": {
+  "id": "demo-f2-csv",
+  "sha256": "8bca61e058e9b7792aaad954eff5b0962541c54429ad4eb6ae7948197f41bc01"
+ },
+ "plugin": {
+  "build": "LeafSolarDesign 2025 licensed 2026-09-23",
+  "state": "committed",
+  "receipt_sha256": "58b3deca52ca48f73c00a5dfeda25afcfa3ec7eb51ce83b303dd4e056561ad7e"
+ },
+ "studio": {
+  "capability_version": "0",
+  "engine": "server-builtin"
+ },
+ "comparator": {
+  "name": "solar-w1-semantic",
+  "version": "1",
+  "verdict": "pass",
+  "diffs": []
+ },
+ "synthetic_fields": [
+  "plugin:before/recorded",
+  "plugin:changes/unrecorded",
+  "studio:before/recorded",
+  "studio:changes/unrecorded"
+ ],
+ "fallback_fields": [],
+ "synthetic_flagged": true,
+ "survived_reopen": true,
+ "produced_at": "2026-09-23T03:12:33Z",
+ "comparison": {
+  "schema": "leaf.solar-w1-comparison.v1",
+  "capability": "project-summary-export-csv-json",
+  "family": "exports",
+  "plugin": {
+   "after": {
+    "format": "csv",
+    "rows": [
+     {
+      "fields": {
+       "Metric": "PanelCount",
+       "Value": "168"
+      },
+      "id": {
+       "entity_id": "PanelCount"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 168.0
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Metric": "InverterCount",
+       "Value": "3"
+      },
+      "id": {
+       "entity_id": "InverterCount"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3.0
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Metric": "StringCount",
+       "Value": "12"
+      },
+      "id": {
+       "entity_id": "StringCount"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 12.0
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Metric": "TotalDcKwp",
+       "Value": "84.672"
+      },
+      "id": {
+       "entity_id": "TotalDcKwp"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 84.672
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Metric": "TotalAcKw",
+       "Value": "66.000"
+      },
+      "id": {
+       "entity_id": "TotalAcKw"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 66.0
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Metric": "DcAcRatio",
+       "Value": "1.283"
+      },
+      "id": {
+       "entity_id": "DcAcRatio"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 1.283
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Metric": "TotalTrunkLength",
+       "Value": "425.75"
+      },
+      "id": {
+       "entity_id": "TotalTrunkLength"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 425.75
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Metric": "TotalBranchLength",
+       "Value": "1240.33"
+      },
+      "id": {
+       "entity_id": "TotalBranchLength"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 1240.33
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Metric": "CriticalFindings",
+       "Value": "1"
+      },
+      "id": {
+       "entity_id": "CriticalFindings"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 1.0
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Metric": "WarningFindings",
+       "Value": "2"
+      },
+      "id": {
+       "entity_id": "WarningFindings"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 2.0
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Metric": "InfoFindings",
+       "Value": "5"
+      },
+      "id": {
+       "entity_id": "InfoFindings"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 5.0
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Metric": "StringsOfLength_12",
+       "Value": "5"
+      },
+      "id": {
+       "entity_id": "StringsOfLength_12"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 5.0
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Metric": "StringsOfLength_14",
+       "Value": "4"
+      },
+      "id": {
+       "entity_id": "StringsOfLength_14"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4.0
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Metric": "StringsOfLength_16",
+       "Value": "3"
+      },
+      "id": {
+       "entity_id": "StringsOfLength_16"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3.0
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Metric": "CableSize_1",
+       "Value": "10 AWG x8"
+      },
+      "id": {
+       "entity_id": "CableSize_1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Metric": "CableSize_2",
+       "Value": "8 AWG x3"
+      },
+      "id": {
+       "entity_id": "CableSize_2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Metric": "CableSize_3",
+       "Value": "6 AWG x1"
+      },
+      "id": {
+       "entity_id": "CableSize_3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "CableSize_1": "CableSize_1",
+    "CableSize_2": "CableSize_2",
+    "CableSize_3": "CableSize_3",
+    "CriticalFindings": "CriticalFindings",
+    "DcAcRatio": "DcAcRatio",
+    "InfoFindings": "InfoFindings",
+    "InverterCount": "InverterCount",
+    "PanelCount": "PanelCount",
+    "StringCount": "StringCount",
+    "StringsOfLength_12": "StringsOfLength_12",
+    "StringsOfLength_14": "StringsOfLength_14",
+    "StringsOfLength_16": "StringsOfLength_16",
+    "TotalAcKw": "TotalAcKw",
+    "TotalBranchLength": "TotalBranchLength",
+    "TotalDcKwp": "TotalDcKwp",
+    "TotalTrunkLength": "TotalTrunkLength",
+    "WarningFindings": "WarningFindings"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "8bca61e058e9b7792aaad954eff5b0962541c54429ad4eb6ae7948197f41bc01",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "a5c5b5bda082b1ab45c30f9fb27a86e3b48c7529519b6f32d93d5a7cda36a7c1",
+   "output_sha256": "5dded0d329d111e2deb73d0385612947cb9e0fa3147142c1e16acb9d9d38fc9a",
+   "parameters": {
+    "capability": "project-summary-export-csv-json",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafprojectsummary_demo_f2.csv",
+    "probe_file_sha256": "895dd9c4eba9a7c562b55822ab7756967828bc35f23d8f547448762fe07402be",
+    "probe_type": "project-summary-csv",
+    "side": "plugin"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "none",
+    "producer": "plugin",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  },
+  "studio": {
+   "after": {
+    "format": "csv",
+    "rows": [
+     {
+      "fields": {
+       "Metric": "PanelCount",
+       "Value": "168"
+      },
+      "id": {
+       "entity_id": "PanelCount"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 168.0
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Metric": "InverterCount",
+       "Value": "3"
+      },
+      "id": {
+       "entity_id": "InverterCount"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3.0
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Metric": "StringCount",
+       "Value": "12"
+      },
+      "id": {
+       "entity_id": "StringCount"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 12.0
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Metric": "TotalDcKwp",
+       "Value": "84.672"
+      },
+      "id": {
+       "entity_id": "TotalDcKwp"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 84.672
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Metric": "TotalAcKw",
+       "Value": "66.000"
+      },
+      "id": {
+       "entity_id": "TotalAcKw"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 66.0
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Metric": "DcAcRatio",
+       "Value": "1.283"
+      },
+      "id": {
+       "entity_id": "DcAcRatio"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 1.283
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Metric": "TotalTrunkLength",
+       "Value": "425.75"
+      },
+      "id": {
+       "entity_id": "TotalTrunkLength"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 425.75
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Metric": "TotalBranchLength",
+       "Value": "1240.33"
+      },
+      "id": {
+       "entity_id": "TotalBranchLength"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 1240.33
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Metric": "CriticalFindings",
+       "Value": "1"
+      },
+      "id": {
+       "entity_id": "CriticalFindings"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 1.0
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Metric": "WarningFindings",
+       "Value": "2"
+      },
+      "id": {
+       "entity_id": "WarningFindings"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 2.0
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Metric": "InfoFindings",
+       "Value": "5"
+      },
+      "id": {
+       "entity_id": "InfoFindings"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 5.0
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Metric": "StringsOfLength_12",
+       "Value": "5"
+      },
+      "id": {
+       "entity_id": "StringsOfLength_12"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 5.0
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Metric": "StringsOfLength_14",
+       "Value": "4"
+      },
+      "id": {
+       "entity_id": "StringsOfLength_14"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4.0
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Metric": "StringsOfLength_16",
+       "Value": "3"
+      },
+      "id": {
+       "entity_id": "StringsOfLength_16"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3.0
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Metric": "CableSize_1",
+       "Value": "10 AWG x8"
+      },
+      "id": {
+       "entity_id": "CableSize_1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Metric": "CableSize_2",
+       "Value": "8 AWG x3"
+      },
+      "id": {
+       "entity_id": "CableSize_2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Metric": "CableSize_3",
+       "Value": "6 AWG x1"
+      },
+      "id": {
+       "entity_id": "CableSize_3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "project-summary-metric",
+      "unit": "none"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "CableSize_1": "CableSize_1",
+    "CableSize_2": "CableSize_2",
+    "CableSize_3": "CableSize_3",
+    "CriticalFindings": "CriticalFindings",
+    "DcAcRatio": "DcAcRatio",
+    "InfoFindings": "InfoFindings",
+    "InverterCount": "InverterCount",
+    "PanelCount": "PanelCount",
+    "StringCount": "StringCount",
+    "StringsOfLength_12": "StringsOfLength_12",
+    "StringsOfLength_14": "StringsOfLength_14",
+    "StringsOfLength_16": "StringsOfLength_16",
+    "TotalAcKw": "TotalAcKw",
+    "TotalBranchLength": "TotalBranchLength",
+    "TotalDcKwp": "TotalDcKwp",
+    "TotalTrunkLength": "TotalTrunkLength",
+    "WarningFindings": "WarningFindings"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "8bca61e058e9b7792aaad954eff5b0962541c54429ad4eb6ae7948197f41bc01",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "a5c5b5bda082b1ab45c30f9fb27a86e3b48c7529519b6f32d93d5a7cda36a7c1",
+   "output_sha256": "5dded0d329d111e2deb73d0385612947cb9e0fa3147142c1e16acb9d9d38fc9a",
+   "parameters": {
+    "capability": "project-summary-export-csv-json",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafprojectsummary_demo_f2.csv",
+    "probe_file_sha256": "895dd9c4eba9a7c562b55822ab7756967828bc35f23d8f547448762fe07402be",
+    "probe_type": "project-summary-csv",
+    "side": "studio"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "server-builtin",
+    "producer": "studio",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  }
+ }
+}

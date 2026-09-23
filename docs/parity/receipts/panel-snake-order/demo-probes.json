@@ -1,0 +1,1281 @@
+{
+ "schema": "leaf.solar-parity-receipt.v1",
+ "capability": "panel-snake-order",
+ "capability_version": "0",
+ "fixture": {
+  "id": "demo-probes",
+  "sha256": "e373489250cb4bc0d334be28e9852851e0f0b7ddb60ca81324d340b7015c49f4"
+ },
+ "plugin": {
+  "build": "LeafSolarDesign 2025 licensed 2026-09-23",
+  "state": "committed",
+  "receipt_sha256": "46eac490c23deb9907a508738926a74c20dac1454ba361e9d4ff3556991cea3d"
+ },
+ "studio": {
+  "capability_version": "0",
+  "engine": "server-builtin"
+ },
+ "comparator": {
+  "name": "solar-w1-semantic",
+  "version": "1",
+  "verdict": "pass",
+  "diffs": []
+ },
+ "synthetic_fields": [
+  "plugin:before/recorded",
+  "plugin:changes/unrecorded",
+  "studio:before/recorded",
+  "studio:changes/unrecorded"
+ ],
+ "fallback_fields": [],
+ "synthetic_flagged": true,
+ "survived_reopen": true,
+ "produced_at": "2026-09-23T03:12:30Z",
+ "comparison": {
+  "schema": "leaf.solar-w1-comparison.v1",
+  "capability": "panel-snake-order",
+  "family": "exports",
+  "plugin": {
+   "after": {
+    "format": "json-probes",
+    "rows": [
+     {
+      "fields": {
+       "InputIsNull": true,
+       "InputPanels": null,
+       "Name": "null_panels",
+       "OutputHandles": null,
+       "Tag": "null_panels",
+       "Unchanged": true
+      },
+      "id": {
+       "entity_id": "null_panels"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "panel-snake-order",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "InputIsNull": false,
+       "InputPanels": [],
+       "Name": "empty_panels",
+       "OutputHandles": [],
+       "Tag": "empty_panels",
+       "Unchanged": true
+      },
+      "id": {
+       "entity_id": "empty_panels"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0
+      },
+      "type": "panel-snake-order",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "InputIsNull": false,
+       "InputPanels": [
+        {
+         "Col": 0,
+         "Handle": "A",
+         "Row": 0,
+         "X": 0.0,
+         "Y": 0.0
+        }
+       ],
+       "Name": "single_panel",
+       "OutputHandles": [
+        "A"
+       ],
+       "Tag": "single_panel",
+       "Unchanged": true
+      },
+      "id": {
+       "entity_id": "single_panel"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 1
+      },
+      "type": "panel-snake-order",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "InputIsNull": false,
+       "InputPanels": [
+        {
+         "Col": 1,
+         "Handle": "B",
+         "Row": 0,
+         "X": 1.0,
+         "Y": 0.0
+        },
+        {
+         "Col": 0,
+         "Handle": "A",
+         "Row": 0,
+         "X": 0.0,
+         "Y": 0.0
+        }
+       ],
+       "Name": "two_same_row_sorted",
+       "OutputHandles": [
+        "A",
+        "B"
+       ],
+       "Tag": "two_same_row_sorted",
+       "Unchanged": false
+      },
+      "id": {
+       "entity_id": "two_same_row_sorted"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 2
+      },
+      "type": "panel-snake-order",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "InputIsNull": false,
+       "InputPanels": [
+        {
+         "Col": 0,
+         "Handle": "A",
+         "Row": 0,
+         "X": 0.0,
+         "Y": 0.0
+        },
+        {
+         "Col": 1,
+         "Handle": "B",
+         "Row": 0,
+         "X": 1.0,
+         "Y": 0.0
+        },
+        {
+         "Col": 0,
+         "Handle": "C",
+         "Row": 1,
+         "X": 0.0,
+         "Y": 1.0
+        },
+        {
+         "Col": 1,
+         "Handle": "D",
+         "Row": 1,
+         "X": 1.0,
+         "Y": 1.0
+        }
+       ],
+       "Name": "grid_2x2",
+       "OutputHandles": [
+        "A",
+        "B",
+        "D",
+        "C"
+       ],
+       "Tag": "grid_2x2",
+       "Unchanged": false
+      },
+      "id": {
+       "entity_id": "grid_2x2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "panel-snake-order",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "InputIsNull": false,
+       "InputPanels": [
+        {
+         "Col": 0,
+         "Handle": "A",
+         "Row": 0,
+         "X": 0.0,
+         "Y": 0.0
+        },
+        {
+         "Col": 1,
+         "Handle": "B",
+         "Row": 0,
+         "X": 1.0,
+         "Y": 0.0
+        },
+        {
+         "Col": 2,
+         "Handle": "C",
+         "Row": 0,
+         "X": 2.0,
+         "Y": 0.0
+        },
+        {
+         "Col": 0,
+         "Handle": "D",
+         "Row": 1,
+         "X": 0.0,
+         "Y": 1.0
+        },
+        {
+         "Col": 1,
+         "Handle": "E",
+         "Row": 1,
+         "X": 1.0,
+         "Y": 1.0
+        },
+        {
+         "Col": 2,
+         "Handle": "F",
+         "Row": 1,
+         "X": 2.0,
+         "Y": 1.0
+        }
+       ],
+       "Name": "grid_2x3",
+       "OutputHandles": [
+        "A",
+        "B",
+        "C",
+        "F",
+        "E",
+        "D"
+       ],
+       "Tag": "grid_2x3",
+       "Unchanged": false
+      },
+      "id": {
+       "entity_id": "grid_2x3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "panel-snake-order",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "InputIsNull": false,
+       "InputPanels": [
+        {
+         "Col": 0,
+         "Handle": "A",
+         "Row": 0,
+         "X": 0.0,
+         "Y": 0.0
+        },
+        {
+         "Col": 1,
+         "Handle": "B",
+         "Row": 0,
+         "X": 1.0,
+         "Y": 0.0
+        },
+        {
+         "Col": 0,
+         "Handle": "C",
+         "Row": 1,
+         "X": 0.0,
+         "Y": 1.0
+        },
+        {
+         "Col": 1,
+         "Handle": "D",
+         "Row": 1,
+         "X": 1.0,
+         "Y": 1.0
+        },
+        {
+         "Col": 0,
+         "Handle": "E",
+         "Row": 2,
+         "X": 0.0,
+         "Y": 2.0
+        },
+        {
+         "Col": 1,
+         "Handle": "F",
+         "Row": 2,
+         "X": 1.0,
+         "Y": 2.0
+        }
+       ],
+       "Name": "three_rows_two_cols",
+       "OutputHandles": [
+        "A",
+        "B",
+        "D",
+        "C",
+        "E",
+        "F"
+       ],
+       "Tag": "three_rows_two_cols",
+       "Unchanged": false
+      },
+      "id": {
+       "entity_id": "three_rows_two_cols"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "panel-snake-order",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "InputIsNull": false,
+       "InputPanels": [
+        {
+         "Col": 0,
+         "Handle": "E",
+         "Row": 2,
+         "X": 0.0,
+         "Y": 2.0
+        },
+        {
+         "Col": 1,
+         "Handle": "F",
+         "Row": 2,
+         "X": 1.0,
+         "Y": 2.0
+        },
+        {
+         "Col": 0,
+         "Handle": "A",
+         "Row": 0,
+         "X": 0.0,
+         "Y": 0.0
+        },
+        {
+         "Col": 1,
+         "Handle": "B",
+         "Row": 0,
+         "X": 1.0,
+         "Y": 0.0
+        },
+        {
+         "Col": 0,
+         "Handle": "C",
+         "Row": 1,
+         "X": 0.0,
+         "Y": 1.0
+        },
+        {
+         "Col": 1,
+         "Handle": "D",
+         "Row": 1,
+         "X": 1.0,
+         "Y": 1.0
+        }
+       ],
+       "Name": "rows_out_of_order_input",
+       "OutputHandles": [
+        "A",
+        "B",
+        "D",
+        "C",
+        "E",
+        "F"
+       ],
+       "Tag": "rows_out_of_order_input",
+       "Unchanged": false
+      },
+      "id": {
+       "entity_id": "rows_out_of_order_input"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "panel-snake-order",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "InputIsNull": false,
+       "InputPanels": [
+        {
+         "Col": -1,
+         "Handle": "A",
+         "Row": -1,
+         "X": 0.0,
+         "Y": 0.0
+        },
+        {
+         "Col": -1,
+         "Handle": "B",
+         "Row": -1,
+         "X": 0.0,
+         "Y": 10.0
+        },
+        {
+         "Col": -1,
+         "Handle": "C",
+         "Row": -1,
+         "X": 0.0,
+         "Y": 20.0
+        }
+       ],
+       "Name": "row_neg_uses_y",
+       "OutputHandles": [
+        "A",
+        "B",
+        "C"
+       ],
+       "Tag": "row_neg_uses_y",
+       "Unchanged": false
+      },
+      "id": {
+       "entity_id": "row_neg_uses_y"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3
+      },
+      "type": "panel-snake-order",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "InputIsNull": false,
+       "InputPanels": [
+        {
+         "Col": -1,
+         "Handle": "A",
+         "Row": 0,
+         "X": 5.0,
+         "Y": 0.0
+        },
+        {
+         "Col": -1,
+         "Handle": "B",
+         "Row": 0,
+         "X": 2.0,
+         "Y": 0.0
+        },
+        {
+         "Col": -1,
+         "Handle": "C",
+         "Row": 0,
+         "X": 8.0,
+         "Y": 0.0
+        }
+       ],
+       "Name": "col_neg_uses_x",
+       "OutputHandles": [
+        "B",
+        "A",
+        "C"
+       ],
+       "Tag": "col_neg_uses_x",
+       "Unchanged": false
+      },
+      "id": {
+       "entity_id": "col_neg_uses_x"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3
+      },
+      "type": "panel-snake-order",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "InputIsNull": false,
+       "InputPanels": [
+        {
+         "Col": 0,
+         "Handle": "A",
+         "Row": 0,
+         "X": 0.0,
+         "Y": 0.0
+        },
+        {
+         "Col": 1,
+         "Handle": "B",
+         "Row": 0,
+         "X": 1.0,
+         "Y": 0.0
+        },
+        {
+         "Col": 0,
+         "Handle": "C",
+         "Row": 1,
+         "X": 0.0,
+         "Y": 1.0
+        },
+        {
+         "Col": 0,
+         "Handle": "D",
+         "Row": 2,
+         "X": 0.0,
+         "Y": 2.0
+        },
+        {
+         "Col": 1,
+         "Handle": "E",
+         "Row": 2,
+         "X": 1.0,
+         "Y": 2.0
+        },
+        {
+         "Col": 2,
+         "Handle": "F",
+         "Row": 2,
+         "X": 2.0,
+         "Y": 2.0
+        }
+       ],
+       "Name": "irregular_row_sizes",
+       "OutputHandles": [
+        "A",
+        "B",
+        "C",
+        "D",
+        "E",
+        "F"
+       ],
+       "Tag": "irregular_row_sizes",
+       "Unchanged": false
+      },
+      "id": {
+       "entity_id": "irregular_row_sizes"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "panel-snake-order",
+      "unit": "none"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "col_neg_uses_x": "col_neg_uses_x",
+    "empty_panels": "empty_panels",
+    "grid_2x2": "grid_2x2",
+    "grid_2x3": "grid_2x3",
+    "irregular_row_sizes": "irregular_row_sizes",
+    "null_panels": "null_panels",
+    "row_neg_uses_y": "row_neg_uses_y",
+    "rows_out_of_order_input": "rows_out_of_order_input",
+    "single_panel": "single_panel",
+    "three_rows_two_cols": "three_rows_two_cols",
+    "two_same_row_sorted": "two_same_row_sorted"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "e373489250cb4bc0d334be28e9852851e0f0b7ddb60ca81324d340b7015c49f4",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "a55f1697ad3c5eaab8cbac1c797743761a9323fe3fc75c9235c05c08e04775dc",
+   "output_sha256": "b5b25cfd019df727c67a51451621b7b17ef61204d109e5325fbd8aa2a2e506d9",
+   "parameters": {
+    "capability": "panel-snake-order",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafsnakeorder_probes.json",
+    "probe_file_sha256": "9564dd09f6ccdde468e944938cc57f042e153fb1b1972bf31dcac82753fce77a",
+    "probe_type": "panel-snake-order",
+    "side": "plugin"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "none",
+    "producer": "plugin",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  },
+  "studio": {
+   "after": {
+    "format": "json-probes",
+    "rows": [
+     {
+      "fields": {
+       "InputIsNull": true,
+       "InputPanels": null,
+       "Name": "null_panels",
+       "OutputHandles": null,
+       "Tag": "null_panels",
+       "Unchanged": true
+      },
+      "id": {
+       "entity_id": "null_panels"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "panel-snake-order",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "InputIsNull": false,
+       "InputPanels": [],
+       "Name": "empty_panels",
+       "OutputHandles": [],
+       "Tag": "empty_panels",
+       "Unchanged": true
+      },
+      "id": {
+       "entity_id": "empty_panels"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0
+      },
+      "type": "panel-snake-order",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "InputIsNull": false,
+       "InputPanels": [
+        {
+         "Col": 0,
+         "Handle": "A",
+         "Row": 0,
+         "X": 0.0,
+         "Y": 0.0
+        }
+       ],
+       "Name": "single_panel",
+       "OutputHandles": [
+        "A"
+       ],
+       "Tag": "single_panel",
+       "Unchanged": true
+      },
+      "id": {
+       "entity_id": "single_panel"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 1
+      },
+      "type": "panel-snake-order",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "InputIsNull": false,
+       "InputPanels": [
+        {
+         "Col": 1,
+         "Handle": "B",
+         "Row": 0,
+         "X": 1.0,
+         "Y": 0.0
+        },
+        {
+         "Col": 0,
+         "Handle": "A",
+         "Row": 0,
+         "X": 0.0,
+         "Y": 0.0
+        }
+       ],
+       "Name": "two_same_row_sorted",
+       "OutputHandles": [
+        "A",
+        "B"
+       ],
+       "Tag": "two_same_row_sorted",
+       "Unchanged": false
+      },
+      "id": {
+       "entity_id": "two_same_row_sorted"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 2
+      },
+      "type": "panel-snake-order",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "InputIsNull": false,
+       "InputPanels": [
+        {
+         "Col": 0,
+         "Handle": "A",
+         "Row": 0,
+         "X": 0.0,
+         "Y": 0.0
+        },
+        {
+         "Col": 1,
+         "Handle": "B",
+         "Row": 0,
+         "X": 1.0,
+         "Y": 0.0
+        },
+        {
+         "Col": 0,
+         "Handle": "C",
+         "Row": 1,
+         "X": 0.0,
+         "Y": 1.0
+        },
+        {
+         "Col": 1,
+         "Handle": "D",
+         "Row": 1,
+         "X": 1.0,
+         "Y": 1.0
+        }
+       ],
+       "Name": "grid_2x2",
+       "OutputHandles": [
+        "A",
+        "B",
+        "D",
+        "C"
+       ],
+       "Tag": "grid_2x2",
+       "Unchanged": false
+      },
+      "id": {
+       "entity_id": "grid_2x2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "panel-snake-order",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "InputIsNull": false,
+       "InputPanels": [
+        {
+         "Col": 0,
+         "Handle": "A",
+         "Row": 0,
+         "X": 0.0,
+         "Y": 0.0
+        },
+        {
+         "Col": 1,
+         "Handle": "B",
+         "Row": 0,
+         "X": 1.0,
+         "Y": 0.0
+        },
+        {
+         "Col": 2,
+         "Handle": "C",
+         "Row": 0,
+         "X": 2.0,
+         "Y": 0.0
+        },
+        {
+         "Col": 0,
+         "Handle": "D",
+         "Row": 1,
+         "X": 0.0,
+         "Y": 1.0
+        },
+        {
+         "Col": 1,
+         "Handle": "E",
+         "Row": 1,
+         "X": 1.0,
+         "Y": 1.0
+        },
+        {
+         "Col": 2,
+         "Handle": "F",
+         "Row": 1,
+         "X": 2.0,
+         "Y": 1.0
+        }
+       ],
+       "Name": "grid_2x3",
+       "OutputHandles": [
+        "A",
+        "B",
+        "C",
+        "F",
+        "E",
+        "D"
+       ],
+       "Tag": "grid_2x3",
+       "Unchanged": false
+      },
+      "id": {
+       "entity_id": "grid_2x3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "panel-snake-order",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "InputIsNull": false,
+       "InputPanels": [
+        {
+         "Col": 0,
+         "Handle": "A",
+         "Row": 0,
+         "X": 0.0,
+         "Y": 0.0
+        },
+        {
+         "Col": 1,
+         "Handle": "B",
+         "Row": 0,
+         "X": 1.0,
+         "Y": 0.0
+        },
+        {
+         "Col": 0,
+         "Handle": "C",
+         "Row": 1,
+         "X": 0.0,
+         "Y": 1.0
+        },
+        {
+         "Col": 1,
+         "Handle": "D",
+         "Row": 1,
+         "X": 1.0,
+         "Y": 1.0
+        },
+        {
+         "Col": 0,
+         "Handle": "E",
+         "Row": 2,
+         "X": 0.0,
+         "Y": 2.0
+        },
+        {
+         "Col": 1,
+         "Handle": "F",
+         "Row": 2,
+         "X": 1.0,
+         "Y": 2.0
+        }
+       ],
+       "Name": "three_rows_two_cols",
+       "OutputHandles": [
+        "A",
+        "B",
+        "D",
+        "C",
+        "E",
+        "F"
+       ],
+       "Tag": "three_rows_two_cols",
+       "Unchanged": false
+      },
+      "id": {
+       "entity_id": "three_rows_two_cols"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "panel-snake-order",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "InputIsNull": false,
+       "InputPanels": [
+        {
+         "Col": 0,
+         "Handle": "E",
+         "Row": 2,
+         "X": 0.0,
+         "Y": 2.0
+        },
+        {
+         "Col": 1,
+         "Handle": "F",
+         "Row": 2,
+         "X": 1.0,
+         "Y": 2.0
+        },
+        {
+         "Col": 0,
+         "Handle": "A",
+         "Row": 0,
+         "X": 0.0,
+         "Y": 0.0
+        },
+        {
+         "Col": 1,
+         "Handle": "B",
+         "Row": 0,
+         "X": 1.0,
+         "Y": 0.0
+        },
+        {
+         "Col": 0,
+         "Handle": "C",
+         "Row": 1,
+         "X": 0.0,
+         "Y": 1.0
+        },
+        {
+         "Col": 1,
+         "Handle": "D",
+         "Row": 1,
+         "X": 1.0,
+         "Y": 1.0
+        }
+       ],
+       "Name": "rows_out_of_order_input",
+       "OutputHandles": [
+        "A",
+        "B",
+        "D",
+        "C",
+        "E",
+        "F"
+       ],
+       "Tag": "rows_out_of_order_input",
+       "Unchanged": false
+      },
+      "id": {
+       "entity_id": "rows_out_of_order_input"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "panel-snake-order",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "InputIsNull": false,
+       "InputPanels": [
+        {
+         "Col": -1,
+         "Handle": "A",
+         "Row": -1,
+         "X": 0.0,
+         "Y": 0.0
+        },
+        {
+         "Col": -1,
+         "Handle": "B",
+         "Row": -1,
+         "X": 0.0,
+         "Y": 10.0
+        },
+        {
+         "Col": -1,
+         "Handle": "C",
+         "Row": -1,
+         "X": 0.0,
+         "Y": 20.0
+        }
+       ],
+       "Name": "row_neg_uses_y",
+       "OutputHandles": [
+        "A",
+        "B",
+        "C"
+       ],
+       "Tag": "row_neg_uses_y",
+       "Unchanged": false
+      },
+      "id": {
+       "entity_id": "row_neg_uses_y"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3
+      },
+      "type": "panel-snake-order",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "InputIsNull": false,
+       "InputPanels": [
+        {
+         "Col": -1,
+         "Handle": "A",
+         "Row": 0,
+         "X": 5.0,
+         "Y": 0.0
+        },
+        {
+         "Col": -1,
+         "Handle": "B",
+         "Row": 0,
+         "X": 2.0,
+         "Y": 0.0
+        },
+        {
+         "Col": -1,
+         "Handle": "C",
+         "Row": 0,
+         "X": 8.0,
+         "Y": 0.0
+        }
+       ],
+       "Name": "col_neg_uses_x",
+       "OutputHandles": [
+        "B",
+        "A",
+        "C"
+       ],
+       "Tag": "col_neg_uses_x",
+       "Unchanged": false
+      },
+      "id": {
+       "entity_id": "col_neg_uses_x"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3
+      },
+      "type": "panel-snake-order",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "InputIsNull": false,
+       "InputPanels": [
+        {
+         "Col": 0,
+         "Handle": "A",
+         "Row": 0,
+         "X": 0.0,
+         "Y": 0.0
+        },
+        {
+         "Col": 1,
+         "Handle": "B",
+         "Row": 0,
+         "X": 1.0,
+         "Y": 0.0
+        },
+        {
+         "Col": 0,
+         "Handle": "C",
+         "Row": 1,
+         "X": 0.0,
+         "Y": 1.0
+        },
+        {
+         "Col": 0,
+         "Handle": "D",
+         "Row": 2,
+         "X": 0.0,
+         "Y": 2.0
+        },
+        {
+         "Col": 1,
+         "Handle": "E",
+         "Row": 2,
+         "X": 1.0,
+         "Y": 2.0
+        },
+        {
+         "Col": 2,
+         "Handle": "F",
+         "Row": 2,
+         "X": 2.0,
+         "Y": 2.0
+        }
+       ],
+       "Name": "irregular_row_sizes",
+       "OutputHandles": [
+        "A",
+        "B",
+        "C",
+        "D",
+        "E",
+        "F"
+       ],
+       "Tag": "irregular_row_sizes",
+       "Unchanged": false
+      },
+      "id": {
+       "entity_id": "irregular_row_sizes"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "panel-snake-order",
+      "unit": "none"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "col_neg_uses_x": "col_neg_uses_x",
+    "empty_panels": "empty_panels",
+    "grid_2x2": "grid_2x2",
+    "grid_2x3": "grid_2x3",
+    "irregular_row_sizes": "irregular_row_sizes",
+    "null_panels": "null_panels",
+    "row_neg_uses_y": "row_neg_uses_y",
+    "rows_out_of_order_input": "rows_out_of_order_input",
+    "single_panel": "single_panel",
+    "three_rows_two_cols": "three_rows_two_cols",
+    "two_same_row_sorted": "two_same_row_sorted"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "e373489250cb4bc0d334be28e9852851e0f0b7ddb60ca81324d340b7015c49f4",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "a55f1697ad3c5eaab8cbac1c797743761a9323fe3fc75c9235c05c08e04775dc",
+   "output_sha256": "b5b25cfd019df727c67a51451621b7b17ef61204d109e5325fbd8aa2a2e506d9",
+   "parameters": {
+    "capability": "panel-snake-order",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafsnakeorder_probes.json",
+    "probe_file_sha256": "9564dd09f6ccdde468e944938cc57f042e153fb1b1972bf31dcac82753fce77a",
+    "probe_type": "panel-snake-order",
+    "side": "studio"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "server-builtin",
+    "producer": "studio",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  }
+ }
+}
