@@ -95,12 +95,14 @@ test('SSD1-24C marquee: window, crossing, Shift union, clear, Escape and right p
   await expect(setCount).toHaveCount(0)
   await expect(start).toHaveText('0.00, 0.00')
   expect(await pose()).toEqual(initialPose)
-  await drag([8, 25], [2, 15])
+  // The view fits the two lines with a 1.08 margin: 0.8 units above y=20 are on the drawing
+  // and anything much higher sits under the chrome, so the crossing box tops out at 20.4.
+  await drag([8, 20.4], [2, 12])
   await expect(start).toHaveText('0.00, 20.00')
   await expect(setCount).toHaveCount(0)
   await drag([-2, -2], [12, 5], { shift: true })
   await expect(setCount).toHaveText('2 objects selected')
-  await drag([2, 40], [8, 48])
+  await drag([2, 8], [8, 12])
   await expect(setCount).toHaveCount(0)
   await expect(engineProps).toHaveCount(0)
   await expect(geometry).toHaveCount(0)
