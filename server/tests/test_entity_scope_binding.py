@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 import tempfile
 from types import SimpleNamespace
+from unittest.mock import Mock
 import uuid
 
 import pytest
@@ -195,6 +196,7 @@ def test_unbound_turn_never_inherits_session_scope(lane):
     assert lane.reads == []
 
 
+# The unbound proposed_run case passes on main by construction and is kept as a regression guard.
 @pytest.mark.parametrize("bound", [False, True])
 @pytest.mark.parametrize("shape", ["proposed_run", "confirmation_required"])
 def test_harness_cannot_supply_entity_scope(lane, bound, shape):
@@ -346,6 +348,102 @@ def test_request_id_distinguishes_entity_scope(lane, monkeypatch):
     assert json.dumps(digests[2]) == json.dumps({"text": "move", "classifier_hint": None, "model": None, "queue": False})
 
 
+@pytest.fixture
+def binding_journal(lane, monkeypatch):
+    journal = sessions_router.request_journal
+    monkeypatch.setattr(journal, "enabled", lambda: True)
+    monkeypatch.setattr(journal, "active_counts", lambda *a, **k: {"executing": 0, "queued": 0})
+    monkeypatch.setattr(entity_scope.store, "resolve_version", lambda *a: (8, "source-8"))
+    monkeypatch.setattr(entity_scope.write_loop, "read_intake",
+                        lambda *a: (8, {"polylines": [{"handle": "CD34"}]}))
+    rid = str(uuid.uuid4())
+    body = {"text": "move", "request_id": rid, "entity_scope": E}
+    row = {"request_id": rid, "tenant_id": lane.tenant, "drawing_id": "D",
+           "session_id": lane.sid, "principal_key": "", "org_id": None, "project_id": None,
+           "digest": journal.payload_digest({"text": "move", "classifier_hint": None,
+                                             "model": None, "queue": False, "entity_scope": E}),
+           "state": "admitted"}
+    get = Mock(return_value=deepcopy(row))
+    admit = Mock(return_value=(deepcopy(row), True))
+    fail = Mock()
+    start = Mock(side_effect=AssertionError("binding refusal must not start a turn"))
+    freeze = Mock(wraps=entity_scope.freeze)
+    monkeypatch.setattr(journal, "get_request", get)
+    monkeypatch.setattr(journal, "admit_request", admit)
+    monkeypatch.setattr(journal, "fail_admitted", fail)
+    monkeypatch.setattr(turn_runner, "start_turn", start)
+    monkeypatch.setattr(entity_scope, "freeze", freeze)
+    return SimpleNamespace(body=body, row=row, get=get, admit=admit, fail=fail,
+                           start=start, freeze=freeze)
+
+
+def test_concurrent_replay_is_judged_by_admission_not_fresh_state(lane, binding_journal):
+    journal = binding_journal
+    recorded = {"status": "started", "turn_id": "recorded-turn", "entity_scope": B}
+    completed = dict(journal.row, state="completed", response_status=202, response_json=recorded)
+    journal.get.return_value = None
+    journal.admit.return_value = (completed, False)
+    response = lane.post(journal.body)
+    assert response.status_code == 202, response.text
+    assert response.json() == json.loads(sessions_router._journal_response(completed, lane.tenant).body)
+    journal.admit.assert_called_once_with(**{k: v for k, v in journal.row.items() if k != "state"})
+    journal.freeze.assert_not_called()
+    journal.fail.assert_not_called()
+    journal.start.assert_not_called()
+
+
+def test_fresh_admission_records_the_binding_refusal(lane, binding_journal):
+    journal = binding_journal
+    response = lane.post(journal.body)
+    assert response.status_code == 400, response.text
+    error = response.json()["error"]
+    assert error["error_code"] == "BAD_PARAMS"
+    assert error["message"] == "entity_scope handle is not present in drawing"
+    assert error["retryable"] is False
+    journal.admit.assert_called_once()
+    journal.freeze.assert_called_once()
+    journal.fail.assert_called_once_with(journal.body["request_id"], response_status=400,
+                                         response=response.json())
+    journal.start.assert_not_called()
+    failed = dict(journal.row, state="failed", response_status=400, response_json=response.json())
+    journal.get.return_value = failed
+    journal.admit.return_value = (failed, False)
+    replay = lane.post(journal.body)
+    assert replay.status_code == 400
+    assert replay.json() == json.loads(sessions_router._journal_response(failed, lane.tenant).body)
+    assert replay.json()["error"] == error
+    assert journal.admit.call_count == 2
+    journal.freeze.assert_called_once()
+    journal.fail.assert_called_once()
+    journal.start.assert_not_called()
+
+
+def test_binding_refusal_after_row_moves_replays_the_row(lane, binding_journal):
+    journal = binding_journal
+    completed = dict(journal.row, state="completed", response_status=202,
+                     response_json={"status": "started", "turn_id": "winning-turn", "entity_scope": B})
+    journal.get.return_value = completed
+    response = lane.post(journal.body)
+    assert response.status_code == 202, response.text
+    assert response.json() == json.loads(sessions_router._journal_response(completed, lane.tenant).body)
+    journal.admit.assert_called_once()
+    journal.freeze.assert_called_once()
+    journal.get.assert_called_once_with(journal.body["request_id"])
+    journal.fail.assert_not_called()
+    journal.start.assert_not_called()
+
+
+def test_unjournaled_binding_refusal_is_unchanged(lane, binding_journal, monkeypatch):
+    journal = binding_journal
+    monkeypatch.setattr(sessions_router.request_journal, "enabled", lambda: False)
+    refuse(lane, journal.body, 400, "entity_scope handle is not present in drawing")
+    journal.freeze.assert_called_once()
+    journal.get.assert_not_called()
+    journal.admit.assert_not_called()
+    journal.fail.assert_not_called()
+    journal.start.assert_not_called()
+
+
 @pytest.mark.parametrize("value", [None, {}, dict(B, base_version=True), dict(B, allowed_handles=["AB12", "CD34"])])
 def test_invalid_stored_binding_requires_fresh_approval(lane, value):
     session_store.create_approval(lane.cid, lane.sid, lane.tenant, turn_id="proposal",
@@ -361,6 +459,7 @@ def test_invalid_stored_binding_requires_fresh_approval(lane, value):
     assert lane.reads == []
 
 
+# This passes on main by construction and is kept as a regression guard.
 def test_foreign_and_unknown_sessions_do_not_read_drawing(lane):
     foreign = session_store.get_or_create_session("foreign-" + uuid.uuid4().hex, "D")
     for sid in [foreign["session_id"], "unknown-session"]:

@@ -1216,16 +1216,6 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
         if requested_scope is not None:
             digest_input["entity_scope"] = requested_scope
         digest = request_journal.payload_digest(digest_input)
-        # Existing identities must pass admission's complete ownership/digest
-        # comparison before replay. Fresh identities validate before admission.
-        if requested_scope is not None and request_journal.get_request(journal_request_id) is None:
-            try:
-                frozen_scope = freeze_scope()
-            except entity_scope.ScopeError as exc:
-                return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
-                                      status_code=exc.status_code)
-            except entity_scope.write_loop.ProofStateUnreadable as exc:
-                return error_response(ErrorCode.INTERNAL, str(exc), retryable=True, status_code=503)
         try:
             journal_row, inserted = request_journal.admit_request(
                 request_id=journal_request_id,
@@ -1249,11 +1239,22 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
     if requested_scope is not None and frozen_scope is None:
         try:
             frozen_scope = freeze_scope()
-        except entity_scope.ScopeError as exc:
-            return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
-                                  status_code=exc.status_code)
-        except entity_scope.write_loop.ProofStateUnreadable as exc:
-            return error_response(ErrorCode.INTERNAL, str(exc), retryable=True, status_code=503)
+        except (entity_scope.ScopeError, entity_scope.write_loop.ProofStateUnreadable) as exc:
+            if isinstance(exc, entity_scope.ScopeError):
+                response = error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
+                                          status_code=exc.status_code)
+            else:
+                response = error_response(ErrorCode.INTERNAL, str(exc), retryable=True, status_code=503)
+            if journal_request_id is not None:
+                current = request_journal.get_request(journal_request_id)
+                if current is not None and current["state"] != "admitted":
+                    return _journal_response(current, tenant)
+                request_journal.fail_admitted(
+                    journal_request_id,
+                    response_status=response.status_code,
+                    response=_response_content(response),
+                )
+            return response
 
     # 4. confirm path: atomically verify-and-consume the durable approval row
     # (merge-gate finding #1 — see module docstring's APPROVAL CONSUME note)
