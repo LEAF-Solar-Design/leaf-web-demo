@@ -472,6 +472,17 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_solar_ground_terrain.py"), 117),
         Suite("server-solar-ground-frames", "server tests/test_solar_ground_frames.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_ground_frames.py"), 95),
+        # W5 second ground batch (2026-09-23, contract G20-G22): terrain analytics (slope map,
+        # survey colours, pad grading, terrain CSV byte for byte), layout (module spec, row spacing,
+        # tracker and SAT layout, setbacks) and the arrays store with the PVsyst scene export. Every
+        # input is authored in the file or read from the committed intake, so each floor is the exact
+        # count, MEASURED on the first green run.
+        Suite("server-solar-ground-analysis", "server tests/test_solar_ground_analysis.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_ground_analysis.py"), 98),
+        Suite("server-solar-ground-layout", "server tests/test_solar_ground_layout.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_ground_layout.py"), 42),
+        Suite("server-solar-ground-scene", "server tests/test_solar_ground_scene.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_ground_scene.py"), 27),
         # S33 KML and LandXML ports (2026-09-23): server/solar_geo_formats.py, the
         # literal port of KmlBoundaryExporter (with every format branch
         # LEAFKMLEXPORTFMTDEMO exercises), KmlBoundaryParser, TerrainExporter's
@@ -1823,7 +1834,7 @@ def build_suites() -> List[Suite]:
         # that commits its intake needs a git executable, so the floor is the 28 that
         # never skip and that one skip reason is allowed.
         Suite("scripts-solar-ground-studio-evidence", "scripts test_solar_ground_studio_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_studio_evidence.py"), 28,
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_studio_evidence.py"), 37,
               allowed_skip_reasons=(r"needs a git executable",)),
         # S40 (2026-09-23): paired evidence shards (contract G19) for a step whose two
         # sides together exceed the comparator's 100,000-node document bound (terrain t1,
@@ -1832,6 +1843,12 @@ def build_suites() -> List[Suite]:
         # 5 tampered shards, 5 malformed inputs and the 2 real step shapes = 27.
         Suite("scripts-solar-evidence-shard", "scripts test_solar_evidence_shard.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_evidence_shard.py"), 27),
+        Suite("scripts-solar-ground-analysis-evidence", "scripts test_solar_ground_analysis_evidence.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_analysis_evidence.py"), 25),
+        Suite("scripts-solar-ground-layout-evidence", "scripts test_solar_ground_layout_evidence.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_layout_evidence.py"), 17),
+        Suite("scripts-solar-ground-scene-evidence", "scripts test_solar_ground_scene_evidence.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_scene_evidence.py"), 20),
         # The parity oracle itself: the ledger rules, the receipt rules, the fail-closed
         # inputs, and (S29, 2026-09-22) the declared divergence a known plugin defect
         # gets, which is the ONLY way a failing comparator settles a capability: the
