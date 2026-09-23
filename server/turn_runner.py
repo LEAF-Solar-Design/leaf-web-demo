@@ -57,6 +57,8 @@ user-message record) and, only as a last-resort backstop, a synthetic
 `error`/`turn_complete{stop_reason:'timeout'}`.
 """
 from __future__ import annotations
+from copy import deepcopy
+import entity_scope as entity_scope_binding
 
 import json
 import base64
@@ -633,7 +635,9 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
                entitlement_elevated: Optional[bool] = None,
                request_id: Optional[str] = None,
                turn_id: Optional[str] = None,
-               journal_claimed: bool = False) -> str:
+               journal_claimed: bool = False,
+               entity_scope: Optional[Dict[str, Any]] = None) -> str:
+    entity_scope = deepcopy(entity_scope)
     # In live auth this is a deps.TenantContext, a str subclass carrying the
     # verified claim. Snapshot the claim before normalizing to the frozen
     # string tenant_id used on the harness wire. Off-auth callers are plain
@@ -723,6 +727,8 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         # (sol-critic PR #123 round 8, blocker 1.)
 
     user_data: Dict[str, Any] = {}
+    if entity_scope is not None:
+        user_data["entity_scope"] = deepcopy(entity_scope)
     if text is not None:
         user_data["text"] = text
     if images:
@@ -976,7 +982,8 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
                  entitlement_roles=entitlement_roles,
                  entitlement_elevated=entitlement_elevated,
                  subject=subject,
-                 request_id=request_id)
+                 request_id=request_id,
+                 **({"entity_scope": deepcopy(entity_scope)} if entity_scope is not None else {}))
     return turn_id
 
 
@@ -1907,8 +1914,13 @@ def _try_one_policy_confirm(tenant_id: str, session_id: str, cid: str,
             },
         }
         try:
+            try:
+                binding = entity_scope_binding.stored_binding(consumed.get("payload"))
+            except entity_scope_binding.ScopeError as exc:
+                raise TurnRejected(409, ErrorCode.BAD_PARAMS, str(exc), pre_harness=True) from exc
             start_turn(tenant_id, session_id, confirm=confirm_payload,
-                       tier=tier, subject=subject)
+                       tier=tier, subject=subject,
+                       **({"entity_scope": binding} if binding is not None else {}))
             _forget_parked()
             return True
         except TurnBusy:
@@ -1971,7 +1983,9 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
                  entitlement_roles: tuple = (),
                  entitlement_elevated: bool = False,
                  subject: Optional[str] = None,
-                 request_id: Optional[str] = None) -> None:
+                 request_id: Optional[str] = None,
+                 entity_scope: Optional[Dict[str, Any]] = None) -> None:
+    entity_scope = deepcopy(entity_scope)
     # ONE deadline, shared by both terminal paths (see _drain_terminal). The
     # watchdog's own wait is anchored here too, so neither path can drift from
     # the other.
@@ -2204,11 +2218,11 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
                                 # keeping the server-authored confirmation wire
                                 # argument-exact with the app gate.
                                 kind="run_capability",
-                                payload=(
+                                payload=entity_scope_binding.approval_payload((
                                     {"dwg": data.get("dwg")}
                                     if isinstance(data.get("dwg"), str)
                                     else None
-                                ),
+                                ), entity_scope),
                                 ttl_s=approval_ttl_s(),
                             )
                         except sqlite3.IntegrityError:
@@ -2223,7 +2237,8 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
                                 turn_id=turn_id, tool=proposal.get("tool"),
                                 params=proposal.get("params"), capability=proposal.get("capability"),
                                 rationale=proposal.get("rationale"), kind=data.get("kind"),
-                                payload=data.get("payload"), ttl_s=approval_ttl_s(),
+                                payload=entity_scope_binding.approval_payload(
+                                    data.get("payload"), entity_scope), ttl_s=approval_ttl_s(),
                             )
                         except sqlite3.IntegrityError:
                             pass  # row created at proposed_run (pair flow)
