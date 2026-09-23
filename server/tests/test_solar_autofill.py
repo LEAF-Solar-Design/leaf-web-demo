@@ -1,13 +1,22 @@
-"""Offline checks for the auto-fill port: the DP, the chain routing, the snake, the capture.
+"""Offline checks for the auto-fill port and its revert: the DP, the chain, the snake.
 
-Nothing here touches a graph, a network or a builtin: server/solar_autofill.py is a
-pure port of the plugin's OptimalPlanSolver and SnakePanelSelector, so it is tested
-as one. The captured case at the end is COMPUTED from the committed rooftop intake
+The first half touches no graph, no network and no builtin: server/solar_autofill.py
+is a pure port of the plugin's OptimalPlanSolver and SnakePanelSelector, so it is
+tested as one. The captured case is COMPUTED from the committed rooftop intake
 (the same kernel, the same four grouping parameters, the same 28 removals the
 licensed run made), never asserted from a stored answer: the only thing taken from
 the capture is its INPUT (which panels the removal took) and its OUTCOME (one panel,
 8201, from the 71-panel group to the 137-panel group).
+
+The second half covers server/builtins/solar_autofill.py's revert_corrections, which
+is where Studio deliberately DIVERGES from the plugin: AutoFillRevert keys its
+snapshot by block handle and AutoFill rebuilds every group it changes under a new
+one, so the plugin's revert skips exactly the groups that moved and leaves them at
+70 and 138. Studio reverts by the PLAN, so the round trip puts 8201 back in the
+71-panel group and every other group back byte for byte. Those cases build a real
+graph, seeded here, offline.
 """
+import importlib.util
 import json
 from copy import deepcopy
 from pathlib import Path
@@ -19,7 +28,10 @@ from solar_autofill import (
     AutofillError, autofill, estimate_panel_dimensions, find_nearest_feasible,
     is_feasible_count, realize_trades, select_snake_panels, _read_groups,
 )
+from solar_design_graph import GraphValidationError, new_id, validate_graph
+from solar_graph_seed import new_empty_graph
 
+SERVER = Path(__file__).resolve().parents[1]
 ROOT = Path(__file__).resolve().parents[2]
 INTAKE = ROOT / "data" / "rooftop_unsplit.intake.json"
 # The four grouping parameters the captured drawing carries (its own settings read,
@@ -241,6 +253,252 @@ def test_the_captured_case_leaves_every_other_group_exactly_as_it_was(captured):
     assert MOVED_PANEL in plan["membership"][RECEIVER]
     assert MOVED_PANEL not in plan["membership"][DONOR]
     assert all(is_feasible_count(STRING_LENGTH, count) for count in after.values())
+
+
+CREATED_AT = "2026-09-22T00:00:00+00:00"
+UNITS = {"drawing_units": "in", "wcs_to_ucs": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+         "elevation_datum": "unrecorded", "crs": ""}
+
+
+def builtin(name):
+    spec = importlib.util.spec_from_file_location(name, SERVER / "builtins" / (name + ".py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+applier = builtin("solar_autofill")
+
+
+def _provenance():
+    return {"created_by": "test", "created_at": CREATED_AT, "last_writer": "test",
+            "source_rev": 0, "source_hash": "a" * 64}
+
+
+def _panel(source):
+    return {"id": new_id("panel"), "kind": "panel", "rev": 0, "extra": {},
+            "validity": {"state": "valid", "reasons": []}, "provenance": _provenance(),
+            "frame_ref": None, "matrix_cell": None,
+            "centre": [source["x"], source["y"]], "angle": source["angle"],
+            "assignment": {"string_ref": None, "seq": None}}
+
+
+def _frame(name, members):
+    """One group over a single full row, the densest shape the schema allows."""
+    cells = [{"code": "panel", "panel_ref": panel["id"], "seq": None, "inverter_id": None,
+              "string_input_number": None, "x": panel["centre"][0], "y": panel["centre"][1],
+              "angle": panel["angle"]} for panel in members]
+    frame = {
+        "id": new_id("frame"), "kind": "frame", "rev": 0, "extra": {},
+        "validity": {"state": "valid", "reasons": []}, "provenance": _provenance(),
+        "name": name, "insertion_point": members[0]["centre"][:], "installation_design": "Roof",
+        "panel_refs": [panel["id"] for panel in members], "module_rows": 1,
+        "module_columns": len(cells), "module_slots": len(cells), "module_power_watts": 0,
+        "module_width_along_row": 77.0, "module_height_across_row": 38.5,
+        "electrical_zone_ref": None, "sequences": [], "matrix": [cells],
+        "panel_assignments": [{"panel_ref": panel["id"], "string_ref": None, "seq": None,
+                               "inverter_id": None, "string_input_number": None}
+                              for panel in members],
+    }
+    for column, panel in enumerate(members):
+        panel["frame_ref"] = frame["id"]
+        panel["matrix_cell"] = {"row": 0, "col": column}
+    return frame
+
+
+def committed(entries):
+    """A committed graph whose frames are exactly the port's `entries`, one row each.
+
+    Returns ``(graph, panel ids by the port's panel id, frame ids by the port's group
+    id)``. The builtin speaks graph ids and the plan speaks the port's, so the two
+    namespaces are mapped ONCE here rather than scanned per assertion.
+    """
+    graph = new_empty_graph(tenant_id="studio-autofill-revert", drawing_id="w2-" + "a" * 16,
+                            source_hash="a" * 64, units=deepcopy(UNITS), created_at=CREATED_AT)
+    panel_ids, frame_ids = {}, {}
+    for entry in entries:
+        members = []
+        for source in entry["panels"]:
+            panel = _panel(source)
+            panel_ids[source["id"]] = panel["id"]
+            graph["panels"].append(panel)
+            members.append(panel)
+        frame = _frame(entry["id"].replace(":", "-"), members)
+        frame_ids[entry["id"]] = frame["id"]
+        graph["frames"].append(frame)
+    return validate_graph(graph), panel_ids, frame_ids
+
+
+def membership(graph, panel_ids, frame_ids):
+    """Group membership back in the PORT's own names, for comparison across a move."""
+    panels = {value: key for key, value in panel_ids.items()}
+    frames = {value: key for key, value in frame_ids.items()}
+    return {frames[frame["id"]]: frozenset(panels[ref] for ref in frame["panel_refs"])
+            for frame in graph["frames"]}
+
+
+def as_request(graph, corrections, panel_ids, frame_ids):
+    """The builtin's {expected_rev, corrections} for a plan written in the port's names."""
+    return {"expected_rev": graph["rev"],
+            "corrections": [{"from_ref": frame_ids[correction["from"]],
+                             "to_ref": frame_ids[correction["to"]],
+                             "panel_refs": [panel_ids[ref] for ref in correction["panels"]]}
+                            for correction in corrections]}
+
+
+@pytest.fixture(scope="module")
+def captured_graph(captured):
+    """The captured rooftop groups as a committed graph, with the port's own plan."""
+    supplied, plan = captured
+    graph, panel_ids, frame_ids = committed(supplied)
+    return graph, plan, panel_ids, frame_ids
+
+
+def small_graph():
+    """Three small groups: enough for a chain, small enough to seed per test."""
+    return committed([group("a", 6, (0.0, 0.0)), group("b", 5, (0.0, 600.0)),
+                      group("c", 4, (0.0, 1200.0))])
+
+
+CHAIN = [{"from": "a", "to": "b", "panels": ["a-0", "a-1"]},
+         {"from": "b", "to": "c", "panels": ["a-0", "b-0"]}]
+
+
+def test_reverting_the_captured_auto_fill_puts_8201_back_in_the_71_panel_group(captured_graph):
+    """The round trip the plugin's own revert fails: 70 and 138 go back to 71 and 137."""
+    graph, plan, panel_ids, frame_ids = captured_graph
+    before = membership(graph, panel_ids, frame_ids)
+    assert len(before[DONOR]) == 71 and len(before[RECEIVER]) == 137
+    plan_request = as_request(graph, plan["corrections"], panel_ids, frame_ids)
+    filled = applier.apply_corrections(graph, plan_request)["graph"]
+    moved = membership(filled, panel_ids, frame_ids)
+    assert MOVED_PANEL in moved[RECEIVER] and MOVED_PANEL not in moved[DONOR]
+    assert len(moved[DONOR]) == 70 and len(moved[RECEIVER]) == 138
+
+    reverted = applier.revert_corrections(
+        filled, {**plan_request, "expected_rev": filled["rev"]})["graph"]
+    after = membership(reverted, panel_ids, frame_ids)
+    assert MOVED_PANEL in after[DONOR] and MOVED_PANEL not in after[RECEIVER]
+    assert len(after[DONOR]) == 71 and len(after[RECEIVER]) == 137
+    # Every group, not just the two the correction named.
+    assert after == before
+    assert validate_graph(reverted) == reverted
+    assert reverted["rev"] == filled["rev"] + 1 == graph["rev"] + 2
+
+
+def test_the_revert_restores_every_panel_s_own_frame_and_matrix_cell(captured_graph):
+    """Membership is not enough: the moved panel goes back into the slot it emptied."""
+    graph, plan, panel_ids, frame_ids = captured_graph
+    plan_request = as_request(graph, plan["corrections"], panel_ids, frame_ids)
+    filled = applier.apply_corrections(graph, plan_request)["graph"]
+    reverted = applier.revert_corrections(
+        filled, {**plan_request, "expected_rev": filled["rev"]})["graph"]
+    donor = frame_ids[DONOR]
+
+    def occupied(state):
+        frame = next(entry for entry in state["frames"] if entry["id"] == donor)
+        return {cell["panel_ref"]: (row, column)
+                for row, line in enumerate(frame["matrix"])
+                for column, cell in enumerate(line) if cell["panel_ref"] is not None}
+
+    # The donation emptied one slot and the revert reuses that same slot, so the
+    # donor's matrix comes back identical rather than merely the right size.
+    assert occupied(reverted) == occupied(graph) and len(occupied(graph)) == 71
+    placed = {panel["id"]: (panel["frame_ref"], panel["matrix_cell"])
+              for panel in reverted["panels"]}
+    started = {panel["id"]: (panel["frame_ref"], panel["matrix_cell"])
+               for panel in graph["panels"]}
+    assert placed[panel_ids[MOVED_PANEL]] == started[panel_ids[MOVED_PANEL]]
+    assert placed == started
+
+
+def test_a_chain_reverts_hop_by_hop_backwards():
+    """The second hop hands its panels back FIRST, so the first hop finds them."""
+    graph, panel_ids, frame_ids = small_graph()
+    before = membership(graph, panel_ids, frame_ids)
+    chain = as_request(graph, CHAIN, panel_ids, frame_ids)
+    filled = applier.apply_corrections(graph, chain)["graph"]
+    moved = membership(filled, panel_ids, frame_ids)
+    assert moved["a"] == before["a"] - {"a-0", "a-1"}
+    assert moved["c"] == before["c"] | {"a-0", "b-0"}
+    result = applier.revert_corrections(filled, {**chain, "expected_rev": filled["rev"]})
+    assert membership(result["graph"], panel_ids, frame_ids) == before
+    assert result["corrections"] == 2 and result["panels_moved"] == 4
+
+
+def test_a_graph_that_was_never_auto_filled_is_refused_before_anything_moves():
+    graph, panel_ids, frame_ids = small_graph()
+    untouched = deepcopy(graph)
+    with pytest.raises(GraphValidationError) as raised:
+        applier.revert_corrections(graph, as_request(graph, CHAIN, panel_ids, frame_ids))
+    assert raised.value.code == "PANEL_NOT_IN_GROUP"
+    assert graph == untouched
+
+
+def test_reverting_twice_is_refused_because_the_second_graph_no_longer_matches():
+    graph, panel_ids, frame_ids = small_graph()
+    chain = as_request(graph, CHAIN, panel_ids, frame_ids)
+    filled = applier.apply_corrections(graph, chain)["graph"]
+    reverted = applier.revert_corrections(filled, {**chain, "expected_rev": filled["rev"]})["graph"]
+    untouched = deepcopy(reverted)
+    with pytest.raises(GraphValidationError) as raised:
+        applier.revert_corrections(reverted, {**chain, "expected_rev": reverted["rev"]})
+    assert raised.value.code == "PANEL_NOT_IN_GROUP"
+    assert reverted == untouched
+
+
+def test_a_correction_naming_a_panel_another_group_holds_is_refused():
+    """Scoped to the pair it names: c never received b-1, so the revert moves nothing."""
+    graph, panel_ids, frame_ids = small_graph()
+    plan = [{"from": "a", "to": "c", "panels": ["b-1"]}]
+    untouched = deepcopy(graph)
+    with pytest.raises(GraphValidationError) as raised:
+        applier.revert_corrections(graph, as_request(graph, plan, panel_ids, frame_ids))
+    assert raised.value.code == "PANEL_NOT_IN_GROUP"
+    assert graph == untouched
+
+
+def test_the_revert_refuses_a_stale_revision_and_an_unknown_group():
+    graph, panel_ids, frame_ids = small_graph()
+    chain = as_request(graph, CHAIN, panel_ids, frame_ids)
+    with pytest.raises(GraphValidationError) as stale:
+        applier.revert_corrections(graph, {**chain, "expected_rev": graph["rev"] + 1})
+    assert stale.value.code == "STALE_GRAPH_REVISION"
+    missing = as_request(graph, [{"from": "a", "to": "b", "panels": ["a-0"]}], panel_ids, frame_ids)
+    # The inverse gives the panels BACK to this group, so an id no frame carries is
+    # caught before any membership is read.
+    missing["corrections"][0]["from_ref"] = new_id("frame")
+    with pytest.raises(GraphValidationError) as absent:
+        applier.revert_corrections(graph, missing)
+    assert absent.value.code == "MISSING_FRAME"
+
+
+@pytest.mark.parametrize("params", [
+    {"expected_rev": 0, "corrections": []},
+    {"expected_rev": 0},
+    {"expected_rev": 0, "corrections": [], "extra": 1},
+    {"expected_rev": "0", "corrections": [{"from_ref": "a", "to_ref": "b", "panel_refs": ["p"]}]},
+    {"expected_rev": 0, "corrections": [{"from_ref": "a", "to_ref": "a", "panel_refs": ["p"]}]},
+    {"expected_rev": 0, "corrections": [{"from_ref": "a", "to_ref": "b", "panel_refs": ["p", "p"]}]},
+    {"expected_rev": 0, "corrections": [{"from_ref": "a", "to_ref": "b", "panel_refs": []}]},
+])
+def test_a_malformed_revert_request_is_refused_as_an_apply_would_be(params):
+    """An empty correction list is refused exactly as apply_corrections refuses it."""
+    graph, _, _ = small_graph()
+    untouched = deepcopy(graph)
+    with pytest.raises(GraphValidationError) as raised:
+        applier.revert_corrections(graph, params)
+    assert raised.value.code == "INVALID_AUTOFILL_REQUEST"
+    assert graph == untouched
+
+
+def test_the_builtin_exposes_the_revert_as_its_own_operation():
+    graph, panel_ids, frame_ids = small_graph()
+    chain = as_request(graph, CHAIN, panel_ids, frame_ids)
+    filled = applier.run(graph, {"operation": "apply-corrections", **chain})
+    reverted = applier.run(filled, {"operation": "revert-corrections",
+                                    **chain, "expected_rev": filled["rev"]})
+    assert membership(reverted, panel_ids, frame_ids) == membership(graph, panel_ids, frame_ids)
 
 
 @pytest.mark.parametrize("groups,length,message", [

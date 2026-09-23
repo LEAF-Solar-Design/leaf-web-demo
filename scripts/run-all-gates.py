@@ -420,13 +420,17 @@ def build_suites() -> List[Suite]:
         # boundary a trade cannot cross, chain routing across twelve groups, the snake's
         # pick on the receiver-facing edge, and the 2026-09-23 captured rooftop case
         # (28 removals, then exactly panel 8201 from the 71-panel group to the
-        # 137-panel one) COMPUTED from the committed intake. Pure (the committed
-        # rooftop intake only; no graph, no builtin, no network), so the floor is the
-        # exact count on every runner: 11 unparametrized tests + one parametrization
-        # over 12 literal feasibility rows + one over 5 nearest-count rows + one over
-        # 6 literal malformed plans = 34.
+        # 137-panel one) COMPUTED from the committed intake. S30 (2026-09-22) adds the
+        # builtin's revert_corrections on a graph seeded in the test file: the captured
+        # round trip puts 8201 back in the 71-panel group with every panel in its own
+        # matrix cell again, a chain reverts hop by hop backwards, and a graph that is
+        # not in the auto-filled state is refused before anything moves. Offline (the
+        # committed rooftop intake only; no network), so the floor is the exact count on
+        # every runner: 19 unparametrized tests + one parametrization over 12 literal
+        # feasibility rows + one over 5 nearest-count rows + one over 6 literal malformed
+        # plans + one over 7 literal malformed revert requests = 49.
         Suite("server-w2-autofill", "server tests/test_solar_autofill.py", "pytest", SERVER,
-              _py_pytest("tests/test_solar_autofill.py"), 34),
+              _py_pytest("tests/test_solar_autofill.py"), 49),
         # S31 harness and BOM ports (2026-09-22): server/solar_harness_bom.py, the
         # literal port of three more licensed engines (HarnessCablePlanner, the
         # harness BOM builder, and the tracker BOM builder with the empty and
@@ -1677,11 +1681,14 @@ def build_suites() -> List[Suite]:
         # (exactly panel 8201, from the 71-panel group to the 137-panel one), the five
         # groups it leaves alone, the reopen, the two matrices the move touched, rule
         # G3's rename of the receiver, rule G8's mapping, the groups evidence, and the
-        # refusals. Hermetic (the committed rooftop fixture and intake only; no
-        # network), so the floor is the exact count on every runner: 10 tests + one
-        # parametrization over 6 literal parameter overrides = 16.
+        # refusals. S30 (2026-09-22) adds the --revert run: the same rebalance applied
+        # and then undone, which puts the groups back to 71 and 137 with 8201 in the
+        # 71-panel one and every other group untouched, where the plugin's own
+        # AutoFillRevert leaves them at 70 and 138. Hermetic (the committed rooftop
+        # fixture and intake only; no network), so the floor is the exact count on every
+        # runner: 13 tests + one parametrization over 6 literal parameter overrides = 19.
         Suite("scripts-solar-w1-studio-autofill", "scripts test_solar_w1_studio_autofill.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_autofill.py"), 16),
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_autofill.py"), 19),
         # S25 (2026-09-22): the MULTISTRING producer on the committed rooftop capture.
         # The solve half is the solve producer and the delete half is the string-delete
         # producer, so the circuits it re-strings beside are the plugin's own 66 and the

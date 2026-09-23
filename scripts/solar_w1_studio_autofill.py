@@ -29,6 +29,15 @@ rationalised angle in radians. The graph's own panel record carries a
 polyline-vertex mean and an edge direction in degrees, which is a different
 quantity, so the kernel's values are used and the metadata says so.
 
+REVERT. With `--revert` the run applies the rebalance and then undoes it with
+server/builtins/solar_autofill.py's revert_corrections, so the written graph is
+the auto-filled drawing put back to the membership it held before AUTOFILL ran.
+Studio's revert is CORRECT where the plugin's AutoFillRevert is not: the plugin
+keys its snapshot by block handle and AutoFill rebuilds every group it changes
+under a new one, so its revert skips exactly the groups that moved. Provenance
+carries the corrections that were made AND `reverted`, so the evidence says which
+plan was undone. Without the flag the run behaves exactly as it did before.
+
 The groups capability carries no string sizing, so the groups builtin's sizing
 recheck is bypassed for the grouping step exactly as the groups producer bypasses
 it, and the metadata lists settings/string_sizing as synthetic. The string length
@@ -223,19 +232,29 @@ def produce(args):
             graph = removal["graph"]
             rebuilt.append(frame_id)
 
-    before_ids = {frame["id"]: group_neutral_id([handles[ref] for ref in frame["panel_refs"]])
-                  for frame in graph["frames"]}
-    before_counts = {frame["id"]: len(frame["panel_refs"]) for frame in graph["frames"]}
+    # One pass for the state auto-fill starts from: the membership a revert must
+    # restore exactly, and the neutral id and count each group carries there.
+    before_members = {frame["id"]: frozenset(handles[ref] for ref in frame["panel_refs"])
+                      for frame in graph["frames"]}
+    before_ids = {frame_id: group_neutral_id(members)
+                  for frame_id, members in before_members.items()}
+    before_counts = {frame_id: len(members) for frame_id, members in before_members.items()}
     plan = autofill(solver_groups(graph, geometry, rebuilt), length)
     corrections = plan["corrections"]
+    reverted = bool(args.revert)
 
     if corrections:
         applier = builtin("solar_autofill")
+        request = [{"from_ref": correction["from"], "to_ref": correction["to"],
+                    "panel_refs": list(correction["panels"])}
+                   for correction in corrections]
         graph = applier.apply_corrections(graph, {
-            "expected_rev": graph["rev"],
-            "corrections": [{"from_ref": correction["from"], "to_ref": correction["to"],
-                             "panel_refs": list(correction["panels"])}
-                            for correction in corrections]})["graph"]
+            "expected_rev": graph["rev"], "corrections": request})["graph"]
+        if reverted:
+            # The SAME plan, undone: revert_corrections refuses unless the graph is
+            # still in the auto-filled state, so this cannot half-apply.
+            graph = applier.revert_corrections(graph, {
+                "expected_rev": graph["rev"], "corrections": request})["graph"]
     reopened = deserialize_graph(serialize_graph(graph))
     validate_graph(reopened)
     if {panel["id"] for panel in reopened["panels"]} != set(handles):
@@ -254,9 +273,17 @@ def produce(args):
     # is exactly what the removal left. Anything else is a lost or duplicated panel.
     if sum(len(frame["panel_refs"]) for frame in reopened["frames"]) != sum(before_counts.values()):
         raise ProducerError("the rebalance must conserve the grouped panel count")
-    for frame_id, frame in surviving.items():
-        if len(frame["panel_refs"]) != plan["counts"][frame_id]:
-            raise ProducerError("a committed group does not hold the count the solver planned")
+    if reverted:
+        # Membership, not counts: the whole point of the revert is that every group
+        # holds the SAME panels again, not merely the same number of them.
+        restored = {frame_id: frozenset(handles[ref] for ref in frame["panel_refs"])
+                    for frame_id, frame in surviving.items()}
+        if restored != before_members:
+            raise ProducerError("the revert must restore every group's membership exactly")
+    else:
+        for frame_id, frame in surviving.items():
+            if len(frame["panel_refs"]) != plan["counts"][frame_id]:
+                raise ProducerError("a committed group does not hold the count the solver planned")
     mapping = evidence_mapping(reopened)
     if len(set(mapping.values())) != len(mapping):
         raise ProducerError("entity mapping must be one-to-one")
@@ -301,7 +328,12 @@ def produce(args):
                        "panels_moved": plan["total_moved"],
                        "groups_modified": len({correction["from"] for correction in corrections}
                                               | {correction["to"] for correction in corrections}),
-                       "corrections": correction_records},
+                       "corrections": correction_records,
+                       # True when the corrections above were MADE and then undone, so
+                       # the committed groups hold their pre-auto-fill membership again.
+                       # Studio's revert is correct where the plugin's is not, which
+                       # the receipt records as a declared divergence.
+                       "reverted": reverted},
     }
     args.out_graph.write_text(serialize_graph(reopened) + "\n", encoding="utf-8")
     args.out_metadata.write_text(json.dumps(metadata, indent=2, sort_keys=True,
@@ -321,6 +353,8 @@ def main(argv=None):
                         help="the string length auto-fill solves against (NumPanelsInSequence)")
     parser.add_argument("--remove", action="append", default=[],
                         help="source handle of a panel to remove before the rebalance; repeatable")
+    parser.add_argument("--revert", action="store_true",
+                        help="undo the rebalance after it is applied and write the reverted graph")
     args = parser.parse_args(argv)
     try:
         produce(args)

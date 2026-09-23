@@ -10,11 +10,18 @@ the group membership, the counts and the correction are all COMPUTED by running 
 producer on data/rooftop_unsplit.intake.json, so a port that got the answer another
 way would fail.
 
-The producer is run twice: once with no removals, which is the control the
+The producer is run three times: once with no removals, which is the control the
 rebalanced run is diffed against (same producer, same intake, same four grouping
-parameters, so every group is feasible and nothing moves), and once with the
-captured 28. Entity ids are fresh per run, so the two runs are compared by SOURCE
+parameters, so every group is feasible and nothing moves), once with the captured
+28, and once more with `--revert`, which applies that same rebalance and then
+undoes it. Entity ids are fresh per run, so the runs are compared by SOURCE
 HANDLE, never by id.
+
+The revert run is a DECLARED DIVERGENCE, not a reproduction. The plugin's own
+AutoFillRevert is defective: it snapshots each group by block handle and AutoFill
+rebuilds every group it changes under a new one, so after save and reopen the two
+groups stayed at 70 and 138. Studio reverts by the plan, so they go back to 71 and
+137 with 8201 in the 71-panel group, which is what these tests assert.
 """
 import hashlib
 import importlib.util
@@ -67,12 +74,13 @@ RECEIVER_AFTER = "group:8201"
 REPORTED_DISTANCE = 1027
 
 
-def arguments(folder, remove=REMOVED_28, **overrides):
+def arguments(folder, remove=REMOVED_28, revert=False, **overrides):
     values = {"fixture": FIXTURE, "intake": INTAKE, **PARAMETERS,
               "out-graph": folder / "graph.json", "out-metadata": folder / "metadata.json"}
     values.update(overrides)
     argv = [part for key, value in values.items() for part in ("--" + key, str(value))]
-    return argv + [part for name in remove for part in ("--remove", str(name))]
+    argv += [part for name in remove for part in ("--remove", str(name))]
+    return argv + (["--revert"] if revert else [])
 
 
 def run(folder, **kwargs):
@@ -103,6 +111,14 @@ def control(tmp_path_factory):
 def rebalanced(tmp_path_factory):
     folder = tmp_path_factory.mktemp("studio-autofill")
     graph, metadata = run(folder)
+    return graph, metadata, folder
+
+
+@pytest.fixture(scope="module")
+def reverted(tmp_path_factory):
+    """The same run with --revert: the rebalance applied, then undone."""
+    folder = tmp_path_factory.mktemp("studio-autofill-revert")
+    graph, metadata = run(folder, revert=True)
     return graph, metadata, folder
 
 
@@ -268,6 +284,69 @@ def test_groups_evidence_validates_the_joint_contract(rebalanced):
     assert len(groups[RECEIVER_AFTER]) == RECEIVER_SIZE + 1
     assert MOVED_PANEL in groups[RECEIVER_AFTER]
     assert evidence["execution_mode"] == "live" and evidence["synthetic_flagged"] is True
+
+
+def test_the_revert_puts_every_group_back_exactly_where_the_rebalance_found_it(reverted, control):
+    """The round trip the plugin's own AutoFillRevert fails: 70 and 138 back to 71 and 137."""
+    graph, _, _ = reverted
+    assert producer.validate_graph(graph) == graph
+    before = [group - set(REMOVED_28) if len(group) == 99 else group
+              for group in membership(control[0])]
+    after = membership(graph)
+    # Member for member, every group, not merely the right counts.
+    assert sorted(sorted(group) for group in after) == sorted(sorted(group) for group in before)
+    assert sorted(len(group) for group in after) == [DONOR_SIZE, 104, 111, 123, 134,
+                                                     RECEIVER_SIZE, 174]
+    donor = next(group for group in after if len(group) == DONOR_SIZE)
+    assert MOVED_PANEL in donor
+    # A correct revert restores the state, not a nicer one: the cut group is infeasible
+    # at 14 again, which is exactly what gave AUTOFILL something to move.
+    assert not is_feasible_count(STRING_LENGTH, DONOR_SIZE)
+    # The 28 the removal freed stay outside every group, as they were.
+    handles = handle_of(graph)
+    free = sorted(handles[panel["id"]] for panel in graph["panels"] if panel["frame_ref"] is None)
+    assert free == sorted(REMOVED_28)
+
+
+def test_the_reverted_run_records_the_correction_it_undid(reverted, rebalanced):
+    graph, metadata, _ = reverted
+    provenance = metadata["provenance"]
+    assert provenance["reverted"] is True
+    assert rebalanced[1]["provenance"]["reverted"] is False
+    # The plan stays the record: the same one correction the rebalance made.
+    assert provenance["panels_moved"] == 1 and provenance["groups_modified"] == 2
+    assert len(provenance["corrections"]) == 1
+    correction = provenance["corrections"][0]
+    assert correction["panels"] == [MOVED_PANEL]
+    assert (correction["from"], correction["to"]) == (DONOR, RECEIVER_BEFORE)
+    assert REPORTED_DISTANCE - 1 <= correction["distance"] <= REPORTED_DISTANCE + 1
+    assert provenance["panels_removed"] == 28 and provenance["removed"] == sorted(REMOVED_28)
+    assert provenance["solver_feasible"] is provenance["solver_valid"] is True
+    assert metadata["state"] == "committed" and metadata["survived_reopen"] is True
+
+
+def test_the_reverted_graph_reopens_and_carries_the_names_the_move_had_taken(reverted):
+    graph, metadata, folder = reverted
+    # rev 1 committed the seven groups, rev 2 removed the 28, rev 3 applied the
+    # correction, rev 4 undid it.
+    assert graph["rev"] == 4 and graph["parent_rev"] == 3
+    assert len(graph["panels"]) == PANEL_COUNT and len(graph["frames"]) == GROUP_COUNT
+    assert producer.deserialize_graph((folder / "graph.json").read_bytes()) == graph
+    mapping = metadata["entity_mapping"]
+    assert mapping == producer.evidence_mapping(graph)
+    names = {mapping[frame["id"]] for frame in graph["frames"]}
+    # Rule G3 names a group by its lowest member, so handing 8201 back renames the
+    # receiver from group:8201 to the group:8228 it carried before the move.
+    assert DONOR in names and RECEIVER_BEFORE in names and RECEIVER_AFTER not in names
+    handles = handle_of(graph)
+    donor = next(frame for frame in graph["frames"] if mapping[frame["id"]] == DONOR)
+    assert len(donor["panel_refs"]) == DONOR_SIZE
+    assert MOVED_PANEL in {handles[ref] for ref in donor["panel_refs"]}
+    assert len(donor["matrix"]) == donor["module_rows"]
+    assert all(len(row) == donor["module_columns"] for row in donor["matrix"])
+    assert donor["module_slots"] == donor["module_rows"] * donor["module_columns"]
+    cells = [cell["panel_ref"] for row in donor["matrix"] for cell in row]
+    assert sorted(ref for ref in cells if ref is not None) == sorted(donor["panel_refs"])
 
 
 def test_a_removal_the_drawing_cannot_take_is_refused_before_any_output(tmp_path, capsys):
