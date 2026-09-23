@@ -16,6 +16,11 @@ scripts/solar_terrain_probes.py and their licensed CSVs are committed in the sam
 folder. Four of them start with the byte order mark Encoding.UTF8 writes, which
 the CSV reader drops as encoding before it looks for the `#` preamble.
 
+The four KML and LandXML capabilities added in S33 come from
+scripts/solar_geo_formats_probes.py, and their eighteen licensed files are
+committed in the same folder. Fifteen are XML documents, read through the XML
+path: one row per file, keyed by its name, its lines verbatim.
+
 What these prove:
   * the evidence a probe file yields is exactly what the frozen comparator
     accepts for family `exports`, with the E4 identity mapping and an observed,
@@ -54,6 +59,7 @@ probes = load_module("solar_nec_probes")
 calc_probes = load_module("solar_probe_calcs_probes")
 harness_probes = load_module("solar_harness_bom_probes")
 terrain_probes = load_module("solar_terrain_probes")
+geo_probes = load_module("solar_geo_formats_probes")
 # The XLSX reader comes from the module under test for the same reason the
 # comparator does: one module object, one exception identity.
 xlsx = normalizer.xlsx
@@ -490,8 +496,9 @@ def test_malformed_arguments_are_refused(overrides):
 
 def test_only_the_implemented_formats_are_wired():
     """Every probe type's format has a reader, and nothing else is claimed."""
-    assert sorted(normalizer.READERS) == [
-        "csv", "csv-pipe", "json-metrics", "json-probes", normalizer.XLSX_BOM_FORMAT]
+    assert sorted(normalizer.READERS) == sorted([
+        "csv", "csv-pipe", "json-metrics", "json-probes", normalizer.XLSX_BOM_FORMAT,
+        normalizer.KML_FORMAT, normalizer.LANDXML_FORMAT])
     assert all(spec.file_format in normalizer.READERS
                for spec in normalizer.PROBE_SPECS.values())
     assert normalizer.TEXT_CELL_FORMATS <= set(normalizer.READERS)
@@ -974,5 +981,189 @@ def test_terrain_row_types_name_the_calculation(tmp_path):
     for name, (row_type, count) in expected.items():
         rows = terrain_evidence_for(terrain_studio_file(tmp_path, name), name,
                                     "studio")["after"]["rows"]
+        assert {row["type"] for row in rows} == {row_type}, name
+        assert len(rows) == count, name
+
+
+# --------------------------------------------------------------------------- #
+# S33: the KML and LandXML capabilities, licensed captures COMMITTED. Fifteen of
+# the eighteen files are XML documents and take the XML path.
+# --------------------------------------------------------------------------- #
+GEO_FILES = sorted(geo_probes.FILE_PROBE_TYPES)
+GEO_XML_FILES = [name for name in GEO_FILES
+                 if normalizer.PROBE_SPECS[geo_probes.FILE_PROBE_TYPES[name]].file_format
+                 in normalizer.NAMED_FORMATS]
+
+
+def geo_studio_file(folder, name):
+    """Write Studio's own copy of one S33 file and return its path.
+
+    The import report is written after the export it re-reads, as --all does.
+    """
+    if geo_probes.FILE_DEMOS[name] == "leafkmlimport":
+        geo_probes.write("leafkmlexport", folder)
+    for path in geo_probes.write(geo_probes.FILE_DEMOS[name], folder):
+        if path.name == name:
+            return path
+    raise AssertionError("demo did not write " + name)
+
+
+def geo_evidence_for(path, name, side):
+    return normalizer.build_evidence_from_file(
+        path, capability=geo_probes.FILE_CAPABILITIES[name],
+        probe_type=geo_probes.FILE_PROBE_TYPES[name], side=side, revision=REVISION)
+
+
+def geo_verdict(plugin, studio, name):
+    return compare.compare(plugin, studio, "exports",
+                           capability=geo_probes.FILE_CAPABILITIES[name])
+
+
+def geo_altered_file(folder, name):
+    """Studio's file with ONE OUTPUT changed, written under the SAME name.
+
+    An XML file's row id is its name, so the altered copy lives in a subfolder
+    rather than under a new name. An XML document gains a comment after its
+    declaration, which keeps it well-formed and moves exactly one line; a CSV
+    has the section's quantity changed in its first data row, which no declared
+    input names. BOM, preamble and CRLFs are kept.
+    """
+    text = (folder / name).read_bytes().decode("utf-8")
+    bom = "﻿" if text.startswith("﻿") else ""
+    body = text[len(bom):]
+    if name in GEO_XML_FILES:
+        body = body.replace("?>", "?><!--altered-->", 1)
+    else:
+        lines = body.replace("\r\n", "\n").split("\n")
+        start = 0
+        while lines[start].startswith("#"):
+            start += 1
+        header = lines[start].split(",")
+        cells = lines[start + 1].split(",")
+        column = header.index(normalizer.PROBE_SPECS[
+            geo_probes.FILE_PROBE_TYPES[name]].sections[0].quantity_field)
+        cells[column] = "0.25" if cells[column] != "0.25" else "0.75"
+        lines[start + 1] = ",".join(cells)
+        body = "\r\n".join(lines)
+    altered = folder / "altered"
+    altered.mkdir(exist_ok=True)
+    path = altered / name
+    path.write_bytes((bom + body).encode("utf-8"))
+    return path
+
+
+def test_geo_captures_are_committed():
+    """A subset check: this block's own eighteen files, never the folder's whole list."""
+    assert len(GEO_FILES) == 18 and len(GEO_XML_FILES) == 15
+    for name in GEO_FILES:
+        assert (CALC_REFERENCE_DIR / name).is_file(), name
+
+
+@pytest.mark.parametrize("name", GEO_FILES)
+def test_geo_evidence_is_comparator_valid(tmp_path, name):
+    evidence = geo_evidence_for(geo_studio_file(tmp_path, name), name, "studio")
+    compare.validate_evidence(evidence, "exports")
+    assert set(evidence) == compare.EVIDENCE_KEYS
+    assert evidence["parameters"] == {"family": "exports",
+                                      "capability": geo_probes.FILE_CAPABILITIES[name]}
+    assert evidence["after"]["format"] == normalizer.PROBE_SPECS[
+        geo_probes.FILE_PROBE_TYPES[name]].file_format
+    assert evidence["survived_reopen"] is True
+    ids = [row["id"]["entity_id"] for row in evidence["after"]["rows"]]
+    assert evidence["entity_mapping"] == {identifier: identifier for identifier in ids}
+    assert len(set(ids)) == len(ids)
+
+
+@pytest.mark.parametrize("name", GEO_FILES)
+def test_geo_studio_compares_pass_against_the_committed_capture(tmp_path, name):
+    """The licensed capture is committed here, so this is the real comparison."""
+    studio = geo_evidence_for(geo_studio_file(tmp_path, name), name, "studio")
+    licensed = geo_evidence_for(CALC_REFERENCE_DIR / name, name, "plugin")
+    result = geo_verdict(licensed, studio, name)
+    assert result["verdict"] == "pass", result["diffs"][:5]
+
+
+@pytest.mark.parametrize("name", GEO_FILES)
+def test_geo_fixture_hash_is_inputs_only(tmp_path, name):
+    geo_studio_file(tmp_path, name)
+    original = geo_evidence_for(tmp_path / name, name, "studio")
+    changed = geo_evidence_for(geo_altered_file(tmp_path, name), name, "studio")
+    assert original["fixture_sha256"] == changed["fixture_sha256"]
+    assert original["input_sha256"] == changed["input_sha256"]
+    assert original["output_sha256"] != changed["output_sha256"]
+
+
+@pytest.mark.parametrize("name", GEO_FILES)
+def test_geo_one_altered_result_is_a_diff(tmp_path, name):
+    geo_studio_file(tmp_path, name)
+    good = geo_evidence_for(tmp_path / name, name, "studio")
+    bad = geo_evidence_for(geo_altered_file(tmp_path, name), name, "plugin")
+    result = geo_verdict(bad, good, name)
+    assert result["verdict"] == "fail"
+    assert all(path.startswith("after/rows/") for path in result["diffs"]), result["diffs"]
+    assert len({path.split("/")[2] for path in result["diffs"]}) == 1, result["diffs"]
+
+
+def test_xml_lines_are_the_canonical_text(tmp_path):
+    """BOM dropped and CRLF made LF, and nothing else: the lines rejoin to the file."""
+    for name in ("leaflandxml_fixed.xml", "leafkmlexport_demo.kml"):
+        raw = geo_studio_file(tmp_path, name).read_bytes().decode("utf-8")
+        rows = geo_evidence_for(tmp_path / name, name, "studio")["after"]["rows"]
+        assert len(rows) == 1
+        assert rows[0]["id"] == {"entity_id": name}
+        canonical = raw.lstrip("﻿").replace("\r\n", "\n")
+        assert "\n".join(rows[0]["fields"]["Lines"]) == canonical
+        assert rows[0]["fields"]["File"] == name
+
+
+def test_xml_quantity_is_the_named_structural_count(tmp_path):
+    expected = {"leafkmlexport_demo.kml": (3, "placemarks", "kml-document"),
+                "leafkmlexportfmt_demo_F9_NULL_POLYGON_SKIP.xml": (2, "placemarks",
+                                                                  "kml-document"),
+                "leaflandxml_delaunay.xml": (800, "faces", "landxml-surface")}
+    for name, (count, unit, row_type) in expected.items():
+        row = geo_evidence_for(geo_studio_file(tmp_path, name), name,
+                               "studio")["after"]["rows"][0]
+        assert row["quantity"] == {"kind": "float", "value": count, "unit": unit}, name
+        assert row["type"] == row_type
+
+
+def test_xml_reader_checks_the_root_the_format_names(tmp_path):
+    """A KML file read as LandXML is refused, never quietly counted as zero faces."""
+    path = geo_studio_file(tmp_path, "leafkmlexport_demo.kml")
+    with pytest.raises(compare.InputError):
+        normalizer.build_evidence_from_file(path, capability="landxml-export",
+                                            probe_type="landxml-surface", side="studio",
+                                            revision=REVISION)
+
+
+def test_xml_reader_refuses_hostile_xml(tmp_path):
+    path = tmp_path / "hostile.kml"
+    path.write_bytes(b'<?xml version="1.0"?><!DOCTYPE kml [<!ENTITY a "aaaa">'
+                     b'<!ENTITY b "&a;&a;&a;&a;">]><kml><name>&b;</name></kml>')
+    with pytest.raises(compare.InputError):
+        normalizer.build_evidence_from_file(path, capability="kml-export",
+                                            probe_type="kml-document", side="studio",
+                                            revision=REVISION)
+
+
+def test_xml_reader_refuses_a_line_past_the_comparators_string_bound(tmp_path):
+    path = tmp_path / "long.kml"
+    path.write_bytes(("<kml><name>" + "x" * 16384 + "</name></kml>").encode("utf-8"))
+    with pytest.raises(compare.InputError):
+        normalizer.build_evidence_from_file(path, capability="kml-export",
+                                            probe_type="kml-document", side="studio",
+                                            revision=REVISION)
+
+
+def test_geo_csv_row_types_name_the_calculation(tmp_path):
+    expected = {
+        "leafkmlexportfmt_demo.csv": ("kml-export-format-fixture", 13),
+        "leafkmlimport_demo.csv": ("kml-import-vertex", 12),
+        "leafimportlandxml_demo.csv": ("landxml-import-point", 15),
+    }
+    for name, (row_type, count) in expected.items():
+        rows = geo_evidence_for(geo_studio_file(tmp_path, name), name,
+                                "studio")["after"]["rows"]
         assert {row["type"] for row in rows} == {row_type}, name
         assert len(rows) == count, name

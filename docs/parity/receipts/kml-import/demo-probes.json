@@ -1,0 +1,743 @@
+{
+ "schema": "leaf.solar-parity-receipt.v1",
+ "capability": "kml-import",
+ "capability_version": "0",
+ "fixture": {
+  "id": "demo-probes",
+  "sha256": "9769286d47dc38e0533d2ac31f51d2254539dca65a6fb881eaf3dc5c48b93aeb"
+ },
+ "plugin": {
+  "build": "LeafSolarDesign 2025 licensed 2026-09-23",
+  "state": "committed",
+  "receipt_sha256": "5c8fa2af2e8c46f7892fa9d160f058d216cd6eda614bb8d83538b1532274d246"
+ },
+ "studio": {
+  "capability_version": "0",
+  "engine": "server-builtin"
+ },
+ "comparator": {
+  "name": "solar-w1-semantic",
+  "version": "1",
+  "verdict": "pass",
+  "diffs": []
+ },
+ "synthetic_fields": [
+  "plugin:before/recorded",
+  "plugin:changes/unrecorded",
+  "studio:before/recorded",
+  "studio:changes/unrecorded"
+ ],
+ "fallback_fields": [],
+ "synthetic_flagged": true,
+ "survived_reopen": true,
+ "produced_at": "2026-09-23T06:23:10Z",
+ "comparison": {
+  "schema": "leaf.solar-w1-comparison.v1",
+  "capability": "kml-import",
+  "family": "exports",
+  "plugin": {
+   "after": {
+    "format": "csv",
+    "rows": [
+     {
+      "fields": {
+       "centroid_lat": "40.00000000",
+       "centroid_lon": "-105.00000000",
+       "lat_deg": "39.99954955",
+       "lon_deg": "-105.00058802",
+       "polygon_index": "0",
+       "polygon_name": "Site Boundary",
+       "vertex_count": "4",
+       "vertex_index": "0"
+      },
+      "id": {
+       "entity_id": "1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": -105.00058802
+      },
+      "type": "kml-import-vertex",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "centroid_lat": "40.00000000",
+       "centroid_lon": "-105.00000000",
+       "lat_deg": "39.99954955",
+       "lon_deg": "-104.99941198",
+       "polygon_index": "0",
+       "polygon_name": "Site Boundary",
+       "vertex_count": "4",
+       "vertex_index": "1"
+      },
+      "id": {
+       "entity_id": "2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": -104.99941198
+      },
+      "type": "kml-import-vertex",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "centroid_lat": "40.00000000",
+       "centroid_lon": "-105.00000000",
+       "lat_deg": "40.00045045",
+       "lon_deg": "-104.99941198",
+       "polygon_index": "0",
+       "polygon_name": "Site Boundary",
+       "vertex_count": "4",
+       "vertex_index": "2"
+      },
+      "id": {
+       "entity_id": "3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": -104.99941198
+      },
+      "type": "kml-import-vertex",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "centroid_lat": "40.00000000",
+       "centroid_lon": "-105.00000000",
+       "lat_deg": "40.00045045",
+       "lon_deg": "-105.00058802",
+       "polygon_index": "0",
+       "polygon_name": "Site Boundary",
+       "vertex_count": "4",
+       "vertex_index": "3"
+      },
+      "id": {
+       "entity_id": "4"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": -105.00058802
+      },
+      "type": "kml-import-vertex",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "centroid_lat": "40.00018018",
+       "centroid_lon": "-105.00000000",
+       "lat_deg": "40.00017568",
+       "lon_deg": "-105.00005880",
+       "polygon_index": "1",
+       "polygon_name": "Tracker Row 1",
+       "vertex_count": "4",
+       "vertex_index": "0"
+      },
+      "id": {
+       "entity_id": "5"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": -105.0000588
+      },
+      "type": "kml-import-vertex",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "centroid_lat": "40.00018018",
+       "centroid_lon": "-105.00000000",
+       "lat_deg": "40.00017568",
+       "lon_deg": "-104.99994120",
+       "polygon_index": "1",
+       "polygon_name": "Tracker Row 1",
+       "vertex_count": "4",
+       "vertex_index": "1"
+      },
+      "id": {
+       "entity_id": "6"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": -104.9999412
+      },
+      "type": "kml-import-vertex",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "centroid_lat": "40.00018018",
+       "centroid_lon": "-105.00000000",
+       "lat_deg": "40.00018468",
+       "lon_deg": "-104.99994120",
+       "polygon_index": "1",
+       "polygon_name": "Tracker Row 1",
+       "vertex_count": "4",
+       "vertex_index": "2"
+      },
+      "id": {
+       "entity_id": "7"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": -104.9999412
+      },
+      "type": "kml-import-vertex",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "centroid_lat": "40.00018018",
+       "centroid_lon": "-105.00000000",
+       "lat_deg": "40.00018468",
+       "lon_deg": "-105.00005880",
+       "polygon_index": "1",
+       "polygon_name": "Tracker Row 1",
+       "vertex_count": "4",
+       "vertex_index": "3"
+      },
+      "id": {
+       "entity_id": "8"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": -105.0000588
+      },
+      "type": "kml-import-vertex",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "centroid_lat": "39.99981982",
+       "centroid_lon": "-105.00000000",
+       "lat_deg": "39.99981532",
+       "lon_deg": "-105.00005880",
+       "polygon_index": "2",
+       "polygon_name": "Tracker Row 2",
+       "vertex_count": "4",
+       "vertex_index": "0"
+      },
+      "id": {
+       "entity_id": "9"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": -105.0000588
+      },
+      "type": "kml-import-vertex",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "centroid_lat": "39.99981982",
+       "centroid_lon": "-105.00000000",
+       "lat_deg": "39.99981532",
+       "lon_deg": "-104.99994120",
+       "polygon_index": "2",
+       "polygon_name": "Tracker Row 2",
+       "vertex_count": "4",
+       "vertex_index": "1"
+      },
+      "id": {
+       "entity_id": "10"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": -104.9999412
+      },
+      "type": "kml-import-vertex",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "centroid_lat": "39.99981982",
+       "centroid_lon": "-105.00000000",
+       "lat_deg": "39.99982432",
+       "lon_deg": "-104.99994120",
+       "polygon_index": "2",
+       "polygon_name": "Tracker Row 2",
+       "vertex_count": "4",
+       "vertex_index": "2"
+      },
+      "id": {
+       "entity_id": "11"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": -104.9999412
+      },
+      "type": "kml-import-vertex",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "centroid_lat": "39.99981982",
+       "centroid_lon": "-105.00000000",
+       "lat_deg": "39.99982432",
+       "lon_deg": "-105.00005880",
+       "polygon_index": "2",
+       "polygon_name": "Tracker Row 2",
+       "vertex_count": "4",
+       "vertex_index": "3"
+      },
+      "id": {
+       "entity_id": "12"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": -105.0000588
+      },
+      "type": "kml-import-vertex",
+      "unit": "deg"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "1": "1",
+    "10": "10",
+    "11": "11",
+    "12": "12",
+    "2": "2",
+    "3": "3",
+    "4": "4",
+    "5": "5",
+    "6": "6",
+    "7": "7",
+    "8": "8",
+    "9": "9"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "9769286d47dc38e0533d2ac31f51d2254539dca65a6fb881eaf3dc5c48b93aeb",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "b1d0ff1147babf575df6db423018895365644a420f5afc4f35106c9912c2cc49",
+   "output_sha256": "02fce3c2a90efd600a793302fd2aa96ab73f6c5c9b9f431be6b0df8d89ff5282",
+   "parameters": {
+    "capability": "kml-import",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafkmlimport_demo.csv",
+    "probe_file_sha256": "ccc926f692e3eb33fbd9ba534412f8d3d1646b4b26ec94c13f077aab6d2fca17",
+    "probe_type": "kml-import-vertices",
+    "side": "plugin"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "none",
+    "producer": "plugin",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  },
+  "studio": {
+   "after": {
+    "format": "csv",
+    "rows": [
+     {
+      "fields": {
+       "centroid_lat": "40.00000000",
+       "centroid_lon": "-105.00000000",
+       "lat_deg": "39.99954955",
+       "lon_deg": "-105.00058802",
+       "polygon_index": "0",
+       "polygon_name": "Site Boundary",
+       "vertex_count": "4",
+       "vertex_index": "0"
+      },
+      "id": {
+       "entity_id": "1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": -105.00058802
+      },
+      "type": "kml-import-vertex",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "centroid_lat": "40.00000000",
+       "centroid_lon": "-105.00000000",
+       "lat_deg": "39.99954955",
+       "lon_deg": "-104.99941198",
+       "polygon_index": "0",
+       "polygon_name": "Site Boundary",
+       "vertex_count": "4",
+       "vertex_index": "1"
+      },
+      "id": {
+       "entity_id": "2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": -104.99941198
+      },
+      "type": "kml-import-vertex",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "centroid_lat": "40.00000000",
+       "centroid_lon": "-105.00000000",
+       "lat_deg": "40.00045045",
+       "lon_deg": "-104.99941198",
+       "polygon_index": "0",
+       "polygon_name": "Site Boundary",
+       "vertex_count": "4",
+       "vertex_index": "2"
+      },
+      "id": {
+       "entity_id": "3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": -104.99941198
+      },
+      "type": "kml-import-vertex",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "centroid_lat": "40.00000000",
+       "centroid_lon": "-105.00000000",
+       "lat_deg": "40.00045045",
+       "lon_deg": "-105.00058802",
+       "polygon_index": "0",
+       "polygon_name": "Site Boundary",
+       "vertex_count": "4",
+       "vertex_index": "3"
+      },
+      "id": {
+       "entity_id": "4"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": -105.00058802
+      },
+      "type": "kml-import-vertex",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "centroid_lat": "40.00018018",
+       "centroid_lon": "-105.00000000",
+       "lat_deg": "40.00017568",
+       "lon_deg": "-105.00005880",
+       "polygon_index": "1",
+       "polygon_name": "Tracker Row 1",
+       "vertex_count": "4",
+       "vertex_index": "0"
+      },
+      "id": {
+       "entity_id": "5"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": -105.0000588
+      },
+      "type": "kml-import-vertex",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "centroid_lat": "40.00018018",
+       "centroid_lon": "-105.00000000",
+       "lat_deg": "40.00017568",
+       "lon_deg": "-104.99994120",
+       "polygon_index": "1",
+       "polygon_name": "Tracker Row 1",
+       "vertex_count": "4",
+       "vertex_index": "1"
+      },
+      "id": {
+       "entity_id": "6"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": -104.9999412
+      },
+      "type": "kml-import-vertex",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "centroid_lat": "40.00018018",
+       "centroid_lon": "-105.00000000",
+       "lat_deg": "40.00018468",
+       "lon_deg": "-104.99994120",
+       "polygon_index": "1",
+       "polygon_name": "Tracker Row 1",
+       "vertex_count": "4",
+       "vertex_index": "2"
+      },
+      "id": {
+       "entity_id": "7"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": -104.9999412
+      },
+      "type": "kml-import-vertex",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "centroid_lat": "40.00018018",
+       "centroid_lon": "-105.00000000",
+       "lat_deg": "40.00018468",
+       "lon_deg": "-105.00005880",
+       "polygon_index": "1",
+       "polygon_name": "Tracker Row 1",
+       "vertex_count": "4",
+       "vertex_index": "3"
+      },
+      "id": {
+       "entity_id": "8"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": -105.0000588
+      },
+      "type": "kml-import-vertex",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "centroid_lat": "39.99981982",
+       "centroid_lon": "-105.00000000",
+       "lat_deg": "39.99981532",
+       "lon_deg": "-105.00005880",
+       "polygon_index": "2",
+       "polygon_name": "Tracker Row 2",
+       "vertex_count": "4",
+       "vertex_index": "0"
+      },
+      "id": {
+       "entity_id": "9"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": -105.0000588
+      },
+      "type": "kml-import-vertex",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "centroid_lat": "39.99981982",
+       "centroid_lon": "-105.00000000",
+       "lat_deg": "39.99981532",
+       "lon_deg": "-104.99994120",
+       "polygon_index": "2",
+       "polygon_name": "Tracker Row 2",
+       "vertex_count": "4",
+       "vertex_index": "1"
+      },
+      "id": {
+       "entity_id": "10"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": -104.9999412
+      },
+      "type": "kml-import-vertex",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "centroid_lat": "39.99981982",
+       "centroid_lon": "-105.00000000",
+       "lat_deg": "39.99982432",
+       "lon_deg": "-104.99994120",
+       "polygon_index": "2",
+       "polygon_name": "Tracker Row 2",
+       "vertex_count": "4",
+       "vertex_index": "2"
+      },
+      "id": {
+       "entity_id": "11"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": -104.9999412
+      },
+      "type": "kml-import-vertex",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "centroid_lat": "39.99981982",
+       "centroid_lon": "-105.00000000",
+       "lat_deg": "39.99982432",
+       "lon_deg": "-105.00005880",
+       "polygon_index": "2",
+       "polygon_name": "Tracker Row 2",
+       "vertex_count": "4",
+       "vertex_index": "3"
+      },
+      "id": {
+       "entity_id": "12"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": -105.0000588
+      },
+      "type": "kml-import-vertex",
+      "unit": "deg"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "1": "1",
+    "10": "10",
+    "11": "11",
+    "12": "12",
+    "2": "2",
+    "3": "3",
+    "4": "4",
+    "5": "5",
+    "6": "6",
+    "7": "7",
+    "8": "8",
+    "9": "9"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "9769286d47dc38e0533d2ac31f51d2254539dca65a6fb881eaf3dc5c48b93aeb",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "b1d0ff1147babf575df6db423018895365644a420f5afc4f35106c9912c2cc49",
+   "output_sha256": "02fce3c2a90efd600a793302fd2aa96ab73f6c5c9b9f431be6b0df8d89ff5282",
+   "parameters": {
+    "capability": "kml-import",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafkmlimport_demo.csv",
+    "probe_file_sha256": "b5b423e40ade0cebd6ac2a759d492870dfd95a44faa2d3c004a53a58ea73da2d",
+    "probe_type": "kml-import-vertices",
+    "side": "studio"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "server-builtin",
+    "producer": "studio",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  }
+ }
+}

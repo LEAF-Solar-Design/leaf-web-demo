@@ -1,0 +1,261 @@
+{
+ "schema": "leaf.solar-parity-receipt.v1",
+ "capability": "kml-export",
+ "capability_version": "0",
+ "fixture": {
+  "id": "demo-fmt-f4-explicit-closed",
+  "sha256": "90599313c675bc0caa849a892530801dbcffffd92c94858d35c14b524ff78a3c"
+ },
+ "plugin": {
+  "build": "LeafSolarDesign 2025 licensed 2026-09-23",
+  "state": "committed",
+  "receipt_sha256": "a2f673335b7fcf770b63836bdba775b3616f6f25576c92f1f3ba3117335e394a"
+ },
+ "studio": {
+  "capability_version": "0",
+  "engine": "server-builtin"
+ },
+ "comparator": {
+  "name": "solar-w1-semantic",
+  "version": "1",
+  "verdict": "pass",
+  "diffs": []
+ },
+ "synthetic_fields": [
+  "plugin:before/recorded",
+  "plugin:changes/unrecorded",
+  "studio:before/recorded",
+  "studio:changes/unrecorded"
+ ],
+ "fallback_fields": [],
+ "synthetic_flagged": true,
+ "survived_reopen": true,
+ "produced_at": "2026-09-23T06:23:05Z",
+ "comparison": {
+  "schema": "leaf.solar-w1-comparison.v1",
+  "capability": "kml-export",
+  "family": "exports",
+  "plugin": {
+   "after": {
+    "format": "xml:kml",
+    "rows": [
+     {
+      "fields": {
+       "Count": 1,
+       "File": "leafkmlexportfmt_demo_F4_EXPLICIT_CLOSED.xml",
+       "Lines": [
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>",
+        "<kml xmlns=\"http://www.opengis.net/kml/2.2\">",
+        "  <Document>",
+        "    <name>F4Doc</name>",
+        "    <Placemark>",
+        "      <name>F4Poly</name>",
+        "      <Polygon>",
+        "        <outerBoundaryIs>",
+        "          <LinearRing>",
+        "            <coordinates>10,40 11,40 10,41 10,40</coordinates>",
+        "          </LinearRing>",
+        "        </outerBoundaryIs>",
+        "      </Polygon>",
+        "    </Placemark>",
+        "  </Document>",
+        "</kml>"
+       ]
+      },
+      "id": {
+       "entity_id": "leafkmlexportfmt_demo_F4_EXPLICIT_CLOSED.xml"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "placemarks",
+       "value": 1
+      },
+      "type": "kml-document",
+      "unit": "placemarks"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "leafkmlexportfmt_demo_F4_EXPLICIT_CLOSED.xml": "leafkmlexportfmt_demo_F4_EXPLICIT_CLOSED.xml"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "90599313c675bc0caa849a892530801dbcffffd92c94858d35c14b524ff78a3c",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "8ee9c9eb6ddf38062ced6aad1f5aca25c2c64ebdb9f2e4023e0b23a0ab573029",
+   "output_sha256": "dbdecc271410262a43d619ba5d201913448d539f4b4330e9d568b364451657ec",
+   "parameters": {
+    "capability": "kml-export",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafkmlexportfmt_demo_F4_EXPLICIT_CLOSED.xml",
+    "probe_file_sha256": "e7deb33125e9f7b68720d9855782d5c7e7e6c19e4426af62a1c8e39a2f29c4a1",
+    "probe_type": "kml-document",
+    "side": "plugin"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "none",
+    "producer": "plugin",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  },
+  "studio": {
+   "after": {
+    "format": "xml:kml",
+    "rows": [
+     {
+      "fields": {
+       "Count": 1,
+       "File": "leafkmlexportfmt_demo_F4_EXPLICIT_CLOSED.xml",
+       "Lines": [
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>",
+        "<kml xmlns=\"http://www.opengis.net/kml/2.2\">",
+        "  <Document>",
+        "    <name>F4Doc</name>",
+        "    <Placemark>",
+        "      <name>F4Poly</name>",
+        "      <Polygon>",
+        "        <outerBoundaryIs>",
+        "          <LinearRing>",
+        "            <coordinates>10,40 11,40 10,41 10,40</coordinates>",
+        "          </LinearRing>",
+        "        </outerBoundaryIs>",
+        "      </Polygon>",
+        "    </Placemark>",
+        "  </Document>",
+        "</kml>"
+       ]
+      },
+      "id": {
+       "entity_id": "leafkmlexportfmt_demo_F4_EXPLICIT_CLOSED.xml"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "placemarks",
+       "value": 1
+      },
+      "type": "kml-document",
+      "unit": "placemarks"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "leafkmlexportfmt_demo_F4_EXPLICIT_CLOSED.xml": "leafkmlexportfmt_demo_F4_EXPLICIT_CLOSED.xml"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "90599313c675bc0caa849a892530801dbcffffd92c94858d35c14b524ff78a3c",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "8ee9c9eb6ddf38062ced6aad1f5aca25c2c64ebdb9f2e4023e0b23a0ab573029",
+   "output_sha256": "dbdecc271410262a43d619ba5d201913448d539f4b4330e9d568b364451657ec",
+   "parameters": {
+    "capability": "kml-export",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafkmlexportfmt_demo_F4_EXPLICIT_CLOSED.xml",
+    "probe_file_sha256": "e7deb33125e9f7b68720d9855782d5c7e7e6c19e4426af62a1c8e39a2f29c4a1",
+    "probe_type": "kml-document",
+    "side": "studio"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "server-builtin",
+    "producer": "studio",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  }
+ }
+}
