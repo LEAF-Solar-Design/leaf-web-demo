@@ -1,11 +1,12 @@
 // W4g-1b: the console's own drawing opens in the browser engine at mount,
 // a hand import always wins, a moved head re-opens only a clean engine copy,
 // and every failure is a sentence on the ribbon, never a retry loop.
+import { StrictMode } from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import CadEditSurface from './CadEditSurface.jsx'
-import EngineHeadOpener, { REACH_STATE, headDocumentId } from './EngineHeadOpener.jsx'
+import EngineHeadOpener, { REACH_STATE, headDocumentId, holdsHeadDocument } from './EngineHeadOpener.jsx'
 import EngineRibbonClusters, { DRAW_REASONS, MODIFY_REASONS } from './EngineRibbonClusters.jsx'
 import EngineSessionProvider, { useEngineSessionContext } from './EngineSessionProvider.jsx'
 import DraftingRibbon from '../site/DraftingRibbon.jsx'
@@ -32,8 +33,9 @@ function fileOf(name = 'hand.dxf') {
 
 let workers
 let handle
-function mount({ drawingId = 'rooftop_demo', enabled = true, headKey = 1, fetchDxf, sourceKey = 'live', opener = true, saveTarget = null, onDirtyChange = null, onDocumentChange = null } = {}) {
+function mount({ drawingId = 'rooftop_demo', enabled = true, headKey = 1, fetchDxf, sourceKey = 'live', opener = true, saveTarget = null, onDirtyChange = null, onDocumentChange = null, strict = false } = {}) {
   workers = []
+  const wrap = (tree) => (strict ? <StrictMode>{tree}</StrictMode> : tree)
   handle = {}
   const createWorker = vi.fn(() => { const w = new ScriptedWorker(); workers.push(w); return w })
   function Probe() { handle.context = useEngineSessionContext(); return null }
@@ -49,8 +51,8 @@ function mount({ drawingId = 'rooftop_demo', enabled = true, headKey = 1, fetchD
       </EngineSessionProvider>
     )
   }
-  const utils = render(<Tree drawingId={drawingId} enabled={enabled} headKey={headKey} fetchDxf={fetchDxf} sourceKey={sourceKey} opener={opener} saveTarget={saveTarget} onDirtyChange={onDirtyChange} onDocumentChange={onDocumentChange} />)
-  handle.rerender = (next) => utils.rerender(<Tree drawingId={drawingId} enabled={enabled} headKey={headKey} fetchDxf={fetchDxf} sourceKey={sourceKey} opener={opener} saveTarget={saveTarget} onDirtyChange={onDirtyChange} onDocumentChange={onDocumentChange} {...next} />)
+  const utils = render(wrap(<Tree drawingId={drawingId} enabled={enabled} headKey={headKey} fetchDxf={fetchDxf} sourceKey={sourceKey} opener={opener} saveTarget={saveTarget} onDirtyChange={onDirtyChange} onDocumentChange={onDocumentChange} />))
+  handle.rerender = (next) => utils.rerender(wrap(<Tree drawingId={drawingId} enabled={enabled} headKey={headKey} fetchDxf={fetchDxf} sourceKey={sourceKey} opener={opener} saveTarget={saveTarget} onDirtyChange={onDirtyChange} onDocumentChange={onDocumentChange} {...next} />))
   handle.unmount = utils.unmount
   return handle
 }
@@ -426,5 +428,117 @@ describe('EngineHeadOpener', () => {
     await settle()
     expect(fetchC).toHaveBeenCalledTimes(1)
     expect(studio.context.reach.source).not.toBe('engine-save')
+  })
+
+  // #218: provenance, not the filename, says the engine holds the head.
+  async function openHeadThenHandImportNamedLikeIt(fetchDxf) {
+    const studio = mount({ fetchDxf })
+    await settle()
+    await waitFor(() => expect(workers.length).toBe(1))
+    loaded(workers[0], headDocumentId('rooftop_demo', 1))
+    await act(async () => { await studio.context.session.actions.open(fileOf(headDocumentId('rooftop_demo', 1))) })
+    loaded(workers[workers.length - 1], headDocumentId('rooftop_demo', 1), [LINE, { ...LINE, id: 'e2' }])
+    expect(studio.context.session.documentOrigin).toBe('import')
+    return studio
+  }
+
+  it('provenance: a hand import named like the head is never replaced by a moved head', async () => {
+    const fetchDxf = vi.fn(async () => answer(1))
+    const studio = await openHeadThenHandImportNamedLikeIt(fetchDxf)
+    fetchDxf.mockImplementation(async () => answer(2))
+    studio.rerender({ headKey: 2 })
+    await settle()
+    expect(fetchDxf).toHaveBeenCalledTimes(1)
+    expect(studio.context.session.documentId).toBe(headDocumentId('rooftop_demo', 1))
+    expect(studio.context.session.entityCount).toBe(2)
+    expect(studio.context.reach.state).toBe(REACH_STATE.IDLE)
+    const posts = loadPosts()
+    expect(posts[posts.length - 1].documentId).toBe(headDocumentId('rooftop_demo', 1))
+    expect(posts.some((m) => m.documentId === headDocumentId('rooftop_demo', 2))).toBe(false)
+  })
+
+  it('provenance: an edited hand import named like the head reads idle, not stale', async () => {
+    const fetchDxf = vi.fn(async () => answer(1))
+    const studio = await openHeadThenHandImportNamedLikeIt(fetchDxf)
+    workers[workers.length - 1].emit({ type: 'editApplied', op: 'createLine', ok: true, entities: [LINE, { ...LINE, id: 'e2' }, { ...LINE, id: 'e3' }], entityCount: 3, bytes: new Uint8Array([48, 10]), byteLength: 2 })
+    expect(studio.context.session.dirty).toBe(true)
+    studio.rerender({ headKey: 2 })
+    await settle()
+    expect(fetchDxf).toHaveBeenCalledTimes(1)
+    expect(studio.context.reach.state).toBe(REACH_STATE.IDLE)
+    expect(studio.context.session.entityCount).toBe(3)
+  })
+
+  it('provenance: the opener\'s own head load in flight still counts as the head', async () => {
+    const fetchDxf = vi.fn(async () => answer(1))
+    const studio = mount({ fetchDxf })
+    await settle()
+    await waitFor(() => expect(workers.length).toBe(1))
+    expect(studio.context.session.documentOrigin).toBe(null)
+    expect(studio.context.session.busy).toBe(true)
+    expect(studio.context.reach.state).toBe(REACH_STATE.OPEN)
+    studio.rerender({})
+    await settle()
+    expect(studio.context.reach.state).toBe(REACH_STATE.OPEN)
+    expect(fetchDxf).toHaveBeenCalledTimes(1)
+    loaded(workers[0], headDocumentId('rooftop_demo', 1))
+    expect(studio.context.reach.state).toBe(REACH_STATE.OPEN)
+    expect(studio.context.session.documentOrigin).toBe('head')
+  })
+
+  it('provenance: holdsHeadDocument decides by origin and shape', () => {
+    const opened = 'rooftop_demo-v1.dxf'
+    const rows = [
+      ['head', 'rooftop_demo-v2.dxf', true],
+      ['import', 'rooftop_demo-v1.dxf', false],
+      ['starter', 'rooftop_demo-v1.dxf', false],
+      [null, 'rooftop_demo-v1.dxf', true],
+      [null, 'rooftop_demo-v3.dxf', false],
+      ['head', 'other-v1.dxf', false],
+      ['head', 'hand.dxf', false],
+      [undefined, 'rooftop_demo-v1.dxf', false],
+    ]
+    for (const [documentOrigin, documentId, expected] of rows) {
+      expect([documentOrigin, documentId, holdsHeadDocument({ documentId, documentOrigin }, 'rooftop_demo', opened)])
+        .toEqual([documentOrigin, documentId, expected])
+    }
+  })
+
+  // #217: StrictMode's setup, cleanup, setup shares one head fetch.
+  const postedWorker = () => workers.find((w) => w.posted.some((m) => m.type === 'loadDocument'))
+
+  it('one fetch: StrictMode opens the head with one fetch', async () => {
+    const fetchDxf = vi.fn(async () => answer(1))
+    const studio = mount({ fetchDxf, strict: true })
+    await settle()
+    await waitFor(() => expect(workers.length).toBeGreaterThan(0))
+    await waitFor(() => expect(loadPosts()).toHaveLength(1))
+    expect(fetchDxf).toHaveBeenCalledTimes(1)
+    expect(loadPosts()).toHaveLength(1)
+    loaded(postedWorker(), headDocumentId('rooftop_demo', 1))
+    expect(studio.context.reach.state).toBe(REACH_STATE.OPEN)
+  })
+
+  it('one fetch: a StrictMode failure is one failure, not a retry', async () => {
+    const fetchDxf = vi.fn(async () => { const e = new Error('GET /api/drawings/rooftop_demo/dxf -> 503'); e.status = 503; throw e })
+    const studio = mount({ fetchDxf, strict: true })
+    await settle()
+    expect(fetchDxf).toHaveBeenCalledTimes(1)
+    expect(studio.context.reach.state).toBe(REACH_STATE.FAILED)
+    expect(note()).toBe('the drawing could not be opened in the browser engine: GET /api/drawings/rooftop_demo/dxf -> 503; import a DXF instead')
+  })
+
+  it('one fetch: a new head after a shared fetch starts its own fetch', async () => {
+    const fetchDxf = vi.fn(async () => answer(1))
+    const studio = mount({ fetchDxf, strict: true })
+    await settle()
+    await waitFor(() => expect(loadPosts()).toHaveLength(1))
+    expect(fetchDxf).toHaveBeenCalledTimes(1)
+    loaded(postedWorker(), headDocumentId('rooftop_demo', 1))
+    fetchDxf.mockImplementation(async () => answer(2))
+    studio.rerender({ headKey: 2 })
+    await settle()
+    expect(fetchDxf).toHaveBeenCalledTimes(2)
+    await waitFor(() => expect(loadPosts()[loadPosts().length - 1].documentId).toBe(headDocumentId('rooftop_demo', 2)))
   })
 })

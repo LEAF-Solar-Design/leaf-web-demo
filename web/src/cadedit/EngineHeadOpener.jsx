@@ -40,6 +40,19 @@ export function headDocumentId(drawingId, version) {
 
 const HEAD_DOC = /-v\d+\.dxf$/
 
+/**
+ * Provenance, not the filename, says the engine holds this drawing's head: the
+ * name must have the head shape for THIS drawing, and the session must have
+ * loaded it as the head, or be loading (or have refused) this opener's own
+ * head load. A hand import named like the head is a hand import. Pure.
+ */
+export function holdsHeadDocument(session, drawingId, openedDocumentId) {
+  const id = session?.documentId
+  if (typeof id !== 'string' || !HEAD_DOC.test(id) || !id.startsWith(`${drawingId}-v`)) return false
+  if (session.documentOrigin === 'head') return true
+  return session.documentOrigin === null && id === openedDocumentId
+}
+
 export default function EngineHeadOpener({ drawingId = null, enabled = false, headKey = null, fetchDxf = null, sourceKey = '' }) {
   const { session, setReach } = useEngineSessionContext()
   const { openBytes } = session.actions
@@ -54,6 +67,11 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
   const openedSourceRef = useRef(null)
   // The session's savedVersion at the moment this opener last opened a head.
   const savedAtOpenRef = useRef(null)
+  // The document name this opener instance last passed to `openBytes`.
+  const openedDocumentRef = useRef(null)
+  // At most one entry, { key, promise }: the head fetch for the current
+  // attempt key, shared by effect runs that were cancelled before they settled.
+  const inflightRef = useRef(null)
   // Bumped on unmount and on every drawing or source switch; an async leg
   // captured before an await compares and abandons if it moved.
   const generationRef = useRef(0)
@@ -62,7 +80,7 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
 
   const documentId = session.documentId
   const present = session.engineParsed || session.busy || documentId !== ''
-  const holdsHead = HEAD_DOC.test(documentId) && documentId.startsWith(`${drawingId}-v`)
+  const holdsHead = holdsHeadDocument(session, drawingId, openedDocumentRef.current)
   const dirty = session.dirty === true
 
   // A drawing or source switch abandons any fetch in flight for the old one.
@@ -79,6 +97,8 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
     // while it is open (the head's sentence would be stale under it). Checked
     // before the attempt key: an import that lands mid-fetch must win too.
     if (present && !holdsHead) {
+      // A hand import wins, so bytes still in flight will never be used.
+      inflightRef.current = null
       setReach({ state: REACH_STATE.IDLE, sentence: '' })
       return undefined
     }
@@ -119,13 +139,33 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
     // re-arms the attempt, so the next quiet moment re-evaluates instead of
     // leaving the head unopened and the reach stuck at "opening".
     let settled = false
+    // A settled attempt drops its shared fetch; a cancelled run leaves it for
+    // the next run with the same key (StrictMode's second setup) to attach to.
+    const release = () => {
+      if (inflightRef.current?.key === key) inflightRef.current = null
+    }
+    let promise
+    if (inflightRef.current?.key === key) {
+      promise = inflightRef.current.promise
+    } else {
+      // A synchronous throw in fetchDxf is a rejection. Called now, not in a
+      // .then: a native promise passes through Promise.resolve unwrapped, so
+      // the load lands on the same microtask it did before the fetch was shared.
+      try {
+        promise = Promise.resolve(fetchRef.current(drawingId))
+      } catch (error) {
+        promise = Promise.reject(error)
+      }
+      inflightRef.current = { key, promise }
+    }
     ;(async () => {
       let answer
       try {
-        answer = await fetchRef.current(drawingId)
+        answer = await promise
       } catch (error) {
         if (cancelled || generation !== generationRef.current) return
         settled = true
+        release()
         setReach({
           state: REACH_STATE.FAILED,
           sentence: `the drawing could not be opened in the browser engine: ${error?.message || 'fetch failed'}; import a DXF instead`,
@@ -134,10 +174,11 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
       }
       if (cancelled || generation !== generationRef.current) return
       settled = true
+      release()
       const latest = sessionRef.current
       // A document appeared while the bytes were in flight (a hand import,
       // or this opener's own earlier open): it wins, the bytes are dropped.
-      if (latest.documentId !== '' && !(HEAD_DOC.test(latest.documentId) && latest.documentId.startsWith(`${drawingId}-v`))) {
+      if (latest.documentId !== '' && !holdsHeadDocument(latest, drawingId, openedDocumentRef.current)) {
         setReach({ state: REACH_STATE.IDLE, sentence: '' })
         return
       }
@@ -173,6 +214,7 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
       }
       // W4g-3b: this document IS the head, so the store keeps the entity
       // list it loads as the base a save diffs against (the mutation plan).
+      openedDocumentRef.current = headDocumentId(drawingId, version)
       openBytes(bytes, headDocumentId(drawingId, version), { committed: true, version })
       openedSourceRef.current = source
       savedAtOpenRef.current = sessionRef.current.savedVersion ?? null
