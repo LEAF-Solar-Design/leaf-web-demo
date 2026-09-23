@@ -1,0 +1,7 @@
+{
+  "measurement": {"count-by-layer": "run_read", "measure-panel-area": "run_read"},
+  "selection": {"highlight-panels-near-edge": "run_read"},
+  "custom": {"string-panels": "run_read", "instant-list-layers": "run_read", "delete-marked-panel": "run_write"},
+  "stringing": {"string-autofill-opt": "solve", "solar-solve-proposal": "solve", "autofill-string-targets": "run_read", "solar-settings": "run_write", "solar-size-strings": "run_write", "solar-panel-groups": "run_write", "solar-commit-solve": "run_write", "solar-correct-string": "run_write", "solar-assign-equipment": "run_write", "solar-homeruns": "run_write", "solar-schedule": "run_write"},
+  "placement": {"arlo-design": "solve"}
+}

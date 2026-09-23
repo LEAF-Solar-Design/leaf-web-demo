@@ -249,9 +249,12 @@ export const PRODUCT_SURFACES = Object.freeze([
       contextMenu: ['version', 'job', 'tool', 'family', 'turn', 'approval', 'item'],
       // shortcuts: no per-surface shortcut registry exists.
       shortcuts: null,
-      // entitlements: EntitlementGate.jsx:15 ROWS are TIER capability keys
-      //   (run_read / run_write / build / converse), never per-surface.
-      entitlements: null,
+      // entitlements: server capabilities the catalog fold and authoring need.
+      //   surfaceEntitlements.test.js pins familyCapabilities.json;
+      //   test_surface_entitlements.py pins that fixture to the real resolver.
+      //   EntitlementGate.jsx ROWS are tier capability keys, so this is
+      //   a baseline declaration, not a grant.
+      entitlements: ['build', 'run_read', 'run_write'],
       // resetOn: no effect in App.jsx keys off activeSurface to reset scope.
       resetOn: null,
       // a11y: no per-surface a11y declaration exists.
@@ -335,7 +338,12 @@ export const PRODUCT_SURFACES = Object.freeze([
       //   the drawing ground replaces the board (`ground: 'drawing'` above).
       contextMenu: ['tool', 'entity', 'turn', 'approval', 'item'],
       shortcuts: null,
-      entitlements: null,
+      // entitlements: server capabilities the catalog fold and authoring need.
+      //   surfaceEntitlements.test.js pins familyCapabilities.json;
+      //   test_surface_entitlements.py pins that fixture to the real resolver.
+      //   EntitlementGate.jsx ROWS are tier capability keys, so this is
+      //   a baseline declaration, not a grant.
+      entitlements: ['build', 'run_read', 'run_write', 'solve'],
       resetOn: null,
       a11y: null,
       // tourAnchors: the ONE surface both tours run on: the console tour
@@ -411,7 +419,12 @@ export const PRODUCT_SURFACES = Object.freeze([
       //   `ground: 'drawing'` with cad above.
       contextMenu: ['tool', 'entity', 'turn', 'approval', 'item'],
       shortcuts: null,
-      entitlements: null,
+      // entitlements: server capabilities the catalog fold and authoring need.
+      //   surfaceEntitlements.test.js pins familyCapabilities.json;
+      //   test_surface_entitlements.py pins that fixture to the real resolver.
+      //   EntitlementGate.jsx ROWS are tier capability keys, so this is
+      //   a baseline declaration, not a grant.
+      entitlements: ['build', 'run_read', 'run_write', 'solve'],
       resetOn: null,
       a11y: null,
       // tourAnchors: the console tour mounts here; the stage takes the frame
@@ -483,7 +496,12 @@ export const PRODUCT_SURFACES = Object.freeze([
       //   `tool` nor `entity` applies.
       contextMenu: ['rung', 'turn', 'approval', 'item'],
       shortcuts: null,
-      entitlements: null,
+      // entitlements: server capabilities the catalog fold and authoring need.
+      //   surfaceEntitlements.test.js pins familyCapabilities.json;
+      //   test_surface_entitlements.py pins that fixture to the real resolver.
+      //   EntitlementGate.jsx ROWS are tier capability keys, so this is
+      //   a baseline declaration, not a grant.
+      entitlements: ['build', 'run_read', 'run_write', 'solve'],
       resetOn: null,
       a11y: null,
       // tourAnchors: the console tour mounts here; the stage's ios arm has no
@@ -585,7 +603,13 @@ export const PRODUCT_SURFACES = Object.freeze([
       // contextMenu: zero contextmenu handlers exist under web/src.
       contextMenu: [],
       shortcuts: null,
-      entitlements: null,
+      // entitlements: server capabilities the catalog fold and authoring need.
+      //   surfaceEntitlements.test.js pins familyCapabilities.json;
+      //   test_surface_entitlements.py pins that fixture to the real resolver.
+      //   EntitlementGate.jsx ROWS are tier capability keys, so this is
+      //   a baseline declaration, not a grant.
+      //   Empty because sheets has no catalog fold and no authoring.
+      entitlements: [],
       resetOn: null,
       a11y: null,
       // tourAnchors: neither shell hosts this surface (scene: 'sheets'), so

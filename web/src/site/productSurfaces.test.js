@@ -172,7 +172,8 @@ describe('product surface contract', () => {
 //                   Link-a-service drawer there. sheets stays undeclared
 //                   (null): a public, session-less page has no tenant to
 //                   link a service from.
-//   everything else undeclared today (null)
+//   entitlements: catalog-fold capabilities plus build for authoring
+//   remaining slots undeclared today (null)
 // ---------------------------------------------------------------------------
 const CONTRACT_FIXTURE = {
   browser: {
@@ -192,7 +193,7 @@ const CONTRACT_FIXTURE = {
     // chat rows ConversePanel renders here (not surface-gated).
     contextMenu: ['version', 'job', 'tool', 'family', 'turn', 'approval', 'item'],
     shortcuts: null,
-    entitlements: null,
+    entitlements: ['build', 'run_read', 'run_write'],
     resetOn: null,
     a11y: null,
     tourAnchors: { console: { welcome: 'shell', viewer: 'viewer', count: 'command-bar', edge: 'command-bar', measure: 'command-bar' }, stage: null },
@@ -214,7 +215,7 @@ const CONTRACT_FIXTURE = {
     // the chat rows this drawing ground carries.
     contextMenu: ['tool', 'entity', 'turn', 'approval', 'item'],
     shortcuts: null,
-    entitlements: null,
+    entitlements: ['build', 'run_read', 'run_write', 'solve'],
     resetOn: null,
     a11y: null,
     tourAnchors: { console: { welcome: 'shell', viewer: 'viewer', count: 'command-bar', edge: 'command-bar', measure: 'command-bar' }, stage: { welcome: 'shell', viewer: 'viewer', request: 'command-bar', versions: 'right-rail', trust: 'right-rail' } },
@@ -240,7 +241,7 @@ const CONTRACT_FIXTURE = {
     // contextMenu: same drafting surface as cad (ribbon + canvas selection + chat rows).
     contextMenu: ['tool', 'entity', 'turn', 'approval', 'item'],
     shortcuts: null,
-    entitlements: null,
+    entitlements: ['build', 'run_read', 'run_write', 'solve'],
     resetOn: null,
     a11y: null,
     tourAnchors: { console: { welcome: 'shell', viewer: 'viewer', count: 'command-bar', edge: 'command-bar', measure: 'command-bar' }, stage: null },
@@ -263,7 +264,7 @@ const CONTRACT_FIXTURE = {
     // contextMenu: the device stage's ship-lane rungs plus the chat rows.
     contextMenu: ['rung', 'turn', 'approval', 'item'],
     shortcuts: null,
-    entitlements: null,
+    entitlements: ['build', 'run_read', 'run_write', 'solve'],
     resetOn: null,
     a11y: null,
     tourAnchors: { console: { welcome: 'shell', viewer: 'viewer', count: 'command-bar', edge: 'command-bar', measure: 'command-bar' }, stage: null },
@@ -295,7 +296,7 @@ const CONTRACT_FIXTURE = {
     builds: { routes: [], card: null },
     contextMenu: [],
     shortcuts: null,
-    entitlements: null,
+    entitlements: [],
     resetOn: null,
     a11y: null,
     tourAnchors: { console: null, stage: null },
@@ -379,6 +380,12 @@ describe('Surface Contract — schema', () => {
       expect(c.authoring === null || typeof c.authoring === 'boolean').toBe(true)
       expect(c.rails.dock === null || Array.isArray(c.rails.dock)).toBe(true)
       expect(c.toolbar.quick === null || Array.isArray(c.toolbar.quick)).toBe(true)
+      expect(Array.isArray(c.entitlements)).toBe(true)
+      expect(c.entitlements).toEqual([...c.entitlements].sort())
+      expect(new Set(c.entitlements).size).toBe(c.entitlements.length)
+      for (const capability of c.entitlements) {
+        expect(['build', 'run_read', 'run_write', 'solve']).toContain(capability)
+      }
       expect(Array.isArray(c.contextMenu)).toBe(true)
       expect(Array.isArray(c.builds.routes)).toBe(true)
       // Nothing in the contract may be a function: this module is data.
