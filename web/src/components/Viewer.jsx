@@ -673,6 +673,7 @@ const Viewer = forwardRef(function Viewer(
       if (!marquee || (e.pointerId !== undefined && e.pointerId !== marquee.pointerId)) return
       clearMarquee()
     }
+    function orphanRelease(e) { if (marquee && e.pointerId === marquee.pointerId && !mount.contains(e.target)) clearMarquee() }
     function escapeMarquee(e) {
       if (e.key === 'Escape' && marquee) {
         e.stopPropagation()
@@ -685,6 +686,8 @@ const Viewer = forwardRef(function Viewer(
     mount.addEventListener('pointercancel', cancelMarquee, true)
     mount.addEventListener('lostpointercapture', cancelMarquee, true)
     window.addEventListener('keydown', escapeMarquee, true)
+    window.addEventListener('pointerup', orphanRelease, true)
+    window.addEventListener('pointercancel', orphanRelease, true)
     dom.addEventListener('pointerdown', onPointerDown)
     dom.addEventListener('pointerup', onPointerUp)
 
@@ -777,6 +780,8 @@ const Viewer = forwardRef(function Viewer(
       mount.removeEventListener('pointercancel', cancelMarquee, true)
       mount.removeEventListener('lostpointercapture', cancelMarquee, true)
       window.removeEventListener('keydown', escapeMarquee, true)
+      window.removeEventListener('pointerup', orphanRelease, true)
+      window.removeEventListener('pointercancel', orphanRelease, true)
       dom.removeEventListener('pointerup', onPointerUp)
       controls.removeEventListener('change', recordCameraPose)
       controls.removeEventListener('start', onControlsStart)

@@ -16,6 +16,7 @@ test('SSD1-24C marquee: window, crossing, Shift union, clear, Escape and right p
   const engine = await request.get('/engine/engine.js').catch(() => null)
   await page.getByRole('tab', { name: 'Draw' }).click()
   if (!engine || engine.status() !== 200 || !(await ribbon.locator('[data-group="modify"]').count())) {
+    expect(process.env.VITE_CAD_EDIT, 'the managed proof sets VITE_CAD_EDIT=1 and serves the compiled engine, so selection must be exercised').not.toBe('1')
     test.info().annotations.push({ type: 'engine', description: 'compiled engine not served, or flag off; canvas selection not exercised' })
     return
   }
@@ -142,6 +143,23 @@ test('SSD1-24C marquee: window, crossing, Shift union, clear, Escape and right p
   ])
   await expect(start).toHaveText('0.00, 20.00')
   await expect(setCount).toHaveCount(0)
+  await pointer('pointerdown', 21, 'touch', [-2, -2])
+  await pointer('pointermove', 21, 'touch', [12, 5])
+  await expect(mount.locator('.viewer-marquee')).toHaveCount(1)
+  await mount.evaluate(el => {
+    const point = el.__cadviewer.project(12, 5)
+    document.body.dispatchEvent(new PointerEvent('pointerup', {
+      bubbles: true, cancelable: true, composed: true, pointerId: 21, pointerType: 'touch',
+      isPrimary: true, button: 0, buttons: 0, clientX: point.x, clientY: point.y,
+    }))
+  })
+  await expect(mount.locator('.viewer-marquee')).toHaveCount(0)
+  const nextPoint = await project(5, 0)
+  await pointers([
+    ['pointerdown', 22, 'touch', nextPoint],
+    ['pointerup', 22, 'touch', nextPoint],
+  ])
+  await expect(start).toHaveText('0.00, 0.00')
   await drag([-2, -2], [12, 5], { button: 'right' })
   await expect.poll(pose).not.toEqual(beforeCancel)
 })
@@ -163,6 +181,7 @@ test('SSD1-24B canvas selection: Shift adds, Shift again removes, a blank click 
   const engine = await request.get('/engine/engine.js').catch(() => null)
   await page.getByRole('tab', { name: 'Draw' }).click()
   if (!engine || engine.status() !== 200 || !(await ribbon.locator('[data-group="modify"]').count())) {
+    expect(process.env.VITE_CAD_EDIT, 'the managed proof sets VITE_CAD_EDIT=1 and serves the compiled engine, so selection must be exercised').not.toBe('1')
     test.info().annotations.push({ type: 'engine', description: 'compiled engine not served, or flag off; canvas selection not exercised' })
     return
   }
