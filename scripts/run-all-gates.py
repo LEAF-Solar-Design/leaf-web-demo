@@ -492,6 +492,13 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_solar_ground_shade.py"), 34),
         Suite("server-solar-ground-reports", "server tests/test_solar_ground_reports.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_ground_reports.py"), 71),
+        # W5 rooftop chain (2026-09-23, contract G27): server/solar_rooftop_chain.py (string flip and
+        # swap, the frame-group operations, the export settings, StringData.json byte for byte, the
+        # string rebuild). Every input is authored in the file or is the committed rooftop intake
+        # (docs/parity/evidence/rooftop/chain/intake.json), so the floor is the exact count on every
+        # runner. COUNTED from the collected cases: 48 tests + 41 more parametrizations = 89.
+        Suite("server-solar-rooftop-chain", "server tests/test_solar_rooftop_chain.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_rooftop_chain.py"), 89),
         # S33 KML and LandXML ports (2026-09-23): server/solar_geo_formats.py, the
         # literal port of KmlBoundaryExporter (with every format branch
         # LEAFKMLEXPORTFMTDEMO exercises), KmlBoundaryParser, TerrainExporter's
@@ -1871,6 +1878,12 @@ def build_suites() -> List[Suite]:
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_shade_evidence.py"), 17),
         Suite("scripts-solar-ground-reports-evidence", "scripts test_solar_ground_reports_evidence.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_reports_evidence.py"), 17),
+        # G27 rooftop chain evidence (c1 to c7, c9, c10, c11): a synthetic intake authored in the file
+        # plus the committed rooftop intake (no capture, no git: the CLI cases pin the revision), so
+        # the floor is the exact count on every runner. COUNTED: 30 tests + 13 more
+        # parametrizations = 43.
+        Suite("scripts-solar-rooftop-chain-evidence", "scripts test_solar_rooftop_chain_evidence.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_rooftop_chain_evidence.py"), 43),
         # The parity oracle itself: the ledger rules, the receipt rules, the fail-closed
         # inputs, and (S29, 2026-09-22) the declared divergence a known plugin defect
         # gets, which is the ONLY way a failing comparator settles a capability: the
