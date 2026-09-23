@@ -1,3 +1,13 @@
+.viewer-marquee {
+  position: absolute;
+  pointer-events: none;
+  z-index: 5;
+  box-sizing: border-box;
+  border: 1px solid var(--cv-select, #e7b643);
+  background: color-mix(in srgb, var(--cv-select, #e7b643) 15%, transparent);
+}
+.viewer-marquee[data-mode="crossing"] { border-style: dashed; }
+
 /* ================= W4e: the reference cockpit, band for band ===============
    Operator, 2026-09-03: "no pixel parity, no organization, no icons, dont
    stop until its all literally perfect." The reference (OpenCADStudio at
