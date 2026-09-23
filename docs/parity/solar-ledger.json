@@ -2420,7 +2420,7 @@
   },
   {
    "global": "LEAFHEALTHCHECK",
-   "class": "T",
+   "class": "H",
    "maturity": "production",
    "capability": "performance-health-check",
    "capability_version": "0",
@@ -2429,9 +2429,9 @@
    "engine": "autocad-lane",
    "wave": 5,
    "status": "resolved",
-   "exclusion_rationale": "",
+   "exclusion_rationale": "Host mechanics: scans the AutoCAD database for DWG performance hazards (hatch, proxy and missing-xref counts); Studio has no DWG database, so there is no independent user outcome to compare. Spec class table: H, replaced by the engine mechanism.",
    "alias_of": "",
-   "evidence": "leaf-plan:solar-parity/ledger-first-pass.json; Scans the drawing for performance warnings (hatches, missing xrefs, proxy entities) and reports them. flow=standalone w1_minimum=False"
+   "evidence": "leaf-plan:solar-parity/ledger-first-pass.json; Scans the drawing for performance warnings (hatches, missing xrefs, proxy entities) and reports them. flow=standalone w1_minimum=False; reclassified to H 2026-09-23 (host mechanics); live runs on licensed AutoCAD committed no design change"
   },
   {
    "global": "LEAFHEATMAP",
@@ -3290,7 +3290,7 @@
   },
   {
    "global": "LEAFOPTIMIZE",
-   "class": "T",
+   "class": "H",
    "maturity": "production",
    "capability": "drawing-optimize",
    "capability_version": "0",
@@ -3299,9 +3299,9 @@
    "engine": "autocad-lane",
    "wave": 5,
    "status": "resolved",
-   "exclusion_rationale": "",
+   "exclusion_rationale": "Host mechanics: backs up the DWG, purges unreferenced symbols and registered applications, detaches missing xrefs and regenerates; all are AutoCAD database housekeeping with no design outcome. Spec class table: H.",
    "alias_of": "",
-   "evidence": "leaf-plan:solar-parity/ledger-first-pass.json; Backs up the drawing, purges unreferenced symbols/regapps, detaches missing xrefs, and regens. flow=standalone w1_minimum=False"
+   "evidence": "leaf-plan:solar-parity/ledger-first-pass.json; Backs up the drawing, purges unreferenced symbols/regapps, detaches missing xrefs, and regens. flow=standalone w1_minimum=False; reclassified to H 2026-09-23 (host mechanics); live runs on licensed AutoCAD committed no design change"
   },
   {
    "global": "LEAFOPTIMIZERDEMO",
@@ -3320,7 +3320,7 @@
   },
   {
    "global": "LEAFOPTIMIZESAFE",
-   "class": "T",
+   "class": "H",
    "maturity": "production",
    "capability": "performance-optimize-safe",
    "capability_version": "0",
@@ -3329,9 +3329,9 @@
    "engine": "autocad-lane",
    "wave": 5,
    "status": "resolved",
-   "exclusion_rationale": "",
+   "exclusion_rationale": "Host mechanics: applies a reversible AutoCAD system-variable baseline; system variables do not exist outside AutoCAD, so there is no independent user outcome. Spec class table: H.",
    "alias_of": "",
-   "evidence": "leaf-plan:solar-parity/ledger-first-pass.json; Applies a reversible performance sysvar baseline and reports the resulting health scan. flow=standalone w1_minimum=False"
+   "evidence": "leaf-plan:solar-parity/ledger-first-pass.json; Applies a reversible performance sysvar baseline and reports the resulting health scan. flow=standalone w1_minimum=False; reclassified to H 2026-09-23 (host mechanics); live runs on licensed AutoCAD committed no design change"
   },
   {
    "global": "LEAFOPTVOLTLOOKUPDEMO",
@@ -3395,7 +3395,7 @@
   },
   {
    "global": "LEAFPERF",
-   "class": "F",
+   "class": "H",
    "maturity": "production",
    "capability": "performance-center",
    "capability_version": "0",
@@ -3404,9 +3404,9 @@
    "engine": "browser",
    "wave": 5,
    "status": "resolved",
-   "exclusion_rationale": "",
+   "exclusion_rationale": "Host mechanics: opens the Command Center on its Performance tab, a view over the same AutoCAD database health checks; no design outcome. Spec class table: H.",
    "alias_of": "",
-   "evidence": "leaf-plan:solar-parity/ledger-first-pass.json; Opens the Branch Command Center dialog on the Performance tab. flow=standalone w1_minimum=False"
+   "evidence": "leaf-plan:solar-parity/ledger-first-pass.json; Opens the Branch Command Center dialog on the Performance tab. flow=standalone w1_minimum=False; reclassified to H 2026-09-23 (host mechanics); live runs on licensed AutoCAD committed no design change"
   },
   {
    "global": "LEAFPERFPROFILE",
@@ -4700,7 +4700,7 @@
   },
   {
    "global": "LEAFSTORAGEAUDIT",
-   "class": "T",
+   "class": "H",
    "maturity": "production",
    "capability": "storage-audit",
    "capability_version": "0",
@@ -4709,9 +4709,9 @@
    "engine": "autocad-lane",
    "wave": 5,
    "status": "resolved",
-   "exclusion_rationale": "",
+   "exclusion_rationale": "Host mechanics: measures XData and extension-dictionary storage inside the DWG; Studio stores a design graph, not DWG objects, so there is no independent user outcome. Spec class table: H.",
    "alias_of": "",
-   "evidence": "leaf-plan:solar-parity/ledger-first-pass.json; Scans drawing entities for xdata/extension-dictionary storage bloat and reports counts. flow=standalone w1_minimum=False"
+   "evidence": "leaf-plan:solar-parity/ledger-first-pass.json; Scans drawing entities for xdata/extension-dictionary storage bloat and reports counts. flow=standalone w1_minimum=False; reclassified to H 2026-09-23 (host mechanics); live runs on licensed AutoCAD committed no design change"
   },
   {
    "global": "LEAFSTRDELTADEMO",
