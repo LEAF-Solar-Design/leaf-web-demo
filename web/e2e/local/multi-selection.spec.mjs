@@ -89,6 +89,15 @@ test('SSD1-24C marquee: window, crossing, Shift union, clear, Escape and right p
     }
     await expect(mount.locator('.viewer-marquee')).toHaveCount(0)
   }
+  // SSD1-24C: a plain press reaches the canvas while the marquee gate is on
+  const canvas = mount.locator('canvas')
+  await canvas.evaluate((el) => {
+    el.dataset.pressProbe = 'pending'
+    el.addEventListener('pointerdown', () => { el.dataset.pressProbe = 'received' }, { once: true })
+  })
+  const pressPoint = await project(5, 10)
+  await page.mouse.click(pressPoint.x, pressPoint.y)
+  await expect(canvas).toHaveAttribute('data-press-probe', 'received')
   const initialPose = await pose()
   await drag([-2, -2], [12, 5])
   await expect(engineProps).toBeVisible()

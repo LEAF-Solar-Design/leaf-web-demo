@@ -588,14 +588,21 @@ const Viewer = forwardRef(function Viewer(
       if (cb) cb(handle, { additive: e.shiftKey || e.ctrlKey || e.metaKey })
     }
     const dom = renderer.domElement
+    let candidate = null
     let marquee = null
     function foreignPointer(e) { return !!marquee && e.pointerId !== marquee.pointerId }
+    function endCandidate() {
+      if (!candidate) return
+      controls.enabled = candidate.controlsWereEnabled
+      candidate = null
+    }
     function clearMarquee() {
+      endCandidate()
+      down = null
       if (!marquee) return
       const pointerId = marquee.pointerId
       marquee.overlay.remove()
       marquee = null
-      down = null
       try {
         if (dom.hasPointerCapture(pointerId)) dom.releasePointerCapture(pointerId)
       } catch {}
@@ -617,30 +624,44 @@ const Viewer = forwardRef(function Viewer(
         if (e.cancelable) e.preventDefault()
         return
       }
+      if (candidate && !marquee && e.pointerId !== candidate.pointerId) {
+        endCandidate()
+        return
+      }
       const callbacks = marqueeRef.current
-      if (e.button !== 0 || marquee || !controls.enabled || rotateEnabledRef.current
+      if (e.button !== 0 || candidate || marquee || !controls.enabled || rotateEnabledRef.current
         || typeof callbacks.gate !== 'function' || typeof callbacks.select !== 'function'
         || !callbacks.gate()) return
-      e.stopPropagation()
-      onPointerDown(e)
-      const overlay = document.createElement('div')
-      overlay.className = 'viewer-marquee'
-      overlay.style.pointerEvents = 'none'
-      mount.appendChild(overlay)
-      marquee = { pointerId: e.pointerId, start: { x: e.clientX, y: e.clientY }, overlay }
-      drawMarquee(e)
-      try { dom.setPointerCapture(e.pointerId) } catch {}
+      candidate = {
+        pointerId: e.pointerId, start: { x: e.clientX, y: e.clientY },
+        controlsWereEnabled: controls.enabled,
+      }
+      controls.enabled = false
     }
     function moveMarquee(e) {
       if (foreignPointer(e)) {
         e.stopPropagation()
         return
       }
+      if (!marquee && candidate && e.pointerId === candidate.pointerId
+        && Math.hypot(e.clientX - candidate.start.x, e.clientY - candidate.start.y) >= CLICK_MOVE_PX) {
+        down = null
+        const overlay = document.createElement('div')
+        overlay.className = 'viewer-marquee'
+        overlay.style.pointerEvents = 'none'
+        mount.appendChild(overlay)
+        marquee = { pointerId: candidate.pointerId, start: candidate.start, overlay }
+        try { dom.setPointerCapture(e.pointerId) } catch {}
+      }
       if (!marquee || e.pointerId !== marquee.pointerId) return
       e.stopPropagation()
       drawMarquee(e)
     }
     function finishMarquee(e) {
+      if (!marquee && candidate && e.pointerId === candidate.pointerId) {
+        endCandidate()
+        return
+      }
       if (foreignPointer(e)) {
         e.stopPropagation()
         return
@@ -650,7 +671,6 @@ const Viewer = forwardRef(function Viewer(
       const start = marquee.start
       const end = { x: e.clientX, y: e.clientY }
       if (Math.hypot(end.x - start.x, end.y - start.y) < CLICK_MOVE_PX) {
-        onPointerUp(e)
         clearMarquee()
         return
       }
@@ -670,13 +690,17 @@ const Viewer = forwardRef(function Viewer(
         e.stopPropagation()
         return
       }
-      if (!marquee || (e.pointerId !== undefined && e.pointerId !== marquee.pointerId)) return
+      const active = marquee || candidate
+      if (!active || (e.pointerId !== undefined && e.pointerId !== active.pointerId)) return
       clearMarquee()
     }
-    function orphanRelease(e) { if (marquee && e.pointerId === marquee.pointerId && !mount.contains(e.target)) clearMarquee() }
+    function orphanRelease(e) {
+      const active = marquee || candidate
+      if (active && e.pointerId === active.pointerId && !mount.contains(e.target)) clearMarquee()
+    }
     function escapeMarquee(e) {
-      if (e.key === 'Escape' && marquee) {
-        e.stopPropagation()
+      if (e.key === 'Escape' && (marquee || candidate)) {
+        if (marquee) e.stopPropagation()
         clearMarquee()
       }
     }
