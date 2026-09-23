@@ -55,12 +55,19 @@ import session_store  # noqa: E402
 
 def _auto_action() -> str:
     """A real action whose policy is `auto`, read from the live policy file —
-    fabricating one would test a straw man."""
+    fabricating one would test a straw man. It must also be one the demo tier
+    can call with the empty args these rows send: the first sorted auto action
+    used to be enough, until #1110 added finish_project (six required args),
+    which the gate refuses as invalid_args before plan-first is consulted."""
     pol = agent_policy.load_policy()
+    caps = _caps()
     for name, act in sorted(pol.actions.items()):
-        if act.policy == "auto":
+        if (act.policy == "auto" and act.enabled
+                and agent_gate._has_capability(caps, act.required_capability)
+                and agent_gate._validate_args(act, {}) is None):
             return name
-    pytest.skip("no auto-policy action in the live policy catalog")
+    pytest.fail("no enabled auto-policy action the demo tier can call with "
+                "empty args in the live policy catalog")
 
 
 def _caps() -> dict:
