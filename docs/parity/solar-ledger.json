@@ -3451,7 +3451,7 @@
    "status": "resolved",
    "exclusion_rationale": "Host mechanics: restores the AutoCAD system variables LEAFOPTIMIZESAFE changed, through Application.SetSystemVariable only (DrawingPerformanceOptimizer.cs 101-121, PerformanceBaselineService.cs 95-120); system variables do not exist outside AutoCAD, so there is no independent user outcome. Spec class table: H, the same rationale as LEAFOPTIMIZESAFE.",
    "alias_of": "",
-   "evidence": "leaf-plan:solar-parity/ledger-first-pass.json; Restores AutoCAD sysvars and drawing settings captured by LEAFOPTIMIZESAFE. flow=standalone w1_minimum=False; reclassified to H 2026-09-24 (host mechanics, source-verified)"
+   "evidence": "leaf-plan:solar-parity/ledger-first-pass.json; Restores AutoCAD sysvars and drawing settings captured by LEAFOPTIMIZESAFE. flow=standalone w1_minimum=False; reclassified to H 2026-09-24 (host mechanics): source-verified, and live on licensed AutoCAD 2025 (VMC, 2026-09-24) LEAFOPTIMIZESAFE then LEAFPERFRESET on the generate fixture, each saved and reopened, committed no entity and no drawing-settings change (Restored sysvars: 0)"
   },
   {
    "global": "LEAFPERMODULESHADEDEMO",
