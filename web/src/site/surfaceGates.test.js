@@ -37,6 +37,18 @@ import { groundShowsDrawing } from './SurfaceGrounds.jsx'
 // here fails the completeness test below rather than quietly going unpinned.
 const SURFACE_IDS = ['browser', 'cad', 'solar', 'ios', 'sheets']
 
+it('pins the server capability baseline for every surface', () => {
+  const expected = {
+    browser: ['build', 'run_read', 'run_write'],
+    cad: ['build', 'run_read', 'run_write', 'solve'],
+    solar: ['build', 'run_read', 'run_write', 'solve'],
+    ios: ['build', 'run_read', 'run_write', 'solve'],
+    sheets: [],
+  }
+  expect(Object.fromEntries(PRODUCT_SURFACES.map(({ id }) =>
+    [id, surfaceContract(id).entitlements]))).toEqual(expected)
+})
+
 // The four the CONSOLE hosts (`scene: 'app'`). The OLD table below is the
 // pre-slice-2 console's own predicates, and those predicates only ever ran for
 // these ids, so applying them to a surface the console never renders would be

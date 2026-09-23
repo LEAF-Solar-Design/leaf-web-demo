@@ -1,0 +1,7 @@
+{
+  "measurement": ["run_read"],
+  "selection": ["run_read"],
+  "custom": ["run_read", "run_write"],
+  "stringing": ["run_read", "run_write", "solve"],
+  "placement": ["solve"]
+}
