@@ -1630,7 +1630,7 @@ def build_suites() -> List[Suite]:
         # ledger, read never written), so the floor is the exact count on every runner:
         # 66 test functions, one parametrized over 2 comparator names = 67.
         Suite("scripts-solar-parity-status", "scripts test_solar_parity_status.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_parity_status.py"), 67),
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_parity_status.py"), 69),
         # Registered per the #29 fix-then-register rule (shipped without a
         # gate entry; measured 1 passed on this tree 2026-07-23).
         # 1 -> 2 on 2026-08-07: the staging relay's convergence contract

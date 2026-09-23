@@ -731,6 +731,45 @@ def test_a_finding_outside_the_divergences_directory_is_invalid(tmp_path, capsys
     assert "is not under docs/parity/divergences/" in result["findings"][0]["detail"]
 
 
+def _symlink_or_skip(link, target, *, directory=False):
+    # Creating a symlink needs a privilege on Windows; the Linux CI runner always runs these.
+    try:
+        link.symlink_to(target, target_is_directory=directory)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlinks unavailable here: {exc}")
+
+
+def test_a_finding_that_is_a_symlink_is_invalid(tmp_path, capsys):
+    ledger = write_ledger(tmp_path, [row("LEAFARRAY")], expected=1)
+    outside = "docs/parity/notes/elsewhere.md"
+    write_finding(tmp_path, outside)
+    reference = "docs/parity/divergences/linked.md"
+    link = tmp_path.joinpath(*reference.split("/"))
+    link.parent.mkdir(parents=True, exist_ok=True)
+    _symlink_or_skip(link, tmp_path.joinpath(*outside.split("/")))
+    write_receipt(tmp_path, "draw-array", diverging_receipt(block=divergence(finding=reference)))
+    code, result = json_result(capsys, ledger, receipts_dir(tmp_path), "--repo-root", str(tmp_path))
+    assert code == 1
+    assert finding_codes(result) == ["RECEIPT_DIVERGENCE_INVALID"]
+    assert "is a symlink" in result["findings"][0]["detail"]
+
+
+def test_a_finding_under_a_symlinked_directory_is_invalid(tmp_path, capsys):
+    ledger = write_ledger(tmp_path, [row("LEAFARRAY")], expected=1)
+    real = tmp_path / "elsewhere"
+    (real / "sub").mkdir(parents=True)
+    (real / "sub" / "defect.md").write_text("# not under divergences" + chr(10), encoding="utf-8")
+    parent = tmp_path / "docs" / "parity" / "divergences"
+    parent.mkdir(parents=True, exist_ok=True)
+    _symlink_or_skip(parent / "linkdir", real / "sub", directory=True)
+    reference = "docs/parity/divergences/linkdir/defect.md"
+    write_receipt(tmp_path, "draw-array", diverging_receipt(block=divergence(finding=reference)))
+    code, result = json_result(capsys, ledger, receipts_dir(tmp_path), "--repo-root", str(tmp_path))
+    assert code == 1
+    assert finding_codes(result) == ["RECEIPT_DIVERGENCE_INVALID"]
+    assert "resolves outside docs/parity/divergences/" in result["findings"][0]["detail"]
+
+
 def test_a_divergence_on_a_passing_receipt_exits_2(tmp_path, capsys):
     ledger = write_ledger(tmp_path, [row("LEAFARRAY")], expected=1)
     doc = receipt("draw-array")

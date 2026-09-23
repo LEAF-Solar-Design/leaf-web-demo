@@ -500,7 +500,20 @@ def finding_document_problem(root, reference):
         return f"finding {reference!r} is not under {DIVERGENCE_DIR}/"
     if not reference.endswith(".md"):
         return f"finding {reference!r} is not a Markdown document"
-    if not root.joinpath(*parts).is_file():
+    path = root.joinpath(*parts)
+    # is_file() follows symlinks, so a committed link under DIVERGENCE_DIR could cite a file
+    # anywhere. Refuse the link itself, and refuse any path that RESOLVES outside the resolved
+    # directory, which also catches a symlinked parent directory.
+    if path.is_symlink():
+        return f"finding {reference!r} is a symlink, not a committed document"
+    try:
+        resolved = path.resolve(strict=True)
+        base = root.joinpath(*prefix).resolve(strict=True)
+    except (OSError, RuntimeError):
+        return f"finding {reference!r} names no committed file under {root}"
+    if not resolved.is_relative_to(base) or resolved == base:
+        return f"finding {reference!r} resolves outside {DIVERGENCE_DIR}/"
+    if not resolved.is_file():
         return f"finding {reference!r} names no committed file under {root}"
     return None
 
