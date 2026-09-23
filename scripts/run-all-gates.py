@@ -499,6 +499,13 @@ def build_suites() -> List[Suite]:
         # runner. COUNTED from the collected cases: 48 tests + 41 more parametrizations = 89.
         Suite("server-solar-rooftop-chain", "server tests/test_solar_rooftop_chain.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_rooftop_chain.py"), 89),
+        # W5 PVcase solve (2026-09-23, contract G33): server/solar_pvcase_solve.py, the literal port of
+        # LEAFPVCASESOLVE (the input builder, PvcaseSolver.Solve with DefaultPanelsPerString and the
+        # zero L2 case, the handle map and the matrix write-back). Inputs are authored in the file
+        # plus the committed intake, so the floor is the exact count on every runner. MEASURED:
+        # 26 tests + 32 more parametrizations = 58 passed.
+        Suite("server-solar-pvcase-solve", "server tests/test_solar_pvcase_solve.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_pvcase_solve.py"), 58),
         # W5 terrain d-steps (2026-09-23, contract G28): trench routing, the export preview, the
         # Yield zip byte for byte, and trackers to panel groups through the key-aware row reader.
         Suite("server-solar-ground-dsteps", "server tests/test_solar_ground_dsteps.py",
@@ -1903,6 +1910,11 @@ def build_suites() -> List[Suite]:
         # parametrizations = 43.
         Suite("scripts-solar-rooftop-chain-evidence", "scripts test_solar_rooftop_chain_evidence.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_rooftop_chain_evidence.py"), 43),
+        # G33 PVcase-solve evidence (v1): a synthetic intake authored in the file plus the committed
+        # intake (no git: every case pins the revision), so the floor is the exact count on every
+        # runner. MEASURED: 13 tests + 6 more parametrizations = 19 passed.
+        Suite("scripts-solar-pvcase-solve-evidence", "scripts test_solar_pvcase_solve_evidence.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_pvcase_solve_evidence.py"), 19),
         Suite("scripts-solar-ground-dsteps-evidence", "scripts test_solar_ground_dsteps_evidence.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_dsteps_evidence.py"), 12),
         # G30 dialog-batch evidence (e1, e4, e6): the committed terrain intake and pile-template
