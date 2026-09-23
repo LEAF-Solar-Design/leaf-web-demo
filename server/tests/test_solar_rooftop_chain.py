@@ -196,6 +196,52 @@ def test_select_outcomes(groups, name, status):
     assert out["status"] == status and out["handles"] == []
 
 
+def zone(name, panels):
+    return {"name": name, "panels": panels}
+
+
+def test_zone_select_matches_the_first_zone_case_insensitively_and_resolves_its_handles():
+    zones = [None, zone("Zone B", ["a1"]), zone(None, ["a9"]),
+             zone("zone a", ["a2", "a3:5f", "a3:60", "", None, "dead", "zz", "a2"]), zone("Zone A", ["b9"])]
+    out = chain.zone_select(zones, "  ZONE A ", ["A2", "A3", "B9"])
+    # a3:60 shares a seen root and is skipped uncounted; "", None, DEAD and zz are stale; a plain
+    # handle listed twice resolves twice (LeafSelectByZoneCommand.cs:111-142).
+    assert out == {"status": "selected", "handles": ["A2", "A3", "A2"], "stale": 4}
+
+
+@pytest.mark.parametrize("zones, name, status", [
+    ([], "Zone A", "no-zones"), (None, "Zone A", "no-zones"), ([zone("Zone A", ["1"])], " ", "cancelled"),
+    ([zone("Zone A", ["1"])], None, "cancelled"), ([zone("Zone A", ["1"])], "Zone C", "missing"),
+    ([zone("Zone A", [])], "zone a", "empty"), ([zone("Zone A", None)], "Zone A", "empty"),
+    ([zone("Zone A", ["DEAD", ""])], "Zone A", "stale")])
+def test_zone_select_outcomes(zones, name, status):
+    out = chain.zone_select(zones, name, ["1"])
+    assert out["status"] == status and out["handles"] == []
+
+
+def test_by_zone_name_select_flags_a_missing_zone_and_returns_a_new_list():
+    panels = ["a1", "a2"]
+    zones = [zone("Zone A", panels)]
+    listed, missing = chain.by_zone_name_select(zones, "ZONE a")
+    assert (listed, missing) == (["a1", "a2"], False) and listed is not panels
+    assert chain.by_zone_name_select(zones, "Zone") == ([], True)
+    with pytest.raises(chain.RooftopInputError):
+        chain.by_zone_name_select(zones, "  ")
+
+
+def test_zone_panel_handles_are_the_neutral_roots():
+    zones = [zone("Zone A", ["0a2", "a3:5f", "", "zz"]), None, zone("Zone B", None)]
+    assert chain.zone_panel_handles(zones) == {"A2", "A3"}
+
+
+@pytest.mark.parametrize("zones", [
+    "x", [{"name": "A"}], [zone(1, [])], [zone("A", [1])], [zone("A", "a1")],
+    [dict(zone("A", []), extra=1)]])
+def test_malformed_zones_are_refused(zones):
+    with pytest.raises(chain.RooftopInputError):
+        chain.zone_select(zones, "A", [])
+
+
 def test_frame_group_setting_shape_is_refused_when_malformed():
     with pytest.raises(chain.RooftopInputError):
         chain.validate_frame_groups([{"Name": "A"}])

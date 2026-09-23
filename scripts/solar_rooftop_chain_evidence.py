@@ -19,6 +19,14 @@ intake (G13); nothing here reads plugin output. The engines are server/solar_roo
 c8 (the trench) is not receipted from this chain (G27). c11 is the Studio side of string-rebuild's
 declared divergence: G27 names the capability and its report row, not a scenario step id.
 
+  z1   select-by-zone          LEAFSELECTBYZONE           the selection row (read only; G31, from
+                                                          the zones intake, not the chain's)
+
+Zones intake (G31, docs/parity/evidence/rooftop/zones-select/intake.json):
+  zones         [{name, panels (stored order)}] from the zones fixture's decoded drawing settings
+  units         optional, a drawing length unit; absent is "in" (the zones fixture is a rooftop
+                drawing, in inches like the chain's)
+
 Intake (inputs only, one JSON; its canonical hash is fixture_sha256):
   units         a drawing length unit ("in" for the rooftop fixture)
   strings       [{handle, panels (stored order, first = start end), label {field: int}, and
@@ -85,6 +93,9 @@ C_STEPS = (("c1", "string-flip", "flip"),
            ("c10", "string-data", "string-data"),
            ("c11", "string-rebuild", "string-rebuild"))
 STEP_IDS = tuple(step for step, _, _ in C_STEPS)
+# G31 scenario rows (the zones fixture, its own intake).
+Z_STEPS = (("z1", "select-by-zone", "zone-select"),)
+ZONE_STEP_IDS = tuple(step for step, _, _ in Z_STEPS)
 # G22 answers for G27, verbatim (c11: Enter at the selection prompt, which rebuilds every string).
 # c2's second pick is A902: G27 records that AutoCAD resolved the pick to A902, not A8FE.
 ANSWERS = {
@@ -98,10 +109,14 @@ ANSWERS = {
     "c9": ("1.134", "2.278", "0.025", "0.03", "1", "12.5", "185", "0.6", "ACME", "P440"),
     "c10": ("strings:A912,A90E",),
     "c11": (),
+    "z1": ("Zone A",),
 }
-READ_ONLY = frozenset({"c5", "c6", "c10"})
+READ_ONLY = frozenset({"c5", "c6", "c10", "z1"})
 INTAKE_KEYS = {"units", "strings", "panel_groups", "settings"}
 INTAKE_OPTIONAL = {"panel_points"}
+ZONES_INTAKE_KEYS = {"zones"}
+ZONES_INTAKE_OPTIONAL = {"units"}
+ZONES_UNITS = "in"
 SETTING_NAMES = ("FrameGroups", "HomerunRouting")
 EXPORT_SETTINGS_KEY = "export-settings"
 FILE_ROLE_STRING_DATA = "string-data"
@@ -166,6 +181,43 @@ def initial_state(intake):
         settings["FrameGroups"] = chain.validate_frame_groups(settings["FrameGroups"])
     return {"strings": strings, "panel_groups": chain.validate_panel_groups(intake["panel_groups"]),
             "settings": settings, "selection": [], "panel_points": _panel_points(intake)}
+
+
+def is_zones_intake(intake):
+    """The G31 zones intake carries `zones`; the chain's intake never does."""
+    return isinstance(intake, dict) and "zones" in intake
+
+
+def validate_zones_intake(intake):
+    """The G31 zones intake, fail closed. Returns the intake unchanged when it is well formed."""
+    if not isinstance(intake, dict):
+        raise EvidenceError("zones intake must be a JSON object")
+    keys = set(intake)
+    if not ZONES_INTAKE_KEYS <= keys or keys - ZONES_INTAKE_KEYS - ZONES_INTAKE_OPTIONAL:
+        raise EvidenceError(f"zones intake keys must be {sorted(ZONES_INTAKE_KEYS)} plus optional "
+                            f"{sorted(ZONES_INTAKE_OPTIONAL)}")
+    if intake.get("units", ZONES_UNITS) not in compare.LENGTH_UNITS:
+        raise EvidenceError(f"intake units must be one of {sorted(compare.LENGTH_UNITS)}")
+    if not isinstance(intake["zones"], list):
+        raise EvidenceError("zones must be a list")
+    try:
+        zones = chain.validate_zones(intake["zones"])
+    except chain.RooftopInputError as exc:
+        raise EvidenceError(f"intake refused: {exc}") from None
+    for z in zones:
+        if z is None or z["name"] is None or z["panels"] is None:
+            raise EvidenceError("every intake zone carries a name and a panel list")
+    return intake
+
+
+def initial_zone_state(intake):
+    """Studio's zones state from the G31 intake: the zones in stored order, the implied selection."""
+    validate_zones_intake(intake)
+    return {"zones": chain.validate_zones(intake["zones"]), "selection": []}
+
+
+def _units(intake):
+    return intake.get("units", ZONES_UNITS) if is_zones_intake(intake) else intake["units"]
 
 
 def _snapshot(state):
@@ -413,6 +465,16 @@ def step_string_data(state, answers):
     return [] if text is None else file_rows({FILE_ROLE_STRING_DATA: text})
 
 
+def step_zone_select(state, answers):
+    """z1: the implied selection after LEAFSELECTBYZONE (read only: a selection is not drawing
+    state). The intake records the zones and nothing else of the drawing, so the handles the
+    zones name are the entity inventory; the selection set holds each entity once, sorted. An
+    unknown zone selects nothing and the implied selection stands."""
+    result = chain.zone_select(state["zones"], answers[0], chain.zone_panel_handles(state["zones"]))
+    chosen = result["handles"] if result["status"] == "selected" else state["selection"]
+    return [_row("selection-1", "selection", handles=sorted(set(chosen), key=chain.handle_order))]
+
+
 def step_string_rebuild(state, answers):
     """c11: every string, in drawing order; the rebuilt count and the re-associated strings."""
     old = list(state["strings"].values())
@@ -424,14 +486,15 @@ def step_string_rebuild(state, answers):
 
 STEPS = {"c1": step_flip, "c2": step_swap, "c3": step_frame_group_create, "c4": step_frame_group_rename,
          "c5": step_frame_group_list, "c6": step_frame_group_select, "c7": step_frame_group_delete,
-         "c9": step_export_settings, "c10": step_string_data, "c11": step_string_rebuild}
+         "c9": step_export_settings, "c10": step_string_data, "c11": step_string_rebuild,
+         "z1": step_zone_select}
 
 
 def step_rows(step_id, state, answers=None):
     """G27 rows for one step from Studio's state (updated in place, G13). A read-only step
     whose state moved also emits `unexpected-change`."""
     if step_id not in STEPS:
-        raise EvidenceError(f"step {step_id!r} is not one of {STEP_IDS}")
+        raise EvidenceError(f"step {step_id!r} is not one of {STEP_IDS + ZONE_STEP_IDS}")
     answers = ANSWERS[step_id] if answers is None else tuple(answers)
     if len(answers) != len(ANSWERS[step_id]):
         raise EvidenceError(f"step {step_id} takes {len(ANSWERS[step_id])} answers")
@@ -486,7 +549,7 @@ def build_document(intake, step_id, capability, operation, rows, revision):
                      "engine": "server-builtin",  # the gate's engine vocabulary; the module is solar_rooftop_chain
                      "catalog": "none", "solver": "none"},
         "parameters": parameters,
-        "units": intake["units"],
+        "units": _units(intake),
         "frame": json.loads(json.dumps(ev.FRAME)),
         "entity_mapping": {ref: ref for ref in sorted(ids)},  # G8
         "before": {"recorded": False},
@@ -530,17 +593,34 @@ def run_steps(intake, revision, only=None):
     return out, state
 
 
+def run_zone_steps(intake, revision, only=None):
+    """Every G31 step in order from the zones intake; returns ({step id: document}, state)."""
+    if only is not None and only not in ZONE_STEP_IDS:
+        raise EvidenceError(f"step {only!r} is not one of {ZONE_STEP_IDS}")
+    state = initial_zone_state(intake)
+    out = {}
+    for step_id, capability, operation in Z_STEPS:
+        rows = step_rows(step_id, state)
+        if only is None or step_id == only:
+            out[step_id] = build_document(intake, step_id, capability, operation, rows, revision)
+        if step_id == only:
+            break
+    return out, state
+
+
 # --------------------------------------------------------------------- CLI --
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Studio G27 rooftop-chain evidence from a rooftop intake.")
+    parser = argparse.ArgumentParser(description="Studio G27 rooftop-chain evidence from a rooftop intake "
+                                                 "(or G31 select-by-zone evidence from a zones intake).")
     parser.add_argument("--intake", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
-    parser.add_argument("--step", choices=STEP_IDS)
+    parser.add_argument("--step", choices=STEP_IDS + ZONE_STEP_IDS)
     args = parser.parse_args(argv)
     try:
         intake = compare.load_evidence(args.intake)
-        docs, _ = run_steps(intake, ev.fixture_revision(args.intake), args.step)
+        run = run_zone_steps if is_zones_intake(intake) else run_steps
+        docs, _ = run(intake, ev.fixture_revision(args.intake), args.step)
         args.out_dir.mkdir(parents=True, exist_ok=True)
         for step_id, doc in docs.items():
             target = args.out_dir / f"{step_id}.json"
