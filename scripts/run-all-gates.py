@@ -670,9 +670,13 @@ def build_suites() -> List[Suite]:
         Suite("server-entity-scope-binding", "server tests/test_entity_scope_binding.py",
               "pytest", SERVER, _py_pytest("tests/test_entity_scope_binding.py"), 75),
         Suite("server-entity-scope-admission", "server tests/test_entity_scope_admission.py",
-              "pytest", SERVER, _py_pytest("tests/test_entity_scope_admission.py"), 52),
+              "pytest", SERVER, _py_pytest("tests/test_entity_scope_admission.py"), 53),
         Suite("server-backedge-author-identity", "server tests/test_backedge_author_identity.py",
               "pytest", SERVER, _py_pytest("tests/test_backedge_author_identity.py"), 44),
+        # 17-B2: the admitted binding carried through the job, its durable
+        # execution, both broker clients and the broker's request models.
+        Suite("server-entity-scope-transport", "server tests/test_entity_scope_transport.py",
+              "pytest", SERVER, _py_pytest("tests/test_entity_scope_transport.py"), 47),
         # W14 admin self-edit lane (R7): branch-only platform-repo writes,
         # fundamental-path co-sign, landing handoff. Own process: it builds
         # real git repos and toggles the R7 rollout env.
