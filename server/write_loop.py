@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from envelopes import DEFAULT_HTTP_STATUS, ErrorCode, err_envelope, ok_envelope
+import entity_scope_containment as containment
 from mutation_plan import (
     MAX_OPERATIONS,
     canonical_json_bytes,
@@ -1606,7 +1607,8 @@ def run_write_mock(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
                    backend, t0: float, run_tool_dynamic_fn,
                    degraded: bool = False, version="head",
                    holder: Optional[str] = None,
-                   fence: Optional[int] = None) -> Tuple[Dict[str, Any], int]:
+                   fence: Optional[int] = None,
+                   entity_scope=None) -> Tuple[Dict[str, Any], int]:
     """APS_LIVE=0 write: run the tool file for its mutations, apply them to the
     BASE version's intake (``version``; default "head", unchanged), persist a new
     version whose parent is that base, stamp result.new_version.
@@ -1621,6 +1623,19 @@ def run_write_mock(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
     try:
         ensure_demo_drawing(backend, tenant_id, drawing_id)
         head_v, cur_intake = read_intake(backend, tenant_id, drawing_id, version)
+        if entity_scope is not None:
+            _, source_key = store.resolve_version(backend, tenant_id, drawing_id, head_v)
+            stored_source = backend.get(source_key)
+            current_head, _ = store.resolve_version(backend, tenant_id, drawing_id, "head")
+            containment.check_parent(
+                entity_scope, drawing_id=drawing_id, version=head_v,
+                head_version=current_head, stored_source=stored_source)
+            containment.require_payload_intake(stored_source, cur_intake)
+            parent_intake = json.loads(stored_source.decode("utf-8"))
+    except containment.ContainmentRefusal as exc:
+        if entity_scope is None:
+            raise
+        return containment.refusal_envelope(exc, tool=name, version=tool_version)
     except ProofStateUnreadable as exc:
         # The base version exists; its proof state is unreachable right now.
         # Retryable — nothing has been written yet at this point.
@@ -1640,6 +1655,20 @@ def run_write_mock(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
 
     result = env.get("result") or {}
     mutations = result.get("mutations") or {}
+    if entity_scope is not None:
+        try:
+            canonical = validate_mutations(
+                parent_intake, mutations, allow_transforms=True, allow_xdata=True,
+                reject_noop=False)
+        except containment.ContainmentRefusal as exc:
+            return containment.refusal_envelope(exc, tool=name, version=tool_version)
+        except Exception:  # Preserve the existing apply_mutations error path.
+            pass
+        else:
+            try:
+                containment.check_plan(entity_scope, canonical)
+            except containment.ContainmentRefusal as exc:
+                return containment.refusal_envelope(exc, tool=name, version=tool_version)
     if params.get("dry_run") is True:
         # Design-time validation and user previews must never advance drawing
         # history. Return the deterministic proposal exactly as the tool
@@ -1650,7 +1679,13 @@ def run_write_mock(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
             env["degraded_mode"] = True
         return env, 200
     try:
-        new_intake = apply_mutations(cur_intake, mutations)
+        if entity_scope is not None:
+            new_intake = apply_mutations(parent_intake, mutations)
+            parent_intake_snapshot = json.loads(stored_source.decode("utf-8"))
+            containment.check_output_exact(
+                entity_scope, parent_intake_snapshot, new_intake)
+        else:
+            new_intake = apply_mutations(cur_intake, mutations)
         with drawing_mutation_refusal_guard() as refusal:
             if refusal is not None:
                 log_mutation_refused(LOGGER, refusal,
@@ -1664,13 +1699,22 @@ def run_write_mock(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
                 json.dumps(new_intake, separators=(",", ":")).encode("utf-8"),
                 parent_version=head_v,
                 meta={"tool": name, "note": "mock write (intake payload)"},
-                holder=holder, fence=fence)
+                holder=holder, fence=fence,
+                **({"require_parent_is_head": True} if entity_scope is not None else {}))
     except store.CheckoutDenied as exc:
         # Caught BEFORE the blanket handler below: publishing under another
         # session's lock is an authorization answer (403), not a persist fault
         # (500). The tool already ran, but nothing was written.
         return _checkout_denied(exc, name, tool_version)
     except Exception as exc:  # noqa: BLE001
+        if entity_scope is not None and isinstance(exc, containment.ContainmentRefusal):
+            return containment.refusal_envelope(exc, tool=name, version=tool_version)
+        if (entity_scope is not None and isinstance(exc, ValueError)
+                and str(exc).startswith(("stale parent ", "stale drawing head:"))):
+            return containment.refusal_envelope(containment.ContainmentRefusal(
+                containment.REASON_PARENT,
+                "This change was prepared for a different version of the drawing. Nothing was published."),
+                tool=name, version=tool_version)
         return (err_envelope(ErrorCode.INTERNAL, f"write persist failed: {type(exc).__name__}: {exc}",
                              retryable=False, tool=name, version=tool_version),
                 DEFAULT_HTTP_STATUS[ErrorCode.INTERNAL])
@@ -3259,7 +3303,7 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
                    ledger_entry: Optional[Dict[str, Any]] = None,
                    version="head", holder: Optional[str] = None,
                    fence: Optional[int] = None,
-                   on_submitted=None) -> Tuple[Dict[str, Any], int]:
+                   on_submitted=None, entity_scope=None) -> Tuple[Dict[str, Any], int]:
     """Execute an authored planner, then apply its validated data plan in APS."""
     import store
     holder = _named_or_anonymous(store, holder)
@@ -3319,6 +3363,11 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
         if base_v != head_v:
             raise ValueError("base intake resolved to a different version")
         stored_source = backend.get(vkey)
+        if entity_scope is not None:
+            current_head, _ = store.resolve_version(backend, tenant_id, drawing_id, "head")
+            containment.check_parent(
+                entity_scope, drawing_id=drawing_id, version=head_v,
+                head_version=current_head, stored_source=stored_source)
         execution_source, bridged_legacy_bootstrap = (
             _live_execution_source_bytes(stored_source))
         base_sha = hashlib.sha256(execution_source).hexdigest()
@@ -3364,6 +3413,8 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
             base_intake, planner_result.get("mutations"),
             allow_transforms=True, allow_xdata=False,
         )
+        if entity_scope is not None:
+            containment.check_plan(entity_scope, canonical)
         # Planar lowering happens during emission, still before any APS call.
         plan_bytes = emit_plan(
             canonical, base_sha256=base_sha, base_intake=base_intake)
@@ -3391,6 +3442,9 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
             planner_result["dry_run"] = True
             planner_env["result"] = planner_result
             return planner_env, 200
+
+        if entity_scope is not None:
+            raise containment.uncheckable()
 
         # SERVER-HELD OR ABSENT, on every tier. The stamp is the digest
         # this process measured over the published tool body it resolved
@@ -3440,6 +3494,8 @@ def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
             retryable=False, tool=name, version=tool_version,
         ), DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
     except Exception as exc:  # noqa: BLE001
+        if entity_scope is not None and isinstance(exc, containment.ContainmentRefusal):
+            return containment.refusal_envelope(exc, tool=name, version=tool_version)
         # Transport exceptions can contain signed APS or object-store URLs.
         # Keep their text out of the client envelope. The exception class is
         # enough to group the failure without persisting credential-shaped data.

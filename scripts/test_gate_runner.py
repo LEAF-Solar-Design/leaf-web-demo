@@ -378,6 +378,7 @@ def test_entity_scope_suites_are_registered_with_measured_floors():
         "server-entity-scope-admission": 53,
         "server-backedge-author-identity": 44,
         "server-entity-scope-transport": 47,
+        "server-entity-scope-containment": 104,
     }
     assert {sid: suites[sid].expected for sid in floors} == floors
     for sid in floors:

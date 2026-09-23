@@ -3118,6 +3118,29 @@ def _execute_plan(req: BrokerPlanRunRequest, tool: Dict[str, Any], engine_op: st
             ErrorCode.BAD_PARAMS, f"the edit plan was refused: {exc}",
             retryable=False, tool=PLAN_TOOL_NAME, version=write_loop.DATA_PLAN_TOOL_VERSION,
         ), 422)
+    if req.entity_scope is not None:
+        import store
+        import entity_scope_containment as containment
+        try:
+            _, source_key = store.resolve_version(
+                backend, req.tenant_id, req.plan.drawing_id, req.plan.parent_version)
+            stored_source = backend.get(source_key)
+            current_head, _ = store.resolve_version(
+                backend, req.tenant_id, req.plan.drawing_id, "head")
+            containment.check_parent(
+                req.entity_scope, drawing_id=req.plan.drawing_id,
+                version=req.plan.parent_version, head_version=current_head,
+                stored_source=stored_source)
+            containment.check_plan(req.entity_scope, canonical)
+            raise containment.uncheckable()
+        except containment.ContainmentRefusal as exc:
+            return containment.refusal_envelope(
+                exc, tool=PLAN_TOOL_NAME, version=write_loop.DATA_PLAN_TOOL_VERSION)
+        except (KeyError, ValueError) as exc:
+            return (err_envelope(
+                ErrorCode.BAD_PARAMS, f"drawing/mutation unavailable: {exc}",
+                retryable=False, tool=PLAN_TOOL_NAME,
+            ), DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
     contract = 3 if mutation_plan.uses_v3(canonical) else 2
     ready, readiness = _plan_activity_ready(contract=contract)
     if not ready:
@@ -3463,7 +3486,8 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
                                                  ledger_entry=entry, version=base_version,
                                                  holder=req.checkout_holder,
                                                  fence=req.checkout_fence,
-                                                 on_submitted=_submission_recorder(req, run_token))
+                                                 on_submitted=_submission_recorder(req, run_token),
+                                                 **({"entity_scope": req.entity_scope} if req.entity_scope is not None else {}))
             # requested live but no da client -> degraded pure-python write
             backend = write_loop.default_backend(aps_live=False)
             _start_admitted_execution(req, admission, aps_submission=False)
@@ -3471,14 +3495,16 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
                                              t0=t0, run_tool_dynamic_fn=run_dynamic,
                                              degraded=True, version=base_version,
                                              holder=req.checkout_holder,
-                                             fence=req.checkout_fence)
+                                             fence=req.checkout_fence,
+                                             **({"entity_scope": req.entity_scope} if req.entity_scope is not None else {}))
         backend = write_loop.default_backend(aps_live=False)
         _start_admitted_execution(req, admission, aps_submission=False)
         return write_loop.run_write_mock(tool, params, req.tenant_id, backend=backend,
                                          t0=t0, run_tool_dynamic_fn=run_dynamic,
                                          version=base_version,
                                          holder=req.checkout_holder,
-                                         fence=req.checkout_fence)
+                                         fence=req.checkout_fence,
+                                         **({"entity_scope": req.entity_scope} if req.entity_scope is not None else {}))
 
     # 2) live path — the ONLY code path that touches da/client.py + the credential
     if req.aps_live:
