@@ -201,6 +201,27 @@ def test_the_pr_scope_is_retired_even_with_no_credential(monkeypatch):
     assert calls == []
 
 
+def test_gate_proof_receipt_row_from_a_fixture_artifact(monkeypatch):
+    _configure_github(monkeypatch)
+    tree = "c" * 40
+    name = "gate-proof-" + tree
+    _stub_github(monkeypatch, {name: [_artifact(name)]},
+                 run_paths={4242: GATE_WORKFLOW})
+    body = rr.read_receipts("tree:" + tree)
+    assert body["contract"] == rr.CONTRACT
+    assert body["unavailable"] == []
+    assert len(body["rows"]) == 1
+    row = body["rows"][0]
+    assert set(row) == {"kind", "ref", "at", "sha", "summary", "url"}
+    assert row["kind"] == "gate-proof"
+    assert row["ref"] == "tree:" + tree
+    assert row["sha"] == "a" * 40
+    assert name in row["summary"]
+    assert "test-gate.yml" in row["summary"], \
+        "the row names the workflow whose provenance it rests on"
+    assert row["url"].endswith("/actions/runs/4242")
+
+
 def test_tree_scope_reads_both_the_gate_proof_and_the_supply_set(monkeypatch):
     _configure_github(monkeypatch)
     tree = "b" * 40
@@ -929,14 +950,15 @@ def test_the_artifact_read_is_cached_so_a_loop_cannot_burn_the_shared_budget(mon
     """The PAT's 5000/hr also carries platform_customize's PR work."""
     _configure_github(monkeypatch)
     calls = []
-    name = "gate-proof-" + "a" * 40
+    tree = "a" * 40
+    name = "gate-proof-" + tree
     _stub_github(monkeypatch, {name: [_artifact(name)]},
                  run_paths={4242: GATE_WORKFLOW}, calls=calls)
     assert rr.ARTIFACT_CACHE_SECONDS == 60.0
     for _ in range(20):
-        assert len(rr._fetch_artifacts_named(name, "gate-proof")[0]) == 1
-    # repo id + artifact listing + run path, once each, for twenty requests
-    assert len(calls) == 3, [url for url, _h, _c in calls]
+        assert len(rr.read_receipts("tree:" + tree)["rows"]) == 1
+    # repo id + gate-proof listing + run path + supply-set listing, once each, for twenty requests
+    assert len(calls) == 4, [url for url, _h, _c in calls]
 
 
 def test_a_failing_artifact_read_is_cached_too(monkeypatch):
@@ -945,8 +967,11 @@ def test_a_failing_artifact_read_is_cached_too(monkeypatch):
     calls = []
     _stub_github(monkeypatch, artifacts_error=OSError("HTTP 403"), calls=calls)
     for _ in range(10):
-        assert rr._fetch_artifacts_named("gate-proof-" + "a" * 40, "gate-proof")[1]["reason"] == rr.REASON_UNREACHABLE
-    assert len(calls) == 2, "one repo lookup and one failed listing, then cached"
+        body = rr.read_receipts("tree:" + "a" * 40)
+        assert [entry["reason"] for entry in body["unavailable"]] == [
+            rr.REASON_UNREACHABLE, rr.REASON_UNREACHABLE,
+        ]
+    assert len(calls) == 3, "one repo lookup and two failed listings, then cached"
 
 
 def test_the_inflight_cap_refuses_instead_of_holding_a_threadpool_slot(monkeypatch):
