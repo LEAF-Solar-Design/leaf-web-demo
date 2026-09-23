@@ -1,4 +1,5 @@
-import { useLayoutEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { BOARD_THEME_KEY, readBoardTheme, writeBoardTheme } from '../lib/themePreference.js'
 import WorldSpaceBoard from './WorldSpaceBoard.jsx'
 import { BoardTiles } from './BoardTiles.jsx'
 import { START_BOARD_COPY } from './startBoardCopy.js'
@@ -10,6 +11,7 @@ export function ProjectBoardGround({
   active = false, workspaceProject = null, workspace = null, drawing = null, catalog = null, mock = false,
   leavingGround = null,
   contained = false, onReturnToDrawing = null, headingRef = null, startFocusRequest = 0,
+  themeable = !contained,
   onCreateProject = null,
   occluders = NO_OCCLUDERS,
   studioPresentation = false, studioShell = false,
@@ -17,6 +19,29 @@ export function ProjectBoardGround({
   worldSpace = import.meta.env.VITE_WORLD_SPACE_BOARD === '1', store,
 }) {
   const state = workspaceProject || EMPTY_WORKSPACE_PROJECT
+  const [theme, setTheme] = useState(() => readBoardTheme())
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined
+    const onStorage = (event) => {
+      if (event.key === BOARD_THEME_KEY || event.key === null) setTheme(readBoardTheme())
+    }
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
+  }, [])
+  const lightBoard = themeable && theme === 'light'
+  const themeToggle = themeable && (
+    <button
+      type="button"
+      className="ground-theme-toggle"
+      aria-pressed={theme === 'light'}
+      title={theme === 'light' ? 'Switch the board back to the dark theme' : 'Switch the board to the light paper theme'}
+      onClick={() => {
+        const next = theme === 'light' ? 'dark' : 'light'
+        setTheme(next)
+        writeBoardTheme(next)
+      }}
+    >Light board</button>
+  )
   const boardRef = useRef(null)
   const leaving = leavingGround === 'board'
   const win = useGroundWindow(active || leaving, contained, boardRef, occluders)
@@ -32,7 +57,8 @@ export function ProjectBoardGround({
   // Outside it the legacy product frame still supplies Browser's heading.
   return (
     <div
-      className="studio-ground-board"
+      className={`studio-ground-board${lightBoard ? ' leaf-light' : ''}`}
+      data-board-theme={lightBoard ? 'light' : undefined}
       ref={boardRef}
       data-ground="browser"
       data-studio-shell={studioShell ? 'cockpit' : undefined}
@@ -47,6 +73,7 @@ export function ProjectBoardGround({
       aria-label="Project workspace"
     >
       <div className="ground-desk" style={windowStyle(win)} data-measured={win ? 'true' : 'false'}>
+        {!contained && themeToggle}
         {contained && (
           <header className="ground-board-header">
             <div>
@@ -55,6 +82,7 @@ export function ProjectBoardGround({
               <WorkspaceProjectSlot state={state} onCreateProject={onCreateProject} studioPresentation={studioPresentation} mock={mock} />
             </div>
             {onReturnToDrawing && <button type="button" onClick={onReturnToDrawing}>{START_BOARD_COPY.returnToDrawing}</button>}
+            {themeToggle}
           </header>
         )}
         {panel}
