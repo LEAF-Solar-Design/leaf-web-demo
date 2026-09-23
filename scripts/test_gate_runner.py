@@ -2592,19 +2592,10 @@ def test_jobs_pool_is_concurrent_with_a_bound_that_serial_sleep_cannot_meet(
     assert elapsed < 3.0, elapsed
 
 
-def test_jobs_conflicts_are_in_one_group_and_excluded_from_lpt(monkeypatch):
+def test_jobs_conflicts_are_classified_into_resource_lanes():
     g = _load_runner()
     suites = g.build_suites()
-    partitioned = []
-    real_partition = g.partition_suites
-
-    def recording_partition(items, count):
-        partitioned.append(([s.id for s in items], count))
-        return real_partition(items, count)
-
-    monkeypatch.setattr(g, "partition_suites", recording_partition)
-    serial, groups = g.parallel_suite_phases(suites, 4)
-    serial_ids = {s.id for s in serial}
+    serial_ids = {s.id for s in suites if g.serial_suite_reason(s)}
     by_id = {s.id: s for s in suites}
     required = {
         "server-nl-router": "authored_tools.json",
@@ -2632,85 +2623,159 @@ def test_jobs_conflicts_are_in_one_group_and_excluded_from_lpt(monkeypatch):
         if suite.cwd in (g.HARNESS, g.WEB):
             assert suite.id in serial_ids, suite.id
     assert "server-checkout-crossproc" not in serial_ids
-    assert [s.id for s in serial] == [s.id for s in suites if s.id in serial_ids]
-    independent_ids = [s.id for s in suites if s.id not in serial_ids]
-    assert partitioned == [(independent_ids, 4)]
-    assert sorted(s.id for group in [serial, *groups] for s in group) == sorted(by_id)
-    assert len(groups) == 4
+    prelude, rest = g.plan_parallel_phases(suites)
+    assert prelude == [s for s in suites if s.id in g._PRELUDE_WRITERS]
+    assert rest == [s for s in suites if s.id not in g._PRELUDE_WRITERS]
+    # Every prelude writer is registered, so none silently drops into the lanes.
+    assert {s.id for s in prelude} == g._PRELUDE_WRITERS
+    assert sorted(s.id for s in [*prelude, *rest]) == sorted(by_id)
+    for suite in suites:
+        assert bool(g.conflict_resources(suite)) == bool(g.serial_suite_reason(suite)), suite.id
+    assert {"web-tree", "harness-tree"} <= g.conflict_resources(by_id["web-link-service-flow"])
+    assert not (g.conflict_resources(by_id["server-backbone"])
+                & g.conflict_resources(by_id["web-vitest"]))
 
 
-@pytest.mark.parametrize("jobs", [1, 4])
-def test_jobs_phases_partition_every_suite_once_with_all_pool_workers(jobs):
+@pytest.mark.parametrize("prelude_slots", [(), (2, 9)])
+def test_jobs_phases_partition_every_suite_once_with_all_pool_workers(prelude_slots):
     g = _load_runner()
     suites = _jobs_catalog(g, 12)
     suites[1].reset_authored = True
     suites[3].db_gated = True
     suites[5].argv = ["npm", "test"]
     suites[7].id = "server-backbone"
-    serial, groups = g.parallel_suite_phases(suites, jobs)
-    assert serial == [s for s in suites if g.serial_suite_reason(s)]
-    assert len(groups) == jobs
-    assert all(groups)
-    pool_ids = [s.id for group in groups for s in group]
-    assert sorted(pool_ids) == sorted(s.id for s in suites
-                                      if not g.serial_suite_reason(s))
-    all_ids = [s.id for s in serial] + pool_ids
+    for slot, sid in zip(prelude_slots, ("web-build", "server-sessions-e2e")):
+        suites[slot].id = sid
+    prelude, rest = g.plan_parallel_phases(suites)
+    assert [s.id for s in prelude] == [suites[i].id for i in prelude_slots]
+    order = {id(s): i for i, s in enumerate(suites)}
+    for phase in (prelude, rest):
+        indexes = [order[id(s)] for s in phase]
+        assert indexes == sorted(indexes)
+    all_ids = [s.id for s in prelude] + [s.id for s in rest]
     assert len(all_ids) == len(set(all_ids)) == len(suites)
     assert set(all_ids) == {s.id for s in suites}
 
 
-def test_jobs_serial_group_never_overlaps_itself_and_pool_never_exceeds_jobs(
+def test_jobs_lanes_never_overlap_a_shared_resource_and_never_exceed_jobs(
         tmp_path, monkeypatch):
     g = _load_runner()
+    jobs = 3
     suites = _jobs_catalog(g, 12)
-    suites[0].reset_authored = True
-    suites[4].argv = ["npm", "test"]
-    suites[8].id = "platform"
-    conflict_ids = {suites[i].id for i in (0, 4, 8)}
+    # Prelude: two writers on disjoint build trees.
+    suites[0].id, suites[0].cwd, suites[0].argv = "web-build", g.WEB, ["npm", "run", "build"]
+    suites[1].id, suites[1].cwd, suites[1].argv = "harness-tsc-build", g.HARNESS, ["npx", "tsc"]
+    # Lanes: authored-store (2, 6, 8), web-tree (4), postgres (5, 9), legacy-serial (10).
+    suites[2].reset_authored = True
+    suites[4].cwd, suites[4].argv = g.WEB, ["npm", "test"]
+    suites[5].id = "platform"
+    suites[6].reset_authored = True
+    suites[8].id = "server-dynamic-loader"
+    suites[9].db_gated = True
+    suites[10].argv = ["npm", "test"]
+    locks = {s.id: g.conflict_resources(s) for s in suites}
+    assert locks[suites[2].id] == {"authored-store"} and locks[suites[5].id] == {"postgres"}
+    prelude_ids = {s.id for s in suites if s.id in g._PRELUDE_WRITERS}
+    assert prelude_ids == {suites[0].id, suites[1].id}
+    # Heads of two disjoint lanes must run at the same time. A scheduler that
+    # serialises them breaks the barrier on timeout: a red row, never a hang.
+    disjoint = threading.Barrier(2)
+    disjoint_ids = {suites[2].id, suites[5].id}
     lock = threading.Lock()
-    rendezvous = threading.Barrier(3)
-    first_threads = set()
-    active = peak = serial_active = serial_peak = 0
-    serial_order = []
+    active = peak = 0
+    holders: dict = {}
+    overlap = []
+    starts = []
     events = []
 
     def tracked_suite(suite, log_dir, retry):
-        nonlocal active, peak, serial_active, serial_peak
+        nonlocal active, peak
         with lock:
             active += 1
-            events.append((suite.id, "start"))
             peak = max(peak, active)
-            if suite.id in conflict_ids:
-                serial_active += 1
-                serial_peak = max(serial_peak, serial_active)
-                serial_order.append((suite.id, threading.get_ident()))
-            first = threading.get_ident() not in first_threads
-            first_threads.add(threading.get_ident())
+            events.append((suite.id, "start"))
+            starts.append(suite.id)
+            for name in locks[suite.id]:
+                if holders.get(name):
+                    overlap.append((name, holders[name], suite.id))
+                holders[name] = suite.id
         try:
-            if first and suite.id not in conflict_ids:
-                rendezvous.wait(timeout=10)
+            if suite.id in disjoint_ids:
+                disjoint.wait(timeout=5)
             time.sleep(0.02)
             return g.Result(suite, "PASS", "2", 0.02), 1
         finally:
             with lock:
                 events.append((suite.id, "end"))
                 active -= 1
-                if suite.id in conflict_ids:
-                    serial_active -= 1
+                for name in locks[suite.id]:
+                    holders[name] = None
 
     monkeypatch.setattr(g, "_run_parallel_suite", tracked_suite)
-    results, _ = g.run_suites_parallel(suites, tmp_path, 3, 0, False)
-    assert len(results) == len(suites)
-    assert all(r.status == "PASS" for r in results)
-    assert peak == 3 and serial_peak == 1
-    assert [sid for sid, _ in serial_order] == [s.id for s in suites if s.id in conflict_ids]
-    assert len({thread for _, thread in serial_order}) == 1
-    assert serial_order[0][1] == threading.get_ident()
-    last_serial_end = max(i for i, (sid, event) in enumerate(events)
-                          if sid in conflict_ids and event == "end")
-    first_pool_start = min(i for i, (sid, event) in enumerate(events)
-                           if sid not in conflict_ids and event == "start")
-    assert last_serial_end < first_pool_start
+    results, _ = g.run_suites_parallel(suites, tmp_path, jobs, 0, False)
+    assert [r.suite.id for r in results] == [s.id for s in suites]
+    assert all(r.status == "PASS" for r in results), [r.note for r in results]
+    assert 2 <= peak <= jobs
+    assert overlap == []
+    for name in set().union(*locks.values()):
+        catalog = [s.id for s in suites if name in locks[s.id]]
+        assert [sid for sid in starts if name in locks[sid]] == catalog, name
+    last_prelude_end = max(i for i, (sid, event) in enumerate(events)
+                           if sid in prelude_ids and event == "end")
+    first_rest_start = min(i for i, (sid, event) in enumerate(events)
+                           if sid not in prelude_ids and event == "start")
+    assert last_prelude_end < first_rest_start
+
+
+def test_conflict_resources_maps_each_rule_to_its_lock(monkeypatch):
+    g = _load_runner()
+
+    def stub(sid="stub", cwd=SCRIPTS, argv=None, **flags):
+        return g.Suite(sid, sid, "script", cwd,
+                       argv or [sys.executable, "-c", "pass"], None, **flags)
+
+    assert g.conflict_resources(stub()) == frozenset()
+    # The override table wins over the generic rules.
+    assert g.conflict_resources(stub("web-link-service-flow", g.WEB, ["npx", "playwright"])) \
+        == {"web-tree", "harness-tree", "link-flow-ports"}
+    assert g.conflict_resources(stub("server-sessions-e2e", g.SERVER)) == {"harness-tree"}
+    assert g.conflict_resources(stub("web-demo-gate", g.REPO, ["bash"])) == {"web-tree"}
+    assert g.conflict_resources(stub("harness-container-smoke", g.REPO)) \
+        == {"compose-8130-8150"}
+    assert g.conflict_resources(stub(reset_authored=True)) == {"authored-store"}
+    assert g.conflict_resources(stub(db_gated=True)) == {"postgres"}
+    assert g.conflict_resources(stub("server-backbone", g.SERVER)) == {"authored-store"}
+    assert g.conflict_resources(stub("platform", g.REPO_PARENT)) == {"postgres"}
+    assert g.conflict_resources(stub("w", g.WEB, ["npm", "test"])) == {"web-tree"}
+    assert g.conflict_resources(stub("h", g.HARNESS, ["npx", "tsc"])) == {"harness-tree"}
+    # A serial reason no rule recognises shares one lock instead of running free.
+    assert g.conflict_resources(stub("elsewhere", g.REPO, ["npm", "test"])) == {"legacy-serial"}
+    monkeypatch.setitem(g._SERIAL_SUITE_REASONS, "mystery", "some new shared thing")
+    assert g.conflict_resources(stub("mystery", g.SERVER)) == {"legacy-serial"}
+
+
+def test_lane_priority_runs_a_long_resource_chain_ahead_of_a_short_pool_suite(
+        tmp_path, monkeypatch):
+    g = _load_runner()
+    suites = _jobs_catalog(g, 4)
+    for suite in suites[1:]:
+        suite.reset_authored = True
+    for suite in suites:
+        monkeypatch.setitem(g._MEASURED_EST_S, suite.id, 3.0)
+    monkeypatch.setitem(g._MEASURED_EST_S, suites[0].id, 5.0)
+    starts = []
+
+    def recorded_suite(suite, log_dir, retry):
+        starts.append(suite.id)
+        return g.Result(suite, "PASS", "2", 0.0), 1
+
+    monkeypatch.setattr(g, "_run_parallel_suite", recorded_suite)
+    completed, state = {}, {"stopped_after": None}
+    g.run_lanes(suites, tmp_path, 1, 0, False, completed, state)
+    # Chain priorities 9 and 6 beat the pool suite's 5; the chain tail's 3 does not.
+    assert starts == [suites[1].id, suites[2].id, suites[0].id, suites[3].id]
+    assert set(completed) == {s.id for s in suites}
+    assert state["stopped_after"] is None
 
 
 def test_jobs_red_and_spawn_retry_keep_the_verdict_rows_and_flaked_callout(
@@ -2883,19 +2948,26 @@ def test_jobs_fail_fast_serial_red_leaves_every_pool_suite_unrun(
     import json
     g = _load_runner()
     suites = _jobs_catalog(g, 8)
+    # Two prelude writers sharing the authored lock: the first red must stop
+    # the second writer and every suite after the prelude.
+    suites[1].id, suites[3].id = "web-build", "harness-tsc-build"
     suites[1].reset_authored = suites[3].reset_authored = True
     monkeypatch.setattr(g, "build_suites", lambda: suites)
     ran = []
+    pools_opened = []
+    real_pool = g.ThreadPoolExecutor
 
     def serial_red(suite, log_dir, retry):
         ran.append(suite.id)
         return g.Result(suite, "FAIL", "err", 0.0, note="serial red"), 1
 
-    def no_pool(*args, **kwargs):
-        raise AssertionError("a serial fail-fast red must not open the pool")
+    class CountedPool(real_pool):
+        def __init__(self, *args, **kwargs):
+            pools_opened.append(kwargs.get("max_workers"))
+            super().__init__(*args, **kwargs)
 
     monkeypatch.setattr(g, "_run_parallel_suite", serial_red)
-    monkeypatch.setattr(g, "ThreadPoolExecutor", no_pool)
+    monkeypatch.setattr(g, "ThreadPoolExecutor", CountedPool)
     result_file = tmp_path / "result.json"
     rc, output = _jobs_main(g, monkeypatch, capsys, tmp_path, [
         "--jobs", "4", "--retry", "0", "--fail-fast",
@@ -2905,8 +2977,11 @@ def test_jobs_fail_fast_serial_red_leaves_every_pool_suite_unrun(
     assert ran == [suites[1].id]
     results = json.loads(result_file.read_text(encoding="utf-8"))["results"]
     assert [r["id"] for r in results] == [suites[1].id]
-    pool_ids = {s.id for s in suites if not g.serial_suite_reason(s)}
-    assert not pool_ids.intersection(r["id"] for r in results)
+    rest_ids = {s.id for s in suites if s.id not in g._PRELUDE_WRITERS}
+    assert len(rest_ids) == 6
+    assert not rest_ids.intersection(r["id"] for r in results)
+    # Only the prelude opened a pool: a prelude red never starts the rest phase.
+    assert len(pools_opened) == 1
     assert "suites: 0 PASS  1 FAIL" in output
 
 
