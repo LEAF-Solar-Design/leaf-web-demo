@@ -396,6 +396,24 @@ def build_suites() -> List[Suite]:
         # literal lists.
         Suite("server-solar-nec", "server tests/test_solar_nec.py", "pytest", SERVER,
               _py_pytest("tests/test_solar_nec.py"), 221),
+        # S28 probe calculations (2026-09-22): server/solar_probe_calcs.py, the
+        # literal port of four more licensed engines (PanelGroupTradeCalculator
+        # .SnakeOrder, ProjectSummary.ToCsv/ToJson, ShadeLimitAngleCalculator with
+        # BacktrackingCalculator and SunPositionCalculator, and
+        # TorqueTubeShadeCalculator) plus the C# "R" formatter and the
+        # round-half-to-EVEN rule BucketCoordinate uses. Three layers: the
+        # formatters, the plugin's OWN NUnit cases ported from
+        # PanelGroupTradeCalculatorTests.cs, LeafTorqueTubeShadeTests.cs,
+        # LeafShadeLimitTests.cs, LeafShadeLimitExternalReferenceTests.cs and
+        # ProjectSummaryReportTests.cs, and every probe in the four licensed DEMO
+        # captures reproduced by COMPUTING it. Unlike server-solar-nec the capture
+        # IS committed here (docs/parity/evidence/probes/demo-probes-20260923), so
+        # the suite reads the artifact rather than a transcription and still never
+        # skips. Floor MEASURED at 163 on the first green run (2026-09-22, 2.1 s):
+        # 34 test functions, 16 of them parametrized over literal lists or over the
+        # capture's own probes.
+        Suite("server-solar-probe-calcs", "server tests/test_solar_probe_calcs.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_probe_calcs.py"), 163),
         Suite("server-w1-sizing-groups", "server tests/test_w1_sizing_groups.py", "pytest", SERVER,
               _py_pytest("tests/test_w1_sizing_groups.py"), 52),
         Suite("server-w1-solar-interchange", "server tests/test_w1_solar_interchange.py", "pytest", SERVER,
@@ -1638,12 +1656,19 @@ def build_suites() -> List[Suite]:
         # Studio's own probe files are generated in tmp_path by
         # scripts/solar_nec_probes.py, so the suite is hermetic and never skips:
         # without the licensed capture the comparison runs against Studio's own file
-        # read back from a second path. The floor is CONSERVATIVE, not measured (see
-        # server-solar-nec above): 15 test functions, 9 parametrized over the six
-        # demos or over literal malformed inputs. Floor MEASURED at 61 on the first
-        # green run (2026-09-22, 1.5 s).
+        # read back from a second path. S28 (2026-09-22) added rule E5's CSV
+        # projection and the four calculation capabilities, whose licensed capture IS
+        # committed, so their half compares Studio against the artifact: the `#`
+        # preamble skipped, values kept as TEXT with the quantity parsed back out of
+        # them, CRLF and LF reading identically (a committed capture is line-ending
+        # translated on checkout, so a verdict must not depend on a git setting), the
+        # headerless, blank-named, repeated-name and ragged files refused, and the
+        # declared non-numeric quantity applying only where a section declares it.
+        # Floor MEASURED at 118 on the first green run after S28 (2026-09-22, 3.2 s);
+        # it was 61 before. 26 test functions, 15 parametrized over the six NEC demos,
+        # the nine committed S28 files, or literal malformed inputs.
         Suite("scripts-solar-probe-evidence", "scripts test_solar_probe_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_probe_evidence.py"), 61),
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_probe_evidence.py"), 118),
         # S22 (2026-09-22): contract rule G9 on the Studio evidence adapter, the first
         # test file it has. A set-valued list (unassigned_panels, duplicate_panels) is
         # emitted in ascending neutral-id order, so the same set recorded in two orders

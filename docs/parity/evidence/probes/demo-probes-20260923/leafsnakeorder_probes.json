@@ -1,0 +1,404 @@
+[
+  {
+    "Name": "null_panels",
+    "Tag": "null_panels",
+    "InputIsNull": true,
+    "InputPanels": null,
+    "OutputHandles": null,
+    "Unchanged": true
+  },
+  {
+    "Name": "empty_panels",
+    "Tag": "empty_panels",
+    "InputIsNull": false,
+    "InputPanels": [],
+    "OutputHandles": [],
+    "Unchanged": true
+  },
+  {
+    "Name": "single_panel",
+    "Tag": "single_panel",
+    "InputIsNull": false,
+    "InputPanels": [
+      {
+        "Handle": "A",
+        "X": 0.0,
+        "Y": 0.0,
+        "Row": 0,
+        "Col": 0
+      }
+    ],
+    "OutputHandles": [
+      "A"
+    ],
+    "Unchanged": true
+  },
+  {
+    "Name": "two_same_row_sorted",
+    "Tag": "two_same_row_sorted",
+    "InputIsNull": false,
+    "InputPanels": [
+      {
+        "Handle": "B",
+        "X": 1.0,
+        "Y": 0.0,
+        "Row": 0,
+        "Col": 1
+      },
+      {
+        "Handle": "A",
+        "X": 0.0,
+        "Y": 0.0,
+        "Row": 0,
+        "Col": 0
+      }
+    ],
+    "OutputHandles": [
+      "A",
+      "B"
+    ],
+    "Unchanged": false
+  },
+  {
+    "Name": "grid_2x2",
+    "Tag": "grid_2x2",
+    "InputIsNull": false,
+    "InputPanels": [
+      {
+        "Handle": "A",
+        "X": 0.0,
+        "Y": 0.0,
+        "Row": 0,
+        "Col": 0
+      },
+      {
+        "Handle": "B",
+        "X": 1.0,
+        "Y": 0.0,
+        "Row": 0,
+        "Col": 1
+      },
+      {
+        "Handle": "C",
+        "X": 0.0,
+        "Y": 1.0,
+        "Row": 1,
+        "Col": 0
+      },
+      {
+        "Handle": "D",
+        "X": 1.0,
+        "Y": 1.0,
+        "Row": 1,
+        "Col": 1
+      }
+    ],
+    "OutputHandles": [
+      "A",
+      "B",
+      "D",
+      "C"
+    ],
+    "Unchanged": false
+  },
+  {
+    "Name": "grid_2x3",
+    "Tag": "grid_2x3",
+    "InputIsNull": false,
+    "InputPanels": [
+      {
+        "Handle": "A",
+        "X": 0.0,
+        "Y": 0.0,
+        "Row": 0,
+        "Col": 0
+      },
+      {
+        "Handle": "B",
+        "X": 1.0,
+        "Y": 0.0,
+        "Row": 0,
+        "Col": 1
+      },
+      {
+        "Handle": "C",
+        "X": 2.0,
+        "Y": 0.0,
+        "Row": 0,
+        "Col": 2
+      },
+      {
+        "Handle": "D",
+        "X": 0.0,
+        "Y": 1.0,
+        "Row": 1,
+        "Col": 0
+      },
+      {
+        "Handle": "E",
+        "X": 1.0,
+        "Y": 1.0,
+        "Row": 1,
+        "Col": 1
+      },
+      {
+        "Handle": "F",
+        "X": 2.0,
+        "Y": 1.0,
+        "Row": 1,
+        "Col": 2
+      }
+    ],
+    "OutputHandles": [
+      "A",
+      "B",
+      "C",
+      "F",
+      "E",
+      "D"
+    ],
+    "Unchanged": false
+  },
+  {
+    "Name": "three_rows_two_cols",
+    "Tag": "three_rows_two_cols",
+    "InputIsNull": false,
+    "InputPanels": [
+      {
+        "Handle": "A",
+        "X": 0.0,
+        "Y": 0.0,
+        "Row": 0,
+        "Col": 0
+      },
+      {
+        "Handle": "B",
+        "X": 1.0,
+        "Y": 0.0,
+        "Row": 0,
+        "Col": 1
+      },
+      {
+        "Handle": "C",
+        "X": 0.0,
+        "Y": 1.0,
+        "Row": 1,
+        "Col": 0
+      },
+      {
+        "Handle": "D",
+        "X": 1.0,
+        "Y": 1.0,
+        "Row": 1,
+        "Col": 1
+      },
+      {
+        "Handle": "E",
+        "X": 0.0,
+        "Y": 2.0,
+        "Row": 2,
+        "Col": 0
+      },
+      {
+        "Handle": "F",
+        "X": 1.0,
+        "Y": 2.0,
+        "Row": 2,
+        "Col": 1
+      }
+    ],
+    "OutputHandles": [
+      "A",
+      "B",
+      "D",
+      "C",
+      "E",
+      "F"
+    ],
+    "Unchanged": false
+  },
+  {
+    "Name": "rows_out_of_order_input",
+    "Tag": "rows_out_of_order_input",
+    "InputIsNull": false,
+    "InputPanels": [
+      {
+        "Handle": "E",
+        "X": 0.0,
+        "Y": 2.0,
+        "Row": 2,
+        "Col": 0
+      },
+      {
+        "Handle": "F",
+        "X": 1.0,
+        "Y": 2.0,
+        "Row": 2,
+        "Col": 1
+      },
+      {
+        "Handle": "A",
+        "X": 0.0,
+        "Y": 0.0,
+        "Row": 0,
+        "Col": 0
+      },
+      {
+        "Handle": "B",
+        "X": 1.0,
+        "Y": 0.0,
+        "Row": 0,
+        "Col": 1
+      },
+      {
+        "Handle": "C",
+        "X": 0.0,
+        "Y": 1.0,
+        "Row": 1,
+        "Col": 0
+      },
+      {
+        "Handle": "D",
+        "X": 1.0,
+        "Y": 1.0,
+        "Row": 1,
+        "Col": 1
+      }
+    ],
+    "OutputHandles": [
+      "A",
+      "B",
+      "D",
+      "C",
+      "E",
+      "F"
+    ],
+    "Unchanged": false
+  },
+  {
+    "Name": "row_neg_uses_y",
+    "Tag": "row_neg_uses_y",
+    "InputIsNull": false,
+    "InputPanels": [
+      {
+        "Handle": "A",
+        "X": 0.0,
+        "Y": 0.0,
+        "Row": -1,
+        "Col": -1
+      },
+      {
+        "Handle": "B",
+        "X": 0.0,
+        "Y": 10.0,
+        "Row": -1,
+        "Col": -1
+      },
+      {
+        "Handle": "C",
+        "X": 0.0,
+        "Y": 20.0,
+        "Row": -1,
+        "Col": -1
+      }
+    ],
+    "OutputHandles": [
+      "A",
+      "B",
+      "C"
+    ],
+    "Unchanged": false
+  },
+  {
+    "Name": "col_neg_uses_x",
+    "Tag": "col_neg_uses_x",
+    "InputIsNull": false,
+    "InputPanels": [
+      {
+        "Handle": "A",
+        "X": 5.0,
+        "Y": 0.0,
+        "Row": 0,
+        "Col": -1
+      },
+      {
+        "Handle": "B",
+        "X": 2.0,
+        "Y": 0.0,
+        "Row": 0,
+        "Col": -1
+      },
+      {
+        "Handle": "C",
+        "X": 8.0,
+        "Y": 0.0,
+        "Row": 0,
+        "Col": -1
+      }
+    ],
+    "OutputHandles": [
+      "B",
+      "A",
+      "C"
+    ],
+    "Unchanged": false
+  },
+  {
+    "Name": "irregular_row_sizes",
+    "Tag": "irregular_row_sizes",
+    "InputIsNull": false,
+    "InputPanels": [
+      {
+        "Handle": "A",
+        "X": 0.0,
+        "Y": 0.0,
+        "Row": 0,
+        "Col": 0
+      },
+      {
+        "Handle": "B",
+        "X": 1.0,
+        "Y": 0.0,
+        "Row": 0,
+        "Col": 1
+      },
+      {
+        "Handle": "C",
+        "X": 0.0,
+        "Y": 1.0,
+        "Row": 1,
+        "Col": 0
+      },
+      {
+        "Handle": "D",
+        "X": 0.0,
+        "Y": 2.0,
+        "Row": 2,
+        "Col": 0
+      },
+      {
+        "Handle": "E",
+        "X": 1.0,
+        "Y": 2.0,
+        "Row": 2,
+        "Col": 1
+      },
+      {
+        "Handle": "F",
+        "X": 2.0,
+        "Y": 2.0,
+        "Row": 2,
+        "Col": 2
+      }
+    ],
+    "OutputHandles": [
+      "A",
+      "B",
+      "C",
+      "D",
+      "E",
+      "F"
+    ],
+    "Unchanged": false
+  }
+]

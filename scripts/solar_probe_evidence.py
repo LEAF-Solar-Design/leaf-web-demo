@@ -28,9 +28,14 @@ What the rules mean here:
       for a sectioned file the sections concatenate in the file's section order.
       `format` names the file kind, `source_revision` is "scenario-list".
   E4  `entity_mapping` maps each row id to itself and to nothing else.
-  E5  XLSX is read cell by cell per sheet. Not implemented here: this slice
-      carries JSON only, and READERS below is the single extension point where
-      the CSV and XLSX readers land.
+  E5  A CSV's HEADER ROW gives the field names and each later row is one probe,
+      with values kept as TEXT: the plugin's CSV is a RENDERING, so its digits
+      are the output under test and parsing them at read time would erase the
+      formatting the capability exists to hold. The numeric quantity is parsed
+      back out of that text in `_quantity_value`, so the two can never disagree.
+      A leading `#` preamble, which one DEMO writes above its header, is
+      metadata and is skipped. XLSX is read cell by cell per sheet and is still
+      not implemented; READERS below stays the single extension point.
 
 Two contract details that the frozen comparator, not this module, decides:
 
@@ -58,9 +63,11 @@ from __future__ import annotations
 
 import argparse
 from copy import deepcopy
+import csv
 import hashlib
 import importlib.util
 import json
+import math
 from pathlib import Path
 import re
 import sys
@@ -99,13 +106,22 @@ class Section:
     `key` is the document key holding the list, or None when the document IS
     the list. `quantity_field` is the E2 choice, stated once here so no caller
     has to guess which of a multi-output probe's numbers is the result.
+
+    `non_numeric_quantity` is the ONE escape from "quantity is a number", and a
+    section that does not declare it fails closed on a non-numeric result rather
+    than inventing one. It exists for two real shapes in the licensed captures:
+    a probe whose output is legitimately null (SnakeOrder returns its argument,
+    so a null input yields a null output) and a metric whose value is text (a
+    cable size, or the empty value a null cable size renders as). In both cases
+    the text rides verbatim under the row's `fields` and is compared byte-exact
+    there, so a constant here can never mask a difference.
     """
 
     __slots__ = ("key", "row_type", "id_field", "inputs", "quantity_field",
-                 "unit_field", "unit_literal")
+                 "unit_field", "unit_literal", "non_numeric_quantity")
 
     def __init__(self, key, row_type, id_field, inputs, quantity_field,
-                 unit_field=None, unit_literal="none"):
+                 unit_field=None, unit_literal="none", non_numeric_quantity=None):
         self.key = key
         self.row_type = row_type
         self.id_field = id_field
@@ -113,6 +129,7 @@ class Section:
         self.quantity_field = quantity_field
         self.unit_field = unit_field
         self.unit_literal = unit_literal
+        self.non_numeric_quantity = non_numeric_quantity
 
 
 class ProbeSpec:
@@ -123,8 +140,8 @@ class ProbeSpec:
         self.sections = tuple(sections)
 
 
-# The six licensed DEMO probe files. Each row's `type` is the CALCULATION, which
-# is why the conduit-fill file contributes four different types.
+# The licensed DEMO probe files. Each row's `type` is the CALCULATION, which is
+# why the conduit-fill file contributes four different types.
 PROBE_SPECS = {
     "nec-ac-voltage-drop": ProbeSpec("json-probes", [
         Section(None, "nec-ac-voltage-drop", "Name",
@@ -169,6 +186,49 @@ PROBE_SPECS = {
         Section("sizeConduit", "nec-conduit-sizing", "label",
                 ("conduitType", "conductors"), "fillPct", unit_literal="%"),
     ]),
+    # SnakeOrder returns a SEQUENCE, so E2's list rule applies: the quantity is
+    # the number of handles the walk emitted, and the sequence ITSELF, which is
+    # the thing a dropped alternation toggle would break, rides verbatim under
+    # fields where its order compares exactly. The null-input probe's output is
+    # null rather than a list, which is the declared non-numeric case.
+    "panel-snake-order": ProbeSpec("json-probes", [
+        Section(None, "panel-snake-order", "Name", ("InputIsNull", "InputPanels"),
+                "OutputHandles", non_numeric_quantity=0.0),
+    ]),
+    # The project summary's two renderings project the same way, so a CSV row
+    # and its JSON twin share a row id and a diff names the metric that moved.
+    # The metric VALUE is the quantity; a cable-size row's text value is the
+    # declared non-numeric case. The fixture is the fixture's identity, which
+    # the file records only as its metric NAMES (f1, f2 and f3 differ in which
+    # StringsOfLength_* and CableSize_* rows exist at all), so `inputs` is empty
+    # by design: every column in these files is output, and declaring one an
+    # input would let an output change move the fixture hash and mask a failure.
+    "project-summary-csv": ProbeSpec("csv", [
+        Section(None, "project-summary-metric", "Metric", (), "Value",
+                non_numeric_quantity=0.0),
+    ]),
+    "project-summary-json": ProbeSpec("json-metrics", [
+        Section(None, "project-summary-metric", "Metric", (), "Value",
+                non_numeric_quantity=0.0),
+    ]),
+    # Three blocks in one CSV, told apart by the `block` column. MAX_GCR is the
+    # quantity: it is the inverse calculator's decision, and both the round-trip
+    # angle and the minimum pitch follow from it. `sla_target_deg` is NOT an
+    # input even though block B supplies it there, because block A writes its
+    # forward SLA and block C its sun elevation into the same column; declaring
+    # it would make an output part of the fixture hash. The label carries what
+    # the input columns do not, and the label is the row id, so the fixture
+    # still distinguishes every scenario.
+    "shade-limit-angle": ProbeSpec("csv", [
+        Section(None, "shade-limit-angle", "label", ("block", "gcr_in", "tilt_deg"),
+                "max_gcr"),
+    ]),
+    # One closed form, one output: the rear self-shade fraction.
+    "torque-tube-rear-shade": ProbeSpec("csv", [
+        Section(None, "torque-tube-rear-shade", "Label",
+                ("RadiusM", "TopGapM", "BotGapM", "CrossAxisM", "TiltDeg"),
+                "Fraction"),
+    ]),
 }
 
 
@@ -177,11 +237,62 @@ def _read_json_probes(text):
     return json.loads(text, object_pairs_hook=compare._unique_object)
 
 
+def _read_json_metrics(text):
+    """A single-object DEMO JSON: each top-level key is one metric probe (E5).
+
+    The project summary's JSON is ONE record rather than a list, so it projects
+    into the same Metric/Value rows its CSV twin carries. Key order is the
+    document's own, which rule E3 requires and which the plugin's JSON writer
+    makes load-bearing (it keeps a dictionary's insertion order where the CSV
+    sorts ascending).
+    """
+    document = json.loads(text, object_pairs_hook=compare._unique_object)
+    if not isinstance(document, dict):
+        raise compare.InputError("probe file must be a JSON object")
+    return [{"Metric": key, "Value": value} for key, value in document.items()]
+
+
+def _read_csv_probes(text):
+    """A DEMO CSV: an optional `#` preamble, one header row, one probe per row.
+
+    Values stay TEXT on purpose (rule E5). Line endings are accepted as CRLF or
+    LF because a committed capture is line-ending translated on checkout, while
+    the CRLF the plugin actually writes is asserted on the generated file, not
+    here. Fails closed on a missing header, a blank or repeated column name, and
+    any row whose column count does not match the header: a short row would
+    otherwise silently shift every value one column left.
+    """
+    lines = text.replace("\r\n", "\n").split("\n")
+    while lines and lines[-1] == "":
+        lines.pop()
+    start = 0
+    while start < len(lines) and lines[start].startswith("#"):
+        start += 1
+    if start >= len(lines):
+        raise compare.InputError("probe CSV has no header row")
+    reader = csv.reader(lines[start:])
+    header = next(reader)
+    if not header or any(not name for name in header):
+        raise compare.InputError("probe CSV header must name every column")
+    if len(set(header)) != len(header):
+        raise compare.InputError("probe CSV header repeats a column name")
+    probes = []
+    for ordinal, row in enumerate(reader, start=1):
+        if len(row) != len(header):
+            raise compare.InputError(
+                "probe CSV row %d has %d columns, header has %d"
+                % (ordinal, len(row), len(header)))
+        probes.append(dict(zip(header, row)))
+    return probes
+
+
 # The single extension point for the rest of contract v5. A later slice adds
-# "csv" and "xlsx:<sheet list>" here (rule E5 reads XLSX cell by cell per sheet)
-# together with the ProbeSpec rows that name them; an unknown format fails
-# closed rather than guessing a projection.
-READERS = {"json-probes": _read_json_probes}
+# "xlsx:<sheet list>" here (rule E5 reads XLSX cell by cell per sheet) together
+# with the ProbeSpec rows that name it; an unknown format fails closed rather
+# than guessing a projection.
+READERS = {"json-probes": _read_json_probes,
+           "json-metrics": _read_json_metrics,
+           "csv": _read_csv_probes}
 
 
 def _sections(document, spec):
@@ -223,16 +334,49 @@ def _unit(section, probe):
     return section.unit_literal
 
 
-def _quantity_value(section, probe):
-    """The primary numeric result; a COUNT when the result is list-valued (E2)."""
+# A finite decimal number as C# renders one. Deliberately narrow: no hex, no
+# thousands separator, no "NaN" or "Infinity", so a text column that is not a
+# number is recognised as text instead of becoming a non-finite quantity the
+# comparator would have to reject later.
+_NUMBER = re.compile(r"[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\Z")
+
+
+def _parse_number(text):
+    """The float a CSV cell renders, or None when the cell is not a number."""
+    if not _NUMBER.match(text):
+        return None
+    try:
+        value = float(text)
+    except ValueError:
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _quantity_value(section, probe, from_text):
+    """The primary numeric result; a COUNT when the result is list-valued (E2).
+
+    `from_text` is true only for a CSV, where every cell arrives as text: the
+    numeric column is parsed HERE rather than at read time, so the row's
+    `fields` keep the plugin's exact digits and the quantity is derived from
+    them and the two can never drift apart. In a JSON probe file the VALUE TYPE
+    is part of the plugin's output, so a quoted number stays a refusal there.
+    Anything that is neither numeric nor a list falls to the section's declared
+    `non_numeric_quantity`, and fails closed when it declared none.
+    """
     if section.quantity_field not in probe:
         raise compare.InputError("probe is missing its quantity field " + section.quantity_field)
     value = probe[section.quantity_field]
     if isinstance(value, list):
         return len(value)
-    if type(value) is bool or type(value) not in (int, float):
+    if type(value) is not bool and type(value) in (int, float):
+        return value
+    if from_text and isinstance(value, str):
+        parsed = _parse_number(value)
+        if parsed is not None:
+            return parsed
+    if section.non_numeric_quantity is None:
         raise compare.InputError("probe quantity must be numeric or list-valued")
-    return value
+    return section.non_numeric_quantity
 
 
 def project(document, probe_type):
@@ -245,6 +389,8 @@ def project(document, probe_type):
     if probe_type not in PROBE_SPECS:
         raise compare.InputError("unknown probe type: " + str(probe_type))
     spec = PROBE_SPECS[probe_type]
+    # A CSV's cells are text; a JSON probe's value types are the plugin's output.
+    from_text = spec.file_format == "csv"
     rows = []
     fixture = []
     seen = set()
@@ -263,7 +409,7 @@ def project(document, probe_type):
                 "id": {"entity_id": row_id},
                 "type": section.row_type,
                 "quantity": {"kind": "float",
-                             "value": _quantity_value(section, probe),
+                             "value": _quantity_value(section, probe, from_text),
                              "unit": _unit(section, probe)},
                 "unit": _unit(section, probe),
                 "fields": deepcopy(probe),

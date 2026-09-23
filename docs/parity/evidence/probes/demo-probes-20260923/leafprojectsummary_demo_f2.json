@@ -1,0 +1,23 @@
+{
+  "PanelCount": 168,
+  "InverterCount": 3,
+  "StringCount": 12,
+  "TotalDcKwp": 84.672,
+  "TotalAcKw": 66.0,
+  "DcAcRatio": 1.283,
+  "TotalTrunkLength": 425.75,
+  "TotalBranchLength": 1240.33,
+  "StringsByLength": {
+    "16": 3,
+    "12": 5,
+    "14": 4
+  },
+  "CriticalFindings": 1,
+  "WarningFindings": 2,
+  "InfoFindings": 5,
+  "LargestCableSizes": [
+    "10 AWG x8",
+    "8 AWG x3",
+    "6 AWG x1"
+  ]
+}

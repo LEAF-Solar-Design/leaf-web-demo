@@ -1,0 +1,16 @@
+Metric,Value
+PanelCount,42
+InverterCount,1
+StringCount,3
+TotalDcKwp,15.120
+TotalAcKw,12.500
+DcAcRatio,1.210
+TotalTrunkLength,50.00
+TotalBranchLength,120.00
+CriticalFindings,0
+WarningFindings,1
+InfoFindings,2
+StringsOfLength_14,3
+CableSize_1,4 AWG x2
+CableSize_2,
+CableSize_3,2 AWG x1

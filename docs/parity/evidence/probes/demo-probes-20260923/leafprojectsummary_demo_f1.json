@@ -1,0 +1,15 @@
+{
+  "PanelCount": 0,
+  "InverterCount": 0,
+  "StringCount": 0,
+  "TotalDcKwp": 0.0,
+  "TotalAcKw": 0.0,
+  "DcAcRatio": 0.0,
+  "TotalTrunkLength": 0.0,
+  "TotalBranchLength": 0.0,
+  "StringsByLength": {},
+  "CriticalFindings": 0,
+  "WarningFindings": 0,
+  "InfoFindings": 0,
+  "LargestCableSizes": []
+}
