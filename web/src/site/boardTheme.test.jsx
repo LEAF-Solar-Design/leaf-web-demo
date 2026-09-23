@@ -79,6 +79,24 @@ it('SSD1-24E board row 8: contained Browser board offers light in its header', (
   expect(localStorage.getItem(BOARD_THEME_KEY)).toBe('light')
 })
 
+it('SSD1-24E board row 10', () => {
+  localStorage.setItem(BOARD_THEME_KEY, 'light')
+  const view = render(<ProjectBoardGround active worldSpace={false} themeable={false} />)
+  expectDark()
+  expect(screen.queryByRole('button', { name: 'Light board' })).toBeNull()
+  view.rerender(<ProjectBoardGround active worldSpace={false} themeable />)
+  expectLight()
+})
+
+it('SSD1-24E board row 11', () => {
+  localStorage.setItem(BOARD_THEME_KEY, 'light')
+  const view = render(<SurfaceGrounds surface="cad" boardVisible studioShell studioPresentation />)
+  expectDark()
+  expect(screen.queryByRole('button', { name: 'Light board' })).toBeNull()
+  view.rerender(<SurfaceGrounds surface="browser" studioShell studioPresentation />)
+  expectLight()
+})
+
 it('SSD1-24E board row 9: SurfaceGrounds themes Browser but not Start over CAD', () => {
   localStorage.setItem(BOARD_THEME_KEY, 'light')
   const view = render(<SurfaceGrounds surface="browser" studioShell studioPresentation />)

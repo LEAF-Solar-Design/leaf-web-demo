@@ -19,7 +19,7 @@ export function ProjectBoardGround({
   worldSpace = import.meta.env.VITE_WORLD_SPACE_BOARD === '1', store,
 }) {
   const state = workspaceProject || EMPTY_WORKSPACE_PROJECT
-  const [theme, setTheme] = useState(() => themeable ? readBoardTheme() : 'dark')
+  const [theme, setTheme] = useState(() => readBoardTheme())
   const lightBoard = themeable && theme === 'light'
   const themeToggle = themeable && (
     <button

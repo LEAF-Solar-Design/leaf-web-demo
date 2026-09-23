@@ -69,4 +69,10 @@ test('SSD1-24E board theme: dark by default, light on request, readable, remembe
   await expect(board).not.toHaveCSS('background-color', 'rgb(233, 231, 224)')
   await expect(page.getByRole('button', { name: 'Light board', exact: true })).toHaveCount(0)
   expect(await page.evaluate(() => localStorage.getItem('leaf.boardTheme'))).toBe('light')
+  await test.step('stored light survives a drawing-to-Browser profile switch without reload', async () => {
+    await page.getByRole('tab', { name: 'Browser', exact: true }).click()
+    await expect(board).toBeVisible()
+    await expect(board).toHaveAttribute('data-board-theme', 'light')
+    await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+  })
 })

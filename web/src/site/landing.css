@@ -1346,6 +1346,11 @@
 .studio-ground-board[data-ground="browser"][data-board-theme="light"][data-board-layout="contained"] .ground-tile {
   background: var(--leaf-card); border-color: var(--leaf-muted);
 }
+.studio-ground-board[data-ground="browser"][data-board-theme="light"] .ground-row-action:hover *,
+.studio-ground-board[data-ground="browser"][data-board-theme="light"] .ground-theme-toggle:hover *,
+.studio-ground-board[data-ground="browser"][data-board-theme="light"][data-board-layout="contained"] .ground-board-header button:hover * {
+  color: var(--leaf-on-accent);
+}
 .ground-device-stage { display: flex; align-items: center; justify-content: center; gap: 44px; }
 .device-frame {
   position: relative; width: 150px; height: 310px; border-radius: 26px; flex: none;

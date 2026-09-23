@@ -78,11 +78,23 @@ it('SSD1-24E light text and tile boundaries meet WCAG contrast', () => {
     const values = [a, b].map((name) => luminance(light[`--${name}`])).sort((x, y) => y - x)
     return (values[0] + 0.05) / (values[1] + 0.05)
   }
-  for (const [a, b] of [['foreground', 'background'], ['foreground', 'card'], ['muted', 'card'], ['primary', 'card'], ['on-accent', 'primary']]) {
+  for (const [a, b] of [['foreground', 'background'], ['foreground', 'card'], ['muted', 'card'], ['primary', 'card'], ['on-accent', 'primary'], ['on-accent', 'primary-hover']]) {
     expect(contrast(a, b), `${a}/${b}`).toBeGreaterThanOrEqual(4.5)
   }
   expect(contrast('muted', 'card')).toBeGreaterThanOrEqual(3)
   expect(contrast('border', 'card')).toBeLessThan(3)
+})
+
+it('SSD1-24E light hover text', () => {
+  const css = stripComments(read('src/site/landing.css'))
+  const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+  const scope = '.studio-ground-board[data-ground="browser"][data-board-theme="light"]'
+  for (const action of ['.ground-row-action:hover *', '.ground-theme-toggle:hover *']) {
+    expect(rules.some(([, selectors, declarations]) =>
+      selectors.split(',').some((selector) => selector.trim() === `${scope} ${action}`)
+      && /(?:^|;)\s*color\s*:\s*var\(--leaf-on-accent\)\s*;/.test(declarations),
+    ), action).toBe(true)
+  }
 })
 
 describe('the --leaf-* token namespace is alias-only (slice 13b)', () => {
