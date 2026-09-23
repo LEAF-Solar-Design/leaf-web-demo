@@ -2616,6 +2616,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_sessions_list.py"), 11),
         Suite("server-ship-skills-telemetry", "server tests/test_ship_skills_telemetry.py", "pytest", SERVER,
               _py_pytest("tests/test_ship_skills_telemetry.py"), 13),
+        Suite("server-skills-catalog", "server tests/test_skills_catalog.py", "pytest", SERVER,
+              _py_pytest("tests/test_skills_catalog.py"), 12),
         Suite("server-start-leaf-harness-config", "server tests/test_start_leaf_harness_config.py", "pytest", SERVER,
               _py_pytest("tests/test_start_leaf_harness_config.py"), 6),
         Suite("server-swallowed-failures", "server tests/test_swallowed_failures.py", "pytest", SERVER,
