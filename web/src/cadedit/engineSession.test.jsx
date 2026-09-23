@@ -658,10 +658,15 @@ describe('save completion', () => {
   it('SSD1-24F row3: nothing retries on its own', async () => {
     const save = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'))
     const session = await editedSession({ headVersion: 4, save })
-    await act(async () => { await session.current.actions.save() })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
+    try {
+      await act(async () => { await session.current.actions.save() })
 
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)) })
-    expect(save).toHaveBeenCalledTimes(1)
+      await act(async () => { await vi.advanceTimersByTimeAsync(600_000) })
+      expect(save).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('SSD1-24F row4: the explicit retry after reconnect settles from the receipt', async () => {
