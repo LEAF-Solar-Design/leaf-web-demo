@@ -2766,6 +2766,94 @@ def test_jobs_invalid_bound_exits_two_before_any_suite_or_log_directory(
     assert not logs.exists()
 
 
+@pytest.mark.parametrize("value", ["auto", "AUTO", "Auto"])
+def test_jobs_count_accepts_auto_case_insensitively(value):
+    g = _load_runner()
+    assert g._jobs_count(value) == "auto"
+
+
+@pytest.mark.parametrize("value", ["0", "17", "x"])
+def test_jobs_count_rejects_out_of_range_with_auto_in_the_message(value):
+    g = _load_runner()
+    with pytest.raises(Exception) as error:
+        g._jobs_count(value)
+    assert str(error.value) == "--jobs must be an integer in 1..16 or auto"
+
+
+_GIB = 2 ** 30
+
+
+@pytest.mark.parametrize("cpus, mem_bytes, expected", [
+    (8, 15 * _GIB, 4),
+    (36, 72 * _GIB, 8),
+    (4, 7 * _GIB, 2),
+    (2, 3 * _GIB, 1),
+    (1, None, 1),
+    (72, 144 * _GIB, 8),
+    (36, 9 * _GIB, 3),
+])
+def test_resolve_auto_jobs_is_bound_by_cpu_memory_and_the_cap(cpus, mem_bytes, expected):
+    g = _load_runner()
+    assert g.resolve_auto_jobs(cpus, mem_bytes) == expected
+
+
+def _fake_cgroup(root, files):
+    for rel, body in files.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="ascii")
+
+
+@pytest.mark.parametrize("files, expected", [
+    ({"sys/fs/cgroup/cpu.max": "200000 100000\n"}, 2.0),
+    ({"sys/fs/cgroup/cpu.max": "max 100000\n"}, 12.0),
+    ({"sys/fs/cgroup/cpu/cpu.cfs_quota_us": "400000\n",
+      "sys/fs/cgroup/cpu/cpu.cfs_period_us": "100000\n"}, 4.0),
+    ({"sys/fs/cgroup/cpu/cpu.cfs_quota_us": "-1\n",
+      "sys/fs/cgroup/cpu/cpu.cfs_period_us": "100000\n"}, 12.0),
+    ({"sys/fs/cgroup/cpu.max": "garbage\n"}, 12.0),
+    ({}, 12.0),
+])
+def test_effective_cpus_reads_the_container_quota_not_the_host(
+        tmp_path, monkeypatch, files, expected):
+    g = _load_runner()
+    monkeypatch.setattr(g, "_affinity_cpus", lambda: 12)
+    _fake_cgroup(tmp_path, files)
+    assert g._effective_cpus(str(tmp_path)) == expected
+
+
+def test_effective_cpus_quota_never_exceeds_affinity(tmp_path, monkeypatch):
+    g = _load_runner()
+    monkeypatch.setattr(g, "_affinity_cpus", lambda: 3)
+    _fake_cgroup(tmp_path, {"sys/fs/cgroup/cpu.max": "800000 100000\n"})
+    assert g._effective_cpus(str(tmp_path)) == 3.0
+
+
+def test_effective_cpus_unreadable_cgroup_falls_back_without_raising(tmp_path, monkeypatch):
+    g = _load_runner()
+    monkeypatch.setattr(g, "_affinity_cpus", lambda: 5)
+    # A directory where the file should be: open() fails with an OSError.
+    (tmp_path / "sys" / "fs" / "cgroup" / "cpu.max").mkdir(parents=True)
+    assert g._effective_cpus(str(tmp_path)) == 5.0
+
+
+@pytest.mark.parametrize("files, expected", [
+    ({"sys/fs/cgroup/memory.max": f"{4 * 2 ** 30}\n",
+      "proc/meminfo": "MemTotal:       16777216 kB\nMemFree: 1 kB\n"}, 4 * 2 ** 30),
+    ({"sys/fs/cgroup/memory.max": "max\n",
+      "proc/meminfo": "MemTotal:       16777216 kB\n"}, 16 * 2 ** 30),
+    ({"sys/fs/cgroup/memory/memory.limit_in_bytes": f"{2 ** 63 - 4096}\n",
+      "proc/meminfo": "MemTotal:       8388608 kB\n"}, 8 * 2 ** 30),
+    ({"sys/fs/cgroup/memory/memory.limit_in_bytes": f"{6 * 2 ** 30}\n"}, 6 * 2 ** 30),
+    ({}, None),
+])
+def test_effective_mem_bytes_takes_the_smaller_of_cgroup_and_meminfo(
+        tmp_path, files, expected):
+    g = _load_runner()
+    _fake_cgroup(tmp_path, files)
+    assert g._effective_mem_bytes(str(tmp_path)) == expected
+
+
 @pytest.mark.parametrize("boundary", ["run_suite_guarded", "_run_parallel_suite"])
 def test_jobs_worker_exception_becomes_a_fail_row_without_losing_the_scoreboard(
         tmp_path, monkeypatch, capsys, boundary):
