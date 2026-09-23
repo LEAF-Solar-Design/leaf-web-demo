@@ -1176,6 +1176,7 @@ describe('App.jsx wiring', () => {
     )
     assert.match(stripped, /headKey:\s*drawingState\?\.head \?\? \(mock \? 1 : null\)/)
     assert.match(stripped, /fetchDxf:\s*mock \? fetchSampleDxf : fetchDrawingDxf/)
+    assert.match(stripped, /sourceKey:\s*mock \? "sample" : "live"/)
     assert.doesNotMatch(stripped, /enabled:\s*!!studioGround && !!drafting && !mock/)
   })
 
