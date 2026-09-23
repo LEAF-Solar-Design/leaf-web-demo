@@ -14,6 +14,10 @@ Contract, stated here so every reader and every future edit conditions on it:
 * Stdlib only, no network, no writes, deterministic output ordering.
 * Single pass over rows and one bounded walk of the receipt tree: no quadratic
   scan, no per-row directory listing.
+* A DECLARED DIVERGENCE is the one way a failing comparator settles a
+  capability, and it is fail closed: the exact declared diff set, a committed
+  finding under docs/parity/divergences/, and every receipt rule still passing.
+  It is a claim about the PLUGIN, never a licence for Studio to be wrong.
 """
 
 from __future__ import annotations
@@ -34,6 +38,10 @@ MAX_ROWS = 5000
 MAX_RECEIPT_BYTES = 2 * 1024 * 1024
 MAX_RECEIPT_FILES = 20000
 MAX_REPORT_LINES = 200
+MAX_DIVERGENCE_LINES = 20
+
+# A declared divergence may only cite a document committed here, repo-relative.
+DIVERGENCE_DIR = "docs/parity/divergences"
 
 CLASSES = ("T", "F", "P", "V", "H", "A")
 MATURITIES = ("production", "preview", "tutorial", "internal")
@@ -87,7 +95,10 @@ RECEIPT_KEYS = (
     "survived_reopen",
     "produced_at",
     "comparison",
+    "divergence",
 )
+
+DIVERGENCE_KEYS = ("finding", "declared_diffs", "summary")
 
 
 class InputError(Exception):
@@ -234,6 +245,23 @@ def parse_row(raw, index):
     }
 
 
+def parse_divergence(doc, where):
+    """Read the optional divergence block. Shape faults are input errors, never a verdict."""
+    if "divergence" not in doc or doc["divergence"] is None:
+        return None
+    block = _object_field(doc, "divergence", where)
+    where = f"{where} divergence"
+    _reject_unknown(block, DIVERGENCE_KEYS, where)
+    declared = _list_of_str(block, "declared_diffs", where)
+    if not declared:
+        raise InputError(f"{where}: field 'declared_diffs' must name at least one diff")
+    return {
+        "finding": _str_field(block, "finding", where, required=True, allow_empty=False),
+        "declared_diffs": declared,
+        "summary": _str_field(block, "summary", where, required=True, allow_empty=False),
+    }
+
+
 def parse_receipt(path, capability):
     """Read one receipt and check its shape. A receipt filed under the wrong capability is a fault."""
     doc = load_json(path, MAX_RECEIPT_BYTES, "receipt")
@@ -280,9 +308,12 @@ def parse_receipt(path, capability):
         "synthetic_flagged": _bool_field(doc, "synthetic_flagged", where),
         "survived_reopen": _bool_field(doc, "survived_reopen", where),
         "produced_at": _str_field(doc, "produced_at", where, required=True, allow_empty=False),
+        "divergence": parse_divergence(doc, where),
     }
     if receipt["comparator"]["verdict"] == "pass" and receipt["comparator"]["diffs"]:
         raise InputError(f"{where}: passing comparator must have no diffs")
+    if receipt["comparator"]["verdict"] == "pass" and receipt["divergence"] is not None:
+        raise InputError(f"{where}: a divergence block requires comparator verdict 'fail'")
     if "comparison" in doc:
         # Load the sibling explicitly: PYTHONSAFEPATH excludes the script directory.
         spec = importlib.util.spec_from_file_location(
@@ -452,31 +483,100 @@ def receipt_violations(receipt, expected_versions):
     return codes
 
 
-def capability_findings(capability, expected_versions, files):
-    """Evaluate one capability once, however many rows share it."""
+def finding_document_problem(root, reference):
+    """Why this finding reference is not a committed document under DIVERGENCE_DIR, or None.
+
+    Fails closed: a traversal segment, a backslash, a foreign directory and an
+    absent file are all refusals, so a divergence can never cite a path the repo
+    does not actually carry.
+    """
+    if "\\" in reference:
+        return f"finding {reference!r} must use forward slashes"
+    parts = reference.split("/")
+    prefix = DIVERGENCE_DIR.split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        return f"finding {reference!r} must be a plain repo-relative path"
+    if parts[: len(prefix)] != prefix or len(parts) <= len(prefix):
+        return f"finding {reference!r} is not under {DIVERGENCE_DIR}/"
+    if not reference.endswith(".md"):
+        return f"finding {reference!r} is not a Markdown document"
+    if not root.joinpath(*parts).is_file():
+        return f"finding {reference!r} names no committed file under {root}"
+    return None
+
+
+def divergence_problem(receipt, expected_versions, root):
+    """Why this failing receipt does NOT settle its capability, or None when it does.
+
+    All four conditions are checked, in a fixed order, and every one of them is a
+    refusal by default: the receipt rules, the exact declared diff set, and the
+    committed finding.
+    """
+    name = receipt["path"].name
+    violations = receipt_violations(receipt, expected_versions)
+    if violations:
+        return f"{name} fails {', '.join(violations)}"
+    produced = set(receipt["comparator"]["diffs"])
+    declared = set(receipt["divergence"]["declared_diffs"])
+    undeclared = sorted(produced - declared)
+    unproduced = sorted(declared - produced)
+    if undeclared or unproduced:
+        parts = []
+        if undeclared:
+            parts.append(f"undeclared diff(s) {undeclared}")
+        if unproduced:
+            parts.append(f"declared diff(s) {unproduced} not produced")
+        return f"{name} diff set disagrees: " + " and ".join(parts)
+    problem = finding_document_problem(root, receipt["divergence"]["finding"])
+    if problem:
+        return f"{name} {problem}"
+    return None
+
+
+def capability_findings(capability, expected_versions, files, root):
+    """Evaluate one capability once, however many rows share it.
+
+    Returns (findings, divergence). A clean passing receipt always wins; a declared
+    divergence settles the capability only when every condition in divergence_problem
+    holds, and a declared divergence that fails one is named, never silently dropped.
+    """
     if not files:
-        return [finding("RECEIPT_MISSING", "no receipt under receipts/" + capability, capability=capability)]
+        return [finding("RECEIPT_MISSING", "no receipt under receipts/" + capability, capability=capability)], None
 
     # Parse every receipt before judging: a malformed sibling is a fault, not a pass.
     receipts = [parse_receipt(path, capability) for path in files]
     passing = [r for r in receipts if r["comparator"]["verdict"] == "pass"]
-    if not passing:
+    declared = [r for r in receipts if r["divergence"] is not None]
+    if not passing and not declared:
         return [
             finding(
                 "RECEIPT_FAIL",
                 f"all {len(receipts)} receipt(s) carry comparator verdict fail",
                 capability=capability,
             )
-        ]
+        ], None
 
     codes = []
     for receipt in passing:
         violations = receipt_violations(receipt, expected_versions)
         if not violations:
-            return []  # one clean passing receipt settles the capability
+            return [], None  # one clean passing receipt settles the capability
         for code in violations:
             if code not in codes:
                 codes.append(code)
+
+    refusals = []
+    for receipt in declared:
+        problem = divergence_problem(receipt, expected_versions, root)
+        if problem is None:
+            # Only reached with no clean passing receipt: a clean pass wins above.
+            return [], {
+                "capability": capability,
+                "finding": receipt["divergence"]["finding"],
+                "summary": receipt["divergence"]["summary"],
+            }
+        if problem not in refusals:
+            refusals.append(problem)
 
     details = {
         "RECEIPT_STALE": "every passing receipt names a capability_version the ledger does not expect, "
@@ -485,10 +585,19 @@ def capability_findings(capability, expected_versions, files):
         "RECEIPT_NOT_COMMITTED": "every passing receipt was produced against a plugin state other than committed",
         "RECEIPT_NO_REOPEN": "every passing receipt failed to record survived_reopen",
     }
-    return [finding(code, details[code], capability=capability) for code in sorted(codes)]
+    found = [finding(code, details[code], capability=capability) for code in sorted(codes)]
+    if refusals:
+        found.append(
+            finding(
+                "RECEIPT_DIVERGENCE_INVALID",
+                "no declared divergence holds: " + "; ".join(refusals),
+                capability=capability,
+            )
+        )
+    return found, None
 
 
-def evaluate(expected, rows, receipts_dir, require):
+def evaluate(expected, rows, receipts_dir, require, root):
     max_wave = scope_wave(require)
     findings = ledger_findings(expected, rows)
 
@@ -501,16 +610,22 @@ def evaluate(expected, rows, receipts_dir, require):
     files_by_capability = receipt_index(receipts_dir) if scoped else {}
 
     failing_capabilities = set()
+    diverged = []
     for capability in sorted(scoped):
-        found = capability_findings(capability, scoped[capability], files_by_capability.get(capability, []))
+        found, divergence = capability_findings(
+            capability, scoped[capability], files_by_capability.get(capability, []), root
+        )
         if found:
             failing_capabilities.add(capability)
             findings.extend(found)
+        elif divergence is not None:
+            diverged.append(divergence)
 
     findings.sort(key=lambda item: (item["code"], finding_name(item)))
 
     duty_rows = [row for row in rows if has_duty(row)]
     scoped_rows = [row for row in duty_rows if in_scope(row, max_wave)]
+    diverged_capabilities = {item["capability"] for item in diverged}
     counts = {
         "rows": len(rows),
         "registrations_expected": expected,
@@ -522,13 +637,18 @@ def evaluate(expected, rows, receipts_dir, require):
         "duty_rows_total": len(duty_rows),
         "duty_rows_in_scope": len(scoped_rows),
         "duty_rows_passing": sum(1 for row in scoped_rows if row["capability"] not in failing_capabilities),
+        # Diverged rows and capabilities are PASSING as well: they have met the spec's
+        # bar. They are counted apart so a reader always sees what was not reproduced.
+        "duty_rows_diverged": sum(1 for row in scoped_rows if row["capability"] in diverged_capabilities),
         "capabilities_in_scope": len(scoped),
         "capabilities_passing": len(scoped) - len(failing_capabilities),
+        "capabilities_diverged": len(diverged_capabilities),
     }
     return {
         "ok": not findings,
         "require": require if require is not None else "all-production",
         "counts": counts,
+        "divergences": sorted(diverged, key=lambda item: item["capability"]),
         "findings": findings,
     }
 
@@ -555,9 +675,20 @@ def human_report(result, ledger_path, receipts_dir):
         f"{counts['duty_rows_in_scope']} in scope, {counts['duty_rows_passing']} passing",
         f"capabilities in scope: {counts['capabilities_in_scope']}, "
         f"{counts['capabilities_passing']} passing",
-        "",
-        f"findings: {len(result['findings'])}",
     ]
+    divergences = result.get("divergences") or []
+    if divergences:
+        header.append("")
+        header.append(
+            f"declared divergences: {counts['capabilities_diverged']} capabilities, "
+            f"{counts['duty_rows_diverged']} duty rows (counted as passing, never reproduced)"
+        )
+        shown = divergences[:MAX_DIVERGENCE_LINES]
+        for item in shown:
+            header.append(f"  {item['capability']}  {item['finding']}: {item['summary']}")
+        if len(divergences) > len(shown):
+            header.append(f"  ... {len(divergences) - len(shown)} more")
+    header.extend(["", f"findings: {len(result['findings'])}"])
     footer = ["", "verdict: " + ("PASS" if result["ok"] else "FAIL")]
     room = MAX_REPORT_LINES - len(header) - len(footer)
     lines = list(header)
@@ -592,6 +723,13 @@ def build_parser():
     parser.add_argument("--ledger", type=Path, default=None, help="path to the parity ledger JSON")
     parser.add_argument("--receipts", type=Path, default=None, help="path to the receipt tree root")
     parser.add_argument("--require", choices=REQUIRE_CHOICES, default=None, help="parity scope to require")
+    parser.add_argument(
+        "--repo-root",
+        type=Path,
+        default=None,
+        help=f"repo the declared divergence findings are read from, under {DIVERGENCE_DIR}/ "
+        "(default: this checkout)",
+    )
     parser.add_argument("--json", action="store_true", help="print one JSON object and nothing else")
     return parser
 
@@ -602,10 +740,11 @@ def main(argv=None):
     root = repo_root()
     ledger_path = args.ledger if args.ledger is not None else root / "docs" / "parity" / "solar-ledger.json"
     receipts_dir = args.receipts if args.receipts is not None else root / "docs" / "parity" / "receipts"
+    finding_root = args.repo_root if args.repo_root is not None else root
 
     try:
         expected, rows = parse_ledger(ledger_path)
-        result = evaluate(expected, rows, receipts_dir, args.require)
+        result = evaluate(expected, rows, receipts_dir, args.require, finding_root)
     except InputError as exc:
         print(f"solar-parity-status: {exc}", file=sys.stderr)
         return 2

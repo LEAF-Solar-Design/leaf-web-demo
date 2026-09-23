@@ -1621,6 +1621,16 @@ def build_suites() -> List[Suite]:
         # over 4 literal malformed sets = 11.
         Suite("scripts-solar-studio-evidence", "scripts test_solar_studio_evidence.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_studio_evidence.py"), 11),
+        # The parity oracle itself: the ledger rules, the receipt rules, the fail-closed
+        # inputs, and (S29, 2026-09-22) the declared divergence a known plugin defect
+        # gets, which is the ONLY way a failing comparator settles a capability: the
+        # exact declared diff set, a committed finding under docs/parity/divergences/,
+        # and every receipt rule still passing. Hermetic (each case builds its ledger,
+        # receipts and finding under tmp_path; the one repo file it reads is the shipped
+        # ledger, read never written), so the floor is the exact count on every runner:
+        # 66 test functions, one parametrized over 2 comparator names = 67.
+        Suite("scripts-solar-parity-status", "scripts test_solar_parity_status.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_parity_status.py"), 67),
         # Registered per the #29 fix-then-register rule (shipped without a
         # gate entry; measured 1 passed on this tree 2026-07-23).
         # 1 -> 2 on 2026-08-07: the staging relay's convergence contract

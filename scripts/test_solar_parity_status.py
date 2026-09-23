@@ -71,6 +71,30 @@ def receipt(capability, **overrides):
     return doc
 
 
+DIVERGENCE_FINDING = "docs/parity/divergences/autofillrevert-handle-drift.md"
+DECLARED_DIFFS = ("group 12: membership differs", "group 41: membership differs")
+DIVERGENCE_SUMMARY = "AUTOFILLREVERT skips the groups AutoFill rebuilt under new handles"
+
+
+def divergence(finding=DIVERGENCE_FINDING, diffs=DECLARED_DIFFS, summary=DIVERGENCE_SUMMARY):
+    return {"finding": finding, "declared_diffs": list(diffs), "summary": summary}
+
+
+def diverging_receipt(capability="draw-array", diffs=DECLARED_DIFFS, block=None, **overrides):
+    """A failing receipt that declares its diffs as a known plugin defect."""
+    doc = receipt(capability, **overrides)
+    doc["comparator"] = dict(doc["comparator"], verdict="fail", diffs=list(diffs))
+    doc["divergence"] = divergence() if block is None else block
+    return doc
+
+
+def write_finding(tmp_path, reference=DIVERGENCE_FINDING):
+    path = tmp_path.joinpath(*reference.split("/"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# known plugin defect\n", encoding="utf-8")
+    return path
+
+
 def write_ledger(tmp_path, rows, expected=None, **overrides):
     doc = {
         "schema": "leaf.solar-parity-ledger.v1",
@@ -621,3 +645,174 @@ def test_comparison_cannot_relabel_its_fixture(tmp_path, capsys):
     write_receipt(tmp_path, "draw-array", doc)
     assert run(ledger, receipts_dir(tmp_path)) == 2
     assert "fixture disagrees" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# declared divergences: a known plugin defect, never reproduced to pass
+# ---------------------------------------------------------------------------
+
+
+def test_declared_divergence_settles_the_capability(tmp_path, capsys):
+    ledger = write_ledger(tmp_path, [row("LEAFARRAY")], expected=1)
+    write_receipt(tmp_path, "draw-array", diverging_receipt())
+    write_finding(tmp_path)
+    code, result = json_result(capsys, ledger, receipts_dir(tmp_path), "--repo-root", str(tmp_path))
+    assert code == 0, result["findings"]
+    assert result["ok"] is True
+
+
+def test_divergence_counts_and_json_name_the_capability(tmp_path, capsys):
+    rows = [row("LEAFARRAY"), row("LEAFARRAYX")]
+    ledger = write_ledger(tmp_path, rows, expected=2)
+    write_receipt(tmp_path, "draw-array", diverging_receipt())
+    write_finding(tmp_path)
+    code, result = json_result(capsys, ledger, receipts_dir(tmp_path), "--repo-root", str(tmp_path))
+    assert code == 0, result["findings"]
+    assert result["counts"]["capabilities_diverged"] == 1
+    assert result["counts"]["duty_rows_diverged"] == 2
+    assert result["counts"]["capabilities_passing"] == 1
+    assert result["counts"]["duty_rows_passing"] == 2
+    assert result["divergences"] == [
+        {"capability": "draw-array", "finding": DIVERGENCE_FINDING, "summary": DIVERGENCE_SUMMARY}
+    ]
+
+
+def test_divergence_is_named_in_the_human_report(tmp_path, capsys):
+    ledger = write_ledger(tmp_path, [row("LEAFARRAY")], expected=1)
+    write_receipt(tmp_path, "draw-array", diverging_receipt())
+    write_finding(tmp_path)
+    code = run(ledger, receipts_dir(tmp_path), "--repo-root", str(tmp_path))
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "declared divergences" in out
+    assert DIVERGENCE_FINDING in out
+    assert "draw-array" in out
+    assert "verdict: PASS" in out
+    assert len(out.splitlines()) <= status.MAX_REPORT_LINES
+
+
+def test_an_undeclared_diff_invalidates_the_divergence(tmp_path, capsys):
+    ledger = write_ledger(tmp_path, [row("LEAFARRAY")], expected=1)
+    write_receipt(tmp_path, "draw-array", diverging_receipt(diffs=DECLARED_DIFFS + ("group 7: count differs",)))
+    write_finding(tmp_path)
+    code, result = json_result(capsys, ledger, receipts_dir(tmp_path), "--repo-root", str(tmp_path))
+    assert code == 1
+    assert finding_codes(result) == ["RECEIPT_DIVERGENCE_INVALID"]
+    assert "undeclared diff" in result["findings"][0]["detail"]
+
+
+def test_a_declared_diff_that_is_not_produced_invalidates_the_divergence(tmp_path, capsys):
+    ledger = write_ledger(tmp_path, [row("LEAFARRAY")], expected=1)
+    write_receipt(tmp_path, "draw-array", diverging_receipt(diffs=DECLARED_DIFFS[:1]))
+    write_finding(tmp_path)
+    code, result = json_result(capsys, ledger, receipts_dir(tmp_path), "--repo-root", str(tmp_path))
+    assert code == 1
+    assert finding_codes(result) == ["RECEIPT_DIVERGENCE_INVALID"]
+    assert "not produced" in result["findings"][0]["detail"]
+
+
+def test_a_missing_finding_file_invalidates_the_divergence(tmp_path, capsys):
+    ledger = write_ledger(tmp_path, [row("LEAFARRAY")], expected=1)
+    write_receipt(tmp_path, "draw-array", diverging_receipt())
+    code, result = json_result(capsys, ledger, receipts_dir(tmp_path), "--repo-root", str(tmp_path))
+    assert code == 1
+    assert finding_codes(result) == ["RECEIPT_DIVERGENCE_INVALID"]
+    assert "names no committed file" in result["findings"][0]["detail"]
+
+
+def test_a_finding_outside_the_divergences_directory_is_invalid(tmp_path, capsys):
+    ledger = write_ledger(tmp_path, [row("LEAFARRAY")], expected=1)
+    reference = "docs/parity/notes/autofillrevert-handle-drift.md"
+    write_receipt(tmp_path, "draw-array", diverging_receipt(block=divergence(finding=reference)))
+    write_finding(tmp_path, reference)  # the file exists; the directory is the refusal
+    code, result = json_result(capsys, ledger, receipts_dir(tmp_path), "--repo-root", str(tmp_path))
+    assert code == 1
+    assert finding_codes(result) == ["RECEIPT_DIVERGENCE_INVALID"]
+    assert "is not under docs/parity/divergences/" in result["findings"][0]["detail"]
+
+
+def test_a_divergence_on_a_passing_receipt_exits_2(tmp_path, capsys):
+    ledger = write_ledger(tmp_path, [row("LEAFARRAY")], expected=1)
+    doc = receipt("draw-array")
+    doc["divergence"] = divergence()
+    write_receipt(tmp_path, "draw-array", doc)
+    write_finding(tmp_path)
+    assert run(ledger, receipts_dir(tmp_path), "--repo-root", str(tmp_path)) == 2
+    assert "requires comparator verdict 'fail'" in capsys.readouterr().err
+
+
+def test_a_stale_divergence_receipt_is_invalid(tmp_path, capsys):
+    ledger = write_ledger(tmp_path, [row("LEAFARRAY", capability_version="2")], expected=1)
+    write_receipt(tmp_path, "draw-array", diverging_receipt())
+    write_finding(tmp_path)
+    code, result = json_result(capsys, ledger, receipts_dir(tmp_path), "--repo-root", str(tmp_path))
+    assert code == 1
+    assert finding_codes(result) == ["RECEIPT_DIVERGENCE_INVALID"]
+    assert "RECEIPT_STALE" in result["findings"][0]["detail"]
+
+
+def test_an_uncommitted_divergence_receipt_is_invalid(tmp_path, capsys):
+    ledger = write_ledger(tmp_path, [row("LEAFARRAY")], expected=1)
+    doc = diverging_receipt()
+    doc["plugin"] = dict(doc["plugin"], state="dirty")
+    write_receipt(tmp_path, "draw-array", doc)
+    write_finding(tmp_path)
+    code, result = json_result(capsys, ledger, receipts_dir(tmp_path), "--repo-root", str(tmp_path))
+    assert code == 1
+    assert finding_codes(result) == ["RECEIPT_DIVERGENCE_INVALID"]
+    assert "RECEIPT_NOT_COMMITTED" in result["findings"][0]["detail"]
+
+
+def test_a_divergence_receipt_that_did_not_survive_reopen_is_invalid(tmp_path, capsys):
+    ledger = write_ledger(tmp_path, [row("LEAFARRAY")], expected=1)
+    write_receipt(tmp_path, "draw-array", diverging_receipt(survived_reopen=False))
+    write_finding(tmp_path)
+    code, result = json_result(capsys, ledger, receipts_dir(tmp_path), "--repo-root", str(tmp_path))
+    assert code == 1
+    assert finding_codes(result) == ["RECEIPT_DIVERGENCE_INVALID"]
+    assert "RECEIPT_NO_REOPEN" in result["findings"][0]["detail"]
+
+
+def test_a_clean_pass_wins_over_a_declared_divergence(tmp_path, capsys):
+    ledger = write_ledger(tmp_path, [row("LEAFARRAY")], expected=1)
+    write_receipt(tmp_path, "draw-array", diverging_receipt(), name="fx-0.json")
+    write_receipt(tmp_path, "draw-array", receipt("draw-array"), name="fx-1.json")
+    write_finding(tmp_path)
+    code, result = json_result(capsys, ledger, receipts_dir(tmp_path), "--repo-root", str(tmp_path))
+    assert code == 0, result["findings"]
+    assert result["divergences"] == []
+    assert result["counts"]["capabilities_diverged"] == 0
+    assert result["counts"]["capabilities_passing"] == 1
+
+
+def test_an_unknown_divergence_field_exits_2(tmp_path, capsys):
+    ledger = write_ledger(tmp_path, [row("LEAFARRAY")], expected=1)
+    block = divergence()
+    block["surprise"] = "yes"
+    write_receipt(tmp_path, "draw-array", diverging_receipt(block=block))
+    assert run(ledger, receipts_dir(tmp_path), "--repo-root", str(tmp_path)) == 2
+    assert "unknown field" in capsys.readouterr().err
+
+
+def test_an_empty_declared_diffs_list_exits_2(tmp_path, capsys):
+    ledger = write_ledger(tmp_path, [row("LEAFARRAY")], expected=1)
+    write_receipt(tmp_path, "draw-array", diverging_receipt(block=divergence(diffs=())))
+    assert run(ledger, receipts_dir(tmp_path), "--repo-root", str(tmp_path)) == 2
+    assert "must name at least one diff" in capsys.readouterr().err
+
+
+def test_the_divergences_readme_is_committed():
+    text = (REPO_ROOT / "docs" / "parity" / "divergences" / "README.md").read_text(encoding="utf-8")
+    assert "never a licence for Studio to be wrong" in text
+    for phrase in ("declared_diffs", "RECEIPT_DIVERGENCE_INVALID", "committed"):
+        assert phrase in text
+
+
+def test_the_default_repo_root_is_this_checkout(tmp_path, capsys):
+    """With no --repo-root, a finding resolves against the repo the gate runs from."""
+    ledger = write_ledger(tmp_path, [row("LEAFARRAY")], expected=1)
+    block = divergence(finding="docs/parity/divergences/README.md")
+    write_receipt(tmp_path, "draw-array", diverging_receipt(block=block))
+    code, result = json_result(capsys, ledger, receipts_dir(tmp_path))
+    assert code == 0, result["findings"]
+    assert result["counts"]["capabilities_diverged"] == 1
