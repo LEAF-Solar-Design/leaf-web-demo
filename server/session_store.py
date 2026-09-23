@@ -533,6 +533,27 @@ def list_sessions(
 # --------------------------------------------------------------------------- #
 # events
 # --------------------------------------------------------------------------- #
+def turn_started_data(session_id: str, turn_id: str, tenant_id: str) -> Optional[dict]:
+    rows = _query(
+        "SELECT e.data_json FROM session_events e JOIN sessions s"
+        " ON s.session_id = e.session_id"
+        " WHERE e.session_id = ? AND e.turn_id = ?"
+        " AND e.type = 'turn_started' AND s.tenant_id = ?",
+        (session_id, turn_id, tenant_id),
+    )
+    if not rows:
+        return None
+    if len(rows) != 1:
+        raise ValueError("ambiguous turn_started events")
+    payload = rows[0]["data_json"]
+    if not isinstance(payload, str):
+        raise ValueError("turn_started data must be a JSON object")
+    data = json.loads(payload)
+    if not isinstance(data, dict):
+        raise ValueError("turn_started data must be an object")
+    return data
+
+
 def append_event(session_id: str, turn_id: Optional[str], type: str,
                   data: Dict[str, Any]) -> int:
     """Allocate the NEXT seq for this session and durably store the event, in
@@ -1023,6 +1044,7 @@ _legacy_get_or_create_session = get_or_create_session
 _legacy_get_session = get_session
 _legacy_list_sessions = list_sessions
 _legacy_append_event = append_event
+_legacy_turn_started_data = turn_started_data
 _legacy_append_confirmation_resolved_once = append_confirmation_resolved_once
 _legacy_events_after = events_after
 _legacy_recent_events = recent_events
@@ -1596,6 +1618,31 @@ def pg_try_begin_turn_in_transaction(
     return updated is not None
 
 
+def _pg_turn_started_data(session_id: str, turn_id: str, tenant_id: str) -> Optional[dict]:
+    db = _platform_db()
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT e.data_json FROM app_session_events e JOIN app_sessions s"
+            " ON s.session_id = e.session_id"
+            " WHERE e.session_id = %s AND e.turn_id = %s AND e.type = 'turn_started'"
+            " AND (s.tenant_id = %s OR (s.org_id::text = %s"
+            " AND s.project_id IS NOT NULL"
+            " AND s.tenant_id = 'project:' || s.org_id::text || ':' || s.project_id::text))",
+            (session_id, turn_id, tenant_id, tenant_id),
+        )
+        rows = cur.fetchall()
+    if not rows:
+        return None
+    if len(rows) != 1:
+        raise ValueError("ambiguous turn_started events")
+    data = rows[0]["data_json"]
+    if isinstance(data, str):
+        data = json.loads(data)
+    if not isinstance(data, dict):
+        raise ValueError("turn_started data must be an object")
+    return data
+
+
 def _pg_active_turn_tier(
     session_id: str, turn_id: str, tenant_id: str,
 ) -> Optional[str]:
@@ -1986,6 +2033,19 @@ def active_turn_tier(
         _shadow_equal(
             "active turn tier", legacy,
             _pg_active_turn_tier(session_id, turn_id, tenant_id),
+        )
+    return legacy
+
+
+def turn_started_data(session_id: str, turn_id: str, tenant_id: str) -> Optional[dict]:
+    mode = _store_mode()
+    if mode == "postgres":
+        return _pg_turn_started_data(session_id, turn_id, tenant_id)
+    legacy = _legacy_turn_started_data(session_id, turn_id, tenant_id)
+    if mode in _SHADOW_READ_MODES:
+        _shadow_equal(
+            "turn started data", legacy,
+            _pg_turn_started_data(session_id, turn_id, tenant_id),
         )
     return legacy
 

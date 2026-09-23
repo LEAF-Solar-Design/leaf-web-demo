@@ -106,6 +106,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 import deps
 import emf_metrics
 import entitlements
+import entity_scope
 import instant_execution
 import platform_link
 import request_journal
@@ -435,6 +436,7 @@ class MessageRequest(BaseModel):
     # ignored unknown request_id shapes; PostgreSQL mode validates the exact
     # canonical UUID before admission without changing that legacy contract.
     request_id: Any = None
+    entity_scope: Any = None
     text: Optional[str] = None
     confirm: Optional[Dict[str, Any]] = None
     # Inline image attachments are bounded before the entitlement and approval
@@ -1046,6 +1048,24 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
         return _session_not_found(session_id)
 
     # 2. Validate images before entitlement evaluation or approval consumption.
+    requested_scope = None
+    frozen_scope = None
+    supplied_scope = "entity_scope" in req.model_fields_set
+    if req.confirm is not None and (supplied_scope or "entity_scope" in req.confirm):
+        return error_response(ErrorCode.BAD_PARAMS, "confirm turns cannot supply entity_scope",
+                              retryable=False, status_code=400)
+    if supplied_scope:
+        try:
+            requested_scope = entity_scope.validate_request(req.entity_scope)
+        except entity_scope.ScopeError as exc:
+            return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False, status_code=422)
+        if req.queue:
+            return error_response(ErrorCode.BAD_PARAMS, "entity_scope turns cannot be queued",
+                                  retryable=False, status_code=400)
+
+    def freeze_scope():
+        return entity_scope.freeze(tenant, session, requested_scope)
+
     # This is deliberately refuse-not-truncate: a caller must choose a bounded
     # attachment set instead of silently losing part of it.
     try:
@@ -1187,12 +1207,15 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
                     "queue payload contains credential material",
                     retryable=False, status_code=400,
                 )
-        digest = request_journal.payload_digest({
+        digest_input = {
             "text": req.text,
             "classifier_hint": req.classifier_hint,
             "model": req.model,
             "queue": req.queue is True,
-        })
+        }
+        if requested_scope is not None:
+            digest_input["entity_scope"] = requested_scope
+        digest = request_journal.payload_digest(digest_input)
         try:
             journal_row, inserted = request_journal.admit_request(
                 request_id=journal_request_id,
@@ -1212,6 +1235,29 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
             )
         if not inserted and journal_row["state"] != "admitted":
             return _journal_response(journal_row, tenant)
+
+    if requested_scope is not None and frozen_scope is None:
+        try:
+            frozen_scope = freeze_scope()
+        except (entity_scope.ScopeError, entity_scope.write_loop.ProofStateUnreadable) as exc:
+            if isinstance(exc, entity_scope.ScopeError):
+                response = error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
+                                          status_code=exc.status_code)
+            else:
+                response = error_response(ErrorCode.INTERNAL, str(exc), retryable=True, status_code=503)
+            if journal_request_id is not None:
+                current = request_journal.get_request(journal_request_id)
+                if current is not None and current["state"] != "admitted":
+                    return _journal_response(current, tenant)
+                if not request_journal.fail_admitted(
+                    journal_request_id,
+                    response_status=response.status_code,
+                    response=_response_content(response),
+                ):
+                    current = request_journal.get_request(journal_request_id)
+                    if current is not None and current["state"] != "admitted":
+                        return _journal_response(current, tenant)
+            return response
 
     # 4. confirm path: atomically verify-and-consume the durable approval row
     # (merge-gate finding #1 — see module docstring's APPROVAL CONSUME note)
@@ -1272,6 +1318,10 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
             "capability": approval.get("capability"),
         }
         stored_payload = approval.get("payload")
+        try:
+            frozen_scope = entity_scope.stored_binding(stored_payload)
+        except entity_scope.ScopeError as exc:
+            return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False, status_code=409)
         stored_dwg = (
             stored_payload.get("dwg")
             if isinstance(stored_payload, dict)
@@ -1308,6 +1358,7 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
             text=req.text, confirm=confirm_payload, classifier_hint=req.classifier_hint,
             model=req.model, credential_grant=validated_grant, images=images,
             request_id=journal_request_id,
+            **({"entity_scope": frozen_scope} if frozen_scope is not None else {}),
         )
     except turn_runner.TurnBusy:
         # OPT-IN queue: a text prompt with queue=true parks (cap 1) instead of

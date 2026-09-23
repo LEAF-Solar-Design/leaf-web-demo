@@ -290,6 +290,60 @@ describe('SSD1-24B canvas picks', () => {
   })
 })
 
+describe('SSD1-24C canvas marquee', () => {
+  const entities = [{ ...LINE, id: '10' }, { ...CIRCLE, id: '11' }]
+  async function setup() {
+    const registerCanvasMarquee = vi.fn()
+    const view = mount({ registerCanvasMarquee, onSelectedHandleChange: vi.fn() })
+    expect(registerCanvasMarquee).not.toHaveBeenCalled()
+    await openAndLoad(entities)
+    const select = (handles, additive = false) => act(() => registerCanvasMarquee.mock.lastCall[0](handles, { additive }))
+    return { ...view, registerCanvasMarquee, select }
+  }
+  it('SSD1-24C registers only while shown and unregisters when hidden and unmounted', async () => {
+    const view = await setup()
+    expect(view.registerCanvasMarquee).toHaveBeenCalledTimes(1)
+    act(() => sessionActions.reset())
+    expect(view.registerCanvasMarquee).toHaveBeenLastCalledWith(null)
+    await openAndLoad(entities, 'two.dxf')
+    expect(view.registerCanvasMarquee.mock.lastCall[0]).toEqual(expect.any(Function))
+    view.unmount()
+    expect(view.registerCanvasMarquee).toHaveBeenLastCalledWith(null)
+  })
+  it('SSD1-24C non-additive marquee replaces the selection', async () => {
+    const view = await setup()
+    view.select(['A'])
+    view.select(['B'])
+    expect(selectedIds).toEqual(['11'])
+  })
+  it('SSD1-24C additive marquee unions without duplicates using current selection', async () => {
+    const view = await setup()
+    view.select(['A'])
+    view.select(['B', 'A', 'B'], true)
+    expect(selectedIds).toEqual(['10', '11'])
+  })
+  it('SSD1-24C unknown handles are ignored', async () => {
+    const view = await setup()
+    view.select(['FFFF', 'B'])
+    expect(selectedIds).toEqual(['11'])
+  })
+  it('SSD1-24C empty non-additive marquee clears', async () => {
+    const view = await setup()
+    view.select(['A', 'B'])
+    view.select([])
+    expect(selectedIds).toEqual([])
+  })
+  it('SSD1-24C empty additive marquee leaves selection unchanged', async () => {
+    const view = await setup()
+    view.select(['A'])
+    const before = selectedIds
+    const replace = vi.spyOn(sessionActions, 'selectReplace')
+    view.select([], true)
+    expect(selectedIds).toBe(before)
+    expect(replace).not.toHaveBeenCalled()
+  })
+})
+
 describe('EngineDocumentView (W4f slice A0)', () => {
   it('row21 reapplies the retained dirty starter after the Viewer seats console intake', async () => {
     const session = { engineParsed: true, documentId: 'solar-starter.dxf', dirty: true, entities: [LINE], undoDepth: 1, redoDepth: 0, selectedId: '', actions: { select: vi.fn() } }

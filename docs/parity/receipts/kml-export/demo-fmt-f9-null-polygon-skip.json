@@ -1,0 +1,281 @@
+{
+ "schema": "leaf.solar-parity-receipt.v1",
+ "capability": "kml-export",
+ "capability_version": "0",
+ "fixture": {
+  "id": "demo-fmt-f9-null-polygon-skip",
+  "sha256": "d6882a58695a133c701969bdfb5961eacfdbab599da11c2ca3f3a318aac0ea0c"
+ },
+ "plugin": {
+  "build": "LeafSolarDesign 2025 licensed 2026-09-23",
+  "state": "committed",
+  "receipt_sha256": "4c67ee9940043c0922aca2987bf9535f519f86163bc1f2d1be39c361d415c63e"
+ },
+ "studio": {
+  "capability_version": "0",
+  "engine": "server-builtin"
+ },
+ "comparator": {
+  "name": "solar-w1-semantic",
+  "version": "1",
+  "verdict": "pass",
+  "diffs": []
+ },
+ "synthetic_fields": [
+  "plugin:before/recorded",
+  "plugin:changes/unrecorded",
+  "studio:before/recorded",
+  "studio:changes/unrecorded"
+ ],
+ "fallback_fields": [],
+ "synthetic_flagged": true,
+ "survived_reopen": true,
+ "produced_at": "2026-09-23T06:23:09Z",
+ "comparison": {
+  "schema": "leaf.solar-w1-comparison.v1",
+  "capability": "kml-export",
+  "family": "exports",
+  "plugin": {
+   "after": {
+    "format": "xml:kml",
+    "rows": [
+     {
+      "fields": {
+       "Count": 2,
+       "File": "leafkmlexportfmt_demo_F9_NULL_POLYGON_SKIP.xml",
+       "Lines": [
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>",
+        "<kml xmlns=\"http://www.opengis.net/kml/2.2\">",
+        "  <Document>",
+        "    <name>F9Doc</name>",
+        "    <Placemark>",
+        "      <name>F9PolyA</name>",
+        "      <Polygon>",
+        "        <outerBoundaryIs>",
+        "          <LinearRing>",
+        "            <coordinates>10,40 11,40 10,41 10,40</coordinates>",
+        "          </LinearRing>",
+        "        </outerBoundaryIs>",
+        "      </Polygon>",
+        "    </Placemark>",
+        "    <Placemark>",
+        "      <name>F9PolyB</name>",
+        "      <Polygon>",
+        "        <outerBoundaryIs>",
+        "          <LinearRing>",
+        "            <coordinates>20,50 21,50 20,51 20,50</coordinates>",
+        "          </LinearRing>",
+        "        </outerBoundaryIs>",
+        "      </Polygon>",
+        "    </Placemark>",
+        "  </Document>",
+        "</kml>"
+       ]
+      },
+      "id": {
+       "entity_id": "leafkmlexportfmt_demo_F9_NULL_POLYGON_SKIP.xml"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "placemarks",
+       "value": 2
+      },
+      "type": "kml-document",
+      "unit": "placemarks"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "leafkmlexportfmt_demo_F9_NULL_POLYGON_SKIP.xml": "leafkmlexportfmt_demo_F9_NULL_POLYGON_SKIP.xml"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "d6882a58695a133c701969bdfb5961eacfdbab599da11c2ca3f3a318aac0ea0c",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "9ff45ccc9d36af0b5bb121ee4e8c35b505e4296aefb04be0b85d91d60b161d51",
+   "output_sha256": "39cb0b09b4ac48f85d5dfbf635d3753d5457a456d4f223113465cdd281570b49",
+   "parameters": {
+    "capability": "kml-export",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafkmlexportfmt_demo_F9_NULL_POLYGON_SKIP.xml",
+    "probe_file_sha256": "0ae070dc3074d2a63f0590eb0d5a3af401a364af97b84afccac25355d9130eb2",
+    "probe_type": "kml-document",
+    "side": "plugin"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "none",
+    "producer": "plugin",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  },
+  "studio": {
+   "after": {
+    "format": "xml:kml",
+    "rows": [
+     {
+      "fields": {
+       "Count": 2,
+       "File": "leafkmlexportfmt_demo_F9_NULL_POLYGON_SKIP.xml",
+       "Lines": [
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>",
+        "<kml xmlns=\"http://www.opengis.net/kml/2.2\">",
+        "  <Document>",
+        "    <name>F9Doc</name>",
+        "    <Placemark>",
+        "      <name>F9PolyA</name>",
+        "      <Polygon>",
+        "        <outerBoundaryIs>",
+        "          <LinearRing>",
+        "            <coordinates>10,40 11,40 10,41 10,40</coordinates>",
+        "          </LinearRing>",
+        "        </outerBoundaryIs>",
+        "      </Polygon>",
+        "    </Placemark>",
+        "    <Placemark>",
+        "      <name>F9PolyB</name>",
+        "      <Polygon>",
+        "        <outerBoundaryIs>",
+        "          <LinearRing>",
+        "            <coordinates>20,50 21,50 20,51 20,50</coordinates>",
+        "          </LinearRing>",
+        "        </outerBoundaryIs>",
+        "      </Polygon>",
+        "    </Placemark>",
+        "  </Document>",
+        "</kml>"
+       ]
+      },
+      "id": {
+       "entity_id": "leafkmlexportfmt_demo_F9_NULL_POLYGON_SKIP.xml"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "placemarks",
+       "value": 2
+      },
+      "type": "kml-document",
+      "unit": "placemarks"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "leafkmlexportfmt_demo_F9_NULL_POLYGON_SKIP.xml": "leafkmlexportfmt_demo_F9_NULL_POLYGON_SKIP.xml"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "d6882a58695a133c701969bdfb5961eacfdbab599da11c2ca3f3a318aac0ea0c",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "9ff45ccc9d36af0b5bb121ee4e8c35b505e4296aefb04be0b85d91d60b161d51",
+   "output_sha256": "39cb0b09b4ac48f85d5dfbf635d3753d5457a456d4f223113465cdd281570b49",
+   "parameters": {
+    "capability": "kml-export",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafkmlexportfmt_demo_F9_NULL_POLYGON_SKIP.xml",
+    "probe_file_sha256": "0ae070dc3074d2a63f0590eb0d5a3af401a364af97b84afccac25355d9130eb2",
+    "probe_type": "kml-document",
+    "side": "studio"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "server-builtin",
+    "producer": "studio",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  }
+ }
+}
