@@ -53,7 +53,6 @@ REPO_SLUG = "LEAF-Solar-Design/leaf-web-demo"
 REPO_ID = 987654
 FORK_ID = 111222
 
-PREWARM_WORKFLOW = ".github/workflows/prewarm-staging-cutover.yml"
 GATE_WORKFLOW = ".github/workflows/test-gate.yml"
 BUILD_WORKFLOW = ".github/workflows/build-platform-images.yml"
 
@@ -126,10 +125,10 @@ def _stub_github(monkeypatch, artifacts=None, *, run_paths=None, repo_id=REPO_ID
     monkeypatch.setattr(rr, "_get_json", fake)
 
 
-def _prewarm_fixture(monkeypatch, pr="988", **kwargs):
-    name = f"prewarm-relay-receipt-pr-{pr}"
+def _gate_fixture(monkeypatch, tree="a" * 40, **kwargs):
+    name = f"gate-proof-{tree}"
     _stub_github(monkeypatch, {name: [_artifact(name, **kwargs)]},
-                 run_paths={kwargs.get("run_id", 4242): PREWARM_WORKFLOW})
+                 run_paths={kwargs.get("run_id", 4242): GATE_WORKFLOW})
     return name
 
 
@@ -157,21 +156,68 @@ def test_malformed_scopes_fail_closed(bad):
 # --------------------------------------------------------------------------- #
 # 2. every artifact kind, from a fixture that clears provenance
 # --------------------------------------------------------------------------- #
-def test_prewarm_relay_receipt_row_from_a_fixture_artifact(monkeypatch):
+def test_the_pr_scope_answers_source_retired_without_a_network_call(monkeypatch):
     _configure_github(monkeypatch)
-    name = _prewarm_fixture(monkeypatch)
+    calls = []
 
+    def must_not_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        pytest.fail("a retired source must not make a network call or read credentials")
+
+    monkeypatch.setattr(rr, "_get_json", must_not_run)
+    monkeypatch.setattr(rr, "_repository_id", must_not_run)
+    monkeypatch.setattr(rr, "github_credentials", must_not_run)
     body = rr.read_receipts("pr:988")
+    assert body["contract"] == rr.CONTRACT
+    assert body["scope"] == "pr:988"
+    assert body["rows"] == []
+    assert body["unavailable"] == [{
+        "source": "prewarm-relay",
+        "reason": "source_retired",
+        "detail": "PR-mode prewarm receipts were retired; merge-group relay receipts are not exposed by this endpoint",
+    }]
+    assert calls == []
+
+
+def test_the_pr_scope_is_retired_even_with_no_credential(monkeypatch):
+    calls = []
+
+    def must_not_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        pytest.fail("a retired source must not make a network call or read credentials")
+
+    monkeypatch.setattr(rr, "_get_json", must_not_run)
+    monkeypatch.setattr(rr, "_repository_id", must_not_run)
+    monkeypatch.setattr(rr, "github_credentials", must_not_run)
+    body = rr.read_receipts("pr:988")
+    assert body["contract"] == rr.CONTRACT
+    assert body["scope"] == "pr:988"
+    assert body["rows"] == []
+    assert body["unavailable"] == [{
+        "source": "prewarm-relay",
+        "reason": "source_retired",
+        "detail": "PR-mode prewarm receipts were retired; merge-group relay receipts are not exposed by this endpoint",
+    }]
+    assert calls == []
+
+
+def test_gate_proof_receipt_row_from_a_fixture_artifact(monkeypatch):
+    _configure_github(monkeypatch)
+    tree = "c" * 40
+    name = "gate-proof-" + tree
+    _stub_github(monkeypatch, {name: [_artifact(name)]},
+                 run_paths={4242: GATE_WORKFLOW})
+    body = rr.read_receipts("tree:" + tree)
     assert body["contract"] == rr.CONTRACT
     assert body["unavailable"] == []
     assert len(body["rows"]) == 1
     row = body["rows"][0]
     assert set(row) == {"kind", "ref", "at", "sha", "summary", "url"}
-    assert row["kind"] == "prewarm-relay"
-    assert row["ref"] == "pr:988"
+    assert row["kind"] == "gate-proof"
+    assert row["ref"] == "tree:" + tree
     assert row["sha"] == "a" * 40
     assert name in row["summary"]
-    assert "prewarm-staging-cutover.yml" in row["summary"], \
+    assert "test-gate.yml" in row["summary"], \
         "the row names the workflow whose provenance it rests on"
     assert row["url"].endswith("/actions/runs/4242")
 
@@ -193,7 +239,7 @@ def test_tree_scope_reads_both_the_gate_proof_and_the_supply_set(monkeypatch):
 def test_an_absent_artifact_yields_no_row_and_no_fabrication(monkeypatch):
     _configure_github(monkeypatch)
     _stub_github(monkeypatch, {})
-    body = rr.read_receipts("pr:1")
+    body = rr.read_receipts("tree:" + "a" * 40)
     assert body["rows"] == []
     assert body["unavailable"] == []
 
@@ -273,10 +319,10 @@ def test_a_fork_run_cannot_mint_a_gate_proof(monkeypatch):
 @pytest.mark.parametrize("missing", [None, "not-an-int", True])
 def test_an_artifact_with_no_usable_head_repository_id_is_dropped(monkeypatch, missing):
     _configure_github(monkeypatch)
-    name = "prewarm-relay-receipt-pr-5"
+    name = "gate-proof-" + "a" * 40
     _stub_github(monkeypatch, {name: [_artifact(name, head_repository_id=missing)]},
-                 run_paths={4242: PREWARM_WORKFLOW})
-    assert rr.read_receipts("pr:5")["rows"] == []
+                 run_paths={4242: GATE_WORKFLOW})
+    assert rr.read_receipts("tree:" + "a" * 40)["rows"] == []
 
 
 def test_an_artifact_minted_by_another_workflow_is_dropped(monkeypatch):
@@ -306,31 +352,31 @@ def test_a_workflow_path_with_an_at_ref_suffix_still_matches(monkeypatch):
     """Some GitHub surfaces render a workflow path with an `@ref` suffix; one
     is stripped defensively, and the match after that is exact."""
     _configure_github(monkeypatch)
-    name = "prewarm-relay-receipt-pr-6"
+    name = "gate-proof-" + "a" * 40
     _stub_github(monkeypatch, {name: [_artifact(name, run_id=61)]},
-                 run_paths={61: PREWARM_WORKFLOW + "@refs/heads/main"})
-    assert len(rr.read_receipts("pr:6")["rows"]) == 1
+                 run_paths={61: GATE_WORKFLOW + "@refs/heads/main"})
+    assert len(rr.read_receipts("tree:" + "a" * 40)["rows"]) == 1
 
 
 def test_an_expired_artifact_is_not_rendered_as_proof(monkeypatch):
     """An expired artifact can never be downloaded again, so nothing can
     re-verify it. Same drop `test-gate.yml`'s reuse filter makes."""
     _configure_github(monkeypatch)
-    name = "prewarm-relay-receipt-pr-7"
+    name = "gate-proof-" + "a" * 40
     _stub_github(monkeypatch, {name: [_artifact(name, expired=True)]},
-                 run_paths={4242: PREWARM_WORKFLOW})
-    assert rr.read_receipts("pr:7")["rows"] == []
+                 run_paths={4242: GATE_WORKFLOW})
+    assert rr.read_receipts("tree:" + "a" * 40)["rows"] == []
 
 
 def test_no_row_is_rendered_when_the_repository_identity_cannot_be_read(monkeypatch):
     """The provenance anchor. Without it nothing can be checked, so nothing is
     trusted -- the failure is honest, never optimistic."""
     _configure_github(monkeypatch)
-    name = "prewarm-relay-receipt-pr-8"
+    name = "gate-proof-" + "a" * 40
     _stub_github(monkeypatch, {name: [_artifact(name)]},
-                 run_paths={4242: PREWARM_WORKFLOW},
+                 run_paths={4242: GATE_WORKFLOW},
                  repo_error=OSError("repo lookup failed"))
-    body = rr.read_receipts("pr:8")
+    body = rr.read_receipts("tree:" + "a" * 40)
     assert body["rows"] == []
     assert body["unavailable"][0]["reason"] == rr.REASON_UNREACHABLE
     assert "same-repository origin" in body["unavailable"][0]["detail"]
@@ -339,11 +385,11 @@ def test_no_row_is_rendered_when_the_repository_identity_cannot_be_read(monkeypa
 def test_an_unidentifiable_run_is_dropped(monkeypatch):
     """No run id means no way to read the minting workflow, so no row."""
     _configure_github(monkeypatch)
-    name = "prewarm-relay-receipt-pr-9"
+    name = "gate-proof-" + "a" * 40
     artifact = _artifact(name)
     artifact["workflow_run"].pop("id")
     _stub_github(monkeypatch, {name: [artifact]})
-    assert rr.read_receipts("pr:9")["rows"] == []
+    assert rr.read_receipts("tree:" + "a" * 40)["rows"] == []
 
 
 def test_the_cap_reports_incomplete_rather_than_a_false_empty(monkeypatch):
@@ -377,13 +423,13 @@ def test_a_repeated_run_id_does_not_spend_a_second_lookup_slot(monkeypatch):
     already makes the second lookup free, so it must not count against
     MAX_PROVENANCE_LOOKUPS as if it were a distinct candidate."""
     _configure_github(monkeypatch)
-    name = "prewarm-relay-receipt-pr-9"
+    name = "gate-proof-" + "a" * 40
     same_run = [
         _artifact(name, run_id=42, created=f"2026-09-01T10:{i:02d}:00Z")
         for i in range(rr.MAX_PROVENANCE_LOOKUPS + 3)
     ]
-    _stub_github(monkeypatch, {name: same_run}, run_paths={42: PREWARM_WORKFLOW})
-    body = rr.read_receipts("pr:9")
+    _stub_github(monkeypatch, {name: same_run}, run_paths={42: GATE_WORKFLOW})
+    body = rr.read_receipts("tree:" + "a" * 40)
     assert len(body["rows"]) == len(same_run), \
         "one distinct run id must verify every artifact it minted, not just the cap's worth"
     assert body["unavailable"] == []
@@ -398,7 +444,7 @@ def test_a_repeated_FAILING_run_id_does_not_retry_past_the_cap(monkeypatch):
     Thirty artifacts sharing one failing run id must cost at most
     MAX_PROVENANCE_LOOKUPS run-record calls, not thirty."""
     _configure_github(monkeypatch)
-    name = "prewarm-relay-receipt-pr-9"
+    name = "gate-proof-" + "a" * 40
     calls = []
     same_failing_run = [
         _artifact(name, run_id=42, created=f"2026-09-01T10:{i:02d}:00Z")
@@ -407,7 +453,7 @@ def test_a_repeated_FAILING_run_id_does_not_retry_past_the_cap(monkeypatch):
     # No entry for run 42 in run_paths: _stub_github's fake() raises OSError
     # for any run id it has no fixture for, exactly like a real lookup failure.
     _stub_github(monkeypatch, {name: same_failing_run}, run_paths={}, calls=calls)
-    body = rr.read_receipts("pr:9")
+    body = rr.read_receipts("tree:" + "a" * 40)
     assert body["rows"] == [], "a run whose own record cannot be read verifies nothing"
     run_calls = [c for c in calls if "/actions/runs/" in c[0]]
     assert len(run_calls) <= rr.MAX_PROVENANCE_LOOKUPS, (
@@ -423,9 +469,9 @@ def test_an_unreadable_run_record_is_incomplete_not_a_confident_empty(monkeypatc
     defect the cap-exhaustion path exists to prevent, reached through a
     different door. It must render `source_busy`, never a silent empty."""
     _configure_github(monkeypatch)
-    name = "prewarm-relay-receipt-pr-9"
+    name = "gate-proof-" + "a" * 40
     _stub_github(monkeypatch, {name: [_artifact(name, run_id=42)]}, run_paths={})
-    body = rr.read_receipts("pr:9")
+    body = rr.read_receipts("tree:" + "a" * 40)
     assert body["rows"] == []
     assert body["unavailable"], "an unreadable run record must not read as a confirmed absence"
     assert body["unavailable"][0]["reason"] == rr.REASON_BUSY
@@ -440,10 +486,10 @@ def test_both_doors_fired_name_both_causes(monkeypatch):
     """Six unreadable runs exhaust the budget AND fail to read: the detail
     names both causes, in that order, and still never reads as an absence."""
     _configure_github(monkeypatch)
-    name = "prevarm-relay-receipt-pr-9".replace("prevarm", "prewarm")
+    name = "gate-proof-" + "a" * 40
     arts = [_artifact(name, run_id=7000 + i, created=f"2026-09-02T10:{i:02d}:00Z") for i in range(6)]
     _stub_github(monkeypatch, {name: arts}, run_paths={})
-    body = rr.read_receipts("pr:9")
+    body = rr.read_receipts("tree:" + "a" * 40)
     assert body["rows"] == []
     detail = body["unavailable"][0]["detail"]
     assert "provenance budget" in detail and "could not be read" in detail, detail
@@ -455,17 +501,17 @@ def test_a_second_repository_cannot_be_served_this_ones_cached_rows(monkeypatch)
     finding 4, previously unpinned): a bare `name` key would let a second
     repository's identical artifact name inherit the FIRST repository's
     cached rows."""
-    name = "prewarm-relay-receipt-pr-9"
+    name = "gate-proof-" + "a" * 40
     _configure_github(monkeypatch)
-    _stub_github(monkeypatch, {name: [_artifact(name)]}, run_paths={4242: PREWARM_WORKFLOW})
-    first = rr.read_receipts("pr:9")
+    _stub_github(monkeypatch, {name: [_artifact(name)]}, run_paths={4242: GATE_WORKFLOW})
+    first = rr.read_receipts("tree:" + "a" * 40)
     assert len(first["rows"]) == 1, "repo A's row is now cached under (REPO_SLUG, name)"
 
     other_slug = "some-other-org/some-other-repo"
     monkeypatch.setenv(rr.ENV_REPO, other_slug)
     # repo B's listing for the SAME artifact name is genuinely empty.
     _stub_github(monkeypatch, {name: []}, repo_id=555555)
-    second = rr.read_receipts("pr:9")
+    second = rr.read_receipts("tree:" + "a" * 40)
     assert second["rows"] == [], (
         "a bare name-only cache key would have served repo A's cached row "
         "to repo B's identical artifact name"
@@ -477,11 +523,11 @@ def test_a_second_repositorys_run_id_cannot_alias_a_workflow_path(monkeypatch):
     (round-2 finding 4, previously unpinned): a bare-int key would let repo
     B's run 42 -- minted by a workflow that may NOT mint this receipt --
     inherit repo A's cached path for the SAME run id."""
-    name = "prewarm-relay-receipt-pr-9"
+    name = "gate-proof-" + "a" * 40
     _configure_github(monkeypatch)
     _stub_github(monkeypatch, {name: [_artifact(name, run_id=42)]},
-                 run_paths={42: PREWARM_WORKFLOW})
-    first = rr.read_receipts("pr:9")
+                 run_paths={42: GATE_WORKFLOW})
+    first = rr.read_receipts("tree:" + "a" * 40)
     assert len(first["rows"]) == 1, "run 42's path is now memoized under (REPO_SLUG, 42)"
 
     other_slug = "some-other-org/some-other-repo"
@@ -493,7 +539,7 @@ def test_a_second_repositorys_run_id_cannot_alias_a_workflow_path(monkeypatch):
         run_paths={42: ".github/workflows/some-other-lane.yml"},
         repo_id=555555,
     )
-    second = rr.read_receipts("pr:9")
+    second = rr.read_receipts("tree:" + "a" * 40)
     assert second["rows"] == [], (
         "a bare-int run-path key would have reused repo A's cached path for "
         "run 42, verifying an artifact repo B's own run cannot mint"
@@ -513,7 +559,6 @@ def test_the_minting_allowlist_names_a_real_uploader_per_kind():
     # kind -> the literal (non-``${{ }}``) prefix receipts_read.py reads that
     # kind's artifact name by, taken from its own f-strings in read_receipts.
     kind_prefix = {
-        "prewarm-relay": "prewarm-relay-receipt-pr-",
         "gate-proof": "gate-proof-",
         "supply-set": "spec-v3-supply-set-",
     }
@@ -551,10 +596,11 @@ def test_missing_token_returns_an_honest_empty_list_and_makes_no_call(monkeypatc
 
     monkeypatch.setattr(rr, "_get_json", must_not_run)
 
-    body = rr.read_receipts("pr:988")
+    body = rr.read_receipts("tree:" + "a" * 40)
     assert called == []
     assert body["rows"] == []
-    assert len(body["unavailable"]) == 1
+    assert len(body["unavailable"]) == 2
+    assert body["unavailable"][0] == body["unavailable"][1]
     entry = body["unavailable"][0]
     assert entry["source"] == "github-artifacts"
     assert entry["reason"] == rr.REASON_NO_CREDENTIAL
@@ -580,7 +626,7 @@ def test_a_403_from_a_token_without_actions_read_is_honest_not_a_fabrication(mon
     monkeypatch.setenv(rr.ENV_REPO, REPO_SLUG)
     monkeypatch.setenv(rr.ENV_FALLBACK_TOKEN, FAKE_FALLBACK_TOKEN)
     _stub_github(monkeypatch, repo_error=OSError("HTTP 403 Forbidden"))
-    body = rr.read_receipts("pr:988")
+    body = rr.read_receipts("tree:" + "a" * 40)
     assert body["rows"] == []
     assert body["unavailable"][0]["reason"] == rr.REASON_UNREACHABLE
 
@@ -612,7 +658,7 @@ def test_an_unusable_credential_is_source_unavailable_not_a_call(monkeypatch, sl
     monkeypatch.setenv(rr.ENV_TOKEN, token)
     monkeypatch.setattr(rr, "_get_json", lambda *a, **k: pytest.fail("must not call"))
     assert rr.github_credentials() == rr.REASON_NO_CREDENTIAL
-    body = rr.read_receipts("pr:1")
+    body = rr.read_receipts("tree:" + "a" * 40)
     assert body["rows"] == []
     assert body["unavailable"][0]["reason"] == rr.REASON_NO_CREDENTIAL
 
@@ -623,11 +669,11 @@ def test_an_unusable_credential_is_source_unavailable_not_a_call(monkeypatch, sl
 def test_the_token_travels_only_in_the_authorization_header(monkeypatch):
     _configure_github(monkeypatch)
     calls = []
-    name = "prewarm-relay-receipt-pr-5"
+    name = "gate-proof-" + "a" * 40
     _stub_github(monkeypatch, {name: [_artifact(name)]},
-                 run_paths={4242: PREWARM_WORKFLOW}, calls=calls)
+                 run_paths={4242: GATE_WORKFLOW}, calls=calls)
 
-    body = rr.read_receipts("pr:5")
+    body = rr.read_receipts("tree:" + "a" * 40)
     assert calls, "the read must actually have happened"
     for url, headers, cap in calls:
         assert FAKE_TOKEN not in url
@@ -640,7 +686,7 @@ def test_an_unreachable_api_reports_a_reason_without_quoting_the_request(monkeyp
     _configure_github(monkeypatch)
     _stub_github(monkeypatch, artifacts_error=OSError(
         f"HTTP 401 for https://api.github.com/x?token={FAKE_TOKEN}"))
-    body = rr.read_receipts("pr:5")
+    body = rr.read_receipts("tree:" + "a" * 40)
     assert body["rows"] == []
     assert body["unavailable"][0]["reason"] == rr.REASON_UNREACHABLE
     assert FAKE_TOKEN not in json.dumps(body)
@@ -652,12 +698,12 @@ def test_an_unreachable_api_reports_a_reason_without_quoting_the_request(monkeyp
 def test_provenance_lookups_are_capped_per_artifact_name(monkeypatch):
     """One request can never fan out to a hundred run reads on a shared token."""
     _configure_github(monkeypatch)
-    name = "prewarm-relay-receipt-pr-9"
+    name = "gate-proof-" + "a" * 40
     many = [_artifact(name, run_id=1000 + i, created=f"2026-09-01T10:{i:02d}:00Z")
             for i in range(40)]
     _stub_github(monkeypatch, {name: many},
-                 run_paths={1000 + i: PREWARM_WORKFLOW for i in range(40)})
-    body = rr.read_receipts("pr:9")
+                 run_paths={1000 + i: GATE_WORKFLOW for i in range(40)})
+    body = rr.read_receipts("tree:" + "a" * 40)
     assert len(body["rows"]) == rr.MAX_PROVENANCE_LOOKUPS
     # spent on the NEWEST candidates, which are the ones a reader would see
     assert body["rows"][0]["at"] == "2026-09-01T10:39:00Z"
@@ -673,10 +719,10 @@ def test_reconciler_rows_are_capped(monkeypatch):
 
 def test_a_field_is_truncated_not_echoed_whole(monkeypatch):
     _configure_github(monkeypatch)
-    name = "prewarm-relay-receipt-pr-9"
+    name = "gate-proof-" + "a" * 40
     _stub_github(monkeypatch, {name: [_artifact("x" * 5000)]},
-                 run_paths={4242: PREWARM_WORKFLOW})
-    body = rr.read_receipts("pr:9")
+                 run_paths={4242: GATE_WORKFLOW})
+    body = rr.read_receipts("tree:" + "a" * 40)
     assert all(len(value) <= rr.MAX_FIELD for value in body["rows"][0].values()), \
         "every rendered field is bounded, including the composed summary"
 
@@ -812,7 +858,7 @@ def test_an_oversize_artifact_listing_is_200_source_unreachable_at_the_route(mon
         return _SmallJSONResponse({"id": REPO_ID})
 
     monkeypatch.setattr(rr.urllib.request, "urlopen", fake_urlopen)
-    resp = _client(tenant).get("/api/receipts", params={"scope": "pr:988"})
+    resp = _client(tenant).get("/api/receipts", params={"scope": "tree:" + "a" * 40})
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["rows"] == []
@@ -823,7 +869,7 @@ def test_an_unexpected_artifact_shape_is_unreadable_not_a_crash(monkeypatch):
     _configure_github(monkeypatch)
     monkeypatch.setattr(rr, "_get_json", lambda url, *, headers, cap: (
         {"artifacts": "nope"} if "/actions/artifacts" in url else {"id": REPO_ID}))
-    body = rr.read_receipts("pr:9")
+    body = rr.read_receipts("tree:" + "a" * 40)
     assert body["rows"] == []
     assert body["unavailable"][0]["reason"] == rr.REASON_UNREADABLE
 
@@ -904,14 +950,15 @@ def test_the_artifact_read_is_cached_so_a_loop_cannot_burn_the_shared_budget(mon
     """The PAT's 5000/hr also carries platform_customize's PR work."""
     _configure_github(monkeypatch)
     calls = []
-    name = "prewarm-relay-receipt-pr-5"
+    tree = "a" * 40
+    name = "gate-proof-" + tree
     _stub_github(monkeypatch, {name: [_artifact(name)]},
-                 run_paths={4242: PREWARM_WORKFLOW}, calls=calls)
+                 run_paths={4242: GATE_WORKFLOW}, calls=calls)
     assert rr.ARTIFACT_CACHE_SECONDS == 60.0
     for _ in range(20):
-        assert len(rr.read_receipts("pr:5")["rows"]) == 1
-    # repo id + artifact listing + run path, once each, for twenty requests
-    assert len(calls) == 3, [url for url, _h, _c in calls]
+        assert len(rr.read_receipts("tree:" + tree)["rows"]) == 1
+    # repo id + gate-proof listing + run path + supply-set listing, once each, for twenty requests
+    assert len(calls) == 4, [url for url, _h, _c in calls]
 
 
 def test_a_failing_artifact_read_is_cached_too(monkeypatch):
@@ -920,34 +967,37 @@ def test_a_failing_artifact_read_is_cached_too(monkeypatch):
     calls = []
     _stub_github(monkeypatch, artifacts_error=OSError("HTTP 403"), calls=calls)
     for _ in range(10):
-        assert rr.read_receipts("pr:5")["unavailable"][0]["reason"] == rr.REASON_UNREACHABLE
-    assert len(calls) == 2, "one repo lookup and one failed listing, then cached"
+        body = rr.read_receipts("tree:" + "a" * 40)
+        assert [entry["reason"] for entry in body["unavailable"]] == [
+            rr.REASON_UNREACHABLE, rr.REASON_UNREACHABLE,
+        ]
+    assert len(calls) == 3, "one repo lookup and two failed listings, then cached"
 
 
 def test_the_inflight_cap_refuses_instead_of_holding_a_threadpool_slot(monkeypatch):
     """Sync `def` is deliberate (urllib blocks), so this semaphore is what
     bounds how many threadpool slots the route can occupy at once."""
     _configure_github(monkeypatch)
-    name = "prewarm-relay-receipt-pr-5"
+    name = "gate-proof-" + "a" * 40
     _stub_github(monkeypatch, {name: [_artifact(name)]},
-                 run_paths={4242: PREWARM_WORKFLOW})
+                 run_paths={4242: GATE_WORKFLOW})
     held = [rr._inflight.acquire(blocking=False) for _ in range(rr.MAX_INFLIGHT_GITHUB)]
     try:
         assert all(held)
-        body = rr.read_receipts("pr:5")
+        body = rr.read_receipts("tree:" + "a" * 40)
         assert body["rows"] == []
         assert body["unavailable"][0]["reason"] == rr.REASON_BUSY
     finally:
         for _ in held:
             rr._inflight.release()
     # and the refusal is not cached as if it were an answer
-    assert len(rr.read_receipts("pr:5")["rows"]) == 1
+    assert len(rr.read_receipts("tree:" + "a" * 40)["rows"]) == 1
 
 
 def test_the_memos_are_bounded(monkeypatch):
     """A hostile scope walk cannot grow an unbounded map."""
     for i in range(rr.MAX_MEMO_ENTRIES + 50):
-        rr._memo_put(rr._run_path_memo, i, PREWARM_WORKFLOW)
+        rr._memo_put(rr._run_path_memo, i, GATE_WORKFLOW)
     assert len(rr._run_path_memo) == rr.MAX_MEMO_ENTRIES
 
 
@@ -1008,23 +1058,48 @@ def _admit_platform(monkeypatch, *, granted=True, rollout=True, tenant=None):
 def test_endpoint_returns_rows_and_the_envelope(monkeypatch):
     tenant = _admit_platform(monkeypatch)
     _configure_github(monkeypatch)
-    _prewarm_fixture(monkeypatch)
-    resp = _client(tenant).get("/api/receipts", params={"scope": "pr:988"})
+    _gate_fixture(monkeypatch)
+    resp = _client(tenant).get("/api/receipts", params={"scope": "tree:" + "a" * 40})
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["contract"] == rr.CONTRACT
-    assert body["scope"] == "pr:988"
+    assert body["scope"] == "tree:" + "a" * 40
     assert len(body["rows"]) == 1
     assert "degraded_mode" in body
 
 
 def test_endpoint_is_honest_when_no_source_is_configured(monkeypatch):
     tenant = _admit_platform(monkeypatch)
-    resp = _client(tenant).get("/api/receipts", params={"scope": "pr:988"})
+    resp = _client(tenant).get("/api/receipts", params={"scope": "tree:" + "a" * 40})
     assert resp.status_code == 200
     body = resp.json()
     assert body["rows"] == []
     assert body["unavailable"][0]["reason"] == rr.REASON_NO_CREDENTIAL
+
+
+def test_endpoint_answers_source_retired_for_an_admitted_pr_scope(monkeypatch):
+    tenant = _admit_platform(monkeypatch)
+    _configure_github(monkeypatch)
+    calls = []
+
+    def must_not_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        pytest.fail("a retired source must not make a network call")
+
+    monkeypatch.setattr(rr, "_get_json", must_not_run)
+    resp = _client(tenant).get("/api/receipts", params={"scope": "pr:988"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["contract"] == rr.CONTRACT
+    assert body["scope"] == "pr:988"
+    assert body["rows"] == []
+    assert body["unavailable"] == [{
+        "source": "prewarm-relay",
+        "reason": "source_retired",
+        "detail": "PR-mode prewarm receipts were retired; merge-group relay receipts are not exposed by this endpoint",
+    }]
+    assert "degraded_mode" in body
+    assert calls == []
 
 
 @pytest.mark.parametrize("bad", ["", "pr:0", "tree:zz", "job:a/b", "nonsense"])

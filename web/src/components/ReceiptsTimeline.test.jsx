@@ -24,11 +24,11 @@ const ROWS = [
     url: 'https://github.com/example/repo/actions/runs/321',
   },
   {
-    kind: 'prewarm-relay',
-    ref: 'pr:988',
+    kind: 'gate-proof',
+    ref: 'tree:ffeeddccbbaa99887766554433221100aabbccdd',
     at: '2026-09-01T09:14:00Z',
     sha: 'ffeeddccbbaa99887766554433221100aabbccdd',
-    summary: 'prewarm-relay-receipt-pr-988 (3 KiB)',
+    summary: 'gate-proof-ffeeddccbbaa99887766554433221100aabbccdd (3 KiB)',
     url: 'https://github.com/example/repo/actions/runs/654',
   },
 ]
@@ -40,7 +40,7 @@ describe('ReceiptsTimeline rows', () => {
     const items = within(list).getAllByRole('listitem')
     expect(items).toHaveLength(2)
     // Newest (2026-09-01) first, even though the fixture is oldest-first.
-    expect(within(items[0]).getByTestId('receipt-kind').textContent).toBe('Prewarm relay')
+    expect(within(items[0]).getByTestId('receipt-kind').textContent).toBe('Gate proof')
     expect(within(items[1]).getByTestId('receipt-kind').textContent).toBe('Gate proof')
     expect(within(items[0]).getByTestId('receipt-sha').textContent).toBe('ffeeddcc')
     expect(within(items[1]).getByTestId('receipt-sha').textContent).toBe('a1b2c3d4')
@@ -69,8 +69,21 @@ describe('ReceiptsTimeline rows', () => {
 })
 
 describe('ReceiptsTimeline honest states', () => {
+  it('SSD1-D row1: a retired source renders as unavailable, never as an empty timeline', () => {
+    render(
+      <ReceiptsTimeline
+        rows={[]}
+        unavailable={[{ source: 'prewarm-relay', reason: 'source_retired', detail: '' }]}
+        scope="pr:988"
+      />,
+    )
+    expect(screen.getByTestId('receipts-unavailable').textContent)
+      .toContain('prewarm-relay is retired and is no longer read by this endpoint.')
+    expect(screen.queryByTestId('receipts-empty')).toBeNull()
+  })
+
   it('says nothing exists yet, and predicts nothing, when every source answered empty', () => {
-    render(<ReceiptsTimeline rows={[]} unavailable={[]} scope="pr:1" />)
+    render(<ReceiptsTimeline rows={[]} unavailable={[]} scope="tree:4f1c2d3e" />)
     const empty = screen.getByTestId('receipts-empty')
     expect(empty.textContent).toContain('No receipt exists for this scope yet')
     expect(screen.queryByTestId('receipts-unavailable')).toBeNull()
@@ -87,7 +100,7 @@ describe('ReceiptsTimeline honest states', () => {
             detail: 'LEAF_PLATFORM_PR_TOKEN is not configured on this deployment',
           },
         ]}
-        scope="pr:988"
+        scope="tree:4f1c2d3e"
       />,
     )
     const blocked = screen.getByTestId('receipts-unavailable')
@@ -156,7 +169,7 @@ describe('ReceiptsTimeline honest states', () => {
         unavailable={[{
           source: 'github-artifacts',
           reason: 'source_busy',
-          detail: "1 run record(s) for 'prewarm-relay-receipt-pr-9' could not be read "
+          detail: "1 run record(s) for 'gate-proof-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' could not be read "
             + '(a transient GitHub error or an unusable body); the ones verified are shown, '
             + 'never rendered as a confirmed absence',
         }]}
