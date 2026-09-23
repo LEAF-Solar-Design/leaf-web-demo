@@ -474,6 +474,115 @@ def test_lost_failure_update_with_missing_row_returns_local_error(lane, binding_
     journal.start.assert_not_called()
 
 
+def unscoped_failed_start(binding_journal, exc):
+    journal = binding_journal
+    journal.body = {"text": "move", "request_id": journal.row["request_id"]}
+    journal.row["digest"] = sessions_router.request_journal.payload_digest(
+        {"text": "move", "classifier_hint": None, "model": None, "queue": False})
+    journal.admit.return_value = (deepcopy(journal.row), True)
+    journal.get.return_value = deepcopy(journal.row)
+    journal.start.side_effect = exc
+    return journal
+
+
+def test_busy_lost_failure_update_replays_the_winner(lane, binding_journal):
+    journal = unscoped_failed_start(binding_journal, turn_runner.TurnBusy())
+    completed = dict(journal.row, state="completed", response_status=202,
+                     response_json={"status": "started", "turn_id": "winning-turn"})
+    journal.get.side_effect = [deepcopy(journal.row), completed]
+    journal.fail.return_value = False
+    response = lane.post(journal.body)
+    expected = sessions_router._journal_response(completed, lane.tenant)
+    assert response.status_code == expected.status_code
+    assert response.content == expected.body
+    journal.start.assert_called_once()
+    assert journal.get.call_count == 2
+    assert all(call.args == (journal.body["request_id"],) for call in journal.get.call_args_list)
+    journal.fail.assert_called_once()
+
+
+def test_busy_lost_failure_update_with_missing_row_returns_busy(lane, binding_journal):
+    journal = unscoped_failed_start(binding_journal, turn_runner.TurnBusy())
+    journal.get.side_effect = [deepcopy(journal.row), None]
+    journal.fail.return_value = False
+    response = lane.post(journal.body)
+    assert response.status_code == 409, response.text
+    assert response.content == sessions_router._busy_response(lane.sid).body
+    journal.start.assert_called_once()
+    assert journal.get.call_count == 2
+    journal.fail.assert_called_once_with(journal.body["request_id"], response_status=409,
+                                         response=response.json())
+
+
+def test_busy_recorded_failure_returns_busy(lane, binding_journal):
+    journal = unscoped_failed_start(binding_journal, turn_runner.TurnBusy())
+    journal.fail.return_value = True
+    response = lane.post(journal.body)
+    assert response.status_code == 409, response.text
+    assert response.content == sessions_router._busy_response(lane.sid).body
+    journal.start.assert_called_once()
+    # The existing pre-write read remains; a successful write adds no re-read.
+    journal.get.assert_called_once_with(journal.body["request_id"])
+    journal.fail.assert_called_once_with(journal.body["request_id"], response_status=409,
+                                         response=response.json())
+
+
+def test_rejected_lost_failure_update_replays_the_winner(lane, binding_journal):
+    exc = turn_runner.TurnRejected(502, "BROKER_UNREACHABLE", "unavailable", pre_harness=True)
+    journal = unscoped_failed_start(binding_journal, exc)
+    completed = dict(journal.row, state="completed", response_status=202,
+                     response_json={"status": "started", "turn_id": "winning-turn"})
+    journal.get.return_value = completed
+    journal.fail.return_value = False
+    response = lane.post(journal.body)
+    expected = sessions_router._journal_response(completed, lane.tenant)
+    assert response.status_code == expected.status_code
+    assert response.content == expected.body
+    journal.start.assert_called_once()
+    journal.get.assert_called_once_with(journal.body["request_id"])
+    journal.fail.assert_called_once()
+    assert journal.fail.call_args.kwargs["response_status"] == 502
+
+
+def test_rejected_lost_finish_update_replays_the_winner(lane, binding_journal, monkeypatch):
+    exc = turn_runner.TurnRejected(502, "BROKER_UNREACHABLE", "unavailable")
+    exc.turn_id = "rejected-turn"
+    journal = unscoped_failed_start(binding_journal, exc)
+    completed = dict(journal.row, state="completed", turn_id="winning-turn", response_status=202,
+                     response_json={"status": "started", "turn_id": "winning-turn"})
+    journal.get.return_value = completed
+    finish = Mock(return_value=False)
+    monkeypatch.setattr(sessions_router.request_journal, "finish_request", finish)
+    response = lane.post(journal.body)
+    expected = sessions_router._journal_response(completed, lane.tenant)
+    assert response.status_code == expected.status_code
+    assert response.content == expected.body
+    journal.start.assert_called_once()
+    journal.get.assert_called_once_with(journal.body["request_id"])
+    journal.fail.assert_not_called()
+    finish.assert_called_once()
+    assert finish.call_args.args == (journal.body["request_id"], exc.turn_id)
+    assert finish.call_args.kwargs["state"] == "failed"
+    assert finish.call_args.kwargs["response_status"] == 502
+
+
+def test_rejected_recorded_finish_returns_rejection(lane, binding_journal, monkeypatch):
+    exc = turn_runner.TurnRejected(502, "BROKER_UNREACHABLE", "unavailable")
+    exc.turn_id = "rejected-turn"
+    journal = unscoped_failed_start(binding_journal, exc)
+    finish = Mock(return_value=True)
+    monkeypatch.setattr(sessions_router.request_journal, "finish_request", finish)
+    response = lane.post(journal.body)
+    assert response.status_code == exc.status_code, response.text
+    assert response.json()["error"]["error_code"] == exc.error_code
+    assert response.json()["error"]["message"] == exc.message
+    journal.start.assert_called_once()
+    journal.get.assert_not_called()
+    journal.fail.assert_not_called()
+    finish.assert_called_once_with(journal.body["request_id"], exc.turn_id, state="failed",
+                                  response_status=exc.status_code, response=response.json())
+
+
 def test_unjournaled_binding_refusal_is_unchanged(lane, binding_journal, monkeypatch):
     journal = binding_journal
     monkeypatch.setattr(sessions_router.request_journal, "enabled", lambda: False)
