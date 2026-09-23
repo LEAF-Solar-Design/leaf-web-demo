@@ -4541,13 +4541,115 @@ def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
     print("=" * len(line))
 
 
-def _jobs_count(value: str) -> int:
+# --jobs auto sizing. Measured 2026-09-23 on leaf-ci-leaf-web-demo (428 suites):
+# 8 vCPU / 15 GB ran jobs 4 = 1048 s, jobs 6 = 982 s, jobs 8 = 975 s.
+# At 8 workers pool suite-seconds inflate x1.57 (browser suites x1.8-1.96), so a worker needs ~2 vCPU.
+_AUTO_CPUS_PER_WORKER = 2
+# Heavy browser suites plus their servers peak near 3 GiB per worker on that same 15 GB box.
+_AUTO_GIB_PER_WORKER = 3
+# A partition replay reaches the gate floor (456 s serial barrier + longest suite) at 8 workers.
+_AUTO_MAX_JOBS = 8
+# Bounded read for one cgroup or /proc file; these are a few bytes (meminfo ~1.5 KB).
+_AUTO_READ_LIMIT = 8192
+
+
+def resolve_auto_jobs(cpus: float, mem_bytes: int | None) -> int:
+    """Pure: workers = min(cpus / 2, mem_gib / 3, 8), floored, never below 1."""
+    bounds = [int(cpus // _AUTO_CPUS_PER_WORKER), _AUTO_MAX_JOBS]
+    if mem_bytes is not None:
+        bounds.append(int(mem_bytes // (_AUTO_GIB_PER_WORKER * 2 ** 30)))
+    return max(1, min(bounds))
+
+
+def _affinity_cpus() -> int:
+    """CPUs this process may run on; the host count when affinity is unavailable."""
+    try:
+        return len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        return os.cpu_count() or 1
+
+
+def _read_small(path: Path) -> str | None:
+    """Bounded read-only text read; None when the file is absent or unreadable."""
+    try:
+        with open(path, "r", encoding="ascii", errors="replace") as fh:
+            return fh.read(_AUTO_READ_LIMIT)
+    except OSError:
+        return None
+
+
+def _cgroup_cpu_quota(root: str) -> float | None:
+    """Container CPU quota in CPUs, None when unlimited or no cgroup file exists."""
+    cgroup = Path(root) / "sys" / "fs" / "cgroup"
+    text = _read_small(cgroup / "cpu.max")
+    if text is not None:
+        parts = text.split()
+        if parts[0] == "max":
+            return None
+        quota, period = int(parts[0]), int(parts[1])
+    else:
+        quota_text = _read_small(cgroup / "cpu" / "cpu.cfs_quota_us")
+        period_text = _read_small(cgroup / "cpu" / "cpu.cfs_period_us")
+        if quota_text is None or period_text is None:
+            return None
+        quota, period = int(quota_text.strip()), int(period_text.strip())
+        if quota == -1:
+            return None
+    if quota <= 0 or period <= 0:
+        raise ValueError(f"bad cpu quota {quota}/{period}")
+    return quota / period
+
+
+def _effective_cpus(root: str = "/") -> float:
+    """The container's real CPU limit: min(cgroup quota, affinity). Never raises."""
+    try:
+        visible = float(_affinity_cpus())
+    except Exception:
+        visible = 1.0
+    try:
+        quota = _cgroup_cpu_quota(root)
+    except Exception:
+        quota = None
+    return min(quota, visible) if quota is not None else visible
+
+
+def _effective_mem_bytes(root: str = "/") -> int | None:
+    """min(cgroup memory limit, MemTotal); None when nothing is readable. Never raises."""
+    cgroup = Path(root) / "sys" / "fs" / "cgroup"
+    limit = None
+    try:
+        text = _read_small(cgroup / "memory.max")
+        if text is not None:
+            if text.strip() != "max":
+                limit = int(text.strip())
+        else:
+            text = _read_small(cgroup / "memory" / "memory.limit_in_bytes")
+            if text is not None and int(text.strip()) < 2 ** 60:
+                limit = int(text.strip())
+    except Exception:
+        limit = None
+    total = None
+    try:
+        text = _read_small(Path(root) / "proc" / "meminfo")
+        for line in (text or "").splitlines():
+            if line.startswith("MemTotal:"):
+                total = int(line.split()[1]) * 1024
+                break
+    except Exception:
+        total = None
+    known = [v for v in (limit, total) if v is not None and v > 0]
+    return min(known) if known else None
+
+
+def _jobs_count(value: str) -> int | str:
+    if value.strip().lower() == "auto":
+        return "auto"
     try:
         jobs = int(value)
     except ValueError:
-        raise argparse.ArgumentTypeError("--jobs must be an integer in 1..16") from None
+        raise argparse.ArgumentTypeError("--jobs must be an integer in 1..16 or auto") from None
     if not 1 <= jobs <= 16:
-        raise argparse.ArgumentTypeError("--jobs must be an integer in 1..16")
+        raise argparse.ArgumentTypeError("--jobs must be an integer in 1..16 or auto")
     return jobs
 
 
@@ -4558,7 +4660,9 @@ def main() -> int:
                          "--jobs > 1, stop dispatching new suites and wait for "
                          "in-flight suites; do not kill running children.")
     ap.add_argument("--jobs", type=_jobs_count, default=1, metavar="N",
-                    help="run suites with N worker threads (1..16, default 1). "
+                    help="run suites with N worker threads (1..16 or auto, default 1). "
+                         "auto sizes N from the container's CPU quota and memory "
+                         "(2 vCPU and 3 GiB per worker, max 8). "
                          "Shared-state suites stay in one sequential group; "
                          "1 uses the original serial path with no threads.")
     ap.add_argument("--continue", dest="cont", action="store_true",
@@ -4616,6 +4720,13 @@ def main() -> int:
                     help="the 40-hex git tree id --verify-gate-proof must find in "
                          "the proof document.")
     args = ap.parse_args()
+
+    if args.jobs == "auto":
+        cpus = _effective_cpus()
+        mem_bytes = _effective_mem_bytes()
+        args.jobs = resolve_auto_jobs(cpus, mem_bytes)
+        mem_gib = "unknown" if mem_bytes is None else f"{mem_bytes / 2 ** 30:.1f}"
+        print(f"jobs=auto resolved to {args.jobs} (cpus={cpus:.1f} mem_gib={mem_gib})")
 
     if args.verify_gate_proof or args.expect_tree:
         if not (args.verify_gate_proof and args.expect_tree):
