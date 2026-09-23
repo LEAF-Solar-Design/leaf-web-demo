@@ -510,6 +510,14 @@ def build_suites() -> List[Suite]:
         # every runner. COUNTED from the collected cases: 33 tests + 41 more parametrizations = 74.
         Suite("server-solar-ground-dialogs", "server tests/test_solar_ground_dialogs.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_ground_dialogs.py"), 74),
+        # W5 design profiles (2026-09-23, contract G32): server/solar_design_profiles.py, the literal
+        # port of LEAFPROFILE and the profile manager (prefixes, the active-profile rules on create,
+        # swap and delete, the record's shape and version). Every input is authored in the file or is
+        # the committed settings snapshot (docs/parity/evidence/ground/generate/profile-settings.json),
+        # so the floor is the exact count on every runner. COUNTED from the collected cases:
+        # 31 tests + 4 more parametrizations = 35.
+        Suite("server-solar-design-profiles", "server tests/test_solar_design_profiles.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_design_profiles.py"), 35),
         # S33 KML and LandXML ports (2026-09-23): server/solar_geo_formats.py, the
         # literal port of KmlBoundaryExporter (with every format branch
         # LEAFKMLEXPORTFMTDEMO exercises), KmlBoundaryParser, TerrainExporter's
@@ -1902,6 +1910,11 @@ def build_suites() -> List[Suite]:
         # so the floor is the exact count on every runner. COUNTED: 17 tests, no parametrizations.
         Suite("scripts-solar-ground-dialogs-evidence", "scripts test_solar_ground_dialogs_evidence.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_dialogs_evidence.py"), 17),
+        # G32 design-profile evidence (f1 to f5 from an empty profile store): the committed generate
+        # intake and settings snapshot only (no capture, no git beyond the untracked-intake refusal),
+        # so the floor is the exact count on every runner. COUNTED: 12 tests, no parametrizations.
+        Suite("scripts-solar-design-profiles-evidence", "scripts test_solar_design_profiles_evidence.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_design_profiles_evidence.py"), 12),
         # The parity oracle itself: the ledger rules, the receipt rules, the fail-closed
         # inputs, and (S29, 2026-09-22) the declared divergence a known plugin defect
         # gets, which is the ONLY way a failing comparator settles a capability: the
