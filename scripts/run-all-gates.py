@@ -503,6 +503,13 @@ def build_suites() -> List[Suite]:
         # Yield zip byte for byte, and trackers to panel groups through the key-aware row reader.
         Suite("server-solar-ground-dsteps", "server tests/test_solar_ground_dsteps.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_ground_dsteps.py"), 31),
+        # W5 dialog batch (2026-09-23, contract G30): server/solar_ground_dialogs.py (the shading
+        # object form and PlaceTree, the project-area manager's Add Area and OK, the pile-template
+        # manager's "+" and OK with the store file byte for byte). Every input is authored in the
+        # file or is the committed pile-template BEFORE store, so the floor is the exact count on
+        # every runner. COUNTED from the collected cases: 33 tests + 41 more parametrizations = 74.
+        Suite("server-solar-ground-dialogs", "server tests/test_solar_ground_dialogs.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_ground_dialogs.py"), 74),
         # S33 KML and LandXML ports (2026-09-23): server/solar_geo_formats.py, the
         # literal port of KmlBoundaryExporter (with every format branch
         # LEAFKMLEXPORTFMTDEMO exercises), KmlBoundaryParser, TerrainExporter's
@@ -1890,6 +1897,11 @@ def build_suites() -> List[Suite]:
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_rooftop_chain_evidence.py"), 43),
         Suite("scripts-solar-ground-dsteps-evidence", "scripts test_solar_ground_dsteps_evidence.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_dsteps_evidence.py"), 12),
+        # G30 dialog-batch evidence (e1, e4, e6): the committed terrain intake and pile-template
+        # BEFORE store plus hand-made states (no capture, no git: the CLI cases pin the revision),
+        # so the floor is the exact count on every runner. COUNTED: 17 tests, no parametrizations.
+        Suite("scripts-solar-ground-dialogs-evidence", "scripts test_solar_ground_dialogs_evidence.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_dialogs_evidence.py"), 17),
         # The parity oracle itself: the ledger rules, the receipt rules, the fail-closed
         # inputs, and (S29, 2026-09-22) the declared divergence a known plugin defect
         # gets, which is the ONLY way a failing comparator settles a capability: the
