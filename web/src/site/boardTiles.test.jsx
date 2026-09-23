@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, createEvent, fireEvent, render, screen } from '@testing-library/react'
+import { BOARD_TRANSFER_TYPE, encodeVersionRef } from '../lib/boardTransfer.js'
 import { BoardTiles } from './BoardTiles.jsx'
 import { ProjectBoardGround } from './ProjectBoardGround.jsx'
 import SurfaceGrounds from './SurfaceGrounds.jsx'
@@ -16,6 +17,86 @@ const props = {
   catalog: { families: [family] },
 }
 const makeActions = () => Object.fromEntries(['onOpenDrawing', 'onOpenVersion', 'onOpenJob', 'onOpenTool', 'onOpenFamily', 'onOpenCapability'].map((name) => [name, vi.fn()]))
+
+const makeTransferActions = () => ({ ...makeActions(), transferProjectId: 'project1', onTransferVersion: vi.fn() })
+const versionRef = encodeVersionRef({ projectId: 'project1', drawingId: version.drawing_id, versionId: version.version_id, seq: version.seq })
+
+it('SSD1-24D leaves the board unchanged without a transfer callback', () => {
+  const actions = makeActions()
+  const { container, rerender } = render(<BoardTiles {...props} actions={actions} />)
+  const html = container.innerHTML
+  expect(container.querySelector('[draggable]')).toBeNull()
+  expect(screen.queryByText('Preview in drawing')).toBeNull()
+  expect(container.querySelector('[data-drop-target]')).toBeNull()
+  rerender(<BoardTiles {...props} actions={{ ...actions, transferStatus: 'Hidden', transferProjectId: 'project1' }} />)
+  expect(container.innerHTML).toBe(html)
+})
+
+it('SSD1-24D drags a version with the bounded type and copy effect', () => {
+  const { container } = render(<BoardTiles {...props} actions={makeTransferActions()} />)
+  const button = container.querySelector('[data-action="version"]')
+  const dataTransfer = { setData: vi.fn(), effectAllowed: 'none' }
+  expect(button).toHaveAttribute('draggable', 'true')
+  fireEvent.dragStart(button, { dataTransfer })
+  expect(dataTransfer.setData).toHaveBeenCalledWith(BOARD_TRANSFER_TYPE, versionRef)
+  expect(dataTransfer.effectAllowed).toBe('copy')
+})
+
+it('SSD1-24D accepts only the version type during drag over', () => {
+  const { container } = render(<BoardTiles {...props} actions={makeTransferActions()} />)
+  const drawing = container.querySelector('[data-drop-target="version"]')
+  for (const [type, accepted] of [[BOARD_TRANSFER_TYPE, true], ['text/plain', false]]) {
+    const dataTransfer = { types: [type], dropEffect: 'none' }
+    const event = createEvent.dragOver(drawing, { dataTransfer })
+    fireEvent(drawing, event)
+    expect(event.defaultPrevented).toBe(accepted)
+    expect(dataTransfer.dropEffect).toBe(accepted ? 'copy' : 'none')
+  }
+})
+
+it('SSD1-24D drops the payload onto the drawing', () => {
+  const actions = makeTransferActions()
+  const { container } = render(<BoardTiles {...props} actions={actions} />)
+  const drawing = container.querySelector('[data-drop-target="version"]')
+  const getData = vi.fn(() => versionRef)
+  const event = createEvent.drop(drawing, { dataTransfer: { getData } })
+  fireEvent(drawing, event)
+  expect(event.defaultPrevented).toBe(true)
+  expect(getData).toHaveBeenCalledWith(BOARD_TRANSFER_TYPE)
+  expect(actions.onTransferVersion).toHaveBeenCalledTimes(1)
+  expect(actions.onTransferVersion).toHaveBeenCalledWith(versionRef)
+})
+
+it('SSD1-24D previews through the accessible button', () => {
+  const actions = makeTransferActions()
+  render(<BoardTiles {...props} actions={actions} />)
+  const button = screen.getByRole('button', { name: 'Preview v1 in the drawing' })
+  expect(button).toHaveTextContent('Preview in drawing')
+  fireEvent.click(button)
+  expect(actions.onTransferVersion).toHaveBeenCalledTimes(1)
+  expect(actions.onTransferVersion).toHaveBeenCalledWith(versionRef)
+  expect(actions.onOpenVersion).not.toHaveBeenCalled()
+})
+
+it('SSD1-24D renders transfer status in the drawing', () => {
+  render(<BoardTiles {...props} actions={{ ...makeTransferActions(), transferStatus: 'Previewing v1 in the drawing' }} />)
+  const status = screen.getByTestId('board-transfer-status')
+  expect(status).toHaveAttribute('role', 'status')
+  expect(status).toHaveTextContent('Previewing v1 in the drawing')
+  expect(status.closest('[data-tile]')).toHaveAttribute('data-tile', 'drawing')
+})
+
+it('SSD1-24D prevents an invalid reference drag and omits its preview button', () => {
+  const actions = { ...makeTransferActions(), transferProjectId: '' }
+  const { container } = render(<BoardTiles {...props} actions={actions} />)
+  const button = container.querySelector('[data-action="version"]')
+  const dataTransfer = { setData: vi.fn() }
+  const event = createEvent.dragStart(button, { dataTransfer })
+  fireEvent(button, event)
+  expect(event.defaultPrevented).toBe(true)
+  expect(dataTransfer.setData).not.toHaveBeenCalled()
+  expect(screen.queryByText('Preview in drawing')).toBeNull()
+})
 
 it('J1 board mount delivers all six object actions through SurfaceGrounds', () => {
   const actions = makeActions()
