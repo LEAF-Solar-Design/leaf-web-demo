@@ -32,6 +32,16 @@ other group was byte-identical.
   from the solver, whose DP may choose a target of 0 (OptimalPlanSolver.cs:555);
   on the captured run no group drains.
 
+REVERT is the one place Studio deliberately does NOT reproduce the plugin. The
+plugin's AutoFillRevert (Commands.cs:581-606, BranchCmd.cs:4562-4644) snapshots
+each group by its BLOCK HANDLE and AutoFill rebuilds every group it changes under
+a NEW handle, so the revert skips exactly the groups that moved: after save and
+reopen the captured run's two groups stayed at 70 and 138 instead of returning to
+71 and 137 (receipts/w2-autofill-20260923/FINDING.md). revert_corrections reverts
+by the PLAN instead, which carries no handle at all, so it restores the exact
+pre-auto-fill membership. The receipt records the plugin's behaviour as a declared
+divergence; reproducing a defect is not parity.
+
 The plan itself is server/solar_autofill.py, the pure port of OptimalPlanSolver.
 This builtin only applies it.
 
@@ -240,7 +250,41 @@ def apply_corrections(graph, params):
                                        for key in ("from_ref", "to_ref")})}
 
 
-OPERATIONS = {"apply-corrections": apply_corrections}
+def _inverse(corrections):
+    """The plan that undoes `corrections`: every trade swapped, in REVERSE order.
+
+    Reverse order is what makes a chain revert: the last hop hands its panels back
+    first, so every earlier hop finds them exactly where it left them. One list
+    comprehension, one new list per correction, no scan of the graph.
+    """
+    return [{"from_ref": correction["to_ref"], "to_ref": correction["from_ref"],
+             "panel_refs": list(correction["panel_refs"])}
+            for correction in reversed(corrections)]
+
+
+def revert_corrections(graph, params):
+    """Undo exactly the corrections an auto-fill made, or refuse and move nothing.
+
+    Takes the SAME {expected_rev, corrections} the auto-fill was given, so the
+    caller keeps the plan rather than a snapshot of group handles, which is the
+    defect the plugin's own revert carries (module docstring).
+
+    Fails closed the way apply_corrections does, and for the same reason: the
+    inverse plan is replayed on a membership map before ANY mutation, so a graph
+    that is not in the auto-filled state, meaning a panel a correction named is no
+    longer in that correction's `to` group, is refused with PANEL_NOT_IN_GROUP and
+    the graph untouched. Bounded: one inverse list, then apply_corrections' own
+    single pass per correction.
+    """
+    _bounded_json(params)
+    if not _valid_request(params):
+        raise GraphValidationError("INVALID_AUTOFILL_REQUEST")
+    return apply_corrections(graph, {"expected_rev": params["expected_rev"],
+                                     "corrections": _inverse(params["corrections"])})
+
+
+OPERATIONS = {"apply-corrections": apply_corrections,
+              "revert-corrections": revert_corrections}
 
 
 def run(intake, params):
