@@ -27,6 +27,7 @@ import checkout_capability
 import catalog
 import deps
 import entitlements
+import entity_scope
 import jobs
 import write_loop
 import product_capability_availability as capability_catalog
@@ -409,6 +410,31 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
         )
     tenant_id = resolved_tenant
 
+    binding = None
+    if authority_session_id is not None or authority_turn_id is not None:
+        if authority_session_id is None or authority_turn_id is None:
+            return error_response(
+                ErrorCode.FORBIDDEN,
+                "active same-account turn authority is required for conversational runs",
+                retryable=False, status_code=403,
+            )
+        try:
+            binding = entity_scope.resolve_turn_binding(
+                authority_session_id, authority_turn_id, str(tenant_id))
+        except entity_scope.ScopeError as exc:
+            if exc.status_code == 409:
+                return JSONResponse(status_code=409, content=with_envelope_fields({
+                    "error": error_obj(ErrorCode.BAD_PARAMS,
+                                       "invalid stored entity_scope; request a new approval",
+                                       retryable=False),
+                    "reason_code": "entity_scope_invalid",
+                }))
+            return error_response(
+                ErrorCode.FORBIDDEN,
+                "active same-account turn authority is required for conversational runs",
+                retryable=False, status_code=403,
+            )
+
     # Started at the first statement of the body so it covers every unit of work
     # this handler does to turn a request into a job_id. It does NOT cover the
     # ASGI/dependency prologue that ran before the body (deps.require_tenant and
@@ -450,6 +476,18 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
             "catalog tool changed or confirmation digest is missing; refresh tools and confirm again",
             retryable=False, tool=req.tool, status_code=409,
         )
+
+    if binding is not None and (
+        (tool.get("name") in capability_catalog.W1_CAPABILITIES
+         and capability_catalog.capability_adapter(tool.get("name")) != capability_catalog.CLOUD_PROPOSAL_ADAPTER)
+        or tool.get("canonical_only")
+        or x_org_id is not None or x_project_id is not None
+    ):
+        return JSONResponse(status_code=403, content=with_envelope_fields({
+            "error": error_obj(ErrorCode.FORBIDDEN, entity_scope.SCOPED_MUTATION_MESSAGE,
+                               retryable=False),
+            "reason_code": entity_scope.SCOPED_MUTATION_REASON,
+        }))
 
     # ENTITLEMENT GATE (§17): the tenant's tier must grant the capability this tool needs
     # (run_write for a drawing.write tool, else run_read). Enforced HERE in the execution
