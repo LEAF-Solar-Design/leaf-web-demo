@@ -433,6 +433,47 @@ def test_binding_refusal_after_row_moves_replays_the_row(lane, binding_journal):
     journal.start.assert_not_called()
 
 
+def test_lost_failure_update_replays_the_winner(lane, binding_journal):
+    journal = binding_journal
+    recorded = {"status": "completed", "turn_id": "winning-turn", "entity_scope": B}
+    completed = dict(journal.row, state="completed", response_status=200, response_json=recorded)
+    journal.admit.return_value = (deepcopy(journal.row), False)
+    journal.freeze.side_effect = entity_scope.write_loop.ProofStateUnreadable("temporary storage outage")
+    journal.get.side_effect = [deepcopy(journal.row), completed]
+    journal.fail.return_value = False
+    response = lane.post(journal.body)
+    assert response.status_code == 200, response.text
+    assert response.json() == json.loads(sessions_router._journal_response(completed, lane.tenant).body)
+    journal.admit.assert_called_once()
+    journal.freeze.assert_called_once()
+    assert journal.get.call_count == 2
+    assert all(call.args == (journal.body["request_id"],) for call in journal.get.call_args_list)
+    journal.fail.assert_called_once()
+    assert journal.fail.call_args.kwargs["response_status"] == 503
+    journal.start.assert_not_called()
+
+
+def test_lost_failure_update_with_missing_row_returns_local_error(lane, binding_journal):
+    journal = binding_journal
+    journal.admit.return_value = (deepcopy(journal.row), False)
+    journal.freeze.side_effect = entity_scope.write_loop.ProofStateUnreadable("temporary storage outage")
+    journal.get.side_effect = [deepcopy(journal.row), None]
+    journal.fail.return_value = False
+    response = lane.post(journal.body)
+    assert response.status_code == 503, response.text
+    error = response.json()["error"]
+    assert error["error_code"] == "INTERNAL"
+    assert error["message"] == "temporary storage outage"
+    assert error["retryable"] is True
+    journal.admit.assert_called_once()
+    journal.freeze.assert_called_once()
+    assert journal.get.call_count == 2
+    assert all(call.args == (journal.body["request_id"],) for call in journal.get.call_args_list)
+    journal.fail.assert_called_once_with(journal.body["request_id"], response_status=503,
+                                         response=response.json())
+    journal.start.assert_not_called()
+
+
 def test_unjournaled_binding_refusal_is_unchanged(lane, binding_journal, monkeypatch):
     journal = binding_journal
     monkeypatch.setattr(sessions_router.request_journal, "enabled", lambda: False)

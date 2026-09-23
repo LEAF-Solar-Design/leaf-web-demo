@@ -1249,11 +1249,14 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
                 current = request_journal.get_request(journal_request_id)
                 if current is not None and current["state"] != "admitted":
                     return _journal_response(current, tenant)
-                request_journal.fail_admitted(
+                if not request_journal.fail_admitted(
                     journal_request_id,
                     response_status=response.status_code,
                     response=_response_content(response),
-                )
+                ):
+                    current = request_journal.get_request(journal_request_id)
+                    if current is not None and current["state"] != "admitted":
+                        return _journal_response(current, tenant)
             return response
 
     # 4. confirm path: atomically verify-and-consume the durable approval row
