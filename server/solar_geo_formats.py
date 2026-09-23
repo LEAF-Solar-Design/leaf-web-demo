@@ -633,6 +633,8 @@ def kml_import_demo_csv(kml_text, kml_path):
     for p, polygon in enumerate(polygons):
         center = centroid(polygon)
         n = len(polygon.vertices)
+        # Deliberate: the plugin replaces commas rather than quoting (KmlImportDemoCommand.cs:100),
+        # and this probe must match its bytes; a Studio-facing CSV export would quote instead.
         name = (polygon.name or "").replace(",", "_")
         for v, vertex in enumerate(polygon.vertices):
             lines.append(",".join((
