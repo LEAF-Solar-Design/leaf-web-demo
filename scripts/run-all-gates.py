@@ -662,6 +662,17 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_agent_policy.py"), 33),
         Suite("server-agent-gate", "server tests/test_agent_gate.py", "pytest", SERVER,
               _py_pytest("tests/test_agent_gate.py"), 57),
+        # SSD1 element 17, entity-scope containment: the turn's frozen binding
+        # (17-A), its admission at the gate and /api/run (17-B1), and the backedge
+        # identity rows whose fixtures 17-B1 extended. None of the three files was
+        # registered before, so native CI never ran them. Floors are the counts
+        # each file executes alone; nothing in them skips on a runner.
+        Suite("server-entity-scope-binding", "server tests/test_entity_scope_binding.py",
+              "pytest", SERVER, _py_pytest("tests/test_entity_scope_binding.py"), 75),
+        Suite("server-entity-scope-admission", "server tests/test_entity_scope_admission.py",
+              "pytest", SERVER, _py_pytest("tests/test_entity_scope_admission.py"), 52),
+        Suite("server-backedge-author-identity", "server tests/test_backedge_author_identity.py",
+              "pytest", SERVER, _py_pytest("tests/test_backedge_author_identity.py"), 44),
         # W14 admin self-edit lane (R7): branch-only platform-repo writes,
         # fundamental-path co-sign, landing handoff. Own process: it builds
         # real git repos and toggles the R7 rollout env.

@@ -730,7 +730,8 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
          args: Optional[Dict[str, Any]], tier_caps: Dict[str, bool], *,
          tier: Optional[str] = None,
          subject: Optional[str] = None,
-         policy_session_id: Optional[str] = None) -> Dict[str, Any]:
+         policy_session_id: Optional[str] = None,
+         scope_refusal: Optional[str] = None) -> Dict[str, Any]:
     """Run the full gate chain for one proposed agent action.
 
     `tier_caps` is the caller-resolved entitlement map for the tenant's tier
@@ -794,6 +795,9 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
         return _deny("unknown_action", extra={"gate": "catalog"})
     if not act.enabled:
         return _deny("action_disabled", act=act, extra={"gate": "catalog"})
+
+    if scope_refusal is not None:
+        return _deny(scope_refusal, act=act, extra={"gate": "entity_scope"})
 
     # 3. args-schema validation — fail fast before any budget/approval work.
     schema_error = _validate_args(act, args)

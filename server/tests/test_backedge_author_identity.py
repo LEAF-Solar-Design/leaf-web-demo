@@ -501,6 +501,7 @@ def test_real_run_route_uses_active_turn_authority_not_stale_broker_tier(
         session_id, "turn-run-route", 60,
         tier="hosted_pro", subject=ALICE,
     )
+    session_store.append_event(session_id, "turn-run-route", "turn_started", {})
     tool = {
         "name": "drape-onto-spheres",
         "description": "Drape arrays onto spheres",
@@ -594,6 +595,7 @@ def test_real_resolved_backedge_write_without_exact_pins_submits_no_job(
         session_id, "turn-write-without-pins", 60,
         tier="hosted_pro", subject=ALICE,
     )
+    session_store.append_event(session_id, "turn-write-without-pins", "turn_started", {})
     tool = {
         "name": "drape-onto-spheres",
         "description": "Drape arrays onto spheres",

@@ -10,6 +10,46 @@ _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@~+-]{0,127}")
 _COLLECTIONS = ("polylines", "inserts", "faces3d", "circles", "arcs",
                 "texts", "dimensions", "mleaders")
 
+SCOPE_REFUSED_ACTIONS = frozenset({
+    "author_tool", "register_tool", "request_publication", "customize_platform",
+    "propose_overlay", "finish_project", "undo_drawing_version",
+})
+SCOPED_MUTATION_REASON = "entity_scope_mutation_unsupported"
+SCOPED_MUTATION_MESSAGE = "Entity-scoped turns can only read or run supported drawing writes."
+
+
+def resolve_turn_binding(session_id, turn_id, tenant_id):
+    import session_store
+
+    try:
+        data = session_store.turn_started_data(session_id, turn_id, tenant_id)
+        if data is None:
+            raise ValueError("missing turn_started event")
+        return stored_binding(data)
+    except ScopeError as exc:
+        if exc.status_code == 409:
+            raise
+        raise ScopeError("active same-account turn authority is required for conversational runs", 403) from exc
+    except Exception as exc:
+        raise ScopeError("active same-account turn authority is required for conversational runs", 403) from exc
+
+
+def gate_scope_refusal(session_id, turn_id, tenant_id):
+    import session_store
+
+    try:
+        if not session_id or not turn_id or session_store.get_session(session_id) is None:
+            return None
+        if resolve_turn_binding(session_id, turn_id, tenant_id) is not None:
+            return f"{SCOPED_MUTATION_REASON}: {SCOPED_MUTATION_MESSAGE}"
+        return None
+    except ScopeError as exc:
+        if exc.status_code == 409:
+            return "entity_scope_invalid: invalid stored entity_scope; request a new approval"
+    except Exception:
+        pass
+    return "entity_scope_unavailable: the turn's start record is unavailable; start a new turn"
+
 
 class ScopeError(ValueError):
     def __init__(self, message, status_code=422):
