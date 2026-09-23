@@ -409,4 +409,22 @@ describe('EngineHeadOpener', () => {
     expect(studio.context.reach.state).toBe(REACH_STATE.OPEN)
     expect(loadPosts()).toHaveLength(1)
   })
+
+  it('source switch: a save from the other source never stands in for this source\'s head', async () => {
+    const fetchA = vi.fn(async () => answer(1))
+    const studio = await openEditAndSave(fetchA)
+    expect(studio.context.session.savedVersion).toBe(2)
+    const fetchB = vi.fn(async () => sampleAnswer(1))
+    studio.rerender({ sourceKey: 'sample', fetchDxf: fetchB })
+    await settle()
+    expect(fetchB).toHaveBeenCalledTimes(1)
+    loaded(workers[0], headDocumentId('rooftop_demo', 1))
+    // The session keeps the live save's version across the sample load.
+    expect(studio.context.session.savedVersion).toBe(2)
+    const fetchC = vi.fn(async () => sampleAnswer(2))
+    studio.rerender({ sourceKey: 'sample', headKey: 2, fetchDxf: fetchC })
+    await settle()
+    expect(fetchC).toHaveBeenCalledTimes(1)
+    expect(studio.context.reach.source).not.toBe('engine-save')
+  })
 })

@@ -52,6 +52,8 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
   // The source of the last head this opener loaded (null until it loads
   // one); the engine-save shortcut applies only within that source.
   const openedSourceRef = useRef(null)
+  // The session's savedVersion at the moment this opener last opened a head.
+  const savedAtOpenRef = useRef(null)
   // Bumped on unmount and on every drawing or source switch; an async leg
   // captured before an await compares and abandons if it moved.
   const generationRef = useRef(0)
@@ -89,7 +91,9 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
     // null means this opener instance has not opened a head (a remount over a
     // retained session), so the shortcut keeps its behaviour from before the
     // source existed; once it has opened one, a different source never matches.
-    if (present && holdsHead && (openedSourceRef.current === null || openedSourceRef.current === sourceKey) &&Number.isInteger(session.savedVersion) && Number(headKey) === session.savedVersion) {
+    // A savedVersion already present when this opener opened its head is not
+    // this head's save (the session keeps it across a document switch).
+    if (present && holdsHead && (openedSourceRef.current === null || openedSourceRef.current === sourceKey) && session.savedVersion !== savedAtOpenRef.current &&Number.isInteger(session.savedVersion) && Number(headKey) === session.savedVersion) {
       attemptRef.current = key
       setReach({ state: REACH_STATE.OPEN, sentence: '', version: session.savedVersion, head: session.savedVersion, source: 'engine-save' })
       return undefined
@@ -171,6 +175,7 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
       // list it loads as the base a save diffs against (the mutation plan).
       openBytes(bytes, headDocumentId(drawingId, version), { committed: true, version })
       openedSourceRef.current = source
+      savedAtOpenRef.current = sessionRef.current.savedVersion ?? null
       setReach({ state: REACH_STATE.OPEN, sentence: '', version, head: Number(answer?.head) || version, source: String(answer?.source || '') })
     })()
     return () => {
