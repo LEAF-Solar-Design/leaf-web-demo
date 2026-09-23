@@ -33,6 +33,26 @@ describe('SSD1-24A pure selection', () => {
     expect(toggleId(ids, '11', entities)).toEqual(['7', '9', '11'])
     for (const id of ['999', 7, null]) expect(toggleId(ids, id, entities)).toBe(ids)
   })
+  it('SSD1-24A-b adding a valid id drops a ghost', () => {
+    expect(addId(['missing'], '7', entities)).toEqual(['7'])
+  })
+  it('SSD1-24A-b toggling a valid id in drops a ghost', () => {
+    expect(toggleId(['missing'], '7', entities)).toEqual(['7'])
+  })
+  it('SSD1-24A-b toggling a valid id out drops a ghost', () => {
+    expect(toggleId(['missing', '7'], '7', entities)).toEqual([])
+  })
+  it('SSD1-24A-b adding an existing id drops a ghost', () => {
+    expect(addId(['missing', '7'], '7', entities)).toEqual(['7'])
+  })
+  it('SSD1-24A-b adding an unknown id still drops a ghost', () => {
+    expect(addId(['missing', '7'], 'unknown', entities)).toEqual(['7'])
+  })
+  it('SSD1-24A-b no-ops preserve an all-valid array identity', () => {
+    const ids = Object.freeze(['7', '9'])
+    for (const id of ['7', 'unknown', 7, null]) expect(addId(ids, id, entities)).toBe(ids)
+    for (const id of ['unknown', 7, null]) expect(toggleId(ids, id, entities)).toBe(ids)
+  })
   it('matches every canonical Modify and Cut/Copy registry display label', () => {
     const records = ACTIONS.filter((action) => action.id.startsWith('modify:') || ['clipboard:cutClip', 'clipboard:copyClip'].includes(action.id))
     expect(records.length).toBeGreaterThan(20)

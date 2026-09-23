@@ -15,13 +15,19 @@ export function replaceIds(nextIds, entities) {
 }
 
 export function addId(ids, id, entities) {
-  if (typeof id !== 'string' || !(entities || []).some((entity) => entity.id === id) || ids.includes(id)) return ids
-  return withSelection([...ids, id]).selectedIds
+  const survivors = surviveSelectionIds(ids, entities)
+  const nextIds = typeof id === 'string' && (entities || []).some((entity) => entity.id === id) && !survivors.includes(id)
+    ? [...survivors, id] : survivors
+  if (nextIds.length === ids.length && nextIds.every((candidate, index) => candidate === ids[index])) return ids
+  return withSelection(nextIds).selectedIds
 }
 
 export function toggleId(ids, id, entities) {
-  if (typeof id !== 'string' || !(entities || []).some((entity) => entity.id === id)) return ids
-  return withSelection(ids.includes(id) ? ids.filter((candidate) => candidate !== id) : [...ids, id]).selectedIds
+  const survivors = surviveSelectionIds(ids, entities)
+  const nextIds = typeof id === 'string' && (entities || []).some((entity) => entity.id === id)
+    ? (survivors.includes(id) ? survivors.filter((candidate) => candidate !== id) : [...survivors, id]) : survivors
+  if (nextIds.length === ids.length && nextIds.every((candidate, index) => candidate === ids[index])) return ids
+  return withSelection(nextIds).selectedIds
 }
 
 export const EDIT_OP_LABELS = Object.freeze({

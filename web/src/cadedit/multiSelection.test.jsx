@@ -95,6 +95,21 @@ it('SSD1-24A select-verbatim repeating an id preserves the session object', asyn
   expectSelection(h, ['7'])
 })
 
+it.each(['selectAdd', 'selectToggle'])('SSD1-24A-b %s replaces a ghost with singleton identity', async (action) => {
+  const h = await mountSession()
+  act(() => h.current.actions.select('missing'))
+  act(() => h.current.actions[action]('7'))
+  expectSelection(h, ['7'])
+  expect(h.current.selected.id).toBe('7')
+})
+it('SSD1-24A-b Draw posts exactly one createLine with a set selected', async () => {
+  const h = await mountSession()
+  selectPair(h)
+  h.worker.posted.length = 0
+  act(() => h.current.actions.create('createLine', { x: '0', y: '0', x2: '2', y2: '3', layer: '0' }))
+  expect(h.worker.posted).toEqual([{ type: 'applyEdit', op: 'createLine', payload: { x1: 0, y1: 0, x2: 2, y2: 3, layer: '0' } }])
+})
+
 it('SSD1-24A row1 replace then add holds a real set', async () => {
   const h = await mountSession()
   act(() => h.current.actions.selectReplace(['7']))
