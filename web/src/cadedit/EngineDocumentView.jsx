@@ -19,7 +19,7 @@ import { engineIntake, hexHandle } from './engineIntake.js'
 import { SESSION_ERROR } from './engineSession.js'
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
 
-export default function EngineDocumentView({ viewerRef = null, consoleIntake = null, onShown = null, onHidden = null, selectedHandle = null, onSelectedHandleChange = null, registerCanvasPick = null }) {
+export default function EngineDocumentView({ viewerRef = null, consoleIntake = null, onShown = null, onHidden = null, selectedHandle = null, onSelectedHandleChange = null, registerCanvasPick = null, registerCanvasMarquee = null }) {
   const { session, highlightedIds } = useEngineSessionContext()
   const showing = session.engineParsed && session.errorKind !== SESSION_ERROR.CRASHED
   const entities = showing ? session.entities : null
@@ -52,6 +52,22 @@ export default function EngineDocumentView({ viewerRef = null, consoleIntake = n
     })
     return () => registerCanvasPick(null)
   }, [canvasShown, registerCanvasPick])
+  useEffect(() => {
+    if (!canvasShown || typeof registerCanvasMarquee !== 'function') return undefined
+    registerCanvasMarquee((handles, { additive } = {}) => {
+      const { session: current, entities: currentEntities } = canvasSessionRef.current
+      const byHandle = new Map((currentEntities || []).map((entity) => [hexHandle(entity.id), entity.id]))
+      const ids = additive ? [...current.selectedIds] : []
+      const seen = new Set(ids)
+      for (const handle of handles) {
+        const id = byHandle.get(handle)
+        if (id !== undefined && !seen.has(id)) { seen.add(id); ids.push(id) }
+      }
+      if (additive && ids.length === current.selectedIds.length) return
+      current.actions.selectReplace(ids)
+    })
+    return () => registerCanvasMarquee(null)
+  }, [canvasShown, registerCanvasMarquee])
   /** one-way: console handle -> engine selection, on change */
   useEffect(() => {
     const previous = lastSelectedHandleRef.current
