@@ -459,6 +459,19 @@ def build_suites() -> List[Suite]:
         # the first green run is the measurement.
         Suite("server-solar-terrain", "server tests/test_solar_terrain.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_terrain.py"), 356),
+        # W5 ground ports (2026-09-23): server/solar_ground_terrain.py (terrain import
+        # from 3D faces, the committed terrain grid, the slope mesh, tracker slope
+        # violations and their clear) and server/solar_ground_frames.py (frame generate,
+        # collision, piling, pile length range). Both take and return NEUTRAL structures
+        # only (S37): the plugin's drawing storage encoding is not in this public repo.
+        # Each suite ports the plugin's own unit tests case for case and adds the
+        # hand-computed rules, bounds and refusals; every input is authored in the file,
+        # so the floor is the exact count on every runner. COUNTED from the collected
+        # cases: terrain 81 tests + 36 more parametrizations = 117, frames 95 tests.
+        Suite("server-solar-ground-terrain", "server tests/test_solar_ground_terrain.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_ground_terrain.py"), 117),
+        Suite("server-solar-ground-frames", "server tests/test_solar_ground_frames.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_ground_frames.py"), 95),
         # S31 XLSX codec (2026-09-22): server/solar_xlsx.py, a small standard-library
         # reader and writer (zipfile plus xml.etree only, NO openpyxl, because this
         # repo declares no such dependency). Covers the round trip, the four
@@ -1767,6 +1780,18 @@ def build_suites() -> List[Suite]:
         # over 4 literal malformed sets = 11.
         Suite("scripts-solar-studio-evidence", "scripts test_solar_studio_evidence.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_studio_evidence.py"), 11),
+        # S37 (2026-09-23): Studio's ground evidence per G14 step from a G11 intake
+        # (contract v6, G10 to G16), each step computed from Studio's own prior state
+        # (G13). Small intakes authored in the file cover every row kind, id and vertex
+        # ordering, pile-set grouping, the terrain-mesh row, chaining, the frozen
+        # comparator passing every document against itself, the comparator's document
+        # bounds, and malformed-intake refusals. COUNTED: 18 tests + 10 more
+        # parametrizations of the malformed-intake case = 29 collected; the one CLI case
+        # that commits its intake needs a git executable, so the floor is the 28 that
+        # never skip and that one skip reason is allowed.
+        Suite("scripts-solar-ground-studio-evidence", "scripts test_solar_ground_studio_evidence.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_studio_evidence.py"), 28,
+              allowed_skip_reasons=(r"needs a git executable",)),
         # The parity oracle itself: the ledger rules, the receipt rules, the fail-closed
         # inputs, and (S29, 2026-09-22) the declared divergence a known plugin defect
         # gets, which is the ONLY way a failing comparator settles a capability: the
