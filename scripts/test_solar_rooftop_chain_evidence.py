@@ -252,7 +252,15 @@ def test_the_committed_intake_runs_every_step(committed):
     assert [g["name"] for g in string_data["groups"]] == [
         "Group 1", "Group 10", "Group 11", "Group 2", "Group 3", "Group 4", "Group 5", "Group 6", "Group 7",
         "Group 8", "Group 9"]
-    assert all(g["strings"] == [] for g in string_data["groups"])   # the intake records no group outline
+    # G29: every group carries a non-empty list of closed [x, y] outlines, and both strings' ends lie in Group 11's.
+    for g in data["panel_groups"]:
+        assert set(g) == {"handle", "name", "outlines"} and g["outlines"], g["handle"]
+        assert all(len(o) >= 3 and all(len(p) == 2 for p in o) for o in g["outlines"]), g["handle"]
+    assert [(g["handle"], g["strings"]) for g in string_data["groups"] if g["strings"]] == [("A646", [
+        {"handle": "A912", "startPoint": {"handle": "A913", "coordinate": "15993.47,3179.76"},
+         "endPoint": {"handle": "A914", "coordinate": "16920.47,3179.76"}},
+        {"handle": "A90E", "startPoint": {"handle": "A90F", "coordinate": "15993.47,3237.56"},
+         "endPoint": {"handle": "A910", "coordinate": "16920.47,3237.56"}}])]
 
     assert [(r["name"], r["value"]) for r in rows_of(docs["c11"])] == [("rebuilt-strings", 173)]
     assert len(state["strings"]) == len(data["strings"]) == 173
