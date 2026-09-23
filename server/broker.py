@@ -56,7 +56,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 LOGGER = logging.getLogger(__name__)
 
@@ -1305,6 +1305,13 @@ class BrokerRunRequest(BaseModel):
     # identifies the WORK, and adding a per-job field would make an existing
     # ledger row's fingerprint unrecognisable on replay.
     job_id: Optional[str] = None
+    entity_scope: Optional[Dict[str, Any]] = None
+
+    @field_validator("entity_scope", mode="before")
+    @classmethod
+    def validate_entity_scope(cls, value):
+        from entity_scope import validate_binding
+        return validate_binding(value) if value is not None else None
 
 
 class PlanBody(BaseModel):
@@ -1328,6 +1335,7 @@ class BrokerPlanRunRequest(BaseModel):
     checkout_holder: Optional[str] = None
     checkout_fence: Optional[int] = None
     job_id: Optional[str] = None
+    entity_scope: Optional[Dict[str, Any]] = None
 
     @model_validator(mode="after")
     def consistent_plan_identity(self) -> BrokerPlanRunRequest:
@@ -1336,6 +1344,12 @@ class BrokerPlanRunRequest(BaseModel):
         if self.dwg_version != self.plan.parent_version:
             raise ValueError("plan request names a different parent")
         return self
+
+    @field_validator("entity_scope", mode="before")
+    @classmethod
+    def validate_entity_scope(cls, value):
+        from entity_scope import validate_binding
+        return validate_binding(value) if value is not None else None
 
 
 class _BlankDwgBrokerRunRequest(BrokerRunRequest):
@@ -1573,6 +1587,8 @@ def _broker_request_fingerprint(req: Union[BrokerRunRequest, BrokerPlanRunReques
             ).hexdigest()
         if _is_campaign_host_fixture(req):
             fingerprint_input["fixture_profile"] = _CAMPAIGN_HOST_FIXTURE_PROFILE
+    if req.entity_scope is not None:
+        fingerprint_input["entity_scope"] = req.entity_scope
     canonical = json.dumps(
         fingerprint_input, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -2775,6 +2791,14 @@ def _broker_run_request(req: Union[BrokerRunRequest, BrokerPlanRunRequest]) -> J
         "status": "unknown",
     }
     from product_capability_availability import is_cloud_proposal, is_local_graph_commit
+    if (isinstance(req, BrokerRunRequest) and req.entity_scope is not None
+            and (is_local_graph_commit(tool) or req.file_only or req.test_source is not None)):
+        env, status = _classified_bad_params(
+            "entity_scope_mutation_unsupported",
+            "Entity-scoped turns can only read or run supported drawing writes.",
+            tool=tool.get("name"),
+        )
+        return JSONResponse(status_code=status, content=env)
     # aps_endpoint stays the process's APS base URL for every kind: the frozen ledger line requires a string
     # and the PostgreSQL column is NOT NULL. aps_live False is what says APS was not used.
     if is_cloud_proposal(tool):

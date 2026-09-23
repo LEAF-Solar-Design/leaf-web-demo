@@ -71,7 +71,10 @@ def validate_request(value):
 def stored_binding(payload):
     if not isinstance(payload, dict) or "entity_scope" not in payload:
         return None
-    value = payload["entity_scope"]
+    return validate_binding(payload["entity_scope"])
+
+
+def validate_binding(value):
     if (type(value) is not dict
             or set(value) != {"drawing_id", "base_version", "base_source_sha256", "allowed_handles"}
             or not _identifier(value["drawing_id"])
