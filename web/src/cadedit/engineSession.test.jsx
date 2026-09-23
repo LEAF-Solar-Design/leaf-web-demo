@@ -626,6 +626,86 @@ describe('save completion', () => {
     expect(session.current.savedVersion).toBe(5)
   })
 
+  it('SSD1-24F row1: an offline save fails in words and keeps the edit', async () => {
+    const save = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'))
+    const onSaved = vi.fn()
+    const session = await editedSession({ headVersion: 4, save }, onSaved)
+    await act(async () => { await session.current.actions.save() })
+
+    expect(session.current.status).toBe('Save failed: Failed to fetch')
+    expect(session.current.errorKind).toBe(SESSION_ERROR.SAVE)
+    expect(session.current.receipt).toBeNull()
+    expect(session.current.savedVersion).toBeNull()
+    expect(session.current.dirty).toBe(true)
+    expect(session.current.savedBytes).toEqual(new Uint8Array([1, 2, 3]))
+    expect(session.current.busy).toBe(false)
+    expect(onSaved).not.toHaveBeenCalled()
+    expect(save).toHaveBeenCalledTimes(1)
+  })
+
+  it('SSD1-24F row2: local editing keeps working after the failed save', async () => {
+    const save = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'))
+    const session = await editedSession({ headVersion: 4, save })
+    await act(async () => { await session.current.actions.save() })
+
+    const posted = session.workers[0].posted
+    const before = posted.length
+    act(() => session.current.actions.applyEdit('move', { dx: '2', dy: '0' }))
+    expect(posted).toHaveLength(before + 1)
+    expect(posted[before]).toMatchObject({ type: 'applyEdit', op: 'move' })
+  })
+
+  it('SSD1-24F row3: nothing retries on its own', async () => {
+    const save = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'))
+    const session = await editedSession({ headVersion: 4, save })
+    await act(async () => { await session.current.actions.save() })
+
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)) })
+    expect(save).toHaveBeenCalledTimes(1)
+  })
+
+  it('SSD1-24F row4: the explicit retry after reconnect settles from the receipt', async () => {
+    const save = vi.fn()
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValueOnce(receipt)
+    const onSaved = vi.fn()
+    const session = await editedSession({ headVersion: 4, save }, onSaved)
+    await act(async () => { await session.current.actions.save() })
+    await act(async () => { await session.current.actions.save() })
+
+    expect(save).toHaveBeenCalledTimes(2)
+    expect(onSaved).toHaveBeenCalledTimes(1)
+    expect(onSaved).toHaveBeenCalledWith(receipt)
+    expect(session.current.dirty).toBe(false)
+    expect(session.current.savedVersion).toBe(5)
+    expect(session.current.status).toContain('Saved as version 5 (parent 4)')
+    expect(session.current.errorKind).toBeNull()
+  })
+
+  it('SSD1-24F row5: an unknown outcome claims nothing', async () => {
+    const message = 'the save may have landed; reload before saving again'
+    const save = vi.fn().mockRejectedValue(Object.assign(new Error(message), { outcomeUnknown: true }))
+    const onSaved = vi.fn()
+    const session = await editedSession({ headVersion: 4, save }, onSaved)
+    await act(async () => { await session.current.actions.save() })
+
+    expect(session.current.status).toBe(message)
+    expect(session.current.dirty).toBe(true)
+    expect(session.current.receipt).toBeNull()
+    expect(onSaved).not.toHaveBeenCalled()
+  })
+
+  it('SSD1-24F row6: two clicks while offline make one attempt', async () => {
+    const save = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'))
+    const session = await editedSession({ headVersion: 4, save })
+    await act(async () => {
+      await Promise.all([session.current.actions.save(), session.current.actions.save()])
+    })
+
+    expect(save).toHaveBeenCalledTimes(1)
+    expect(session.current.status).toBe('Save failed: Failed to fetch')
+  })
+
   it('will not save with no target, and will not save unedited bytes', async () => {
     const save = vi.fn()
     const session = mountSession({ saveTarget: { headVersion: 1, save } })
