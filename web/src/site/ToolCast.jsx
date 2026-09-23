@@ -104,6 +104,16 @@ import DemoConversationPanel, { demoReplyFor } from '../demo/DemoConversationPan
 import FirstRunCoach from '../demo/FirstRunCoach.jsx'
 import { shouldStartTour } from '../demo/tourEntry.js'
 import * as mockVersions from '../mock/mockVersions.js'
+import { humanizeError, MSG_GENERIC } from '../errorHumanize.js'
+
+export function panelErrorText(value) {
+  const text = typeof value === 'string'
+    ? value
+    : value && typeof value === 'object' && typeof value.message === 'string' && value.message.length > 0
+      ? humanizeError(value)
+      : MSG_GENERIC
+  return text.slice(0, 300)
+}
 
 const CAT_REQUEST = 'Rearrange the existing panels in this drawing into the shape of a sitting cat. Preserve every panel, create a new version, and show me the proposed change before anything runs.'
 // Catalog is browsable with no drawing open (rail row B2: the rail advertises
@@ -1507,7 +1517,7 @@ export default function ToolCast({
               face for .tc-bar-inert .tc-run lives in landing.css (record
               R2B, not this one). */}
           {barInert && (
-            <div className="strip-decision enter" role="status" data-testid="tc-bar-inert-strip">
+            <div className="strip-decision enter" role="status" data-testid="tc-bar-inert-strip" data-escape-passive="true">
               <span className="dot hollow" aria-hidden="true" />
               <span className="strip-sentence">Open the sample rooftop to run a request.<span className="dim"> Nothing runs while you are signed out.</span></span>
               <button type="button" className="chip-act" onClick={openSampleRooftop}>Open the sample rooftop</button>
@@ -2201,7 +2211,7 @@ export default function ToolCast({
               onBackToHead={drawing.actions.backToHead}
             />
             {drawing.historyLoading && <div className="tc-panel-note">Loading versions</div>}
-            {drawing.historyError && <div className="tc-panel-error">{drawing.historyError}</div>}
+            {drawing.historyError && <div className="tc-panel-error">{panelErrorText(drawing.historyError)}</div>}
             <VersionList
               variant="tab"
               versions={drawing.history?.versions}

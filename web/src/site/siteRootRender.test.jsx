@@ -11,7 +11,7 @@
 // under jsdom); the REAL modules under test are SiteRoot's branch logic and
 // runtimeFlags' module-eval read — which is why every case resets the module
 // registry and sets the flag global BEFORE the dynamic import.
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('./StageScene.jsx', () => ({
@@ -54,6 +54,34 @@ async function mountAppRoute(flagValue) {
 }
 
 describe('SiteRoot arm swap under the one-shell rail', () => {
+  it('SSD1-B row1: a passive decision strip never blocks the Escape eject, an owned one still does', async () => {
+    vi.resetModules()
+    globalThis.__LEAF_FLAGS = { oneShell: '0' }
+    window.history.pushState({}, '', '/try')
+    const router = await import('./router.js')
+    const navigate = vi.spyOn(router, 'navigate').mockImplementation(() => {})
+    const strip = document.createElement('div')
+    strip.className = 'strip-decision'
+    strip.setAttribute('data-escape-passive', 'true')
+    try {
+      const { default: SiteRoot } = await import('./SiteRoot.jsx')
+      render(<SiteRoot />)
+      expect(screen.getByTestId('stage-stub').getAttribute('data-scene')).toBe('tool')
+      document.body.appendChild(strip)
+      fireEvent.keyDown(window, { key: 'Escape' })
+      expect(navigate).toHaveBeenCalledTimes(1)
+      expect(navigate).toHaveBeenCalledWith('/')
+
+      navigate.mockClear()
+      strip.removeAttribute('data-escape-passive')
+      fireEvent.keyDown(window, { key: 'Escape' })
+      expect(navigate).not.toHaveBeenCalled()
+    } finally {
+      strip.remove()
+      navigate.mockRestore()
+    }
+  })
+
   it("rail '1' mounts the console INSIDE the studio shell with its ground", async () => {
     await mountAppRoute('1')
     const shell = document.querySelector('.studio-shell[data-mode="console"]')

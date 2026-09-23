@@ -6,6 +6,7 @@
 // the two-drifting-call-sites defect the module retires.
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
+import { humanizeError } from '../errorHumanize.js'
 
 vi.mock('../api.js', () => ({
   getDrawingIntake: vi.fn(),
@@ -45,6 +46,12 @@ describe('console mount', () => {
 })
 
 describe('operator mount', () => {
+  it('SSD1-B row2: the operator mount formats version errors as text', () => {
+    const result = operatorWorkspaceMount().drawingOptions.formatError(new Error('boom'))
+    expect(typeof result).toBe('string')
+    expect(result).toBe(humanizeError(new Error('boom')))
+  })
+
   it('never retries not_found and binds every loader to the public-demo flag', () => {
     const mount = operatorWorkspaceMount({ publicDemo: true })
     expect(mount.retryNotFound).toBe(false)

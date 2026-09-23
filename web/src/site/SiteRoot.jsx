@@ -127,7 +127,8 @@ export default function SiteRoot() {
       // reach navigate('/') here (ACCEPTANCE; APP_ONLY_HOSTS redirect would
       // discard live console work). See routeScene.js.
       if (e.key === 'Escape' && sceneAllowsMarketingEject(scene)) {
-        const ownedSurface = document.querySelector('.proj-menu, .route, .strip-decision, .resolver, .drawer-layer .drawer, .claude-pop')
+        // A passive status strip has no dialog and never holds Escape; every other decision strip still does.
+        const ownedSurface = document.querySelector('.proj-menu, .route, .strip-decision:not([data-escape-passive]), .resolver, .drawer-layer .drawer, .claude-pop')
         if (!ownedSurface) navigate('/')
       }
       else if ((e.key === 't' || e.key === 'T') && scene === 'site') enterWorkspace()

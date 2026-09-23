@@ -146,7 +146,8 @@ describe('pilot round 2: the signed-out stage reads as a state, not a failure', 
     expect(toolCast).toMatch(/^  const openSampleRooftop = useCallback\(\(\) => \{ window\.location\.href = '\/try\?demo=1' \}, \[\]\)$/m)
     const tcBar = barBlock.slice(barBlock.indexOf('className={`tc-bar '), barBlock.indexOf('<RoutePanel'))
     expect(tcBar).toMatch(/\$\{barInert \? ' tc-bar-inert' : ''\}/)
-    expect(tcBar).toMatch(/\{barInert && \(\s*<div className="strip-decision enter" role="status" data-testid="tc-bar-inert-strip">/)
+    // The passive mark lets SiteRoot's Escape eject pass this status strip (ssd1-hp01).
+    expect(tcBar).toMatch(/\{barInert && \(\s*<div className="strip-decision enter" role="status" data-testid="tc-bar-inert-strip" data-escape-passive="true">/)
     expect(tcBar).toMatch(/<button type="button" className="chip-act" onClick=\{openSampleRooftop\}>Open the sample rooftop<\/button>/)
     // SessionGate's Explore the demo is the same handler, not a second copy.
     expect(toolCast).toMatch(/onDemo=\{openSampleRooftop\}/)
