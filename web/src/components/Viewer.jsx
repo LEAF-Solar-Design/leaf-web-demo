@@ -561,13 +561,15 @@ const Viewer = forwardRef(function Viewer(
     // --- picking: click (not drag) -> raycast -> handle ---------------------
     const raycaster = new THREE.Raycaster()
     const ndc = new THREE.Vector2()
-    let down = null // { x, y, t }
+    let down = null // { x, y, t, pointerId }
     function onPointerDown(e) {
       if (e.button !== 0) return // only left-click selects
-      down = { x: e.clientX, y: e.clientY, t: performance.now() }
+      if (down && down.pointerId !== e.pointerId && e.isPrimary === false) return
+      down = { x: e.clientX, y: e.clientY, t: performance.now(), pointerId: e.pointerId }
     }
     function onPointerUp(e) {
       if (!down) return
+      if (down.pointerId !== e.pointerId) return
       const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y)
       const dt = performance.now() - down.t
       const wasClick = moved < CLICK_MOVE_PX && dt < CLICK_MAX_MS
@@ -586,6 +588,9 @@ const Viewer = forwardRef(function Viewer(
       const handle = pickHandleFromHits(hits)
       const cb = onSelectRef.current
       if (cb) cb(handle, { additive: e.shiftKey || e.ctrlKey || e.metaKey })
+    }
+    function onPointerCancel(e) {
+      if (down && down.pointerId === e.pointerId) down = null
     }
     const dom = renderer.domElement
     let candidate = null
@@ -714,6 +719,7 @@ const Viewer = forwardRef(function Viewer(
     window.addEventListener('pointercancel', orphanRelease, true)
     dom.addEventListener('pointerdown', onPointerDown)
     dom.addEventListener('pointerup', onPointerUp)
+    dom.addEventListener('pointercancel', onPointerCancel)
 
     let raf
     function animate() {
@@ -807,6 +813,7 @@ const Viewer = forwardRef(function Viewer(
       window.removeEventListener('pointerup', orphanRelease, true)
       window.removeEventListener('pointercancel', orphanRelease, true)
       dom.removeEventListener('pointerup', onPointerUp)
+      dom.removeEventListener('pointercancel', onPointerCancel)
       controls.removeEventListener('change', recordCameraPose)
       controls.removeEventListener('start', onControlsStart)
       controls.removeEventListener('change', onControlsChange)
