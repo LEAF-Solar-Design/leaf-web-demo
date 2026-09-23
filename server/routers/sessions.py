@@ -1397,11 +1397,14 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
             current = request_journal.get_request(journal_request_id)
             if current is not None and current["state"] != "admitted":
                 return _journal_response(current, tenant)
-            request_journal.fail_admitted(
+            if not request_journal.fail_admitted(
                 journal_request_id,
                 response_status=response.status_code,
                 response=_response_content(response),
-            )
+            ):
+                current = request_journal.get_request(journal_request_id)
+                if current is not None and current["state"] != "admitted":
+                    return _journal_response(current, tenant)
         return response
     except turn_runner.TurnRejected as exc:
         # Same rule, second site: give the approval back on every rejection
@@ -1450,17 +1453,25 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
         )
         if journal_request_id is not None:
             if exc.turn_id is not None:
-                request_journal.finish_request(
+                if not request_journal.finish_request(
                     journal_request_id, exc.turn_id, state="failed",
                     response_status=response.status_code,
                     response=_response_content(response),
-                )
+                ):
+                    current = request_journal.get_request(journal_request_id)
+                    if current is not None and not (
+                        current["state"] == "executing" and current.get("turn_id") == exc.turn_id
+                    ):
+                        return _journal_response(current, tenant)
             else:
-                request_journal.fail_admitted(
+                if not request_journal.fail_admitted(
                     journal_request_id,
                     response_status=response.status_code,
                     response=_response_content(response),
-                )
+                ):
+                    current = request_journal.get_request(journal_request_id)
+                    if current is not None and current["state"] != "admitted":
+                        return _journal_response(current, tenant)
         return response
 
     if journal_request_id is not None:
