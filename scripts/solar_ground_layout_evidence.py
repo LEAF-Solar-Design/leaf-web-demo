@@ -80,13 +80,13 @@ LAYOUT_ORDER = ("a3", "a4", "a8", "a9", "a11")
 BOUNDARY_PICK = "LEAF-BOUNDARY"   # G20: the boundary answer is the LEAF-BOUNDARY polyline
 SETBACK_KIND = "Array"
 SETBACK_DISTANCE = 5
-# G20: the ordered non-default answers per step (every other prompt takes its default).
+# G22: the frozen answers table, every value the string recorded for that prompt.
 STEP_ANSWERS = {
     "a3": [],
     "a4": [],
-    "a8": [BOUNDARY_PICK],
-    "a9": [BOUNDARY_PICK],
-    "a11": [SETBACK_KIND, BOUNDARY_PICK, SETBACK_DISTANCE],
+    "a8": ["select:" + BOUNDARY_PICK],
+    "a9": ["select:" + BOUNDARY_PICK],
+    "a11": [SETBACK_KIND, "select:" + BOUNDARY_PICK, str(SETBACK_DISTANCE)],
 }
 UNIT = producer.UNIT
 

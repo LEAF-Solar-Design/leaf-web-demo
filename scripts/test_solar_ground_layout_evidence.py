@@ -205,7 +205,7 @@ def test_document_fields_parameters_and_hashes(docs):
         assert doc["entity_mapping"] == {i: i for i in ids(doc)}
         assert (doc["revision"], doc["state"], doc["survived_reopen"]) == (REVISION, "committed", True)
         assert doc["versions"]["capability"] == "0"
-    assert docs["a11"]["parameters"]["answers"] == ["Array", "LEAF-BOUNDARY", 5]
+    assert docs["a11"]["parameters"]["answers"] == ["Array", "select:LEAF-BOUNDARY", "5"]  # G22
 
 
 def test_comparator_accepts_every_document_against_itself(docs):
