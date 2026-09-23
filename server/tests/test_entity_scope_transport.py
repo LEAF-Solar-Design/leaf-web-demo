@@ -394,22 +394,28 @@ def test_t23_submit_refuses_scope_on_campaign_paths(lane, extra):
     assert not lane.submissions
 
 
-@pytest.mark.parametrize("value", [B, B2, None, {}, [], True,
-    {**B, "extra": 1}, {**B, "drawing_id": "../D"}, {**B, "base_version": True},
-    {**B, "base_version": 0}, {**B, "base_version": 7.0}, {**B, "base_source_sha256": "A" * 64},
-    {**B, "allowed_handles": []}, {**B, "allowed_handles": ["AB12", "CD34"]},
-    {**B, "allowed_handles": ["bad handle"]}])
-def test_t24_validate_binding_matches_stored_binding(value):
-    outcomes = []
+@pytest.mark.parametrize("value,accepted", [
+    (B, True), (B2, True), (None, False), ({}, False), ([], False), (True, False),
+    ({**B, "extra": 1}, False), ({**B, "drawing_id": "../D"}, False),
+    ({**B, "base_version": True}, False), ({**B, "base_version": 0}, False),
+    ({**B, "base_version": 7.0}, False), ({**B, "base_source_sha256": "A" * 64}, False),
+    ({**B, "allowed_handles": []}, False),
+    ({**B, "allowed_handles": ["AB12", "CD34"]}, False),
+    ({**B, "allowed_handles": ["bad handle"]}, False)])
+def test_t24_validate_binding_matches_stored_binding(value, accepted):
     for validate in (entity_scope.validate_binding,
                      lambda v: entity_scope.stored_binding({"entity_scope": v})):
-        try:
+        if accepted:
             result = validate(value)
-        except entity_scope.ScopeError as exc:
-            outcomes.append((str(exc), exc.status_code))
-            assert exc.status_code == 409
-        else:
+            assert isinstance(result, dict)
             assert result == value and result is not value
             assert result["allowed_handles"] is not value["allowed_handles"]
-            outcomes.append(result)
-    assert outcomes[0] == outcomes[1]
+        else:
+            with pytest.raises(entity_scope.ScopeError) as exc:
+                validate(value)
+            assert exc.value.status_code == 409
+
+
+@pytest.mark.parametrize("value", [{}, {"other": 1}, "x"])
+def test_t24b_stored_binding_without_a_binding_is_none(value):
+    assert entity_scope.stored_binding(value) is None
