@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 import uuid
@@ -95,6 +97,47 @@ def proposal(lane, shapes=("proposed_run",), capability="drawing.write"):
 
 def starts(lane):
     return [e["data"] for e in lane.events() if e["type"] == "turn_started"]
+
+
+def watch_terminal(lane, monkeypatch):
+    """A wait(n=1) that returns once this lane's session has finished n WHOLE
+    terminal tails. drain() returns when active_turn_id clears, which the relay
+    does before its own policy auto-confirm check and before _kick_queued."""
+    kicks = []
+    cond = threading.Condition()
+    real_kick = turn_runner._kick_queued
+
+    def kick(session_id):
+        try:
+            return real_kick(session_id)
+        finally:
+            if session_id == lane.sid:
+                with cond:
+                    kicks.append(session_id)
+                    cond.notify_all()
+
+    monkeypatch.setattr(turn_runner, "_kick_queued", kick)
+
+    def wait(n=1):
+        with cond:
+            assert cond.wait_for(lambda: len(kicks) >= n, 10), f"terminal tail {n} never finished"
+
+    return wait
+
+
+def watch_confirm_starts(lane, monkeypatch):
+    """Record, for every confirm turn start_turn begins, whether it ran on the
+    test's own thread."""
+    starters = []
+    real_start = turn_runner.start_turn
+
+    def start(*args, **kwargs):
+        if kwargs.get("confirm") is not None and len(args) > 1 and args[1] == lane.sid:
+            starters.append(threading.current_thread() is threading.main_thread())
+        return real_start(*args, **kwargs)
+
+    monkeypatch.setattr(turn_runner, "start_turn", start)
+    return starters
 
 
 def refuse(lane, body, status, message=None):
@@ -223,10 +266,13 @@ def test_both_approval_event_shapes_preserve_binding(lane, shapes):
     assert not any(e["type"] == "error" for e in lane.events())
 
 
-def test_policy_resume_preserves_binding(lane, monkeypatch):
+def run_policy_resume(lane, monkeypatch):
+    wait_terminal = watch_terminal(lane, monkeypatch)
+    starters = watch_confirm_starts(lane, monkeypatch)
     proposal(lane, capability="drawing.read")
     assert lane.post({"text": "move A", "entity_scope": E}).status_code == 202
     lane.drain()
+    wait_terminal()
     session_store.get_or_create_session(lane.tenant, "D", scope_kind="entity", scope_handle="CD34")
     lane.stub.SCRIPT = [{"type": "turn_complete", "data": {"stop_reason": "end_turn"}}]
     monkeypatch.setattr(turn_runner.session_policy, "get_policy", lambda *a: "auto_approve_reads")
@@ -234,8 +280,90 @@ def test_policy_resume_preserves_binding(lane, monkeypatch):
     turn_runner._auto_confirm_reads(lane.tenant, lane.sid,
                                    {lane.cid: {"capability": "drawing.read"}}, None, "demo")
     lane.drain()
+    wait_terminal(2)
     assert [e["entity_scope"] for e in starts(lane)] == [B, B]
     assert lane.reads == [("D", 7)]
+    assert starters == [True]
+
+
+def test_policy_resume_preserves_binding(lane, monkeypatch):
+    run_policy_resume(lane, monkeypatch)
+
+
+# Force with barriers the order that failed before wait_terminal() existed:
+# the relay decides and consumes first, then starts its confirm turn only after
+# the test's final drain.
+def test_policy_resume_is_not_raced_by_the_proposal_terminal(lane, monkeypatch):
+    main = threading.main_thread()
+    relay_done = threading.Event()
+    final_drained = threading.Event()
+
+    def switched():
+        return turn_runner.session_policy.get_policy(lane.sid, lane.tenant) == "auto_approve_reads"
+
+    real_emit = turn_runner.telemetry_sink.emit
+
+    def emit(*args, **kwargs):
+        # The relay's tail runs after end_turn and before its own auto-confirm:
+        # hold it until the test switches the policy. This bound is EXPECTED
+        # to expire in the fixed flow: policy switches only after this tail ends.
+        if threading.current_thread() is not main and kwargs.get("session_id") == lane.sid:
+            _wait_until(switched, 2.0)
+        return real_emit(*args, **kwargs)
+
+    monkeypatch.setattr(turn_runner.telemetry_sink, "emit", emit)
+    real_auto = turn_runner._auto_confirm_reads
+
+    def auto(*args, **kwargs):
+        try:
+            return real_auto(*args, **kwargs)
+        finally:
+            if threading.current_thread() is not main and len(args) > 1 and args[1] == lane.sid:
+                relay_done.set()
+
+    monkeypatch.setattr(turn_runner, "_auto_confirm_reads", auto)
+    real_decide = session_store.decide_approval
+
+    def decide(*args, **kwargs):
+        # When the relay is racing, it decides first.
+        if threading.current_thread() is main and args and args[0] == lane.cid:
+            assert _wait_until(lambda: relay_done.is_set() or bool(
+                (session_store.get_approval(lane.cid) or {}).get("decided")), 5.0)
+        return real_decide(*args, **kwargs)
+
+    monkeypatch.setattr(session_store, "decide_approval", decide)
+    real_ensure = turn_runner._ensure_policy_resolution_event
+
+    def ensure(*args, **kwargs):
+        # The test's own call waits here until the relay has either consumed
+        # the approval or finished its auto-confirm, so the relay wins any race.
+        if threading.current_thread() is main and len(args) > 1 and args[1] == lane.cid:
+            assert _wait_until(lambda: relay_done.is_set() or bool(
+                (session_store.get_approval(lane.cid) or {}).get("consumed")), 5.0)
+        return real_ensure(*args, **kwargs)
+
+    monkeypatch.setattr(turn_runner, "_ensure_policy_resolution_event", ensure)
+    real_start = turn_runner.start_turn
+
+    def start(*args, **kwargs):
+        # A relay-started confirm turn begins only after the test's final drain.
+        if (kwargs.get("confirm") is not None and threading.current_thread() is not main
+                and len(args) > 1 and args[1] == lane.sid):
+            final_drained.wait(5.0)
+        return real_start(*args, **kwargs)
+
+    monkeypatch.setattr(turn_runner, "start_turn", start)
+    real_drain = lane.drain
+    drains = []
+
+    def drain():
+        real_drain()
+        drains.append(1)
+        if len(drains) == 2:
+            final_drained.set()
+
+    lane.drain = drain
+    run_policy_resume(lane, monkeypatch)
 
 
 @pytest.mark.parametrize("busy", [False, True])
