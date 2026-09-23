@@ -30,6 +30,9 @@ Literal ports of Branch2025 (read 2026-09-23 at C:/tmp/solar-parity/wt-b25-s51):
                                       the prompt order, PromptDouble and PromptString
   StringHomeRunCmd.cs:153-338         GetStringData and GetStringPanelGroupData: each string's two
                                       ends located in a panel group, the groups sorted by name
+  LeafSolarDesign.Core/PanelGroupData.cs:47-86, LeafSolarDesign.Core/PolylineExtensions.cs:89-114,
+  :357-453                            the group outlines (every block-definition polyline in world
+                                      coordinates) and PointIsInside, Weiler's quadrant-angle test
   LeafSolarDesign.Core/StringData.cs  the StringData.json shape and the "0.00" coordinate format
   BranchCmd.cs:18255-18354, :18464-18557
                                       STRINGREBUILD: every string vertex re-associated with the
@@ -69,6 +72,7 @@ MAX_PANELS_PER_STRING = 5_000
 MAX_PANELS = 500_000
 MAX_PANEL_GROUPS = 20_000
 MAX_OUTLINE_VERTICES = 100_000
+MAX_OUTLINE_VERTICES_TOTAL = 1_000_000   # across every group's outlines in one call
 MAX_FRAME_GROUPS = 10_000
 MAX_FRAMES_PER_GROUP = 100_000
 MAX_LABEL_FIELDS = 64
@@ -535,24 +539,55 @@ def _culture_name_key(name):
     return (tuple(primary), tuple(tertiary), name)
 
 
+def _quadrant(u, v, pu, pv):
+    """PointInPoly.GetQuadrant (PolylineExtensions.cs:363-368)."""
+    return (0 if v > pv else 3) if u > pu else (1 if v > pv else 2)
+
+
 def _point_inside(x, y, polygon):
-    """Even-odd containment of (x, y) in a closed outline polygon."""
-    inside = False
+    """Polyline.PointIsInside (PolylineExtensions.cs:89-114) through PointInPoly.PolygonContains
+    (:414-453), Weiler's incremental-angle test, ported literally: the polyline's vertices in
+    order (bulges ignored, as GetPoint2dAt reads them), the closing edge back to vertex 0 implied,
+    and inside only when the quadrant angle sums to +4 or -4. A point exactly on an edge or a
+    vertex is inside or outside exactly as the plugin's comparisons decide. No vertices: outside."""
     n = len(polygon)
-    j = n - 1
+    if n == 0:
+        return False   # pts.Count == 0 (:99)
+    quad = _quadrant(polygon[0][0], polygon[0][1], x, y)
+    angle = 0
     for i in range(n):
-        xi, yi = polygon[i]
-        xj, yj = polygon[j]
-        if (yi > y) != (yj > y) and x < (xj - xi) * (y - yi) / (yj - yi) + xi:
-            inside = not inside
-        j = i
-    return inside
+        u, v = polygon[i]
+        nu, nv = polygon[i + 1 if i + 1 < n else 0]
+        next_quad = _quadrant(nu, nv, x, y)
+        delta = next_quad - quad
+        # AdjustDelta (:382-398).
+        if delta == 3:
+            delta = -1
+        elif delta == -3:
+            delta = 1
+        elif delta in (2, -2):
+            # X_intercept(vertex, next_vertex, p.V) (:375-380); a +-2 step crosses p.V, so v != nv.
+            if nu - ((nv - y) * ((u - nu) / (v - nv))) > x:
+                delta = -delta
+        angle += delta
+        quad = next_quad
+    return angle == 4 or angle == -4
+
+
+def _outline_box(polygon):
+    """(min x, min y, max x, max y) of an outline. Outside it every vertex sits in one half-plane
+    of the test point, so the quadrant steps cancel and PolygonContains is false: the box test
+    only skips outlines the plugin's own test would reject."""
+    xs = [p[0] for p in polygon]
+    ys = [p[1] for p in polygon]
+    return min(xs), min(ys), max(xs), max(ys)
 
 
 def validate_panel_groups(panel_groups):
     """[{handle, name, panels?, outlines?}] in drawing order; returns normalized copies."""
     _bounded_list(panel_groups, MAX_PANEL_GROUPS, "panel groups")
     out, seen = [], set()
+    outline_vertices = 0
     for g in panel_groups:
         if not isinstance(g, dict) or not {"handle", "name"} <= set(g) or \
                 set(g) - {"handle", "name", "panels", "outlines"}:
@@ -566,11 +601,15 @@ def validate_panel_groups(panel_groups):
             item["panels"] = [neutral_handle(p, "panel group panel")
                               for p in _bounded_list(g["panels"], MAX_PANELS, "panel group panels")]
         if "outlines" in g:
+            # Every polyline in the block definition is an outline (PanelGroupData.cs:73-82), whatever
+            # its vertex count; PointIsInside decides containment on it as it stands.
             outlines = []
             for poly in _bounded_list(g["outlines"], MAX_OUTLINE_VERTICES, "panel group outlines"):
                 pts = [_xy(v, "outline vertex") for v in _bounded_list(poly, MAX_OUTLINE_VERTICES, "outline")]
-                if len(pts) < 3:
-                    raise RooftopInputError("an outline needs at least 3 vertices")
+                outline_vertices += len(pts)
+                if outline_vertices > MAX_OUTLINE_VERTICES_TOTAL:
+                    raise RooftopBoundsError(
+                        f"panel group outlines hold more than {MAX_OUTLINE_VERTICES_TOTAL} vertices")
                 outlines.append(pts)
             item["outlines"] = outlines
         out.append(item)
@@ -578,20 +617,31 @@ def validate_panel_groups(panel_groups):
 
 
 def _group_locator(panel_groups):
-    """The group an end lies in: by outline containment when the groups carry outlines (the
-    plugin's GetStringPanelGroupData, StringHomeRunCmd.cs:313-338, first outline that holds the
-    marker), else by the panel at that end belonging to the group's panels.
+    """The group an end lies in: by outline containment when the groups carry outlines (G29),
+    else by the panel at that end belonging to the group's panels (the pre-G29 intake shape).
 
-    A group that carries neither is a group with no outline polyline: the plugin's dictionary
-    (:186-195) holds no outline for it, so no end lies in it and every string misses it (:243-246).
-    The committed rooftop intake records groups as {handle, name} only, so there every group is
-    listed with no strings."""
+    The outline path is the plugin's own. GetStringData (StringHomeRunCmd.cs:186-195) keys every
+    outline polyline of every panel group, groups in GetPanelGroupData order and each group's
+    outlines in block-definition order (PanelGroupData.cs:47-86, world coordinates through the
+    insert's BlockTransform), into one insertion-ordered dictionary; GetStringPanelGroupData
+    (:313-338) walks it and returns the group of the FIRST outline whose PointIsInside holds the
+    end marker's insertion point. A group with no outline polyline has no dictionary entry, so no
+    end lies in it and every string misses it (:243-246). The committed rooftop intake records
+    groups as {handle, name} only, so there every group is listed with no strings.
+
+    Linear in strings x outline vertices, as the plugin is; each outline's bounding box is taken
+    once and skips outlines whose quadrant test is provably false (see _outline_box)."""
     with_outlines = [g for g in panel_groups if "outlines" in g]
     if with_outlines:
+        # The plugin's mGroupPolylinePanelGroupDataDictionary, flattened in insertion order.
+        keyed = [(_outline_box(poly), poly, g["handle"])
+                 for g in with_outlines for poly in g["outlines"] if poly]
+
         def by_point(point, panel):
-            for g in with_outlines:
-                if any(_point_inside(point[0], point[1], poly) for poly in g["outlines"]):
-                    return g["handle"]
+            x, y = point[0], point[1]
+            for (x0, y0, x1, y1), poly, handle in keyed:
+                if x0 <= x <= x1 and y0 <= y <= y1 and _point_inside(x, y, poly):
+                    return handle
             return None
         return by_point
     owner = {}
@@ -609,8 +659,9 @@ def string_data(panel_groups, selected_strings):
     the command writes no file.
 
     Every panel group gets a group entry {handle, name, strings}; a selected string joins the
-    group both of its ends lie in (a string whose ends lie in two groups, or in none, joins no
-    group, :220-246). A string without both end markers raises inside the plugin's loop, which
+    group both of its ends lie in, each end located by its marker's insertion point in the group
+    outlines (GetStringPanelGroupData, :313-338; see _group_locator), and a string whose ends lie
+    in two groups, or in none, joins no group (:220-246). A string without both end markers raises inside the plugin's loop, which
     leaves the group list empty (:213-216, :264-267), so no file is written. The groups are sorted
     by name (:262); strings keep the selection order. The serializer writes indented JSON with
     two-space indents, CRLF line ends and no trailing newline (:277-287)."""

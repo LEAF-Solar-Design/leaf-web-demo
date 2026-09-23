@@ -6,6 +6,8 @@ FrameGroupOps (find, delete, every rename outcome), the frame-group create, list
 commands, the export-settings prompt (defaults, the G22 answers, orientation truncation, the
 negative-value rule), the "0.00" coordinate format, the StringData.json text byte for byte
 (group order, empty groups, a string across two groups, a missing marker, outline containment),
+the G29 outline assignment (the plugin's quadrant-angle PointIsInside on edges, diagonals, notches
+and multiple windings, first outline in group order, a group's several outlines),
 the rebuild's nearest-panel search and count, the setting canonicalization, and the bounds.
 Every input is authored in this file.
 """
@@ -355,6 +357,123 @@ def test_string_data_lists_groups_without_outlines_with_no_strings():
     data = json.loads(chain.string_data([{"handle": "D2", "name": "y"}, {"handle": "D1", "name": "x"}], [s]))
     assert data == {"groups": [{"handle": "D1", "name": "x", "strings": []},
                                {"handle": "D2", "name": "y", "strings": []}]}
+
+
+SQUARE = [[0, 0], [10, 0], [10, 10], [0, 10]]
+
+
+def _outline_groups():
+    # The _groups() scenario rebuilt on G29 outlines: B2's outline holds both of A1's ends, B10's
+    # holds only A4's end, B3 carries no outline polyline.
+    return [{"handle": "B2", "name": "Group 2", "outlines": [[[0.5, 1.5], [5, 1.5], [5, 5], [0.5, 5]]]},
+            {"handle": "B10", "name": "Group 10", "outlines": [[[0.9, 0.9], [1.1, 0.9], [1.1, 1.1], [0.9, 1.1]]]},
+            {"handle": "B3", "name": "group 3"}]
+
+
+def test_string_data_text_byte_for_byte_from_outlines():
+    s1 = string("A1", ["10", "11"], start={"handle": "A2", "at": [1.005, 2]},
+                end={"handle": "A3", "at": [3.0, 4.456]})
+    s2 = string("A4", ["11", "12"], start={"handle": "A5", "at": [0, 0]}, end={"handle": "A6", "at": [1, 1]})
+    assert chain.string_data(_outline_groups(), [s1, s2]) == EXPECTED_STRING_DATA
+
+
+@pytest.mark.parametrize("point,inside", [
+    ((5, 5), True), ((0, 5), True), ((5, 0), True), ((0, 0), True),     # left and bottom edges hold
+    ((10, 5), False), ((5, 10), False), ((10, 10), False),               # right and top edges do not
+    ((-1, 5), False), ((11, 5), False), ((5, -1), False), ((5, 11), False)])
+def test_point_inside_is_the_plugins_quadrant_test_on_the_edges(point, inside):
+    # PointInPoly.GetQuadrant (PolylineExtensions.cs:363-368) compares with strict >, so the
+    # low edges fall inside and the high edges outside.
+    assert chain._point_inside(point[0], point[1], [tuple(p) for p in SQUARE]) is inside
+
+
+def test_point_inside_diagonal_edge_takes_the_intercept_branch():
+    # A +-2 quadrant step runs X_intercept (:375-380, :390-396); a point on the hypotenuse is out.
+    tri = [(0.0, 0.0), (10.0, 0.0), (0.0, 10.0)]
+    assert chain._point_inside(2, 2, tri) and not chain._point_inside(5, 5, tri)
+    assert not chain._point_inside(6, 6, tri)
+
+
+def test_point_inside_concave_notch_is_outside():
+    u_shape = [(0.0, 0.0), (30.0, 0.0), (30.0, 30.0), (20.0, 30.0), (20.0, 10.0), (10.0, 10.0),
+               (10.0, 30.0), (0.0, 30.0)]
+    assert chain._point_inside(5, 25, u_shape) and chain._point_inside(25, 25, u_shape)
+    assert not chain._point_inside(15, 25, u_shape) and chain._point_inside(15, 5, u_shape)
+
+
+def test_point_inside_needs_a_winding_of_exactly_one():
+    # (angle == +4) || (angle == -4) (:447): a doubly or triply wound outline holds nothing, where
+    # an even-odd test would call the triple winding inside.
+    once = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]
+    assert chain._point_inside(5, 5, once) and chain._point_inside(5, 5, once[::-1])
+    assert not chain._point_inside(5, 5, once * 2)
+    assert not chain._point_inside(5, 5, once * 3)
+
+
+def test_point_inside_empty_and_degenerate_outlines_hold_nothing():
+    assert not chain._point_inside(0, 0, [])
+    assert not chain._point_inside(0, 0, [(0.0, 0.0)])
+    assert not chain._point_inside(1, 0, [(0.0, 0.0), (2.0, 0.0)])
+
+
+def test_outline_box_only_skips_what_the_quadrant_test_rejects():
+    import random
+    rng = random.Random(29)
+    for _ in range(300):
+        poly = [(rng.uniform(-5, 5), rng.uniform(-5, 5)) for _ in range(rng.randint(1, 9))]
+        x0, y0, x1, y1 = chain._outline_box(poly)
+        for _ in range(20):
+            x, y = rng.uniform(-8, 8), rng.uniform(-8, 8)
+            if not (x0 <= x <= x1 and y0 <= y <= y1):
+                assert not chain._point_inside(x, y, poly)
+        for x, y in poly:   # vertices sit on the box, never pruned
+            assert x0 <= x <= x1 and y0 <= y <= y1
+
+
+def test_string_data_first_outline_in_group_order_wins():
+    # GetStringPanelGroupData breaks on the first dictionary outline that holds the end (:327-331);
+    # the dictionary is filled group by group in drawing order (:186-195), not by name.
+    groups = [{"handle": "E1", "name": "Zed", "outlines": [SQUARE]},
+              {"handle": "E2", "name": "Alpha", "outlines": [SQUARE]}]
+    s = string("A1", ["1"], start={"handle": "C1", "at": [1, 1]}, end={"handle": "C2", "at": [9, 9]})
+    data = json.loads(chain.string_data(groups, [s]))
+    assert [(g["name"], [x["handle"] for x in g["strings"]]) for g in data["groups"]] == \
+        [("Alpha", []), ("Zed", ["A1"])]
+
+
+def test_string_data_two_outlines_of_one_group_are_one_group():
+    # Both ends resolve to the same blockObjectId (:220-222) though they lie in different outlines.
+    groups = [{"handle": "F1", "name": "Split", "outlines": [SQUARE, [[20, 0], [30, 0], [30, 10], [20, 10]]]},
+              {"handle": "F2", "name": "Other"}]
+    s = string("A1", ["1"], start={"handle": "C1", "at": [5, 5]}, end={"handle": "C2", "at": [25, 5]})
+    miss = string("A2", ["2"], start={"handle": "C3", "at": [5, 5]}, end={"handle": "C4", "at": [15, 5]})
+    data = json.loads(chain.string_data(groups, [s, miss]))
+    assert data["groups"] == [
+        {"handle": "F2", "name": "Other", "strings": []},
+        {"handle": "F1", "name": "Split", "strings": [
+            {"handle": "A1", "startPoint": {"handle": "C1", "coordinate": "5.00,5.00"},
+             "endPoint": {"handle": "C2", "coordinate": "25.00,5.00"}}]}]
+
+
+def test_string_data_outlines_ignore_panel_membership():
+    # With outlines the plugin never looks at panels: a string whose panels are the group's but
+    # whose markers sit outside every outline joins no group.
+    groups = [{"handle": "1A1", "name": "G", "panels": ["1", "2"], "outlines": [SQUARE]}]
+    s = string("A1", ["1", "2"], start={"handle": "C1", "at": [50, 50]}, end={"handle": "C2", "at": [60, 60]})
+    data = json.loads(chain.string_data(groups, [s]))
+    assert data == {"groups": [{"handle": "1A1", "name": "G", "strings": []}]}
+
+
+def test_panel_group_outlines_accept_any_polyline_and_are_bounded(monkeypatch):
+    # PanelGroupData.cs:73-82 keeps every polyline of the block, whatever its vertex count.
+    (g,) = chain.validate_panel_groups([{"handle": "A1", "name": "n", "outlines": [[], [[0, 0], [1, 1]]]}])
+    assert g["outlines"] == [[], [(0.0, 0.0), (1.0, 1.0)]]
+    monkeypatch.setattr(chain, "MAX_OUTLINE_VERTICES_TOTAL", 5)
+    with pytest.raises(chain.RooftopBoundsError):
+        chain.validate_panel_groups([{"handle": "A1", "name": "n", "outlines": [SQUARE]},
+                                     {"handle": "A2", "name": "m", "outlines": [SQUARE]}])
+    with pytest.raises(chain.RooftopInputError):
+        chain.validate_panel_groups([{"handle": "A1", "name": "n", "outlines": [[[0, "x"]]]}])
 
 
 def test_marker_takes_handle_and_at_only():
