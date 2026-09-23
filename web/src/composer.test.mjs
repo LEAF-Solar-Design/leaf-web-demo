@@ -818,8 +818,8 @@ describe('a dropped refusal is still a leak (round 4)', () => {
         `${file}: authorAuthorityProvider must accept allowSecretOnce`,
       )
       assert.ok(
-        /(?:startAgentTurn|startTurnRef\.current)\(description,\{[^}]*\},\{allowSecretOnce(?:,requireImmediateTurn:true)?\}\)/.test(source),
-        `${file}: authorAuthorityProvider must forward allowSecretOnce to its turn-start call`,
+        /(?:startAgentTurn|startTurnRef\.current)\(description,\{[^}]*\},\{allowSecretOnce,requireImmediateTurn:true\}\)/.test(source),
+        `${file}: authorAuthorityProvider must forward allowSecretOnce to its turn-start call and the authority mint must require an immediate turn`,
       )
     }
   })

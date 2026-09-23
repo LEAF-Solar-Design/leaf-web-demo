@@ -16,13 +16,18 @@ it('a. accepts the stored completed answer for the journaled request', async () 
   await expect(postMessage('S', { text: 'move', request_id: 'r1' })).resolves.toEqual(completed)
 })
 
-it('b. rejects a completed answer when no request identity was sent', async () => {
+it('b. accepts a server-minted request id when the caller sent none', async () => {
   reply(200, completed)
-  await expect(postMessage('S', { text: 'move' })).rejects.toMatchObject({ status: 200 })
+  await expect(postMessage('S', { text: 'move' })).resolves.toEqual(completed)
 })
 
 it('b2. rejects a completed answer that names no request when none was sent', async () => {
   reply(200, { turn_id: 't1', status: 'completed', stop_reason: 'end_turn' })
+  await expect(postMessage('S', { text: 'move' })).rejects.toMatchObject({ status: 200 })
+})
+
+it('b3. rejects a completed answer with an empty request id when none was sent', async () => {
+  reply(200, { ...completed, request_id: '' })
   await expect(postMessage('S', { text: 'move' })).rejects.toMatchObject({ status: 200 })
 })
 

@@ -31,11 +31,11 @@ describe('author immediate-turn contract', () => {
     expect(result.current.requestStatus).toBe('completed')
   })
 
-  it('accepts a completed journaled answer for an immediate turn without reposting', async () => {
+  it('an immediate turn refuses a completed answer without reposting', async () => {
     postMessage.mockResolvedValue({ status: 'completed', turn_id: 'turn-a', request_id: 'request-a' })
     const { result } = projectController()
     await act(async () => {
-      await expect(result.current.startTurn('hello', {}, { requireImmediateTurn: true })).resolves.toMatchObject({ turn_id: 'turn-a' })
+      await expect(result.current.startTurn('hello', {}, { requireImmediateTurn: true })).rejects.toThrow('already finished')
     })
     expect(postMessage).toHaveBeenCalledTimes(1)
   })
