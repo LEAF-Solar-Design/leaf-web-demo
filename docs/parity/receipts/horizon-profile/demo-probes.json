@@ -1,0 +1,1415 @@
+{
+ "schema": "leaf.solar-parity-receipt.v1",
+ "capability": "horizon-profile",
+ "capability_version": "0",
+ "fixture": {
+  "id": "demo-probes",
+  "sha256": "54cc09f955e79edc492817e81c44f9d5f5770da380ad50a7394f6ba1b1e2fdc5"
+ },
+ "plugin": {
+  "build": "LeafSolarDesign 2025 licensed 2026-09-23",
+  "state": "committed",
+  "receipt_sha256": "5223e6e7c3184d66678fa6ad87812014b287796b05f1e9ef70bcd798312acb7d"
+ },
+ "studio": {
+  "capability_version": "0",
+  "engine": "server-builtin"
+ },
+ "comparator": {
+  "name": "solar-w1-semantic",
+  "version": "1",
+  "verdict": "pass",
+  "diffs": []
+ },
+ "synthetic_fields": [
+  "plugin:before/recorded",
+  "plugin:changes/unrecorded",
+  "studio:before/recorded",
+  "studio:changes/unrecorded"
+ ],
+ "fallback_fields": [],
+ "synthetic_flagged": true,
+ "survived_reopen": true,
+ "produced_at": "2026-09-23T06:02:41Z",
+ "comparison": {
+  "schema": "leaf.solar-w1-comparison.v1",
+  "capability": "horizon-profile",
+  "family": "exports",
+  "plugin": {
+   "after": {
+    "format": "csv",
+    "rows": [
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "0.000",
+       "horizon_elevation_deg": "2.862405"
+      },
+      "id": {
+       "entity_id": "0.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 2.862405
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "10.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "10.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "20.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "20.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "30.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "30.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "40.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "40.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "50.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "50.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "60.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "60.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "70.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "70.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "80.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "80.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "90.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "90.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "100.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "100.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "110.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "110.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "120.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "120.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "130.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "130.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "140.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "140.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "150.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "150.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "160.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "160.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "170.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "170.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "180.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "180.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "190.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "190.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "200.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "200.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "210.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "210.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "220.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "220.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "230.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "230.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "240.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "240.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "250.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "250.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "260.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "260.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "270.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "270.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "280.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "280.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "290.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "290.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "300.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "300.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "310.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "310.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "320.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "320.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "330.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "330.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "340.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "340.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "350.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "350.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "0.000": "0.000",
+    "10.000": "10.000",
+    "100.000": "100.000",
+    "110.000": "110.000",
+    "120.000": "120.000",
+    "130.000": "130.000",
+    "140.000": "140.000",
+    "150.000": "150.000",
+    "160.000": "160.000",
+    "170.000": "170.000",
+    "180.000": "180.000",
+    "190.000": "190.000",
+    "20.000": "20.000",
+    "200.000": "200.000",
+    "210.000": "210.000",
+    "220.000": "220.000",
+    "230.000": "230.000",
+    "240.000": "240.000",
+    "250.000": "250.000",
+    "260.000": "260.000",
+    "270.000": "270.000",
+    "280.000": "280.000",
+    "290.000": "290.000",
+    "30.000": "30.000",
+    "300.000": "300.000",
+    "310.000": "310.000",
+    "320.000": "320.000",
+    "330.000": "330.000",
+    "340.000": "340.000",
+    "350.000": "350.000",
+    "40.000": "40.000",
+    "50.000": "50.000",
+    "60.000": "60.000",
+    "70.000": "70.000",
+    "80.000": "80.000",
+    "90.000": "90.000"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "54cc09f955e79edc492817e81c44f9d5f5770da380ad50a7394f6ba1b1e2fdc5",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "2b1e5b1a6ec4589a7944e7dacfa8e0e26abe38049fdef42eb800a5f775e330c0",
+   "output_sha256": "c025c3ff38a2cc324ad82fe6775a74a55909781fbc70907b249bfadeec3eece9",
+   "parameters": {
+    "capability": "horizon-profile",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafhorizon_demo.csv",
+    "probe_file_sha256": "2b6dadee4560efa62a1b955ddac54ac1d4e5e8c70e59fbca31007f5d17806eb4",
+    "probe_type": "horizon-profile",
+    "side": "plugin"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "none",
+    "producer": "plugin",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  },
+  "studio": {
+   "after": {
+    "format": "csv",
+    "rows": [
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "0.000",
+       "horizon_elevation_deg": "2.862405"
+      },
+      "id": {
+       "entity_id": "0.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 2.862405
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "10.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "10.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "20.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "20.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "30.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "30.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "40.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "40.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "50.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "50.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "60.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "60.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "70.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "70.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "80.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "80.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "90.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "90.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "100.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "100.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "110.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "110.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "120.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "120.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "130.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "130.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "140.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "140.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "150.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "150.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "160.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "160.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "170.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "170.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "180.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "180.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "190.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "190.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "200.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "200.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "210.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "210.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "220.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "220.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "230.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "230.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "240.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "240.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "250.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "250.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "260.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "260.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "270.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "270.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "280.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "280.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "290.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "290.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "300.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "300.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "310.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "310.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "320.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "320.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "330.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "330.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "340.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "340.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     },
+     {
+      "fields": {
+       "azimuth_deg_cw_from_N": "350.000",
+       "horizon_elevation_deg": "0.000000"
+      },
+      "id": {
+       "entity_id": "350.000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "deg",
+       "value": 0.0
+      },
+      "type": "horizon-profile-sample",
+      "unit": "deg"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "0.000": "0.000",
+    "10.000": "10.000",
+    "100.000": "100.000",
+    "110.000": "110.000",
+    "120.000": "120.000",
+    "130.000": "130.000",
+    "140.000": "140.000",
+    "150.000": "150.000",
+    "160.000": "160.000",
+    "170.000": "170.000",
+    "180.000": "180.000",
+    "190.000": "190.000",
+    "20.000": "20.000",
+    "200.000": "200.000",
+    "210.000": "210.000",
+    "220.000": "220.000",
+    "230.000": "230.000",
+    "240.000": "240.000",
+    "250.000": "250.000",
+    "260.000": "260.000",
+    "270.000": "270.000",
+    "280.000": "280.000",
+    "290.000": "290.000",
+    "30.000": "30.000",
+    "300.000": "300.000",
+    "310.000": "310.000",
+    "320.000": "320.000",
+    "330.000": "330.000",
+    "340.000": "340.000",
+    "350.000": "350.000",
+    "40.000": "40.000",
+    "50.000": "50.000",
+    "60.000": "60.000",
+    "70.000": "70.000",
+    "80.000": "80.000",
+    "90.000": "90.000"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "54cc09f955e79edc492817e81c44f9d5f5770da380ad50a7394f6ba1b1e2fdc5",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "2b1e5b1a6ec4589a7944e7dacfa8e0e26abe38049fdef42eb800a5f775e330c0",
+   "output_sha256": "c025c3ff38a2cc324ad82fe6775a74a55909781fbc70907b249bfadeec3eece9",
+   "parameters": {
+    "capability": "horizon-profile",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafhorizon_demo.csv",
+    "probe_file_sha256": "2b6dadee4560efa62a1b955ddac54ac1d4e5e8c70e59fbca31007f5d17806eb4",
+    "probe_type": "horizon-profile",
+    "side": "studio"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "server-builtin",
+    "producer": "studio",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  }
+ }
+}

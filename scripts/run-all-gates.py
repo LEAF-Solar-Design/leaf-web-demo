@@ -445,6 +445,20 @@ def build_suites() -> List[Suite]:
         # on the first green run (2026-09-22, 0.8 s).
         Suite("server-solar-harness-bom", "server tests/test_solar_harness_bom.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_harness_bom.py"), 155),
+        # S32 terrain and irradiance ports (2026-09-23): server/solar_terrain.py, the
+        # literal port of six more licensed engines (CutFillHeatmapCalculator,
+        # HorizonProfileCalculator, InPlaneIrradianceCalculator's isotropic, HDKR and
+        # Perez 1990 models, GradingPadCalculator, TerrainProfileCalculator, and
+        # CapacityIterationCalculator over TrackerRowGenerator) on the shared
+        # TerrainGridInterpolator. Two layers: every licensed probe in the six
+        # committed DEMO captures (docs/parity/evidence/probes/demo-probes-20260923)
+        # reproduced by COMPUTING it, one case per licensed row collected from the
+        # committed file so the suite never skips, and the plugin's OWN NUnit cases
+        # for these engines. Floor COUNTED at 356 from the collected cases (240 capture
+        # checks, 221 of them one per licensed row, plus 116 ported NUnit cases);
+        # the first green run is the measurement.
+        Suite("server-solar-terrain", "server tests/test_solar_terrain.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_terrain.py"), 356),
         # S31 XLSX codec (2026-09-22): server/solar_xlsx.py, a small standard-library
         # reader and writer (zipfile plus xml.etree only, NO openpyxl, because this
         # repo declares no such dependency). Covers the round trip, the four
@@ -1736,9 +1750,13 @@ def build_suites() -> List[Suite]:
         # tracker-bom-xlsx-export). Its half compares Studio against the four new
         # committed licensed files, and adds the comparator pass on each of them.
         # Floor MEASURED at 151 on the first green run after S31 (2026-09-22, 2.6 s);
-        # it was 118 after S28 and 61 before that.
+        # it was 118 after S28 and 61 before that. S32 (2026-09-23) adds the six
+        # terrain and irradiance CSVs (four carrying Encoding.UTF8's byte order
+        # mark, which the CSV reader now drops as encoding) with a comparator pass
+        # on each against its committed licensed capture: 28 more cases, so the
+        # floor is COUNTED at 179 until the first green run measures it.
         Suite("scripts-solar-probe-evidence", "scripts test_solar_probe_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_probe_evidence.py"), 151),
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_probe_evidence.py"), 179),
         # S22 (2026-09-22): contract rule G9 on the Studio evidence adapter, the first
         # test file it has. A set-valued list (unassigned_panels, duplicate_panels) is
         # emitted in ascending neutral-id order, so the same set recorded in two orders

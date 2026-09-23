@@ -276,6 +276,54 @@ PROBE_SPECS = {
     "tracker-bom-xlsx": ProbeSpec(XLSX_BOM_FORMAT, [
         Section(None, "tracker-bom-sheet-row", "Key", (), "Cells"),
     ]),
+    # S32, the six terrain and irradiance DEMOs. None of these files has a
+    # column that names a probe on its own (a heatmap cell is fixture plus
+    # index, a POA row fixture plus model), so every row id is its 1-based
+    # ordinal and the identifying columns are the declared inputs instead.
+    #
+    # One row per grid cell. DeltaM is the quantity: the per-cell cut or fill
+    # depth is the calculation, and the colour (R, G, B) and the NEUTRAL, CUT
+    # or FILL bucket are functions of it that ride verbatim under fields.
+    "cut-fill-heatmap": ProbeSpec("csv", [
+        Section(None, "cut-fill-heatmap-cell", None,
+                ("Fixture", "CellIndex", "Rows", "Cols"), "DeltaM", unit_literal="m"),
+    ]),
+    # One row per azimuth. The azimuth is the sweep input; the horizon
+    # elevation angle is the quantity. The site-centre line is `#` preamble.
+    "horizon-profile": ProbeSpec("csv", [
+        Section(None, "horizon-profile-sample", "azimuth_deg_cw_from_N",
+                ("azimuth_deg_cw_from_N",), "horizon_elevation_deg", unit_literal="deg"),
+    ]),
+    # One row per fixture and transposition model. Global is the quantity: it
+    # is the plane-of-array answer, and the three components that sum to it
+    # ride verbatim under fields, so a moved component is still a diff.
+    "plane-of-array-irradiance": ProbeSpec("csv", [
+        Section(None, "plane-of-array-irradiance", None, ("Fixture", "Model"),
+                "Global", unit_literal="W/m2"),
+    ]),
+    # One row per toe corner per mode. horizontal_run_m is the quantity: it is
+    # the embankment decision the toe coordinates follow from, and the corners,
+    # height delta and slope ratio ride verbatim under fields.
+    "grading-pad-design": ProbeSpec("csv", [
+        Section(None, "grading-pad-toe-corner", None, ("mode", "corner"),
+                "horizontal_run_m", unit_literal="m"),
+    ]),
+    # One row per sample along the cut line. The line, the grid and the sample
+    # count are the fixture and live only in the `#` preamble, so `inputs` is
+    # empty: distance, x and y are the sampler's OUTPUT, and declaring them
+    # inputs would let an output change move the fixture hash and mask a
+    # failure. z_sampled, the interpolated elevation, is the quantity.
+    "terrain-cross-section": ProbeSpec("csv", [
+        Section(None, "terrain-cross-section-sample", None, (), "z_sampled",
+                unit_literal="m"),
+    ]),
+    # One row per GCR and tilt scenario, in the sweep's own most-capacity-first
+    # order. dc_kwp is the quantity: it is the figure the sweep ranks by, and
+    # the pitch, row and module counts and acreage ride verbatim under fields.
+    "capacity-iteration-sweep": ProbeSpec("csv", [
+        Section(None, "capacity-iteration-scenario", None, ("gcr", "tilt_deg"),
+                "dc_kwp", unit_literal="kWp"),
+    ]),
 }
 
 
@@ -312,7 +360,15 @@ def _read_csv_probes(text, delimiter=","):
     `delimiter` is the DEMO's own separator. The harness plan writes a `.csv`
     with pipes so its `;`-joined drops list needs no quoting, and reading it
     with the comma reader would hand back one column holding the whole line.
+
+    A leading byte order mark is ENCODING, not content: a command that passes
+    `Encoding.UTF8` to File.WriteAllText writes one, and left in place it would
+    hide a `#` preamble line and rename the first column. It is dropped here,
+    once, at the very start of the text only; the generated file's bytes are
+    where its presence is asserted.
     """
+    if text.startswith("﻿"):
+        text = text[1:]
     lines = text.replace("\r\n", "\n").split("\n")
     while lines and lines[-1] == "":
         lines.pop()

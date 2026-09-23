@@ -1,0 +1,631 @@
+{
+ "schema": "leaf.solar-parity-receipt.v1",
+ "capability": "capacity-iteration-sweep",
+ "capability_version": "0",
+ "fixture": {
+  "id": "demo-probes",
+  "sha256": "2c899d97b76e93422ef48addb413968292ba9c607959116f53dceeb1c7d4acfe"
+ },
+ "plugin": {
+  "build": "LeafSolarDesign 2025 licensed 2026-09-23",
+  "state": "committed",
+  "receipt_sha256": "ac46b89caa79507f7fbef757ce4c5de5843c14c91a31b225315741398f29e8ed"
+ },
+ "studio": {
+  "capability_version": "0",
+  "engine": "server-builtin"
+ },
+ "comparator": {
+  "name": "solar-w1-semantic",
+  "version": "1",
+  "verdict": "pass",
+  "diffs": []
+ },
+ "synthetic_fields": [
+  "plugin:before/recorded",
+  "plugin:changes/unrecorded",
+  "studio:before/recorded",
+  "studio:changes/unrecorded"
+ ],
+ "fallback_fields": [],
+ "synthetic_flagged": true,
+ "survived_reopen": true,
+ "produced_at": "2026-09-23T06:02:47Z",
+ "comparison": {
+  "schema": "leaf.solar-w1-comparison.v1",
+  "capability": "capacity-iteration-sweep",
+  "family": "exports",
+  "plugin": {
+   "after": {
+    "format": "csv",
+    "rows": [
+     {
+      "fields": {
+       "acres_used": "1.235527",
+       "dc_kwp": "705.600000",
+       "gcr": "0.5000",
+       "module_count": "1176",
+       "pitch_m": "4.200000",
+       "row_count": "24",
+       "tilt_deg": "20.0000"
+      },
+      "id": {
+       "entity_id": "1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "kWp",
+       "value": 705.6
+      },
+      "type": "capacity-iteration-scenario",
+      "unit": "kWp"
+     },
+     {
+      "fields": {
+       "acres_used": "1.235527",
+       "dc_kwp": "705.600000",
+       "gcr": "0.5000",
+       "module_count": "1176",
+       "pitch_m": "4.200000",
+       "row_count": "24",
+       "tilt_deg": "50.0000"
+      },
+      "id": {
+       "entity_id": "2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "kWp",
+       "value": 705.6
+      },
+      "type": "capacity-iteration-scenario",
+      "unit": "kWp"
+     },
+     {
+      "fields": {
+       "acres_used": "1.235527",
+       "dc_kwp": "617.400000",
+       "gcr": "0.4500",
+       "module_count": "1029",
+       "pitch_m": "4.666667",
+       "row_count": "21",
+       "tilt_deg": "20.0000"
+      },
+      "id": {
+       "entity_id": "3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "kWp",
+       "value": 617.4
+      },
+      "type": "capacity-iteration-scenario",
+      "unit": "kWp"
+     },
+     {
+      "fields": {
+       "acres_used": "1.235527",
+       "dc_kwp": "617.400000",
+       "gcr": "0.4500",
+       "module_count": "1029",
+       "pitch_m": "4.666667",
+       "row_count": "21",
+       "tilt_deg": "50.0000"
+      },
+      "id": {
+       "entity_id": "4"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "kWp",
+       "value": 617.4
+      },
+      "type": "capacity-iteration-scenario",
+      "unit": "kWp"
+     },
+     {
+      "fields": {
+       "acres_used": "1.235527",
+       "dc_kwp": "558.600000",
+       "gcr": "0.4000",
+       "module_count": "931",
+       "pitch_m": "5.250000",
+       "row_count": "19",
+       "tilt_deg": "20.0000"
+      },
+      "id": {
+       "entity_id": "5"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "kWp",
+       "value": 558.6
+      },
+      "type": "capacity-iteration-scenario",
+      "unit": "kWp"
+     },
+     {
+      "fields": {
+       "acres_used": "1.235527",
+       "dc_kwp": "558.600000",
+       "gcr": "0.4000",
+       "module_count": "931",
+       "pitch_m": "5.250000",
+       "row_count": "19",
+       "tilt_deg": "50.0000"
+      },
+      "id": {
+       "entity_id": "6"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "kWp",
+       "value": 558.6
+      },
+      "type": "capacity-iteration-scenario",
+      "unit": "kWp"
+     },
+     {
+      "fields": {
+       "acres_used": "1.235527",
+       "dc_kwp": "499.800000",
+       "gcr": "0.3500",
+       "module_count": "833",
+       "pitch_m": "6.000000",
+       "row_count": "17",
+       "tilt_deg": "20.0000"
+      },
+      "id": {
+       "entity_id": "7"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "kWp",
+       "value": 499.8
+      },
+      "type": "capacity-iteration-scenario",
+      "unit": "kWp"
+     },
+     {
+      "fields": {
+       "acres_used": "1.235527",
+       "dc_kwp": "499.800000",
+       "gcr": "0.3500",
+       "module_count": "833",
+       "pitch_m": "6.000000",
+       "row_count": "17",
+       "tilt_deg": "50.0000"
+      },
+      "id": {
+       "entity_id": "8"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "kWp",
+       "value": 499.8
+      },
+      "type": "capacity-iteration-scenario",
+      "unit": "kWp"
+     },
+     {
+      "fields": {
+       "acres_used": "1.235527",
+       "dc_kwp": "411.600000",
+       "gcr": "0.3000",
+       "module_count": "686",
+       "pitch_m": "7.000000",
+       "row_count": "14",
+       "tilt_deg": "20.0000"
+      },
+      "id": {
+       "entity_id": "9"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "kWp",
+       "value": 411.6
+      },
+      "type": "capacity-iteration-scenario",
+      "unit": "kWp"
+     },
+     {
+      "fields": {
+       "acres_used": "1.235527",
+       "dc_kwp": "411.600000",
+       "gcr": "0.3000",
+       "module_count": "686",
+       "pitch_m": "7.000000",
+       "row_count": "14",
+       "tilt_deg": "50.0000"
+      },
+      "id": {
+       "entity_id": "10"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "kWp",
+       "value": 411.6
+      },
+      "type": "capacity-iteration-scenario",
+      "unit": "kWp"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "1": "1",
+    "10": "10",
+    "2": "2",
+    "3": "3",
+    "4": "4",
+    "5": "5",
+    "6": "6",
+    "7": "7",
+    "8": "8",
+    "9": "9"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "2c899d97b76e93422ef48addb413968292ba9c607959116f53dceeb1c7d4acfe",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "54df35fcdeb2335f3212e002c2ddb1adb6a74abaeca2002c47b6fa09c2287ce8",
+   "output_sha256": "2ff969364825d0282f8b80f8832ef75093e73bf5c7cf83042702840863a91a54",
+   "parameters": {
+    "capability": "capacity-iteration-sweep",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafcapacity_demo.csv",
+    "probe_file_sha256": "5b000e3ccd249e0f109ec48383b477a332e0fa8ac35bc70e5b85d23e4d3f5605",
+    "probe_type": "capacity-iteration-sweep",
+    "side": "plugin"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "none",
+    "producer": "plugin",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  },
+  "studio": {
+   "after": {
+    "format": "csv",
+    "rows": [
+     {
+      "fields": {
+       "acres_used": "1.235527",
+       "dc_kwp": "705.600000",
+       "gcr": "0.5000",
+       "module_count": "1176",
+       "pitch_m": "4.200000",
+       "row_count": "24",
+       "tilt_deg": "20.0000"
+      },
+      "id": {
+       "entity_id": "1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "kWp",
+       "value": 705.6
+      },
+      "type": "capacity-iteration-scenario",
+      "unit": "kWp"
+     },
+     {
+      "fields": {
+       "acres_used": "1.235527",
+       "dc_kwp": "705.600000",
+       "gcr": "0.5000",
+       "module_count": "1176",
+       "pitch_m": "4.200000",
+       "row_count": "24",
+       "tilt_deg": "50.0000"
+      },
+      "id": {
+       "entity_id": "2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "kWp",
+       "value": 705.6
+      },
+      "type": "capacity-iteration-scenario",
+      "unit": "kWp"
+     },
+     {
+      "fields": {
+       "acres_used": "1.235527",
+       "dc_kwp": "617.400000",
+       "gcr": "0.4500",
+       "module_count": "1029",
+       "pitch_m": "4.666667",
+       "row_count": "21",
+       "tilt_deg": "20.0000"
+      },
+      "id": {
+       "entity_id": "3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "kWp",
+       "value": 617.4
+      },
+      "type": "capacity-iteration-scenario",
+      "unit": "kWp"
+     },
+     {
+      "fields": {
+       "acres_used": "1.235527",
+       "dc_kwp": "617.400000",
+       "gcr": "0.4500",
+       "module_count": "1029",
+       "pitch_m": "4.666667",
+       "row_count": "21",
+       "tilt_deg": "50.0000"
+      },
+      "id": {
+       "entity_id": "4"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "kWp",
+       "value": 617.4
+      },
+      "type": "capacity-iteration-scenario",
+      "unit": "kWp"
+     },
+     {
+      "fields": {
+       "acres_used": "1.235527",
+       "dc_kwp": "558.600000",
+       "gcr": "0.4000",
+       "module_count": "931",
+       "pitch_m": "5.250000",
+       "row_count": "19",
+       "tilt_deg": "20.0000"
+      },
+      "id": {
+       "entity_id": "5"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "kWp",
+       "value": 558.6
+      },
+      "type": "capacity-iteration-scenario",
+      "unit": "kWp"
+     },
+     {
+      "fields": {
+       "acres_used": "1.235527",
+       "dc_kwp": "558.600000",
+       "gcr": "0.4000",
+       "module_count": "931",
+       "pitch_m": "5.250000",
+       "row_count": "19",
+       "tilt_deg": "50.0000"
+      },
+      "id": {
+       "entity_id": "6"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "kWp",
+       "value": 558.6
+      },
+      "type": "capacity-iteration-scenario",
+      "unit": "kWp"
+     },
+     {
+      "fields": {
+       "acres_used": "1.235527",
+       "dc_kwp": "499.800000",
+       "gcr": "0.3500",
+       "module_count": "833",
+       "pitch_m": "6.000000",
+       "row_count": "17",
+       "tilt_deg": "20.0000"
+      },
+      "id": {
+       "entity_id": "7"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "kWp",
+       "value": 499.8
+      },
+      "type": "capacity-iteration-scenario",
+      "unit": "kWp"
+     },
+     {
+      "fields": {
+       "acres_used": "1.235527",
+       "dc_kwp": "499.800000",
+       "gcr": "0.3500",
+       "module_count": "833",
+       "pitch_m": "6.000000",
+       "row_count": "17",
+       "tilt_deg": "50.0000"
+      },
+      "id": {
+       "entity_id": "8"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "kWp",
+       "value": 499.8
+      },
+      "type": "capacity-iteration-scenario",
+      "unit": "kWp"
+     },
+     {
+      "fields": {
+       "acres_used": "1.235527",
+       "dc_kwp": "411.600000",
+       "gcr": "0.3000",
+       "module_count": "686",
+       "pitch_m": "7.000000",
+       "row_count": "14",
+       "tilt_deg": "20.0000"
+      },
+      "id": {
+       "entity_id": "9"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "kWp",
+       "value": 411.6
+      },
+      "type": "capacity-iteration-scenario",
+      "unit": "kWp"
+     },
+     {
+      "fields": {
+       "acres_used": "1.235527",
+       "dc_kwp": "411.600000",
+       "gcr": "0.3000",
+       "module_count": "686",
+       "pitch_m": "7.000000",
+       "row_count": "14",
+       "tilt_deg": "50.0000"
+      },
+      "id": {
+       "entity_id": "10"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "kWp",
+       "value": 411.6
+      },
+      "type": "capacity-iteration-scenario",
+      "unit": "kWp"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "1": "1",
+    "10": "10",
+    "2": "2",
+    "3": "3",
+    "4": "4",
+    "5": "5",
+    "6": "6",
+    "7": "7",
+    "8": "8",
+    "9": "9"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "2c899d97b76e93422ef48addb413968292ba9c607959116f53dceeb1c7d4acfe",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "54df35fcdeb2335f3212e002c2ddb1adb6a74abaeca2002c47b6fa09c2287ce8",
+   "output_sha256": "2ff969364825d0282f8b80f8832ef75093e73bf5c7cf83042702840863a91a54",
+   "parameters": {
+    "capability": "capacity-iteration-sweep",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafcapacity_demo.csv",
+    "probe_file_sha256": "5b000e3ccd249e0f109ec48383b477a332e0fa8ac35bc70e5b85d23e4d3f5605",
+    "probe_type": "capacity-iteration-sweep",
+    "side": "studio"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "server-builtin",
+    "producer": "studio",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  }
+ }
+}

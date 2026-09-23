@@ -1,0 +1,2935 @@
+{
+ "schema": "leaf.solar-parity-receipt.v1",
+ "capability": "cut-fill-heatmap",
+ "capability_version": "0",
+ "fixture": {
+  "id": "demo-probes",
+  "sha256": "092ce1ccc059b65b1e6d317ccda86b9daaa24f9a3313859f0d3b3d7d8919d0cf"
+ },
+ "plugin": {
+  "build": "LeafSolarDesign 2025 licensed 2026-09-23",
+  "state": "committed",
+  "receipt_sha256": "f7de030e89aebb34bd8ccd1b25eaa03a11d99a691e2616d8a64f16f77c34841a"
+ },
+ "studio": {
+  "capability_version": "0",
+  "engine": "server-builtin"
+ },
+ "comparator": {
+  "name": "solar-w1-semantic",
+  "version": "1",
+  "verdict": "pass",
+  "diffs": []
+ },
+ "synthetic_fields": [
+  "plugin:before/recorded",
+  "plugin:changes/unrecorded",
+  "studio:before/recorded",
+  "studio:changes/unrecorded"
+ ],
+ "fallback_fields": [],
+ "synthetic_flagged": true,
+ "survived_reopen": true,
+ "produced_at": "2026-09-23T06:02:41Z",
+ "comparison": {
+  "schema": "leaf.solar-w1-comparison.v1",
+  "capability": "cut-fill-heatmap",
+  "family": "exports",
+  "plugin": {
+   "after": {
+    "format": "csv",
+    "rows": [
+     {
+      "fields": {
+       "B": "210",
+       "Bucket": "NEUTRAL",
+       "CellIndex": "0",
+       "CenterX": "0",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "0",
+       "Fixture": "F1_AT_GRADE_ZERO",
+       "G": "210",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "210",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "210",
+       "Bucket": "NEUTRAL",
+       "CellIndex": "1",
+       "CenterX": "100",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "0",
+       "Fixture": "F1_AT_GRADE_ZERO",
+       "G": "210",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "210",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "210",
+       "Bucket": "NEUTRAL",
+       "CellIndex": "2",
+       "CenterX": "0",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "0",
+       "Fixture": "F1_AT_GRADE_ZERO",
+       "G": "210",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "210",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "210",
+       "Bucket": "NEUTRAL",
+       "CellIndex": "3",
+       "CenterX": "100",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "0",
+       "Fixture": "F1_AT_GRADE_ZERO",
+       "G": "210",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "210",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "4"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "210",
+       "Bucket": "NEUTRAL",
+       "CellIndex": "0",
+       "CenterX": "0",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "0.04899999999999993",
+       "Fixture": "F2_NEUTRAL_BAND_UNDER",
+       "G": "210",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "210",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "5"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.04899999999999993
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "210",
+       "Bucket": "NEUTRAL",
+       "CellIndex": "1",
+       "CenterX": "100",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "0.04899999999999993",
+       "Fixture": "F2_NEUTRAL_BAND_UNDER",
+       "G": "210",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "210",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "6"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.04899999999999993
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "210",
+       "Bucket": "NEUTRAL",
+       "CellIndex": "2",
+       "CenterX": "0",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "0.04899999999999993",
+       "Fixture": "F2_NEUTRAL_BAND_UNDER",
+       "G": "210",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "210",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "7"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.04899999999999993
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "210",
+       "Bucket": "NEUTRAL",
+       "CellIndex": "3",
+       "CenterX": "100",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "0.04899999999999993",
+       "Fixture": "F2_NEUTRAL_BAND_UNDER",
+       "G": "210",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "210",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "8"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.04899999999999993
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "206",
+       "Bucket": "CUT",
+       "CellIndex": "0",
+       "CenterX": "0",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "0.050000000000000044",
+       "Fixture": "F3_NEUTRAL_BAND_OVER",
+       "G": "206",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "9"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.050000000000000044
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "206",
+       "Bucket": "CUT",
+       "CellIndex": "1",
+       "CenterX": "100",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "0.050000000000000044",
+       "Fixture": "F3_NEUTRAL_BAND_OVER",
+       "G": "206",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "10"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.050000000000000044
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "206",
+       "Bucket": "CUT",
+       "CellIndex": "2",
+       "CenterX": "0",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "0.050000000000000044",
+       "Fixture": "F3_NEUTRAL_BAND_OVER",
+       "G": "206",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "11"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.050000000000000044
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "206",
+       "Bucket": "CUT",
+       "CellIndex": "3",
+       "CenterX": "100",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "0.050000000000000044",
+       "Fixture": "F3_NEUTRAL_BAND_OVER",
+       "G": "206",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "12"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.050000000000000044
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "189",
+       "Bucket": "CUT",
+       "CellIndex": "0",
+       "CenterX": "0",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "0.30000000000000004",
+       "Fixture": "F4_LIGHT_CUT",
+       "G": "189",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "13"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.30000000000000004
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "189",
+       "Bucket": "CUT",
+       "CellIndex": "1",
+       "CenterX": "100",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "0.30000000000000004",
+       "Fixture": "F4_LIGHT_CUT",
+       "G": "189",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "14"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.30000000000000004
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "189",
+       "Bucket": "CUT",
+       "CellIndex": "2",
+       "CenterX": "0",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "0.30000000000000004",
+       "Fixture": "F4_LIGHT_CUT",
+       "G": "189",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "15"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.30000000000000004
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "189",
+       "Bucket": "CUT",
+       "CellIndex": "3",
+       "CenterX": "100",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "0.30000000000000004",
+       "Fixture": "F4_LIGHT_CUT",
+       "G": "189",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "16"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.30000000000000004
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "189",
+       "Bucket": "FILL",
+       "CellIndex": "0",
+       "CenterX": "0",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "-0.30000000000000004",
+       "Fixture": "F5_LIGHT_FILL",
+       "G": "255",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "189",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "17"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.30000000000000004
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "189",
+       "Bucket": "FILL",
+       "CellIndex": "1",
+       "CenterX": "100",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "-0.30000000000000004",
+       "Fixture": "F5_LIGHT_FILL",
+       "G": "255",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "189",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "18"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.30000000000000004
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "189",
+       "Bucket": "FILL",
+       "CellIndex": "2",
+       "CenterX": "0",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "-0.30000000000000004",
+       "Fixture": "F5_LIGHT_FILL",
+       "G": "255",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "189",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "19"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.30000000000000004
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "189",
+       "Bucket": "FILL",
+       "CellIndex": "3",
+       "CenterX": "100",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "-0.30000000000000004",
+       "Fixture": "F5_LIGHT_FILL",
+       "G": "255",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "189",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "20"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.30000000000000004
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "105",
+       "Bucket": "CUT",
+       "CellIndex": "0",
+       "CenterX": "0",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "1.5",
+       "Fixture": "F6_MID_CUT",
+       "G": "105",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "21"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 1.5
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "105",
+       "Bucket": "CUT",
+       "CellIndex": "1",
+       "CenterX": "100",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "1.5",
+       "Fixture": "F6_MID_CUT",
+       "G": "105",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "22"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 1.5
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "105",
+       "Bucket": "CUT",
+       "CellIndex": "2",
+       "CenterX": "0",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "1.5",
+       "Fixture": "F6_MID_CUT",
+       "G": "105",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "23"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 1.5
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "105",
+       "Bucket": "CUT",
+       "CellIndex": "3",
+       "CenterX": "100",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "1.5",
+       "Fixture": "F6_MID_CUT",
+       "G": "105",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "24"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 1.5
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "105",
+       "Bucket": "FILL",
+       "CellIndex": "0",
+       "CenterX": "0",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "-1.5",
+       "Fixture": "F7_MID_FILL",
+       "G": "255",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "105",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "25"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -1.5
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "105",
+       "Bucket": "FILL",
+       "CellIndex": "1",
+       "CenterX": "100",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "-1.5",
+       "Fixture": "F7_MID_FILL",
+       "G": "255",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "105",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "26"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -1.5
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "105",
+       "Bucket": "FILL",
+       "CellIndex": "2",
+       "CenterX": "0",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "-1.5",
+       "Fixture": "F7_MID_FILL",
+       "G": "255",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "105",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "27"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -1.5
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "105",
+       "Bucket": "FILL",
+       "CellIndex": "3",
+       "CenterX": "100",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "-1.5",
+       "Fixture": "F7_MID_FILL",
+       "G": "255",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "105",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "28"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -1.5
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "0",
+       "Bucket": "CUT",
+       "CellIndex": "0",
+       "CenterX": "0",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "3",
+       "Fixture": "F8_SAT_CUT",
+       "G": "0",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "29"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 3.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "0",
+       "Bucket": "CUT",
+       "CellIndex": "1",
+       "CenterX": "100",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "3",
+       "Fixture": "F8_SAT_CUT",
+       "G": "0",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "30"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 3.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "0",
+       "Bucket": "CUT",
+       "CellIndex": "2",
+       "CenterX": "0",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "3",
+       "Fixture": "F8_SAT_CUT",
+       "G": "0",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "31"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 3.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "0",
+       "Bucket": "CUT",
+       "CellIndex": "3",
+       "CenterX": "100",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "3",
+       "Fixture": "F8_SAT_CUT",
+       "G": "0",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "32"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 3.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "0",
+       "Bucket": "FILL",
+       "CellIndex": "0",
+       "CenterX": "0",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "-3",
+       "Fixture": "F9_SAT_FILL",
+       "G": "255",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "0",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "33"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -3.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "0",
+       "Bucket": "FILL",
+       "CellIndex": "1",
+       "CenterX": "100",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "-3",
+       "Fixture": "F9_SAT_FILL",
+       "G": "255",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "0",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "34"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -3.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "0",
+       "Bucket": "FILL",
+       "CellIndex": "2",
+       "CenterX": "0",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "-3",
+       "Fixture": "F9_SAT_FILL",
+       "G": "255",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "0",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "35"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -3.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "0",
+       "Bucket": "FILL",
+       "CellIndex": "3",
+       "CenterX": "100",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "-3",
+       "Fixture": "F9_SAT_FILL",
+       "G": "255",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "0",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "36"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -3.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "0",
+       "Bucket": "CUT",
+       "CellIndex": "0",
+       "CenterX": "0",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "5",
+       "Fixture": "F10_OVERSAT_CUT",
+       "G": "0",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "37"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 5.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "0",
+       "Bucket": "CUT",
+       "CellIndex": "1",
+       "CenterX": "100",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "5",
+       "Fixture": "F10_OVERSAT_CUT",
+       "G": "0",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "38"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 5.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "0",
+       "Bucket": "CUT",
+       "CellIndex": "2",
+       "CenterX": "0",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "5",
+       "Fixture": "F10_OVERSAT_CUT",
+       "G": "0",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "39"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 5.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "0",
+       "Bucket": "CUT",
+       "CellIndex": "3",
+       "CenterX": "100",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "5",
+       "Fixture": "F10_OVERSAT_CUT",
+       "G": "0",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "40"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 5.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "210",
+       "Bucket": "NEUTRAL",
+       "CellIndex": "0",
+       "CenterX": "0",
+       "CenterY": "0",
+       "Cols": "3",
+       "DeltaM": "0",
+       "Fixture": "F11_3X3_MIXED",
+       "G": "210",
+       "HalfHeightDu": "25",
+       "HalfWidthDu": "25",
+       "R": "210",
+       "Rows": "3"
+      },
+      "id": {
+       "entity_id": "41"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "189",
+       "Bucket": "CUT",
+       "CellIndex": "1",
+       "CenterX": "50",
+       "CenterY": "0",
+       "Cols": "3",
+       "DeltaM": "0.30000000000000004",
+       "Fixture": "F11_3X3_MIXED",
+       "G": "189",
+       "HalfHeightDu": "25",
+       "HalfWidthDu": "25",
+       "R": "255",
+       "Rows": "3"
+      },
+      "id": {
+       "entity_id": "42"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.30000000000000004
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "189",
+       "Bucket": "FILL",
+       "CellIndex": "2",
+       "CenterX": "100",
+       "CenterY": "0",
+       "Cols": "3",
+       "DeltaM": "-0.30000000000000004",
+       "Fixture": "F11_3X3_MIXED",
+       "G": "255",
+       "HalfHeightDu": "25",
+       "HalfWidthDu": "25",
+       "R": "189",
+       "Rows": "3"
+      },
+      "id": {
+       "entity_id": "43"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.30000000000000004
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "210",
+       "Bucket": "NEUTRAL",
+       "CellIndex": "3",
+       "CenterX": "0",
+       "CenterY": "50",
+       "Cols": "3",
+       "DeltaM": "-0.030000000000000027",
+       "Fixture": "F11_3X3_MIXED",
+       "G": "210",
+       "HalfHeightDu": "25",
+       "HalfWidthDu": "25",
+       "R": "210",
+       "Rows": "3"
+      },
+      "id": {
+       "entity_id": "44"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.030000000000000027
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "210",
+       "Bucket": "NEUTRAL",
+       "CellIndex": "4",
+       "CenterX": "50",
+       "CenterY": "50",
+       "Cols": "3",
+       "DeltaM": "0",
+       "Fixture": "F11_3X3_MIXED",
+       "G": "210",
+       "HalfHeightDu": "25",
+       "HalfWidthDu": "25",
+       "R": "210",
+       "Rows": "3"
+      },
+      "id": {
+       "entity_id": "45"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "0",
+       "Bucket": "CUT",
+       "CellIndex": "5",
+       "CenterX": "100",
+       "CenterY": "50",
+       "Cols": "3",
+       "DeltaM": "3",
+       "Fixture": "F11_3X3_MIXED",
+       "G": "0",
+       "HalfHeightDu": "25",
+       "HalfWidthDu": "25",
+       "R": "255",
+       "Rows": "3"
+      },
+      "id": {
+       "entity_id": "46"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 3.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "0",
+       "Bucket": "CUT",
+       "CellIndex": "6",
+       "CenterX": "0",
+       "CenterY": "100",
+       "Cols": "3",
+       "DeltaM": "5",
+       "Fixture": "F11_3X3_MIXED",
+       "G": "0",
+       "HalfHeightDu": "25",
+       "HalfWidthDu": "25",
+       "R": "255",
+       "Rows": "3"
+      },
+      "id": {
+       "entity_id": "47"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 5.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "189",
+       "Bucket": "FILL",
+       "CellIndex": "7",
+       "CenterX": "50",
+       "CenterY": "100",
+       "Cols": "3",
+       "DeltaM": "-0.30000000000000004",
+       "Fixture": "F11_3X3_MIXED",
+       "G": "255",
+       "HalfHeightDu": "25",
+       "HalfWidthDu": "25",
+       "R": "189",
+       "Rows": "3"
+      },
+      "id": {
+       "entity_id": "48"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.30000000000000004
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "210",
+       "Bucket": "NEUTRAL",
+       "CellIndex": "8",
+       "CenterX": "100",
+       "CenterY": "100",
+       "Cols": "3",
+       "DeltaM": "0.030000000000000027",
+       "Fixture": "F11_3X3_MIXED",
+       "G": "210",
+       "HalfHeightDu": "25",
+       "HalfWidthDu": "25",
+       "R": "210",
+       "Rows": "3"
+      },
+      "id": {
+       "entity_id": "49"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.030000000000000027
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "1": "1",
+    "10": "10",
+    "11": "11",
+    "12": "12",
+    "13": "13",
+    "14": "14",
+    "15": "15",
+    "16": "16",
+    "17": "17",
+    "18": "18",
+    "19": "19",
+    "2": "2",
+    "20": "20",
+    "21": "21",
+    "22": "22",
+    "23": "23",
+    "24": "24",
+    "25": "25",
+    "26": "26",
+    "27": "27",
+    "28": "28",
+    "29": "29",
+    "3": "3",
+    "30": "30",
+    "31": "31",
+    "32": "32",
+    "33": "33",
+    "34": "34",
+    "35": "35",
+    "36": "36",
+    "37": "37",
+    "38": "38",
+    "39": "39",
+    "4": "4",
+    "40": "40",
+    "41": "41",
+    "42": "42",
+    "43": "43",
+    "44": "44",
+    "45": "45",
+    "46": "46",
+    "47": "47",
+    "48": "48",
+    "49": "49",
+    "5": "5",
+    "6": "6",
+    "7": "7",
+    "8": "8",
+    "9": "9"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "092ce1ccc059b65b1e6d317ccda86b9daaa24f9a3313859f0d3b3d7d8919d0cf",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "b1dcd5a66533cb4f6db4482e86da91e88087c8168e78bce36de772ed36241799",
+   "output_sha256": "b61d4394032d2a608ee6f92f862d6f13a86d3975a53a864ac37e42b7e28e3d97",
+   "parameters": {
+    "capability": "cut-fill-heatmap",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafheatmap_demo.csv",
+    "probe_file_sha256": "ddf88e78fbe8a76ae6e3f1e4a60493f8aceac0b8d7c1532f17950e7a9fa6228b",
+    "probe_type": "cut-fill-heatmap",
+    "side": "plugin"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "none",
+    "producer": "plugin",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  },
+  "studio": {
+   "after": {
+    "format": "csv",
+    "rows": [
+     {
+      "fields": {
+       "B": "210",
+       "Bucket": "NEUTRAL",
+       "CellIndex": "0",
+       "CenterX": "0",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "0",
+       "Fixture": "F1_AT_GRADE_ZERO",
+       "G": "210",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "210",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "210",
+       "Bucket": "NEUTRAL",
+       "CellIndex": "1",
+       "CenterX": "100",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "0",
+       "Fixture": "F1_AT_GRADE_ZERO",
+       "G": "210",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "210",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "210",
+       "Bucket": "NEUTRAL",
+       "CellIndex": "2",
+       "CenterX": "0",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "0",
+       "Fixture": "F1_AT_GRADE_ZERO",
+       "G": "210",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "210",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "210",
+       "Bucket": "NEUTRAL",
+       "CellIndex": "3",
+       "CenterX": "100",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "0",
+       "Fixture": "F1_AT_GRADE_ZERO",
+       "G": "210",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "210",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "4"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "210",
+       "Bucket": "NEUTRAL",
+       "CellIndex": "0",
+       "CenterX": "0",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "0.04899999999999993",
+       "Fixture": "F2_NEUTRAL_BAND_UNDER",
+       "G": "210",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "210",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "5"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.04899999999999993
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "210",
+       "Bucket": "NEUTRAL",
+       "CellIndex": "1",
+       "CenterX": "100",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "0.04899999999999993",
+       "Fixture": "F2_NEUTRAL_BAND_UNDER",
+       "G": "210",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "210",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "6"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.04899999999999993
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "210",
+       "Bucket": "NEUTRAL",
+       "CellIndex": "2",
+       "CenterX": "0",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "0.04899999999999993",
+       "Fixture": "F2_NEUTRAL_BAND_UNDER",
+       "G": "210",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "210",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "7"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.04899999999999993
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "210",
+       "Bucket": "NEUTRAL",
+       "CellIndex": "3",
+       "CenterX": "100",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "0.04899999999999993",
+       "Fixture": "F2_NEUTRAL_BAND_UNDER",
+       "G": "210",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "210",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "8"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.04899999999999993
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "206",
+       "Bucket": "CUT",
+       "CellIndex": "0",
+       "CenterX": "0",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "0.050000000000000044",
+       "Fixture": "F3_NEUTRAL_BAND_OVER",
+       "G": "206",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "9"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.050000000000000044
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "206",
+       "Bucket": "CUT",
+       "CellIndex": "1",
+       "CenterX": "100",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "0.050000000000000044",
+       "Fixture": "F3_NEUTRAL_BAND_OVER",
+       "G": "206",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "10"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.050000000000000044
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "206",
+       "Bucket": "CUT",
+       "CellIndex": "2",
+       "CenterX": "0",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "0.050000000000000044",
+       "Fixture": "F3_NEUTRAL_BAND_OVER",
+       "G": "206",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "11"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.050000000000000044
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "206",
+       "Bucket": "CUT",
+       "CellIndex": "3",
+       "CenterX": "100",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "0.050000000000000044",
+       "Fixture": "F3_NEUTRAL_BAND_OVER",
+       "G": "206",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "12"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.050000000000000044
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "189",
+       "Bucket": "CUT",
+       "CellIndex": "0",
+       "CenterX": "0",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "0.30000000000000004",
+       "Fixture": "F4_LIGHT_CUT",
+       "G": "189",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "13"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.30000000000000004
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "189",
+       "Bucket": "CUT",
+       "CellIndex": "1",
+       "CenterX": "100",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "0.30000000000000004",
+       "Fixture": "F4_LIGHT_CUT",
+       "G": "189",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "14"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.30000000000000004
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "189",
+       "Bucket": "CUT",
+       "CellIndex": "2",
+       "CenterX": "0",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "0.30000000000000004",
+       "Fixture": "F4_LIGHT_CUT",
+       "G": "189",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "15"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.30000000000000004
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "189",
+       "Bucket": "CUT",
+       "CellIndex": "3",
+       "CenterX": "100",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "0.30000000000000004",
+       "Fixture": "F4_LIGHT_CUT",
+       "G": "189",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "16"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.30000000000000004
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "189",
+       "Bucket": "FILL",
+       "CellIndex": "0",
+       "CenterX": "0",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "-0.30000000000000004",
+       "Fixture": "F5_LIGHT_FILL",
+       "G": "255",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "189",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "17"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.30000000000000004
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "189",
+       "Bucket": "FILL",
+       "CellIndex": "1",
+       "CenterX": "100",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "-0.30000000000000004",
+       "Fixture": "F5_LIGHT_FILL",
+       "G": "255",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "189",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "18"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.30000000000000004
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "189",
+       "Bucket": "FILL",
+       "CellIndex": "2",
+       "CenterX": "0",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "-0.30000000000000004",
+       "Fixture": "F5_LIGHT_FILL",
+       "G": "255",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "189",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "19"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.30000000000000004
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "189",
+       "Bucket": "FILL",
+       "CellIndex": "3",
+       "CenterX": "100",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "-0.30000000000000004",
+       "Fixture": "F5_LIGHT_FILL",
+       "G": "255",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "189",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "20"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.30000000000000004
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "105",
+       "Bucket": "CUT",
+       "CellIndex": "0",
+       "CenterX": "0",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "1.5",
+       "Fixture": "F6_MID_CUT",
+       "G": "105",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "21"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 1.5
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "105",
+       "Bucket": "CUT",
+       "CellIndex": "1",
+       "CenterX": "100",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "1.5",
+       "Fixture": "F6_MID_CUT",
+       "G": "105",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "22"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 1.5
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "105",
+       "Bucket": "CUT",
+       "CellIndex": "2",
+       "CenterX": "0",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "1.5",
+       "Fixture": "F6_MID_CUT",
+       "G": "105",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "23"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 1.5
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "105",
+       "Bucket": "CUT",
+       "CellIndex": "3",
+       "CenterX": "100",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "1.5",
+       "Fixture": "F6_MID_CUT",
+       "G": "105",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "24"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 1.5
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "105",
+       "Bucket": "FILL",
+       "CellIndex": "0",
+       "CenterX": "0",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "-1.5",
+       "Fixture": "F7_MID_FILL",
+       "G": "255",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "105",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "25"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -1.5
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "105",
+       "Bucket": "FILL",
+       "CellIndex": "1",
+       "CenterX": "100",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "-1.5",
+       "Fixture": "F7_MID_FILL",
+       "G": "255",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "105",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "26"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -1.5
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "105",
+       "Bucket": "FILL",
+       "CellIndex": "2",
+       "CenterX": "0",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "-1.5",
+       "Fixture": "F7_MID_FILL",
+       "G": "255",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "105",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "27"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -1.5
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "105",
+       "Bucket": "FILL",
+       "CellIndex": "3",
+       "CenterX": "100",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "-1.5",
+       "Fixture": "F7_MID_FILL",
+       "G": "255",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "105",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "28"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -1.5
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "0",
+       "Bucket": "CUT",
+       "CellIndex": "0",
+       "CenterX": "0",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "3",
+       "Fixture": "F8_SAT_CUT",
+       "G": "0",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "29"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 3.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "0",
+       "Bucket": "CUT",
+       "CellIndex": "1",
+       "CenterX": "100",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "3",
+       "Fixture": "F8_SAT_CUT",
+       "G": "0",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "30"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 3.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "0",
+       "Bucket": "CUT",
+       "CellIndex": "2",
+       "CenterX": "0",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "3",
+       "Fixture": "F8_SAT_CUT",
+       "G": "0",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "31"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 3.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "0",
+       "Bucket": "CUT",
+       "CellIndex": "3",
+       "CenterX": "100",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "3",
+       "Fixture": "F8_SAT_CUT",
+       "G": "0",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "32"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 3.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "0",
+       "Bucket": "FILL",
+       "CellIndex": "0",
+       "CenterX": "0",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "-3",
+       "Fixture": "F9_SAT_FILL",
+       "G": "255",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "0",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "33"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -3.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "0",
+       "Bucket": "FILL",
+       "CellIndex": "1",
+       "CenterX": "100",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "-3",
+       "Fixture": "F9_SAT_FILL",
+       "G": "255",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "0",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "34"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -3.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "0",
+       "Bucket": "FILL",
+       "CellIndex": "2",
+       "CenterX": "0",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "-3",
+       "Fixture": "F9_SAT_FILL",
+       "G": "255",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "0",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "35"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -3.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "0",
+       "Bucket": "FILL",
+       "CellIndex": "3",
+       "CenterX": "100",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "-3",
+       "Fixture": "F9_SAT_FILL",
+       "G": "255",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "0",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "36"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -3.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "0",
+       "Bucket": "CUT",
+       "CellIndex": "0",
+       "CenterX": "0",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "5",
+       "Fixture": "F10_OVERSAT_CUT",
+       "G": "0",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "37"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 5.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "0",
+       "Bucket": "CUT",
+       "CellIndex": "1",
+       "CenterX": "100",
+       "CenterY": "0",
+       "Cols": "2",
+       "DeltaM": "5",
+       "Fixture": "F10_OVERSAT_CUT",
+       "G": "0",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "38"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 5.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "0",
+       "Bucket": "CUT",
+       "CellIndex": "2",
+       "CenterX": "0",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "5",
+       "Fixture": "F10_OVERSAT_CUT",
+       "G": "0",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "39"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 5.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "0",
+       "Bucket": "CUT",
+       "CellIndex": "3",
+       "CenterX": "100",
+       "CenterY": "100",
+       "Cols": "2",
+       "DeltaM": "5",
+       "Fixture": "F10_OVERSAT_CUT",
+       "G": "0",
+       "HalfHeightDu": "50",
+       "HalfWidthDu": "50",
+       "R": "255",
+       "Rows": "2"
+      },
+      "id": {
+       "entity_id": "40"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 5.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "210",
+       "Bucket": "NEUTRAL",
+       "CellIndex": "0",
+       "CenterX": "0",
+       "CenterY": "0",
+       "Cols": "3",
+       "DeltaM": "0",
+       "Fixture": "F11_3X3_MIXED",
+       "G": "210",
+       "HalfHeightDu": "25",
+       "HalfWidthDu": "25",
+       "R": "210",
+       "Rows": "3"
+      },
+      "id": {
+       "entity_id": "41"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "189",
+       "Bucket": "CUT",
+       "CellIndex": "1",
+       "CenterX": "50",
+       "CenterY": "0",
+       "Cols": "3",
+       "DeltaM": "0.30000000000000004",
+       "Fixture": "F11_3X3_MIXED",
+       "G": "189",
+       "HalfHeightDu": "25",
+       "HalfWidthDu": "25",
+       "R": "255",
+       "Rows": "3"
+      },
+      "id": {
+       "entity_id": "42"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.30000000000000004
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "189",
+       "Bucket": "FILL",
+       "CellIndex": "2",
+       "CenterX": "100",
+       "CenterY": "0",
+       "Cols": "3",
+       "DeltaM": "-0.30000000000000004",
+       "Fixture": "F11_3X3_MIXED",
+       "G": "255",
+       "HalfHeightDu": "25",
+       "HalfWidthDu": "25",
+       "R": "189",
+       "Rows": "3"
+      },
+      "id": {
+       "entity_id": "43"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.30000000000000004
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "210",
+       "Bucket": "NEUTRAL",
+       "CellIndex": "3",
+       "CenterX": "0",
+       "CenterY": "50",
+       "Cols": "3",
+       "DeltaM": "-0.030000000000000027",
+       "Fixture": "F11_3X3_MIXED",
+       "G": "210",
+       "HalfHeightDu": "25",
+       "HalfWidthDu": "25",
+       "R": "210",
+       "Rows": "3"
+      },
+      "id": {
+       "entity_id": "44"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.030000000000000027
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "210",
+       "Bucket": "NEUTRAL",
+       "CellIndex": "4",
+       "CenterX": "50",
+       "CenterY": "50",
+       "Cols": "3",
+       "DeltaM": "0",
+       "Fixture": "F11_3X3_MIXED",
+       "G": "210",
+       "HalfHeightDu": "25",
+       "HalfWidthDu": "25",
+       "R": "210",
+       "Rows": "3"
+      },
+      "id": {
+       "entity_id": "45"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "0",
+       "Bucket": "CUT",
+       "CellIndex": "5",
+       "CenterX": "100",
+       "CenterY": "50",
+       "Cols": "3",
+       "DeltaM": "3",
+       "Fixture": "F11_3X3_MIXED",
+       "G": "0",
+       "HalfHeightDu": "25",
+       "HalfWidthDu": "25",
+       "R": "255",
+       "Rows": "3"
+      },
+      "id": {
+       "entity_id": "46"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 3.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "0",
+       "Bucket": "CUT",
+       "CellIndex": "6",
+       "CenterX": "0",
+       "CenterY": "100",
+       "Cols": "3",
+       "DeltaM": "5",
+       "Fixture": "F11_3X3_MIXED",
+       "G": "0",
+       "HalfHeightDu": "25",
+       "HalfWidthDu": "25",
+       "R": "255",
+       "Rows": "3"
+      },
+      "id": {
+       "entity_id": "47"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 5.0
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "189",
+       "Bucket": "FILL",
+       "CellIndex": "7",
+       "CenterX": "50",
+       "CenterY": "100",
+       "Cols": "3",
+       "DeltaM": "-0.30000000000000004",
+       "Fixture": "F11_3X3_MIXED",
+       "G": "255",
+       "HalfHeightDu": "25",
+       "HalfWidthDu": "25",
+       "R": "189",
+       "Rows": "3"
+      },
+      "id": {
+       "entity_id": "48"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": -0.30000000000000004
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     },
+     {
+      "fields": {
+       "B": "210",
+       "Bucket": "NEUTRAL",
+       "CellIndex": "8",
+       "CenterX": "100",
+       "CenterY": "100",
+       "Cols": "3",
+       "DeltaM": "0.030000000000000027",
+       "Fixture": "F11_3X3_MIXED",
+       "G": "210",
+       "HalfHeightDu": "25",
+       "HalfWidthDu": "25",
+       "R": "210",
+       "Rows": "3"
+      },
+      "id": {
+       "entity_id": "49"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "m",
+       "value": 0.030000000000000027
+      },
+      "type": "cut-fill-heatmap-cell",
+      "unit": "m"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "1": "1",
+    "10": "10",
+    "11": "11",
+    "12": "12",
+    "13": "13",
+    "14": "14",
+    "15": "15",
+    "16": "16",
+    "17": "17",
+    "18": "18",
+    "19": "19",
+    "2": "2",
+    "20": "20",
+    "21": "21",
+    "22": "22",
+    "23": "23",
+    "24": "24",
+    "25": "25",
+    "26": "26",
+    "27": "27",
+    "28": "28",
+    "29": "29",
+    "3": "3",
+    "30": "30",
+    "31": "31",
+    "32": "32",
+    "33": "33",
+    "34": "34",
+    "35": "35",
+    "36": "36",
+    "37": "37",
+    "38": "38",
+    "39": "39",
+    "4": "4",
+    "40": "40",
+    "41": "41",
+    "42": "42",
+    "43": "43",
+    "44": "44",
+    "45": "45",
+    "46": "46",
+    "47": "47",
+    "48": "48",
+    "49": "49",
+    "5": "5",
+    "6": "6",
+    "7": "7",
+    "8": "8",
+    "9": "9"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "092ce1ccc059b65b1e6d317ccda86b9daaa24f9a3313859f0d3b3d7d8919d0cf",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "b1dcd5a66533cb4f6db4482e86da91e88087c8168e78bce36de772ed36241799",
+   "output_sha256": "b61d4394032d2a608ee6f92f862d6f13a86d3975a53a864ac37e42b7e28e3d97",
+   "parameters": {
+    "capability": "cut-fill-heatmap",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafheatmap_demo.csv",
+    "probe_file_sha256": "ddf88e78fbe8a76ae6e3f1e4a60493f8aceac0b8d7c1532f17950e7a9fa6228b",
+    "probe_type": "cut-fill-heatmap",
+    "side": "studio"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "server-builtin",
+    "producer": "studio",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  }
+ }
+}
