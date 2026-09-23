@@ -1,0 +1,22 @@
+# trackers-to-panelgroups: the command cannot read the tracker rows the plugin writes
+
+**Plugin:** Branch2025 `Pvcase/LeafTrackersToPanelGroupsCommand.cs` 618-637 (`ReadLeafTrackerXData`), filed on
+Branch2025 issue #281.
+**Proven:** licensed AutoCAD 2025 on the VMC, 2026-09-23, step d3 of the terrain chain, on a drawing holding the
+plugin's own LEAFTRACK output. The command raised the AutoCAD modal "System.FormatException: The input string
+'schema_version' was not in a correct format." (stack: `ReadLeafTrackerXData` :635, `TryBuildLeafBlockSpec` :597,
+`CollectTrackers` :297) and committed nothing: DBMOD stayed 0 and the reopened dump is byte-identical to the one
+before.
+
+## Why
+
+`ReadLeafTrackerXData` reads the tracker record by position and converts slots 1 to 3 with `Convert.ToInt32`
+(lines 632 to 635). The tracker writers now emit key=value strings that include `schema_version`, and the
+key-aware reader `Terrain/TrackerRowReader.cs` exists but is not used on this path.
+
+## Studio's behaviour, and the declared diffs
+
+Studio reads the same tracker rows through the key-aware reader and converts them to panel groups, reporting how
+many groups and slots it created; the plugin's evidence is its empty delta plus the `command-error` report row. The
+declared diffs are exactly the comparator's. When the plugin reads tracker rows by key, this capability can be
+recaptured for an ordinary receipt.
