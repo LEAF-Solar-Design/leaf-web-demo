@@ -387,6 +387,21 @@ def test_entity_scope_suites_are_registered_with_measured_floors():
         assert suites[sid].allowed_skip_reasons == (), sid
 
 
+def test_studio_suites_are_registered_with_measured_floors():
+    g = _load_runner()
+    suites = {s.id: s for s in g.build_suites()}
+
+    for sid in (
+        "scripts-solar-w1-studio-string-add",
+        "scripts-solar-w1-studio-string-delete",
+        "scripts-solar-w1-studio-string-multi-add",
+        "scripts-solar-w1-studio-solve",
+    ):
+        assert sid in suites, sid
+        assert sid in g._MEASURED_EST_S, sid
+        assert g._MEASURED_EST_S[sid] >= 100.0, sid
+
+
 def test_host_capability_ci_producers_cover_unit_and_postgres_modules(tmp_path, monkeypatch):
     """ReciPDF host capability proofs run in the existing unit and PG producers."""
     import re
