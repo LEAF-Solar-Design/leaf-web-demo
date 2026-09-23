@@ -483,6 +483,15 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_solar_ground_layout.py"), 42),
         Suite("server-solar-ground-scene", "server tests/test_solar_ground_scene.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_ground_scene.py"), 27),
+        # W5 third ground batch (2026-09-23, contract G23-G26): build-out (BOM CSV byte for byte, torque
+        # tubes, multi-pad grading, roads), shade (sim, annual, compare, explain) and reports (fence audit,
+        # mesh diff, civil vegetation and fence mesh, optimal spacing). Floors MEASURED on the first green run.
+        Suite("server-solar-ground-buildout", "server tests/test_solar_ground_buildout.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_ground_buildout.py"), 28),
+        Suite("server-solar-ground-shade", "server tests/test_solar_ground_shade.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_ground_shade.py"), 34),
+        Suite("server-solar-ground-reports", "server tests/test_solar_ground_reports.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_ground_reports.py"), 71),
         # S33 KML and LandXML ports (2026-09-23): server/solar_geo_formats.py, the
         # literal port of KmlBoundaryExporter (with every format branch
         # LEAFKMLEXPORTFMTDEMO exercises), KmlBoundaryParser, TerrainExporter's
@@ -1856,6 +1865,12 @@ def build_suites() -> List[Suite]:
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_layout_evidence.py"), 17),
         Suite("scripts-solar-ground-scene-evidence", "scripts test_solar_ground_scene_evidence.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_scene_evidence.py"), 20),
+        Suite("scripts-solar-ground-buildout-evidence", "scripts test_solar_ground_buildout_evidence.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_buildout_evidence.py"), 18),
+        Suite("scripts-solar-ground-shade-evidence", "scripts test_solar_ground_shade_evidence.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_shade_evidence.py"), 17),
+        Suite("scripts-solar-ground-reports-evidence", "scripts test_solar_ground_reports_evidence.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_reports_evidence.py"), 17),
         # The parity oracle itself: the ledger rules, the receipt rules, the fail-closed
         # inputs, and (S29, 2026-09-22) the declared divergence a known plugin defect
         # gets, which is the ONLY way a failing comparator settles a capability: the

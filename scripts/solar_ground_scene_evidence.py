@@ -177,10 +177,14 @@ def line_count(text):
     return text.count("\n") + (1 if text and not text.endswith("\n") else 0)
 
 
+# G26: the frozen order of file roles (ids file-<n> follow it).
+G26_FILE_ROLE_ORDER = ("terrain-csv", "scene-dae", "scene-pvc", "bom-csv", "shade-csv", "shade-azal-matrix", "shade-sam", "shade-per-panel")
+
 def file_rows(files):
     """files: {role: text as written}. One `file` row per role, ids file-<n> in role order."""
     rows = []
-    for n, role in enumerate(sorted(files), 1):
+    # G26: file rows follow the frozen role order.
+    for n, role in enumerate(sorted(files, key=G26_FILE_ROLE_ORDER.index), 1):
         text = normalize_file_text(files[role], role)
         try:
             chunks = g21_chunks(text, MAX_CHUNK)
