@@ -349,7 +349,7 @@ function ScopedAskPanel({ identity, drawingId, x, y, resolveScopedIntakes, onClo
       // THE ONE GUARDED TRANSPORT: postMessage runs the credential guard
       // (lib/secretGuardTransport.js) before this text ever reaches the
       // network — see converse.js's own header. Never call fetch here.
-      await postMessage(created.session_id, { text: trimmed })
+      await postMessage(created.session_id, { text: trimmed, entity_scope: { drawing_id: drawingId, handle: identity.id } })
       setText('')
     } catch (err) {
       if (isSecretRefused(err)) setRefusal(err.refusal)

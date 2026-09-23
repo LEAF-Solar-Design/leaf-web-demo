@@ -290,6 +290,7 @@ export async function listSessions({ scope = null, limit = 20, cursor = null } =
 // llm_rate_limited · 404 session_not_found).
 export async function postMessage(sessionId, {
   text, confirm, images, classifier_hint, credential_grant, queue, request_id,
+  entity_scope,
   // Slice 6b hand-off identity: WHO asked for this background start. Bounded
   // and trimmed below before it can reach the wire; slice 11 is its consumer
   // (the build queue card), and nothing in this slice reads it back.
@@ -317,6 +318,7 @@ export async function postMessage(sessionId, {
   if (credential_grant != null) payload.credential_grant = credential_grant
   if (queue === true) payload.queue = true
   if (request_id != null) payload.request_id = request_id
+  if (entity_scope !== undefined) payload.entity_scope = entity_scope
   // Only a QUEUED start is a background hand-off, and only a bounded non-empty
   // string rides along: an over-long or blank value is dropped here rather
   // than posted for the server to refuse. Never logged, never echoed.

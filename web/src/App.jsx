@@ -364,6 +364,8 @@ export default function App() {
   const [selectedHandle, setSelectedHandle] = useState(null)
   const canvasPickRef = useRef(null)
   const registerCanvasPick = useCallback((fn) => { canvasPickRef.current = fn }, [])
+  const canvasMarqueeRef = useRef(null)
+  const registerCanvasMarquee = useCallback((fn) => { canvasMarqueeRef.current = fn }, [])
   const [activeIntake, setActiveIntake] = useState(null)
   const [engineHistory, setEngineHistory] = useState(null)
   const [resultCandidate, setResultCandidate] = useState(null)
@@ -3792,6 +3794,7 @@ export default function App() {
               selectedHandle={selectedHandle}
               onSelectedHandleChange={setSelectedHandle}
               registerCanvasPick={registerCanvasPick}
+              registerCanvasMarquee={registerCanvasMarquee}
               onShown={(intake, history) => {
                 setActiveIntake(intake)
                 setEngineHistory(history ? { undoDepth: history.undoDepth, redoDepth: history.redoDepth } : null)
@@ -4080,6 +4083,11 @@ export default function App() {
                     if (workspaceCardRef.current?.dataset.cockpitPicking === '1') return
                     if (canvasPickRef.current?.(handle, { additive: !!gesture?.additive })) return
                     setSelectedHandle(handle)
+                  }}
+                  marqueeGate={() => typeof canvasMarqueeRef.current === 'function' && workspaceCardRef.current?.dataset.cockpitPicking !== '1'}
+                  onMarqueeSelect={(handles, gesture) => {
+                    if (workspaceCardRef.current?.dataset.cockpitPicking === '1') return
+                    canvasMarqueeRef.current?.(handles, { additive: !!gesture?.additive })
                   }}
                   pendingEdit={pendingEdit || writeGhost}
                   background={studioGround ? 'transparent' : undefined}

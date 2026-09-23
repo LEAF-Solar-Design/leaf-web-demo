@@ -58,6 +58,7 @@ import agent_audit
 import agent_gate
 import deps
 import entitlements
+import entity_scope
 import platform_link
 import session_store
 import turn_runner
@@ -156,9 +157,14 @@ def internal_gate(req: GateRequest,
                 ErrorCode.BAD_PARAMS, "current project role does not permit this action",
                 retryable=False, status_code=403,
             )
+    scope_refusal = (
+        entity_scope.gate_scope_refusal(authority_session_id, authority_turn_id, req.tenant_id)
+        if req.action in entity_scope.SCOPE_REFUSED_ACTIONS else None
+    )
     result = agent_gate.gate(req.tenant_id, req.session_id, req.turn_id,
                              req.action, req.args, tier_caps, tier=tier,
                              subject=turn_subject,
+                             scope_refusal=scope_refusal,
                              # The APP-owned session the client stored its
                              # approval policy against — req.session_id is the
                              # harness's private one (review round 1).

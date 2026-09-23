@@ -366,6 +366,24 @@ def test_w4g7b_contract_v3_server_suites_are_registered_with_measured_floors():
         canary_reason,), "server-w4g7b-06i"
 
 
+def test_entity_scope_suites_are_registered_with_measured_floors():
+    """SSD1 element 17: the binding, admission and backedge identity suites run
+    in native CI. Mirrors the floors in run-all-gates.py; BOTH move together,
+    and only alongside a re-measured run. No row in them may skip."""
+    g = _load_runner()
+    suites = {s.id: s for s in g.build_suites()}
+
+    floors = {
+        "server-entity-scope-binding": 75,
+        "server-entity-scope-admission": 52,
+        "server-backedge-author-identity": 44,
+    }
+    assert {sid: suites[sid].expected for sid in floors} == floors
+    for sid in floors:
+        assert suites[sid].cwd == g.SERVER, sid
+        assert suites[sid].allowed_skip_reasons == (), sid
+
+
 def test_host_capability_ci_producers_cover_unit_and_postgres_modules(tmp_path, monkeypatch):
     """ReciPDF host capability proofs run in the existing unit and PG producers."""
     import re

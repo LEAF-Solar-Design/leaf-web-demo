@@ -1,0 +1,261 @@
+{
+ "schema": "leaf.solar-parity-receipt.v1",
+ "capability": "kml-export",
+ "capability_version": "0",
+ "fixture": {
+  "id": "demo-fmt-f6-projected-roundtrip",
+  "sha256": "688864d10eedebb4e9fb70b4a12a0db3aa581797d1c6271fcd2c16bb49a83b54"
+ },
+ "plugin": {
+  "build": "LeafSolarDesign 2025 licensed 2026-09-23",
+  "state": "committed",
+  "receipt_sha256": "c1c48f7cb66183da9ac11384d2c3f4942277207ac04a00e497f0ee3effd1b7ea"
+ },
+ "studio": {
+  "capability_version": "0",
+  "engine": "server-builtin"
+ },
+ "comparator": {
+  "name": "solar-w1-semantic",
+  "version": "1",
+  "verdict": "pass",
+  "diffs": []
+ },
+ "synthetic_fields": [
+  "plugin:before/recorded",
+  "plugin:changes/unrecorded",
+  "studio:before/recorded",
+  "studio:changes/unrecorded"
+ ],
+ "fallback_fields": [],
+ "synthetic_flagged": true,
+ "survived_reopen": true,
+ "produced_at": "2026-09-23T06:23:06Z",
+ "comparison": {
+  "schema": "leaf.solar-w1-comparison.v1",
+  "capability": "kml-export",
+  "family": "exports",
+  "plugin": {
+   "after": {
+    "format": "xml:kml",
+    "rows": [
+     {
+      "fields": {
+       "Count": 1,
+       "File": "leafkmlexportfmt_demo_F6_PROJECTED_ROUNDTRIP.xml",
+       "Lines": [
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>",
+        "<kml xmlns=\"http://www.opengis.net/kml/2.2\">",
+        "  <Document>",
+        "    <name>F6Doc</name>",
+        "    <Placemark>",
+        "      <name>F6Poly</name>",
+        "      <Polygon>",
+        "        <outerBoundaryIs>",
+        "          <LinearRing>",
+        "            <coordinates>-105,40 -104.997647914794,40 -105,40.000900900900902 -105,40</coordinates>",
+        "          </LinearRing>",
+        "        </outerBoundaryIs>",
+        "      </Polygon>",
+        "    </Placemark>",
+        "  </Document>",
+        "</kml>"
+       ]
+      },
+      "id": {
+       "entity_id": "leafkmlexportfmt_demo_F6_PROJECTED_ROUNDTRIP.xml"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "placemarks",
+       "value": 1
+      },
+      "type": "kml-document",
+      "unit": "placemarks"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "leafkmlexportfmt_demo_F6_PROJECTED_ROUNDTRIP.xml": "leafkmlexportfmt_demo_F6_PROJECTED_ROUNDTRIP.xml"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "688864d10eedebb4e9fb70b4a12a0db3aa581797d1c6271fcd2c16bb49a83b54",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "b1fe8f186db63b247bcedacc8146b9fb66979d82a5000ba76e6f3da899d1b902",
+   "output_sha256": "155e4a70ca3f26bc7952146e2c758c13e0a13b82a4d218fe461f50326dee2932",
+   "parameters": {
+    "capability": "kml-export",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafkmlexportfmt_demo_F6_PROJECTED_ROUNDTRIP.xml",
+    "probe_file_sha256": "926ed22255f3ad5a7e3badf6a7b55ae22b3e63a4211e9fc57988c0e697aed6a2",
+    "probe_type": "kml-document",
+    "side": "plugin"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "none",
+    "producer": "plugin",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  },
+  "studio": {
+   "after": {
+    "format": "xml:kml",
+    "rows": [
+     {
+      "fields": {
+       "Count": 1,
+       "File": "leafkmlexportfmt_demo_F6_PROJECTED_ROUNDTRIP.xml",
+       "Lines": [
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>",
+        "<kml xmlns=\"http://www.opengis.net/kml/2.2\">",
+        "  <Document>",
+        "    <name>F6Doc</name>",
+        "    <Placemark>",
+        "      <name>F6Poly</name>",
+        "      <Polygon>",
+        "        <outerBoundaryIs>",
+        "          <LinearRing>",
+        "            <coordinates>-105,40 -104.997647914794,40 -105,40.000900900900902 -105,40</coordinates>",
+        "          </LinearRing>",
+        "        </outerBoundaryIs>",
+        "      </Polygon>",
+        "    </Placemark>",
+        "  </Document>",
+        "</kml>"
+       ]
+      },
+      "id": {
+       "entity_id": "leafkmlexportfmt_demo_F6_PROJECTED_ROUNDTRIP.xml"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "placemarks",
+       "value": 1
+      },
+      "type": "kml-document",
+      "unit": "placemarks"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "leafkmlexportfmt_demo_F6_PROJECTED_ROUNDTRIP.xml": "leafkmlexportfmt_demo_F6_PROJECTED_ROUNDTRIP.xml"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "688864d10eedebb4e9fb70b4a12a0db3aa581797d1c6271fcd2c16bb49a83b54",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "b1fe8f186db63b247bcedacc8146b9fb66979d82a5000ba76e6f3da899d1b902",
+   "output_sha256": "155e4a70ca3f26bc7952146e2c758c13e0a13b82a4d218fe461f50326dee2932",
+   "parameters": {
+    "capability": "kml-export",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafkmlexportfmt_demo_F6_PROJECTED_ROUNDTRIP.xml",
+    "probe_file_sha256": "926ed22255f3ad5a7e3badf6a7b55ae22b3e63a4211e9fc57988c0e697aed6a2",
+    "probe_type": "kml-document",
+    "side": "studio"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "server-builtin",
+    "producer": "studio",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  }
+ }
+}

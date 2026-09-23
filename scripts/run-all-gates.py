@@ -472,6 +472,19 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_solar_ground_terrain.py"), 117),
         Suite("server-solar-ground-frames", "server tests/test_solar_ground_frames.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_ground_frames.py"), 95),
+        # S33 KML and LandXML ports (2026-09-23): server/solar_geo_formats.py, the
+        # literal port of KmlBoundaryExporter (with every format branch
+        # LEAFKMLEXPORTFMTDEMO exercises), KmlBoundaryParser, TerrainExporter's
+        # LandXML writer with its Fixed and Delaunay triangulations, and
+        # TerrainImporter.ParseLandXmlPoints plus LandXmlImporter. Three layers:
+        # all eighteen licensed files in the committed DEMO captures
+        # (docs/parity/evidence/probes/demo-probes-20260923) reproduced by
+        # COMPUTING them, whole and CSV row by row; the writer and reader branches;
+        # and hostile XML (DTDs, entities, depth and size bounds) refused at every
+        # entry point. Floor MEASURED at 160 on the first green run (2026-09-23,
+        # 1.1 s).
+        Suite("server-solar-geo-formats", "server tests/test_solar_geo_formats.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_geo_formats.py"), 160),
         # S31 XLSX codec (2026-09-22): server/solar_xlsx.py, a small standard-library
         # reader and writer (zipfile plus xml.etree only, NO openpyxl, because this
         # repo declares no such dependency). Covers the round trip, the four
@@ -649,6 +662,17 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_agent_policy.py"), 33),
         Suite("server-agent-gate", "server tests/test_agent_gate.py", "pytest", SERVER,
               _py_pytest("tests/test_agent_gate.py"), 57),
+        # SSD1 element 17, entity-scope containment: the turn's frozen binding
+        # (17-A), its admission at the gate and /api/run (17-B1), and the backedge
+        # identity rows whose fixtures 17-B1 extended. None of the three files was
+        # registered before, so native CI never ran them. Floors are the counts
+        # each file executes alone; nothing in them skips on a runner.
+        Suite("server-entity-scope-binding", "server tests/test_entity_scope_binding.py",
+              "pytest", SERVER, _py_pytest("tests/test_entity_scope_binding.py"), 75),
+        Suite("server-entity-scope-admission", "server tests/test_entity_scope_admission.py",
+              "pytest", SERVER, _py_pytest("tests/test_entity_scope_admission.py"), 52),
+        Suite("server-backedge-author-identity", "server tests/test_backedge_author_identity.py",
+              "pytest", SERVER, _py_pytest("tests/test_backedge_author_identity.py"), 44),
         # W14 admin self-edit lane (R7): branch-only platform-repo writes,
         # fundamental-path co-sign, landing handoff. Own process: it builds
         # real git repos and toggles the R7 rollout env.
@@ -1767,9 +1791,14 @@ def build_suites() -> List[Suite]:
         # terrain and irradiance CSVs (four carrying Encoding.UTF8's byte order
         # mark, which the CSV reader now drops as encoding) with a comparator pass
         # on each against its committed licensed capture: 28 more cases, so the
-        # floor is COUNTED at 179 until the first green run measures it.
+        # floor is COUNTED at 179 until the first green run measures it. S33
+        # (2026-09-23) adds the XML path (one row per KML or LandXML document,
+        # keyed by file name, its canonical lines verbatim, root element checked,
+        # hostile XML refused) and the five new probe types, with a comparator pass
+        # on each of the eighteen committed licensed files: floor MEASURED at 258
+        # on the first green run (2026-09-23, 5.0 s).
         Suite("scripts-solar-probe-evidence", "scripts test_solar_probe_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_probe_evidence.py"), 179),
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_probe_evidence.py"), 258),
         # S22 (2026-09-22): contract rule G9 on the Studio evidence adapter, the first
         # test file it has. A set-valued list (unassigned_panels, duplicate_panels) is
         # emitted in ascending neutral-id order, so the same set recorded in two orders

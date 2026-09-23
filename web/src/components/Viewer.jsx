@@ -3,6 +3,7 @@ import { applyViewPose, cameraPose, nextFitState, pickLineThreshold, safeFitFrus
 import { blockDefinitions } from './viewerIntake.js'
 import { expandBulgedPolylines, intakeRoundPolylines } from '../cadedit/engineIntake.js'
 import { formatElementId } from '../lib/elementIdentity.js'
+import { marqueeMode, worldRect, marqueeHandles } from '../lib/marqueeSelection.js'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 
@@ -137,6 +138,7 @@ const Viewer = forwardRef(function Viewer(
     intake, colorForLayer, visibleLayers, paletteRevision = undefined,
     highlightHandles, markers, overlayPolylines,
     selectedHandle, onSelectEntity, pendingEdit,
+    marqueeGate, onMarqueeSelect,
     background, controlsEnabled = true, rotateEnabled = false,
     panelSculpture = false, stringRoutes, onGlError, safeRect = null,
   },
@@ -155,6 +157,8 @@ const Viewer = forwardRef(function Viewer(
   // fires a stale closure.
   const onSelectRef = useRef(onSelectEntity)
   onSelectRef.current = onSelectEntity
+  const marqueeRef = useRef(null)
+  marqueeRef.current = { gate: marqueeGate, select: onMarqueeSelect, visibleLayers }
   const onGlErrorRef = useRef(onGlError)
   onGlErrorRef.current = onGlError
   // controlsEnabled read via ref inside the scene build (and synced by its own
@@ -557,13 +561,15 @@ const Viewer = forwardRef(function Viewer(
     // --- picking: click (not drag) -> raycast -> handle ---------------------
     const raycaster = new THREE.Raycaster()
     const ndc = new THREE.Vector2()
-    let down = null // { x, y, t }
+    let down = null // { x, y, t, pointerId }
     function onPointerDown(e) {
       if (e.button !== 0) return // only left-click selects
-      down = { x: e.clientX, y: e.clientY, t: performance.now() }
+      if (down && down.pointerId !== e.pointerId && e.isPrimary === false) return
+      down = { x: e.clientX, y: e.clientY, t: performance.now(), pointerId: e.pointerId }
     }
     function onPointerUp(e) {
       if (!down) return
+      if (down.pointerId !== e.pointerId) return
       const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y)
       const dt = performance.now() - down.t
       const wasClick = moved < CLICK_MOVE_PX && dt < CLICK_MAX_MS
@@ -583,9 +589,137 @@ const Viewer = forwardRef(function Viewer(
       const cb = onSelectRef.current
       if (cb) cb(handle, { additive: e.shiftKey || e.ctrlKey || e.metaKey })
     }
+    function onPointerCancel(e) {
+      if (down && down.pointerId === e.pointerId) down = null
+    }
     const dom = renderer.domElement
+    let candidate = null
+    let marquee = null
+    function foreignPointer(e) { return !!marquee && e.pointerId !== marquee.pointerId }
+    function endCandidate() {
+      if (!candidate) return
+      controls.enabled = candidate.controlsWereEnabled
+      candidate = null
+    }
+    function clearMarquee() {
+      endCandidate()
+      down = null
+      if (!marquee) return
+      const pointerId = marquee.pointerId
+      marquee.overlay.remove()
+      marquee = null
+      try {
+        if (dom.hasPointerCapture(pointerId)) dom.releasePointerCapture(pointerId)
+      } catch {}
+    }
+    function drawMarquee(e) {
+      const rect = mount.getBoundingClientRect()
+      const end = { x: e.clientX, y: e.clientY }
+      marquee.overlay.dataset.mode = marqueeMode(marquee.start, end)
+      Object.assign(marquee.overlay.style, {
+        left: `${Math.min(marquee.start.x, end.x) - rect.left}px`,
+        top: `${Math.min(marquee.start.y, end.y) - rect.top}px`,
+        width: `${Math.abs(end.x - marquee.start.x)}px`,
+        height: `${Math.abs(end.y - marquee.start.y)}px`,
+      })
+    }
+    function startMarquee(e) {
+      if (foreignPointer(e)) {
+        e.stopPropagation()
+        if (e.cancelable) e.preventDefault()
+        return
+      }
+      if (candidate && !marquee && e.pointerId !== candidate.pointerId) {
+        endCandidate()
+        return
+      }
+      const callbacks = marqueeRef.current
+      if (e.button !== 0 || candidate || marquee || !controls.enabled || rotateEnabledRef.current
+        || typeof callbacks.gate !== 'function' || typeof callbacks.select !== 'function'
+        || !callbacks.gate()) return
+      candidate = {
+        pointerId: e.pointerId, start: { x: e.clientX, y: e.clientY },
+        controlsWereEnabled: controls.enabled,
+      }
+      controls.enabled = false
+    }
+    function moveMarquee(e) {
+      if (foreignPointer(e)) {
+        e.stopPropagation()
+        return
+      }
+      if (!marquee && candidate && e.pointerId === candidate.pointerId
+        && Math.hypot(e.clientX - candidate.start.x, e.clientY - candidate.start.y) >= CLICK_MOVE_PX) {
+        down = null
+        const overlay = document.createElement('div')
+        overlay.className = 'viewer-marquee'
+        overlay.style.pointerEvents = 'none'
+        mount.appendChild(overlay)
+        marquee = { pointerId: candidate.pointerId, start: candidate.start, overlay }
+        try { dom.setPointerCapture(e.pointerId) } catch {}
+      }
+      if (!marquee || e.pointerId !== marquee.pointerId) return
+      e.stopPropagation()
+      drawMarquee(e)
+    }
+    function finishMarquee(e) {
+      if (!marquee && candidate && e.pointerId === candidate.pointerId) {
+        endCandidate()
+        return
+      }
+      if (foreignPointer(e)) {
+        e.stopPropagation()
+        return
+      }
+      if (!marquee || e.pointerId !== marquee.pointerId || e.button !== 0) return
+      e.stopPropagation()
+      const start = marquee.start
+      const end = { x: e.clientX, y: e.clientY }
+      if (Math.hypot(end.x - start.x, end.y - start.y) < CLICK_MOVE_PX) {
+        clearMarquee()
+        return
+      }
+      const mode = marqueeMode(start, end)
+      const bounds = dom.getBoundingClientRect()
+      const rect = worldRect(unprojectClientToPlane(camera, bounds, start.x, start.y),
+        unprojectClientToPlane(camera, bounds, end.x, end.y))
+      clearMarquee()
+      const callbacks = marqueeRef.current
+      if (!rect || !callbacks.gate?.()) return
+      const handles = marqueeHandles(polylines, rect, mode,
+        (pl) => !callbacks.visibleLayers || callbacks.visibleLayers[pl.layer] !== false)
+      callbacks.select?.(handles, { additive: e.shiftKey || e.ctrlKey || e.metaKey, mode })
+    }
+    function cancelMarquee(e) {
+      if (foreignPointer(e)) {
+        e.stopPropagation()
+        return
+      }
+      const active = marquee || candidate
+      if (!active || (e.pointerId !== undefined && e.pointerId !== active.pointerId)) return
+      clearMarquee()
+    }
+    function orphanRelease(e) {
+      const active = marquee || candidate
+      if (active && e.pointerId === active.pointerId && !mount.contains(e.target)) clearMarquee()
+    }
+    function escapeMarquee(e) {
+      if (e.key === 'Escape' && (marquee || candidate)) {
+        if (marquee) e.stopPropagation()
+        clearMarquee()
+      }
+    }
+    mount.addEventListener('pointerdown', startMarquee, true)
+    mount.addEventListener('pointermove', moveMarquee, true)
+    mount.addEventListener('pointerup', finishMarquee, true)
+    mount.addEventListener('pointercancel', cancelMarquee, true)
+    mount.addEventListener('lostpointercapture', cancelMarquee, true)
+    window.addEventListener('keydown', escapeMarquee, true)
+    window.addEventListener('pointerup', orphanRelease, true)
+    window.addEventListener('pointercancel', orphanRelease, true)
     dom.addEventListener('pointerdown', onPointerDown)
     dom.addEventListener('pointerup', onPointerUp)
+    dom.addEventListener('pointercancel', onPointerCancel)
 
     let raf
     function animate() {
@@ -669,7 +803,17 @@ const Viewer = forwardRef(function Viewer(
       cancelAnimationFrame(raf)
       ro.disconnect()
       dom.removeEventListener('pointerdown', onPointerDown)
+      clearMarquee()
+      mount.removeEventListener('pointerdown', startMarquee, true)
+      mount.removeEventListener('pointermove', moveMarquee, true)
+      mount.removeEventListener('pointerup', finishMarquee, true)
+      mount.removeEventListener('pointercancel', cancelMarquee, true)
+      mount.removeEventListener('lostpointercapture', cancelMarquee, true)
+      window.removeEventListener('keydown', escapeMarquee, true)
+      window.removeEventListener('pointerup', orphanRelease, true)
+      window.removeEventListener('pointercancel', orphanRelease, true)
       dom.removeEventListener('pointerup', onPointerUp)
+      dom.removeEventListener('pointercancel', onPointerCancel)
       controls.removeEventListener('change', recordCameraPose)
       controls.removeEventListener('start', onControlsStart)
       controls.removeEventListener('change', onControlsChange)
