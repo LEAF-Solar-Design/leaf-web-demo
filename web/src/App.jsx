@@ -13,6 +13,7 @@ import { CockpitStatus, FootRegion, StatusTabs, ViewCluster } from './site/Drawi
 // rail it used to spell inline. Every shared chrome gate lives there now.
 import SurfaceFrame from './site/SurfaceFrame.jsx'
 import { useToastBus } from './lib/notifications.js'
+import { createPreviewRunner, resolveVersionTransfer } from './lib/boardTransfer.js'
 import NavRail from './site/NavRail.jsx'
 import CockpitTopBand from './site/CockpitTopBand.jsx'
 import DraftingRibbon from './site/DraftingRibbon.jsx'
@@ -712,6 +713,8 @@ export default function App() {
   } = workspaceController
   const [projectPane, setProjectPane] = useState(null)
   const [boardJob, setBoardJob] = useState(null)
+  const [boardTransferStatus, setBoardTransferStatus] = useState('')
+  const boardPreviewRunRef = useRef(null)
   useEffect(() => {
     setProjectPane(null)
     setBoardJob(null)
@@ -3632,6 +3635,21 @@ export default function App() {
             headingRef={boardHeadingRef}
             workspaceProject={workspaceProjectState}
             actions={surfaceSlots.ground === 'board' ? {
+              transferProjectId: openProjectId || '',
+              transferStatus: boardTransferStatus,
+              onTransferVersion: openProjectId && workspace && drawingState?.drawing_id ? (raw) => {
+                const result = resolveVersionTransfer(raw, {
+                  projectId: openProjectId,
+                  drawingId: drawingState.drawing_id,
+                  versions: workspace.drawing_versions || [],
+                })
+                if (result.ok) {
+                  boardPreviewRunRef.current ??= createPreviewRunner()
+                  boardPreviewRunRef.current(result.seq, onPreviewVersionTracked, setBoardTransferStatus)
+                } else {
+                  setBoardTransferStatus(result.message)
+                }
+              } : undefined,
               onOpenDrawing: () => setProjectPane('material'),
               onOpenVersion: () => setProjectPane('versions'),
               onOpenJob: (job) => { setBoardJob(job); setProjectPane('jobs') },

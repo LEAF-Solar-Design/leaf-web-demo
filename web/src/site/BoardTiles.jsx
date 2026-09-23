@@ -4,6 +4,7 @@ import { isWriteTool } from '../lib/toolRecord.js'
 import { formatElementId } from '../lib/elementIdentity.js'
 import { SHARED_WORKSPACE_CAPABILITIES } from './productSurfaces.js'
 import { shortId } from './groundWindow.js'
+import { BOARD_TRANSFER_TYPE, encodeVersionRef } from '../lib/boardTransfer.js'
 
 const listCount = (list) => (Array.isArray(list) ? list.length : 0)
 
@@ -19,16 +20,31 @@ function capabilityTotal(families) {
 // null (no project open, or the offline demo) renders the honest empties.
 // ---------------------------------------------------------------------------
 export function BoardTiles({ workspace, drawing, catalog, renderTile, studioPresentation = false, actions }) {
-  const action = (kind, id, callback, value, text, label) => callback
-    ? <button type="button" className="ground-row-action" data-action={kind} data-id={id} aria-label={label} onClick={() => callback(value)}>{text}</button>
+  const action = (kind, id, callback, value, text, label, buttonProps) => callback || buttonProps
+    ? <button type="button" className="ground-row-action" data-action={kind} data-id={id} aria-label={label} onClick={() => callback?.(value)} {...buttonProps}>{text}</button>
     : text
+  const canTransferVersion = typeof actions?.onTransferVersion === 'function'
+  const drawingTransferProps = canTransferVersion ? {
+    'data-drop-target': 'version',
+    onDragOver: (event) => {
+      if (Array.from(event.dataTransfer.types).includes(BOARD_TRANSFER_TYPE)) {
+        event.preventDefault()
+        event.dataTransfer.dropEffect = 'copy'
+      }
+    },
+    onDrop: (event) => {
+      if (!Array.from(event.dataTransfer.types).includes(BOARD_TRANSFER_TYPE)) return
+      event.preventDefault()
+      actions.onTransferVersion(event.dataTransfer.getData(BOARD_TRANSFER_TYPE))
+    },
+  } : {}
   const versions = workspace?.drawing_versions || []
   const jobs = [...(workspace?.jobs || [])].reverse().slice(0, 5) // newest first
   const tools = workspace?.built_tools || []
   const families = catalog?.families || []
   const tiles = (
     <>
-          <section className="ground-tile" data-tile="drawing" aria-label="Drawing">
+          <section className="ground-tile" data-tile="drawing" aria-label="Drawing" {...drawingTransferProps}>
             <h3>Drawing</h3>
             {drawing ? (
               <>
@@ -36,6 +52,7 @@ export function BoardTiles({ workspace, drawing, catalog, renderTile, studioPres
                 <p>{drawing.polylines} polylines · {drawing.layers} layers</p>
               </>
             ) : <p className="ground-empty">No drawing mounted</p>}
+            {canTransferVersion && typeof actions.transferStatus === 'string' && actions.transferStatus && <p role="status" data-testid="board-transfer-status">{actions.transferStatus}</p>}
           </section>
           <section className="ground-tile" data-tile="versions" aria-label="Versions">
             <h3>Versions</h3>
@@ -43,9 +60,23 @@ export function BoardTiles({ workspace, drawing, catalog, renderTile, studioPres
               <>
                 <strong>{versions.length} drawing version{versions.length === 1 ? '' : 's'}</strong>
                 <ul>
-                  {[...versions].slice(-3).reverse().map((version) => (
-                    <li key={version.version_id} data-element-id={formatElementId('version', version.version_id) || undefined}>{action('version', version.version_id, actions?.onOpenVersion, version, <>v{version.seq} · {shortId(version.drawing_id)}</>)}</li>
-                  ))}
+                  {[...versions].slice(-3).reverse().map((version) => {
+                    const ref = canTransferVersion ? encodeVersionRef({ projectId: actions.transferProjectId, drawingId: version.drawing_id, versionId: version.version_id, seq: version.seq }) : null
+                    const dragProps = canTransferVersion ? {
+                      draggable: true,
+                      onDragStart: (event) => {
+                        if (ref === null) { event.preventDefault(); return }
+                        event.dataTransfer.setData(BOARD_TRANSFER_TYPE, ref)
+                        event.dataTransfer.effectAllowed = 'copy'
+                      },
+                    } : undefined
+                    return (
+                      <li key={version.version_id} data-element-id={formatElementId('version', version.version_id) || undefined}>
+                        {action('version', version.version_id, actions?.onOpenVersion, version, <>v{version.seq} · {shortId(version.drawing_id)}</>, undefined, dragProps)}
+                        {canTransferVersion && ref !== null && <button type="button" className="ground-row-action" aria-label={`Preview v${version.seq} in the drawing`} onClick={() => actions.onTransferVersion(ref)}>Preview in drawing</button>}
+                      </li>
+                    )
+                  })}
                 </ul>
               </>
             ) : <p className="ground-empty">{workspace ? 'No versions yet' : 'Versions live with a workspace project'}</p>}
