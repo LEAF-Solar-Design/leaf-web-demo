@@ -525,6 +525,15 @@ def build_suites() -> List[Suite]:
         # 31 tests + 4 more parametrizations = 35.
         Suite("server-solar-design-profiles", "server tests/test_solar_design_profiles.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_design_profiles.py"), 35),
+        # W5 Rooftop workflow flow (2026-09-24, contracts G34/G34a/G34b): server/solar_workflow_flow.py,
+        # the pure progression engine (every step's CanAdvance and HasDrawingPrerequisites, the L1/L2
+        # gates on the host's setting, AdvanceStep, GoBack and NavigateToStep Stale marking over the
+        # in-memory and state-file status layers, BTHost's palette_set_step, the ValidateDrawingState
+        # reopen cascade), over hand-made intakes and the committed docs/parity/evidence/rooftop/flow
+        # drawings, so the floor is the exact count on every runner. COUNTED from the collected cases:
+        # 56 tests + 122 more parametrizations = 178.
+        Suite("server-solar-workflow-flow", "server tests/test_solar_workflow_flow.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_workflow_flow.py"), 178),
         # S33 KML and LandXML ports (2026-09-23): server/solar_geo_formats.py, the
         # literal port of KmlBoundaryExporter (with every format branch
         # LEAFKMLEXPORTFMTDEMO exercises), KmlBoundaryParser, TerrainExporter's
@@ -1927,6 +1936,12 @@ def build_suites() -> List[Suite]:
         # so the floor is the exact count on every runner. COUNTED: 12 tests, no parametrizations.
         Suite("scripts-solar-design-profiles-evidence", "scripts test_solar_design_profiles_evidence.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_design_profiles_evidence.py"), 12),
+        # G34/G34a/G34b Rooftop flow evidence (flow-step and flow-event rows in the G34b envelope):
+        # the committed drawings of the three fixture states plus hand-made intakes (no capture; the
+        # CLI cases pin the revision or run outside any git work tree), so the floor is the exact
+        # count on every runner. COUNTED: 23 tests + 20 more parametrizations = 43.
+        Suite("scripts-solar-workflow-flow-evidence", "scripts test_solar_workflow_flow_evidence.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_workflow_flow_evidence.py"), 43),
         # The parity oracle itself: the ledger rules, the receipt rules, the fail-closed
         # inputs, and (S29, 2026-09-22) the declared divergence a known plugin defect
         # gets, which is the ONLY way a failing comparator settles a capability: the
