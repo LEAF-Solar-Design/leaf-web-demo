@@ -362,6 +362,8 @@ export default function App() {
   const [intakeRetryKey, setIntakeRetryKey] = useState(0) // X3 Retry — bumping re-runs the intake load effect
   const [selectedTool, setSelectedTool] = useState(null)
   const [selectedHandle, setSelectedHandle] = useState(null)
+  const canvasPickRef = useRef(null)
+  const registerCanvasPick = useCallback((fn) => { canvasPickRef.current = fn }, [])
   const [activeIntake, setActiveIntake] = useState(null)
   const [engineHistory, setEngineHistory] = useState(null)
   const [resultCandidate, setResultCandidate] = useState(null)
@@ -3789,6 +3791,7 @@ export default function App() {
               consoleIntake={intake}
               selectedHandle={selectedHandle}
               onSelectedHandleChange={setSelectedHandle}
+              registerCanvasPick={registerCanvasPick}
               onShown={(intake, history) => {
                 setActiveIntake(intake)
                 setEngineHistory(history ? { undoDepth: history.undoDepth, redoDepth: history.redoDepth } : null)
@@ -4073,8 +4076,9 @@ export default function App() {
                   // W4f slice A1: a click that answers an armed point prompt
                   // is not a selection (the picker stamps the card while a
                   // point command is live).
-                  onSelectEntity={(handle) => {
+                  onSelectEntity={(handle, gesture) => {
                     if (workspaceCardRef.current?.dataset.cockpitPicking === '1') return
+                    if (canvasPickRef.current?.(handle, { additive: !!gesture?.additive })) return
                     setSelectedHandle(handle)
                   }}
                   pendingEdit={pendingEdit || writeGhost}

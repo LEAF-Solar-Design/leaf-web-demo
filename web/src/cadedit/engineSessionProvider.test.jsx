@@ -186,6 +186,58 @@ beforeEach(() => {
   globalThis.URL.revokeObjectURL = vi.fn()
 })
 
+describe('SSD1-24B provider highlights', () => {
+  function setup() {
+    const studio = mount()
+    act(() => studio.context.session.actions.openBytes(new Uint8Array([48, 10]), 'one.dxf'))
+    studio.workers[0].emit({
+      ...loadedMessage([{ ...LINE, id: '10' }, { ...POLY, id: '11' }, { ...LINE, id: '12' }]),
+      groups: [{ id: '240', name: 'RACK', memberIds: ['10', '12'] }],
+    })
+    return studio
+  }
+
+  it('SSD1-24B provider highlights every selection member ahead of the group', () => {
+    const studio = setup()
+    act(() => studio.context.selectGroup('rack'))
+    act(() => studio.context.session.actions.selectReplace(['10', '11']))
+    expect([...studio.context.highlightedIds]).toEqual(['10', '11'])
+  })
+
+  it('SSD1-24B provider set-to-set', () => {
+    const studio = setup()
+    act(() => studio.context.session.actions.selectReplace(['10', '11']))
+    expect([...studio.context.highlightedIds]).toEqual(['10', '11'])
+    expect(studio.context.session.selectedId).toBe('')
+
+    act(() => studio.context.session.actions.selectAdd('12'))
+    expect([...studio.context.highlightedIds]).toEqual(['10', '11', '12'])
+    expect(studio.context.session.selectedId).toBe('')
+
+    act(() => studio.context.session.actions.selectToggle('10'))
+    expect([...studio.context.highlightedIds]).toEqual(['11', '12'])
+    expect(studio.context.session.selectedId).toBe('')
+  })
+
+  it('SSD1-24B provider single selection falls back to the group rule', () => {
+    const studio = setup()
+    act(() => studio.context.session.actions.selectReplace(['10']))
+    expect([...studio.context.highlightedIds]).toEqual([])
+    act(() => studio.context.selectGroup('rack'))
+    act(() => studio.context.session.actions.selectReplace(['10', '11']))
+    act(() => studio.context.session.actions.selectReplace(['11']))
+    expect([...studio.context.highlightedIds]).toEqual(['10', '12'])
+  })
+
+  it('SSD1-24B provider Create Block members take priority over a selection set', () => {
+    const studio = setup()
+    act(() => studio.context.session.actions.selectReplace(['10', '11']))
+    act(() => studio.context.setArmed({ group: 'draw', op: 'createBlock' }))
+    act(() => studio.context.setInput('members', '12'))
+    expect([...studio.context.highlightedIds]).toEqual(['12'])
+  })
+})
+
 describe('provider construction: one session, one worker, every consumer', () => {
   it('derives group highlights from the live projection and clears them on a same-name document load', () => {
     const worker = new ScriptedWorker()

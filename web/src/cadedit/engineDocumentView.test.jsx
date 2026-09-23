@@ -36,9 +36,11 @@ let viewer
 let viewerRef
 let onShown
 let sessionActions
+let selectedIds
 function SelectionProbe() {
   const { session } = useEngineSessionContext()
   sessionActions = session.actions
+  selectedIds = session.selectedIds
   return <output data-testid="engine-selection">{session.selectedId ?? 'none'}</output>
 }
 
@@ -198,6 +200,93 @@ describe.each([true, false])('EngineDocumentView reverse selection (callback ena
     expect(screen.getByTestId('engine-selection').textContent).toBe('')
     expect(callback.mock.calls).toEqual(withCallback ? [['2A'], [null]] : [])
     expect(select).not.toHaveBeenCalled()
+  })
+})
+
+describe('SSD1-24B canvas picks', () => {
+  const entities = [{ ...LINE, id: '10' }, { ...CIRCLE, id: '11' }]
+  async function setup() {
+    const registerCanvasPick = vi.fn()
+    const onSelectedHandleChange = vi.fn()
+    const props = { registerCanvasPick, onSelectedHandleChange }
+    const view = mount(props)
+    await openAndLoad(entities)
+    const pick = registerCanvasPick.mock.lastCall[0]
+    const click = (handle, additive = true) => {
+      let handled
+      act(() => { handled = pick(handle, { additive }) })
+      return handled
+    }
+    return { ...view, props, registerCanvasPick, onSelectedHandleChange, click }
+  }
+
+  it('SSD1-24B registers once per shown document and unregisters on close and unmount', async () => {
+    const view = await setup()
+    expect(view.registerCanvasPick).toHaveBeenCalledTimes(1)
+    expect(view.registerCanvasPick.mock.lastCall[0]).toEqual(expect.any(Function))
+    view.click('A')
+    view.rerender(view.props)
+    expect(view.registerCanvasPick).toHaveBeenCalledTimes(1)
+    act(() => sessionActions.reset())
+    expect(view.registerCanvasPick).toHaveBeenLastCalledWith(null)
+    await openAndLoad(entities, 'two.dxf')
+    expect(view.registerCanvasPick.mock.lastCall[0]).toEqual(expect.any(Function))
+    view.unmount()
+    expect(view.registerCanvasPick).toHaveBeenLastCalledWith(null)
+    expect(view.registerCanvasPick).toHaveBeenCalledTimes(4)
+  })
+
+  it('SSD1-24B additive pick selects the first decimal engine id', async () => {
+    const view = await setup()
+    expect(view.click('A')).toBe(true)
+    expect(selectedIds).toEqual(['10'])
+  })
+
+  it('SSD1-24B additive second pick survives the null console echo', async () => {
+    const view = await setup()
+    view.click('A')
+    view.rerender({ ...view.props, selectedHandle: 'A' })
+    expect(view.click('B')).toBe(true)
+    expect(selectedIds).toEqual(['10', '11'])
+    expect(view.onSelectedHandleChange).toHaveBeenLastCalledWith(null)
+    view.rerender({ ...view.props, selectedHandle: null })
+    expect(selectedIds).toEqual(['10', '11'])
+    expect(view.registerCanvasPick).toHaveBeenCalledTimes(1)
+  })
+
+  it('SSD1-24B additive repeat removes a member and mirrors the remaining handle', async () => {
+    const view = await setup()
+    view.click('A')
+    view.click('B')
+    expect(view.click('A')).toBe(true)
+    expect(selectedIds).toEqual(['11'])
+    expect(view.onSelectedHandleChange).toHaveBeenLastCalledWith('B')
+  })
+
+  it('SSD1-24B additive unknown and blank picks are consumed without changing selection', async () => {
+    const view = await setup()
+    view.click('A')
+    expect(view.click('FFFF')).toBe(true)
+    expect(selectedIds).toEqual(['10'])
+    expect(view.click(null)).toBe(true)
+    expect(selectedIds).toEqual(['10'])
+  })
+
+  it('SSD1-24B plain blank clears a two-object set', async () => {
+    const view = await setup()
+    view.click('A')
+    view.click('B')
+    expect(view.click(null, false)).toBe(true)
+    expect(selectedIds).toEqual([])
+  })
+
+  it('SSD1-24B plain blank with one object leaves the scalar flow to App', async () => {
+    const view = await setup()
+    view.click('A')
+    expect(view.click(null, false)).toBe(false)
+    expect(selectedIds).toEqual(['10'])
+    expect(view.click('B', false)).toBe(false)
+    expect(selectedIds).toEqual(['10'])
   })
 })
 

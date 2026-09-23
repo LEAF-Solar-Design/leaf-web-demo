@@ -581,7 +581,7 @@ const Viewer = forwardRef(function Viewer(
       const hits = raycaster.intersectObjects(pickables, false)
       const handle = pickHandleFromHits(hits)
       const cb = onSelectRef.current
-      if (cb) cb(handle)
+      if (cb) cb(handle, { additive: e.shiftKey || e.ctrlKey || e.metaKey })
     }
     const dom = renderer.domElement
     dom.addEventListener('pointerdown', onPointerDown)
