@@ -60,7 +60,7 @@ export default function CadEditSurface({
   const setInput = engine?.setInput ?? noop
   const canSave = !!engine?.canSave
   const {
-    documentId = '', entities = [], entityCount = 0, selectedId = '', selected = null,
+    documentId = '', entities = [], entityCount = 0, selectedId = '', selectedIds = [], selected = null,
     status = '', savedBytes = null, busy = false,
   } = session ?? {}
 
@@ -119,17 +119,31 @@ export default function CadEditSurface({
         </p>
       )}
 
+      {selectedIds.length > 1 && (
+        <p data-testid="cad-edit-selection-count">{selectedIds.length} objects selected</p>
+      )}
       {entities.length > 0 && (
         <ul className="cad-edit-entity-list" data-testid="cad-edit-entity-list">
           {entities.map((entity) => (
-            <li key={entity.id}>
+            <li key={entity.id}
+              data-in-selection={selectedIds.length > 1 && selectedIds.includes(entity.id) ? 'true' : undefined}
+              onClick={(event) => {
+                if (!(event.shiftKey || event.ctrlKey || event.metaKey) || entity.editable === false) return
+                event.preventDefault()
+                session.actions.selectToggle(entity.id)
+              }}
+            >
               <label>
                 <input
                   type="radio"
                   name="cad-edit-entity"
                   value={entity.id}
-                  checked={selectedId === entity.id}
-                  onChange={() => session.actions.select(entity.id)}
+                  checked={selectedIds.length === 1 && selectedId === entity.id}
+                  onChange={(event) => {
+                    const click = event.nativeEvent
+                    if (click.shiftKey || click.ctrlKey || click.metaKey) return
+                    session.actions.select(entity.id)
+                  }}
                   disabled={entity.editable === false}
                 />
                 {entity.type} on layer {entity.layer}

@@ -46,7 +46,14 @@ export default function EngineDockProperties() {
   const entity = session
     ? (session.entities || []).find((e) => e.id === session.selectedId) || null
     : null
-  if (!slot || !entity) return null
+  if (!slot) return null
+  if ((session?.selectedIds?.length ?? 0) > 1) return createPortal(
+    <dl className="dock-properties" data-testid="dock-properties">
+      <dt>Selection</dt><dd data-testid="dock-selection-count">{session.selectedIds.length} objects selected</dd>
+    </dl>,
+    slot,
+  )
+  if (!entity) return null
   // W4g-7b-04c: a selected DIMENSION's measurement, read-only, through this
   // same slot idiom (the dock's Geometry section otherwise has no field for
   // it: entityGeometry knows nothing of a DIMENSION's projection).
