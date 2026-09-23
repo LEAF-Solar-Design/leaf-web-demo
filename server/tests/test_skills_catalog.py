@@ -165,12 +165,13 @@ def test_symlinked_skill_directory_is_skipped(tmp_path):
 
 
 def test_duplicate_listing_entries_are_deduped(monkeypatch, tmp_path):
-    """First-wins case-fold dedupe, portable across filesystems.
+    """A name listed twice is one directory, not a case collision.
 
-    A case-insensitive FS cannot HOLD `Probe` and `probe` at once, so the
-    collision is reproduced at the catalog's actual seam: the scandir listing.
-    Yielding every entry twice is exactly what a case-folded collision looks
-    like to the `seen` set, and the catalog must emit each skill ONCE."""
+    Discovery collects names into a set before counting case-folded keys, so
+    the same entry yielded twice by the scandir listing counts once and the
+    catalog emits the skill ONCE. The case collision itself (`safe` beside
+    `SAFE`) is refused by
+    test_case_ambiguous_names_are_refused_on_every_filesystem."""
     bundle = _bundle(tmp_path / "bundle", "tenant-safe", {"safe": "Safe"})
     real_scandir = os.scandir
 

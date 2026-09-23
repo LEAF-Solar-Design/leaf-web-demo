@@ -122,8 +122,11 @@ def _parse_frontmatter(source: str) -> Optional[tuple[str, str]]:
 def discover_bundle(bundle_path: str, expected_tier: str) -> list[dict[str, str]]:
     """Return valid skills from exactly one correctly tiered bundle, or no skills.
 
-    Names differing only by case are ambiguous and neither is cataloged;
-    discovery is independent of directory order.
+    Names differing only by case are ambiguous and neither is cataloged,
+    whatever their contents. Below the examination bound (MAX_SKILLS * 2
+    listing entries) the result depends only on which names exist, never on
+    directory order; past it, which names get examined still follows the
+    listing.
     """
     if not bundle_path:
         return []
