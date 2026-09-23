@@ -69,6 +69,7 @@ export default function SurfaceGrounds({
         active={boardVisible ?? surfaceGround(surface) === 'board'}
         leavingGround={leavingGround}
         contained={studioShell || (boardVisible === true && groundShowsDrawing(surface))}
+        themeable={!groundShowsDrawing(surface)}
         occluders={occluders}
         onReturnToDrawing={onReturnToDrawing}
         onCreateProject={onCreateProject}

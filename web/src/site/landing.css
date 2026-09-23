@@ -1035,12 +1035,26 @@
   --leaf-font-mono: var(--font-mono);
 }
 
-/* .leaf-light: reserved, wired to nothing yet. The design session has not
-   ratified light-mode values for this namespace; when it does, they land
-   here through the sync lane. Declaring no values now is deliberate: an
-   empty scope cannot repaint anything it is applied to, so adopting the
-   class ahead of the ratified values is inert rather than a half theme. */
+/* .leaf-light: Browser board's opt-in light scope over the ratified paper identity. */
 .leaf-light {
+  --background: #e9e7e0;
+  --foreground: #191d1a;
+  --card: #ffffff;
+  --border: #d6d4cb;
+  --primary: #1e6b45;
+  --primary-hover: #175437;
+  --on-accent: #f5faf6;
+  --muted: #4f5851;
+  --muted-2: #5d645d;
+  --leaf-background: var(--background);
+  --leaf-foreground: var(--foreground);
+  --leaf-card: var(--card);
+  --leaf-border: var(--border);
+  --leaf-primary: var(--primary);
+  --leaf-primary-hover: var(--primary-hover);
+  --leaf-on-accent: var(--on-accent);
+  --leaf-muted: var(--muted);
+  --leaf-muted-2: var(--muted-2);
 }
 
 /* usage ledger (showcase #2): the cap bar rides inside the trust row */
@@ -1269,6 +1283,69 @@
 .studio-ground-board[data-studio-presentation="true"] .ground-catalog-tool { display: grid; align-content: start; gap: 3px; }
 .ground-empty { color: rgba(240, 242, 240, .5) !important; font-style: italic; }
 .ground-note { margin: 0; font: 11px var(--font-mono); color: rgba(240, 242, 240, .55); }
+.studio-ground-board:not([data-board-layout="contained"]) .ground-desk {
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+.ground-theme-toggle {
+  justify-self: end; padding: 5px 9px; border: 1px solid rgba(240, 242, 240, .55);
+  border-radius: 4px; background: #151b18; color: rgba(240, 242, 240, .96);
+  font: 12px var(--font-sans); cursor: pointer;
+}
+.ground-theme-toggle:focus-visible { outline: 2px solid #7fd6a6; outline-offset: 3px; }
+.studio-ground-board.studio-ground-board[data-ground="browser"][data-board-theme="light"] {
+  color: var(--leaf-foreground);
+  background:
+    linear-gradient(color-mix(in srgb, var(--leaf-foreground) 8%, transparent) 1px, transparent 1px) 0 0 / 100% 48px,
+    linear-gradient(90deg, color-mix(in srgb, var(--leaf-foreground) 8%, transparent) 1px, transparent 1px) 0 0 / 48px 100%,
+    var(--leaf-background);
+}
+.studio-ground-board[data-ground="browser"][data-board-theme="light"] .ground-tile {
+  background: var(--leaf-card); border: 1px solid var(--leaf-muted);
+}
+.studio-ground-board[data-ground="browser"][data-board-theme="light"] .ground-tile strong { color: var(--leaf-foreground); }
+.studio-ground-board[data-ground="browser"][data-board-theme="light"] .ground-tile p,
+.studio-ground-board[data-ground="browser"][data-board-theme="light"] .ground-tile ul { color: var(--leaf-muted); }
+.studio-ground-board[data-ground="browser"][data-board-theme="light"] .ground-tile h3,
+.studio-ground-board[data-ground="browser"][data-board-theme="light"] .ground-eyebrow { color: var(--leaf-primary); }
+.studio-ground-board[data-ground="browser"][data-board-theme="light"] .ground-empty { color: var(--leaf-muted-2) !important; }
+.studio-ground-board[data-ground="browser"][data-board-theme="light"] .ground-note { color: var(--leaf-muted); }
+.studio-ground-board[data-ground="browser"][data-board-theme="light"] .ground-row-action,
+.studio-ground-board[data-ground="browser"][data-board-theme="light"] .ground-theme-toggle {
+  background: var(--leaf-card); color: var(--leaf-primary); border: 1px solid var(--leaf-muted);
+}
+.studio-ground-board[data-ground="browser"][data-board-theme="light"] .ground-row-action:hover,
+.studio-ground-board[data-ground="browser"][data-board-theme="light"] .ground-theme-toggle:hover {
+  background: var(--leaf-primary-hover); color: var(--leaf-on-accent);
+}
+.studio-ground-board[data-ground="browser"][data-board-theme="light"] :focus-visible {
+  outline: 2px solid var(--leaf-primary); outline-offset: 3px;
+}
+.studio-ground-board[data-ground="browser"][data-board-theme="light"][data-board-layout="contained"] {
+  color: var(--leaf-foreground);
+  background-color: var(--leaf-background);
+}
+.studio-ground-board[data-ground="browser"][data-board-theme="light"][data-board-layout="contained"] .ground-desk,
+.studio-ground-board[data-ground="browser"][data-board-theme="light"][data-board-layout="contained"] .ground-board-header {
+  background: var(--leaf-background); color: var(--leaf-foreground);
+}
+.studio-ground-board[data-ground="browser"][data-board-theme="light"][data-board-layout="contained"] .ground-board-header h1,
+.studio-ground-board[data-ground="browser"][data-board-theme="light"][data-board-layout="contained"] .ground-board-header strong {
+  color: var(--leaf-foreground);
+}
+.studio-ground-board[data-ground="browser"][data-board-theme="light"][data-board-layout="contained"] .ground-board-header p,
+.studio-ground-board[data-ground="browser"][data-board-theme="light"][data-board-layout="contained"] [data-testid="surface-project-state"],
+.studio-ground-board[data-ground="browser"][data-board-theme="light"][data-board-layout="contained"] .tc-product-project-reason {
+  color: var(--leaf-muted);
+}
+.studio-ground-board[data-ground="browser"][data-board-theme="light"][data-board-layout="contained"] .ground-board-header button {
+  background: var(--leaf-card); color: var(--leaf-primary); border-color: var(--leaf-muted);
+}
+.studio-ground-board[data-ground="browser"][data-board-theme="light"][data-board-layout="contained"] .ground-board-header button:hover {
+  background: var(--leaf-primary-hover); color: var(--leaf-on-accent);
+}
+.studio-ground-board[data-ground="browser"][data-board-theme="light"][data-board-layout="contained"] .ground-tile {
+  background: var(--leaf-card); border-color: var(--leaf-muted);
+}
 .ground-device-stage { display: flex; align-items: center; justify-content: center; gap: 44px; }
 .device-frame {
   position: relative; width: 150px; height: 310px; border-radius: 26px; flex: none;

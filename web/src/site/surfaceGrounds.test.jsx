@@ -172,14 +172,19 @@ it('J1 row3 SurfaceGrounds forwards only the two new board props', () => {
   expect(board.type).toBe(DirectProjectBoardGround)
   expect(board.props.actions).toBe(actions)
   expect(board.props.panel).toBe(panel)
+  expect(board.props.themeable).toBe(true)
   expect(Object.keys(board.props).sort()).toEqual([
     'active', 'leavingGround', 'contained', 'occluders', 'onReturnToDrawing', 'onCreateProject',
-    'actions', 'panel', 'headingRef', 'startFocusRequest', 'studioPresentation', 'studioShell',
+    'actions', 'panel', 'headingRef', 'startFocusRequest', 'studioPresentation', 'studioShell', 'themeable',
     'workspaceProject', 'workspace', 'drawing', 'catalog', 'mock',
   ].sort())
   const device = element.props.children[1]
   expect(device.props).not.toHaveProperty('actions')
   expect(device.props).not.toHaveProperty('panel')
+  for (const surface of ['cad', 'solar']) {
+    const drawingElement = SurfaceGrounds({ surface, actions, panel })
+    expect(drawingElement.props.children[0].props.themeable).toBe(false)
+  }
 })
 
 it('J1 row6 the demo ground mounts disabled material without a mutation', () => {

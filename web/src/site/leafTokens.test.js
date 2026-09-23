@@ -51,9 +51,39 @@ const landing = read('src/site/landing.css')
 const cockpit = read('src/site/cockpit.css')
 
 const SCOPES = [
+  { file: 'landing.css', css: landing, selector: '.leaf-light' },
   { file: 'landing.css', css: landing, selector: '.stage-root' },
   { file: 'cockpit.css', css: cockpit, selector: '.studio-shell .app:is([data-surface="cad"], [data-surface="solar"])' },
 ]
+
+it('SSD1-24E light tokens match the ratified paper identity', () => {
+  const light = declsFor(landing, '.leaf-light')
+  const paper = declsFor(read('src/styles.css'), ':root')
+  for (const name of ['background', 'foreground', 'card', 'border', 'primary', 'primary-hover', 'on-accent', 'muted', 'muted-2']) {
+    expect(light[`--${name}`]).toMatch(/^#[0-9a-f]{6}$/i)
+    expect(light[`--${name}`].toLowerCase()).toBe(paper[`--${name}`].toLowerCase())
+  }
+})
+
+it('SSD1-24E light text and tile boundaries meet WCAG contrast', () => {
+  const light = declsFor(landing, '.leaf-light')
+  const luminance = (hex) => {
+    const channels = hex.slice(1).match(/../g).map((value) => {
+      const srgb = parseInt(value, 16) / 255
+      return srgb <= 0.04045 ? srgb / 12.92 : ((srgb + 0.055) / 1.055) ** 2.4
+    })
+    return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722
+  }
+  const contrast = (a, b) => {
+    const values = [a, b].map((name) => luminance(light[`--${name}`])).sort((x, y) => y - x)
+    return (values[0] + 0.05) / (values[1] + 0.05)
+  }
+  for (const [a, b] of [['foreground', 'background'], ['foreground', 'card'], ['muted', 'card'], ['primary', 'card'], ['on-accent', 'primary']]) {
+    expect(contrast(a, b), `${a}/${b}`).toBeGreaterThanOrEqual(4.5)
+  }
+  expect(contrast('muted', 'card')).toBeGreaterThanOrEqual(3)
+  expect(contrast('border', 'card')).toBeLessThan(3)
+})
 
 describe('the --leaf-* token namespace is alias-only (slice 13b)', () => {
   it('declares no --leaf-* literal colour or length, only var() references', () => {
