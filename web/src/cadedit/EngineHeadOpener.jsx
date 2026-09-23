@@ -12,7 +12,10 @@
  * constructs no boundary.
  *
  * Rules, each pinned by engineHeadOpener.test.jsx:
- *   - opens once per (drawing, head) when NO document is in the engine; a
+ *   - `sourceKey` names where the head bytes come from (the live API or the
+ *     static sample), so a source switch is a new head to open under the
+ *     same import, dirty and busy protections as a moved head;
+ *   - opens once per (drawing, source, head) when NO document is in the engine; a
  *     hand import always wins (a late fetch never replaces a document that
  *     appeared while it was in flight);
  *   - the head moving on the server (a tool run, undo/redo, restore) re-opens
@@ -37,17 +40,22 @@ export function headDocumentId(drawingId, version) {
 
 const HEAD_DOC = /-v\d+\.dxf$/
 
-export default function EngineHeadOpener({ drawingId = null, enabled = false, headKey = null, fetchDxf = null }) {
+export default function EngineHeadOpener({ drawingId = null, enabled = false, headKey = null, fetchDxf = null, sourceKey = '' }) {
   const { session, setReach } = useEngineSessionContext()
   const { openBytes } = session.actions
   // Latest session for the post-await checks (a state read inside the async
   // leg would be the render it was captured in).
   const sessionRef = useRef(session)
   sessionRef.current = session
-  // What this opener has opened or tried: one attempt per (drawing, head).
+  // What this opener has opened or tried: one attempt per (drawing, source, head).
   const attemptRef = useRef('')
-  // Bumped on unmount and on every drawing switch; an async leg captured
-  // before an await compares and abandons if it moved.
+  // The source of the last head this opener loaded (null until it loads
+  // one); the engine-save shortcut applies only within that source.
+  const openedSourceRef = useRef(null)
+  // The session's savedVersion at the moment this opener last opened a head.
+  const savedAtOpenRef = useRef(null)
+  // Bumped on unmount and on every drawing or source switch; an async leg
+  // captured before an await compares and abandons if it moved.
   const generationRef = useRef(0)
   const fetchRef = useRef(fetchDxf)
   fetchRef.current = fetchDxf
@@ -57,13 +65,13 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
   const holdsHead = HEAD_DOC.test(documentId) && documentId.startsWith(`${drawingId}-v`)
   const dirty = session.dirty === true
 
-  // A drawing switch abandons any fetch in flight for the old drawing. The
-  // attempt key already carries the drawing id, so it is NOT cleared here:
-  // clearing it between StrictMode's two effect invocations issued a second
-  // fetch on every dev mount (kimi, #1006).
+  // A drawing or source switch abandons any fetch in flight for the old one.
+  // The attempt key already carries the drawing id and the source, so it is
+  // NOT cleared here: clearing it between StrictMode's two effect
+  // invocations issued a second fetch on every dev mount (kimi, #1006).
   useEffect(() => {
     generationRef.current += 1
-  }, [drawingId])
+  }, [drawingId, sourceKey])
 
   useEffect(() => {
     if (!enabled || !drawingId || typeof fetchRef.current !== 'function') return undefined
@@ -74,13 +82,18 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
       setReach({ state: REACH_STATE.IDLE, sentence: '' })
       return undefined
     }
-    const key = `${drawingId}#${headKey}`
+    const key = `${drawingId}#${sourceKey}#${headKey}`
     if (attemptRef.current === key) return undefined
     // The head moved because THIS engine saved it: the engine already holds
     // exactly those bytes, so there is nothing to fetch and the undo history
     // is kept (a re-open would floor it at the save, which no drafter asked
-    // for).
-    if (present && holdsHead && Number.isInteger(session.savedVersion) && Number(headKey) === session.savedVersion) {
+    // for). Never across a source switch: the saved head is the old source's.
+    // null means this opener instance has not opened a head (a remount over a
+    // retained session), so the shortcut keeps its behaviour from before the
+    // source existed; once it has opened one, a different source never matches.
+    // A savedVersion already present when this opener opened its head is not
+    // this head's save (the session keeps it across a document switch).
+    if (present && holdsHead && (openedSourceRef.current === null || openedSourceRef.current === sourceKey) && session.savedVersion !== savedAtOpenRef.current &&Number.isInteger(session.savedVersion) && Number(headKey) === session.savedVersion) {
       attemptRef.current = key
       setReach({ state: REACH_STATE.OPEN, sentence: '', version: session.savedVersion, head: session.savedVersion, source: 'engine-save' })
       return undefined
@@ -97,6 +110,7 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
     }
     attemptRef.current = key
     const generation = generationRef.current
+    const source = sourceKey
     setReach({ state: REACH_STATE.OPENING, sentence: `opening ${drawingId} in the browser engine...` })
     let cancelled = false
     // Settled = this attempt reached a terminal verdict (loaded, refused,
@@ -160,6 +174,8 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
       // W4g-3b: this document IS the head, so the store keeps the entity
       // list it loads as the base a save diffs against (the mutation plan).
       openBytes(bytes, headDocumentId(drawingId, version), { committed: true, version })
+      openedSourceRef.current = source
+      savedAtOpenRef.current = sessionRef.current.savedVersion ?? null
       setReach({ state: REACH_STATE.OPEN, sentence: '', version, head: Number(answer?.head) || version, source: String(answer?.source || '') })
     })()
     return () => {
@@ -168,7 +184,7 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
     }
     // present/holdsHead/dirty/busy are read from the same session object the
     // effect keys on; listing the derived booleans keeps the deps honest.
-  }, [enabled, drawingId, headKey, present, holdsHead, dirty, session.busy, session.savedVersion, openBytes, setReach])
+  }, [enabled, drawingId, sourceKey, headKey, present, holdsHead, dirty, session.busy, session.savedVersion, openBytes, setReach])
 
   // Unmount: nothing in flight may report onto a provider that outlives it.
   useEffect(() => () => { generationRef.current += 1 }, [])

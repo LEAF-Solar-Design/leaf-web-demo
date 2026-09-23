@@ -3853,6 +3853,7 @@ export default function App() {
               enabled={!!studioGround && !!drafting && !!intake}
               headKey={drawingState?.head ?? (mock ? 1 : null)}
               fetchDxf={mock ? fetchSampleDxf : fetchDrawingDxf}
+              sourceKey={mock ? 'sample' : 'live'}
             />
           )}
           {ENV_CAD_EDIT && studioGround && (

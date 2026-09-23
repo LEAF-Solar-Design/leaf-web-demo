@@ -32,16 +32,16 @@ function fileOf(name = 'hand.dxf') {
 
 let workers
 let handle
-function mount({ drawingId = 'rooftop_demo', enabled = true, headKey = 1, fetchDxf, onDirtyChange = null, onDocumentChange = null } = {}) {
+function mount({ drawingId = 'rooftop_demo', enabled = true, headKey = 1, fetchDxf, sourceKey = 'live', opener = true, saveTarget = null, onDirtyChange = null, onDocumentChange = null } = {}) {
   workers = []
   handle = {}
   const createWorker = vi.fn(() => { const w = new ScriptedWorker(); workers.push(w); return w })
   function Probe() { handle.context = useEngineSessionContext(); return null }
   function Tree(props) {
     return (
-      <EngineSessionProvider createWorker={createWorker} onDirtyChange={props.onDirtyChange} onDocumentChange={props.onDocumentChange}>
+      <EngineSessionProvider createWorker={createWorker} saveTarget={props.saveTarget} onDirtyChange={props.onDirtyChange} onDocumentChange={props.onDocumentChange}>
         <Probe />
-        <EngineHeadOpener drawingId={props.drawingId} enabled={props.enabled} headKey={props.headKey} fetchDxf={props.fetchDxf} />
+        {props.opener !== false && <EngineHeadOpener drawingId={props.drawingId} enabled={props.enabled} headKey={props.headKey} fetchDxf={props.fetchDxf} sourceKey={props.sourceKey} />}
         <DraftingRibbon clusters={[]}>
           <EngineRibbonClusters importOpen={false} onToggleImport={() => {}} />
         </DraftingRibbon>
@@ -49,8 +49,8 @@ function mount({ drawingId = 'rooftop_demo', enabled = true, headKey = 1, fetchD
       </EngineSessionProvider>
     )
   }
-  const utils = render(<Tree drawingId={drawingId} enabled={enabled} headKey={headKey} fetchDxf={fetchDxf} onDirtyChange={onDirtyChange} onDocumentChange={onDocumentChange} />)
-  handle.rerender = (next) => utils.rerender(<Tree drawingId={drawingId} enabled={enabled} headKey={headKey} fetchDxf={fetchDxf} onDirtyChange={onDirtyChange} onDocumentChange={onDocumentChange} {...next} />)
+  const utils = render(<Tree drawingId={drawingId} enabled={enabled} headKey={headKey} fetchDxf={fetchDxf} sourceKey={sourceKey} opener={opener} saveTarget={saveTarget} onDirtyChange={onDirtyChange} onDocumentChange={onDocumentChange} />)
+  handle.rerender = (next) => utils.rerender(<Tree drawingId={drawingId} enabled={enabled} headKey={headKey} fetchDxf={fetchDxf} sourceKey={sourceKey} opener={opener} saveTarget={saveTarget} onDirtyChange={onDirtyChange} onDocumentChange={onDocumentChange} {...next} />)
   handle.unmount = utils.unmount
   return handle
 }
@@ -272,5 +272,159 @@ describe('EngineHeadOpener', () => {
     expect(studio.context.reach.state).toBe(REACH_STATE.FAILED)
     expect(note()).toContain('answered without a document')
     expect(workers.length).toBe(0)
+  })
+
+  // The attempt identity is (drawing, source, head): the live API and the
+  // static sample at the same head number are different heads.
+  const SAMPLE_BYTES = new TextEncoder().encode('0\nSECTION\n2\nHEADER\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n')
+  const sampleAnswer = (version = 1) => ({ ...answer(version), bytes: SAMPLE_BYTES, source: 'sample' })
+  const loadPosts = () => workers.flatMap((w) => w.posted).filter((m) => m.type === 'loadDocument')
+
+  it('source switch: a live head then the sample head re-opens from the sample', async () => {
+    const fetchA = vi.fn(async () => answer(1))
+    const studio = mount({ fetchDxf: fetchA, sourceKey: 'live' })
+    await settle()
+    await waitFor(() => expect(workers.length).toBe(1))
+    loaded(workers[0], headDocumentId('rooftop_demo', 1))
+    const fetchB = vi.fn(async () => sampleAnswer(1))
+    studio.rerender({ sourceKey: 'sample', fetchDxf: fetchB })
+    await settle()
+    expect(fetchB).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(loadPosts()[loadPosts().length - 1].bytes).toBe(SAMPLE_BYTES))
+    const last = loadPosts()[loadPosts().length - 1]
+    expect(last.documentId).toBe(headDocumentId('rooftop_demo', 1))
+    expect(fetchA).toHaveBeenCalledTimes(1)
+  })
+
+  it('source switch: a settled live failure does not block the sample', async () => {
+    const fetchA = vi.fn(async () => { const e = new Error('GET /api/drawings/rooftop_demo/dxf -> 503'); e.status = 503; throw e })
+    const studio = mount({ fetchDxf: fetchA, sourceKey: 'live' })
+    await settle()
+    expect(studio.context.reach.state).toBe(REACH_STATE.FAILED)
+    const fetchB = vi.fn(async () => sampleAnswer(1))
+    studio.rerender({ sourceKey: 'sample', fetchDxf: fetchB })
+    await settle()
+    expect(fetchB).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(loadPosts().some((m) => m.bytes === SAMPLE_BYTES)).toBe(true))
+    expect(fetchA).toHaveBeenCalledTimes(1)
+  })
+
+  it('source switch: an in-flight live fetch never lands after the switch', async () => {
+    let resolveA
+    const fetchA = vi.fn(() => new Promise((r) => { resolveA = r }))
+    const studio = mount({ fetchDxf: fetchA, sourceKey: 'live' })
+    await settle()
+    expect(fetchA).toHaveBeenCalledTimes(1)
+    const fetchB = vi.fn(async () => sampleAnswer(1))
+    studio.rerender({ sourceKey: 'sample', fetchDxf: fetchB })
+    await settle()
+    expect(fetchB).toHaveBeenCalledTimes(1)
+    await act(async () => { resolveA(answer(1)); await Promise.resolve(); await Promise.resolve() })
+    await settle()
+    await waitFor(() => expect(loadPosts()).toHaveLength(1))
+    expect(loadPosts()[0].bytes).toBe(SAMPLE_BYTES)
+    expect(loadPosts().some((m) => m.bytes === BYTES)).toBe(false)
+  })
+
+  it('source switch: a dirty engine document is not replaced', async () => {
+    const fetchA = vi.fn(async () => answer(1))
+    const studio = mount({ fetchDxf: fetchA, sourceKey: 'live' })
+    await settle()
+    await waitFor(() => expect(workers.length).toBe(1))
+    loaded(workers[0], headDocumentId('rooftop_demo', 1))
+    // An engine edit makes the copy dirty; the source switch must not discard it.
+    workers[0].emit({ type: 'editApplied', op: 'createLine', ok: true, entities: [LINE, { ...LINE, id: 'e2' }], entityCount: 2, bytes: new Uint8Array([48, 10]), byteLength: 2 })
+    expect(studio.context.session.dirty).toBe(true)
+    const fetchB = vi.fn(async () => sampleAnswer(1))
+    studio.rerender({ sourceKey: 'sample', fetchDxf: fetchB })
+    await settle()
+    expect(fetchB).not.toHaveBeenCalled()
+    expect(studio.context.reach.state).toBe(REACH_STATE.STALE)
+    expect(studio.context.session.entityCount).toBe(2)
+    expect(loadPosts()).toHaveLength(1)
+  })
+
+  it('source switch: the same source and head fetch once', async () => {
+    const fetchA = vi.fn(async () => answer(1))
+    const studio = mount({ fetchDxf: fetchA, sourceKey: 'live' })
+    await settle()
+    await waitFor(() => expect(workers.length).toBe(1))
+    studio.rerender({})
+    await settle()
+    studio.rerender({ sourceKey: 'live', headKey: 1 })
+    await settle()
+    studio.rerender({ sourceKey: 'live' })
+    await settle()
+    expect(fetchA).toHaveBeenCalledTimes(1)
+  })
+
+  // The engine-save shortcut: a head this engine saved is already held, but
+  // only within the source it was opened from.
+  const saveReceipt = () => ({ new_version: { drawing_id: 'rooftop_demo', version: 2, parent: 1 }, head: 2, cost: { engine_usd: 0 } })
+  async function openEditAndSave(fetchA) {
+    const saveTarget = { headVersion: 1, save: vi.fn(async () => saveReceipt()) }
+    const studio = mount({ fetchDxf: fetchA, sourceKey: 'live', saveTarget })
+    await settle()
+    await waitFor(() => expect(workers.length).toBe(1))
+    loaded(workers[0], headDocumentId('rooftop_demo', 1))
+    workers[0].emit({ type: 'editApplied', op: 'createLine', ok: true, entities: [LINE, { ...LINE, id: 'e2' }], entityCount: 2, bytes: new Uint8Array([48, 10]), byteLength: 2 })
+    expect(studio.context.session.dirty).toBe(true)
+    await act(async () => { await studio.context.session.actions.save() })
+    expect(saveTarget.save).toHaveBeenCalledTimes(1)
+    expect(studio.context.session.savedVersion).toBe(2)
+    expect(studio.context.session.dirty).toBe(false)
+    return studio
+  }
+
+  it('source switch: the head this engine saved is not fetched again within its source', async () => {
+    const fetchA = vi.fn(async () => answer(1))
+    const studio = await openEditAndSave(fetchA)
+    studio.rerender({ headKey: 2 })
+    await settle()
+    expect(fetchA).toHaveBeenCalledTimes(1)
+    expect(studio.context.reach.state).toBe(REACH_STATE.OPEN)
+    expect(studio.context.reach.source).toBe('engine-save')
+  })
+
+  it('source switch: an engine save never stands in for the other source\'s head', async () => {
+    const fetchA = vi.fn(async () => answer(1))
+    const studio = await openEditAndSave(fetchA)
+    const fetchB = vi.fn(async () => sampleAnswer(2))
+    studio.rerender({ headKey: 2, sourceKey: 'sample', fetchDxf: fetchB })
+    await settle()
+    expect(fetchB).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(loadPosts()[loadPosts().length - 1].bytes).toBe(SAMPLE_BYTES))
+    expect(fetchA).toHaveBeenCalledTimes(1)
+  })
+
+  it('source switch: a remounted opener keeps the save shortcut', async () => {
+    const fetchA = vi.fn(async () => answer(1))
+    const studio = await openEditAndSave(fetchA)
+    studio.rerender({ opener: false })
+    await settle()
+    studio.rerender({ opener: true, headKey: 2 })
+    await settle()
+    expect(fetchA).toHaveBeenCalledTimes(1)
+    expect(studio.context.reach.source).toBe('engine-save')
+    expect(studio.context.reach.state).toBe(REACH_STATE.OPEN)
+    expect(loadPosts()).toHaveLength(1)
+  })
+
+  it('source switch: a save from the other source never stands in for this source\'s head', async () => {
+    const fetchA = vi.fn(async () => answer(1))
+    const studio = await openEditAndSave(fetchA)
+    expect(studio.context.session.savedVersion).toBe(2)
+    const fetchB = vi.fn(async () => sampleAnswer(1))
+    studio.rerender({ sourceKey: 'sample', fetchDxf: fetchB })
+    await settle()
+    expect(fetchB).toHaveBeenCalledTimes(1)
+    loaded(workers[0], headDocumentId('rooftop_demo', 1))
+    // The session keeps the live save's version across the sample load.
+    expect(studio.context.session.savedVersion).toBe(2)
+    const fetchC = vi.fn(async () => sampleAnswer(2))
+    studio.rerender({ sourceKey: 'sample', headKey: 2, fetchDxf: fetchC })
+    await settle()
+    expect(fetchC).toHaveBeenCalledTimes(1)
+    expect(studio.context.reach.source).not.toBe('engine-save')
   })
 })
