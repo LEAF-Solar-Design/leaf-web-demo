@@ -229,16 +229,17 @@ Enable (per admin account, staging first):
    optionally `LEAF_RECONCILER_RECEIPT_URL` (https only) for the reconciler feed. This one is
    separate for a concrete reason rather than symmetry: the Actions artifacts
    and runs APIs the receipts reader calls need `Actions: read`, which the PR
-   PAT above deliberately does not carry. Leave it unset and both artifact
-   sources answer `source_unreachable` and render no rows — the honest inert
+   PAT above deliberately does not carry. Leave it unset and both `tree:` artifact
+   sources (gate proof and supply set) answer `source_unreachable` and render no rows — the honest inert
    state, and the intended one until an operator decides to grant it. Do NOT
    widen the PR PAT to make receipts work; that couples two revocations that
-   are kept separate on purpose.
+   are kept separate on purpose. `scope=pr:` answers `source_retired` without
+   reading anything; PR-mode prewarm receipts were retired.
 3. Verify dark-ness elsewhere: every non-admin tier answers 403
    `entitlement_required: platform_customize`; a non-allowlisted admin answers
    404 `platform_customize_disabled`. That same 403 covers
-   `GET /api/receipts?scope=pr:|tree:|train`, which reads this repository's
-   private CI state with the platform's own credential and therefore rides the
+   `GET /api/receipts?scope=pr:|tree:|train`. The `tree:` and `train` scopes read
+   private CI state with the platform's own credential; `pr:` remains under the
    same admission as `GET /api/platform/source`; `scope=job:` is tenant data
    and is bound to the calling tenant instead.
 

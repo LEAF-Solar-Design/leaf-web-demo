@@ -1,8 +1,8 @@
 /**
  * ReceiptsTimeline — the delivery receipts that EXIST, newest first.
  *
- * This renders rows another system already minted: a prewarm-relay receipt, a
- * gate proof, a supply-set manifest, a reconciler entry, a per-job receipt. It
+ * This renders rows another system already minted: a gate proof, a supply-set
+ * manifest, a reconciler entry, a per-job receipt. It
  * invents nothing. There is no "pending" row, no "expected" row, no row for a
  * run that has not published its artifact yet. Absence is shown as absence,
  * and a source that could not be read is shown as that source being
@@ -40,7 +40,6 @@
  */
 
 const KIND_LABELS = {
-  'prewarm-relay': 'Prewarm relay',
   'gate-proof': 'Gate proof',
   'supply-set': 'Supply set',
   reconciler: 'Reconciler',
@@ -48,6 +47,7 @@ const KIND_LABELS = {
 }
 
 const REASON_SENTENCES = {
+  source_retired: 'is retired and is no longer read by this endpoint',
   source_unavailable: 'is not configured on this deployment, so it was not read',
   source_unreachable: 'did not answer, so its receipts are not shown',
   receipt_unreadable: 'answered with something this reader could not parse',

@@ -11,11 +11,10 @@ three receipts were read.
 
 THE SOURCES
 -----------
-``prewarm-relay``  the prewarm relay's own receipt artifact,
-                   ``prewarm-relay-receipt-pr-<n>`` (``leaf.staging-prewarm-relay.v1``,
-                   minted by ``prewarm-staging-cutover.yml``). Looked up BY NAME
-                   through the GitHub Actions artifacts API, which is why the
-                   workflow deliberately keeps no run id in the name.
+``prewarm-relay``  the PR-scoped prewarm relay receipt was retired with PR-mode
+                   staging (#1085). ``scope=pr:`` now answers ``source_retired``
+                   without a network call. The merge-group relay receipt lives
+                   in the S3 transport bucket and is not read here.
 ``gate-proof``     ``gate-proof-<tree>`` from ``test-gate.yml``: the proven-tree
                    artifact the build reuses instead of re-running eight shards.
 ``supply-set``     ``spec-v3-supply-set-<tree>`` from ``build-platform-images.yml``,
@@ -184,16 +183,15 @@ REASON_NO_CREDENTIAL = "source_unavailable"
 REASON_UNREACHABLE = "source_unreachable"
 REASON_UNREADABLE = "receipt_unreadable"
 REASON_BUSY = "source_busy"
+REASON_RETIRED = "source_retired"
 
 # Which workflows may mint each receipt kind. Provenance, not decoration: an
 # artifact minted by anything else is dropped even when its name matches
 # exactly. Verified against the minting workflows in this repository, not from
-# memory: prewarm-staging-cutover.yml uploads prewarm-relay-receipt-pr-<n>,
-# test-gate.yml uploads gate-proof-<tree> (build-platform-images.yml is the
+# memory: test-gate.yml uploads gate-proof-<tree> (build-platform-images.yml is the
 # second gate workflow test-gate.yml's own reuse filter allowlists), and
 # build-platform-images.yml uploads spec-v3-supply-set-<tree>.
 MINTING_WORKFLOWS: Mapping[str, frozenset] = {
-    "prewarm-relay": frozenset({".github/workflows/prewarm-staging-cutover.yml"}),
     "gate-proof": frozenset({
         ".github/workflows/test-gate.yml",
         ".github/workflows/build-platform-images.yml",
@@ -844,8 +842,10 @@ def read_receipts(scope: str) -> dict[str, Any]:
             rows.append(_artifact_row(item, row_kind, ref) if raw_artifacts else item)
 
     if kind == "pr":
-        take(_fetch_artifacts_named(f"prewarm-relay-receipt-pr-{value}", "prewarm-relay"),
-             "prewarm-relay", f"pr:{value}")
+        unavailable.append(_unavailable(
+            "prewarm-relay", REASON_RETIRED,
+            "PR-mode prewarm receipts were retired; merge-group relay receipts are not exposed by this endpoint",
+        ))
     elif kind == "tree":
         take(_fetch_artifacts_named(f"gate-proof-{value}", "gate-proof"),
              "gate-proof", f"tree:{value}")
@@ -890,6 +890,7 @@ __all__ = [
     "MINTING_WORKFLOWS",
     "REASON_BUSY",
     "REASON_NO_CREDENTIAL",
+    "REASON_RETIRED",
     "REASON_UNREACHABLE",
     "REASON_UNREADABLE",
     "ReceiptsError",
