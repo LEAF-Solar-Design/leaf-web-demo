@@ -1,0 +1,711 @@
+{
+ "schema": "leaf.solar-parity-receipt.v1",
+ "capability": "kml-export",
+ "capability_version": "0",
+ "fixture": {
+  "id": "demo-fmt-manifest",
+  "sha256": "306d463f0a90a13c998b54084d45e447c78ded5d132ae86b44466f5c1dac2c0f"
+ },
+ "plugin": {
+  "build": "LeafSolarDesign 2025 licensed 2026-09-23",
+  "state": "committed",
+  "receipt_sha256": "5dbc42f8385c18bd106846d16243f31eb88c3b4281298152ca06414075968b14"
+ },
+ "studio": {
+  "capability_version": "0",
+  "engine": "server-builtin"
+ },
+ "comparator": {
+  "name": "solar-w1-semantic",
+  "version": "1",
+  "verdict": "pass",
+  "diffs": []
+ },
+ "synthetic_fields": [
+  "plugin:before/recorded",
+  "plugin:changes/unrecorded",
+  "studio:before/recorded",
+  "studio:changes/unrecorded"
+ ],
+ "fallback_fields": [],
+ "synthetic_flagged": true,
+ "survived_reopen": true,
+ "produced_at": "2026-09-23T06:22:59Z",
+ "comparison": {
+  "schema": "leaf.solar-w1-comparison.v1",
+  "capability": "kml-export",
+  "family": "exports",
+  "plugin": {
+   "after": {
+    "format": "csv",
+    "rows": [
+     {
+      "fields": {
+       "CenterLat": "",
+       "CenterLon": "",
+       "Error": "",
+       "Fixture": "F1_ALT_ZERO_OMIT",
+       "KmlFile": "leafkmlexportfmt_demo_F1_ALT_ZERO_OMIT.xml"
+      },
+      "id": {
+       "entity_id": "F1_ALT_ZERO_OMIT"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "kml-export-format-fixture",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "CenterLat": "",
+       "CenterLon": "",
+       "Error": "",
+       "Fixture": "F2_ALT_NONZERO",
+       "KmlFile": "leafkmlexportfmt_demo_F2_ALT_NONZERO.xml"
+      },
+      "id": {
+       "entity_id": "F2_ALT_NONZERO"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "kml-export-format-fixture",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "CenterLat": "",
+       "CenterLon": "",
+       "Error": "",
+       "Fixture": "F3_MIXED_ALT",
+       "KmlFile": "leafkmlexportfmt_demo_F3_MIXED_ALT.xml"
+      },
+      "id": {
+       "entity_id": "F3_MIXED_ALT"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "kml-export-format-fixture",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "CenterLat": "",
+       "CenterLon": "",
+       "Error": "",
+       "Fixture": "F4_EXPLICIT_CLOSED",
+       "KmlFile": "leafkmlexportfmt_demo_F4_EXPLICIT_CLOSED.xml"
+      },
+      "id": {
+       "entity_id": "F4_EXPLICIT_CLOSED"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "kml-export-format-fixture",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "CenterLat": "",
+       "CenterLon": "",
+       "Error": "",
+       "Fixture": "F5_IMPLICIT_OPEN",
+       "KmlFile": "leafkmlexportfmt_demo_F5_IMPLICIT_OPEN.xml"
+      },
+      "id": {
+       "entity_id": "F5_IMPLICIT_OPEN"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "kml-export-format-fixture",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "CenterLat": "40",
+       "CenterLon": "-105",
+       "Error": "",
+       "Fixture": "F6_PROJECTED_ROUNDTRIP",
+       "KmlFile": "leafkmlexportfmt_demo_F6_PROJECTED_ROUNDTRIP.xml"
+      },
+      "id": {
+       "entity_id": "F6_PROJECTED_ROUNDTRIP"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "kml-export-format-fixture",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "CenterLat": "",
+       "CenterLon": "",
+       "Error": "",
+       "Fixture": "F7_NO_DOC_NAME",
+       "KmlFile": "leafkmlexportfmt_demo_F7_NO_DOC_NAME.xml"
+      },
+      "id": {
+       "entity_id": "F7_NO_DOC_NAME"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "kml-export-format-fixture",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "CenterLat": "",
+       "CenterLon": "",
+       "Error": "",
+       "Fixture": "F8_NO_PM_NAME",
+       "KmlFile": "leafkmlexportfmt_demo_F8_NO_PM_NAME.xml"
+      },
+      "id": {
+       "entity_id": "F8_NO_PM_NAME"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "kml-export-format-fixture",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "CenterLat": "",
+       "CenterLon": "",
+       "Error": "",
+       "Fixture": "F9_NULL_POLYGON_SKIP",
+       "KmlFile": "leafkmlexportfmt_demo_F9_NULL_POLYGON_SKIP.xml"
+      },
+      "id": {
+       "entity_id": "F9_NULL_POLYGON_SKIP"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "kml-export-format-fixture",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "CenterLat": "",
+       "CenterLon": "",
+       "Error": "",
+       "Fixture": "F10_G17_PRECISION",
+       "KmlFile": "leafkmlexportfmt_demo_F10_G17_PRECISION.xml"
+      },
+      "id": {
+       "entity_id": "F10_G17_PRECISION"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "kml-export-format-fixture",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "CenterLat": "",
+       "CenterLon": "",
+       "Error": "",
+       "Fixture": "F11_IS_CLOSED_EPS",
+       "KmlFile": "leafkmlexportfmt_demo_F11_IS_CLOSED_EPS.xml"
+      },
+      "id": {
+       "entity_id": "F11_IS_CLOSED_EPS"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "kml-export-format-fixture",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "CenterLat": "",
+       "CenterLon": "",
+       "Error": "",
+       "Fixture": "F12_UTF8_DECL",
+       "KmlFile": "leafkmlexportfmt_demo_F12_UTF8_DECL.xml"
+      },
+      "id": {
+       "entity_id": "F12_UTF8_DECL"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "kml-export-format-fixture",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "CenterLat": "",
+       "CenterLon": "",
+       "Error": "centerLatDeg too close to \u00b190\u00b0 (pole) \u2014 longitude degenerate. (Parameter 'centerLatDeg')",
+       "Fixture": "F13_POLE_GUARD",
+       "KmlFile": ""
+      },
+      "id": {
+       "entity_id": "F13_POLE_GUARD"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "kml-export-format-fixture",
+      "unit": "none"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "F10_G17_PRECISION": "F10_G17_PRECISION",
+    "F11_IS_CLOSED_EPS": "F11_IS_CLOSED_EPS",
+    "F12_UTF8_DECL": "F12_UTF8_DECL",
+    "F13_POLE_GUARD": "F13_POLE_GUARD",
+    "F1_ALT_ZERO_OMIT": "F1_ALT_ZERO_OMIT",
+    "F2_ALT_NONZERO": "F2_ALT_NONZERO",
+    "F3_MIXED_ALT": "F3_MIXED_ALT",
+    "F4_EXPLICIT_CLOSED": "F4_EXPLICIT_CLOSED",
+    "F5_IMPLICIT_OPEN": "F5_IMPLICIT_OPEN",
+    "F6_PROJECTED_ROUNDTRIP": "F6_PROJECTED_ROUNDTRIP",
+    "F7_NO_DOC_NAME": "F7_NO_DOC_NAME",
+    "F8_NO_PM_NAME": "F8_NO_PM_NAME",
+    "F9_NULL_POLYGON_SKIP": "F9_NULL_POLYGON_SKIP"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "306d463f0a90a13c998b54084d45e447c78ded5d132ae86b44466f5c1dac2c0f",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "e05bafae4624886c36db45e06bf12ef5d9daefd633ea5a807c806f74fbb3e97b",
+   "output_sha256": "05a01c2d6d2a5631aae68b2712952dc30b23434de50a583dd4bdbea9cc43022a",
+   "parameters": {
+    "capability": "kml-export",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafkmlexportfmt_demo.csv",
+    "probe_file_sha256": "2ec8ae9edbd54584473b6f1b2b0bc58ea496f7bd88c53300717ba6fce84d0893",
+    "probe_type": "kml-export-format-manifest",
+    "side": "plugin"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "none",
+    "producer": "plugin",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  },
+  "studio": {
+   "after": {
+    "format": "csv",
+    "rows": [
+     {
+      "fields": {
+       "CenterLat": "",
+       "CenterLon": "",
+       "Error": "",
+       "Fixture": "F1_ALT_ZERO_OMIT",
+       "KmlFile": "leafkmlexportfmt_demo_F1_ALT_ZERO_OMIT.xml"
+      },
+      "id": {
+       "entity_id": "F1_ALT_ZERO_OMIT"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "kml-export-format-fixture",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "CenterLat": "",
+       "CenterLon": "",
+       "Error": "",
+       "Fixture": "F2_ALT_NONZERO",
+       "KmlFile": "leafkmlexportfmt_demo_F2_ALT_NONZERO.xml"
+      },
+      "id": {
+       "entity_id": "F2_ALT_NONZERO"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "kml-export-format-fixture",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "CenterLat": "",
+       "CenterLon": "",
+       "Error": "",
+       "Fixture": "F3_MIXED_ALT",
+       "KmlFile": "leafkmlexportfmt_demo_F3_MIXED_ALT.xml"
+      },
+      "id": {
+       "entity_id": "F3_MIXED_ALT"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "kml-export-format-fixture",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "CenterLat": "",
+       "CenterLon": "",
+       "Error": "",
+       "Fixture": "F4_EXPLICIT_CLOSED",
+       "KmlFile": "leafkmlexportfmt_demo_F4_EXPLICIT_CLOSED.xml"
+      },
+      "id": {
+       "entity_id": "F4_EXPLICIT_CLOSED"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "kml-export-format-fixture",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "CenterLat": "",
+       "CenterLon": "",
+       "Error": "",
+       "Fixture": "F5_IMPLICIT_OPEN",
+       "KmlFile": "leafkmlexportfmt_demo_F5_IMPLICIT_OPEN.xml"
+      },
+      "id": {
+       "entity_id": "F5_IMPLICIT_OPEN"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "kml-export-format-fixture",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "CenterLat": "40",
+       "CenterLon": "-105",
+       "Error": "",
+       "Fixture": "F6_PROJECTED_ROUNDTRIP",
+       "KmlFile": "leafkmlexportfmt_demo_F6_PROJECTED_ROUNDTRIP.xml"
+      },
+      "id": {
+       "entity_id": "F6_PROJECTED_ROUNDTRIP"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "kml-export-format-fixture",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "CenterLat": "",
+       "CenterLon": "",
+       "Error": "",
+       "Fixture": "F7_NO_DOC_NAME",
+       "KmlFile": "leafkmlexportfmt_demo_F7_NO_DOC_NAME.xml"
+      },
+      "id": {
+       "entity_id": "F7_NO_DOC_NAME"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "kml-export-format-fixture",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "CenterLat": "",
+       "CenterLon": "",
+       "Error": "",
+       "Fixture": "F8_NO_PM_NAME",
+       "KmlFile": "leafkmlexportfmt_demo_F8_NO_PM_NAME.xml"
+      },
+      "id": {
+       "entity_id": "F8_NO_PM_NAME"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "kml-export-format-fixture",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "CenterLat": "",
+       "CenterLon": "",
+       "Error": "",
+       "Fixture": "F9_NULL_POLYGON_SKIP",
+       "KmlFile": "leafkmlexportfmt_demo_F9_NULL_POLYGON_SKIP.xml"
+      },
+      "id": {
+       "entity_id": "F9_NULL_POLYGON_SKIP"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "kml-export-format-fixture",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "CenterLat": "",
+       "CenterLon": "",
+       "Error": "",
+       "Fixture": "F10_G17_PRECISION",
+       "KmlFile": "leafkmlexportfmt_demo_F10_G17_PRECISION.xml"
+      },
+      "id": {
+       "entity_id": "F10_G17_PRECISION"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "kml-export-format-fixture",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "CenterLat": "",
+       "CenterLon": "",
+       "Error": "",
+       "Fixture": "F11_IS_CLOSED_EPS",
+       "KmlFile": "leafkmlexportfmt_demo_F11_IS_CLOSED_EPS.xml"
+      },
+      "id": {
+       "entity_id": "F11_IS_CLOSED_EPS"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "kml-export-format-fixture",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "CenterLat": "",
+       "CenterLon": "",
+       "Error": "",
+       "Fixture": "F12_UTF8_DECL",
+       "KmlFile": "leafkmlexportfmt_demo_F12_UTF8_DECL.xml"
+      },
+      "id": {
+       "entity_id": "F12_UTF8_DECL"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "kml-export-format-fixture",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "CenterLat": "",
+       "CenterLon": "",
+       "Error": "centerLatDeg too close to \u00b190\u00b0 (pole) \u2014 longitude degenerate. (Parameter 'centerLatDeg')",
+       "Fixture": "F13_POLE_GUARD",
+       "KmlFile": ""
+      },
+      "id": {
+       "entity_id": "F13_POLE_GUARD"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "kml-export-format-fixture",
+      "unit": "none"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "F10_G17_PRECISION": "F10_G17_PRECISION",
+    "F11_IS_CLOSED_EPS": "F11_IS_CLOSED_EPS",
+    "F12_UTF8_DECL": "F12_UTF8_DECL",
+    "F13_POLE_GUARD": "F13_POLE_GUARD",
+    "F1_ALT_ZERO_OMIT": "F1_ALT_ZERO_OMIT",
+    "F2_ALT_NONZERO": "F2_ALT_NONZERO",
+    "F3_MIXED_ALT": "F3_MIXED_ALT",
+    "F4_EXPLICIT_CLOSED": "F4_EXPLICIT_CLOSED",
+    "F5_IMPLICIT_OPEN": "F5_IMPLICIT_OPEN",
+    "F6_PROJECTED_ROUNDTRIP": "F6_PROJECTED_ROUNDTRIP",
+    "F7_NO_DOC_NAME": "F7_NO_DOC_NAME",
+    "F8_NO_PM_NAME": "F8_NO_PM_NAME",
+    "F9_NULL_POLYGON_SKIP": "F9_NULL_POLYGON_SKIP"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "306d463f0a90a13c998b54084d45e447c78ded5d132ae86b44466f5c1dac2c0f",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "e05bafae4624886c36db45e06bf12ef5d9daefd633ea5a807c806f74fbb3e97b",
+   "output_sha256": "05a01c2d6d2a5631aae68b2712952dc30b23434de50a583dd4bdbea9cc43022a",
+   "parameters": {
+    "capability": "kml-export",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafkmlexportfmt_demo.csv",
+    "probe_file_sha256": "2ec8ae9edbd54584473b6f1b2b0bc58ea496f7bd88c53300717ba6fce84d0893",
+    "probe_type": "kml-export-format-manifest",
+    "side": "studio"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "server-builtin",
+    "producer": "studio",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  }
+ }
+}

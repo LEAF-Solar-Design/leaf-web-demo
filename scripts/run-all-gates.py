@@ -459,6 +459,19 @@ def build_suites() -> List[Suite]:
         # the first green run is the measurement.
         Suite("server-solar-terrain", "server tests/test_solar_terrain.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_terrain.py"), 356),
+        # S33 KML and LandXML ports (2026-09-23): server/solar_geo_formats.py, the
+        # literal port of KmlBoundaryExporter (with every format branch
+        # LEAFKMLEXPORTFMTDEMO exercises), KmlBoundaryParser, TerrainExporter's
+        # LandXML writer with its Fixed and Delaunay triangulations, and
+        # TerrainImporter.ParseLandXmlPoints plus LandXmlImporter. Three layers:
+        # all eighteen licensed files in the committed DEMO captures
+        # (docs/parity/evidence/probes/demo-probes-20260923) reproduced by
+        # COMPUTING them, whole and CSV row by row; the writer and reader branches;
+        # and hostile XML (DTDs, entities, depth and size bounds) refused at every
+        # entry point. Floor MEASURED at 160 on the first green run (2026-09-23,
+        # 1.1 s).
+        Suite("server-solar-geo-formats", "server tests/test_solar_geo_formats.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_geo_formats.py"), 160),
         # S31 XLSX codec (2026-09-22): server/solar_xlsx.py, a small standard-library
         # reader and writer (zipfile plus xml.etree only, NO openpyxl, because this
         # repo declares no such dependency). Covers the round trip, the four
@@ -1754,9 +1767,14 @@ def build_suites() -> List[Suite]:
         # terrain and irradiance CSVs (four carrying Encoding.UTF8's byte order
         # mark, which the CSV reader now drops as encoding) with a comparator pass
         # on each against its committed licensed capture: 28 more cases, so the
-        # floor is COUNTED at 179 until the first green run measures it.
+        # floor is COUNTED at 179 until the first green run measures it. S33
+        # (2026-09-23) adds the XML path (one row per KML or LandXML document,
+        # keyed by file name, its canonical lines verbatim, root element checked,
+        # hostile XML refused) and the five new probe types, with a comparator pass
+        # on each of the eighteen committed licensed files: floor MEASURED at 258
+        # on the first green run (2026-09-23, 5.0 s).
         Suite("scripts-solar-probe-evidence", "scripts test_solar_probe_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_probe_evidence.py"), 179),
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_probe_evidence.py"), 258),
         # S22 (2026-09-22): contract rule G9 on the Studio evidence adapter, the first
         # test file it has. A set-valued list (unassigned_panels, duplicate_panels) is
         # emitted in ascending neutral-id order, so the same set recorded in two orders
