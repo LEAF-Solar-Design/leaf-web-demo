@@ -1,0 +1,829 @@
+{
+ "schema": "leaf.solar-parity-receipt.v1",
+ "capability": "nec-ac-voltage-drop",
+ "capability_version": "0",
+ "fixture": {
+  "id": "demo-probes",
+  "sha256": "9a640553a96c242e132b7c222db3a7214662e510772c4b1ee7b17a30fd989b08"
+ },
+ "plugin": {
+  "build": "LeafSolarDesign 2025 licensed 2026-09-23",
+  "state": "committed",
+  "receipt_sha256": "8187efebb698d0f932fdabba6ff36f56ea023def6d4584bc6bc6b0dfe33c8001"
+ },
+ "studio": {
+  "capability_version": "0",
+  "engine": "server-builtin"
+ },
+ "comparator": {
+  "name": "solar-w1-semantic",
+  "version": "1",
+  "verdict": "pass",
+  "diffs": []
+ },
+ "synthetic_fields": [
+  "plugin:before/recorded",
+  "plugin:changes/unrecorded",
+  "studio:before/recorded",
+  "studio:changes/unrecorded"
+ ],
+ "fallback_fields": [],
+ "synthetic_flagged": true,
+ "survived_reopen": true,
+ "produced_at": "2026-09-23T02:33:45Z",
+ "comparison": {
+  "schema": "leaf.solar-w1-comparison.v1",
+  "capability": "nec-ac-voltage-drop",
+  "family": "exports",
+  "plugin": {
+   "after": {
+    "format": "json-probes",
+    "rows": [
+     {
+      "fields": {
+       "Article": "NEC 210.19(A)(4) Informational Note 4 (AC)",
+       "Formula": "VD% = (2 \u00d7 I \u00d7 (R\u00b7cos\u03c6 + X\u00b7sin\u03c6) \u00d7 L / 1000) / V \u00d7 100 = (2 \u00d7 10 \u00d7 (0.5\u00b71 + 0.1\u00b70.000) \u00d7 100 / 1000) / 240 \u00d7 100",
+       "I_in": 10.0,
+       "L_in": 100.0,
+       "Name": "single_phase_unity_pf",
+       "PF_in": 1.0,
+       "Phase_in": 1,
+       "R_in": 0.5,
+       "Result": 0.4166666666666667,
+       "ShortDescription": "AC voltage drop (1-phase, recommended <= 3% for inverter output)",
+       "Tag": "single_phase_unity_pf",
+       "Units": "% (3% recommended max)",
+       "V_in": 240.0,
+       "X_in": 0.1
+      },
+      "id": {
+       "entity_id": "single_phase_unity_pf"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "% (3% recommended max)",
+       "value": 0.4166666666666667
+      },
+      "type": "nec-ac-voltage-drop",
+      "unit": "% (3% recommended max)"
+     },
+     {
+      "fields": {
+       "Article": "NEC 210.19(A)(4) Informational Note 4 (AC)",
+       "Formula": "VD% = (\u221a3 \u00d7 I \u00d7 (R\u00b7cos\u03c6 + X\u00b7sin\u03c6) \u00d7 L / 1000) / V \u00d7 100 = (\u221a3 \u00d7 50 \u00d7 (0.3\u00b71 + 0.1\u00b70.000) \u00d7 200 / 1000) / 480 \u00d7 100",
+       "I_in": 50.0,
+       "L_in": 200.0,
+       "Name": "three_phase_unity_pf",
+       "PF_in": 1.0,
+       "Phase_in": 3,
+       "R_in": 0.3,
+       "Result": 1.0825317547305482,
+       "ShortDescription": "AC voltage drop (3-phase, recommended <= 3% for inverter output)",
+       "Tag": "three_phase_unity_pf",
+       "Units": "% (3% recommended max)",
+       "V_in": 480.0,
+       "X_in": 0.1
+      },
+      "id": {
+       "entity_id": "three_phase_unity_pf"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "% (3% recommended max)",
+       "value": 1.0825317547305482
+      },
+      "type": "nec-ac-voltage-drop",
+      "unit": "% (3% recommended max)"
+     },
+     {
+      "fields": {
+       "Article": "NEC 210.19(A)(4) Informational Note 4 (AC)",
+       "Formula": "VD% = (2 \u00d7 I \u00d7 (R\u00b7cos\u03c6 + X\u00b7sin\u03c6) \u00d7 L / 1000) / V \u00d7 100 = (2 \u00d7 30 \u00d7 (0.4\u00b70.95 + 0.08\u00b70.312) \u00d7 150 / 1000) / 208 \u00d7 100",
+       "I_in": 30.0,
+       "L_in": 150.0,
+       "Name": "single_phase_pf_95",
+       "PF_in": 0.95,
+       "Phase_in": 1,
+       "R_in": 0.4,
+       "Result": 1.7523172730492027,
+       "ShortDescription": "AC voltage drop (1-phase, recommended <= 3% for inverter output)",
+       "Tag": "single_phase_pf_95",
+       "Units": "% (3% recommended max)",
+       "V_in": 208.0,
+       "X_in": 0.08
+      },
+      "id": {
+       "entity_id": "single_phase_pf_95"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "% (3% recommended max)",
+       "value": 1.7523172730492027
+      },
+      "type": "nec-ac-voltage-drop",
+      "unit": "% (3% recommended max)"
+     },
+     {
+      "fields": {
+       "Article": "NEC 210.19(A)(4) Informational Note 4 (AC)",
+       "Formula": "VD% = (\u221a3 \u00d7 I \u00d7 (R\u00b7cos\u03c6 + X\u00b7sin\u03c6) \u00d7 L / 1000) / V \u00d7 100 = (\u221a3 \u00d7 100 \u00d7 (0.2\u00b70.9 + 0.05\u00b70.436) \u00d7 300 / 1000) / 480 \u00d7 100",
+       "I_in": 100.0,
+       "L_in": 300.0,
+       "Name": "three_phase_pf_90",
+       "PF_in": 0.9,
+       "Phase_in": 3,
+       "R_in": 0.2,
+       "Result": 2.184489484617198,
+       "ShortDescription": "AC voltage drop (3-phase, recommended <= 3% for inverter output)",
+       "Tag": "three_phase_pf_90",
+       "Units": "% (3% recommended max)",
+       "V_in": 480.0,
+       "X_in": 0.05
+      },
+      "id": {
+       "entity_id": "three_phase_pf_90"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "% (3% recommended max)",
+       "value": 2.184489484617198
+      },
+      "type": "nec-ac-voltage-drop",
+      "unit": "% (3% recommended max)"
+     },
+     {
+      "fields": {
+       "Article": "NEC 210.19(A)(4) Informational Note 4 (AC)",
+       "Formula": "VD% = (2 \u00d7 I \u00d7 (R\u00b7cos\u03c6 + X\u00b7sin\u03c6) \u00d7 L / 1000) / V \u00d7 100 = (2 \u00d7 0 \u00d7 (0.5\u00b71 + 0.1\u00b70.000) \u00d7 100 / 1000) / 240 \u00d7 100",
+       "I_in": 0.0,
+       "L_in": 100.0,
+       "Name": "zero_current",
+       "PF_in": 1.0,
+       "Phase_in": 1,
+       "R_in": 0.5,
+       "Result": 0.0,
+       "ShortDescription": "AC voltage drop (1-phase, recommended <= 3% for inverter output)",
+       "Tag": "zero_current",
+       "Units": "% (3% recommended max)",
+       "V_in": 240.0,
+       "X_in": 0.1
+      },
+      "id": {
+       "entity_id": "zero_current"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "% (3% recommended max)",
+       "value": 0.0
+      },
+      "type": "nec-ac-voltage-drop",
+      "unit": "% (3% recommended max)"
+     },
+     {
+      "fields": {
+       "Article": "NEC 210.19(A)(4) Informational Note 4 (AC)",
+       "Formula": "VD% = (2 \u00d7 I \u00d7 (R\u00b7cos\u03c6 + X\u00b7sin\u03c6) \u00d7 L / 1000) / V \u00d7 100 = (2 \u00d7 20 \u00d7 (0.5\u00b70.95 + 0\u00b70.312) \u00d7 100 / 1000) / 240 \u00d7 100",
+       "I_in": 20.0,
+       "L_in": 100.0,
+       "Name": "zero_reactance",
+       "PF_in": 0.95,
+       "Phase_in": 1,
+       "R_in": 0.5,
+       "Result": 0.7916666666666665,
+       "ShortDescription": "AC voltage drop (1-phase, recommended <= 3% for inverter output)",
+       "Tag": "zero_reactance",
+       "Units": "% (3% recommended max)",
+       "V_in": 240.0,
+       "X_in": 0.0
+      },
+      "id": {
+       "entity_id": "zero_reactance"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "% (3% recommended max)",
+       "value": 0.7916666666666665
+      },
+      "type": "nec-ac-voltage-drop",
+      "unit": "% (3% recommended max)"
+     },
+     {
+      "fields": {
+       "Article": "NEC 210.19(A)(4) Informational Note 4 (AC)",
+       "Formula": "VD% = (2 \u00d7 I \u00d7 (R\u00b7cos\u03c6 + X\u00b7sin\u03c6) \u00d7 L / 1000) / V \u00d7 100 = (2 \u00d7 10 \u00d7 (0.5\u00b71 + 0.1\u00b70.000) \u00d7 100 / 1000) / 240 \u00d7 100",
+       "I_in": 10.0,
+       "L_in": 100.0,
+       "Name": "pf_over_one_clamped",
+       "PF_in": 1.2,
+       "Phase_in": 1,
+       "R_in": 0.5,
+       "Result": 0.4166666666666667,
+       "ShortDescription": "AC voltage drop (1-phase, recommended <= 3% for inverter output)",
+       "Tag": "pf_over_one_clamped",
+       "Units": "% (3% recommended max)",
+       "V_in": 240.0,
+       "X_in": 0.1
+      },
+      "id": {
+       "entity_id": "pf_over_one_clamped"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "% (3% recommended max)",
+       "value": 0.4166666666666667
+      },
+      "type": "nec-ac-voltage-drop",
+      "unit": "% (3% recommended max)"
+     },
+     {
+      "fields": {
+       "Article": "NEC 210.19(A)(4) Informational Note 4 (AC)",
+       "Formula": "VD% = (2 \u00d7 I \u00d7 (R\u00b7cos\u03c6 + X\u00b7sin\u03c6) \u00d7 L / 1000) / V \u00d7 100 = (2 \u00d7 10 \u00d7 (0.5\u00b70 + 0.1\u00b71.000) \u00d7 100 / 1000) / 240 \u00d7 100",
+       "I_in": 10.0,
+       "L_in": 100.0,
+       "Name": "pf_negative_clamped",
+       "PF_in": -0.5,
+       "Phase_in": 1,
+       "R_in": 0.5,
+       "Result": 0.08333333333333334,
+       "ShortDescription": "AC voltage drop (1-phase, recommended <= 3% for inverter output)",
+       "Tag": "pf_negative_clamped",
+       "Units": "% (3% recommended max)",
+       "V_in": 240.0,
+       "X_in": 0.1
+      },
+      "id": {
+       "entity_id": "pf_negative_clamped"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "% (3% recommended max)",
+       "value": 0.08333333333333334
+      },
+      "type": "nec-ac-voltage-drop",
+      "unit": "% (3% recommended max)"
+     },
+     {
+      "fields": {
+       "Article": "NEC 210.19(A)(4) Informational Note 4 (AC)",
+       "Formula": "VD% = (\u221a3 \u00d7 I \u00d7 (R\u00b7cos\u03c6 + X\u00b7sin\u03c6) \u00d7 L / 1000) / V \u00d7 100 = (\u221a3 \u00d7 50 \u00d7 (0.3\u00b71 + 0.1\u00b70.000) \u00d7 200 / 1000) / 0 \u00d7 100",
+       "I_in": 50.0,
+       "L_in": 200.0,
+       "Name": "zero_source_voltage",
+       "PF_in": 1.0,
+       "Phase_in": 3,
+       "R_in": 0.3,
+       "Result": 0.0,
+       "ShortDescription": "AC voltage drop (3-phase, recommended <= 3% for inverter output)",
+       "Tag": "zero_source_voltage",
+       "Units": "% (3% recommended max)",
+       "V_in": 0.0,
+       "X_in": 0.1
+      },
+      "id": {
+       "entity_id": "zero_source_voltage"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "% (3% recommended max)",
+       "value": 0.0
+      },
+      "type": "nec-ac-voltage-drop",
+      "unit": "% (3% recommended max)"
+     },
+     {
+      "fields": {
+       "Article": "NEC 210.19(A)(4) Informational Note 4 (AC)",
+       "Formula": "VD% = (\u221a3 \u00d7 I \u00d7 (R\u00b7cos\u03c6 + X\u00b7sin\u03c6) \u00d7 L / 1000) / V \u00d7 100 = (\u221a3 \u00d7 75 \u00d7 (0.25\u00b70.9 + 0.07\u00b70.436) \u00d7 1000 / 1000) / 600 \u00d7 100",
+       "I_in": 75.0,
+       "L_in": 1000.0,
+       "Name": "long_run",
+       "PF_in": 0.9,
+       "Phase_in": 3,
+       "R_in": 0.25,
+       "Result": 5.532003409373658,
+       "ShortDescription": "AC voltage drop (3-phase, recommended <= 3% for inverter output)",
+       "Tag": "long_run",
+       "Units": "% (3% recommended max)",
+       "V_in": 600.0,
+       "X_in": 0.07
+      },
+      "id": {
+       "entity_id": "long_run"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "% (3% recommended max)",
+       "value": 5.532003409373658
+      },
+      "type": "nec-ac-voltage-drop",
+      "unit": "% (3% recommended max)"
+     },
+     {
+      "fields": {
+       "Article": "NEC 210.19(A)(4) Informational Note 4 (AC)",
+       "Formula": "VD% = (2 \u00d7 I \u00d7 (R\u00b7cos\u03c6 + X\u00b7sin\u03c6) \u00d7 L / 1000) / V \u00d7 100 = (2 \u00d7 25 \u00d7 (0.6\u00b70.95 + 0.12\u00b70.312) \u00d7 50 / 1000) / 120 \u00d7 100",
+       "I_in": 25.0,
+       "L_in": 50.0,
+       "Name": "low_voltage_residential",
+       "PF_in": 0.95,
+       "Phase_in": 1,
+       "R_in": 0.6,
+       "Result": 1.2655624749799799,
+       "ShortDescription": "AC voltage drop (1-phase, recommended <= 3% for inverter output)",
+       "Tag": "low_voltage_residential",
+       "Units": "% (3% recommended max)",
+       "V_in": 120.0,
+       "X_in": 0.12
+      },
+      "id": {
+       "entity_id": "low_voltage_residential"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "% (3% recommended max)",
+       "value": 1.2655624749799799
+      },
+      "type": "nec-ac-voltage-drop",
+      "unit": "% (3% recommended max)"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "long_run": "long_run",
+    "low_voltage_residential": "low_voltage_residential",
+    "pf_negative_clamped": "pf_negative_clamped",
+    "pf_over_one_clamped": "pf_over_one_clamped",
+    "single_phase_pf_95": "single_phase_pf_95",
+    "single_phase_unity_pf": "single_phase_unity_pf",
+    "three_phase_pf_90": "three_phase_pf_90",
+    "three_phase_unity_pf": "three_phase_unity_pf",
+    "zero_current": "zero_current",
+    "zero_reactance": "zero_reactance",
+    "zero_source_voltage": "zero_source_voltage"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "9a640553a96c242e132b7c222db3a7214662e510772c4b1ee7b17a30fd989b08",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "0162340eb2aaa29676ca266a8f64fab595db4096dfdbede63fbf2911416d820a",
+   "output_sha256": "dd24dfee3607ea0c83321447e704115b06792e7795bf0fb7f9f140aa3460d8ae",
+   "parameters": {
+    "capability": "nec-ac-voltage-drop",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafvdropac_probes.json",
+    "probe_file_sha256": "33b21d0d1bab82da3d8e9681b6437ec355d46782454735035bedd00beb95168a",
+    "probe_type": "nec-ac-voltage-drop",
+    "side": "plugin"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "none",
+    "producer": "plugin",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  },
+  "studio": {
+   "after": {
+    "format": "json-probes",
+    "rows": [
+     {
+      "fields": {
+       "Article": "NEC 210.19(A)(4) Informational Note 4 (AC)",
+       "Formula": "VD% = (2 \u00d7 I \u00d7 (R\u00b7cos\u03c6 + X\u00b7sin\u03c6) \u00d7 L / 1000) / V \u00d7 100 = (2 \u00d7 10 \u00d7 (0.5\u00b71 + 0.1\u00b70.000) \u00d7 100 / 1000) / 240 \u00d7 100",
+       "I_in": 10.0,
+       "L_in": 100.0,
+       "Name": "single_phase_unity_pf",
+       "PF_in": 1.0,
+       "Phase_in": 1,
+       "R_in": 0.5,
+       "Result": 0.4166666666666667,
+       "ShortDescription": "AC voltage drop (1-phase, recommended <= 3% for inverter output)",
+       "Tag": "single_phase_unity_pf",
+       "Units": "% (3% recommended max)",
+       "V_in": 240.0,
+       "X_in": 0.1
+      },
+      "id": {
+       "entity_id": "single_phase_unity_pf"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "% (3% recommended max)",
+       "value": 0.4166666666666667
+      },
+      "type": "nec-ac-voltage-drop",
+      "unit": "% (3% recommended max)"
+     },
+     {
+      "fields": {
+       "Article": "NEC 210.19(A)(4) Informational Note 4 (AC)",
+       "Formula": "VD% = (\u221a3 \u00d7 I \u00d7 (R\u00b7cos\u03c6 + X\u00b7sin\u03c6) \u00d7 L / 1000) / V \u00d7 100 = (\u221a3 \u00d7 50 \u00d7 (0.3\u00b71 + 0.1\u00b70.000) \u00d7 200 / 1000) / 480 \u00d7 100",
+       "I_in": 50.0,
+       "L_in": 200.0,
+       "Name": "three_phase_unity_pf",
+       "PF_in": 1.0,
+       "Phase_in": 3,
+       "R_in": 0.3,
+       "Result": 1.0825317547305482,
+       "ShortDescription": "AC voltage drop (3-phase, recommended <= 3% for inverter output)",
+       "Tag": "three_phase_unity_pf",
+       "Units": "% (3% recommended max)",
+       "V_in": 480.0,
+       "X_in": 0.1
+      },
+      "id": {
+       "entity_id": "three_phase_unity_pf"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "% (3% recommended max)",
+       "value": 1.0825317547305482
+      },
+      "type": "nec-ac-voltage-drop",
+      "unit": "% (3% recommended max)"
+     },
+     {
+      "fields": {
+       "Article": "NEC 210.19(A)(4) Informational Note 4 (AC)",
+       "Formula": "VD% = (2 \u00d7 I \u00d7 (R\u00b7cos\u03c6 + X\u00b7sin\u03c6) \u00d7 L / 1000) / V \u00d7 100 = (2 \u00d7 30 \u00d7 (0.4\u00b70.95 + 0.08\u00b70.312) \u00d7 150 / 1000) / 208 \u00d7 100",
+       "I_in": 30.0,
+       "L_in": 150.0,
+       "Name": "single_phase_pf_95",
+       "PF_in": 0.95,
+       "Phase_in": 1,
+       "R_in": 0.4,
+       "Result": 1.7523172730492027,
+       "ShortDescription": "AC voltage drop (1-phase, recommended <= 3% for inverter output)",
+       "Tag": "single_phase_pf_95",
+       "Units": "% (3% recommended max)",
+       "V_in": 208.0,
+       "X_in": 0.08
+      },
+      "id": {
+       "entity_id": "single_phase_pf_95"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "% (3% recommended max)",
+       "value": 1.7523172730492027
+      },
+      "type": "nec-ac-voltage-drop",
+      "unit": "% (3% recommended max)"
+     },
+     {
+      "fields": {
+       "Article": "NEC 210.19(A)(4) Informational Note 4 (AC)",
+       "Formula": "VD% = (\u221a3 \u00d7 I \u00d7 (R\u00b7cos\u03c6 + X\u00b7sin\u03c6) \u00d7 L / 1000) / V \u00d7 100 = (\u221a3 \u00d7 100 \u00d7 (0.2\u00b70.9 + 0.05\u00b70.436) \u00d7 300 / 1000) / 480 \u00d7 100",
+       "I_in": 100.0,
+       "L_in": 300.0,
+       "Name": "three_phase_pf_90",
+       "PF_in": 0.9,
+       "Phase_in": 3,
+       "R_in": 0.2,
+       "Result": 2.184489484617198,
+       "ShortDescription": "AC voltage drop (3-phase, recommended <= 3% for inverter output)",
+       "Tag": "three_phase_pf_90",
+       "Units": "% (3% recommended max)",
+       "V_in": 480.0,
+       "X_in": 0.05
+      },
+      "id": {
+       "entity_id": "three_phase_pf_90"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "% (3% recommended max)",
+       "value": 2.184489484617198
+      },
+      "type": "nec-ac-voltage-drop",
+      "unit": "% (3% recommended max)"
+     },
+     {
+      "fields": {
+       "Article": "NEC 210.19(A)(4) Informational Note 4 (AC)",
+       "Formula": "VD% = (2 \u00d7 I \u00d7 (R\u00b7cos\u03c6 + X\u00b7sin\u03c6) \u00d7 L / 1000) / V \u00d7 100 = (2 \u00d7 0 \u00d7 (0.5\u00b71 + 0.1\u00b70.000) \u00d7 100 / 1000) / 240 \u00d7 100",
+       "I_in": 0.0,
+       "L_in": 100.0,
+       "Name": "zero_current",
+       "PF_in": 1.0,
+       "Phase_in": 1,
+       "R_in": 0.5,
+       "Result": 0.0,
+       "ShortDescription": "AC voltage drop (1-phase, recommended <= 3% for inverter output)",
+       "Tag": "zero_current",
+       "Units": "% (3% recommended max)",
+       "V_in": 240.0,
+       "X_in": 0.1
+      },
+      "id": {
+       "entity_id": "zero_current"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "% (3% recommended max)",
+       "value": 0.0
+      },
+      "type": "nec-ac-voltage-drop",
+      "unit": "% (3% recommended max)"
+     },
+     {
+      "fields": {
+       "Article": "NEC 210.19(A)(4) Informational Note 4 (AC)",
+       "Formula": "VD% = (2 \u00d7 I \u00d7 (R\u00b7cos\u03c6 + X\u00b7sin\u03c6) \u00d7 L / 1000) / V \u00d7 100 = (2 \u00d7 20 \u00d7 (0.5\u00b70.95 + 0\u00b70.312) \u00d7 100 / 1000) / 240 \u00d7 100",
+       "I_in": 20.0,
+       "L_in": 100.0,
+       "Name": "zero_reactance",
+       "PF_in": 0.95,
+       "Phase_in": 1,
+       "R_in": 0.5,
+       "Result": 0.7916666666666665,
+       "ShortDescription": "AC voltage drop (1-phase, recommended <= 3% for inverter output)",
+       "Tag": "zero_reactance",
+       "Units": "% (3% recommended max)",
+       "V_in": 240.0,
+       "X_in": 0.0
+      },
+      "id": {
+       "entity_id": "zero_reactance"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "% (3% recommended max)",
+       "value": 0.7916666666666665
+      },
+      "type": "nec-ac-voltage-drop",
+      "unit": "% (3% recommended max)"
+     },
+     {
+      "fields": {
+       "Article": "NEC 210.19(A)(4) Informational Note 4 (AC)",
+       "Formula": "VD% = (2 \u00d7 I \u00d7 (R\u00b7cos\u03c6 + X\u00b7sin\u03c6) \u00d7 L / 1000) / V \u00d7 100 = (2 \u00d7 10 \u00d7 (0.5\u00b71 + 0.1\u00b70.000) \u00d7 100 / 1000) / 240 \u00d7 100",
+       "I_in": 10.0,
+       "L_in": 100.0,
+       "Name": "pf_over_one_clamped",
+       "PF_in": 1.2,
+       "Phase_in": 1,
+       "R_in": 0.5,
+       "Result": 0.4166666666666667,
+       "ShortDescription": "AC voltage drop (1-phase, recommended <= 3% for inverter output)",
+       "Tag": "pf_over_one_clamped",
+       "Units": "% (3% recommended max)",
+       "V_in": 240.0,
+       "X_in": 0.1
+      },
+      "id": {
+       "entity_id": "pf_over_one_clamped"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "% (3% recommended max)",
+       "value": 0.4166666666666667
+      },
+      "type": "nec-ac-voltage-drop",
+      "unit": "% (3% recommended max)"
+     },
+     {
+      "fields": {
+       "Article": "NEC 210.19(A)(4) Informational Note 4 (AC)",
+       "Formula": "VD% = (2 \u00d7 I \u00d7 (R\u00b7cos\u03c6 + X\u00b7sin\u03c6) \u00d7 L / 1000) / V \u00d7 100 = (2 \u00d7 10 \u00d7 (0.5\u00b70 + 0.1\u00b71.000) \u00d7 100 / 1000) / 240 \u00d7 100",
+       "I_in": 10.0,
+       "L_in": 100.0,
+       "Name": "pf_negative_clamped",
+       "PF_in": -0.5,
+       "Phase_in": 1,
+       "R_in": 0.5,
+       "Result": 0.08333333333333334,
+       "ShortDescription": "AC voltage drop (1-phase, recommended <= 3% for inverter output)",
+       "Tag": "pf_negative_clamped",
+       "Units": "% (3% recommended max)",
+       "V_in": 240.0,
+       "X_in": 0.1
+      },
+      "id": {
+       "entity_id": "pf_negative_clamped"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "% (3% recommended max)",
+       "value": 0.08333333333333334
+      },
+      "type": "nec-ac-voltage-drop",
+      "unit": "% (3% recommended max)"
+     },
+     {
+      "fields": {
+       "Article": "NEC 210.19(A)(4) Informational Note 4 (AC)",
+       "Formula": "VD% = (\u221a3 \u00d7 I \u00d7 (R\u00b7cos\u03c6 + X\u00b7sin\u03c6) \u00d7 L / 1000) / V \u00d7 100 = (\u221a3 \u00d7 50 \u00d7 (0.3\u00b71 + 0.1\u00b70.000) \u00d7 200 / 1000) / 0 \u00d7 100",
+       "I_in": 50.0,
+       "L_in": 200.0,
+       "Name": "zero_source_voltage",
+       "PF_in": 1.0,
+       "Phase_in": 3,
+       "R_in": 0.3,
+       "Result": 0.0,
+       "ShortDescription": "AC voltage drop (3-phase, recommended <= 3% for inverter output)",
+       "Tag": "zero_source_voltage",
+       "Units": "% (3% recommended max)",
+       "V_in": 0.0,
+       "X_in": 0.1
+      },
+      "id": {
+       "entity_id": "zero_source_voltage"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "% (3% recommended max)",
+       "value": 0.0
+      },
+      "type": "nec-ac-voltage-drop",
+      "unit": "% (3% recommended max)"
+     },
+     {
+      "fields": {
+       "Article": "NEC 210.19(A)(4) Informational Note 4 (AC)",
+       "Formula": "VD% = (\u221a3 \u00d7 I \u00d7 (R\u00b7cos\u03c6 + X\u00b7sin\u03c6) \u00d7 L / 1000) / V \u00d7 100 = (\u221a3 \u00d7 75 \u00d7 (0.25\u00b70.9 + 0.07\u00b70.436) \u00d7 1000 / 1000) / 600 \u00d7 100",
+       "I_in": 75.0,
+       "L_in": 1000.0,
+       "Name": "long_run",
+       "PF_in": 0.9,
+       "Phase_in": 3,
+       "R_in": 0.25,
+       "Result": 5.532003409373658,
+       "ShortDescription": "AC voltage drop (3-phase, recommended <= 3% for inverter output)",
+       "Tag": "long_run",
+       "Units": "% (3% recommended max)",
+       "V_in": 600.0,
+       "X_in": 0.07
+      },
+      "id": {
+       "entity_id": "long_run"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "% (3% recommended max)",
+       "value": 5.532003409373658
+      },
+      "type": "nec-ac-voltage-drop",
+      "unit": "% (3% recommended max)"
+     },
+     {
+      "fields": {
+       "Article": "NEC 210.19(A)(4) Informational Note 4 (AC)",
+       "Formula": "VD% = (2 \u00d7 I \u00d7 (R\u00b7cos\u03c6 + X\u00b7sin\u03c6) \u00d7 L / 1000) / V \u00d7 100 = (2 \u00d7 25 \u00d7 (0.6\u00b70.95 + 0.12\u00b70.312) \u00d7 50 / 1000) / 120 \u00d7 100",
+       "I_in": 25.0,
+       "L_in": 50.0,
+       "Name": "low_voltage_residential",
+       "PF_in": 0.95,
+       "Phase_in": 1,
+       "R_in": 0.6,
+       "Result": 1.2655624749799799,
+       "ShortDescription": "AC voltage drop (1-phase, recommended <= 3% for inverter output)",
+       "Tag": "low_voltage_residential",
+       "Units": "% (3% recommended max)",
+       "V_in": 120.0,
+       "X_in": 0.12
+      },
+      "id": {
+       "entity_id": "low_voltage_residential"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "% (3% recommended max)",
+       "value": 1.2655624749799799
+      },
+      "type": "nec-ac-voltage-drop",
+      "unit": "% (3% recommended max)"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "long_run": "long_run",
+    "low_voltage_residential": "low_voltage_residential",
+    "pf_negative_clamped": "pf_negative_clamped",
+    "pf_over_one_clamped": "pf_over_one_clamped",
+    "single_phase_pf_95": "single_phase_pf_95",
+    "single_phase_unity_pf": "single_phase_unity_pf",
+    "three_phase_pf_90": "three_phase_pf_90",
+    "three_phase_unity_pf": "three_phase_unity_pf",
+    "zero_current": "zero_current",
+    "zero_reactance": "zero_reactance",
+    "zero_source_voltage": "zero_source_voltage"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "9a640553a96c242e132b7c222db3a7214662e510772c4b1ee7b17a30fd989b08",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "0162340eb2aaa29676ca266a8f64fab595db4096dfdbede63fbf2911416d820a",
+   "output_sha256": "dd24dfee3607ea0c83321447e704115b06792e7795bf0fb7f9f140aa3460d8ae",
+   "parameters": {
+    "capability": "nec-ac-voltage-drop",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafvdropac_probes.json",
+    "probe_file_sha256": "33b21d0d1bab82da3d8e9681b6437ec355d46782454735035bedd00beb95168a",
+    "probe_type": "nec-ac-voltage-drop",
+    "side": "studio"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "server-builtin",
+    "producer": "studio",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  }
+ }
+}

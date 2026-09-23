@@ -1,0 +1,68 @@
+[
+  {
+    "Name": "neg_minus_5",
+    "Tag": "neg_minus_5",
+    "N": -5,
+    "Fill": 0.0
+  },
+  {
+    "Name": "neg_one",
+    "Tag": "neg_one",
+    "N": -1,
+    "Fill": 0.0
+  },
+  {
+    "Name": "zero",
+    "Tag": "zero",
+    "N": 0,
+    "Fill": 0.0
+  },
+  {
+    "Name": "one",
+    "Tag": "one",
+    "N": 1,
+    "Fill": 0.53
+  },
+  {
+    "Name": "two",
+    "Tag": "two",
+    "N": 2,
+    "Fill": 0.31
+  },
+  {
+    "Name": "three",
+    "Tag": "three",
+    "N": 3,
+    "Fill": 0.4
+  },
+  {
+    "Name": "four",
+    "Tag": "four",
+    "N": 4,
+    "Fill": 0.4
+  },
+  {
+    "Name": "ten",
+    "Tag": "ten",
+    "N": 10,
+    "Fill": 0.4
+  },
+  {
+    "Name": "hundred",
+    "Tag": "hundred",
+    "N": 100,
+    "Fill": 0.4
+  },
+  {
+    "Name": "thousand",
+    "Tag": "thousand",
+    "N": 1000,
+    "Fill": 0.4
+  },
+  {
+    "Name": "intmax",
+    "Tag": "intmax",
+    "N": 2147483647,
+    "Fill": 0.4
+  }
+]

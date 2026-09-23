@@ -1,0 +1,3179 @@
+{
+ "schema": "leaf.solar-parity-receipt.v1",
+ "capability": "nec-conduit-fill",
+ "capability_version": "0",
+ "fixture": {
+  "id": "demo-probes-tables",
+  "sha256": "09caa2e31610f7e6c0c9f5ec3baafbcb782978d5653c115a4697df1cf862cea5"
+ },
+ "plugin": {
+  "build": "LeafSolarDesign 2025 licensed 2026-09-23",
+  "state": "committed",
+  "receipt_sha256": "1b02fffc4edbb53fe440e00fec06f1f2f775f831eff0cc3b0690e5053ab02a46"
+ },
+ "studio": {
+  "capability_version": "0",
+  "engine": "server-builtin"
+ },
+ "comparator": {
+  "name": "solar-w1-semantic",
+  "version": "1",
+  "verdict": "pass",
+  "diffs": []
+ },
+ "synthetic_fields": [
+  "plugin:before/recorded",
+  "plugin:changes/unrecorded",
+  "studio:before/recorded",
+  "studio:changes/unrecorded"
+ ],
+ "fallback_fields": [],
+ "synthetic_flagged": true,
+ "survived_reopen": true,
+ "produced_at": "2026-09-23T02:33:45Z",
+ "comparison": {
+  "schema": "leaf.solar-w1-comparison.v1",
+  "capability": "nec-conduit-fill",
+  "family": "exports",
+  "plugin": {
+   "after": {
+    "format": "json-probes",
+    "rows": [
+     {
+      "fields": {
+       "conductorCount": 1,
+       "csharpFraction": 0.53,
+       "label": "I1_count_1"
+      },
+      "id": {
+       "entity_id": "maxFill:I1_count_1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.53
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "conductorCount": 2,
+       "csharpFraction": 0.31,
+       "label": "I2_count_2"
+      },
+      "id": {
+       "entity_id": "maxFill:I2_count_2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.31
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "conductorCount": 3,
+       "csharpFraction": 0.4,
+       "label": "I3_count_3"
+      },
+      "id": {
+       "entity_id": "maxFill:I3_count_3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.4
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "conductorCount": 100,
+       "csharpFraction": 0.4,
+       "label": "I3_count_100"
+      },
+      "id": {
+       "entity_id": "maxFill:I3_count_100"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.4
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "conductorCount": 0,
+       "csharpFraction": 0.0,
+       "label": "I4_count_0"
+      },
+      "id": {
+       "entity_id": "maxFill:I4_count_0"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "conductorCount": -5,
+       "csharpFraction": 0.0,
+       "label": "I4_count_neg"
+      },
+      "id": {
+       "entity_id": "maxFill:I4_count_neg"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.0097,
+       "gauge": "14",
+       "insulation": "THWN2",
+       "label": "I5_14_THWN2",
+       "unit": "AWG"
+      },
+      "id": {
+       "entity_id": "conductorArea:I5_14_THWN2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0097
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.0133,
+       "gauge": "12",
+       "insulation": "THWN2",
+       "label": "I5_12_THWN2",
+       "unit": "AWG"
+      },
+      "id": {
+       "entity_id": "conductorArea:I5_12_THWN2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0133
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.0211,
+       "gauge": "10",
+       "insulation": "THWN2",
+       "label": "I5_10_THWN2",
+       "unit": "AWG"
+      },
+      "id": {
+       "entity_id": "conductorArea:I5_10_THWN2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0211
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.0176,
+       "gauge": "10",
+       "insulation": "XHHW2",
+       "label": "I5_10_XHHW2",
+       "unit": "AWG"
+      },
+      "id": {
+       "entity_id": "conductorArea:I5_10_XHHW2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0176
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.0211,
+       "gauge": "10",
+       "insulation": "USE2",
+       "label": "I5_10_USE2",
+       "unit": "AWG"
+      },
+      "id": {
+       "entity_id": "conductorArea:I5_10_USE2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0211
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.0106,
+       "gauge": "10",
+       "insulation": "Bare",
+       "label": "I5_10_Bare",
+       "unit": "AWG"
+      },
+      "id": {
+       "entity_id": "conductorArea:I5_10_Bare"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0106
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.0366,
+       "gauge": "8",
+       "insulation": "THWN2",
+       "label": "I5_8_THWN2",
+       "unit": "AWG"
+      },
+      "id": {
+       "entity_id": "conductorArea:I5_8_THWN2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0366
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.0507,
+       "gauge": "6",
+       "insulation": "THWN2",
+       "label": "I5_6_THWN2",
+       "unit": "AWG"
+      },
+      "id": {
+       "entity_id": "conductorArea:I5_6_THWN2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0507
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.0824,
+       "gauge": "4",
+       "insulation": "THWN2",
+       "label": "I5_4_THWN2",
+       "unit": "AWG"
+      },
+      "id": {
+       "entity_id": "conductorArea:I5_4_THWN2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0824
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.1158,
+       "gauge": "2",
+       "insulation": "THWN2",
+       "label": "I5_2_THWN2",
+       "unit": "AWG"
+      },
+      "id": {
+       "entity_id": "conductorArea:I5_2_THWN2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.1158
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.1676,
+       "gauge": "1/0",
+       "insulation": "XHHW2",
+       "label": "I5_1_0_XHHW2",
+       "unit": "AWG"
+      },
+      "id": {
+       "entity_id": "conductorArea:I5_1_0_XHHW2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.1676
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.3237,
+       "gauge": "4/0",
+       "insulation": "THWN2",
+       "label": "I5_4_0_THWN2",
+       "unit": "AWG"
+      },
+      "id": {
+       "entity_id": "conductorArea:I5_4_0_THWN2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.3237
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.397,
+       "gauge": "250",
+       "insulation": "THWN2",
+       "label": "I5_250_THWN2",
+       "unit": "kcmil"
+      },
+      "id": {
+       "entity_id": "conductorArea:I5_250_THWN2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.397
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.6619,
+       "gauge": "500",
+       "insulation": "XHHW2",
+       "label": "I5_500_XHHW2",
+       "unit": "kcmil"
+      },
+      "id": {
+       "entity_id": "conductorArea:I5_500_XHHW2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.6619
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 1.3478,
+       "gauge": "1000",
+       "insulation": "THWN2",
+       "label": "I5_1000_THWN2",
+       "unit": "kcmil"
+      },
+      "id": {
+       "entity_id": "conductorArea:I5_1000_THWN2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 1.3478
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.0,
+       "gauge": "99",
+       "insulation": "THWN2",
+       "label": "I5_unknown_gauge",
+       "unit": "AWG"
+      },
+      "id": {
+       "entity_id": "conductorArea:I5_unknown_gauge"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.0,
+       "gauge": "250",
+       "insulation": "Bare",
+       "label": "I6_bare_250",
+       "unit": "kcmil"
+      },
+      "id": {
+       "entity_id": "conductorArea:I6_bare_250"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.0,
+       "gauge": "500",
+       "insulation": "Bare",
+       "label": "I6_bare_500",
+       "unit": "kcmil"
+      },
+      "id": {
+       "entity_id": "conductorArea:I6_bare_500"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.0,
+       "gauge": "1000",
+       "insulation": "Bare",
+       "label": "I6_bare_1000",
+       "unit": "kcmil"
+      },
+      "id": {
+       "entity_id": "conductorArea:I6_bare_1000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conduitType": "EMT",
+       "csharpArea": 0.304,
+       "label": "I7_half_EMT",
+       "tradeSize": "1/2"
+      },
+      "id": {
+       "entity_id": "conduitArea:I7_half_EMT"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.304
+      },
+      "type": "nec-conduit-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conduitType": "PvcSch40",
+       "csharpArea": 0.285,
+       "label": "I7_half_PVC40",
+       "tradeSize": "1/2"
+      },
+      "id": {
+       "entity_id": "conduitArea:I7_half_PVC40"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.285
+      },
+      "type": "nec-conduit-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conduitType": "PvcSch80",
+       "csharpArea": 0.217,
+       "label": "I7_half_PVC80",
+       "tradeSize": "1/2"
+      },
+      "id": {
+       "entity_id": "conduitArea:I7_half_PVC80"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.217
+      },
+      "type": "nec-conduit-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conduitType": "RMC",
+       "csharpArea": 0.314,
+       "label": "I7_half_RMC",
+       "tradeSize": "1/2"
+      },
+      "id": {
+       "entity_id": "conduitArea:I7_half_RMC"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.314
+      },
+      "type": "nec-conduit-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conduitType": "LFNC_B",
+       "csharpArea": 0.275,
+       "label": "I7_half_LFNC",
+       "tradeSize": "1/2"
+      },
+      "id": {
+       "entity_id": "conduitArea:I7_half_LFNC"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.275
+      },
+      "type": "nec-conduit-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conduitType": "EMT",
+       "csharpArea": 0.864,
+       "label": "I7_1_EMT",
+       "tradeSize": "1"
+      },
+      "id": {
+       "entity_id": "conduitArea:I7_1_EMT"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.864
+      },
+      "type": "nec-conduit-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conduitType": "EMT",
+       "csharpArea": 1.496,
+       "label": "I7_1q_EMT",
+       "tradeSize": "1-1/4"
+      },
+      "id": {
+       "entity_id": "conduitArea:I7_1q_EMT"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 1.496
+      },
+      "type": "nec-conduit-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conduitType": "EMT",
+       "csharpArea": 2.036,
+       "label": "I7_1h_EMT",
+       "tradeSize": "1-1/2"
+      },
+      "id": {
+       "entity_id": "conduitArea:I7_1h_EMT"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 2.036
+      },
+      "type": "nec-conduit-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conduitType": "EMT",
+       "csharpArea": 3.356,
+       "label": "I7_2_EMT",
+       "tradeSize": "2"
+      },
+      "id": {
+       "entity_id": "conduitArea:I7_2_EMT"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 3.356
+      },
+      "type": "nec-conduit-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conduitType": "LFNC_B",
+       "csharpArea": 3.195,
+       "label": "I7_2_LFNC",
+       "tradeSize": "2"
+      },
+      "id": {
+       "entity_id": "conduitArea:I7_2_LFNC"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 3.195
+      },
+      "type": "nec-conduit-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conduitType": "EMT",
+       "csharpArea": 15.901,
+       "label": "I7_4_EMT",
+       "tradeSize": "4"
+      },
+      "id": {
+       "entity_id": "conduitArea:I7_4_EMT"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 15.901
+      },
+      "type": "nec-conduit-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conduitType": "EMT",
+       "csharpArea": 0.0,
+       "label": "I7_unknown_trade",
+       "tradeSize": "9999"
+      },
+      "id": {
+       "entity_id": "conduitArea:I7_unknown_trade"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0
+      },
+      "type": "nec-conduit-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conduitType": "LFNC_B",
+       "csharpArea": 0.0,
+       "label": "I8_LFNC_2h",
+       "tradeSize": "2-1/2"
+      },
+      "id": {
+       "entity_id": "conduitArea:I8_LFNC_2h"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0
+      },
+      "type": "nec-conduit-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conduitType": "LFNC_B",
+       "csharpArea": 0.0,
+       "label": "I8_LFNC_3",
+       "tradeSize": "3"
+      },
+      "id": {
+       "entity_id": "conduitArea:I8_LFNC_3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0
+      },
+      "type": "nec-conduit-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conduitType": "LFNC_B",
+       "csharpArea": 0.0,
+       "label": "I8_LFNC_3h",
+       "tradeSize": "3-1/2"
+      },
+      "id": {
+       "entity_id": "conduitArea:I8_LFNC_3h"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0
+      },
+      "type": "nec-conduit-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conduitType": "LFNC_B",
+       "csharpArea": 0.0,
+       "label": "I8_LFNC_4",
+       "tradeSize": "4"
+      },
+      "id": {
+       "entity_id": "conduitArea:I8_LFNC_4"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0
+      },
+      "type": "nec-conduit-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conductorAreaSqIn": 0.0211,
+       "conductors": [
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        }
+       ],
+       "conduitAreaSqIn": 0.304,
+       "conduitType": "EMT",
+       "failureReason": null,
+       "fillPct": 6.9407894736842115,
+       "label": "I9_one_10awg_emt",
+       "maxFillPct": 53.0,
+       "success": true,
+       "totalConductors": 1,
+       "tradeSize": "1/2"
+      },
+      "id": {
+       "entity_id": "sizeConduit:I9_one_10awg_emt"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "%",
+       "value": 6.9407894736842115
+      },
+      "type": "nec-conduit-sizing",
+      "unit": "%"
+     },
+     {
+      "fields": {
+       "conductorAreaSqIn": 0.0422,
+       "conductors": [
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        }
+       ],
+       "conduitAreaSqIn": 0.304,
+       "conduitType": "EMT",
+       "failureReason": null,
+       "fillPct": 13.881578947368423,
+       "label": "I9_two_10awg_emt",
+       "maxFillPct": 31.0,
+       "success": true,
+       "totalConductors": 2,
+       "tradeSize": "1/2"
+      },
+      "id": {
+       "entity_id": "sizeConduit:I9_two_10awg_emt"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "%",
+       "value": 13.881578947368423
+      },
+      "type": "nec-conduit-sizing",
+      "unit": "%"
+     },
+     {
+      "fields": {
+       "conductorAreaSqIn": 0.0633,
+       "conductors": [
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        }
+       ],
+       "conduitAreaSqIn": 0.304,
+       "conduitType": "EMT",
+       "failureReason": null,
+       "fillPct": 20.82236842105263,
+       "label": "I9_three_10awg_emt",
+       "maxFillPct": 40.0,
+       "success": true,
+       "totalConductors": 3,
+       "tradeSize": "1/2"
+      },
+      "id": {
+       "entity_id": "sizeConduit:I9_three_10awg_emt"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "%",
+       "value": 20.82236842105263
+      },
+      "type": "nec-conduit-sizing",
+      "unit": "%"
+     },
+     {
+      "fields": {
+       "conductorAreaSqIn": 0.112,
+       "conductors": [
+        {
+         "gauge": "6",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "6",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "Bare",
+         "unit": "AWG"
+        }
+       ],
+       "conduitAreaSqIn": 0.285,
+       "conduitType": "PvcSch40",
+       "failureReason": null,
+       "fillPct": 39.298245614035096,
+       "label": "I9_mixed_pvc40",
+       "maxFillPct": 40.0,
+       "success": true,
+       "totalConductors": 3,
+       "tradeSize": "1/2"
+      },
+      "id": {
+       "entity_id": "sizeConduit:I9_mixed_pvc40"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "%",
+       "value": 39.298245614035096
+      },
+      "type": "nec-conduit-sizing",
+      "unit": "%"
+     },
+     {
+      "fields": {
+       "conductorAreaSqIn": 0.9410999999999999,
+       "conductors": [
+        {
+         "gauge": "4/0",
+         "insulation": "XHHW2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "4/0",
+         "insulation": "XHHW2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "4/0",
+         "insulation": "XHHW2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "4",
+         "insulation": "Bare",
+         "unit": "AWG"
+        }
+       ],
+       "conduitAreaSqIn": 2.874,
+       "conduitType": "PvcSch80",
+       "failureReason": null,
+       "fillPct": 32.74530271398747,
+       "label": "I9_feeder_pvc80",
+       "maxFillPct": 40.0,
+       "success": true,
+       "totalConductors": 4,
+       "tradeSize": "2"
+      },
+      "id": {
+       "entity_id": "sizeConduit:I9_feeder_pvc80"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "%",
+       "value": 32.74530271398747
+      },
+      "type": "nec-conduit-sizing",
+      "unit": "%"
+     },
+     {
+      "fields": {
+       "conductorAreaSqIn": 0.0,
+       "conductors": [],
+       "conduitAreaSqIn": 0.0,
+       "conduitType": "EMT",
+       "failureReason": "No conductors specified.",
+       "fillPct": 0.0,
+       "label": "I12_empty",
+       "maxFillPct": 0.0,
+       "success": false,
+       "totalConductors": 0,
+       "tradeSize": null
+      },
+      "id": {
+       "entity_id": "sizeConduit:I12_empty"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "%",
+       "value": 0.0
+      },
+      "type": "nec-conduit-sizing",
+      "unit": "%"
+     },
+     {
+      "fields": {
+       "conductorAreaSqIn": 0.0633,
+       "conductors": [
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        }
+       ],
+       "conduitAreaSqIn": 0.304,
+       "conduitType": "EMT",
+       "failureReason": null,
+       "fillPct": 20.82236842105263,
+       "label": "I13_mono_3",
+       "maxFillPct": 40.0,
+       "success": true,
+       "totalConductors": 3,
+       "tradeSize": "1/2"
+      },
+      "id": {
+       "entity_id": "sizeConduit:I13_mono_3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "%",
+       "value": 20.82236842105263
+      },
+      "type": "nec-conduit-sizing",
+      "unit": "%"
+     },
+     {
+      "fields": {
+       "conductorAreaSqIn": 0.0844,
+       "conductors": [
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        }
+       ],
+       "conduitAreaSqIn": 0.304,
+       "conduitType": "EMT",
+       "failureReason": null,
+       "fillPct": 27.763157894736846,
+       "label": "I13_mono_4",
+       "maxFillPct": 40.0,
+       "success": true,
+       "totalConductors": 4,
+       "tradeSize": "1/2"
+      },
+      "id": {
+       "entity_id": "sizeConduit:I13_mono_4"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "%",
+       "value": 27.763157894736846
+      },
+      "type": "nec-conduit-sizing",
+      "unit": "%"
+     },
+     {
+      "fields": {
+       "conductorAreaSqIn": 0.10550000000000001,
+       "conductors": [
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        }
+       ],
+       "conduitAreaSqIn": 0.304,
+       "conduitType": "EMT",
+       "failureReason": null,
+       "fillPct": 34.703947368421055,
+       "label": "I13_mono_5",
+       "maxFillPct": 40.0,
+       "success": true,
+       "totalConductors": 5,
+       "tradeSize": "1/2"
+      },
+      "id": {
+       "entity_id": "sizeConduit:I13_mono_5"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "%",
+       "value": 34.703947368421055
+      },
+      "type": "nec-conduit-sizing",
+      "unit": "%"
+     },
+     {
+      "fields": {
+       "conductorAreaSqIn": 0.12660000000000002,
+       "conductors": [
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        }
+       ],
+       "conduitAreaSqIn": 0.533,
+       "conduitType": "EMT",
+       "failureReason": null,
+       "fillPct": 23.752345215759853,
+       "label": "I13_mono_6",
+       "maxFillPct": 40.0,
+       "success": true,
+       "totalConductors": 6,
+       "tradeSize": "3/4"
+      },
+      "id": {
+       "entity_id": "sizeConduit:I13_mono_6"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "%",
+       "value": 23.752345215759853
+      },
+      "type": "nec-conduit-sizing",
+      "unit": "%"
+     },
+     {
+      "fields": {
+       "conductorAreaSqIn": 0.14770000000000003,
+       "conductors": [
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        }
+       ],
+       "conduitAreaSqIn": 0.533,
+       "conduitType": "EMT",
+       "failureReason": null,
+       "fillPct": 27.711069418386497,
+       "label": "I13_mono_7",
+       "maxFillPct": 40.0,
+       "success": true,
+       "totalConductors": 7,
+       "tradeSize": "3/4"
+      },
+      "id": {
+       "entity_id": "sizeConduit:I13_mono_7"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "%",
+       "value": 27.711069418386497
+      },
+      "type": "nec-conduit-sizing",
+      "unit": "%"
+     },
+     {
+      "fields": {
+       "conductorAreaSqIn": 0.16880000000000003,
+       "conductors": [
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        }
+       ],
+       "conduitAreaSqIn": 0.533,
+       "conduitType": "EMT",
+       "failureReason": null,
+       "fillPct": 31.669793621013138,
+       "label": "I13_mono_8",
+       "maxFillPct": 40.0,
+       "success": true,
+       "totalConductors": 8,
+       "tradeSize": "3/4"
+      },
+      "id": {
+       "entity_id": "sizeConduit:I13_mono_8"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "%",
+       "value": 31.669793621013138
+      },
+      "type": "nec-conduit-sizing",
+      "unit": "%"
+     },
+     {
+      "fields": {
+       "conductorAreaSqIn": 0.18990000000000004,
+       "conductors": [
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        }
+       ],
+       "conduitAreaSqIn": 0.533,
+       "conduitType": "EMT",
+       "failureReason": null,
+       "fillPct": 35.62851782363978,
+       "label": "I13_mono_9",
+       "maxFillPct": 40.0,
+       "success": true,
+       "totalConductors": 9,
+       "tradeSize": "3/4"
+      },
+      "id": {
+       "entity_id": "sizeConduit:I13_mono_9"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "%",
+       "value": 35.62851782363978
+      },
+      "type": "nec-conduit-sizing",
+      "unit": "%"
+     },
+     {
+      "fields": {
+       "conductorAreaSqIn": 0.21100000000000005,
+       "conductors": [
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        }
+       ],
+       "conduitAreaSqIn": 0.533,
+       "conduitType": "EMT",
+       "failureReason": null,
+       "fillPct": 39.58724202626642,
+       "label": "I13_mono_10",
+       "maxFillPct": 40.0,
+       "success": true,
+       "totalConductors": 10,
+       "tradeSize": "3/4"
+      },
+      "id": {
+       "entity_id": "sizeConduit:I13_mono_10"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "%",
+       "value": 39.58724202626642
+      },
+      "type": "nec-conduit-sizing",
+      "unit": "%"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "conductorArea:I5_1000_THWN2": "conductorArea:I5_1000_THWN2",
+    "conductorArea:I5_10_Bare": "conductorArea:I5_10_Bare",
+    "conductorArea:I5_10_THWN2": "conductorArea:I5_10_THWN2",
+    "conductorArea:I5_10_USE2": "conductorArea:I5_10_USE2",
+    "conductorArea:I5_10_XHHW2": "conductorArea:I5_10_XHHW2",
+    "conductorArea:I5_12_THWN2": "conductorArea:I5_12_THWN2",
+    "conductorArea:I5_14_THWN2": "conductorArea:I5_14_THWN2",
+    "conductorArea:I5_1_0_XHHW2": "conductorArea:I5_1_0_XHHW2",
+    "conductorArea:I5_250_THWN2": "conductorArea:I5_250_THWN2",
+    "conductorArea:I5_2_THWN2": "conductorArea:I5_2_THWN2",
+    "conductorArea:I5_4_0_THWN2": "conductorArea:I5_4_0_THWN2",
+    "conductorArea:I5_4_THWN2": "conductorArea:I5_4_THWN2",
+    "conductorArea:I5_500_XHHW2": "conductorArea:I5_500_XHHW2",
+    "conductorArea:I5_6_THWN2": "conductorArea:I5_6_THWN2",
+    "conductorArea:I5_8_THWN2": "conductorArea:I5_8_THWN2",
+    "conductorArea:I5_unknown_gauge": "conductorArea:I5_unknown_gauge",
+    "conductorArea:I6_bare_1000": "conductorArea:I6_bare_1000",
+    "conductorArea:I6_bare_250": "conductorArea:I6_bare_250",
+    "conductorArea:I6_bare_500": "conductorArea:I6_bare_500",
+    "conduitArea:I7_1_EMT": "conduitArea:I7_1_EMT",
+    "conduitArea:I7_1h_EMT": "conduitArea:I7_1h_EMT",
+    "conduitArea:I7_1q_EMT": "conduitArea:I7_1q_EMT",
+    "conduitArea:I7_2_EMT": "conduitArea:I7_2_EMT",
+    "conduitArea:I7_2_LFNC": "conduitArea:I7_2_LFNC",
+    "conduitArea:I7_4_EMT": "conduitArea:I7_4_EMT",
+    "conduitArea:I7_half_EMT": "conduitArea:I7_half_EMT",
+    "conduitArea:I7_half_LFNC": "conduitArea:I7_half_LFNC",
+    "conduitArea:I7_half_PVC40": "conduitArea:I7_half_PVC40",
+    "conduitArea:I7_half_PVC80": "conduitArea:I7_half_PVC80",
+    "conduitArea:I7_half_RMC": "conduitArea:I7_half_RMC",
+    "conduitArea:I7_unknown_trade": "conduitArea:I7_unknown_trade",
+    "conduitArea:I8_LFNC_2h": "conduitArea:I8_LFNC_2h",
+    "conduitArea:I8_LFNC_3": "conduitArea:I8_LFNC_3",
+    "conduitArea:I8_LFNC_3h": "conduitArea:I8_LFNC_3h",
+    "conduitArea:I8_LFNC_4": "conduitArea:I8_LFNC_4",
+    "maxFill:I1_count_1": "maxFill:I1_count_1",
+    "maxFill:I2_count_2": "maxFill:I2_count_2",
+    "maxFill:I3_count_100": "maxFill:I3_count_100",
+    "maxFill:I3_count_3": "maxFill:I3_count_3",
+    "maxFill:I4_count_0": "maxFill:I4_count_0",
+    "maxFill:I4_count_neg": "maxFill:I4_count_neg",
+    "sizeConduit:I12_empty": "sizeConduit:I12_empty",
+    "sizeConduit:I13_mono_10": "sizeConduit:I13_mono_10",
+    "sizeConduit:I13_mono_3": "sizeConduit:I13_mono_3",
+    "sizeConduit:I13_mono_4": "sizeConduit:I13_mono_4",
+    "sizeConduit:I13_mono_5": "sizeConduit:I13_mono_5",
+    "sizeConduit:I13_mono_6": "sizeConduit:I13_mono_6",
+    "sizeConduit:I13_mono_7": "sizeConduit:I13_mono_7",
+    "sizeConduit:I13_mono_8": "sizeConduit:I13_mono_8",
+    "sizeConduit:I13_mono_9": "sizeConduit:I13_mono_9",
+    "sizeConduit:I9_feeder_pvc80": "sizeConduit:I9_feeder_pvc80",
+    "sizeConduit:I9_mixed_pvc40": "sizeConduit:I9_mixed_pvc40",
+    "sizeConduit:I9_one_10awg_emt": "sizeConduit:I9_one_10awg_emt",
+    "sizeConduit:I9_three_10awg_emt": "sizeConduit:I9_three_10awg_emt",
+    "sizeConduit:I9_two_10awg_emt": "sizeConduit:I9_two_10awg_emt"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "09caa2e31610f7e6c0c9f5ec3baafbcb782978d5653c115a4697df1cf862cea5",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "f744e68babd4a78b6fd6175d63d2eb07431ec809edb76abd695004df5a972ee9",
+   "output_sha256": "50bcd0112d1d85537c4140dbc1f51c806f853df3375052f689d1f4d3c7a4328c",
+   "parameters": {
+    "capability": "nec-conduit-fill",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafconduitfill_probes.json",
+    "probe_file_sha256": "4a29e832a2233cf7741d3add1bc2426d36cf6b051f9f0ad54bfdb61f011f0f0a",
+    "probe_type": "nec-conduit-fill-tables",
+    "side": "plugin"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "none",
+    "producer": "plugin",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  },
+  "studio": {
+   "after": {
+    "format": "json-probes",
+    "rows": [
+     {
+      "fields": {
+       "conductorCount": 1,
+       "csharpFraction": 0.53,
+       "label": "I1_count_1"
+      },
+      "id": {
+       "entity_id": "maxFill:I1_count_1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.53
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "conductorCount": 2,
+       "csharpFraction": 0.31,
+       "label": "I2_count_2"
+      },
+      "id": {
+       "entity_id": "maxFill:I2_count_2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.31
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "conductorCount": 3,
+       "csharpFraction": 0.4,
+       "label": "I3_count_3"
+      },
+      "id": {
+       "entity_id": "maxFill:I3_count_3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.4
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "conductorCount": 100,
+       "csharpFraction": 0.4,
+       "label": "I3_count_100"
+      },
+      "id": {
+       "entity_id": "maxFill:I3_count_100"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.4
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "conductorCount": 0,
+       "csharpFraction": 0.0,
+       "label": "I4_count_0"
+      },
+      "id": {
+       "entity_id": "maxFill:I4_count_0"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "conductorCount": -5,
+       "csharpFraction": 0.0,
+       "label": "I4_count_neg"
+      },
+      "id": {
+       "entity_id": "maxFill:I4_count_neg"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.0097,
+       "gauge": "14",
+       "insulation": "THWN2",
+       "label": "I5_14_THWN2",
+       "unit": "AWG"
+      },
+      "id": {
+       "entity_id": "conductorArea:I5_14_THWN2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0097
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.0133,
+       "gauge": "12",
+       "insulation": "THWN2",
+       "label": "I5_12_THWN2",
+       "unit": "AWG"
+      },
+      "id": {
+       "entity_id": "conductorArea:I5_12_THWN2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0133
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.0211,
+       "gauge": "10",
+       "insulation": "THWN2",
+       "label": "I5_10_THWN2",
+       "unit": "AWG"
+      },
+      "id": {
+       "entity_id": "conductorArea:I5_10_THWN2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0211
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.0176,
+       "gauge": "10",
+       "insulation": "XHHW2",
+       "label": "I5_10_XHHW2",
+       "unit": "AWG"
+      },
+      "id": {
+       "entity_id": "conductorArea:I5_10_XHHW2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0176
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.0211,
+       "gauge": "10",
+       "insulation": "USE2",
+       "label": "I5_10_USE2",
+       "unit": "AWG"
+      },
+      "id": {
+       "entity_id": "conductorArea:I5_10_USE2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0211
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.0106,
+       "gauge": "10",
+       "insulation": "Bare",
+       "label": "I5_10_Bare",
+       "unit": "AWG"
+      },
+      "id": {
+       "entity_id": "conductorArea:I5_10_Bare"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0106
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.0366,
+       "gauge": "8",
+       "insulation": "THWN2",
+       "label": "I5_8_THWN2",
+       "unit": "AWG"
+      },
+      "id": {
+       "entity_id": "conductorArea:I5_8_THWN2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0366
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.0507,
+       "gauge": "6",
+       "insulation": "THWN2",
+       "label": "I5_6_THWN2",
+       "unit": "AWG"
+      },
+      "id": {
+       "entity_id": "conductorArea:I5_6_THWN2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0507
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.0824,
+       "gauge": "4",
+       "insulation": "THWN2",
+       "label": "I5_4_THWN2",
+       "unit": "AWG"
+      },
+      "id": {
+       "entity_id": "conductorArea:I5_4_THWN2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0824
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.1158,
+       "gauge": "2",
+       "insulation": "THWN2",
+       "label": "I5_2_THWN2",
+       "unit": "AWG"
+      },
+      "id": {
+       "entity_id": "conductorArea:I5_2_THWN2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.1158
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.1676,
+       "gauge": "1/0",
+       "insulation": "XHHW2",
+       "label": "I5_1_0_XHHW2",
+       "unit": "AWG"
+      },
+      "id": {
+       "entity_id": "conductorArea:I5_1_0_XHHW2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.1676
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.3237,
+       "gauge": "4/0",
+       "insulation": "THWN2",
+       "label": "I5_4_0_THWN2",
+       "unit": "AWG"
+      },
+      "id": {
+       "entity_id": "conductorArea:I5_4_0_THWN2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.3237
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.397,
+       "gauge": "250",
+       "insulation": "THWN2",
+       "label": "I5_250_THWN2",
+       "unit": "kcmil"
+      },
+      "id": {
+       "entity_id": "conductorArea:I5_250_THWN2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.397
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.6619,
+       "gauge": "500",
+       "insulation": "XHHW2",
+       "label": "I5_500_XHHW2",
+       "unit": "kcmil"
+      },
+      "id": {
+       "entity_id": "conductorArea:I5_500_XHHW2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.6619
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 1.3478,
+       "gauge": "1000",
+       "insulation": "THWN2",
+       "label": "I5_1000_THWN2",
+       "unit": "kcmil"
+      },
+      "id": {
+       "entity_id": "conductorArea:I5_1000_THWN2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 1.3478
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.0,
+       "gauge": "99",
+       "insulation": "THWN2",
+       "label": "I5_unknown_gauge",
+       "unit": "AWG"
+      },
+      "id": {
+       "entity_id": "conductorArea:I5_unknown_gauge"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.0,
+       "gauge": "250",
+       "insulation": "Bare",
+       "label": "I6_bare_250",
+       "unit": "kcmil"
+      },
+      "id": {
+       "entity_id": "conductorArea:I6_bare_250"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.0,
+       "gauge": "500",
+       "insulation": "Bare",
+       "label": "I6_bare_500",
+       "unit": "kcmil"
+      },
+      "id": {
+       "entity_id": "conductorArea:I6_bare_500"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "csharpArea": 0.0,
+       "gauge": "1000",
+       "insulation": "Bare",
+       "label": "I6_bare_1000",
+       "unit": "kcmil"
+      },
+      "id": {
+       "entity_id": "conductorArea:I6_bare_1000"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0
+      },
+      "type": "nec-conductor-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conduitType": "EMT",
+       "csharpArea": 0.304,
+       "label": "I7_half_EMT",
+       "tradeSize": "1/2"
+      },
+      "id": {
+       "entity_id": "conduitArea:I7_half_EMT"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.304
+      },
+      "type": "nec-conduit-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conduitType": "PvcSch40",
+       "csharpArea": 0.285,
+       "label": "I7_half_PVC40",
+       "tradeSize": "1/2"
+      },
+      "id": {
+       "entity_id": "conduitArea:I7_half_PVC40"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.285
+      },
+      "type": "nec-conduit-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conduitType": "PvcSch80",
+       "csharpArea": 0.217,
+       "label": "I7_half_PVC80",
+       "tradeSize": "1/2"
+      },
+      "id": {
+       "entity_id": "conduitArea:I7_half_PVC80"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.217
+      },
+      "type": "nec-conduit-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conduitType": "RMC",
+       "csharpArea": 0.314,
+       "label": "I7_half_RMC",
+       "tradeSize": "1/2"
+      },
+      "id": {
+       "entity_id": "conduitArea:I7_half_RMC"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.314
+      },
+      "type": "nec-conduit-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conduitType": "LFNC_B",
+       "csharpArea": 0.275,
+       "label": "I7_half_LFNC",
+       "tradeSize": "1/2"
+      },
+      "id": {
+       "entity_id": "conduitArea:I7_half_LFNC"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.275
+      },
+      "type": "nec-conduit-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conduitType": "EMT",
+       "csharpArea": 0.864,
+       "label": "I7_1_EMT",
+       "tradeSize": "1"
+      },
+      "id": {
+       "entity_id": "conduitArea:I7_1_EMT"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.864
+      },
+      "type": "nec-conduit-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conduitType": "EMT",
+       "csharpArea": 1.496,
+       "label": "I7_1q_EMT",
+       "tradeSize": "1-1/4"
+      },
+      "id": {
+       "entity_id": "conduitArea:I7_1q_EMT"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 1.496
+      },
+      "type": "nec-conduit-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conduitType": "EMT",
+       "csharpArea": 2.036,
+       "label": "I7_1h_EMT",
+       "tradeSize": "1-1/2"
+      },
+      "id": {
+       "entity_id": "conduitArea:I7_1h_EMT"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 2.036
+      },
+      "type": "nec-conduit-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conduitType": "EMT",
+       "csharpArea": 3.356,
+       "label": "I7_2_EMT",
+       "tradeSize": "2"
+      },
+      "id": {
+       "entity_id": "conduitArea:I7_2_EMT"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 3.356
+      },
+      "type": "nec-conduit-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conduitType": "LFNC_B",
+       "csharpArea": 3.195,
+       "label": "I7_2_LFNC",
+       "tradeSize": "2"
+      },
+      "id": {
+       "entity_id": "conduitArea:I7_2_LFNC"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 3.195
+      },
+      "type": "nec-conduit-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conduitType": "EMT",
+       "csharpArea": 15.901,
+       "label": "I7_4_EMT",
+       "tradeSize": "4"
+      },
+      "id": {
+       "entity_id": "conduitArea:I7_4_EMT"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 15.901
+      },
+      "type": "nec-conduit-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conduitType": "EMT",
+       "csharpArea": 0.0,
+       "label": "I7_unknown_trade",
+       "tradeSize": "9999"
+      },
+      "id": {
+       "entity_id": "conduitArea:I7_unknown_trade"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0
+      },
+      "type": "nec-conduit-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conduitType": "LFNC_B",
+       "csharpArea": 0.0,
+       "label": "I8_LFNC_2h",
+       "tradeSize": "2-1/2"
+      },
+      "id": {
+       "entity_id": "conduitArea:I8_LFNC_2h"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0
+      },
+      "type": "nec-conduit-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conduitType": "LFNC_B",
+       "csharpArea": 0.0,
+       "label": "I8_LFNC_3",
+       "tradeSize": "3"
+      },
+      "id": {
+       "entity_id": "conduitArea:I8_LFNC_3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0
+      },
+      "type": "nec-conduit-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conduitType": "LFNC_B",
+       "csharpArea": 0.0,
+       "label": "I8_LFNC_3h",
+       "tradeSize": "3-1/2"
+      },
+      "id": {
+       "entity_id": "conduitArea:I8_LFNC_3h"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0
+      },
+      "type": "nec-conduit-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conduitType": "LFNC_B",
+       "csharpArea": 0.0,
+       "label": "I8_LFNC_4",
+       "tradeSize": "4"
+      },
+      "id": {
+       "entity_id": "conduitArea:I8_LFNC_4"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "sq in",
+       "value": 0.0
+      },
+      "type": "nec-conduit-area",
+      "unit": "sq in"
+     },
+     {
+      "fields": {
+       "conductorAreaSqIn": 0.0211,
+       "conductors": [
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        }
+       ],
+       "conduitAreaSqIn": 0.304,
+       "conduitType": "EMT",
+       "failureReason": null,
+       "fillPct": 6.9407894736842115,
+       "label": "I9_one_10awg_emt",
+       "maxFillPct": 53.0,
+       "success": true,
+       "totalConductors": 1,
+       "tradeSize": "1/2"
+      },
+      "id": {
+       "entity_id": "sizeConduit:I9_one_10awg_emt"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "%",
+       "value": 6.9407894736842115
+      },
+      "type": "nec-conduit-sizing",
+      "unit": "%"
+     },
+     {
+      "fields": {
+       "conductorAreaSqIn": 0.0422,
+       "conductors": [
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        }
+       ],
+       "conduitAreaSqIn": 0.304,
+       "conduitType": "EMT",
+       "failureReason": null,
+       "fillPct": 13.881578947368423,
+       "label": "I9_two_10awg_emt",
+       "maxFillPct": 31.0,
+       "success": true,
+       "totalConductors": 2,
+       "tradeSize": "1/2"
+      },
+      "id": {
+       "entity_id": "sizeConduit:I9_two_10awg_emt"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "%",
+       "value": 13.881578947368423
+      },
+      "type": "nec-conduit-sizing",
+      "unit": "%"
+     },
+     {
+      "fields": {
+       "conductorAreaSqIn": 0.0633,
+       "conductors": [
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        }
+       ],
+       "conduitAreaSqIn": 0.304,
+       "conduitType": "EMT",
+       "failureReason": null,
+       "fillPct": 20.82236842105263,
+       "label": "I9_three_10awg_emt",
+       "maxFillPct": 40.0,
+       "success": true,
+       "totalConductors": 3,
+       "tradeSize": "1/2"
+      },
+      "id": {
+       "entity_id": "sizeConduit:I9_three_10awg_emt"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "%",
+       "value": 20.82236842105263
+      },
+      "type": "nec-conduit-sizing",
+      "unit": "%"
+     },
+     {
+      "fields": {
+       "conductorAreaSqIn": 0.112,
+       "conductors": [
+        {
+         "gauge": "6",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "6",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "Bare",
+         "unit": "AWG"
+        }
+       ],
+       "conduitAreaSqIn": 0.285,
+       "conduitType": "PvcSch40",
+       "failureReason": null,
+       "fillPct": 39.298245614035096,
+       "label": "I9_mixed_pvc40",
+       "maxFillPct": 40.0,
+       "success": true,
+       "totalConductors": 3,
+       "tradeSize": "1/2"
+      },
+      "id": {
+       "entity_id": "sizeConduit:I9_mixed_pvc40"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "%",
+       "value": 39.298245614035096
+      },
+      "type": "nec-conduit-sizing",
+      "unit": "%"
+     },
+     {
+      "fields": {
+       "conductorAreaSqIn": 0.9410999999999999,
+       "conductors": [
+        {
+         "gauge": "4/0",
+         "insulation": "XHHW2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "4/0",
+         "insulation": "XHHW2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "4/0",
+         "insulation": "XHHW2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "4",
+         "insulation": "Bare",
+         "unit": "AWG"
+        }
+       ],
+       "conduitAreaSqIn": 2.874,
+       "conduitType": "PvcSch80",
+       "failureReason": null,
+       "fillPct": 32.74530271398747,
+       "label": "I9_feeder_pvc80",
+       "maxFillPct": 40.0,
+       "success": true,
+       "totalConductors": 4,
+       "tradeSize": "2"
+      },
+      "id": {
+       "entity_id": "sizeConduit:I9_feeder_pvc80"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "%",
+       "value": 32.74530271398747
+      },
+      "type": "nec-conduit-sizing",
+      "unit": "%"
+     },
+     {
+      "fields": {
+       "conductorAreaSqIn": 0.0,
+       "conductors": [],
+       "conduitAreaSqIn": 0.0,
+       "conduitType": "EMT",
+       "failureReason": "No conductors specified.",
+       "fillPct": 0.0,
+       "label": "I12_empty",
+       "maxFillPct": 0.0,
+       "success": false,
+       "totalConductors": 0,
+       "tradeSize": null
+      },
+      "id": {
+       "entity_id": "sizeConduit:I12_empty"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "%",
+       "value": 0.0
+      },
+      "type": "nec-conduit-sizing",
+      "unit": "%"
+     },
+     {
+      "fields": {
+       "conductorAreaSqIn": 0.0633,
+       "conductors": [
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        }
+       ],
+       "conduitAreaSqIn": 0.304,
+       "conduitType": "EMT",
+       "failureReason": null,
+       "fillPct": 20.82236842105263,
+       "label": "I13_mono_3",
+       "maxFillPct": 40.0,
+       "success": true,
+       "totalConductors": 3,
+       "tradeSize": "1/2"
+      },
+      "id": {
+       "entity_id": "sizeConduit:I13_mono_3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "%",
+       "value": 20.82236842105263
+      },
+      "type": "nec-conduit-sizing",
+      "unit": "%"
+     },
+     {
+      "fields": {
+       "conductorAreaSqIn": 0.0844,
+       "conductors": [
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        }
+       ],
+       "conduitAreaSqIn": 0.304,
+       "conduitType": "EMT",
+       "failureReason": null,
+       "fillPct": 27.763157894736846,
+       "label": "I13_mono_4",
+       "maxFillPct": 40.0,
+       "success": true,
+       "totalConductors": 4,
+       "tradeSize": "1/2"
+      },
+      "id": {
+       "entity_id": "sizeConduit:I13_mono_4"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "%",
+       "value": 27.763157894736846
+      },
+      "type": "nec-conduit-sizing",
+      "unit": "%"
+     },
+     {
+      "fields": {
+       "conductorAreaSqIn": 0.10550000000000001,
+       "conductors": [
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        }
+       ],
+       "conduitAreaSqIn": 0.304,
+       "conduitType": "EMT",
+       "failureReason": null,
+       "fillPct": 34.703947368421055,
+       "label": "I13_mono_5",
+       "maxFillPct": 40.0,
+       "success": true,
+       "totalConductors": 5,
+       "tradeSize": "1/2"
+      },
+      "id": {
+       "entity_id": "sizeConduit:I13_mono_5"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "%",
+       "value": 34.703947368421055
+      },
+      "type": "nec-conduit-sizing",
+      "unit": "%"
+     },
+     {
+      "fields": {
+       "conductorAreaSqIn": 0.12660000000000002,
+       "conductors": [
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        }
+       ],
+       "conduitAreaSqIn": 0.533,
+       "conduitType": "EMT",
+       "failureReason": null,
+       "fillPct": 23.752345215759853,
+       "label": "I13_mono_6",
+       "maxFillPct": 40.0,
+       "success": true,
+       "totalConductors": 6,
+       "tradeSize": "3/4"
+      },
+      "id": {
+       "entity_id": "sizeConduit:I13_mono_6"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "%",
+       "value": 23.752345215759853
+      },
+      "type": "nec-conduit-sizing",
+      "unit": "%"
+     },
+     {
+      "fields": {
+       "conductorAreaSqIn": 0.14770000000000003,
+       "conductors": [
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        }
+       ],
+       "conduitAreaSqIn": 0.533,
+       "conduitType": "EMT",
+       "failureReason": null,
+       "fillPct": 27.711069418386497,
+       "label": "I13_mono_7",
+       "maxFillPct": 40.0,
+       "success": true,
+       "totalConductors": 7,
+       "tradeSize": "3/4"
+      },
+      "id": {
+       "entity_id": "sizeConduit:I13_mono_7"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "%",
+       "value": 27.711069418386497
+      },
+      "type": "nec-conduit-sizing",
+      "unit": "%"
+     },
+     {
+      "fields": {
+       "conductorAreaSqIn": 0.16880000000000003,
+       "conductors": [
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        }
+       ],
+       "conduitAreaSqIn": 0.533,
+       "conduitType": "EMT",
+       "failureReason": null,
+       "fillPct": 31.669793621013138,
+       "label": "I13_mono_8",
+       "maxFillPct": 40.0,
+       "success": true,
+       "totalConductors": 8,
+       "tradeSize": "3/4"
+      },
+      "id": {
+       "entity_id": "sizeConduit:I13_mono_8"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "%",
+       "value": 31.669793621013138
+      },
+      "type": "nec-conduit-sizing",
+      "unit": "%"
+     },
+     {
+      "fields": {
+       "conductorAreaSqIn": 0.18990000000000004,
+       "conductors": [
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        }
+       ],
+       "conduitAreaSqIn": 0.533,
+       "conduitType": "EMT",
+       "failureReason": null,
+       "fillPct": 35.62851782363978,
+       "label": "I13_mono_9",
+       "maxFillPct": 40.0,
+       "success": true,
+       "totalConductors": 9,
+       "tradeSize": "3/4"
+      },
+      "id": {
+       "entity_id": "sizeConduit:I13_mono_9"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "%",
+       "value": 35.62851782363978
+      },
+      "type": "nec-conduit-sizing",
+      "unit": "%"
+     },
+     {
+      "fields": {
+       "conductorAreaSqIn": 0.21100000000000005,
+       "conductors": [
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        },
+        {
+         "gauge": "10",
+         "insulation": "THWN2",
+         "unit": "AWG"
+        }
+       ],
+       "conduitAreaSqIn": 0.533,
+       "conduitType": "EMT",
+       "failureReason": null,
+       "fillPct": 39.58724202626642,
+       "label": "I13_mono_10",
+       "maxFillPct": 40.0,
+       "success": true,
+       "totalConductors": 10,
+       "tradeSize": "3/4"
+      },
+      "id": {
+       "entity_id": "sizeConduit:I13_mono_10"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "%",
+       "value": 39.58724202626642
+      },
+      "type": "nec-conduit-sizing",
+      "unit": "%"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "conductorArea:I5_1000_THWN2": "conductorArea:I5_1000_THWN2",
+    "conductorArea:I5_10_Bare": "conductorArea:I5_10_Bare",
+    "conductorArea:I5_10_THWN2": "conductorArea:I5_10_THWN2",
+    "conductorArea:I5_10_USE2": "conductorArea:I5_10_USE2",
+    "conductorArea:I5_10_XHHW2": "conductorArea:I5_10_XHHW2",
+    "conductorArea:I5_12_THWN2": "conductorArea:I5_12_THWN2",
+    "conductorArea:I5_14_THWN2": "conductorArea:I5_14_THWN2",
+    "conductorArea:I5_1_0_XHHW2": "conductorArea:I5_1_0_XHHW2",
+    "conductorArea:I5_250_THWN2": "conductorArea:I5_250_THWN2",
+    "conductorArea:I5_2_THWN2": "conductorArea:I5_2_THWN2",
+    "conductorArea:I5_4_0_THWN2": "conductorArea:I5_4_0_THWN2",
+    "conductorArea:I5_4_THWN2": "conductorArea:I5_4_THWN2",
+    "conductorArea:I5_500_XHHW2": "conductorArea:I5_500_XHHW2",
+    "conductorArea:I5_6_THWN2": "conductorArea:I5_6_THWN2",
+    "conductorArea:I5_8_THWN2": "conductorArea:I5_8_THWN2",
+    "conductorArea:I5_unknown_gauge": "conductorArea:I5_unknown_gauge",
+    "conductorArea:I6_bare_1000": "conductorArea:I6_bare_1000",
+    "conductorArea:I6_bare_250": "conductorArea:I6_bare_250",
+    "conductorArea:I6_bare_500": "conductorArea:I6_bare_500",
+    "conduitArea:I7_1_EMT": "conduitArea:I7_1_EMT",
+    "conduitArea:I7_1h_EMT": "conduitArea:I7_1h_EMT",
+    "conduitArea:I7_1q_EMT": "conduitArea:I7_1q_EMT",
+    "conduitArea:I7_2_EMT": "conduitArea:I7_2_EMT",
+    "conduitArea:I7_2_LFNC": "conduitArea:I7_2_LFNC",
+    "conduitArea:I7_4_EMT": "conduitArea:I7_4_EMT",
+    "conduitArea:I7_half_EMT": "conduitArea:I7_half_EMT",
+    "conduitArea:I7_half_LFNC": "conduitArea:I7_half_LFNC",
+    "conduitArea:I7_half_PVC40": "conduitArea:I7_half_PVC40",
+    "conduitArea:I7_half_PVC80": "conduitArea:I7_half_PVC80",
+    "conduitArea:I7_half_RMC": "conduitArea:I7_half_RMC",
+    "conduitArea:I7_unknown_trade": "conduitArea:I7_unknown_trade",
+    "conduitArea:I8_LFNC_2h": "conduitArea:I8_LFNC_2h",
+    "conduitArea:I8_LFNC_3": "conduitArea:I8_LFNC_3",
+    "conduitArea:I8_LFNC_3h": "conduitArea:I8_LFNC_3h",
+    "conduitArea:I8_LFNC_4": "conduitArea:I8_LFNC_4",
+    "maxFill:I1_count_1": "maxFill:I1_count_1",
+    "maxFill:I2_count_2": "maxFill:I2_count_2",
+    "maxFill:I3_count_100": "maxFill:I3_count_100",
+    "maxFill:I3_count_3": "maxFill:I3_count_3",
+    "maxFill:I4_count_0": "maxFill:I4_count_0",
+    "maxFill:I4_count_neg": "maxFill:I4_count_neg",
+    "sizeConduit:I12_empty": "sizeConduit:I12_empty",
+    "sizeConduit:I13_mono_10": "sizeConduit:I13_mono_10",
+    "sizeConduit:I13_mono_3": "sizeConduit:I13_mono_3",
+    "sizeConduit:I13_mono_4": "sizeConduit:I13_mono_4",
+    "sizeConduit:I13_mono_5": "sizeConduit:I13_mono_5",
+    "sizeConduit:I13_mono_6": "sizeConduit:I13_mono_6",
+    "sizeConduit:I13_mono_7": "sizeConduit:I13_mono_7",
+    "sizeConduit:I13_mono_8": "sizeConduit:I13_mono_8",
+    "sizeConduit:I13_mono_9": "sizeConduit:I13_mono_9",
+    "sizeConduit:I9_feeder_pvc80": "sizeConduit:I9_feeder_pvc80",
+    "sizeConduit:I9_mixed_pvc40": "sizeConduit:I9_mixed_pvc40",
+    "sizeConduit:I9_one_10awg_emt": "sizeConduit:I9_one_10awg_emt",
+    "sizeConduit:I9_three_10awg_emt": "sizeConduit:I9_three_10awg_emt",
+    "sizeConduit:I9_two_10awg_emt": "sizeConduit:I9_two_10awg_emt"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "09caa2e31610f7e6c0c9f5ec3baafbcb782978d5653c115a4697df1cf862cea5",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "f744e68babd4a78b6fd6175d63d2eb07431ec809edb76abd695004df5a972ee9",
+   "output_sha256": "50bcd0112d1d85537c4140dbc1f51c806f853df3375052f689d1f4d3c7a4328c",
+   "parameters": {
+    "capability": "nec-conduit-fill",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafconduitfill_probes.json",
+    "probe_file_sha256": "4a29e832a2233cf7741d3add1bc2426d36cf6b051f9f0ad54bfdb61f011f0f0a",
+    "probe_type": "nec-conduit-fill-tables",
+    "side": "studio"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "server-builtin",
+    "producer": "studio",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  }
+ }
+}

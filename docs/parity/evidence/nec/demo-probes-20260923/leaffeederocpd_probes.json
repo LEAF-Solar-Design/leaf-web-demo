@@ -1,0 +1,123 @@
+[
+  {
+    "Name": "feeder_cont_cu_20a",
+    "Tag": "feeder_cont_cu_20a",
+    "ContinuousCurrentA": 20.0,
+    "IsContinuous": true,
+    "EgcMaterial": "Copper",
+    "MinOcpdA": 25.0,
+    "OcpdRatingA": 25.0,
+    "EgcGauge": "10 AWG",
+    "Note": "NEC 215.3 — 20.0A × 1.25 = 25.0A → 25A OCPD; EGC: 10 AWG per NEC 250.122"
+  },
+  {
+    "Name": "feeder_cont_al_20a",
+    "Tag": "feeder_cont_al_20a",
+    "ContinuousCurrentA": 20.0,
+    "IsContinuous": true,
+    "EgcMaterial": "Aluminum",
+    "MinOcpdA": 25.0,
+    "OcpdRatingA": 25.0,
+    "EgcGauge": "8 AWG",
+    "Note": "NEC 215.3 — 20.0A × 1.25 = 25.0A → 25A OCPD; EGC: 8 AWG per NEC 250.122"
+  },
+  {
+    "Name": "feeder_noncont_cu_20a",
+    "Tag": "feeder_noncont_cu_20a",
+    "ContinuousCurrentA": 20.0,
+    "IsContinuous": false,
+    "EgcMaterial": "Copper",
+    "MinOcpdA": 20.0,
+    "OcpdRatingA": 20.0,
+    "EgcGauge": "12 AWG",
+    "Note": "NEC 210.20(A) — 20.0A → 20A OCPD; EGC: 12 AWG per NEC 250.122"
+  },
+  {
+    "Name": "feeder_cont_cu_100a",
+    "Tag": "feeder_cont_cu_100a",
+    "ContinuousCurrentA": 100.0,
+    "IsContinuous": true,
+    "EgcMaterial": "Copper",
+    "MinOcpdA": 125.0,
+    "OcpdRatingA": 125.0,
+    "EgcGauge": "6 AWG",
+    "Note": "NEC 215.3 — 100.0A × 1.25 = 125.0A → 125A OCPD; EGC: 6 AWG per NEC 250.122"
+  },
+  {
+    "Name": "feeder_cont_small_10a",
+    "Tag": "feeder_cont_small_10a",
+    "ContinuousCurrentA": 10.0,
+    "IsContinuous": true,
+    "EgcMaterial": "Copper",
+    "MinOcpdA": 12.5,
+    "OcpdRatingA": 15.0,
+    "EgcGauge": "14 AWG",
+    "Note": "NEC 215.3 — 10.0A × 1.25 = 12.5A → 15A OCPD; EGC: 14 AWG per NEC 250.122"
+  },
+  {
+    "Name": "feeder_cont_at_boundary_12a",
+    "Tag": "feeder_cont_at_boundary_12a",
+    "ContinuousCurrentA": 12.0,
+    "IsContinuous": true,
+    "EgcMaterial": "Copper",
+    "MinOcpdA": 15.0,
+    "OcpdRatingA": 15.0,
+    "EgcGauge": "14 AWG",
+    "Note": "NEC 215.3 — 12.0A × 1.25 = 15.0A → 15A OCPD; EGC: 14 AWG per NEC 250.122"
+  },
+  {
+    "Name": "feeder_cont_at_table_max_4800a",
+    "Tag": "feeder_cont_at_table_max_4800a",
+    "ContinuousCurrentA": 4800.0,
+    "IsContinuous": true,
+    "EgcMaterial": "Copper",
+    "MinOcpdA": 6000.0,
+    "OcpdRatingA": 6000.0,
+    "EgcGauge": "750 kcmil",
+    "Note": "NEC 215.3 — 4800.0A × 1.25 = 6000.0A → 6000A OCPD; EGC: 750 kcmil per NEC 250.122"
+  },
+  {
+    "Name": "feeder_cont_above_table_7000a",
+    "Tag": "feeder_cont_above_table_7000a",
+    "ContinuousCurrentA": 7000.0,
+    "IsContinuous": true,
+    "EgcMaterial": "Copper",
+    "MinOcpdA": 8750.0,
+    "OcpdRatingA": 8750.0,
+    "EgcGauge": null,
+    "Note": "NEC 215.3 — 7000.0A × 1.25 = 8750.0A → 8750A OCPD; EGC: N/A per NEC 250.122"
+  },
+  {
+    "Name": "feeder_noncont_cu_100a",
+    "Tag": "feeder_noncont_cu_100a",
+    "ContinuousCurrentA": 100.0,
+    "IsContinuous": false,
+    "EgcMaterial": "Copper",
+    "MinOcpdA": 100.0,
+    "OcpdRatingA": 100.0,
+    "EgcGauge": "8 AWG",
+    "Note": "NEC 210.20(A) — 100.0A → 100A OCPD; EGC: 8 AWG per NEC 250.122"
+  },
+  {
+    "Name": "feeder_noncont_al_100a",
+    "Tag": "feeder_noncont_al_100a",
+    "ContinuousCurrentA": 100.0,
+    "IsContinuous": false,
+    "EgcMaterial": "Aluminum",
+    "MinOcpdA": 100.0,
+    "OcpdRatingA": 100.0,
+    "EgcGauge": "6 AWG",
+    "Note": "NEC 210.20(A) — 100.0A → 100A OCPD; EGC: 6 AWG per NEC 250.122"
+  },
+  {
+    "Name": "feeder_cont_fractional_12p5a",
+    "Tag": "feeder_cont_fractional_12p5a",
+    "ContinuousCurrentA": 12.5,
+    "IsContinuous": true,
+    "EgcMaterial": "Copper",
+    "MinOcpdA": 15.625,
+    "OcpdRatingA": 20.0,
+    "EgcGauge": "12 AWG",
+    "Note": "NEC 215.3 — 12.5A × 1.25 = 15.6A → 20A OCPD; EGC: 12 AWG per NEC 250.122"
+  }
+]

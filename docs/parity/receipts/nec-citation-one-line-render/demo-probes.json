@@ -1,0 +1,755 @@
+{
+ "schema": "leaf.solar-parity-receipt.v1",
+ "capability": "nec-citation-one-line-render",
+ "capability_version": "0",
+ "fixture": {
+  "id": "demo-probes",
+  "sha256": "7383b10bce3fa6cedc6578fa7f3e61416c7cb80a9cd056b90f8fdddac5fab77b"
+ },
+ "plugin": {
+  "build": "LeafSolarDesign 2025 licensed 2026-09-23",
+  "state": "committed",
+  "receipt_sha256": "2931554d99bcf4bd8fe6d22b50211593e0a95356c716a68129cb7c468697274a"
+ },
+ "studio": {
+  "capability_version": "0",
+  "engine": "server-builtin"
+ },
+ "comparator": {
+  "name": "solar-w1-semantic",
+  "version": "1",
+  "verdict": "pass",
+  "diffs": []
+ },
+ "synthetic_fields": [
+  "plugin:before/recorded",
+  "plugin:changes/unrecorded",
+  "studio:before/recorded",
+  "studio:changes/unrecorded"
+ ],
+ "fallback_fields": [],
+ "synthetic_flagged": true,
+ "survived_reopen": true,
+ "produced_at": "2026-09-23T02:33:46Z",
+ "comparison": {
+  "schema": "leaf.solar-w1-comparison.v1",
+  "capability": "nec-citation-one-line-render",
+  "family": "exports",
+  "plugin": {
+   "after": {
+    "format": "json-probes",
+    "rows": [
+     {
+      "fields": {
+       "Article": "NEC 690.8(A)",
+       "Formula": "I*1.25",
+       "HasSyntheticInputs": false,
+       "Name": "minimal",
+       "OneLiner": "NEC 690.8(A) \u2014 Continuous current: I*1.25 = 1",
+       "Result": 1.0,
+       "ShortDescription": "Continuous current",
+       "SyntheticInputNames": [],
+       "Tag": "minimal",
+       "Units": null
+      },
+      "id": {
+       "entity_id": "minimal"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 1.0
+      },
+      "type": "nec-citation-one-line-render",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Article": "NEC 690.8(A)",
+       "Formula": "I*1.25",
+       "HasSyntheticInputs": false,
+       "Name": "with_units",
+       "OneLiner": "NEC 690.8(A) \u2014 Continuous current: I*1.25 = 1 A",
+       "Result": 1.0,
+       "ShortDescription": "Continuous current",
+       "SyntheticInputNames": [],
+       "Tag": "with_units",
+       "Units": "A"
+      },
+      "id": {
+       "entity_id": "with_units"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 1.0
+      },
+      "type": "nec-citation-one-line-render",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "Article": "NEC 690.7(A)(3)",
+       "Formula": "Voc*(1+b*dT)",
+       "HasSyntheticInputs": false,
+       "Name": "decimal_res",
+       "OneLiner": "NEC 690.7(A)(3) \u2014 Cold Voc: Voc*(1+b*dT) = 60.5 V",
+       "Result": 60.5,
+       "ShortDescription": "Cold Voc",
+       "SyntheticInputNames": [],
+       "Tag": "decimal_res",
+       "Units": "V"
+      },
+      "id": {
+       "entity_id": "decimal_res"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "V",
+       "value": 60.5
+      },
+      "type": "nec-citation-one-line-render",
+      "unit": "V"
+     },
+     {
+      "fields": {
+       "Article": "A",
+       "Formula": "f",
+       "HasSyntheticInputs": false,
+       "Name": "zero_res",
+       "OneLiner": "A \u2014 d: f = 0 %",
+       "Result": 0.0,
+       "ShortDescription": "d",
+       "SyntheticInputNames": [],
+       "Tag": "zero_res",
+       "Units": "%"
+      },
+      "id": {
+       "entity_id": "zero_res"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "%",
+       "value": 0.0
+      },
+      "type": "nec-citation-one-line-render",
+      "unit": "%"
+     },
+     {
+      "fields": {
+       "Article": "A",
+       "Formula": "f",
+       "HasSyntheticInputs": false,
+       "Name": "neg_res",
+       "OneLiner": "A \u2014 d: f = -3.14 C",
+       "Result": -3.14,
+       "ShortDescription": "d",
+       "SyntheticInputNames": [],
+       "Tag": "neg_res",
+       "Units": "C"
+      },
+      "id": {
+       "entity_id": "neg_res"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "C",
+       "value": -3.14
+      },
+      "type": "nec-citation-one-line-render",
+      "unit": "C"
+     },
+     {
+      "fields": {
+       "Article": "A",
+       "Formula": "f",
+       "HasSyntheticInputs": false,
+       "Name": "six_digits",
+       "OneLiner": "A \u2014 d: f = 123.456 ft",
+       "Result": 123.456,
+       "ShortDescription": "d",
+       "SyntheticInputNames": [],
+       "Tag": "six_digits",
+       "Units": "ft"
+      },
+      "id": {
+       "entity_id": "six_digits"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "ft",
+       "value": 123.456
+      },
+      "type": "nec-citation-one-line-render",
+      "unit": "ft"
+     },
+     {
+      "fields": {
+       "Article": "A",
+       "Formula": "f",
+       "HasSyntheticInputs": false,
+       "Name": "round_six",
+       "OneLiner": "A \u2014 d: f = 123.457 ft",
+       "Result": 123.4567,
+       "ShortDescription": "d",
+       "SyntheticInputNames": [],
+       "Tag": "round_six",
+       "Units": "ft"
+      },
+      "id": {
+       "entity_id": "round_six"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "ft",
+       "value": 123.4567
+      },
+      "type": "nec-citation-one-line-render",
+      "unit": "ft"
+     },
+     {
+      "fields": {
+       "Article": "A",
+       "Formula": "f",
+       "HasSyntheticInputs": false,
+       "Name": "empty_units",
+       "OneLiner": "A \u2014 d: f = 1",
+       "Result": 1.0,
+       "ShortDescription": "d",
+       "SyntheticInputNames": [],
+       "Tag": "empty_units",
+       "Units": ""
+      },
+      "id": {
+       "entity_id": "empty_units"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 1.0
+      },
+      "type": "nec-citation-one-line-render",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Article": "A",
+       "Formula": "f",
+       "HasSyntheticInputs": true,
+       "Name": "synth_one",
+       "OneLiner": "A \u2014 d: f = 1 [SYNTHETIC: bvoc]",
+       "Result": 1.0,
+       "ShortDescription": "d",
+       "SyntheticInputNames": [
+        "bvoc"
+       ],
+       "Tag": "synth_one",
+       "Units": null
+      },
+      "id": {
+       "entity_id": "synth_one"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 1.0
+      },
+      "type": "nec-citation-one-line-render",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Article": "A",
+       "Formula": "f",
+       "HasSyntheticInputs": true,
+       "Name": "synth_multi",
+       "OneLiner": "A \u2014 d: f = 1 [SYNTHETIC: bvoc, tmax]",
+       "Result": 1.0,
+       "ShortDescription": "d",
+       "SyntheticInputNames": [
+        "bvoc",
+        "tmax"
+       ],
+       "Tag": "synth_multi",
+       "Units": null
+      },
+      "id": {
+       "entity_id": "synth_multi"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 1.0
+      },
+      "type": "nec-citation-one-line-render",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Article": "A",
+       "Formula": "f",
+       "HasSyntheticInputs": true,
+       "Name": "synth_units",
+       "OneLiner": "A \u2014 d: f = 1 V [SYNTHETIC: isc]",
+       "Result": 1.0,
+       "ShortDescription": "d",
+       "SyntheticInputNames": [
+        "isc"
+       ],
+       "Tag": "synth_units",
+       "Units": "V"
+      },
+      "id": {
+       "entity_id": "synth_units"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "V",
+       "value": 1.0
+      },
+      "type": "nec-citation-one-line-render",
+      "unit": "V"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "decimal_res": "decimal_res",
+    "empty_units": "empty_units",
+    "minimal": "minimal",
+    "neg_res": "neg_res",
+    "round_six": "round_six",
+    "six_digits": "six_digits",
+    "synth_multi": "synth_multi",
+    "synth_one": "synth_one",
+    "synth_units": "synth_units",
+    "with_units": "with_units",
+    "zero_res": "zero_res"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "7383b10bce3fa6cedc6578fa7f3e61416c7cb80a9cd056b90f8fdddac5fab77b",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "5a84d940c4eb326041ba555bed17b8df18b89e090ab008b87f6cce4a3d569488",
+   "output_sha256": "e4fd4ddb4ab1abbbf1744654794ecff8346ccab8a5faf97f4e44368d11778a29",
+   "parameters": {
+    "capability": "nec-citation-one-line-render",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafoneliner_probes.json",
+    "probe_file_sha256": "6b02ce6b011fcefd717d56e5657383b17b116b0a2419c097df18f8c3f7750709",
+    "probe_type": "nec-citation-one-line-render",
+    "side": "plugin"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "none",
+    "producer": "plugin",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  },
+  "studio": {
+   "after": {
+    "format": "json-probes",
+    "rows": [
+     {
+      "fields": {
+       "Article": "NEC 690.8(A)",
+       "Formula": "I*1.25",
+       "HasSyntheticInputs": false,
+       "Name": "minimal",
+       "OneLiner": "NEC 690.8(A) \u2014 Continuous current: I*1.25 = 1",
+       "Result": 1.0,
+       "ShortDescription": "Continuous current",
+       "SyntheticInputNames": [],
+       "Tag": "minimal",
+       "Units": null
+      },
+      "id": {
+       "entity_id": "minimal"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 1.0
+      },
+      "type": "nec-citation-one-line-render",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Article": "NEC 690.8(A)",
+       "Formula": "I*1.25",
+       "HasSyntheticInputs": false,
+       "Name": "with_units",
+       "OneLiner": "NEC 690.8(A) \u2014 Continuous current: I*1.25 = 1 A",
+       "Result": 1.0,
+       "ShortDescription": "Continuous current",
+       "SyntheticInputNames": [],
+       "Tag": "with_units",
+       "Units": "A"
+      },
+      "id": {
+       "entity_id": "with_units"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 1.0
+      },
+      "type": "nec-citation-one-line-render",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "Article": "NEC 690.7(A)(3)",
+       "Formula": "Voc*(1+b*dT)",
+       "HasSyntheticInputs": false,
+       "Name": "decimal_res",
+       "OneLiner": "NEC 690.7(A)(3) \u2014 Cold Voc: Voc*(1+b*dT) = 60.5 V",
+       "Result": 60.5,
+       "ShortDescription": "Cold Voc",
+       "SyntheticInputNames": [],
+       "Tag": "decimal_res",
+       "Units": "V"
+      },
+      "id": {
+       "entity_id": "decimal_res"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "V",
+       "value": 60.5
+      },
+      "type": "nec-citation-one-line-render",
+      "unit": "V"
+     },
+     {
+      "fields": {
+       "Article": "A",
+       "Formula": "f",
+       "HasSyntheticInputs": false,
+       "Name": "zero_res",
+       "OneLiner": "A \u2014 d: f = 0 %",
+       "Result": 0.0,
+       "ShortDescription": "d",
+       "SyntheticInputNames": [],
+       "Tag": "zero_res",
+       "Units": "%"
+      },
+      "id": {
+       "entity_id": "zero_res"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "%",
+       "value": 0.0
+      },
+      "type": "nec-citation-one-line-render",
+      "unit": "%"
+     },
+     {
+      "fields": {
+       "Article": "A",
+       "Formula": "f",
+       "HasSyntheticInputs": false,
+       "Name": "neg_res",
+       "OneLiner": "A \u2014 d: f = -3.14 C",
+       "Result": -3.14,
+       "ShortDescription": "d",
+       "SyntheticInputNames": [],
+       "Tag": "neg_res",
+       "Units": "C"
+      },
+      "id": {
+       "entity_id": "neg_res"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "C",
+       "value": -3.14
+      },
+      "type": "nec-citation-one-line-render",
+      "unit": "C"
+     },
+     {
+      "fields": {
+       "Article": "A",
+       "Formula": "f",
+       "HasSyntheticInputs": false,
+       "Name": "six_digits",
+       "OneLiner": "A \u2014 d: f = 123.456 ft",
+       "Result": 123.456,
+       "ShortDescription": "d",
+       "SyntheticInputNames": [],
+       "Tag": "six_digits",
+       "Units": "ft"
+      },
+      "id": {
+       "entity_id": "six_digits"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "ft",
+       "value": 123.456
+      },
+      "type": "nec-citation-one-line-render",
+      "unit": "ft"
+     },
+     {
+      "fields": {
+       "Article": "A",
+       "Formula": "f",
+       "HasSyntheticInputs": false,
+       "Name": "round_six",
+       "OneLiner": "A \u2014 d: f = 123.457 ft",
+       "Result": 123.4567,
+       "ShortDescription": "d",
+       "SyntheticInputNames": [],
+       "Tag": "round_six",
+       "Units": "ft"
+      },
+      "id": {
+       "entity_id": "round_six"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "ft",
+       "value": 123.4567
+      },
+      "type": "nec-citation-one-line-render",
+      "unit": "ft"
+     },
+     {
+      "fields": {
+       "Article": "A",
+       "Formula": "f",
+       "HasSyntheticInputs": false,
+       "Name": "empty_units",
+       "OneLiner": "A \u2014 d: f = 1",
+       "Result": 1.0,
+       "ShortDescription": "d",
+       "SyntheticInputNames": [],
+       "Tag": "empty_units",
+       "Units": ""
+      },
+      "id": {
+       "entity_id": "empty_units"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 1.0
+      },
+      "type": "nec-citation-one-line-render",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Article": "A",
+       "Formula": "f",
+       "HasSyntheticInputs": true,
+       "Name": "synth_one",
+       "OneLiner": "A \u2014 d: f = 1 [SYNTHETIC: bvoc]",
+       "Result": 1.0,
+       "ShortDescription": "d",
+       "SyntheticInputNames": [
+        "bvoc"
+       ],
+       "Tag": "synth_one",
+       "Units": null
+      },
+      "id": {
+       "entity_id": "synth_one"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 1.0
+      },
+      "type": "nec-citation-one-line-render",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Article": "A",
+       "Formula": "f",
+       "HasSyntheticInputs": true,
+       "Name": "synth_multi",
+       "OneLiner": "A \u2014 d: f = 1 [SYNTHETIC: bvoc, tmax]",
+       "Result": 1.0,
+       "ShortDescription": "d",
+       "SyntheticInputNames": [
+        "bvoc",
+        "tmax"
+       ],
+       "Tag": "synth_multi",
+       "Units": null
+      },
+      "id": {
+       "entity_id": "synth_multi"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 1.0
+      },
+      "type": "nec-citation-one-line-render",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Article": "A",
+       "Formula": "f",
+       "HasSyntheticInputs": true,
+       "Name": "synth_units",
+       "OneLiner": "A \u2014 d: f = 1 V [SYNTHETIC: isc]",
+       "Result": 1.0,
+       "ShortDescription": "d",
+       "SyntheticInputNames": [
+        "isc"
+       ],
+       "Tag": "synth_units",
+       "Units": "V"
+      },
+      "id": {
+       "entity_id": "synth_units"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "V",
+       "value": 1.0
+      },
+      "type": "nec-citation-one-line-render",
+      "unit": "V"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "decimal_res": "decimal_res",
+    "empty_units": "empty_units",
+    "minimal": "minimal",
+    "neg_res": "neg_res",
+    "round_six": "round_six",
+    "six_digits": "six_digits",
+    "synth_multi": "synth_multi",
+    "synth_one": "synth_one",
+    "synth_units": "synth_units",
+    "with_units": "with_units",
+    "zero_res": "zero_res"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "7383b10bce3fa6cedc6578fa7f3e61416c7cb80a9cd056b90f8fdddac5fab77b",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "5a84d940c4eb326041ba555bed17b8df18b89e090ab008b87f6cce4a3d569488",
+   "output_sha256": "e4fd4ddb4ab1abbbf1744654794ecff8346ccab8a5faf97f4e44368d11778a29",
+   "parameters": {
+    "capability": "nec-citation-one-line-render",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafoneliner_probes.json",
+    "probe_file_sha256": "6b02ce6b011fcefd717d56e5657383b17b116b0a2419c097df18f8c3f7750709",
+    "probe_type": "nec-citation-one-line-render",
+    "side": "studio"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "server-builtin",
+    "producer": "studio",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  }
+ }
+}
