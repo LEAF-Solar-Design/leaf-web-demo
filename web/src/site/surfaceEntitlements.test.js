@@ -6,10 +6,18 @@ import fixture from './familyCapabilities.json'
 const families = Object.keys(fixture).map((family_id) => ({ family_id }))
 
 function catalogCapabilities(id) {
-  return familiesForSurface(families, id).flatMap(({ family_id }) => fixture[family_id])
+  return familiesForSurface(families, id).flatMap(({ family_id }) => Object.values(fixture[family_id]))
 }
 
 describe('surface entitlement declarations', () => {
+  it('every tool fixture value is a supported capability', () => {
+    for (const tools of Object.values(fixture)) {
+      for (const capability of Object.values(tools)) {
+        expect(['run_read', 'run_write', 'solve']).toContain(capability)
+      }
+    }
+  })
+
   for (const { id } of PRODUCT_SURFACES) {
     it(`${id} declares its catalog fold and authoring capabilities`, () => {
       const contract = surfaceContract(id)
