@@ -39,24 +39,29 @@ function isPlainEnglish(s) {
 export function humanizeError(errOrString) {
   if (errOrString == null) return MSG_GENERIC
 
-  const name = (errOrString && errOrString.name) || ''
-  const raw = String(
-    (errOrString && typeof errOrString === 'object' && (errOrString.message || errOrString.error)) ||
-    errOrString ||
-    '',
-  ).trim()
+  // Never throws, whatever the value; unreadable or unconvertible values get the generic sentence.
+  try {
+    const name = (errOrString && errOrString.name) || ''
+    const raw = String(
+      (errOrString && typeof errOrString === 'object' && (errOrString.message || errOrString.error)) ||
+      errOrString ||
+      '',
+    ).trim()
 
-  if (!raw) return MSG_GENERIC
+    if (!raw) return MSG_GENERIC
 
-  // Network / unreachable service first — a TypeError from fetch() lands here.
-  if (NETWORKY.test(raw) || (name === 'TypeError' && /fetch/i.test(raw))) return MSG_NETWORK
-  if (name === 'TypeError' && !isPlainEnglish(raw)) return MSG_NETWORK
+    // Network / unreachable service first — a TypeError from fetch() lands here.
+    if (NETWORKY.test(raw) || (name === 'TypeError' && /fetch/i.test(raw))) return MSG_NETWORK
+    if (name === 'TypeError' && !isPlainEnglish(raw)) return MSG_NETWORK
 
-  // Transport plumbing of any shape -> the calm service sentence.
-  if (VERB.test(raw) || PATHY.test(raw) || STATUS_ARROW.test(raw) || JOBBY.test(raw)) return MSG_SERVICE
+    // Transport plumbing of any shape -> the calm service sentence.
+    if (VERB.test(raw) || PATHY.test(raw) || STATUS_ARROW.test(raw) || JOBBY.test(raw)) return MSG_SERVICE
 
-  if (isPlainEnglish(raw)) return raw
-  return MSG_GENERIC
+    if (isPlainEnglish(raw)) return raw
+    return MSG_GENERIC
+  } catch {
+    return MSG_GENERIC
+  }
 }
 
 export default humanizeError
