@@ -2871,8 +2871,6 @@ UNREGISTERED_SERVER_TESTS = {
     "test_published_source_containment.py": "skips 1 when run alone: needs its skip reasons allowlisted",
     "test_request_journal_activation_postgres.py": "skips 11 when run alone: needs its skip reasons allowlisted",
     "test_rewind.py": "red on main: 5 of 12 fail when run alone",
-    "test_skills_catalog.py": "order-dependent on a case-sensitive filesystem: discovery keeps the first of "
-                              "SAFE and safe from an unsorted os.scandir, and the case-duplicate row expects safe",
     "test_solar_cad_template_manifest.py": "imports server.* as a package: needs a repo-root row",
     "test_template_store.py": "red on main: 3 fail when run alone",
     "test_uploaded_live_read_production_contract.py": "red on main: 2 of 19 fail when run alone",

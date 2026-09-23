@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sys
+import types
 from pathlib import Path
 
 SERVER_DIR = Path(__file__).resolve().parent.parent
@@ -79,18 +80,73 @@ def test_hostile_names_and_case_duplicates_are_not_cataloged(tmp_path):
     duplicate = bundle / "skills" / "SAFE"
     try:
         duplicate.mkdir()
+        duplicate_created = True
         (duplicate / "SKILL.md").write_text("---\nname: SAFE\n---\n", encoding="utf-8")
     except FileExistsError:
         # Case-insensitive filesystem (Windows/macOS): `safe` and `SAFE` are ONE
-        # directory, so the on-disk collision cannot even be constructed here —
-        # which is itself why the case-fold dedupe exists. The dedupe rule is
-        # asserted portably by test_duplicate_listing_entries_are_deduped.
-        pass
+        # directory. The portable row below proves the ambiguous rule.
+        duplicate_created = False
 
     output = skills_catalog.discover_bundle(str(bundle), "tenant-safe")
 
-    assert output == [{"id": "safe", "name": "safe", "description": "Safe", "tier": "tenant-safe"}]
+    if duplicate_created:
+        assert output == []
+    else:
+        assert output == [{"id": "safe", "name": "safe", "description": "Safe", "tier": "tenant-safe"}]
     assert skills_catalog.is_valid_skill_name("../../x") is False
+
+
+def test_case_ambiguous_names_are_refused_on_every_filesystem(monkeypatch, tmp_path):
+    bundle = _bundle(tmp_path / "bundle", "tenant-safe", {"safe": "Safe", "other": "Other"})
+    real_scandir = os.scandir
+
+    class _AmbiguousListing:
+        def __init__(self, path):
+            self._path = path
+
+        def __enter__(self):
+            with real_scandir(self._path) as it:
+                entries = list(it)
+            return iter(entries + [types.SimpleNamespace(name="SAFE")])
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(skills_catalog.os, "scandir", _AmbiguousListing)
+    output = skills_catalog.discover_bundle(str(bundle), "tenant-safe")
+    assert output == [
+        {"id": "other", "name": "other", "description": "Other", "tier": "tenant-safe"}
+    ]
+
+
+def test_discovery_is_independent_of_listing_order(monkeypatch, tmp_path):
+    monkeypatch.setattr(skills_catalog, "MAX_SKILLS", 2)
+    bundle = _bundle(tmp_path / "bundle", "tenant-safe", {
+        "alpha": "Alpha", "beta": "Beta", "gamma": "Gamma",
+    })
+    real_scandir = os.scandir
+    reverse = False
+
+    class _SortedListing:
+        def __init__(self, path):
+            self._path = path
+
+        def __enter__(self):
+            with real_scandir(self._path) as it:
+                entries = list(it)
+            return iter(sorted(entries, key=lambda entry: entry.name, reverse=reverse))
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(skills_catalog.os, "scandir", _SortedListing)
+    forward_output = skills_catalog.discover_bundle(str(bundle), "tenant-safe")
+    reverse = True
+    reverse_output = skills_catalog.discover_bundle(str(bundle), "tenant-safe")
+    assert forward_output == reverse_output == [
+        {"id": "alpha", "name": "alpha", "description": "Alpha", "tier": "tenant-safe"},
+        {"id": "beta", "name": "beta", "description": "Beta", "tier": "tenant-safe"},
+    ]
 
 
 def test_symlinked_skill_directory_is_skipped(tmp_path):
@@ -109,12 +165,13 @@ def test_symlinked_skill_directory_is_skipped(tmp_path):
 
 
 def test_duplicate_listing_entries_are_deduped(monkeypatch, tmp_path):
-    """First-wins case-fold dedupe, portable across filesystems.
+    """A name listed twice is one directory, not a case collision.
 
-    A case-insensitive FS cannot HOLD `Probe` and `probe` at once, so the
-    collision is reproduced at the catalog's actual seam: the scandir listing.
-    Yielding every entry twice is exactly what a case-folded collision looks
-    like to the `seen` set, and the catalog must emit each skill ONCE."""
+    Discovery collects names into a set before counting case-folded keys, so
+    the same entry yielded twice by the scandir listing counts once and the
+    catalog emits the skill ONCE. The case collision itself (`safe` beside
+    `SAFE`) is refused by
+    test_case_ambiguous_names_are_refused_on_every_filesystem."""
     bundle = _bundle(tmp_path / "bundle", "tenant-safe", {"safe": "Safe"})
     real_scandir = os.scandir
 

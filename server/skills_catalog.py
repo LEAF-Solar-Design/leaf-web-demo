@@ -1,6 +1,7 @@
 """Safe, disk-backed catalog discovery for curated Leaf skill bundles."""
 from __future__ import annotations
 
+import collections
 import json
 import os
 import re
@@ -25,7 +26,7 @@ _FRONTMATTER_FIELD_RE = re.compile(r"^(name|description)\s*:\s*(.*)$")
 def _dedupe_key(name: str) -> str:
     """The collision key for case-only duplicates (`Probe` vs `probe`): one
     directory on Windows/macOS, two on Linux — ambiguous either way, so they
-    fold to one key and the first wins. Extracted so the FOLD itself is a
+    fold to one key and neither is cataloged. Extracted so the FOLD itself is a
     testable unit on every platform (a case-insensitive filesystem cannot even
     construct the on-disk pair)."""
     return name.lower()
@@ -119,7 +120,14 @@ def _parse_frontmatter(source: str) -> Optional[tuple[str, str]]:
 
 
 def discover_bundle(bundle_path: str, expected_tier: str) -> list[dict[str, str]]:
-    """Return valid skills from exactly one correctly tiered bundle, or no skills."""
+    """Return valid skills from exactly one correctly tiered bundle, or no skills.
+
+    Names differing only by case are ambiguous and neither is cataloged,
+    whatever their contents. Below the examination bound (MAX_SKILLS * 2
+    listing entries) the result depends only on which names exist, never on
+    directory order; past it, which names get examined still follows the
+    listing.
+    """
     if not bundle_path:
         return []
     try:
@@ -143,45 +151,47 @@ def discover_bundle(bundle_path: str, expected_tier: str) -> list[dict[str, str]
         return []
 
     found: list[dict[str, str]] = []
-    seen: set[str] = set()
+    names: set[str] = set()
     try:
         with os.scandir(skills_root_real) as entries:
             for examined, entry in enumerate(entries, start=1):
-                if len(found) >= MAX_SKILLS or examined > MAX_SKILLS * 2:
+                if examined > MAX_SKILLS * 2:
                     break
-                if not is_valid_skill_name(entry.name):
+                if is_valid_skill_name(entry.name):
+                    names.add(entry.name)
+        keys = collections.Counter(_dedupe_key(name) for name in names)
+        for name in sorted(names):
+            if len(found) >= MAX_SKILLS:
+                break
+            if keys[_dedupe_key(name)] > 1:
+                continue
+            try:
+                skill_dir = skills_root_real / name
+                skill_file = skill_dir / "SKILL.md"
+                if skill_dir.is_symlink() or skill_file.is_symlink():
                     continue
-                key = _dedupe_key(entry.name)
-                if key in seen:
+                skill_dir_real = _contained_real_path(skills_root_real, skill_dir)
+                skill_file_real = _contained_real_path(root_real, skill_file)
+                if skill_dir_real is None or skill_file_real is None:
                     continue
-                try:
-                    skill_dir = skills_root_real / entry.name
-                    skill_file = skill_dir / "SKILL.md"
-                    if skill_dir.is_symlink() or skill_file.is_symlink():
-                        continue
-                    skill_dir_real = _contained_real_path(skills_root_real, skill_dir)
-                    skill_file_real = _contained_real_path(root_real, skill_file)
-                    if skill_dir_real is None or skill_file_real is None:
-                        continue
-                    if not skill_dir_real.is_dir() or not skill_file_real.is_file():
-                        continue
-                    if _is_multiply_linked(skill_file_real):
-                        continue
-                    source = _read_capped(skill_file_real, MAX_SKILL_FILE_BYTES)
-                except OSError:
+                if not skill_dir_real.is_dir() or not skill_file_real.is_file():
                     continue
-                if source is None:
+                if _is_multiply_linked(skill_file_real):
                     continue
-                parsed = _parse_frontmatter(source)
-                if parsed is None or parsed[0] != entry.name:
-                    continue
-                seen.add(key)
-                found.append({
-                    "id": parsed[0],
-                    "name": parsed[0],
-                    "description": parsed[1],
-                    "tier": expected_tier,
-                })
+                source = _read_capped(skill_file_real, MAX_SKILL_FILE_BYTES)
+            except OSError:
+                continue
+            if source is None:
+                continue
+            parsed = _parse_frontmatter(source)
+            if parsed is None or parsed[0] != name:
+                continue
+            found.append({
+                "id": parsed[0],
+                "name": parsed[0],
+                "description": parsed[1],
+                "tier": expected_tier,
+            })
     except OSError:
         return []
     return sorted(found, key=lambda skill: skill["name"].lower())
