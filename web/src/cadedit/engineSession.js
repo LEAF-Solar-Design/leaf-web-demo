@@ -43,6 +43,7 @@ import { offsetEntity } from './offset.js'
 import { MAX_BATCH_STEPS, MAX_COORD, MAX_INTERSECT_POINTS, chamferLines, extendEntity, filletLines, trimEntity } from './intersect.js'
 import { clipboardRecord, describeRecord, pasteOp } from './clipboard.js'
 import { diffPlan } from './mutationDiff.js'
+import { NO_IDS, withSelection, surviveSelectionIds, addId, toggleId, replaceIds, multiSelectionRefusal } from './selection.js'
 
 // Mirrors the worker's own bound. Checked against File.size BEFORE any read.
 export const MAX_DOCUMENT_BYTES = 16 * 1024 * 1024
@@ -107,7 +108,8 @@ const INITIAL_SESSION = Object.freeze({
   entities: NO_ENTITIES,
   entityCount: 0,
   blockBasePatched: false,
-  selectedId: '',
+  selectedIds: NO_IDS,
+  ...withSelection([]),
   status: '',
   savedBytes: null,
   // W4g-1b: the bytes the last successful save committed (the same reference
@@ -1137,7 +1139,7 @@ export default function useEngineSession({
             entities,
             entityCount: message.entityCount ?? 0,
             blockBasePatched: message.blockBasePatched ?? false,
-            selectedId: surviveSelection(current.selectedId, entities),
+            ...withSelection(surviveSelectionIds(current.selectedIds, entities)),
             savedBytes: edited ? reload.bytes : null,
             busy: false,
             engineParsed: true,
@@ -1161,7 +1163,7 @@ export default function useEngineSession({
           entities,
           entityCount: message.entityCount ?? 0,
           blockBasePatched: message.blockBasePatched ?? false,
-          selectedId: '',
+          ...withSelection([]),
           savedBytes: null,
           committedBytes: null,
           committedEntities: committedLoadRef.current ? entities : null,
@@ -1227,7 +1229,7 @@ export default function useEngineSession({
           entityCount: message.entityCount ?? 0,
           savedBytes: message.bytes ?? null,
           blockBasePatched: message.blockBasePatched ?? false,
-          selectedId: createdId || surviveSelection(current.selectedId, entities),
+          ...withSelection(createdId ? [createdId] : surviveSelectionIds(current.selectedIds, entities)),
           undoDepth: history.undo.length,
           redoDepth: history.redo.length,
           engineParsed: true,
@@ -1257,7 +1259,7 @@ export default function useEngineSession({
           busy: false,
           entities: NO_ENTITIES,
           entityCount: 0,
-          selectedId: '',
+          ...withSelection([]),
           savedBytes: null,
           committedBytes: null,
           committedEntities: null,
@@ -1349,16 +1351,41 @@ export default function useEngineSession({
     openBytes(bytes, file.name)
   }, [openBytes, patch])
 
-  const select = useCallback((entityId) => {
-    setSession((current) => (current.selectedId === entityId
-      ? current
-      : Object.freeze({ ...current, selectedId: entityId })))
+  const updateSelection = useCallback((resolve) => {
+    setSession((current) => {
+      const ids = resolve(current)
+      if (ids.length === current.selectedIds.length && ids.every((id, i) => id === current.selectedIds[i])) return current
+      return Object.freeze({ ...current, ...withSelection(ids) })
+    })
   }, [])
+  const selectReplace = useCallback((ids) => {
+    updateSelection((current) => replaceIds(ids, current.entities))
+  }, [updateSelection])
+  const select = useCallback((entityId) => {
+    setSession((current) => {
+      const selectedIds = typeof entityId === 'string' && entityId !== '' ? Object.freeze([entityId]) : NO_IDS
+      if (current.selectedId === entityId && selectedIds.length === current.selectedIds.length
+          && selectedIds.every((id, i) => id === current.selectedIds[i])) return current
+      // Legacy select preserves its argument verbatim, the sole exception to withSelection writes.
+      return Object.freeze({ ...current, selectedId: entityId, selectedIds })
+    })
+  }, [])
+  const selectAdd = useCallback((id) => {
+    updateSelection((current) => addId(current.selectedIds, id, current.entities))
+  }, [updateSelection])
+  const selectToggle = useCallback((id) => {
+    updateSelection((current) => toggleId(current.selectedIds, id, current.entities))
+  }, [updateSelection])
+  const selectClear = useCallback(() => selectReplace([]), [selectReplace])
 
   // W4d Draw group: creation needs an open, engine-parsed document and no
   // selection. Refused here for malformed input (a sentence, no round trip),
   // refused as TRANSPORT when nothing is open.
   const create = useCallback((op, inputs) => {
+    if (op === 'createBlock' && sessionRef.current.selectedIds.length > 1) {
+      patch({ errorKind: SESSION_ERROR.REFUSED, status: multiSelectionRefusal(op, sessionRef.current.selectedIds.length) })
+      return
+    }
     if (savingRef.current) {
       patch({ status: 'a save is in flight; wait for its receipt' })
       return null
@@ -1388,6 +1415,10 @@ export default function useEngineSession({
   }, [patch])
 
   const applyEdit = useCallback((op, inputs) => {
+    if (op !== 'ungroup' && sessionRef.current.selectedIds.length > 1) {
+      patch({ errorKind: SESSION_ERROR.REFUSED, status: multiSelectionRefusal(op, sessionRef.current.selectedIds.length) })
+      return
+    }
     if (savingRef.current) {
       patch({ status: 'a save is in flight; wait for its receipt' })
       return null
@@ -1661,6 +1692,10 @@ export default function useEngineSession({
   // selection's own geometry, and a paste is one create at a base point
   // through the same path the Draw group uses.
   const copyToClipboard = useCallback((cut = false) => {
+    if (sessionRef.current.selectedIds.length > 1) {
+      patch({ errorKind: SESSION_ERROR.REFUSED, status: multiSelectionRefusal(cut ? 'cutClip' : 'copyClip', sessionRef.current.selectedIds.length) })
+      return
+    }
     const { entities, selectedId } = sessionRef.current
     const entity = entities.find((candidate) => candidate.id === selectedId)
     const verb = cut ? 'Cut' : 'Copy'
@@ -1694,9 +1729,9 @@ export default function useEngineSession({
   }, [create, patch])
 
   const actions = useMemo(() => ({
-    open, openBytes, select, applyEdit, create, save, reset, undo, redo,
+    open, openBytes, select, selectAdd, selectToggle, selectReplace, selectClear, applyEdit, create, save, reset, undo, redo,
     copyToClipboard, pasteFromClipboard,
-  }), [applyEdit, copyToClipboard, create, open, openBytes, pasteFromClipboard, redo, reset, save, select, undo])
+  }), [applyEdit, copyToClipboard, create, open, openBytes, pasteFromClipboard, redo, reset, save, select, selectAdd, selectToggle, selectReplace, selectClear, undo])
 
   const selected = useMemo(
     () => session.entities.find((entity) => entity.id === session.selectedId) || null,

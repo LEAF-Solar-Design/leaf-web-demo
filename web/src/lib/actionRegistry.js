@@ -114,10 +114,12 @@ export const MODIFY_REASONS = Object.freeze({
   crashed: 'engine stopped: open a drawing again',
   busy: 'engine busy: wait for the current edit',
   noSelection: 'select an entity in the drawing',
+  multiSelection: 'select one object: this works on a single object and more than one is selected',
   readOnlyKind: 'read-only entity kind',
 })
 
 export const PROPERTY_REASONS = Object.freeze({
+  multiSelection: 'Match copies properties to another object; ByLayer inherits layer properties: select one source object because more than one is selected',
   noDocument: 'Match copies properties to another object; ByLayer inherits layer properties: open a drawing in Leaf Automation first',
   crashed: 'Match copies properties to another object; ByLayer inherits layer properties: the engine stopped, so open the drawing again',
   busy: 'Match copies properties to another object; ByLayer inherits layer properties: wait for the current edit',
@@ -206,6 +208,7 @@ export function modifyReason(session, reach = null) {
   if (session.errorKind === SESSION_ERROR.CRASHED) return MODIFY_REASONS.crashed
   if (!session.engineParsed) return reachSentence(reach) || MODIFY_REASONS.noDocument
   if (session.busy) return MODIFY_REASONS.busy
+  if ((session.selectedIds?.length ?? 0) > 1) return MODIFY_REASONS.multiSelection
   if (!session.selected) return MODIFY_REASONS.noSelection
   if (session.selected.editable === false && !PLACED_KINDS.has(session.selected.type)) return MODIFY_REASONS.readOnlyKind
   return ''
@@ -226,6 +229,7 @@ export function propertyReason(session, reach = null) {
   if (session.errorKind === SESSION_ERROR.CRASHED) return MODIFY_REASONS.crashed
   if (!session.engineParsed) return reachSentence(reach) || MODIFY_REASONS.noDocument
   if (session.busy) return MODIFY_REASONS.busy
+  if ((session.selectedIds?.length ?? 0) > 1) return MODIFY_REASONS.multiSelection
   if (!session.selected) return MODIFY_REASONS.noSelection
   if (session.selected.editable === false && session.selected.type !== 'INSERT') return MODIFY_REASONS.readOnlyKind
   return ''
