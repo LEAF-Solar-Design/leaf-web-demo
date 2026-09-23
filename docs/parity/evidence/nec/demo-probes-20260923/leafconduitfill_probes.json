@@ -1,0 +1,789 @@
+{
+  "maxFill": [
+    {
+      "label": "I1_count_1",
+      "conductorCount": 1,
+      "csharpFraction": 0.53
+    },
+    {
+      "label": "I2_count_2",
+      "conductorCount": 2,
+      "csharpFraction": 0.31
+    },
+    {
+      "label": "I3_count_3",
+      "conductorCount": 3,
+      "csharpFraction": 0.4
+    },
+    {
+      "label": "I3_count_100",
+      "conductorCount": 100,
+      "csharpFraction": 0.4
+    },
+    {
+      "label": "I4_count_0",
+      "conductorCount": 0,
+      "csharpFraction": 0.0
+    },
+    {
+      "label": "I4_count_neg",
+      "conductorCount": -5,
+      "csharpFraction": 0.0
+    }
+  ],
+  "conductorArea": [
+    {
+      "label": "I5_14_THWN2",
+      "gauge": "14",
+      "unit": "AWG",
+      "insulation": "THWN2",
+      "csharpArea": 0.0097
+    },
+    {
+      "label": "I5_12_THWN2",
+      "gauge": "12",
+      "unit": "AWG",
+      "insulation": "THWN2",
+      "csharpArea": 0.0133
+    },
+    {
+      "label": "I5_10_THWN2",
+      "gauge": "10",
+      "unit": "AWG",
+      "insulation": "THWN2",
+      "csharpArea": 0.0211
+    },
+    {
+      "label": "I5_10_XHHW2",
+      "gauge": "10",
+      "unit": "AWG",
+      "insulation": "XHHW2",
+      "csharpArea": 0.0176
+    },
+    {
+      "label": "I5_10_USE2",
+      "gauge": "10",
+      "unit": "AWG",
+      "insulation": "USE2",
+      "csharpArea": 0.0211
+    },
+    {
+      "label": "I5_10_Bare",
+      "gauge": "10",
+      "unit": "AWG",
+      "insulation": "Bare",
+      "csharpArea": 0.0106
+    },
+    {
+      "label": "I5_8_THWN2",
+      "gauge": "8",
+      "unit": "AWG",
+      "insulation": "THWN2",
+      "csharpArea": 0.0366
+    },
+    {
+      "label": "I5_6_THWN2",
+      "gauge": "6",
+      "unit": "AWG",
+      "insulation": "THWN2",
+      "csharpArea": 0.0507
+    },
+    {
+      "label": "I5_4_THWN2",
+      "gauge": "4",
+      "unit": "AWG",
+      "insulation": "THWN2",
+      "csharpArea": 0.0824
+    },
+    {
+      "label": "I5_2_THWN2",
+      "gauge": "2",
+      "unit": "AWG",
+      "insulation": "THWN2",
+      "csharpArea": 0.1158
+    },
+    {
+      "label": "I5_1_0_XHHW2",
+      "gauge": "1/0",
+      "unit": "AWG",
+      "insulation": "XHHW2",
+      "csharpArea": 0.1676
+    },
+    {
+      "label": "I5_4_0_THWN2",
+      "gauge": "4/0",
+      "unit": "AWG",
+      "insulation": "THWN2",
+      "csharpArea": 0.3237
+    },
+    {
+      "label": "I5_250_THWN2",
+      "gauge": "250",
+      "unit": "kcmil",
+      "insulation": "THWN2",
+      "csharpArea": 0.397
+    },
+    {
+      "label": "I5_500_XHHW2",
+      "gauge": "500",
+      "unit": "kcmil",
+      "insulation": "XHHW2",
+      "csharpArea": 0.6619
+    },
+    {
+      "label": "I5_1000_THWN2",
+      "gauge": "1000",
+      "unit": "kcmil",
+      "insulation": "THWN2",
+      "csharpArea": 1.3478
+    },
+    {
+      "label": "I5_unknown_gauge",
+      "gauge": "99",
+      "unit": "AWG",
+      "insulation": "THWN2",
+      "csharpArea": 0.0
+    },
+    {
+      "label": "I6_bare_250",
+      "gauge": "250",
+      "unit": "kcmil",
+      "insulation": "Bare",
+      "csharpArea": 0.0
+    },
+    {
+      "label": "I6_bare_500",
+      "gauge": "500",
+      "unit": "kcmil",
+      "insulation": "Bare",
+      "csharpArea": 0.0
+    },
+    {
+      "label": "I6_bare_1000",
+      "gauge": "1000",
+      "unit": "kcmil",
+      "insulation": "Bare",
+      "csharpArea": 0.0
+    }
+  ],
+  "conduitArea": [
+    {
+      "label": "I7_half_EMT",
+      "tradeSize": "1/2",
+      "conduitType": "EMT",
+      "csharpArea": 0.304
+    },
+    {
+      "label": "I7_half_PVC40",
+      "tradeSize": "1/2",
+      "conduitType": "PvcSch40",
+      "csharpArea": 0.285
+    },
+    {
+      "label": "I7_half_PVC80",
+      "tradeSize": "1/2",
+      "conduitType": "PvcSch80",
+      "csharpArea": 0.217
+    },
+    {
+      "label": "I7_half_RMC",
+      "tradeSize": "1/2",
+      "conduitType": "RMC",
+      "csharpArea": 0.314
+    },
+    {
+      "label": "I7_half_LFNC",
+      "tradeSize": "1/2",
+      "conduitType": "LFNC_B",
+      "csharpArea": 0.275
+    },
+    {
+      "label": "I7_1_EMT",
+      "tradeSize": "1",
+      "conduitType": "EMT",
+      "csharpArea": 0.864
+    },
+    {
+      "label": "I7_1q_EMT",
+      "tradeSize": "1-1/4",
+      "conduitType": "EMT",
+      "csharpArea": 1.496
+    },
+    {
+      "label": "I7_1h_EMT",
+      "tradeSize": "1-1/2",
+      "conduitType": "EMT",
+      "csharpArea": 2.036
+    },
+    {
+      "label": "I7_2_EMT",
+      "tradeSize": "2",
+      "conduitType": "EMT",
+      "csharpArea": 3.356
+    },
+    {
+      "label": "I7_2_LFNC",
+      "tradeSize": "2",
+      "conduitType": "LFNC_B",
+      "csharpArea": 3.195
+    },
+    {
+      "label": "I7_4_EMT",
+      "tradeSize": "4",
+      "conduitType": "EMT",
+      "csharpArea": 15.901
+    },
+    {
+      "label": "I7_unknown_trade",
+      "tradeSize": "9999",
+      "conduitType": "EMT",
+      "csharpArea": 0.0
+    },
+    {
+      "label": "I8_LFNC_2h",
+      "tradeSize": "2-1/2",
+      "conduitType": "LFNC_B",
+      "csharpArea": 0.0
+    },
+    {
+      "label": "I8_LFNC_3",
+      "tradeSize": "3",
+      "conduitType": "LFNC_B",
+      "csharpArea": 0.0
+    },
+    {
+      "label": "I8_LFNC_3h",
+      "tradeSize": "3-1/2",
+      "conduitType": "LFNC_B",
+      "csharpArea": 0.0
+    },
+    {
+      "label": "I8_LFNC_4",
+      "tradeSize": "4",
+      "conduitType": "LFNC_B",
+      "csharpArea": 0.0
+    }
+  ],
+  "sizeConduit": [
+    {
+      "label": "I9_one_10awg_emt",
+      "conduitType": "EMT",
+      "conductors": [
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        }
+      ],
+      "success": true,
+      "tradeSize": "1/2",
+      "conductorAreaSqIn": 0.0211,
+      "conduitAreaSqIn": 0.304,
+      "fillPct": 6.9407894736842115,
+      "maxFillPct": 53.0,
+      "totalConductors": 1,
+      "failureReason": null
+    },
+    {
+      "label": "I9_two_10awg_emt",
+      "conduitType": "EMT",
+      "conductors": [
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        }
+      ],
+      "success": true,
+      "tradeSize": "1/2",
+      "conductorAreaSqIn": 0.0422,
+      "conduitAreaSqIn": 0.304,
+      "fillPct": 13.881578947368423,
+      "maxFillPct": 31.0,
+      "totalConductors": 2,
+      "failureReason": null
+    },
+    {
+      "label": "I9_three_10awg_emt",
+      "conduitType": "EMT",
+      "conductors": [
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        }
+      ],
+      "success": true,
+      "tradeSize": "1/2",
+      "conductorAreaSqIn": 0.0633,
+      "conduitAreaSqIn": 0.304,
+      "fillPct": 20.82236842105263,
+      "maxFillPct": 40.0,
+      "totalConductors": 3,
+      "failureReason": null
+    },
+    {
+      "label": "I9_mixed_pvc40",
+      "conduitType": "PvcSch40",
+      "conductors": [
+        {
+          "gauge": "6",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "6",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "Bare"
+        }
+      ],
+      "success": true,
+      "tradeSize": "1/2",
+      "conductorAreaSqIn": 0.112,
+      "conduitAreaSqIn": 0.285,
+      "fillPct": 39.298245614035096,
+      "maxFillPct": 40.0,
+      "totalConductors": 3,
+      "failureReason": null
+    },
+    {
+      "label": "I9_feeder_pvc80",
+      "conduitType": "PvcSch80",
+      "conductors": [
+        {
+          "gauge": "4/0",
+          "unit": "AWG",
+          "insulation": "XHHW2"
+        },
+        {
+          "gauge": "4/0",
+          "unit": "AWG",
+          "insulation": "XHHW2"
+        },
+        {
+          "gauge": "4/0",
+          "unit": "AWG",
+          "insulation": "XHHW2"
+        },
+        {
+          "gauge": "4",
+          "unit": "AWG",
+          "insulation": "Bare"
+        }
+      ],
+      "success": true,
+      "tradeSize": "2",
+      "conductorAreaSqIn": 0.9410999999999999,
+      "conduitAreaSqIn": 2.874,
+      "fillPct": 32.74530271398747,
+      "maxFillPct": 40.0,
+      "totalConductors": 4,
+      "failureReason": null
+    },
+    {
+      "label": "I12_empty",
+      "conduitType": "EMT",
+      "conductors": [],
+      "success": false,
+      "tradeSize": null,
+      "conductorAreaSqIn": 0.0,
+      "conduitAreaSqIn": 0.0,
+      "fillPct": 0.0,
+      "maxFillPct": 0.0,
+      "totalConductors": 0,
+      "failureReason": "No conductors specified."
+    },
+    {
+      "label": "I13_mono_3",
+      "conduitType": "EMT",
+      "conductors": [
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        }
+      ],
+      "success": true,
+      "tradeSize": "1/2",
+      "conductorAreaSqIn": 0.0633,
+      "conduitAreaSqIn": 0.304,
+      "fillPct": 20.82236842105263,
+      "maxFillPct": 40.0,
+      "totalConductors": 3,
+      "failureReason": null
+    },
+    {
+      "label": "I13_mono_4",
+      "conduitType": "EMT",
+      "conductors": [
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        }
+      ],
+      "success": true,
+      "tradeSize": "1/2",
+      "conductorAreaSqIn": 0.0844,
+      "conduitAreaSqIn": 0.304,
+      "fillPct": 27.763157894736846,
+      "maxFillPct": 40.0,
+      "totalConductors": 4,
+      "failureReason": null
+    },
+    {
+      "label": "I13_mono_5",
+      "conduitType": "EMT",
+      "conductors": [
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        }
+      ],
+      "success": true,
+      "tradeSize": "1/2",
+      "conductorAreaSqIn": 0.10550000000000001,
+      "conduitAreaSqIn": 0.304,
+      "fillPct": 34.703947368421055,
+      "maxFillPct": 40.0,
+      "totalConductors": 5,
+      "failureReason": null
+    },
+    {
+      "label": "I13_mono_6",
+      "conduitType": "EMT",
+      "conductors": [
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        }
+      ],
+      "success": true,
+      "tradeSize": "3/4",
+      "conductorAreaSqIn": 0.12660000000000002,
+      "conduitAreaSqIn": 0.533,
+      "fillPct": 23.752345215759853,
+      "maxFillPct": 40.0,
+      "totalConductors": 6,
+      "failureReason": null
+    },
+    {
+      "label": "I13_mono_7",
+      "conduitType": "EMT",
+      "conductors": [
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        }
+      ],
+      "success": true,
+      "tradeSize": "3/4",
+      "conductorAreaSqIn": 0.14770000000000003,
+      "conduitAreaSqIn": 0.533,
+      "fillPct": 27.711069418386497,
+      "maxFillPct": 40.0,
+      "totalConductors": 7,
+      "failureReason": null
+    },
+    {
+      "label": "I13_mono_8",
+      "conduitType": "EMT",
+      "conductors": [
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        }
+      ],
+      "success": true,
+      "tradeSize": "3/4",
+      "conductorAreaSqIn": 0.16880000000000003,
+      "conduitAreaSqIn": 0.533,
+      "fillPct": 31.669793621013138,
+      "maxFillPct": 40.0,
+      "totalConductors": 8,
+      "failureReason": null
+    },
+    {
+      "label": "I13_mono_9",
+      "conduitType": "EMT",
+      "conductors": [
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        }
+      ],
+      "success": true,
+      "tradeSize": "3/4",
+      "conductorAreaSqIn": 0.18990000000000004,
+      "conduitAreaSqIn": 0.533,
+      "fillPct": 35.62851782363978,
+      "maxFillPct": 40.0,
+      "totalConductors": 9,
+      "failureReason": null
+    },
+    {
+      "label": "I13_mono_10",
+      "conduitType": "EMT",
+      "conductors": [
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        },
+        {
+          "gauge": "10",
+          "unit": "AWG",
+          "insulation": "THWN2"
+        }
+      ],
+      "success": true,
+      "tradeSize": "3/4",
+      "conductorAreaSqIn": 0.21100000000000005,
+      "conduitAreaSqIn": 0.533,
+      "fillPct": 39.58724202626642,
+      "maxFillPct": 40.0,
+      "totalConductors": 10,
+      "failureReason": null
+    }
+  ]
+}

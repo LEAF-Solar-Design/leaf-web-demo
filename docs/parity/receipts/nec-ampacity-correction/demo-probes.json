@@ -1,0 +1,741 @@
+{
+ "schema": "leaf.solar-parity-receipt.v1",
+ "capability": "nec-ampacity-correction",
+ "capability_version": "0",
+ "fixture": {
+  "id": "demo-probes",
+  "sha256": "75834ff013bb3a5f57a541d853d3769c6bb69a2c9aab1b24b230198e7cb957e7"
+ },
+ "plugin": {
+  "build": "LeafSolarDesign 2025 licensed 2026-09-23",
+  "state": "committed",
+  "receipt_sha256": "ccee5fe0bb5e47e1af4d7f86fc4c0b2c6635a3d22b28dd7432c3151bd0a4eb4e"
+ },
+ "studio": {
+  "capability_version": "0",
+  "engine": "server-builtin"
+ },
+ "comparator": {
+  "name": "solar-w1-semantic",
+  "version": "1",
+  "verdict": "pass",
+  "diffs": []
+ },
+ "synthetic_fields": [
+  "plugin:before/recorded",
+  "plugin:changes/unrecorded",
+  "studio:before/recorded",
+  "studio:changes/unrecorded"
+ ],
+ "fallback_fields": [],
+ "synthetic_flagged": true,
+ "survived_reopen": true,
+ "produced_at": "2026-09-23T02:33:45Z",
+ "comparison": {
+  "schema": "leaf.solar-w1-comparison.v1",
+  "capability": "nec-ampacity-correction",
+  "family": "exports",
+  "plugin": {
+   "after": {
+    "format": "json-probes",
+    "rows": [
+     {
+      "fields": {
+       "Article": "NEC 310.16",
+       "BaseA": 1.0,
+       "ConduitFactor": 1.0,
+       "Formula": "I_corrected = I_base \u00d7 temp_factor \u00d7 conduit_factor = 1 \u00d7 1 \u00d7 1",
+       "Name": "all_unity",
+       "RejectedResult": 1.0,
+       "Result": 1.0,
+       "Tag": "all_unity",
+       "TempFactor": 1.0,
+       "Units": "A"
+      },
+      "id": {
+       "entity_id": "all_unity"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 1.0
+      },
+      "type": "nec-ampacity-correction",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "Article": "NEC 310.16",
+       "BaseA": 100.0,
+       "ConduitFactor": 1.0,
+       "Formula": "I_corrected = I_base \u00d7 temp_factor \u00d7 conduit_factor = 100 \u00d7 0.82 \u00d7 1",
+       "Name": "temp_only",
+       "RejectedResult": 100.0,
+       "Result": 82.0,
+       "Tag": "temp_only",
+       "TempFactor": 0.82,
+       "Units": "A"
+      },
+      "id": {
+       "entity_id": "temp_only"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 82.0
+      },
+      "type": "nec-ampacity-correction",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "Article": "NEC 310.16",
+       "BaseA": 100.0,
+       "ConduitFactor": 0.7,
+       "Formula": "I_corrected = I_base \u00d7 temp_factor \u00d7 conduit_factor = 100 \u00d7 1 \u00d7 0.7",
+       "Name": "conduit_only",
+       "RejectedResult": 70.0,
+       "Result": 70.0,
+       "Tag": "conduit_only",
+       "TempFactor": 1.0,
+       "Units": "A"
+      },
+      "id": {
+       "entity_id": "conduit_only"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 70.0
+      },
+      "type": "nec-ampacity-correction",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "Article": "NEC 310.16",
+       "BaseA": 100.0,
+       "ConduitFactor": 0.7,
+       "Formula": "I_corrected = I_base \u00d7 temp_factor \u00d7 conduit_factor = 100 \u00d7 0.82 \u00d7 0.7",
+       "Name": "both",
+       "RejectedResult": 70.0,
+       "Result": 57.4,
+       "Tag": "both",
+       "TempFactor": 0.82,
+       "Units": "A"
+      },
+      "id": {
+       "entity_id": "both"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 57.4
+      },
+      "type": "nec-ampacity-correction",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "Article": "NEC 310.16",
+       "BaseA": 0.0,
+       "ConduitFactor": 0.7,
+       "Formula": "I_corrected = I_base \u00d7 temp_factor \u00d7 conduit_factor = 0 \u00d7 0.82 \u00d7 0.7",
+       "Name": "zero_base",
+       "RejectedResult": 0.0,
+       "Result": 0.0,
+       "Tag": "zero_base",
+       "TempFactor": 0.82,
+       "Units": "A"
+      },
+      "id": {
+       "entity_id": "zero_base"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 0.0
+      },
+      "type": "nec-ampacity-correction",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "Article": "NEC 310.16",
+       "BaseA": 100.0,
+       "ConduitFactor": 0.7,
+       "Formula": "I_corrected = I_base \u00d7 temp_factor \u00d7 conduit_factor = 100 \u00d7 0 \u00d7 0.7",
+       "Name": "zero_temp",
+       "RejectedResult": 70.0,
+       "Result": 0.0,
+       "Tag": "zero_temp",
+       "TempFactor": 0.0,
+       "Units": "A"
+      },
+      "id": {
+       "entity_id": "zero_temp"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 0.0
+      },
+      "type": "nec-ampacity-correction",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "Article": "NEC 310.16",
+       "BaseA": 100.0,
+       "ConduitFactor": 0.0,
+       "Formula": "I_corrected = I_base \u00d7 temp_factor \u00d7 conduit_factor = 100 \u00d7 0.82 \u00d7 0",
+       "Name": "zero_conduit",
+       "RejectedResult": 0.0,
+       "Result": 0.0,
+       "Tag": "zero_conduit",
+       "TempFactor": 0.82,
+       "Units": "A"
+      },
+      "id": {
+       "entity_id": "zero_conduit"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 0.0
+      },
+      "type": "nec-ampacity-correction",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "Article": "NEC 310.16",
+       "BaseA": 600.0,
+       "ConduitFactor": 0.8,
+       "Formula": "I_corrected = I_base \u00d7 temp_factor \u00d7 conduit_factor = 600 \u00d7 0.88 \u00d7 0.8",
+       "Name": "high_base",
+       "RejectedResult": 480.0,
+       "Result": 422.40000000000003,
+       "Tag": "high_base",
+       "TempFactor": 0.88,
+       "Units": "A"
+      },
+      "id": {
+       "entity_id": "high_base"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 422.40000000000003
+      },
+      "type": "nec-ampacity-correction",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "Article": "NEC 310.16",
+       "BaseA": 50.0,
+       "ConduitFactor": 0.5,
+       "Formula": "I_corrected = I_base \u00d7 temp_factor \u00d7 conduit_factor = 50 \u00d7 0.5 \u00d7 0.5",
+       "Name": "small_factors",
+       "RejectedResult": 25.0,
+       "Result": 12.5,
+       "Tag": "small_factors",
+       "TempFactor": 0.5,
+       "Units": "A"
+      },
+      "id": {
+       "entity_id": "small_factors"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 12.5
+      },
+      "type": "nec-ampacity-correction",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "Article": "NEC 310.16",
+       "BaseA": 40.0,
+       "ConduitFactor": 1.0,
+       "Formula": "I_corrected = I_base \u00d7 temp_factor \u00d7 conduit_factor = 40 \u00d7 1.05 \u00d7 1",
+       "Name": "over_unity",
+       "RejectedResult": 40.0,
+       "Result": 42.0,
+       "Tag": "over_unity",
+       "TempFactor": 1.05,
+       "Units": "A"
+      },
+      "id": {
+       "entity_id": "over_unity"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 42.0
+      },
+      "type": "nec-ampacity-correction",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "Article": "NEC 310.16",
+       "BaseA": 12.5,
+       "ConduitFactor": 0.8,
+       "Formula": "I_corrected = I_base \u00d7 temp_factor \u00d7 conduit_factor = 12.5 \u00d7 0.75 \u00d7 0.8",
+       "Name": "fractional_base",
+       "RejectedResult": 10.0,
+       "Result": 7.5,
+       "Tag": "fractional_base",
+       "TempFactor": 0.75,
+       "Units": "A"
+      },
+      "id": {
+       "entity_id": "fractional_base"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 7.5
+      },
+      "type": "nec-ampacity-correction",
+      "unit": "A"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "all_unity": "all_unity",
+    "both": "both",
+    "conduit_only": "conduit_only",
+    "fractional_base": "fractional_base",
+    "high_base": "high_base",
+    "over_unity": "over_unity",
+    "small_factors": "small_factors",
+    "temp_only": "temp_only",
+    "zero_base": "zero_base",
+    "zero_conduit": "zero_conduit",
+    "zero_temp": "zero_temp"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "75834ff013bb3a5f57a541d853d3769c6bb69a2c9aab1b24b230198e7cb957e7",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "da12ee5ef797500e7005df255c7dd80cc3662e7f614b25ed40a2789042fc79b8",
+   "output_sha256": "f6f9aabd9166f3752f1d161e78b2e0c68104a3c4b6b4d155bf85b9bd114946df",
+   "parameters": {
+    "capability": "nec-ampacity-correction",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafampcorr_probes.json",
+    "probe_file_sha256": "a2fe01fb5ee17caff4d24bed94c4c884967f97e12aa399f596ff0e25a5840f98",
+    "probe_type": "nec-ampacity-correction",
+    "side": "plugin"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "none",
+    "producer": "plugin",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  },
+  "studio": {
+   "after": {
+    "format": "json-probes",
+    "rows": [
+     {
+      "fields": {
+       "Article": "NEC 310.16",
+       "BaseA": 1.0,
+       "ConduitFactor": 1.0,
+       "Formula": "I_corrected = I_base \u00d7 temp_factor \u00d7 conduit_factor = 1 \u00d7 1 \u00d7 1",
+       "Name": "all_unity",
+       "RejectedResult": 1.0,
+       "Result": 1.0,
+       "Tag": "all_unity",
+       "TempFactor": 1.0,
+       "Units": "A"
+      },
+      "id": {
+       "entity_id": "all_unity"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 1.0
+      },
+      "type": "nec-ampacity-correction",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "Article": "NEC 310.16",
+       "BaseA": 100.0,
+       "ConduitFactor": 1.0,
+       "Formula": "I_corrected = I_base \u00d7 temp_factor \u00d7 conduit_factor = 100 \u00d7 0.82 \u00d7 1",
+       "Name": "temp_only",
+       "RejectedResult": 100.0,
+       "Result": 82.0,
+       "Tag": "temp_only",
+       "TempFactor": 0.82,
+       "Units": "A"
+      },
+      "id": {
+       "entity_id": "temp_only"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 82.0
+      },
+      "type": "nec-ampacity-correction",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "Article": "NEC 310.16",
+       "BaseA": 100.0,
+       "ConduitFactor": 0.7,
+       "Formula": "I_corrected = I_base \u00d7 temp_factor \u00d7 conduit_factor = 100 \u00d7 1 \u00d7 0.7",
+       "Name": "conduit_only",
+       "RejectedResult": 70.0,
+       "Result": 70.0,
+       "Tag": "conduit_only",
+       "TempFactor": 1.0,
+       "Units": "A"
+      },
+      "id": {
+       "entity_id": "conduit_only"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 70.0
+      },
+      "type": "nec-ampacity-correction",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "Article": "NEC 310.16",
+       "BaseA": 100.0,
+       "ConduitFactor": 0.7,
+       "Formula": "I_corrected = I_base \u00d7 temp_factor \u00d7 conduit_factor = 100 \u00d7 0.82 \u00d7 0.7",
+       "Name": "both",
+       "RejectedResult": 70.0,
+       "Result": 57.4,
+       "Tag": "both",
+       "TempFactor": 0.82,
+       "Units": "A"
+      },
+      "id": {
+       "entity_id": "both"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 57.4
+      },
+      "type": "nec-ampacity-correction",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "Article": "NEC 310.16",
+       "BaseA": 0.0,
+       "ConduitFactor": 0.7,
+       "Formula": "I_corrected = I_base \u00d7 temp_factor \u00d7 conduit_factor = 0 \u00d7 0.82 \u00d7 0.7",
+       "Name": "zero_base",
+       "RejectedResult": 0.0,
+       "Result": 0.0,
+       "Tag": "zero_base",
+       "TempFactor": 0.82,
+       "Units": "A"
+      },
+      "id": {
+       "entity_id": "zero_base"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 0.0
+      },
+      "type": "nec-ampacity-correction",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "Article": "NEC 310.16",
+       "BaseA": 100.0,
+       "ConduitFactor": 0.7,
+       "Formula": "I_corrected = I_base \u00d7 temp_factor \u00d7 conduit_factor = 100 \u00d7 0 \u00d7 0.7",
+       "Name": "zero_temp",
+       "RejectedResult": 70.0,
+       "Result": 0.0,
+       "Tag": "zero_temp",
+       "TempFactor": 0.0,
+       "Units": "A"
+      },
+      "id": {
+       "entity_id": "zero_temp"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 0.0
+      },
+      "type": "nec-ampacity-correction",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "Article": "NEC 310.16",
+       "BaseA": 100.0,
+       "ConduitFactor": 0.0,
+       "Formula": "I_corrected = I_base \u00d7 temp_factor \u00d7 conduit_factor = 100 \u00d7 0.82 \u00d7 0",
+       "Name": "zero_conduit",
+       "RejectedResult": 0.0,
+       "Result": 0.0,
+       "Tag": "zero_conduit",
+       "TempFactor": 0.82,
+       "Units": "A"
+      },
+      "id": {
+       "entity_id": "zero_conduit"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 0.0
+      },
+      "type": "nec-ampacity-correction",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "Article": "NEC 310.16",
+       "BaseA": 600.0,
+       "ConduitFactor": 0.8,
+       "Formula": "I_corrected = I_base \u00d7 temp_factor \u00d7 conduit_factor = 600 \u00d7 0.88 \u00d7 0.8",
+       "Name": "high_base",
+       "RejectedResult": 480.0,
+       "Result": 422.40000000000003,
+       "Tag": "high_base",
+       "TempFactor": 0.88,
+       "Units": "A"
+      },
+      "id": {
+       "entity_id": "high_base"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 422.40000000000003
+      },
+      "type": "nec-ampacity-correction",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "Article": "NEC 310.16",
+       "BaseA": 50.0,
+       "ConduitFactor": 0.5,
+       "Formula": "I_corrected = I_base \u00d7 temp_factor \u00d7 conduit_factor = 50 \u00d7 0.5 \u00d7 0.5",
+       "Name": "small_factors",
+       "RejectedResult": 25.0,
+       "Result": 12.5,
+       "Tag": "small_factors",
+       "TempFactor": 0.5,
+       "Units": "A"
+      },
+      "id": {
+       "entity_id": "small_factors"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 12.5
+      },
+      "type": "nec-ampacity-correction",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "Article": "NEC 310.16",
+       "BaseA": 40.0,
+       "ConduitFactor": 1.0,
+       "Formula": "I_corrected = I_base \u00d7 temp_factor \u00d7 conduit_factor = 40 \u00d7 1.05 \u00d7 1",
+       "Name": "over_unity",
+       "RejectedResult": 40.0,
+       "Result": 42.0,
+       "Tag": "over_unity",
+       "TempFactor": 1.05,
+       "Units": "A"
+      },
+      "id": {
+       "entity_id": "over_unity"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 42.0
+      },
+      "type": "nec-ampacity-correction",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "Article": "NEC 310.16",
+       "BaseA": 12.5,
+       "ConduitFactor": 0.8,
+       "Formula": "I_corrected = I_base \u00d7 temp_factor \u00d7 conduit_factor = 12.5 \u00d7 0.75 \u00d7 0.8",
+       "Name": "fractional_base",
+       "RejectedResult": 10.0,
+       "Result": 7.5,
+       "Tag": "fractional_base",
+       "TempFactor": 0.75,
+       "Units": "A"
+      },
+      "id": {
+       "entity_id": "fractional_base"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 7.5
+      },
+      "type": "nec-ampacity-correction",
+      "unit": "A"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "all_unity": "all_unity",
+    "both": "both",
+    "conduit_only": "conduit_only",
+    "fractional_base": "fractional_base",
+    "high_base": "high_base",
+    "over_unity": "over_unity",
+    "small_factors": "small_factors",
+    "temp_only": "temp_only",
+    "zero_base": "zero_base",
+    "zero_conduit": "zero_conduit",
+    "zero_temp": "zero_temp"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "75834ff013bb3a5f57a541d853d3769c6bb69a2c9aab1b24b230198e7cb957e7",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "da12ee5ef797500e7005df255c7dd80cc3662e7f614b25ed40a2789042fc79b8",
+   "output_sha256": "f6f9aabd9166f3752f1d161e78b2e0c68104a3c4b6b4d155bf85b9bd114946df",
+   "parameters": {
+    "capability": "nec-ampacity-correction",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafampcorr_probes.json",
+    "probe_file_sha256": "a2fe01fb5ee17caff4d24bed94c4c884967f97e12aa399f596ff0e25a5840f98",
+    "probe_type": "nec-ampacity-correction",
+    "side": "studio"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "server-builtin",
+    "producer": "studio",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  }
+ }
+}

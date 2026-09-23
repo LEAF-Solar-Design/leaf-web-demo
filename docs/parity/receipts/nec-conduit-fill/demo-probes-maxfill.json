@@ -1,0 +1,609 @@
+{
+ "schema": "leaf.solar-parity-receipt.v1",
+ "capability": "nec-conduit-fill",
+ "capability_version": "0",
+ "fixture": {
+  "id": "demo-probes-maxfill",
+  "sha256": "6e7d4055337374794ba87d2f71d69f4d790ab8d195cbf128bc9307824a83ab9b"
+ },
+ "plugin": {
+  "build": "LeafSolarDesign 2025 licensed 2026-09-23",
+  "state": "committed",
+  "receipt_sha256": "d62db3d572fa174e52032acc35073d037aa766e7a24b8b334f335ffc8782afb6"
+ },
+ "studio": {
+  "capability_version": "0",
+  "engine": "server-builtin"
+ },
+ "comparator": {
+  "name": "solar-w1-semantic",
+  "version": "1",
+  "verdict": "pass",
+  "diffs": []
+ },
+ "synthetic_fields": [
+  "plugin:before/recorded",
+  "plugin:changes/unrecorded",
+  "studio:before/recorded",
+  "studio:changes/unrecorded"
+ ],
+ "fallback_fields": [],
+ "synthetic_flagged": true,
+ "survived_reopen": true,
+ "produced_at": "2026-09-23T02:33:45Z",
+ "comparison": {
+  "schema": "leaf.solar-w1-comparison.v1",
+  "capability": "nec-conduit-fill",
+  "family": "exports",
+  "plugin": {
+   "after": {
+    "format": "json-probes",
+    "rows": [
+     {
+      "fields": {
+       "Fill": 0.0,
+       "N": -5,
+       "Name": "neg_minus_5",
+       "Tag": "neg_minus_5"
+      },
+      "id": {
+       "entity_id": "neg_minus_5"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Fill": 0.0,
+       "N": -1,
+       "Name": "neg_one",
+       "Tag": "neg_one"
+      },
+      "id": {
+       "entity_id": "neg_one"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Fill": 0.0,
+       "N": 0,
+       "Name": "zero",
+       "Tag": "zero"
+      },
+      "id": {
+       "entity_id": "zero"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Fill": 0.53,
+       "N": 1,
+       "Name": "one",
+       "Tag": "one"
+      },
+      "id": {
+       "entity_id": "one"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.53
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Fill": 0.31,
+       "N": 2,
+       "Name": "two",
+       "Tag": "two"
+      },
+      "id": {
+       "entity_id": "two"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.31
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Fill": 0.4,
+       "N": 3,
+       "Name": "three",
+       "Tag": "three"
+      },
+      "id": {
+       "entity_id": "three"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.4
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Fill": 0.4,
+       "N": 4,
+       "Name": "four",
+       "Tag": "four"
+      },
+      "id": {
+       "entity_id": "four"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.4
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Fill": 0.4,
+       "N": 10,
+       "Name": "ten",
+       "Tag": "ten"
+      },
+      "id": {
+       "entity_id": "ten"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.4
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Fill": 0.4,
+       "N": 100,
+       "Name": "hundred",
+       "Tag": "hundred"
+      },
+      "id": {
+       "entity_id": "hundred"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.4
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Fill": 0.4,
+       "N": 1000,
+       "Name": "thousand",
+       "Tag": "thousand"
+      },
+      "id": {
+       "entity_id": "thousand"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.4
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Fill": 0.4,
+       "N": 2147483647,
+       "Name": "intmax",
+       "Tag": "intmax"
+      },
+      "id": {
+       "entity_id": "intmax"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.4
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "four": "four",
+    "hundred": "hundred",
+    "intmax": "intmax",
+    "neg_minus_5": "neg_minus_5",
+    "neg_one": "neg_one",
+    "one": "one",
+    "ten": "ten",
+    "thousand": "thousand",
+    "three": "three",
+    "two": "two",
+    "zero": "zero"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "6e7d4055337374794ba87d2f71d69f4d790ab8d195cbf128bc9307824a83ab9b",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "125287b4e19b65f5b846395fb38cb740cd5f91ceed1e2c963069311824ad78b7",
+   "output_sha256": "530c5f50431a99a082d73ea07be291b813f6cfbb8947642b3e69e0bee2e0261b",
+   "parameters": {
+    "capability": "nec-conduit-fill",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafmaxfill_probes.json",
+    "probe_file_sha256": "b9170a140764d8bb0f16bd72e729bfc548e6b2babf6bea5b86d0bdf14f3ee9d3",
+    "probe_type": "nec-max-fill-fraction",
+    "side": "plugin"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "none",
+    "producer": "plugin",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  },
+  "studio": {
+   "after": {
+    "format": "json-probes",
+    "rows": [
+     {
+      "fields": {
+       "Fill": 0.0,
+       "N": -5,
+       "Name": "neg_minus_5",
+       "Tag": "neg_minus_5"
+      },
+      "id": {
+       "entity_id": "neg_minus_5"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Fill": 0.0,
+       "N": -1,
+       "Name": "neg_one",
+       "Tag": "neg_one"
+      },
+      "id": {
+       "entity_id": "neg_one"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Fill": 0.0,
+       "N": 0,
+       "Name": "zero",
+       "Tag": "zero"
+      },
+      "id": {
+       "entity_id": "zero"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.0
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Fill": 0.53,
+       "N": 1,
+       "Name": "one",
+       "Tag": "one"
+      },
+      "id": {
+       "entity_id": "one"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.53
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Fill": 0.31,
+       "N": 2,
+       "Name": "two",
+       "Tag": "two"
+      },
+      "id": {
+       "entity_id": "two"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.31
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Fill": 0.4,
+       "N": 3,
+       "Name": "three",
+       "Tag": "three"
+      },
+      "id": {
+       "entity_id": "three"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.4
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Fill": 0.4,
+       "N": 4,
+       "Name": "four",
+       "Tag": "four"
+      },
+      "id": {
+       "entity_id": "four"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.4
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Fill": 0.4,
+       "N": 10,
+       "Name": "ten",
+       "Tag": "ten"
+      },
+      "id": {
+       "entity_id": "ten"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.4
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Fill": 0.4,
+       "N": 100,
+       "Name": "hundred",
+       "Tag": "hundred"
+      },
+      "id": {
+       "entity_id": "hundred"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.4
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Fill": 0.4,
+       "N": 1000,
+       "Name": "thousand",
+       "Tag": "thousand"
+      },
+      "id": {
+       "entity_id": "thousand"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.4
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Fill": 0.4,
+       "N": 2147483647,
+       "Name": "intmax",
+       "Tag": "intmax"
+      },
+      "id": {
+       "entity_id": "intmax"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 0.4
+      },
+      "type": "nec-max-fill-fraction",
+      "unit": "none"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "four": "four",
+    "hundred": "hundred",
+    "intmax": "intmax",
+    "neg_minus_5": "neg_minus_5",
+    "neg_one": "neg_one",
+    "one": "one",
+    "ten": "ten",
+    "thousand": "thousand",
+    "three": "three",
+    "two": "two",
+    "zero": "zero"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "6e7d4055337374794ba87d2f71d69f4d790ab8d195cbf128bc9307824a83ab9b",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "125287b4e19b65f5b846395fb38cb740cd5f91ceed1e2c963069311824ad78b7",
+   "output_sha256": "530c5f50431a99a082d73ea07be291b813f6cfbb8947642b3e69e0bee2e0261b",
+   "parameters": {
+    "capability": "nec-conduit-fill",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafmaxfill_probes.json",
+    "probe_file_sha256": "b9170a140764d8bb0f16bd72e729bfc548e6b2babf6bea5b86d0bdf14f3ee9d3",
+    "probe_type": "nec-max-fill-fraction",
+    "side": "studio"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "server-builtin",
+    "producer": "studio",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  }
+ }
+}

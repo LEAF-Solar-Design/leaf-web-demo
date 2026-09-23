@@ -1,0 +1,719 @@
+{
+ "schema": "leaf.solar-parity-receipt.v1",
+ "capability": "nec-feeder-ocpd-sizing",
+ "capability_version": "0",
+ "fixture": {
+  "id": "demo-probes",
+  "sha256": "5ad2921a68fa3ab42f99df1d34d60d730b9b754ccd4214be6c3a5e2c5497a3d4"
+ },
+ "plugin": {
+  "build": "LeafSolarDesign 2025 licensed 2026-09-23",
+  "state": "committed",
+  "receipt_sha256": "8bf2b32e004e156ae0b5f918a5b1e6cdbcfe502a199982856be1021c7a5e8e16"
+ },
+ "studio": {
+  "capability_version": "0",
+  "engine": "server-builtin"
+ },
+ "comparator": {
+  "name": "solar-w1-semantic",
+  "version": "1",
+  "verdict": "pass",
+  "diffs": []
+ },
+ "synthetic_fields": [
+  "plugin:before/recorded",
+  "plugin:changes/unrecorded",
+  "studio:before/recorded",
+  "studio:changes/unrecorded"
+ ],
+ "fallback_fields": [],
+ "synthetic_flagged": true,
+ "survived_reopen": true,
+ "produced_at": "2026-09-23T02:33:46Z",
+ "comparison": {
+  "schema": "leaf.solar-w1-comparison.v1",
+  "capability": "nec-feeder-ocpd-sizing",
+  "family": "exports",
+  "plugin": {
+   "after": {
+    "format": "json-probes",
+    "rows": [
+     {
+      "fields": {
+       "ContinuousCurrentA": 20.0,
+       "EgcGauge": "10 AWG",
+       "EgcMaterial": "Copper",
+       "IsContinuous": true,
+       "MinOcpdA": 25.0,
+       "Name": "feeder_cont_cu_20a",
+       "Note": "NEC 215.3 \u2014 20.0A \u00d7 1.25 = 25.0A \u2192 25A OCPD; EGC: 10 AWG per NEC 250.122",
+       "OcpdRatingA": 25.0,
+       "Tag": "feeder_cont_cu_20a"
+      },
+      "id": {
+       "entity_id": "feeder_cont_cu_20a"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 25.0
+      },
+      "type": "nec-feeder-ocpd-sizing",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "ContinuousCurrentA": 20.0,
+       "EgcGauge": "8 AWG",
+       "EgcMaterial": "Aluminum",
+       "IsContinuous": true,
+       "MinOcpdA": 25.0,
+       "Name": "feeder_cont_al_20a",
+       "Note": "NEC 215.3 \u2014 20.0A \u00d7 1.25 = 25.0A \u2192 25A OCPD; EGC: 8 AWG per NEC 250.122",
+       "OcpdRatingA": 25.0,
+       "Tag": "feeder_cont_al_20a"
+      },
+      "id": {
+       "entity_id": "feeder_cont_al_20a"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 25.0
+      },
+      "type": "nec-feeder-ocpd-sizing",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "ContinuousCurrentA": 20.0,
+       "EgcGauge": "12 AWG",
+       "EgcMaterial": "Copper",
+       "IsContinuous": false,
+       "MinOcpdA": 20.0,
+       "Name": "feeder_noncont_cu_20a",
+       "Note": "NEC 210.20(A) \u2014 20.0A \u2192 20A OCPD; EGC: 12 AWG per NEC 250.122",
+       "OcpdRatingA": 20.0,
+       "Tag": "feeder_noncont_cu_20a"
+      },
+      "id": {
+       "entity_id": "feeder_noncont_cu_20a"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 20.0
+      },
+      "type": "nec-feeder-ocpd-sizing",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "ContinuousCurrentA": 100.0,
+       "EgcGauge": "6 AWG",
+       "EgcMaterial": "Copper",
+       "IsContinuous": true,
+       "MinOcpdA": 125.0,
+       "Name": "feeder_cont_cu_100a",
+       "Note": "NEC 215.3 \u2014 100.0A \u00d7 1.25 = 125.0A \u2192 125A OCPD; EGC: 6 AWG per NEC 250.122",
+       "OcpdRatingA": 125.0,
+       "Tag": "feeder_cont_cu_100a"
+      },
+      "id": {
+       "entity_id": "feeder_cont_cu_100a"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 125.0
+      },
+      "type": "nec-feeder-ocpd-sizing",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "ContinuousCurrentA": 10.0,
+       "EgcGauge": "14 AWG",
+       "EgcMaterial": "Copper",
+       "IsContinuous": true,
+       "MinOcpdA": 12.5,
+       "Name": "feeder_cont_small_10a",
+       "Note": "NEC 215.3 \u2014 10.0A \u00d7 1.25 = 12.5A \u2192 15A OCPD; EGC: 14 AWG per NEC 250.122",
+       "OcpdRatingA": 15.0,
+       "Tag": "feeder_cont_small_10a"
+      },
+      "id": {
+       "entity_id": "feeder_cont_small_10a"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 15.0
+      },
+      "type": "nec-feeder-ocpd-sizing",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "ContinuousCurrentA": 12.0,
+       "EgcGauge": "14 AWG",
+       "EgcMaterial": "Copper",
+       "IsContinuous": true,
+       "MinOcpdA": 15.0,
+       "Name": "feeder_cont_at_boundary_12a",
+       "Note": "NEC 215.3 \u2014 12.0A \u00d7 1.25 = 15.0A \u2192 15A OCPD; EGC: 14 AWG per NEC 250.122",
+       "OcpdRatingA": 15.0,
+       "Tag": "feeder_cont_at_boundary_12a"
+      },
+      "id": {
+       "entity_id": "feeder_cont_at_boundary_12a"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 15.0
+      },
+      "type": "nec-feeder-ocpd-sizing",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "ContinuousCurrentA": 4800.0,
+       "EgcGauge": "750 kcmil",
+       "EgcMaterial": "Copper",
+       "IsContinuous": true,
+       "MinOcpdA": 6000.0,
+       "Name": "feeder_cont_at_table_max_4800a",
+       "Note": "NEC 215.3 \u2014 4800.0A \u00d7 1.25 = 6000.0A \u2192 6000A OCPD; EGC: 750 kcmil per NEC 250.122",
+       "OcpdRatingA": 6000.0,
+       "Tag": "feeder_cont_at_table_max_4800a"
+      },
+      "id": {
+       "entity_id": "feeder_cont_at_table_max_4800a"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 6000.0
+      },
+      "type": "nec-feeder-ocpd-sizing",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "ContinuousCurrentA": 7000.0,
+       "EgcGauge": null,
+       "EgcMaterial": "Copper",
+       "IsContinuous": true,
+       "MinOcpdA": 8750.0,
+       "Name": "feeder_cont_above_table_7000a",
+       "Note": "NEC 215.3 \u2014 7000.0A \u00d7 1.25 = 8750.0A \u2192 8750A OCPD; EGC: N/A per NEC 250.122",
+       "OcpdRatingA": 8750.0,
+       "Tag": "feeder_cont_above_table_7000a"
+      },
+      "id": {
+       "entity_id": "feeder_cont_above_table_7000a"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 8750.0
+      },
+      "type": "nec-feeder-ocpd-sizing",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "ContinuousCurrentA": 100.0,
+       "EgcGauge": "8 AWG",
+       "EgcMaterial": "Copper",
+       "IsContinuous": false,
+       "MinOcpdA": 100.0,
+       "Name": "feeder_noncont_cu_100a",
+       "Note": "NEC 210.20(A) \u2014 100.0A \u2192 100A OCPD; EGC: 8 AWG per NEC 250.122",
+       "OcpdRatingA": 100.0,
+       "Tag": "feeder_noncont_cu_100a"
+      },
+      "id": {
+       "entity_id": "feeder_noncont_cu_100a"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 100.0
+      },
+      "type": "nec-feeder-ocpd-sizing",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "ContinuousCurrentA": 100.0,
+       "EgcGauge": "6 AWG",
+       "EgcMaterial": "Aluminum",
+       "IsContinuous": false,
+       "MinOcpdA": 100.0,
+       "Name": "feeder_noncont_al_100a",
+       "Note": "NEC 210.20(A) \u2014 100.0A \u2192 100A OCPD; EGC: 6 AWG per NEC 250.122",
+       "OcpdRatingA": 100.0,
+       "Tag": "feeder_noncont_al_100a"
+      },
+      "id": {
+       "entity_id": "feeder_noncont_al_100a"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 100.0
+      },
+      "type": "nec-feeder-ocpd-sizing",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "ContinuousCurrentA": 12.5,
+       "EgcGauge": "12 AWG",
+       "EgcMaterial": "Copper",
+       "IsContinuous": true,
+       "MinOcpdA": 15.625,
+       "Name": "feeder_cont_fractional_12p5a",
+       "Note": "NEC 215.3 \u2014 12.5A \u00d7 1.25 = 15.6A \u2192 20A OCPD; EGC: 12 AWG per NEC 250.122",
+       "OcpdRatingA": 20.0,
+       "Tag": "feeder_cont_fractional_12p5a"
+      },
+      "id": {
+       "entity_id": "feeder_cont_fractional_12p5a"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 20.0
+      },
+      "type": "nec-feeder-ocpd-sizing",
+      "unit": "A"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "feeder_cont_above_table_7000a": "feeder_cont_above_table_7000a",
+    "feeder_cont_al_20a": "feeder_cont_al_20a",
+    "feeder_cont_at_boundary_12a": "feeder_cont_at_boundary_12a",
+    "feeder_cont_at_table_max_4800a": "feeder_cont_at_table_max_4800a",
+    "feeder_cont_cu_100a": "feeder_cont_cu_100a",
+    "feeder_cont_cu_20a": "feeder_cont_cu_20a",
+    "feeder_cont_fractional_12p5a": "feeder_cont_fractional_12p5a",
+    "feeder_cont_small_10a": "feeder_cont_small_10a",
+    "feeder_noncont_al_100a": "feeder_noncont_al_100a",
+    "feeder_noncont_cu_100a": "feeder_noncont_cu_100a",
+    "feeder_noncont_cu_20a": "feeder_noncont_cu_20a"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "5ad2921a68fa3ab42f99df1d34d60d730b9b754ccd4214be6c3a5e2c5497a3d4",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "1ec3b1ceeeed6aeead7af810f3a1af9c6e912882a71341ca3d1ed13c206b53b6",
+   "output_sha256": "09444a68d97e59e9c1625c278399ff5a1cd4e15472d621153c8c27a8bb32072a",
+   "parameters": {
+    "capability": "nec-feeder-ocpd-sizing",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leaffeederocpd_probes.json",
+    "probe_file_sha256": "039e22e48d1035b0c7155516281d8da760fbaf3d055304df19969dec879b98a1",
+    "probe_type": "nec-feeder-ocpd-sizing",
+    "side": "plugin"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "none",
+    "producer": "plugin",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  },
+  "studio": {
+   "after": {
+    "format": "json-probes",
+    "rows": [
+     {
+      "fields": {
+       "ContinuousCurrentA": 20.0,
+       "EgcGauge": "10 AWG",
+       "EgcMaterial": "Copper",
+       "IsContinuous": true,
+       "MinOcpdA": 25.0,
+       "Name": "feeder_cont_cu_20a",
+       "Note": "NEC 215.3 \u2014 20.0A \u00d7 1.25 = 25.0A \u2192 25A OCPD; EGC: 10 AWG per NEC 250.122",
+       "OcpdRatingA": 25.0,
+       "Tag": "feeder_cont_cu_20a"
+      },
+      "id": {
+       "entity_id": "feeder_cont_cu_20a"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 25.0
+      },
+      "type": "nec-feeder-ocpd-sizing",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "ContinuousCurrentA": 20.0,
+       "EgcGauge": "8 AWG",
+       "EgcMaterial": "Aluminum",
+       "IsContinuous": true,
+       "MinOcpdA": 25.0,
+       "Name": "feeder_cont_al_20a",
+       "Note": "NEC 215.3 \u2014 20.0A \u00d7 1.25 = 25.0A \u2192 25A OCPD; EGC: 8 AWG per NEC 250.122",
+       "OcpdRatingA": 25.0,
+       "Tag": "feeder_cont_al_20a"
+      },
+      "id": {
+       "entity_id": "feeder_cont_al_20a"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 25.0
+      },
+      "type": "nec-feeder-ocpd-sizing",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "ContinuousCurrentA": 20.0,
+       "EgcGauge": "12 AWG",
+       "EgcMaterial": "Copper",
+       "IsContinuous": false,
+       "MinOcpdA": 20.0,
+       "Name": "feeder_noncont_cu_20a",
+       "Note": "NEC 210.20(A) \u2014 20.0A \u2192 20A OCPD; EGC: 12 AWG per NEC 250.122",
+       "OcpdRatingA": 20.0,
+       "Tag": "feeder_noncont_cu_20a"
+      },
+      "id": {
+       "entity_id": "feeder_noncont_cu_20a"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 20.0
+      },
+      "type": "nec-feeder-ocpd-sizing",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "ContinuousCurrentA": 100.0,
+       "EgcGauge": "6 AWG",
+       "EgcMaterial": "Copper",
+       "IsContinuous": true,
+       "MinOcpdA": 125.0,
+       "Name": "feeder_cont_cu_100a",
+       "Note": "NEC 215.3 \u2014 100.0A \u00d7 1.25 = 125.0A \u2192 125A OCPD; EGC: 6 AWG per NEC 250.122",
+       "OcpdRatingA": 125.0,
+       "Tag": "feeder_cont_cu_100a"
+      },
+      "id": {
+       "entity_id": "feeder_cont_cu_100a"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 125.0
+      },
+      "type": "nec-feeder-ocpd-sizing",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "ContinuousCurrentA": 10.0,
+       "EgcGauge": "14 AWG",
+       "EgcMaterial": "Copper",
+       "IsContinuous": true,
+       "MinOcpdA": 12.5,
+       "Name": "feeder_cont_small_10a",
+       "Note": "NEC 215.3 \u2014 10.0A \u00d7 1.25 = 12.5A \u2192 15A OCPD; EGC: 14 AWG per NEC 250.122",
+       "OcpdRatingA": 15.0,
+       "Tag": "feeder_cont_small_10a"
+      },
+      "id": {
+       "entity_id": "feeder_cont_small_10a"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 15.0
+      },
+      "type": "nec-feeder-ocpd-sizing",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "ContinuousCurrentA": 12.0,
+       "EgcGauge": "14 AWG",
+       "EgcMaterial": "Copper",
+       "IsContinuous": true,
+       "MinOcpdA": 15.0,
+       "Name": "feeder_cont_at_boundary_12a",
+       "Note": "NEC 215.3 \u2014 12.0A \u00d7 1.25 = 15.0A \u2192 15A OCPD; EGC: 14 AWG per NEC 250.122",
+       "OcpdRatingA": 15.0,
+       "Tag": "feeder_cont_at_boundary_12a"
+      },
+      "id": {
+       "entity_id": "feeder_cont_at_boundary_12a"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 15.0
+      },
+      "type": "nec-feeder-ocpd-sizing",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "ContinuousCurrentA": 4800.0,
+       "EgcGauge": "750 kcmil",
+       "EgcMaterial": "Copper",
+       "IsContinuous": true,
+       "MinOcpdA": 6000.0,
+       "Name": "feeder_cont_at_table_max_4800a",
+       "Note": "NEC 215.3 \u2014 4800.0A \u00d7 1.25 = 6000.0A \u2192 6000A OCPD; EGC: 750 kcmil per NEC 250.122",
+       "OcpdRatingA": 6000.0,
+       "Tag": "feeder_cont_at_table_max_4800a"
+      },
+      "id": {
+       "entity_id": "feeder_cont_at_table_max_4800a"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 6000.0
+      },
+      "type": "nec-feeder-ocpd-sizing",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "ContinuousCurrentA": 7000.0,
+       "EgcGauge": null,
+       "EgcMaterial": "Copper",
+       "IsContinuous": true,
+       "MinOcpdA": 8750.0,
+       "Name": "feeder_cont_above_table_7000a",
+       "Note": "NEC 215.3 \u2014 7000.0A \u00d7 1.25 = 8750.0A \u2192 8750A OCPD; EGC: N/A per NEC 250.122",
+       "OcpdRatingA": 8750.0,
+       "Tag": "feeder_cont_above_table_7000a"
+      },
+      "id": {
+       "entity_id": "feeder_cont_above_table_7000a"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 8750.0
+      },
+      "type": "nec-feeder-ocpd-sizing",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "ContinuousCurrentA": 100.0,
+       "EgcGauge": "8 AWG",
+       "EgcMaterial": "Copper",
+       "IsContinuous": false,
+       "MinOcpdA": 100.0,
+       "Name": "feeder_noncont_cu_100a",
+       "Note": "NEC 210.20(A) \u2014 100.0A \u2192 100A OCPD; EGC: 8 AWG per NEC 250.122",
+       "OcpdRatingA": 100.0,
+       "Tag": "feeder_noncont_cu_100a"
+      },
+      "id": {
+       "entity_id": "feeder_noncont_cu_100a"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 100.0
+      },
+      "type": "nec-feeder-ocpd-sizing",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "ContinuousCurrentA": 100.0,
+       "EgcGauge": "6 AWG",
+       "EgcMaterial": "Aluminum",
+       "IsContinuous": false,
+       "MinOcpdA": 100.0,
+       "Name": "feeder_noncont_al_100a",
+       "Note": "NEC 210.20(A) \u2014 100.0A \u2192 100A OCPD; EGC: 6 AWG per NEC 250.122",
+       "OcpdRatingA": 100.0,
+       "Tag": "feeder_noncont_al_100a"
+      },
+      "id": {
+       "entity_id": "feeder_noncont_al_100a"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 100.0
+      },
+      "type": "nec-feeder-ocpd-sizing",
+      "unit": "A"
+     },
+     {
+      "fields": {
+       "ContinuousCurrentA": 12.5,
+       "EgcGauge": "12 AWG",
+       "EgcMaterial": "Copper",
+       "IsContinuous": true,
+       "MinOcpdA": 15.625,
+       "Name": "feeder_cont_fractional_12p5a",
+       "Note": "NEC 215.3 \u2014 12.5A \u00d7 1.25 = 15.6A \u2192 20A OCPD; EGC: 12 AWG per NEC 250.122",
+       "OcpdRatingA": 20.0,
+       "Tag": "feeder_cont_fractional_12p5a"
+      },
+      "id": {
+       "entity_id": "feeder_cont_fractional_12p5a"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "A",
+       "value": 20.0
+      },
+      "type": "nec-feeder-ocpd-sizing",
+      "unit": "A"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "feeder_cont_above_table_7000a": "feeder_cont_above_table_7000a",
+    "feeder_cont_al_20a": "feeder_cont_al_20a",
+    "feeder_cont_at_boundary_12a": "feeder_cont_at_boundary_12a",
+    "feeder_cont_at_table_max_4800a": "feeder_cont_at_table_max_4800a",
+    "feeder_cont_cu_100a": "feeder_cont_cu_100a",
+    "feeder_cont_cu_20a": "feeder_cont_cu_20a",
+    "feeder_cont_fractional_12p5a": "feeder_cont_fractional_12p5a",
+    "feeder_cont_small_10a": "feeder_cont_small_10a",
+    "feeder_noncont_al_100a": "feeder_noncont_al_100a",
+    "feeder_noncont_cu_100a": "feeder_noncont_cu_100a",
+    "feeder_noncont_cu_20a": "feeder_noncont_cu_20a"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "5ad2921a68fa3ab42f99df1d34d60d730b9b754ccd4214be6c3a5e2c5497a3d4",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "1ec3b1ceeeed6aeead7af810f3a1af9c6e912882a71341ca3d1ed13c206b53b6",
+   "output_sha256": "09444a68d97e59e9c1625c278399ff5a1cd4e15472d621153c8c27a8bb32072a",
+   "parameters": {
+    "capability": "nec-feeder-ocpd-sizing",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leaffeederocpd_probes.json",
+    "probe_file_sha256": "039e22e48d1035b0c7155516281d8da760fbaf3d055304df19969dec879b98a1",
+    "probe_type": "nec-feeder-ocpd-sizing",
+    "side": "studio"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "server-builtin",
+    "producer": "studio",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  }
+ }
+}

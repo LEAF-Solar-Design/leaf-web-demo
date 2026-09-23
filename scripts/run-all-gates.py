@@ -381,6 +381,21 @@ def build_suites() -> List[Suite]:
         # ConservationLaw rows + one over 8 literal out-of-range arguments = 35.
         Suite("server-w2-string-combo", "server tests/test_solar_string_combo.py", "pytest", SERVER,
               _py_pytest("tests/test_solar_string_combo.py"), 35),
+        # S26 NEC port (2026-09-22): server/solar_nec.py, the literal port of the
+        # licensed plugin's four NEC engines (AC voltage drop, ampacity correction,
+        # Chapter 9 conduit fill, 240.6(A)/250.122 OCPD and EGC sizing) plus the C#
+        # number formatters its strings depend on. Three layers: the formatters, the
+        # plugin's OWN NUnit cases ported from NecConduitFillEngineTests.cs and
+        # NecOcpdSizingTests.cs, and every probe in the six licensed DEMO capture
+        # files reproduced by COMPUTING it through Studio's ported scenario lists.
+        # Hermetic and skip-free on every runner: the capture is not committed here,
+        # so its expected values are transcribed into the test file and the two
+        # capture-reading tests assert the capture is present as a whole or not at
+        # all rather than skipping. Floor MEASURED at 221 on the first green run
+        # (2026-09-22, 1.6 s): 36 test functions, 24 of them parametrized over
+        # literal lists.
+        Suite("server-solar-nec", "server tests/test_solar_nec.py", "pytest", SERVER,
+              _py_pytest("tests/test_solar_nec.py"), 221),
         Suite("server-w1-sizing-groups", "server tests/test_w1_sizing_groups.py", "pytest", SERVER,
               _py_pytest("tests/test_w1_sizing_groups.py"), 52),
         Suite("server-w1-solar-interchange", "server tests/test_w1_solar_interchange.py", "pytest", SERVER,
@@ -1611,6 +1626,24 @@ def build_suites() -> List[Suite]:
         Suite("scripts-solar-w1-studio-string-multi-add",
               "scripts test_solar_w1_studio_string_multi_add.py", "pytest", SCRIPTS_DIR,
               _py_pytest("test_solar_w1_studio_string_multi_add.py"), 17),
+        # S26 (2026-09-22): the shared probe-file normalizer, contract v5 rules E1-E5.
+        # Every DEMO probe file becomes `exports` evidence the frozen comparator
+        # accepts, from either side, through the same code. Covers the evidence
+        # shape, rule E4's identity mapping, rule E3's file order across the
+        # conduit-fill file's four batteries, rule E1 (the fixture is the INPUTS, so
+        # two files with equal scenarios and different results share it), the pass
+        # verdict for Studio against the licensed capture, one altered result
+        # producing exactly one row's diffs, an unobserved reopen refused, and the
+        # malformed documents and arguments that are refused rather than answered.
+        # Studio's own probe files are generated in tmp_path by
+        # scripts/solar_nec_probes.py, so the suite is hermetic and never skips:
+        # without the licensed capture the comparison runs against Studio's own file
+        # read back from a second path. The floor is CONSERVATIVE, not measured (see
+        # server-solar-nec above): 15 test functions, 9 parametrized over the six
+        # demos or over literal malformed inputs. Floor MEASURED at 61 on the first
+        # green run (2026-09-22, 1.5 s).
+        Suite("scripts-solar-probe-evidence", "scripts test_solar_probe_evidence.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_probe_evidence.py"), 61),
         # S22 (2026-09-22): contract rule G9 on the Studio evidence adapter, the first
         # test file it has. A set-valued list (unassigned_panels, duplicate_panels) is
         # emitted in ascending neutral-id order, so the same set recorded in two orders

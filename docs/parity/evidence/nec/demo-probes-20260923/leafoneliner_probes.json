@@ -1,0 +1,141 @@
+[
+  {
+    "Name": "minimal",
+    "Tag": "minimal",
+    "Article": "NEC 690.8(A)",
+    "ShortDescription": "Continuous current",
+    "Formula": "I*1.25",
+    "Result": 1.0,
+    "Units": null,
+    "HasSyntheticInputs": false,
+    "SyntheticInputNames": [],
+    "OneLiner": "NEC 690.8(A) — Continuous current: I*1.25 = 1"
+  },
+  {
+    "Name": "with_units",
+    "Tag": "with_units",
+    "Article": "NEC 690.8(A)",
+    "ShortDescription": "Continuous current",
+    "Formula": "I*1.25",
+    "Result": 1.0,
+    "Units": "A",
+    "HasSyntheticInputs": false,
+    "SyntheticInputNames": [],
+    "OneLiner": "NEC 690.8(A) — Continuous current: I*1.25 = 1 A"
+  },
+  {
+    "Name": "decimal_res",
+    "Tag": "decimal_res",
+    "Article": "NEC 690.7(A)(3)",
+    "ShortDescription": "Cold Voc",
+    "Formula": "Voc*(1+b*dT)",
+    "Result": 60.5,
+    "Units": "V",
+    "HasSyntheticInputs": false,
+    "SyntheticInputNames": [],
+    "OneLiner": "NEC 690.7(A)(3) — Cold Voc: Voc*(1+b*dT) = 60.5 V"
+  },
+  {
+    "Name": "zero_res",
+    "Tag": "zero_res",
+    "Article": "A",
+    "ShortDescription": "d",
+    "Formula": "f",
+    "Result": 0.0,
+    "Units": "%",
+    "HasSyntheticInputs": false,
+    "SyntheticInputNames": [],
+    "OneLiner": "A — d: f = 0 %"
+  },
+  {
+    "Name": "neg_res",
+    "Tag": "neg_res",
+    "Article": "A",
+    "ShortDescription": "d",
+    "Formula": "f",
+    "Result": -3.14,
+    "Units": "C",
+    "HasSyntheticInputs": false,
+    "SyntheticInputNames": [],
+    "OneLiner": "A — d: f = -3.14 C"
+  },
+  {
+    "Name": "six_digits",
+    "Tag": "six_digits",
+    "Article": "A",
+    "ShortDescription": "d",
+    "Formula": "f",
+    "Result": 123.456,
+    "Units": "ft",
+    "HasSyntheticInputs": false,
+    "SyntheticInputNames": [],
+    "OneLiner": "A — d: f = 123.456 ft"
+  },
+  {
+    "Name": "round_six",
+    "Tag": "round_six",
+    "Article": "A",
+    "ShortDescription": "d",
+    "Formula": "f",
+    "Result": 123.4567,
+    "Units": "ft",
+    "HasSyntheticInputs": false,
+    "SyntheticInputNames": [],
+    "OneLiner": "A — d: f = 123.457 ft"
+  },
+  {
+    "Name": "empty_units",
+    "Tag": "empty_units",
+    "Article": "A",
+    "ShortDescription": "d",
+    "Formula": "f",
+    "Result": 1.0,
+    "Units": "",
+    "HasSyntheticInputs": false,
+    "SyntheticInputNames": [],
+    "OneLiner": "A — d: f = 1"
+  },
+  {
+    "Name": "synth_one",
+    "Tag": "synth_one",
+    "Article": "A",
+    "ShortDescription": "d",
+    "Formula": "f",
+    "Result": 1.0,
+    "Units": null,
+    "HasSyntheticInputs": true,
+    "SyntheticInputNames": [
+      "bvoc"
+    ],
+    "OneLiner": "A — d: f = 1 [SYNTHETIC: bvoc]"
+  },
+  {
+    "Name": "synth_multi",
+    "Tag": "synth_multi",
+    "Article": "A",
+    "ShortDescription": "d",
+    "Formula": "f",
+    "Result": 1.0,
+    "Units": null,
+    "HasSyntheticInputs": true,
+    "SyntheticInputNames": [
+      "bvoc",
+      "tmax"
+    ],
+    "OneLiner": "A — d: f = 1 [SYNTHETIC: bvoc, tmax]"
+  },
+  {
+    "Name": "synth_units",
+    "Tag": "synth_units",
+    "Article": "A",
+    "ShortDescription": "d",
+    "Formula": "f",
+    "Result": 1.0,
+    "Units": "V",
+    "HasSyntheticInputs": true,
+    "SyntheticInputNames": [
+      "isc"
+    ],
+    "OneLiner": "A — d: f = 1 V [SYNTHETIC: isc]"
+  }
+]
