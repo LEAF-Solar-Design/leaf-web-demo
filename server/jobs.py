@@ -1563,7 +1563,7 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
             aps_live
             and plan is None
             and err.get("error_code") != ErrorCode.TURN_IN_PROGRESS
-            and not is_scope_refusal(err)
+            and not (entity_scope is not None and is_scope_refusal(err))
             and _allows_local_fallback(tool)
         ):
             _run_local_fallback(job_id, worker_id, tenant_id, tool, params, dwg, attempt, provenance,

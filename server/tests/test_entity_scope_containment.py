@@ -161,6 +161,22 @@ def test_c1_output_refuses_another_record():
                      scope.REASON_OUT_OF_SCOPE, out_message("2B"))
 
 
+def test_c1b_output_refuses_a_collection_move():
+    after = intake()
+    moved = after["polylines"].pop()
+    after["circles"] = [moved]
+    assert_exception(lambda: scope.check_output_exact(B, intake(), after),
+                     scope.REASON_OUT_OF_SCOPE, out_message("2B"))
+
+
+def test_c1b_output_absent_collection_equals_empty():
+    before = intake()
+    after = deepcopy(before)
+    after["texts"] = []
+    scope.check_output_exact(B, before, after)
+    scope.check_output_exact(B, after, before)
+
+
 def test_c1_output_refuses_a_deleted_neighbour():
     after = intake()
     after["polylines"].pop()
@@ -330,6 +346,48 @@ def test_c1_mock_scoped_non_payload_intake_refuses(drawing, monkeypatch):
     unchanged(d, saved)
 
 
+def _side_effecting_tool(tool, received, params, **kwargs):
+    received["polylines"][1]["pts"][0][0] = 999
+    received["layers"].append("Injected")
+    return {"ok": True, "result": {"mutations": transform()}}
+
+
+def test_c1b_mock_tool_side_effects_are_not_published(drawing):
+    d = drawing()
+    env, status = mock_run(d, run=_side_effecting_tool)
+    assert status == 200
+    assert env["result"]["new_version"] == {
+        "drawing_id": "demo", "version": 3, "parent": 2}
+    version, after = write_loop.read_intake(d.backend, TENANT, "demo", 3)
+    assert version == 3
+    assert after["polylines"][0]["pts"][0] == [3.0, 4.0, 7.0]
+    assert after["polylines"][1] == d.before["polylines"][1]
+    assert after["layers"] == d.before["layers"]
+
+
+def test_c1b_mock_tool_side_effects_unscoped_unchanged(drawing):
+    d = drawing()
+    env, status = mock_run(d, scoped=False, run=_side_effecting_tool)
+    assert status == 200
+    assert env["result"]["new_version"] == {
+        "drawing_id": "demo", "version": 3, "parent": 2}
+    version, after = write_loop.read_intake(d.backend, TENANT, "demo", 3)
+    assert version == 3
+    assert after["polylines"][1]["pts"][0][0] == 999
+    assert "Injected" in after["layers"]
+
+
+def test_c1b_plan_check_refusal_is_never_swallowed(drawing, monkeypatch):
+    d = drawing()
+
+    def refuse(*args, **kwargs):
+        raise scope.ContainmentRefusal(scope.REASON_UNCHECKABLE, UNCHECKABLE)
+
+    monkeypatch.setattr(write_loop, "validate_mutations", refuse)
+    assert_refusal(mock_run(d, transform(), dry_run=True),
+                   scope.REASON_UNCHECKABLE, UNCHECKABLE)
+
+
 @pytest.mark.parametrize("handle", ["2A", "2B"])
 def test_c1_mock_scoped_dry_run(drawing, handle):
     d = drawing()
@@ -359,6 +417,15 @@ def test_c1_mock_scoped_stale_parent_at_publish(drawing, monkeypatch):
     saved = snapshot(d)
     monkeypatch.setattr(write_loop, "_put_bytes_version",
                         Mock(side_effect=ValueError("stale parent 2: head is now 3")))
+    assert_refusal(mock_run(d, transform()), scope.REASON_PARENT, PARENT)
+    unchanged(d, saved)
+
+
+def test_c1b_mock_scoped_stale_head_postgres_message(drawing, monkeypatch):
+    d = drawing()
+    saved = snapshot(d)
+    monkeypatch.setattr(write_loop, "_put_bytes_version", Mock(
+        side_effect=ValueError("stale drawing head: expected 2, current 3")))
     assert_refusal(mock_run(d, transform()), scope.REASON_PARENT, PARENT)
     unchanged(d, saved)
 
@@ -460,6 +527,33 @@ def test_c1_data_plan_scoped_refuses_before_execution(drawing, broker_lane, monk
     unchanged(d, saved)
 
 
+@pytest.mark.parametrize("mismatch", ["digest", "base_version"])
+def test_c1b_data_plan_parent_mismatch(drawing, broker_lane, monkeypatch, mismatch):
+    d = drawing(live=True)
+    saved = snapshot(d)
+    binding = deepcopy(d.binding)
+    if mismatch == "digest":
+        binding["base_source_sha256"] = "0" * 64
+    else:
+        binding["base_version"] = 1
+    monkeypatch.setattr(write_loop, "default_backend", lambda **k: d.backend)
+    start = Mock(side_effect=AssertionError("execution started"))
+    writer = Mock(side_effect=AssertionError("data plan writer called"))
+    monkeypatch.setattr(broker, "_start_admitted_execution", start)
+    monkeypatch.setattr(write_loop, "run_data_plan_live", writer)
+    req = broker.BrokerPlanRunRequest(
+        tenant_id=TENANT, dwg="demo", dwg_version=2, entity_scope=binding,
+        plan={"drawing_id": "demo", "parent_version": 2, "mutations": transform(),
+              "plan_sha256": "a" * 64,
+              "source_sha256": d.binding["base_source_sha256"]})
+    assert_refusal(broker._execute_plan(
+        req, broker.PLAN_TOOL, "", time.perf_counter(), {}),
+        scope.REASON_PARENT, PARENT)
+    start.assert_not_called()
+    writer.assert_not_called()
+    unchanged(d, saved)
+
+
 @pytest.mark.parametrize("path", ["live", "degraded", "mock"])
 def test_c1_broker_forwards_scope_only_when_present(drawing, broker_lane, monkeypatch, path):
     d = drawing()
@@ -527,6 +621,26 @@ def test_c1_job_scope_refusal_never_falls_back(job_lane, monkeypatch):
     rec = jobs.get_job(jid)
     assert rec["status"] == "failed"
     assert rec["error"] == response[0]["error"]
+
+
+def test_c1b_unscoped_job_keeps_fallback(job_lane, monkeypatch):
+    response = scope.refusal_envelope(
+        scope.uncheckable(), tool=TOOL["name"], version="1.0.0")
+
+    def run(*args, **kwargs):
+        if args[4]:
+            return deepcopy(response[0])
+        return {"ok": True, "result": {}}
+
+    monkeypatch.setattr(broker_client, "run_via_broker", run)
+    fallback = Mock(wraps=jobs._run_local_fallback)
+    monkeypatch.setattr(jobs, "_run_local_fallback", fallback)
+    jid = jobs.submit_job(
+        TENANT, {**TOOL, "allow_local_fallback": True}, {}, "demo", True,
+        dwg_version=2)
+    job_lane.run()
+    fallback.assert_called_once()
+    assert jobs.get_job(jid)["status"] == "complete"
 
 
 def test_c1_job_other_failures_still_fall_back(job_lane, monkeypatch):

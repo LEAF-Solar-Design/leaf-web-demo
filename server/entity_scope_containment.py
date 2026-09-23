@@ -1,4 +1,8 @@
-"""Fail-closed containment for the drawing writers' frozen entity binding."""
+"""Fail-closed containment for the drawing writers' frozen entity binding.
+
+Handle collections absent on one side are treated as empty.  Containment compares
+entities, so an absent collection and a present empty collection are equivalent.
+"""
 import hashlib
 import hmac
 import json
@@ -119,7 +123,7 @@ def _handle_index(intake):
             handle = item["handle"]
             if handle in result:
                 raise uncheckable()
-            result[handle] = item
+            result[handle] = (collection, item)
     return result
 
 

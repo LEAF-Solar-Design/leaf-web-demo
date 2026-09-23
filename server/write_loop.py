@@ -1631,6 +1631,7 @@ def run_write_mock(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
                 entity_scope, drawing_id=drawing_id, version=head_v,
                 head_version=current_head, stored_source=stored_source)
             containment.require_payload_intake(stored_source, cur_intake)
+            parent_intake = json.loads(stored_source.decode("utf-8"))
     except containment.ContainmentRefusal as exc:
         return containment.refusal_envelope(exc, tool=name, version=tool_version)
     except ProofStateUnreadable as exc:
@@ -1655,8 +1656,10 @@ def run_write_mock(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
     if entity_scope is not None:
         try:
             canonical = validate_mutations(
-                cur_intake, mutations, allow_transforms=True, allow_xdata=True,
+                parent_intake, mutations, allow_transforms=True, allow_xdata=True,
                 reject_noop=False)
+        except containment.ContainmentRefusal as exc:
+            return containment.refusal_envelope(exc, tool=name, version=tool_version)
         except Exception:  # Preserve the existing apply_mutations error path.
             pass
         else:
@@ -1674,9 +1677,13 @@ def run_write_mock(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
             env["degraded_mode"] = True
         return env, 200
     try:
-        new_intake = apply_mutations(cur_intake, mutations)
         if entity_scope is not None:
-            containment.check_output_exact(entity_scope, cur_intake, new_intake)
+            new_intake = apply_mutations(parent_intake, mutations)
+            parent_intake_snapshot = json.loads(stored_source.decode("utf-8"))
+            containment.check_output_exact(
+                entity_scope, parent_intake_snapshot, new_intake)
+        else:
+            new_intake = apply_mutations(cur_intake, mutations)
         with drawing_mutation_refusal_guard() as refusal:
             if refusal is not None:
                 log_mutation_refused(LOGGER, refusal,
@@ -1700,7 +1707,8 @@ def run_write_mock(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str,
     except containment.ContainmentRefusal as exc:
         return containment.refusal_envelope(exc, tool=name, version=tool_version)
     except Exception as exc:  # noqa: BLE001
-        if entity_scope is not None and isinstance(exc, ValueError) and str(exc).startswith("stale parent "):
+        if (entity_scope is not None and isinstance(exc, ValueError)
+                and str(exc).startswith(("stale parent ", "stale drawing head:"))):
             return containment.refusal_envelope(containment.ContainmentRefusal(
                 containment.REASON_PARENT,
                 "This change was prepared for a different version of the drawing. Nothing was published."),
