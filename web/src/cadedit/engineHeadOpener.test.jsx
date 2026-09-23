@@ -541,4 +541,53 @@ describe('EngineHeadOpener', () => {
     expect(fetchDxf).toHaveBeenCalledTimes(2)
     await waitFor(() => expect(loadPosts()[loadPosts().length - 1].documentId).toBe(headDocumentId('rooftop_demo', 2)))
   })
+
+  it('provenance: a longer drawing id that shares the prefix is not this drawing\'s head', () => {
+    const rows = [
+      ['rooftop_demo-villa-v1.dxf', false],
+      ['rooftop_demo-v12.dxf', true],
+      ['rooftop_demo-v.dxf', false],
+      ['rooftop_demo-v1.dxf.bak', false],
+    ]
+    for (const [documentId, expected] of rows) {
+      expect([documentId, holdsHeadDocument({ documentId, documentOrigin: 'head' }, 'rooftop_demo', null)])
+        .toEqual([documentId, expected])
+    }
+    expect(holdsHeadDocument({ documentId: '-v1.dxf', documentOrigin: 'head' }, '', null)).toBe(false)
+  })
+
+  it('one fetch: a fetch that fails while its run was cancelled is fetched again', async () => {
+    const fetchDxf = vi.fn(async () => answer(1))
+    const studio = mount({ fetchDxf })
+    await settle()
+    await waitFor(() => expect(workers.length).toBe(1))
+    loaded(workers[0], headDocumentId('rooftop_demo', 1))
+    expect(fetchDxf).toHaveBeenCalledTimes(1)
+    // The head moves; the fetch for v2 is in flight...
+    let reject
+    fetchDxf.mockImplementation(() => new Promise((_, r) => { reject = r }))
+    studio.rerender({ headKey: 2 })
+    await settle()
+    expect(fetchDxf).toHaveBeenCalledTimes(2)
+    // ...an edit goes busy, cancelling the run that owned the fetch...
+    act(() => { studio.context.session.actions.select('e1') })
+    act(() => { studio.context.session.actions.applyEdit('move', { dx: '1', dy: '0' }) })
+    expect(studio.context.session.busy).toBe(true)
+    // ...and the fetch fails with no run attached.
+    await act(async () => { reject(new Error('GET /api/drawings/rooftop_demo/dxf -> 503')); await Promise.resolve(); await Promise.resolve(); await Promise.resolve() })
+    // The edit is refused: clean and quiet again, so the same key fetches anew.
+    fetchDxf.mockImplementation(async () => answer(2))
+    workers[0].emit({ type: 'editApplied', op: 'move', ok: false, reason: 'test refusal' })
+    await settle()
+    expect(studio.context.session.dirty).toBe(false)
+    expect(fetchDxf).toHaveBeenCalledTimes(3)
+    const posts = workers[0].posted.filter((m) => m.type === 'loadDocument')
+    expect(posts[posts.length - 1].documentId).toBe(headDocumentId('rooftop_demo', 2))
+    expect(studio.context.reach.state).not.toBe(REACH_STATE.FAILED)
+    // The v2 load is in flight; once it lands the session is quiet and the head is open.
+    loaded(workers[0], headDocumentId('rooftop_demo', 2))
+    expect(studio.context.session.busy).toBe(false)
+    expect(studio.context.session.dirty).toBe(false)
+    expect(studio.context.reach.state).toBe(REACH_STATE.OPEN)
+  })
 })

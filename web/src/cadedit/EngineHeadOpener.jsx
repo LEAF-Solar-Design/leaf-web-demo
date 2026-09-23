@@ -48,7 +48,12 @@ const HEAD_DOC = /-v\d+\.dxf$/
  */
 export function holdsHeadDocument(session, drawingId, openedDocumentId) {
   const id = session?.documentId
-  if (typeof id !== 'string' || !HEAD_DOC.test(id) || !id.startsWith(`${drawingId}-v`)) return false
+  if (typeof id !== 'string' || !HEAD_DOC.test(id)) return false
+  if (typeof drawingId !== 'string' || drawingId === '') return false
+  // Exact: the remainder after `${drawingId}-v` is only the version, so a
+  // longer drawing id sharing the prefix (rooftop_demo-villa) never matches.
+  const prefix = `${drawingId}-v`
+  if (!id.startsWith(prefix) || !/^\d+\.dxf$/.test(id.slice(prefix.length))) return false
   if (session.documentOrigin === 'head') return true
   return session.documentOrigin === null && id === openedDocumentId
 }
@@ -69,8 +74,10 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
   const savedAtOpenRef = useRef(null)
   // The document name this opener instance last passed to `openBytes`.
   const openedDocumentRef = useRef(null)
-  // At most one entry, { key, promise }: the head fetch for the current
-  // attempt key, shared by effect runs that were cancelled before they settled.
+  // At most one entry, { key, promise, pending }: the head fetch for the
+  // current attempt key, shared by effect runs that were cancelled before they
+  // settled. A run attaches only while the fetch is still pending; a settled
+  // one (above all a rejected one) is fetched again, as before sharing.
   const inflightRef = useRef(null)
   // Bumped on unmount and on every drawing or source switch; an async leg
   // captured before an await compares and abandons if it moved.
@@ -93,6 +100,10 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
 
   useEffect(() => {
     if (!enabled || !drawingId || typeof fetchRef.current !== 'function') return undefined
+    const key = `${drawingId}#${sourceKey}#${headKey}`
+    // An entry for another key serves nothing now. Hygiene only (no row): the
+    // pending check below already keeps a stale entry from being misused.
+    if (inflightRef.current !== null && inflightRef.current.key !== key) inflightRef.current = null
     // A hand-imported document is never replaced, and the reach reads idle
     // while it is open (the head's sentence would be stale under it). Checked
     // before the attempt key: an import that lands mid-fetch must win too.
@@ -102,7 +113,6 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
       setReach({ state: REACH_STATE.IDLE, sentence: '' })
       return undefined
     }
-    const key = `${drawingId}#${sourceKey}#${headKey}`
     if (attemptRef.current === key) return undefined
     // The head moved because THIS engine saved it: the engine already holds
     // exactly those bytes, so there is nothing to fetch and the undo history
@@ -115,6 +125,8 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
     // this head's save (the session keeps it across a document switch).
     if (present && holdsHead && (openedSourceRef.current === null || openedSourceRef.current === sourceKey) && session.savedVersion !== savedAtOpenRef.current &&Number.isInteger(session.savedVersion) && Number(headKey) === session.savedVersion) {
       attemptRef.current = key
+      // Decided without a fetch, so no shared fetch serves this attempt.
+      inflightRef.current = null
       setReach({ state: REACH_STATE.OPEN, sentence: '', version: session.savedVersion, head: session.savedVersion, source: 'engine-save' })
       return undefined
     }
@@ -123,6 +135,8 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
       // nothing would be lost.
       if (dirty) {
         attemptRef.current = key
+        // Decided without a fetch, so no shared fetch serves this attempt.
+        inflightRef.current = null
         setReach({ state: REACH_STATE.STALE, sentence: 'the drawing moved on the server; save or discard the browser edits to open the new version' })
         return undefined
       }
@@ -145,7 +159,7 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
       if (inflightRef.current?.key === key) inflightRef.current = null
     }
     let promise
-    if (inflightRef.current?.key === key) {
+    if (inflightRef.current?.key === key && inflightRef.current.pending === true) {
       promise = inflightRef.current.promise
     } else {
       // A synchronous throw in fetchDxf is a rejection. Called now, not in a
@@ -156,7 +170,10 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
       } catch (error) {
         promise = Promise.reject(error)
       }
-      inflightRef.current = { key, promise }
+      const entry = { key, promise, pending: true }
+      // Also handles a rejection nobody is attached to (a cancelled run's).
+      promise.then(() => { entry.pending = false }, () => { entry.pending = false })
+      inflightRef.current = entry
     }
     ;(async () => {
       let answer
