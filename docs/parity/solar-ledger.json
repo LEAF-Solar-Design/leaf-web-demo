@@ -3440,7 +3440,7 @@
   },
   {
    "global": "LEAFPERFRESET",
-   "class": "T",
+   "class": "H",
    "maturity": "production",
    "capability": "performance-optimize-safe",
    "capability_version": "0",
@@ -3449,9 +3449,9 @@
    "engine": "autocad-lane",
    "wave": 5,
    "status": "resolved",
-   "exclusion_rationale": "",
+   "exclusion_rationale": "Host mechanics: restores the AutoCAD system variables LEAFOPTIMIZESAFE changed, through Application.SetSystemVariable only (DrawingPerformanceOptimizer.cs 101-121, PerformanceBaselineService.cs 95-120); system variables do not exist outside AutoCAD, so there is no independent user outcome. Spec class table: H, the same rationale as LEAFOPTIMIZESAFE.",
    "alias_of": "",
-   "evidence": "leaf-plan:solar-parity/ledger-first-pass.json; Restores AutoCAD sysvars and drawing settings captured by LEAFOPTIMIZESAFE. flow=standalone w1_minimum=False"
+   "evidence": "leaf-plan:solar-parity/ledger-first-pass.json; Restores AutoCAD sysvars and drawing settings captured by LEAFOPTIMIZESAFE. flow=standalone w1_minimum=False; reclassified to H 2026-09-24 (host mechanics, source-verified)"
   },
   {
    "global": "LEAFPERMODULESHADEDEMO",
