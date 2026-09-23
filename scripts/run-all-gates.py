@@ -97,6 +97,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -3563,6 +3564,12 @@ _MEASURED_EST_S = {
     "scripts-solar-w1-studio-string-delete": 336.6,
     "scripts-solar-w1-studio-string-multi-add": 211.7,
     "scripts-solar-w1-studio-solve": 121.0,
+    # Refreshed 2026-09-23 from build leaf-ci-leaf-web-demo:ab6b3982 (BUILD_GENERAL1_XLARGE, jobs auto=8).
+    "web-vitest": 31.0,
+    "web-link-service-flow": 17.0,
+    "harness-vitest": 13.7,
+    "server-sessions-e2e": 12.1,
+    "platform-static": 18.1,
     # Operator control-plane suites, MEASURED on the CI runner from the shard
     # logs of run 33283298381 (the registration PR's own first green run), the
     # same provenance as the 2026-08-17 entries below.
@@ -3590,8 +3597,6 @@ _MEASURED_EST_S = {
     "server-turn-runner": 15.8,
     "server-task-local-state-authority": 14.0,
     "web-author-quota-gate": 14.0,
-    "server-sessions-e2e": 11.2,
-    "harness-vitest": 10.4,
     "server-write-loop": 8.9,
     "server-sessions-routes": 7.0,
     "server-wave5": 6.9,
@@ -3604,7 +3609,6 @@ _MEASURED_EST_S = {
     # 2026-09-02, against 7.33/7.42s on 575bc57 for the A/B), so it takes the
     # default like the other eight .test.mjs suites. Do not re-add it from a
     # pre-#883 measurement.
-    "web-vitest": 5.4,
     "server-mcp-gateway-authority": 5.1,
     "server-platform-customize": 4.9,
     "server-wave4": 4.9,
@@ -3702,22 +3706,83 @@ def serial_suite_reason(suite: Suite) -> str:
     return _SERIAL_SUITE_REASONS.get(suite.id, "")
 
 
-def parallel_suite_phases(suites: List[Suite], jobs: int) -> tuple[List[Suite], List[List[Suite]]]:
-    """Run shared state behind a barrier, then give independent suites all jobs.
+# Suites whose conflict is not what their generic rule would say, by id.
+# Checked before every rule in conflict_resources().
+_CONFLICT_RESOURCES_OVERRIDE = {
+    # Runs `npm --prefix harness run build` and clears ports 5275/8230/8240/8250.
+    "web-link-service-flow": frozenset({"web-tree", "harness-tree", "link-flow-ports"}),
+    # Its fixture rebuilds harness/dist with npm before starting Node.
+    "server-sessions-e2e": frozenset({"harness-tree"}),
+    # The nested runner rebuilds web/dist and may unpack web/node_modules.
+    "web-demo-gate": frozenset({"web-tree"}),
+    # One fixed compose project on container ports 8130/8150.
+    "harness-container-smoke": frozenset({"compose-8130-8150"}),
+}
 
-    Main build leaf-ci-leaf-web-demo:df5b47e4 (5bf9ca61) measured 259 suites
-    at 15.76 min: 69 serial suites / 6.88 min and 190 independent / 8.88 min,
-    with a longest suite of 72.2s. Concurrent scheduling floors at
-    max(6.88, 8.88 / (N - 1)) = 6.88 min for N >= 4; the barrier costs
-    6.88 + 8.88 / N = 8.36 min at N = 6, about 21% slower. Prefer that
-    sound barrier to assuming classification proves all 190 suites cannot
-    conflict with serial state. Re-measure before restoring concurrency.
+# Suites that rewrite build outputs (web/dist, harness/dist) other suites may
+# read without declaring it. They run first, as their own lane-scheduled
+# phase, and every one finishes before any other suite starts.
+_PRELUDE_WRITERS = frozenset({
+    "web-build", "harness-tsc-build", "web-demo-gate", "server-sessions-e2e",
+    "web-link-service-flow",
+})
+
+
+def conflict_resources(suite: Suite) -> frozenset[str]:
+    """The named locks a suite holds while it runs; empty means it conflicts with nothing.
+
+    Nonempty exactly when serial_suite_reason() is. A conflict no rule
+    recognises falls back to one shared "legacy-serial" lock, so an
+    unclassified conflict stays serialised rather than running free.
     """
-    serial = []
-    independent = []
-    for suite in suites:
-        (serial if serial_suite_reason(suite) else independent).append(suite)
-    return serial, partition_suites(independent, jobs)
+    if not serial_suite_reason(suite):
+        return frozenset()
+    override = _CONFLICT_RESOURCES_OVERRIDE.get(suite.id)
+    if override is not None:
+        return override
+    table_reason = _SERIAL_SUITE_REASONS.get(suite.id, "")
+    held = set()
+    # server/authored_tools.json is reset in place before the suite runs.
+    if suite.reset_authored:
+        held.add("authored-store")
+    # DATABASE_URL points every db-gated suite at the one PostgreSQL schema.
+    if suite.db_gated:
+        held.add("postgres")
+    # The authored catalog and tool bodies the older author paths read and write.
+    if table_reason == "shared authored catalog or tool bodies":
+        held.add("authored-store")
+    # Live DB cases that migrate or inspect the same schema as platform.
+    if table_reason == "shared PostgreSQL schema":
+        held.add("postgres")
+    # web/node_modules, web/dist, vite dev port 5185, ../artifacts/cat-operator-proof.
+    if suite.cwd == WEB:
+        held.add("web-tree")
+    # harness/node_modules and harness/dist.
+    if suite.cwd == HARNESS:
+        held.add("harness-tree")
+    # Any other serial reason: one shared lock keeps it serialised.
+    return frozenset(held) if held else frozenset({"legacy-serial"})
+
+
+def plan_parallel_phases(suites: List[Suite]) -> tuple[List[Suite], List[Suite]]:
+    """Split the catalog into the build-output writers and everything else.
+
+    Pure; catalog order is kept inside each list and every suite lands once.
+
+    Until 2026-09-23 --jobs ran every serial suite behind one barrier, one at a
+    time, then the pool. Build leaf-ci-leaf-web-demo:ab6b3982 (XLARGE, jobs
+    auto=8) measured gate wall 716 s = that barrier 372 s (70 suites) + pool.
+    The serial suites conflict only within resource groups (web/npm 197 s,
+    authored 117 s, postgres 38 s, sessions-e2e 12 s, demo-gate 5 s), so
+    conflict_resources() names one lock per group and run_lanes() runs
+    disjoint lanes alongside the pool: modelled at about 390 s, floored by the
+    longest single suite (scripts-solar-w1-studio-string-add, about 341 s).
+    Only the prelude writers keep a barrier, because what they rewrite is read
+    by suites that declare no lock for it.
+    """
+    prelude = [s for s in suites if s.id in _PRELUDE_WRITERS]
+    rest = [s for s in suites if s.id not in _PRELUDE_WRITERS]
+    return prelude, rest
 
 
 def _run_parallel_suite(suite: Suite, log_dir: Path, retry: int) -> tuple[Result, int]:
@@ -3747,39 +3812,130 @@ def _run_parallel_suite(suite: Suite, log_dir: Path, retry: int) -> tuple[Result
     return res, attempts
 
 
-def run_suites_parallel(suites: List[Suite], log_dir: Path, jobs: int,
-                        retry: int, fail_fast: bool) -> tuple[List[Result], dict]:
-    completed = {}
-    dispatch_lock = threading.Lock()
-    stopped_after = None
+_LANE_IDLE_WAIT_S = 1.0  # bounded wait before an idle worker re-checks eligibility
 
-    def drain(group: List[Suite]) -> None:
-        nonlocal stopped_after
-        for suite in group:
-            # Admission and publication of the first red share a lock. Suites
-            # admitted before it are in flight and finish, including retries.
-            with dispatch_lock:
-                if stopped_after is not None:
-                    break
+
+def run_lanes(suites: List[Suite], log_dir: Path, jobs: int, retry: int,
+              fail_fast: bool, completed: dict, state: dict) -> None:
+    """Run suites on at most `jobs` workers; suites sharing a resource never overlap.
+
+    A pending suite is eligible when none of its conflict_resources() is held
+    and no earlier (catalog order) pending suite shares one of them, so every
+    resource sees its suites in catalog order. A free worker takes the eligible
+    suite with the highest priority: its own weight plus, for a locked suite,
+    the weight still queued behind it on its resources (critical path first);
+    ties go to catalog order. Idle workers wait on one condition, bounded and
+    re-checked, and exit when nothing is pending or fail-fast stopped admission.
+
+    Results land in `completed` (id -> (Result, attempts)) and the first
+    fail-fast red in state["stopped_after"]. Admission and that publication
+    share the condition, so after the first red no new suite starts; suites
+    already admitted finish, including retries. Only the caller prints.
+    Each claim costs O(resources x queue length), never a scan of the catalog.
+    """
+    if not suites:
+        return
+    locks = [conflict_resources(s) for s in suites]
+    weight = [suite_weight(s) for s in suites]
+    position = {id(s): i for i, s in enumerate(suites)}
+    # Pending locked suites per resource in catalog order; only a head may run next.
+    queued: dict[str, deque] = {}
+    for index, held in enumerate(locks):
+        for name in sorted(held):
+            queued.setdefault(name, deque()).append(index)
+    # Pending lock-free suites, heaviest first, ties by catalog index.
+    unlocked = deque(sorted((i for i, held in enumerate(locks) if not held),
+                            key=lambda i: (-weight[i], i)))
+    busy: set = set()
+    ready = threading.Condition()
+
+    def pending() -> bool:
+        return bool(unlocked) or any(queued.values())
+
+    def claim() -> Optional[int]:
+        # Caller holds `ready`. Returns the claimed catalog index, resources taken.
+        if state["stopped_after"] is not None:
+            return None
+        best, best_key = None, None
+        if unlocked:
+            best = unlocked[0]
+            best_key = (-weight[best], best)
+        for queue in queued.values():
+            if not queue:
+                continue
+            head = queue[0]
+            held = locks[head]
+            if busy & held or any(queued[name][0] != head for name in held):
+                continue
+            behind = {i for name in held for i in queued[name]}
+            behind.discard(head)
+            key = (-(weight[head] + sum(weight[i] for i in behind)), head)
+            if best_key is None or key < best_key:
+                best, best_key = head, key
+        if best is None:
+            return None
+        if locks[best]:
+            for name in locks[best]:
+                queued[name].popleft()
+            busy.update(locks[best])
+        else:
+            unlocked.popleft()
+        return best
+
+    def worker(seed: List[Suite]) -> None:
+        index = position[id(seed[0])] if seed else None
+        while True:
+            if index is None:
+                with ready:
+                    while index is None:
+                        if state["stopped_after"] is not None or not pending():
+                            return
+                        index = claim()
+                        if index is None:
+                            ready.wait(timeout=_LANE_IDLE_WAIT_S)
+            suite = suites[index]
+            res, attempts = None, 1
             try:
                 res, attempts = _run_parallel_suite(suite, log_dir, retry)
             except Exception as exc:
                 res = Result(suite, "FAIL", "err", 0.0,
                              note=f"runner error: {type(exc).__name__}: {str(exc)[:160]}")
                 attempts = 1
-            with dispatch_lock:
-                completed[suite.id] = (res, attempts)
-                if fail_fast and res.status == "FAIL" and stopped_after is None:
-                    stopped_after = suite.id
+            finally:
+                # Release even on a non-Exception escape, so no lane waits on a dead holder.
+                with ready:
+                    if res is not None:
+                        completed[suite.id] = (res, attempts)
+                        if (fail_fast and res.status == "FAIL"
+                                and state["stopped_after"] is None):
+                            state["stopped_after"] = suite.id
+                    busy.difference_update(locks[index])
+                    ready.notify_all()
+            index = None
 
-    serial, pool_groups = parallel_suite_phases(suites, jobs)
-    drain(serial)
-    # A fail-fast red in the serial phase must not start the pool at all.
-    if stopped_after is None:
-        with ThreadPoolExecutor(max_workers=jobs) as pool:
-            futures = [pool.submit(drain, group) for group in pool_groups if group]
-            for future in futures:
-                future.result()
+    workers = min(jobs, len(suites))
+    # The first wave is claimed here, so its picks are deterministic.
+    with ready:
+        seeds = []
+        for _ in range(workers):
+            index = claim()
+            seeds.append([suites[index]] if index is not None else [])
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(worker, seed) for seed in seeds]
+        for future in futures:
+            future.result()
+
+
+def run_suites_parallel(suites: List[Suite], log_dir: Path, jobs: int,
+                        retry: int, fail_fast: bool) -> tuple[List[Result], dict]:
+    completed = {}
+    state = {"stopped_after": None}
+    prelude, rest = plan_parallel_phases(suites)
+    run_lanes(prelude, log_dir, jobs, retry, fail_fast, completed, state)
+    # A fail-fast red in the prelude must not start any other suite.
+    if state["stopped_after"] is None:
+        run_lanes(rest, log_dir, jobs, retry, fail_fast, completed, state)
+    stopped_after = state["stopped_after"]
 
     # Only this thread prints. Completion order must never reorder the rows or
     # their FLAKED/skip/audit callouts (or the machine-readable result file).
