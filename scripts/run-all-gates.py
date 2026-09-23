@@ -414,6 +414,19 @@ def build_suites() -> List[Suite]:
         # capture's own probes.
         Suite("server-solar-probe-calcs", "server tests/test_solar_probe_calcs.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_probe_calcs.py"), 163),
+        # S27 autofill (2026-09-22): the literal port of the licensed plugin's
+        # OptimalPlanSolver and SnakePanelSelector -- IsFeasibleCount and the nearest
+        # feasible count, the targets DP with its scan-order tie-break, the zone
+        # boundary a trade cannot cross, chain routing across twelve groups, the snake's
+        # pick on the receiver-facing edge, and the 2026-09-23 captured rooftop case
+        # (28 removals, then exactly panel 8201 from the 71-panel group to the
+        # 137-panel one) COMPUTED from the committed intake. Pure (the committed
+        # rooftop intake only; no graph, no builtin, no network), so the floor is the
+        # exact count on every runner: 11 unparametrized tests + one parametrization
+        # over 12 literal feasibility rows + one over 5 nearest-count rows + one over
+        # 6 literal malformed plans = 34.
+        Suite("server-w2-autofill", "server tests/test_solar_autofill.py", "pytest", SERVER,
+              _py_pytest("tests/test_solar_autofill.py"), 34),
         Suite("server-w1-sizing-groups", "server tests/test_w1_sizing_groups.py", "pytest", SERVER,
               _py_pytest("tests/test_w1_sizing_groups.py"), 52),
         Suite("server-w1-solar-interchange", "server tests/test_w1_solar_interchange.py", "pytest", SERVER,
@@ -1626,6 +1639,20 @@ def build_suites() -> List[Suite]:
         # overrides = 20.
         Suite("scripts-solar-w1-studio-panel-add", "scripts test_solar_w1_studio_panel_add.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_panel_add.py"), 20),
+        # S27 (2026-09-22): the auto-fill producer on the committed rooftop intake. The
+        # grouping half is the groups producer and the removal half is the panel-remove
+        # builtin, so the rebalance starts from a committed grouped state that the
+        # captured 28 removals have made infeasible at a string length of 14. The same
+        # producer with NO removals is the control it is diffed against, by SOURCE
+        # HANDLE because entity ids are fresh per run. Covers the captured outcome
+        # (exactly panel 8201, from the 71-panel group to the 137-panel one), the five
+        # groups it leaves alone, the reopen, the two matrices the move touched, rule
+        # G3's rename of the receiver, rule G8's mapping, the groups evidence, and the
+        # refusals. Hermetic (the committed rooftop fixture and intake only; no
+        # network), so the floor is the exact count on every runner: 10 tests + one
+        # parametrization over 6 literal parameter overrides = 16.
+        Suite("scripts-solar-w1-studio-autofill", "scripts test_solar_w1_studio_autofill.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_autofill.py"), 16),
         # S25 (2026-09-22): the MULTISTRING producer on the committed rooftop capture.
         # The solve half is the solve producer and the delete half is the string-delete
         # producer, so the circuits it re-strings beside are the plugin's own 66 and the
