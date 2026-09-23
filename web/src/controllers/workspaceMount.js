@@ -38,6 +38,7 @@ import {
   redoDrawing,
   undoDrawing,
 } from '../api.js'
+import { humanizeError } from '../errorHumanize.js'
 
 export const CONSOLE_CONVERSE_DRAWING_ID = 'rooftop_demo'
 
@@ -64,6 +65,7 @@ export function operatorWorkspaceMount({
     drawingId,
     retryNotFound: false,
     drawingOptions: {
+      formatError: humanizeError,
       loadHead: (id) => getDrawingIntake(publicDemo, id, 'head'),
       loadVersion: (id, version) => getDrawingIntake(publicDemo, id, version),
       // Slice 6a: /try now renders the SAME VersionList primitive /app's

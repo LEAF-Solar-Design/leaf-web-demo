@@ -15,6 +15,19 @@ import {
   validateIosShipReadiness,
 } from './iosShipReadiness.js'
 import { productSurfaceStates } from './productSurfaces.js'
+import { panelErrorText } from './ToolCast.jsx'
+import { humanizeError, MSG_GENERIC } from '../errorHumanize.js'
+
+it('SSD1-B row3: panelErrorText never returns a non-string', () => {
+  expect(panelErrorText('A plain message.')).toBe('A plain message.')
+  expect(panelErrorText(new Error('x'))).toBe(humanizeError(new Error('x')))
+  for (const value of [{}, null, 42]) {
+    expect(panelErrorText(value)).toBe(MSG_GENERIC)
+  }
+  const capped = panelErrorText('x'.repeat(1000))
+  expect(typeof capped).toBe('string')
+  expect(capped.length).toBeLessThanOrEqual(300)
+})
 
 const APPROVED = {
   approval_id: 'a-1',

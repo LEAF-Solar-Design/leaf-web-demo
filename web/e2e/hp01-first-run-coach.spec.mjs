@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 import { catProofResponse, makeCatProofState } from './catProofFixture.mjs'
 import { shouldOfferCoach } from '../src/demo/tourEntry.js'
+import { setRail } from './local/railFlag.mjs'
 
 // HP-01 — first-run coach mark.
 //
@@ -45,6 +46,8 @@ test('fresh profile lands signed-out on /try and sees the first-run coach exactl
 })
 
 test('an explicit demo param keeps absolute priority and suppresses the coach', async ({ page }) => {
+  // The console answers ?demo=1 only under the one-shell rail, so arm it as every studio row does.
+  await setRail(page, '1')
   const state = makeCatProofState()
   await routeSession401(page, state)
 
@@ -289,7 +292,9 @@ test('the coach shows the command-bar keycap hints', async ({ page }) => {
   const coach = page.getByTestId('first-run-coach')
   await expect(coach).toBeVisible()
 
-  const focusKey = coach.locator('.key', { hasText: '⌘K' })
+  const isApple = await page.evaluate(() => /Mac|iPhone|iPod|iPad/i.test(navigator.platform || ''))
+  const chord = isApple ? '⌘K' : 'Ctrl+K'
+  const focusKey = coach.locator('.key', { hasText: chord })
   const backKey = coach.locator('.key', { hasText: 'Esc' })
   await expect(focusKey).toBeVisible()
   await expect(backKey).toBeVisible()
