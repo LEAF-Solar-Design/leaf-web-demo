@@ -45,7 +45,7 @@ foreach ($port in @($WebPort, $AppPort, $BrokerPort, $HarnessPort)) {
 }
 
 New-Item -ItemType Directory -Path $runRoot, $artifactRoot | Out-Null
-foreach ($name in @('drawings', 'guest-drawings', 'uploads', 'grants', 'tenants', 'tenant-git')) {
+foreach ($name in @('drawings', 'guest-drawings', 'uploads', 'grants', 'tenants', 'tenant-git', 'tenant-mcp')) {
   New-Item -ItemType Directory -Path (Join-Path $runRoot $name) | Out-Null
 }
 
@@ -78,6 +78,32 @@ $env:LEAF_E2E_API_BASE = "http://127.0.0.1:$AppPort"
 $env:LEAF_E2E_MANAGED = '1'
 $env:VITE_STARTUP_FETCH_TIMEOUT_MS = '15000'
 $env:LEAF_CORS_ORIGINS = $env:LEAF_E2E_BASE_URL
+
+# These are the three fixtures playwright.local.config.mjs's standalone link-flow boot
+# supplies. That block is skipped under LEAF_E2E_MANAGED=1, so this runner supplies them.
+# The policy copy changes only demo.link_service and never edits the shipped file.
+# TENANT_MCP_FAKE_OAUTH is honoured only under a local runtime posture;
+# server/routers/tenant_mcp.py refuses it with 403 on a deployed or unknown posture.
+if ($Mode -eq 'account') {
+  $env:LEAF_TENANT_MCP_DIR = Join-Path $runRoot 'tenant-mcp'
+  $policy = Get-Content -LiteralPath (Join-Path $repoRoot 'server\entitlements.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+  $sourceTierNames = @($policy.PSObject.Properties.Name)
+  $policy.demo | Add-Member -NotePropertyName link_service -NotePropertyValue $true -Force
+  $policyPath = Join-Path $runRoot 'entitlements.json'
+  $policyJson = $policy | ConvertTo-Json -Depth 64
+  [System.IO.File]::WriteAllText($policyPath, $policyJson, [System.Text.UTF8Encoding]::new($false))
+  $policyCopy = Get-Content -LiteralPath $policyPath -Raw -Encoding UTF8 | ConvertFrom-Json
+  if ($policyCopy.demo.link_service -ne $true) {
+    throw 'Isolated policy did not enable demo.link_service'
+  }
+  foreach ($tierName in $sourceTierNames) {
+    if ($policyCopy.PSObject.Properties.Name -cnotcontains $tierName) {
+      throw "Isolated policy is missing source tier $tierName"
+    }
+  }
+  $env:LEAF_ENTITLEMENTS_FILE = $policyPath
+  $env:TENANT_MCP_FAKE_OAUTH = '1'
+}
 
 $stdout = Join-Path $runRoot 'stack.out.log'
 $stderr = Join-Path $runRoot 'stack.err.log'
