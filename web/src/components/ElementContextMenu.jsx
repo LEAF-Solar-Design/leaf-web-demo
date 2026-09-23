@@ -21,7 +21,7 @@
 // ROWS come from the merged action registry (web/src/lib/actionRegistry.js,
 // slice 10a), filtered by the element's KIND and run through the SAME
 // resolver-row anatomy the Ctrl/Cmd+K palette already uses
-// (web/src/lib/palette.js `actionPaletteRows`) — reused, not forked, so a
+// (web/src/lib/palette.js `actionRow`) — reused, not forked, so a
 // disabled row's reason is composed exactly once no matter which surface
 // renders it.
 //
@@ -53,7 +53,7 @@ import * as RadixContextMenu from '@radix-ui/react-context-menu'
 
 import { accessibleName, byId, forCluster, forGroup } from '../lib/actionRegistry.js'
 import { closestElementIdentity } from '../lib/elementIdentity.js'
-import { actionPaletteRows } from '../lib/palette.js'
+import { actionRow } from '../lib/palette.js'
 import { ensureSession, postMessage } from '../converse.js'
 import { isSecretRefused } from '../lib/secretGuardTransport.js'
 import { useAnnotations } from '../useAnnotations.js'
@@ -128,6 +128,7 @@ export function actionsForKind(kind, id) {
  * field as `undefined`, which is exactly the "not available" branch every
  * ladder function already has — an honest reason, never a fabricated one.
  */
+// The context menu is not a search result: it lists the finite registry actions the kind answers to; a cap hid cut-clip and copy-clip when #1267 pushed them past 24.
 export function rowsForIdentity(identity, ctx = {}) {
   if (!identity) return []
   const actions = actionsForKind(identity.kind, identity.id)
@@ -143,7 +144,7 @@ export function rowsForIdentity(identity, ctx = {}) {
       onSelect: () => action.run(ctx),
     }
   })
-  return actionPaletteRows(shaped, '')
+  return shaped.filter((action) => typeof action.id === 'string').map(actionRow)
 }
 
 export default function ElementContextMenu({ ctx = {} }) {

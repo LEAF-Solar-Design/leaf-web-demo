@@ -55,7 +55,7 @@ test('a board tile opens the ElementContextMenu via right-click and a long press
   await tile.click({ button: 'right' })
   await expect(menu).toBeVisible()
   await expect(askClaude).toHaveAttribute('aria-disabled', 'true')
-  await expect(askClaude).toHaveAttribute('data-reason', 'the scoped prompt lands with the change capsule in a later slice')
+  await expect(askClaude).toHaveAttribute('data-reason', 'this element kind has no conversation scope yet, so the scoped prompt cannot open')
   await page.keyboard.press('Escape')
   await expect(menu).toHaveCount(0)
 
@@ -93,14 +93,10 @@ test("the viewer wrapper's selected entity opens the ElementContextMenu via righ
   await expect(page.getByRole('menuitem', { name: `delete (unavailable: ${NO_ENGINE})` })).toBeVisible()
   await expect(page.getByRole('menuitem', { name: `copy-clip (unavailable: ${NO_ENGINE})` })).toBeVisible()
   await expect(askClaude).toHaveAttribute('aria-disabled', 'true')
-  // Escape closes the menu AND, since nothing higher on ESCAPE_RUNGS is open,
-  // also clears the console's own selection (actionRegistry.js's 'selection'
-  // rung) — a real, correct interaction, not a test artifact. Re-pick the
-  // entity before proving the second trigger.
+  // Esc pops one rung at a time (actionRegistry.js ESCAPE_RUNGS). The open menu
+  // is the topmost surface, so this Escape closes it and the selection survives.
   await page.keyboard.press('Escape')
   await expect(menu).toHaveCount(0)
-  await expect(mount).not.toHaveAttribute('data-element-id', /.+/)
-  await page.mouse.click(point.x, point.y)
   await expect(mount).toHaveAttribute('data-element-id', 'entity:P0000')
 
   await mount.dispatchEvent('touchstart', {
@@ -110,6 +106,10 @@ test("the viewer wrapper's selected entity opens the ElementContextMenu via righ
   await expect(menu).toBeVisible()
   await page.keyboard.press('Escape')
   await expect(menu).toHaveCount(0)
+  await expect(mount).toHaveAttribute('data-element-id', 'entity:P0000')
+  // The second Escape reaches the selection rung.
+  await page.keyboard.press('Escape')
+  await expect(mount).not.toHaveAttribute('data-element-id', /.+/)
 })
 
 test('Shift+F10 opens the ElementContextMenu on a focused ribbon tool button, the one identity-carrying element the console makes focusable', async ({ page }) => {

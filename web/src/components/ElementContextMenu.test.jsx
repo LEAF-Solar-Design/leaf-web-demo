@@ -7,6 +7,7 @@ import { resolve } from 'node:path'
 
 import ElementContextMenu, { actionsForKind, askClaudeReason, CONTEXT_MENU_REASONS, rowsForIdentity } from './ElementContextMenu.jsx'
 import { byId } from '../lib/actionRegistry.js'
+import { MAX_ACTION_ROWS } from '../lib/palette.js'
 
 const ensureSessionMock = vi.fn()
 const postMessageMock = vi.fn()
@@ -40,6 +41,23 @@ function Scene({ ctx }) {
 }
 
 describe('actionsForKind / rowsForIdentity (pure)', () => {
+  it('SSD1-A row1: rowsForIdentity lists every action the entity kind answers to, past the palette cap', () => {
+    const actions = actionsForKind('entity', 'AB12')
+    expect(actions.length).toBeGreaterThan(MAX_ACTION_ROWS)
+    const ids = rowsForIdentity({ kind: 'entity', id: 'AB12' }, {}).map((r) => r.id)
+    expect(ids).toEqual(actions.map((a) => a.id))
+    expect(ids).toContain('clipboard:cutClip')
+    expect(ids).toContain('clipboard:copyClip')
+  })
+  it('SSD1-A row2: rowsForIdentity keeps the honest reason on a row past position 24', () => {
+    const ctx = {}
+    const action = actionsForKind('entity', 'AB12').find((a) => a.id === 'clipboard:copyClip')
+    const row = rowsForIdentity({ kind: 'entity', id: 'AB12' }, ctx).find((r) => r.id === action.id)
+    expect(row.disabled).toBe(true)
+    expect(typeof row.reason).toBe('string')
+    expect(row.reason.length).toBeGreaterThan(0)
+    expect(row.reason).toBe(action.when(ctx))
+  })
   it('resolves a tool id straight through the registry', () => {
     expect(actionsForKind('tool', 'fit')).toEqual([byId('fit')])
     expect(actionsForKind('tool', 'not-a-real-id')).toEqual([])
