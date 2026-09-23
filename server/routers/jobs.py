@@ -737,6 +737,7 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
                 # A local graph commit is the exception: it requires a held checkout.
                 checkout_holder=checkout_holder,
                 checkout_fence=checkout_fence,
+                entity_scope=binding,
             )
     except jobs.platform_link.CanonicalEntitlementDenied as exc:
         # STORED-org entitlement denial from the canonical choke point (P1

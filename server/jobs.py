@@ -571,7 +571,8 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
                checkout_holder: Optional[str] = None,
                checkout_fence: Optional[int] = None,
                capability_provenance: Optional[Dict[str, Any]] = None,
-               completion_provenance: Optional[Dict[str, Any]] = None) -> str:
+               completion_provenance: Optional[Dict[str, Any]] = None,
+               entity_scope: Optional[Dict[str, Any]] = None) -> str:
     """Insert the durable job row and hand it to the executor. Returns job_id.
 
     ``org_id`` / ``project_id`` carry the OPTIONAL project context from the
@@ -633,17 +634,20 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
         platform_context=platform_context, checkout_holder=checkout_holder,
         checkout_fence=checkout_fence, capability_provenance=capability_provenance,
         completion_provenance=completion_provenance,
+        entity_scope=entity_scope,
     )
 
 
 def submit_plan_job(tenant_id: str, plan: Dict[str, Any], dwg: str, *,
-                    checkout_holder: Optional[str], checkout_fence: Optional[int]) -> str:
+                    checkout_holder: Optional[str], checkout_fence: Optional[int],
+                    entity_scope: Optional[Dict[str, Any]] = None) -> str:
     """Put a browser's full data plan on the durable live-write job lane."""
     _reject_oversized_params(plan)
     return _submit_job(
         tenant_id, PLAN_TOOL, plan, dwg, True,
         dwg_version=int(plan["parent_version"]), checkout_holder=checkout_holder,
         checkout_fence=checkout_fence, plan=plan,
+        entity_scope=entity_scope,
     )
 
 
@@ -657,8 +661,19 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
                 checkout_fence: Optional[int] = None,
                 plan: Optional[Dict[str, Any]] = None,
                 capability_provenance: Optional[Dict[str, Any]] = None,
-                completion_provenance: Optional[Dict[str, Any]] = None) -> str:
+                completion_provenance: Optional[Dict[str, Any]] = None,
+                entity_scope: Optional[Dict[str, Any]] = None) -> str:
     """Shared durable insert and executor hand-off for tool and data-plan jobs."""
+    if entity_scope is not None:
+        from entity_scope import ScopeError, validate_binding
+        from product_capability_availability import is_local_graph_commit
+        try:
+            entity_scope = validate_binding(entity_scope)
+        except ScopeError as exc:
+            raise ValueError("invalid entity scope") from exc
+        if (capability_provenance is not None or completion_provenance is not None
+                or (plan is None and is_local_graph_commit(tool))):
+            raise ValueError("entity-scoped runs cannot use this execution path")
     if project_id and not idempotency_key:
         raise ValueError("Idempotency-Key is required for project-scoped runs")
     if completion_provenance is not None:
@@ -702,6 +717,8 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
         fingerprint_payload["capability_provenance"] = capability_provenance
     if completion_provenance is not None:
         fingerprint_payload["completion_provenance"] = completion_provenance
+    if entity_scope is not None:
+        fingerprint_payload["entity_scope"] = entity_scope
     submission_fingerprint = hashlib.sha256(json.dumps(
         fingerprint_payload, sort_keys=True, separators=(",", ":"), default=str,
     ).encode("utf-8")).hexdigest()
@@ -710,6 +727,8 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
     now = time.time()
     execution = {"tool": tool, "aps_live": bool(aps_live), "dwg_version": dwg_version,
                  "checkout_holder": checkout_holder, "checkout_fence": checkout_fence}
+    if entity_scope is not None:
+        execution["entity_scope"] = validate_binding(entity_scope)
     from product_capability_availability import is_cloud_proposal, is_local_graph_commit
     if is_cloud_proposal(tool):
         execution["cloud_service"] = {"tenant_id": str(tenant_id)}
@@ -903,6 +922,23 @@ def capability_context(job_id: str) -> Optional[Dict[str, Any]]:
         if not rows:
             return None
         return record_context(json.loads(rows[0]["execution_json"] or "{}"), dict(rows[0]))
+
+
+def entity_scope_context(job_id: str) -> Optional[Dict[str, Any]]:
+    """Read the frozen binding from durable execution on every delivery attempt."""
+    from entity_scope import validate_binding
+    if job_store_mode() == "postgres":
+        execution = _pg_store.execution(job_id)
+    else:
+        rows = _query("SELECT execution_json FROM jobs WHERE job_id = ?", (job_id,))
+        if not rows:
+            raise ValueError("missing durable execution")
+        execution = json.loads(rows[0]["execution_json"])
+    if not isinstance(execution, dict):
+        raise ValueError("invalid durable execution")
+    if "entity_scope" not in execution:
+        return None
+    return validate_binding(execution["entity_scope"])
 
 
 def completion_context(job_id: str) -> Optional[Dict[str, Any]]:
@@ -1389,6 +1425,14 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
                              env["error"], provenance)
         return
 
+    try:
+        entity_scope = entity_scope_context(job_id)
+    except (ValueError, TypeError):
+        _finish(job_id, "failed", started, worker_id=worker_id,
+                error=error_obj(ErrorCode.INTERNAL, "invalid durable entity scope", False),
+                provenance={"attempt": attempt, "execution_path": "local"})
+        return
+
     # Richer progress (Contract 5c, §15): mark the real phase this run is ENTERING
     # before the (blocking) broker call, so SSE/poll consumers see more than status flips.
     _heartbeat(job_id, worker_id, _progress_phase(tool, aps_live, params))
@@ -1403,6 +1447,7 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
                     dwg_version=dwg_version, ledger_event_key=f"{job_id}:broker-run",
                     checkout_holder=checkout_holder, checkout_fence=checkout_fence,
                     job_id=job_id,
+                    **({"entity_scope": entity_scope} if entity_scope is not None else {}),
                 )
                 return
             holder["env"] = broker_client.run_via_broker(
@@ -1416,6 +1461,7 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
                 # Correlates this job row with the live WorkItem inside the
                 # broker, so a tab closed mid-run has an id to cancel.
                 job_id=job_id,
+                **({"entity_scope": entity_scope} if entity_scope is not None else {}),
             )
         except Exception as exc:  # noqa: BLE001
             holder["exc"] = exc
@@ -1519,7 +1565,8 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
             and _allows_local_fallback(tool)
         ):
             _run_local_fallback(job_id, worker_id, tenant_id, tool, params, dwg, attempt, provenance,
-                                dwg_version, checkout_holder, checkout_fence)
+                                dwg_version, checkout_holder, checkout_fence,
+                                **({"entity_scope": entity_scope} if entity_scope is not None else {}))
             return
         _retry_or_finish(job_id, worker_id, tenant_id, tool, params, dwg, aps_live, err, provenance, dwg_version=dwg_version,
                          checkout_holder=checkout_holder, checkout_fence=checkout_fence,
@@ -1540,7 +1587,8 @@ def _run_local_fallback(job_id: str, worker_id: str, tenant_id: str, tool: Dict[
                         cloud_failure: Dict[str, Any],
                         dwg_version: Optional[int] = None,
                         checkout_holder: Optional[str] = None,
-                        checkout_fence: Optional[int] = None) -> None:
+                        checkout_fence: Optional[int] = None, *,
+                        entity_scope: Optional[Dict[str, Any]] = None) -> None:
     """Run local only after recording a cloud-path failure in the success provenance."""
     holder: Dict[str, Any] = {}
 
@@ -1555,6 +1603,7 @@ def _run_local_fallback(job_id: str, worker_id: str, tenant_id: str, tool: Dict[
                 # The fallback publishes a version too, so it must be authorized
                 # as the same session the cloud attempt was.
                 checkout_holder=checkout_holder, checkout_fence=checkout_fence,
+                **({"entity_scope": entity_scope} if entity_scope is not None else {}),
             )
         except Exception as exc:  # noqa: BLE001
             holder["exc"] = exc

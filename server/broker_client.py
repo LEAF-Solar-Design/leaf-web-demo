@@ -103,7 +103,8 @@ def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
                    checkout_fence: Optional[int] = None,
                    job_id: Optional[str] = None,
                    file_only: bool = False,
-                   test_source: Optional[str] = None) -> Dict[str, Any]:
+                   test_source: Optional[str] = None,
+                   entity_scope: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """POST /broker/run -> extended section-3 envelope (ok true OR false).
 
     ``dwg_version`` (None -> head, unchanged behaviour) pins the run to a specific
@@ -153,6 +154,8 @@ def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
         payload["file_only"] = True
     if test_source is not None:
         payload["test_source"] = test_source
+    if entity_scope is not None:
+        payload["entity_scope"] = entity_scope
     try:
         resp = requests.post(
             f"{broker_url()}/broker/run",
@@ -205,15 +208,19 @@ def run_plan_via_broker(tenant_id: str, plan: Dict[str, Any], dwg: str,
                         ledger_event_key: Optional[str] = None,
                         checkout_holder: Optional[str] = None,
                         checkout_fence: Optional[int] = None,
-                        job_id: Optional[str] = None) -> Dict[str, Any]:
+                        job_id: Optional[str] = None,
+                        entity_scope: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """POST a durable browser plan to the server-owned live-write endpoint."""
+    payload = {"tenant_id": tenant_id, "plan": plan, "dwg": dwg,
+               "dwg_version": dwg_version, "ledger_event_key": ledger_event_key,
+               "checkout_holder": checkout_holder, "checkout_fence": checkout_fence,
+               "job_id": job_id}
+    if entity_scope is not None:
+        payload["entity_scope"] = entity_scope
     try:
         resp = requests.post(
             f"{broker_url()}/broker/run-plan",
-            json={"tenant_id": tenant_id, "plan": plan, "dwg": dwg,
-                  "dwg_version": dwg_version, "ledger_event_key": ledger_event_key,
-                  "checkout_holder": checkout_holder, "checkout_fence": checkout_fence,
-                  "job_id": job_id},
+            json=payload,
             headers=broker_headers(),
             timeout=timeout_s or 600,
         )
