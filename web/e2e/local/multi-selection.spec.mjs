@@ -61,6 +61,18 @@ test('SSD1-24C marquee: window, crossing, Shift union, clear, Escape and right p
       }))
     }, { type, pointerId, pointerType, point, extra })
   }
+  const pointers = async (events) => {
+    await mount.evaluate((el, events) => {
+      for (const [type, pointerId, pointerType, point, extra = {}] of events) {
+        const clientX = point.x, clientY = point.y
+        document.elementFromPoint(clientX, clientY).dispatchEvent(new PointerEvent(type, {
+          bubbles: true, cancelable: true, composed: true, pointerId, pointerType,
+          isPrimary: extra.isPrimary ?? true, button: type === 'pointermove' ? -1 : 0,
+          buttons: type === 'pointerup' ? 0 : 1, clientX, clientY,
+        }))
+      }
+    }, events)
+  }
   const drag = async (a, b, { shift = false, cancel = false, button = 'left' } = {}) => {
     const start = await project(...a)
     const end = await project(...b)
@@ -120,10 +132,14 @@ test('SSD1-24C marquee: window, crossing, Shift union, clear, Escape and right p
   await expect(mount.locator('.viewer-marquee')).toHaveCount(0)
   await expect(start).toHaveText('0.00, 0.00')
   expect(await pose()).toEqual(beforePointers)
-  await pointer('pointerdown', 14, 'touch', [5, 20])
-  await pointer('pointerdown', 15, 'touch', [5, 0], { isPrimary: false })
-  await pointer('pointerup', 15, 'touch', [5, 0], { isPrimary: false })
-  await pointer('pointerup', 14, 'touch', [5, 20])
+  const heldPoint = await project(5, 20)
+  const secondaryPoint = await project(5, 0)
+  await pointers([
+    ['pointerdown', 14, 'touch', heldPoint],
+    ['pointerdown', 15, 'touch', secondaryPoint, { isPrimary: false }],
+    ['pointerup', 15, 'touch', secondaryPoint, { isPrimary: false }],
+    ['pointerup', 14, 'touch', heldPoint],
+  ])
   await expect(start).toHaveText('0.00, 20.00')
   await expect(setCount).toHaveCount(0)
   await drag([-2, -2], [12, 5], { button: 'right' })
