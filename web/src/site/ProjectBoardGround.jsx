@@ -1,5 +1,5 @@
-import { useLayoutEffect, useRef, useState } from 'react'
-import { readBoardTheme, writeBoardTheme } from '../lib/themePreference.js'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { BOARD_THEME_KEY, readBoardTheme, writeBoardTheme } from '../lib/themePreference.js'
 import WorldSpaceBoard from './WorldSpaceBoard.jsx'
 import { BoardTiles } from './BoardTiles.jsx'
 import { START_BOARD_COPY } from './startBoardCopy.js'
@@ -20,6 +20,14 @@ export function ProjectBoardGround({
 }) {
   const state = workspaceProject || EMPTY_WORKSPACE_PROJECT
   const [theme, setTheme] = useState(() => readBoardTheme())
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined
+    const onStorage = (event) => {
+      if (event.key === BOARD_THEME_KEY || event.key === null) setTheme(readBoardTheme())
+    }
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
+  }, [])
   const lightBoard = themeable && theme === 'light'
   const themeToggle = themeable && (
     <button
