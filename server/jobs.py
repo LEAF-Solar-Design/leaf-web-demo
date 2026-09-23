@@ -35,6 +35,7 @@ from typing import Any, Dict, List, Optional
 import broker_client
 import platform_link
 from envelopes import ErrorCode, err_envelope, error_obj
+from entity_scope_containment import is_scope_refusal
 from job_pg_store import PostgresJobStore
 
 try:  # APS domain metrics (CloudWatch EMF); best-effort, optional
@@ -1562,6 +1563,7 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
             aps_live
             and plan is None
             and err.get("error_code") != ErrorCode.TURN_IN_PROGRESS
+            and not is_scope_refusal(err)
             and _allows_local_fallback(tool)
         ):
             _run_local_fallback(job_id, worker_id, tenant_id, tool, params, dwg, attempt, provenance,
