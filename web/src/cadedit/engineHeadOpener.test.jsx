@@ -590,4 +590,53 @@ describe('EngineHeadOpener', () => {
     expect(studio.context.session.dirty).toBe(false)
     expect(studio.context.reach.state).toBe(REACH_STATE.OPEN)
   })
+
+  it('one fetch: a fetch that settles just before a later run is fetched again', async () => {
+    const fetchDxf = vi.fn(async () => answer(1))
+    const studio = mount({ fetchDxf })
+    await settle()
+    await waitFor(() => expect(workers.length).toBe(1))
+    loaded(workers[0], headDocumentId('rooftop_demo', 1))
+    expect(fetchDxf).toHaveBeenCalledTimes(1)
+    let reject
+    fetchDxf.mockImplementation(() => new Promise((_, r) => { reject = r }))
+    studio.rerender({ headKey: 2 })
+    await settle()
+    expect(fetchDxf).toHaveBeenCalledTimes(2)
+    act(() => { studio.context.session.actions.select('e1') })
+    act(() => { studio.context.session.actions.applyEdit('move', { dx: '1', dy: '0' }) })
+    expect(studio.context.session.busy).toBe(true)
+    // An edit's reply arrives in a later task, so a microtask checkpoint always separates the edit starting from its refusal.
+    await settle()
+    // The fetch fails and the edit is refused with no yield between them.
+    act(() => {
+      reject(new Error('GET /api/drawings/rooftop_demo/dxf -> 503'))
+      fetchDxf.mockImplementation(async () => answer(2))
+      workers[0].emit({ type: 'editApplied', op: 'move', ok: false, reason: 'test refusal' })
+    })
+    await settle()
+    expect(fetchDxf).toHaveBeenCalledTimes(3)
+    const posts = workers[0].posted.filter((m) => m.type === 'loadDocument')
+    expect(posts[posts.length - 1].documentId).toBe(headDocumentId('rooftop_demo', 2))
+    loaded(workers[0], headDocumentId('rooftop_demo', 2))
+    expect(studio.context.reach.state).toBe(REACH_STATE.OPEN)
+  })
+
+  it('one fetch: disabling and re-enabling during a pending fetch fetches again', async () => {
+    let resolveA
+    const fetchDxf = vi.fn(() => new Promise((r) => { resolveA = r }))
+    const studio = mount({ fetchDxf, sourceKey: 'live' })
+    await settle()
+    expect(fetchDxf).toHaveBeenCalledTimes(1)
+    studio.rerender({ enabled: false, sourceKey: 'sample' })
+    fetchDxf.mockImplementation(async () => answer(2))
+    studio.rerender({ enabled: true, sourceKey: 'live' })
+    await act(async () => { resolveA(answer(1)); await Promise.resolve(); await Promise.resolve() })
+    await settle()
+    expect(fetchDxf).toHaveBeenCalledTimes(2)
+    const posts = loadPosts()
+    expect(posts.length).toBeGreaterThan(0)
+    expect(posts.some((m) => m.documentId === headDocumentId('rooftop_demo', 1))).toBe(false)
+    expect(posts[posts.length - 1].documentId).toBe(headDocumentId('rooftop_demo', 2))
+  })
 })

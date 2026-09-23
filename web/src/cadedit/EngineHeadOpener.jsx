@@ -74,10 +74,10 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
   const savedAtOpenRef = useRef(null)
   // The document name this opener instance last passed to `openBytes`.
   const openedDocumentRef = useRef(null)
-  // At most one entry, { key, promise, pending }: the head fetch for the
-  // current attempt key, shared by effect runs that were cancelled before they
-  // settled. A run attaches only while the fetch is still pending; a settled
-  // one (above all a rejected one) is fetched again, as before sharing.
+  // At most one entry, { key, promise, attachable }: the head fetch for the
+  // current attempt key. A run attaches only inside the synchronous window the
+  // cleanup that orphaned the fetch opens (StrictMode's second setup); the
+  // window closes at the next microtask, and any later run fetches again.
   const inflightRef = useRef(null)
   // Bumped on unmount and on every drawing or source switch; an async leg
   // captured before an await compares and abandons if it moved.
@@ -99,10 +99,14 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
   }, [drawingId, sourceKey])
 
   useEffect(() => {
-    if (!enabled || !drawingId || typeof fetchRef.current !== 'function') return undefined
+    if (!enabled || !drawingId || typeof fetchRef.current !== 'function') {
+      // A disabled or incomplete run leaves nothing a later run may attach to.
+      inflightRef.current = null
+      return undefined
+    }
     const key = `${drawingId}#${sourceKey}#${headKey}`
     // An entry for another key serves nothing now. Hygiene only (no row): the
-    // pending check below already keeps a stale entry from being misused.
+    // attachable check below already keeps a stale entry from being misused.
     if (inflightRef.current !== null && inflightRef.current.key !== key) inflightRef.current = null
     // A hand-imported document is never replaced, and the reach reads idle
     // while it is open (the head's sentence would be stale under it). Checked
@@ -159,8 +163,12 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
       if (inflightRef.current?.key === key) inflightRef.current = null
     }
     let promise
-    if (inflightRef.current?.key === key && inflightRef.current.pending === true) {
-      promise = inflightRef.current.promise
+    let entry
+    if (inflightRef.current?.key === key && inflightRef.current.attachable === true) {
+      entry = inflightRef.current
+      // Attaching consumes the window: one run shares the fetch, no more.
+      entry.attachable = false
+      promise = entry.promise
     } else {
       // A synchronous throw in fetchDxf is a rejection. Called now, not in a
       // .then: a native promise passes through Promise.resolve unwrapped, so
@@ -170,9 +178,9 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
       } catch (error) {
         promise = Promise.reject(error)
       }
-      const entry = { key, promise, pending: true }
-      // Also handles a rejection nobody is attached to (a cancelled run's).
-      promise.then(() => { entry.pending = false }, () => { entry.pending = false })
+      entry = { key, promise, attachable: false }
+      // Handles a rejection nobody is attached to (a cancelled run's).
+      promise.catch(() => {})
       inflightRef.current = entry
     }
     ;(async () => {
@@ -239,7 +247,15 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
     })()
     return () => {
       cancelled = true
-      if (!settled) attemptRef.current = ''
+      if (!settled) {
+        attemptRef.current = ''
+        // Open the attach window for a run in this same synchronous commit
+        // (StrictMode's second setup) only; it closes at the next microtask.
+        if (inflightRef.current === entry) {
+          entry.attachable = true
+          queueMicrotask(() => { entry.attachable = false })
+        }
+      }
     }
     // present/holdsHead/dirty/busy are read from the same session object the
     // effect keys on; listing the derived booleans keeps the deps honest.
