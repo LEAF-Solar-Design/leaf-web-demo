@@ -8,6 +8,7 @@ import {
   MAX_ACTION_ROWS,
   MAX_ARTIFACT_ROWS_PER_KIND,
   actionPaletteRows,
+  actionRow,
   findResultRows,
   sessionArtifactRows,
   toolArtifactRows,
@@ -15,6 +16,14 @@ import {
 } from './palette.js'
 
 describe('actionPaletteRows', () => {
+  it('SSD1-A row3: actionRow maps the eight fields and actionPaletteRows still caps at MAX_ACTION_ROWS', () => {
+    expect(actionRow({ id: 'x', label: 'X' })).toEqual({
+      kind: 'action', id: 'x', label: 'X', icon: '', kbd: null, disabled: false, reason: '', onSelect: undefined,
+    })
+    const list = Array.from({ length: 30 }, (_, i) => ({ id: `a${i}`, label: `action ${i}` }))
+    expect(actionPaletteRows(list, '')).toHaveLength(MAX_ACTION_ROWS)
+  })
+
   const actions = [
     { id: 'fit', label: 'fit', icon: 'fit', kbd: null, disabled: false, reason: '', onSelect: () => {} },
     { id: 'undo', label: 'undo', icon: 'undo', kbd: null, disabled: true, reason: 'nothing to undo', onSelect: () => {} },

@@ -67,20 +67,24 @@ test('bar:retry — R runs the exact handler the visible Retry button runs', asy
   await setRail(page, '1')
   const catalogGate = { succeed: false }
   await installFixture(page, { catalogGate })
-  // The browser surface's NavRail never collapses to a spine (rails.left is
-  // 'nav', not 'spine' — productSurfaces.js), so its "Retry" chip is always
-  // on screen, unlike the drafting surfaces where the rail hides behind the
-  // band by default.
+  // On the Browser surface the rail is a spine under the studio (#1259).
+  // A spine mounts no children, so the Retry chip exists only after the
+  // band's `Tool rail` button expands it.
   await page.goto('/app?surface=browser')
 
   // The one failed-catalog surface: NavRail's own "Retry" chip (onRetryCatalog).
   const retryButton = page.getByRole('button', { name: 'Retry', exact: true })
+  const railButton = page.getByRole('button', { name: 'Tool rail', exact: true })
+  await expect(railButton).toBeVisible({ timeout: 20_000 })
+  await expect(retryButton).toHaveCount(0)
+  await railButton.click()
   await expect(retryButton).toBeVisible({ timeout: 20_000 })
   await expect(page.getByText(/Couldn.t load families/)).toBeVisible()
 
   // No click on Retry: only the R key ladder rung (rTarget 'catalog') can
   // recover this, so a real recovery here is proof R invoked the same
   // onRetryCatalog handler the button carries.
+  await page.evaluate(() => document.activeElement?.blur())
   catalogGate.succeed = true
   await page.keyboard.press('r')
   await expect(retryButton).toHaveCount(0, { timeout: 15_000 })

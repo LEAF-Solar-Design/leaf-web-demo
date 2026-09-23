@@ -23,6 +23,19 @@ function matches(query, ...fields) {
 // 10b), already carrying the LIVE reason from the same builder the ribbon
 // itself calls — this module invents no reason of its own. Prefix matches on
 // the label rank first, like the "/" picker's own rankEntries.
+export function actionRow(action) {
+  return {
+    kind: 'action',
+    id: action.id,
+    label: action.label,
+    icon: action.icon || '',
+    kbd: action.kbd || null,
+    disabled: !!action.disabled,
+    reason: action.reason || '',
+    onSelect: action.onSelect,
+  }
+}
+
 export function actionPaletteRows(actions, query) {
   const q = String(query || '').trim().toLowerCase()
   const pre = []
@@ -33,16 +46,7 @@ export function actionPaletteRows(actions, query) {
     if (!matches(query, label)) continue
     ;(label.toLowerCase().startsWith(q) ? pre : sub).push(a)
   }
-  return [...pre, ...sub].slice(0, MAX_ACTION_ROWS).map((a) => ({
-    kind: 'action',
-    id: a.id,
-    label: a.label,
-    icon: a.icon || '',
-    kbd: a.kbd || null,
-    disabled: !!a.disabled,
-    reason: a.reason || '',
-    onSelect: a.onSelect,
-  }))
+  return [...pre, ...sub].slice(0, MAX_ACTION_ROWS).map(actionRow)
 }
 
 // The version-history artifact index (GET /api/drawings/{id}/versions,
