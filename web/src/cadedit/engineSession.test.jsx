@@ -656,14 +656,19 @@ describe('save completion', () => {
   })
 
   it('SSD1-24F row3: nothing retries on its own', async () => {
+    // Timers captured before the fake clock (for example const later = setTimeout) are outside its view; this row covers retries through global timers, promise chains, or React effects.
     const save = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'))
     const session = await editedSession({ headVersion: 4, save })
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
     try {
       await act(async () => { await session.current.actions.save() })
 
-      await act(async () => { await vi.advanceTimersByTimeAsync(600_000) })
+      // Step the advance so React effects flush between acts.
+      for (let step = 0; step < 20; step += 1) {
+        await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
+      }
       expect(save).toHaveBeenCalledTimes(1)
+      expect(vi.getTimerCount()).toBe(0)
     } finally {
       vi.useRealTimers()
     }
