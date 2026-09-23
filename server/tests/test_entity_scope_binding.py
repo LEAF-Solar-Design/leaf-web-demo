@@ -303,6 +303,17 @@ def test_request_id_distinguishes_entity_scope(lane, monkeypatch, order):
     original_digest = journal.payload_digest
     monkeypatch.setattr(journal, "enabled", lambda: True)
     monkeypatch.setattr(journal, "get_request", lambda rid: deepcopy(rows.get(rid)))
+    if order == "route_first":
+        import threading
+
+        route_read = threading.Event()
+
+        def get_request(rid):
+            row = deepcopy(rows.get(rid))
+            route_read.set()
+            return row
+
+        monkeypatch.setattr(journal, "get_request", get_request)
     if order == "turn_first":
         import time
 
@@ -339,6 +350,8 @@ def test_request_id_distinguishes_entity_scope(lane, monkeypatch, order):
         return True
 
     def finish(rid, tid, **kw):
+        if order == "route_first":
+            route_read.wait(5)
         rows[rid].update(state=kw["state"], response_status=kw["response_status"], response_json=kw["response"])
 
     monkeypatch.setattr(journal, "payload_digest", digest)
@@ -350,6 +363,8 @@ def test_request_id_distinguishes_entity_scope(lane, monkeypatch, order):
     response = lane.post(body)
     assert (response.status_code, response.json()["status"]) in ((202, "started"), (200, "completed"))
     assert response.json()["request_id"] == rid
+    if order == "route_first":
+        assert (response.status_code, response.json()["status"]) == (202, "started")
     if order == "turn_first":
         assert (response.status_code, response.json()["status"]) == (200, "completed")
     lane.drain()
