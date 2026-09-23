@@ -688,6 +688,10 @@ def build_suites() -> List[Suite]:
         # execution, both broker clients and the broker's request models.
         Suite("server-entity-scope-transport", "server tests/test_entity_scope_transport.py",
               "pytest", SERVER, _py_pytest("tests/test_entity_scope_transport.py"), 47),
+        # Plan-first consent on the live gate path. Unregistered until now, so
+        # it sat red on main for weeks after #1110 changed the action catalog.
+        Suite("server-plan-first-gate", "server tests/test_plan_first_gate.py",
+              "pytest", SERVER, _py_pytest("tests/test_plan_first_gate.py"), 5),
         # W14 admin self-edit lane (R7): branch-only platform-repo writes,
         # fundamental-path co-sign, landing handoff. Own process: it builds
         # real git repos and toggles the R7 rollout env.
