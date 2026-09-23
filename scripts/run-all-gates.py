@@ -1792,6 +1792,13 @@ def build_suites() -> List[Suite]:
         Suite("scripts-solar-ground-studio-evidence", "scripts test_solar_ground_studio_evidence.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_studio_evidence.py"), 28,
               allowed_skip_reasons=(r"needs a git executable",)),
+        # S40 (2026-09-23): paired evidence shards (contract G19) for a step whose two
+        # sides together exceed the comparator's 100,000-node document bound (terrain t1,
+        # piling t4). Every document is authored in the file (no capture, no git, no
+        # network), so the floor is the exact count on every runner: 15 plain tests plus
+        # 5 tampered shards, 5 malformed inputs and the 2 real step shapes = 27.
+        Suite("scripts-solar-evidence-shard", "scripts test_solar_evidence_shard.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_evidence_shard.py"), 27),
         # The parity oracle itself: the ledger rules, the receipt rules, the fail-closed
         # inputs, and (S29, 2026-09-22) the declared divergence a known plugin defect
         # gets, which is the ONLY way a failing comparator settles a capability: the
