@@ -499,6 +499,10 @@ def build_suites() -> List[Suite]:
         # runner. COUNTED from the collected cases: 48 tests + 41 more parametrizations = 89.
         Suite("server-solar-rooftop-chain", "server tests/test_solar_rooftop_chain.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_rooftop_chain.py"), 89),
+        # W5 terrain d-steps (2026-09-23, contract G28): trench routing, the export preview, the
+        # Yield zip byte for byte, and trackers to panel groups through the key-aware row reader.
+        Suite("server-solar-ground-dsteps", "server tests/test_solar_ground_dsteps.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_ground_dsteps.py"), 31),
         # S33 KML and LandXML ports (2026-09-23): server/solar_geo_formats.py, the
         # literal port of KmlBoundaryExporter (with every format branch
         # LEAFKMLEXPORTFMTDEMO exercises), KmlBoundaryParser, TerrainExporter's
@@ -1884,6 +1888,8 @@ def build_suites() -> List[Suite]:
         # parametrizations = 43.
         Suite("scripts-solar-rooftop-chain-evidence", "scripts test_solar_rooftop_chain_evidence.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_rooftop_chain_evidence.py"), 43),
+        Suite("scripts-solar-ground-dsteps-evidence", "scripts test_solar_ground_dsteps_evidence.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_dsteps_evidence.py"), 12),
         # The parity oracle itself: the ledger rules, the receipt rules, the fail-closed
         # inputs, and (S29, 2026-09-22) the declared divergence a known plugin defect
         # gets, which is the ONLY way a failing comparator settles a capability: the
