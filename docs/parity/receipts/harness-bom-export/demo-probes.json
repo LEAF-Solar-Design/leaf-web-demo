@@ -1,0 +1,2505 @@
+{
+ "schema": "leaf.solar-parity-receipt.v1",
+ "capability": "harness-bom-export",
+ "capability_version": "0",
+ "fixture": {
+  "id": "demo-probes",
+  "sha256": "0a7e3c28e3bdce38288fe43f06c5ff60e40c09726e9ce9d3dc09a47b229c85ce"
+ },
+ "plugin": {
+  "build": "LeafSolarDesign 2025 licensed 2026-09-23",
+  "state": "committed",
+  "receipt_sha256": "9630a86d34686179d1b56a1bae5212406f9258d4422c2c4b4223d4f54ac3ec85"
+ },
+ "studio": {
+  "capability_version": "0",
+  "engine": "server-builtin"
+ },
+ "comparator": {
+  "name": "solar-w1-semantic",
+  "version": "1",
+  "verdict": "pass",
+  "diffs": []
+ },
+ "synthetic_fields": [
+  "plugin:before/recorded",
+  "plugin:changes/unrecorded",
+  "studio:before/recorded",
+  "studio:changes/unrecorded"
+ ],
+ "fallback_fields": [],
+ "synthetic_flagged": true,
+ "survived_reopen": true,
+ "produced_at": "2026-09-23T03:45:59Z",
+ "comparison": {
+  "schema": "leaf.solar-w1-comparison.v1",
+  "capability": "harness-bom-export",
+  "family": "exports",
+  "plugin": {
+   "after": {
+    "format": "xlsx:Overview|By Area|Modules|Cable Tray|Layout|Electrical|Piling",
+    "rows": [
+     {
+      "fields": {
+       "Cells": [
+        "Metric",
+        "Value",
+        "Unit"
+       ],
+       "Key": "Overview:1"
+      },
+      "id": {
+       "entity_id": "Overview:1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Total rows (sections)",
+        3,
+        "ea"
+       ],
+       "Key": "Overview:2"
+      },
+      "id": {
+       "entity_id": "Overview:2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Total modules",
+        30,
+        "ea"
+       ],
+       "Key": "Overview:3"
+      },
+      "id": {
+       "entity_id": "Overview:3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Total tube length",
+        60,
+        "m"
+       ],
+       "Key": "Overview:4"
+      },
+      "id": {
+       "entity_id": "Overview:4"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Total piles",
+        12,
+        "ea"
+       ],
+       "Key": "Overview:5"
+      },
+      "id": {
+       "entity_id": "Overview:5"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Total drive units",
+        3,
+        "ea"
+       ],
+       "Key": "Overview:6"
+      },
+      "id": {
+       "entity_id": "Overview:6"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "DC nameplate capacity",
+        18,
+        "kWp"
+       ],
+       "Key": "Overview:7"
+      },
+      "id": {
+       "entity_id": "Overview:7"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Category",
+        "Description",
+        "Unit",
+        "Quantity"
+       ],
+       "Key": "By Area:1"
+      },
+      "id": {
+       "entity_id": "By Area:1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Module",
+        "PV Module \u2014 2.000 m \u00d7 1.000 m portrait",
+        "ea",
+        30
+       ],
+       "Key": "By Area:2"
+      },
+      "id": {
+       "entity_id": "By Area:2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Torque Tube",
+        "Torque tube / tracker rail (3 sections, 60.0 m total)",
+        "m",
+        60
+       ],
+       "Key": "By Area:3"
+      },
+      "id": {
+       "entity_id": "By Area:3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Torque Tube",
+        "Torque tube section count",
+        "ea",
+        3
+       ],
+       "Key": "By Area:4"
+      },
+      "id": {
+       "entity_id": "By Area:4"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Pile",
+        "Ground pile / foundation (at 5.0 m c/c spacing, estimated)",
+        "ea",
+        12
+       ],
+       "Key": "By Area:5"
+      },
+      "id": {
+       "entity_id": "By Area:5"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Drive Unit",
+        "Single-axis tracker drive unit (one per table section)",
+        "ea",
+        3
+       ],
+       "Key": "By Area:6"
+      },
+      "id": {
+       "entity_id": "By Area:6"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "DC Capacity",
+        "Total DC nameplate (30 \u00d7 600 Wp)",
+        "kWp",
+        18
+       ],
+       "Key": "By Area:7"
+      },
+      "id": {
+       "entity_id": "By Area:7"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Category",
+        "Description",
+        "Unit",
+        "Quantity"
+       ],
+       "Key": "Modules:1"
+      },
+      "id": {
+       "entity_id": "Modules:1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Module",
+        "PV Module \u2014 2.000 m \u00d7 1.000 m portrait",
+        "ea",
+        30
+       ],
+       "Key": "Modules:2"
+      },
+      "id": {
+       "entity_id": "Modules:2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "HarnessType",
+        "CableGaugeAwg",
+        "DropLengthM",
+        "Count",
+        "TotalLengthM"
+       ],
+       "Key": "Cable Tray:1"
+      },
+      "id": {
+       "entity_id": "Cable Tray:1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 5
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "EndOfRow",
+        10,
+        0,
+        3,
+        0
+       ],
+       "Key": "Cable Tray:2"
+      },
+      "id": {
+       "entity_id": "Cable Tray:2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 5
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "EndOfRow",
+        10,
+        1,
+        3,
+        3
+       ],
+       "Key": "Cable Tray:3"
+      },
+      "id": {
+       "entity_id": "Cable Tray:3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 5
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "EndOfRow",
+        10,
+        2,
+        3,
+        6
+       ],
+       "Key": "Cable Tray:4"
+      },
+      "id": {
+       "entity_id": "Cable Tray:4"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 5
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "EndOfRow",
+        10,
+        3,
+        3,
+        9
+       ],
+       "Key": "Cable Tray:5"
+      },
+      "id": {
+       "entity_id": "Cable Tray:5"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 5
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "EndOfRow",
+        10,
+        4,
+        3,
+        12
+       ],
+       "Key": "Cable Tray:6"
+      },
+      "id": {
+       "entity_id": "Cable Tray:6"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 5
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "EndOfRow",
+        10,
+        5,
+        3,
+        15
+       ],
+       "Key": "Cable Tray:7"
+      },
+      "id": {
+       "entity_id": "Cable Tray:7"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 5
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "EndOfRow",
+        10,
+        6,
+        3,
+        18
+       ],
+       "Key": "Cable Tray:8"
+      },
+      "id": {
+       "entity_id": "Cable Tray:8"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 5
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "EndOfRow",
+        10,
+        7,
+        3,
+        21
+       ],
+       "Key": "Cable Tray:9"
+      },
+      "id": {
+       "entity_id": "Cable Tray:9"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 5
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "EndOfRow",
+        10,
+        8,
+        3,
+        24
+       ],
+       "Key": "Cable Tray:10"
+      },
+      "id": {
+       "entity_id": "Cable Tray:10"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 5
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "EndOfRow",
+        10,
+        9,
+        3,
+        27
+       ],
+       "Key": "Cable Tray:11"
+      },
+      "id": {
+       "entity_id": "Cable Tray:11"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 5
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Motor",
+        6,
+        4.5,
+        1,
+        4.5
+       ],
+       "Key": "Cable Tray:12"
+      },
+      "id": {
+       "entity_id": "Cable Tray:12"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 5
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "RowIndex",
+        "AxisStartX",
+        "AxisStartY",
+        "AxisEndX",
+        "AxisEndY",
+        "LengthMeters",
+        "RailOverhangM",
+        "PhysicalLengthMeters",
+        "ModuleSlots"
+       ],
+       "Key": "Layout:1"
+      },
+      "id": {
+       "entity_id": "Layout:1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 9
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        0,
+        0,
+        0,
+        0,
+        20,
+        20,
+        0,
+        20,
+        10
+       ],
+       "Key": "Layout:2"
+      },
+      "id": {
+       "entity_id": "Layout:2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 9
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        1,
+        5,
+        0,
+        5,
+        20,
+        20,
+        0,
+        20,
+        10
+       ],
+       "Key": "Layout:3"
+      },
+      "id": {
+       "entity_id": "Layout:3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 9
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        2,
+        10,
+        0,
+        10,
+        20,
+        20,
+        0,
+        20,
+        10
+       ],
+       "Key": "Layout:4"
+      },
+      "id": {
+       "entity_id": "Layout:4"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 9
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Category",
+        "Description",
+        "Unit",
+        "Quantity"
+       ],
+       "Key": "Electrical:1"
+      },
+      "id": {
+       "entity_id": "Electrical:1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "DC Capacity",
+        "Total DC nameplate (30 \u00d7 600 Wp)",
+        "kWp",
+        18
+       ],
+       "Key": "Electrical:2"
+      },
+      "id": {
+       "entity_id": "Electrical:2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "PileIndex",
+        "RowIndex",
+        "X",
+        "Y",
+        "TerrainZ",
+        "PileHeightAboveGrade"
+       ],
+       "Key": "Piling:1"
+      },
+      "id": {
+       "entity_id": "Piling:1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        1.2
+       ],
+       "Key": "Piling:2"
+      },
+      "id": {
+       "entity_id": "Piling:2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        2,
+        0,
+        0,
+        5,
+        0,
+        1.2
+       ],
+       "Key": "Piling:3"
+      },
+      "id": {
+       "entity_id": "Piling:3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        3,
+        0,
+        0,
+        10,
+        0,
+        1.2
+       ],
+       "Key": "Piling:4"
+      },
+      "id": {
+       "entity_id": "Piling:4"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        4,
+        0,
+        0,
+        15,
+        0,
+        1.2
+       ],
+       "Key": "Piling:5"
+      },
+      "id": {
+       "entity_id": "Piling:5"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        5,
+        0,
+        0,
+        20,
+        0,
+        1.2
+       ],
+       "Key": "Piling:6"
+      },
+      "id": {
+       "entity_id": "Piling:6"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        6,
+        1,
+        5,
+        0,
+        0,
+        1.2
+       ],
+       "Key": "Piling:7"
+      },
+      "id": {
+       "entity_id": "Piling:7"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        7,
+        1,
+        5,
+        5,
+        0,
+        1.2
+       ],
+       "Key": "Piling:8"
+      },
+      "id": {
+       "entity_id": "Piling:8"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        8,
+        1,
+        5,
+        10,
+        0,
+        1.2
+       ],
+       "Key": "Piling:9"
+      },
+      "id": {
+       "entity_id": "Piling:9"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        9,
+        1,
+        5,
+        15,
+        0,
+        1.2
+       ],
+       "Key": "Piling:10"
+      },
+      "id": {
+       "entity_id": "Piling:10"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        10,
+        1,
+        5,
+        20,
+        0,
+        1.2
+       ],
+       "Key": "Piling:11"
+      },
+      "id": {
+       "entity_id": "Piling:11"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        11,
+        2,
+        10,
+        0,
+        0,
+        1.2
+       ],
+       "Key": "Piling:12"
+      },
+      "id": {
+       "entity_id": "Piling:12"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        12,
+        2,
+        10,
+        5,
+        0,
+        1.2
+       ],
+       "Key": "Piling:13"
+      },
+      "id": {
+       "entity_id": "Piling:13"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        13,
+        2,
+        10,
+        10,
+        0,
+        1.2
+       ],
+       "Key": "Piling:14"
+      },
+      "id": {
+       "entity_id": "Piling:14"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        14,
+        2,
+        10,
+        15,
+        0,
+        1.2
+       ],
+       "Key": "Piling:15"
+      },
+      "id": {
+       "entity_id": "Piling:15"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        15,
+        2,
+        10,
+        20,
+        0,
+        1.2
+       ],
+       "Key": "Piling:16"
+      },
+      "id": {
+       "entity_id": "Piling:16"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "By Area:1": "By Area:1",
+    "By Area:2": "By Area:2",
+    "By Area:3": "By Area:3",
+    "By Area:4": "By Area:4",
+    "By Area:5": "By Area:5",
+    "By Area:6": "By Area:6",
+    "By Area:7": "By Area:7",
+    "Cable Tray:1": "Cable Tray:1",
+    "Cable Tray:10": "Cable Tray:10",
+    "Cable Tray:11": "Cable Tray:11",
+    "Cable Tray:12": "Cable Tray:12",
+    "Cable Tray:2": "Cable Tray:2",
+    "Cable Tray:3": "Cable Tray:3",
+    "Cable Tray:4": "Cable Tray:4",
+    "Cable Tray:5": "Cable Tray:5",
+    "Cable Tray:6": "Cable Tray:6",
+    "Cable Tray:7": "Cable Tray:7",
+    "Cable Tray:8": "Cable Tray:8",
+    "Cable Tray:9": "Cable Tray:9",
+    "Electrical:1": "Electrical:1",
+    "Electrical:2": "Electrical:2",
+    "Layout:1": "Layout:1",
+    "Layout:2": "Layout:2",
+    "Layout:3": "Layout:3",
+    "Layout:4": "Layout:4",
+    "Modules:1": "Modules:1",
+    "Modules:2": "Modules:2",
+    "Overview:1": "Overview:1",
+    "Overview:2": "Overview:2",
+    "Overview:3": "Overview:3",
+    "Overview:4": "Overview:4",
+    "Overview:5": "Overview:5",
+    "Overview:6": "Overview:6",
+    "Overview:7": "Overview:7",
+    "Piling:1": "Piling:1",
+    "Piling:10": "Piling:10",
+    "Piling:11": "Piling:11",
+    "Piling:12": "Piling:12",
+    "Piling:13": "Piling:13",
+    "Piling:14": "Piling:14",
+    "Piling:15": "Piling:15",
+    "Piling:16": "Piling:16",
+    "Piling:2": "Piling:2",
+    "Piling:3": "Piling:3",
+    "Piling:4": "Piling:4",
+    "Piling:5": "Piling:5",
+    "Piling:6": "Piling:6",
+    "Piling:7": "Piling:7",
+    "Piling:8": "Piling:8",
+    "Piling:9": "Piling:9"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "0a7e3c28e3bdce38288fe43f06c5ff60e40c09726e9ce9d3dc09a47b229c85ce",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "d3ea35ca0094e16c43c03e326542162100440e79e6164fa45cf16dbaa177b23f",
+   "output_sha256": "4e4115fb8140b1444c6ef97604dd3125d7a5064c49472c46a7cf80435b05c23f",
+   "parameters": {
+    "capability": "harness-bom-export",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafharness_bom_demo.xlsx",
+    "probe_file_sha256": "ddca22b266d9a382230e210349090bd5a6824101a5d16d127897512cf0ae0c15",
+    "probe_type": "harness-bom-xlsx",
+    "side": "plugin"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "none",
+    "producer": "plugin",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  },
+  "studio": {
+   "after": {
+    "format": "xlsx:Overview|By Area|Modules|Cable Tray|Layout|Electrical|Piling",
+    "rows": [
+     {
+      "fields": {
+       "Cells": [
+        "Metric",
+        "Value",
+        "Unit"
+       ],
+       "Key": "Overview:1"
+      },
+      "id": {
+       "entity_id": "Overview:1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Total rows (sections)",
+        3,
+        "ea"
+       ],
+       "Key": "Overview:2"
+      },
+      "id": {
+       "entity_id": "Overview:2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Total modules",
+        30,
+        "ea"
+       ],
+       "Key": "Overview:3"
+      },
+      "id": {
+       "entity_id": "Overview:3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Total tube length",
+        60,
+        "m"
+       ],
+       "Key": "Overview:4"
+      },
+      "id": {
+       "entity_id": "Overview:4"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Total piles",
+        12,
+        "ea"
+       ],
+       "Key": "Overview:5"
+      },
+      "id": {
+       "entity_id": "Overview:5"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Total drive units",
+        3,
+        "ea"
+       ],
+       "Key": "Overview:6"
+      },
+      "id": {
+       "entity_id": "Overview:6"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "DC nameplate capacity",
+        18,
+        "kWp"
+       ],
+       "Key": "Overview:7"
+      },
+      "id": {
+       "entity_id": "Overview:7"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 3
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Category",
+        "Description",
+        "Unit",
+        "Quantity"
+       ],
+       "Key": "By Area:1"
+      },
+      "id": {
+       "entity_id": "By Area:1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Module",
+        "PV Module \u2014 2.000 m \u00d7 1.000 m portrait",
+        "ea",
+        30
+       ],
+       "Key": "By Area:2"
+      },
+      "id": {
+       "entity_id": "By Area:2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Torque Tube",
+        "Torque tube / tracker rail (3 sections, 60.0 m total)",
+        "m",
+        60
+       ],
+       "Key": "By Area:3"
+      },
+      "id": {
+       "entity_id": "By Area:3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Torque Tube",
+        "Torque tube section count",
+        "ea",
+        3
+       ],
+       "Key": "By Area:4"
+      },
+      "id": {
+       "entity_id": "By Area:4"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Pile",
+        "Ground pile / foundation (at 5.0 m c/c spacing, estimated)",
+        "ea",
+        12
+       ],
+       "Key": "By Area:5"
+      },
+      "id": {
+       "entity_id": "By Area:5"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Drive Unit",
+        "Single-axis tracker drive unit (one per table section)",
+        "ea",
+        3
+       ],
+       "Key": "By Area:6"
+      },
+      "id": {
+       "entity_id": "By Area:6"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "DC Capacity",
+        "Total DC nameplate (30 \u00d7 600 Wp)",
+        "kWp",
+        18
+       ],
+       "Key": "By Area:7"
+      },
+      "id": {
+       "entity_id": "By Area:7"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Category",
+        "Description",
+        "Unit",
+        "Quantity"
+       ],
+       "Key": "Modules:1"
+      },
+      "id": {
+       "entity_id": "Modules:1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Module",
+        "PV Module \u2014 2.000 m \u00d7 1.000 m portrait",
+        "ea",
+        30
+       ],
+       "Key": "Modules:2"
+      },
+      "id": {
+       "entity_id": "Modules:2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "HarnessType",
+        "CableGaugeAwg",
+        "DropLengthM",
+        "Count",
+        "TotalLengthM"
+       ],
+       "Key": "Cable Tray:1"
+      },
+      "id": {
+       "entity_id": "Cable Tray:1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 5
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "EndOfRow",
+        10,
+        0,
+        3,
+        0
+       ],
+       "Key": "Cable Tray:2"
+      },
+      "id": {
+       "entity_id": "Cable Tray:2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 5
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "EndOfRow",
+        10,
+        1,
+        3,
+        3
+       ],
+       "Key": "Cable Tray:3"
+      },
+      "id": {
+       "entity_id": "Cable Tray:3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 5
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "EndOfRow",
+        10,
+        2,
+        3,
+        6
+       ],
+       "Key": "Cable Tray:4"
+      },
+      "id": {
+       "entity_id": "Cable Tray:4"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 5
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "EndOfRow",
+        10,
+        3,
+        3,
+        9
+       ],
+       "Key": "Cable Tray:5"
+      },
+      "id": {
+       "entity_id": "Cable Tray:5"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 5
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "EndOfRow",
+        10,
+        4,
+        3,
+        12
+       ],
+       "Key": "Cable Tray:6"
+      },
+      "id": {
+       "entity_id": "Cable Tray:6"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 5
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "EndOfRow",
+        10,
+        5,
+        3,
+        15
+       ],
+       "Key": "Cable Tray:7"
+      },
+      "id": {
+       "entity_id": "Cable Tray:7"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 5
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "EndOfRow",
+        10,
+        6,
+        3,
+        18
+       ],
+       "Key": "Cable Tray:8"
+      },
+      "id": {
+       "entity_id": "Cable Tray:8"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 5
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "EndOfRow",
+        10,
+        7,
+        3,
+        21
+       ],
+       "Key": "Cable Tray:9"
+      },
+      "id": {
+       "entity_id": "Cable Tray:9"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 5
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "EndOfRow",
+        10,
+        8,
+        3,
+        24
+       ],
+       "Key": "Cable Tray:10"
+      },
+      "id": {
+       "entity_id": "Cable Tray:10"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 5
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "EndOfRow",
+        10,
+        9,
+        3,
+        27
+       ],
+       "Key": "Cable Tray:11"
+      },
+      "id": {
+       "entity_id": "Cable Tray:11"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 5
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Motor",
+        6,
+        4.5,
+        1,
+        4.5
+       ],
+       "Key": "Cable Tray:12"
+      },
+      "id": {
+       "entity_id": "Cable Tray:12"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 5
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "RowIndex",
+        "AxisStartX",
+        "AxisStartY",
+        "AxisEndX",
+        "AxisEndY",
+        "LengthMeters",
+        "RailOverhangM",
+        "PhysicalLengthMeters",
+        "ModuleSlots"
+       ],
+       "Key": "Layout:1"
+      },
+      "id": {
+       "entity_id": "Layout:1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 9
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        0,
+        0,
+        0,
+        0,
+        20,
+        20,
+        0,
+        20,
+        10
+       ],
+       "Key": "Layout:2"
+      },
+      "id": {
+       "entity_id": "Layout:2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 9
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        1,
+        5,
+        0,
+        5,
+        20,
+        20,
+        0,
+        20,
+        10
+       ],
+       "Key": "Layout:3"
+      },
+      "id": {
+       "entity_id": "Layout:3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 9
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        2,
+        10,
+        0,
+        10,
+        20,
+        20,
+        0,
+        20,
+        10
+       ],
+       "Key": "Layout:4"
+      },
+      "id": {
+       "entity_id": "Layout:4"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 9
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "Category",
+        "Description",
+        "Unit",
+        "Quantity"
+       ],
+       "Key": "Electrical:1"
+      },
+      "id": {
+       "entity_id": "Electrical:1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "DC Capacity",
+        "Total DC nameplate (30 \u00d7 600 Wp)",
+        "kWp",
+        18
+       ],
+       "Key": "Electrical:2"
+      },
+      "id": {
+       "entity_id": "Electrical:2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 4
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        "PileIndex",
+        "RowIndex",
+        "X",
+        "Y",
+        "TerrainZ",
+        "PileHeightAboveGrade"
+       ],
+       "Key": "Piling:1"
+      },
+      "id": {
+       "entity_id": "Piling:1"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        1.2
+       ],
+       "Key": "Piling:2"
+      },
+      "id": {
+       "entity_id": "Piling:2"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        2,
+        0,
+        0,
+        5,
+        0,
+        1.2
+       ],
+       "Key": "Piling:3"
+      },
+      "id": {
+       "entity_id": "Piling:3"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        3,
+        0,
+        0,
+        10,
+        0,
+        1.2
+       ],
+       "Key": "Piling:4"
+      },
+      "id": {
+       "entity_id": "Piling:4"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        4,
+        0,
+        0,
+        15,
+        0,
+        1.2
+       ],
+       "Key": "Piling:5"
+      },
+      "id": {
+       "entity_id": "Piling:5"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        5,
+        0,
+        0,
+        20,
+        0,
+        1.2
+       ],
+       "Key": "Piling:6"
+      },
+      "id": {
+       "entity_id": "Piling:6"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        6,
+        1,
+        5,
+        0,
+        0,
+        1.2
+       ],
+       "Key": "Piling:7"
+      },
+      "id": {
+       "entity_id": "Piling:7"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        7,
+        1,
+        5,
+        5,
+        0,
+        1.2
+       ],
+       "Key": "Piling:8"
+      },
+      "id": {
+       "entity_id": "Piling:8"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        8,
+        1,
+        5,
+        10,
+        0,
+        1.2
+       ],
+       "Key": "Piling:9"
+      },
+      "id": {
+       "entity_id": "Piling:9"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        9,
+        1,
+        5,
+        15,
+        0,
+        1.2
+       ],
+       "Key": "Piling:10"
+      },
+      "id": {
+       "entity_id": "Piling:10"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        10,
+        1,
+        5,
+        20,
+        0,
+        1.2
+       ],
+       "Key": "Piling:11"
+      },
+      "id": {
+       "entity_id": "Piling:11"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        11,
+        2,
+        10,
+        0,
+        0,
+        1.2
+       ],
+       "Key": "Piling:12"
+      },
+      "id": {
+       "entity_id": "Piling:12"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        12,
+        2,
+        10,
+        5,
+        0,
+        1.2
+       ],
+       "Key": "Piling:13"
+      },
+      "id": {
+       "entity_id": "Piling:13"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        13,
+        2,
+        10,
+        10,
+        0,
+        1.2
+       ],
+       "Key": "Piling:14"
+      },
+      "id": {
+       "entity_id": "Piling:14"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        14,
+        2,
+        10,
+        15,
+        0,
+        1.2
+       ],
+       "Key": "Piling:15"
+      },
+      "id": {
+       "entity_id": "Piling:15"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     },
+     {
+      "fields": {
+       "Cells": [
+        15,
+        2,
+        10,
+        20,
+        0,
+        1.2
+       ],
+       "Key": "Piling:16"
+      },
+      "id": {
+       "entity_id": "Piling:16"
+      },
+      "quantity": {
+       "kind": "float",
+       "unit": "none",
+       "value": 6
+      },
+      "type": "harness-bom-sheet-row",
+      "unit": "none"
+     }
+    ],
+    "source_revision": "scenario-list"
+   },
+   "before": {
+    "recorded": false
+   },
+   "changes": {
+    "created": [],
+    "deleted": [],
+    "modified": []
+   },
+   "elapsed_ms": 0,
+   "entity_mapping": {
+    "By Area:1": "By Area:1",
+    "By Area:2": "By Area:2",
+    "By Area:3": "By Area:3",
+    "By Area:4": "By Area:4",
+    "By Area:5": "By Area:5",
+    "By Area:6": "By Area:6",
+    "By Area:7": "By Area:7",
+    "Cable Tray:1": "Cable Tray:1",
+    "Cable Tray:10": "Cable Tray:10",
+    "Cable Tray:11": "Cable Tray:11",
+    "Cable Tray:12": "Cable Tray:12",
+    "Cable Tray:2": "Cable Tray:2",
+    "Cable Tray:3": "Cable Tray:3",
+    "Cable Tray:4": "Cable Tray:4",
+    "Cable Tray:5": "Cable Tray:5",
+    "Cable Tray:6": "Cable Tray:6",
+    "Cable Tray:7": "Cable Tray:7",
+    "Cable Tray:8": "Cable Tray:8",
+    "Cable Tray:9": "Cable Tray:9",
+    "Electrical:1": "Electrical:1",
+    "Electrical:2": "Electrical:2",
+    "Layout:1": "Layout:1",
+    "Layout:2": "Layout:2",
+    "Layout:3": "Layout:3",
+    "Layout:4": "Layout:4",
+    "Modules:1": "Modules:1",
+    "Modules:2": "Modules:2",
+    "Overview:1": "Overview:1",
+    "Overview:2": "Overview:2",
+    "Overview:3": "Overview:3",
+    "Overview:4": "Overview:4",
+    "Overview:5": "Overview:5",
+    "Overview:6": "Overview:6",
+    "Overview:7": "Overview:7",
+    "Piling:1": "Piling:1",
+    "Piling:10": "Piling:10",
+    "Piling:11": "Piling:11",
+    "Piling:12": "Piling:12",
+    "Piling:13": "Piling:13",
+    "Piling:14": "Piling:14",
+    "Piling:15": "Piling:15",
+    "Piling:16": "Piling:16",
+    "Piling:2": "Piling:2",
+    "Piling:3": "Piling:3",
+    "Piling:4": "Piling:4",
+    "Piling:5": "Piling:5",
+    "Piling:6": "Piling:6",
+    "Piling:7": "Piling:7",
+    "Piling:8": "Piling:8",
+    "Piling:9": "Piling:9"
+   },
+   "execution_mode": "recorded",
+   "fallback_fields": [],
+   "fixture_sha256": "0a7e3c28e3bdce38288fe43f06c5ff60e40c09726e9ce9d3dc09a47b229c85ce",
+   "frame": {
+    "coordinate_system": "world",
+    "crs": "none",
+    "elevation_datum": "unrecorded",
+    "transform": [
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1,
+     0,
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "input_sha256": "d3ea35ca0094e16c43c03e326542162100440e79e6164fa45cf16dbaa177b23f",
+   "output_sha256": "4e4115fb8140b1444c6ef97604dd3125d7a5064c49472c46a7cf80435b05c23f",
+   "parameters": {
+    "capability": "harness-bom-export",
+    "family": "exports"
+   },
+   "provenance": {
+    "probe_file": "leafharness_bom_demo.xlsx",
+    "probe_file_sha256": "77cbe67b82b15f4ced4c9f9e1c19dd97a958fab51944ae1f463379b3761f1e9a",
+    "probe_type": "harness-bom-xlsx",
+    "side": "studio"
+   },
+   "rejected_inputs": [],
+   "revision": "e9835ad32f78dd8afb39310d6647f3b15a7d9277",
+   "state": "committed",
+   "survived_reopen": true,
+   "synthetic_fields": [
+    "before/recorded",
+    "changes/unrecorded"
+   ],
+   "synthetic_flagged": true,
+   "units": "in",
+   "versions": {
+    "capability": "0",
+    "catalog": "none",
+    "engine": "server-builtin",
+    "producer": "studio",
+    "schema": "leaf.solar-w1-comparison.v1",
+    "solver": "none"
+   },
+   "warnings": []
+  }
+ }
+}

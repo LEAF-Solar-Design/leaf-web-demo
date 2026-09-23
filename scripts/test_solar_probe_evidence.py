@@ -47,6 +47,10 @@ def load_module(name):
 normalizer = load_module("solar_probe_evidence")
 probes = load_module("solar_nec_probes")
 calc_probes = load_module("solar_probe_calcs_probes")
+harness_probes = load_module("solar_harness_bom_probes")
+# The XLSX reader comes from the module under test for the same reason the
+# comparator does: one module object, one exception identity.
+xlsx = normalizer.xlsx
 # The comparator comes from the module under test, never a second load of the
 # same file: `spec_from_file_location` builds a NEW module object each call, so
 # a private copy here would carry its own InputError class and every
@@ -150,6 +154,68 @@ def calc_evidence_for(path, name, side):
 def calc_verdict(plugin, studio, name):
     return compare.compare(plugin, studio, "exports",
                            capability=calc_probes.FILE_CAPABILITIES[name])
+
+
+# --------------------------------------------------------------------------- #
+# S31 helpers: the harness plan (a PIPE-separated CSV) and the three workbooks.
+# --------------------------------------------------------------------------- #
+HARNESS_FILES = sorted(harness_probes.FILE_PROBE_TYPES)
+HARNESS_WORKBOOKS = tuple(name for name in HARNESS_FILES if name.endswith(".xlsx"))
+HARNESS_CSV = "leafharnessplan_demo.csv"
+# The one OUTPUT cell each file's alteration moves. The CSV target is a column
+# the planner computes; a workbook target is the Overview total, which no
+# declared input names, so the fixture hash must stay put in both cases.
+HARNESS_ALTERED = {HARNESS_CSV: ("csv-pipe", "TotalCableLengthM")}
+for _name in HARNESS_WORKBOOKS:
+    HARNESS_ALTERED[_name] = ("xlsx", ("Overview", 2, 1))
+del _name
+
+
+def harness_studio_file(folder, name):
+    """Write Studio's own copy of one S31 file and return its path."""
+    for path in harness_probes.write(harness_probes.FILE_DEMOS[name], folder):
+        if path.name == name:
+            return path
+    raise AssertionError("demo did not write " + name)
+
+
+def harness_evidence_for(path, name, side):
+    return normalizer.build_evidence_from_file(
+        path, capability=harness_probes.FILE_CAPABILITIES[name],
+        probe_type=harness_probes.FILE_PROBE_TYPES[name], side=side, revision=REVISION)
+
+
+def harness_verdict(plugin, studio, name):
+    return compare.compare(plugin, studio, "exports",
+                           capability=harness_probes.FILE_CAPABILITIES[name])
+
+
+def harness_altered_file(folder, name):
+    """Studio's file with ONE OUTPUT changed and every declared input untouched."""
+    kind, target = HARNESS_ALTERED[name]
+    path = folder / ("altered_" + name)
+    if kind == "csv-pipe":
+        lines = (folder / name).read_bytes().decode("ascii").replace("\r\n", "\n").split("\n")
+        header = lines[0].split("|")
+        cells = lines[1].split("|")
+        column = header.index(target)
+        cells[column] = "0.25" if cells[column] != "0.25" else "0.75"
+        lines[1] = "|".join(cells)
+        path.write_bytes("\r\n".join(lines).encode("ascii"))
+        return path
+    sheet_name, row_index, column = target
+    sheets = xlsx.read_workbook_file(folder / name)
+    altered = []
+    for sheet in sheets:
+        rows = []
+        for row in sheet.rows:
+            cells = list(row.cells)
+            if sheet.name == sheet_name and row.index == row_index:
+                cells[column] = 4242
+            rows.append((row.index, cells))
+        altered.append((sheet.name, rows))
+    path.write_bytes(xlsx.write_workbook(altered))
+    return path
 
 
 def calc_altered_file(folder, name):
@@ -368,12 +434,28 @@ def test_malformed_arguments_are_refused(overrides):
 
 
 def test_only_the_implemented_formats_are_wired():
-    """XLSX lands in READERS in a later slice; until then, fail closed."""
-    assert sorted(normalizer.READERS) == ["csv", "json-metrics", "json-probes"]
+    """Every probe type's format has a reader, and nothing else is claimed."""
+    assert sorted(normalizer.READERS) == [
+        "csv", "csv-pipe", "json-metrics", "json-probes", normalizer.XLSX_BOM_FORMAT]
     assert all(spec.file_format in normalizer.READERS
                for spec in normalizer.PROBE_SPECS.values())
-    assert not any(spec.file_format.startswith("xlsx")
-                   for spec in normalizer.PROBE_SPECS.values())
+    assert normalizer.TEXT_CELL_FORMATS <= set(normalizer.READERS)
+    assert normalizer.BINARY_FORMATS <= set(normalizer.READERS)
+    # A text format is never binary, and the XLSX format NAMES the sheet list
+    # its reader then checks, so the recorded `format` is a claim under test.
+    assert not normalizer.TEXT_CELL_FORMATS & normalizer.BINARY_FORMATS
+    assert normalizer.XLSX_BOM_FORMAT == "xlsx:" + "|".join(normalizer.XLSX_BOM_SHEETS)
+
+
+def test_an_unknown_format_fails_closed():
+    spec = normalizer.ProbeSpec("xlsx:Nope", [
+        normalizer.Section(None, "t", "Key", (), "Cells")])
+    with pytest.raises(compare.InputError):
+        normalizer.build_evidence([{"Key": "a:1", "Cells": [1]}], capability="tracker-bom-xlsx-export",
+                                  probe_type="unknown-probe-type", side="studio",
+                                  revision=REVISION, survived_reopen=True,
+                                  file_name="p.xlsx", file_sha256="0" * 64)
+    assert spec.file_format not in normalizer.READERS
 
 
 # --------------------------------------------------------------------------- #
@@ -566,6 +648,177 @@ def test_cli_writes_evidence(tmp_path):
     output = tmp_path / "evidence.json"
     code = normalizer.main(["--probe-file", str(path), "--capability", "nec-conduit-fill",
                             "--probe-type", "nec-max-fill-fraction", "--side", "studio",
+                            "--revision", REVISION, "--output", str(output)])
+    assert code == 0
+    compare.validate_evidence(json.loads(output.read_text(encoding="utf-8")), "exports")
+
+
+# --------------------------------------------------------------------------- #
+# S31: rule E5's XLSX projection and the pipe-separated CSV
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("name", HARNESS_FILES)
+def test_harness_evidence_is_comparator_valid(tmp_path, name):
+    evidence = harness_evidence_for(harness_studio_file(tmp_path, name), name, "studio")
+    compare.validate_evidence(evidence, "exports")
+    assert set(evidence) == compare.EVIDENCE_KEYS
+    assert evidence["parameters"] == {"family": "exports",
+                                      "capability": harness_probes.FILE_CAPABILITIES[name]}
+    assert evidence["after"]["format"] == \
+        normalizer.PROBE_SPECS[harness_probes.FILE_PROBE_TYPES[name]].file_format
+    assert evidence["survived_reopen"] is True
+    ids = [row["id"]["entity_id"] for row in evidence["after"]["rows"]]
+    assert evidence["entity_mapping"] == {identifier: identifier for identifier in ids}
+    assert len(set(ids)) == len(ids)
+
+
+@pytest.mark.parametrize("name", HARNESS_FILES)
+def test_harness_studio_compares_pass_against_the_committed_capture(tmp_path, name):
+    """The licensed capture is committed here, so this is the real comparison."""
+    studio = harness_evidence_for(harness_studio_file(tmp_path, name), name, "studio")
+    licensed = harness_evidence_for(CALC_REFERENCE_DIR / name, name, "plugin")
+    result = harness_verdict(licensed, studio, name)
+    assert result["verdict"] == "pass", result["diffs"][:5]
+
+
+@pytest.mark.parametrize("name", HARNESS_FILES)
+def test_harness_fixture_hash_is_inputs_only(tmp_path, name):
+    harness_studio_file(tmp_path, name)
+    original = harness_evidence_for(tmp_path / name, name, "studio")
+    changed = harness_evidence_for(harness_altered_file(tmp_path, name), name, "studio")
+    assert original["fixture_sha256"] == changed["fixture_sha256"]
+    assert original["input_sha256"] == changed["input_sha256"]
+    assert original["output_sha256"] != changed["output_sha256"]
+
+
+@pytest.mark.parametrize("name", HARNESS_FILES)
+def test_harness_one_altered_result_is_a_diff(tmp_path, name):
+    harness_studio_file(tmp_path, name)
+    good = harness_evidence_for(tmp_path / name, name, "studio")
+    bad = harness_evidence_for(harness_altered_file(tmp_path, name), name, "plugin")
+    result = harness_verdict(bad, good, name)
+    assert result["verdict"] == "fail"
+    assert all(path.startswith("after/rows/") for path in result["diffs"]), result["diffs"]
+    assert len({path.split("/")[2] for path in result["diffs"]}) == 1, result["diffs"]
+
+
+def test_xlsx_rows_are_keyed_by_sheet_and_row_index(tmp_path):
+    """Rule E5: `<sheet>:<row index>`, in sheet order, non-empty rows only."""
+    path = harness_studio_file(tmp_path, "leafbomxlsx_demo.xlsx")
+    rows = harness_evidence_for(path, "leafbomxlsx_demo.xlsx", "studio")["after"]["rows"]
+    ids = [row["id"]["entity_id"] for row in rows]
+    assert ids[0] == "Overview:1"
+    assert ids[6] == "Overview:7"
+    assert ids[7] == "By Area:1"
+    # The placeholder tab holds exactly one row, and the sheets keep their order.
+    assert "Cable Tray:1" in ids and "Cable Tray:2" not in ids
+    sheets = [identifier.rsplit(":", 1)[0] for identifier in ids]
+    assert list(dict.fromkeys(sheets)) == list(normalizer.XLSX_BOM_SHEETS)
+    assert {row["type"] for row in rows} == {"tracker-bom-sheet-row"}
+
+
+def test_xlsx_cells_ride_verbatim_and_the_quantity_is_their_count(tmp_path):
+    """Cells are VALUES, not text: an XLSX cell already carries its type."""
+    path = harness_studio_file(tmp_path, "leafbomxlsx_demo.xlsx")
+    rows = harness_evidence_for(path, "leafbomxlsx_demo.xlsx", "studio")["after"]["rows"]
+    by_id = {row["id"]["entity_id"]: row for row in rows}
+    assert by_id["Overview:2"]["fields"] == {
+        "Key": "Overview:2", "Cells": ["Total rows (sections)", 3, "ea"]}
+    assert by_id["Overview:2"]["quantity"] == {"kind": "float", "value": 3, "unit": "none"}
+    assert by_id["Piling:2"]["fields"]["Cells"] == [1, 0, 0, 0, 0, 1.2]
+    # A one-cell placeholder row is a real row with a count of one.
+    assert by_id["Cable Tray:1"]["quantity"]["value"] == 1
+
+
+def test_the_two_empty_fixtures_differ_only_in_the_cable_tray_row(tmp_path):
+    """F1 passes null lists and F2 empty ones; the projection must keep them apart."""
+    for name in ("leafbomxlsxempty_demo_f1.xlsx", "leafbomxlsxempty_demo_f2.xlsx"):
+        harness_studio_file(tmp_path, name)
+    rows = {}
+    for name in ("leafbomxlsxempty_demo_f1.xlsx", "leafbomxlsxempty_demo_f2.xlsx"):
+        rows[name] = {row["id"]["entity_id"]: row["fields"]["Cells"]
+                      for row in harness_evidence_for(tmp_path / name, name,
+                                                      "studio")["after"]["rows"]}
+    f1, f2 = rows.values()
+    assert set(f1) == set(f2)
+    assert [key for key in f1 if f1[key] != f2[key]] == ["Cable Tray:1"]
+
+
+def test_a_workbook_whose_sheets_are_not_the_named_list_is_refused(tmp_path):
+    """The format string NAMES the tab contract, so a dropped tab is a refusal."""
+    path = harness_studio_file(tmp_path, "leafbomxlsx_demo.xlsx")
+    short = tmp_path / "short.xlsx"
+    sheets = xlsx.read_workbook_file(path)
+    short.write_bytes(xlsx.write_workbook(
+        [(sheet.name, [(row.index, row.cells) for row in sheet.rows])
+         for sheet in sheets[:-1]]))
+    with pytest.raises(compare.InputError):
+        harness_evidence_for(short, "leafbomxlsx_demo.xlsx", "studio")
+
+
+@pytest.mark.parametrize("payload", [b"", b"not a zip", b"PK\x03\x04 truncated"])
+def test_an_unreadable_workbook_is_refused_not_answered(tmp_path, payload):
+    path = tmp_path / "probe.xlsx"
+    path.write_bytes(payload)
+    with pytest.raises(compare.InputError):
+        normalizer.build_evidence_from_file(
+            path, capability="tracker-bom-xlsx-export", probe_type="tracker-bom-xlsx",
+            side="studio", revision=REVISION)
+
+
+def test_a_binary_format_is_read_as_bytes(tmp_path):
+    """A zip has no text decoding; decoding it first would corrupt rather than fail."""
+    assert normalizer.XLSX_BOM_FORMAT in normalizer.BINARY_FORMATS
+    path = harness_studio_file(tmp_path, "leafharness_bom_demo.xlsx")
+    raw = path.read_bytes()
+    with pytest.raises(UnicodeDecodeError):
+        raw.decode("utf-8")
+    assert harness_evidence_for(path, "leafharness_bom_demo.xlsx", "studio")["after"]["rows"]
+
+
+def test_the_pipe_separated_csv_splits_on_pipes_not_commas(tmp_path):
+    """Read with the comma reader this file is ONE column holding the whole line."""
+    path = harness_studio_file(tmp_path, HARNESS_CSV)
+    rows = harness_evidence_for(path, HARNESS_CSV, "studio")["after"]["rows"]
+    assert len(rows) == 23
+    by_id = {row["id"]["entity_id"]: row for row in rows}
+    assert by_id["A1"]["fields"] == {
+        "Label": "A1", "Type": "EndOfRow", "ModuleCount": "10", "ModulePitchM": "1",
+        "TrunkTapFromStartM": "0", "StringMaxAmps": "10", "IsTrackerRow": "True",
+        "ResultType": "OK", "CableGaugeAwg": "10", "Connectors": "10",
+        "TotalCableLengthM": "45", "Drops": "0;1;2;3;4;5;6;7;8;9"}
+    assert by_id["A1"]["quantity"] == {"kind": "float", "value": 45.0, "unit": "none"}
+    assert {row["type"] for row in rows} == {"harness-cable-plan"}
+
+
+def test_an_error_rows_blank_quantity_is_the_declared_non_numeric_case(tmp_path):
+    path = harness_studio_file(tmp_path, HARNESS_CSV)
+    rows = harness_evidence_for(path, HARNESS_CSV, "studio")["after"]["rows"]
+    by_id = {row["id"]["entity_id"]: row for row in rows}
+    assert by_id["E1"]["quantity"]["value"] == 0.0
+    assert by_id["E1"]["fields"]["TotalCableLengthM"] == ""
+    # The refusal message is an OUTPUT and compares byte-exact under `fields`.
+    assert by_id["E1"]["fields"]["Drops"].startswith("Parallel trunk harness")
+    assert by_id["E3"]["fields"]["ResultType"] == "ERROR_AMPS"
+
+
+def test_the_harness_plan_fixture_is_its_declared_inputs_only(tmp_path):
+    """Rule E1: an output column must never reach the fixture projection."""
+    path = harness_studio_file(tmp_path, HARNESS_CSV)
+    rows, fixture = normalizer.project(
+        normalizer.READERS["csv-pipe"](path.read_bytes().decode("ascii")),
+        "harness-cable-plan")
+    assert len(rows) == len(fixture) == 23
+    assert set(fixture[0]["inputs"]) == {
+        "Type", "ModuleCount", "ModulePitchM", "TrunkTapFromStartM",
+        "StringMaxAmps", "IsTrackerRow"}
+
+
+def test_cli_writes_xlsx_evidence(tmp_path):
+    path = harness_studio_file(tmp_path, "leafbomxlsx_demo.xlsx")
+    output = tmp_path / "evidence.json"
+    code = normalizer.main(["--probe-file", str(path),
+                            "--capability", "tracker-bom-xlsx-export",
+                            "--probe-type", "tracker-bom-xlsx", "--side", "studio",
                             "--revision", REVISION, "--output", str(output)])
     assert code == 0
     compare.validate_evidence(json.loads(output.read_text(encoding="utf-8")), "exports")

@@ -34,8 +34,16 @@ What the rules mean here:
       formatting the capability exists to hold. The numeric quantity is parsed
       back out of that text in `_quantity_value`, so the two can never disagree.
       A leading `#` preamble, which one DEMO writes above its header, is
-      metadata and is skipped. XLSX is read cell by cell per sheet and is still
-      not implemented; READERS below stays the single extension point.
+      metadata and is skipped. A DEMO that writes a `.csv` with a different
+      DELIMITER (the harness plan is pipe-separated so its drops list needs no
+      quoting) reads through the same code under the `csv-pipe` format.
+      An XLSX is read cell by cell per sheet through server/solar_xlsx.py: one
+      row record per NON-EMPTY sheet row, keyed `<sheet>:<row index>` so the
+      sheet's own row number is part of the identity, with the cells as a list
+      and styling not compared. Its `format` NAMES the sheet list, and the
+      reader refuses a workbook whose sheets are not exactly that list, so the
+      format string is a checked claim rather than a label. READERS below stays
+      the single extension point and an unknown format still fails closed.
 
 Two contract details that the frozen comparator, not this module, decides:
 
@@ -90,14 +98,22 @@ FRAME = {
 SYNTHETIC_FIELDS = ["before/recorded", "changes/unrecorded"]
 
 
-def _sibling(name):
-    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(name + ".py"))
+def _by_path(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
+def _sibling(name):
+    return _by_path(name, Path(__file__).with_name(name + ".py"))
+
+
 compare = _sibling("solar_w1_compare")
+# The standard-library XLSX reader. It lives in server/ because the port that
+# writes these workbooks does, and both halves must read cells the same way.
+xlsx = _by_path("solar_xlsx",
+                Path(__file__).resolve().parents[1] / "server" / "solar_xlsx.py")
 
 
 class Section:
@@ -138,6 +154,14 @@ class ProbeSpec:
     def __init__(self, file_format, sections):
         self.file_format = file_format
         self.sections = tuple(sections)
+
+
+# The seven-tab contract every tracker BOM workbook holds (Q24, preserved by
+# Q26's harness overload). The format string NAMES it so the evidence records
+# which sheet list it was read against; `_read_xlsx_probes` then checks it.
+XLSX_BOM_SHEETS = ("Overview", "By Area", "Modules", "Cable Tray", "Layout",
+                   "Electrical", "Piling")
+XLSX_BOM_FORMAT = "xlsx:" + "|".join(XLSX_BOM_SHEETS)
 
 
 # The licensed DEMO probe files. Each row's `type` is the CALCULATION, which is
@@ -229,6 +253,29 @@ PROBE_SPECS = {
                 ("RadiusM", "TopGapM", "BotGapM", "CrossAxisM", "TiltDeg"),
                 "Fraction"),
     ]),
+    # The harness plan is a PIPE-separated .csv. TotalCableLengthM is the
+    # quantity: it is the planner's headline number and the drops sum to it.
+    # An ERROR row leaves it blank, which is the declared non-numeric case; the
+    # sanitized refusal message rides in the Drops column and compares
+    # byte-exact there, so a changed message is still a diff.
+    "harness-cable-plan": ProbeSpec("csv-pipe", [
+        Section(None, "harness-cable-plan", "Label",
+                ("Type", "ModuleCount", "ModulePitchM", "TrunkTapFromStartM",
+                 "StringMaxAmps", "IsTrackerRow"),
+                "TotalCableLengthM", non_numeric_quantity=0.0),
+    ]),
+    # Two workbooks, one projection. Every cell is output (the fixture is the
+    # command's own, not a column in the file), so `inputs` is empty exactly as
+    # it is for the project summary: declaring a cell an input would let an
+    # output change move the fixture hash and mask a parity failure. The
+    # quantity is the row's CELL COUNT under E2's list rule, and the cells
+    # themselves ride verbatim under `fields` where they compare exactly.
+    "harness-bom-xlsx": ProbeSpec(XLSX_BOM_FORMAT, [
+        Section(None, "harness-bom-sheet-row", "Key", (), "Cells"),
+    ]),
+    "tracker-bom-xlsx": ProbeSpec(XLSX_BOM_FORMAT, [
+        Section(None, "tracker-bom-sheet-row", "Key", (), "Cells"),
+    ]),
 }
 
 
@@ -252,7 +299,7 @@ def _read_json_metrics(text):
     return [{"Metric": key, "Value": value} for key, value in document.items()]
 
 
-def _read_csv_probes(text):
+def _read_csv_probes(text, delimiter=","):
     """A DEMO CSV: an optional `#` preamble, one header row, one probe per row.
 
     Values stay TEXT on purpose (rule E5). Line endings are accepted as CRLF or
@@ -261,6 +308,10 @@ def _read_csv_probes(text):
     here. Fails closed on a missing header, a blank or repeated column name, and
     any row whose column count does not match the header: a short row would
     otherwise silently shift every value one column left.
+
+    `delimiter` is the DEMO's own separator. The harness plan writes a `.csv`
+    with pipes so its `;`-joined drops list needs no quoting, and reading it
+    with the comma reader would hand back one column holding the whole line.
     """
     lines = text.replace("\r\n", "\n").split("\n")
     while lines and lines[-1] == "":
@@ -270,7 +321,7 @@ def _read_csv_probes(text):
         start += 1
     if start >= len(lines):
         raise compare.InputError("probe CSV has no header row")
-    reader = csv.reader(lines[start:])
+    reader = csv.reader(lines[start:], delimiter=delimiter)
     header = next(reader)
     if not header or any(not name for name in header):
         raise compare.InputError("probe CSV header must name every column")
@@ -286,13 +337,50 @@ def _read_csv_probes(text):
     return probes
 
 
-# The single extension point for the rest of contract v5. A later slice adds
-# "xlsx:<sheet list>" here (rule E5 reads XLSX cell by cell per sheet) together
-# with the ProbeSpec rows that name it; an unknown format fails closed rather
-# than guessing a projection.
+def _read_xlsx_probes(data, sheet_names):
+    """Rule E5: one probe per NON-EMPTY sheet row, keyed `<sheet>:<row index>`.
+
+    `sheet_names` is the sheet list the format string names, and a workbook
+    whose sheets are not exactly that list, in that order, is REFUSED: the tab
+    contract is what several of these DEMOs exist to hold, so a dropped or
+    renamed tab must be a failure here rather than a quietly shorter document.
+
+    Cells arrive as VALUES, not text, because an XLSX cell already carries its
+    type: a number is a number and only its rendering was the file's choice.
+    That is the opposite of the CSV rule above, and it is why `project` asks the
+    format, not the file, whether cells are text.
+    """
+    try:
+        sheets = xlsx.read_workbook(data)
+    except xlsx.XlsxError as error:
+        raise compare.InputError("probe XLSX is unreadable: %s" % error)
+    if tuple(sheet.name for sheet in sheets) != tuple(sheet_names):
+        raise compare.InputError(
+            "probe XLSX sheets are %s, expected %s"
+            % (", ".join(sheet.name for sheet in sheets), ", ".join(sheet_names)))
+    probes = []
+    for sheet in sheets:
+        for row in sheet.rows:
+            probes.append({"Key": "%s:%d" % (sheet.name, row.index),
+                           "Cells": list(row.cells)})
+    return probes
+
+
+# The single extension point for the rest of contract v5: one entry per file
+# kind, and an unknown format fails closed rather than guessing a projection.
 READERS = {"json-probes": _read_json_probes,
            "json-metrics": _read_json_metrics,
-           "csv": _read_csv_probes}
+           "csv": _read_csv_probes,
+           "csv-pipe": lambda text: _read_csv_probes(text, delimiter="|"),
+           XLSX_BOM_FORMAT: lambda data: _read_xlsx_probes(data, XLSX_BOM_SHEETS)}
+
+# Formats whose CELLS are text, so `_quantity_value` parses the number back out
+# of the plugin's own digits instead of trusting a value type the file did not
+# record. An XLSX is NOT one of them: its cells carry their type.
+TEXT_CELL_FORMATS = frozenset({"csv", "csv-pipe"})
+# Formats read from BYTES. A zip container has no text decoding at all, so
+# decoding it before the reader would corrupt it rather than fail.
+BINARY_FORMATS = frozenset({XLSX_BOM_FORMAT})
 
 
 def _sections(document, spec):
@@ -389,8 +477,9 @@ def project(document, probe_type):
     if probe_type not in PROBE_SPECS:
         raise compare.InputError("unknown probe type: " + str(probe_type))
     spec = PROBE_SPECS[probe_type]
-    # A CSV's cells are text; a JSON probe's value types are the plugin's output.
-    from_text = spec.file_format == "csv"
+    # A CSV's cells are text; a JSON probe's and an XLSX cell's value types are
+    # the plugin's output.
+    from_text = spec.file_format in TEXT_CELL_FORMATS
     rows = []
     fixture = []
     seen = set()
@@ -500,7 +589,8 @@ def build_evidence_from_file(path, *, capability, probe_type, side, revision, el
     raw = path.read_bytes()
     if len(raw) > compare.MAX_INPUT_BYTES:
         raise compare.InputError("probe file exceeds byte limit")
-    document = reader(raw.decode("utf-8"))
+    # A zip container has no text decoding, so a binary format reads the bytes.
+    document = reader(raw) if spec.file_format in BINARY_FORMATS else reader(raw.decode("utf-8"))
     compare.scan_input(document)
     reopened = path.read_bytes()
     return build_evidence(document, capability=capability, probe_type=probe_type, side=side,

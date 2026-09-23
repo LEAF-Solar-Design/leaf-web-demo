@@ -89,8 +89,11 @@ def reference_rows(name):
 # The capture is committed, and it is what layer 3 reads
 # --------------------------------------------------------------------------- #
 def test_every_licensed_file_is_committed():
-    present = sorted(path.name for path in REFERENCE_DIR.iterdir() if path.is_file())
-    assert present == sorted(ALL_FILES)
+    # The folder is shared by every probe slice, so this slice checks that ITS files are all
+    # committed; a later slice adding its own capture beside them is not a fault here.
+    present = {path.name for path in REFERENCE_DIR.iterdir() if path.is_file()}
+    missing = sorted(set(ALL_FILES) - present)
+    assert not missing, "licensed files missing from the committed capture: " + repr(missing)
 
 
 # --------------------------------------------------------------------------- #
