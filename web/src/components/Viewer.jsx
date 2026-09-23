@@ -589,13 +589,16 @@ const Viewer = forwardRef(function Viewer(
     }
     const dom = renderer.domElement
     let marquee = null
+    function foreignPointer(e) { return !!marquee && e.pointerId !== marquee.pointerId }
     function clearMarquee() {
       if (!marquee) return
       const pointerId = marquee.pointerId
       marquee.overlay.remove()
       marquee = null
       down = null
-      if (dom.hasPointerCapture(pointerId)) dom.releasePointerCapture(pointerId)
+      try {
+        if (dom.hasPointerCapture(pointerId)) dom.releasePointerCapture(pointerId)
+      } catch {}
     }
     function drawMarquee(e) {
       const rect = mount.getBoundingClientRect()
@@ -609,6 +612,11 @@ const Viewer = forwardRef(function Viewer(
       })
     }
     function startMarquee(e) {
+      if (foreignPointer(e)) {
+        e.stopPropagation()
+        if (e.cancelable) e.preventDefault()
+        return
+      }
       const callbacks = marqueeRef.current
       if (e.button !== 0 || marquee || !controls.enabled || rotateEnabledRef.current
         || typeof callbacks.gate !== 'function' || typeof callbacks.select !== 'function'
@@ -621,14 +629,22 @@ const Viewer = forwardRef(function Viewer(
       mount.appendChild(overlay)
       marquee = { pointerId: e.pointerId, start: { x: e.clientX, y: e.clientY }, overlay }
       drawMarquee(e)
-      dom.setPointerCapture(e.pointerId)
+      try { dom.setPointerCapture(e.pointerId) } catch {}
     }
     function moveMarquee(e) {
+      if (foreignPointer(e)) {
+        e.stopPropagation()
+        return
+      }
       if (!marquee || e.pointerId !== marquee.pointerId) return
       e.stopPropagation()
       drawMarquee(e)
     }
     function finishMarquee(e) {
+      if (foreignPointer(e)) {
+        e.stopPropagation()
+        return
+      }
       if (!marquee || e.pointerId !== marquee.pointerId || e.button !== 0) return
       e.stopPropagation()
       const start = marquee.start
@@ -650,6 +666,10 @@ const Viewer = forwardRef(function Viewer(
       callbacks.select?.(handles, { additive: e.shiftKey || e.ctrlKey || e.metaKey, mode })
     }
     function cancelMarquee(e) {
+      if (foreignPointer(e)) {
+        e.stopPropagation()
+        return
+      }
       if (!marquee || (e.pointerId !== undefined && e.pointerId !== marquee.pointerId)) return
       clearMarquee()
     }

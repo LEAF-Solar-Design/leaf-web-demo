@@ -35,8 +35,10 @@ test('SSD1-24C marquee: window, crossing, Shift union, clear, Escape and right p
     await page.keyboard.press('Escape')
   }
   const mount = page.locator('.studio-ground .viewer-canvas')
-  const lines = page.getByTestId('cad-edit-entity-list').getByRole('radio')
-  const selectionCount = page.getByTestId('cad-edit-selection-count')
+  const setCount = page.getByTestId('dock-selection-count')
+  const engineProps = page.getByTestId('dock-properties')
+  const geometry = page.getByTestId('dock-geometry')
+  const start = geometry.locator('dt', { hasText: /^Start$/ }).locator('xpath=following-sibling::dd[1]')
   const pose = () => mount.evaluate(el => ({
     position: el.dataset.cameraPosition, target: el.dataset.cameraTarget,
   }))
@@ -47,6 +49,17 @@ test('SSD1-24C marquee: window, crossing, Shift union, clear, Escape and right p
     }, { x, y })
     expect(point.onGround, `projected point (${x},${y}) must be on the drawing`).toBe(true)
     return point
+  }
+  const pointer = async (type, pointerId, pointerType, world, extra = {}) => {
+    const point = await project(...world)
+    await mount.evaluate((el, { type, pointerId, pointerType, point, extra }) => {
+      const clientX = point.x, clientY = point.y
+      document.elementFromPoint(clientX, clientY).dispatchEvent(new PointerEvent(type, {
+        bubbles: true, cancelable: true, composed: true, pointerId, pointerType,
+        isPrimary: extra.isPrimary ?? true, button: type === 'pointermove' ? -1 : 0,
+        buttons: type === 'pointerup' ? 0 : 1, clientX, clientY,
+      }))
+    }, { type, pointerId, pointerType, point, extra })
   }
   const drag = async (a, b, { shift = false, cancel = false, button = 'left' } = {}) => {
     const start = await project(...a)
@@ -65,27 +78,54 @@ test('SSD1-24C marquee: window, crossing, Shift union, clear, Escape and right p
   }
   const initialPose = await pose()
   await drag([-2, -2], [12, 5])
-  await expect(lines.nth(0)).toBeChecked()
-  await expect(lines.nth(1)).not.toBeChecked()
-  await expect(selectionCount).toHaveCount(0)
+  await expect(engineProps).toBeVisible()
+  await expect(setCount).toHaveCount(0)
+  await expect(start).toHaveText('0.00, 0.00')
   expect(await pose()).toEqual(initialPose)
   await drag([8, 25], [2, 15])
-  await expect(lines.nth(0)).not.toBeChecked()
-  await expect(lines.nth(1)).toBeChecked()
-  await expect(selectionCount).toHaveCount(0)
+  await expect(start).toHaveText('0.00, 20.00')
+  await expect(setCount).toHaveCount(0)
   await drag([-2, -2], [12, 5], { shift: true })
-  await expect(selectionCount).toHaveText('2 objects selected')
+  await expect(setCount).toHaveText('2 objects selected')
   await drag([2, 40], [8, 48])
-  await expect(lines.nth(0)).not.toBeChecked()
-  await expect(lines.nth(1)).not.toBeChecked()
-  await expect(selectionCount).toHaveCount(0)
+  await expect(setCount).toHaveCount(0)
+  await expect(engineProps).toHaveCount(0)
+  await expect(geometry).toHaveCount(0)
   // Cancel a drag that would otherwise select the first line.
   const beforeCancel = await pose()
   await drag([-2, -2], [12, 5], { cancel: true })
-  await expect(lines.nth(0)).not.toBeChecked()
-  await expect(lines.nth(1)).not.toBeChecked()
-  await expect(selectionCount).toHaveCount(0)
+  await expect(setCount).toHaveCount(0)
+  await expect(engineProps).toHaveCount(0)
+  await expect(geometry).toHaveCount(0)
   expect(await pose()).toEqual(beforeCancel)
+  // A gated press owns selection and camera input until it ends or is cancelled.
+  await drag([-2, -2], [12, 5])
+  await expect(start).toHaveText('0.00, 0.00')
+  const beforePointers = await pose()
+  await pointer('pointerdown', 11, 'touch', [-2, -2])
+  await pointer('pointermove', 11, 'touch', [12, 5])
+  await expect(mount.locator('.viewer-marquee')).toHaveCount(1)
+  await pointer('pointerdown', 12, 'touch', [5, 20], { isPrimary: false })
+  await pointer('pointerup', 12, 'touch', [5, 20], { isPrimary: false })
+  await expect(start).toHaveText('0.00, 0.00')
+  await expect(setCount).toHaveCount(0)
+  await pointer('pointerdown', 13, 'pen', [5, 10])
+  for (let step = 1; step <= 4; step++) {
+    await pointer('pointermove', 13, 'pen', [5 + 3 * step / 4, 10])
+  }
+  await pointer('pointerup', 13, 'pen', [8, 10])
+  expect(await pose()).toEqual(beforePointers)
+  await page.keyboard.press('Escape')
+  await pointer('pointerup', 11, 'touch', [12, 5])
+  await expect(mount.locator('.viewer-marquee')).toHaveCount(0)
+  await expect(start).toHaveText('0.00, 0.00')
+  expect(await pose()).toEqual(beforePointers)
+  await pointer('pointerdown', 14, 'touch', [5, 20])
+  await pointer('pointerdown', 15, 'touch', [5, 0], { isPrimary: false })
+  await pointer('pointerup', 15, 'touch', [5, 0], { isPrimary: false })
+  await pointer('pointerup', 14, 'touch', [5, 20])
+  await expect(start).toHaveText('0.00, 20.00')
+  await expect(setCount).toHaveCount(0)
   await drag([-2, -2], [12, 5], { button: 'right' })
   await expect.poll(pose).not.toEqual(beforeCancel)
 })
