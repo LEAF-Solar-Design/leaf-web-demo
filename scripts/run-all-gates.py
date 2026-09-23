@@ -682,6 +682,9 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_entity_scope_binding.py"), 75),
         Suite("server-entity-scope-admission", "server tests/test_entity_scope_admission.py",
               "pytest", SERVER, _py_pytest("tests/test_entity_scope_admission.py"), 53),
+        # 17-C: a scoped write may change only its bound entity.
+        Suite("server-entity-scope-containment", "server tests/test_entity_scope_containment.py",
+              "pytest", SERVER, _py_pytest("tests/test_entity_scope_containment.py"), 104),
         Suite("server-backedge-author-identity", "server tests/test_backedge_author_identity.py",
               "pytest", SERVER, _py_pytest("tests/test_backedge_author_identity.py"), 44),
         # 17-B2: the admitted binding carried through the job, its durable
