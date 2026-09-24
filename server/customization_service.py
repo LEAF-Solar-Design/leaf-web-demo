@@ -60,6 +60,10 @@ _configured_lock = threading.Lock()
 _configured_services: dict[str, "CustomizationService"] = {}
 _LOG = logging.getLogger(__name__)
 _REPOSITORY_VISIBILITY_DELAYS = (0.0, 1.0, 2.0, 4.0, 8.0, 15.0, 30.0)
+# The harness's closed 409 codes for a publish that lost for good (a lost
+# expected-head CAS, a remote that did not accept). Only these end a change
+# SUPERSEDED; anything else, including an unreadable 409, stays recoverable.
+_HARNESS_PUBLISH_LOST = frozenset({"publish_conflict", "publish_not_accepted"})
 
 
 class CustomizationServiceError(RuntimeError):
@@ -1439,6 +1443,8 @@ class CustomizationService:
                 raise CustomizationServiceError("publish_not_available")
             return self._publication_status(change, "published")
 
+        if change.state is ChangeState.SUPERSEDED:
+            raise CustomizationServiceError("publish_superseded", 409)
         if change.state not in {ChangeState.STAGED, ChangeState.PUBLISHING}:
             raise CustomizationServiceError("publication_request_not_available")
 
@@ -1656,6 +1662,9 @@ class CustomizationService:
                 request=request,
                 confirmation_id=confirmation_id,
             )
+            # Before prepare_publish: a stale addition must leave the change
+            # STAGED and its confirmation unconsumed.
+            self._refuse_stale_addition_base(change)
         publishing = self.store.prepare_publish(
             tenant_id=tenant_id,
             change_set_id=change.change_set_id,
@@ -1667,7 +1676,23 @@ class CustomizationService:
         self.store.verify_removal_predecessor(
             tenant_id=tenant_id, change_set_id=change.change_set_id
         )
-        published_commit = self._harness_publish(change)
+        try:
+            published_commit = self._harness_publish(change)
+        except CustomizationServiceError as exc:
+            if exc.status_code == 409 and exc.code in _HARNESS_PUBLISH_LOST:
+                # A lost publish never wins on retry, so leaving it PUBLISHING
+                # would hold the tenant's only publish slot forever. End it here.
+                self.store.supersede_publish(
+                    tenant_id=tenant_id, change_set_id=change.change_set_id,
+                    expected_version=publishing.version,
+                    idempotency_key=idempotency_key,
+                    reason_code=f"harness_{exc.code}",
+                )
+                _LOG.warning(
+                    "customization_publish_superseded: change_set=%s code=%s",
+                    change.change_set_id, exc.code,
+                )
+            raise
         if published_commit != request.staged_commit:
             raise CustomizationServiceError("published_commit_mismatch", 502)
         effective = self.store.publish(tenant_id=tenant_id, change_set_id=change.change_set_id,
@@ -1677,6 +1702,27 @@ class CustomizationService:
                 "catalog_commit": effective.catalog_commit, "catalog_digest": effective.catalog_digest,
                 "platform_release": effective.effective_platform_release,
                 "workspace_contract_digest": effective.workspace_contract_digest}
+
+    def _refuse_stale_addition_base(self, change: ChangeSet) -> None:
+        """Refuse an addition staged on a catalog that is no longer effective.
+
+        Reads only, so the change stays STAGED and its confirmation unconsumed.
+        A removal binds and rechecks its own predecessor pin, and a tenant with
+        no effective catalog has nothing to be stale against (the harness CAS on
+        main still guards that first publish).
+        """
+        if change.change_kind != "create":
+            return
+        try:
+            effective = self.store.get_effective_catalog(tenant_id=change.tenant_id)
+        except ChangeSetNotFoundError:
+            return
+        if not hmac.compare_digest(change.base_commit, effective.catalog_commit):
+            raise CustomizationServiceError(
+                "stale_base", 409,
+                f"stale_base: change_set={change.change_set_id} "
+                f"base={change.base_commit} effective={effective.catalog_commit}",
+            )
 
     def _harness_publish(self, change: ChangeSet) -> str:
         url = os.environ.get("LEAF_AUTHOR_HARNESS_URL", "").rstrip("/")
@@ -1695,7 +1741,14 @@ class CustomizationService:
             response.raise_for_status()
             body = response.json()
         except Exception as exc:
-            status = getattr(getattr(exc, "response", None), "status_code", None)
+            response = getattr(exc, "response", None)
+            status = getattr(response, "status_code", None)
+            lost = _harness_publish_lost_code(response)
+            if lost is not None:
+                raise CustomizationServiceError(
+                    lost, 409,
+                    f"harness_publish_lost: {url}/author/publish status={status} {lost}",
+                ) from exc
             raise CustomizationServiceError(
                 "customization_publish_incomplete", 503,
                 f"harness_publish_failed: {url}/author/publish status={status} "
@@ -1968,6 +2021,22 @@ _worktree_locks: dict[str, threading.Lock] = {}
 def _git_stderr(result: subprocess.CompletedProcess) -> str:
     """Collapse git's stderr to one bounded line fit for a log record."""
     return " ".join((result.stderr or "").split())[:500]
+
+
+def _harness_publish_lost_code(response: Any) -> str | None:
+    """The harness's closed code for a publish that lost for good, else None.
+
+    Never raises: a 409 whose body is unreadable or carries any other code is not
+    proof of a loss, so the caller keeps it recoverable.
+    """
+    if getattr(response, "status_code", None) != 409:
+        return None
+    try:
+        body = response.json()
+    except Exception:  # noqa: BLE001 - an unreadable body proves nothing
+        return None
+    code = body.get("error") if isinstance(body, Mapping) else None
+    return code if isinstance(code, str) and code in _HARNESS_PUBLISH_LOST else None
 
 
 def _unavailable(detail: str) -> CustomizationServiceError:
