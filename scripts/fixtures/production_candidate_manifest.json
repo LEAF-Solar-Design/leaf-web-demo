@@ -53,7 +53,7 @@
     {"name": "production deployment identity answers without a bearer", "status": "passed"},
     {"name": "production auth ladder rejects absent and invalid bearers", "status": "passed"},
     {"name": "production app displays its served build stamp", "status": "passed"},
-    {"name": "production runtime flags turn oneShell on", "status": "passed"},
+    {"name": "production app renders the studio shell", "status": "passed"},
     {"name": "production app and web serve the expected candidate", "status": "passed"}
   ],
   "staging_refusal": "fixture staging promotion refused",

@@ -3,7 +3,6 @@
 export const PROD_HOSTS = Object.freeze(['platform.leafdesign.ai', 'app.leafdesign.ai', 'studio.leafautomation.ai'])
 
 const EXPECTED_SHA = /^[0-9a-f]{40}$/
-const RUNTIME_FLAGS_MAX_BYTES = 64 * 1024
 
 function parseProdUrl(value) {
   if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > 4096) {
@@ -53,25 +52,4 @@ export function requireProdTarget(env = process.env) {
   if (resolveExpectedSha(env) === null) {
     throw new Error('LEAF_E2E_PROD_REQUIRED=1 but LEAF_E2E_EXPECTED_SHA is not set')
   }
-}
-
-// Line-anchored so a commented-out assignment never counts.
-const FLAGS_ASSIGNMENT = /^[ \t]*window\.__LEAF_FLAGS[ \t]*=[ \t]*\{([^{}\n]*)\}[ \t]*;?[ \t]*$/gm
-const ONE_SHELL_ENTRY = /(?:^|,)\s*(?:oneShell|"oneShell"|'oneShell')\s*:\s*([^,]*?)\s*(?=,|$)/g
-
-// Pure, bounded at 64 KB (larger is off). Mirrors the client's rule in
-// web/src/lib/runtimeFlags.js, readOneShellEnabled():
-//   return globals?.__LEAF_FLAGS?.oneShell === '1'
-// so only the literal string '1' is on. A missing flag, "0", "false", a number,
-// an empty or malformed file, or an ambiguous file (more than one assignment or
-// more than one oneShell key) is off.
-export function oneShellOn(text) {
-  if (typeof text !== 'string' || text.length > RUNTIME_FLAGS_MAX_BYTES) return false
-  if (Buffer.byteLength(text, 'utf8') > RUNTIME_FLAGS_MAX_BYTES) return false
-  const assignments = [...text.matchAll(FLAGS_ASSIGNMENT)]
-  if (assignments.length !== 1) return false
-  const entries = [...assignments[0][1].matchAll(ONE_SHELL_ENTRY)]
-  if (entries.length !== 1) return false
-  const value = entries[0][1]
-  return value === '"1"' || value === "'1'"
 }

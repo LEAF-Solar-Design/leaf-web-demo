@@ -36,7 +36,7 @@ PROD_SMOKE_ROWS = (
     "production deployment identity answers without a bearer",
     "production auth ladder rejects absent and invalid bearers",
     "production app displays its served build stamp",
-    "production runtime flags turn oneShell on",
+    "production app renders the studio shell",
     "production app and web serve the expected candidate",
 )
 

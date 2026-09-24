@@ -296,3 +296,31 @@ Contract:
   collapses to a spine), the properties dock as a grown SelectionReadout,
   document tabs per drawing (one drawing per console today), split
   viewports (P6 spike).
+
+## Version 3, 2026-09-24 (W7): the deletion criteria resolved, appended
+
+The operator resolved the W7 criteria on 2026-09-24 ("Amend, then build"), before the deletion PR,
+because the size criterion as written can no longer be met by any deletion: the W0 freeze
+(web/scripts/bundle-baseline.json at 2c744969, _ref 8969839) totals 337,890 gzip bytes, the current
+baseline (_ref 0e6ffdaf) totals 507,842, and the 169,952-byte difference is product added since W0
+(the browser engine, the cockpit, the iOS and Browser profiles), not the second shell.
+
+1. Two clean staging cadences. A cadence is one distinct candidate that completes its staging release
+   and its proof; relay deploys and retries do not count. Clean means no new failed rows, no previously
+   passing rows newly skipped and no unexplained missing rows against the recorded baseline. The two
+   cadences are ae5dc847 and 2f8e5241: each was released to staging and promoted to production while
+   production ran with the rail ON (oneShell "1" since 2026-09-22 18:19Z). Receipts:
+   docs/convergence/release-candidates/2f8e5241251ec3047a228fd14db90066c224db63/ and the production
+   transactions prod-ae5dc847-0924 and prod-2f8e5241-0924.
+2. Source-string pins. The criterion covers every pin on code or selectors W7 deletes (the rail's
+   SiteRoot branch and flag reads, the flag module and its writer, the studioGround-null branches W7
+   removes) and the rail's own tests; each is replaced by a behaviour check or retired with its code in
+   the deletion PR. App.jsx is not deleted, so its remaining text pins are not a W7 gate; rewriting them
+   as behaviour checks is separate standardization work.
+3. Bundle. The W7 receipt is the deletion PR's build with the deployed flags, measured by
+   web/scripts/check_bundle_budget.mjs. Its total must be at or below the total of the build
+   immediately before it (the deletion adds nothing), and the receipt records the delta against both
+   the W0 freeze (337,890) and the current baseline. The baseline is not rewritten to make W7 pass.
+4. The runtime smoke no longer reads /runtime-flags.js. Production and staging assert the rendered
+   studio shell instead (one `.studio-shell` app scene holding one Drawing region), which holds before
+   and after W7. The rail and its flag module are still removed in the deletion PR, as written.

@@ -2,7 +2,6 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   assertProdResponse,
-  oneShellOn,
   requireProdTarget,
   resolveExpectedSha,
   resolveProdBaseUrl,
@@ -101,22 +100,4 @@ test('E06 row7 requireProdTarget is silent when not required', () => {
   assert.equal(requireProdTarget({}), undefined)
   assert.equal(requireProdTarget({ LEAF_E2E_PROD_REQUIRED: '0' }), undefined)
   assert.equal(requireProdTarget({ LEAF_E2E_PROD_REQUIRED: 'true' }), undefined)
-})
-
-test('E06 row8 oneShellOn is true for the measured production text', () => {
-  assert.equal(oneShellOn('window.__LEAF_FLAGS = { oneShell: "1" }'), true)
-  assert.equal(oneShellOn('window.__LEAF_FLAGS = { oneShell: "1" }\n'), true)
-})
-
-test('E06 row9 oneShellOn is false for "0", a missing flag, an empty file, and a 65 KB file', () => {
-  assert.equal(oneShellOn('window.__LEAF_FLAGS = { oneShell: "0" }\n'), false)
-  assert.equal(oneShellOn("window.__LEAF_FLAGS = { oneShell: '0' }\n"), false)
-  assert.equal(oneShellOn('window.__LEAF_FLAGS = { oneShell: "false" }\n'), false)
-  assert.equal(oneShellOn('window.__LEAF_FLAGS = { oneShell: 1 }\n'), false)
-  assert.equal(oneShellOn('window.__LEAF_FLAGS = {}\n'), false)
-  assert.equal(oneShellOn('// oneShell: "1"\n'), false)
-  assert.equal(oneShellOn('// window.__LEAF_FLAGS = { oneShell: "1" }\n'), false)
-  assert.equal(oneShellOn(''), false)
-  assert.equal(oneShellOn(undefined), false)
-  assert.equal(oneShellOn(`${'/'.repeat(65 * 1024)}\nwindow.__LEAF_FLAGS = { oneShell: "1" }\n`), false)
 })

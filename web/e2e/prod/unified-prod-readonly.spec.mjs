@@ -1,7 +1,6 @@
 import { expect, test } from '@playwright/test'
 import {
   assertProdResponse,
-  oneShellOn,
   requireProdTarget,
   resolveExpectedSha,
   resolveProdBaseUrl,
@@ -84,12 +83,18 @@ test('production app displays its served build stamp', async ({ page }) => {
   assertProdResponse(page.url())
 })
 
-test('production runtime flags turn oneShell on', async ({ request }) => {
-  const response = await get(request, '/runtime-flags.js')
-  expect(response.ok()).toBeTruthy()
-  const text = await response.text()
-  expect(text).toContain('oneShell')
-  expect(oneShellOn(text)).toBe(true)
+test('production app renders the studio shell', async ({ page }) => {
+  test.setTimeout(60000)
+  const response = await page.goto(prodUrl('/app?demo=1'))
+  assertProdResponse(response.url())
+  assertProdResponse(page.url())
+  const shell = page.locator('.studio-shell[data-scene="app"]')
+  await expect(shell).toHaveCount(1, { timeout: 30000 })
+  // Attached, not visible: the region carries aria-hidden until the ground node attaches.
+  const drawing = shell.locator('[role="region"][aria-label="Drawing"]')
+  await expect(drawing).toHaveCount(1)
+  await expect(drawing).toBeAttached()
+  assertProdResponse(page.url())
 })
 
 test('production app and web serve the expected candidate', async ({ request }) => {
