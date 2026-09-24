@@ -531,6 +531,13 @@ def build_suites() -> List[Suite]:
         # 10 + 5 parametrizations = 15, 8 + 8 = 16.
         Suite("server-solar-batch2-simple", "server tests/test_solar_batch2_simple.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_batch2_simple.py"), 17),
+        # ImportSolarEdgePDF parity (2026-09-24): the PDF reader (pdfminer.six hooks reproducing PdfPig's raw
+        # operators, paths and letters) and the SolarEdgePdfConverter port, both held to the plugin's golden dump by
+        # committed digests over data/solaredge_1to1_demo.pdf. Hermetic, so each floor is the exact count: 21, 19.
+        Suite("server-solar-solaredge-pdf", "server tests/test_solar_solaredge_pdf.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_solaredge_pdf.py"), 21),
+        Suite("server-solar-solaredge-parse", "server tests/test_solar_solaredge_parse.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_solaredge_parse.py"), 19),
         Suite("server-solar-guardrails", "server tests/test_solar_guardrails.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_guardrails.py"), 15),
         Suite("server-solar-pile-block-mapping", "server tests/test_solar_pile_block_mapping.py",
@@ -1851,6 +1858,12 @@ def build_suites() -> List[Suite]:
         # runner: 13 tests + one parametrization over 6 literal parameter overrides = 19.
         Suite("scripts-solar-w1-studio-autofill", "scripts test_solar_w1_studio_autofill.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_autofill.py"), 19),
+        # W5 (2026-09-24): AutoFillSolve, the auto-fill producer chained into the solve producer on the same
+        # REMOVEPANEL fixture, replaying its committed stringer responses; the receiving group's regrid and
+        # the grouped-only evidence scope. Hermetic (committed fixture, intake and responses), so the floor is
+        # the exact count: 5.
+        Suite("scripts-solar-w1-studio-autofill-solve", "scripts test_solar_w1_studio_autofill_solve.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_autofill_solve.py"), 5),
         # S25 (2026-09-22): the MULTISTRING producer on the committed rooftop capture.
         # The solve half is the solve producer and the delete half is the string-delete
         # producer, so the circuits it re-strings beside are the plugin's own 66 and the

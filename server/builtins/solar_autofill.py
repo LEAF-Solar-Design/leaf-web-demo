@@ -23,9 +23,16 @@ other group was byte-identical.
   intermediate group arrives here as several corrections in the solver's own
   order, and they are applied in that order, so an intermediate group can hand on
   a panel it has just received;
-* the receiving group's matrix reuses the slots the donation emptied before it
-  grows, and it grows only by whole rows, so every panel already placed keeps its
-  own (row, col), exactly as panel-add does;
+* with `alignment_tolerance` in the request (the producer always sends it), both
+  groups a correction touches are REGRIDDED the way the plugin rebuilds them:
+  AutoFill Phase 4 calls RebuildPanelGroupBlockFromPgd (BranchCmd.cs:4116), which
+  rebuilds the group from its panel list in list order (the moved panel appended
+  last) and writes a fresh matrix with WriteMatrixForPanelGroup (:4806), the same
+  axis-distance bucketing PanelGroupCreate uses (solar_panel_group_kernel.group_matrix)
+  at the group's row angle. Measured on the 2026-09-24 AutoFillSolve capture: the
+  138-panel group's stringer request is 11 x 16 with the moved panel alone in a new
+  top row and right column. Without the tolerance the older slot-reuse placement
+  is kept (the receiving matrix reuses emptied slots and grows by whole rows);
 * a group is never emptied. The groups builtin commits no group with fewer than
   two panels, so a correction that would take a group below that is refused and
   panel-group-delete stays the way to remove one. This is a deliberate divergence
@@ -53,7 +60,10 @@ membership map built once for the whole plan, at most one pass over a frame's
 matrix per correction, and the receiving frame's sequences are rebuilt only for
 the circuits the moved panels actually carry.
 """
+import math
+
 from solar_design_graph import GraphValidationError, _bounded_json
+import solar_panel_group_kernel as kernel
 from solar_sizing_client import advance, checked_graph
 
 TOOL = "solar-autofill"
@@ -73,9 +83,15 @@ EMPTY_CELL = {"code": "empty", "panel_ref": None, "seq": None, "inverter_id": No
 
 
 def _valid_request(params):
-    """True for exactly {expected_rev, corrections}, no coercion anywhere."""
-    if type(params) is not dict or set(params) != {"expected_rev", "corrections"}:
+    """True for exactly {expected_rev, corrections} plus an optional positive finite alignment_tolerance,
+    no coercion anywhere."""
+    if type(params) is not dict or not ({"expected_rev", "corrections"} <= set(params)
+                                        <= {"expected_rev", "corrections", "alignment_tolerance"}):
         return False
+    if "alignment_tolerance" in params:
+        tolerance = params["alignment_tolerance"]
+        if type(tolerance) is not float or not math.isfinite(tolerance) or tolerance <= 0:
+            return False
     corrections = params["corrections"]
     if type(params["expected_rev"]) is not int or type(corrections) is not list:
         return False
@@ -210,6 +226,37 @@ def _receive(frame, arriving, inputs, strings):
             sequence["ordered_panel_refs"] = ordered
 
 
+def _regrid(frame, panels, tolerance):
+    """Rebuild one frame's matrix from its panel list the way RebuildPanelGroupBlockFromPgd does: list order,
+    the frame's row angle, the kernel's PanelGroupCreate bucketing. Every panel keeps its assignment fields;
+    dimensions and each member's matrix cell follow the new grid. Refuses two panels in one cell."""
+    members = [panels[ref] for ref in frame["panel_refs"]]
+    row_angle = float(frame["provenance"].get("row_angle", 0.0))
+    grid = kernel.group_matrix([{"centre": tuple(p["centre"]), "handle": p["id"]} for p in members],
+                               row_angle, tolerance)
+    placed = sum(1 for row in grid for cell in row if cell is not None)
+    if placed != len(members):
+        raise GraphValidationError("REGRID_CELL_COLLISION")
+    assigned = {a["panel_ref"]: a for a in frame["panel_assignments"]}
+    matrix = []
+    for row_number, row in enumerate(grid):
+        cells = []
+        for column, ref in enumerate(row):
+            if ref is None:
+                cells.append(dict(EMPTY_CELL))
+                continue
+            panel, assignment = panels[ref], assigned.get(ref, {})
+            cells.append({"code": "panel", "panel_ref": ref, "seq": assignment.get("seq"),
+                          "inverter_id": assignment.get("inverter_id"),
+                          "string_input_number": assignment.get("string_input_number"),
+                          "x": panel["centre"][0], "y": panel["centre"][1], "angle": panel["angle"]})
+            panel["matrix_cell"] = {"row": row_number, "col": column}
+        matrix.append(cells)
+    frame["matrix"] = matrix
+    frame["module_rows"], frame["module_columns"] = len(matrix), len(matrix[0]) if matrix else 0
+    frame["module_slots"] = frame["module_rows"] * frame["module_columns"]
+
+
 def apply_corrections(graph, params):
     """Move exactly the panels each correction names, in the solver's own order."""
     _bounded_json(params)
@@ -241,6 +288,10 @@ def apply_corrections(graph, params):
             panel["frame_ref"], panel["matrix_cell"] = None, None
         _donate(source, moved)
         _receive(target, arriving, inputs, strings)
+        if "alignment_tolerance" in params:
+            for frame in (source, target):
+                _regrid(frame, panels, params["alignment_tolerance"])
+                changed.update({ref: panels[ref] for ref in frame["panel_refs"]})
         for entity in (source, target, *arriving):
             changed[entity["id"]] = entity
     moved_total = sum(len(correction["panel_refs"]) for correction in corrections)

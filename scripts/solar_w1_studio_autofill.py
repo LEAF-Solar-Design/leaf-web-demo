@@ -249,7 +249,8 @@ def produce(args):
                     "panel_refs": list(correction["panels"])}
                    for correction in corrections]
         graph = applier.apply_corrections(graph, {
-            "expected_rev": graph["rev"], "corrections": request})["graph"]
+            "expected_rev": graph["rev"], "corrections": request,
+            "alignment_tolerance": args.alignment_tolerance})["graph"]
         if reverted:
             # The SAME plan, undone: revert_corrections refuses unless the graph is
             # still in the auto-filled state, so this cannot half-apply.
