@@ -5,6 +5,10 @@
  *
  * Routes:
  *   GET  /health          -> { ok: true }
+ *   GET  /ready           -> 200 { ok: true, ready: true, service, stores } when every required
+ *                            store (grant store; session store when constructed) is usable,
+ *                            else 503 { ok: false, ready: false, service, stores }. Kinds,
+ *                            states and required flags only (storeReadiness.ts). Unwired -> 404.
  *   POST /author          -> author route (build | one-off). Body {description, mode?}.
  *                            build:   200 { tool, code, preview, telemetry? } (CONTRACT section 4)
  *                            one-off: 200 { tool, code, preview, run, telemetry? }
@@ -30,7 +34,7 @@
  *
  * CALLER AUTH (F5): the HTTP surface is NOT public. When the gate is enabled
  * (LEAF_HARNESS_AUTH truthy in the live serve path), EVERY route except GET /health
- * requires a shared secret on the `X-Harness-Secret` header, constant-time compared
+ * and GET /ready requires a shared secret on the `X-Harness-Secret` header, constant-time compared
  * against LEAF_HARNESS_SECRET; a wrong/absent secret is 401. The gate is DEFAULT-OFF
  * so the hermetic/local path (and `npm test`) is unchanged. On a reachable harness the
  * ONLY legitimate caller is the app (server/routers/author.py, server/routers/tenant.py),
@@ -46,6 +50,8 @@ import { AuthorLoop, AuthorLoopError } from "./agent/authorLoop.js";
 import { CAMPAIGN_SOURCE_BODY_LIMIT, dispatchCampaignSource, type CampaignSourceService } from "./agent/campaignSourceIntegration.js";
 import { ProjectRepositoryEditCoordinator, ProjectRepositoryEditSettlementUnavailable } from "./agent/projectRepositoryEditCoordinator.js";
 import { redactTokens } from "./redact.js";
+import { createReadinessCheck, fileStoreProbe } from "./storeReadiness.js";
+import type { StoreReadiness } from "./storeReadiness.js";
 import { GrantPoolUnavailableError, GrantRequiredError } from "./ports/impl/oauthGrantProvider.js";
 import { classifyRoute } from "./routing.js";
 import {
@@ -764,6 +770,11 @@ export function createHarness(ports: HarnessPorts, opts?: {
   /** Glug maintenance runs in this grant-owning sidecar. Git publication and
    * provider credentials remain in the calling control plane. */
   glugMushyAuthor?: GlugMushyAuthor;
+  /** GET /ready: the harness's own session and grant store readiness, built from
+   * the stores the composition root already constructed (createReadinessCheck
+   * coalesces and caches). Absent -> /ready answers 404, which the app's harness
+   * dependency reads as "older harness" and falls back to /health. */
+  readiness?: () => Promise<StoreReadiness>;
 }): Harness {
   const loop = new AuthorLoop(ports);
   const explicitAuth = opts?.auth ?? null;
@@ -775,6 +786,30 @@ export function createHarness(ports: HarnessPorts, opts?: {
     try {
       if (method === "GET" && path === "/health") {
         return send(res, 200, { ok: true, service: "leaf-tenant-author-harness" });
+      }
+
+      if (method === "GET" && path === "/ready") {
+        const readiness = opts?.readiness;
+        if (!readiness) {
+          return send(res, 404, { error: { code: "not_found", message: "route not found" } });
+        }
+        // Kinds, states and required flags only: never a path, URL, tenant or error text.
+        let stores: StoreReadiness["stores"] | undefined;
+        let ready = false;
+        try {
+          const result = await readiness();
+          stores = result.stores;
+          ready = result.ready === true;
+        } catch {
+          ready = false;
+        }
+        res.setHeader("cache-control", "no-store");
+        return send(res, ready ? 200 : 503, {
+          ok: ready,
+          ready,
+          service: "leaf-tenant-author-harness",
+          ...(stores ? { stores } : {}),
+        });
       }
 
       if (method === "POST" && path.startsWith("/internal/standard-services/approvals/")) {
@@ -1499,7 +1534,7 @@ export function createEnabledProductionInstantExecutorClient<T>(
 export async function startReal(port = 8130): Promise<Server> {
   const { AgentSdkRunner } = await import("./ports/impl/agentSdkRunner.js");
   const { BrokerApsClientHttp } = await import("./ports/impl/brokerApsClient.js");
-  const { createTenantGrantStore, OAuthGrantProviderImpl } = await import("./ports/impl/oauthGrantProvider.js");
+  const { createTenantGrantStore, OAuthGrantProviderImpl, resolveGrantsDir } = await import("./ports/impl/oauthGrantProvider.js");
   const { TenantRepoProviderImpl } = await import("./ports/impl/tenantRepoProvider.js");
   const { CustomizationCoordinationClient } = await import("./ports/impl/customizationCoordinationClient.js");
   const { ProjectRepositoryEditCoordinationClient } = await import("./ports/impl/projectRepositoryEditCoordinationClient.js");
@@ -1510,7 +1545,7 @@ export async function startReal(port = 8130): Promise<Server> {
   const { HaikuIntentSynthesizer } = await import(
     "./ports/impl/haikuIntentSynthesizer.js"
   );
-  const { createSessionStore } = await import("./ports/impl/sessionStoreFactory.js");
+  const { createProbedSessionStore } = await import("./ports/impl/sessionStoreFactory.js");
   const { HttpInstantExecutorClient } = await import("./ports/impl/instantExecutorClient.js");
   const { upstreamSinkFromEnv } = await import("./ports/impl/httpUpstreamSink.js");
   const {
@@ -1527,12 +1562,22 @@ export async function startReal(port = 8130): Promise<Server> {
     (options) => new HttpInstantExecutorClient(options),
   );
   // F18 seam: per-tenant grant + admin (one store); LEAF_GRANT_STORE=vault fails loudly.
-  const grantStore = createTenantGrantStore();
+  // The grant directory is resolved once and handed to both the store and its
+  // readiness probe, so the two can never name different directories.
+  const grantsDir = resolveGrantsDir();
+  const grantStore = createTenantGrantStore({ dir: grantsDir });
   const standardServicesResolver = standardServicesResolverFromEnv();
   const oauth = new StandardServicesOAuthGrantProvider(
     new OAuthGrantProviderImpl({ store: grantStore }),
   );
-  const sessionStore = appUrl && dispatchSecret ? createSessionStore() : null;
+  const sessionStore = appUrl && dispatchSecret ? createProbedSessionStore() : null;
+  // GET /ready probes exactly the stores built above; nothing is constructed per request.
+  // createTenantGrantStore has already failed loudly for an unwired vault, so the
+  // grant store here is the file store.
+  const readiness = createReadinessCheck({
+    session: sessionStore ? sessionStore.readiness : null,
+    grants: { kind: "file", probe: () => fileStoreProbe(grantsDir) },
+  });
   const converseRunner = sessionStore
     ? new SpineTurnAdapter({
         oauth,
@@ -1606,7 +1651,10 @@ export async function startReal(port = 8130): Promise<Server> {
     changeRepo: authority => basePorts.tenantRepo.projectChangeRepo(authority),
     coordination: new ProjectRepositoryEditCoordinationClient({ baseUrl: appUrl, dispatchSecret }),
   }) : undefined;
-  const server = createHarness(ports, { ...(projectRepositoryEdits ? { projectRepositoryEdits } : {}) }).listen(port);
+  const server = createHarness(ports, {
+    ...(projectRepositoryEdits ? { projectRepositoryEdits } : {}),
+    readiness,
+  }).listen(port);
   if (sessionStore) {
     server.once("close", () => { void sessionStore.close(); });
   }

@@ -13,6 +13,7 @@ import re
 import secrets
 import threading
 import time
+import urllib.error
 import urllib.request
 from copy import deepcopy
 from concurrent.futures import Future, ThreadPoolExecutor, wait
@@ -147,6 +148,77 @@ def _http_probe(url: str, timeout: float) -> None:
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise DependencyUnavailable() from exc
     if parsed.get("ok") is not True:
+        raise DependencyUnavailable()
+
+
+class _ReadyRouteAbsent(Exception):
+    """The harness answered 404 for /ready: it predates the route (rolling deploy)."""
+
+
+class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: the 3xx surfaces as an HTTPError, so a readiness
+    answer is always the named route's own answer, never another route's."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_RefuseRedirect())
+
+
+def _http_ready_json(url: str, timeout: float) -> Any:
+    """GET a readiness body without following redirects, bounded to 4096 bytes.
+    Fails closed on anything but a 200 with valid JSON (any 3xx included); a 404
+    alone raises _ReadyRouteAbsent."""
+    request = urllib.request.Request(url, method="GET")
+    try:
+        with _NO_REDIRECT_OPENER.open(request, timeout=timeout) as response:
+            if response.status == 404:
+                raise _ReadyRouteAbsent()
+            if response.status != 200:
+                raise DependencyUnavailable()
+            body = response.read(4097)
+    except (DependencyUnavailable, _ReadyRouteAbsent):
+        raise
+    except urllib.error.HTTPError as exc:
+        code = exc.code
+        try:
+            exc.close()
+        except Exception:
+            pass
+        if code == 404:
+            raise _ReadyRouteAbsent() from None
+        raise DependencyUnavailable() from None
+    except Exception as exc:
+        raise DependencyUnavailable() from exc
+    if len(body) > 4096:
+        raise DependencyUnavailable()
+    try:
+        return json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DependencyUnavailable() from exc
+
+
+def _harness_probe(harness_base: str, timeout: float) -> None:
+    """The harness answers for its own session and grant stores at /ready. A 404
+    there falls back to /health under the previous rule (``ok`` exactly true),
+    inside the same budget. Neither request follows a redirect, and only a 404
+    from /ready itself takes the fallback."""
+    deadline = time.monotonic() + timeout
+    try:
+        parsed = _http_ready_json(f"{harness_base}/ready", timeout)
+    except _ReadyRouteAbsent:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise DependencyUnavailable() from None
+        try:
+            health = _http_ready_json(f"{harness_base}/health", remaining)
+        except _ReadyRouteAbsent:
+            raise DependencyUnavailable() from None
+        if not isinstance(health, dict) or health.get("ok") is not True:
+            raise DependencyUnavailable()
+        return
+    if not isinstance(parsed, dict) or parsed.get("ready") is not True:
         raise DependencyUnavailable()
 
 
@@ -322,7 +394,7 @@ def default_specs(
             lambda: _http_probe(f"{broker_base}/broker/health", budget)),
         DependencySpec(
             "harness", harness_required,
-            (lambda: _http_probe(f"{harness_base}/health", budget))
+            (lambda: _harness_probe(harness_base, budget))
             if harness_base else (lambda: unavailable_or_degraded(harness_required))),
         DependencySpec(
             "database", database_required,

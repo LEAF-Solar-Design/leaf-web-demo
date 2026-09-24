@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.server
 import json
 import threading
 import time
@@ -316,6 +317,9 @@ def test_default_contract_has_all_dependency_classes_without_targets(monkeypatch
         "LEAF_READINESS_TIMEOUT_S": "0.2",
     }
     monkeypatch.setattr(dependency_health, "_http_probe", lambda *_args: None)
+    monkeypatch.setattr(
+        dependency_health, "_http_ready_json",
+        lambda *_args: {"ok": True, "ready": True})
     monkeypatch.setattr(dependency_health, "_database_probe", lambda *_args: None)
     monkeypatch.setattr(dependency_health, "_worker_probe", lambda *_args: None)
     monkeypatch.setattr(dependency_health, "_durable_stores_probe", lambda *_args: None)
@@ -488,11 +492,17 @@ def test_configured_harness_is_required_and_outage_blocks_readiness(monkeypatch)
         "LEAF_READINESS_TIMEOUT_S": "0.2",
     }
 
-    def http_probe(url, _timeout):
-        if "harness.internal" in url:
-            raise dependency_health.DependencyUnavailable()
+    requested = []
 
-    monkeypatch.setattr(dependency_health, "_http_probe", http_probe)
+    def harness_json(url, _timeout):
+        requested.append(url)
+        if url.endswith("/ready"):
+            # A harness older than GET /ready: the outage shows on the /health fallback.
+            raise dependency_health._ReadyRouteAbsent()
+        raise dependency_health.DependencyUnavailable()
+
+    monkeypatch.setattr(dependency_health, "_http_probe", lambda *_args: None)
+    monkeypatch.setattr(dependency_health, "_http_ready_json", harness_json)
     monkeypatch.setattr(dependency_health, "_durable_stores_probe", lambda *_args: None)
     report = dependency_health.readiness_report(env)
     assert report["dependencies"]["harness"] == {
@@ -502,6 +512,10 @@ def test_configured_harness_is_required_and_outage_blocks_readiness(monkeypatch)
     }
     assert report["ready"] is False
     assert report["status"] == "unavailable"
+    assert requested == [
+        "http://harness.internal:8150/ready",
+        "http://harness.internal:8150/health",
+    ]
 
 
 def test_ready_route_is_separate_from_unchanged_liveness(monkeypatch):
@@ -612,3 +626,159 @@ def test_liveness_ignores_unsupported_shared_customization_while_disabled(
 
     assert response["ok"] is True
     assert response["n_tools"] > 0
+
+
+class _E04Harness:
+    """A loopback harness that answers scripted routes and records each request.
+
+    `routes` maps a path to (status, body bytes) or (status, body bytes, Location).
+    An unscripted path answers 404 with an empty body."""
+
+    def __init__(self, routes):
+        self.requested = []
+        requested = self.requested
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                requested.append(self.path)
+                status, body, *location = routes.get(self.path, (404, b""))
+                try:
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    if location:
+                        self.send_header("Location", location[0])
+                    self.end_headers()
+                    self.wfile.write(body)
+                except OSError:
+                    pass  # the client may close after its 4097-byte read
+
+            def log_message(self, *_args):
+                return None
+
+        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.base = f"http://127.0.0.1:{self._server.server_address[1]}"
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_args):
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5)
+
+
+def _e04_harness_state(monkeypatch, routes):
+    """Run only the default harness spec against a loopback harness over real HTTP,
+    through the probe's own opener. Returns (state, requested paths)."""
+    for name in ("HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+    with _E04Harness(routes) as harness:
+        env = {
+            "LEAF_CONVERSE_HARNESS_URL": harness.base,
+            "LEAF_READINESS_TIMEOUT_S": "2.0",
+            "LEAF_BUILD_REVISION": "abcdef123456",
+        }
+        specs = [
+            spec for spec in dependency_health.default_specs(env, timeout=2.0)
+            if spec.name == "harness"
+        ]
+        report = dependency_health.readiness_report(env, specs)
+    encoded = json.dumps(report)
+    assert harness.base not in encoded
+    assert "127.0.0.1" not in encoded
+    return report["dependencies"]["harness"]["state"], harness.requested
+
+
+_E04_READY_TRUE = json.dumps({"ok": True, "ready": True}).encode()
+
+
+def test_e04_harness_ready_200_is_ready(monkeypatch):
+    state, requested = _e04_harness_state(monkeypatch, {
+        "/ready": (200, _E04_READY_TRUE),
+    })
+    assert state == "ready"
+    assert requested == ["/ready"]
+
+
+def test_e04_harness_ready_503_is_unavailable(monkeypatch):
+    # The body says ready, so only the status rule can refuse it.
+    state, requested = _e04_harness_state(monkeypatch, {
+        "/ready": (503, _E04_READY_TRUE),
+        "/health": (200, json.dumps({"ok": True}).encode()),
+    })
+    assert state == "unavailable"
+    # Only a 404 falls back; a 503 never reaches the liveness route.
+    assert requested == ["/ready"]
+
+
+def test_e04_harness_ready_404_falls_back_to_health(monkeypatch):
+    state, requested = _e04_harness_state(monkeypatch, {
+        "/ready": (404, b'{"error":{"message":"no route"}}'),
+        "/health": (200, json.dumps({"ok": True}).encode()),
+    })
+    assert state == "ready"
+    assert requested == ["/ready", "/health"]
+
+    state, requested = _e04_harness_state(monkeypatch, {
+        "/ready": (404, b""),
+        "/health": (200, json.dumps({"ok": False}).encode()),
+    })
+    assert state == "unavailable"
+    assert requested == ["/ready", "/health"]
+
+
+def test_e04_harness_ready_redirect_to_ready_body_is_unavailable(monkeypatch):
+    # A 3xx is never followed, so a ready body behind a redirect never reads ready.
+    state, requested = _e04_harness_state(monkeypatch, {
+        "/ready": (302, b"", "/elsewhere"),
+        "/elsewhere": (200, _E04_READY_TRUE),
+        "/health": (200, json.dumps({"ok": True}).encode()),
+    })
+    assert state == "unavailable"
+    assert requested == ["/ready"]
+
+
+def test_e04_harness_ready_redirect_to_404_never_falls_back(monkeypatch):
+    # Only /ready's own 404 takes the /health fallback; a redirect to a 404 does not.
+    state, requested = _e04_harness_state(monkeypatch, {
+        "/ready": (302, b"", "/missing"),
+        "/health": (200, json.dumps({"ok": True}).encode()),
+    })
+    assert state == "unavailable"
+    assert requested == ["/ready"]
+
+
+def test_e04_harness_ready_false_body_is_unavailable(monkeypatch):
+    for body in (
+            {"ok": True, "ready": False},
+            {"ok": True},
+            {"ok": True, "ready": "true"},
+            {"ok": True, "ready": 1},
+            [True]):
+        state, requested = _e04_harness_state(monkeypatch, {
+            "/ready": (200, json.dumps(body).encode()),
+        })
+        assert state == "unavailable", body
+        assert requested == ["/ready"]
+    state, _requested = _e04_harness_state(monkeypatch, {
+        "/ready": (200, b"not json"),
+    })
+    assert state == "unavailable"
+
+
+def test_e04_harness_ready_oversized_body_is_unavailable(monkeypatch):
+    # Valid JSON that says ready, padded with whitespace past the bound, so only
+    # the length rule can refuse it.
+    padded = _E04_READY_TRUE + b" " * 5000
+    assert len(padded) > 4096
+    assert json.loads(padded) == {"ok": True, "ready": True}
+    state, requested = _e04_harness_state(monkeypatch, {
+        "/ready": (200, padded),
+    })
+    assert state == "unavailable"
+    assert requested == ["/ready"]
