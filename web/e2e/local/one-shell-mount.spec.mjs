@@ -166,6 +166,86 @@ test('J1 row6: served demo material stays disabled and makes no project mutation
   expect(mutations).toEqual([])
 })
 
+test("E02 row1: a real-size catalog never covers the Start panel's Create project button", async ({ page, request }) => {
+  test.setTimeout(120_000)
+  await requireLocalReady(request, test, API_BASE)
+  await setRail(page, '1')
+  await page.setViewportSize({ width: 1920, height: 1080 })
+  // The same presentation fixture as J1, never a credential.
+  await page.addInitScript(() => {
+    localStorage.setItem('leaf.jwt', 'j1-presentation-fixture')
+    if (!sessionStorage.getItem('j1-initialized')) {
+      localStorage.removeItem('leaf.org_id')
+      sessionStorage.setItem('j1-initialized', 'true')
+    }
+  })
+  const project = { project_id: 'j1-project', name: 'J1 roof' }
+  // A real-size catalog: 5 families of 8 capabilities (40), the size the
+  // local stack serves, with descriptions long enough to wrap.
+  const families = Array.from({ length: 5 }, (_, f) => ({
+    family_id: `e02-family-${f + 1}`,
+    label: `E02 family ${f + 1}`,
+    description: `Capabilities of E02 family ${f + 1}.`,
+    capabilities: Array.from({ length: 8 }, (_, c) => ({
+      name: `e02_f${f + 1}_cap${c + 1}`,
+      version: '1.0.0',
+      description: `E02 capability ${c + 1} of family ${f + 1} reads the drawing and reports what it found, in a sentence long enough to wrap onto a second line of its tile.`,
+      params_schema: { type: 'object', properties: {} },
+      capabilities: ['drawing.read'],
+      provenance: 'e02',
+    })),
+  }))
+  let bound = false
+  await page.route('**/api/**', async (route) => {
+    const req = route.request()
+    const path = new URL(req.url()).pathname
+    const json = (body, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
+    if (path === '/api/orgs' && req.method() === 'POST') {
+      bound = true
+      return json({ org: { org_id: 'j1-org', name: 'J1 workspace' } })
+    }
+    if (path === '/api/projects' && req.method() === 'GET') {
+      return bound ? json({ projects: [project] })
+        : json({ detail: 'verified subject has no active platform identity binding' }, 403)
+    }
+    if (path === '/api/projects' && req.method() === 'POST') return json({ project })
+    if (path === '/api/capabilities' && req.method() === 'GET') return json({ families })
+    // Do not send the presentation sentinel to the real local service.
+    const headers = { ...req.headers() }
+    delete headers.authorization
+    return route.continue({ headers })
+  })
+  await page.goto('/app?surface=browser')
+  const board = page.locator('[data-ground="browser"]')
+  await expect(board).toBeVisible()
+  const createWorkspace = board.getByRole('region', { name: 'Create your workspace' })
+  await createWorkspace.getByLabel('Workspace name').fill('J1 workspace')
+  await createWorkspace.getByRole('button', { name: 'Create workspace', exact: true }).click()
+  const start = board.getByRole('region', { name: 'Workspace projects', exact: true })
+  await expect(start.getByRole('button', { name: 'J1 roof', exact: true })).toBeVisible()
+
+  // The tiles start below the panel: nothing of theirs overlaps it.
+  const tiles = board.locator('.ground-tiles')
+  await expect(tiles).toBeVisible()
+  const region = await start.boundingBox()
+  const tilesBox = await tiles.boundingBox()
+  expect(tilesBox.y).toBeGreaterThanOrEqual(region.y + region.height - 1)
+
+  // The button's own centre hits the button, not a tile painted over it.
+  const create = start.getByRole('button', { name: 'Create project', exact: true })
+  await create.scrollIntoViewIfNeeded()
+  const box = await create.boundingBox()
+  const hitsButton = await create.evaluate((button, point) => {
+    const hit = document.elementFromPoint(point.x, point.y)
+    return Boolean(hit) && button.contains(hit)
+  }, { x: box.x + box.width / 2, y: box.y + box.height / 2 })
+  expect(hitsButton).toBe(true)
+
+  await start.getByLabel('Project name').fill('J1 roof')
+  await create.click()
+  await expect(board).toHaveAttribute('data-project-state', 'project')
+})
+
 async function expectSharedChrome(page) {
   await expect(page.locator('.app[data-studio-shell="cockpit"]')).toHaveCount(1)
   await expect(page.getByTestId('cockpit-band')).toHaveCount(1)
