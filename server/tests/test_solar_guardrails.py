@@ -122,6 +122,18 @@ def test_malformed_or_uncarried_intakes_refuse(mutate):
         eng.guardrail_rows(doc, "drawing")
 
 
+def test_plugin_mode_reads_only_l1_devices():
+    doc = intake()
+    doc["devices"] = [{"is_l2": True, "role": "l2-inverter", "type_key": "A"}] * 3
+    assert report(eng.guardrail_rows(doc, "plugin"))["status"] == "HEALTHY"   # every device is an L2: L1 list empty
+    doc["devices"].append({"is_l2": False, "role": "inverter", "type_key": "A"})
+    with pytest.raises(eng.GuardrailError):
+        eng.guardrail_rows(doc, "plugin")                                        # the runtime count says 0, one L1
+    doc["runtime_lists"]["inverter_list_count"] = 1
+    with pytest.raises(eng.GuardrailError):
+        eng.guardrail_rows(doc, "plugin")                                        # a non-empty L1 list is not carried
+
+
 def test_unknown_mode_refuses():
     with pytest.raises(eng.GuardrailError):
         eng.guardrail_rows(intake(), "memory")

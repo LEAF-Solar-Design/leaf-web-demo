@@ -7,13 +7,14 @@ LeafSolarDesign.Core/Guardrails/Rules, registered and run in GuardrailEngine.Reg
 (GuardrailEngine.cs:32-60), ordered for display by OrderForDisplay (:157-199), and summarised the way
 the palette's health banner prints it (HealthBanner.cs:80-125).
 
-Two list modes, because the plugin validates its IN-MEMORY inverter list, which it resets to empty
-on every document activation (DocumentEventHandler.cs:235):
-  plugin   the lists as the plugin holds them right after a drawing is opened: empty. This mode
-           reproduces the capture and pins the port.
-  drawing  the lists as the drawing's string assignments define them (every inverter that has
-           strings, in number order). Studio validates the design it actually holds, so this is
-           the mode its evidence uses; the difference is the declared divergence of G36.
+Two list modes, because the plugin validates only its L1 inverter list. Document activation rebuilds the lists from
+the drawing (DocumentEventHandler.GetAllInverters, :233-276), and AddInverter files every L2 device in a separate
+collector list (:305-313) that the snapshot collector never reads (DesignSnapshotCollector.cs:166-189):
+  plugin   the L1 list as the plugin builds it. This intake version carries it only when it is empty (every device
+           is L2), which reproduces the capture and pins the port.
+  drawing  every inverter the drawing's string assignments name, L1 or L2, in number order. Studio validates the
+           design it actually holds, so this is the mode its evidence uses; the difference is the declared
+           divergence of G36.
 
 Pure and bounded: every function reads its inputs, allocates at most O(strings), and raises
 GuardrailError on a malformed intake. Nothing here reads a database; the catalog row arrives in the
@@ -173,6 +174,15 @@ def build_snapshot(intake, mode):
                 snap["strings"].append({"panel_count": count, "inverter": number, "mppt": letter,
                                         "type_key": "A", "circuit": circuit})
             snap["summaries"].append(summary)
+    if mode == "plugin":
+        l1_devices = 0
+        for device in devices:
+            _require(isinstance(device, dict) and isinstance(device.get("is_l2"), bool), "an intake device is invalid")
+            l1_devices += 0 if device["is_l2"] else 1
+        runtime = intake.get("runtime_lists")
+        _require(isinstance(runtime, dict) and runtime.get("inverter_list_count") == l1_devices,
+                 "the intake's runtime inverter list does not match its L1 devices")
+        _require(l1_devices == 0, "a non-empty L1 inverter list is not carried by this intake version")
     snap["inverter_count"] = len(snap["summaries"])
     snap["has_design"] = not snap["inverter_list_null"] and snap["inverter_count"] > 0
     return snap
