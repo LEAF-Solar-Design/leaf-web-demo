@@ -45,7 +45,7 @@ foreach ($port in @($WebPort, $AppPort, $BrokerPort, $HarnessPort)) {
 }
 
 New-Item -ItemType Directory -Path $runRoot, $artifactRoot | Out-Null
-foreach ($name in @('drawings', 'guest-drawings', 'uploads', 'grants', 'tenants', 'tenant-git', 'tenant-mcp')) {
+foreach ($name in @('drawings', 'guest-drawings', 'uploads', 'grants', 'tenants', 'tenant-git', 'tenant-mcp', 'marathon-runs')) {
   New-Item -ItemType Directory -Path (Join-Path $runRoot $name) | Out-Null
 }
 
@@ -73,6 +73,10 @@ $env:CLAUDE_CODE_OAUTH_TOKEN = ''
 $env:ANTHROPIC_API_KEY = ''
 $env:LEAF_TENANTS_DIR = Join-Path $runRoot 'tenants'
 $env:LEAF_TENANT_GIT_DIR = Join-Path $runRoot 'tenant-git'
+# One isolated marathon fixture root per run: the marathon card row writes its
+# fixture replay here and the app reads the same root, never a retained one.
+$env:LEAF_MARATHON_RUNS_DIR = Join-Path $runRoot 'marathon-runs'
+$env:LEAF_E2E_MARATHON_FIXTURE_ROOT = $env:LEAF_MARATHON_RUNS_DIR
 $env:LEAF_E2E_BASE_URL = "http://127.0.0.1:$WebPort"
 $env:LEAF_E2E_API_BASE = "http://127.0.0.1:$AppPort"
 $env:LEAF_E2E_MANAGED = '1'
