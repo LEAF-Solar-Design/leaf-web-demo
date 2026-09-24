@@ -53,6 +53,11 @@ STEPS = {
     "f1": ("frame-information", "m", "f0-intake.json", None),
     "q1": ("deep-search-status", "in", None, None),
     # G36 addendum: LEAFFRAME, OK then Cancel, over the same frame store intake as f1.
+    # String sizer (W4 k1): the StringSizeForm answers, over the plugin request and the recorded live response.
+    "k1": ("string-sizer", "in", "k0-intake.json",
+           {"zip_code": "78701", "module": "Canadian Solar Inc  CS5T 130M", "inverter": "Sungrow SG-HX SG250HX",
+            "array_type": "Fixed Tilt", "thermal_model": "close mount glass glass", "tilt": "5", "azimuth": "180",
+            "calculate": 1, "error_dialog": "Cancel", "form": "Cancel"}),
     "f2": ("frame-park-settings", "m", "f0-intake.json", {"ok": 1, "cancel": 1}),
     # G36 addendum: the height zone's panels (z2) and strings (z3) from the zones after z1.
     "m1": ("string-midpoint-connection", "in", "m0-intake.json", None),
@@ -117,6 +122,8 @@ def step_rows(step, intake):
             return {"report": engine.deep_search_status([])}
         if step in ("z2", "z3"):
             return zone_assign_step(step, intake)
+        if step == "k1":
+            return engine.string_sizer_rows(intake, read_intake(_INTAKES_DIR[0], "k1-response.json"))
         if step == "m1":
             start, end = (answer[len("handle:"):] for answer in STEP_ANSWERS["m1"])
             return {"mid-string": engine.string_midpoint_rows(intake, start, end)}
@@ -194,7 +201,11 @@ def build_document(step, intake, revision):
     return doc
 
 
+_INTAKES_DIR = [DEFAULT_INTAKES]   # the folder run_steps reads, for the one step that needs a second input file
+
+
 def run_steps(intakes_dir, revision=None, only=None):
+    _INTAKES_DIR[0] = intakes_dir
     out = {}
     for step, (_, _, intake_name, _) in STEPS.items():
         if only is not None and step != only:

@@ -210,6 +210,42 @@ def test_assign_refuses_a_missing_zone_or_reference():
         eng.zone_assign_panels(bad, zones, "Zone 1", "7FA3")
 
 
+# --- string sizer (k1) ---------------------------------------------------------------------------------------------
+
+import json as _json
+
+SIZER_INTAKE = {"request": {"zip_code": "78701", "module_name": "Canadian_Solar_Inc__CS5T_130M",
+                            "full_inverter_name": "Sungrow SG-HX SG250HX", "bifacial": False,
+                            "bifacial_coefficient": ".7", "max_voltage": "1500",
+                            "thermal_model_type": "close mount glass glass", "open_circuit_rise": False,
+                            "racking_params": {"albedo": ".25", "racking_type": "fixed_tilt", "surface_tilt": "5",
+                                               "surface_azimuth": "180"}},
+                "settings": {name: None for name in eng.SIZER_SETTINGS}}
+
+
+def sizer_response(body):
+    return {"status": 200, "content_type": "application/json", "body_text": body}
+
+
+def test_sizer_refuses_a_double_encoded_result_and_commits_nothing():
+    body = _json.dumps(_json.dumps({"cells": 60, "simulation_results": {}}))
+    assert eng.string_sizer_outcome(SIZER_INTAKE, sizer_response(body)) ==         ({"calculation": "failed", "error": "response-not-an-object"}, {})
+    assert eng.string_sizer_outcome(SIZER_INTAKE, sizer_response("not json")) == ({"calculation": "failed",
+                                                                                   "error": "other"}, {})
+
+
+def test_sizer_result_object_path_is_not_guessed_and_inputs_fail_closed():
+    cached = _json.loads((Path(__file__).parent / "fixtures" / "w1_plugin_stringsizer_response.json")
+                         .read_text(encoding="utf-8"))["response"]
+    with pytest.raises(eng.BatchTwoError, match="result-form port"):
+        eng.string_sizer_outcome(SIZER_INTAKE, sizer_response(_json.dumps(cached)))
+    assert eng.string_sizer_outcome(SIZER_INTAKE, sizer_response(_json.dumps({"cells": 60}))) ==         ({"calculation": "failed", "error": "other"}, {})
+    with pytest.raises(eng.BatchTwoError):
+        eng.string_sizer_outcome(dict(SIZER_INTAKE, request={"zip_code": 1}), sizer_response("1"))
+    with pytest.raises(eng.BatchTwoError):
+        eng.string_sizer_outcome(SIZER_INTAKE, {"status": 500, "body_text": ""})
+
+
 # --- string midpoint connection (m1) and customer open (o1) --------------------------------------------------------
 
 def grid_intake(columns=4, rows=1, dx=10.0, dy=6.0):
