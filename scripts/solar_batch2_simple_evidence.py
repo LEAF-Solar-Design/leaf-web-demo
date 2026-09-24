@@ -52,7 +52,13 @@ STEPS = {
     "s4": ("shade-loss-heatmap-clear", "m", "s4-state.json", None),
     "f1": ("frame-information", "m", "f0-intake.json", None),
     "q1": ("deep-search-status", "in", None, None),
+    # G36 addendum: the height zone's panels (z2) and strings (z3) from the zones after z1.
+    "z2": ("elevation-zone-assign-panels", "in", "z1-assign.json", {"height_zone": "Zone 1", "assign_panels": 1}),
+    "z3": ("elevation-zone-assign-strings", "in", "z1-assign.json",
+           {"height_zone": "Zone 1", "assign_panels_cancelled": 1}),
 }
+# G22 answers as the plugin adapter records them: the reference panel by handle, ALL, Enter ("").
+STEP_ANSWERS = {"z2": ["handle:7FA3", "ALL", ""], "z3": ["ALL", ""]}
 # The plugin adapter's frame (ground_evidence.FRAME): world coordinates, identity transform.
 FRAME = {"coordinate_system": "world", "transform": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
          "elevation_datum": "unrecorded", "crs": "none"}
@@ -103,16 +109,32 @@ def step_rows(step, intake):
             return {"frame-info": engine.frame_rows(intake)}
         if step == "q1":
             return {"report": engine.deep_search_status([])}
+        if step in ("z2", "z3"):
+            return zone_assign_step(step, intake)
     except engine.BatchTwoError as exc:
         raise EvidenceError(f"step {step}: {exc}") from None
     raise EvidenceError(f"unknown step {step!r}")
+
+
+def zone_assign_step(step, intake):
+    """z2 on the intake's zones; z3 on Studio's own zones after z2 (G13)."""
+    zone = STEPS[step][3]["height_zone"]
+    answer = STEP_ANSWERS["z2"][0]
+    if not answer.startswith("handle:"):
+        raise EvidenceError("z2's first answer is not a picked handle")
+    zones0 = [engine._zone(z, intake["units"]) for z in intake.get("elevation_zones") or []]
+    zones2, recoloured, _ = engine.zone_assign_panels(intake, zones0, zone, answer[len("handle:"):])
+    if step == "z2":
+        return engine.zone_assign_rows(zones0, zones2, recoloured)
+    zones3 = engine.zone_assign_strings(intake, zones2, zone)
+    return engine.zone_assign_rows(zones2, zones3)
 
 
 def build_document(step, intake, revision):
     if revision is not None and not re.fullmatch(r"[0-9a-f]{40}", revision or ""):
         raise EvidenceError("revision must be a 40-character lowercase git commit")
     capability, units, _, form_values = STEPS[step]
-    parameters = {"answers": []}
+    parameters = {"answers": list(STEP_ANSWERS.get(step, []))}
     if form_values is not None:
         parameters["form_values"] = dict(form_values)
     rows, references = [], []

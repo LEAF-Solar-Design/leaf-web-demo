@@ -126,3 +126,52 @@ def test_deep_search_empty_state_and_refusal():
                                           ("report-sessions", {"name": "sessions", "value": 0})]
     with pytest.raises(eng.BatchTwoError):
         eng.deep_search_status([{"id": 1}])
+
+
+# --- elevation zone assignment (z2, z3) ----------------------------------------------------------------------------
+
+def assign_intake(zones=None):
+    zone = {"name": "Zone 1", "offset": {"kind": "length", "value": 24.0, "unit": "in"}, "colour": 1,
+            "strings": [], "panels": []}
+    return {"format": "zone-assign-intake-v1", "units": "in",
+            "elevation_zones": zones if zones is not None else [zone], "reference_panel": "7FA3",
+            "panels": [{"panel": "7FA4", "size": "8.0x4.0", "colour": 7},
+                       {"panel": "7FA3", "size": "8.0x4.0", "colour": 1},
+                       {"panel": "7FA2", "size": "8.0x5.0", "colour": 7}],
+            "strings": ["200", "1F0"]}
+
+
+def test_assign_panels_takes_the_reference_signature_only():
+    intake = assign_intake()
+    zones = [eng._zone(z, "in") for z in intake["elevation_zones"]]
+    after, recoloured, skipped = eng.zone_assign_panels(intake, zones, "zone 1", "7FA3")
+    assert after[0]["panels"] == ["7FA4", "7FA3"] and skipped == 1
+    assert recoloured == {"7FA4": 1}                      # 7FA3 already carries the zone colour
+    rows = eng.zone_assign_rows(zones, after, recoloured)
+    assert [row_id for row_id, _ in rows["elevation-zone"]] == ["elevation-zone-1"]
+    assert rows["recoloured"] == [("recoloured-1", {"panel": "7FA4", "colour": 1})]
+
+
+def test_assigning_moves_handles_out_of_other_zones():
+    other = {"name": "Zone 2", "offset": {"kind": "length", "value": 6.0, "unit": "in"}, "colour": 3,
+             "strings": ["200"], "panels": ["7FA4"]}
+    first = {"name": "Zone 1", "offset": {"kind": "length", "value": 24.0, "unit": "in"}, "colour": 1,
+             "strings": [], "panels": []}
+    intake = assign_intake([first, other])
+    zones = [eng._zone(z, "in") for z in intake["elevation_zones"]]
+    after, _, _ = eng.zone_assign_panels(intake, zones, "Zone 1", "7FA3")
+    assert after[1]["panels"] == [] and after[0]["panels"] == ["7FA4", "7FA3"]
+    strings = eng.zone_assign_strings(intake, after, "Zone 1")
+    assert strings[0]["strings"] == ["200", "1F0"] and strings[1]["strings"] == []
+
+
+def test_assign_refuses_a_missing_zone_or_reference():
+    intake = assign_intake()
+    zones = [eng._zone(z, "in") for z in intake["elevation_zones"]]
+    with pytest.raises(eng.BatchTwoError):
+        eng.zone_assign_panels(intake, zones, "Zone 9", "7FA3")
+    with pytest.raises(eng.BatchTwoError):
+        eng.zone_assign_panels(intake, zones, "Zone 1", "ABCD")
+    bad = dict(intake, panels=[{"panel": "not-hex", "size": None, "colour": 7}])
+    with pytest.raises(eng.BatchTwoError):
+        eng.zone_assign_panels(bad, zones, "Zone 1", "7FA3")
