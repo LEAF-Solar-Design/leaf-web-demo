@@ -1850,6 +1850,12 @@ def build_suites() -> List[Suite]:
         # runner: 13 tests + one parametrization over 6 literal parameter overrides = 19.
         Suite("scripts-solar-w1-studio-autofill", "scripts test_solar_w1_studio_autofill.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_autofill.py"), 19),
+        # W5 (2026-09-24): AutoFillSolve, the auto-fill producer chained into the solve producer on the same
+        # REMOVEPANEL fixture, replaying its committed stringer responses; the receiving group's regrid and
+        # the grouped-only evidence scope. Hermetic (committed fixture, intake and responses), so the floor is
+        # the exact count: 5.
+        Suite("scripts-solar-w1-studio-autofill-solve", "scripts test_solar_w1_studio_autofill_solve.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_autofill_solve.py"), 5),
         # S25 (2026-09-22): the MULTISTRING producer on the committed rooftop capture.
         # The solve half is the solve producer and the delete half is the string-delete
         # producer, so the circuits it re-strings beside are the plugin's own 66 and the
