@@ -222,6 +222,84 @@ def matching_response(request, responses, used=None):
     return cloud.canonical_bytes(responses[matches[0]])
 
 
+
+def apply_recorded_sizing(graph, sizing_record, tenant):
+    """The string-sizing precondition from a recorded response: the builtin's own request, response,
+    confirmation and graph validation, with only the transport substituted (scoped to this call)."""
+    def recorded_sizing(request, grant):
+        if request.wire() != sizing_record["request"]:
+            raise ProducerError("sizing request does not match its recording")
+        return sizing_cloud.canonical_bytes(sizing_record["response"])
+
+    with patch.object(sizing_cloud, "resolve_grant", lambda *a: CloudGrant(tenant, "")), \
+            patch.object(sizing_cloud, "post_string_length", recorded_sizing):
+        return builtin("solar_size_strings").size_strings(graph, {
+            "expected_rev": graph["rev"], "mode": "global", "confirm": True,
+            "grant_ref": "recorded-sizing", "requests": {graph["settings"]["id"]: sizing_record["request"]},
+        }, tenant_id=tenant, job_id="w1-sizing")["graph"]
+
+
+def solve_frames(graph, frames, *, maximum, dwgname, tenant, grant_ref, replay=None):
+    """Solve and commit every frame in `frames` order, a split frame piece by piece through the plugin's
+    retry loop. `replay` is the list of recorded responses (each used at most once), or None for live calls.
+    Returns (graph, recorded bodies, response hashes, split frame records)."""
+    responses = replay or []
+    recorded_bodies, response_hashes, split_frames = [], [], []
+    used_responses = set()
+    original_post = cloud.post_stringer
+
+    def transport(request, grant):
+        raw = (matching_response(request, responses, used_responses) if replay is not None
+               else original_post(request, grant))
+        recorded_bodies.append(json.loads(raw))
+        response_hashes.append(sha256(raw))
+        return raw
+
+    def replay_grant():
+        # Replay resolves the grant exactly as the unsplit path does; live uses the real one.
+        return (patch.object(cloud, "resolve_grant", lambda *a: CloudGrant(tenant, ""))
+                if replay is not None else nullcontext())
+
+    commit = builtin("solar_commit_solve")
+    with patch.object(cloud, "post_stringer", transport):
+        for number, frame in enumerate(frames, 1):
+            job = f"w1-solve-{number}"
+            if needs_split_solve(graph, frame["id"], max_string_length=maximum):
+                def solve_piece(index, piece, job=job):
+                    # One stringer call per piece; only a plugin-retried answer is None.
+                    try:
+                        return cloud.piece_proposal(
+                            {"grant_ref": grant_ref or "recorded-solve", "request": piece["request"]},
+                            tenant, piece_job_id(job, index))
+                    except CloudError as exc:
+                        if exc.classification == "cloud_piece_failed":
+                            return None
+                        raise
+
+                with replay_grant():
+                    out = solve_split_frame(graph, frame["id"], max_string_length=maximum,
+                                            dwgname=dwgname, solve_piece=solve_piece)
+                binding = bind_split_request(graph, out["pieces"], expected_rev=graph["rev"],
+                                             frame_ref=frame["id"], tenant_id=tenant, job_id=job,
+                                             split_state=out["split_state"])
+                candidate = complete_split_search(graph, binding, out["proposals"])
+                graph = commit.commit_solve(graph, {"expected_rev": graph["rev"]}, candidate=candidate)
+                split_frames.append({"frame": frame["name"], "pieces": len(out["pieces"]),
+                                     "split_state": dict(out["split_state"])})
+                continue
+            request = build_stringer_request(graph, frame["id"], max_string_length=maximum, dwgname=dwgname)
+            binding = bind_request(graph, request, expected_rev=graph["rev"], frame_ref=frame["id"],
+                                   tenant_id=tenant, job_id=job)
+            params = {"grant_ref": grant_ref or "recorded-solve", "request": request}
+            if replay is not None:
+                with patch.object(cloud, "resolve_grant", lambda *a: CloudGrant(tenant, "")):
+                    proposal = cloud.proposal(params, tenant, job)
+            else:
+                proposal = cloud.proposal(params, tenant, job)
+            candidate = complete_search(graph, binding, proposal)
+            graph = commit.commit_solve(graph, {"expected_rev": graph["rev"]}, candidate=candidate)
+    return graph, recorded_bodies, response_hashes, split_frames
+
 def produce(args):
     started = time.monotonic()
     maximum = args.max_string_length
@@ -249,19 +327,7 @@ def produce(args):
     by_handle, dimensions = import_panels(graph, intake, created_at)
     graph = validate_graph(graph)
 
-    def recorded_sizing(request, grant):
-        if request.wire() != sizing_record["request"]:
-            raise ProducerError("sizing request does not match its recording")
-        return sizing_cloud.canonical_bytes(sizing_record["response"])
-
-    # Scope transport substitution to this CLI invocation and retain the builtin's
-    # request, response, confirmation and graph validation in both solve modes.
-    with patch.object(sizing_cloud, "resolve_grant", lambda *a: CloudGrant(tenant, "")), \
-            patch.object(sizing_cloud, "post_string_length", recorded_sizing):
-        graph = builtin("solar_size_strings").size_strings(graph, {
-            "expected_rev": graph["rev"], "mode": "global", "confirm": True,
-            "grant_ref": "recorded-sizing", "requests": {graph["settings"]["id"]: sizing_record["request"]},
-        }, tenant_id=tenant, job_id="w1-sizing")["graph"]
+    graph = apply_recorded_sizing(graph, sizing_record, tenant)
     groups, frames = group_frames(graph, placement, by_handle, dimensions, placement_hash, created_at)
 
     def licensed_matrix(*, plan, **kwargs):
@@ -271,65 +337,13 @@ def produce(args):
         "expected_rev": graph["rev"], "groups": groups,
     }, drawing_intake=intake, licensed_matrix=licensed_matrix)["graph"]
     replay_hash = None
-    responses = []
+    responses = None
     if args.replay:
         document, replay_hash = read_json(args.replay)
         responses = replay_responses(document, by_handle)
-    recorded_bodies, response_hashes, split_frames = [], [], []
-    used_responses = set()
-    original_post = cloud.post_stringer
-
-    def transport(request, grant):
-        raw = (matching_response(request, responses, used_responses) if args.replay
-               else original_post(request, grant))
-        recorded_bodies.append(json.loads(raw))
-        response_hashes.append(sha256(raw))
-        return raw
-
-    def replay_grant():
-        # Replay resolves the grant exactly as the unsplit path does; live uses the real one.
-        return (patch.object(cloud, "resolve_grant", lambda *a: CloudGrant(tenant, ""))
-                if args.replay else nullcontext())
-
-    commit = builtin("solar_commit_solve")
-    with patch.object(cloud, "post_stringer", transport):
-        for number, frame in enumerate(frames, 1):
-            job = f"w1-solve-{number}"
-            if needs_split_solve(graph, frame["id"], max_string_length=maximum):
-                def solve_piece(index, piece, job=job):
-                    # One stringer call per piece; only a plugin-retried answer is None.
-                    try:
-                        return cloud.piece_proposal(
-                            {"grant_ref": args.grant_ref or "recorded-solve", "request": piece["request"]},
-                            tenant, piece_job_id(job, index))
-                    except CloudError as exc:
-                        if exc.classification == "cloud_piece_failed":
-                            return None
-                        raise
-
-                with replay_grant():
-                    out = solve_split_frame(graph, frame["id"], max_string_length=maximum,
-                                            dwgname=args.dwgname, solve_piece=solve_piece)
-                binding = bind_split_request(graph, out["pieces"], expected_rev=graph["rev"],
-                                             frame_ref=frame["id"], tenant_id=tenant, job_id=job,
-                                             split_state=out["split_state"])
-                candidate = complete_split_search(graph, binding, out["proposals"])
-                graph = commit.commit_solve(graph, {"expected_rev": graph["rev"]}, candidate=candidate)
-                split_frames.append({"frame": frame["name"], "pieces": len(out["pieces"]),
-                                     "split_state": dict(out["split_state"])})
-                continue
-            request = build_stringer_request(graph, frame["id"], max_string_length=maximum,
-                                             dwgname=args.dwgname)
-            binding = bind_request(graph, request, expected_rev=graph["rev"], frame_ref=frame["id"],
-                                   tenant_id=tenant, job_id=job)
-            params = {"grant_ref": args.grant_ref or "recorded-solve", "request": request}
-            if args.replay:
-                with patch.object(cloud, "resolve_grant", lambda *a: CloudGrant(tenant, "")):
-                    proposal = cloud.proposal(params, tenant, job)
-            else:
-                proposal = cloud.proposal(params, tenant, job)
-            candidate = complete_search(graph, binding, proposal)
-            graph = commit.commit_solve(graph, {"expected_rev": graph["rev"]}, candidate=candidate)
+    graph, recorded_bodies, response_hashes, split_frames = solve_frames(
+        graph, frames, maximum=maximum, dwgname=args.dwgname, tenant=tenant, grant_ref=args.grant_ref,
+        replay=responses)
     reopened = deserialize_graph(serialize_graph(graph))
     validate_graph(reopened)
     if any(reopened["extra"]["solve_coverage"].values()):
