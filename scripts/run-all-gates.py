@@ -507,6 +507,17 @@ def build_suites() -> List[Suite]:
         # 26 tests + 32 more parametrizations = 58 passed.
         Suite("server-solar-pvcase-solve", "server tests/test_solar_pvcase_solve.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_pvcase_solve.py"), 58),
+        # W5 inverter family (2026-09-24, contract G35): the shared state and delta module and the
+        # device, string and output engines (literal ports of the plugin's inverter commands). Inputs
+        # are authored in each file, so each floor is the exact count on every runner. MEASURED.
+        Suite("server-solar-inverter-state", "server tests/test_solar_inverter_state.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_inverter_state.py"), 21),
+        Suite("server-solar-inverter-devices", "server tests/test_solar_inverter_devices.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_inverter_devices.py"), 21),
+        Suite("server-solar-inverter-strings", "server tests/test_solar_inverter_strings.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_inverter_strings.py"), 16),
+        Suite("server-solar-inverter-outputs", "server tests/test_solar_inverter_outputs.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_inverter_outputs.py"), 22),
         # W5 terrain d-steps (2026-09-23, contract G28): trench routing, the export preview, the
         # Yield zip byte for byte, and trackers to panel groups through the key-aware row reader.
         Suite("server-solar-ground-dsteps", "server tests/test_solar_ground_dsteps.py",
@@ -1925,6 +1936,13 @@ def build_suites() -> List[Suite]:
         # runner. MEASURED: 13 tests + 6 more parametrizations = 19 passed.
         Suite("scripts-solar-pvcase-solve-evidence", "scripts test_solar_pvcase_solve_evidence.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_pvcase_solve_evidence.py"), 19),
+        # G35 inverter-family evidence producers (synthetic states in each file). MEASURED.
+        Suite("scripts-solar-inverter-devices-evidence", "scripts test_solar_inverter_devices_evidence.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_inverter_devices_evidence.py"), 8),
+        Suite("scripts-solar-inverter-strings-evidence", "scripts test_solar_inverter_strings_evidence.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_inverter_strings_evidence.py"), 7),
+        Suite("scripts-solar-inverter-outputs-evidence", "scripts test_solar_inverter_outputs_evidence.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_inverter_outputs_evidence.py"), 6),
         Suite("scripts-solar-ground-dsteps-evidence", "scripts test_solar_ground_dsteps_evidence.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_dsteps_evidence.py"), 12),
         # G30 dialog-batch evidence (e1, e4, e6): the committed terrain intake and pile-template
