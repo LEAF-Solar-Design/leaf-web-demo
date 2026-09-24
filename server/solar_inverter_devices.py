@@ -138,7 +138,7 @@ ASSIGN_MANUAL, ASSIGN_LATER = "Manual", "AddLater"
 HOST_KEYS = frozenset({
     "UseL2Collectors", "UseCombinerBox", "UsePatternPlacement", "StringsPerCentralInverter",
     "CombinerBoxConnections", "SuggestedInverterCount", "L1CollectorsPerL2", "L2InverterSelection",
-    "CentralInverterSymbolScale", "CombinerSymbolScale", "OsnapApertureDrawingUnits"})
+    "CentralInverterSymbolScale", "CombinerSymbolScale", "OsnapApertureDrawingUnits", "SessionColorCounter"})
 
 
 class InverterDeviceError(ValueError):
@@ -389,7 +389,7 @@ def inverter_add_all(state, panel_groups, host, form_values):
     if str(installation).lower() != ROOF.lower() and use_l2 and host.get("UsePatternPlacement") is not False:
         raise InverterNotPortedError("AddAllInverters would run pattern device placement (not a Roof drawing)")
     if not use_l2:
-        raise InverterNotPortedError("AddAllInverters outside L1/L2 mode assigns strings per inverter")
+        return _inverter_add_all_legacy(new, panel_groups, host, form_values, lines)
     # BranchCmd.cs:11648-11658: L1/L2 mode places central inverters.
     lines.append("L1/L2 mode detected: AddAllInverters will place central inverters.")
     strings_per_inverter = int(_positive(host, "StringsPerCentralInverter", "NumMppt x StringsPerMppt"))
@@ -443,6 +443,131 @@ def inverter_add_all(state, panel_groups, host, form_values):
                              number=number, box_inputs=0)
         new["rows"]["device"].append(device)
         placed.append((number, x, y))
+    lines.append(f"--- Placed {len(placed)} inverter(s) ---")
+    lines.extend(f"  inverter #{n} at ({x:.1f}, {y:.1f})" for n, x, y in placed)
+    st.sort_rows(new)
+    return new, lines
+
+
+# --------------------------------------------------- inverter-add, legacy --
+
+def polyline_midpoint(vertices):
+    """GetCableMidpoint (BranchCmd.cs:16032-16059): the point halfway along the polyline, else its first
+    vertex (straight segments: the string polylines carry no bulge)."""
+    points = [_finite_xy(v, "string vertex") for v in vertices or []]
+    if not points:
+        raise InverterDeviceError("a string has no vertices")
+    lengths = [math.dist(points[i], points[i + 1]) for i in range(len(points) - 1)]
+    total = sum(lengths)
+    if total <= 0:
+        return points[0]
+    target, walked = total * 0.5, 0.0
+    for i, length in enumerate(lengths):
+        if walked + length >= target and length > 0:
+            t = (target - walked) / length
+            a, b = points[i], points[i + 1]
+            return a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t
+        walked += length
+    return points[-1]
+
+
+def nearest_placement_point(points, loads, target, capacity):
+    """FindNearestPlacementPoint (BranchCmd.cs:16061-16101) with preferCapacity: the nearest point below
+    capacity, else the nearest point."""
+    best, best_d, fallback, fallback_d = 0, math.inf, 0, math.inf
+    capped = max(1, capacity)
+    for i, (x, y) in enumerate(points):
+        d = (target[0] - x) ** 2 + (target[1] - y) ** 2
+        if d < fallback_d:
+            fallback_d, fallback = d, i
+        if loads[i] >= capped:
+            continue
+        if d < best_d:
+            best_d, best = d, i
+    return best if best_d < math.inf else fallback
+
+
+def _inverter_add_all_legacy(new, panel_groups, host, form_values, lines):
+    """AddAllInverters without L1/L2 collectors: string inverters (BranchCmd.cs:11634-11658 falls through),
+    placed by the grid fallback the capture took (the cloud answered 503), each string assigned to its point's
+    inverter (BuildGridPlacementPoints with assignStrings, :15966-15992; the placement loop :13155-13365).
+    Returns (new state, printed lines)."""
+    strings_module = _load_sibling("solar_inverter_strings")
+    strings_per_inverter = int(_positive(host, "StringsPerCentralInverter", "NumMppt x StringsPerMppt"))
+    geometry = {g.get("string"): g for g in new["geometry"]["strings"]}
+    rows = [item for item in new["rows"]["string-assignment"]
+            if (item.get("_detail") or {}).get("circuit") == UNASSIGNED_CIRCUIT]
+    if not rows:
+        lines.append("No unassigned strings found. AddAllInverters has nothing to place.")
+        return new, lines
+    l1_list, _ = _levels(new)
+    if l1_list:
+        raise InverterNotPortedError("AddAllInverters over existing string inverters (their fill is unknown)")
+    total = len(rows)
+    count, remainder = divmod(total, strings_per_inverter)
+    if remainder:
+        count += 1
+    if count > MAX_INVERTERS:
+        raise InverterDeviceError(f"{count} inverters exceed the bound of {MAX_INVERTERS}")
+    suggested = host.get("SuggestedInverterCount")
+    if suggested is None or (type(suggested) is int and suggested > 0 and suggested != count):
+        answer = (form_values or {}).get("inverters_count_differs_from_stringsizer")
+        if answer not in ("Yes", "No"):
+            raise InverterDeviceError("the count-differs dialog needs a Yes or No answer")
+        if answer == "No":
+            return new, lines
+    if remainder > 0 and remainder / strings_per_inverter * 100.0 < LOW_FILL_PERCENT:
+        answer = (form_values or {}).get("low_utilization_on_last_inverter")
+        if answer == RESIZE_CANCEL:
+            return new, lines
+        if answer == RESIZE_APPLY:
+            raise InverterNotPortedError("the resize dialog's recommended size is not ported")
+        if answer != RESIZE_KEEP:
+            raise InverterDeviceError("the low-utilization dialog needs Keep current, Apply recommended or Cancel")
+
+    groups = validate_panel_groups(panel_groups, new)
+    extents = placement_extents(groups, [geometry.get(item["string"], {}) for item in rows])
+    lines.append("Falling back to deterministic grid placement. Blocks will be marked auto-placed, not optimized.")
+    points = grid_placement_points(count, extents)
+    ordered = sorted(((polyline_midpoint(geometry.get(item["string"], {}).get("vertices")), item) for item in rows),
+                     key=lambda pair: (pair[0][0], pair[0][1]))       # OrderBy X then Y (stable)
+    buckets, loads = [[] for _ in points], [0] * len(points)
+    for midpoint, item in ordered:
+        nearest = nearest_placement_point(points, loads, midpoint, strings_per_inverter)
+        buckets[nearest].append(item)
+        loads[nearest] += 1
+
+    scale = _symbol_scale(host, False)
+    counter = host.get("SessionColorCounter", 1)
+    if type(counter) is not int or counter < 0:
+        raise InverterDeviceError("host input SessionColorCounter must be a non-negative integer")
+    string_number = 1 + max((int((item.get("_detail") or {}).get("string_number") or 0)
+                             for item in new["rows"]["string-assignment"]), default=0)   # :13141-13149
+    placed = []
+    for n, (gx, gy) in enumerate(points):
+        x, y = move_out_of_outlines(gx, gy, groups)
+        number = _next_number(_levels(new)[0])
+        family = strings_module.type_colours(new, number)
+        colour = family[counter % len(family)]
+        counter += 1
+        device = _device_row(new, is_l2=False, x=x, y=y, scale=scale, placement=FALLBACK_MARKER,
+                             number=number, box_inputs=0)
+        device["_detail"]["colour"] = colour
+        new["rows"]["device"].append(device)
+        placed.append((number, x, y))
+        num_mppt = _setting(new, "NumMppt", 0)
+        strings_per_mppt = _setting(new, "StringPerMppt", 0)
+        for item in buckets[n]:                                         # AssignStringToInverter :16475-16570
+            letter = strings_module.mppt_letter(string_number, num_mppt, strings_per_mppt)
+            tag = strings_module.tag_text(number, string_number, num_mppt, strings_per_mppt)
+            detail = dict(item.get("_detail") or {})
+            detail.update({"circuit": tag, "num_mppt": num_mppt, "strings_per_mppt": strings_per_mppt,
+                           "string_number": string_number, "mppt": letter,
+                           "strings_on_inverter": num_mppt * strings_per_mppt,
+                           "terminal_number": strings_module.TERMINAL_NUMBER, "color_counter": colour})
+            item.update({"device": number, "input": ord(letter) - ord("a") + 1, "label": tag,
+                         "colour": colour, "_detail": detail})
+            string_number += 1
     lines.append(f"--- Placed {len(placed)} inverter(s) ---")
     lines.extend(f"  inverter #{n} at ({x:.1f}, {y:.1f})" for n, x, y in placed)
     st.sort_rows(new)

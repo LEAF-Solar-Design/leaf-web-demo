@@ -76,6 +76,7 @@ def chain(tmp_path):
     }
     for number, value in states.items():
         (folder / f"state-i{number}.json").write_bytes(st.canonical(value))
+    (folder / "state-c0.json").write_bytes(st.canonical(state()))
     intake = tmp_path / "intake.json"
     intake.write_text(json.dumps({"panel_groups": [{"handle": "A5", "name": "G", "outlines": [OUTLINE]}]}),
                       encoding="utf-8")
@@ -93,9 +94,10 @@ def rows_of(doc, kind=None):
 
 
 def test_every_step_with_its_capability_answers_and_one_fixture(docs):
-    assert list(docs) == ["i1", "i4", "i10", "i18", "i19"]
+    assert list(docs) == ["i1", "i4", "i10", "i18", "i19", "c1"]
     assert [d["provenance"]["capability"] for d in docs.values()] == \
-        ["inverter-add", "inverter-balance", "skid-reconcile", "inverter-add", "adopt-l2-inverters"]
+        ["inverter-add", "inverter-balance", "skid-reconcile", "inverter-add", "adopt-l2-inverters",
+         "devices-cloud-place"]
     assert docs["i18"]["parameters"] == {"answers": ["15", "20300,3589.19,0", "AddLater"],
                                          "form_values": {"select_equipment_type": "Combiner box"}}
     assert docs["i10"]["parameters"] == {"answers": []}
@@ -145,11 +147,11 @@ def test_one_step_equals_the_same_step_of_a_full_run(tmp_path, docs):
     assert list(only) == ["i18"] and only["i18"] == docs["i18"]
 
 
-def test_cli_writes_the_five_files(tmp_path):
+def test_cli_writes_the_six_files(tmp_path):
     folder, intake = chain(tmp_path)
     out = tmp_path / "out"
     assert ev.main(["--states", str(folder), "--out", str(out), "--intake", str(intake)]) == 0
-    assert sorted(p.name for p in out.iterdir()) == ["i1.json", "i10.json", "i18.json", "i19.json", "i4.json"]
+    assert sorted(p.name for p in out.iterdir()) == ["c1.json", "i1.json", "i10.json", "i18.json", "i19.json", "i4.json"]
     doc = json.loads((out / "i1.json").read_text(encoding="utf-8"))
     assert doc["revision"] is None and doc["fallback_fields"] == ["revision"]
     assert "\n" not in (out / "i1.json").read_text(encoding="utf-8").rstrip("\n")
@@ -170,3 +172,13 @@ def test_refusals_write_nothing(tmp_path):
         ev.run_steps(folder, ev.load_intake_groups(intake), revision="HEAD", only="i4")
     with pytest.raises(ev.EvidenceError):
         ev.run_steps(folder, ev.load_intake_groups(intake), only="i2")
+
+
+def test_c1_places_string_inverters_and_assigns_every_string(docs):
+    c1 = docs["c1"]
+    devices = rows_of(c1, "device")
+    assert devices and all(r["role"] == "combiner" and r["placement"] == "AUTO_PLACED_NOT_OPTIMIZED"
+                           and r["scale"] == 8.673644733572 for r in devices)
+    assigned = rows_of(c1, "string-assignment")
+    assert assigned and all(r["change"] == "changed" and r["label"].startswith("+") for r in assigned)
+    assert c1["parameters"]["form_values"]["low_utilization_on_last_inverter"] == "Keep current"
