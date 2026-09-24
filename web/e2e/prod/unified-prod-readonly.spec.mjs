@@ -1,5 +1,11 @@
 import { expect, test } from '@playwright/test'
-import { assertProdResponse, resolveProdBaseUrl } from './prodConfig.mjs'
+import {
+  assertProdResponse,
+  oneShellOn,
+  requireProdTarget,
+  resolveExpectedSha,
+  resolveProdBaseUrl,
+} from './prodConfig.mjs'
 
 const USER_AGENT = 'leaf-prod-readonly-smoke/1.0'
 test.use({
@@ -9,6 +15,8 @@ test.use({
 })
 
 test.beforeEach(() => {
+  // A required release run with a missing target fails here instead of skipping.
+  requireProdTarget()
   test.skip(!process.env.LEAF_E2E_PROD_BASE_URL, 'LEAF_E2E_PROD_BASE_URL is not set')
   resolveProdBaseUrl()
 })
@@ -39,6 +47,8 @@ test('production app health reports its served source', async ({ request }) => {
   expect(health.ok).toBe(true)
   expect(health.source_sha).toMatch(/^[a-f0-9]{40}$/i)
   test.info().annotations.push({ type: 'served-app-sha', description: health.source_sha })
+  const expected = resolveExpectedSha()
+  if (expected) expect(health.source_sha).toBe(expected)
 })
 
 test('production web health reports its served source', async ({ request }) => {
@@ -48,6 +58,8 @@ test('production web health reports its served source', async ({ request }) => {
   expect(health.service).toBe('leaf-platform-web')
   expect(health.source_sha).toMatch(/^[a-f0-9]{40}$/i)
   test.info().annotations.push({ type: 'served-web-sha', description: health.source_sha })
+  const expected = resolveExpectedSha()
+  if (expected) expect(health.source_sha).toBe(expected)
 })
 
 test('production deployment identity answers without a bearer', async ({ request }) => {
@@ -72,8 +84,24 @@ test('production app displays its served build stamp', async ({ page }) => {
   assertProdResponse(page.url())
 })
 
-test('production runtime flags include oneShell', async ({ request }) => {
+test('production runtime flags turn oneShell on', async ({ request }) => {
   const response = await get(request, '/runtime-flags.js')
   expect(response.ok()).toBeTruthy()
-  expect(await response.text()).toContain('oneShell')
+  const text = await response.text()
+  expect(text).toContain('oneShell')
+  expect(oneShellOn(text)).toBe(true)
+})
+
+test('production app and web serve the expected candidate', async ({ request }) => {
+  const expected = resolveExpectedSha()
+  test.skip(!expected, 'LEAF_E2E_EXPECTED_SHA is not set')
+  const app = await get(request, '/api/health')
+  expect(app.ok()).toBeTruthy()
+  const appHealth = await app.json()
+  const web = await get(request, '/health.json')
+  expect(web.ok()).toBeTruthy()
+  const webHealth = await web.json()
+  test.info().annotations.push({ type: 'expected-sha', description: expected })
+  expect(appHealth.source_sha).toBe(expected)
+  expect(webHealth.source_sha).toBe(expected)
 })
