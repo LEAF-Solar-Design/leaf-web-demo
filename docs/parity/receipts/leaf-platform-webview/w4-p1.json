@@ -1,0 +1,233 @@
+{
+  "schema": "leaf.solar-parity-receipt.v1",
+  "capability": "leaf-platform-webview",
+  "capability_version": "0",
+  "fixture": {
+    "id": "w4-p1",
+    "sha256": "de4155f62e80aa6955f96ac1b6cbb364825d243798bdf7da67599260b68a32d0"
+  },
+  "plugin": {
+    "build": "Branch2025 LeafSolarDesign 1.1.4.4 (c0f45f41) LEAFPLATFORM on licensed AutoCAD 2025 via BranchTestHost, shipped configuration (LEAF_PLATFORM_ORIGIN unset): the palette showed the name-not-resolved page for app.leafdesign.ai; saved and reopened; evidence by tools/parity/w4_evidence.py (Branch2025 parity-platform-webview)",
+    "state": "committed",
+    "receipt_sha256": "88f8c8f01555dc3a99e267ce30a0d89fda596ed28b8a6462f2e289224d1aa45a"
+  },
+  "studio": {
+    "capability_version": "0",
+    "engine": "server-builtin"
+  },
+  "comparator": {
+    "name": "solar-w1-semantic",
+    "version": "1",
+    "verdict": "fail",
+    "diffs": [
+      "entity_mapping: length differs",
+      "after/rows: length differs"
+    ]
+  },
+  "synthetic_fields": [
+    "plugin:before",
+    "plugin:changes",
+    "plugin:rejected_inputs",
+    "plugin:versions.catalog",
+    "plugin:versions.engine",
+    "plugin:versions.solver",
+    "studio:before/recorded",
+    "studio:changes/unrecorded"
+  ],
+  "fallback_fields": [
+    "plugin:elapsed_ms"
+  ],
+  "synthetic_flagged": true,
+  "survived_reopen": true,
+  "produced_at": "2026-09-24T20:57:56Z",
+  "comparison": {
+    "schema": "leaf.solar-w1-comparison.v1",
+    "capability": "leaf-platform-webview",
+    "family": "exports",
+    "plugin": {
+      "after": {
+        "format": "batch2-v1",
+        "rows": [
+          {
+            "id": {
+              "entity_id": "report-error"
+            },
+            "name": "error",
+            "quantity": 1,
+            "type": "report",
+            "unit": "each",
+            "value": "name-not-resolved"
+          },
+          {
+            "id": {
+              "entity_id": "report-platform-page"
+            },
+            "name": "platform-page",
+            "quantity": 1,
+            "type": "report",
+            "unit": "each",
+            "value": "unreachable"
+          }
+        ],
+        "source_revision": "p1"
+      },
+      "before": {
+        "recorded": false
+      },
+      "changes": {
+        "created": [],
+        "deleted": [],
+        "modified": []
+      },
+      "elapsed_ms": 0,
+      "entity_mapping": {
+        "report-error": "report-error",
+        "report-platform-page": "report-platform-page"
+      },
+      "execution_mode": "recorded",
+      "fallback_fields": [
+        "elapsed_ms"
+      ],
+      "fixture_sha256": "de4155f62e80aa6955f96ac1b6cbb364825d243798bdf7da67599260b68a32d0",
+      "frame": {
+        "coordinate_system": "world",
+        "crs": "none",
+        "elevation_datum": "unrecorded",
+        "transform": [
+          1,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+          0,
+          1
+        ]
+      },
+      "input_sha256": "74c5b4923dbec1bf0d4488b13480a4d8048a36e61ebecf32f79fb633652a7f2a",
+      "output_sha256": "be5d67fea0243d97b95908b859f71225b8f32db0270bf8538404186a4ae83ce3",
+      "parameters": {
+        "answers": []
+      },
+      "provenance": {
+        "after_dump_sha256": "6584919a14b95bb9673d84579b94856f9c77293da6b075764e59f68aad63aabc",
+        "before_dump_sha256": "8692d5357afc3f11e805219be002beb3cdd8b2357ca607c62c886d96f16d37fb",
+        "command": "LEAFPLATFORM",
+        "source": "autocad-w4-capture",
+        "step": "p1"
+      },
+      "rejected_inputs": [],
+      "revision": "b2c801a141358cb0d1788936b2871cb4bf89cacc",
+      "state": "committed",
+      "survived_reopen": true,
+      "synthetic_fields": [
+        "before",
+        "changes",
+        "versions.engine",
+        "versions.catalog",
+        "versions.solver",
+        "rejected_inputs"
+      ],
+      "synthetic_flagged": true,
+      "units": "in",
+      "versions": {
+        "capability": "leaf-platform-webview",
+        "catalog": "none",
+        "engine": "none",
+        "producer": "w4_evidence.v1",
+        "schema": "leaf.solar-w1-comparison.v1",
+        "solver": "none"
+      },
+      "warnings": []
+    },
+    "studio": {
+      "fixture_sha256": "de4155f62e80aa6955f96ac1b6cbb364825d243798bdf7da67599260b68a32d0",
+      "input_sha256": "74c5b4923dbec1bf0d4488b13480a4d8048a36e61ebecf32f79fb633652a7f2a",
+      "output_sha256": "ef45862338df3e6130a9ad446b20b3bc963bb828c5c86967b051897d39462488",
+      "revision": "b2c801a141358cb0d1788936b2871cb4bf89cacc",
+      "versions": {
+        "schema": "leaf.solar-w1-comparison.v1",
+        "producer": "studio",
+        "capability": "0",
+        "engine": "server-builtin",
+        "catalog": "none",
+        "solver": "none"
+      },
+      "parameters": {
+        "answers": []
+      },
+      "units": "in",
+      "frame": {
+        "coordinate_system": "world",
+        "transform": [
+          1,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+          0,
+          1
+        ],
+        "elevation_datum": "unrecorded",
+        "crs": "none"
+      },
+      "entity_mapping": {},
+      "before": {
+        "recorded": false
+      },
+      "after": {
+        "rows": [],
+        "source_revision": "p1",
+        "format": "batch2-v1"
+      },
+      "changes": {
+        "created": [],
+        "modified": [],
+        "deleted": []
+      },
+      "warnings": [],
+      "rejected_inputs": [],
+      "provenance": {
+        "side": "studio",
+        "step": "p1",
+        "capability": "leaf-platform-webview",
+        "engine": "server/solar_batch2_simple.py"
+      },
+      "elapsed_ms": 0,
+      "execution_mode": "live",
+      "state": "committed",
+      "survived_reopen": true,
+      "synthetic_fields": [
+        "before/recorded",
+        "changes/unrecorded"
+      ],
+      "fallback_fields": [],
+      "synthetic_flagged": true
+    }
+  },
+  "divergence": {
+    "finding": "docs/parity/divergences/leaf-platform-webview/palette-partner-unreachable.md",
+    "declared_diffs": [
+      "entity_mapping: length differs",
+      "after/rows: length differs"
+    ],
+    "summary": "The plugin's palette opens app.leafdesign.ai, which does not resolve, and no host it accepts serves its page, so it shows an unreachable page and commits nothing; Studio is the authoring surface itself and also commits nothing."
+  }
+}
