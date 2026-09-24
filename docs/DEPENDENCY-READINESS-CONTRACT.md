@@ -11,7 +11,7 @@ stable dependency classes:
 | Name | Required when | Probe |
 |---|---|---|
 | `broker` | Always | Public broker health response |
-| `harness` | A harness URL is configured, or `LEAF_AUTHORED_EXECUTION=1` | Public harness health response |
+| `harness` | A harness URL is configured, or `LEAF_AUTHORED_EXECUTION=1` | Harness `GET /ready` (store readiness), falling back to `GET /health` only on a 404 |
 | `database` | `LEAF_PLATFORM_POSTGRES_REQUIRED=1` | PostgreSQL connection and required schema |
 | `worker` | `LEAF_CANONICAL_WORKER_REQUIRED=1` | Fresh canonical worker heartbeat |
 | `durable_stores` | Always | App state locations have a writable directory |
@@ -36,8 +36,42 @@ probe URL, filesystem path, database identity, credential, secret-presence
 fact, exception message, worker identity, or tenant data.
 
 The durable-store check covers app-accessible jobs, drawings, guest drawings,
-agent state, and tenant state. It does not inspect grants or harness sessions
-because the app process intentionally cannot mount those stores.
+agent state, and tenant state. The app process intentionally cannot mount the
+grant or harness session stores, so the harness answers for them itself.
+
+The harness's `GET /ready` inspects its own stores: the session store (file or
+PostgreSQL, `LEAF_HARNESS_SESSION_STORE`) and the grant store
+(`LEAF_GRANT_STORE`). A file store is probed by creating, syncing and removing
+one uniquely named sentinel file in the store's existing directory; the probe
+never creates the directory and removes its sentinel even when a later step
+fails. If the sentinel cannot be removed, the store reads unavailable and each
+later check retries removing that same file before it creates another, so a
+store that refuses deletes holds at most one probe sentinel. It proves the directory accepts a create, write, sync and unlink, not that
+every store file inside it is writable. A PostgreSQL store runs `SELECT 1` under
+a statement timeout on a client from the store's own pool; a client still busy at
+the probe's own timeout is destroyed, never returned to the pool. Both probes share one
+deadline (1500 ms by default, clamped to 100 ms to 3 seconds); a probe still
+running at the deadline is `timeout`. Store states are `ready`, `unavailable`,
+`timeout`, or `not_configured`. The grant store is always required. A session
+store the harness does not construct (no app URL or dispatch secret) is
+`not_configured` and not required. A tenant with no grant is normal and never
+makes the grant store unready. The harness answers HTTP 200 with `ready: true`
+when every required store is ready and HTTP 503 with `ready: false` otherwise,
+with `cache-control: no-store`. Concurrent calls share one in-flight probe and
+the last result is reused for one second. The harness `GET /health` stays a
+constant liveness answer that never depends on a store.
+
+The app's `harness` dependency consumes the harness `GET /ready`. A 404 there
+means a harness older than this contract (a rolling deploy) and falls back to
+the harness `GET /health` under the previous rule within the same budget.
+Neither request follows a redirect: any 3xx is `unavailable` and never takes
+the fallback. Any other non-200 answer, a timeout, a body over 4096 bytes,
+invalid JSON, or `ready` not exactly `true` is `unavailable`.
+
+The harness readiness body carries only store kinds, states and requirement
+flags. Like the app response, it never contains a probe URL, filesystem path,
+connection string, database identity, credential, secret-presence fact,
+exception message, grant, tenant id, or tenant data.
 
 Public source revision selection accepts only a 7 to 64 character hexadecimal
 Git SHA or `sha256:` followed by 64 hexadecimal characters. It uses the first
