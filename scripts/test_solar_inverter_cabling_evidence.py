@@ -112,6 +112,7 @@ def test_the_producer_writes_every_ported_step_and_names_i5(chain, tmp_path, cap
     assert len(lite) == 2 and all(r["change"] == "changed" and r["length"]["value"] == 0.0 for r in lite)
     assert docs["i17"]["parameters"] == {"answers": ["A9D5", "20153.4,3589.19,0"]}
     assert docs["i17"]["provenance"]["declared_divergence"] is True
+    assert docs["position"]["parameters"] == {"answers": ["A9D5"]}
     assert docs["position"]["provenance"]["declared_divergence"] is True
     assert docs["position"]["versions"]["engine"] == "server-builtin"
     moved = rows_of(docs["i17"], "device")

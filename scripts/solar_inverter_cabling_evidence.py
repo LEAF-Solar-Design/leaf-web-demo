@@ -73,9 +73,10 @@ STEPS = {"i5": ("combiner-auto-place", "LEAFCOMBINERAUTO", "combiner-auto-place"
 STEP_IDS = tuple(STEPS)
 DECLARED = frozenset({"i17", "position"})
 # G22 answers (command line) and G30a form_values (dialogs), verbatim from G35 (inverter_evidence.py:
-# 145-159); POSITIONINV's one answer is the device it positions.
+# 145-159); POSITIONINV's one answer is the handle the capture gave its prompt, the picked block A9D5
+# (as MOVEINV's), not the device number; the engine resolves the device from host PositionDevice.
 STEP_ANSWERS = {"i5": [], "i11": [], "i12": [], "i13": [], "i17": ["A9D5", "20153.4,3589.19,0"],
-                "position": ["14"]}
+                "position": ["A9D5"]}
 STEP_FORM_VALUES = {"i5": {"combiner_input_plan": "Apply"}}
 # G35b: the engine's MOVEINV point is the point the jig acquired, not the typed text: the capture typed
 # "20153.4,3589.19,0" under running object snaps and AutoCAD delivered the snapped panel vertex below
@@ -99,7 +100,7 @@ CAPTURE_HOST = {
     # MOVEINV's picked block A9D5 is the combiner LEAFCOMBINERAUTO created at i5 whose feeder circuit is
     # F14/8 in state-i16 (the handle never leaves the plugin adapter; the number does).
     "MovedDevice": ["L1", 14],
-    # G35: POSITIONINV of device 14 from state i16.
+    # G35: POSITIONINV of device 14 (the picked block A9D5) from state i16.
     "PositionDevice": ["L1", 14],
 }
 
