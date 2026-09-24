@@ -59,7 +59,12 @@ def test_replay_reproduces_the_plugins_committed_strings(produced):
     graph, metadata, _ = produced
     document = evidence.build_evidence(graph, "strings", metadata)
     receipt = json.loads(RECEIPT.read_text(encoding="utf-8"))
-    result = compare.compare(receipt["comparison"]["plugin"], document, "strings", capability="auto-fill-then-solve")
+    plugin = receipt["comparison"]["plugin"]
+    # The revision is the fixture's last commit as THIS checkout sees it: a shallow CI clone reports its own head.
+    # Check it against the checkout, then compare everything else with the receipt.
+    assert document["revision"] == chain.solve.fixture_revision((ROOT / "data" / "rooftop_demo.dwg").resolve())
+    result = compare.compare(plugin, dict(document, revision=plugin["revision"]), "strings",
+                             capability="auto-fill-then-solve")
     assert result["verdict"] == "pass", result["diffs"][:10]
     assert len(document["after"]["strings"]) == 170 and document["after"]["unassigned_panels"] == []
 
