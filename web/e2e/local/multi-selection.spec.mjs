@@ -1,11 +1,9 @@
 import { expect, test } from '@playwright/test'
 import { requireLocalReady } from './requireReady.mjs'
-import { setRail } from './railFlag.mjs'
 
 test('SSD1-24C marquee: window, crossing, Shift union, clear, Escape and right pan', async ({ page, request }) => {
   test.setTimeout(120_000)
   await requireLocalReady(request, test, API_BASE)
-  await setRail(page, '1')
   const headDxf = '0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n'
   // Route both heads so live boot cannot open the shared stack's drawing.
   await page.route('**/sample.dxf', (route) => route.fulfill({ status: 200, contentType: 'application/dxf', body: headDxf }))
@@ -181,7 +179,6 @@ const API_BASE = process.env.LEAF_E2E_API_BASE || 'http://127.0.0.1:8230'
 test('SSD1-24B canvas selection: Shift adds, Shift again removes, a blank click clears, a set refuses Move', async ({ page, request }) => {
   test.setTimeout(120_000)
   await requireLocalReady(request, test, API_BASE)
-  await setRail(page, '1')
   const headDxf = '0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n'
   // Route both heads so live boot cannot open the shared stack's drawing.
   await page.route('**/sample.dxf', (route) => route.fulfill({ status: 200, contentType: 'application/dxf', body: headDxf }))

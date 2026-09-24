@@ -106,7 +106,6 @@ targets:
     deploy_shape: ecs-fargate
     manifest: deploy/required-config.web.json
     dockerfile: deploy/Dockerfile.web
-    companions: [deploy/write-runtime-flags.sh]
   - id: leaf-platform-harness
     exposure: pre_ga
     deploy_shape: ecs-fargate

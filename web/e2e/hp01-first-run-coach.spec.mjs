@@ -1,7 +1,6 @@
 import { expect, test } from '@playwright/test'
 import { catProofResponse, makeCatProofState } from './catProofFixture.mjs'
 import { shouldOfferCoach } from '../src/demo/tourEntry.js'
-import { setRail } from './local/railFlag.mjs'
 
 // HP-01 — first-run coach mark.
 //
@@ -46,8 +45,6 @@ test('fresh profile lands signed-out on /try and sees the first-run coach exactl
 })
 
 test('an explicit demo param keeps absolute priority and suppresses the coach', async ({ page }) => {
-  // The console answers ?demo=1 only under the one-shell rail, so arm it as every studio row does.
-  await setRail(page, '1')
   const state = makeCatProofState()
   await routeSession401(page, state)
 

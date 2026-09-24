@@ -1,6 +1,5 @@
 import { expect, test } from '@playwright/test'
 import { requireLocalReady } from './requireReady.mjs'
-import { setRail } from './railFlag.mjs'
 
 // The cross-scene continuity row (standardization slice 4b).
 //
@@ -26,6 +25,9 @@ import { setRail } from './railFlag.mjs'
 // intercepts the session probe the way hp01-first-run-coach.spec.mjs does.
 // Both scenes still render their nav under a signed-out session, which is
 // what the rail rides in.
+//
+// W7 deleted the old shell, so /app is always the studio shell. The row keeps
+// its "(rail ON)" title so its proof history carries over.
 //
 // Every row calls requireLocalReady first: under the managed runner
 // (LEAF_E2E_MANAGED=1) a dead stack HARD-FAILS instead of skipping.
@@ -61,65 +63,61 @@ const mark = (page, value) => page.evaluate(([key, v]) => {
 }, [MARK, value])
 const readMark = (page) => page.evaluate((key) => document.querySelector('[data-testid="continuity-rail"]')?.[key] ?? null, MARK)
 
-for (const rail of ['1', '0']) {
-  test(`/try -> /app -> /try keeps ONE continuity rail and a dismissed coach stays dismissed (rail ${rail === '1' ? 'ON' : 'OFF'})`, async ({ page, request }) => {
-    test.setTimeout(120_000)
-    await requireLocalReady(request, test, API_BASE)
-    await setRail(page, rail)
-    await routeSession401(page)
+test('/try -> /app -> /try keeps ONE continuity rail and a dismissed coach stays dismissed (rail ON)', async ({ page, request }) => {
+  test.setTimeout(120_000)
+  await requireLocalReady(request, test, API_BASE)
+  await routeSession401(page)
 
-    // /try: the stage, signed out, so the coach is offered.
-    await page.goto('/try')
-    await expect(page.getByRole('main', { name: 'Leaf operator workspace' })).toBeVisible()
-    const railEl = page.getByTestId('continuity-rail')
-    await expect(railEl).toBeAttached()
-    // The stage publishes its derivation on mount; wait for the live catalog
-    // item so the captured label is the settled one, not the first paint.
-    await expect(railEl).toContainText('catalog ·', { timeout: 30_000 })
-    const coach = page.getByTestId('first-run-coach')
-    await expect(coach).toBeVisible()
-    const { text: label, catalogItem } = await mark(page, 'try')
-    expect(label).toContain(STATIC_LABEL)
-    expect(catalogItem).toMatch(/^catalog · \d+ (family|families) \/ \d+ tools$/)
-    await page.getByTestId('first-run-coach-dismiss').click()
-    await expect(coach).toHaveCount(0)
+  // /try: the stage, signed out, so the coach is offered.
+  await page.goto('/try')
+  await expect(page.getByRole('main', { name: 'Leaf operator workspace' })).toBeVisible()
+  const railEl = page.getByTestId('continuity-rail')
+  await expect(railEl).toBeAttached()
+  // The stage publishes its derivation on mount; wait for the live catalog
+  // item so the captured label is the settled one, not the first paint.
+  await expect(railEl).toContainText('catalog ·', { timeout: 30_000 })
+  const coach = page.getByTestId('first-run-coach')
+  await expect(coach).toBeVisible()
+  const { text: label, catalogItem } = await mark(page, 'try')
+  expect(label).toContain(STATIC_LABEL)
+  expect(catalogItem).toMatch(/^catalog · \d+ (family|families) \/ \d+ tools$/)
+  await page.getByTestId('first-run-coach-dismiss').click()
+  await expect(coach).toHaveCount(0)
 
-    // The crossing to /app: the console mounts (lazy), adopts the SAME node.
-    await cross(page, '/app')
-    await expect(page.locator('.app')).toBeAttached({ timeout: 60_000 })
-    if (rail === '1') await expect(page.locator('.studio-shell[data-scene="app"]')).toHaveCount(1)
-    else await expect(page.locator('.studio-shell')).toHaveCount(0)
-    await expect(railEl).toBeAttached()
-    expect(await readMark(page)).toBe('try')
-    // Same label, for the parts both scenes derive from the same source: the
-    // static label and the catalog item (both shells read the ONE tenant
-    // catalog fold, F-7). The project item is each scene's OWN derivation
-    // (F-9): on this stack the stage's operator identity starts with no
-    // drawing while the console boots its drawing, so the two legitimately
-    // differ there once the console has published. The carry of the stage's
-    // value across the crossing window itself is a timing race in a browser,
-    // so it is pinned deterministically in site/continuityHoist.test.jsx
-    // rather than asserted here.
-    await expect(railEl).toContainText(STATIC_LABEL)
-    await expect(railEl).toContainText(catalogItem)
-    // The console's own nav is where it now sits: the console's tabs, not a
-    // leftover stage element (the stage unmounted with its scene).
-    await expect(page.locator('.app .tc-product-nav [data-testid="continuity-rail"]')).toHaveCount(1)
-    await expect(page.locator('.stage-root')).toHaveCount(0)
-    await expect(page.getByTestId('first-run-coach')).toHaveCount(0)
+  // The crossing to /app: the console mounts (lazy), adopts the SAME node.
+  await cross(page, '/app')
+  await expect(page.locator('.app')).toBeAttached({ timeout: 60_000 })
+  await expect(page.locator('.studio-shell[data-scene="app"]')).toHaveCount(1)
+  await expect(railEl).toBeAttached()
+  expect(await readMark(page)).toBe('try')
+  // Same label, for the parts both scenes derive from the same source: the
+  // static label and the catalog item (both scenes read the ONE tenant
+  // catalog fold, F-7). The project item is each scene's OWN derivation
+  // (F-9): on this stack the stage's operator identity starts with no
+  // drawing while the console boots its drawing, so the two legitimately
+  // differ there once the console has published. The carry of the stage's
+  // value across the crossing window itself is a timing race in a browser,
+  // so it is pinned deterministically in site/continuityHoist.test.jsx
+  // rather than asserted here.
+  await expect(railEl).toContainText(STATIC_LABEL)
+  await expect(railEl).toContainText(catalogItem)
+  // The console's own nav is where it now sits: the console's tabs, not a
+  // leftover stage element (the stage unmounted with its scene).
+  await expect(page.locator('.app .tc-product-nav [data-testid="continuity-rail"]')).toHaveCount(1)
+  await expect(page.locator('.stage-root')).toHaveCount(0)
+  await expect(page.getByTestId('first-run-coach')).toHaveCount(0)
 
-    // Back to /try: still the same node, and the coach is not re-offered.
-    await cross(page, '/try')
-    await expect(page.getByRole('main', { name: 'Leaf operator workspace' })).toBeVisible()
-    await expect(railEl).toBeAttached()
-    expect(await readMark(page)).toBe('try')
-    // Back on the stage the derivation is the stage's again, so the FULL
-    // label is byte-equal to what was captured before the round trip.
-    await expect(railEl).toHaveText(label)
-    await expect(page.locator('.stage-root .tc-product-nav [data-testid="continuity-rail"]')).toHaveCount(1)
-    await expect(page.getByTestId('first-run-coach')).toHaveCount(0)
-    await expect.poll(() => page.evaluate(() => localStorage.getItem('leaf.coach.dismissed.v1'))).toBe('1')
-    // Exactly one rail in the document at every point above, never two.
-    await expect(page.getByTestId('continuity-rail')).toHaveCount(1)
-  })
-}
+  // Back to /try: still the same node, and the coach is not re-offered.
+  await cross(page, '/try')
+  await expect(page.getByRole('main', { name: 'Leaf operator workspace' })).toBeVisible()
+  await expect(railEl).toBeAttached()
+  expect(await readMark(page)).toBe('try')
+  // Back on the stage the derivation is the stage's again, so the FULL
+  // label is byte-equal to what was captured before the round trip.
+  await expect(railEl).toHaveText(label)
+  await expect(page.locator('.stage-root .tc-product-nav [data-testid="continuity-rail"]')).toHaveCount(1)
+  await expect(page.getByTestId('first-run-coach')).toHaveCount(0)
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('leaf.coach.dismissed.v1'))).toBe('1')
+  // Exactly one rail in the document at every point above, never two.
+  await expect(page.getByTestId('continuity-rail')).toHaveCount(1)
+})

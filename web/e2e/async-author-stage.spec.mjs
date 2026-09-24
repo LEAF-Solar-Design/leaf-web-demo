@@ -3,7 +3,7 @@ import { AUTHORED_TOOL, catProofResponse, makeCatProofState } from './catProofFi
 
 const SURFACES = [
   { name: 'unified surface', path: '/try?proof=1' },
-  { name: 'console surface', path: '/app?dev=1&proof=1' },
+  { name: 'console surface', path: '/app?dev=1&proof=1', railButton: true },
 ]
 
 for (const surface of SURFACES) {
@@ -113,6 +113,8 @@ for (const surface of SURFACES) {
     await page.goto(surface.path)
     const catalogTab = page.getByRole('tab', { name: /Catalog/ })
     if (await catalogTab.count()) await catalogTab.click()
+    // The studio shell collapses the tool rail to a spine on every load; its band's Tool rail button expands it.
+    if (surface.railButton) await page.getByRole('button', { name: 'Tool rail', exact: true }).click()
     const customFamily = page.getByRole('button', { name: /Custom authored tools/ })
     await expect(customFamily).toBeVisible({ timeout: 15_000 })
     if (await customFamily.getAttribute('aria-expanded') === 'false') await customFamily.click()
@@ -136,6 +138,7 @@ for (const surface of SURFACES) {
 
     const readsBeforeReload = pollReads
     await page.reload()
+    if (surface.railButton) await page.getByRole('button', { name: 'Tool rail', exact: true }).click()
     await expect(page.getByLabel('Tool to revise')).toHaveValue(AUTHORED_TOOL.name, { timeout: 15_000 })
     await expect(page.getByText(/Reconnecting to authoring|Authoring with the agent/)).toBeVisible()
     await expect.poll(() => pollReads).toBeGreaterThan(readsBeforeReload)
@@ -153,6 +156,7 @@ for (const surface of SURFACES) {
     await expect.poll(() => page.evaluate(() => localStorage.getItem('leaf.inflightAuthor.v1'))).not.toBeNull()
 
     await page.reload()
+    if (surface.railButton) await page.getByRole('button', { name: 'Tool rail', exact: true }).click()
     await expect(page.locator('.authored')).toContainText('Repaired the exact existing custom tool.', { timeout: 30_000 })
     const terminalPointer = await page.evaluate(() => JSON.parse(localStorage.getItem('leaf.inflightAuthor.v1')))
     expect(terminalPointer).toMatchObject({

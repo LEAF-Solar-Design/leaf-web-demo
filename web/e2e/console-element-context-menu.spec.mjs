@@ -1,6 +1,5 @@
 import { expect, test } from '@playwright/test'
 import { catProofResponse, makeCatProofState } from './catProofFixture.mjs'
-import { setRail } from './local/railFlag.mjs'
 
 // Standardization slice 9b/9d (context-menu rows). ElementContextMenu.jsx
 // mounts through SurfaceFrame's ContextMenu slot wherever a surface declares
@@ -37,7 +36,6 @@ async function installFixture(page) {
 
 test('a board tile opens the ElementContextMenu via right-click and a long press, filtered by its kind, and Escape closes each', async ({ page }) => {
   test.setTimeout(60_000)
-  await setRail(page, '1')
   await installFixture(page)
   await page.goto('/app?surface=browser')
 
@@ -72,7 +70,6 @@ test('a board tile opens the ElementContextMenu via right-click and a long press
 
 test("the viewer wrapper's selected entity opens the ElementContextMenu via right-click and a long press, with every Modify/Clipboard row disabled by the engine's own reason, and Escape closes each", async ({ page }) => {
   test.setTimeout(60_000)
-  await setRail(page, '1')
   await installFixture(page)
   await page.goto('/app')
   await expect(page.locator('.viewer-title')).toContainText('cat.dwg', { timeout: 20_000 })
@@ -114,7 +111,6 @@ test("the viewer wrapper's selected entity opens the ElementContextMenu via righ
 
 test('Shift+F10 opens the ElementContextMenu on a focused ribbon tool button, the one identity-carrying element the console makes focusable', async ({ page }) => {
   test.setTimeout(60_000)
-  await setRail(page, '1')
   await installFixture(page)
   await page.goto('/app')
   await expect(page.locator('.viewer-title')).toContainText('cat.dwg', { timeout: 20_000 })

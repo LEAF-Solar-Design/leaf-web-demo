@@ -2,7 +2,6 @@ import { expect, test } from '@playwright/test'
 import { join } from 'node:path'
 import { writeProofReceipt } from '../proofReceipt.mjs'
 import { requireLocalReady } from './requireReady.mjs'
-import { setRail } from './railFlag.mjs'
 
 // Slice 11a: the BuildQueueCard on the console's job monitor, driven by ONE
 // real local job (the local engine stands in for APS under APS_LIVE=0, the
@@ -57,7 +56,6 @@ test('one real job rides the BuildQueueCard from running to a verified, unpromot
   // and a job submitted before the shell finished booting (15-30 s on the
   // local stack) would be complete before the first poll, which the badge
   // would honestly report as nothing running.
-  await setRail(page, '1')
   await page.goto('/app?surface=cad')
   await expect(page.locator('.app[data-surface="cad"]')).toHaveCount(1, { timeout: 30_000 })
   await expect(page.locator('aside.rail[data-spine]')).toHaveCount(1, { timeout: 30_000 })

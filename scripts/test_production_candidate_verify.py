@@ -569,6 +569,92 @@ def test_e07_proof_flaky_counts_as_passed(candidate):
     assert evidence.startswith("03 FAIL ") and "new_skipped=1" in evidence
 
 
+def playwright_title(key, directory="e2e\\local\\", position="3203:3", separator="›"):
+    """A row key as Playwright's reporter writes it: a path, :line:col and U+203A separators."""
+    spec_file, rest = key.split(" > ", 1)
+    return f"{directory}{spec_file}:{position} {separator} " + rest.replace(" > ", f" {separator} ")
+
+
+def retire(candidate, retired, replacement=None, status="passed"):
+    """The retired row passed in the baseline and is gone from the candidate proof."""
+    candidate[0]["baseline_proof"]["rows"].append({"title": playwright_title(retired), "status": "passed"})
+    if replacement is not None:
+        candidate[0]["candidate_proof"]["rows"].append(
+            {"title": playwright_title(replacement, directory="e2e/local/", position="3150:3"),
+             "status": status})
+
+
+@pytest.mark.parametrize("retired", sorted(verifier.W7_RETIRED_PROOF_ROWS))
+def test_w7_retired_row_missing_with_its_replacement_passed_passes(candidate, retired):
+    retire(candidate, retired, verifier.W7_RETIRED_PROOF_ROWS[retired])
+    result = cli(candidate)
+    assert result.returncode == 0, result.stdout + result.stderr
+    evidence = line(result.stdout, 3)
+    assert evidence.startswith("03 PASS ") and "missing=0" in evidence
+
+
+def test_w7_retired_row_missing_without_its_replacement_fails(candidate):
+    retired = sorted(verifier.W7_RETIRED_PROOF_ROWS)[0]
+    retire(candidate, retired)
+    result = cli(candidate)
+    assert result.returncode == 1
+    evidence = line(result.stdout, 3)
+    assert evidence.startswith("03 FAIL ") and "missing=1" in evidence
+    assert retired.rsplit(" > ", 1)[1] in evidence
+
+
+def test_w7_retired_row_missing_with_its_replacement_failed_fails(candidate):
+    retired = sorted(verifier.W7_RETIRED_PROOF_ROWS)[0]
+    retire(candidate, retired, verifier.W7_RETIRED_PROOF_ROWS[retired], status="failed")
+    result = cli(candidate)
+    assert result.returncode == 1
+    evidence = line(result.stdout, 3)
+    assert evidence.startswith("03 FAIL ") and "missing=1" in evidence and "new_failed=1" in evidence
+    assert retired.rsplit(" > ", 1)[1] in evidence
+
+
+def test_w7_unrelated_missing_row_still_fails_beside_an_excused_one(candidate):
+    retired = sorted(verifier.W7_RETIRED_PROOF_ROWS)[0]
+    retire(candidate, retired, verifier.W7_RETIRED_PROOF_ROWS[retired])
+    rows = candidate[0]["candidate_proof"]["rows"]
+    rows[:] = [row for row in rows if not row["title"].endswith("fixture green")]
+    result = cli(candidate)
+    assert result.returncode == 1
+    evidence = line(result.stdout, 3)
+    assert evidence.startswith("03 FAIL ") and "missing=1" in evidence
+    assert "fixture green" in evidence
+    assert retired.rsplit(" > ", 1)[1] not in evidence
+
+
+@pytest.mark.parametrize("raw", [
+    "e2e\\local\\one-shell-mount.spec.mjs:3289:3 › route matrix, rail ON › a row",
+    "e2e/local/one-shell-mount.spec.mjs ΓÇ║ route matrix, rail ON ΓÇ║ a row",
+    "e2e/local/one-shell-mount.spec.mjs:3289:3 ΓÇ║ route matrix, rail ON ΓÇ║ a row",
+    "\x1b[31mweb\\e2e/local\\one-shell-mount.spec.mjs:12:7 › route matrix, rail ON › a row\x1b[0m",
+    "one-shell-mount.spec.mjs > route matrix, rail ON > a row",
+])
+def test_w7_proof_row_key_normalizes_paths_positions_and_separators(raw):
+    assert verifier.proof_row_key(raw) == "one-shell-mount.spec.mjs > route matrix, rail ON > a row"
+
+
+def test_w7_proof_row_key_keeps_arrows_inside_a_title():
+    raw = "e2e/local/continuity-cross-scene.spec.mjs:65:3 › /try -> /app -> /try keeps ONE"
+    assert verifier.proof_row_key(raw) == "continuity-cross-scene.spec.mjs > /try -> /app -> /try keeps ONE"
+
+
+def test_w7_retired_table_shape():
+    table = verifier.W7_RETIRED_PROOF_ROWS
+    assert len(table) == 5
+    for key, replacement in table.items():
+        for value in (key, replacement):
+            assert value.isascii(), value
+            assert re.match(r"[a-z0-9-]+\.spec\.mjs > \S", value), value
+            assert verifier.proof_row_key(value) == value
+        assert replacement not in table, replacement
+        assert key.split(" > ", 1)[0] == replacement.split(" > ", 1)[0]
+    assert verifier.W7_LEGACY_FLAG_ROW in table.values()
+
+
 def test_e07_smoke_all_required_rows_pass(candidate):
     assert [row["name"] for row in candidate[0]["rows"]] == list(verifier.PROD_SMOKE_ROWS)
     result = cli(candidate)

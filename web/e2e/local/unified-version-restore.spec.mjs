@@ -188,9 +188,11 @@ test('guest sandbox restore never reaches the server', async ({ page }) => {
   })
   await page.context().clearCookies()
   await page.addInitScript(() => localStorage.removeItem('leaf.jwt'))
+  // Since W7, /try?demo=1 boots the console's local demo (mock data, the
+  // studio shell) instead of the /try tool cast. The invariant is unchanged:
+  // a visitor's restore runs in the local chain and never reaches the server.
   await page.goto('/try?demo=1')
-  await expect(page.getByTestId('operator-phase')).toContainText(/ready/i, { timeout: 15_000 })
-  await expect(page.locator('.tc-caption')).toContainText('Interactive local demo')
+  await expect(page.getByRole('checkbox', { name: /Use mock data/ })).toBeChecked({ timeout: 15_000 })
 
   // Seed a readable non-head version in the real local chain. The restore
   // itself must go through the visitor's confirmation controls below.
@@ -199,16 +201,15 @@ test('guest sandbox restore never reaches the server', async ({ page }) => {
     versions.applyDelete()
     versions.undo()
   })
-  await page.getByRole('tab', { name: /^Versions/ }).click()
-  const history = page.getByRole('region', { name: 'Version history' })
-  await expect(history.getByTestId('try-version-v1')).toContainText('head')
-  const source = history.getByTestId('try-version-v2')
-  await source.getByRole('button').first().click()
-  await expect(page.getByTestId('try-preview-write-lock')).toBeVisible()
+  await page.getByRole('button', { name: 'History', exact: true }).click()
+  const history = page.getByRole('dialog', { name: 'Version history' })
+  await expect(history.getByTestId('vh-row-v1')).toContainText('head')
+  const source = history.getByTestId('vh-row-v2')
   await source.getByRole('button', { name: 'Restore', exact: true }).click()
   await source.getByRole('button', { name: 'Restore v2', exact: true }).click()
-  await expect(history.getByTestId('try-version-v3')).toContainText('head')
-  await expect(page.getByTestId('try-preview-write-lock')).toHaveCount(0)
+  await expect(history).toBeHidden()
+  await page.getByRole('button', { name: 'History', exact: true }).click()
+  await expect(history.getByTestId('vh-row-v3')).toContainText('head')
   const restored = await page.evaluate(async () => {
     const versions = await import('/src/mock/mockVersions.js')
     const history = versions.list()

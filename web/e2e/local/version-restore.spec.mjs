@@ -188,8 +188,10 @@ test('an unreadable restored head keeps its warning through history refresh and 
   await expect(persistentLock).toContainText('Restored as v4')
   await expect(persistentLock).toHaveAttribute('data-head', '4')
   await expect(persistentLock).toHaveAttribute('data-latest', '4')
-  await expect(page.getByRole('button', { name: 'Undo' })).toBeDisabled()
-  await expect(page.getByRole('button', { name: 'Redo' })).toBeDisabled()
+  await expect(page.locator('[data-quick="quick-undo"]')).toBeDisabled()
+  await expect(page.locator('[data-quick="quick-redo"]')).toBeDisabled()
+  // The studio shell collapses the tool rail to a spine; its band's Tool rail button expands it.
+  await page.getByRole('button', { name: 'Tool rail', exact: true }).click()
   await page.getByRole('button', { name: /Drawing tools/ }).click()
   const writeTool = page.locator('.tool-card').filter({ hasText: 'arrange-panels-as-cat' })
   await writeTool.getByRole('button').first().click()
@@ -209,7 +211,7 @@ test('an unreadable restored head keeps its warning through history refresh and 
   await expect(persistentLock).toBeHidden()
   expect(observed.intakeReadsAfterRestore()).toBe(1)
   expect(observed.restoreCount()).toBe(2)
-  await expect(page.getByRole('button', { name: 'Undo' })).toBeEnabled()
+  await expect(page.locator('[data-quick="quick-undo"]')).toBeEnabled()
 })
 
 test('an unreadable committed head locks writes before a stalled history refresh and survives a failed repair', async ({ page }) => {
@@ -230,14 +232,14 @@ test('an unreadable committed head locks writes before a stalled history refresh
   const persistentLock = page.getByTestId('unreadable-head-lock')
   await expect(persistentLock).toHaveAttribute('data-head', '4')
   await history.getByRole('button', { name: 'Close version history' }).click()
-  await expect(page.getByRole('button', { name: 'Undo' })).toBeDisabled()
-  await expect(page.getByRole('button', { name: 'Redo' })).toBeDisabled()
+  await expect(page.locator('[data-quick="quick-undo"]')).toBeDisabled()
+  await expect(page.locator('[data-quick="quick-redo"]')).toBeDisabled()
 
   // A failed intake retry cannot clear the lock. Only a later successful read
   // can seat the committed head and make mutations eligible again.
   await persistentLock.getByRole('button', { name: 'Retry loading' }).click()
   await expect(persistentLock).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Undo' })).toBeDisabled()
+  await expect(page.locator('[data-quick="quick-undo"]')).toBeDisabled()
   await persistentLock.getByRole('button', { name: 'Retry loading' }).click()
   await expect(persistentLock).toBeHidden()
   expect(observed.intakeReadsAfterRestore()).toBe(2)
@@ -256,14 +258,16 @@ test('a stale post-restore head response cannot clear the write lock', async ({ 
 
   const persistentLock = page.getByTestId('unreadable-head-lock')
   await expect(persistentLock).toHaveAttribute('data-head', '4')
+  // In the studio shell the open drawer overlays the column's right edge, where the lock's Retry sits; close it first (as the two rows above do).
+  await history.getByRole('button', { name: 'Close version history' }).click()
   await expect(persistentLock).not.toHaveAttribute('data-pending', 'true')
   await expect(persistentLock.getByRole('button', { name: 'Retry loading' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Undo' })).toBeDisabled()
+  await expect(page.locator('[data-quick="quick-undo"]')).toBeDisabled()
   expect(observed.intakeReadsAfterRestore()).toBe(1)
 
   await persistentLock.getByRole('button', { name: 'Retry loading' }).click()
   await expect(persistentLock).toBeHidden()
-  await expect(page.getByRole('button', { name: 'Undo' })).toBeEnabled()
+  await expect(page.locator('[data-quick="quick-undo"]')).toBeEnabled()
   expect(observed.intakeReadsAfterRestore()).toBe(2)
 })
 
@@ -282,12 +286,14 @@ test('a split head response (new head, old geometry) cannot clear the write lock
 
   const persistentLock = page.getByTestId('unreadable-head-lock')
   await expect(persistentLock).toHaveAttribute('data-head', '4')
-  await expect(page.getByRole('button', { name: 'Undo' })).toBeDisabled()
+  // In the studio shell the open drawer overlays the column's right edge, where the lock's Retry sits; close it first (as the two rows above do).
+  await history.getByRole('button', { name: 'Close version history' }).click()
+  await expect(page.locator('[data-quick="quick-undo"]')).toBeDisabled()
   expect(observed.intakeReadsAfterRestore()).toBe(1)
 
   await persistentLock.getByRole('button', { name: 'Retry loading' }).click()
   await expect(persistentLock).toBeHidden()
-  await expect(page.getByRole('button', { name: 'Undo' })).toBeEnabled()
+  await expect(page.locator('[data-quick="quick-undo"]')).toBeEnabled()
   expect(observed.intakeReadsAfterRestore()).toBe(2)
 })
 
@@ -306,13 +312,15 @@ test('an undo that landed after the restore releases the lock instead of wedging
 
   const persistentLock = page.getByTestId('unreadable-head-lock')
   await expect(persistentLock).toHaveAttribute('data-head', '4')
-  await expect(page.getByRole('button', { name: 'Undo' })).toBeDisabled()
+  // In the studio shell the open drawer overlays the column's right edge, where the lock's Retry sits; close it first (as the two rows above do).
+  await history.getByRole('button', { name: 'Close version history' }).click()
+  await expect(page.locator('[data-quick="quick-undo"]')).toBeDisabled()
   expect(observed.intakeReadsAfterRestore()).toBe(1)
 
   await persistentLock.getByRole('button', { name: 'Retry loading' }).click()
   await expect(persistentLock).toBeHidden()
   // head 3 / latest 4: redo is the operation that makes sense here.
-  await expect(page.getByRole('button', { name: 'Redo' })).toBeEnabled()
+  await expect(page.locator('[data-quick="quick-redo"]')).toBeEnabled()
   expect(observed.intakeReadsAfterRestore()).toBe(2)
 })
 
@@ -389,8 +397,11 @@ test('the /app drawer is read-only while previewing an older version and fires n
   const observed = await mountVersionSurface(page)
   const history = page.getByRole('dialog', { name: 'Version history' })
 
-  const undo = page.getByRole('button', { name: 'Undo', exact: true })
-  const redo = page.getByRole('button', { name: 'Redo', exact: true })
+  // The studio shell (the only shell since W7) hides the viewer toolbar's own
+  // Undo and Redo (data-cockpit="ribbon"); the quick-access band serves
+  // version undo and redo under the toolbar's exact gates (App.jsx quick-undo).
+  const undo = page.locator('[data-quick="quick-undo"]')
+  const redo = page.locator('[data-quick="quick-redo"]')
   await expect(undo).toBeEnabled()
 
   const beforePreview = observed.mutating().length

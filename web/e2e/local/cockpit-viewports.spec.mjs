@@ -1,6 +1,5 @@
 import { expect, test } from '@playwright/test'
 import { requireLocalReady } from './requireReady.mjs'
-import { setRail } from './railFlag.mjs'
 
 const API_BASE = process.env.LEAF_E2E_API_BASE || 'http://127.0.0.1:8230'
 const conditions = [
@@ -12,7 +11,6 @@ const conditions = [
 
 async function boot(page, request) {
   await requireLocalReady(request, test, API_BASE)
-  await setRail(page, '1')
   await page.goto('/app?drawing=cat-panels')
   await expect(page.locator('.studio-shell .viewer-canvas canvas')).toHaveCount(1, { timeout: 30_000 })
   await expect(page.locator('#drafting-ribbon')).toBeVisible()
@@ -209,7 +207,6 @@ test.describe('shared phone workspace', () => {
 
   test('the demo coach stays above the folded headings and command bar', async ({ page, request }) => {
     await requireLocalReady(request, test, API_BASE)
-    await setRail(page, '1')
     await page.goto('/try?demo=tour&dev=1')
     await page.getByLabel('Use mock data (off = live backend)').check()
     const coach = page.locator('.tour-card.is-coach')

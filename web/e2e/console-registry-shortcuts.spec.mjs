@@ -1,6 +1,5 @@
 import { expect, test } from '@playwright/test'
 import { catProofResponse, makeCatProofState } from './catProofFixture.mjs'
-import { setRail } from './local/railFlag.mjs'
 
 // Standardization slice 10d (keyboard rows). Three of the FOUR registry
 // actions that carry a real `kbd` cap (web/src/lib/actionRegistry.js: only
@@ -32,7 +31,6 @@ async function installFixture(page, { catalogGate = null } = {}) {
 
 test('bar:shortcuts — Shift+? runs the exact handler the act-palette row runs', async ({ page }) => {
   test.setTimeout(60_000)
-  await setRail(page, '1')
   await installFixture(page)
   await page.goto('/app')
   await expect(page.locator('.viewer-title')).toContainText('cat.dwg', { timeout: 20_000 })
@@ -64,7 +62,6 @@ test('bar:shortcuts — Shift+? runs the exact handler the act-palette row runs'
 
 test('bar:retry — R runs the exact handler the visible Retry button runs', async ({ page }) => {
   test.setTimeout(60_000)
-  await setRail(page, '1')
   const catalogGate = { succeed: false }
   await installFixture(page, { catalogGate })
   // On the Browser surface the rail is a spine under the studio (#1259).
@@ -93,7 +90,6 @@ test('bar:retry — R runs the exact handler the visible Retry button runs', asy
 
 test('bar:focus — Mod+K reaches the exact command-bar element a direct focus reaches', async ({ page }) => {
   test.setTimeout(60_000)
-  await setRail(page, '1')
   await installFixture(page)
   await page.goto('/app')
   await expect(page.locator('.viewer-title')).toContainText('cat.dwg', { timeout: 20_000 })

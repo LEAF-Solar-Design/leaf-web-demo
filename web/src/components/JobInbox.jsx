@@ -70,10 +70,8 @@ export default function JobInbox({ bus } = {}) {
         <span className="n">{visible.length}</span>
         {/* Its own class, NOT `.spine-btn .spine-collapse`: those are the
             studio spine's furniture (JobRail / NavRail collapse-to-spine), and
-            the rail-OFF byte-identity row (one-shell-mount.spec.mjs "rail off
-            is byte-for-byte the old shell") counts `.spine-collapse` and
-            requires 0. The inbox renders rail-ON and rail-OFF alike, so it
-            must never wear a studio-only marker. The look is shared by
+            the inbox renders wherever the job rail slot is passed, so it must
+            never wear a studio-only marker. The look is shared by
             selector in landing.css (`.spine-btn, .inbox-toggle`). */}
         <button
           type="button"

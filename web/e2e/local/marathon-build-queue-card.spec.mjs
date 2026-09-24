@@ -4,7 +4,6 @@ import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node
 import { join, resolve } from 'node:path'
 import { makeProofReceipt } from '../proofReceipt.mjs'
 import { requireLocalReady } from './requireReady.mjs'
-import { setRail } from './railFlag.mjs'
 
 const API_BASE = process.env.LEAF_E2E_API_BASE || 'http://127.0.0.1:8230'
 const TENANT = 'demo-tenant'
@@ -43,7 +42,6 @@ test('fixture-replay: marathon card running, verified, and synthetic promotion',
     write('run-manifest.json', { title, requested_by: TIER, started_at: Date.now() / 1000 })
     write('state.json', running)
     await page.setViewportSize({ width: 1600, height: 1000 })
-    await setRail(page, '1')
     await page.goto('/app?surface=cad')
     await expect(page.locator('.app[data-surface="cad"]')).toHaveCount(1, { timeout: 30_000 })
     const badge = page.getByTestId('builds-badge')

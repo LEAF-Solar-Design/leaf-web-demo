@@ -76,10 +76,10 @@ describe('JobInbox', () => {
   })
 
   it('wears no studio spine furniture: the rail-OFF byte-identity row counts .spine-collapse and requires 0', () => {
-    // one-shell-mount.spec.mjs "rail off is byte-for-byte the old shell" asserts
-    // `.spine-collapse` has count 0 with the rail off; the inbox mounts rail-OFF
-    // too (it tracks the job rail slot, which the console always passes), so its
-    // toggle must never reuse JobRail's / NavRail's collapse-to-spine classes.
+    // The row this title names (one-shell-mount.spec.mjs) was retired with the
+    // rail in W7-C1. The inbox still tracks the job rail slot, which the console
+    // always passes, so its toggle must never reuse JobRail's / NavRail's
+    // collapse-to-spine classes: those are studio spine furniture.
     // This went red on main after #1023 (d29c78f1) shipped the toggle as
     // `.spine-btn .spine-collapse`; a sibling proof on f28c0e00 caught it.
     const bus = createNotificationBus(5)

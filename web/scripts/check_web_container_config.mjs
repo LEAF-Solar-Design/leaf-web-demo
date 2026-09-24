@@ -33,16 +33,18 @@ assert.match(dockerfile, /VITE_LIFECYCLE_UI=\$\{VITE_LIFECYCLE_UI\}/)
 assert.match(dockerfile, /VITE_CAD_EDIT=\$\{VITE_CAD_EDIT\}/,
   'the VITE_CAD_EDIT build ARG must reach the vite build via the ENV block')
 
-// The one-shell runtime rail (W3): the entrypoint drop-in must ship and the
-// flags file must load before the bundle, or an environment silently strands
-// on the default shell regardless of its task-definition flag. The rail is
-// RUNTIME (LEAF_ONE_SHELL_ENABLED on the TD), deliberately NOT a VITE ARG:
-// one shared image serves staging and production.
-assert.match(dockerfile, /COPY deploy\/write-runtime-flags\.sh \/docker-entrypoint\.d\/40-runtime-flags\.sh/,
-  'the web image must install the runtime-flags entrypoint drop-in')
+// W7 (docs/convergence/ACCEPTANCE.md, Version 3): the old shell and its
+// runtime rail are deleted, so the app always renders the studio shell. The
+// image must not install the flags entrypoint drop-in, and the page must not
+// load a flags file: nothing at boot may select a shell. (The patterns match
+// the separator loosely so this file names no deleted path verbatim.)
+assert.doesNotMatch(dockerfile, /write.runtime.flags/,
+  'the web image must not install the deleted runtime flags entrypoint drop-in')
 assert.doesNotMatch(dockerfile, /VITE_ONE_SHELL/,
-  'one-shell must stay a runtime rail, never a build-time VITE fence')
-assert.match(index, /<script src="\/runtime-flags\.js"><\/script>[\s\S]*<script type="module" src="\/src\/main\.jsx">/,
-  'index.html must load the runtime flags synchronously before the bundle')
+  'no build-time VITE fence may select a shell either')
+assert.doesNotMatch(index, /\/runtime.flags\.js/,
+  'index.html must not load a runtime flags file')
+assert.match(index, /<script type="module" src="\/src\/main\.jsx">/,
+  'index.html must still load the bundle')
 
-console.log('web container config: page assets, API, Auth0 SPA values, and the runtime-flags rail are pinned')
+console.log('web container config: page assets, API, Auth0 SPA values, and the absence of a shell rail are pinned')

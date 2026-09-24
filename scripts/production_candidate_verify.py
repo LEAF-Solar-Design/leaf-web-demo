@@ -39,6 +39,32 @@ PROD_SMOKE_ROWS = (
     "production app renders the studio shell",
     "production app and web serve the expected candidate",
 )
+# W7 (docs/convergence/ACCEPTANCE.md, Version 3) deleted the old shell and its rail, so its
+# rail-OFF rows are retired. A retired row missing from a candidate proof is excused only
+# while the row that replaces it is present and passed; every other missing row still fails.
+W7_LEGACY_FLAG_ROW = ("one-shell-mount.spec.mjs > route matrix, rail ON > a legacy flag value "
+                      "cannot select an old shell: absent, 0 and 1 all render the one studio")
+W7_RETIRED_PROOF_ROWS = {
+    "one-shell-mount.spec.mjs > route matrix, rail ON > rail OFF keeps every block in flow: "
+    "the cockpit changes nothing without the rail (W4c-C)": W7_LEGACY_FLAG_ROW,
+    "one-shell-mount.spec.mjs > route matrix, rail OFF + rollback > rail off is byte-for-byte "
+    "the old shell: inline canvas, no studio DOM": W7_LEGACY_FLAG_ROW,
+    "one-shell-mount.spec.mjs > route matrix, rail OFF + rollback > ROLLBACK: on -> off restores "
+    "the old shell with no stale storage, URL state, or provider duplication": W7_LEGACY_FLAG_ROW,
+    "continuity-cross-scene.spec.mjs > /try -> /app -> /try keeps ONE continuity rail and a "
+    "dismissed coach stays dismissed (rail OFF)":
+        "continuity-cross-scene.spec.mjs > /try -> /app -> /try keeps ONE continuity rail and a "
+        "dismissed coach stays dismissed (rail ON)",
+    "console-checkout-ownership.spec.mjs > the console holds the same single-writer lock the "
+    "stage does [rail 0]":
+        "console-checkout-ownership.spec.mjs > the console holds the same single-writer lock the "
+        "stage does [rail 1]",
+}
+# The Playwright title separator U+203A, and the same UTF-8 bytes read back as cp437.
+PROOF_SEPARATORS = ("\u203a", "\u0393\u00c7\u2551")
+# The leading spec path of a row title: every directory (either separator) and the
+# optional :line:col suffix are dropped, so only the spec file's own name remains.
+PROOF_FILE_PREFIX = re.compile(r"(?:\S*[\\/])?(?P<file>[^\s\\/]+?)(?::\d+:\d+)?(?=\s+>\s)")
 
 
 def command(*args):
@@ -93,6 +119,17 @@ def probe_health_sha(origin):
 
 def title(value):
     return re.sub(r":\d+:\d+(?=\s*›)", "", ANSI.sub("", value)).strip()
+
+
+def proof_row_key(name):
+    """Pure: a proof row title as `<spec file> > <describe> > <title>`, path- and separator-free."""
+    key = title(name)
+    for separator in PROOF_SEPARATORS:
+        key = key.replace(separator, ">")
+    match = PROOF_FILE_PREFIX.match(key)
+    if match:
+        key = match.group("file") + key[match.end():]
+    return key
 
 
 def clean(value):
@@ -259,6 +296,11 @@ def report(manifest, directory, live=True):
         skipped = sorted(name for name, status in after.items()
                          if status == "skipped" and before.get(name) == "passed")
         missing = sorted(set(before) - set(after))
+        if missing:
+            # A W7-retired row is excused only by its replacement row, present and passed.
+            passed = {proof_row_key(name) for name, status in after.items() if status == "passed"}
+            missing = [name for name in missing
+                       if W7_RETIRED_PROOF_ROWS.get(proof_row_key(name)) not in passed]
         named = list(dict.fromkeys(new + failed + skipped + missing))[:5]
         ok = not (new or failed or skipped or missing)
         return ok, (f"new_reds={len(new)}; new_failed={len(failed)}; new_skipped={len(skipped)}; "

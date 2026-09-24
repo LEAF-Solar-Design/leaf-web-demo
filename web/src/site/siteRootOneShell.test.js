@@ -3,7 +3,7 @@
 // Source pins for the W3 one-shell mount (docs/convergence/ACCEPTANCE.md).
 // Each pin names a contract whose loss is silent at build time: the rollback
 // arm drifting from the shipped shell, the auth-callback deferral slipping
-// below the shell branch, the portal losing its null-ground inline path, or
+// below the shell branch, the portal regrowing a null-ground inline Viewer, or
 // the studio shell adopting the dark-token .stage-root class before W4's
 // re-pin work. Normalized to LF (Windows checkout is CRLF) and pinned on
 // COMMENT-STRIPPED source, so a commented-out copy of the required code can
@@ -25,28 +25,37 @@ export function stripComments(src) {
 
 const read = (rel) => stripComments(raw(rel))
 
-const viewerPortalPattern = /studioGround\s*\?\s*createPortal\(<div className="studio-ground-viewer"[\s\S]{0,600}?\bhidden=\{effectiveGround !== 'drawing' && leavingGround !== 'drawing'\}[\s\S]{0,600}?>\{viewerEl\}<\/div>,\s*studioGround\)\s*:\s*viewerEl/
+const viewerPortalPattern = /studioGround\s*\?\s*createPortal\(<div className="studio-ground-viewer"[\s\S]{0,600}?\bhidden=\{effectiveGround !== 'drawing' && leavingGround !== 'drawing'\}[\s\S]{0,600}?>\{viewerEl\}<\/div>,\s*studioGround\)\s*:\s*null/
 
-// The studio-shell JSX block: from the host div to the rollback arm.
+// The studio-shell JSX block: from the host div to the sheets arm.
 function studioArm(src) {
   const start = src.indexOf('<div className="studio-shell"')
-  const end = src.indexOf(') : (', start)
+  const end = src.indexOf(") : scene === 'sheets'", start)
   expect(start).toBeGreaterThan(-1)
   expect(end).toBeGreaterThan(start)
   return src.slice(start, end)
 }
 
+// W7 deleted the rail. The deleted module and constant are spelled by parts
+// so this file never carries the retired names verbatim.
+const FLAG_MODULE = ['runtime', 'Flags'].join('')
+const FLAG_CONST = ['ONE', 'SHELL', 'ENABLED'].join('_')
+// Scene 'app' renders the studio shell DIRECTLY: the host div is the arm's
+// first element, with no condition between the scene test and the markup.
+const directStudioArm = /scene === 'app' \? \(\s*\n\s*<div className="studio-shell" data-scene="app" data-mode="console">/
+
 describe('SiteRoot one-shell branch', () => {
   const src = read('./SiteRoot.jsx')
 
-  it('branches the app arm on the runtime rail, imported from runtimeFlags', () => {
-    expect(src).toMatch(/import \{ ONE_SHELL_ENABLED \} from '\.\.\/lib\/runtimeFlags\.js'/)
-    expect(src).toMatch(/scene === 'app' \? \(\s*\n\s*ONE_SHELL_ENABLED \? \(/)
+  it('renders the studio shell for scene app unconditionally: no rail import, no flag', () => {
+    expect(raw('./SiteRoot.jsx')).not.toContain(FLAG_MODULE)
+    expect(raw('./SiteRoot.jsx')).not.toContain(FLAG_CONST)
+    expect(src).toMatch(directStudioArm)
   })
 
-  it('mounts ONE console workspace provider in EACH arm — the factory literal, twice', () => {
+  it('mounts ONE console workspace provider — the factory literal, once', () => {
     const mounts = src.match(/<WorkspaceControllerProvider \{\.\.\.consoleWorkspaceMount\(\)\}>/g) || []
-    expect(mounts).toHaveLength(2)
+    expect(mounts).toHaveLength(1)
   })
 
   it('the studio shell declares scene and mode for the route-matrix receipts', () => {
@@ -66,7 +75,7 @@ describe('SiteRoot one-shell branch', () => {
 
   it('keeps the auth-callback deferral ABOVE the shell branch (never regress the deferral)', () => {
     const deferral = src.indexOf('if (authCallbackPending) return')
-    const branch = src.indexOf('ONE_SHELL_ENABLED ?')
+    const branch = src.indexOf('<div className="studio-shell"')
     expect(deferral).toBeGreaterThan(-1)
     expect(branch).toBeGreaterThan(-1)
     expect(deferral).toBeLessThan(branch)
@@ -169,14 +178,20 @@ describe('rollback contract', () => {
 
 // Falsification: the pins must FAIL on the shapes they forbid.
 describe('falsification', () => {
-  it('an unconditional studio shell (no rail branch) fails the branch pin', () => {
-    const mutated = read('./SiteRoot.jsx').replace('ONE_SHELL_ENABLED ? (', 'true ? (')
-    expect(mutated).not.toMatch(/scene === 'app' \? \(\s*\n\s*ONE_SHELL_ENABLED \? \(/)
+  it('a studio arm wrapped back in a condition fails the direct-render pin', () => {
+    const src = read('./SiteRoot.jsx')
+    expect(src).toMatch(directStudioArm)
+    const mutated = src.replace('<div className="studio-shell"', 'legacyShell ? (\n          <div className="studio-shell"')
+    expect(mutated).not.toBe(src)
+    expect(mutated).not.toMatch(directStudioArm)
   })
 
-  it('a portal without the null-ground inline fallback fails the portal pin', () => {
-    expect(read('../App.jsx')).toMatch(viewerPortalPattern)
-    const mutated = read('../App.jsx').replace(': viewerEl', ': null')
+  it('a portal that regrows the null-ground inline Viewer fails the portal pin', () => {
+    const src = read('../App.jsx')
+    expect(src).toMatch(viewerPortalPattern)
+    // Anchored on the portal's own tail: App.jsx carries many other `: null`.
+    const mutated = src.replace(/(>\{viewerEl\}<\/div>,\s*studioGround\)\s*): null/, '$1: viewerEl')
+    expect(mutated).not.toBe(src)
     expect(mutated).not.toMatch(viewerPortalPattern)
   })
 

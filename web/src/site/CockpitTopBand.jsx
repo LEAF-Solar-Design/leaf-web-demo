@@ -1,7 +1,7 @@
 // The reference's top band (W4e slice F): quick-access commands on the left,
 // then the ribbon tabs. STUDIO-ONLY by construction: App mounts it inside
-// header.top behind `studioGround && drafting`, so rail OFF and every
-// non-drafting surface render the header exactly as before.
+// header.top behind `studioGround && drafting`, so a ground not attached yet
+// and every non-drafting surface render the plain header.
 //
 // Honesty: every quick-access button is a real handler App owns, or it is
 // disabled with the reason on its title AND accessible name. The engine's
