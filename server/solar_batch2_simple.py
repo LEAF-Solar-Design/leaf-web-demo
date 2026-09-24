@@ -330,6 +330,66 @@ def frame_rows(intake):
             for number, (group, field, value) in enumerate(frame_information(intake), 1)]
 
 
+
+# ---------------------------------------------------------------------------------------------
+# f2: frame and park settings (LEAFFRAME, LeafFrameCommand.cs:15-31, FrameParkSettingsForm.cs).
+
+FRAME_FORM_KEYS = {"ok", "cancel"}
+MAX_PACK_SEGMENTS = 10_000
+
+
+def tracker_pack_modules(preset):
+    """TrackerPack.ModuleCountTotal (TrackerPack.cs:57-59) of the preset as stored: the Modules segments' counts.
+    A preset without a pack takes DefaultUniform(Rows x Columns) (FramePreset.cs:76-89, TrackerPack.cs:219-228)."""
+    target = frame_target(preset)
+    pack = preset.get("TrackerPack")
+    if pack is None:
+        return target
+    _require(isinstance(pack, dict), "a tracker pack is not an object")
+    segments = pack.get("Segments")
+    if segments is None or segments == []:
+        return target
+    _require(isinstance(segments, list) and len(segments) <= MAX_PACK_SEGMENTS, "the tracker pack segments are invalid")
+    total = 0
+    for segment in segments:
+        if segment is None:
+            continue
+        _require(isinstance(segment, dict), "a tracker pack segment is not an object")
+        count = segment.get("Count", 0)
+        _require(type(count) is int, "a tracker pack segment count is not an integer")
+        if segment.get("Kind") == "Modules":
+            total += max(0, count)
+    return total
+
+
+def frame_target(preset):
+    """FramePreset.TargetModuleCount (FramePreset.cs:103-113): Rows x Columns, each floored at zero."""
+    rows, columns = preset.get("Rows", 0), preset.get("Columns", 0)
+    _require(type(rows) is int and type(columns) is int, "a preset's Rows and Columns are not integers")
+    return min(max(0, rows) * max(0, columns), 2**31 - 1)
+
+
+def frame_park_settings(intake, form_values):
+    """LEAFFRAME with the G36 actions: OK on the active preset, then Cancel if OK was refused. OnOkClicked
+    (FrameParkSettingsForm.cs:605-622): a fixed-tilt preset skips the tracker field check; the pack check
+    (ValidateTrackerPack :762-772) compares the pack's module total with Rows x Columns; on a pass the working
+    preset is saved and made active (unchanged here, so the stores do not change). Studio reads the preset store as
+    stored. Returns the `report` rows in the plugin adapter's shape."""
+    _require(isinstance(intake, dict), "the frame intake is not an object")
+    _require(isinstance(form_values, dict) and set(form_values) == FRAME_FORM_KEYS, "form_values must be ok and cancel")
+    preset = _active_preset(intake.get("frame_presets"))
+    _require(preset.get("FramingType") != "SingleAxisTracker",
+             "a tracker preset's field validation is not carried by this intake version")
+    modules, target = tracker_pack_modules(preset), frame_target(preset)
+    values = {"store-changed": False}
+    if modules == target:
+        values.update({"pack-check": "passed", "committed": True})
+    else:
+        values.update({"pack-check": "failed", "pack-modules": modules, "pack-target": target, "committed": False})
+    values["active-preset"] = preset.get("Name")
+    return report_rows(values)
+
+
 # ---------------------------------------------------------------------------------------------
 # q1: deep search status.
 
