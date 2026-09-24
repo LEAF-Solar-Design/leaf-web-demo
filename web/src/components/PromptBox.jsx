@@ -100,7 +100,8 @@ export default function PromptBox({
   // W4d Slice E: the reference's one-line docked "Command:" prompt. The DOM
   // is the same well; this only adds a class the studio's drafting-surface
   // CSS lays out as one row, and swaps the caret glyph for the prompt word.
-  // False (the default, and rail OFF) renders byte-for-byte as before.
+  // False (the default, and off the studio's drafting surfaces) renders the
+  // plain well.
   commandLine = false,
   armedAsk = '',
   // Standardization slice 5a: the stage (/try, site/ToolCast.jsx) mounts THIS

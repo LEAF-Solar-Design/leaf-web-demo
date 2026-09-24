@@ -1,5 +1,5 @@
 /* One-shell shared chrome. These bands use the existing cockpit skin.
-   Drafting instruments remain in cockpit.css; rail OFF has no shell hook. */
+   Drafting instruments remain in cockpit.css. */
 .studio-shell .studio-drawer-tabs { display: none; }
 .studio-shell .app[data-studio-shell="cockpit"] .result-block:has(.result-panel > p.panel-sub) { display: none; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] {

@@ -179,8 +179,8 @@ const PALETTE = ['#6b9fd4', '#8fbf9c', '#b49bd1', '#d4af6e', '#cf8fa6', '#79bcc7
 function ViewerSkeleton() {
   // Material follows the host: --viewer-skeleton-bg is re-pinned by the
   // studio ground (landing.css) so the fallback sheet matches whichever
-  // surface it paints over; the inline fallback keeps the old shell's
-  // card material byte-identical (W4c-0 debt, ACCEPTANCE deferred list).
+  // surface it paints over; the var's fallback is the card material
+  // (W4c-0 debt, ACCEPTANCE deferred list).
   return (
     <div className="viewer-skeleton" aria-hidden="true" style={{ position: 'absolute', inset: 0, background: 'var(--viewer-skeleton-bg, #0f0f11)' }}>
       <div className="loading-line dim" style={{ position: 'absolute', top: 14, left: 14 }}>
@@ -303,9 +303,9 @@ export default function App() {
   const { drawingId: REQUESTED_DRAWING_ID, source: DRAWING_SOURCE } = useDrawingIdentity()
   const requestedDrawingIdRef = useRef(REQUESTED_DRAWING_ID)
   requestedDrawingIdRef.current = REQUESTED_DRAWING_ID
-  // W3 one-shell: non-null ONLY under the studio shell (rail on). The sole
-  // consumer is the Viewer render site, which portals into it; null renders
-  // the old shell byte-for-byte (the rollback contract, studioGround.js).
+  // W3 one-shell: the studio ground node, which the Viewer portals into.
+  // null only until SiteRoot's ground attaches on the first render
+  // (studioGround.js); there is no old shell.
   const studioGround = useStudioGround()
   const [activeSurface, setActiveSurface] = useState(() => {
     try { return productSurfaceFromSearch(window.location.search) } catch { return 'cad' }
@@ -2632,7 +2632,7 @@ export default function App() {
   }, [])
   // W4c-C: the DXF import surface is a floating cockpit pane on drafting
   // surfaces (it was a full-width page block across the drawing); the ribbon
-  // opens it. Rail OFF it renders inline exactly as before.
+  // opens it.
   const [importOpen, setImportOpen] = useState(false)
   // W4d Slice D: the job monitor's posture on drafting surfaces (spine by
   // default; in-memory only, like the nav posture).
@@ -2727,8 +2727,8 @@ export default function App() {
   const [studioRibbonHost, setStudioRibbonHost] = useState(null)
   const projectSwitcherRef = useRef(null)
   // Every studio profile shares the status regions at the wide breakpoint.
-  // Below it the flat footer rules still own the segments. Rail OFF each
-  // FootRegion is a fragment, preserving the original DOM.
+  // Below it the flat footer rules still own the segments, and each
+  // FootRegion is a fragment.
   const footRegions = studioShell && wideViewport
   // The properties dock's declared sections; null off a drafting surface. Its
   // TRUTHINESS is the mount gate (paneOpen is the second gate, below).
@@ -2747,8 +2747,8 @@ export default function App() {
   drawingCommandOnRef.current = ENV_CAD_EDIT && !!studioGround && !!drafting
   const navSpine = !!studioGround && surfaceSlots.rails.left === 'spine' && !navExpanded && wideViewport
   // The per-application fold (operator directive): under the studio each
-  // tab's rail carries the families its application calls for; the old shell
-  // keeps the whole catalog byte-for-byte.
+  // tab's rail carries the families its application calls for; before the
+  // ground attaches on the first render the whole catalog shows.
   const railFamilies = useMemo(
     () => (studioGround ? familiesForSurface(catalog.families, activeSurface) : catalog.families),
     [studioGround, catalog.families, activeSurface],
@@ -2756,9 +2756,8 @@ export default function App() {
 
   // W4c-V3: the Solar tab's ground material. Under the studio on the solar
   // surface, the Panels layer takes the solar accent and every other layer
-  // keeps its palette - rail OFF (and every other surface) returns the SAME
-  // colorForLayer reference, so the old shell's canvas bytes are untouched
-  // (viewer-interaction screenshots compare layer colors rail-OFF).
+  // keeps its palette - every other surface (and a ground not attached yet)
+  // returns the SAME colorForLayer reference.
   const surfaceColorForLayer = useMemo(() => {
     if (!(studioGround && surfaceSlots.groundMaterial.layerAccent === 'solar')) return colorForLayer
     return (layer) => (layer === 'Panels' ? '#7fd6a6' : colorForLayer(layer))
@@ -2899,7 +2898,8 @@ export default function App() {
   // component already owns, each disabled control carrying its reason. The
   // engine's own clusters (Drawing, Modify) render as the ribbon's children
   // so they can read the ONE engine session through context. Studio-only:
-  // rail OFF the ribbon never mounts and this list is never read.
+  // off a studio drafting surface the ribbon never mounts and this list is
+  // never read.
   // One profile ribbon over the same project, catalog and conversation owners.
   const profileTabs = useMemo(() => {
     const openProjects = () => {
@@ -3371,8 +3371,8 @@ export default function App() {
           imageAttachmentsEnabled={false}
           // W4d Slice E seating: on drafting surfaces under the studio the
           // well is the reference's one-line docked "Command:" prompt.
-          // Rail OFF (and every non-drafting surface) the prop is false and
-          // the well renders exactly as before.
+          // Before the ground attaches (and on every non-drafting surface)
+          // the prop is false and the well renders its plain form.
           commandLine={!!studioGround && surfaceSlots.commandLine}
           armedAsk={armedPromptAsk}
           // Slice 8c: connected Link-a-service servers join the @ mounts
@@ -3421,8 +3421,8 @@ export default function App() {
         <div className="mark"><span className="diamond" aria-hidden="true" /> Leaf: build CAD tools with AI</div>
         {/* W4e: on the studio's drafting surfaces the header IS the
             reference's top band: quick access, then the ribbon tabs. The
-            engine's Open/Save portal into the band's slot. Rail OFF and
-            every other surface: nothing here. */}
+            engine's Open/Save portal into the band's slot. Every other
+            surface: nothing here. */}
         {studioShell && surfaceSlots.toolbar.ribbon && (
           <CockpitTopBand tabs={profileTabs} tab={activeRibbonTab} onTab={setRibbonTab} before={ribbon.quickBefore} after={ribbon.quickAfter} />
         )}
@@ -3622,8 +3622,8 @@ export default function App() {
         {/* W4a surface grounds (site/SurfaceGrounds.jsx): under the studio
             shell the ground IS each tab's workspace — the project board for
             Browser, the device stage for iOS; CAD and Solar CAD keep the
-            drawing (portaled above). ONLY through the ground portal: the
-            old shell has no ground, so rail OFF renders none of this. */}
+            drawing (portaled above). ONLY through the ground portal: before
+            the ground attaches on the first render none of this renders. */}
         {studioGround && createPortal(
           <SurfaceGrounds
             occluders={STUDIO_DRAWING_OCCLUDERS}
@@ -3776,8 +3776,8 @@ export default function App() {
             </div>
           )}
           {/* W4c-V1: the drafting ribbon — the drawing window's command
-              strip, in the cockpit grammar. Studio-only (rail OFF renders
-              nothing); tools are the ACTIVE SURFACE's fold, wired through
+              strip, in the cockpit grammar. Studio-only (nothing renders
+              before the ground attaches); tools are the ACTIVE SURFACE's fold, wired through
               the same run-decision path as the rail (source 'ribbon'). */}
           {studioShell && surfaceSlots.toolbar.ribbon && studioRibbonHost && createPortal(
             <DraftingRibbon clusters={ribbonClusters} tab={activeRibbonTab}>
@@ -3856,8 +3856,8 @@ export default function App() {
               mount (GET .../dxf), so Draw/Modify are live without an
               import; a moved head (a tool run, undo/redo, restore)
               re-opens a clean engine copy. The studio's drafting surfaces
-              only; the rail-OFF shell stays byte-identical (no fetch, no
-              engine view, no card stamp outside the cockpit). W4g-1c:
+              only (no fetch, no engine view, no card stamp outside the
+              cockpit). W4g-1c:
               the public demo (mock) has no server head, so its head is
               the static /sample.dxf, the synthesis of the very intake it
               draws, at version 1; the Draw tools go live there too, and
@@ -4091,12 +4091,13 @@ export default function App() {
             )}
             {(intake || solarStarter === 'open') && (() => {
               // W3 one-shell: the console OWNS this element — every prop, the
-              // ref, the version/undo/redo imperative path — in BOTH shells.
-              // Under the studio shell the element PORTALS into the ground
-              // layer (z0, under the floating console) instead of rendering
-              // inline; a null ground (rail off, old shell) renders inline
-              // exactly as before, which is the rollback contract. The ground
-              // viewer goes transparent so the studio void reads through.
+              // ref, the version/undo/redo imperative path. The drawing
+              // renders ONLY inside the ground layer (z0, under the floating
+              // console), through the portal. Before the ground attaches on
+              // the first render there is no Viewer at all: one Viewer, one
+              // WebGL context, never an inline-then-portal remount (a lost
+              // camera and a second context). The ground viewer goes
+              // transparent so the studio void reads through.
               const viewerEl = (
                 <Suspense fallback={<ViewerSkeleton />}>
                 <Viewer
@@ -4139,11 +4140,12 @@ export default function App() {
                     aria-hidden={leavingGround === 'drawing' ? 'true' : undefined}
                     inert={leavingGround === 'drawing' ? '' : undefined}
                   >{viewerEl}</div>, studioGround)
-                : viewerEl
+                : null
             })()}
             {/* W4c-V2: under the studio the Legend and the readout live in
                 the right palette (the SAME elements - one source of truth
-                for every field); rail OFF renders them inline byte-for-byte.
+                for every field); otherwise (no ground yet, a narrow
+                viewport, no dock) they render inline.
                 Geometry is client-derived from the intake entity in place. */}
             {(() => {
               const legendEl = drawingIntake ? (
@@ -4449,11 +4451,11 @@ export default function App() {
             element, so the boundary between a coordinate readout and a build
             hash is a region edge and not one more cell in a strip. `footRegions`
             is the ONE gate; off, every FootRegion is a fragment and this
-            footer's DOM is byte-identical to what the old shell renders. */}
+            footer's DOM is the flat strip. */}
         <FootRegion on={footRegions} name="docs">
         {/* W4e: on the studio's drafting surfaces the status bar opens with
             the reference's Model tab, the drawing's name, and + (the project
-            board). Rail OFF and every other surface: nothing here. */}
+            board). Every other surface: nothing here. */}
         {studioShell && (drafting ? (
           <StatusTabs name={shown ? `${projectName}.dwg` : ''} onStart={onOpenStart} />
         ) : (

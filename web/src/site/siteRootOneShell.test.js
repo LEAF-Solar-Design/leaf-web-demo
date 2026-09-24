@@ -3,7 +3,7 @@
 // Source pins for the W3 one-shell mount (docs/convergence/ACCEPTANCE.md).
 // Each pin names a contract whose loss is silent at build time: the rollback
 // arm drifting from the shipped shell, the auth-callback deferral slipping
-// below the shell branch, the portal losing its null-ground inline path, or
+// below the shell branch, the portal regrowing a null-ground inline Viewer, or
 // the studio shell adopting the dark-token .stage-root class before W4's
 // re-pin work. Normalized to LF (Windows checkout is CRLF) and pinned on
 // COMMENT-STRIPPED source, so a commented-out copy of the required code can
@@ -25,7 +25,7 @@ export function stripComments(src) {
 
 const read = (rel) => stripComments(raw(rel))
 
-const viewerPortalPattern = /studioGround\s*\?\s*createPortal\(<div className="studio-ground-viewer"[\s\S]{0,600}?\bhidden=\{effectiveGround !== 'drawing' && leavingGround !== 'drawing'\}[\s\S]{0,600}?>\{viewerEl\}<\/div>,\s*studioGround\)\s*:\s*viewerEl/
+const viewerPortalPattern = /studioGround\s*\?\s*createPortal\(<div className="studio-ground-viewer"[\s\S]{0,600}?\bhidden=\{effectiveGround !== 'drawing' && leavingGround !== 'drawing'\}[\s\S]{0,600}?>\{viewerEl\}<\/div>,\s*studioGround\)\s*:\s*null/
 
 // The studio-shell JSX block: from the host div to the sheets arm.
 function studioArm(src) {
@@ -186,9 +186,12 @@ describe('falsification', () => {
     expect(mutated).not.toMatch(directStudioArm)
   })
 
-  it('a portal without the null-ground inline fallback fails the portal pin', () => {
-    expect(read('../App.jsx')).toMatch(viewerPortalPattern)
-    const mutated = read('../App.jsx').replace(': viewerEl', ': null')
+  it('a portal that regrows the null-ground inline Viewer fails the portal pin', () => {
+    const src = read('../App.jsx')
+    expect(src).toMatch(viewerPortalPattern)
+    // Anchored on the portal's own tail: App.jsx carries many other `: null`.
+    const mutated = src.replace(/(>\{viewerEl\}<\/div>,\s*studioGround\)\s*): null/, '$1: viewerEl')
+    expect(mutated).not.toBe(src)
     expect(mutated).not.toMatch(viewerPortalPattern)
   })
 

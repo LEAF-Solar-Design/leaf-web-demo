@@ -407,6 +407,29 @@ describe('EngineDocumentView (W4f slice A0)', () => {
     expect(onShown).not.toHaveBeenCalled()
   })
 
+  it('an engine document that arrives before the viewer attaches is shown once the viewer attaches', () => {
+    // The Viewer mounts only inside the studio ground, so on the first render
+    // the ref can still be empty while the engine already holds a document.
+    const session = { engineParsed: true, documentId: 'early.dxf', entities: [LINE, CIRCLE], undoDepth: 0, redoDepth: 0, selectedId: '', status: 'Ready', actions: { select: vi.fn() } }
+    vi.spyOn(engineSessionContext, 'useEngineSessionContext').mockImplementation(() => ({ session, highlightedIds: [] }))
+    const viewerRef = { current: null }
+    const firstShown = vi.fn()
+    const utils = render(<EngineDocumentView viewerRef={viewerRef} onShown={firstShown} />)
+    expect(firstShown).not.toHaveBeenCalled()
+    const viewer = { applyVersion: vi.fn() }
+    viewerRef.current = viewer
+    // App passes an inline arrow, so every App render hands a new onShown.
+    const nextShown = vi.fn()
+    utils.rerender(<EngineDocumentView viewerRef={viewerRef} onShown={nextShown} />)
+    expect(viewer.applyVersion).toHaveBeenCalledTimes(1)
+    const intake = viewer.applyVersion.mock.calls[0][0]
+    expect(intake.source).toBe('engine')
+    expect(intake.documentId).toBe('early.dxf')
+    expect(intake.polylines.map((p) => p.handle)).toEqual(['e1', 'e2'])
+    expect(nextShown).toHaveBeenCalledWith(intake, { undoDepth: 0, redoDepth: 0, createdResult: null })
+    expect(firstShown).not.toHaveBeenCalled()
+  })
+
   it('reports document close and unmount through onHidden exactly once', async () => {
     const onHidden = vi.fn()
     const utils = mount({ onHidden })

@@ -1,8 +1,8 @@
 // The right palette (W4c-V2): the utility-CAD properties dock. STUDIO-ONLY
 // by construction (App mounts it behind studioGround && groundShowsDrawing);
-// rail OFF renders the same Legend and SelectionReadout inline, byte-for-
-// byte, because this dock HOSTS those exact elements rather than re-
-// implementing them - one source of truth for every field (ACCEPTANCE: "the
+// elsewhere (no ground yet, a narrow viewport) App renders the same Legend
+// and SelectionReadout inline, because this dock HOSTS those exact elements
+// rather than re-implementing them - one source of truth for every field (ACCEPTANCE: "the
 // properties dock as a grown SelectionReadout").
 //
 // READ-ONLY structurally: the dock consumes render slots and a derived
