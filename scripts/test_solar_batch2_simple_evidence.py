@@ -55,7 +55,7 @@ def write_intakes(tmp_path):
 
 def test_every_step_builds_a_valid_document(tmp_path):
     docs = prod.run_steps(write_intakes(tmp_path), REV)
-    assert set(docs) == {"z1", "z2", "z3", "s2", "s3", "s4", "f1", "q1", "m1", "o1"}
+    assert set(docs) == {"z1", "z2", "z3", "s2", "s3", "s4", "f1", "f2", "q1", "m1", "o1"}
     for step, doc in docs.items():
         prod.compare.validate_evidence(doc, "exports")
         assert doc["after"]["source_revision"] == step and doc["after"]["format"] == "batch2-v1"
@@ -101,7 +101,14 @@ def test_missing_or_malformed_intakes_refuse(tmp_path):
 def test_cli_writes_each_step(tmp_path):
     out = tmp_path / "out"
     assert prod.main(["--intakes", str(write_intakes(tmp_path)), "--out", str(out), "--revision", REV]) == 0
-    assert sorted(p.name for p in out.iterdir()) == ["f1.json", "m1.json", "o1.json", "q1.json", "s2.json", "s3.json", "s4.json", "z1.json", "z2.json", "z3.json"]
+    assert sorted(p.name for p in out.iterdir()) == ["f1.json", "f2.json", "m1.json", "o1.json", "q1.json", "s2.json", "s3.json", "s4.json", "z1.json", "z2.json", "z3.json"]
+
+
+def test_f2_reports_the_ok_on_the_active_preset(tmp_path):
+    doc = prod.run_steps(write_intakes(tmp_path), REV, "f2")["f2"]
+    values = {row["name"]: row["value"] for row in doc["after"]["rows"]}
+    assert values["active-preset"] == "P" and values["store-changed"] is False
+    assert doc["parameters"] == {"answers": [], "form_values": {"ok": 1, "cancel": 1}}
 
 
 def test_zone_assign_steps_chain_z3_on_studio_z2(tmp_path):

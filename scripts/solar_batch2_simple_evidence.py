@@ -52,6 +52,8 @@ STEPS = {
     "s4": ("shade-loss-heatmap-clear", "m", "s4-state.json", None),
     "f1": ("frame-information", "m", "f0-intake.json", None),
     "q1": ("deep-search-status", "in", None, None),
+    # G36 addendum: LEAFFRAME, OK then Cancel, over the same frame store intake as f1.
+    "f2": ("frame-park-settings", "m", "f0-intake.json", {"ok": 1, "cancel": 1}),
     # G36 addendum: the height zone's panels (z2) and strings (z3) from the zones after z1.
     "m1": ("string-midpoint-connection", "in", "m0-intake.json", None),
     "o1": ("open-customer-dwg", "in", "o0-intake.json", None),
@@ -109,6 +111,8 @@ def step_rows(step, intake):
             return {"report": engine.shade_loss_heatmap_clear(intake)}
         if step == "f1":
             return {"frame-info": engine.frame_rows(intake)}
+        if step == "f2":
+            return {"report": engine.frame_park_settings(intake, STEPS["f2"][3])}
         if step == "q1":
             return {"report": engine.deep_search_status([])}
         if step in ("z2", "z3"):

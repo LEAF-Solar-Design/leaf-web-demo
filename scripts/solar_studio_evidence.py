@@ -84,6 +84,8 @@ def build_evidence(graph, family, metadata):
         raise compare.InputError("input_sha256 must be derived, not supplied")
     if not isinstance(metadata["revision"], str) or not re.fullmatch(r"[0-9a-f]{40}", metadata["revision"]):
         raise compare.InputError("revision must be a 40-character lowercase git commit")
+    if (metadata.get("provenance") or {}).get("unassigned_scope") not in (None, "grouped"):
+        raise compare.InputError("unassigned_scope must be grouped when given")
     result = {key: deepcopy(metadata[key]) for key in required}
     result["input_sha256"] = compare.semantic_hash({
         "fixture_sha256": metadata["fixture_sha256"], "parameters": metadata["parameters"],
@@ -230,10 +232,18 @@ def build_evidence(graph, family, metadata):
         coverage = extra.get("solve_coverage") if isinstance(extra, dict) else None
         if not isinstance(coverage, dict):
             raise compare.InputError("strings evidence requires committed solve_coverage")
+        # A producer that ran a REMOVEPANEL cut declares provenance.unassigned_scope "grouped": a panel no group
+        # holds is then not a stringing target, as the plugin's evidence counts unassigned panels among grouped
+        # panels only (plugin_evidence.py, grouped_panels - assigned). Every other producer keeps every panel.
+        scope = (metadata.get("provenance") or {}).get("unassigned_scope")
+        grouped = ({panel["id"] for panel in graph.get("panels", []) if panel.get("frame_ref") is not None}
+                   if scope == "grouped" else None)
         for field in ("unassigned", "duplicate"):
             refs = coverage.get(field + "_panel_refs")
             if not isinstance(refs, list):
                 raise compare.InputError("solve_coverage requires panel reference arrays")
+            if field == "unassigned" and grouped is not None:
+                refs = [ref for ref in refs if ref in grouped]
             panels = [reference(identifier) for identifier in refs]
             # Rule G9: a SET-valued list is emitted in ascending neutral-id order on both
             # sides, by the same key the records above sort by, so two equal sets recorded
