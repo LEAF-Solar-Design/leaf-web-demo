@@ -4761,14 +4761,16 @@ def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
 _AUTO_CPUS_PER_WORKER = 2
 # Heavy browser suites plus their servers peak near 3 GiB per worker on that same 15 GB box.
 _AUTO_GIB_PER_WORKER = 3
-# A partition replay reaches the gate floor (456 s serial barrier + longest suite) at 8 workers.
-_AUTO_MAX_JOBS = 8
+# Conflict lanes (#1400) and the graph memo (#1402) removed the old floor; on 36 vCPU XLARGE,
+# 2026-09-24, gate wall was 276 s at 8, 227 s at 12, 207 s at 16 workers, 0 FAIL/RETRY each.
+# 16 is also --jobs' own upper bound.
+_AUTO_MAX_JOBS = 16
 # Bounded read for one cgroup or /proc file; these are a few bytes (meminfo ~1.5 KB).
 _AUTO_READ_LIMIT = 8192
 
 
 def resolve_auto_jobs(cpus: float, mem_bytes: int | None) -> int:
-    """Pure: workers = min(cpus / 2, mem_gib / 3, 8), floored, never below 1."""
+    """Pure: workers = min(cpus / 2, mem_gib / 3, 16), floored, never below 1."""
     bounds = [int(cpus // _AUTO_CPUS_PER_WORKER), _AUTO_MAX_JOBS]
     if mem_bytes is not None:
         bounds.append(int(mem_bytes // (_AUTO_GIB_PER_WORKER * 2 ** 30)))
@@ -4876,7 +4878,7 @@ def main() -> int:
     ap.add_argument("--jobs", type=_jobs_count, default=1, metavar="N",
                     help="run suites with N worker threads (1..16 or auto, default 1). "
                          "auto sizes N from the container's CPU quota and memory "
-                         "(2 vCPU and 3 GiB per worker, max 8). "
+                         "(2 vCPU and 3 GiB per worker, max 16). "
                          "Shared-state suites stay in one sequential group; "
                          "1 uses the original serial path with no threads.")
     ap.add_argument("--continue", dest="cont", action="store_true",

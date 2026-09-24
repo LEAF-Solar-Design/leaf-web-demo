@@ -2850,11 +2850,12 @@ _GIB = 2 ** 30
 
 @pytest.mark.parametrize("cpus, mem_bytes, expected", [
     (8, 15 * _GIB, 4),
-    (36, 72 * _GIB, 8),
+    (36, 72 * _GIB, 16),
     (4, 7 * _GIB, 2),
     (2, 3 * _GIB, 1),
     (1, None, 1),
-    (72, 144 * _GIB, 8),
+    (72, 144 * _GIB, 16),
+    (24, 72 * _GIB, 12),
     (36, 9 * _GIB, 3),
 ])
 def test_resolve_auto_jobs_is_bound_by_cpu_memory_and_the_cap(cpus, mem_bytes, expected):
