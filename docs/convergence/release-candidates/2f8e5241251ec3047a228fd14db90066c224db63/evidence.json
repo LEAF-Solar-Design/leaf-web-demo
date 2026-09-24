@@ -1,0 +1,323 @@
+{
+ "schema": "leaf-web-demo/release-candidate-evidence.v1",
+ "candidate": "2f8e5241251ec3047a228fd14db90066c224db63",
+ "tree": "8088e232e0ae7560bbdfe38b6353d7a6087042c1",
+ "previous_production": "ae5dc847b4f329a724fdd1b1ffec17a3bd54ffa6",
+ "assembled_at": "2026-09-24T09:06:39Z",
+ "results": [
+  {
+   "id": "staging-served",
+   "source": "6c38cfea0c259081729d045a24a063dffb2f1490",
+   "origin": "staging",
+   "tier": "staging",
+   "command": "GET /api/health and GET /health.json",
+   "counts": {
+    "origins_serving": 2,
+    "origins": 2,
+    "serves_candidate": false
+   },
+   "runtime_equivalence": {
+    "candidate": "2f8e5241251ec3047a228fd14db90066c224db63",
+    "served": "6c38cfea0c259081729d045a24a063dffb2f1490",
+    "equivalent": true,
+    "files_changed": 55,
+    "lines_deleted": 0,
+    "new_server_modules": [
+     "server/solar_inverter_devices.py",
+     "server/solar_inverter_outputs.py",
+     "server/solar_inverter_state.py",
+     "server/solar_inverter_strings.py"
+    ],
+    "importers_of_new_modules": [],
+    "existing_runtime_files_touched": []
+   },
+   "verdict": "PENDING"
+  },
+  {
+   "id": "staging-candidate-release",
+   "source": "2f8e5241251ec3047a228fd14db90066c224db63",
+   "origin": "staging (all five services, read back by field)",
+   "tier": "staging",
+   "command": "five-service native transaction of the admitted candidate supply, then describe-services and the ECR tag per service",
+   "counts": {
+    "services_on_candidate": 5,
+    "services": 5
+   },
+   "note": "released after the checks above; the push relay moved app to the next main merge within minutes, so the staging live acceptance could not bind one source (see live-plan-acceptance)",
+   "verdict": null
+  },
+  {
+   "id": "managed-proof",
+   "source": "2f8e5241251ec3047a228fd14db90066c224db63",
+   "origin": "local managed stack (web/scripts/run_unified_local_proof.ps1, VITE_CAD_EDIT=1, APS_LIVE=0)",
+   "tier": "local-e2e",
+   "command": "powershell -File web/scripts/run_unified_local_proof.ps1",
+   "counts": {
+    "passed": 84,
+    "failed": 0,
+    "skipped": 1,
+    "flaky": 1
+   },
+   "baseline": {
+    "source": "2ccbeccd",
+    "counts": {
+     "passed": 78,
+     "failed": 3,
+     "skipped": 1,
+     "flaky": 0
+    }
+   },
+   "fixed_since_baseline": [
+    "e2e\\local\\cockpit-viewports.spec.mjs > shared phone workspace > all four profiles share one band and exclusive bottom drawers",
+    "e2e\\local\\one-shell-mount.spec.mjs > J1 row1, J1 row2, J1 row4, J1 row5, J1 row8: served Browser panes, first run, material and drawing-profile continuity",
+    "e2e\\local\\uploaded-drawing-run.spec.mjs > an uploaded DXF remains the authorized target of a catalog run"
+   ],
+   "new_failures": [],
+   "still_failing": [],
+   "missing_rows": [],
+   "alone_reruns": [
+    {
+     "title": "e2e\\local\\one-shell-mount.spec.mjs > route matrix, rail ON > W4g bleed-2b: profile switches settle, fade inertly and keep one canvas",
+     "result": "passed alone"
+    }
+   ],
+   "verdict": "PASS"
+  },
+  {
+   "id": "start-board",
+   "source": "6c38cfea0c259081729d045a24a063dffb2f1490",
+   "origin": "staging",
+   "tier": "staging",
+   "command": "start-board probe (Playwright, read-only)",
+   "counts": {
+    "rows": 4,
+    "passing": 4
+   },
+   "verdict": "PASS"
+  },
+  {
+   "id": "surfaces",
+   "source": "6c38cfea0c259081729d045a24a063dffb2f1490",
+   "origin": "staging",
+   "tier": "staging",
+   "command": "surfaces probe (four profiles, read-only)",
+   "counts": {
+    "profiles": 4
+   },
+   "verdict": "PASS"
+  },
+  {
+   "id": "ssd2-markers",
+   "source": "6c38cfea0c259081729d045a24a063dffb2f1490",
+   "origin": "staging",
+   "tier": "staging",
+   "command": "marker audit over the served bundle",
+   "counts": {
+    "served": 25,
+    "total": 25
+   },
+   "verdict": "PASS"
+  },
+  {
+   "id": "ssd1-elements",
+   "source": "2f8e5241251ec3047a228fd14db90066c224db63",
+   "origin": "local managed stack plus the console spec files and one pytest row",
+   "tier": "local-e2e",
+   "command": "t02_element_table.py over the combined proof log",
+   "counts": {
+    "proven": 24,
+    "total": 24
+   },
+   "verdict": "PASS"
+  },
+  {
+   "id": "live-plan-acceptance",
+   "source": "2f8e5241",
+   "origin": "staging (the rail's plan-live-save-acceptance step)",
+   "tier": "staging",
+   "command": "plan-live-save-acceptance, contract 2 and contract 3",
+   "counts": {
+    "contract_2": {
+     "outcome": "refused",
+     "acceptance_outcome": null,
+     "source": "2f8e5241",
+     "reason": "deployment identity source mismatch: app"
+    },
+    "contract_3": {
+     "outcome": "refused",
+     "acceptance_outcome": null,
+     "source": "2f8e5241",
+     "reason": "deployment identity source mismatch: app"
+    }
+   },
+   "note": "refused at the identity precondition, which needs one source on all five staging services; the push relay moved app to the next main merge after the candidate's staging release. The last passing runs were on 74136c70 (2026-09-22), and no file the mutation Activity bakes differs between 74136c70 and the candidate",
+   "verdict": null
+  },
+  {
+   "id": "production-plan",
+   "source": "2f8e5241251ec3047a228fd14db90066c224db63",
+   "origin": "production (adapter --plan, zero writes by construction)",
+   "tier": "contract",
+   "command": "native-production-activation.py --plan against the live production baseline",
+   "counts": {
+    "exit": 0,
+    "planned_operations": 11,
+    "promotion": "already_public"
+   },
+   "images": {
+    "app": "sha256:9d5f50f1cc5635b604ab43b113c85d83c4ab1f1d3f20a2f7260ed2e45e7f0a2a",
+    "broker": "sha256:0442cc3479d431b8b091dfa742153233523f354f6a3f2dc5fbc4a2798477acfa",
+    "canonical-worker": "sha256:e2bdd0cb39ab38174aa518ca656a2c1d6cee90f65fdc5688a10c62846ed7beb9",
+    "harness": "sha256:44b92b87a7b8ddbfcb350e9247dbe4e0fe8f0cf0faf77578238210994fb6d806",
+    "web": "sha256:bb12e4ce43b548a72cb8a9530149d975ebd9b03036c886229fb048f7d0d89448"
+   },
+   "verdict": "PASS"
+  },
+  {
+   "id": "production-smoke",
+   "source": "ae5dc847b4f329a724fdd1b1ffec17a3bd54ffa6",
+   "origin": "production (read-only)",
+   "tier": "production",
+   "command": "web/e2e/prod/unified-prod-readonly.spec.mjs",
+   "counts": {
+    "rows": 8,
+    "passed": 8
+   },
+   "note": "a baseline of the build production served before the transaction; the candidate's own smoke is row production-terminal",
+   "verdict": "PENDING"
+  },
+  {
+   "id": "production-terminal",
+   "source": "2f8e5241251ec3047a228fd14db90066c224db63",
+   "origin": "production (read-only, after the transaction)",
+   "tier": "production",
+   "command": "the four production health endpoints, the auth ladder and web/e2e/prod/unified-prod-readonly.spec.mjs with the candidate expected",
+   "counts": {
+    "endpoints_serving_candidate": 4,
+    "endpoints": 4,
+    "pass": true,
+    "smoke": [
+     "8"
+    ]
+   },
+   "verdict": "PASS"
+  },
+  {
+   "id": "auth-ladder",
+   "source": "6c38cfea0c259081729d045a24a063dffb2f1490",
+   "origin": "staging and production",
+   "tier": "staging",
+   "command": "no bearer, a controlled tenant token, one capability the tier lacks",
+   "counts": {
+    "staging": [
+     401,
+     200,
+     403
+    ],
+    "production": [
+     401,
+     200,
+     403
+    ]
+   },
+   "verdict": "PASS"
+  }
+ ],
+ "checks": {
+  "01": "PASS",
+  "02": "PENDING",
+  "03": "PASS",
+  "04": "PASS",
+  "05": "PASS",
+  "06": "PASS",
+  "07": "PASS",
+  "08": "PASS",
+  "09": "PASS",
+  "10": "PENDING",
+  "11": "PASS",
+  "12": "PASS",
+  "13": "PASS",
+  "14": "OPERATOR"
+ },
+ "rollback": {
+  "production": "re-run the activation adapter with the recorded baseline: production returns to ae5dc847, its five image digests and its three task-definition revisions as recorded before the transaction",
+  "staging": "staging follows main through the relay; a revert of the offending merge on main is the rollback",
+  "door": "unchanged: the door already forwards to the production origin"
+ },
+ "unresolved": [
+  {
+   "id": "P-001",
+   "owner": "operator",
+   "text": "DOD6 signatures (gate public launch, not the technical promotion: decision 4A)"
+  },
+  {
+   "id": "P-002",
+   "owner": "operator",
+   "text": "counsel review"
+  },
+  {
+   "id": "P-003",
+   "owner": "operator",
+   "text": "Autodesk invoice US$1,620 due 2026-10-04 (money)"
+  },
+  {
+   "id": "P-006",
+   "owner": "operator",
+   "text": "trademark / public branding hold (gates public launch, decision 4A)"
+  },
+  {
+   "id": "P-074",
+   "owner": "operator",
+   "text": "the nine Postgres decisions (gates Open a project)"
+  },
+  {
+   "id": "P-071",
+   "owner": "operator",
+   "text": "E2B template and author broker gateway (money)"
+  },
+  {
+   "id": "P-020",
+   "owner": "operator",
+   "text": "the 12a live tenant credential"
+  },
+  {
+   "id": "P-142",
+   "owner": "operator",
+   "text": "Studio SKU (pricing decision, leaf_website)"
+  },
+  {
+   "id": "P-145",
+   "owner": "operator",
+   "text": "billing chain (leaf_website, after P-142)"
+  },
+  {
+   "id": "iOS",
+   "owner": "operator (iOS lane)",
+   "text": "the catalog projection activation apply, the owner's approve click, and fact (b) on project c6dbda41"
+  },
+  {
+   "id": "#106",
+   "owner": "operator",
+   "text": "CODE_MAP_PR_TOKEN for ops-dashboard"
+  }
+ ],
+ "resolved": [
+  {
+   "id": "PROMOTE",
+   "text": "the operator's yes for this candidate (2026-09-24 07:05Z); production transaction ok at 07:56Z"
+  }
+ ],
+ "commits_since_previous_production": [
+  "2f8e5241 Phone workspace row: a budget that fits its measured walk (#1413)",
+  "2c8e1e8a Browser board: host the project's campaign and summary panels instead of lying under them (#1412)",
+  "b027e014 Build rail: say when the build feed is stale and how to recover (#1410)",
+  "005aefa1 Start board: a real-size catalog never covers the Create project button (#1411)",
+  "8006febb Solar local graph commit end to end, and the session seats the real head (#1407)",
+  "6c458c1d Harness readiness answers for its own stores; the app asks the harness (#1409)",
+  "719007b3 ci(gate): --jobs auto may use up to 16 workers (#1408)",
+  "43863824 Managed proof runner provisions an isolated marathon fixture root (#1406)",
+  "4610d5d1 Production smoke: the served build must be the candidate with the rail on (#1405)",
+  "2928e28f Candidate verifier: judge a repeat release, not only the first promotion (#1404)",
+  "032b4c6b Viewer: an edit keeps the view the drafter moved (#1403)"
+ ]
+}
