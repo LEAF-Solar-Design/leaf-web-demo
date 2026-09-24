@@ -1,12 +1,12 @@
 import { expect, test } from '@playwright/test'
-import { assertResponseOnAllowedOrigin } from './stagingConfig.mjs'
-import { oneShellOn, resolveExpectedSha } from '../prod/prodConfig.mjs'
+import { assertPageOnAllowedOrigin, assertResponseOnAllowedOrigin } from './stagingConfig.mjs'
+import { resolveExpectedSha } from '../prod/prodConfig.mjs'
 
 // The staging twin of the production candidate checks in
 // e2e/prod/unified-prod-readonly.spec.mjs: the staged app and web must both
-// serve the candidate being promoted, and the served runtime flags must turn
-// oneShell on under the client's own rule. Read-only, no Authorization header,
-// no receipt. The host allowlist is enforced by globalSetup and by
+// serve the candidate being promoted, and the app must render the studio shell
+// (one app scene holding one Drawing region). Read-only, no Authorization
+// header, no receipt. The host allowlist is enforced by globalSetup and by
 // assertResponseOnAllowedOrigin on every response.
 
 test('staging app and web serve the expected candidate', async ({ request }) => {
@@ -25,9 +25,16 @@ test('staging app and web serve the expected candidate', async ({ request }) => 
   expect(webHealth.source_sha).toBe(expected)
 })
 
-test('staging runtime flags turn oneShell on', async ({ request }) => {
-  const response = await request.get('/runtime-flags.js', { timeout: 10_000 })
+test('staging app renders the studio shell', async ({ page }) => {
+  test.setTimeout(60000)
+  const response = await page.goto('/app?demo=1')
   assertResponseOnAllowedOrigin(response)
-  expect(response.ok()).toBeTruthy()
-  expect(oneShellOn(await response.text())).toBe(true)
+  assertPageOnAllowedOrigin(page)
+  const shell = page.locator('.studio-shell[data-scene="app"]')
+  await expect(shell).toHaveCount(1, { timeout: 30000 })
+  // Attached, not visible: the region carries aria-hidden until the ground node attaches.
+  const drawing = shell.locator('[role="region"][aria-label="Drawing"]')
+  await expect(drawing).toHaveCount(1)
+  await expect(drawing).toBeAttached()
+  assertPageOnAllowedOrigin(page)
 })

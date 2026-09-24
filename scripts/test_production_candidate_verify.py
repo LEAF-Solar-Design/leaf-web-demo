@@ -577,7 +577,7 @@ def test_e07_smoke_all_required_rows_pass(candidate):
     assert evidence.startswith("10 PASS ") and "required_rows=8/8 passed" in evidence
 
 
-@pytest.mark.parametrize("name", ["production runtime flags turn oneShell on",
+@pytest.mark.parametrize("name", ["production app renders the studio shell",
                                   "production deployment identity answers without a bearer"])
 def test_e07_smoke_missing_required_row_fails(candidate, name):
     candidate[0]["rows"] = [row for row in candidate[0]["rows"] if row["name"] != name]
@@ -586,6 +586,27 @@ def test_e07_smoke_missing_required_row_fails(candidate, name):
     assert result.returncode == 1
     evidence = line(result.stdout, 10)
     assert evidence.startswith("10 FAIL ") and f"{name}=missing" in evidence
+
+
+LEGACY_FLAG_ROW = "production runtime flags turn oneShell on"
+STUDIO_ROW = "production app renders the studio shell"
+
+
+def test_e07_smoke_legacy_flag_row_is_not_required():
+    assert LEGACY_FLAG_ROW not in verifier.PROD_SMOKE_ROWS
+    assert STUDIO_ROW in verifier.PROD_SMOKE_ROWS
+
+
+def test_e07_smoke_legacy_flag_row_does_not_satisfy_the_studio_row(candidate):
+    candidate[0]["rows"] = [
+        {"name": LEGACY_FLAG_ROW, "status": "passed"} if row["name"] == STUDIO_ROW else row
+        for row in candidate[0]["rows"]
+    ]
+    assert STUDIO_ROW not in [row["name"] for row in candidate[0]["rows"]]
+    result = cli(candidate)
+    assert result.returncode == 1
+    evidence = line(result.stdout, 10)
+    assert evidence.startswith("10 FAIL ") and f"{STUDIO_ROW}=missing" in evidence
 
 
 @pytest.mark.parametrize("statuses", [["skipped"], ["passed", "skipped"]])
