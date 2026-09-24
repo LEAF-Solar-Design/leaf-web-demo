@@ -90,6 +90,7 @@ def chain(tmp_path):
     for number in (0, 10, 11, 12, 16):
         (states / f"state-i{number}.json").write_text(json.dumps(state()), encoding="utf-8")
     (states / "state-i4.json").write_bytes((COMMITTED / "state-i4.json").read_bytes())
+    (states / "state-i19.json").write_bytes((COMMITTED / "state-i19.json").read_bytes())
     intake = tmp_path / "intake.json"
     intake.write_text(json.dumps({"panel_groups": GROUPS}), encoding="utf-8")
     return states, intake
@@ -106,7 +107,8 @@ def test_the_producer_writes_every_step(chain, tmp_path, capsys):
                     "--combiner-intake", str(COMMITTED / "combiner-intake.json")])
     assert code == 0
     written = sorted(p.name for p in out.iterdir())
-    assert written == ["i11.json", "i12.json", "i13.json", "i17.json", "i5.json", "position.json"]
+    assert written == ["i11.json", "i12.json", "i13.json", "i17.json", "i5.json", "l1.json", "l2.json",
+                       "position.json"]
     assert "not written" not in capsys.readouterr().err
     docs = {name[:-5]: json.loads((out / name).read_text(encoding="utf-8")) for name in written}
     assert docs["i5"]["parameters"] == {"answers": [], "form_values": {"combiner_input_plan": "Apply"}}
@@ -133,6 +135,20 @@ def test_the_producer_writes_every_step(chain, tmp_path, capsys):
     # G35b: the acquired point, as is.
     assert len(moved) == 1 and moved[0]["position"]["value"] == [20150.90569654952, 3589.187227900471]
     assert len(rows_of(docs["i17"], "cable")) == 2
+    # G36: the cabling studio on the committed i19 state. l1 opens it (the save's catalog pair, the report);
+    # l2 opens it, Simulates and Commits: 173 combiners, 173 routed homeruns, 173 comb feeders, the 14 earlier
+    # feeders removed, the 322 earlier homeruns kept.
+    assert rows_of(docs["l1"], "report")[0]["value"] == "studio-opened"
+    assert [r["name"] for r in rows_of(docs["l1"], "setting")] == ["HomerunRouting"]
+    assert docs["l2"]["parameters"] == {"answers": [], "form_values": {"cabling_redesign_simulate": "Simulate",
+                                                                       "cabling_redesign_commit": "Commit"}}
+    kinds = {}
+    for row in docs["l2"]["after"]["rows"]:
+        key = (row["type"], row.get("cable_kind"), row.get("change"))
+        kinds[key] = kinds.get(key, 0) + 1
+    assert kinds == {("device", None, "added"): 173, ("cable", "dc-homerun", "added"): 173,
+                     ("cable", "feeder", "added"): 173, ("cable", "feeder", "removed"): 14}
+    assert {r["scale"] for r in rows_of(docs["l2"], "device")} == {8.673644733572}
 
 
 def test_one_step_alone_equals_the_full_run(chain):

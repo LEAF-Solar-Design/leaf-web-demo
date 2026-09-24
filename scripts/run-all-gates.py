@@ -533,6 +533,10 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_solar_guardrails.py"), 15),
         Suite("server-solar-pile-block-mapping", "server tests/test_solar_pile_block_mapping.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_pile_block_mapping.py"), 16),
+        # W5 cabling studio (2026-09-24, contract G36): server/solar_lite_cabling.py, the plugin's lightweight
+        # cabling engine in adopt mode. Every input is authored in the file: the floor is the exact count, 14.
+        Suite("server-solar-lite-cabling", "server tests/test_solar_lite_cabling.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_lite_cabling.py"), 14),
         # W5 terrain d-steps (2026-09-23, contract G28): trench routing, the export preview, the
         # Yield zip byte for byte, and trackers to panel groups through the key-aware row reader.
         Suite("server-solar-ground-dsteps", "server tests/test_solar_ground_dsteps.py",

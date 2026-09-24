@@ -153,7 +153,7 @@ MAX_OUTLINE_VERTICES_TOTAL = 1_000_000
 MAX_DEVICES = 10_000
 UNASSIGNED_CIRCUIT = "-"
 HOST_KEYS = frozenset({"UseL2Collectors", "L1CollectorsPerL2", "RackExtents", "MovedDevice", "PositionDevice",
-                       "CombinerSymbolScale"})
+                       "CombinerSymbolScale", "L2Numbers"})
 # combiner-auto-place: the intake's full doubles against the state's printed ones (the dump keeps about
 # 16 significant digits), in drawing units; a match must be unique.
 MATCH_EPSILON = 1e-6
@@ -1093,5 +1093,152 @@ def combiner_auto_place(state, panel_groups, host, form_values, intake):
     if homeruns > 0 and (not l2 or feeders > 0):
         lines.append(f"LEAFCOMBINERAUTO: automatic cabling complete ({homeruns} DC homerun cable(s), "
                      f"{feeders} feeder cable(s)).")
+    st.sort_rows(new)
+    return new, lines
+
+
+# ------------------------------------------------------------- lightweight cabling studio --
+#
+# LEAFLITEPLACE / LEAFCABLEVIEW (LightweightCablingCommands.cs:65-89, the studio palette
+# CablingViewPaletteControl.cs): opening the studio reads the drawing's raw environment and draws nothing
+# (LoadEnvironment, :255-276); Simulate runs the engine (Simulate, LightweightCablingCommands.cs:205-220, the
+# engine in server/solar_lite_cabling.py); Commit writes that result (CommitResult, :225-270). The palette's
+# options are the engine defaults (ReadOptions, :221-246, over the controls' defaults, :138-157).
+
+lite = _load_sibling("solar_lite_cabling")
+LITE_HOMERUN_LAYER = "Homerun"                     # LightweightCablingCommands.cs:56
+LITE_FORM_KEYS = {"cabling_redesign_simulate", "cabling_redesign_commit"}
+
+
+def _lite_strings(state, intake):
+    """BuildRequest's strings (LightweightCablingCommands.cs:444-455): one per String-layer polyline, its A and
+    B terminals the polyline's first and last vertex (BuildStringSummariesFromCables, CombinerAutoCmd.cs:
+    3826-3905), in the plugin's cable dictionary order. That order is host state no drawing row carries: it is
+    the order the combiner intake records (the same builder's list at i5), each string matched to the one
+    state string with those terminals, and every state string must be matched."""
+    order = _string_ids(state, intake)
+    geometry = {g.get("string"): g for g in state["geometry"]["strings"] if isinstance(g, dict)}
+    if len(order) != len(geometry):
+        raise InverterCablingError("the combiner intake does not order every string of the state")
+    strings = []
+    for sid in sorted(order):
+        vertices = geometry[order[sid]]["vertices"]
+        strings.append((dev._finite_xy(vertices[0], "string vertex"),
+                        dev._finite_xy(vertices[-1], "string vertex")))
+    return strings
+
+
+def _lite_inverters(state, host):
+    """BuildRequest's ExistingInverters: every registered L2 (App.gL2CollectorList, DocumentEventHandler.cs:
+    305-313) with its NUMBER attribute. The state carries no number; host L2Numbers [[x, y, number]] records
+    them, measured from the capture. The list is taken in number order."""
+    table = host.get("L2Numbers")
+    if not isinstance(table, list) or len(table) > lite.MAX_INVERTERS:
+        raise InverterCablingError("host input L2Numbers (the L2 blocks' NUMBER attributes) is required")
+    index = _PointIndex()
+    for entry in table:
+        if not (isinstance(entry, list) and len(entry) == 3 and type(entry[2]) is int):
+            raise InverterCablingError("a host L2Numbers entry is not [x, y, number]")
+        index.add(dev._finite_xy(entry[:2], "L2Numbers point"), entry[2])
+    _, l2 = levels(state)
+    result = []
+    for item in l2:
+        hits = index.near(item["position"])
+        if len(hits) != 1:
+            raise InverterCablingError("an L2 device matches no single host L2Numbers entry")
+        result.append((hits[0], item["position"]))
+    if len({number for number, _ in result}) != len(result):
+        raise InverterCablingError("two L2 devices share a number")
+    return sorted(result, key=lambda item: item[0])
+
+
+def _lite_status_line(command, strings, inverters):
+    return f"{command}: environment: {len(strings)} strings, {len(inverters)} inverters - Simulate to string."
+
+
+def lite_studio_open(state, host, intake, command="LEAFLITEPLACE"):
+    """LEAFLITEPLACE (l1) on the Studio state: the studio opens on the raw environment and draws nothing.
+    The capture's reopened drawing carries one more CreateDefault() catalog pair than before it (the G27
+    per-save duplication), so the step saves the drawing properties once. Returns (new state, printed lines)."""
+    host = _host(host)
+    new = copy.deepcopy(state)
+    strings, inverters = _lite_strings(new, intake), _lite_inverters(new, host)
+    st.save_drawing_properties(new)
+    return new, [_lite_status_line(command, strings, inverters)]
+
+
+def lite_studio_commit(state, host, intake, form_values, command="LEAFLITEPLACE"):
+    """The studio opened, Simulate, then Commit (l2) on the Studio state: the engine's result written as
+    CommitResult does (LightweightCablingCommands.cs:225-270): the lite feeders and homeruns and every L1
+    combiner block erased, one L1 block per simulated combiner (PlaceNewInverterBlock, the combiner symbol
+    scale a host quantity), the adopted inverters left in place, the routed homeruns and the comb feeders
+    drawn. Returns (new state, printed lines)."""
+    host = _host(host)
+    if not isinstance(form_values, dict) or set(form_values) != LITE_FORM_KEYS:
+        raise InverterCablingError("the studio form values are Simulate and Commit")
+    racks = host.get("RackExtents")
+    if not isinstance(racks, list):
+        raise InverterCablingError("host input RackExtents (the drawing's rack extents) is required")
+    if racks:
+        raise InverterCablingNotPortedError("the studio over rack extents")
+    try:
+        scale = dev._symbol_scale(host, False)
+    except dev.InverterDeviceError as exc:
+        raise InverterCablingError(str(exc)) from None
+    strings, inverters = _lite_strings(state, intake), _lite_inverters(state, host)
+    lines = [_lite_status_line(command, strings, inverters)]
+    options = lite.default_options()
+    try:
+        result = lite.place(strings, inverters, None, options)
+    except lite.LiteCablingNotPortedError as exc:
+        raise InverterCablingNotPortedError(str(exc)) from None
+    except lite.LiteCablingError as exc:
+        raise InverterCablingError(str(exc)) from None
+    if not result["success"]:
+        lines.append("engine: " + "; ".join(result["warnings"]))
+        return copy.deepcopy(state), lines
+    if not result["homerun_paths"]:
+        raise InverterCablingNotPortedError("euclidean (non row-aware) homeruns")
+
+    new = copy.deepcopy(state)
+
+    def lite_homerun(row):
+        return row.get("cable_kind") == "dc-homerun" and (row.get("_detail") or {}).get("layer") == LITE_HOMERUN_LAYER
+    cables = new["rows"]["cable"]
+    erased_feeders = sum(1 for row in cables if row.get("cable_kind") == "feeder")
+    erased_homeruns = sum(1 for row in cables if lite_homerun(row))
+    new["rows"]["cable"] = [row for row in cables if row.get("cable_kind") != "feeder" and not lite_homerun(row)]
+    l1, _ = levels(new)
+    erased_combiners = len(l1)
+    dropped = {id(item["row"]) for item in l1}
+    new["rows"]["device"] = [row for row in new["rows"]["device"] if id(row) not in dropped]
+
+    for c in result["combiners"]:
+        x, y = c["location"]
+        new["rows"]["device"].append(dev._device_row(new, is_l2=False, x=x, y=y, scale=scale, placement=None,
+                                                     number=c["number"], box_inputs=0))
+    homeruns = 0
+    for _, cb, points in result["homerun_paths"]:
+        circuit = str(cb)
+        new["rows"]["cable"].append({
+            "cable_kind": "dc-homerun", "segment": "start", "from": None, "to": _homerun_to(circuit),
+            "vertices": [st.coordinate(x, y) for x, y in points], "length": _feet(0.0),
+            "_pair": st.new_pair(new, "cable"),
+            "_detail": {"circuit": circuit, "gauge": "", "closed": False, "layer": LITE_HOMERUN_LAYER}})
+        homeruns += 1
+    lanes = result["lanes"] if len(result["lanes"]) >= 2 else []
+    cb_pos = {c["number"]: c["location"] for c in result["combiners"]}
+    inv_pos = {inv["number"]: inv["location"] for inv in result["inverters"]}
+    direct = options["DirectFeeders"]
+    feeders = 0
+    for cb, inv, points in lite.build_feeder_paths(result["assignments"], cb_pos, inv_pos, lanes, direct):
+        new["rows"]["cable"].append(_feeder_row(new, cb, inv, points, 0.0))
+        feeders += 1
+    replaced = erased_combiners + erased_homeruns + erased_feeders
+    lines.append(f"committed: {len(result['combiners'])} combiners, {len(result['inverters'])} inverters "
+                 f"(adopted, not moved), {homeruns} homeruns, {feeders} {'direct' if direct else 'comb'} feeders"
+                 + (f" - replaced {erased_combiners} combiners / {erased_homeruns + erased_feeders} cables."
+                    if replaced > 0 else "."))
+    lines.extend(lite.printed(f) for f in result["findings"])
     st.sort_rows(new)
     return new, lines

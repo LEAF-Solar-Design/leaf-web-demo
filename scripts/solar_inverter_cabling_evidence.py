@@ -72,15 +72,21 @@ STEPS = {"i5": ("combiner-auto-place", "LEAFCOMBINERAUTO", "combiner-auto-place"
          "i12": ("homeruns", "HomerunsAuto", "homeruns", 11),
          "i13": ("lightweight-cabling-feeders", "LEAFLITEFEEDERS", "lightweight-cabling-feeders", 12),
          "i17": ("inverter-move", "MOVEINV", "inverter-move", 16),
-         "position": ("inverter-position", "POSITIONINV", "inverter-position", 16)}
+         "position": ("inverter-position", "POSITIONINV", "inverter-position", 16),
+         # G36: the cabling studio on the i19 drawing: l1 opens it, l2 opens it again, Simulates and Commits.
+         "l1": ("lightweight-cabling-studio", "LEAFLITEPLACE", "lightweight-cabling-studio", 19),
+         "l2": ("lightweight-cabling-studio", "LEAFLITEPLACE", "lightweight-cabling-studio", 19)}
+# A step whose before state is another step's Studio after state (G13), not a committed plugin state.
+CHAINED = {"l2": "l1"}
 STEP_IDS = tuple(STEPS)
 DECLARED = frozenset({"i17", "position"})
 # G22 answers (command line) and G30a form_values (dialogs), verbatim from G35 (inverter_evidence.py:
 # 145-159); POSITIONINV's one answer is the handle the capture gave its prompt, the picked block A9D5
 # (as MOVEINV's), not the device number; the engine resolves the device from host PositionDevice.
 STEP_ANSWERS = {"i5": [], "i11": [], "i12": [], "i13": [], "i17": ["A9D5", "20153.4,3589.19,0"],
-                "position": ["A9D5"]}
-STEP_FORM_VALUES = {"i5": {"combiner_input_plan": "Apply"}}
+                "position": ["A9D5"], "l1": [], "l2": []}
+STEP_FORM_VALUES = {"i5": {"combiner_input_plan": "Apply"},
+                    "l2": {"cabling_redesign_simulate": "Simulate", "cabling_redesign_commit": "Commit"}}
 # G35b: the engine's MOVEINV point is the point the jig acquired, not the typed text: the capture typed
 # "20153.4,3589.19,0" under running object snaps and AutoCAD delivered the snapped panel vertex below
 # (the committed device position; InverterMoveJig.cs:51-69 takes it as is). Object snap is host input no
@@ -110,6 +116,30 @@ CAPTURE_HOST = {
     # G35: POSITIONINV of device 14 (the picked block A9D5) from state i16.
     "PositionDevice": ["L1", 14],
 }
+
+
+# HOST INPUTS of the batch-2 studio capture (G36), a later AutoCAD session on the same host:
+LITE_HOST = dict(
+    CAPTURE_HOST,
+    # EquipmentSymbolScale of a combiner block in that session: all 173 combiners l2 committed carry it.
+    CombinerSymbolScale=8.673644733572,
+    # The L2 blocks' NUMBER attributes (LEAFADOPTL2INVERTERS renumbered them 9..31 at i19): the number each
+    # l2 feeder's circuit names at the inverter its last vertex lands on; the one inverter no feeder reaches
+    # (the engine's idle unit) takes the one number left, 14.
+    L2Numbers=[[14901.8327700701, 3681.255695906479, 9], [14846.65419864152, 3355.060294967476, 10],
+               [16924.46559667041, 3989.05109401393, 11], [18311.60743636922, 3932.459860849482, 12],
+               [19821.65569654869, 3704.800787681172, 13], [20150.90569654952, 3589.187227900471, 14],
+               [20260.85195774109, 3589.187227900471, 15], [14126.56588605084, 2046.065855186917, 16],
+               [14281.0658860496, 1410.191276031353, 17], [14298.59861051802, 1644.100118557831, 18],
+               [14340.48896297348, 2246.166246920207, 19], [14522.5827700701, 3954.99625300923, 20],
+               [14670.08277007158, 3970.289594996278, 21], [16543.08713383614, 1828.816546064558, 22],
+               [16613.12670764324, 4121.285469013931, 23], [16758.3563267214, 1576.097866801099, 24],
+               [18436.98933559365, 3800.225486334549, 25], [18439.06415238894, 2175.590566676287, 26],
+               [18680.17286698163, 2030.831390476388, 27], [19023.30618978309, 2748.140762355975, 28],
+               [20188.01288361916, 2196.600526755965, 29], [20260.85195774109, 2025.737421601047, 30],
+               [20260.85195774109, 3954.99625300923, 31]],
+)
+LITE_STEPS = frozenset({"l1", "l2"})
 
 
 class EvidenceError(ValueError):
@@ -171,6 +201,12 @@ def run_engine(step, state, panel_groups, host, combiner_intake=None):
         return cabling.inverter_move(state, host, answers)
     if step == "position":
         return cabling.inverter_position(state, panel_groups, host)
+    if step in LITE_STEPS:
+        if combiner_intake is None:
+            raise EvidenceError(f"step {step} needs the combiner intake (the string order)")
+        if step == "l1":
+            return cabling.lite_studio_open(state, host, combiner_intake)
+        return cabling.lite_studio_commit(state, host, combiner_intake, forms)
     raise EvidenceError(f"step {step!r} is not one of {STEP_IDS}")
 
 
@@ -244,6 +280,7 @@ def run_steps(states_dir, panel_groups, host=None, revision=None, only=None, com
     """({step: document}, {step: not-ported reason}) for every owned step (or only `only`); i5 reads
     `combiner_intake`."""
     states_dir = Path(states_dir)
+    host_default = host is None
     host = dict(CAPTURE_HOST if host is None else host)
     if only is not None and only not in STEPS:
         raise EvidenceError(f"step {only!r} is not one of {STEP_IDS}")
@@ -254,8 +291,11 @@ def run_steps(states_dir, panel_groups, host=None, revision=None, only=None, com
             if only is not None and step != only:
                 continue
             before = st.load_state(states_dir / f"state-i{STEPS[step][3]}.json")
+            step_host = LITE_HOST if step in LITE_STEPS and host_default else host
             try:
-                after, lines = run_engine(step, before, panel_groups, host, combiner_intake)
+                if step in CHAINED:
+                    before, _ = run_engine(CHAINED[step], before, panel_groups, step_host, combiner_intake)
+                after, lines = run_engine(step, before, panel_groups, step_host, combiner_intake)
             except cabling.InverterCablingNotPortedError as exc:
                 refused[step] = str(exc)
                 continue
@@ -269,7 +309,7 @@ def run_steps(states_dir, panel_groups, host=None, revision=None, only=None, com
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Studio G35 evidence for i5, i11, i12, i13, i17 and position.")
+    parser = argparse.ArgumentParser(description="Studio G35 evidence for i5, i11, i12, i13, i17 and position, and G36's l1 and l2.")
     parser.add_argument("--states", type=Path, default=DEFAULT_STATES,
                         help="the folder holding state-iN.json (default the committed copies)")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
@@ -281,7 +321,7 @@ def main(argv=None):
     parser.add_argument("--revision", default=None, help="the git commit the evidence is bound to, if any")
     args = parser.parse_args(argv)
     try:
-        combiner_intake = load_combiner_intake(args.combiner_intake) if args.step in (None, "i5") else None
+        combiner_intake = load_combiner_intake(args.combiner_intake) if args.step in (None, "i5", "l1", "l2") else None
         docs, refused = run_steps(args.states, load_intake_groups(args.intake), revision=args.revision,
                                   only=args.step, combiner_intake=combiner_intake)
         args.out.mkdir(parents=True, exist_ok=True)

@@ -126,6 +126,8 @@ REPORT_RULES = {
     "i17": (((r"No inverters found in drawing", "no-inverters"),), "no-change"),
     "i20": (((r"LEAFCABLETOTRAY: No trench within", "no-trench"),), "no-change"),
     "i21": (((r"LEAFDEVICESPATTERN: no tracker rows found", "no-tracker-rows"),), "no-change"),
+    # G36: the cabling studio's open status (CablingViewPaletteControl.cs:267).
+    "l1": (((r"LEAFLITEPLACE: environment:", "studio-opened"),), "no-change"),
 }
 MAX_REPORT_LINES = 10_000
 
