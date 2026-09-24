@@ -522,6 +522,17 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_solar_inverter_cabling.py"), 22),
         Suite("server-solar-inverter-combiner", "server tests/test_solar_inverter_combiner.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_inverter_combiner.py"), 27),
+        # W5 batch 2 (2026-09-24, contract G36): zone height, the shade reports, frame information and
+        # deep search status (server/solar_batch2_simple.py); the guardrails' 14 rules, display order and
+        # health banner in two list modes (server/solar_guardrails.py); the pile block mapper's save
+        # (server/solar_pile_block_mapping.py). Every input is authored in the file, so each floor is the
+        # exact collected count on every runner: 11, 10 + 5 parametrizations = 15, 8 + 8 = 16.
+        Suite("server-solar-batch2-simple", "server tests/test_solar_batch2_simple.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_batch2_simple.py"), 11),
+        Suite("server-solar-guardrails", "server tests/test_solar_guardrails.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_guardrails.py"), 15),
+        Suite("server-solar-pile-block-mapping", "server tests/test_solar_pile_block_mapping.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_pile_block_mapping.py"), 16),
         # W5 terrain d-steps (2026-09-23, contract G28): trench routing, the export preview, the
         # Yield zip byte for byte, and trackers to panel groups through the key-aware row reader.
         Suite("server-solar-ground-dsteps", "server tests/test_solar_ground_dsteps.py",
@@ -1928,6 +1939,14 @@ def build_suites() -> List[Suite]:
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_layout_evidence.py"), 17),
         Suite("scripts-solar-ground-scene-evidence", "scripts test_solar_ground_scene_evidence.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_scene_evidence.py"), 20),
+        # W5 batch 2 evidence (2026-09-24, contract G36): the producers over synthetic intakes authored in
+        # the file, so each floor is the exact collected count: 5, 5 and 3.
+        Suite("scripts-solar-batch2-simple-evidence", "scripts test_solar_batch2_simple_evidence.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_batch2_simple_evidence.py"), 5),
+        Suite("scripts-solar-guardrails-evidence", "scripts test_solar_guardrails_evidence.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_guardrails_evidence.py"), 5),
+        Suite("scripts-solar-pile-block-mapping-evidence", "scripts test_solar_pile_block_mapping_evidence.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_pile_block_mapping_evidence.py"), 3),
         Suite("scripts-solar-ground-buildout-evidence", "scripts test_solar_ground_buildout_evidence.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_buildout_evidence.py"), 18),
         Suite("scripts-solar-ground-shade-evidence", "scripts test_solar_ground_shade_evidence.py",
