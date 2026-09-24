@@ -51,6 +51,12 @@ When `LEAF_AUTHOR_SANDBOX_PROVIDER` is absent, local environments preserve the
 documented `LEAF_SANDBOX=e2b` author fallback. An explicit new selector always
 wins. The legacy value never satisfies the production startup gate.
 
+Production must run `LEAF_AUTHORED_EXECUTION` off (0). Staging may run it idle (0)
+or on (1) only with the complete active tuple the platform's own rule admits
+(`leaf_platform_runtime_posture._assert_broker`): the `e2b` tool sandbox, R5 `all`,
+R6 `all`, the `postgres` customization store, the E2B key secret, and a positive
+tenant cap. Check 12 of `scripts/production_candidate_verify.py` enforces exactly this.
+
 Source pins sandbox policy `leaf.sandbox-policy.v1` and E2B template
 `leaf-python-2026-07-29-v2` (template ID `r0kto3ypd1sgylx4tkz4`, build ID
 `273367ae-6a5b-47da-ba46-7782c2fa5d6b`). Production activation remains blocked until the

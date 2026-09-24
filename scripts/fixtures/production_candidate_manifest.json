@@ -3,8 +3,14 @@
   "candidate": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "main": {"sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "older_open_prs": 0},
   "staging": {"source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "identity_status": 401, "ladder": [401, 200, 403]},
-  "baseline_proof": {"run": "baseline-fixture", "reds": ["spec.mjs:521:3 › existing red"]},
-  "candidate_proof": {"run": "candidate-fixture", "reds": ["spec.mjs:521:3 › existing red"]},
+  "baseline_proof": {"run": "baseline-fixture", "reds": ["spec.mjs:521:3 › existing red"],
+    "source_sha": "9999999999999999999999999999999999999999",
+    "rows": [{"title": "spec.mjs:521:3 › existing red", "status": "failed"},
+             {"title": "spec.mjs:600:3 › fixture green", "status": "passed"}]},
+  "candidate_proof": {"run": "candidate-fixture", "reds": ["spec.mjs:521:3 › existing red"],
+    "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "rows": [{"title": "spec.mjs:521:3 › existing red", "status": "failed"},
+             {"title": "spec.mjs:600:3 › fixture green", "status": "passed"}]},
   "start_board": {"rows": [{"name": "fixture start", "pass": true}]},
   "surfaces": {
     "browser": {"cockpit": true, "evidence": "browser fixture"},
@@ -27,7 +33,9 @@
     "aps_window_receipt": "production_candidate_manifest.json",
     "aps_max_concurrency_production": 1
   },
-  "door_pr": {"number": 103, "state": "draft", "rollback": "restore prior production pin"},
+  "door_pr": {"number": 103, "state": "completed", "rollback": "restore prior production pin",
+    "target": "platform.leafdesign.ai", "merged_sha": "dddddddddddddddddddddddddddddddddddddddd",
+    "deploy_receipt": "production_candidate_manifest.json"},
   "operator_items": [{"id": "P-001", "owner": "operator", "text": "Review production promotion separately"}],
   "exit": 0, "planned_operations": 1, "promotion": "fixture-only",
   "source_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -38,8 +46,20 @@
     "harness": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "web": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   },
-  "result": "7 passed in fixture", "staging_refusal": "fixture staging promotion refused",
-  "served_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "rows": [
+    {"name": "production-like unified route is reachable without mutation", "status": "passed"},
+    {"name": "production app health reports its served source", "status": "passed"},
+    {"name": "production web health reports its served source", "status": "passed"},
+    {"name": "production deployment identity answers without a bearer", "status": "passed"},
+    {"name": "production auth ladder rejects absent and invalid bearers", "status": "passed"},
+    {"name": "production app displays its served build stamp", "status": "passed"},
+    {"name": "production runtime flags turn oneShell on", "status": "passed"},
+    {"name": "production app and web serve the expected candidate", "status": "passed"}
+  ],
+  "staging_refusal": "fixture staging promotion refused",
+  "served_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "target": "platform.leafdesign.ai",
   "pass": true, "ladder": [401, 200, 403],
   "fixture_note": "The staging object supplies both offline identity and the auth receipt ladder."
 }

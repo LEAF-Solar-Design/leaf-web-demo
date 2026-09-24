@@ -1,6 +1,7 @@
 """Read-only V-01 candidate report. Offline probes use manifest main/staging fields.
 
-main: {sha, older_open_prs}; staging: {source_sha, identity_status}.
+main: {sha, older_open_prs[, frozen, candidate_is_ancestor, drift_commits]};
+staging: {source_sha, identity_status}.
 Receipt paths resolve beside the manifest, including the self-contained fixture.
 """
 
@@ -24,6 +25,20 @@ USER_AGENT = "leaf-production-candidate-verify/1.0"
 SHA = re.compile(r"[0-9a-fA-F]{40}\Z")
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 ROLES = ("app", "broker", "canonical-worker", "harness", "web")
+MERGED_SHA = re.compile(r"[0-9a-f]{40}\Z")
+HOST = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?\Z")
+# Worst status wins per title; a flaky row counts as passed.
+PROOF_RANK = {"passed": 0, "flaky": 0, "skipped": 1, "failed": 2}
+PROD_SMOKE_ROWS = (
+    "production-like unified route is reachable without mutation",
+    "production app health reports its served source",
+    "production web health reports its served source",
+    "production deployment identity answers without a bearer",
+    "production auth ladder rejects absent and invalid bearers",
+    "production app displays its served build stamp",
+    "production runtime flags turn oneShell on",
+    "production app and web serve the expected candidate",
+)
 
 
 def command(*args):
@@ -186,9 +201,37 @@ def report(manifest, directory, live=True):
             count = probe_gh_open_prs(candidate) if live else manifest["main"]["older_open_prs"]
         except Exception as error:
             return "PENDING", f"main={sha} candidate={candidate}; gh {type(error).__name__}"
+        pinned = manifest.get("main") if isinstance(manifest.get("main"), dict) else {}
+        if sha != candidate and pinned.get("frozen") is True:
+            return frozen_main(sha, count, pinned)
         if live and (sha != candidate or type(count) is not int or count != 0):
             return "PENDING", f"main={sha} candidate={candidate}; older_open_prs={count}"
         return sha == candidate and type(count) is int and count == 0, f"main={sha} candidate={candidate}; older_open_prs={count}"
+
+    # A frozen candidate stays valid while main only gains later commits on top of it.
+    def frozen_main(sha, count, pinned):
+        evidence = f"main={sha} candidate={candidate}; older_open_prs={count}; frozen candidate; main moved"
+        if "drift_commits" in pinned:
+            evidence += f"; drift_commits={pinned['drift_commits']}"
+        if live:
+            # Both are argv to git: only a full sha may reach it, never an option.
+            if not all(isinstance(value, str) and SHA.fullmatch(value) for value in (sha, candidate)):
+                return "PENDING", evidence + "; ancestry unreadable"
+            try:
+                code = subprocess.run(["git", "merge-base", "--is-ancestor", candidate, sha],
+                                      capture_output=True, text=True, timeout=15).returncode
+            except Exception as error:
+                return "PENDING", evidence + f"; ancestry {type(error).__name__}"
+            if type(code) is not int or code not in (0, 1):
+                return "PENDING", evidence + f"; ancestry exit {code}"
+            ancestor = code == 0
+        else:
+            ancestor = pinned.get("candidate_is_ancestor") is True
+        evidence += f"; candidate_is_ancestor={ancestor}"
+        counted = type(count) is int and count == 0
+        if live and ancestor and not counted:
+            return "PENDING", evidence
+        return ancestor and counted, evidence
 
     def staging_check():
         data = probe_health_sha(STAGING) if live else manifest["staging"]
@@ -203,8 +246,24 @@ def report(manifest, directory, live=True):
 
     def proof_check():
         baseline, current = manifest["baseline_proof"], manifest["candidate_proof"]
-        new = sorted(set(map(title, current["reds"])) - set(map(title, baseline["reds"])))
-        return not new, f"new_reds={len(new)}; baseline={baseline['run']}; candidate={current['run']}; rows={', '.join(new)}"
+        if "source_sha" in current and current["source_sha"] != candidate:
+            return False, f"stale proof: {current['source_sha']}"
+        if "rows" not in baseline or "rows" not in current:
+            new = sorted(set(map(title, current["reds"])) - set(map(title, baseline["reds"])))
+            return not new, f"new_reds={len(new)}; baseline={baseline['run']}; candidate={current['run']}; rows={', '.join(new)}; legacy reds-only"
+        before, after = proof_rows(baseline["rows"]), proof_rows(current["rows"])
+        # Reds still listed beside rows keep their own set comparison.
+        new = sorted(set(map(title, current.get("reds", []))) - set(map(title, baseline.get("reds", []))))
+        failed = sorted(name for name, status in after.items()
+                        if status == "failed" and before.get(name) != "failed")
+        skipped = sorted(name for name, status in after.items()
+                         if status == "skipped" and before.get(name) == "passed")
+        missing = sorted(set(before) - set(after))
+        named = list(dict.fromkeys(new + failed + skipped + missing))[:5]
+        ok = not (new or failed or skipped or missing)
+        return ok, (f"new_reds={len(new)}; new_failed={len(failed)}; new_skipped={len(skipped)}; "
+                    f"missing={len(missing)}; baseline={baseline['run']}; candidate={current['run']}; "
+                    f"rows={', '.join(named)}")
 
     def board_check():
         rows = manifest["start_board"]["rows"]
@@ -238,13 +297,31 @@ def report(manifest, directory, live=True):
 
     def smoke_check():
         data = receipt("prod_smoke")
+        if "rows" not in data:
+            return "PENDING", "legacy count receipt; rows required"
         expected = data["served_source_sha"]
+        if expected != candidate:
+            # The smoke of the production live before promotion is a baseline, never terminal.
+            return "PENDING", f"baseline smoke of {expected}"
+        rows = data["rows"]
+        if not isinstance(rows, list):
+            raise ValueError()
+        seen = {}
+        for row in rows:
+            if not isinstance(row, dict) or not isinstance(row.get("name"), str):
+                raise ValueError()
+            seen.setdefault(row["name"], []).append(row.get("status"))
+        # Every occurrence of a required name must pass; a duplicate cannot mask a failure.
+        # name=status keeps "bearer" out of the sanitizer's "Bearer <token>" pattern.
+        failing = [f"{name}={'/'.join(map(str, seen[name])) if name in seen else 'missing'}"
+                   for name in PROD_SMOKE_ROWS
+                   if not seen.get(name) or any(status != "passed" for status in seen[name])]
         actual = expected
         if live:
             health = probe_health_sha(PRODUCTION)
             actual = health["source_sha"] if isinstance(health, dict) else health
-        ok = isinstance(data["result"], str) and data["result"].startswith("7 passed") and nonempty(data["staging_refusal"])
-        return ok and actual == expected, f"result={data['result']}; staging_refusal={data['staging_refusal']}; receipt_sha={expected}; served_sha={actual}; {'live' if live else 'offline receipt only'}"
+        ok = not failing and nonempty(data["staging_refusal"])
+        return ok and actual == expected, f"required_rows={len(PROD_SMOKE_ROWS) - len(failing)}/{len(PROD_SMOKE_ROWS)} passed; failing={', '.join(failing)}; staging_refusal={data['staging_refusal']}; receipt_sha={expected}; served_sha={actual}; {'live' if live else 'offline receipt only'}"
 
     def auth_check():
         data = receipt("auth_ladder")
@@ -283,7 +360,30 @@ def report(manifest, directory, live=True):
 
     def door_check():
         data = manifest["door_pr"]
-        return data["state"] == "draft" and nonempty(data["rollback"]), f"PR={data['number']}; state={data['state']}; rollback={data['rollback']}"
+        if data["state"] != "completed":
+            return data["state"] == "draft" and nonempty(data["rollback"]), f"PR={data['number']}; state={data['state']}; rollback={data['rollback']}"
+        # A repeat release: the door merged and deployed; its deploy receipt must agree.
+        target, merged = data.get("target"), data.get("merged_sha")
+        evidence = f"PR={data['number']}; state=completed; target={target}; merged_sha={merged}; rollback={data.get('rollback')}"
+        ok = isinstance(merged, str) and MERGED_SHA.fullmatch(merged) is not None
+        ok = ok and nonempty(target) and HOST.fullmatch(target) is not None
+        ok = ok and nonempty(data.get("rollback")) and nonempty(data.get("deploy_receipt"))
+        if not ok:
+            return False, evidence
+        source = path(data["deploy_receipt"])
+        if not source.is_file():
+            return False, evidence + "; deploy_receipt missing"
+        try:
+            with source.open(encoding="utf-8") as stream:
+                deployed = json.load(stream)
+        except ValueError:  # JSONDecodeError and UnicodeDecodeError
+            return False, evidence + "; deploy_receipt unparseable"
+        if not isinstance(deployed, dict):
+            return False, evidence + "; deploy_receipt not an object"
+        collect(deployed)
+        if "target" in deployed and deployed["target"] != target:
+            return False, evidence + f"; deploy_receipt target={deployed['target']}"
+        return True, evidence + "; deploy_receipt present"
 
     check(1, "main == " + candidate, main_check)
     check(2, "staging", staging_check)
@@ -318,6 +418,22 @@ def statuses(ladder):
     if not isinstance(ladder, list):
         return None
     return [entry.get("status") if isinstance(entry, dict) else entry for entry in ladder]
+
+
+def proof_rows(rows):
+    """Title -> worst status, flaky folded into passed; fails closed on any malformed row."""
+    if not isinstance(rows, list):
+        raise ValueError()
+    result = {}
+    for row in rows:
+        if (not isinstance(row, dict) or not isinstance(row.get("title"), str)
+                or not isinstance(row.get("status"), str) or row["status"] not in PROOF_RANK):
+            raise ValueError()
+        name = title(row["title"])
+        status = "passed" if row["status"] == "flaky" else row["status"]
+        if name not in result or PROOF_RANK[status] > PROOF_RANK[result[name]]:
+            result[name] = status
+    return result
 
 
 def main(argv=None):
