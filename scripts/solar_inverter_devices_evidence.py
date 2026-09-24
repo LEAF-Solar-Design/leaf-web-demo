@@ -63,16 +63,31 @@ STEPS = {"i1": ("inverter-add", "AddAllInverters", "inverter-add-all"),
          "i4": ("inverter-balance", "INVBALANCE", "inverter-balance"),
          "i10": ("skid-reconcile", "LEAFSKIDRECONCILE", "skid-reconcile"),
          "i18": ("inverter-add", "ADDINVERTER", "inverter-add"),
-         "i19": ("adopt-l2-inverters", "LEAFADOPTL2INVERTERS", "adopt-l2-inverters")}
+         "i19": ("adopt-l2-inverters", "LEAFADOPTL2INVERTERS", "adopt-l2-inverters"),
+         # G36: LEAFDEVICESCLOUD from c0 (the i0 drawing with its customer welcome dismissed). The capture's cloud
+         # optimizer answered 503, so the plugin took its deterministic grid placement, which is this engine.
+         "c1": ("devices-cloud-place", "LEAFDEVICESCLOUD", "devices-cloud-place")}
+# The before state of a step that is not state-i(N-1).
+BEFORE_STATE = {"c1": "state-c0.json"}
+# The batch-2 capture session's host differs from the inverter chain's in one setting: UseL2Collectors is false
+# there (measured: c1's eight blocks carry no L2 flag and AddAllInverters assigned the strings, which it does only
+# without L2 collectors).
+STEP_HOST = {"c1": {"UseL2Collectors": False,
+                   # App.mColorCtr at the session's first AddAllInverters: inverter 1 took the untyped family's
+                   # second colour (2), then 5, 3, 6, 4, 1, 2, 5 in placement order.
+                   "SessionColorCounter": 1,
+                   # EquipmentSymbolScale of a string inverter block in that session (all eight c1 blocks).
+                   "CombinerSymbolScale": 8.673644733572}}
 STEP_IDS = tuple(STEPS)
 # G22 answers (command line) and G30a form_values (dialogs), verbatim from G35.
-STEP_ANSWERS = {"i1": [], "i4": [], "i10": [], "i18": ["15", "20300,3589.19,0", "AddLater"], "i19": []}
+STEP_ANSWERS = {"i1": [], "i4": [], "i10": [], "i18": ["15", "20300,3589.19,0", "AddLater"], "i19": [], "c1": []}
 STEP_FORM_VALUES = {
     "i1": {"inverters_count_differs_from_stringsizer": "Yes", "low_utilization_on_last_inverter": "Keep current"},
     "i4": {"branch_inverter_manager_tab": "Central Inverters",
            "branch_inverter_manager_action": "Auto-Balance All", "branch_inverter_manager": "Close"},
     "i18": {"select_equipment_type": "Combiner box"},
     "i19": {"select_l2_inverter_hardware_mapping": "default", "select_l2_inverter_hardware": "Adopt"},
+    "c1": {"inverters_count_differs_from_stringsizer": "Yes", "low_utilization_on_last_inverter": "Keep current"},
 }
 
 # HOST INPUTS: the capture host's per-user settings and block-definition quantities the commands read,
@@ -136,7 +151,7 @@ def load_intake_groups(path):
 def run_engine(step, state, panel_groups, host):
     """(after state, printed lines) of one step's Studio engine."""
     answers, forms = STEP_ANSWERS[step], STEP_FORM_VALUES.get(step, {})
-    if step == "i1":
+    if step in ("i1", "c1"):
         return devices.inverter_add_all(state, panel_groups, host, forms)
     if step == "i4":
         return devices.inverter_balance(state, host, forms)
@@ -224,9 +239,9 @@ def run_steps(states_dir, panel_groups, host=None, revision=None, only=None):
         for step in STEP_IDS:
             if only is not None and step != only:
                 continue
-            number = int(step[1:])
-            before = st.load_state(states_dir / f"state-i{number - 1}.json")
-            after, lines = run_engine(step, before, panel_groups, host)
+            name = BEFORE_STATE.get(step) or f"state-i{int(step[1:]) - 1}.json"
+            before = st.load_state(states_dir / name)
+            after, lines = run_engine(step, before, panel_groups, {**host, **STEP_HOST.get(step, {})})
             rows, settings = st.step_rows(step, before, after, lines)
             out[step] = build_document(step, fixture, before, after, rows, settings, revision)
         return out
@@ -237,7 +252,7 @@ def run_steps(states_dir, panel_groups, host=None, revision=None, only=None):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Studio G35 evidence for i1, i4, i10, i18 and i19.")
+    parser = argparse.ArgumentParser(description="Studio G35 evidence for i1, i4, i10, i18 and i19, and G36's c1.")
     parser.add_argument("--states", type=Path, default=DEFAULT_STATES,
                         help="the folder holding state-iN.json (default the committed copies)")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)

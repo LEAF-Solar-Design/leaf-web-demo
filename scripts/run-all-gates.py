@@ -513,7 +513,7 @@ def build_suites() -> List[Suite]:
         Suite("server-solar-inverter-state", "server tests/test_solar_inverter_state.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_inverter_state.py"), 21),
         Suite("server-solar-inverter-devices", "server tests/test_solar_inverter_devices.py",
-              "pytest", SERVER, _py_pytest("tests/test_solar_inverter_devices.py"), 21),
+              "pytest", SERVER, _py_pytest("tests/test_solar_inverter_devices.py"), 24),
         Suite("server-solar-inverter-strings", "server tests/test_solar_inverter_strings.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_inverter_strings.py"), 16),
         Suite("server-solar-inverter-outputs", "server tests/test_solar_inverter_outputs.py",
@@ -1971,7 +1971,7 @@ def build_suites() -> List[Suite]:
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_pvcase_solve_evidence.py"), 19),
         # G35 inverter-family evidence producers (synthetic states in each file). MEASURED.
         Suite("scripts-solar-inverter-devices-evidence", "scripts test_solar_inverter_devices_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_inverter_devices_evidence.py"), 8),
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_inverter_devices_evidence.py"), 9),
         Suite("scripts-solar-inverter-strings-evidence", "scripts test_solar_inverter_strings_evidence.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_inverter_strings_evidence.py"), 7),
         Suite("scripts-solar-inverter-outputs-evidence", "scripts test_solar_inverter_outputs_evidence.py",

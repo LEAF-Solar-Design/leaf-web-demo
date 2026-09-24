@@ -278,3 +278,45 @@ def test_reconcile_counts_unassigned_and_oversized():
     result = dev.reconcile([1, 2, 3, 4], {1: 5, 2: 5, 3: 5, 4: 9}, {5: 2})
     assert not result["reconciled"] and result["unassigned"] == [4] and result["oversized"] == [(5, 3, 2)]
     assert result["messages"][-1] == "Combiner 5 oversized: 3 string(s) assigned, capacity 2 (over by 1)."
+
+
+# ------------------------------------------------ add all, string inverters --
+
+LEGACY = dict(HOST, UseL2Collectors=False, SessionColorCounter=1)
+LEGACY_SETTINGS = {"InstallationDesign": "Roof", "NumMppt": 3, "StringPerMppt": 3,
+                   "HomerunRouting": copy.deepcopy(st.HOMERUN_ROUTING_DEFAULT)}
+
+
+def test_add_all_without_l2_places_string_inverters_and_assigns_their_strings():
+    state = make_state(30, settings=LEGACY_SETTINGS)
+    square = outlines([[0, 0], [400, 0], [400, 200], [0, 200]])
+    after, lines = dev.inverter_add_all(state, square, LEGACY, ADD_ALL)
+    devices = after["rows"]["device"]
+    assert len(devices) == 2 and all(d["role"] == "combiner" and d["scale"] == 2.0
+                                     and d["placement"] == dev.FALLBACK_MARKER for d in devices)
+    assert [d["_detail"]["colour"] for d in sorted(devices, key=lambda d: d["_number"])] == [2, 5]
+    rows = after["rows"]["string-assignment"]
+    loads = {}
+    for row in rows:
+        loads[row["device"]] = loads.get(row["device"], 0) + 1
+    assert loads == {1: 21, 2: 9}                             # the nearest point (x 100 or 300), under capacity
+    labels = sorted(int(row["label"][1:].split("/")[0]) for row in rows)
+    assert labels == list(range(1, 31))                       # one sequence across the inverters
+    first = min(rows, key=lambda row: int(row["label"][1:].split("/")[0]))
+    assert first["label"].endswith("a") and first["input"] == 1
+    assert "Falling back to deterministic grid placement." in lines[0]
+
+
+def test_add_all_without_l2_refuses_existing_string_inverters():
+    with pytest.raises(dev.InverterNotPortedError):
+        dev.inverter_add_all(make_state(10, devices=[device(1, 1, role="combiner")], settings=LEGACY_SETTINGS),
+                             outlines(SQUARE), LEGACY, ADD_ALL)
+
+
+def test_midpoint_and_nearest_capacity_rules():
+    assert dev.polyline_midpoint([[0, 0], [10, 0], [10, 10]]) == (10.0, 0.0)
+    assert dev.polyline_midpoint([[3, 4]]) == (3.0, 4.0)
+    points = [(0.0, 0.0), (100.0, 0.0)]
+    assert dev.nearest_placement_point(points, [0, 0], (10.0, 0.0), 2) == 0
+    assert dev.nearest_placement_point(points, [2, 0], (10.0, 0.0), 2) == 1   # the nearest is full
+    assert dev.nearest_placement_point(points, [2, 2], (10.0, 0.0), 2) == 0   # all full: the nearest
