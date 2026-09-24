@@ -164,9 +164,10 @@ describe('route matrix: ONE reading of the search serves both consumers', () => 
   // `classifyDemo` -> `seedDrawingIdentity` (the drawing selection) both take
   // that same string, so a second, drifting reading cannot pass this suite.
   const ROWS = [
-    // `?demo=` ON /try stays on the stage — and picks the stage's drawing.
-    { search: '?demo=1', path: '/try', signedIn: false, boot: false, drawingId: 'demo', source: 'demo' },
-    { search: '?demo=1', path: '/try', signedIn: true, boot: false, drawingId: 'rooftop_demo', source: 'rooftop_demo' },
+    // `/try?demo=1` boots the console, the one studio, which seeds its own
+    // identity; `?demo=tour` on /try still stays on the stage.
+    { search: '?demo=1', path: '/try', signedIn: false, boot: true, drawingId: 'demo', source: 'rooftop_demo' },
+    { search: '?demo=1', path: '/try', signedIn: true, boot: true, drawingId: 'demo', source: 'rooftop_demo' },
     { search: '?demo=tour', path: '/try', signedIn: false, boot: false, drawingId: 'rooftop_demo', source: 'rooftop_demo' },
     // `?demo=` OFF /try boots the console, which seeds its own identity.
     { search: '?demo=1', path: '/', signedIn: false, boot: true, drawingId: 'demo', source: 'rooftop_demo' },

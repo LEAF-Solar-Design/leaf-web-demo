@@ -62,17 +62,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
-  vi.doUnmock('../lib/runtimeFlags.js')
 })
-
-// The one-shell rail is read once at module evaluation; beforeEach resets the
-// module graph and SiteRoot is imported per mount, so a doMock here lands.
-function stubOneShellRail(enabled) {
-  vi.doMock('../lib/runtimeFlags.js', () => ({
-    ONE_SHELL_ENABLED: enabled,
-    readOneShellEnabled: () => enabled,
-  }))
-}
 
 async function mountFrontDoor(path = '/', hostname = 'platform.leafdesign.ai') {
   const browserWindow = window
@@ -140,7 +130,6 @@ describe('Leaf workspace guest front door', () => {
   })
 
   it('boots the forwarded /try?demo=1 into the same console scene under the one-shell rail', async () => {
-    stubOneShellRail(true)
     await mountFrontDoor('/try?demo=1')
     await screen.findByTestId('app-stub')
     expect(document.querySelector('.studio-shell').getAttribute('data-scene')).toBe('app')
@@ -151,16 +140,7 @@ describe('Leaf workspace guest front door', () => {
     expect(mocks.replace).not.toHaveBeenCalled()
   })
 
-  it('keeps /try?demo=1 on the tool scene with the one-shell rail off', async () => {
-    stubOneShellRail(false)
-    await mountFrontDoor('/try?demo=1')
-    expect(document.querySelector('.stage-root').getAttribute('data-scene')).toBe('tool')
-    expect(screen.getByTestId('tool-stub').getAttribute('data-active')).toBe('true')
-    expect(screen.queryByTestId('app-stub')).toBeNull()
-  })
-
   it('keeps bare /try on the tool scene whatever the rail says', async () => {
-    stubOneShellRail(true)
     await mountFrontDoor('/try')
     expect(document.querySelector('.stage-root').getAttribute('data-scene')).toBe('tool')
     expect(screen.getByTestId('tool-stub').getAttribute('data-active')).toBe('true')

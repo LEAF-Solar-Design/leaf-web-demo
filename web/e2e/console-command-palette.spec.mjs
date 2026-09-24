@@ -1,6 +1,5 @@
 import { expect, test } from '@playwright/test'
 import { catProofResponse, makeCatProofState } from './catProofFixture.mjs'
-import { setRail } from './local/railFlag.mjs'
 
 // Standardization slice 10d (palette row). The console's command bar
 // (web/src/components/PromptBox.jsx) has no scope of its own until the
@@ -25,7 +24,6 @@ async function installFixture(page) {
 
 test('Ctrl/Cmd+K focuses the command bar, and the act scope shows palette rows over the action registry', async ({ page }) => {
   test.setTimeout(60_000)
-  await setRail(page, '1')
   await installFixture(page)
   await page.goto('/app')
   await expect(page.locator('.viewer-title')).toContainText('cat.dwg', { timeout: 20_000 })

@@ -2,18 +2,16 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { expect, test } from '@playwright/test'
 import { requireLocalReady } from './requireReady.mjs'
-import { setRail } from './railFlag.mjs'
 
 // The W3 one-shell mount proof (docs/convergence/ACCEPTANCE.md): every
-// route-matrix row the local stack can exercise, with the rail ON and OFF,
-// plus the sol-required ROLLBACK walk (rail off restores the old shell with
-// no stale storage, URL state, or provider duplication).
+// route-matrix row the local stack can exercise in the studio shell.
 //
-// The rail is RUNTIME: /runtime-flags.js is a same-origin static file loaded
-// synchronously before the bundle, so per-test route interception is the
-// exact production mechanism (the container entrypoint rewrites the same
-// file). addInitScript is NOT sufficient — the real file executes after init
-// scripts and would overwrite the flag back to '0'.
+// W7 (ACCEPTANCE, Version 3) deleted the old shell and the runtime rail that
+// selected it: /app ALWAYS renders the studio shell, and no file, global or
+// environment variable can select anything else. The rail-OFF and ROLLBACK
+// rows are retired; one row proves a legacy flag value is inert. The
+// describe keeps its `route matrix, rail ON` name because the proof history
+// of every row under it is keyed by that name.
 //
 // Every test here calls requireLocalReady first: under the managed runner
 // (LEAF_E2E_MANAGED=1) a dead stack HARD-FAILS instead of skipping, so a
@@ -21,15 +19,11 @@ import { setRail } from './railFlag.mjs'
 // executed/skipped counts (the unmanaged `proof:local` skips silently).
 const API_BASE = process.env.LEAF_E2E_API_BASE || 'http://127.0.0.1:8230'
 
-// setRail moved to railFlag.mjs (W4c-0): the checkout-ownership twin and
-// every future rail-ON row arm the flag through the same interception.
-
 const STUDIO = '.studio-shell[data-scene="app"][data-mode="console"]'
 
 test('J1 row1, J1 row2, J1 row4, J1 row5, J1 row8: served Browser panes, first run, material and drawing-profile continuity', async ({ page, request }) => {
   test.setTimeout(120_000)
   await requireLocalReady(request, test, API_BASE)
-  await setRail(page, '1')
   await page.setViewportSize({ width: 1920, height: 1080 })
   // A local presentation fixture, never a credential. Workspace and upload
   // writes are intercepted; the rest of the managed stack keeps its real IO.
@@ -162,7 +156,6 @@ test('J1 row1, J1 row2, J1 row4, J1 row5, J1 row8: served Browser panes, first r
 
 test('J1 row6: served demo material stays disabled and makes no project mutation', async ({ page, request }) => {
   await requireLocalReady(request, test, API_BASE)
-  await setRail(page, '1')
   const mutations = []
   page.on('request', (req) => {
     const path = new URL(req.url()).pathname
@@ -182,7 +175,6 @@ test('J1 row6: served demo material stays disabled and makes no project mutation
 test("E02 row1: a real-size catalog never covers the Start panel's Create project button", async ({ page, request }) => {
   test.setTimeout(120_000)
   await requireLocalReady(request, test, API_BASE)
-  await setRail(page, '1')
   await page.setViewportSize({ width: 1920, height: 1080 })
   // The same presentation fixture as J1, never a credential.
   await page.addInitScript(() => {
@@ -298,43 +290,17 @@ async function expectStudioBoardDetails(page, board) {
   if (openSummary) await summary.locator('summary').click()
 }
 
-// One canvas, and it lives where the mode says: the studio ground when the
-// rail is on, the console's inline wrap when it is off.
+// One canvas in the whole page, and it lives in the named container (the
+// studio ground).
 async function expectOneCanvasIn(page, containerSelector) {
   await expect(page.locator('.viewer-canvas canvas')).toHaveCount(1, { timeout: 30_000 })
   await expect(page.locator(`${containerSelector} .viewer-canvas canvas`)).toHaveCount(1)
-}
-
-// Storage keys telemetry.js owns (`leaf.telemetry.session` sid and the
-// per-event `leaf.telemetry.cap.*` counters), written LAZILY on the first
-// tracked event by BOTH shells — the one NAMED exclusion from the rollback
-// residue diff, because they are event-driven rather than shell-driven (an
-// idle boot writes none; the first click writes the sid). The baseline walk
-// below performs the SAME interaction as the studio walk anyway, so the diff
-// is symmetric even without the exclusion. Anything else that grows during
-// or after a studio session is stale storage the rollback contract forbids.
-const TELEMETRY_OWNED = (k) => k === 'leaf.telemetry.session' || k.startsWith('leaf.telemetry.cap.')
-function residue(baseline, keys) {
-  return keys.filter((k) => !baseline.includes(k) && !TELEMETRY_OWNED(k))
-}
-
-const storageKeys = (page) => page.evaluate(() => Object.keys({ ...localStorage, ...sessionStorage }))
-
-// The one interaction both walks perform: hit the card's viewer window (the
-// pan/select path through the pointer chain under the rail; the inline canvas
-// without it) and walk the top-level Esc rung.
-async function interact(page) {
-  const box = await page.locator('.viewer-wrap').boundingBox()
-  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2)
-  await page.keyboard.press('Escape')
-  await expect(page).toHaveURL(/\/app$/)
 }
 
 test('option A: translucent chrome owns clicks and wheel over the full-bleed drawing', async ({ page, request }) => {
   test.setTimeout(120_000)
   await page.setViewportSize({ width: 1920, height: 940 })
   await requireLocalReady(request, test, API_BASE)
-  await setRail(page, '1')
   await page.goto('/app?surface=cad&drawing=cat-panels')
   await expectOneCanvasIn(page, '.studio-ground')
   const canvas = page.locator('.studio-ground .viewer-canvas')
@@ -383,7 +349,6 @@ test.describe('route matrix, rail ON', () => {
     test(`Start preserves the ${surface} profile, document, prompt and mounted nodes`, async ({ page, request }) => {
       test.setTimeout(120_000)
       await requireLocalReady(request, test, API_BASE)
-      await setRail(page, '1')
       await page.goto(`/app?surface=${surface}`)
       await expectOneCanvasIn(page, '.studio-ground')
       // C-04B (38e7568e): the solar profile opens on its Solar tab, so the Draw tools mount only after the Draw tab is clicked.
@@ -464,7 +429,6 @@ test.describe('route matrix, rail ON', () => {
   test('/app boots studio mode console: one canvas in the ground, one controller, one command bar', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
-    await setRail(page, '1')
     await page.goto('/app')
     await expect(page.locator(STUDIO)).toHaveCount(1)
     await expectOneCanvasIn(page, '.studio-ground')
@@ -489,7 +453,6 @@ test.describe('route matrix, rail ON', () => {
   test('the pointer chain punches through the card window to the ground canvas', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
-    await setRail(page, '1')
     await page.goto('/app')
     await expectOneCanvasIn(page, '.studio-ground')
     // Every link in the chain computes to `none` (a specificity defeat at
@@ -530,7 +493,6 @@ test.describe('route matrix, rail ON', () => {
   test('/app/* and /ty/* sub-paths, and every boot query off /try, are the same console mode', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
-    await setRail(page, '1')
     for (const path of ['/ty', '/app/deep/link', '/ty/deep', '/?drawing=cat-panels', '/?ops=1', '/?demo=1', '/?dev=1', '/?fixture=edit']) {
       await page.goto(path)
       await expect(page.locator(STUDIO), path).toHaveCount(1)
@@ -540,7 +502,6 @@ test.describe('route matrix, rail ON', () => {
   test('W4g S08: an explicit demo boots without one authenticated request', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
-    await setRail(page, '1')
     const apiRequests = []
     page.on('request', (request) => {
       const { pathname } = new URL(request.url())
@@ -557,7 +518,6 @@ test.describe('route matrix, rail ON', () => {
   test('W4g S08: Details carries a copyable diagnostics block with the served build', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
-    await setRail(page, '1')
     await page.goto('/app')
     await expect(page.locator(STUDIO)).toHaveCount(1)
     await expect(page.locator('footer.foot-bar')).toContainText(/backend · (local only|cloud live)/, { timeout: 30_000 })
@@ -577,7 +537,6 @@ test.describe('route matrix, rail ON', () => {
   test('each tab has its own ground: drawing for CAD and Solar CAD, the project board for Browser, the device stage for iOS', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
-    await setRail(page, '1')
     await page.goto('/app')
     await expectOneCanvasIn(page, '.studio-ground')
     const viewer = page.locator('.studio-ground .studio-ground-viewer')
@@ -632,7 +591,6 @@ test.describe('route matrix, rail ON', () => {
   test('C-05 row8 demo Ship status rows stay disabled with Setup required', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
-    await setRail(page, '1')
     await page.setViewportSize({ width: 1600, height: 1000 })
     await page.goto('/app?surface=ios&dev=1')
     await page.getByLabel('Use mock data (off = live backend)').check()
@@ -654,7 +612,6 @@ test.describe('route matrix, rail ON', () => {
   test('C-04 solar-starter opens locally in a live empty Solar workspace', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
-    await setRail(page, '1')
     // On the local APS_LIVE=0 stack write_loop.ensure_demo_drawing bootstraps ANY
     // slug-safe first-seen id with the demo intake (a 200 that seats a drawing), so
     // the only honest 404 the session route gives is an id outside its slug rule:
@@ -707,7 +664,6 @@ test.describe('route matrix, rail ON', () => {
   test('floating rails, dark chrome, and the drawing cockpit (W4b)', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
-    await setRail(page, '1')
     await page.goto('/app')
     await expectOneCanvasIn(page, '.studio-ground')
     // The surface hook exists only under the rail, and CAD drops the page
@@ -791,7 +747,6 @@ test.describe('route matrix, rail ON', () => {
   test('bare /try stays the operator stage; /sheets and unknown paths never mount the studio', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
-    await setRail(page, '1')
     await page.goto('/try')
     await expect(page.locator('main.stage-root[data-scene="tool"]')).toHaveCount(1)
     await expect(page.locator(STUDIO)).toHaveCount(0)
@@ -806,7 +761,6 @@ test.describe('route matrix, rail ON', () => {
 
   test('/try?demo=1 mounts the shared console and its drawing', async ({ page, request }) => {
     await requireLocalReady(request, test, API_BASE)
-    await setRail(page, '1')
     await page.goto('/try?demo=1')
     await expect(page.locator(STUDIO)).toHaveCount(1)
     await expect(page.locator('main.stage-root[data-scene="tool"]')).toHaveCount(0)
@@ -819,7 +773,6 @@ test.describe('route matrix, rail ON', () => {
   test('Esc at top level in console mode never leaves /app (route matrix, Esc row)', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
-    await setRail(page, '1')
     await page.goto('/app')
     await expect(page.locator(STUDIO)).toHaveCount(1)
     await page.keyboard.press('Escape')
@@ -831,7 +784,6 @@ test.describe('route matrix, rail ON', () => {
   test('the drafting cockpit on the REAL stack: spine by default, per-surface ribbon, rail adaptation (W4c-V1)', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
-    await setRail(page, '1')
     await page.goto('/app')
     await expect(page.locator(STUDIO)).toHaveCount(1)
 
@@ -890,7 +842,6 @@ test.describe('route matrix, rail ON', () => {
     // runs (armDecision fails closed there by design - same as the rail).
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
-    await setRail(page, '1')
     await page.goto('/app?dev=1')
     await expect(page.locator(STUDIO)).toHaveCount(1)
     // Deterministic mock: the signed-in local stack classifies ?demo=1 as
@@ -962,7 +913,6 @@ test.describe('route matrix, rail ON', () => {
     ))
     expect(candidates.length, 'the sample drawing must carry a closed polyline').toBeGreaterThan(0)
 
-    await setRail(page, '1')
     await page.goto('/app')
     await expect(page.locator('.studio-ground .viewer-canvas canvas')).toHaveCount(1, { timeout: 30_000 })
 
@@ -1012,7 +962,6 @@ test.describe('route matrix, rail ON', () => {
   test('the right palette keeps the plan reachable before drawing intake exists', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
-    await setRail(page, '1')
     await page.route('**/api/session?**', (route) => route.fulfill({
       status: 503,
       contentType: 'application/json',
@@ -1045,7 +994,6 @@ test.describe('route matrix, rail ON', () => {
     // proves the narrow side of it never lets the panel vanish.
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
-    await setRail(page, '1')
     await page.setViewportSize({ width: 900, height: 640 })
 
     const expectInlineGate = async () => {
@@ -1090,7 +1038,6 @@ test.describe('route matrix, rail ON', () => {
     // row past three minutes on a loaded host; five is its budget now.
     test.setTimeout(300_000)
     await requireLocalReady(request, test, API_BASE)
-    await setRail(page, '1')
     await page.goto('/app')
     await expect(page.locator(STUDIO)).toHaveCount(1)
     await expectOneCanvasIn(page, '.studio-ground')
@@ -2503,7 +2450,6 @@ test.describe('route matrix, rail ON', () => {
   test('W4g bleed-2a: CAD and Solar CAD keep one canvas, one WebGL context and the camera', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
-    await setRail(page, '1')
     await page.goto('/app?surface=cad&drawing=cat-panels')
     const viewer = page.locator('.studio-ground .viewer-canvas')
     const canvas = viewer.locator('canvas')
@@ -2583,7 +2529,6 @@ test.describe('route matrix, rail ON', () => {
   test('W4g bleed-2b: profile switches settle, fade inertly and keep one canvas', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
-    await setRail(page, '1')
     await page.emulateMedia({ reducedMotion: 'no-preference' })
     await page.goto('/app?surface=cad&drawing=cat-panels')
     await expectOneCanvasIn(page, '.studio-ground')
@@ -2699,7 +2644,6 @@ test.describe('route matrix, rail ON', () => {
   test('W4g-7b-02c: INSERT of an existing block, on the real engine', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
-    await setRail(page, '1')
     await page.goto('/app')
     await expect(page.locator(STUDIO)).toHaveCount(1)
     const ribbon = page.getByTestId('drafting-ribbon')
@@ -2770,7 +2714,6 @@ test.describe('route matrix, rail ON', () => {
   test('W4g-7c-2d: create a block from committed and unsaved LINE picks', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
-    await setRail(page, '1')
     let headDxf = '0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n'
     // After a reload, live boot can fetch the head before the mock switch is checked.
     // Route both heads to this row's bytes so that race cannot open the stack's head.
@@ -2875,7 +2818,6 @@ test.describe('route matrix, rail ON', () => {
     test.setTimeout(120_000)
     await page.setViewportSize({ width: 1600, height: 1000 })
     await requireLocalReady(request, test, API_BASE)
-    await setRail(page, '1')
     let releaseSample
     let sawSample
     const held = new Promise((resolve) => { releaseSample = resolve })
@@ -2922,7 +2864,6 @@ test.describe('route matrix, rail ON', () => {
     test.setTimeout(120_000)
     await page.setViewportSize({ width: 390, height: 844 })
     await requireLocalReady(request, test, API_BASE)
-    await setRail(page, '1')
     await page.goto('/app?surface=solar&dev=1')
     await page.getByLabel('Use mock data (off = live backend)').check()
     await expect(page.locator('.workspace-card[data-engine-document$="-v1.dxf"]')).toHaveCount(1, { timeout: 60_000 })
@@ -2970,7 +2911,6 @@ test.describe('route matrix, rail ON', () => {
     test.setTimeout(120_000)
     await page.setViewportSize({ width: 1600, height: 1000 })
     await requireLocalReady(request, test, API_BASE)
-    await setRail(page, '1')
     await page.goto('/app?surface=solar&dev=1')
     await expect(page.getByRole('tab', { name: 'Solar', exact: true })).toHaveAttribute('aria-selected', 'true')
     await page.getByLabel('Use mock data (off = live backend)').check()
@@ -3061,7 +3001,6 @@ test.describe('route matrix, rail ON', () => {
   test('solar depth: real solved strings on the Solar tab only, honesty-gated (W4c-V3)', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
-    await setRail(page, '1')
     await page.goto('/app?dev=1')
     await expect(page.locator(STUDIO)).toHaveCount(1)
     // Mock: the bundled solve was computed against these exact drawing
@@ -3094,7 +3033,6 @@ test.describe('route matrix, rail ON', () => {
   test('solar depth never projects rooftop strings over the edit fixture (W4c-V3)', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
-    await setRail(page, '1')
     await page.goto('/?fixture=edit&dev=1')
     await expect(page.locator(STUDIO)).toHaveCount(1)
     await page.getByLabel('Use mock data (off = live backend)').check()
@@ -3113,7 +3051,6 @@ test.describe('route matrix, rail ON', () => {
   test('the page dissolves into the viewport: no page-shaped block sits on the drawing (W4c-C)', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
-    await setRail(page, '1')
     await page.goto('/app')
     await expect(page.locator(STUDIO)).toHaveCount(1)
     await expect(page.locator('.studio-ground .viewer-canvas canvas')).toHaveCount(1, { timeout: 30_000 })
@@ -3200,29 +3137,29 @@ test.describe('route matrix, rail ON', () => {
     await expect(page.locator('aside.rail[data-spine]')).toHaveCount(1)
   })
 
-  test('rail OFF keeps every block in flow: the cockpit changes nothing without the rail (W4c-C)', async ({ page, request }) => {
-    test.setTimeout(120_000)
+  test('a legacy flag value cannot select an old shell: absent, 0 and 1 all render the one studio', async ({ page, request }) => {
+    // W7: the old shell and its rail are deleted. Whatever a stale page, a
+    // cached script or an old container would have put in the legacy global,
+    // /app renders the ONE studio shell with one canvas and one controller of
+    // each kind, and the page never asks for a flags file.
+    test.setTimeout(180_000)
     await requireLocalReady(request, test, API_BASE)
-    await setRail(page, '0')
-    await page.goto('/app')
-    await expect(page.locator('.studio-shell')).toHaveCount(0)
-    await expect(page.locator('.viewer-wrap .viewer-canvas canvas')).toHaveCount(1, { timeout: 30_000 })
-    await expect(page.locator('.app[data-drawer], .studio-drawer-tabs')).toHaveCount(0)
-    // The card grows no cockpit hooks, and the blocks keep their page flow.
-    await expect(page.locator('.workspace-card[data-import-open]')).toHaveCount(0)
-    await expect(page.locator('.workspace-card#cockpit-import-pane')).toHaveCount(0)
-    await expect(page.getByTestId('properties-dock')).toHaveCount(0)
-    // Slice E: the command well keeps its caret glyph and two-row well rail OFF.
-    await expect(page.locator('.bar.bar-command-line')).toHaveCount(0)
-    await expect(page.locator('.bar .bar-caret')).toHaveText('›')
-    const result = page.locator('.result-block')
-    if (await result.count()) {
-      expect(await result.evaluate((el) => getComputedStyle(el).position)).toBe('static')
+    const requested = []
+    page.on('request', (req) => requested.push(req.url()))
+    for (const value of [undefined, '0', '1']) {
+      const label = `legacy flag ${value === undefined ? 'absent' : value}`
+      if (value !== undefined) {
+        await page.addInitScript((v) => { window.__LEAF_FLAGS = { oneShell: v } }, value)
+      }
+      await page.goto('/app')
+      await expect(page.locator('.studio-shell'), label).toHaveCount(1)
+      await expectOneCanvasIn(page, '.studio-ground')
+      expect(await page.locator('[data-checkout-instance]').count(), label).toBe(1)
+      expect(await page.locator('[data-controller-instance]').count(), label).toBe(1)
     }
-    const ent = page.locator('.ent-panel')
-    if (await ent.count()) {
-      expect(await ent.first().evaluate((el) => !!el.closest('main.center-scroll'))).toBe(true)
-    }
+    // Spelled by parts so the retired file name never appears verbatim here.
+    const flagsFile = ['/runtime', 'flags.js'].join('-')
+    expect(requested.filter((url) => new URL(url).pathname.endsWith(flagsFile))).toEqual([])
   })
 
   test('Esc ladder, history rung under the rail: an open drawer owns Esc, the route never moves', async ({ page, request }) => {
@@ -3233,7 +3170,6 @@ test.describe('route matrix, rail ON', () => {
     // is owed with the first rail-ON run walk.
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
-    await setRail(page, '1')
     await page.goto('/app?drawing=cat-panels')
     await expect(page.locator(STUDIO)).toHaveCount(1)
     const history = page.getByRole('button', { name: 'History' })
@@ -3254,7 +3190,6 @@ test.describe('route matrix, rail ON', () => {
   test('<=980px: the CAD shell does not scroll and the ground stays pinned between the fixed chrome', async ({ page, request }) => {
     test.setTimeout(120_000)
     await requireLocalReady(request, test, API_BASE)
-    await setRail(page, '1')
     await page.setViewportSize({ width: 900, height: 640 })
     await page.goto('/app')
     await expectOneCanvasIn(page, '.studio-ground')
@@ -3282,79 +3217,5 @@ test.describe('route matrix, rail ON', () => {
     expect(ground.first.top).toBeGreaterThanOrEqual(0)
     expect(ground.first.bottom).toBeLessThanOrEqual(ground.viewport)
     expect(ground.first.height, 'the drawing ground keeps a usable height').toBeGreaterThanOrEqual(120)
-  })
-})
-
-test.describe('route matrix, rail OFF + rollback', () => {
-  test('rail off is byte-for-byte the old shell: inline canvas, no studio DOM', async ({ page, request }) => {
-    test.setTimeout(120_000)
-    await requireLocalReady(request, test, API_BASE)
-    await setRail(page, '0')
-    await page.goto('/app')
-    await expect(page.locator('.studio-shell')).toHaveCount(0)
-    await expect(page.locator('.studio-ground')).toHaveCount(0)
-    await expectOneCanvasIn(page, '.viewer-wrap')
-    expect(await page.locator('[data-checkout-instance]').count()).toBe(1)
-    expect(await page.locator('[data-controller-instance]').count()).toBe(1)
-    await expect(page.locator('.app[data-studio-shell], .app[data-drawer], .studio-drawer-tabs')).toHaveCount(0)
-    // No surface ground, no surface hook, no cockpit without the shell.
-    await expect(page.locator('[data-ground]')).toHaveCount(0)
-    await expect(page.locator('.app[data-surface]')).toHaveCount(0)
-    await expect(page.getByTestId('cockpit-view')).toHaveCount(0)
-    await expect(page.getByTestId('cockpit-status')).toHaveCount(0)
-    // W4c-V1 furniture is studio-only: none of it may exist rail-OFF.
-    await expect(page.getByTestId('drafting-ribbon')).toHaveCount(0)
-    await expect(page.locator('aside.nav[data-spine]')).toHaveCount(0)
-    await expect(page.locator('.nav-spine')).toHaveCount(0)
-    await expect(page.locator('.spine-collapse')).toHaveCount(0)
-    await expect(page.getByTestId('properties-dock')).toHaveCount(0)
-    await page.getByRole('tab', { name: 'Browser' }).click()
-    await expect(page.locator('[data-ground]')).toHaveCount(0)
-    await expect(page.locator('#product-surface-panel')).toHaveCount(1)
-  })
-
-  test('ROLLBACK: on -> off restores the old shell with no stale storage, URL state, or provider duplication', async ({ page, request }) => {
-    test.setTimeout(180_000)
-    await requireLocalReady(request, test, API_BASE)
-
-    // BASELINE FIRST, rail OFF: the key set the old shell owns after a fresh
-    // boot AND the same interaction the studio walk performs, captured
-    // BEFORE any studio session exists. (A baseline taken after the studio
-    // boots grandfathers every key the studio writes; an idle baseline
-    // misattributes event-driven keys to the studio.)
-    await setRail(page, '0')
-    await page.goto('/app')
-    await expectOneCanvasIn(page, '.viewer-wrap')
-    await interact(page)
-    const baseline = await storageKeys(page)
-
-    // The studio session, interacted with — not idle.
-    await page.unroute('**/runtime-flags.js')
-    await setRail(page, '1')
-    await page.reload()
-    await expect(page.locator(STUDIO)).toHaveCount(1)
-    await expectOneCanvasIn(page, '.studio-ground')
-    await interact(page)
-    expect(residue(baseline, await storageKeys(page)), 'the studio session wrote storage').toEqual([])
-
-    // The flip: the same file the container entrypoint rewrites, then a
-    // reload — exactly the production rollback (env flip + task restart).
-    await page.unroute('**/runtime-flags.js')
-    await setRail(page, '0')
-    await page.reload()
-
-    await expect(page.locator('.studio-shell')).toHaveCount(0)
-    await expect(page.locator('.studio-ground')).toHaveCount(0)
-    await expectOneCanvasIn(page, '.viewer-wrap')
-    expect(await page.locator('[data-checkout-instance]').count()).toBe(1)
-    expect(await page.locator('[data-controller-instance]').count()).toBe(1)
-    await expect(page.getByLabel('Command bar', { exact: true })).toHaveCount(1)
-    await expect(page.locator('main')).toHaveCount(1)
-    await expect(page).toHaveURL(/\/app$/)
-
-    // No storage residue from the studio session: nothing the old shell did
-    // not already own on its own fresh boot may survive the rollback.
-    expect(residue(baseline, await storageKeys(page)), 'stale storage survived rollback').toEqual([])
-    await expect(page.locator('.app[data-studio-shell], .app[data-drawer], .studio-drawer-tabs')).toHaveCount(0)
   })
 })

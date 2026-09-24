@@ -1,7 +1,6 @@
 import { expect, test } from '@playwright/test'
 import { readFileSync } from 'node:fs'
 import { requireLocalReady } from './requireReady.mjs'
-import { setRail } from './railFlag.mjs'
 
 const API_BASE = process.env.LEAF_E2E_API_BASE || 'http://127.0.0.1:8230'
 const REGISTRY = '/api/tenant/mcp-servers'
@@ -42,7 +41,6 @@ test('link service through local OAuth, show connected, then unlink', async ({ p
   for (const server of (await initial.json()).servers.filter((item) => item.label === label)) {
     expect((await request.delete(`${API_BASE}${REGISTRY}/${server.id}`, { headers: HEADERS })).status()).toBe(200)
   }
-  await setRail(page, '1')
   await page.goto('/app')
   await page.locator('.link-svc-trigger').click()
   const drawer = page.getByRole('dialog', { name: 'Linked services', exact: true })

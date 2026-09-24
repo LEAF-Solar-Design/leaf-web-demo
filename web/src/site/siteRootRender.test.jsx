@@ -1,16 +1,15 @@
 // @vitest-environment jsdom
 //
-// The ARM-SWAP receipt (W4c-0 debt, ACCEPTANCE deferred list): a real jsdom
-// mount of SiteRoot under BOTH `__LEAF_FLAGS` values. The source pins in
-// siteRootOneShell.test.js prove the two arms EXIST in the file; only a
-// render proves the flag picks the right one — a dodge that renders the
-// studio arm under rail OFF (or swaps the arms) passes every source pin and
-// fails here.
+// The ONE-SHELL render receipt (W7, docs/convergence/ACCEPTANCE.md Version 3):
+// a real jsdom mount of SiteRoot proving scene 'app' renders the studio shell
+// whatever a legacy `__LEAF_FLAGS` global says. The old shell and its rail are
+// deleted, so an absent global, '0' and '1' must all produce the same studio
+// DOM; a leftover read of the global that picked a different arm fails here.
 //
 // The heavy subtrees are stubbed at their module seams (three.js cannot run
-// under jsdom); the REAL modules under test are SiteRoot's branch logic and
-// runtimeFlags' module-eval read — which is why every case resets the module
-// registry and sets the flag global BEFORE the dynamic import.
+// under jsdom); the REAL module under test is SiteRoot's scene logic. Every
+// mount resets the module registry and sets the global BEFORE the dynamic
+// import, so a module-eval read of it could not hide behind a cached module.
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -42,21 +41,22 @@ afterEach(() => {
   delete globalThis.__LEAF_FLAGS
 })
 
+// `flagValue` undefined means the global is absent.
 async function mountAppRoute(flagValue) {
   vi.resetModules()
-  globalThis.__LEAF_FLAGS = { oneShell: flagValue }
+  if (flagValue === undefined) delete globalThis.__LEAF_FLAGS
+  else globalThis.__LEAF_FLAGS = { oneShell: flagValue }
   window.history.pushState({}, '', '/app')
   const { default: SiteRoot } = await import('./SiteRoot.jsx')
   render(<SiteRoot />)
-  // The console arm is lazy in both shells; its resolution proves the arm
-  // actually MOUNTED, not merely that the wrapper rendered.
+  // The console arm is lazy; its resolution proves the arm actually
+  // MOUNTED, not merely that the wrapper rendered.
   await screen.findByTestId('app-stub')
 }
 
-describe('SiteRoot arm swap under the one-shell rail', () => {
+describe('SiteRoot renders the one studio shell', () => {
   it('SSD1-B row1: a passive decision strip never blocks the Escape eject, an owned one still does', async () => {
     vi.resetModules()
-    globalThis.__LEAF_FLAGS = { oneShell: '0' }
     window.history.pushState({}, '', '/try')
     const router = await import('./router.js')
     const navigate = vi.spyOn(router, 'navigate').mockImplementation(() => {})
@@ -82,30 +82,20 @@ describe('SiteRoot arm swap under the one-shell rail', () => {
     }
   })
 
-  it("rail '1' mounts the console INSIDE the studio shell with its ground", async () => {
-    await mountAppRoute('1')
-    const shell = document.querySelector('.studio-shell[data-mode="console"]')
-    expect(shell).toBeTruthy()
-    expect(shell.querySelector('.studio-ground')).toBeTruthy()
-    expect(shell.contains(screen.getByTestId('app-stub'))).toBe(true)
-    expect(document.querySelector('.stage-stub')).toBeNull()
-  })
-
-  it("rail '0' renders the console alone: no studio DOM anywhere", async () => {
-    await mountAppRoute('0')
-    expect(document.querySelector('.studio-shell')).toBeNull()
-    expect(document.querySelector('.studio-ground')).toBeNull()
-    expect(screen.getByTestId('app-stub')).toBeTruthy()
-    expect(document.querySelector('.stage-stub')).toBeNull()
-  })
-
-  it('an absent flags global fails closed to the old shell', async () => {
-    vi.resetModules()
-    delete globalThis.__LEAF_FLAGS
-    window.history.pushState({}, '', '/app')
-    const { default: SiteRoot } = await import('./SiteRoot.jsx')
-    render(<SiteRoot />)
-    await screen.findByTestId('app-stub')
-    expect(document.querySelector('.studio-shell')).toBeNull()
+  it('absent, 0 and 1 legacy flag values all mount the console INSIDE the one studio shell with its ground', async () => {
+    for (const flagValue of [undefined, '0', '1']) {
+      await mountAppRoute(flagValue)
+      const label = `__LEAF_FLAGS ${flagValue === undefined ? 'absent' : flagValue}`
+      const shells = document.querySelectorAll('.studio-shell[data-scene="app"]')
+      expect(shells, label).toHaveLength(1)
+      const shell = shells[0]
+      expect(shell.getAttribute('data-mode'), label).toBe('console')
+      const grounds = document.querySelectorAll('.studio-ground[role="region"]')
+      expect(grounds, label).toHaveLength(1)
+      expect(shell.contains(grounds[0]), label).toBe(true)
+      expect(shell.contains(screen.getByTestId('app-stub')), label).toBe(true)
+      expect(document.querySelector('.stage-stub'), label).toBeNull()
+      cleanup()
+    }
   })
 })

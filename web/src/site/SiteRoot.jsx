@@ -26,7 +26,6 @@ import React, { Suspense, useEffect, useRef, useState } from 'react'
 import { markInstant } from '../lib/instant.js'
 import { useRoute, navigate } from './router.js'
 import { activeCastForScene, sceneAllowsMarketingEject, sceneForPath } from './routeScene.js'
-import { ONE_SHELL_ENABLED } from '../lib/runtimeFlags.js'
 import { StudioGroundContext } from './studioGround.js'
 import StageScene from './StageScene.jsx'
 import { enterWorkspace } from './LandingCast.jsx'
@@ -206,39 +205,27 @@ export default function SiteRoot() {
     >
       <ContinuityStore search={BOOT_SEARCH}>
       {scene === 'app' ? (
-        ONE_SHELL_ENABLED ? (
-          // W3 one-shell mount (docs/convergence/ACCEPTANCE.md): scene 'app'
-          // becomes STUDIO MODE CONSOLE. The .studio-shell host carries the
-          // ground layer at z0 — the node App portals its own shared <Viewer>
-          // into (see studioGround.js: the console keeps FULL ownership of
-          // the drawing dataflow in W3; only where the element renders moves).
-          // Deliberately NOT .stage-root: landing.css re-pins the full dark
-          // token set on that class, which would flip the console's ratified
-          // paper identity; class adoption is W4's token work.
-          // NOT StageScene/StageLayer/ToolCast: each would co-mount a second
-          // session/checkout controller, command bar, or operator provider —
-          // the exact duplicate-instance defects the ownership specs pin.
-          <div className="studio-shell" data-scene="app" data-mode="console">
-            <div className="studio-ground" ref={setStudioGround} role="region" aria-label="Drawing" aria-hidden={studioGround ? undefined : true} />
-            <StudioGroundContext.Provider value={studioGround}>
-              <WorkspaceControllerProvider {...consoleWorkspaceMount()}>
-                <Suspense fallback={null}>
-                  <App />
-                </Suspense>
-              </WorkspaceControllerProvider>
-            </StudioGroundContext.Provider>
-          </div>
-        ) : (
-          // ROLLBACK PATH, byte-for-byte today's shell: the console ALONE —
-          // no stage mounted; App owns its own Viewer inline. Mount shape
-          // from workspaceMount.js (convergence bug c): the console/operator
-          // divergences are named decisions there, not two drifting literals.
-          <WorkspaceControllerProvider {...consoleWorkspaceMount()}>
-            <Suspense fallback={null}>
-              <App />
-            </Suspense>
-          </WorkspaceControllerProvider>
-        )
+        // W3 one-shell mount (docs/convergence/ACCEPTANCE.md): scene 'app'
+        // is STUDIO MODE CONSOLE. The .studio-shell host carries the
+        // ground layer at z0 — the node App portals its own shared <Viewer>
+        // into (see studioGround.js: the console keeps FULL ownership of
+        // the drawing dataflow in W3; only where the element renders moves).
+        // Deliberately NOT .stage-root: landing.css re-pins the full dark
+        // token set on that class, which would flip the console's ratified
+        // paper identity; class adoption is W4's token work.
+        // NOT StageScene/StageLayer/ToolCast: each would co-mount a second
+        // session/checkout controller, command bar, or operator provider —
+        // the exact duplicate-instance defects the ownership specs pin.
+        <div className="studio-shell" data-scene="app" data-mode="console">
+          <div className="studio-ground" ref={setStudioGround} role="region" aria-label="Drawing" aria-hidden={studioGround ? undefined : true} />
+          <StudioGroundContext.Provider value={studioGround}>
+            <WorkspaceControllerProvider {...consoleWorkspaceMount()}>
+              <Suspense fallback={null}>
+                <App />
+              </Suspense>
+            </WorkspaceControllerProvider>
+          </StudioGroundContext.Provider>
+        </div>
       ) : scene === 'sheets' ? (
         <Suspense fallback={null}>
           <SheetsPage />

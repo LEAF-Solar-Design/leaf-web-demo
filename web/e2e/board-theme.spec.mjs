@@ -1,10 +1,8 @@
 import { expect, test } from '@playwright/test'
 import { catProofResponse, makeCatProofState } from './catProofFixture.mjs'
-import { setRail } from './local/railFlag.mjs'
 
 test('SSD1-24E board theme: dark by default, light on request, readable, remembered', async ({ page }) => {
   test.setTimeout(60_000)
-  await setRail(page, '1')
   const state = makeCatProofState()
   await page.route('http://leaf-proof.invalid/api/**', async (route) => {
     const request = route.request()

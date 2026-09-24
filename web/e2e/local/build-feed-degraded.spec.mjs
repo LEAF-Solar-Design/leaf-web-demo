@@ -1,6 +1,5 @@
 import { expect, test } from '@playwright/test'
 import { requireLocalReady } from './requireReady.mjs'
-import { setRail } from './railFlag.mjs'
 
 // W6-E01: the job monitor says when its builds feed is stale or paused by
 // sign-in, offers Retry or Resume, counts unreadable records, and never
@@ -54,7 +53,6 @@ test('E01 build feed: a failed refresh keeps the cards, says so, and recovers', 
     return route.fulfill({ status: 200, contentType: 'application/json', body: listBody(builds) })
   })
 
-  await setRail(page, '1')
   await page.goto('/app?surface=cad')
   await expect(page.locator('.app[data-surface="cad"]')).toHaveCount(1, { timeout: 30_000 })
 

@@ -15,7 +15,6 @@
 // persisted before the first authed render on every landing.
 
 import { isAuthRedirectCallback } from '../auth.js'
-import { ONE_SHELL_ENABLED } from '../lib/runtimeFlags.js'
 
 const APP_BOOT_PARAMS = ['fixture', 'dev', 'drawing']
 
@@ -40,7 +39,7 @@ export function bootWantsApp(search, path = window.location.pathname) {
     const q = new URLSearchParams(search)
     if (APP_BOOT_PARAMS.some((k) => q.has(k))) return true
     if (q.has('demo') && path !== '/try') return true
-    if (ONE_SHELL_ENABLED && path === '/try' && q.get('demo') === '1') return true
+    if (path === '/try' && q.get('demo') === '1') return true
     if (q.has('ops') && path !== '/try') return true
     if (isAuthRedirectCallback(search) && path !== '/try') return true
   } catch { /* malformed search — fall through to path routing */ }
