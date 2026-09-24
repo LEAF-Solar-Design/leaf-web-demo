@@ -53,6 +53,8 @@ import { redactTokens } from "./redact.js";
 import { createFileStoreProbe, createReadinessCheck } from "./storeReadiness.js";
 import type { StoreReadiness } from "./storeReadiness.js";
 import { GrantPoolUnavailableError, GrantRequiredError } from "./ports/impl/oauthGrantProvider.js";
+import { GitRefConflictError } from "./ports/impl/tenantChangeRepo.js";
+import { ForgePublicationError } from "./vendor/mushy-author/ports/impl/forgeRemoteAuthority.js";
 import { classifyRoute } from "./routing.js";
 import {
   DEFAULT_TENANT,
@@ -476,6 +478,31 @@ function send(res: ServerResponse, status: number, body: unknown): void {
   if (status === 413) headers.connection = "close";
   res.writeHead(status, headers);
   res.end(payload);
+}
+
+export type PublishErrorCode =
+  "publish_conflict" | "publish_not_accepted" | "publish_refused" | "publish_outcome_unknown";
+
+/**
+ * Closed mapping of a /author/publish failure to the status the app keys its
+ * state machine on. 409 means this publish lost for good (the app ends the change
+ * terminally), 403 means the remote refused the credential, 503 means the outcome
+ * is unknown and stays recoverable. The body is a fixed code only: a conflict
+ * message names refs and SHAs the app never needs. Null leaves the error to the
+ * shared catch-all, so every existing mapping is unchanged.
+ */
+export function publishErrorResponse(
+  err: unknown,
+): { status: 409 | 403 | 503; body: { error: PublishErrorCode } } | null {
+  if (err instanceof GitRefConflictError) {
+    return { status: 409, body: { error: "publish_conflict" } };
+  }
+  if (err instanceof ForgePublicationError) {
+    if (err.state === "not-published") return { status: 409, body: { error: "publish_not_accepted" } };
+    if (err.state === "refused") return { status: 403, body: { error: "publish_refused" } };
+    if (err.state === "unknown") return { status: 503, body: { error: "publish_outcome_unknown" } };
+  }
+  return null;
 }
 
 // --------------------------------------------------------------------------- //
@@ -1346,10 +1373,20 @@ export function createHarness(ports: HarnessPorts, opts?: {
         }
         // Do not reconstitute receipt fields. The exact staged receipt is the
         // publish authority and AuthorLoop verifies its private ref again.
-        const out = await loop.publish(
-          receipt as import("./ports/index.js").StagedCustomizationReceipt,
-          requiredText(body, "expectedMainSha"),
-        );
+        const expectedMainSha = requiredText(body, "expectedMainSha");
+        let out: { commit: string };
+        try {
+          out = await loop.publish(
+            receipt as import("./ports/index.js").StagedCustomizationReceipt,
+            expectedMainSha,
+          );
+        } catch (err) {
+          const mapped = publishErrorResponse(err);
+          if (!mapped) throw err;
+          console.error("[harness] publish refused:", mapped.body.error,
+            redactTokens((err as Error).message ?? String(err)));
+          return send(res, mapped.status, mapped.body);
+        }
         return send(res, 200, out);
       }
 

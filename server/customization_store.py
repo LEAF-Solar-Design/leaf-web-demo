@@ -174,7 +174,9 @@ _NEXT = {
     ChangeState.STAGED: {ChangeState.AWAITING_APPROVAL},
     ChangeState.AWAITING_APPROVAL: {ChangeState.APPROVED},
     ChangeState.APPROVED: {ChangeState.PUBLISHING},
-    ChangeState.PUBLISHING: {ChangeState.PUBLISHED},
+    # A publish the harness refused for good (lost CAS, remote did not accept)
+    # ends SUPERSEDED so it releases the tenant's single PUBLISHING slot.
+    ChangeState.PUBLISHING: {ChangeState.PUBLISHED, ChangeState.SUPERSEDED},
     ChangeState.PUBLISHED: {ChangeState.ROLLED_BACK},
 }
 
@@ -1099,6 +1101,30 @@ class SQLiteCustomizationStore(CustomizationRepository):
                 f"publishing:{idempotency_key}", expected_state=ChangeState.APPROVED,
             )
 
+    def supersede_publish(
+        self,
+        *,
+        tenant_id: str,
+        change_set_id: str,
+        expected_version: int,
+        idempotency_key: str,
+        reason_code: str,
+    ) -> ChangeSet:
+        """End a ``publishing`` row the harness refused for good, in one audited CAS.
+
+        Terminal, so the tenant's single-PUBLISHING slot is freed for the next
+        change. The confirmation stays consumed: the loser's approval was spent on
+        an attempt, never reusable authority. A replay of the same key returns the
+        superseded row; any other state or version fails closed.
+        """
+        with self._transaction() as conn:
+            row = self._find_change_set(conn, tenant_id, change_set_id)
+            return self._transition_row(
+                conn, row, ChangeState.SUPERSEDED, expected_version,
+                f"superseded:{idempotency_key}",
+                expected_state=ChangeState.PUBLISHING, reason_code=reason_code,
+            )
+
     @staticmethod
     def _catalog_snapshot(conn: sqlite3.Connection) -> tuple[list[dict], str]:
         rows = conn.execute(
@@ -1375,7 +1401,9 @@ class SQLiteCustomizationStore(CustomizationRepository):
         event_id = str(uuid4())
         audit_result = (
             "denied" if next_state is ChangeState.REJECTED
-            else "failed" if next_state in {ChangeState.CONFLICTED, ChangeState.FAILED}
+            else "failed" if next_state in {
+                ChangeState.CONFLICTED, ChangeState.FAILED, ChangeState.SUPERSEDED,
+            }
             else "ok"
         )
         event = AuditEvent(

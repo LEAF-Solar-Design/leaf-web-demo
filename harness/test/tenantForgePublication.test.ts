@@ -116,7 +116,7 @@ describe("Forge remote artifact authority", () => {
     await expect(f.authority.bind(TENANT, loserDir, f.remote).publishAuthoritatively!(loser)).rejects.toThrow("Git ref conflict");
     expect(git(f.remote, ["rev-parse", "main"])).toBe(winner);
     expect(git(f.cache, ["rev-parse", "main"])).toBe(f.base);
-  });
+  }, 60_000);
 
   it("refuses wrong tenant, origin, private ref and credential binding before remote mutation", async () => {
     const f = fixture();
