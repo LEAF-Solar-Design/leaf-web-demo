@@ -990,6 +990,15 @@
   background: transparent; isolation: isolate; pointer-events: auto;
   backdrop-filter: none;
 }
+/* That isolation also traps the Version history drawer (.drawer-fixed,
+   z-index 70, mounted in .vh-anchor inside the viewer toolbar) in the
+   toolbar's own stacking context, so in-flow center-column cards painted
+   later in the DOM (the conversation card spans the whole column) covered
+   the drawer and took its clicks: Restore could not be pressed. While the
+   drawer is open the toolbar itself sits above every drawing-window layer
+   and below header.top (z-index 45), the band the drawer is placed under.
+   Pinned by e2e/local/version-restore.spec.mjs (Restore through the card). */
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar:has(.drawer-fixed) { z-index: 44; }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt,
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .foot-region-instruments { position: relative; }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) header.top::before,
