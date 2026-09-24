@@ -7,11 +7,16 @@ import { describe, expect, it } from 'vitest'
 import * as THREE from 'three'
 
 import {
+  applyCameraCarry,
   applyViewPose,
+  cameraCarry,
+  cameraCarryKey,
   cameraPose,
+  captureCameraCarry,
   nextFitState,
   ndcFromClient,
   pickLineThreshold,
+  resizeCameraAction,
   safeFitFrustum,
   safeCenterShift,
   safeRectCameraAction,
@@ -206,5 +211,152 @@ describe('cameraPose', () => {
 
   it('is null before layout — no NaN scale on a hidden pane', () => {
     expect(cameraPose(flatCamera(), new THREE.Vector3(), { left: 0, top: 0, width: 0, height: 0 })).toBeNull()
+  })
+})
+
+describe('camera carry', () => {
+  const KEY = 'engine:flat:a.dxf'
+  const SIZE = { width: 800, height: 600 }
+  function movedCamera() {
+    const camera = new THREE.OrthographicCamera(-40, 40, 30, -30, -1000, 1000)
+    camera.position.set(5, -3, 100)
+    camera.zoom = 2.5
+    camera.updateProjectionMatrix()
+    return { camera, target: new THREE.Vector3(5, -3, 0) }
+  }
+  function capture(fitted = false) {
+    const { camera, target } = movedCamera()
+    return captureCameraCarry(camera, target, { key: KEY, fitted, ...SIZE })
+  }
+  const snapshot = (camera, target) => ({
+    left: camera.left, right: camera.right, top: camera.top, bottom: camera.bottom, zoom: camera.zoom,
+    position: camera.position.toArray(), target: target.toArray(),
+  })
+
+  it('camera carry: key names a flat engine document; a sculpture view has none', () => {
+    for (const [intake, sculpture, expected] of [
+      [{ source: 'engine', documentId: 'a.dxf' }, false, 'engine:flat:a.dxf'],
+      [{ source: 'engine', documentId: 'a.dxf' }, true, ''],
+      [{ source: 'engine', documentId: 'a.dxf' }, 'yes', 'engine:flat:a.dxf'],
+      [{ documentId: 'a.dxf' }, false, ''],
+      [{ source: 'engine', documentId: '' }, false, ''],
+      [{ source: 'engine', documentId: 7 }, false, ''],
+      [null, false, ''],
+      [{ source: 'console', documentId: 'a.dxf' }, false, ''],
+    ]) expect(cameraCarryKey(intake, sculpture), JSON.stringify([intake, sculpture])).toBe(expected)
+  })
+
+  it('camera carry: a moved view round-trips the frustum, zoom, position and target', () => {
+    const { camera: a, target: targetA } = movedCamera()
+    const captured = captureCameraCarry(a, targetA, { key: KEY, fitted: false, ...SIZE })
+    const carried = cameraCarry(captured, { key: KEY, ...SIZE })
+    expect(carried).not.toBeNull()
+    const b = new THREE.OrthographicCamera(-1, 1, 1, -1, -1000, 1000)
+    const targetB = new THREE.Vector3()
+    expect(applyCameraCarry(b, targetB, carried)).toBe(true)
+    for (const key of ['left', 'right', 'top', 'bottom', 'zoom']) expect(b[key]).toBe(a[key])
+    expect(b.position.equals(a.position)).toBe(true)
+    expect(targetB.equals(targetA)).toBe(true)
+    a.projectionMatrix.elements.forEach((value, index) => expect(b.projectionMatrix.elements[index]).toBeCloseTo(value, 12))
+    a.updateMatrixWorld()
+    b.updateMatrixWorld()
+    const ndcA = new THREE.Vector3(12, 7, 0).project(a)
+    const ndcB = new THREE.Vector3(12, 7, 0).project(b)
+    expect(ndcB.x).toBeCloseTo(ndcA.x, 12)
+    expect(ndcB.y).toBeCloseTo(ndcA.y, 12)
+    expect(ndcB.z).toBeCloseTo(ndcA.z, 12)
+  })
+
+  it('camera carry: the capture is a copy', () => {
+    const { camera, target } = movedCamera()
+    const captured = captureCameraCarry(camera, target, { key: KEY, fitted: false, ...SIZE })
+    camera.position.set(90, 90, 90)
+    camera.zoom = 7
+    camera.left = -500
+    target.set(40, 40, 40)
+    expect(captured.position).toEqual([5, -3, 100])
+    expect(captured.zoom).toBe(2.5)
+    expect(captured.left).toBe(-40)
+    expect(captured.target).toEqual([5, -3, 0])
+  })
+
+  it('camera carry: nothing carries across a different document, mode or empty key', () => {
+    const captured = capture()
+    expect(cameraCarry(captured, { key: 'engine:flat:b.dxf', ...SIZE })).toBeNull()
+    expect(cameraCarry(captured, { key: 'engine:sculpture:a.dxf', ...SIZE })).toBeNull()
+    expect(cameraCarry(captured, { key: '', ...SIZE })).toBeNull()
+    expect(cameraCarry(null, { key: KEY, ...SIZE })).toBeNull()
+  })
+
+  it('camera carry: a view nobody moved refits', () => {
+    expect(cameraCarry(capture(true), { key: KEY, ...SIZE })).toBeNull()
+  })
+
+  it('camera carry: a resized mount refits', () => {
+    const captured = capture()
+    expect(cameraCarry(captured, { key: KEY, width: 801, height: 600 })).toBeNull()
+    expect(cameraCarry(captured, { key: KEY, width: 800, height: 599 })).toBeNull()
+    expect(cameraCarry(captured, { key: KEY, width: 0, height: 600 })).toBeNull()
+    expect(cameraCarry(captured, { key: KEY, width: 800, height: NaN })).toBeNull()
+  })
+
+  it('camera carry: a malformed pose refits', () => {
+    const captured = capture()
+    expect(cameraCarry(captured, { key: KEY, ...SIZE })).not.toBeNull()
+    for (const change of [{ zoom: 0 }, { zoom: -1 }, { zoom: NaN }, { left: Infinity },
+      { right: captured.left }, { top: captured.bottom - 1 }, { position: [5, -3] },
+      { position: [5, NaN, 100] }, { target: 'not an array' }]) {
+      expect(cameraCarry({ ...captured, ...change }, { key: KEY, ...SIZE })).toBeNull()
+    }
+  })
+
+  it('camera carry: applying a malformed pose changes nothing', () => {
+    const b = new THREE.OrthographicCamera(-1, 1, 1, -1, -1000, 1000)
+    const target = new THREE.Vector3(1, 2, 3)
+    const before = snapshot(b, target)
+    expect(applyCameraCarry(b, target, { ...capture(), zoom: 0 })).toBe(false)
+    expect(snapshot(b, target)).toEqual(before)
+  })
+
+  it('camera carry: a triple with holes is refused', () => {
+    const captured = capture()
+    // eslint-disable-next-line no-sparse-arrays
+    for (const change of [{ position: Array(3) }, { target: [1, , 3] }]) {
+      expect(cameraCarry({ ...captured, ...change }, { key: KEY, ...SIZE })).toBeNull()
+      const b = new THREE.OrthographicCamera(-1, 1, 1, -1, -1000, 1000)
+      const target = new THREE.Vector3(1, 2, 3)
+      const before = snapshot(b, target)
+      expect(applyCameraCarry(b, target, { ...captured, ...change })).toBe(false)
+      expect(snapshot(b, target)).toEqual(before)
+    }
+  })
+
+  it('camera carry: a resize to the same size does nothing', () => {
+    const safe = { left: 0, top: 0, width: 400, height: 300 }
+    const applied = { frustumWidth: 800, frustumHeight: 600 }
+    expect(resizeCameraAction({ ...applied, width: 800, height: 600, fitted: true, sculpture: false, safe })).toBe('none')
+    expect(resizeCameraAction({ ...applied, width: 800, height: 600, fitted: false, sculpture: false, safe })).toBe('none')
+    expect(resizeCameraAction({ ...applied, width: 800, height: 600, fitted: false, sculpture: true, safe: null })).toBe('none')
+    expect(resizeCameraAction({ ...applied, width: 0, height: 600, fitted: true, sculpture: false, safe })).toBe('none')
+    expect(resizeCameraAction({ ...applied, width: 800, height: -1, fitted: true, sculpture: false, safe })).toBe('none')
+    expect(resizeCameraAction({ ...applied, width: NaN, height: 600, fitted: true, sculpture: false, safe })).toBe('none')
+  })
+
+  it('camera carry: a real resize refits a fitted safe view and reframes anything else', () => {
+    const safe = { left: 0, top: 0, width: 400, height: 300 }
+    const resized = { frustumWidth: 800, frustumHeight: 600, width: 1000, height: 600 }
+    expect(resizeCameraAction({ ...resized, fitted: true, sculpture: false, safe })).toBe('refit')
+    expect(resizeCameraAction({ ...resized, fitted: false, sculpture: false, safe })).toBe('frustum')
+    expect(resizeCameraAction({ ...resized, fitted: true, sculpture: true, safe })).toBe('frustum')
+    expect(resizeCameraAction({ ...resized, fitted: true, sculpture: false, safe: null })).toBe('frustum')
+  })
+
+  it("camera carry: the resize decision follows the frustum's size, not the renderer's", () => {
+    expect(resizeCameraAction({ frustumWidth: 0, frustumHeight: 0, width: 800, height: 600, fitted: true, sculpture: false, safe: null })).toBe('frustum')
+    expect(resizeCameraAction({ frustumWidth: 1000, frustumHeight: 600, width: 800, height: 600, fitted: false, sculpture: false, safe: null })).toBe('frustum')
+    expect(resizeCameraAction({
+      frustumWidth: 800, frustumHeight: 600, width: 800, height: 600, fitted: true, sculpture: false,
+      safe: { left: 0, top: 0, width: 800, height: 600 },
+    })).toBe('none')
   })
 })
