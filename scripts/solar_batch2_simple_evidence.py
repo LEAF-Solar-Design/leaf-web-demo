@@ -58,6 +58,10 @@ STEPS = {
            {"zip_code": "78701", "module": "Canadian Solar Inc  CS5T 130M", "inverter": "Sungrow SG-HX SG250HX",
             "array_type": "Fixed Tilt", "thermal_model": "close mount glass glass", "tilt": "5", "azimuth": "180",
             "calculate": 1, "error_dialog": "Cancel", "form": "Cancel"}),
+    "k2": ("string-sizer", "in", "k2-intake.json",
+           {"zip_code": "78701", "module": "Canadian Solar Inc  CS5T 130M", "inverter": "Sungrow SG-HX SG250HX",
+            "array_type": "Fixed Tilt", "thermal_model": "close mount glass glass", "tilt": "5", "azimuth": "180",
+            "calculate": 1, "design_standard": "standard", "voc_cold_resolution": "pick-shorter", "result_form": "Close"}),
     "f2": ("frame-park-settings", "m", "f0-intake.json", {"ok": 1, "cancel": 1}),
     # G36 addendum: the height zone's panels (z2) and strings (z3) from the zones after z1.
     "m1": ("string-midpoint-connection", "in", "m0-intake.json", None),
@@ -126,6 +130,9 @@ def step_rows(step, intake):
             return zone_assign_step(step, intake)
         if step == "k1":
             return engine.string_sizer_rows(intake, read_intake(_INTAKES_DIR[0], "k1-response.json"))
+        if step == "k2":
+            form = {key: STEPS[step][3][key] for key in ("design_standard", "voc_cold_resolution")}
+            return engine.string_sizer_rows(intake, read_intake(_INTAKES_DIR[0], "k2-response.json"), form)
         if step == "m1":
             start, end = (answer[len("handle:"):] for answer in STEP_ANSWERS["m1"])
             return {"mid-string": engine.string_midpoint_rows(intake, start, end)}
