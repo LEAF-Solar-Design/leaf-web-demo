@@ -47,10 +47,16 @@ const SECRETLIKE_KEY_RE =
 /** Scrubbed copy of `base`: known keys + every secret-like key removed. */
 export function scrubSecrets(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...base };
-  for (const k of AMBIENT_CRED_KEYS) delete env[k];
-  for (const k of INTERNAL_FLAG_KEYS) delete env[k];
+  // Windows env var names are case-insensitive, but the spread above copies them
+  // into a plain, case-sensitive JS object keyed however the OS/parent process
+  // happened to set them. Compare upper-cased names so a differently-cased
+  // ambient credential/flag (e.g. `Anthropic_Api_Key`, `Claude_Code_Use_Bedrock`)
+  // cannot survive an exact-case delete.
+  const knownUpper = new Set(
+    [...AMBIENT_CRED_KEYS, ...INTERNAL_FLAG_KEYS].map((k) => k.toUpperCase()),
+  );
   for (const k of Object.keys(env)) {
-    if (SECRETLIKE_KEY_RE.test(k)) delete env[k];
+    if (knownUpper.has(k.toUpperCase()) || SECRETLIKE_KEY_RE.test(k)) delete env[k];
   }
   return env;
 }

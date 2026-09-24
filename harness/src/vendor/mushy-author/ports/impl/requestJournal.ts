@@ -23,6 +23,7 @@ export type DurableRequestState =
   | "accepted"
   | "queued"
   | "running"
+  | "escalated"
   | "cancelling"
   | "succeeded"
   | "failed"
@@ -114,6 +115,7 @@ const STATES = new Set<DurableRequestState>([
   "accepted",
   "queued",
   "running",
+  "escalated",
   "cancelling",
   "succeeded",
   "failed",
@@ -125,7 +127,8 @@ const STATES = new Set<DurableRequestState>([
 const NEXT: Record<DurableRequestState, ReadonlySet<DurableRequestState>> = {
   accepted: new Set(["queued", "running", "failed", "cancelled", "interrupted", "conflicted"]),
   queued: new Set(["running", "cancelled", "interrupted", "conflicted"]),
-  running: new Set(["cancelling", "succeeded", "failed", "cancelled", "interrupted", "conflicted"]),
+  running: new Set(["escalated", "cancelling", "succeeded", "failed", "cancelled", "interrupted", "conflicted"]),
+  escalated: new Set(["succeeded", "failed", "cancelled"]),
   cancelling: new Set(["cancelled", "failed", "interrupted"]),
   succeeded: new Set(),
   failed: new Set(),
@@ -334,7 +337,7 @@ export class DurableRequestJournal {
         attempt: event.attempt,
         state: event.state,
         updatedAt: event.recordedAt,
-        ...(event.state === "running" && previous.startedAt === undefined
+        ...((event.state === "running" || event.state === "escalated") && previous.startedAt === undefined
           ? { startedAt: event.recordedAt } : {}),
         ...(TERMINAL.has(event.state) && previous.finishedAt === undefined
           ? { finishedAt: event.recordedAt } : {}),
@@ -442,7 +445,7 @@ export class DurableRequestJournal {
       ...current,
       state,
       updatedAt: event.recordedAt,
-      ...(state === "running" && current.startedAt === undefined
+      ...((state === "running" || state === "escalated") && current.startedAt === undefined
         ? { startedAt: event.recordedAt } : {}),
       ...(TERMINAL.has(state) && current.finishedAt === undefined
         ? { finishedAt: event.recordedAt } : {}),

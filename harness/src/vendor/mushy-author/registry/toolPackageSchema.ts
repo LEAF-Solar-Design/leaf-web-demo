@@ -20,7 +20,7 @@ const SEMVER = /^\d+\.\d+\.\d+([-+][0-9A-Za-z-.]+)*$/;
 // Pragmatic ISO-8601 (date, or date-time with optional fractional seconds + tz).
 const ISO8601 = /^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})?)?$/;
 
-const VALID_KINDS = new Set(["script", "appbundle"]);
+const VALID_KINDS = new Set(["script", "appbundle", "view"]);
 const VALID_CAPS = new Set(["drawing.read", "drawing.write"]);
 const VALID_AUTHORS = new Set(["agent", "user"]);
 
@@ -93,6 +93,18 @@ export function validateToolPackage(value: unknown): string[] {
       if (typeof c !== "string" || !VALID_CAPS.has(c)) {
         errs.push(`capabilities: unknown capability ${JSON.stringify(c)}`);
       }
+    }
+  }
+
+  // view packages: rendered by the shell, never run by the engine, so they
+  // take no engine capabilities and MUST name the session that authored them
+  // (non-negotiable 4: every artifact carries source_ref).
+  if (t.kind === "view") {
+    if (Array.isArray(t.capabilities) && t.capabilities.length > 0) {
+      errs.push("capabilities: a view package renders in the shell and takes no engine capabilities");
+    }
+    if (typeof t.source_ref !== "string" || t.source_ref.trim().length === 0) {
+      errs.push("source_ref: required non-empty string on a view package (authoring attribution)");
     }
   }
 

@@ -1,0 +1,621 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:leaf:assistant-contract:v1",
+  "title": "Leaf Automation assistant contract",
+  "version": "1.0.0",
+  "$defs": {
+    "ReasonV1": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "rate_limited", "busy", "worker_offline", "tool_failed", "turn_expired", "card_expired",
+            "card_superseded", "card_consumed", "card_digest_mismatch", "self_approval_refused", "access_revoked",
+            "unpaired", "unconfigured", "assistant_disabled", "update_required", "not_found", "refused", "internal",
+            "client.offline", "client.timeout"
+          ]
+        },
+        "text": { "type": "string", "minLength": 1, "maxLength": 280 },
+        "next": {
+          "type": "object",
+          "properties": {
+            "label": { "type": "string", "minLength": 1, "maxLength": 24 },
+            "action": { "type": "string", "enum": ["retry", "wait", "refresh", "open_settings", "pair", "none"] }
+          },
+          "required": ["label", "action"],
+          "additionalProperties": false
+        },
+        "retry_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$"
+        }
+      },
+      "required": ["code", "text", "next"],
+      "additionalProperties": false
+    },
+    "ErrorV1": {
+      "type": "object",
+      "properties": {
+        "reason": { "$ref": "#/$defs/ReasonV1" }
+      },
+      "required": ["reason"],
+      "additionalProperties": false
+    },
+    "ProposalV1": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "proposal_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+            "session_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+            "turn_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+            "created_at": {
+              "type": "string",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$"
+            },
+            "expires_at": {
+              "type": "string",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$"
+            },
+            "proposal_digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "kind": { "type": "string", "const": "control" },
+            "control": {
+              "type": "object",
+              "properties": {
+                "action": {
+                  "type": "string",
+                  "enum": ["engine.halt", "engine.enable", "engine.disable", "engine.probe", "risk.breaker"]
+                },
+                "target_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" }
+              },
+              "required": ["action", "target_id"],
+              "additionalProperties": false
+            }
+          },
+          "required": ["proposal_id", "session_id", "turn_id", "created_at", "expires_at", "proposal_digest", "kind", "control"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "proposal_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+            "session_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+            "turn_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+            "created_at": {
+              "type": "string",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$"
+            },
+            "expires_at": {
+              "type": "string",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$"
+            },
+            "proposal_digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "kind": { "type": "string", "const": "build" },
+            "build": {
+              "type": "object",
+              "properties": {
+                "recipe_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+                "max_rounds": { "type": "integer", "minimum": 1, "maximum": 100 }
+              },
+              "required": ["recipe_id", "max_rounds"],
+              "additionalProperties": false
+            }
+          },
+          "required": ["proposal_id", "session_id", "turn_id", "created_at", "expires_at", "proposal_digest", "kind", "build"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "proposal_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+            "session_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+            "turn_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+            "created_at": {
+              "type": "string",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$"
+            },
+            "expires_at": {
+              "type": "string",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$"
+            },
+            "proposal_digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "kind": { "type": "string", "const": "config_draft" },
+            "config_draft": {
+              "type": "object",
+              "properties": {
+                "config_key": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+                "base_snapshot_digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+                "draft_digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+              },
+              "required": ["config_key", "base_snapshot_digest", "draft_digest"],
+              "additionalProperties": false
+            }
+          },
+          "required": ["proposal_id", "session_id", "turn_id", "created_at", "expires_at", "proposal_digest", "kind", "config_draft"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "proposal_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+            "session_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+            "turn_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+            "created_at": {
+              "type": "string",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$"
+            },
+            "expires_at": {
+              "type": "string",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$"
+            },
+            "proposal_digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "kind": { "type": "string", "const": "slot_promotion" },
+            "slot_promotion": {
+              "type": "object",
+              "properties": {
+                "slot_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+                "artifact_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+                "artifact_digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+              },
+              "required": ["slot_id", "artifact_id", "artifact_digest"],
+              "additionalProperties": false
+            }
+          },
+          "required": ["proposal_id", "session_id", "turn_id", "created_at", "expires_at", "proposal_digest", "kind", "slot_promotion"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "ConfirmCardV1": {
+      "type": "object",
+      "properties": {
+        "card_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+        "proposal_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+        "proposal_digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "kind": { "type": "string", "enum": ["control", "build", "config_draft", "slot_promotion"] },
+        "state": { "type": "string", "enum": ["pending", "approved", "declined", "expired", "superseded"] },
+        "title": {
+          "type": "object",
+          "properties": {
+            "text": { "type": "string", "minLength": 1, "maxLength": 120 },
+            "origin": { "type": "string", "const": "server" }
+          },
+          "required": ["text", "origin"],
+          "additionalProperties": false
+        },
+        "fields": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 24,
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+              "label": { "type": "string", "minLength": 1, "maxLength": 60 },
+              "value": { "type": "string", "minLength": 1, "maxLength": 400 },
+              "origin": { "type": "string", "enum": ["server", "model"] },
+              "placement": { "type": "string", "enum": ["above_approve", "assistants_note"] }
+            },
+            "required": ["key", "label", "value", "origin", "placement"],
+            "additionalProperties": false
+          }
+        },
+        "approve": {
+          "type": "object",
+          "properties": {
+            "text": { "type": "string", "minLength": 1, "maxLength": 120 },
+            "origin": { "type": "string", "const": "server" }
+          },
+          "required": ["text", "origin"],
+          "additionalProperties": false
+        },
+        "decline": {
+          "type": "object",
+          "properties": {
+            "text": { "type": "string", "minLength": 1, "maxLength": 120 },
+            "origin": { "type": "string", "const": "server" }
+          },
+          "required": ["text", "origin"],
+          "additionalProperties": false
+        },
+        "spend": {
+          "type": "object",
+          "properties": {
+            "state": { "type": "string", "enum": ["none", "unknown", "reported"] },
+            "cents": {
+              "anyOf": [
+                { "type": "integer", "minimum": -999999999999, "maximum": 999999999999 },
+                { "type": "null" }
+              ]
+            }
+          },
+          "required": ["state", "cents"],
+          "additionalProperties": false
+        },
+        "requires_face_id": { "type": "boolean" },
+        "created_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$"
+        },
+        "expires_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$"
+        },
+        "card_digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "resolution": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "at": {
+                  "type": "string",
+                  "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$"
+                },
+                "actor": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": { "type": "string", "enum": ["owner", "tenant_device", "admin_session"] },
+                        "label": { "type": "string", "minLength": 1, "maxLength": 60 },
+                        "principal_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" }
+                      },
+                      "required": ["kind", "label", "principal_id"],
+                      "additionalProperties": false
+                    },
+                    { "type": "null" }
+                  ]
+                },
+                "receipt": {
+                  "type": "object",
+                  "properties": {
+                    "text": { "type": "string", "minLength": 1, "maxLength": 120 },
+                    "origin": { "type": "string", "const": "server" }
+                  },
+                  "required": ["text", "origin"],
+                  "additionalProperties": false
+                }
+              },
+              "required": ["at", "actor", "receipt"],
+              "additionalProperties": false
+            },
+            { "type": "null" }
+          ]
+        }
+      },
+      "required": [
+        "card_id", "proposal_id", "proposal_digest", "kind", "state", "title", "fields", "approve", "decline", "spend",
+        "requires_face_id", "created_at", "expires_at", "card_digest", "resolution"
+      ],
+      "additionalProperties": false
+    },
+    "ApproveRequestV1": {
+      "type": "object",
+      "properties": {
+        "card_digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "request_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" }
+      },
+      "required": ["card_digest", "request_id"],
+      "additionalProperties": false
+    },
+    "ToolCallV1": {
+      "type": "object",
+      "properties": {
+        "invocation_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+        "name": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+        "label": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "state": { "type": "string", "enum": ["running", "done", "failed"] },
+        "reason": { "$ref": "#/$defs/ReasonV1" }
+      },
+      "required": ["invocation_id", "name", "label", "state"],
+      "additionalProperties": false
+    },
+    "BlockV1": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": { "type": "string", "const": "text" },
+            "text": { "type": "string", "minLength": 1, "maxLength": 16000 }
+          },
+          "required": ["type", "text"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": { "type": "string", "const": "tools" },
+            "tools": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "$ref": "#/$defs/ToolCallV1" } }
+          },
+          "required": ["type", "tools"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": { "type": "string", "const": "view" },
+            "origin": { "type": "string", "const": "server" },
+            "view_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+            "kind": { "type": "string", "enum": ["metric", "table", "line"] },
+            "title": { "type": "string", "minLength": 1, "maxLength": 60 },
+            "invocation_ids": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 16,
+              "items": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" }
+            },
+            "as_of": {
+              "type": "string",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$"
+            },
+            "rows": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 50,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "invocation_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+                  "label": { "type": "string", "minLength": 1, "maxLength": 60 },
+                  "value": { "anyOf": [{ "type": "number" }, { "type": "string", "maxLength": 200 }, { "type": "null" }] },
+                  "unit": { "anyOf": [{ "type": "string", "enum": ["cents", "pct", "count", "text"] }, { "type": "null" }] }
+                },
+                "required": ["invocation_id", "label", "value", "unit"],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": ["type", "origin", "view_id", "kind", "title", "invocation_ids", "as_of", "rows"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": { "type": "string", "const": "card" },
+            "origin": { "type": "string", "const": "server" },
+            "card": { "$ref": "#/$defs/ConfirmCardV1" }
+          },
+          "required": ["type", "origin", "card"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": { "type": "string", "const": "artifact" },
+            "origin": { "type": "string", "const": "server" },
+            "artifact_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+            "title": { "type": "string", "minLength": 1, "maxLength": 60 },
+            "digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "as_of": {
+              "type": "string",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$"
+            }
+          },
+          "required": ["type", "origin", "artifact_id", "title", "digest", "as_of"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": { "type": "string", "const": "notice" },
+            "origin": { "type": "string", "const": "server" },
+            "reason": { "$ref": "#/$defs/ReasonV1" }
+          },
+          "required": ["type", "origin", "reason"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "ItemV1": {
+      "type": "object",
+      "properties": {
+        "seq": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+        "item_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+        "turn_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+        "role": { "type": "string", "enum": ["user", "assistant", "server"] },
+        "at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$"
+        },
+        "blocks": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "$ref": "#/$defs/BlockV1" } }
+      },
+      "required": ["seq", "item_id", "turn_id", "role", "at", "blocks"],
+      "additionalProperties": false
+    },
+    "ThreadV1": {
+      "type": "object",
+      "properties": {
+        "session_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+        "scope": {
+          "type": "object",
+          "properties": {
+            "kind": { "type": "string", "enum": ["owner", "tenant"] },
+            "label": { "type": "string", "minLength": 1, "maxLength": 60 }
+          },
+          "required": ["kind", "label"],
+          "additionalProperties": false
+        },
+        "provider": {
+          "type": "object",
+          "properties": {
+            "kind": { "type": "string", "enum": ["claude-code-cli", "anthropic-api", "bedrock", "codex-cli"] },
+            "label": { "type": "string", "minLength": 1, "maxLength": 60 },
+            "model": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" }
+          },
+          "required": ["kind", "label", "model"],
+          "additionalProperties": false
+        },
+        "quota": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "used": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+                "window": { "type": "string", "enum": ["hour", "day"] },
+                "resets_at": {
+                  "type": "string",
+                  "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$"
+                }
+              },
+              "required": ["used", "limit", "window", "resets_at"],
+              "additionalProperties": false
+            },
+            { "type": "null" }
+          ]
+        },
+        "items": { "type": "array", "maxItems": 500, "items": { "$ref": "#/$defs/ItemV1" } }
+      },
+      "required": ["session_id", "scope", "provider", "quota", "items"],
+      "additionalProperties": false
+    },
+    "ThreadEventV1": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": { "type": "string", "const": "item" },
+            "session_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+            "seq": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+            "at": {
+              "type": "string",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$"
+            },
+            "requires_action": { "type": "boolean" },
+            "item": { "$ref": "#/$defs/ItemV1" }
+          },
+          "required": ["type", "session_id", "seq", "at", "requires_action", "item"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": { "type": "string", "const": "turn" },
+            "session_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+            "seq": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+            "at": {
+              "type": "string",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$"
+            },
+            "requires_action": { "type": "boolean" },
+            "turn_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+            "state": { "type": "string", "enum": ["queued", "running", "done", "failed", "stopped", "expired"] },
+            "reason": { "$ref": "#/$defs/ReasonV1" }
+          },
+          "required": ["type", "session_id", "seq", "at", "requires_action", "turn_id", "state"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "EventsPageV1": {
+      "type": "object",
+      "properties": {
+        "events": { "type": "array", "maxItems": 200, "items": { "$ref": "#/$defs/ThreadEventV1" } },
+        "next_after": { "type": "integer", "minimum": 0, "maximum": 2147483647 }
+      },
+      "required": ["events", "next_after"],
+      "additionalProperties": false
+    },
+    "TurnRequestV1": {
+      "type": "object",
+      "properties": {
+        "request_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+        "text": { "type": "string", "minLength": 1, "maxLength": 7000 }
+      },
+      "required": ["request_id", "text"],
+      "additionalProperties": false
+    },
+    "WorkerEventV1": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "job_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+            "seq": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+            "type": { "type": "string", "const": "status" },
+            "status": { "type": "string", "enum": ["thinking", "streaming"] }
+          },
+          "required": ["job_id", "seq", "type", "status"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "job_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+            "seq": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+            "type": { "type": "string", "const": "text" },
+            "text": { "type": "string", "minLength": 1, "maxLength": 16000 }
+          },
+          "required": ["job_id", "seq", "type", "text"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "job_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+            "seq": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+            "type": { "type": "string", "const": "tool" },
+            "tool_call_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+            "name": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+            "state": { "type": "string", "enum": ["running", "done", "failed"] }
+          },
+          "required": ["job_id", "seq", "type", "tool_call_id", "name", "state"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "job_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+            "seq": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+            "type": { "type": "string", "const": "error" },
+            "code": { "type": "string", "enum": ["worker_offline", "tool_failed", "turn_expired", "internal"] }
+          },
+          "required": ["job_id", "seq", "type", "code"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "job_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+            "seq": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+            "type": { "type": "string", "const": "card_ref" },
+            "card_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" }
+          },
+          "required": ["job_id", "seq", "type", "card_id"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "job_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+            "seq": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+            "type": { "type": "string", "const": "artifact_ref" },
+            "artifact_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" }
+          },
+          "required": ["job_id", "seq", "type", "artifact_id"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "WorkerEventsBatchV1": {
+      "type": "object",
+      "properties": {
+        "events": { "type": "array", "minItems": 1, "maxItems": 100, "items": { "$ref": "#/$defs/WorkerEventV1" } }
+      },
+      "required": ["events"],
+      "additionalProperties": false
+    },
+    "GoldenConversationV1": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "thread": { "$ref": "#/$defs/ThreadV1" },
+        "events": { "type": "array", "maxItems": 200, "items": { "$ref": "#/$defs/ThreadEventV1" } }
+      },
+      "required": ["name", "title", "thread", "events"],
+      "additionalProperties": false
+    }
+  }
+}

@@ -7,7 +7,9 @@
 
 import { randomUUID } from "node:crypto";
 import type {
+  ConfirmationActor,
   ConfirmationRecord,
+  ConfirmationStatus,
   ConverseEventType,
   ConverseTurnUsage,
   SessionRecord,
@@ -140,23 +142,59 @@ export class FakeSessionStore implements SessionStore {
     return this.confirmations.get(confirmationId) ?? null;
   }
 
-  async resolveConfirmation(
+  /** Mirrors the real stores: the only status mutation path, so a caller cannot ask
+   *  for an illegal transition. Single-threaded here, but the CONTRACT is what the
+   *  tests exercise, so it must refuse the same things the durable stores refuse. */
+  private transition(
     confirmationId: string,
-    approved: boolean,
-    decidedBy: string,
-  ): Promise<ConfirmationRecord | null> {
+    from: ConfirmationStatus,
+    decide: (rec: ConfirmationRecord, now: number) => ConfirmationRecord | null,
+  ): ConfirmationRecord | null {
     const rec = this.confirmations.get(confirmationId);
     if (!rec) return null;
-    if (rec.status !== "pending") return rec;
-    const expired = Date.parse(rec.expires_at) < Date.now();
-    const updated: ConfirmationRecord = {
-      ...rec,
-      status: expired ? "expired" : approved ? "approved" : "denied",
-      decided_at: nowIso(),
-      decided_by: expired ? null : decidedBy,
-    };
+    if (rec.status !== from) return null;
+    const updated = decide(rec, Date.now());
+    if (!updated) return null;
     this.confirmations.set(confirmationId, updated);
     return updated;
+  }
+
+  async decideConfirmation(
+    confirmationId: string,
+    decision: "approved" | "denied",
+    decidedBy: ConfirmationActor,
+  ): Promise<ConfirmationRecord | null> {
+    const result = this.transition(confirmationId, "pending", (rec, now) => {
+      if (Date.parse(rec.expires_at) < now) {
+        return { ...rec, status: "expired", decided_at: nowIso(), decided_by: null };
+      }
+      return {
+        ...rec,
+        status: decision,
+        decided_at: nowIso(),
+        decided_by: `${decidedBy.kind}:${decidedBy.id}`,
+      };
+    });
+    return result && result.status === decision ? result : null;
+  }
+
+  async consumeApproved(
+    confirmationId: string,
+    binding: { sessionId: string; action: string; argsJson: string },
+    consumedBy: ConfirmationActor,
+  ): Promise<ConfirmationRecord | null> {
+    return this.transition(confirmationId, "approved", (rec, now) => {
+      if (Date.parse(rec.expires_at) < now) return null;
+      if (rec.session_id !== binding.sessionId) return null;
+      if (rec.action !== binding.action) return null;
+      if (rec.args_json !== binding.argsJson) return null;
+      return {
+        ...rec,
+        status: "consumed",
+        consumed_at: nowIso(),
+        consumed_by: `${consumedBy.kind}:${consumedBy.id}`,
+      };
+    });
   }
 
   async appendUsage(sessionId: string, turnId: string, usage: ConverseTurnUsage): Promise<void> {

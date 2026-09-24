@@ -41,10 +41,13 @@ def is_unsafe_ref(ref: Any) -> bool:
     return False
 
 
-def resolve_within(root: Path, rel: str) -> Optional[Path]:
+def resolve_within(
+    root: Path, rel: str, suffixes: Tuple[str, ...] = (".py",)
+) -> Optional[Path]:
     """Join repo-relative ``rel`` onto an allowed ``root``; return the resolved
-    ``.py`` file ONLY if it stays INSIDE ``root`` (symlink-safe) and is a
-    regular file. Returns None otherwise.
+    file ONLY if it stays INSIDE ``root`` (symlink-safe), is a regular file,
+    and carries an allowed suffix (default: ``.py``; ``view`` artifacts pass
+    ``(".html",)``). Returns None otherwise.
     """
     try:
         root_r = Path(root).resolve()
@@ -57,7 +60,7 @@ def resolve_within(root: Path, rel: str) -> Optional[Path]:
         cand.relative_to(root_r)
     except ValueError:
         return None  # escaped the allowed root (traversal / symlink) -> reject
-    if cand.suffix == ".py" and cand.is_file():
+    if cand.suffix in suffixes and cand.is_file():
         return cand
     return None
 
@@ -77,15 +80,18 @@ def declares_local_python(tool: Dict[str, Any]) -> bool:
 def resolve_entry(
     tool: Dict[str, Any],
     roots: Iterable[Tuple[Path, str]],
+    suffixes: Tuple[str, ...] = (".py",),
 ) -> Optional[Path]:
     """Resolve a tool's declared ``entry`` against ordered allowed (root, rel)
     candidates; first containment-checked hit wins. A declared ``.py`` entry
     that resolves nowhere returns None — an honest miss, never a substitution.
+    ``view`` packages resolve their ``view.html`` template with
+    ``suffixes=(".html",)`` under the SAME containment rules.
     """
     entry = tool.get("entry")
     if entry and not is_unsafe_ref(entry):
         for root, rel in roots:
-            hit = resolve_within(root, rel)
+            hit = resolve_within(root, rel, suffixes)
             if hit is not None:
                 return hit
     return None

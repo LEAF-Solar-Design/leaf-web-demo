@@ -251,7 +251,8 @@ export const AUTHOR_FS_ACTIONS = ["read", "list", "exists"] as const;
 export const AUTHOR_RUNNER_GUIDE = `
 === How to author (drive these three tools, nothing else) ===
 1. Choose a kebab-case tool NAME and a snake_case ENGINE_OP.
-2. Write the entry-script source in your validate_tool call. Do not write repo files.
+2. Choose kind "script" for CAD computation or kind "view" for an inline
+   visualization. Write the entry source in your validate_tool call. Do not write repo files.
    Contract of the submitted source (runs later with ZERO LLM):
      def run(intake, params):
          # pure standard-library Python; deterministic; no I/O, no network.
@@ -262,11 +263,11 @@ export const AUTHOR_RUNNER_GUIDE = `
    params_schema_json, returns_schema_json, capabilities). The trusted harness
    validates and writes exactly tools/<name>/tool.py and tool.json. Fix any
    diagnostics and resubmit until it says VALID.
-4. Call aps_test_run (optionally with params_json) to run your tool on the REAL
+4. For scripts, call aps_test_run (optionally with params_json) to run your tool on the REAL
    drawing intake through the broker and inspect the computed result. Confirm the
    numbers look sane; fix tool.py + re-validate if not.
-5. Stop once validate_tool says VALID and aps_test_run returned ok:true with a
-   sensible result. Do not write anything outside tools/<name>/.
+   Views stop after validate_tool says VALID; they never call aps_test_run.
+5. Stop once the required validation is green. Do not write anything outside tools/<name>/.
 
 Be efficient: you do NOT need to read the repo or other tools first. Submit once
 (fix and resubmit only if it reports diagnostics), call aps_test_run
@@ -543,10 +544,11 @@ export class AgentSdkRunner implements AgentRunner {
 
     const validateTool = sdk.tool(
       "validate_tool",
-      "Submit Python source and manifest metadata. The trusted harness validates them and atomically writes only tools/<name>/tool.py and tool.json. Returns VALID plus exact-byte hashes or diagnostics.",
+      "Submit script or view source and manifest metadata. The trusted harness validates them and atomically writes only tools/<name>/tool.py or view.html plus tool.json. Returns VALID plus exact-byte hashes or diagnostics.",
       {
         name: z.string(),
         description: z.string(),
+        kind: (z.enum(["script", "view"]) as { optional(): unknown }).optional(),
         engine_op: z.string(),
         source: z.string(),
         params_schema_json: z.string(),
@@ -559,6 +561,7 @@ export class AgentSdkRunner implements AgentRunner {
           const params = JSON.parse(String(a.params_schema_json));
           const returns = JSON.parse(String(a.returns_schema_json));
           const caps = Array.isArray(a.capabilities) ? (a.capabilities as unknown[]).map(String) : [];
+          const kind = a.kind === "view" ? "view" : "script";
           const submitted = input.toolset.submitTool({
             name,
             description: String(a.description),
@@ -568,6 +571,7 @@ export class AgentSdkRunner implements AgentRunner {
             capabilities: caps as ToolPackage["capabilities"],
             source: String(a.source),
             session: "agent-sdk",
+            kind,
           });
           candidate = submitted.tool;
           candidateSubmission = submitted;
@@ -576,7 +580,9 @@ export class AgentSdkRunner implements AgentRunner {
             status: "VALID",
             tool: submitted.tool,
             source_receipt: submitted.receipt,
-            next: "Call aps_test_run. The author result is refused until that broker test passes.",
+            next: kind === "view"
+              ? "View validation is complete. Do not call aps_test_run."
+              : "Call aps_test_run. The author result is refused until that broker test passes.",
           }));
         } catch (e) {
           return bad(`validate error: ${(e as Error).message}`);
@@ -591,6 +597,7 @@ export class AgentSdkRunner implements AgentRunner {
       async (a): Promise<CallToolResult> => {
         try {
           if (!candidate) return bad("no validated candidate yet - call validate_tool first.");
+          if (candidate.kind === "view") return bad("views do not execute on the CAD engine; validation is complete.");
           const params = typeof a.params_json === "string" && a.params_json.trim()
             ? JSON.parse(a.params_json)
             : {};
@@ -849,7 +856,7 @@ export class AgentSdkRunner implements AgentRunner {
     return {
       tool: finalPkg,
       code: finalSubmission.code,
-      preview: `Tool "${finalPkg.name}" authored via the Agent SDK (engine_op=${finalPkg.engine_op}); runs zero-LLM at runtime.`,
+      preview: `${finalPkg.kind === "view" ? "View" : "Tool"} "${finalPkg.name}" authored via the Agent SDK (engine_op=${finalPkg.engine_op}); runs zero-LLM at runtime.`,
       files: finalSubmission.files,
       sourceReceipt: finalSubmission.receipt,
       ...(candidateExecutionReceipt
@@ -875,6 +882,7 @@ export async function completeRequiredBrokerTest(
   testSource?: string,
   signal?: AbortSignal,
 ): Promise<ToolExecutionReceipt | null> {
+  if (candidate.kind === "view") return null;
   const finalState = state.attempted
     ? state
     : brokerTestState(await apsTestRun(

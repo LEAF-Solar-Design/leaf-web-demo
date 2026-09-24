@@ -127,6 +127,8 @@ export interface ConverseTurnInput {
    * again defensively (ports/modelAllowlist.ts) before it reaches sdk.query().
    */
   model?: string;
+  /** Optional catalog reasoning selection, validated against the effective model. */
+  reasoning_id?: import("./modelAllowlist.js").ReasoningId;
   /**
    * OPTIONAL per-session bring-your-own credential. When present the turn runs on
    * THIS grant (injected into the scrubbed runner env) instead of the tenant's

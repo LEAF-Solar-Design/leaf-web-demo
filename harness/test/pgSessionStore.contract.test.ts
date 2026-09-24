@@ -210,21 +210,23 @@ describeWithPostgres("PgSessionStore contract", () => {
     ).rejects.toThrow(/confirmation_conflict/);
 
     const [approved, denied] = await Promise.all([
-      first.resolveConfirmation(confirmation.confirmation_id, true, "operator-a"),
-      second.resolveConfirmation(confirmation.confirmation_id, false, "operator-b"),
+      first.decideConfirmation(confirmation.confirmation_id, "approved", { kind: "operator", id: "operator-a" }),
+      second.decideConfirmation(confirmation.confirmation_id, "denied", { kind: "operator", id: "operator-b" }),
     ]);
-    expect(approved?.status).toBe(denied?.status);
-    expect(approved?.decided_by).toBe(denied?.decided_by);
-    expect(["approved", "denied"]).toContain(approved?.status);
+    expect([approved, denied].filter((record) => record !== null)).toHaveLength(1);
+    const winner = (approved ?? denied)!;
+    expect(winner).toMatchObject(approved
+      ? { status: "approved", decided_by: "operator:operator-a" }
+      : { status: "denied", decided_by: "operator:operator-b" });
+    const stored = await first.getConfirmation(confirmation.confirmation_id);
+    expect(stored).toEqual(winner);
 
-    const replay = await first.resolveConfirmation(
+    const replay = await first.decideConfirmation(
       confirmation.confirmation_id,
-      approved?.status !== "approved",
-      "operator-c",
+      winner.status === "approved" ? "denied" : "approved",
+      { kind: "operator", id: "operator-c" },
     );
-    expect(replay).toMatchObject({
-      status: approved?.status,
-      decided_by: approved?.decided_by,
-    });
+    expect(replay).toBeNull();
+    expect(await first.getConfirmation(confirmation.confirmation_id)).toEqual(stored);
   });
 });

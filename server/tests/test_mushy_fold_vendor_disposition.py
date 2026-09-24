@@ -16,11 +16,7 @@ pin.
 Standardization slice 7b extended this tripwire to a second vendored file,
 surface_config.py, and a second deps.py import
 (deps.effective_surface_config -> mushy_fold.surface_config.load_repo_surface_config).
-It was vendored from a DIFFERENT upstream commit than the rest of the
-package (mushy-code merged the surface-config artifact class after the
-registry-fold pin was recorded), so its own upstream commit lives in
-VENDOR-PIN.json's `file_upstream_commits`, not the package-wide
-`upstream_commit`.
+Magpie AD4 re-pinned the package, the schema and the harness to one Kit commit.
 """
 from __future__ import annotations
 
@@ -82,33 +78,18 @@ def test_recorded_disposition_is_wired_core_and_deps_matches_it():
     )
 
 
-def test_surface_config_vendored_from_its_own_recorded_upstream_commit():
-    """surface_config.py's sha lives in the shared `files` pin, but it was
-    vendored from a DIFFERENT upstream commit than the rest of the package
-    (mushy-code merged the surface-config artifact class after the
-    registry-fold pin was recorded). `file_upstream_commits` is the override
-    map for exactly the files whose origin commit differs from the
-    package-wide `upstream_commit`; both keys must resolve so a future
-    re-vendor of the whole package cannot silently forget which commit
-    surface_config.py actually came from."""
+def test_surface_config_is_at_the_package_wide_pin():
+    """The full re-pin removes the former per-file commit override."""
     pin = _pin()
     assert "surface_config.py" in pin["files"], "surface_config.py is not pinned"
-    overrides = pin.get("file_upstream_commits", {})
-    assert overrides.get("surface_config.py") == (
-        "e146b78352bba788de80421787b871d62c42f86f"
-    ), "surface_config.py's recorded upstream commit drifted"
-    assert overrides["surface_config.py"] != pin["upstream_commit"], (
-        "file_upstream_commits should only ever list files whose commit "
-        "differs from the package-wide pin; drop the override once a full "
-        "re-vendor catches this file up"
-    )
+    assert "file_upstream_commits" not in pin
 
 
 def test_surface_config_schema_pinned_byte_identical_to_its_vendored_commit():
     """contract/surface-config.v1.schema.json (repo root) is a second
     artifact vendored from mushy-code, alongside the python fold reader, at
-    the SAME upstream commit (file_upstream_commits' surface_config.py entry
-    above). Pinned here the same way the python files are pinned: sha256 of
+    the SAME package-wide upstream commit. Pinned here the same way the
+    python files are pinned: sha256 of
     the bytes on disk, recorded in VENDOR-PIN.json's `contract_files`, so an
     accidental hand-edit that drifts from the merged mushy-code schema fails
     this test instead of silently diverging until a review catches it."""
@@ -119,4 +100,16 @@ def test_surface_config_schema_pinned_byte_identical_to_its_vendored_commit():
     assert actual == entry["sha256"], (
         "contract/surface-config.v1.schema.json drifted from its vendor pin"
     )
-    assert entry["upstream_commit"] == "e146b78352bba788de80421787b871d62c42f86f"
+    assert entry["upstream_commit"] == pin["upstream_commit"]
+    assert entry["upstream_path"] == "contract/surface-config.v1.schema.json"
+
+
+def test_kit_contract_schema_pinned_byte_identical():
+    pin = _pin()
+    entry = pin["contract_files"]["assistant.schema.json"]
+    assert entry["path"] == "contract/assistant.schema.json"
+    assert entry["upstream_path"] == "packages/assistant-contract/schema/assistant.schema.json"
+    assert entry["upstream_commit"] == pin["upstream_commit"]
+    blob = (PROJECT_ROOT / entry["path"]).read_bytes()
+    assert hashlib.sha256(blob).hexdigest() == entry["sha256"]
+    assert "ThreadEventV1" in json.loads(blob)["$defs"]

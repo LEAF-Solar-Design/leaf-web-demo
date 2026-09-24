@@ -46,14 +46,17 @@ export interface ToolPackage {
   name: string; // kebab-case, unique, = MCP tool suffix
   version: string;
   description: string;
-  kind: "script" | "appbundle";
+  kind: "script" | "appbundle" | "view";
   engine_op: string;
   params: JsonSchema; // JSON Schema
   returns: JsonSchema;
   capabilities: Capability[];
   provenance: ToolProvenance;
+  /** view packages only (required there): the authoring session this artifact
+   * came from, e.g. "session:<label>" (non-negotiable 4). */
+  source_ref?: string;
   // --- hot-script SPEC section 7.1 tool.json (design-time author metadata) ---
-  entry?: string; // entry script, relative to the tool package dir (e.g. "tool.py")
+  entry?: string; // entry script, relative to the tool package dir (e.g. "tool.py"; views: "view.html")
   timeout_ms?: number;
   idempotent?: boolean;
   review?: { status: "unreviewed" | "reviewed" | "rejected" };
@@ -410,9 +413,13 @@ export interface ToolSourceProposal {
   params: JsonSchema;
   returns: JsonSchema;
   capabilities: Capability[];
+  /** Entry-script source (kind script) or the HTML fragment template (kind view). */
   source: string;
   /** Trusted provenance session label. The model cannot set credential material. */
   session: string;
+  /** Package kind to author. Default "script"; "view" writes view.html and
+   * validates the fragment against the view checks instead of def run(). */
+  kind?: "script" | "view";
 }
 
 /** Exact-byte receipt returned after the harness validates and writes a proposal. */
@@ -434,9 +441,36 @@ export interface ToolSubmissionResult {
 }
 
 /**
- * The exactly-three tools the design-time author session is granted: read-only
- * tenant-repo inspection, structured source submission plus validation, and a
- * broker test run. There is no model-controlled filesystem write capability.
+ * Structured surface-config overlay proposal (slice 7b). ``overlay`` is
+ * validated against ``contract/surface-config.v1.schema.json`` before any
+ * write; ``session`` is the same trusted provenance label ``ToolSourceProposal``
+ * carries (harness-derived, never model-settable free text).
+ */
+export interface SurfaceConfigProposal {
+  overlay: Record<string, unknown>;
+  session: string;
+}
+
+/** Exact-byte receipt returned after the harness validates and writes an overlay. */
+export interface SurfaceConfigReceipt {
+  contract: "leaf.surface-config.v1";
+  sha256: string;
+  bytes: number;
+  path: string;
+}
+
+export interface SurfaceConfigSubmissionResult {
+  overlay: Record<string, unknown>;
+  file: string;
+  receipt: SurfaceConfigReceipt;
+}
+
+/**
+ * The design-time author session's granted tools: read-only tenant-repo
+ * inspection, structured tool-source submission plus validation, a broker
+ * test run, and (slice 7b) structured surface-config overlay submission.
+ * There is no model-controlled filesystem write capability outside these
+ * structured boundaries.
  */
 export interface AuthorToolset {
   /** Read-only inspection scoped to the tenant checkout; rejects path escapes. */
@@ -450,6 +484,15 @@ export interface AuthorToolset {
     testSource?: string,
     signal?: AbortSignal,
   ) => Promise<ResultEnvelope>;
+  /**
+   * Validate and atomically write the tenant's surface-config.json overlay
+   * (slice 7b). OPTIONAL: composition-time, not every AuthorToolset caller
+   * (existing fakes/tests) needs to model it, and the real AgentSdkRunner's
+   * session-must-end-with-a-validated-tool invariant is unchanged by its
+   * presence — wiring it as a live model-facing MCP tool is tracked
+   * separately (see the slice-7b PR body).
+   */
+  submitSurfaceConfig?: (proposal: SurfaceConfigProposal) => SurfaceConfigSubmissionResult;
 }
 
 export interface ReadonlyFsTenantRepoTool {
@@ -849,7 +892,7 @@ export interface AppRunClient {
   ): Promise<Record<string, unknown>>;
   /** GET /api/platform/customize — tenant-scoped, newest-first change listing.
    * Read-only: exists so a conversation that lost its change_id recovers it
-   * instead of proposing a duplicate change. */
+   * instead of proposing a duplicate. */
   customizeList(tenantId: string, limit: number): Promise<Record<string, unknown>>;
   /** GET /api/platform/source?path= — ONE platform source file at the review
    * base (R7 read side). Size-capped server-side; binary reported, not returned. */
@@ -967,7 +1010,30 @@ export interface StoredEvent {
   ts: string;
 }
 
-export type ConfirmationStatus = "pending" | "approved" | "denied" | "expired";
+/**
+ * An approval's lifecycle. Deciding and SPENDING are different events, so they are
+ * different states: `approved` means an operator said yes, `consumed` means the one
+ * permitted action has since been taken. Collapsing them makes an approval replayable,
+ * because "still approved" reads the same before and after it was used.
+ *
+ * MIGRATION: the Postgres schema pins these values in a CHECK constraint and its
+ * bootstrap is CREATE TABLE IF NOT EXISTS, which never alters an existing table. Adding
+ * `consumed` therefore requires an explicit migration on any live database; without it,
+ * consumption fails at runtime rather than at deploy time.
+ */
+export type ConfirmationStatus =
+  | "pending"
+  | "approved"
+  | "denied"
+  | "expired"
+  | "consumed";
+
+/** Who acted. Structured so that a system component recording itself as the deciding
+ *  operator has to state that explicitly, rather than hiding inside a bare string. */
+export interface ConfirmationActor {
+  kind: "operator" | "system";
+  id: string;
+}
 
 export interface ConfirmationRecord {
   confirmation_id: string;
@@ -981,8 +1047,13 @@ export interface ConfirmationRecord {
   status: ConfirmationStatus;
   created_at: string;
   expires_at: string;
+  /** When and by whom the approval was DECIDED. Preserved through consumption, so the
+   *  operator's decision is never overwritten by the act of spending it. */
   decided_at: string | null;
   decided_by: string | null;
+  /** When and by whom the approval was SPENT. Null until consumed. */
+  consumed_at?: string | null;
+  consumed_by?: string | null;
 }
 
 export interface UsageRecord {
@@ -1031,12 +1102,43 @@ export interface SessionStore {
   eventsAfter(sessionId: string, afterSeq: number, limit?: number): Promise<StoredEvent[]>;
 
   putConfirmation(rec: ConfirmationRecord): Promise<void>;
+  /**
+   * Observational read. NEVER build an authorization decision on this followed by a
+   * mutation: that read-then-write is the shape that lets two callers both spend one
+   * approval. Use `decideConfirmation` / `consumeApproved`, which decide atomically.
+   */
   getConfirmation(confirmationId: string): Promise<ConfirmationRecord | null>;
-  /** Resolve a pending confirmation; expired-on-arrival is marked + returned as such. */
-  resolveConfirmation(
+
+  /**
+   * DECIDE a pending approval. Returns the updated record only when THIS call performed
+   * the transition, and null otherwise (unknown id, no longer pending, or expired).
+   *
+   * The null-on-loss contract is the point: a previous implementation returned the
+   * already-decided record, so the loser of a race received the winner's approval and
+   * could not tell the difference.
+   *
+   * Expiry is evaluated inside the transition against the store's own clock, never by
+   * the caller, so a slow or skewed caller cannot spend a stale approval.
+   */
+  decideConfirmation(
     confirmationId: string,
-    approved: boolean,
-    decidedBy: string,
+    decision: "approved" | "denied",
+    decidedBy: ConfirmationActor,
+  ): Promise<ConfirmationRecord | null>;
+
+  /**
+   * SPEND an approved approval, exactly once. Returns the consumed record only when THIS
+   * call performed the transition; null means the action must NOT be taken.
+   *
+   * The binding is checked inside the same atomic step as the transition, not before it.
+   * That ordering matters: if the binding were checked first, a wrong presentation would
+   * still consume the record, letting anyone burn a legitimate approval by submitting
+   * mismatched arguments.
+   */
+  consumeApproved(
+    confirmationId: string,
+    binding: { sessionId: string; action: string; argsJson: string },
+    consumedBy: ConfirmationActor,
   ): Promise<ConfirmationRecord | null>;
 
   appendUsage(sessionId: string, turnId: string, usage: ConverseTurnUsage): Promise<void>;

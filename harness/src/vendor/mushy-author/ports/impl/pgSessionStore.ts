@@ -3,7 +3,8 @@
  *
  * The adapter does not create schema implicitly. Production must apply the
  * matching migration before constructing it. initializeSchema() is an explicit
- * helper for contract tests and disposable environments.
+ * helper for contract tests and disposable environments. Migrations live in
+ * migrations/ at the package root, numbered and applied by hand.
  */
 
 import { randomUUID } from "node:crypto";
@@ -11,6 +12,7 @@ import { Pool } from "pg";
 import type { PoolClient, PoolConfig, QueryResultRow } from "pg";
 
 import type {
+  ConfirmationActor,
   ConfirmationRecord,
   ConfirmationStatus,
   ConverseEventType,
@@ -83,6 +85,8 @@ interface ConfirmationRow extends QueryResultRow {
   expires_at: Date | string;
   decided_at: Date | string | null;
   decided_by: string | null;
+  consumed_at?: Date | string | null;
+  consumed_by?: string | null;
 }
 
 interface ExactMatchRow extends QueryResultRow {
@@ -120,6 +124,9 @@ function confirmationRecord(row: ConfirmationRow): ConfirmationRecord {
     created_at: iso(row.created_at),
     expires_at: iso(row.expires_at),
     decided_at: row.decided_at === null ? null : iso(row.decided_at),
+    consumed_at:
+      row.consumed_at === null || row.consumed_at === undefined ? null : iso(row.consumed_at),
+    consumed_by: row.consumed_by ?? null,
   };
 }
 
@@ -255,11 +262,13 @@ export class PgSessionStore implements SessionStore {
         action text NOT NULL,
         args_json text NOT NULL,
         kind text NOT NULL,
-        status text NOT NULL CHECK (status IN ('pending', 'approved', 'denied', 'expired')),
+        status text NOT NULL CHECK (status IN ('pending', 'approved', 'denied', 'expired', 'consumed')),
         created_at timestamptz NOT NULL,
         expires_at timestamptz NOT NULL,
         decided_at timestamptz,
-        decided_by text
+        decided_by text,
+        consumed_at timestamptz,
+        consumed_by text
       );
 
       CREATE TABLE IF NOT EXISTS ${t.usage} (
@@ -531,32 +540,65 @@ export class PgSessionStore implements SessionStore {
     return result.rows[0] ? confirmationRecord(result.rows[0]) : null;
   }
 
-  async resolveConfirmation(
+  async decideConfirmation(
     confirmationId: string,
-    approved: boolean,
-    decidedBy: string,
+    decision: "approved" | "denied",
+    decidedBy: ConfirmationActor,
   ): Promise<ConfirmationRecord | null> {
     return this.transaction(async (client) => {
+      // The UPDATE is the decision. It is conditional on status = 'pending', so exactly
+      // one concurrent caller can match a row, and the RETURNING clause tells us it was
+      // us. The old implementation fell back to a plain SELECT here and handed the
+      // loser of the race the winner's approved row, which is what made an approval
+      // silently replayable.
       const updated = await client.query<ConfirmationRow>(
         `UPDATE ${this.tables.confirmations}
-            SET status = CASE
-                  WHEN expires_at < NOW() THEN 'expired'
-                  WHEN $2 THEN 'approved'
-                  ELSE 'denied'
-                END,
+            SET status = CASE WHEN expires_at < NOW() THEN 'expired' ELSE $2 END,
                 decided_at = NOW(),
                 decided_by = CASE WHEN expires_at < NOW() THEN NULL ELSE $3 END
           WHERE confirmation_id = $1 AND status = 'pending'
           RETURNING *`,
-        [confirmationId, approved, decidedBy],
+        [confirmationId, decision, `${decidedBy.kind}:${decidedBy.id}`],
       );
-      if (updated.rows[0]) return confirmationRecord(updated.rows[0]);
+      const row = updated.rows[0];
+      if (!row) return null;
+      const record = confirmationRecord(row);
+      // An expired record is still marked, but this caller decided nothing.
+      return record.status === decision ? record : null;
+    });
+  }
 
-      const existing = await client.query<ConfirmationRow>(
-        `SELECT * FROM ${this.tables.confirmations} WHERE confirmation_id = $1`,
-        [confirmationId],
+  async consumeApproved(
+    confirmationId: string,
+    binding: { sessionId: string; action: string; argsJson: string },
+    consumedBy: ConfirmationActor,
+  ): Promise<ConfirmationRecord | null> {
+    return this.transaction(async (client) => {
+      // Every condition lives in the WHERE clause, so the binding is checked in the same
+      // atomic step as the transition. A mismatched presentation matches no row, writes
+      // nothing, and therefore cannot burn an approval that its rightful caller still
+      // needs. Expiry is judged by the database clock, never by the caller's.
+      const updated = await client.query<ConfirmationRow>(
+        `UPDATE ${this.tables.confirmations}
+            SET status = 'consumed',
+                consumed_at = NOW(),
+                consumed_by = $5
+          WHERE confirmation_id = $1
+            AND status = 'approved'
+            AND expires_at >= NOW()
+            AND session_id = $2
+            AND action = $3
+            AND args_json = $4
+          RETURNING *`,
+        [
+          confirmationId,
+          binding.sessionId,
+          binding.action,
+          binding.argsJson,
+          `${consumedBy.kind}:${consumedBy.id}`,
+        ],
       );
-      return existing.rows[0] ? confirmationRecord(existing.rows[0]) : null;
+      return updated.rows[0] ? confirmationRecord(updated.rows[0]) : null;
     });
   }
 

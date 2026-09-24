@@ -17,6 +17,7 @@ import { AUTHOR_SYSTEM_PROMPT } from "./systemPrompt.js";
 import { FsTenantRepo } from "./tools/fsTenantRepo.js";
 import { makeApsTestRun } from "./tools/apsTestRun.js";
 import { submitToolProposal } from "./tools/submitToolProposal.js";
+import { submitSurfaceConfig } from "./tools/submitSurfaceConfig.js";
 import { validateTool } from "./tools/validateTool.js";
 import {
   HARNESS_IDENTITY,
@@ -647,6 +648,7 @@ export class AuthorLoop {
         return submitted;
       },
       apsTestRun: makeApsTestRun(this.ports.broker, tenantId),
+      submitSurfaceConfig: (proposal) => submitSurfaceConfig(repoDir, proposal),
     };
   }
 
@@ -657,7 +659,8 @@ export class AuthorLoop {
    * into the later harness commit.
    */
   private verifySubmittedTool(tenantId: string, repoDir: string, run: AgentRunResult): void {
-    const expectedEntry = `tools/${run.tool.name}/tool.py`;
+    const entryBasename = run.tool.kind === "view" ? "view.html" : "tool.py";
+    const expectedEntry = `tools/${run.tool.name}/${entryBasename}`;
     const expectedManifest = `tools/${run.tool.name}/tool.json`;
     if (run.tool.entry !== expectedEntry) {
       throw new AuthorLoopError("authored tool entry does not match its package path", 422);
@@ -746,8 +749,9 @@ export class AuthorLoop {
     }
 
     const manifest = JSON.parse(manifestBytes.toString("utf8")) as ToolPackage;
-    const expectedPackageManifest = { ...run.tool, entry: "tool.py" };
-    // isDeepStrictEqual does not consult toJSON; JSON equality did.
+    // entryBasename, not a hardcoded "tool.py": a view artifact's entry is
+    // view.html. isDeepStrictEqual, not JSON equality: it does not consult toJSON.
+    const expectedPackageManifest = { ...run.tool, entry: entryBasename };
     if (!isDeepStrictEqual(manifest, expectedPackageManifest)) {
       throw new AuthorLoopError("authored manifest does not match the validated tool", 422);
     }
@@ -906,8 +910,9 @@ export class AuthorLoop {
 
       this.verifySubmittedTool(tenantId, repoDir, run);
 
-      // Defense in depth: re-run the CONTRACT section 2 oracle on the result.
-      const vr = validateTool(run.tool);
+      // Defense in depth: re-run the CONTRACT section 2 oracle on the result
+      // (plus the view fragment checks when the artifact is a view).
+      const vr = validateTool(run.tool, run.code);
       if (!vr.ok) {
         throw new AuthorLoopError(
           `authored tool failed CONTRACT section 2 validation`,

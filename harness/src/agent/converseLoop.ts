@@ -313,10 +313,10 @@ export class ConverseLoop {
       );
     }
     if (Date.parse(rec.expires_at) < Date.now()) {
-      await this.ports.store.resolveConfirmation(
+      await this.ports.store.decideConfirmation(
         confirm.confirmationId,
-        confirm.approved,
-        session.tenant_id,
+        confirm.approved ? "approved" : "denied",
+        { kind: "operator", id: session.tenant_id },
       );
       throw new ConfirmationInvalidError(
         `confirmation ${confirm.confirmationId} expired`,
@@ -342,15 +342,23 @@ export class ConverseLoop {
         "already_decided",
       );
     }
-    const resolved = await this.ports.store.resolveConfirmation(
+    // decideConfirmation is the atomic decide; null means THIS call decided nothing.
+    const resolved = await this.ports.store.decideConfirmation(
       confirm.confirmationId,
-      confirm.approved,
-      session.tenant_id,
+      confirm.approved ? "approved" : "denied",
+      { kind: "operator", id: session.tenant_id },
     );
-    if (!resolved || resolved.status === "expired") {
+    if (!resolved) {
+      const current = await this.ports.store.getConfirmation(confirm.confirmationId);
+      if (!current || current.status === "expired") {
+        throw new ConfirmationInvalidError(
+          `confirmation ${confirm.confirmationId} expired`,
+          "expired",
+        );
+      }
       throw new ConfirmationInvalidError(
-        `confirmation ${confirm.confirmationId} expired`,
-        "expired",
+        `confirmation ${confirm.confirmationId} already ${current.status}`,
+        "already_decided",
       );
     }
     const expectedStatus = confirm.approved ? "approved" : "denied";

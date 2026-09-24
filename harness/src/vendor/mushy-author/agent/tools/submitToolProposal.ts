@@ -33,6 +33,7 @@ import type {
 } from "../../ports/index.js";
 import { readRegistry } from "../../registry/registerTool.js";
 import { validateToolPackage } from "../../registry/toolPackageSchema.js";
+import { checkViewFragment, VIEW_ENTRY_BASENAME } from "../../registry/viewChecks.js";
 
 const KEBAB = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const ENGINE_OP = /^[a-z][a-z0-9_]{0,63}$/;
@@ -74,13 +75,14 @@ function assertReplaceable(
   entry: string,
   manifestPath: string,
   fallbackCreated: string,
+  entryBasename: string,
 ): string {
   if (previous.entry !== entry || previous.manifest !== manifestPath) {
     throw withFailureCategory(new Error("tool proposal replacement receipt path mismatch"), "validation_failed");
   }
   assertOrdinaryDirectory(targetDir, "existing proposal package");
   const names = readdirSync(targetDir).sort();
-  if (JSON.stringify(names) !== JSON.stringify(["tool.json", "tool.py"])) {
+  if (JSON.stringify(names) !== JSON.stringify([entryBasename, "tool.json"].sort())) {
     throw withFailureCategory(new Error("tool proposal replacement target contains unexpected files"), "validation_failed");
   }
   for (const name of names) {
@@ -89,7 +91,7 @@ function assertReplaceable(
       throw withFailureCategory(new Error("tool proposal replacement target must contain ordinary files"), "validation_failed");
     }
   }
-  const source = readFileSync(join(targetDir, "tool.py"));
+  const source = readFileSync(join(targetDir, entryBasename));
   const manifest = readFileSync(join(targetDir, "tool.json"));
   if (
     source.byteLength !== previous.source_bytes ||
@@ -137,6 +139,7 @@ export function submitToolProposal(
   if (!proposal.description.trim() || proposal.description.length > 1000) {
     diagnostics.push("description must be 1-1000 characters");
   }
+  const kind = proposal.kind ?? "script";
   const sourceBytes = Buffer.byteLength(proposal.source, "utf8");
   if (sourceBytes === 0 || sourceBytes > MAX_TOOL_SOURCE_BYTES) {
     diagnostics.push(`source must be 1-${MAX_TOOL_SOURCE_BYTES} UTF-8 bytes`);
@@ -144,7 +147,10 @@ export function submitToolProposal(
   if (proposal.source.includes("\0")) {
     diagnostics.push("source cannot contain NUL bytes");
   }
-  if (!RUN_FUNCTION.test(proposal.source)) {
+  if (kind === "view") {
+    // The fragment half of validate-tool: a bad widget must not reach a commit.
+    diagnostics.push(...checkViewFragment(proposal.source));
+  } else if (!RUN_FUNCTION.test(proposal.source)) {
     diagnostics.push("source must define def run(intake, params):");
   }
   validateWriteContract(proposal, diagnostics);
@@ -176,11 +182,12 @@ export function submitToolProposal(
     throw new Error(`tool proposal rejected: package path for ${JSON.stringify(proposal.name)} already exists`);
   }
 
-  const entry = `tools/${proposal.name}/tool.py`;
+  const entryBasename = kind === "view" ? VIEW_ENTRY_BASENAME : "tool.py";
+  const entry = `tools/${proposal.name}/${entryBasename}`;
   const manifestPath = `tools/${proposal.name}/tool.json`;
   const modified = now.toISOString();
   const created = existsSync(targetDir)
-    ? assertReplaceable(targetDir, previous!, entry, manifestPath, modified)
+    ? assertReplaceable(targetDir, previous!, entry, manifestPath, modified, entryBasename)
     : modified;
   let version = "1.0.0";
   if (registered.length === 1) {
@@ -194,7 +201,7 @@ export function submitToolProposal(
     name: proposal.name,
     version,
     description: proposal.description,
-    kind: "script",
+    kind,
     engine_op: proposal.engine_op,
     entry,
     params: proposal.params,
@@ -203,6 +210,9 @@ export function submitToolProposal(
     timeout_ms: 30_000,
     idempotent: true,
     review: { status: "unreviewed" },
+    // source_ref (non-negotiable 4): harness-derived from the TRUSTED session
+    // label, never model-settable free text.
+    ...(kind === "view" ? { source_ref: `session:${proposal.session}` } : {}),
     provenance: {
       author: "agent",
       created,
@@ -216,10 +226,10 @@ export function submitToolProposal(
     throw new Error(`tool proposal rejected: ${packageDiagnostics.join("; ")}`);
   }
 
-  const manifest = JSON.stringify({ ...tool, entry: "tool.py" }, null, 2) + "\n";
+  const manifest = JSON.stringify({ ...tool, entry: entryBasename }, null, 2) + "\n";
   const tempDir = mkdtempSync(join(toolsDir, ".leaf-proposal-"));
   try {
-    writeExact(join(tempDir, "tool.py"), proposal.source);
+    writeExact(join(tempDir, entryBasename), proposal.source);
     writeExact(join(tempDir, "tool.json"), manifest);
     if (!existsSync(targetDir)) {
       renameSync(tempDir, targetDir);

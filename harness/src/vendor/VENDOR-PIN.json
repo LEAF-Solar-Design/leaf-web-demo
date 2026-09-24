@@ -1,94 +1,86 @@
 {
   "contract": "leaf.vendor-pin.v1",
   "downstream_overlays": {
-    "agent/authorLoop.ts": {
-      "reason": "Selective upstream PR93 Forge publication integration with existing consumer leases and durable effective catalog checkout; upstream merge 1619e956c3960cf2da044b78da2f455437e8529b",
-      "sha256": "c354b73dead5c4583d851fb74b834237b839f317629b18dfbe1ebb4f49de14bf"
-    },
-    "ports/fakes/fakeConverseRunner.ts": {
-      "reason": "leaf-web-demo downstream patch not present at the pinned upstream commit",
-      "sha256": "8a7b076759ad4f7fea0c6ec4de078c32f3cc556252a9328668c41881b7f75f41"
-    },
     "ports/fakes/fakeSessionStore.ts": {
-      "reason": "Isolate SDK transcript bindings by authenticated app conversation in leaf-web-demo",
-      "sha256": "31eaf1f92200b7822ad31fa9f5d6c3d4e07d90767e419482acc6290fd38053c0"
-    },
-    "ports/impl/agentSdkRunner.ts": {
-      "reason": "leaf-web-demo downstream patch not present at the pinned upstream commit",
-      "sha256": "1e36deb407e2dcc1958682b911480aae3ef6e802277a38cc4b72d6680c99d0c6"
+      "reason": "Isolate SDK transcript bindings by authenticated app conversation in leaf-web-demo (rebased onto mushy-code ad209705 by AD4; upstream candidate)",
+      "sha256": "ad67275b16d64bd7525ec520dd36b2a6a7bd533107f6ec8132f2392e7e83afda"
     },
     "ports/impl/converseSdkRunner.ts": {
-      "reason": "leaf-web-demo downstream patch not present at the pinned upstream commit",
+      "reason": "finish_project and project_completion_status spine tools plus the delivered-answer end_turn rule (rebased onto mushy-code ad209705 by AD4; upstream candidate)",
       "sha256": "fc776378a88e913b658e57473a1694007ce5078ccdcfaaf1ceb9779af1b89181"
     },
-    "ports/impl/forgeRemoteAuthority.ts": {
-      "reason": "Selective upstream PR93 Forge publication integration with existing consumer leases and durable effective catalog checkout; upstream merge 1619e956c3960cf2da044b78da2f455437e8529b",
-      "sha256": "7391d1f42e7697e560084d8dfff8f245f1a2d6bdd172450c8bec34a5e869c76b"
+    "ports/impl/harnessSchema.ts": {
+      "reason": "Held at mushy-code 52e8a36 bytes: ad209705 asserts harness_confirmations.consumed_at, consumed_by and a status CHECK including 'consumed', which no platform migration adds yet. Retired by slice AD4b (platform migration plus consumeApproved adoption).",
+      "sha256": "3c42381eee5aaee016ceb8c5d3d0f74d164dd2022e32610dc2fd5aea35c9cfb4"
     },
     "ports/impl/pgSessionStore.ts": {
-      "reason": "Isolate SDK transcript bindings by authenticated app conversation in leaf-web-demo",
-      "sha256": "bf933056361301fe7f83ef2506ca8b6446b2e7c586898da520f3d063cfffb2a2"
+      "reason": "Isolate SDK transcript bindings by authenticated app conversation in leaf-web-demo (rebased onto mushy-code ad209705 by AD4; upstream candidate)",
+      "sha256": "f5b97239f0e615109aa7a1efbfbef2bbe4a47a012f5167eaa887ce476efb6ee2"
     },
     "ports/impl/sessionStore.ts": {
-      "reason": "Isolate SDK transcript bindings by authenticated app conversation in leaf-web-demo",
-      "sha256": "178f761c6dde05e6f60aac87904cd741f5b81c57508efa45e4329c77fc594f5d"
+      "reason": "Isolate SDK transcript bindings by authenticated app conversation in leaf-web-demo (rebased onto mushy-code ad209705 by AD4; upstream candidate)",
+      "sha256": "27b54a1563833bc62c7f8a1e0a0b4d1d5990e0d31485b6abbef0d6893e32b1be"
     },
     "ports/impl/tenantChangeRepo.ts": {
-      "reason": "leaf-web-demo downstream patch not present at the pinned upstream commit",
+      "reason": "leaf-web-demo downstream patch not present upstream (upstream unchanged since 52e8a36; carried unchanged by AD4)",
       "sha256": "58b125b5c4c4b7aecab3351031c951cbde849a38f5b263c674e9c41ef6b1d87f"
     },
     "ports/impl/tenantRepoProvider.ts": {
-      "reason": "Selective upstream PR93 Forge publication integration with existing consumer leases and durable effective catalog checkout; upstream merge 1619e956c3960cf2da044b78da2f455437e8529b",
-      "sha256": "bc8ea33c0e915479ba0edfcefd4fb3679a8b88acba4f0839faf3be95a9cbc46c"
+      "reason": "Selective PR93 Forge publication with consumer leases and the durable effective catalog checkout (rebased onto mushy-code ad209705 by AD4; upstream candidate)",
+      "sha256": "a1469ba8882eea3b79e450135abad9f29b95718e67bf511180d9c728052f8c15"
     },
     "ports/index.ts": {
-      "reason": "Selective upstream PR93 Forge publication integration with existing consumer leases and durable effective catalog checkout; upstream merge 1619e956c3960cf2da044b78da2f455437e8529b",
-      "sha256": "5da95920576e4093c896c470072f0b59749c200257864d893f36c4339ad70102"
+      "reason": "AppRunClient finishProject/projectCompletionStatus and app SDK session ports (rebased onto mushy-code ad209705 by AD4; upstream candidate)",
+      "sha256": "7cc65099cb8b31a6ec796ed162fbe7c55a05ee4ed66ce2abf3eb089e65bd4552"
     }
   },
   "files": {
-    "agent/authorLoop.ts": "c354b73dead5c4583d851fb74b834237b839f317629b18dfbe1ebb4f49de14bf",
+    "agent/authorLoop.ts": "99cdb16c5fdedc5740a21f0b40f71666f65a95826f9abaa2231e9a89304c44dd",
     "agent/captureGuards.ts": "ae3e2e735196115235678411a942a5a99eeec0d6f8769b920e034b9d1a73e911",
-    "agent/systemPrompt.ts": "48a671cc826db22ae1a4d539cd2c2fc11b70f584218caf113e5564d919bbc732",
+    "agent/systemPrompt.ts": "f7ca7fd5451f144f5f86cfd88931b39dbd0684e6912f1f86998ccfed923e4805",
     "agent/tools/apsTestRun.ts": "4e4794a8ac035cff1a4237de827f3f6eee4d2540689a6ee9585fc24bd5031667",
     "agent/tools/fsTenantRepo.ts": "51d065a4394996e304463098205c341d4c42bebd438a1bc353ccda35a210db23",
     "agent/tools/repoPathSafety.ts": "e7883d6c9566923748759c036e2566b6e1dbd02388cc2851df639c7f62fb5673",
-    "agent/tools/submitToolProposal.ts": "441cf4f3548dfac5b3a99122ff7413c77acd39600fd0db20923363a8d6dcfe1b",
+    "agent/tools/submitSurfaceConfig.ts": "76d8b0bae5d2c91ef5d17c2e890555fb143ea6a4c5139f93cd8307c7a3bc14fb",
+    "agent/tools/submitToolProposal.ts": "46488bde244581383b52b04206d88d873a7e0cd4d96573067e5e8514cefb8159",
+    "agent/tools/surfaceConfigSchema.ts": "a1ee124e4ea169b75346da8dba9a67c5875404df9ffc42f5ebb8b956174d7319",
     "agent/tools/toolExecutionReceipt.ts": "f71cd9293dcade693e1847220c3cc89fa704e8715fd6e87eb7f82422a317b04b",
-    "agent/tools/validateTool.ts": "0ce4f9515865ce770f5496c00113a54b5eb074df158821cc935b1d1e59fbe1f3",
-    "browser/conversationWorkspace.ts": "796d49f2720b116d8dee0a3a9416123bb4b60f9ac47170773a68d6f04e762d5a",
+    "agent/tools/validateTool.ts": "df8a0522f5703a3cb76e9fbff5c3200e4a717a0ab4c99d12f912d8c44e38faee",
+    "browser/conversationWorkspace.ts": "3bb8c517ff9ceb0db3510a5869e4383a4c04dcc0567268075f6db4c0dfadb7fa",
     "browser/historyFeed.ts": "504c16d2a1b2deb923b6b5ef2e0d2c12311e3966ca7c62ef2472d311e3cfa816",
-    "index.ts": "4a8d9b5539f7d1b87ae070898c220377a4e27b677dcdc55d9fbcbe08b1d3a813",
-    "ports/converse.ts": "ce505e83a1b93970dd30b9106b1ca046540334116057d3c58317eb020cac3f7a",
-    "ports/fakes/fakeAgentRunner.ts": "4a08933ea73572a549b6ceb0dad908afde63a37f0e0397d4b383703e6f212ea3",
+    "index.ts": "b201a546958d8d25e8dd0b6e675484d564f9f716ad0baf668b7c15809b1d9d5d",
+    "ports/converse.ts": "31223db386cf719c6ae400aa7aa5f44a2414d2293355d290a407b7a8c98df1bd",
+    "ports/fakes/fakeAgentRunner.ts": "bcd81974277d1934dd6a6e5a660203b248b5b3caefb0a594d32f4905a449d3ef",
     "ports/fakes/fakeConverseRunner.ts": "8a7b076759ad4f7fea0c6ec4de078c32f3cc556252a9328668c41881b7f75f41",
     "ports/fakes/fakeIntentSynthesizer.ts": "c7d32cc3b6a677e17688ba768c660afde238778a4eba18eefab82852398a153c",
     "ports/fakes/fakeOAuthGrant.ts": "b0d44aa4ce9dc8e313cc7b8ba9caa372250d99229ce68e2ccfb27286e8616802",
-    "ports/fakes/fakeRepoEditor.ts": "bcf03cccc0e003e0b0afd804e57b78486a485506d8133baeb4bc12cfc0e4c38d",
-    "ports/fakes/fakeSessionStore.ts": "31eaf1f92200b7822ad31fa9f5d6c3d4e07d90767e419482acc6290fd38053c0",
+    "ports/fakes/fakeRepoEditor.ts": "3cd2208765e2004f897655ee1944163fa8551754ec656f652fcc7cd416b12870",
+    "ports/fakes/fakeSessionStore.ts": "ad67275b16d64bd7525ec520dd36b2a6a7bd533107f6ec8132f2392e7e83afda",
     "ports/fakes/fakeStandardServiceProvider.ts": "23e90488798f5669baaf4bc67cc0d598aec666ef6f05c88e071cc79a572fa979",
     "ports/fakes/fakeTenantRepo.ts": "d1c545d5fe141870e1ceabbbcc15794b92e8c4e2a22ea8138e7b9da4234a1a0d",
     "ports/fakes/fakeTurnRunner.ts": "2ec3b103d6a866265a756d756d6e28416bcd3390b5759394f1ad2faadae68f50",
     "ports/fakes/fakeUpstreamSink.ts": "ba55ed5b026a219ecf8f316af102638d7397a7d66363d1adafa53dd794c74d17",
-    "ports/impl/agentSdkRunner.ts": "1e36deb407e2dcc1958682b911480aae3ef6e802277a38cc4b72d6680c99d0c6",
-    "ports/impl/agentSdkTurnRunner.ts": "2f8bcaec9c5f99d4e7ad7357ef1a100560a618f6f32b08dd4bc5dd22a5c386b0",
+    "ports/impl/agentSdkRunner.ts": "8321beb45242efaf3cfab5bd7e6cd4f6cc8f7da51c0077d9e204db69eafc6976",
+    "ports/impl/agentSdkTurnRunner.ts": "f00e89a219f30fc2ec033335c72eddff681db402e6cddf2b6bbb2fe0fb2a2f3f",
+    "ports/impl/capabilityApproval.ts": "2e0e833df4bcb5e6aa347fbd01d043ef546c486aad4ba0e2f126e6452b401372",
     "ports/impl/conversationManager.ts": "423899c87e552aef85fb8b4b14f78a25a8813284adff56fb0b32946b7032ce4e",
     "ports/impl/converseSdkRunner.ts": "fc776378a88e913b658e57473a1694007ce5078ccdcfaaf1ceb9779af1b89181",
-    "ports/impl/e2bAgentRunner.ts": "d03029ee3598e2d9d64e0f34b43f8bb6610fdcf1560e7c9a2af209df5c8ceb15",
-    "ports/impl/envScrub.ts": "d3620e14d92f1aa8b7623236de7993b53b58806f12d641bea89c70d733bf29ad",
+    "ports/impl/e2bAgentRunner.ts": "3d89898c95e45e366107a10faa4ea1396f6aaa74242c3c2bacf55cd1add53a94",
+    "ports/impl/envScrub.ts": "fc9640a4940a4cb4756714f91144a9dd54fc188f7333aa8618c2fa8f15212f5c",
+    "ports/impl/escalationOutbox.ts": "f5b33fd43b776574d1a90fdccc4adbc9dfc2d1e3f540f4f9ae07c2ba7eb4ec5b",
     "ports/impl/forgeRemoteAuthority.ts": "7391d1f42e7697e560084d8dfff8f245f1a2d6bdd172450c8bec34a5e869c76b",
     "ports/impl/gitWorker.ts": "efc5cdd3e199857fa6f40673091f6b56d1c398259c39f48270f03955867893e0",
     "ports/impl/harnessSchema.ts": "3c42381eee5aaee016ceb8c5d3d0f74d164dd2022e32610dc2fd5aea35c9cfb4",
     "ports/impl/httpUpstreamSink.ts": "ec12e8d499bbe9968f8df4cab181d752dad220e4f0e7a78c87c70dade4e5624e",
     "ports/impl/mcpNetworkPolicy.ts": "298ac12f2c6a76acaf30aa18459d3aba1a8a3082eb0024f5c8deb48f6b4dc7a2",
     "ports/impl/mcpProxy.ts": "62f34ba8837d0b90ea066b944c2b88f69920e92a9bc2376f95cc3eb9bdb4df1b",
-    "ports/impl/oauthGrantProvider.ts": "0e87ba5ebe133432e7a0417cd24da3ee99caefe2c88d5b5d4dc15027f1f6aacd",
-    "ports/impl/pgSessionStore.ts": "bf933056361301fe7f83ef2506ca8b6446b2e7c586898da520f3d063cfffb2a2",
+    "ports/impl/oauthGrantProvider.ts": "f63af7109359ac361b3ab7e6867e7fc91fba92a5abd248483397fff3a33800e7",
+    "ports/impl/pgSessionStore.ts": "f5b97239f0e615109aa7a1efbfbef2bbe4a47a012f5167eaa887ce476efb6ee2",
     "ports/impl/repoEditRunner.ts": "d924a9f2cc131676a7b1aadd966c8176a6186b03d1c4b0caf05f9fbca10595bb",
-    "ports/impl/requestJournal.ts": "bed5a89d8b9b1c1ec0b1dfeb87f89b1b5f8cd7c0668eb93d89c9b0a4dd96d7ea",
+    "ports/impl/requestJournal.ts": "f17dbd7e7a9ce79a864034ba4a04a3b0ae276235ec2ead4f1b147497e72af1e6",
     "ports/impl/requestScheduler.ts": "9041c1f4e47eec185c30e46e10c16a6151541d378012050d7c5b891f3f6c7175",
     "ports/impl/runnerCapabilities.ts": "fa06d4730aaa442a5d7b2b585024aa00ed8dbda55e37b911547c6a0898ad6478",
-    "ports/impl/sessionStore.ts": "178f761c6dde05e6f60aac87904cd741f5b81c57508efa45e4329c77fc594f5d",
+    "ports/impl/sessionStore.ts": "27b54a1563833bc62c7f8a1e0a0b4d1d5990e0d31485b6abbef0d6893e32b1be",
     "ports/impl/sessionStoreFactory.ts": "b896d48b96f39ca6a3afcfbebc752cba155ef8d77762f5add0472ebcd9b39124",
     "ports/impl/skillBundle.ts": "e0a0f9b4e3a7eeaf37bdea16d0b2bd188096b0b30b18507d44beebacfd680e8f",
     "ports/impl/standardServices.ts": "6a7293a33330e464341b09e0ea602ba527c8e9aa13fda7ae10bc819b4ea9a528",
@@ -96,14 +88,15 @@
     "ports/impl/standardServicesRuntime.ts": "74925259f354b874d5ad5318701f4bc727d4a043939dfe8c995711daa7300e95",
     "ports/impl/tenantBrokerStandardServiceProvider.ts": "35226b73731b2f31df0d7ff6da133b8bf327ea2896c2975fbd22729e78f08266",
     "ports/impl/tenantChangeRepo.ts": "58b125b5c4c4b7aecab3351031c951cbde849a38f5b263c674e9c41ef6b1d87f",
-    "ports/impl/tenantRepoProvider.ts": "bc8ea33c0e915479ba0edfcefd4fb3679a8b88acba4f0839faf3be95a9cbc46c",
-    "ports/index.ts": "5da95920576e4093c896c470072f0b59749c200257864d893f36c4339ad70102",
-    "ports/modelAllowlist.ts": "1e994732e3750e8e8fef4eb9a66d3b7223cdcc155cc93d5de0b4ef9832118684",
+    "ports/impl/tenantRepoProvider.ts": "a1469ba8882eea3b79e450135abad9f29b95718e67bf511180d9c728052f8c15",
+    "ports/index.ts": "7cc65099cb8b31a6ec796ed162fbe7c55a05ee4ed66ce2abf3eb089e65bd4552",
+    "ports/modelAllowlist.ts": "f43695aebb520bf4d614fbf6c0ac79591772abfd235bfb598c2d7888ee413c88",
     "ports/surfaceAnnotations.ts": "8fba9c1d4373c2e9600e29a68ee78c801dd75bc56411baf9a33570b65cd52e5b",
     "ports/wireGrant.ts": "ac9619a708b426ff3920c796497727497bc7e707d70a5a5503c759324e379904",
     "redact.ts": "1f0d0b8e7010b7789719c4a56c40fe0f61cfdc94fba06b5559b443f47cc14b2e",
     "registry/registerTool.ts": "43a291686f86b1a681488514b3400859429e766a3f4aca543436947621be09c0",
-    "registry/toolPackageSchema.ts": "edff46e327682d2ee3b6c44501bf61809e374218d1f9bbb06868ba7088b3861b",
+    "registry/toolPackageSchema.ts": "4d334b80a5fcb832b3b8b8d729196c0161502956cd10fcf00e2ea8ca7fcdbd53",
+    "registry/viewChecks.ts": "3857c4fc443dc77216e013122067fd7d95c1463fe6261e897e0c08931ee3fc38",
     "testing/conformance.ts": "8cf4ee5c7433ebc281b4eb7d20a73da93845baa6d64f5402808de182e5050e0a",
     "testing/index.ts": "c2435ab88514485bded5b3422be0b10945e36a3b3e43a96bedb63a4a63c6c3c5"
   },
@@ -112,5 +105,5 @@
   },
   "surface": "packages/author-ts/src",
   "upstream": "LEAF-Solar-Design/mushy-code",
-  "upstream_commit": "52e8a367d8ca322856e9cd3a7455a6f399a34b2a"
+  "upstream_commit": "ad209705096daeda7f217a6e1da3394dea411723"
 }
