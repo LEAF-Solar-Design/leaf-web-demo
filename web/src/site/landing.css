@@ -1229,12 +1229,14 @@
   height: var(--ground-window);
 }
 /* A flex column, not positional grid rows: every child keeps its content
-   height and the tile container is the one flexible item, so a real-size
-   catalog shrinks the tiles (or scrolls the desk) instead of painting them
-   over the Start panel above. */
+   height. The world view is the one item that shrinks to fit; the flat tile
+   grid grows to fill but never shrinks below its content, so a real-size
+   catalog or the project panels the board hosts scroll the desk instead of
+   collapsing the tiles to zero height or painting them over the Start panel. */
 .ground-desk { display: flex; flex-direction: column; gap: 6px; overflow-y: auto; }
 .ground-desk > * { flex: none; }
-.ground-desk > :is(.ground-tiles, .ground-world) { flex: 1 1 0; min-height: 0; }
+.ground-desk > .ground-world { flex: 1 1 0; min-height: 0; }
+.ground-desk > .ground-tiles { flex: 1 0 auto; }
 .ground-desk > .ground-theme-toggle { align-self: flex-end; }
 /* --ground-top/left/right/window above are a fixed approximation, tuned for
    the common project states only. The frame's chrome grows by an explainer,

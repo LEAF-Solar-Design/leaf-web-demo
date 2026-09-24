@@ -104,6 +104,50 @@ describe('J1 Browser composition', () => {
     assert.doesNotMatch(appBody, /useMaterialIntake\(/)
     mount('ProjectMaterialIntake')
   })
+
+  // Both placements of a project panel, in source order: [inline, board].
+  // Props are read from the compiled object literal, so a comment cannot satisfy them.
+  const placements = (name) => {
+    const found = [...compiled.matchAll(new RegExp('React\\.createElement\\(\\s*' + name + ',\\s*\\{([^{}]*)\\}', 'g'))]
+    assert.equal(found.length, 2, name + ' must be created exactly twice (inline and on the board)')
+    return found.map((match) => ({
+      index: match.index,
+      guard: compiled.slice(Math.max(0, match.index - 200), match.index),
+      props: match[1].split(',').map((entry) => entry.trim()).filter(Boolean),
+    }))
+  }
+  const PURE = '(?:\\/\\*\\s*@__PURE__\\s*\\*\\/\\s*)?$'
+
+  it('J1B row1: the Browser board hosts the campaign and summary panels', () => {
+    assert.match(compiled, /const boardHostsProject = boardVisible && surfaceSlots\.ground === "board";/)
+    const grounds = compiled.search(/React\.createElement\(\s*SurfaceGrounds,/)
+    const panelSlot = compiled.indexOf('panel: surfaceSlots.ground === "board" ?', grounds)
+    const intakeAt = compiled.slice(panelSlot).search(/React\.createElement\(\s*LiveProjectMaterialIntake,/)
+    const intake = panelSlot + intakeAt
+    assert.ok(grounds >= 0 && panelSlot > grounds && intakeAt > 0, 'the board panel slot must exist')
+    for (const name of ['CampaignPanel', 'WorkspaceSummary']) {
+      const [inline, board] = placements(name)
+      assert.ok(inline.index < grounds, name + ' inline placement must precede the grounds')
+      assert.match(inline.guard, new RegExp('!boardHostsProject\\s*&&\\s*!mock\\s*&&\\s*openProjectId\\s*&&\\s*' + PURE),
+        name + ' inline placement must be guarded by !boardHostsProject')
+      assert.ok(board.index > intake, name + ' board placement must follow the pane content in the panel slot')
+      assert.match(board.guard, new RegExp('!mock\\s*&&\\s*openProjectId\\s*&&\\s*' + PURE), name + ' board placement keeps its guards')
+      assert.doesNotMatch(board.guard, /boardHostsProject/)
+    }
+  })
+
+  it('J1B row2: the board placement keeps every prop', () => {
+    const names = (props) => props.map((entry) => entry.split(':')[0].trim()).sort()
+    for (const [name, expected] of Object.entries({
+      CampaignPanel: ['projectId', 'projectName', 'signedIn', 'authorityProvider'],
+      WorkspaceSummary: ['workspace', 'loading', 'selectedVersionId', 'onSelectVersion', 'onClose'],
+    })) {
+      const [inline, board] = placements(name)
+      assert.deepEqual(names(inline.props), [...expected].sort(), name + ' inline props')
+      assert.deepEqual(names(board.props), names(inline.props), name + ' board placement must pass the same props')
+      assert.deepEqual([...board.props].sort(), [...inline.props].sort(), name + ' board placement must bind the same values')
+    }
+  })
 })
 
 function codeOnly(src) {

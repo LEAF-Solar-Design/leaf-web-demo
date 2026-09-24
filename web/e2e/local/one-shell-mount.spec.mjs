@@ -106,6 +106,19 @@ test('J1 row1, J1 row2, J1 row4, J1 row5, J1 row8: served Browser panes, first r
   const openStart = board.getByRole('region', { name: 'Workspace projects', exact: true })
   await openStart.getByRole('button', { name: 'J1 roof', exact: true }).click()
   await expect(board).toHaveAttribute('data-project-state', 'project')
+  // J1B: the board hosts the project panels, once, instead of lying under them.
+  await expect(board.getByRole('region', { name: 'Campaign', exact: true })).toHaveCount(1)
+  await expect(page.getByRole('region', { name: 'Campaign', exact: true })).toHaveCount(1)
+  await expect(board.locator('.workspace-summary')).toHaveCount(1)
+  const tiles = board.locator('.ground-tiles')
+  if (await tiles.count()) expect((await tiles.first().boundingBox())?.height ?? 0).toBeGreaterThan(0)
+  const versionTile = board.locator('[data-action="version"]')
+  await versionTile.scrollIntoViewIfNeeded()
+  expect(await versionTile.evaluate((tile) => {
+    const box = tile.getBoundingClientRect()
+    const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2)
+    return !!hit && (hit === tile || tile.contains(hit))
+  })).toBe(true)
   for (const [action, pane] of [['version', 'versions'], ['job', 'jobs'], ['tool', 'tools']]) {
     await board.locator(`[data-action="${action}"]`).click()
     const panel = board.locator(`[data-pane="${pane}"]`)
