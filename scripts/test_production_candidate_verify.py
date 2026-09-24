@@ -411,6 +411,7 @@ def test_row9_overlapping_redaction_rules(candidate, token, disposition, replace
 @pytest.mark.parametrize("section, field, number", [
     ("production_plan", "receipt", 9), ("prod_smoke", "receipt", 10),
     ("auth_ladder", "receipt", 11), ("hardening", "aps_window_receipt", 12),
+    ("door_pr", "deploy_receipt", 13),
 ])
 def test_row10_refused_receipt_path(candidate, monkeypatch, capsys, receipt_path, section, field, number):
     calls = []
@@ -425,6 +426,7 @@ def test_row10_refused_receipt_path(candidate, monkeypatch, capsys, receipt_path
     for receipt_section in ("production_plan", "prod_smoke", "auth_ladder"):
         candidate[0].pop(receipt_section, None)
     candidate[0]["hardening"]["aps_window_receipt"] = receipt_path
+    candidate[0]["door_pr"]["deploy_receipt"] = receipt_path
     candidate[0].setdefault(section, {})
     candidate[0][section][field] = receipt_path
     monkeypatch.setattr(builtins, "open", forbidden)
@@ -435,3 +437,233 @@ def test_row10_refused_receipt_path(candidate, monkeypatch, capsys, receipt_path
     assert "path refused" in line(captured.out, number)
     assert captured.err == ""
     assert calls == []
+
+
+def test_e07_completed_door_with_target_and_receipt_passes(candidate):
+    data, path = candidate
+    result = cli(candidate)
+    assert result.returncode == 0, result.stdout + result.stderr
+    evidence = line(result.stdout, 13)
+    assert evidence.startswith("13 PASS ")
+    assert "state=completed" in evidence and "merged_sha=" + "d" * 40 in evidence
+    receipt = path.parent / "door-receipt.json"
+    receipt.write_text(json.dumps({"target": data["door_pr"]["target"]}), encoding="utf-8")
+    data["door_pr"]["deploy_receipt"] = str(receipt)
+    result = cli(candidate)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert line(result.stdout, 13).startswith("13 PASS ")
+
+
+@pytest.mark.parametrize("deploy_receipt", [None, "", "absent-door-receipt.json"])
+def test_e07_completed_door_without_receipt_fails(candidate, deploy_receipt):
+    if deploy_receipt is None:
+        del candidate[0]["door_pr"]["deploy_receipt"]
+    else:
+        candidate[0]["door_pr"]["deploy_receipt"] = deploy_receipt
+    result = cli(candidate)
+    assert result.returncode == 1
+    assert line(result.stdout, 13).startswith("13 FAIL ")
+
+
+@pytest.mark.parametrize("merged_sha", ["D" * 40, "d" * 39, "g" * 40, 7, None])
+def test_e07_completed_door_bad_merged_sha_fails(candidate, merged_sha):
+    candidate[0]["door_pr"]["merged_sha"] = merged_sha
+    result = cli(candidate)
+    assert result.returncode == 1
+    evidence = line(result.stdout, 13)
+    assert evidence.startswith("13 FAIL ") and "state=completed" in evidence
+
+
+@pytest.mark.parametrize("body", [{"target": "platform-staging.leafdesign.ai"}, ["not", "an", "object"], "not json"])
+def test_e07_completed_door_receipt_target_mismatch_fails(candidate, body):
+    data, path = candidate
+    receipt = path.parent / "door-receipt.json"
+    receipt.write_text(body if isinstance(body, str) else json.dumps(body), encoding="utf-8")
+    data["door_pr"]["deploy_receipt"] = str(receipt)
+    result = cli(candidate)
+    assert result.returncode == 1
+    assert line(result.stdout, 13).startswith("13 FAIL ")
+
+
+def test_e07_draft_door_still_passes(candidate):
+    candidate[0]["door_pr"] = {"number": 103, "state": "draft", "rollback": "restore prior production pin"}
+    result = cli(candidate)
+    assert result.returncode == 0, result.stdout + result.stderr
+    evidence = line(result.stdout, 13)
+    assert evidence.startswith("13 PASS ") and "state=draft" in evidence
+
+
+def proof_row(candidate, side, name, status):
+    for row in candidate[0][side]["rows"]:
+        if row["title"].endswith(name):
+            row["status"] = status
+
+
+def test_e07_proof_new_skip_fails(candidate):
+    proof_row(candidate, "candidate_proof", "fixture green", "skipped")
+    result = cli(candidate)
+    assert result.returncode == 1
+    evidence = line(result.stdout, 3)
+    assert evidence.startswith("03 FAIL ")
+    assert "new_skipped=1" in evidence and "fixture green" in evidence
+
+
+def test_e07_proof_missing_row_fails(candidate):
+    rows = candidate[0]["candidate_proof"]["rows"]
+    rows[:] = [row for row in rows if not row["title"].endswith("fixture green")]
+    result = cli(candidate)
+    assert result.returncode == 1
+    evidence = line(result.stdout, 3)
+    assert evidence.startswith("03 FAIL ")
+    assert "missing=1" in evidence and "fixture green" in evidence
+
+
+def test_e07_proof_replacement_red_fails(candidate):
+    # Rows only, so the row comparison alone must catch the equal-count swap.
+    for side in ("baseline_proof", "candidate_proof"):
+        del candidate[0][side]["reds"]
+    proof_row(candidate, "candidate_proof", "existing red", "passed")
+    candidate[0]["candidate_proof"]["rows"].append(
+        {"title": "spec.mjs:700:3 › replacement red", "status": "failed"})
+    result = cli(candidate)
+    assert result.returncode == 1
+    evidence = line(result.stdout, 3)
+    assert evidence.startswith("03 FAIL ")
+    assert "new_reds=0" in evidence and "new_failed=1" in evidence
+    assert "replacement red" in evidence
+
+
+def test_e07_proof_stale_sha_fails(candidate):
+    candidate[0]["candidate_proof"]["source_sha"] = "b" * 40
+    result = cli(candidate)
+    assert result.returncode == 1
+    evidence = line(result.stdout, 3)
+    assert evidence.startswith("03 FAIL ") and "stale proof: " + "b" * 40 in evidence
+    del candidate[0]["baseline_proof"]["rows"]
+    result = cli(candidate)
+    assert line(result.stdout, 3).startswith("03 FAIL ")
+
+
+def test_e07_proof_identical_rows_pass(candidate):
+    result = cli(candidate)
+    assert result.returncode == 0, result.stdout + result.stderr
+    evidence = line(result.stdout, 3)
+    assert evidence.startswith("03 PASS ")
+    assert "new_reds=0; new_failed=0; new_skipped=0; missing=0" in evidence
+    assert "legacy reds-only" not in evidence
+    del candidate[0]["baseline_proof"]["rows"]
+    result = cli(candidate)
+    evidence = line(result.stdout, 3)
+    assert evidence.startswith("03 PASS ") and "legacy reds-only" in evidence
+
+
+def test_e07_proof_flaky_counts_as_passed(candidate):
+    proof_row(candidate, "candidate_proof", "fixture green", "flaky")
+    result = cli(candidate)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert line(result.stdout, 3).startswith("03 PASS ")
+    proof_row(candidate, "baseline_proof", "fixture green", "flaky")
+    proof_row(candidate, "candidate_proof", "fixture green", "skipped")
+    result = cli(candidate)
+    evidence = line(result.stdout, 3)
+    assert evidence.startswith("03 FAIL ") and "new_skipped=1" in evidence
+
+
+def test_e07_smoke_all_required_rows_pass(candidate):
+    assert [row["name"] for row in candidate[0]["rows"]] == list(verifier.PROD_SMOKE_ROWS)
+    result = cli(candidate)
+    assert result.returncode == 0, result.stdout + result.stderr
+    evidence = line(result.stdout, 10)
+    assert evidence.startswith("10 PASS ") and "required_rows=8/8 passed" in evidence
+
+
+@pytest.mark.parametrize("name", ["production runtime flags turn oneShell on",
+                                  "production deployment identity answers without a bearer"])
+def test_e07_smoke_missing_required_row_fails(candidate, name):
+    candidate[0]["rows"] = [row for row in candidate[0]["rows"] if row["name"] != name]
+    candidate[0]["rows"].append({"name": "an unrelated extra row", "status": "passed"})
+    result = cli(candidate)
+    assert result.returncode == 1
+    evidence = line(result.stdout, 10)
+    assert evidence.startswith("10 FAIL ") and f"{name}=missing" in evidence
+
+
+@pytest.mark.parametrize("statuses", [["skipped"], ["passed", "skipped"]])
+def test_e07_smoke_skipped_required_row_fails(candidate, statuses):
+    name = verifier.PROD_SMOKE_ROWS[1]
+    candidate[0]["rows"] = [row for row in candidate[0]["rows"] if row["name"] != name]
+    candidate[0]["rows"].extend({"name": name, "status": status} for status in statuses)
+    result = cli(candidate)
+    assert result.returncode == 1
+    evidence = line(result.stdout, 10)
+    assert evidence.startswith("10 FAIL ") and f"{name}={'/'.join(statuses)}" in evidence
+
+
+def test_e07_smoke_baseline_sha_is_pending(candidate):
+    candidate[0]["served_source_sha"] = "b" * 40
+    result = cli(candidate)
+    assert result.returncode == 1
+    evidence = line(result.stdout, 10)
+    assert evidence.startswith("10 PENDING ") and "baseline smoke of " + "b" * 40 in evidence
+
+
+def test_e07_smoke_legacy_count_receipt_is_pending(candidate):
+    del candidate[0]["rows"]
+    candidate[0]["result"] = "7 passed in fixture"
+    result = cli(candidate)
+    assert result.returncode == 1
+    evidence = line(result.stdout, 10)
+    assert evidence.startswith("10 PENDING ") and "legacy count receipt; rows required" in evidence
+
+
+def frozen(candidate, monkeypatch, mode, ancestor, code):
+    data, path = candidate
+    drift = "e" * 40
+    data["main"].update({"sha": drift, "frozen": True, "candidate_is_ancestor": ancestor,
+                         "drift_commits": 3})
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(args)
+        assert args == ["git", "merge-base", "--is-ancestor", data["candidate"], drift]
+        return type("Completed", (), {"returncode": code})()
+
+    monkeypatch.setattr(verifier, "probe_main_sha", lambda: drift)
+    monkeypatch.setattr(verifier.subprocess, "run", run)
+    path = write(candidate)
+    exit_code = verifier.main(["--manifest", str(path), "--live" if mode == "live" else "--no-live"])
+    return exit_code, calls
+
+
+@pytest.mark.parametrize("mode", ["offline", "live"])
+def test_e07_frozen_candidate_ancestor_passes(candidate, monkeypatch, capsys, mode):
+    # Live ignores the manifest's ancestry claim and asks git.
+    exit_code, calls = frozen(candidate, monkeypatch, mode, mode == "offline", 0)
+    out = capsys.readouterr().out
+    assert exit_code == 0, out
+    evidence = line(out, 1)
+    assert evidence.startswith("01 PASS ")
+    assert "frozen candidate; main moved" in evidence and "drift_commits=3" in evidence
+    assert len(calls) == (1 if mode == "live" else 0)
+
+
+@pytest.mark.parametrize("mode, code, status", [
+    ("offline", 0, "FAIL"), ("live", 1, "FAIL"), ("live", 128, "PENDING"),
+])
+def test_e07_frozen_candidate_not_ancestor_fails(candidate, monkeypatch, capsys, mode, code, status):
+    exit_code, _ = frozen(candidate, monkeypatch, mode, mode == "live", code)
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    evidence = line(out, 1)
+    assert evidence.startswith(f"01 {status} ") and "frozen candidate; main moved" in evidence
+
+
+@pytest.mark.parametrize("flag", ["absent", False, 1, "true"])
+def test_e07_unfrozen_drift_still_fails(candidate, flag):
+    candidate[0]["main"].update({"sha": "e" * 40, "candidate_is_ancestor": True})
+    if flag != "absent":
+        candidate[0]["main"]["frozen"] = flag
+    result = cli(candidate)
+    assert result.returncode == 1
+    evidence = line(result.stdout, 1)
+    assert evidence.startswith("01 FAIL ") and "frozen candidate" not in evidence
