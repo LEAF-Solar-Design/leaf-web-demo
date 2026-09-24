@@ -94,6 +94,7 @@ import type {
 import { findTool } from "../../registry/registerTool.js";
 import { grantSecrets, redactSecrets } from "../../redact.js";
 import { GrantRequiredError } from "./oauthGrantProvider.js";
+import { reasoningOptions, type ReasoningId } from "../modelAllowlist.js";
 
 // --------------------------------------------------------------------------- //
 // Minimal local views of the SDK / zod surfaces this file relies on (documented above,
@@ -483,6 +484,7 @@ type CanUseTool = (
 export interface BuildTurnOptionsInput {
   childEnv: NodeJS.ProcessEnv;
   model: string | undefined;
+  reasoning_id?: ReasoningId;
   maxTurns: number;
   abortController: AbortController;
   server: unknown;
@@ -493,6 +495,8 @@ export interface BuildTurnOptionsInput {
 
 /** Assemble SDK options in one testable place from private and contained servers. */
 export function buildTurnOptions(input: BuildTurnOptionsInput): Record<string, unknown> {
+  const selection = input.model === undefined && input.reasoning_id === undefined
+    ? {} : reasoningOptions(input.model, input.reasoning_id);
   const composition = composeRunnerCapabilities({
     profile: LEGACY_CONVERSE_PROFILE,
     private_mcp_servers: { [MCP_SERVER_NAME]: input.server },
@@ -501,6 +505,7 @@ export function buildTurnOptions(input: BuildTurnOptionsInput): Record<string, u
   return {
     env: input.childEnv,
     model: input.model,
+    ...selection,
     maxTurns: input.maxTurns,
     settingSources: [],
     permissionMode: "default",
@@ -716,10 +721,25 @@ function validateStandardServicesContext(
   return trusted;
 }
 
-async function* guardedQuery(query: AsyncIterable<unknown>): AsyncIterable<unknown> {
+/**
+ * `signal` is OUR OWN AbortController (canUseTool aborts it to interrupt a
+ * pending tool-approval; driveSession also links external cancellation into
+ * it). If the SDK reacts to that abort by rejecting/throwing from its async
+ * generator rather than quietly ending the iterable, the throw must NOT
+ * become a hard error here: driveSession's post-loop pending-flush exists
+ * specifically to turn "the iterable ended after we aborted it" into
+ * awaiting_approval, and that code only runs on a NORMAL loop exit. Ending
+ * the generator quietly (instead of rethrowing) on our own abort lets that
+ * flush run; a throw from any other cause is a genuine stream fault.
+ */
+async function* guardedQuery(
+  query: AsyncIterable<unknown>,
+  signal: AbortSignal,
+): AsyncIterable<unknown> {
   try {
     yield* query;
   } catch (error) {
+    if (signal.aborted) return;
     throw stageError(error, "agent_sdk_turn_query_failed");
   }
 }
@@ -740,7 +760,18 @@ export class AgentSdkTurnRunner implements ConverseRunner {
   ) {}
 
   async *runTurn(input: ConverseTurnInput, opts?: ConverseRunOptions): AsyncIterable<HarnessTurnEvent> {
-    const turnInput = snapshotTurnInput(input);
+    const snapshot = snapshotTurnInput(input);
+    // Pin the effective selection before credentials or confirmation execution.
+    // With no selection, retain the SDK/account default used by older callers.
+    const model = snapshot.model === undefined
+      ? (this.opts.model === undefined ? (snapshot.reasoning_id === undefined ? undefined : "claude-sonnet-5") : this.opts.model)
+      : snapshot.model;
+    try {
+      if (model !== undefined || snapshot.reasoning_id !== undefined) reasoningOptions(model, snapshot.reasoning_id);
+    } catch {
+      throw cleanError("agent_sdk_turn_input_invalid");
+    }
+    const turnInput = deepFreeze({ ...snapshot, model });
     // Product authority must match the requested turn before any credential,
     // repository, broker, resolver, or SDK dependency is touched. In particular,
     // an approved confirmation is not permission to execute under swapped context.
@@ -958,7 +989,8 @@ export class AgentSdkTurnRunner implements ConverseRunner {
         prompt: buildPrompt(input),
         options: buildTurnOptions({
           childEnv,
-          model: this.opts.model,
+          model: input.model,
+          reasoning_id: input.reasoning_id,
           maxTurns,
           abortController: abort,
           server,
@@ -975,7 +1007,7 @@ export class AgentSdkTurnRunner implements ConverseRunner {
 
     let turnCount = 0;
     let cumulativeTokens = 0;
-    for await (const raw of guardedQuery(q)) {
+    for await (const raw of guardedQuery(q, abort.signal)) {
       const msg = raw as Record<string, unknown>;
       if (msg.type === "assistant") {
         turnCount += 1;

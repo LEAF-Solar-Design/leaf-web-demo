@@ -24,6 +24,7 @@ export * from "./ports/impl/tenantChangeRepo.js";
 export * from "./ports/impl/oauthGrantProvider.js";
 export * from "./ports/impl/sessionStore.js";
 export * from "./ports/impl/pgSessionStore.js";
+export * from "./ports/impl/capabilityApproval.js";
 export * from "./ports/impl/sessionStoreFactory.js";
 export * from "./ports/impl/harnessSchema.js";
 export * from "./ports/impl/skillBundle.js";

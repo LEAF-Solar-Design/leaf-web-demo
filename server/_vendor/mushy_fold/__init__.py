@@ -14,6 +14,7 @@ Every security property carried over is documented on the function it guards.
 from .ids import CONSUMER_ID_PATTERN, is_valid_consumer_id, validate_consumer_id
 from .paths import resolve_consumer_repo_dir, safe_component
 from .registry import load_repo_registry_tools
+from .surface_config import load_repo_surface_config
 from .entry import is_unsafe_ref, resolve_within, resolve_entry
 
 __all__ = [
@@ -23,6 +24,7 @@ __all__ = [
     "resolve_consumer_repo_dir",
     "safe_component",
     "load_repo_registry_tools",
+    "load_repo_surface_config",
     "is_unsafe_ref",
     "resolve_within",
     "resolve_entry",

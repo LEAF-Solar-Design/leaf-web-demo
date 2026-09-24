@@ -7,6 +7,13 @@ export interface BrowserConversationMessage {
   kind: string;
   text: string;
   ts: string;
+  view?: {
+    name: string;
+    version: string;
+    fragment: string;
+    data: Record<string, unknown>;
+    llm_modules_loaded: string[];
+  };
 }
 
 export interface BrowserConversation {

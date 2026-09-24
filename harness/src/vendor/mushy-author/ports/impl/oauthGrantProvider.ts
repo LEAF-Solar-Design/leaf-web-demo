@@ -96,10 +96,11 @@ export class GrantRequiredError extends Error {
 }
 
 /**
- * Concrete grant store for the legacy demo/single-operator lane: resolves ONE OAuth grant
+ * Concrete grant store for the legacy demo/single-operator lane: resolves ONE grant
  * from the env var `CLAUDE_CODE_OAUTH_TOKEN`, else from the file named by env
  * `LEAF_GRANT_FILE` (default the proven hosted-oauth-spike grant path). This is the
- * legacy operator token. The token VALUE is only
+ * legacy operator token. Kind is auto-detected via `detectGrantKind` (§17) so an
+ * `sk-ant-api…` value here yields an api_key grant, not just oauth. The token VALUE is only
  * ever returned inside the AgentGrant; it is NEVER printed or logged here.
  *
  * In wave 4 this survives as the BACK-COMPAT fallback the per-tenant store consults for
@@ -121,11 +122,12 @@ export class EnvOrFileGrantStore implements TenantGrantStore {
   async get(_tenantId: string): Promise<AgentGrant | null> {
     const fromEnv = process.env.CLAUDE_CODE_OAUTH_TOKEN;
     if (fromEnv && fromEnv.trim()) {
-      return { kind: "oauth", oauthToken: fromEnv.trim() };
+      const t = fromEnv.trim();
+      return grantFor(detectGrantKind(t), t);
     }
     if (existsSync(this.grantFile)) {
       const fromFile = readFileSync(this.grantFile, "utf8").trim();
-      if (fromFile) return { kind: "oauth", oauthToken: fromFile };
+      if (fromFile) return grantFor(detectGrantKind(fromFile), fromFile);
     }
     return null;
   }

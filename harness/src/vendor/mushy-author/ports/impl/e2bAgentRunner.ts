@@ -53,6 +53,7 @@ import type {
 import { readFile } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
 import { createHash } from "node:crypto";
+import { completeRequiredBrokerTest } from "./agentSdkRunner.js";
 
 // --------------------------------------------------------------------------- //
 // Minimal local view of the E2B Sandbox surface we rely on (documented, not
@@ -626,7 +627,15 @@ export class E2bAgentRunner implements AgentRunner {
     });
 
     // Test-run once through the broker (broker only, aps_live=false) to confirm the numbers.
-    await input.toolset.apsTestRun(submitted.tool, {}, submitted.code);
+    // This gate must be enforced, not just invoked: an ok:false envelope resolves
+    // normally rather than rejecting, so completeRequiredBrokerTest throws on our
+    // behalf when the authored tool fails the broker test.
+    const executionReceipt = await completeRequiredBrokerTest(
+      submitted.tool,
+      input.toolset.apsTestRun,
+      undefined,
+      submitted.code,
+    );
 
     const preview =
       `Tool "${name}" ${author.preview_verb} (engine_op=${author.engine_op}); ` +
@@ -637,6 +646,7 @@ export class E2bAgentRunner implements AgentRunner {
       preview,
       files: submitted.files,
       sourceReceipt: submitted.receipt,
+      ...(executionReceipt ? { executionReceipt } : {}),
     };
   }
 }

@@ -23,3 +23,29 @@ export type AllowedModel = (typeof ALLOWED_MODELS)[number];
 export function isAllowedModel(m: unknown): m is AllowedModel {
   return typeof m === "string" && (ALLOWED_MODELS as readonly string[]).includes(m);
 }
+
+/** Public selection metadata only. Keep the Presenter catalog in sync. */
+export const REASONING_IDS = ["disabled", "low", "medium", "high", "max"] as const;
+export type ReasoningId = (typeof REASONING_IDS)[number];
+export const MODEL_REASONING_CATALOG = Object.freeze(ALLOWED_MODELS.map(id => Object.freeze({
+  id,
+  reasoning_ids: Object.freeze<ReasoningId[]>(id === "claude-haiku-4-5"
+    ? ["disabled"]
+    : id === "claude-opus-4-8" ? ["disabled", "low", "medium", "high", "max"] : ["disabled", "low", "medium", "high"]),
+})));
+
+export function isAllowedReasoning(model: unknown, reasoning_id: unknown): reasoning_id is ReasoningId | undefined {
+  const entry = MODEL_REASONING_CATALOG.find(item => item.id === model);
+  return !!entry && (reasoning_id === undefined || entry.reasoning_ids.some(id => id === reasoning_id));
+}
+
+/** Validate the effective model, including the host default, before calling the SDK. */
+export function reasoningOptions(model: unknown, reasoning_id?: unknown): {
+  thinking?: { type: "disabled" | "adaptive" };
+  effort?: "low" | "medium" | "high" | "max";
+} {
+  if (!isAllowedReasoning(model, reasoning_id)) throw new Error("Invalid model or reasoning selection.");
+  if (reasoning_id === undefined) return {};
+  if (reasoning_id === "disabled") return { thinking: { type: "disabled" } };
+  return { thinking: { type: "adaptive" }, effort: reasoning_id };
+}

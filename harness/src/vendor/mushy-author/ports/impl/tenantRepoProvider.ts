@@ -378,25 +378,33 @@ class GitTenantRepo implements TenantRepo {
     // tree; spawning `git.exe` immediately after can fail with 0xC0000142
     // (STATUS_DLL_INIT_FAILED) until that tree fully releases desktop-heap/handles.
     // Let it settle, then retry with generous exponential backoff (~30s worst case).
+    // The whole sequence (add, commit, rev-parse) is covered by the retry, not just
+    // `add`: the same spawn pressure that hits `add` can just as easily land on the
+    // very next spawn a beat later. `add -A` is idempotent so it is safe to re-run
+    // on retry; `commit` is NOT (a second commit attempt on an already-committed,
+    // now-clean tree fails with "nothing to commit"), so once commit has actually
+    // succeeded a retry only re-attempts the trailing `rev-parse`.
     await new Promise((r) => setTimeout(r, 800));
     let lastErr: unknown;
+    let committed = false;
     for (let attempt = 0; attempt < 8; attempt++) {
       try {
-        git(this.dir, ["add", "-A"], identity);
-        lastErr = undefined;
-        break;
+        if (!committed) {
+          git(this.dir, ["add", "-A"], identity);
+          git(
+            this.dir,
+            ["commit", "-m", message, `--author=${identity.name} <${identity.email}>`],
+            identity,
+          );
+          committed = true;
+        }
+        return { commit: git(this.dir, ["rev-parse", "HEAD"]).trim() };
       } catch (e) {
         lastErr = e;
         await new Promise((r) => setTimeout(r, Math.min(4000, 500 * 2 ** attempt)));
       }
     }
-    if (lastErr) throw lastErr;
-    git(
-      this.dir,
-      ["commit", "-m", message, `--author=${identity.name} <${identity.email}>`],
-      identity,
-    );
-    return { commit: git(this.dir, ["rev-parse", "HEAD"]).trim() };
+    throw lastErr;
   }
 }
 
@@ -686,6 +694,9 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
   }
 
   async checkout(tenantId: string): Promise<TenantRepo> {
+    if (!/^[A-Za-z0-9._-]+$/.test(tenantId)) {
+      throw new Error("tenantId must be a single safe path component");
+    }
     if (this.opts.remoteAuthority && (this.opts.isRemoteTenant?.(tenantId) ?? true)) {
       if (!this.opts.effectiveCatalog || !this.opts.bareBase) {
         throw new Error("Forge checkout requires a durable effective catalog resolver and shared bareBase");

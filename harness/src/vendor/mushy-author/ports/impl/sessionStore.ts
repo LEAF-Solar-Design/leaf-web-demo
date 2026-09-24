@@ -36,7 +36,9 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type {
+  ConfirmationActor,
   ConfirmationRecord,
+  ConfirmationStatus,
   ConverseEventType,
   ConverseTurnUsage,
   SessionRecord,
@@ -69,6 +71,12 @@ export class TurnLockHeldError extends Error {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+/** Persist an actor as `kind:id`. The kind is kept so an audit can see at a glance
+ *  whether a decision was made by a person or by a machine component. */
+function actorText(actor: ConfirmationActor): string {
+  return `${actor.kind}:${actor.id}`;
 }
 
 /** Atomic whole-file write: temp sibling + rename (never a half-written file). */
@@ -407,10 +415,19 @@ export class FileSessionStore implements SessionStore {
     );
   }
 
-  async resolveConfirmation(
+  /**
+   * The ONE place this store mutates a confirmation's status. Keeping the transition
+   * matrix private means a caller cannot ask for an illegal move such as
+   * denied -> approved; the public methods below expose only the legal ones.
+   *
+   * `decide` runs INSIDE the lock and returns the replacement record, or null to make
+   * the whole attempt a no-op. Returning null writes nothing, which is what stops a
+   * mismatched presentation from burning a legitimate approval.
+   */
+  private transition(
     confirmationId: string,
-    approved: boolean,
-    decidedBy: string,
+    from: ConfirmationStatus,
+    decide: (rec: ConfirmationRecord, now: number) => ConfirmationRecord | null,
   ): Promise<ConfirmationRecord | null> {
     return this.locked(() => {
       const sessionId = this.readConfirmationIndex()[confirmationId];
@@ -419,17 +436,52 @@ export class FileSessionStore implements SessionStore {
       const idx = rows.findIndex((r) => r.confirmation_id === confirmationId);
       if (idx < 0) return null;
       const rec = rows[idx]!;
-      if (rec.status !== "pending") return rec; // already decided/expired: no-op
-      const expired = Date.parse(rec.expires_at) < Date.now();
-      const updated: ConfirmationRecord = {
-        ...rec,
-        status: expired ? "expired" : approved ? "approved" : "denied",
-        decided_at: nowIso(),
-        decided_by: expired ? null : decidedBy,
-      };
+      // Not in the expected state: either an illegal move, or this caller lost the race.
+      if (rec.status !== from) return null;
+      const updated = decide(rec, Date.now());
+      if (!updated) return null;
       rows[idx] = updated;
       this.writeConfirmations(sessionId, rows);
       return updated;
+    });
+  }
+
+  async decideConfirmation(
+    confirmationId: string,
+    decision: "approved" | "denied",
+    decidedBy: ConfirmationActor,
+  ): Promise<ConfirmationRecord | null> {
+    const result = await this.transition(confirmationId, "pending", (rec, now) => {
+      // Expiry is judged here, against this store's clock, never by the caller.
+      // A stale record is still marked so it cannot be decided later, but the caller
+      // is told it decided nothing.
+      if (Date.parse(rec.expires_at) < now) {
+        return { ...rec, status: "expired", decided_at: nowIso(), decided_by: null };
+      }
+      return { ...rec, status: decision, decided_at: nowIso(), decided_by: actorText(decidedBy) };
+    });
+    return result && result.status === decision ? result : null;
+  }
+
+  async consumeApproved(
+    confirmationId: string,
+    binding: { sessionId: string; action: string; argsJson: string },
+    consumedBy: ConfirmationActor,
+  ): Promise<ConfirmationRecord | null> {
+    return this.transition(confirmationId, "approved", (rec, now) => {
+      // Every check sits inside the transition. Any failure returns null, which writes
+      // nothing, so a wrong presentation leaves the approval spendable by its rightful
+      // caller instead of destroying it.
+      if (Date.parse(rec.expires_at) < now) return null;
+      if (rec.session_id !== binding.sessionId) return null;
+      if (rec.action !== binding.action) return null;
+      if (rec.args_json !== binding.argsJson) return null;
+      return {
+        ...rec,
+        status: "consumed",
+        consumed_at: nowIso(),
+        consumed_by: actorText(consumedBy),
+      };
     });
   }
 

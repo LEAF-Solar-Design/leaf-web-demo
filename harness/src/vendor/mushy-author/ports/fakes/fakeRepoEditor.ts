@@ -46,6 +46,10 @@ export class FakeRepoEditor implements RepoEditor {
         if (input.signal?.aborted) throw new Error("in-app edit session was cancelled");
         continue;
       }
+      if (line === "die_turn_cap") {
+        commanded = true;
+        throw new Error("Claude Code returned an error result: Reached maximum number of turns (40)");
+      }
       m = line.match(/^write\s+(\S+):\s?([\s\S]*)$/);
       if (m) {
         commanded = true;
