@@ -3386,6 +3386,7 @@ export default function App() {
         reattaching,
         onSelectJob,
         builds: buildQueue.builds,
+        buildFeed: { status: buildQueue.status, dropped: buildQueue.dropped, onRetry: buildQueue.resume },
       }}
       toast={{ toast, onDone: onToastDone }}
       integrations={{

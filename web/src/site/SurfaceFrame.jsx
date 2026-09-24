@@ -134,14 +134,17 @@ function useSlot() {
  *   commandBar        render prop (or node): App's PromptBox, ToolCast's
  *                     .tc-bar block, until slice 5 unifies them
  *   jobRail           { mock, jobs, currentJob, inflight, reattaching,
- *                      onSelectJob, builds? } or null. The stage gates its own
+ *                      onSelectJob, builds?, buildFeed? } or null. The stage gates its own
  *                      `rightView === 'jobs'` OUTSIDE the frame by passing
  *                      null, so the frame never assumes rightView exists.
  *                      Slice 11a: `builds` is the validated GET /api/builds
  *                      list (useBuildQueue); the rail hosts every lane's
  *                      BuildQueueCard from it, and the Builds slot below
  *                      counts its open work into the toolbar badge.
- *   toast             { toast, onDone }
+ *                      W6-E01: `buildFeed` is { status, dropped, onRetry }
+ *                      from useBuildQueue; the rail says when that list is
+ *                      stale or paused by sign-in. The badge never reads it.
+ *   toast            { toast, onDone }
  *   conversations     slice 6b. { activeSessionId, onResume, label } or null.
  *                     The CONTRACT decides WHETHER the list mounts
  *                     (contract.conversations.scope !== null); the scene
@@ -391,6 +394,7 @@ function JobRail() {
       reattaching={rail.reattaching}
       onSelectJob={rail.onSelectJob}
       builds={rail.builds}
+      buildFeed={rail.buildFeed}
       spine={spined && !!posture.wideViewport && !posture.jobRailExpanded}
       onExpand={spined ? posture.onJobRailExpand : undefined}
       onCollapse={spined && posture.jobRailExpanded ? posture.onJobRailCollapse : undefined}
