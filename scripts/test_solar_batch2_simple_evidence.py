@@ -14,6 +14,16 @@ _SPEC.loader.exec_module(prod)
 REV = "a" * 40
 
 
+SIZER_REQUEST = {"zip_code": "78701", "module_name": "Canadian_Solar_Inc__CS5T_130M",
+                 "full_inverter_name": "Sungrow SG-HX SG250HX", "bifacial": False, "bifacial_coefficient": ".7",
+                 "max_voltage": "1500", "thermal_model_type": "close mount glass glass", "open_circuit_rise": False,
+                 "racking_params": {"albedo": ".25", "racking_type": "fixed_tilt", "surface_tilt": "5",
+                                    "surface_azimuth": "180"}}
+SIZER_SETTINGS = {"PanelsInSequence": 15, "VocColdPasses": None, "VocColdOverrideAccepted": False,
+                  "VocColdSuggestedStringLength": 0, "VocColdPerModule": 0.0, "VocColdStringVoltage": 0.0,
+                  "VocColdMaxDcVoltage": 0.0}
+
+
 def write_intakes(tmp_path):
     intakes = {
         "z0-state.json": {"format": "zone-height-state-v1", "units": "in", "installation_design": "Roof",
@@ -40,6 +50,9 @@ def write_intakes(tmp_path):
                              "colour": 1, "strings": [], "panels": []}],
         "panels": [{"panel": "7FA4", "size": "8.0x4.0", "colour": 7}, {"panel": "7FA3", "size": "8.0x4.0", "colour": 7}],
         "strings": ["200"]}
+    intakes["k0-intake.json"] = {"request": SIZER_REQUEST, "settings": dict(SIZER_SETTINGS)}
+    intakes["k1-response.json"] = {"status": 200, "content_type": "application/json",
+                                   "body_text": json.dumps(json.dumps({"cells": 60}))}
     for name, value in intakes.items():
         (tmp_path / name).write_text(json.dumps(value), encoding="utf-8")
     return tmp_path
@@ -47,7 +60,7 @@ def write_intakes(tmp_path):
 
 def test_every_step_builds_a_valid_document(tmp_path):
     docs = prod.run_steps(write_intakes(tmp_path), REV)
-    assert set(docs) == {"z1", "z2", "z3", "s2", "s3", "s4", "f1", "f2", "q1"}
+    assert set(docs) == {"z1", "z2", "z3", "s2", "s3", "s4", "f1", "f2", "q1", "k1"}
     for step, doc in docs.items():
         prod.compare.validate_evidence(doc, "exports")
         assert doc["after"]["source_revision"] == step and doc["after"]["format"] == "batch2-v1"
@@ -93,7 +106,7 @@ def test_missing_or_malformed_intakes_refuse(tmp_path):
 def test_cli_writes_each_step(tmp_path):
     out = tmp_path / "out"
     assert prod.main(["--intakes", str(write_intakes(tmp_path)), "--out", str(out), "--revision", REV]) == 0
-    assert sorted(p.name for p in out.iterdir()) == ["f1.json", "f2.json", "q1.json", "s2.json", "s3.json", "s4.json", "z1.json", "z2.json", "z3.json"]
+    assert sorted(p.name for p in out.iterdir()) == ["f1.json", "f2.json", "k1.json", "q1.json", "s2.json", "s3.json", "s4.json", "z1.json", "z2.json", "z3.json"]
 
 
 def test_f2_reports_the_ok_on_the_active_preset(tmp_path):
@@ -112,3 +125,10 @@ def test_zone_assign_steps_chain_z3_on_studio_z2(tmp_path):
     zone = [row for row in z3["after"]["rows"] if row["type"] == "elevation-zone"][0]
     assert zone["panels"] == ["7FA4", "7FA3"] and zone["strings"] == ["200"]
     assert z2["fixture_sha256"] == z3["fixture_sha256"]
+
+
+def test_k1_reports_the_refused_double_encoded_response(tmp_path):
+    doc = prod.run_steps(write_intakes(tmp_path), REV, "k1")["k1"]
+    values = {row["name"]: row["value"] for row in doc["after"]["rows"]}
+    assert values == {"calculation": "failed", "error": "response-not-an-object"}
+    assert doc["parameters"]["form_values"]["zip_code"] == "78701"

@@ -401,3 +401,68 @@ def deep_search_status(sessions):
     if sessions:
         raise BatchTwoError("sessions are listed; G36 receipts only the empty state")
     return report_rows({"message": "no-sessions", "sessions": 0})
+
+
+# ---------------------------------------------------------------------------------------------
+# k1: string sizer (StringSizer): Studio's pinned sizing client over the service's response.
+
+SIZER_SETTINGS = ("PanelsInSequence", "VocColdPasses", "VocColdOverrideAccepted", "VocColdSuggestedStringLength",
+                  "VocColdPerModule", "VocColdStringVoltage", "VocColdMaxDcVoltage")
+MAX_SIZER_BODY = 256 * 1024
+
+
+def string_sizer_outcome(intake, response):
+    """What Studio commits for one string sizing: the request must be the pinned plugin request (SizingRequest), the
+    response body is parsed exactly as solar_sizing_client.size parses it (strict JSON, duplicate keys refused) and
+    validated as the plugin's result object. A body that is valid JSON but not an object (the service's
+    double-encoded 200) is refused the way the plugin's Newtonsoft conversion refuses it, and nothing is committed.
+    Returns (report values, {setting: value})."""
+    import json as _json
+    import os as _os
+    import sys as _sys
+    _here = _os.path.dirname(_os.path.abspath(__file__))
+    if _here not in _sys.path:          # the evidence producer loads this module by path
+        _sys.path.insert(0, _here)
+    import solar_sizing_client as sizing
+
+    _require(isinstance(intake, dict) and isinstance(intake.get("request"), dict), "the sizer intake has no request")
+    settings = intake.get("settings")
+    _require(isinstance(settings, dict) and set(settings) == set(SIZER_SETTINGS), "the sizer intake settings are invalid")
+    try:
+        sizing.SizingRequest.model_validate(intake["request"])
+    except (ValueError, TypeError):
+        raise BatchTwoError("the sizer request is not the plugin's request shape") from None
+    _require(isinstance(response, dict) and response.get("status") == 200 and isinstance(response.get("body_text"), str),
+             "the recorded sizer response is invalid")
+    body = response["body_text"]
+    _require(len(body.encode("utf-8")) <= MAX_SIZER_BODY, "the recorded sizer response is too large")
+
+    def unique(items):
+        result = {}
+        for key, value in items:
+            _require(key not in result, "the sizer response repeats a key")
+            result[key] = value
+        return result
+
+    try:
+        value = _json.loads(body, object_pairs_hook=unique)
+    except ValueError:
+        return {"calculation": "failed", "error": "other"}, {}
+    if not isinstance(value, dict):
+        return {"calculation": "failed", "error": "response-not-an-object"}, {}
+    try:
+        sizing.validate_response(value)
+    except sizing.CloudError:
+        return {"calculation": "failed", "error": "other"}, {}
+    # A result object reaches the plugin's result form; its close writes SIZER_SETTINGS. That path is ported with
+    # the capture that exercises it (the service returns a string today), never guessed.
+    raise BatchTwoError("a sizing result object needs the result-form port; no capture exercises it yet")
+
+
+def string_sizer_rows(intake, response):
+    """k1 rows in the plugin adapter's shape: the calculation report and one `setting` row per changed setting."""
+    report, changed = string_sizer_outcome(intake, response)
+    rows = {"report": report_rows(report)}
+    if changed:
+        rows["setting"] = [(f"setting-{name}", {"name": name, "value": changed[name]}) for name in sorted(changed)]
+    return rows
