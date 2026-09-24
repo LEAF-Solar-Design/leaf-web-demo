@@ -525,7 +525,9 @@ describe('W4g bleed-2a: one canvas across CAD and Solar CAD', () => {
     assert.match(viewerSource, /export function recolorLayerGroups\(/)
   })
   it('ignores zero-size resize notifications before resizing the renderer', () => {
-    assert.match(viewerSource, new RegExp('function onResize\\(\\)\\s*\\{\\s*const w = mount\\.clientWidth, h = mount\\.clientHeight\\s*if \\(!\\(w > 0\\) \\|\\| !\\(h > 0\\)\\) return\\s*renderer\\.setSize\\('))
+    // The camera carry (W5 #123) resizes the renderer only when the mount size
+    // changed; the zero-size return must still come first.
+    assert.match(viewerSource, new RegExp('function onResize\\(\\)\\s*\\{\\s*const w = mount\\.clientWidth, h = mount\\.clientHeight\\s*if \\(!\\(w > 0\\) \\|\\| !\\(h > 0\\)\\) return\\s*if \\(w !== rendererWidth \\|\\| h !== rendererHeight\\) \\{\\s*rendererWidth = w; rendererHeight = h\\s*renderer\\.setSize\\('))
   })
 })
 

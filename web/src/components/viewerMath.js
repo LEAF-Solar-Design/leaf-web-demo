@@ -145,3 +145,74 @@ export function cameraPose(camera, target, rect) {
     worldPerPixel: (camera.right - camera.left) / camera.zoom / rect.width,
   }
 }
+
+/** The carry key of a flat engine document view, or '' for anything that must refit on every build
+ *  (a sculpture view's depth range follows the drawing, so it always refits). */
+export function cameraCarryKey(intake, sculpture) {
+  if (sculpture === true) return ''
+  if (!intake || typeof intake !== 'object' || intake.source !== 'engine') return ''
+  const { documentId } = intake
+  if (typeof documentId !== 'string' || documentId === '') return ''
+  return `engine:flat:${documentId}`
+}
+
+/** A plain-data copy of the camera and target at call time; later camera moves never reach it. */
+export function captureCameraCarry(camera, target, { key, fitted, width, height }) {
+  return {
+    key, fitted: fitted === true, width, height,
+    left: camera.left, right: camera.right, top: camera.top, bottom: camera.bottom,
+    zoom: camera.zoom,
+    position: [camera.position.x, camera.position.y, camera.position.z],
+    target: [target.x, target.y, target.z],
+  }
+}
+
+// Each index checked explicitly: every() skips holes, so Array(3) would pass it.
+const finiteTriple = (value) => Array.isArray(value) && value.length === 3
+  && Number.isFinite(value[0]) && Number.isFinite(value[1]) && Number.isFinite(value[2])
+
+// A pose applyCameraCarry may write: a finite, non-inverted frustum, a
+// positive zoom and finite position/target triples. Fails closed on anything else.
+function carryPoseUsable(pose) {
+  if (!pose || typeof pose !== 'object') return false
+  const { left, right, top, bottom, zoom } = pose
+  return [left, right, top, bottom, zoom].every(Number.isFinite)
+    && zoom > 0 && right > left && top > bottom
+    && finiteTriple(pose.position) && finiteTriple(pose.target)
+}
+
+/** The pose to restore, or null when the next build must refit. */
+export function cameraCarry(previous, { key, width, height }) {
+  if (!previous || typeof previous !== 'object') return null
+  if (typeof key !== 'string' || key === '' || key !== previous.key) return null
+  if (previous.fitted !== false) return null
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0
+    || width !== previous.width || height !== previous.height) return null
+  if (!carryPoseUsable(previous)) return null
+  return {
+    key: previous.key, fitted: previous.fitted, width: previous.width, height: previous.height,
+    left: previous.left, right: previous.right, top: previous.top, bottom: previous.bottom,
+    zoom: previous.zoom, position: [...previous.position], target: [...previous.target],
+  }
+}
+
+/** Writes a carried pose onto the camera and target; the caller owns controls.update(). False, and nothing changed, on a malformed pose. */
+export function applyCameraCarry(camera, target, pose) {
+  if (!carryPoseUsable(pose)) return false
+  camera.left = pose.left; camera.right = pose.right
+  camera.top = pose.top; camera.bottom = pose.bottom
+  camera.zoom = pose.zoom
+  camera.position.set(...pose.position)
+  target.set(...pose.target)
+  camera.updateProjectionMatrix()
+  return true
+}
+
+/** Whether a ResizeObserver notification must recompute the camera's FRUSTUM (the renderer's own size
+ *  is the caller's): 'none' when the size is unusable or equals the size the frustum was computed for,
+ *  'refit' for a fitted flat view with a safe rectangle, else 'frustum'. */
+export function resizeCameraAction({ frustumWidth, frustumHeight, width, height, fitted, sculpture, safe }) {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return 'none'
+  if (width === frustumWidth && height === frustumHeight) return 'none'
+  return sculpture !== true && !!safe && fitted === true ? 'refit' : 'frustum'
+}
