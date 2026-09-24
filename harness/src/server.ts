@@ -50,7 +50,7 @@ import { AuthorLoop, AuthorLoopError } from "./agent/authorLoop.js";
 import { CAMPAIGN_SOURCE_BODY_LIMIT, dispatchCampaignSource, type CampaignSourceService } from "./agent/campaignSourceIntegration.js";
 import { ProjectRepositoryEditCoordinator, ProjectRepositoryEditSettlementUnavailable } from "./agent/projectRepositoryEditCoordinator.js";
 import { redactTokens } from "./redact.js";
-import { createReadinessCheck, fileStoreProbe } from "./storeReadiness.js";
+import { createFileStoreProbe, createReadinessCheck } from "./storeReadiness.js";
 import type { StoreReadiness } from "./storeReadiness.js";
 import { GrantPoolUnavailableError, GrantRequiredError } from "./ports/impl/oauthGrantProvider.js";
 import { classifyRoute } from "./routing.js";
@@ -1576,7 +1576,7 @@ export async function startReal(port = 8130): Promise<Server> {
   // grant store here is the file store.
   const readiness = createReadinessCheck({
     session: sessionStore ? sessionStore.readiness : null,
-    grants: { kind: "file", probe: () => fileStoreProbe(grantsDir) },
+    grants: { kind: "file", probe: createFileStoreProbe(grantsDir) },
   });
   const converseRunner = sessionStore
     ? new SpineTurnAdapter({

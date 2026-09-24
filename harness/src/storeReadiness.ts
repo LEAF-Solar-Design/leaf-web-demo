@@ -105,23 +105,34 @@ const nodeProbeFs: ProbeFs = {
 
 const SENTINEL_BYTES = new TextEncoder().encode("leaf-ready\n");
 
+/** True when an unlink failed only because the file is already gone. */
+function isAlreadyGone(err: unknown): boolean {
+  return typeof err === "object" && err !== null && (err as { code?: unknown }).code === "ENOENT";
+}
+
+/** One probe's outcome, plus the sentinel it created and could not remove (else null). */
+interface FileProbeRun {
+  outcome: ProbeOutcome;
+  leaked: string | null;
+}
+
 /**
- * Create, write, fsync, close and remove one uniquely named sentinel in `dir`.
- * Never creates `dir` (a missing directory is `unavailable`) and never touches
- * any other file. Any failure along the way is `unavailable`.
+ * The one file probe both entry points share: create, write, fsync, close and
+ * remove one uniquely named sentinel in `dir`. Never rejects.
  */
-export async function fileStoreProbe(dir: string, fs: ProbeFs = nodeProbeFs): Promise<ProbeOutcome> {
-  if (typeof dir !== "string" || dir.length === 0) return "unavailable";
+async function runFileProbe(dir: string, fs: ProbeFs): Promise<FileProbeRun> {
+  if (typeof dir !== "string" || dir.length === 0) return { outcome: "unavailable", leaked: null };
   const sentinel = join(dir, `.leaf-ready-${randomUUID()}.probe`);
   let handle: ProbeFileHandle;
   try {
     handle = await fs.openExclusive(sentinel);
   } catch {
-    return "unavailable";
+    return { outcome: "unavailable", leaked: null };
   }
   // Past a successful create the sentinel is ours: whatever fails next, the finally
   // still closes and removes it when it can, and the result stays `unavailable`.
   let ok = false;
+  let leaked: string | null = null;
   try {
     await handle.write(SENTINEL_BYTES);
     await handle.sync();
@@ -136,11 +147,57 @@ export async function fileStoreProbe(dir: string, fs: ProbeFs = nodeProbeFs): Pr
     }
     try {
       await fs.unlink(sentinel);
-    } catch {
+    } catch (err) {
       ok = false;
+      if (!isAlreadyGone(err)) leaked = sentinel;
     }
   }
-  return ok ? "ready" : "unavailable";
+  return { outcome: ok ? "ready" : "unavailable", leaked };
+}
+
+/**
+ * Create, write, fsync, close and remove one uniquely named sentinel in `dir`.
+ * Never creates `dir` (a missing directory is `unavailable`) and never touches
+ * any other file. Any failure along the way is `unavailable`. Stateless: every
+ * call names a new sentinel; a caller that polls uses createFileStoreProbe.
+ */
+export async function fileStoreProbe(dir: string, fs: ProbeFs = nodeProbeFs): Promise<ProbeOutcome> {
+  return (await runFileProbe(dir, fs)).outcome;
+}
+
+/**
+ * fileStoreProbe that holds at most one sentinel it could not remove: a later call
+ * first retries removing that same file and creates no new sentinel until it is
+ * gone (removed now, or ENOENT), so a store that refuses deletes accumulates at
+ * most one probe file however often it is polled. Concurrent calls join the one
+ * running call. Never rejects; touches no file but its own sentinels.
+ */
+export function createFileStoreProbe(dir: string, fs: ProbeFs = nodeProbeFs): () => Promise<ProbeOutcome> {
+  let leaked: string | null = null;
+  let running: Promise<ProbeOutcome> | null = null;
+  const probeOnce = async (): Promise<ProbeOutcome> => {
+    if (leaked !== null) {
+      try {
+        await fs.unlink(leaked);
+      } catch (err) {
+        if (!isAlreadyGone(err)) return "unavailable";
+      }
+      leaked = null;
+    }
+    const run = await runFileProbe(dir, fs);
+    leaked = run.leaked;
+    return run.outcome;
+  };
+  return () => {
+    if (running === null) {
+      running = probeOnce()
+        .catch((): ProbeOutcome => "unavailable")
+        .finally(() => {
+          running = null;
+        });
+    }
+    return running;
+  };
 }
 
 // ---------------------------------------------------------------------------

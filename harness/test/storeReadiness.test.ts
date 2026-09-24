@@ -25,6 +25,7 @@ import { FakeTenantRepoProvider } from "../src/ports/fakes/fakeTenantRepo.js";
 import { FakeBrokerApsClient } from "../src/ports/fakes/fakeBrokerApsClient.js";
 import { FakeAgentRunner } from "../src/ports/fakes/fakeAgentRunner.js";
 import {
+  createFileStoreProbe,
   createPgStoreProbe,
   createReadinessCheck,
   fileStoreProbe,
@@ -54,6 +55,29 @@ function okClient(calls: string[]): PgProbeClient {
       calls.push(`release:${destroy === true}`);
     },
   };
+}
+
+/** A ProbeFs whose creates always succeed and whose unlink fails with each listed code, in order, then succeeds. */
+function recordingFs(unlinkFailures: string[]): { fs: ProbeFs; opened: string[]; unlinked: string[] } {
+  const opened: string[] = [];
+  const unlinked: string[] = [];
+  const failures = [...unlinkFailures];
+  const fs: ProbeFs = {
+    async openExclusive(path: string) {
+      opened.push(path);
+      return {
+        async write() { return undefined; },
+        async sync() {},
+        async close() {},
+      };
+    },
+    async unlink(path: string) {
+      unlinked.push(path);
+      const code = failures.shift();
+      if (code !== undefined) throw Object.assign(new Error(code), { code });
+    },
+  };
+  return { fs, opened, unlinked };
 }
 
 function ports(grantAdmin: FileTenantGrantStore): HarnessPorts {
@@ -268,6 +292,54 @@ describe("W6-E04 harness store readiness", () => {
     // The fresh probes are held too, so the third check times out again.
     expect(third.stores.session.state).toBe("timeout");
     for (const release of releasers.splice(0)) release();
+  });
+
+  it("E04 row15 a sentinel the store will not delete is retried, never multiplied", async () => {
+    const { fs, opened, unlinked } = recordingFs(["EPERM", "EPERM", "EPERM"]);
+    const probe = createFileStoreProbe(root, fs);
+
+    await expect(probe()).resolves.toBe("unavailable");
+    expect(opened).toHaveLength(1);
+    const a = opened[0]!;
+    expect(unlinked).toEqual([a]);
+
+    await expect(probe()).resolves.toBe("unavailable");
+    expect(opened).toHaveLength(1);
+    expect(unlinked).toEqual([a, a]);
+
+    await expect(probe()).resolves.toBe("unavailable");
+    expect(opened).toHaveLength(1);
+    expect(unlinked).toEqual([a, a, a]);
+
+    // The retry of A succeeds, then a fresh probe creates B and removes it.
+    await expect(probe()).resolves.toBe("ready");
+    expect(opened).toHaveLength(2);
+    const b = opened[1]!;
+    expect(b).not.toBe(a);
+    expect(unlinked).toEqual([a, a, a, a, b]);
+  });
+
+  it("E04 row16 an already-removed leaked sentinel counts as removed", async () => {
+    const { fs, opened, unlinked } = recordingFs(["EPERM", "ENOENT"]);
+    const probe = createFileStoreProbe(root, fs);
+
+    await expect(probe()).resolves.toBe("unavailable");
+    expect(opened).toHaveLength(1);
+    const a = opened[0]!;
+
+    await expect(probe()).resolves.toBe("ready");
+    expect(opened).toHaveLength(2);
+    const b = opened[1]!;
+    expect(b).not.toBe(a);
+    expect(unlinked).toEqual([a, a, b]);
+  });
+
+  it("E04 row17 fileStoreProbe keeps no state between calls", async () => {
+    const { fs, opened } = recordingFs(["EPERM", "EPERM"]);
+    await expect(fileStoreProbe(root, fs)).resolves.toBe("unavailable");
+    await expect(fileStoreProbe(root, fs)).resolves.toBe("unavailable");
+    expect(opened).toHaveLength(2);
+    expect(new Set(opened).size).toBe(2);
   });
 
   it("E04 row4 a postgres connect that rejects is unavailable and a hanging one is timeout at the deadline", async () => {

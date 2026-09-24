@@ -4,7 +4,7 @@
 // is synced by scripts/sync-mushy-code.py (pin: harness/src/vendor/VENDOR-PIN.json).
 import { Pool } from "pg";
 
-import { createPgStoreProbe, fileStoreProbe } from "../../storeReadiness.js";
+import { createFileStoreProbe, createPgStoreProbe } from "../../storeReadiness.js";
 import type { StoreProbe } from "../../storeReadiness.js";
 import { createSessionStore } from "../../vendor/mushy-author/ports/impl/sessionStoreFactory.js";
 import type { SessionStoreHandle } from "../../vendor/mushy-author/ports/impl/sessionStoreFactory.js";
@@ -42,7 +42,7 @@ export function createProbedSessionStore(
       kind,
       store: new FileSessionStore({ dir }),
       async close(): Promise<void> {},
-      readiness: { kind: "file", probe: () => fileStoreProbe(dir) },
+      readiness: { kind: "file", probe: createFileStoreProbe(dir) },
     };
   }
   if (kind !== "postgres" || !connectionString) {

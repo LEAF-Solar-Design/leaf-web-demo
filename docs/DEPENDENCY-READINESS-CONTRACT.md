@@ -44,7 +44,9 @@ PostgreSQL, `LEAF_HARNESS_SESSION_STORE`) and the grant store
 (`LEAF_GRANT_STORE`). A file store is probed by creating, syncing and removing
 one uniquely named sentinel file in the store's existing directory; the probe
 never creates the directory and removes its sentinel even when a later step
-fails. It proves the directory accepts a create, write, sync and unlink, not that
+fails. If the sentinel cannot be removed, the store reads unavailable and each
+later check retries removing that same file before it creates another, so a
+store that refuses deletes holds at most one probe sentinel. It proves the directory accepts a create, write, sync and unlink, not that
 every store file inside it is writable. A PostgreSQL store runs `SELECT 1` under
 a statement timeout on a client from the store's own pool; a client still busy at
 the probe's own timeout is destroyed, never returned to the pool. Both probes share one
