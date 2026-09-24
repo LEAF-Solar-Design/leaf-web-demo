@@ -60,12 +60,14 @@ STEPS = {
             "calculate": 1, "error_dialog": "Cancel", "form": "Cancel"}),
     "f2": ("frame-park-settings", "m", "f0-intake.json", {"ok": 1, "cancel": 1}),
     # G36 addendum: the height zone's panels (z2) and strings (z3) from the zones after z1.
+    "m1": ("string-midpoint-connection", "in", "m0-intake.json", None),
+    "o1": ("open-customer-dwg", "in", "o0-intake.json", None),
     "z2": ("elevation-zone-assign-panels", "in", "z1-assign.json", {"height_zone": "Zone 1", "assign_panels": 1}),
     "z3": ("elevation-zone-assign-strings", "in", "z1-assign.json",
            {"height_zone": "Zone 1", "assign_panels_cancelled": 1}),
 }
 # G22 answers as the plugin adapter records them: the reference panel by handle, ALL, Enter ("").
-STEP_ANSWERS = {"z2": ["handle:7FA3", "ALL", ""], "z3": ["ALL", ""]}
+STEP_ANSWERS = {"z2": ["handle:7FA3", "ALL", ""], "z3": ["ALL", ""], "m1": ["handle:8D3A", "handle:8D9D"]}
 # The plugin adapter's frame (ground_evidence.FRAME): world coordinates, identity transform.
 FRAME = {"coordinate_system": "world", "transform": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
          "elevation_datum": "unrecorded", "crs": "none"}
@@ -122,6 +124,12 @@ def step_rows(step, intake):
             return zone_assign_step(step, intake)
         if step == "k1":
             return engine.string_sizer_rows(intake, read_intake(_INTAKES_DIR[0], "k1-response.json"))
+        if step == "m1":
+            start, end = (answer[len("handle:"):] for answer in STEP_ANSWERS["m1"])
+            return {"mid-string": engine.string_midpoint_rows(intake, start, end)}
+        if step == "o1":
+            rows = engine.open_customer_rows(intake)
+            return {"setting": rows} if rows else {}
     except engine.BatchTwoError as exc:
         raise EvidenceError(f"step {step}: {exc}") from None
     raise EvidenceError(f"unknown step {step!r}")

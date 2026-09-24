@@ -466,3 +466,184 @@ def string_sizer_rows(intake, response):
     if changed:
         rows["setting"] = [(f"setting-{name}", {"name": name, "value": changed[name]}) for name in sorted(changed)]
     return rows
+
+
+# ---------------------------------------------------------------------------------------------
+# m1: string midpoint connection (LEAFSTRINGMID, Commands.cs:4642-4865, Core/StringMidpointPlacer.cs).
+
+MAX_PANELS = 200_000
+MID_LABEL = "MID"                    # Commands.cs:4830
+MID_MIN_TRAVERSAL = 3                # StringMidpointPlacer.MinimumTraversalLength
+MID_BAND_DIAGONALS = 6.0             # the crossing band pad (Commands.cs:4731-4735)
+MID_ADJACENCY_DIAGONALS = 1.5        # the adjacency threshold (:4722-4724)
+MID_LABEL_HEIGHT_DIAGONALS = 0.4     # the label height (:4826)
+MID_DECIMALS = 6
+
+
+def _mid_round(value):
+    return round(float(value), MID_DECIMALS)
+
+
+def _mid_panels(intake):
+    """{handle: (x, y)}, (hx, hy), diagonal from a panel intake; fails closed on anything malformed."""
+    _require(isinstance(intake, dict), "the panel intake is not an object")
+    panels = intake.get("panels")
+    _require(isinstance(panels, list) and 0 < len(panels) <= MAX_PANELS, "the panel list is invalid")
+    half = intake.get("half_extents")
+    _require(isinstance(half, list) and len(half) == 2 and all(_is_number(v) and v > 0 for v in half),
+             "the panel half extents are invalid")
+    diagonal = intake.get("diagonal")
+    _require(_is_number(diagonal) and diagonal > 0, "the panel diagonal is invalid")
+    out = {}
+    for panel in panels:
+        _require(isinstance(panel, dict) and isinstance(panel.get("handle"), str) and panel["handle"],
+                 "a panel has no handle")
+        _require(_is_number(panel.get("x")) and _is_number(panel.get("y")), "a panel has no centroid")
+        _require(panel["handle"].upper() not in out, "a panel handle repeats")
+        out[panel["handle"].upper()] = (float(panel["x"]), float(panel["y"]))
+    return out, (float(half[0]), float(half[1])), float(diagonal)
+
+
+def _is_number(value):
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def string_midpoint_path(intake, start, end):
+    """The panels LEAFSTRINGMID strings between two picked panels: the crossing-window band around the picks (padded
+    six diagonals; a panel is a candidate when its extents touch the band), proximity adjacency (centroids within 1.5
+    diagonals, inclusive), and a breadth-first shortest path. The plugin takes neighbours in AutoCAD selection
+    order, which a drawing does not record, so a tie between equal shortest paths is broken by handle order here;
+    the capture's endpoints have one shortest path. Returns (path, label index); refuses what the command refuses."""
+    panels, (hx, hy), diagonal = _mid_panels(intake)
+    start, end = str(start).upper(), str(end).upper()
+    _require(start in panels and end in panels, "an endpoint is not a panel")
+    _require(start != end, "the endpoints are the same panel")
+    (ax, ay), (bx, by) = panels[start], panels[end]
+    pad = diagonal * MID_BAND_DIAGONALS
+    min_x, max_x = min(ax, bx) - pad, max(ax, bx) + pad
+    min_y, max_y = min(ay, by) - pad, max(ay, by) + pad
+    band = sorted(h for h, (x, y) in panels.items()
+                  if x + hx >= min_x and x - hx <= max_x and y + hy >= min_y and y - hy <= max_y)
+    threshold_sq = (diagonal * MID_ADJACENCY_DIAGONALS) ** 2
+    cell = diagonal * MID_ADJACENCY_DIAGONALS
+    buckets = {}
+    for handle in band:
+        x, y = panels[handle]
+        buckets.setdefault((math.floor(x / cell), math.floor(y / cell)), []).append(handle)
+
+    def neighbours(handle):
+        x, y = panels[handle]
+        gx, gy = math.floor(x / cell), math.floor(y / cell)
+        found = []
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for other in buckets.get((gx + dx, gy + dy), ()):
+                    ox, oy = panels[other]
+                    if other != handle and (x - ox) ** 2 + (y - oy) ** 2 <= threshold_sq:
+                        found.append(other)
+        return sorted(found)
+
+    previous, seen, queue, head = {}, {start}, [start], 0
+    while head < len(queue):
+        current = queue[head]
+        head += 1
+        if current == end:
+            break
+        for other in neighbours(current):
+            if other not in seen:
+                seen.add(other)
+                previous[other] = current
+                queue.append(other)
+    _require(end in seen, "no adjacency path between the endpoints")
+    path = [end]
+    while path[-1] in previous:
+        path.append(previous[path[-1]])
+    path.reverse()
+    _require(len(path) >= MID_MIN_TRAVERSAL, "the path is too short for a midpoint string")
+    return path, len(path) // 2
+
+
+def string_midpoint_rows(intake, start, end):
+    """LEAFSTRINGMID's one `mid-string` row in the plugin adapter's shape: the path's panels, the polyline through
+    their centroids, the label index, text, position (the label panel's centroid) and height (0.4 diagonals), both
+    on the drawing's string layer."""
+    panels, _, diagonal = _mid_panels(intake)
+    path, label_index = string_midpoint_path(intake, start, end)
+    vertices = [[_mid_round(panels[h][0]), _mid_round(panels[h][1])] for h in path]
+    fields = {"panels": path, "vertices": vertices, "label_index": label_index, "label_text": MID_LABEL,
+              "label_position": list(vertices[label_index]),
+              "label_height": _mid_round(diagonal * MID_LABEL_HEIGHT_DIAGONALS), "on_string_layer": True}
+    return [("mid-string-1", fields)]
+
+
+# ---------------------------------------------------------------------------------------------
+# o1: open a customer drawing (LEAFOPENCUSTOMERDWG, Commands.cs:2677-2745, CustomerDwgWelcomeService.cs,
+# CustomerDwgStartupAnalyzer.cs).
+
+CUSTOMER_SCAN_KEYS = frozenset({"pvcase_area_entities", "pvcase_tracker_blocks", "pvcase_xdata_blocks",
+                                "branch_tracker_polylines"})
+CUSTOMER_SETTING_KEYS = ("ProjectName", "ProjectZipCode", "InstallationDesign", "LeafProjectCanceled",
+                         "CustomerWelcomeDismissed")
+GROUND, ROOF = "Ground", "Roof"      # AppConstants.Ground, AppConstants.Roof
+
+
+def suggest_project_name(file_name):
+    """SuggestProjectName (:94-104): the file name without its extension, underscores and dashes as spaces, each
+    word lower-cased then title-cased; "Customer DWG" when nothing is left."""
+    stem = str(file_name or "").replace("\\", "/").rsplit("/", 1)[-1]
+    stem = stem.rsplit(".", 1)[0] if "." in stem else stem
+    words = stem.replace("_", " ").replace("-", " ").split()
+    return " ".join(word.lower()[:1].upper() + word.lower()[1:] for word in words) or "Customer DWG"
+
+
+def infer_flow(file_name, scan):
+    """InferFlow (:398-427): PVcase evidence, then Branch tracker evidence or a ground-mount-physical file name, then
+    the ground-mount and SolarEdge file names, else rooftop."""
+    name = str(file_name or "").replace("\\", "/").rsplit("/", 1)[-1].casefold()
+    if scan["pvcase_area_entities"] or scan["pvcase_tracker_blocks"] or scan["pvcase_xdata_blocks"]:
+        return "PvcaseParity"
+    if scan["branch_tracker_polylines"] or "groundmountphysical" in name:
+        return "GroundMountPhysical"
+    if "groundmount" in name:
+        return "GroundMount"
+    if "solaredge" in name:
+        return "SolarEdge"
+    return "Rooftop"
+
+
+def open_customer_dwg(intake):
+    """The settings LEAFOPENCUSTOMERDWG writes to the drawing it opens when the welcome shows
+    (ShowForDocumentIfNeeded, ApplyInferredProjectDefaults with canceled and dismissed false): a blank project name
+    becomes the suggested one, a ground flow sets the installation design to ground and a rooftop flow fills a blank
+    one with roof, and the project is marked not canceled. Nothing is written when the drawing was canceled or
+    dismissed before, or when the file sits under a tutorial folder. Returns {name: value} of the changed settings."""
+    _require(isinstance(intake, dict), "the customer intake is not an object")
+    file_name = intake.get("file_name")
+    _require(isinstance(file_name, str) and file_name.strip(), "the customer intake has no file name")
+    _require(intake.get("opened_via_command") is True, "only the command's own open is carried")
+    settings = intake.get("settings")
+    _require(isinstance(settings, dict) and set(settings) == set(CUSTOMER_SETTING_KEYS),
+             "the customer intake settings are invalid")
+    scan = intake.get("scan")
+    _require(isinstance(scan, dict) and set(scan) == CUSTOMER_SCAN_KEYS
+             and all(type(v) is int and v >= 0 for v in scan.values()), "the customer intake scan is invalid")
+    if settings["LeafProjectCanceled"] is True or settings["CustomerWelcomeDismissed"] is True:
+        return {}
+    if "\\res\\drawings\\" in file_name.replace("/", "\\").casefold():
+        return {}
+    after = dict(settings)
+    if not str(settings["ProjectName"] or "").strip():
+        after["ProjectName"] = suggest_project_name(file_name)
+    flow = infer_flow(file_name, scan)
+    if flow in ("GroundMount", "GroundMountPhysical", "PvcaseParity"):
+        after["InstallationDesign"] = GROUND
+    elif flow == "Rooftop" and not str(settings["InstallationDesign"] or "").strip():
+        after["InstallationDesign"] = ROOF
+    after["LeafProjectCanceled"] = False
+    return {name: after[name] for name in CUSTOMER_SETTING_KEYS if after[name] != settings[name]}
+
+
+def open_customer_rows(intake):
+    """One `setting` row per changed setting, by name, in the plugin adapter's shape."""
+    changed = open_customer_dwg(intake)
+    return [(f"setting-{name}", {"name": name, "value": changed[name]}) for name in sorted(changed)]
