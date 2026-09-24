@@ -40,6 +40,14 @@ def write_intakes(tmp_path):
                              "colour": 1, "strings": [], "panels": []}],
         "panels": [{"panel": "7FA4", "size": "8.0x4.0", "colour": 7}, {"panel": "7FA3", "size": "8.0x4.0", "colour": 7}],
         "strings": ["200"]}
+    intakes["m0-intake.json"] = {"panels": [{"handle": h, "x": 10.0 * i, "y": 0.0}
+                                            for i, h in enumerate(["8D3A", "A1", "A2", "8D9D"])],
+                                 "half_extents": [4.0, 2.0], "diagonal": 8.944272}
+    intakes["o0-intake.json"] = {"file_name": "customer_review.dwg", "opened_via_command": True,
+                                 "settings": {"ProjectName": "", "ProjectZipCode": "", "InstallationDesign": "Roof",
+                                              "LeafProjectCanceled": False, "CustomerWelcomeDismissed": False},
+                                 "scan": {"pvcase_area_entities": 0, "pvcase_tracker_blocks": 0,
+                                          "pvcase_xdata_blocks": 0, "branch_tracker_polylines": 0}}
     for name, value in intakes.items():
         (tmp_path / name).write_text(json.dumps(value), encoding="utf-8")
     return tmp_path
@@ -47,7 +55,7 @@ def write_intakes(tmp_path):
 
 def test_every_step_builds_a_valid_document(tmp_path):
     docs = prod.run_steps(write_intakes(tmp_path), REV)
-    assert set(docs) == {"z1", "z2", "z3", "s2", "s3", "s4", "f1", "f2", "q1"}
+    assert set(docs) == {"z1", "z2", "z3", "s2", "s3", "s4", "f1", "f2", "q1", "m1", "o1"}
     for step, doc in docs.items():
         prod.compare.validate_evidence(doc, "exports")
         assert doc["after"]["source_revision"] == step and doc["after"]["format"] == "batch2-v1"
@@ -93,7 +101,7 @@ def test_missing_or_malformed_intakes_refuse(tmp_path):
 def test_cli_writes_each_step(tmp_path):
     out = tmp_path / "out"
     assert prod.main(["--intakes", str(write_intakes(tmp_path)), "--out", str(out), "--revision", REV]) == 0
-    assert sorted(p.name for p in out.iterdir()) == ["f1.json", "f2.json", "q1.json", "s2.json", "s3.json", "s4.json", "z1.json", "z2.json", "z3.json"]
+    assert sorted(p.name for p in out.iterdir()) == ["f1.json", "f2.json", "m1.json", "o1.json", "q1.json", "s2.json", "s3.json", "s4.json", "z1.json", "z2.json", "z3.json"]
 
 
 def test_f2_reports_the_ok_on_the_active_preset(tmp_path):
@@ -112,3 +120,11 @@ def test_zone_assign_steps_chain_z3_on_studio_z2(tmp_path):
     zone = [row for row in z3["after"]["rows"] if row["type"] == "elevation-zone"][0]
     assert zone["panels"] == ["7FA4", "7FA3"] and zone["strings"] == ["200"]
     assert z2["fixture_sha256"] == z3["fixture_sha256"]
+
+
+def test_m1_and_o1_rows(tmp_path):
+    docs = prod.run_steps(write_intakes(tmp_path), REV)
+    (row,) = docs["m1"]["after"]["rows"]
+    assert row["panels"] == ["8D3A", "A1", "A2", "8D9D"] and row["label_index"] == 2 and row["label_text"] == "MID"
+    assert docs["m1"]["parameters"] == {"answers": ["handle:8D3A", "handle:8D9D"]}
+    assert [(r["name"], r["value"]) for r in docs["o1"]["after"]["rows"]] == [("ProjectName", "Customer Review")]
