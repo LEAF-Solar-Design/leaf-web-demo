@@ -6,13 +6,16 @@ adopted: nothing drawn, the one save, the report; a missing feeder drawn as a co
 (each string's legs redrawn identical, so the step reports no change; the nearest-combiner fallback);
 LEAFLITEFEEDERS (the tail-biased assignment, lane-less comb paths, stored length 0, the refusals);
 MOVEINV (the device moved, its homerun legs rerouted, one save, declared); the bounded POSITIONINV
-search (outside the outline band, never worse, the time bound failing closed); and LEAFCOMBINERAUTO's
-named refusal. States are synthetic and authored here.
+search (outside the outline band, never worse, the time bound failing closed); and LEAFCOMBINERAUTO
+(the seeded MPPT inputs; the committed i4 state and combiner intake reproducing the committed i5 delta
+row for row; its refusals). States are synthetic and authored here, except the LEAFCOMBINERAUTO
+fixture, which is the committed G35 chain (docs/parity/evidence/rooftop).
 """
 from __future__ import annotations
 
 import copy
 import importlib.util
+import json
 import math
 from pathlib import Path
 import sys
@@ -271,11 +274,86 @@ def test_position_search_is_bounded_and_fails_closed_past_its_time():
     assert best == (5.0, 0.0) and cost == 0.0
 
 
-# ------------------------------------------------------------------ refusals --
+# ------------------------------------------------------------------ combiner-auto-place --
 
-def test_combiner_auto_place_is_a_named_refusal():
-    with pytest.raises(cab.InverterCablingNotPortedError, match="CombinerPlacementEngine"):
-        cab.combiner_auto_place(make_state(), GROUPS, HOST, {"combiner_input_plan": "Apply"})
+EVIDENCE = ROOT / "docs" / "parity" / "evidence" / "rooftop"
+PLAN = {"combiner_input_plan": "Apply"}
+CAPTURE = dict(HOST, CombinerSymbolScale=2.891214911191)
+
+
+def committed_fixture():
+    intake = json.loads((EVIDENCE / "inverters" / "combiner-intake.json").read_text(encoding="utf-8-sig"))
+    chain = json.loads((EVIDENCE / "chain" / "intake.json").read_text(encoding="utf-8"))
+    groups = [{"handle": g.get("handle"), "outlines": g.get("outlines") or []} for g in chain["panel_groups"]]
+    return st.load_state(EVIDENCE / "inverters" / "state-i4.json"), intake, groups
+
+
+def assert_rows_close(expected, actual, path="rows"):
+    if isinstance(expected, dict):
+        assert expected.keys() == actual.keys(), path
+        for key in expected:
+            assert_rows_close(expected[key], actual[key], f"{path}/{key}")
+    elif isinstance(expected, list):
+        assert len(expected) == len(actual), path
+        for i, (a, b) in enumerate(zip(expected, actual)):
+            assert_rows_close(a, b, f"{path}/{i}")
+    elif isinstance(expected, float) or isinstance(actual, float):
+        assert actual == pytest.approx(expected, abs=1e-6), path
+    else:
+        assert expected == actual, path
+
+
+def test_seeded_mppt_inputs_count_each_l2s_combiners_in_number_order():
+    # MpptBalanceAnalyzer.cs:854-877: grouped by L2, sorted by L1 number, slot = index mod MPPT count.
+    assert cab.seed_input_assignments({3: 1, 1: 1, 2: 1, 4: 2, 5: 1}, 3) == {1: 0, 2: 1, 3: 2, 5: 0, 4: 0}
+    assert cab.seed_input_assignments({1: 1}, 0) == {}
+    assert cab.seed_input_assignments({}, 6) == {}
+
+
+def test_combiner_auto_place_reproduces_the_committed_i5_delta():
+    before, intake, groups = committed_fixture()
+    after, lines = cab.combiner_auto_place(before, groups, CAPTURE, PLAN, intake)
+    expected, _ = st.step_rows("i5", before, st.load_state(EVIDENCE / "inverters" / "state-i5.json"))
+    actual, settings = st.step_rows("i5", before, after, lines)
+    kinds = {}
+    for row in actual:
+        key = (row["type"], row.get("cable_kind"))
+        kinds[key] = kinds.get(key, 0) + 1
+    assert kinds == {("cable", "dc-homerun"): 346, ("cable", "feeder"): 14, ("device", None): 14,
+                     ("setting", None): 4}
+    assert_rows_close(expected, actual)
+    assert [s["fields"]["name"] for s in settings] == ["CombinerStringL1Assignments", "HomerunRouting",
+                                                       "L1ToL2Assignments", "L1ToL2InputAssignments"]
+    # Two drawing-properties saves: the association persist and RouteL2Feeders' (the G27 catalog growth).
+    grown = len(after["setting"]["HomerunRouting"]["CableCatalog"]) - \
+        len(before["setting"]["HomerunRouting"]["CableCatalog"])
+    assert grown == 4
+    assert "HomerunsAuto: drew 346 straight-line DC homerun(s)." in lines
+    assert "14 nearest-lane comb feeder(s) drawn." in lines
+    assert before == committed_fixture()[0]  # the input state is never mutated
+
+
+def test_combiner_auto_place_refusals():
+    before, intake, groups = committed_fixture()
+    with pytest.raises(cab.InverterCablingError, match="form value"):
+        cab.combiner_auto_place(before, groups, CAPTURE, {"combiner_input_plan": "Cancel"}, intake)
+    with pytest.raises(cab.InverterCablingError, match="intake"):
+        cab.combiner_auto_place(before, groups, CAPTURE, PLAN, None)
+    with pytest.raises(cab.InverterCablingNotPortedError, match="L1/L2 mode"):
+        cab.combiner_auto_place(before, groups, dict(CAPTURE, UseL2Collectors=False), PLAN, intake)
+    # A drawing that already holds L1 combiners takes a path this port does not cover.
+    with pytest.raises(cab.InverterCablingNotPortedError, match="existing L1"):
+        cab.combiner_auto_place(make_state(), GROUPS, CAPTURE, PLAN, intake)
+    # An intake that is not this drawing's (its L2 blocks are elsewhere) fails closed.
+    elsewhere = make_state()
+    elsewhere["rows"]["device"] = [d for d in elsewhere["rows"]["device"] if d["role"] != "combiner"]
+    with pytest.raises(cab.InverterCablingError, match="L2"):
+        cab.combiner_auto_place(elsewhere, GROUPS, CAPTURE, PLAN, intake)
+    with pytest.raises(cab.InverterCablingError, match="symbol scale"):
+        cab.combiner_auto_place(before, groups, HOST, PLAN, intake)
+
+
+# ------------------------------------------------------------------ refusals --
 
 
 def test_host_inputs_are_checked():

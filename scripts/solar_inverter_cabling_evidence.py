@@ -6,8 +6,8 @@ adapter's G35 projection; default the committed copies under docs/parity/evidenc
 --states overrides), runs the Studio engine (server/solar_inverter_cabling.py) with the G35 answers,
 and writes step N's delta in the plugin adapter's shape (server/solar_inverter_state.py) to iN.json.
 
-  i5        combiner-auto-place          LEAFCOMBINERAUTO   not ported in this slice (the engine refuses,
-                                                            named; a later slice ports it)
+  i5        combiner-auto-place          LEAFCOMBINERAUTO   placed (G35c intake), associated, homeruns and
+                                                            feeders drawn
   i11       route-l2-feeders             RouteL2Feeders     every feeder adopted: report
   i12       homeruns                     HomerunsAuto       homeruns redrawn identical: report
   i13       lightweight-cabling-feeders  LEAFLITEFEEDERS    feeders reassigned, redrawn as comb paths
@@ -17,7 +17,9 @@ and writes step N's delta in the plugin adapter's shape (server/solar_inverter_s
 
 The panel-group outlines the feeder lanes and the position search read live in the panel groups'
 block definitions, which the G35 state does not carry; they come from the committed rooftop chain
-intake of the same fixture (docs/parity/evidence/rooftop/chain/intake.json, --intake overrides).
+intake of the same fixture (docs/parity/evidence/rooftop/chain/intake.json, --intake overrides). i5
+also reads the committed combiner intake (G35c: the command's input-before-placement dump, projected;
+docs/parity/evidence/rooftop/inverters/combiner-intake.json, --combiner-intake overrides).
 
 Envelope: the plugin adapter's parameters (G22 answers, G30a form_values), fixture_sha256 the digest of
 the i0 state as written, input_sha256 over fixture and parameters, engine "server-builtin", capability
@@ -25,7 +27,7 @@ version "0", compact canonical JSON (the S70 producer's envelope, scripts/solar_
 Nothing here reads plugin evidence (iN.json); only the G35 states. Fails closed: a malformed state or a
 document the comparator refuses is a named error and nothing is written; a step whose engine is not
 ported is named on stderr and nothing is written for it. The exit status is 0 when every refused step
-is one a later slice owns (OUT_OF_SLICE, i5), else 3.
+is one a later slice owns (OUT_OF_SLICE, none now), else 3.
 """
 from __future__ import annotations
 
@@ -56,12 +58,13 @@ compare = _load("solar_w1_compare", HERE / "solar_w1_compare.py")
 
 DEFAULT_STATES = ROOT / "docs" / "parity" / "evidence" / "rooftop" / "inverters"
 DEFAULT_INTAKE = ROOT / "docs" / "parity" / "evidence" / "rooftop" / "chain" / "intake.json"
+DEFAULT_COMBINER_INTAKE = DEFAULT_STATES / "combiner-intake.json"
 DEFAULT_OUT = Path("C:/tmp/solar-parity/inv-ev/studio")
 CAPABILITY_VERSION = "0"
 MAX_INTAKE_BYTES = 32 * 1024 * 1024
 EXIT_NOT_PORTED = 3
-# Steps a later slice ports (G35: LEAFCOMBINERAUTO); their named refusal does not fail this producer.
-OUT_OF_SLICE = frozenset({"i5"})
+# Steps a later slice ports; their named refusal does not fail this producer. None: G35c ported i5.
+OUT_OF_SLICE = frozenset()
 
 # Step -> (capability, command, Studio operation, before state number). G35.
 STEPS = {"i5": ("combiner-auto-place", "LEAFCOMBINERAUTO", "combiner-auto-place", 4),
@@ -93,6 +96,10 @@ CAPTURE_HOST = {
     "UseL2Collectors": True,
     # L1CollectorsPerL2: i10 printed "8 L2 x 4 slots".
     "L1CollectorsPerL2": 4,
+    # EquipmentSymbolScale of a combiner block (the module scale over the block definition's native size,
+    # host and block-definition quantities): every combiner block the capture holds carries exactly this
+    # (the devices producer's CombinerSymbolScale, scripts/solar_inverter_devices_evidence.py).
+    "CombinerSymbolScale": 2.891214911191,
     # SwitchgearReader.ReadRackExtents: the rooftop fixture holds no rack (G35a: no tracker rows), so
     # LEAFLITEFEEDERS derives no lane; i13's paths drop at each inverter's X, which only a lane-less run
     # produces.
@@ -131,11 +138,29 @@ def load_intake_groups(path):
     return [{"handle": g.get("handle"), "outlines": g.get("outlines") or []} for g in groups if isinstance(g, dict)]
 
 
-def run_engine(step, state, panel_groups, host):
+def load_combiner_intake(path):
+    """The combiner intake (format combiner-intake-v1), bounded, UTF-8 JSON (a BOM tolerated)."""
+    path = Path(path)
+    with path.open("rb") as stream:
+        raw = stream.read(MAX_INTAKE_BYTES + 1)
+    if len(raw) > MAX_INTAKE_BYTES:
+        raise EvidenceError(f"{path.name} exceeds {MAX_INTAKE_BYTES} bytes")
+    try:
+        intake = json.loads(raw.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise EvidenceError(f"{path.name} is not UTF-8 JSON: {exc}") from None
+    if not isinstance(intake, dict):
+        raise EvidenceError(f"{path.name} is not a combiner intake object")
+    return intake
+
+
+def run_engine(step, state, panel_groups, host, combiner_intake=None):
     """(after state, printed lines) of one step's Studio engine."""
     answers, forms = ENGINE_ANSWERS.get(step, STEP_ANSWERS[step]), STEP_FORM_VALUES.get(step, {})
     if step == "i5":
-        return cabling.combiner_auto_place(state, panel_groups, host, forms)
+        if combiner_intake is None:
+            raise EvidenceError("step i5 needs the combiner intake")
+        return cabling.combiner_auto_place(state, panel_groups, host, forms, combiner_intake)
     if step == "i11":
         return cabling.route_l2_feeders(state, panel_groups, host)
     if step == "i12":
@@ -215,8 +240,9 @@ def build_document(step, fixture, before, after, rows, settings, revision):
     return doc
 
 
-def run_steps(states_dir, panel_groups, host=None, revision=None, only=None):
-    """({step: document}, {step: not-ported reason}) for every owned step (or only `only`)."""
+def run_steps(states_dir, panel_groups, host=None, revision=None, only=None, combiner_intake=None):
+    """({step: document}, {step: not-ported reason}) for every owned step (or only `only`); i5 reads
+    `combiner_intake`."""
     states_dir = Path(states_dir)
     host = dict(CAPTURE_HOST if host is None else host)
     if only is not None and only not in STEPS:
@@ -229,7 +255,7 @@ def run_steps(states_dir, panel_groups, host=None, revision=None, only=None):
                 continue
             before = st.load_state(states_dir / f"state-i{STEPS[step][3]}.json")
             try:
-                after, lines = run_engine(step, before, panel_groups, host)
+                after, lines = run_engine(step, before, panel_groups, host, combiner_intake)
             except cabling.InverterCablingNotPortedError as exc:
                 refused[step] = str(exc)
                 continue
@@ -249,12 +275,15 @@ def main(argv=None):
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--intake", type=Path, default=DEFAULT_INTAKE,
                         help="the rooftop chain intake carrying the panel-group outlines")
+    parser.add_argument("--combiner-intake", type=Path, default=DEFAULT_COMBINER_INTAKE,
+                        help="i5's combiner intake (default the committed copy)")
     parser.add_argument("--step", choices=STEP_IDS)
     parser.add_argument("--revision", default=None, help="the git commit the evidence is bound to, if any")
     args = parser.parse_args(argv)
     try:
+        combiner_intake = load_combiner_intake(args.combiner_intake) if args.step in (None, "i5") else None
         docs, refused = run_steps(args.states, load_intake_groups(args.intake), revision=args.revision,
-                                  only=args.step)
+                                  only=args.step, combiner_intake=combiner_intake)
         args.out.mkdir(parents=True, exist_ok=True)
         for step, doc in docs.items():
             target = args.out / f"{step}.json"

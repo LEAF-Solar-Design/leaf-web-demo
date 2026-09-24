@@ -1,10 +1,38 @@
-"""Studio ports of the plugin's inverter cabling commands (contract G35, G35a): route-l2-feeders (i11
-RouteL2Feeders), homeruns (i12 HomerunsAuto), lightweight-cabling-feeders (i13 LEAFLITEFEEDERS),
-inverter-move (i17 MOVEINV, declared) and inverter-position (POSITIONINV, declared).
-combiner-auto-place (i5 LEAFCOMBINERAUTO) is NOT ported here: see combiner_auto_place.
+"""Studio ports of the plugin's inverter cabling commands (contract G35, G35a, G35c): combiner-auto-place
+(i5 LEAFCOMBINERAUTO), route-l2-feeders (i11 RouteL2Feeders), homeruns (i12 HomerunsAuto),
+lightweight-cabling-feeders (i13 LEAFLITEFEEDERS), inverter-move (i17 MOVEINV, declared) and
+inverter-position (POSITIONINV, declared).
 
 Literal ports of Branch2025 (read 2026-09-24 at C:/tmp/solar-parity/wt-b25-s69, master 6b940d51, the
 captured build):
+
+  combiner-auto-place (CombinerAutoCmd.Run, CombinerAutoCmd.cs:52-760), after the placement solution
+  (server/solar_inverter_combiner.py place(intake), G35c):
+    :524-569     one L1 block per placed combiner, in solution order, through PlaceNewInverterBlock
+                 (StringHomeRunCmd.cs:1363-1586): number = L1Number, the placed location, no placement
+                 marker, the combiner symbol scale (StringHomeRunCmd.cs:1480-1484, a host quantity),
+                 the CombinerBoxConnections snapshot as its input count (:1568-1575)
+    :601-622     L1ToL2Assignments merged with the solution's, L1ToL2InputAssignments seeded
+                 (MpptBalanceAnalyzer.cs:854-877) from the merged map for the solution's L1s under
+                 the host's L2NumMppt (the intake's commandContext), then one drawing-properties save
+    :3160-3221   PersistStringAssociations: each served string (combiners in L1 order) gets the
+                 combiner's number in memory, and the string -> L1 map replaces the combiner string
+                 assignment store (CombinerStringAssignmentStore.cs:85-125)
+    :3867-3931   the served string ids are the pre-built strings' cableByStringId keys; a pre-built
+                 string's EndpointA and EndpointB are its polyline's first and last vertex
+    :2413-2468   then HomerunsAuto's automatic mode (OptiHomerunCmd.Run(true, true), :121-192):
+      :141-154     every String-layer string
+      :2034-2134   DrawUtilityScaleDirectHomeruns (the same direct router as homeruns below): the
+                   existing homeruns erased, then one straight leg per string endpoint marker to the
+                   string's combiner, length / 12 in feet
+      :3506-3595   the combiner: the number the association set on the string (the cached Cable,
+                   AcadCommandBase.cs:1137-1139; else the circuit's number, Cable.cs:36-41) in the L1
+                   dictionary (:1951-1968), the one of that number or the closest to the start marker,
+                   else (L1/L2 mode) the nearest registered L1 to the markers' midpoint
+      :176-181     then RouteL2Feeders (below) when both levels are registered
+    The L2 numbers the feeder routing reads are the NUMBER attributes the state does not carry; the
+    intake's l2Inverters record them with each block's insertion point (G35c), matched here to the
+    state's L2 devices by position.
 
   route-l2-feeders (OptiHomerunCmd.RouteL2Feeders, OptiHomerunCmd.cs:1042-1368)
     :1005-1040   the phantom-L2 guard: an L2 both far from every combiner (over 4x the median nearest
@@ -101,6 +129,7 @@ def _load_sibling(name):
 
 st = _load_sibling("solar_inverter_state")
 dev = _load_sibling("solar_inverter_devices")
+comb = _load_sibling("solar_inverter_combiner")
 
 # OptiHomerunCmd.cs:1021-1022: the phantom-L2 guard.
 PHANTOM_MEDIAN_FACTOR, PHANTOM_STACK_RADIUS = 4.0, 100.0
@@ -123,7 +152,13 @@ POSITION_TIME_BUDGET_S = 10.0
 MAX_OUTLINE_VERTICES_TOTAL = 1_000_000
 MAX_DEVICES = 10_000
 UNASSIGNED_CIRCUIT = "-"
-HOST_KEYS = frozenset({"UseL2Collectors", "L1CollectorsPerL2", "RackExtents", "MovedDevice", "PositionDevice"})
+HOST_KEYS = frozenset({"UseL2Collectors", "L1CollectorsPerL2", "RackExtents", "MovedDevice", "PositionDevice",
+                       "CombinerSymbolScale"})
+# combiner-auto-place: the intake's full doubles against the state's printed ones (the dump keeps about
+# 16 significant digits), in drawing units; a match must be unique.
+MATCH_EPSILON = 1e-6
+# CombinerAutoCmd.cs:2635-2669: the input plan dialog's answer the capture gave (G30a form_values).
+INPUT_PLAN_APPLY = "Apply"
 # inverter_evidence.py:116-117: the circuits a homerun and a feeder carry.
 _HOMERUN_CIRCUIT = re.compile(r"[+-]?(?P<string>[0-9]+)/(?P<type>[A-Za-z]?)(?P<device>[0-9]+)(?P<mppt>[A-Za-z]*)")
 _FEEDER_CIRCUIT = re.compile(r"F(?P<source>[0-9]+)/(?P<target>[0-9]+)")
@@ -791,9 +826,272 @@ def inverter_position(state, panel_groups, host):
 
 # ------------------------------------------------------ combiner-auto-place --
 
-def combiner_auto_place(state, panel_groups, host, form_values):
-    """LEAFCOMBINERAUTO (i5). Not ported: the placement is CombinerPlacementEngine.Place with the
-    combiner input planner (LeafSolarDesign.Core/CombinerPlacement, about 7,000 lines: StringPartitioner,
-    CombinerPositioner, AlleyDetector, PlacementSpace, CombinerStringOptimizer, VdropValidator,
-    CombinerBoxAutoResizer) over panel-group matrix data the G35 state does not carry."""
-    raise InverterCablingNotPortedError("LEAFCOMBINERAUTO's CombinerPlacementEngine and combiner input planner")
+def seed_input_assignments(l1_to_l2, l2_num_mppt):
+    """MpptBalanceAnalyzer.SeedDefaultL1ToL2InputAssignments (MpptBalanceAnalyzer.cs:854-877): the L1s of
+    each L2, in number order, take MPPT slots 0, 1, ... modulo the L2's MPPT count."""
+    result = {}
+    if not l1_to_l2 or l2_num_mppt <= 0:
+        return result
+    by_l2 = {}
+    for l1, l2 in l1_to_l2.items():
+        by_l2.setdefault(l2, []).append(l1)
+    for l1s in by_l2.values():
+        for index, l1 in enumerate(sorted(l1s)):
+            result[l1] = index % l2_num_mppt
+    return result
+
+
+def _int_map(value, name):
+    """A stored {number: number} setting as ints (absent or empty: {}); fails closed on anything else."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise InverterCablingError(f"setting {name} must be an object of numbers")
+    out = {}
+    for key, item in value.items():
+        if not (isinstance(key, str) and re.fullmatch(r"-?[0-9]{1,9}", key)) or type(item) is not int:
+            raise InverterCablingError(f"setting {name} must map numbers to numbers")
+        out[int(key)] = item
+    return out
+
+
+def _stored_map(mapping):
+    return {str(key): mapping[key] for key in sorted(mapping)}
+
+
+class _PointIndex:
+    """Points bucketed on a unit grid: a MATCH_EPSILON lookup reads at most 9 cells (no N x M scan)."""
+
+    def __init__(self):
+        self.cells = {}
+
+    @staticmethod
+    def _cell(p):
+        return (math.floor(p[0]), math.floor(p[1]))
+
+    def add(self, p, item):
+        self.cells.setdefault(self._cell(p), []).append((p, item))
+
+    def near(self, p):
+        cx, cy = self._cell(p)
+        return [item for dx in (-1, 0, 1) for dy in (-1, 0, 1)
+                for q, item in self.cells.get((cx + dx, cy + dy), ()) if _dist(p, q) <= MATCH_EPSILON]
+
+
+def _intake_context(intake):
+    context = intake.get("commandContext") if isinstance(intake, dict) else None
+    if not isinstance(context, dict):
+        raise InverterCablingError("the combiner intake carries no commandContext")
+    values = {}
+    for key in ("l2NumMppt", "combinerBoxConnections"):
+        value = context.get(key, 0)
+        if type(value) is not int or value < 0:
+            raise InverterCablingError(f"the combiner intake's commandContext.{key} must be a non-negative integer")
+        values[key] = value
+    return values
+
+
+def _number_l2_from_intake(new, intake):
+    """The L2 NUMBER attributes (App.gL2CollectorList, DocumentEventHandler.cs:310-318) as the intake's
+    l2Inverters record them, set on the state's L2 devices matched by insertion point. Every intake L2
+    must match exactly one state L2 and every state L2 one intake L2, or the intake is not this state's."""
+    inputs = intake.get("inputs") if isinstance(intake, dict) else None
+    raw = inputs.get("l2Inverters") if isinstance(inputs, dict) else None
+    if not isinstance(raw, list) or len(raw) > MAX_DEVICES:
+        raise InverterCablingError("the combiner intake carries no l2Inverters list")
+    index = _PointIndex()
+    l2_rows = [row for row in new["rows"]["device"] if dev._is_l2(row)]
+    for row in l2_rows:
+        index.add(_xy(row["position"]), row)
+    numbered = set()
+    for i, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise InverterCablingError(f"l2Inverters[{i}] must be an object")
+        try:
+            number = comb._int(item.get("Number"), f"l2Inverters[{i}].Number")
+            point = comb._point(item.get("InsertPt"), f"l2Inverters[{i}].InsertPt", upper=True)
+        except comb.PlacementError as exc:
+            raise InverterCablingError(str(exc)) from None
+        hits = index.near(point)
+        if len(hits) != 1 or id(hits[0]) in numbered:
+            raise InverterCablingError(f"the intake's L2 {number} matches no single L2 device of the state")
+        numbered.add(id(hits[0]))
+        hits[0]["_number"] = number
+    if len(numbered) != len(l2_rows):
+        raise InverterCablingError("the state holds an L2 device the combiner intake does not record")
+
+
+def _string_ids(new, intake):
+    """{pre-built string id: String-layer string handle}: each intake string (CombinerAutoCmd.cs:3867-3931)
+    matched to the one state string whose first and last polyline vertex are its EndpointA and EndpointB."""
+    try:
+        strings = comb.build_strings(intake)
+    except comb.PlacementError as exc:
+        raise InverterCablingError(str(exc)) from None
+    index = _PointIndex()
+    for g in new["geometry"]["strings"]:
+        vertices = g.get("vertices") if isinstance(g, dict) else None
+        if not isinstance(vertices, list) or not vertices or g.get("string") is None:
+            continue
+        first = dev._finite_xy(vertices[0], "string vertex")
+        last = dev._finite_xy(vertices[-1], "string vertex")
+        index.add(first, (g["string"], last))
+    ids = {}
+    for s in strings:
+        hits = [handle for handle, last in index.near(s.endpoint_a) if _dist(last, s.endpoint_b) <= MATCH_EPSILON]
+        if len(hits) != 1:
+            raise InverterCablingError(f"the intake's string {s.string_number} matches no single string of the state")
+        if s.string_number in ids:
+            raise InverterCablingError(f"the intake repeats the string id {s.string_number}")
+        ids[s.string_number] = hits[0]
+    return ids
+
+
+def _draw_direct_homeruns(new, association, host, lines):
+    """HomerunsAuto's automatic mode (OptiHomerunCmd.Run(true, true), :121-192) on `new`, in place: every
+    String-layer string, the existing homeruns erased (:3884), one straight leg per endpoint marker to the
+    string's combiner (DrawUtilityScaleDirectHomeruns, :2034-2134). Returns the legs drawn."""
+    l1, _ = levels(new)
+    by_number = {}
+    for item in l1:                                    # FindAllInverterBlocks (:1951-1968)
+        by_number.setdefault(item["number"], []).append(item)
+    if not by_number:
+        lines.append("No inverters found in drawing. Place inverters first.")
+        return 0
+    strings = _strings(new)
+    if not strings:
+        lines.append("No strings selected.")
+        return 0
+    lines.append(f"{len(strings)} strings selected.")
+    new["rows"]["cable"] = [row for row in new["rows"]["cable"] if row.get("cable_kind") != "dc-homerun"]
+    use_l2 = _host_bool(host, "UseL2Collectors")
+    drawn = fallback = 0
+    for item in strings:
+        number = association.get(item["string"])
+        if number is None:
+            number = _homerun_to(item["circuit"])      # Cable.cs:36-41: the circuit's number
+        target = None
+        candidates = by_number.get(number)
+        if candidates:                                 # FindClosestInverter (:3506-3551)
+            target = candidates[0]
+            if len(candidates) > 1 and item["start"] is not None:
+                best = _dist(item["start"], target["position"])
+                for candidate in candidates:
+                    d = _dist(item["start"], candidate["position"])
+                    if d < best:
+                        best, target = d, candidate
+        elif use_l2:                                   # FindNearestRegisteredL1Combiner (:3553-3595)
+            anchor = item["start"] if item["end"] is None else item["end"] if item["start"] is None else \
+                ((item["start"][0] + item["end"][0]) / 2.0, (item["start"][1] + item["end"][1]) / 2.0)
+            if anchor is not None:
+                best = math.inf
+                for candidate in l1:
+                    d = _dist(anchor, candidate["position"])
+                    if d < best:
+                        best, target = d, candidate
+                if target is not None:
+                    fallback += 1
+        if target is None or (item["start"] is None and item["end"] is None):
+            continue
+        for segment, leg in (("start", item["start"]), ("end", item["end"])):
+            if leg is None:
+                continue
+            new["rows"]["cable"].append(_homerun_row(new, item["string"], segment, item["circuit"], leg,
+                                                     target["position"],
+                                                     _dist(leg, target["position"]) / INCHES_PER_FOOT))
+            drawn += 1
+    lines.append(f"HomerunsAuto: drew {drawn} straight-line DC homerun(s).")
+    if fallback:
+        lines.append(f"HomerunsAuto: assigned {fallback} string(s) to nearest L1 combiner because their circuit "
+                     f"tag did not match a registered combiner number.")
+    return drawn
+
+
+def combiner_auto_place(state, panel_groups, host, form_values, intake):
+    """LEAFCOMBINERAUTO (i5) on the Studio state: the placement solution of `intake` (the command's
+    input-before-placement dump, G35c; place() is the port of CombinerPlacementEngine.Place), its L1
+    blocks inserted, the L1/L2 and string/L1 associations persisted, then HomerunsAuto's automatic mode
+    (direct homeruns, then RouteL2Feeders). Returns (new state, printed lines)."""
+    host = _host(host)
+    outlines = validate_outlines(panel_groups)
+    if not isinstance(form_values, dict) or form_values != {"combiner_input_plan": INPUT_PLAN_APPLY}:
+        raise InverterCablingError('LEAFCOMBINERAUTO takes the form value {"combiner_input_plan": "Apply"}')
+    if not isinstance(intake, dict):
+        raise InverterCablingError("LEAFCOMBINERAUTO needs its combiner intake")
+    if not _host_bool(host, "UseL2Collectors"):
+        raise InverterCablingNotPortedError("LEAFCOMBINERAUTO outside L1/L2 mode (legacy single-level blocks)")
+    context = _intake_context(intake)
+    inputs = intake.get("inputs")
+    if not isinstance(inputs, dict):
+        raise InverterCablingError("the combiner intake carries no inputs")
+    new = copy.deepcopy(state)
+    if any(not dev._is_l2(row) for row in new["rows"]["device"]) or inputs.get("existingL1s"):
+        raise InverterCablingNotPortedError("LEAFCOMBINERAUTO over existing L1 combiners")
+    installation = new["setting"].get("InstallationDesign", st.DECLARED_DEFAULTS["InstallationDesign"])
+    try:
+        solution = comb.place(intake, installation)
+    except comb.PlacementError as exc:
+        if "not ported" in str(exc):
+            raise InverterCablingNotPortedError(str(exc)) from None
+        raise InverterCablingError(str(exc)) from None
+    lines = []
+    placed = solution["combiners"]
+    if not placed:                                     # CombinerAutoCmd.cs:493-503
+        lines.append("LEAFCOMBINERAUTO: No combiners produced. See warnings above.")
+        return new, lines
+    _number_l2_from_intake(new, intake)
+    string_ids = _string_ids(new, intake)
+    try:
+        scale = dev._symbol_scale(host, False)
+    except dev.InverterDeviceError as exc:
+        raise InverterCablingError(str(exc)) from None
+
+    # 7. The L1 blocks (CombinerAutoCmd.cs:524-569, StringHomeRunCmd.cs:1363-1586).
+    for pc in placed:
+        location = pc["location"]
+        new["rows"]["device"].append(dev._device_row(
+            new, is_l2=False, x=float(location["x"]), y=float(location["y"]), scale=scale, placement=None,
+            number=pc["L1Number"], box_inputs=context["combinerBoxConnections"]))
+
+    # 8. L1/L2 assignments and the seeded MPPT inputs, one save (CombinerAutoCmd.cs:601-622).
+    solution_map = {int(k): v for k, v in solution["l1ToL2Assignments"].items()}
+    assignments = _int_map(new["setting"].get("L1ToL2Assignments"), "L1ToL2Assignments")
+    assignments.update(solution_map)
+    new["setting"]["L1ToL2Assignments"] = _stored_map(assignments)
+    if context["l2NumMppt"] > 0:
+        slots = _int_map(new["setting"].get("L1ToL2InputAssignments"), "L1ToL2InputAssignments")
+        for l1, slot in seed_input_assignments(assignments, context["l2NumMppt"]).items():
+            if l1 in solution_map:
+                slots[l1] = slot
+        new["setting"]["L1ToL2InputAssignments"] = _stored_map(slots)
+    st.save_drawing_properties(new)
+
+    # PersistStringAssociations (CombinerAutoCmd.cs:3160-3221).
+    string_to_l1, association = {}, {}
+    for pc in sorted(placed, key=lambda c: c["L1Number"]):
+        for string_id in pc["ServedStringIds"]:
+            handle = string_ids.get(string_id)
+            if handle is None:
+                continue
+            string_to_l1[string_id] = pc["L1Number"]
+            association[handle] = pc["L1Number"]
+    if string_to_l1:
+        new["setting"][st.L1_SETTING] = _stored_map(string_to_l1)
+
+    total = sum(pc["InputCountUsed"] for pc in placed)
+    distinct_l2 = len(set(solution_map.values()))
+    lines.append(f"LEAFCOMBINERAUTO: placed {len(placed)} of {len(placed)} combiner(s) for {total} strings across "
+                 f"{distinct_l2} L2 inverter(s). Associated {len(string_to_l1)} string(s) to L1 combiner blocks.")
+
+    # TryRouteCablingAfterCombinerPlacement (CombinerAutoCmd.cs:2413-2468).
+    lines.append("LEAFCOMBINERAUTO: routing DC cabling now via HomerunsAuto automatic mode.")
+    homeruns = _draw_direct_homeruns(new, association, host, lines)
+    l1, l2 = levels(new)
+    if l1 and l2:                                      # OptiHomerunCmd.cs:176-181
+        _route_l2_feeders(new, outlines, host, lines)
+    feeders = sum(1 for row in new["rows"]["cable"] if row.get("cable_kind") == "feeder")
+    if homeruns > 0 and (not l2 or feeders > 0):
+        lines.append(f"LEAFCOMBINERAUTO: automatic cabling complete ({homeruns} DC homerun cable(s), "
+                     f"{feeders} feeder cable(s)).")
+    st.sort_rows(new)
+    return new, lines

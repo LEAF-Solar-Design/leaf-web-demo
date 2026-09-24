@@ -1,10 +1,11 @@
 """Studio's G35 evidence for the inverter cabling steps (i5, i11, i12, i13, i17, inverter-position).
 
-A synthetic G35 state chain (state-i0, i4, i10, i11, i12, i16) and a synthetic panel-group intake run
-the producer end to end: the documents in the plugin adapter's shape (parameters with the G22 answers,
-one fixture hash, the delta rows and the report rows), LEAFCOMBINERAUTO named as not ported with
-nothing written for it and exit status 3, the declared steps marked, one step alone equal to the same
-step of a full run, and the refusals (a missing state, a bad revision) writing nothing.
+A synthetic G35 state chain (state-i0, i10, i11, i12, i16), the committed state-i4 with its committed
+combiner intake (LEAFCOMBINERAUTO reads the drawing its intake was dumped from) and a synthetic
+panel-group intake run the producer end to end: the documents in the plugin adapter's shape (parameters
+with the G22 answers and G30a form values, one fixture hash, the delta rows and the report rows), every
+step written with exit status 0, the declared steps marked, one step alone equal to the same step of a
+full run, and the refusals (a missing state, a bad revision, i5 without its intake) writing nothing.
 """
 from __future__ import annotations
 
@@ -79,12 +80,16 @@ def state():
                                            "rotation_deg": 0.0} for g in GROUPS]}}
 
 
+COMMITTED = ev.DEFAULT_STATES
+
+
 @pytest.fixture()
 def chain(tmp_path):
     states = tmp_path / "states"
     states.mkdir()
-    for number in (0, 4, 10, 11, 12, 16):
+    for number in (0, 10, 11, 12, 16):
         (states / f"state-i{number}.json").write_text(json.dumps(state()), encoding="utf-8")
+    (states / "state-i4.json").write_bytes((COMMITTED / "state-i4.json").read_bytes())
     intake = tmp_path / "intake.json"
     intake.write_text(json.dumps({"panel_groups": GROUPS}), encoding="utf-8")
     return states, intake
@@ -94,15 +99,24 @@ def rows_of(doc, kind):
     return [r for r in doc["after"]["rows"] if r["type"] == kind]
 
 
-def test_the_producer_writes_every_ported_step_and_names_i5(chain, tmp_path, capsys):
+def test_the_producer_writes_every_step(chain, tmp_path, capsys):
     states, intake = chain
     out = tmp_path / "out"
-    code = ev.main(["--states", str(states), "--intake", str(intake), "--out", str(out)])
-    assert code == 0  # only i5 refused, and a later slice owns it
+    code = ev.main(["--states", str(states), "--intake", str(intake), "--out", str(out),
+                    "--combiner-intake", str(COMMITTED / "combiner-intake.json")])
+    assert code == 0
     written = sorted(p.name for p in out.iterdir())
-    assert written == ["i11.json", "i12.json", "i13.json", "i17.json", "position.json"]
-    assert "i5 combiner-auto-place not written: not ported" in capsys.readouterr().err
+    assert written == ["i11.json", "i12.json", "i13.json", "i17.json", "i5.json", "position.json"]
+    assert "not written" not in capsys.readouterr().err
     docs = {name[:-5]: json.loads((out / name).read_text(encoding="utf-8")) for name in written}
+    assert docs["i5"]["parameters"] == {"answers": [], "form_values": {"combiner_input_plan": "Apply"}}
+    counts = {}
+    for row in docs["i5"]["after"]["rows"]:
+        key = (row["type"], row.get("cable_kind"))
+        counts[key] = counts.get(key, 0) + 1
+    assert counts == {("cable", "dc-homerun"): 346, ("cable", "feeder"): 14, ("device", None): 14,
+                      ("setting", None): 4}
+    assert all(r["role"] == "combiner" and r["change"] == "added" for r in rows_of(docs["i5"], "device"))
     fixture = st.digest(st.publish(st.load_state(states / "state-i0.json")))
     assert {doc["fixture_sha256"] for doc in docs.values()} == {fixture}
     assert rows_of(docs["i11"], "report")[0]["value"] == "no-feeders"
@@ -124,10 +138,13 @@ def test_the_producer_writes_every_ported_step_and_names_i5(chain, tmp_path, cap
 def test_one_step_alone_equals_the_full_run(chain):
     states, intake = chain
     groups = ev.load_intake_groups(intake)
-    full, refused = ev.run_steps(states, groups, revision=REVISION)
+    combiner = ev.load_combiner_intake(COMMITTED / "combiner-intake.json")
+    full, refused = ev.run_steps(states, groups, revision=REVISION, combiner_intake=combiner)
     alone, _ = ev.run_steps(states, groups, revision=REVISION, only="i13")
-    assert alone == {"i13": full["i13"]} and set(refused) == {"i5"}
+    assert alone == {"i13": full["i13"]} and refused == {}
     assert full["i13"]["revision"] == REVISION and full["i13"]["fallback_fields"] == []
+    five, _ = ev.run_steps(states, groups, revision=REVISION, only="i5", combiner_intake=combiner)
+    assert five == {"i5": full["i5"]}
 
 
 def test_refusals_write_nothing(chain, tmp_path):
@@ -138,3 +155,10 @@ def test_refusals_write_nothing(chain, tmp_path):
     assert not out.exists()
     with pytest.raises(ev.EvidenceError):
         ev.run_steps(states, ev.load_intake_groups(intake), revision="HEAD", only="i11")
+    with pytest.raises(ev.EvidenceError, match="combiner intake"):
+        ev.run_steps(states, ev.load_intake_groups(intake), only="i5")
+    bad = tmp_path / "bad-intake.json"
+    bad.write_text("[1, 2]", encoding="utf-8")
+    assert ev.main(["--states", str(states), "--intake", str(intake), "--out", str(out),
+                    "--combiner-intake", str(bad), "--step", "i5"]) == 2
+    assert not out.exists()
