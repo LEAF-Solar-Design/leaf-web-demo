@@ -518,6 +518,8 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_solar_inverter_strings.py"), 16),
         Suite("server-solar-inverter-outputs", "server tests/test_solar_inverter_outputs.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_inverter_outputs.py"), 22),
+        Suite("server-solar-inverter-cabling", "server tests/test_solar_inverter_cabling.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_inverter_cabling.py"), 20),
         # W5 terrain d-steps (2026-09-23, contract G28): trench routing, the export preview, the
         # Yield zip byte for byte, and trackers to panel groups through the key-aware row reader.
         Suite("server-solar-ground-dsteps", "server tests/test_solar_ground_dsteps.py",
@@ -1943,6 +1945,8 @@ def build_suites() -> List[Suite]:
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_inverter_strings_evidence.py"), 7),
         Suite("scripts-solar-inverter-outputs-evidence", "scripts test_solar_inverter_outputs_evidence.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_inverter_outputs_evidence.py"), 6),
+        Suite("scripts-solar-inverter-cabling-evidence", "scripts test_solar_inverter_cabling_evidence.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_inverter_cabling_evidence.py"), 3),
         Suite("scripts-solar-ground-dsteps-evidence", "scripts test_solar_ground_dsteps_evidence.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_dsteps_evidence.py"), 12),
         # G30 dialog-batch evidence (e1, e4, e6): the committed terrain intake and pile-template
