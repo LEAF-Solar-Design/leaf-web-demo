@@ -149,6 +149,10 @@ test.describe('shared phone workspace', () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true })
 
   test('all four profiles share one band and exclusive bottom drawers', async ({ page, request }) => {
+    // Five profile switches and twenty drawer toggles: 36 to 45 s on a calm host, 60 to 66 s at about
+    // 900 host processes on every commit tried (ctlbase e887e943, ctlprod f5599f86, ctlcand ae5dc847,
+    // 2026-09-24), so the default 60 s budget failed on load, not on a regression. Siblings here use 180 s.
+    test.setTimeout(120_000)
     await boot(page, request)
     const panels = page.getByRole('group', { name: 'Workspace panels', exact: true })
     // .rail-stack is the shared wrapper for Jobs and Plan.
