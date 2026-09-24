@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   assertHarnessCatalog,
+  CONSUMED_CONFIRMATION_STATUS_CHECK,
+  HELD_CONFIRMATION_STATUS_CHECK,
+  withWidenedConfirmationStatusAccepted,
   type HarnessCatalog,
   type HarnessColumn,
 } from "../src/ports/impl/harnessSchema.js";
@@ -175,5 +178,80 @@ describe("assertHarnessCatalog", () => {
     )!;
     generation.data_type = "integer";
     expect(() => assertHarnessCatalog(catalog)).toThrow(/generation/);
+  });
+});
+
+describe("assertHarnessCatalog across the AD4b-2 status CHECK widening", () => {
+  function confirmationCheck(catalog: HarnessCatalog) {
+    return catalog.constraints.find(
+      (constraint) =>
+        constraint.table_name === "harness_confirmations" &&
+        constraint.definition.startsWith("CHECK"),
+    )!;
+  }
+
+  function withConsumedColumns(catalog: HarnessCatalog): HarnessCatalog {
+    catalog.columns.push(
+      ...columns("harness_confirmations", {
+        consumed_at: ["timestamp with time zone", "YES"],
+        consumed_by: ["text", "YES"],
+      }),
+    );
+    return catalog;
+  }
+
+  it("accepts the 0066 schema (consumed columns, held CHECK)", () => {
+    expect(() => assertHarnessCatalog(withConsumedColumns(validCatalog()))).not.toThrow();
+  });
+
+  it("accepts the widened CHECK that AD4b-2 installs", () => {
+    const catalog = withConsumedColumns(validCatalog());
+    confirmationCheck(catalog).definition = CONSUMED_CONFIRMATION_STATUS_CHECK;
+    expect(() => assertHarnessCatalog(catalog)).not.toThrow();
+  });
+
+  it("accepts the widened CHECK with different whitespace and case", () => {
+    const catalog = withConsumedColumns(validCatalog());
+    confirmationCheck(catalog).definition =
+      `  ${CONSUMED_CONFIRMATION_STATUS_CHECK.replace(/ /g, "  ").toLowerCase()} `;
+    expect(() => assertHarnessCatalog(catalog)).not.toThrow();
+  });
+
+  it("rejects a CHECK that admits any other extra status", () => {
+    const catalog = withConsumedColumns(validCatalog());
+    confirmationCheck(catalog).definition = CONSUMED_CONFIRMATION_STATUS_CHECK.replace(
+      "'consumed'::text", "'bogus'::text",
+    );
+    expect(() => assertHarnessCatalog(catalog)).toThrow(/harness_confirmations\.constraint/);
+  });
+
+  it("rejects a missing status CHECK", () => {
+    const catalog = withConsumedColumns(validCatalog());
+    const check = confirmationCheck(catalog);
+    catalog.constraints = catalog.constraints.filter((constraint) => constraint !== check);
+    expect(() => assertHarnessCatalog(catalog)).toThrow(/harness_confirmations\.constraint/);
+  });
+
+  it("does not let the widened CHECK on another table stand in", () => {
+    const catalog = withConsumedColumns(validCatalog());
+    const check = confirmationCheck(catalog);
+    check.table_name = "harness_usage";
+    check.definition = CONSUMED_CONFIRMATION_STATUS_CHECK;
+    expect(() => assertHarnessCatalog(catalog)).toThrow(/harness_confirmations\.constraint/);
+  });
+
+  it("never mutates its input and returns the same object when nothing widens", () => {
+    const held = validCatalog();
+    expect(withWidenedConfirmationStatusAccepted(held)).toBe(held);
+    const catalog = withConsumedColumns(validCatalog());
+    confirmationCheck(catalog).definition = CONSUMED_CONFIRMATION_STATUS_CHECK;
+    const before = JSON.stringify(catalog);
+    const result = withWidenedConfirmationStatusAccepted(catalog);
+    expect(JSON.stringify(catalog)).toBe(before);
+    expect(result.constraints).toHaveLength(catalog.constraints.length + 1);
+    expect(result.constraints[result.constraints.length - 1]).toEqual({
+      table_name: "harness_confirmations",
+      definition: HELD_CONFIRMATION_STATUS_CHECK,
+    });
   });
 });

@@ -569,6 +569,9 @@ _AUTHORITY_REQUIRED_COLUMNS = {
         "harness_confirmations": {
             "confirmation_id", "session_id", "turn_id", "action", "args_json", "kind",
             "status", "created_at", "expires_at", "decided_at", "decided_by",
+            # 0066 (magpie AD4b): the Kit's consumption columns. Required so a
+            # database without the migration fails readiness loudly.
+            "consumed_at", "consumed_by",
         },
         "harness_usage": {"usage_id", "session_id", "turn_id", "usage", "ts"},
         "harness_tenant_repo_leases": {
