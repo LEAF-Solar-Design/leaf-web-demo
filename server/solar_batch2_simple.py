@@ -14,6 +14,8 @@ malformed input (BatchTwoError); nothing here touches a drawing or a store.
 """
 from __future__ import annotations
 
+import re
+
 from decimal import Decimal, ROUND_HALF_UP
 import math
 
@@ -100,6 +102,98 @@ def zone_rows(state, zones_after):
     if before == zones_after:
         return []
     return [(f"elevation-zone-{number}", zone) for number, zone in enumerate(zones_after, 1)]
+
+
+# ---------------------------------------------------------------------------------------------
+# z2, z3: elevation zone assignment (Commands.cs LEAFZONEASSIGNPANELHEIGHT :3748-3916, LEAFZONEASSIGNSTRINGS
+# :3921-4033), both reached from the palette's height zone (ZonesStepPanel.ElevAssignPanels_Click :1355-1374).
+
+MAX_PANELS = 1_000_000
+_HANDLE = re.compile(r"[0-9A-F]{1,16}")
+
+
+def _assign_intake(intake):
+    _require(isinstance(intake, dict) and intake.get("format") == "zone-assign-intake-v1",
+             "the intake is not a zone assign intake")
+    units = intake.get("units")
+    _require(units in ("in", "ft", "mm", "cm", "m"), "the zone assign intake has no drawing units")
+    zones = intake.get("elevation_zones")
+    _require(isinstance(zones, list) and len(zones) <= MAX_ZONES, "the stored zone list is invalid")
+    panels = intake.get("panels")
+    _require(isinstance(panels, list) and len(panels) <= MAX_PANELS, "the intake panels are invalid")
+    for panel in panels:
+        _require(isinstance(panel, dict) and set(panel) == {"panel", "size", "colour"}
+                 and type(panel["panel"]) is str and _HANDLE.fullmatch(panel["panel"])
+                 and (panel["size"] is None or type(panel["size"]) is str) and type(panel["colour"]) is int,
+                 "an intake panel is invalid")
+    strings = intake.get("strings")
+    _require(isinstance(strings, list) and len(strings) <= MAX_PANELS
+             and all(type(h) is str and _HANDLE.fullmatch(h) for h in strings), "the intake strings are invalid")
+    return units, [_zone(zone, units) for zone in zones], panels, strings
+
+
+def _zone_named(zones, name):
+    """zones.FirstOrDefault(z => z.Name equals name, OrdinalIgnoreCase) (Commands.cs:3772-3773)."""
+    for zone in zones:
+        if zone["name"].upper() == name.upper():
+            return zone
+    return None
+
+
+def _move_into(zones, zone, key, handle):
+    """Remove the handle from every zone's list, then add it to the target once (Commands.cs:3866-3875, :3998-4006)."""
+    for other in zones:
+        while handle in other[key]:
+            other[key].remove(handle)
+    if handle not in zone[key]:
+        zone[key].append(handle)
+
+
+def zone_assign_panels(intake, zones, height_zone, reference):
+    """LEAFZONEASSIGNPANELHEIGHT with the reference panel picked by handle (its layer sets the "*layer*" filter and
+    its rectangle size the signature, Commands.cs:3789-3811, EntitySignature, HandleResolver.cs:24-83) and ALL:
+    every panel of the intake in the selection's order (descending handle), the signature-matching ones moved into
+    the zone and given its colour (:3848-3877). Returns (zones after, {panel: colour} of the recoloured, skipped)."""
+    units, _, panels, _ = _assign_intake(intake)
+    zones = [_zone(zone, units) for zone in zones]
+    zone = _zone_named(zones, height_zone)
+    _require(zone is not None, "the pending height zone is not in the drawing")
+    by_handle = {panel["panel"]: panel for panel in panels}
+    _require(reference in by_handle, "the reference panel is not one of the intake panels")
+    signature = by_handle[reference]["size"]
+    recoloured, skipped = {}, 0
+    for panel in panels:
+        if signature is not None and panel["size"] != signature:
+            skipped += 1
+            continue
+        _move_into(zones, zone, "panels", panel["panel"])
+        if panel["colour"] != zone["colour"]:
+            recoloured[panel["panel"]] = zone["colour"]
+    return zones, recoloured, skipped
+
+
+def zone_assign_strings(intake, zones, height_zone):
+    """LEAFZONEASSIGNSTRINGS with ALL: every String-layer polyline with a string record (the intake's strings, the
+    selection's descending-handle order) moved into the pending zone (Commands.cs:3979-4007)."""
+    units, _, _, strings = _assign_intake(intake)
+    zones = [_zone(zone, units) for zone in zones]
+    zone = _zone_named(zones, height_zone)
+    _require(zone is not None, "the pending height zone is not in the drawing")
+    for handle in strings:
+        _move_into(zones, zone, "strings", handle)
+    return zones
+
+
+def zone_assign_rows(zones_before, zones_after, recoloured=None):
+    """z2 and z3 rows (the plugin adapter's rule): every zone after when the list changed, then one `recoloured`
+    row per panel whose colour changed, in selection order."""
+    rows = {}
+    if zones_before != zones_after:
+        rows["elevation-zone"] = [(f"elevation-zone-{n}", zone) for n, zone in enumerate(zones_after, 1)]
+    if recoloured:
+        rows["recoloured"] = [(f"recoloured-{n}", {"panel": handle, "colour": colour})
+                              for n, (handle, colour) in enumerate(recoloured.items(), 1)]
+    return rows
 
 
 # ---------------------------------------------------------------------------------------------
