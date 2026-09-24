@@ -2715,6 +2715,8 @@ export default function App() {
   // for a tenant with no overlay (useSurfaceContract's own contract).
   const surfaceSlots = useSurfaceContract(activeSurface, mock)
   const boardVisible = !!studioGround && (startOpen || surfaceSlots.ground === 'board')
+  // The Browser board's panel slot hosts the project panels; CAD and Solar Start keep them inline because they pass no panel.
+  const boardHostsProject = boardVisible && surfaceSlots.ground === 'board'
   const effectiveGround = studioGround ? (boardVisible ? 'board' : surfaceGround(activeSurface)) : null
   const leavingGround = useLeavingGround(effectiveGround)
   // Keeps its name: ~20 sites read `studioGround && drafting`, and the App
@@ -3602,11 +3604,11 @@ export default function App() {
         </>)}
 
         <SurfaceFrame.Tabs />
-        {!mock && openProjectId && (
+        {!boardHostsProject && !mock && openProjectId && (
           <CampaignPanel projectId={openProjectId} projectName={currentProjectName} signedIn={signedIn} authorityProvider={authorAuthorityProvider} />
         )}
 
-        {!mock && openProjectId && (
+        {!boardHostsProject && !mock && openProjectId && (
           <WorkspaceSummary
             workspace={workspace}
             loading={wsLoading}
@@ -3698,6 +3700,18 @@ export default function App() {
                   artifacts={workspace?.drawing_artifacts || []}
                   onAttached={rehydrate}
                 />)}
+              {!mock && openProjectId && (
+                <CampaignPanel projectId={openProjectId} projectName={currentProjectName} signedIn={signedIn} authorityProvider={authorAuthorityProvider} />
+              )}
+              {!mock && openProjectId && (
+                <WorkspaceSummary
+                  workspace={workspace}
+                  loading={wsLoading}
+                  selectedVersionId={canonicalVersionId}
+                  onSelectVersion={selectCanonicalVersion}
+                  onClose={onCloseProject}
+                />
+              )}
             </> : undefined}
             workspace={!mock && openProjectId ? workspace : null}
             drawing={shown ? { name: projectName, polylines: shown.polylines.length, layers: shown.layers.length } : null}
