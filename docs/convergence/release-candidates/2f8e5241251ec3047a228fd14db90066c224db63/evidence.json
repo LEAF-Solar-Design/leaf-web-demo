@@ -3,7 +3,7 @@
  "candidate": "2f8e5241251ec3047a228fd14db90066c224db63",
  "tree": "8088e232e0ae7560bbdfe38b6353d7a6087042c1",
  "previous_production": "ae5dc847b4f329a724fdd1b1ffec17a3bd54ffa6",
- "assembled_at": "2026-09-24T08:58:10Z",
+ "assembled_at": "2026-09-24T09:06:39Z",
  "results": [
   {
    "id": "staging-served",
@@ -68,16 +68,16 @@
     }
    },
    "fixed_since_baseline": [
-    "e2e\\local\\cockpit-viewports.spec.mjs › shared phone workspace › all four profiles share one band and exclusive bottom drawers",
-    "e2e\\local\\one-shell-mount.spec.mjs › J1 row1, J1 row2, J1 row4, J1 row5, J1 row8: served Browser panes, first run, material and drawing-profile continuity",
-    "e2e\\local\\uploaded-drawing-run.spec.mjs › an uploaded DXF remains the authorized target of a catalog run"
+    "e2e\\local\\cockpit-viewports.spec.mjs > shared phone workspace > all four profiles share one band and exclusive bottom drawers",
+    "e2e\\local\\one-shell-mount.spec.mjs > J1 row1, J1 row2, J1 row4, J1 row5, J1 row8: served Browser panes, first run, material and drawing-profile continuity",
+    "e2e\\local\\uploaded-drawing-run.spec.mjs > an uploaded DXF remains the authorized target of a catalog run"
    ],
    "new_failures": [],
    "still_failing": [],
    "missing_rows": [],
    "alone_reruns": [
     {
-     "title": "e2e\\local\\one-shell-mount.spec.mjs › route matrix, rail ON › W4g bleed-2b: profile switches settle, fade inertly and keep one canvas",
+     "title": "e2e\\local\\one-shell-mount.spec.mjs > route matrix, rail ON > W4g bleed-2b: profile switches settle, fade inertly and keep one canvas",
      "result": "passed alone"
     }
    ],

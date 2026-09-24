@@ -52,11 +52,11 @@ Each row names its source, where it was measured, the command, the counts and it
 
 Baseline main `2ccbeccd`: 78 passed, 3 failed, 1 skipped. Candidate: 84 passed, 0 failed, 1 skipped, 1 flaky.
 
-- fixed since the baseline: e2e\local\cockpit-viewports.spec.mjs › shared phone workspace › all four profiles share one band and exclusive bottom drawers
-- fixed since the baseline: e2e\local\one-shell-mount.spec.mjs › J1 row1, J1 row2, J1 row4, J1 row5, J1 row8: served Browser panes, first run, material and drawing-profile continuity
-- fixed since the baseline: e2e\local\uploaded-drawing-run.spec.mjs › an uploaded DXF remains the authorized target of a catalog run
+- fixed since the baseline: e2e\local\cockpit-viewports.spec.mjs > shared phone workspace > all four profiles share one band and exclusive bottom drawers
+- fixed since the baseline: e2e\local\one-shell-mount.spec.mjs > J1 row1, J1 row2, J1 row4, J1 row5, J1 row8: served Browser panes, first run, material and drawing-profile continuity
+- fixed since the baseline: e2e\local\uploaded-drawing-run.spec.mjs > an uploaded DXF remains the authorized target of a catalog run
 - new failures: none
-- re-run alone after a timing failure in the full walk: e2e\local\one-shell-mount.spec.mjs › route matrix, rail ON › W4g bleed-2b: profile switches settle, fade inertly and keep one canvas (passed alone)
+- re-run alone after a timing failure in the full walk: e2e\local\one-shell-mount.spec.mjs > route matrix, rail ON > W4g bleed-2b: profile switches settle, fade inertly and keep one canvas (passed alone)
 
 ### Production plan
 
