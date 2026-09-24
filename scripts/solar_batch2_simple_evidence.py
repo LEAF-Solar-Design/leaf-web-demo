@@ -52,6 +52,8 @@ STEPS = {
     "s4": ("shade-loss-heatmap-clear", "m", "s4-state.json", None),
     "f1": ("frame-information", "m", "f0-intake.json", None),
     "q1": ("deep-search-status", "in", None, None),
+    # G36 addendum: LEAFFRAME, OK then Cancel, over the same frame store intake as f1.
+    "f2": ("frame-park-settings", "m", "f0-intake.json", {"ok": 1, "cancel": 1}),
 }
 # The plugin adapter's frame (ground_evidence.FRAME): world coordinates, identity transform.
 FRAME = {"coordinate_system": "world", "transform": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
@@ -101,6 +103,8 @@ def step_rows(step, intake):
             return {"report": engine.shade_loss_heatmap_clear(intake)}
         if step == "f1":
             return {"frame-info": engine.frame_rows(intake)}
+        if step == "f2":
+            return {"report": engine.frame_park_settings(intake, STEPS["f2"][3])}
         if step == "q1":
             return {"report": engine.deep_search_status([])}
     except engine.BatchTwoError as exc:

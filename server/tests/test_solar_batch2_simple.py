@@ -126,3 +126,36 @@ def test_deep_search_empty_state_and_refusal():
                                           ("report-sessions", {"name": "sessions", "value": 0})]
     with pytest.raises(eng.BatchTwoError):
         eng.deep_search_status([{"id": 1}])
+
+
+# --- frame and park settings (f2) ----------------------------------------------------------------------------------
+
+def park_intake(preset):
+    return {"frame_presets": {"SchemaVersion": 1, "ActiveName": preset["Name"], "Presets": [preset]}}
+
+
+def test_f2_ok_commits_when_the_stored_pack_matches_rows_by_columns():
+    preset = {"Name": "Tiny", "FramingType": "FixedTilt", "Rows": 6, "Columns": 1,
+              "TrackerPack": {"Segments": [{"Kind": "Modules", "Count": 1}] * 6}}
+    rows = dict((f["name"], f["value"]) for _, f in eng.frame_park_settings(park_intake(preset), {"ok": 1, "cancel": 1}))
+    assert rows == {"active-preset": "Tiny", "committed": True, "pack-check": "passed", "store-changed": False}
+
+
+def test_f2_ok_is_refused_on_a_pack_that_does_not_match():
+    preset = {"Name": "Grown", "FramingType": "FixedTilt", "Rows": 4, "Columns": 24,
+              "TrackerPack": {"Segments": [{"Kind": "Modules", "Count": 96}, {"Kind": "Modules", "Count": 96},
+                                           {"Kind": "Gap", "Count": 3}]}}
+    rows = dict((f["name"], f["value"]) for _, f in eng.frame_park_settings(park_intake(preset), {"ok": 1, "cancel": 1}))
+    assert rows["pack-check"] == "failed" and rows["pack-modules"] == 192 and rows["pack-target"] == 96
+    assert rows["committed"] is False
+
+
+def test_f2_default_pack_and_refusals():
+    preset = {"Name": "Plain", "FramingType": "FixedTilt", "Rows": 2, "Columns": 3}
+    assert eng.tracker_pack_modules(preset) == 6
+    with pytest.raises(eng.BatchTwoError):
+        eng.frame_park_settings(park_intake(dict(preset, FramingType="SingleAxisTracker")), {"ok": 1, "cancel": 1})
+    with pytest.raises(eng.BatchTwoError):
+        eng.frame_park_settings(park_intake(preset), {"ok": 1})
+    with pytest.raises(eng.BatchTwoError):
+        eng.frame_park_settings(park_intake(dict(preset, Rows="2")), {"ok": 1, "cancel": 1})
