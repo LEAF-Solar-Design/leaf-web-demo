@@ -209,7 +209,7 @@ describe("FileSessionStore — turn lock", () => {
 });
 
 describe("FileSessionStore — confirmations", () => {
-  it("put / get / resolve, with duplicate resolution a no-op", async () => {
+  it("decides once, returning null for duplicate and missing confirmations", async () => {
     const store = new FileSessionStore({ dir: scratch() });
     const s = await store.createOrGetSession("demo-tenant", "rooftop_demo");
     const rec = store.newConfirmation(s.session_id, "turn-1", "run_capability", {
@@ -223,23 +223,28 @@ describe("FileSessionStore — confirmations", () => {
       action: "run_capability",
     });
 
-    const resolved = await store.resolveConfirmation(rec.confirmation_id, true, "demo-tenant");
-    expect(resolved).toMatchObject({ status: "approved", decided_by: "demo-tenant" });
+    const actor = { kind: "operator" as const, id: "demo-tenant" };
+    const resolved = await store.decideConfirmation(rec.confirmation_id, "approved", actor);
+    expect(resolved).toMatchObject({ status: "approved", decided_by: "operator:demo-tenant" });
     expect(resolved!.decided_at).not.toBeNull();
 
     // Second resolution does not flip the decision.
-    const again = await store.resolveConfirmation(rec.confirmation_id, false, "demo-tenant");
-    expect(again!.status).toBe("approved");
-    expect(await store.resolveConfirmation("missing", true, "x")).toBeNull();
+    const again = await store.decideConfirmation(rec.confirmation_id, "denied", actor);
+    expect(again).toBeNull();
+    expect((await store.getConfirmation(rec.confirmation_id))!.status).toBe("approved");
+    expect(await store.decideConfirmation("missing", "approved", actor)).toBeNull();
   });
 
-  it("resolving past the TTL marks the record expired (section 7: TTL 300s)", async () => {
+  it("deciding past the TTL returns null and marks the record expired", async () => {
     const store = new FileSessionStore({ dir: scratch(), confirmationTtlS: -1 });
     const s = await store.createOrGetSession("demo-tenant", "rooftop_demo");
     const rec = store.newConfirmation(s.session_id, "turn-1", "run_capability", {}, "run_capability");
     await store.putConfirmation(rec);
-    const resolved = await store.resolveConfirmation(rec.confirmation_id, true, "demo-tenant");
-    expect(resolved).toMatchObject({ status: "expired", decided_by: null });
+    const resolved = await store.decideConfirmation(rec.confirmation_id, "approved", {
+      kind: "operator", id: "demo-tenant",
+    });
+    expect(resolved).toBeNull();
+    expect(await store.getConfirmation(rec.confirmation_id)).toMatchObject({ status: "expired", decided_by: null });
   });
 });
 

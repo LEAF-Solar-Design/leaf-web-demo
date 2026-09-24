@@ -464,6 +464,9 @@ def test_s21_turn_input_field_set_frozen_no_packet():
     absent-safe, carried for one turn and never stored as prior context. A
     ContextPacket field remains explicitly forbidden (that is the §2.1 packet
     decision, distinct from these per-session additions).
+    `reasoning_id` arrived with the mushy-code ad209705 re-pin (magpie AD4),
+    an optional catalog reasoning selection validated against the effective
+    model, absent-safe on the wire.
 
     This gate is why the field set is written out rather than derived: adding
     `images` had to be a deliberate edit here, in the same commit, instead of a
@@ -472,7 +475,7 @@ def test_s21_turn_input_field_set_frozen_no_packet():
     assert _ts_field_names(block) == {"tenant_id", "session_id", "turn_id",
                                       "drawing_id", "messages", "text",
                                       "confirm", "model", "credential_grant",
-                                      "images"}, (
+                                      "images", "reasoning_id"}, (
         f"ConverseTurnInput field set drifted: {sorted(_ts_field_names(block))}")
     assert "contextPacket" not in block and "context_packet" not in block, (
         "ConverseTurnInput grew a packet field — that is a §2.1 wire change, "

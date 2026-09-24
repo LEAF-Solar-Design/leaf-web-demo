@@ -30,6 +30,11 @@ PIN CONVENTION:
   replace an overlay, the sync stops with no writes. Remove an overlay entry
   only when the incoming upstream tree reproduces the intended bytes or the
   downstream patch is deliberately retired.
+
+  ``contract_files`` are copied from their upstream paths and verified with
+  raw-byte sha256 hashes. Both package pins must name one Kit commit.
+  A re-pin with declared overlays is a three-way rebase outside ``--from``
+  (magpie AD4 used AD4-revendor.py), which refuses overlay loss by design.
 """
 from __future__ import annotations
 
@@ -94,6 +99,10 @@ def check_sync_preflight(upstream: Path) -> list[str]:
 
         manifest = json.loads(pin.read_text(encoding="utf-8"))
         pinned_files = manifest.get("files", {})
+        for entry in manifest.get("contract_files", {}).values():
+            upstream_path = entry.get("upstream_path")
+            if upstream_path and not (upstream / upstream_path).is_file():
+                problems.append(f"upstream contract file missing: {upstream_path}")
         for rel, declared_hash in downstream_overlays(manifest).items():
             current = vendored / rel
             incoming = src / rel
@@ -165,6 +174,20 @@ def do_sync(upstream: Path) -> int:
         }
         if old_manifest.get("downstream_overlays"):
             manifest["downstream_overlays"] = old_manifest["downstream_overlays"]
+        if "disposition" in old_manifest:
+            manifest["disposition"] = old_manifest["disposition"]
+        if "contract_files" in old_manifest:
+            contracts = {}
+            for name, old_entry in old_manifest["contract_files"].items():
+                entry = dict(old_entry)
+                if entry.get("upstream_path"):
+                    dst = REPO / entry["path"]
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(upstream / entry["upstream_path"], dst)
+                    entry["sha256"] = hashlib.sha256(dst.read_bytes()).hexdigest()
+                    entry["upstream_commit"] = head
+                contracts[name] = entry
+            manifest["contract_files"] = contracts
         extras = {}
         if pin == SURFACES[0][2]:
             for single_rel, single_dst in SINGLE_FILES:
@@ -181,12 +204,14 @@ def do_sync(upstream: Path) -> int:
 
 def do_verify() -> int:
     bad = 0
+    commits = []
     for _upstream_rel, vendored, pin in SURFACES:
         if not pin.exists():
             print(f"missing pin manifest: {pin}")
             bad += 1
             continue
         manifest = json.loads(pin.read_text(encoding="utf-8"))
+        commits.append(manifest.get("upstream_commit", ""))
         actual = tree_manifest(vendored) if vendored.is_dir() else {}
         for rel, declared_hash in downstream_overlays(manifest).items():
             if manifest.get("files", {}).get(rel) != declared_hash:
@@ -206,6 +231,17 @@ def do_verify() -> int:
             if got != want:
                 print(f"DRIFT {rel}: {want[:12]} != {str(got)[:12]}")
                 bad += 1
+        for entry in manifest.get("contract_files", {}).values():
+            rel = entry["path"]
+            p = REPO / rel
+            got = hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else None
+            want = entry["sha256"]
+            if got != want:
+                print(f"DRIFT {rel}: {want[:12]} != {str(got)[:12]}")
+                bad += 1
+    if len(commits) == 2 and commits[0] != commits[1]:
+        print(f"SPLIT PIN harness={commits[0][:12]} server={commits[1][:12]}")
+        bad += 1
     if bad:
         print(f"vendor verify: NOT-READY ({bad} problems)")
         return 1

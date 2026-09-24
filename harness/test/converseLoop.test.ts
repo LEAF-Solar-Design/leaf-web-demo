@@ -982,9 +982,9 @@ describe("ConverseLoop — write split turns (wire contract section 7)", () => {
       ofType(await store.eventsAfter(s.session_id, 0), "proposed_run")[0]!.data.confirmation_id,
     );
 
-    const resolveConfirmation = store.resolveConfirmation.bind(store);
-    store.resolveConfirmation = async (confirmationId, approved, resolvedBy) =>
-      resolveConfirmation(confirmationId, !approved, resolvedBy);
+    const decideConfirmation = store.decideConfirmation.bind(store);
+    store.decideConfirmation = async (confirmationId, decision, actor) =>
+      decideConfirmation(confirmationId, decision === "approved" ? "denied" : "approved", actor);
 
     await expect(
       loop.handleMessage({
@@ -995,6 +995,31 @@ describe("ConverseLoop — write split turns (wire contract section 7)", () => {
       }),
     ).rejects.toMatchObject({ name: "ConfirmationInvalidError", reason: "already_decided" });
 
+    expect((await store.getConfirmation(cid))!.status).toBe("denied");
+    expect(appRun.submitCalls).toHaveLength(0);
+    expect(await store.getActiveTurn(s.session_id)).toBeNull();
+  });
+});
+
+describe("ConverseLoop — atomic confirmation race", () => {
+  it("a confirm whose decide loses the race is already_decided and dispatches nothing", async () => {
+    const { loop, appRun, store } = makeLoop();
+    const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    await sendText(loop, s, "RUN:add-panel");
+    const cid = String(
+      ofType(await store.eventsAfter(s.session_id, 0), "proposed_run")[0]!.data.confirmation_id,
+    );
+    const decideConfirmation = store.decideConfirmation.bind(store);
+    store.decideConfirmation = async (confirmationId, decision, actor) => {
+      await decideConfirmation(confirmationId, decision === "approved" ? "denied" : "approved", actor);
+      return decideConfirmation(confirmationId, decision, actor);
+    };
+    await expect(loop.handleMessage({
+      sessionId: s.session_id,
+      tenantId: "demo-tenant",
+      confirm: { confirmationId: cid, approved: true },
+      contextPacket: PACKET,
+    })).rejects.toMatchObject({ name: "ConfirmationInvalidError", reason: "already_decided" });
     expect((await store.getConfirmation(cid))!.status).toBe("denied");
     expect(appRun.submitCalls).toHaveLength(0);
     expect(await store.getActiveTurn(s.session_id)).toBeNull();
