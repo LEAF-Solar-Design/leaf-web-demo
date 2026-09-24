@@ -411,7 +411,7 @@ SIZER_SETTINGS = ("PanelsInSequence", "VocColdPasses", "VocColdOverrideAccepted"
 MAX_SIZER_BODY = 256 * 1024
 
 
-def string_sizer_outcome(intake, response):
+def string_sizer_outcome(intake, response, form=None):
     """What Studio commits for one string sizing: the request must be the pinned plugin request (SizingRequest), the
     response body is parsed exactly as solar_sizing_client.size parses it (strict JSON, duplicate keys refused) and
     validated as the plugin's result object. A body that is valid JSON but not an object (the service's
@@ -450,18 +450,64 @@ def string_sizer_outcome(intake, response):
         return {"calculation": "failed", "error": "other"}, {}
     if not isinstance(value, dict):
         return {"calculation": "failed", "error": "response-not-an-object"}, {}
-    try:
-        sizing.validate_response(value)
-    except sizing.CloudError:
+    if form is None:
+        try:
+            sizing.validate_response(value)
+        except sizing.CloudError:
+            # The result form also accepts the captured response without the client's min_temp.
+            if not (isinstance(value.get("simulation_results"), dict) and value["simulation_results"]
+                    and all(_is_number(value.get(k)) for k in ("voc", "bvoc"))):
+                return {"calculation": "failed", "error": "other"}, {}
+        raise BatchTwoError("the result-form port needs explicit form choices")
+    simulations = value.get("simulation_results")
+    if not isinstance(simulations, dict) or not all(_is_number(value.get(k)) for k in ("voc", "bvoc")):
         return {"calculation": "failed", "error": "other"}, {}
-    # A result object reaches the plugin's result form; its close writes SIZER_SETTINGS. That path is ported with
-    # the capture that exercises it (the service returns a string today), never guessed.
-    raise BatchTwoError("a sizing result object needs the result-form port; no capture exercises it yet")
+    _require(isinstance(form, dict), "the result form is not an object")
+    standard = form.get("design_standard")
+    _require(type(standard) is str and standard in simulations, "the result form needs a design standard")
+    resolution = form.get("voc_cold_resolution")
+    _require(resolution in (None, "pick-shorter", "override"), "the Voc_cold resolution is invalid")
+    sim = simulations[standard]
+    _require(isinstance(sim, dict), "the selected simulation is not an object")
+    n0 = sim.get("string_length")
+    _require(_is_number(n0) and n0 > 0 and float(n0).is_integer(), "the string length must be a positive integer")
+    vmax = sim.get("string_design_voltage")
+    _require(_is_number(vmax) and float(vmax).is_integer(), "the design voltage must be an integer")
+    voc, bvoc = float(value["voc"]), float(value["bvoc"])
+    # R28: today's response omits mintemp; FunctionResults defaults that field to zero.
+    tmin = value.get("mintemp", 0.0)
+    _require(_is_number(tmin), "mintemp must be a finite number")
+    vmax = float(vmax)
+
+    def evaluate(n):
+        if voc <= 0 or vmax <= 0:
+            return True, 0, 0.0, 0.0, 0.0, False
+        cold = voc * (1.0 + bvoc / 100.0 * (float(tmin) - 25.0))
+        voltage = cold * n
+        passes = voltage <= vmax
+        suggested = max(1, math.floor(vmax / cold)) if not passes and cold > 0 else 0
+        return passes, suggested, cold, voltage, vmax, True
+
+    n = int(n0)
+    final = evaluate(n)
+    override = False
+    if not final[0]:
+        _require(resolution is not None, "the result form blocks Close until Voc_cold is resolved")
+        if resolution == "pick-shorter":
+            n = final[1]
+            final = evaluate(n)
+        else:
+            override = True
+    passes, suggested, cold, voltage, max_dc, complete = final
+    committed = {"PanelsInSequence": n, "VocColdPasses": passes if complete else None,
+                 "VocColdOverrideAccepted": override, "VocColdSuggestedStringLength": suggested,
+                 "VocColdPerModule": cold, "VocColdStringVoltage": voltage, "VocColdMaxDcVoltage": max_dc}
+    return {"calculation": "succeeded"}, {name: v for name, v in committed.items() if settings[name] != v}
 
 
-def string_sizer_rows(intake, response):
+def string_sizer_rows(intake, response, form=None):
     """k1 rows in the plugin adapter's shape: the calculation report and one `setting` row per changed setting."""
-    report, changed = string_sizer_outcome(intake, response)
+    report, changed = string_sizer_outcome(intake, response, form)
     rows = {"report": report_rows(report)}
     if changed:
         rows["setting"] = [(f"setting-{name}", {"name": name, "value": changed[name]}) for name in sorted(changed)]

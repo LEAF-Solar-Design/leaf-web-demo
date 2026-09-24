@@ -246,6 +246,80 @@ def test_sizer_result_object_path_is_not_guessed_and_inputs_fail_closed():
         eng.string_sizer_outcome(SIZER_INTAKE, {"status": 500, "body_text": ""})
 
 
+def committed_sizer_result():
+    root = Path(__file__).resolve().parents[2] / "docs" / "parity" / "evidence" / "batch2"
+    response = _json.loads((root / "k2-response.json").read_text(encoding="utf-8"))
+    return _json.loads(response["body_text"])
+
+
+def form_outcome(value, resolution=None, standard="standard", intake=SIZER_INTAKE):
+    return eng.string_sizer_outcome(intake, sizer_response(_json.dumps(value)),
+                                    {"design_standard": standard, "voc_cold_resolution": resolution})
+
+
+def test_sizer_passes_first_time_on_selected_standard():
+    report, changed = form_outcome(committed_sizer_result(), standard="conservative")
+    assert report == {"calculation": "succeeded"}
+    assert changed == {"PanelsInSequence": 39, "VocColdPasses": True, "VocColdOverrideAccepted": False,
+                       "VocColdSuggestedStringLength": 0, "VocColdPerModule": 37.505023875,
+                       "VocColdStringVoltage": 1462.695931125, "VocColdMaxDcVoltage": 1500.0}
+
+
+def test_sizer_pick_shorter_rechecks_and_commits_only_changes():
+    value = committed_sizer_result()
+    assert value["simulation_results"]["standard"]["string_length"] == 41
+    settings = dict(SIZER_INTAKE["settings"], VocColdOverrideAccepted=False, VocColdSuggestedStringLength=0)
+    intake = dict(SIZER_INTAKE, settings=settings)
+    report, changed = form_outcome(value, "pick-shorter", intake=intake)
+    assert report == {"calculation": "succeeded"}
+    assert changed == {"PanelsInSequence": 39, "VocColdPasses": True, "VocColdPerModule": 37.505023875,
+                       "VocColdStringVoltage": 1462.695931125, "VocColdMaxDcVoltage": 1500.0}
+    assert eng.string_sizer_rows(intake, sizer_response(_json.dumps(value)),
+                                {"design_standard": "standard", "voc_cold_resolution": "pick-shorter"})["setting"] == [
+        (f"setting-{name}", {"name": name, "value": changed[name]}) for name in sorted(changed)]
+
+
+def test_sizer_override_preserves_failed_voltage_and_length():
+    _, changed = form_outcome(committed_sizer_result(), "override")
+    assert changed == {"PanelsInSequence": 41, "VocColdPasses": False, "VocColdOverrideAccepted": True,
+                       "VocColdSuggestedStringLength": 39, "VocColdPerModule": 37.505023875,
+                       "VocColdStringVoltage": 37.505023875 * 41, "VocColdMaxDcVoltage": 1500.0}
+
+
+def test_sizer_failed_close_requires_resolution():
+    with pytest.raises(eng.BatchTwoError, match="blocks Close"):
+        form_outcome(committed_sizer_result())
+    with pytest.raises(eng.BatchTwoError, match="form choices"):
+        eng.string_sizer_outcome(SIZER_INTAKE, sizer_response(_json.dumps(committed_sizer_result())))
+
+
+def test_sizer_incomplete_voc_commits_unknown_passes():
+    value = committed_sizer_result()
+    value["voc"] = 0
+    intake = dict(SIZER_INTAKE, settings=dict(SIZER_INTAKE["settings"], VocColdPasses=True))
+    report, changed = form_outcome(value, intake=intake)
+    assert report == {"calculation": "succeeded"}
+    assert changed == {"PanelsInSequence": 41, "VocColdPasses": None, "VocColdOverrideAccepted": False,
+                       "VocColdSuggestedStringLength": 0, "VocColdPerModule": 0.0,
+                       "VocColdStringVoltage": 0.0, "VocColdMaxDcVoltage": 0.0}
+
+
+def test_sizer_non_integral_length_refuses():
+    value = committed_sizer_result()
+    value["simulation_results"]["standard"]["string_length"] = 41.5
+    with pytest.raises(eng.BatchTwoError, match="positive integer"):
+        form_outcome(value, "pick-shorter")
+
+
+def test_sizer_uses_present_mintemp():
+    value = committed_sizer_result()
+    value["mintemp"] = 25.0
+    _, changed = form_outcome(value)
+    assert changed["PanelsInSequence"] == 41 and changed["VocColdPasses"] is True
+    assert changed["VocColdPerModule"] == 36.3
+    assert changed["VocColdStringVoltage"] == 36.3 * 41
+
+
 # --- string midpoint connection (m1) and customer open (o1) --------------------------------------------------------
 
 def grid_intake(columns=4, rows=1, dx=10.0, dy=6.0):
