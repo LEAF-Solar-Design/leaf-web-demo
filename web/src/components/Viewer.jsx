@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react'
-import { applyViewPose, cameraPose, nextFitState, pickLineThreshold, safeFitFrustum, safeCenterShift, safeRectCameraAction, unprojectClientToPlane } from './viewerMath.js'
+import { applyCameraCarry, applyViewPose, cameraCarry, cameraCarryKey, cameraPose, captureCameraCarry, nextFitState, pickLineThreshold, resizeCameraAction, safeFitFrustum, safeCenterShift, safeRectCameraAction, unprojectClientToPlane } from './viewerMath.js'
 import { blockDefinitions } from './viewerIntake.js'
 import { expandBulgedPolylines, intakeRoundPolylines } from '../cadedit/engineIntake.js'
 import { formatElementId } from '../lib/elementIdentity.js'
@@ -152,6 +152,8 @@ const Viewer = forwardRef(function Viewer(
   safeRectRef.current = safeRect
   const previousSafeRef = useRef(safeRect)
   const fittedRef = useRef(false)
+  // The camera the last build of this engine document left behind, restored by the next build when the drafter had moved the view.
+  const viewCarryRef = useRef(null)
   const interactingRef = useRef(false)
   // Latest onSelectEntity kept in a ref so the (one-time) pointer handler never
   // fires a stale closure.
@@ -213,6 +215,9 @@ const Viewer = forwardRef(function Viewer(
     setGlError(false)
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     renderer.setSize(width, height)
+    // The size the renderer was last set to, and the size the camera's frustum was last computed for.
+    let rendererWidth = width, rendererHeight = height
+    let frustumWidth = 0, frustumHeight = 0
     mount.appendChild(renderer.domElement)
 
     const controls = new OrbitControls(camera, renderer.domElement)
@@ -492,6 +497,7 @@ const Viewer = forwardRef(function Viewer(
         if (!fit) return null
         camera.left = -fit.halfW; camera.right = fit.halfW
         camera.top = fit.halfH; camera.bottom = -fit.halfH
+        frustumWidth = w; frustumHeight = h
         camera.updateProjectionMatrix()
         return fit
       }
@@ -508,6 +514,7 @@ const Viewer = forwardRef(function Viewer(
       }
       camera.left = -halfW; camera.right = halfW
       camera.top = halfH; camera.bottom = -halfH
+      frustumWidth = w; frustumHeight = h
       camera.updateProjectionMatrix()
     }
 
@@ -532,8 +539,19 @@ const Viewer = forwardRef(function Viewer(
       controls.update()
       updateFitState('fit')
     }
-    previousSafeRef.current = safeRectRef.current
-    fitToBounds()
+    // An edit to the same engine document rebuilds the scene; a view the
+    // drafter moved stays where it was, anything else refits.
+    const carryKey = cameraCarryKey(activeIntake, sculpture)
+    const carried = cameraCarry(viewCarryRef.current, { key: carryKey, width, height })
+    viewCarryRef.current = null
+    if (carried) {
+      applyCameraCarry(camera, controls.target, carried)
+      frustumWidth = carried.width; frustumHeight = carried.height
+      controls.update()
+    } else {
+      previousSafeRef.current = safeRectRef.current
+      fitToBounds()
+    }
     function updateFitState(event) {
       const next = nextFitState({ fitted: fittedRef.current, interacting: interactingRef.current }, event)
       fittedRef.current = next.fitted
@@ -735,9 +753,16 @@ const Viewer = forwardRef(function Viewer(
     function onResize() {
       const w = mount.clientWidth, h = mount.clientHeight
       if (!(w > 0) || !(h > 0)) return
-      renderer.setSize(w, h)
-      if (!sculpture && safeRectRef.current && fittedRef.current) fitToBounds()
-      else applyFrustum()
+      if (w !== rendererWidth || h !== rendererHeight) {
+        rendererWidth = w; rendererHeight = h
+        renderer.setSize(w, h)
+      }
+      const action = resizeCameraAction({
+        frustumWidth, frustumHeight, width: w, height: h,
+        fitted: fittedRef.current, sculpture, safe: safeRectRef.current,
+      })
+      if (action === 'refit') fitToBounds()
+      else if (action === 'frustum') applyFrustum()
     }
     const ro = new ResizeObserver(onResize)
     ro.observe(mount)
@@ -800,6 +825,10 @@ const Viewer = forwardRef(function Viewer(
     setBuildTick((t) => t + 1)
 
     return () => {
+      viewCarryRef.current = captureCameraCarry(camera, controls.target, {
+        key: carryKey, fitted: fittedRef.current,
+        width: frustumWidth, height: frustumHeight,
+      })
       cancelAnimationFrame(raf)
       ro.disconnect()
       dom.removeEventListener('pointerdown', onPointerDown)
