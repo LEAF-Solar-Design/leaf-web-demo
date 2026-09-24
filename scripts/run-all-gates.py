@@ -4770,7 +4770,7 @@ _AUTO_READ_LIMIT = 8192
 
 
 def resolve_auto_jobs(cpus: float, mem_bytes: int | None) -> int:
-    """Pure: workers = min(cpus / 2, mem_gib / 3, 8), floored, never below 1."""
+    """Pure: workers = min(cpus / 2, mem_gib / 3, 16), floored, never below 1."""
     bounds = [int(cpus // _AUTO_CPUS_PER_WORKER), _AUTO_MAX_JOBS]
     if mem_bytes is not None:
         bounds.append(int(mem_bytes // (_AUTO_GIB_PER_WORKER * 2 ** 30)))
