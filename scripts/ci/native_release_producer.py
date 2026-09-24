@@ -147,8 +147,41 @@ def stage_release(output_dir: Path, **inputs) -> dict:
             for name, data in (("web-dist.zip", payload), ("staging-supply-set.json", encoded))}
 
 
+def gate_parallelism(total_jobs: int) -> tuple[int, int]:
+    """Pure: split a host's suite-job budget into (checkout workers, jobs per shard).
+
+    Workers is the largest of 8, 4, 2, 1 not above the budget; each shard gets
+    the remaining factor, capped at 16. Fails closed on a non-positive budget.
+    """
+    if type(total_jobs) is not int or total_jobs < 1:
+        raise ValueError("gate job budget must be a positive int")
+    workers = next(count for count in (8, 4, 2, 1) if count <= total_jobs)
+    return workers, min(16, max(1, total_jobs // workers))
+
+
+def host_gate_jobs(root: Path) -> int:
+    """Size the gate from the canonical runner's own auto sizing; 4 when unavailable."""
+    try:
+        path = root / "scripts" / "run-all-gates.py"
+        spec = importlib.util.spec_from_file_location("leaf_run_all_gates_auto", path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+            jobs = module.resolve_auto_jobs(module._effective_cpus(), module._effective_mem_bytes())
+        finally:
+            sys.modules.pop(spec.name, None)
+        if type(jobs) is not int or jobs < 1:
+            raise ValueError("auto sizing returned an invalid job count")
+        return jobs
+    except Exception as exc:
+        print(f"native gate: auto sizing unavailable ({type(exc).__name__}), using 4", flush=True)
+        return 4
+
+
 def run_gate(root: Path, results_dir: Path, *, env: dict[str, str],
-             timeout_seconds: int = 2700, worker_count: int = 4) -> Path:
+             timeout_seconds: int = 2700, worker_count: int = 4,
+             jobs_per_shard: int = 1) -> Path:
     """Run all eight canonical shards and require an emitted tree-bound proof.
 
     Run this in the dedicated test project, not the image-publishing project.
@@ -160,6 +193,10 @@ def run_gate(root: Path, results_dir: Path, *, env: dict[str, str],
         raise ValueError("gate timeout must be positive")
     if type(worker_count) is not int or worker_count not in (1, 2, 4, 8):
         raise ValueError("gate worker count must be one of 1, 2, 4, 8")
+    if type(jobs_per_shard) is not int or not 1 <= jobs_per_shard <= 16:
+        raise ValueError("gate jobs per shard must be an int from 1 to 16")
+    # One job per shard keeps the shard command byte-identical to the serial runner.
+    shard_jobs = ["--jobs", str(jobs_per_shard)] if jobs_per_shard > 1 else []
     root = root.resolve()
     results_dir = results_dir.resolve()
     results_dir.mkdir(parents=True, exist_ok=False)
@@ -206,7 +243,7 @@ def run_gate(root: Path, results_dir: Path, *, env: dict[str, str],
                     result = run(runner + ["--retry", "1", "--shard-count", "8",
                                           "--shard-index", str(shard), "--result-json",
                                           str(results_dir / f"shard-{shard}.json"),
-                                          "--log-dir", str(results_dir / f"logs-{shard}")],
+                                          "--log-dir", str(results_dir / f"logs-{shard}")] + shard_jobs,
                                  cwd=roots[worker], check=False,
                                  child_env={**env, "LEAF_NATIVE_GATE_WORKER": str(worker)})
                     if result.returncode != 0:
@@ -295,12 +332,14 @@ def image_build_command(service: str, source: str, build_number: int,
 def build_image(root: Path, service: str, source: str, build_number: int,
                 freshness: dict[str, str], metadata: Path, *,
                 solver_revision: str | None = None,
-                solver_root: Path | None = None) -> dict:
+                solver_root: Path | None = None,
+                log_path: Path | None = None) -> dict:
     """Execute one admitted image build and return its exact pushed digest.
 
     The caller owns authentication, approval, complete source/gate admission,
     solver content hash verification, and the overall bounded release lifetime.
     This function never discovers credentials or launches another AWS build.
+    With log_path, buildx output goes to that new file instead of the console.
     """
     command = image_build_command(service, source, build_number, freshness,
                                   metadata, solver_revision=solver_revision, solver_root=solver_root)
@@ -320,7 +359,13 @@ def build_image(root: Path, service: str, source: str, build_number: int,
     metadata = metadata if metadata.is_absolute() else root / metadata
     with metadata.open("x", encoding="utf-8") as stream:
         stream.write("{}")
-    subprocess.run(command, cwd=root, check=True, timeout=45 * 60)
+    if log_path is None:
+        subprocess.run(command, cwd=root, check=True, timeout=45 * 60)
+    else:
+        # Exclusive, like metadata: a retry never appends to a stale log.
+        with log_path.open("xb") as log:
+            subprocess.run(command, cwd=root, check=True, timeout=45 * 60,
+                           stdout=log, stderr=subprocess.STDOUT)
     result = json.loads(metadata.read_text(encoding="utf-8"))
     digest = result.get("containerimage.digest")
     if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
@@ -538,6 +583,45 @@ def stage_harness_release(output: Path, *, source, tree, identity, harness, gate
         previous=previous, web_bytes=web_bytes)
 
 
+BUILD_LOG_TAIL_BYTES = 1024 * 1024
+
+
+def _print_build_logs(work: Path, services) -> None:
+    """Print each image log's last 1 MiB in the given order; bounded read, never raises on absence."""
+    for service in services:
+        print(f"==== image build log: {service} ====", flush=True)
+        try:
+            with (work / f"{service}.log").open("rb") as stream:
+                stream.seek(0, 2)
+                stream.seek(max(0, stream.tell() - BUILD_LOG_TAIL_BYTES))
+                tail = stream.read(BUILD_LOG_TAIL_BYTES)
+        except FileNotFoundError:
+            print("(no log)", flush=True)
+            continue
+        print(tail.decode("utf-8", errors="replace"), flush=True)
+
+
+def _build_images(root: Path, services, source: str, build_number: int,
+                  freshness: dict, work: Path, extras: dict | None = None) -> dict:
+    """Build the selected images and return them keyed in SERVICES order."""
+    ordered = [service for service in SERVICES if service in services]
+    extras = extras or {}
+    # Independent images build concurrently, one thread per image. Every build
+    # settles before any failure is raised, and the raised failure is the first
+    # in SERVICES order, so the outcome never depends on thread timing.
+    with ThreadPoolExecutor(max_workers=len(ordered)) as pool:
+        futures = {service: pool.submit(build_image, root, service, source, build_number,
+                                        freshness[service], work / f"{service}.json",
+                                        log_path=work / f"{service}.log", **extras.get(service, {}))
+                   for service in ordered}
+    _print_build_logs(work, ordered)
+    for service in ordered:
+        error = futures[service].exception()
+        if error is not None:
+            raise error
+    return {service: futures[service].result() for service in ordered}
+
+
 def produce_release(root: Path, output: Path, request: dict, env: dict, codebuild, s3) -> dict:
     """Execute the complete admitted producer, without provisioning or deployment."""
     fields = {"source_revision", "source_tree", "gate", "contract_revision"}
@@ -582,9 +666,7 @@ def produce_release(root: Path, output: Path, request: dict, env: dict, codebuil
         selected = ("harness",) if selection == "harness" else ("app", "harness")
         freshness = (resolve_freshness(root, harness_only=True) if selection == "harness"
                      else resolve_freshness(root, app_harness=True))
-        images = {service: build_image(root, service, source, identity["build_number"],
-                                       freshness[service], work / f"{service}.json")
-                  for service in selected}
+        images = _build_images(root, selected, source, identity["build_number"], freshness, work)
         gate = {"producer": {"project_arn": gate_request.project_arn, "build_arn": gate_request.build_arn,
                              "build_number": gate_request.build_number},
                 "source_revision": source, "source_tree": tree, "proof_sha256": hashlib.sha256(proof).hexdigest(),
@@ -604,10 +686,8 @@ def produce_release(root: Path, output: Path, request: dict, env: dict, codebuil
     if _git(solver_root, "rev-parse", "HEAD") != revision or _git(solver_root, "status", "--porcelain"):
         raise ValueError("solver secondary source differs from reviewed pin")
     freshness = resolve_freshness(root)
-    images = {}
-    for service in SERVICES:
-        extra = {"solver_revision": revision, "solver_root": solver_root} if service == "canonical-worker" else {}
-        images[service] = build_image(root, service, source, identity["build_number"], freshness[service], work / f"{service}.json", **extra)
+    images = _build_images(root, SERVICES, source, identity["build_number"], freshness, work,
+                           {"canonical-worker": {"solver_revision": revision, "solver_root": solver_root}})
     web = package_web_image(root, images["web"]["image_digest"], source, work / "web")
     gate = {"producer": {"project_arn": gate_request.project_arn, "build_arn": gate_request.build_arn,
                          "build_number": gate_request.build_number},
@@ -647,7 +727,9 @@ def main() -> int:
         env.pop("DATABASE_URL", None)
         env.pop("LEAF_CONTAINER_SMOKE", None)
         env["LEAF_AUTOFILL_SOLVER_ABSENT_OK"] = "1"
-        proof = run_gate(root, work / "results", env=env)
+        workers, jobs = gate_parallelism(host_gate_jobs(root))
+        print(f"native gate parallelism: workers={workers} jobs_per_shard={jobs}", flush=True)
+        proof = run_gate(root, work / "results", env=env, worker_count=workers, jobs_per_shard=jobs)
         args.output.mkdir(parents=True, exist_ok=False)
         (args.output / "gate-proof.json").write_bytes(proof.read_bytes())
     return 0

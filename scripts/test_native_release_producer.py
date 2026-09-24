@@ -542,11 +542,199 @@ def test_composed_release_verifies_gate_before_all_five_builds(tmp_path, monkeyp
         assert not output.exists()
     else:
         result = producer.produce_release(tmp_path, output, request, env, object(), object())
-        assert events == ["admit", "gate-provider", "canonical-proof", *SERVICES]
+        assert events[:3] == ["admit", "gate-provider", "canonical-proof"]
+        assert sorted(events[3:]) == sorted(SERVICES)
         assert set(result) == {"staging-supply-set.json", "web-dist.zip"}
         manifest = json.loads((output / "staging-supply-set.json").read_bytes())
         assert manifest["gate"]["producer"] == gate_identity
         assert manifest["producer"]["project_arn"].endswith("/leaf-studio-native-release")
+
+
+def full_release_case(tmp_path, monkeypatch, build):
+    inputs = assembly_inputs(tmp_path)
+    gate_request = dict(native_identity("leaf-studio-native-gate"), source_revision="a" * 40,
+                        service_role="arn:aws:iam::807034087062:role/leaf-studio-native-gate-role",
+                        repository_url="https://github.com/LEAF-Solar-Design/leaf-web-demo.git",
+                        buildspec=".codebuild/release.yml", bucket="unit-gates", key="gate.zip",
+                        version_id="unit-version", sha256="f" * 64)
+    request = {"source_revision": "a" * 40, "source_tree": "b" * 40,
+               "gate": gate_request, "contract_revision": "d" * 40}
+    (tmp_path / "deploy").mkdir()
+    (tmp_path / "deploy/autofill-solver-sources.json").write_text(json.dumps({"e" * 40: "f" * 64}))
+    work = tmp_path / "scratch"
+    work.mkdir()
+    contract = SimpleNamespace(NativeRelease=SimpleNamespace,
+                               read_native_release=lambda *a, **k: ({}, b"provider archive unit fixture"),
+                               _members=lambda *a, **k: {"gate-proof.json": b"canonical proof unit fixture"})
+    monkeypatch.setattr(producer, "admit_checkout", lambda *a: None)
+    monkeypatch.setattr(producer, "runtime_identity", lambda *a: native_identity("leaf-studio-native-release"))
+    monkeypatch.setattr(producer, "load_evidence_contract", lambda *a: contract)
+    monkeypatch.setattr(producer.tempfile, "mkdtemp", lambda **k: str(work))
+    monkeypatch.setattr(producer.subprocess, "run", lambda *a, **k: None)
+    monkeypatch.setattr(producer, "_git", lambda root, *args: "e" * 40 if args[0] == "rev-parse" else "")
+    monkeypatch.setattr(producer, "resolve_freshness", lambda *a: {service: {} for service in SERVICES})
+    monkeypatch.setattr(producer, "build_image", lambda *a, **k: build(inputs, *a, **k))
+    monkeypatch.setattr(producer, "package_web_image", lambda *a: inputs["web"])
+    env = {"CODEBUILD_SRC_DIR_provider_contract": "/unit/contract", "CODEBUILD_SRC_DIR_autofill_solver": "/unit/solver"}
+    return request, env, work
+
+
+def test_release_raises_first_failure_in_services_order_after_all_builds(tmp_path, monkeypatch, capsys):
+    attempted = []
+    lock = threading.Lock()
+
+    def build(inputs, root, service, source, number, freshness, metadata, **kwargs):
+        with lock:
+            attempted.append(service)
+        assert kwargs["log_path"] == metadata.with_suffix(".log")
+        if service == "web":
+            raise RuntimeError("web build failed")
+        if service == "broker":
+            raise RuntimeError("broker build failed")
+        if service == "canonical-worker":
+            kwargs["log_path"].write_text("worker buildx output")
+        return inputs["images"][service]
+
+    request, env, _ = full_release_case(tmp_path, monkeypatch, build)
+    output = tmp_path / "artifacts"
+    with pytest.raises(RuntimeError, match="broker build failed"):
+        producer.produce_release(tmp_path, output, request, env, object(), object())
+    assert sorted(attempted) == sorted(SERVICES)
+    assert not output.exists()
+    printed = capsys.readouterr().out
+    headers = [printed.index(f"==== image build log: {service} ====") for service in SERVICES]
+    assert headers == sorted(headers)
+    assert "worker buildx output" in printed
+    assert printed.count("(no log)") == len(SERVICES) - 1
+
+
+def test_release_builds_all_images_concurrently(tmp_path, monkeypatch):
+    barrier = threading.Barrier(len(SERVICES), timeout=5)
+
+    def build(inputs, root, service, source, number, freshness, metadata, **kwargs):
+        barrier.wait()
+        return inputs["images"][service]
+
+    request, env, _ = full_release_case(tmp_path, monkeypatch, build)
+    output = tmp_path / "artifacts"
+    producer.produce_release(tmp_path, output, request, env, object(), object())
+    manifest = json.loads((output / "staging-supply-set.json").read_bytes())
+    assert set(manifest["services"]) == set(SERVICES)
+
+
+def test_build_logs_print_only_the_bounded_tail(tmp_path, capsys):
+    (tmp_path / "app.log").write_bytes(b"HEAD" + b"x" * producer.BUILD_LOG_TAIL_BYTES + b"TAIL")
+    producer._print_build_logs(tmp_path, ["app", "web"])
+    printed = capsys.readouterr().out
+    assert "HEAD" not in printed and "TAIL" in printed
+    assert printed.index("==== image build log: app ====") < printed.index("==== image build log: web ====")
+    assert printed.rstrip().endswith("(no log)")
+
+
+def fake_buildx(monkeypatch, tmp_path):
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        if command[:2] == ["git", "rev-parse"]:
+            return SimpleNamespace(stdout="a" * 40 + "\n")
+        (tmp_path / "image.json").write_text(json.dumps({"containerimage.digest": "sha256:" + "c" * 64}))
+        if "stdout" in kwargs:
+            kwargs["stdout"].write(b"buildx output")
+        return SimpleNamespace(stdout="")
+
+    monkeypatch.setattr(producer.subprocess, "run", run)
+    return calls
+
+
+def test_build_image_writes_buildx_output_to_exclusive_log(tmp_path, monkeypatch):
+    calls = fake_buildx(monkeypatch, tmp_path)
+    log = tmp_path / "app.log"
+    freshness = {name: "b" * 64 for name in TRIXIE}
+    result = producer.build_image(tmp_path, "app", "a" * 40, 7, freshness, tmp_path / "image.json", log_path=log)
+    command, kwargs = calls[-1]
+    assert command[:3] == ["docker", "buildx", "build"]
+    assert os.fspath(kwargs["stdout"].name) == str(log)
+    assert kwargs["stderr"] == subprocess.STDOUT
+    assert kwargs["timeout"] == 45 * 60 and kwargs["check"] is True
+    assert log.read_bytes() == b"buildx output"
+    assert result["image_digest"] == "sha256:" + "c" * 64
+    (tmp_path / "image.json").unlink()
+    with pytest.raises(FileExistsError):
+        producer.build_image(tmp_path, "app", "a" * 40, 7, freshness, tmp_path / "image.json", log_path=log)
+
+
+def test_build_image_without_log_inherits_console(tmp_path, monkeypatch):
+    calls = fake_buildx(monkeypatch, tmp_path)
+    freshness = {name: "b" * 64 for name in TRIXIE}
+    producer.build_image(tmp_path, "app", "a" * 40, 7, freshness, tmp_path / "image.json")
+    command, kwargs = calls[-1]
+    assert command[:3] == ["docker", "buildx", "build"]
+    assert "stdout" not in kwargs and "stderr" not in kwargs
+
+
+@pytest.mark.parametrize("total,expected", [
+    (1, (1, 1)), (2, (2, 1)), (3, (2, 1)), (4, (4, 1)), (5, (4, 1)), (8, (8, 1)),
+    (12, (8, 1)), (16, (8, 2)), (200, (8, 16)),
+])
+def test_gate_parallelism_splits_host_budget(total, expected):
+    assert producer.gate_parallelism(total) == expected
+
+
+@pytest.mark.parametrize("total", [0, -1, True, 4.0, "4", None])
+def test_gate_parallelism_rejects_invalid_budget(total):
+    with pytest.raises(ValueError, match="job budget"):
+        producer.gate_parallelism(total)
+
+
+def test_native_gate_passes_jobs_to_every_shard(tmp_path, monkeypatch):
+    calls = fake_gate(monkeypatch)
+    producer.run_gate(tmp_path, tmp_path / "results", env={}, jobs_per_shard=2)
+    shards = [command for command, _ in calls if "--shard-index" in command]
+    assert len(shards) == 8
+    assert all(command[-2:] == ["--jobs", "2"] and command.count("--jobs") == 1 for command in shards)
+    assert all("--jobs" not in command for command, _ in calls if "--shard-index" not in command)
+
+
+def test_native_gate_single_job_shard_command_is_unchanged(tmp_path, monkeypatch):
+    calls = fake_gate(monkeypatch)
+    producer.run_gate(tmp_path, tmp_path / "results", env={}, jobs_per_shard=1)
+    shards = [command for command, _ in calls if "--shard-index" in command]
+    assert len(shards) == 8
+    assert all("--jobs" not in command and command[-2] == "--log-dir" for command in shards)
+
+
+@pytest.mark.parametrize("jobs", [0, 17, True, 2.0, "2", None])
+def test_native_gate_rejects_invalid_jobs_per_shard(tmp_path, jobs):
+    with pytest.raises(ValueError, match="jobs per shard"):
+        producer.run_gate(tmp_path, tmp_path / "results", env={}, jobs_per_shard=jobs)
+    assert not (tmp_path / "results").exists()
+
+
+def test_host_gate_jobs_falls_back_to_four_without_runner(tmp_path, capsys):
+    assert producer.host_gate_jobs(tmp_path) == 4
+    assert "native gate: auto sizing unavailable (FileNotFoundError), using 4" in capsys.readouterr().out
+    assert "leaf_run_all_gates_auto" not in producer.sys.modules
+
+
+def test_host_gate_jobs_uses_runner_auto_sizing(tmp_path):
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts/run-all-gates.py").write_text(
+        "def _effective_cpus():\n    return 36.0\n"
+        "def _effective_mem_bytes():\n    return 72 * 2 ** 30\n"
+        "def resolve_auto_jobs(cpus, mem):\n    return 16 if (cpus, mem) == (36.0, 72 * 2 ** 30) else 0\n")
+    assert producer.host_gate_jobs(tmp_path) == 16
+    assert producer.gate_parallelism(producer.host_gate_jobs(tmp_path)) == (8, 2)
+
+
+def test_host_gate_jobs_rejects_invalid_runner_answer(tmp_path, capsys):
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts/run-all-gates.py").write_text(
+        "def _effective_cpus():\n    return 8.0\n"
+        "def _effective_mem_bytes():\n    return None\n"
+        "def resolve_auto_jobs(cpus, mem):\n    return 0\n")
+    assert producer.host_gate_jobs(tmp_path) == 4
+    assert "(ValueError), using 4" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("extra", [{"selection": "app", "predecessor": {}}, {"selection": "harness"},
@@ -600,7 +788,8 @@ def selective_case(tmp_path, monkeypatch, *, predecessor_ok=True, supports=True,
     monkeypatch.setattr(producer, "resolve_freshness", freshness)
     def build(root, service, source, number, freshness, metadata, **kwargs):
         events.append(service)
-        assert service in (("harness",) if selection == "harness" else ("app", "harness")) and not kwargs
+        assert service in (("harness",) if selection == "harness" else ("app", "harness"))
+        assert set(kwargs) == {"log_path"}
         return dict(repository=f"leaf-platform-{service}", image_digest="sha256:" + "0" * 64,
                     source_revision=source, native_build_number=number)
     monkeypatch.setattr(producer, "build_image", build)
@@ -658,7 +847,8 @@ def test_selective_builds_only_changed_services_and_preserves_origins(tmp_path, 
     producer.produce_release(tmp_path, output, request, {"CODEBUILD_SRC_DIR_provider_contract": "contract"}, "cb", "s3")
     manifest = json.loads((output / "staging-supply-set.json").read_bytes())
     selected = ["harness"] if selection == "harness" else ["app", "harness"]
-    assert events == ["checkout", "canonical-gate", "fixed-gate", "predecessor", "freshness", *selected]
+    assert events[:5] == ["checkout", "canonical-gate", "fixed-gate", "predecessor", "freshness"]
+    assert sorted(events[5:]) == sorted(selected)
     assert manifest["schema"] == f"leaf.native-release.{selection}.v1"
     assert manifest["selection"] == selection and manifest["source_tree"] == request["source_tree"]
     assert manifest["predecessor"] == request["predecessor"]
@@ -744,7 +934,8 @@ def test_app_harness_retains_independent_web_without_relabel_or_rebuild(tmp_path
     output = tmp_path / "output"
     producer.produce_release(tmp_path, output, request, {"CODEBUILD_SRC_DIR_provider_contract": "contract"}, "cb", "s3")
     actual = json.loads((output / "staging-supply-set.json").read_bytes())
-    assert events == ["checkout", "canonical-gate", "fixed-gate", "predecessor", "retained-web", "freshness", "app", "harness"]
+    assert events[:6] == ["checkout", "canonical-gate", "fixed-gate", "predecessor", "retained-web", "freshness"]
+    assert sorted(events[6:]) == ["app", "harness"]
     assert actual["retained_web"] == request["retained_web"]
     assert actual["web"] == {"member": web["web"]["path"],
                              "artifact_sha256": web["web"]["artifact_sha256"],
