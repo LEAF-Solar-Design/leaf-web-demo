@@ -29,13 +29,14 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { cleanup, render } from '@testing-library/react'
+import { cleanup, fireEvent, render } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import EntitlementGate from '../components/EntitlementGate.jsx'
 import JobRail from '../components/JobRail.jsx'
 import ProductSurfaceTabs, { ProductSurfaceFrame } from '../components/ProductSurfaceTabs.jsx'
 import Toast from '../components/Toast.jsx'
+import { validateBuildRecord } from '../lib/buildQueue.js'
 
 import ContinuityStore from './ContinuityStore.jsx'
 import { CONTINUITY_HOST_CLASS, useContinuityPublish } from './continuityStore.js'
@@ -671,3 +672,85 @@ describe.skipIf(CAPTURE)('SurfaceFrame — the gates it now owns', () => {
     })
   })
 })
+
+// W6-E01: the frame hands the builds feed through to the rail; the badge
+// never reads it.
+describe.skipIf(CAPTURE)('SurfaceFrame, the builds feed', () => {
+  const queued = (id) => validateBuildRecord({
+    id, lane: 'fleet', state: 'queued', title: `task ${id}`, requested_by: null, started: null,
+    elapsed_ms: null, estimate_ms: null, cost_usd: null, receipts: [],
+    terminal: { verified: false, promoted: false }, actions: [], status: { word: 'queued', tint: 'mut', detail: null },
+  })
+  const BUILDS = [queued('f1'), queued('f2')]
+  const mount = (jobRail) => render(
+    <SurfaceFrame scene="console" activeSurface="browser" states={STATES} jobRail={jobRail}>
+      <SurfaceFrame.Builds />
+      <SurfaceFrame.JobRail />
+    </SurfaceFrame>,
+  )
+
+  it('E01 row14 a stale buildFeed renders its sentence inside the frame and leaves the badge count alone', () => {
+    const plain = mount({ ...JOBS, builds: BUILDS })
+    const badge = plain.container.querySelector('[data-testid="builds-badge"]')?.textContent
+    expect(badge).toBe('2 running')
+    expect(plain.container.querySelector('[data-feed="stale"]')).toBeNull()
+    cleanup()
+
+    const onRetry = vi.fn()
+    const stale = mount({ ...JOBS, builds: BUILDS, buildFeed: { status: 'stale', dropped: 0, onRetry } })
+    const note = stale.container.querySelector('.rail .rail-feed[data-feed="stale"]')
+    expect(note?.textContent).toContain('Build list may be out of date: the last refresh failed.')
+    expect(stale.container.querySelector('[data-testid="builds-badge"]')?.textContent).toBe(badge)
+    expect(stale.container.querySelectorAll('.bq-card')).toHaveLength(BUILDS.length)
+    fireEvent.click(note.querySelector('button'))
+    expect(onRetry).toHaveBeenCalledTimes(1)
+  })
+
+  // A source read, not a render: both scenes build their own jobRail object,
+  // and a host that forgets the field silently hides every feed note. The
+  // workspace panel's JobRail lists workspace jobs, not the builds feed, so it
+  // correctly receives no buildFeed and is not a host here. Comments are
+  // blanked first, so a commented-out field fails the row.
+  it('E01 row18 App and ToolCast pass buildFeed to their JobRail hosts', () => {
+    const FEED = 'buildFeed: { status: buildQueue.status, dropped: buildQueue.dropped, onRetry: buildQueue.resume }'
+    for (const rel of [['src', 'App.jsx'], ['src', 'site', 'ToolCast.jsx']]) {
+      const source = codeOnly(readFileSync(join(process.cwd(), ...rel), 'utf8'))
+      const start = source.indexOf('jobRail={')
+      expect(start, rel.join('/')).toBeGreaterThan(-1)
+      expect(source.indexOf('jobRail={', start + 1), rel.join('/')).toBe(-1)
+      const end = source.indexOf('toast={', start)
+      expect(end, rel.join('/')).toBeGreaterThan(start)
+      expect(source.slice(start, end), rel.join('/')).toContain(FEED)
+    }
+  })
+})
+
+// Copied from web/src/app-wiring.test.mjs: blanks comment bodies (keeping
+// offsets and line breaks) and steps over string and template literals.
+function codeOnly(src) {
+  const chars = src.split('')
+  let i = 0
+  while (i < src.length) {
+    const quote = src[i]
+    if (quote === "'" || quote === '"' || quote === '`') {
+      i++
+      while (i < src.length) {
+        if (src[i] === '\\') i += 2
+        else if (src[i++] === quote) break
+      }
+    } else if (src[i] === '/' && src[i + 1] === '/') {
+      i += 2
+      while (i < src.length && src[i] !== '\n' && src[i] !== '\r') chars[i++] = ' '
+    } else if (src[i] === '/' && src[i + 1] === '*') {
+      i += 2
+      while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) {
+        if (src[i] !== '\n' && src[i] !== '\r') chars[i] = ' '
+        i++
+      }
+      i += 2
+    } else {
+      i++
+    }
+  }
+  return chars.join('')
+}

@@ -64,11 +64,44 @@ function extraBuilds(builds, knownJobIds) {
     .sort((a, b) => (b.started || 0) - (a.started || 0))
 }
 
+// W6-E01: what the rail says about the builds feed (useBuildQueue's status and
+// dropped count). A stale or paused feed never removes a card; it adds one
+// note above the ledger with its recovery button. Absent, or live/idle with
+// nothing dropped, renders nothing.
+const FEED_NOTE = {
+  stale: { text: 'Build list may be out of date: the last refresh failed.', action: 'Retry' },
+  auth: { text: 'Build updates are paused until you sign in again.', action: 'Resume' },
+}
+
+function BuildFeedNotes({ buildFeed }) {
+  if (!buildFeed || typeof buildFeed !== 'object') return null
+  const note = FEED_NOTE[buildFeed.status]
+  const dropped = Number.isInteger(buildFeed.dropped) && buildFeed.dropped > 0 ? buildFeed.dropped : 0
+  if (!note && dropped === 0) return null
+  return (
+    <>
+      {note && (
+        <div className="rail-note rail-feed" role="status" data-feed={buildFeed.status}>
+          {note.text}{' '}
+          <button type="button" className="chip-act" onClick={buildFeed.onRetry}>{note.action}</button>
+        </div>
+      )}
+      {dropped > 0 && (
+        <div className="rail-note" data-feed-dropped={dropped}>
+          {dropped === 1
+            ? '1 build record could not be read and is not shown.'
+            : `${dropped} build records could not be read and are not shown.`}
+        </div>
+      )}
+    </>
+  )
+}
+
 // W4d Slice D seating: `spine` renders the rail as a 44px strip (the live
 // count and one expand button); `onCollapse` adds the collapse control to the
 // expanded rail's header. Both undefined = the rail exactly as before (rail
 // OFF is byte-identical by construction).
-export default function JobRail({ mock, jobs, currentJob, inflight, reattaching, onSelectJob, builds, spine = false, onExpand, onCollapse }) {
+export default function JobRail({ mock, jobs, currentJob, inflight, reattaching, onSelectJob, builds, buildFeed, spine = false, onExpand, onCollapse }) {
   const list = jobs || []
   const knownIds = new Set(list.map((j) => j.job_id))
   const showCurrent = currentJob && (!currentJob.job_id || !knownIds.has(currentJob.job_id))
@@ -182,6 +215,8 @@ export default function JobRail({ mock, jobs, currentJob, inflight, reattaching,
           <span>Re-attaching to in-flight job: {inflight.tool}</span>
         </div>
       )}
+
+      <BuildFeedNotes buildFeed={buildFeed} />
 
       <div className="rail-ledger">
         {showCurrent && (

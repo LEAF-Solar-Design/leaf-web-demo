@@ -1743,6 +1743,7 @@ export default function ToolCast({
         reattaching,
         onSelectJob: inspectHistoricalJob,
         builds: buildQueue.builds,
+        buildFeed: { status: buildQueue.status, dropped: buildQueue.dropped, onRetry: buildQueue.resume },
       } : null}
       toast={{ toast, onDone: onToastDone }}
       // Slice 6b. Same two facts the console supplies, spelled in the stage's
