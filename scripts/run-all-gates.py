@@ -526,10 +526,11 @@ def build_suites() -> List[Suite]:
         # deep search status (server/solar_batch2_simple.py); the guardrails' 14 rules, display order and
         # health banner in two list modes (server/solar_guardrails.py); the pile block mapper's save
         # (server/solar_pile_block_mapping.py). Every input is authored in the file, so each floor is the
-        # exact collected count on every runner: 14 (11 + the three zone-assign cases, G36 addendum),
+        # exact collected count on every runner: 17 (11 + the three zone-assign and three frame-park cases,
+        # G36 addendum),
         # 10 + 5 parametrizations = 15, 8 + 8 = 16.
         Suite("server-solar-batch2-simple", "server tests/test_solar_batch2_simple.py",
-              "pytest", SERVER, _py_pytest("tests/test_solar_batch2_simple.py"), 14),
+              "pytest", SERVER, _py_pytest("tests/test_solar_batch2_simple.py"), 17),
         # ImportSolarEdgePDF parity (2026-09-24): the PDF reader (pdfminer.six hooks reproducing PdfPig's raw
         # operators, paths and letters) and the SolarEdgePdfConverter port, both held to the plugin's golden dump by
         # committed digests over data/solaredge_1to1_demo.pdf. Hermetic, so each floor is the exact count: 21, 19.
@@ -1958,9 +1959,9 @@ def build_suites() -> List[Suite]:
         Suite("scripts-solar-ground-scene-evidence", "scripts test_solar_ground_scene_evidence.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_scene_evidence.py"), 20),
         # W5 batch 2 evidence (2026-09-24, contract G36): the producers over synthetic intakes authored in
-        # the file, so each floor is the exact collected count: 6 (with z2 and z3), 5 and 3.
+        # the file, so each floor is the exact collected count: 7 (with z2, z3 and f2), 5 and 3.
         Suite("scripts-solar-batch2-simple-evidence", "scripts test_solar_batch2_simple_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_batch2_simple_evidence.py"), 6),
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_batch2_simple_evidence.py"), 7),
         Suite("scripts-solar-guardrails-evidence", "scripts test_solar_guardrails_evidence.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_guardrails_evidence.py"), 5),
         Suite("scripts-solar-pile-block-mapping-evidence", "scripts test_solar_pile_block_mapping_evidence.py",
