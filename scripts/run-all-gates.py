@@ -1506,6 +1506,11 @@ def build_suites() -> List[Suite]:
               allowed_skip_reasons=(r"POSIX advisory locking only",)),
         Suite("server-customization-publish-recovery", "server customization publish recovery", "pytest",
               SERVER, _py_pytest("tests/test_customization_publish_recovery.py"), 1),
+        # A lost or stale publish must end SUPERSEDED (terminal) instead of holding
+        # the tenant's single PUBLISHING slot; stale-base additions refuse before the
+        # confirmation is consumed. Floor 5 = the executed count (one parametrized).
+        Suite("server-customization-publish-conflict", "server customization publish conflict", "pytest",
+              SERVER, _py_pytest("tests/test_customization_publish_conflict.py"), 5),
         # Async stage queue: reservation/lease/worker semantics AND the terminal
         # failure-visibility guards (a harness-answered job failure must FAIL the
         # change set on attempt 1 with the harness's reason readable from stage
