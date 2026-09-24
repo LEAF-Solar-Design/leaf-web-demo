@@ -14,6 +14,7 @@ from solar_design_graph import (  # noqa: E402
     require_revision, serialize_graph, validate_graph,
 )
 from solar_dependencies import affected_entities, membership_changes  # noqa: E402
+import solar_design_graph as sdg  # noqa: E402
 
 
 def app_id(kind, number):
@@ -224,3 +225,113 @@ def test_ids_are_application_owned():
     first, second = new_id("panel"), new_id("panel")
     assert first != second
     Draft202012Validator(load_schema()["$defs"]["id"]).validate(first)
+
+
+class _CountingValidator:
+    """Delegates to a real validator and counts full-schema passes."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.calls = 0
+
+    def is_valid(self, instance):
+        return self.inner.is_valid(instance)
+
+    def iter_errors(self, instance):
+        self.calls += 1
+        return self.inner.iter_errors(instance)
+
+
+class TestValidationMemo:
+    @pytest.fixture(autouse=True)
+    def _fresh_caches(self):
+        sdg._reset_validation_caches()
+        yield
+        sdg._reset_validation_caches()
+
+    def _count_full_validator(self, monkeypatch):
+        units, full = sdg._schema_validators()
+        counter = _CountingValidator(full)
+        monkeypatch.setattr(sdg, "_SCHEMA_VALIDATORS", (units, counter))
+        return counter
+
+    def test_repeat_returns_equal_isolated_copies(self, graph):
+        first = validate_graph(graph)
+        second = validate_graph(graph)
+        assert first == second == graph
+        assert first is not second and first is not graph and second is not graph
+        first["extra"]["mutated"] = True
+        second["panels"][0]["extra"]["mutated"] = 1
+        third = validate_graph(graph)
+        assert third == graph
+        assert "mutated" not in third["extra"] and "mutated" not in third["panels"][0]["extra"]
+        assert "mutated" not in graph["extra"]
+
+    def test_identical_graph_skips_schema_and_changed_graph_reruns(self, graph, monkeypatch):
+        counter = self._count_full_validator(monkeypatch)
+        validate_graph(graph)
+        assert counter.calls == 1
+        validate_graph(copy.deepcopy(graph))
+        assert counter.calls == 1
+        graph["extra"]["note"] = "changed"
+        validate_graph(graph)
+        assert counter.calls == 2
+
+    def test_key_order_shares_one_memo_entry(self, graph, monkeypatch):
+        counter = self._count_full_validator(monkeypatch)
+        validate_graph(graph)
+        reordered = dict(reversed(list(graph.items())))
+        assert list(reordered) != list(graph)
+        assert validate_graph(reordered) == graph
+        assert counter.calls == 1
+        assert len(sdg._VALIDATED_GRAPH_MEMO) == 1
+
+    def test_refusal_is_repeated_and_never_memoized(self, graph, monkeypatch):
+        counter = self._count_full_validator(monkeypatch)
+        graph["strings"][0]["module_count"] = 7
+        for attempt in range(3):
+            with pytest.raises(GraphValidationError, match="STRING_COUNT_MISMATCH"):
+                validate_graph(graph)
+            assert counter.calls == attempt + 1
+        assert len(sdg._VALIDATED_GRAPH_MEMO) == 0
+
+    def test_memo_is_bounded(self, graph, monkeypatch):
+        monkeypatch.setattr(sdg, "_VALIDATED_GRAPH_MEMO_MAX", 2)
+        for number in range(5):
+            graph["extra"]["n"] = number
+            validate_graph(graph)
+            assert len(sdg._VALIDATED_GRAPH_MEMO) <= 2
+        assert len(sdg._VALIDATED_GRAPH_MEMO) == 2
+        assert all(type(key) is bytes and len(key) == 32 for key in sdg._VALIDATED_GRAPH_MEMO)
+
+    def test_bounds_check_runs_on_memo_hit(self, graph, monkeypatch):
+        calls = []
+        real = sdg._bounded_json
+
+        def spy(value):
+            calls.append(value)
+            return real(value)
+
+        monkeypatch.setattr(sdg, "_bounded_json", spy)
+        validate_graph(graph)
+        validate_graph(graph)
+        assert len(calls) == 2
+        assert len(sdg._VALIDATED_GRAPH_MEMO) == 1
+
+    def test_schema_read_at_most_once(self, graph, monkeypatch):
+        calls = []
+        real = sdg.load_schema
+
+        def spy():
+            calls.append(1)
+            return real()
+
+        monkeypatch.setattr(sdg, "load_schema", spy)
+        for number in range(4):
+            graph["extra"]["n"] = number
+            validate_graph(graph)
+            validate_graph(graph)
+        graph["strings"][0]["module_count"] = 7
+        with pytest.raises(GraphValidationError, match="STRING_COUNT_MISMATCH"):
+            validate_graph(graph)
+        assert len(calls) == 1
