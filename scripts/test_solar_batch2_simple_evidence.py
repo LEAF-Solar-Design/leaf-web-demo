@@ -34,6 +34,12 @@ def write_intakes(tmp_path):
                                            "ShadingLimitAngleDeg": 25.0},
                            "drawing_totals": {"frames": 0, "kwp_total": 0.0, "piles": 0, "frame_types": []}},
     }
+    intakes["z1-assign.json"] = {
+        "format": "zone-assign-intake-v1", "units": "in", "reference_panel": "7FA3",
+        "elevation_zones": [{"name": "Zone 1", "offset": {"kind": "length", "value": 24.0, "unit": "in"},
+                             "colour": 1, "strings": [], "panels": []}],
+        "panels": [{"panel": "7FA4", "size": "8.0x4.0", "colour": 7}, {"panel": "7FA3", "size": "8.0x4.0", "colour": 7}],
+        "strings": ["200"]}
     for name, value in intakes.items():
         (tmp_path / name).write_text(json.dumps(value), encoding="utf-8")
     return tmp_path
@@ -41,7 +47,7 @@ def write_intakes(tmp_path):
 
 def test_every_step_builds_a_valid_document(tmp_path):
     docs = prod.run_steps(write_intakes(tmp_path), REV)
-    assert set(docs) == {"z1", "s2", "s3", "s4", "f1", "q1"}
+    assert set(docs) == {"z1", "z2", "z3", "s2", "s3", "s4", "f1", "q1"}
     for step, doc in docs.items():
         prod.compare.validate_evidence(doc, "exports")
         assert doc["after"]["source_revision"] == step and doc["after"]["format"] == "batch2-v1"
@@ -87,4 +93,15 @@ def test_missing_or_malformed_intakes_refuse(tmp_path):
 def test_cli_writes_each_step(tmp_path):
     out = tmp_path / "out"
     assert prod.main(["--intakes", str(write_intakes(tmp_path)), "--out", str(out), "--revision", REV]) == 0
-    assert sorted(p.name for p in out.iterdir()) == ["f1.json", "q1.json", "s2.json", "s3.json", "s4.json", "z1.json"]
+    assert sorted(p.name for p in out.iterdir()) == ["f1.json", "q1.json", "s2.json", "s3.json", "s4.json", "z1.json", "z2.json", "z3.json"]
+
+
+def test_zone_assign_steps_chain_z3_on_studio_z2(tmp_path):
+    docs = prod.run_steps(write_intakes(tmp_path), REV)
+    z2, z3 = docs["z2"], docs["z3"]
+    assert z2["parameters"]["answers"] == ["handle:7FA3", "ALL", ""]
+    kinds = [row["type"] for row in z2["after"]["rows"]]
+    assert kinds.count("recoloured") == 2 and kinds.count("elevation-zone") == 1
+    zone = [row for row in z3["after"]["rows"] if row["type"] == "elevation-zone"][0]
+    assert zone["panels"] == ["7FA4", "7FA3"] and zone["strings"] == ["200"]
+    assert z2["fixture_sha256"] == z3["fixture_sha256"]
