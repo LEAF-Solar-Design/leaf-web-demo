@@ -647,3 +647,19 @@ def open_customer_rows(intake):
     """One `setting` row per changed setting, by name, in the plugin adapter's shape."""
     changed = open_customer_dwg(intake)
     return [(f"setting-{name}", {"name": name, "value": changed[name]}) for name in sorted(changed)]
+
+
+# ---------------------------------------------------------------------------------------------
+# p1: the Leaf Platform palette (LEAFPLATFORM, WebBridge/LeafPlatformWebViewHost.cs:48-57).
+
+PLATFORM_INTAKE_KEYS = frozenset({"origin_overridden", "bound"})
+
+
+def platform_webview_rows(intake):
+    """What Studio commits when the hosted authoring surface is opened for a drawing: nothing. Studio is that surface,
+    so there is no host palette to open, and which project and drawing a session works on is Studio-side state, never
+    a record written into the drawing. Fails closed on an intake that is not the two facts the plugin adapter records
+    (whether the platform origin was overridden, whether the drawing already carries a platform binding)."""
+    _require(isinstance(intake, dict) and set(intake) == PLATFORM_INTAKE_KEYS
+             and all(type(value) is bool for value in intake.values()), "the platform intake is invalid")
+    return {}

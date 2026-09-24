@@ -61,6 +61,7 @@ def write_intakes(tmp_path):
                                               "LeafProjectCanceled": False, "CustomerWelcomeDismissed": False},
                                  "scan": {"pvcase_area_entities": 0, "pvcase_tracker_blocks": 0,
                                           "pvcase_xdata_blocks": 0, "branch_tracker_polylines": 0}}
+    intakes["p0-intake.json"] = {"bound": False, "origin_overridden": False}
     for name, value in intakes.items():
         (tmp_path / name).write_text(json.dumps(value), encoding="utf-8")
     return tmp_path
@@ -68,7 +69,7 @@ def write_intakes(tmp_path):
 
 def test_every_step_builds_a_valid_document(tmp_path):
     docs = prod.run_steps(write_intakes(tmp_path), REV)
-    assert set(docs) == {"z1", "z2", "z3", "s2", "s3", "s4", "f1", "f2", "q1", "m1", "o1", "k1"}
+    assert set(docs) == {"z1", "z2", "z3", "s2", "s3", "s4", "f1", "f2", "q1", "m1", "o1", "k1", "p1"}
     for step, doc in docs.items():
         prod.compare.validate_evidence(doc, "exports")
         assert doc["after"]["source_revision"] == step and doc["after"]["format"] == "batch2-v1"
@@ -114,7 +115,7 @@ def test_missing_or_malformed_intakes_refuse(tmp_path):
 def test_cli_writes_each_step(tmp_path):
     out = tmp_path / "out"
     assert prod.main(["--intakes", str(write_intakes(tmp_path)), "--out", str(out), "--revision", REV]) == 0
-    assert sorted(p.name for p in out.iterdir()) == ["f1.json", "f2.json", "k1.json", "m1.json", "o1.json", "q1.json", "s2.json", "s3.json", "s4.json", "z1.json", "z2.json", "z3.json"]
+    assert sorted(p.name for p in out.iterdir()) == ["f1.json", "f2.json", "k1.json", "m1.json", "o1.json", "p1.json", "q1.json", "s2.json", "s3.json", "s4.json", "z1.json", "z2.json", "z3.json"]
 
 
 def test_f2_reports_the_ok_on_the_active_preset(tmp_path):
@@ -148,3 +149,10 @@ def test_m1_and_o1_rows(tmp_path):
     assert row["panels"] == ["8D3A", "A1", "A2", "8D9D"] and row["label_index"] == 2 and row["label_text"] == "MID"
     assert docs["m1"]["parameters"] == {"answers": ["handle:8D3A", "handle:8D9D"]}
     assert [(r["name"], r["value"]) for r in docs["o1"]["after"]["rows"]] == [("ProjectName", "Customer Review")]
+
+
+def test_p1_commits_nothing_over_the_platform_intake(tmp_path):
+    doc = prod.run_steps(write_intakes(tmp_path), REV, "p1")["p1"]
+    assert doc["after"]["rows"] == [] and doc["entity_mapping"] == {}
+    assert doc["provenance"]["capability"] == "leaf-platform-webview"
+    assert doc["fixture_sha256"] == prod.compare.semantic_hash({"bound": False, "origin_overridden": False})

@@ -62,6 +62,8 @@ STEPS = {
     # G36 addendum: the height zone's panels (z2) and strings (z3) from the zones after z1.
     "m1": ("string-midpoint-connection", "in", "m0-intake.json", None),
     "o1": ("open-customer-dwg", "in", "o0-intake.json", None),
+    # W4 p1: LEAFPLATFORM. Studio is the authoring surface the palette opens; it commits nothing to the drawing.
+    "p1": ("leaf-platform-webview", "in", "p0-intake.json", None),
     "z2": ("elevation-zone-assign-panels", "in", "z1-assign.json", {"height_zone": "Zone 1", "assign_panels": 1}),
     "z3": ("elevation-zone-assign-strings", "in", "z1-assign.json",
            {"height_zone": "Zone 1", "assign_panels_cancelled": 1}),
@@ -130,6 +132,8 @@ def step_rows(step, intake):
         if step == "o1":
             rows = engine.open_customer_rows(intake)
             return {"setting": rows} if rows else {}
+        if step == "p1":
+            return engine.platform_webview_rows(intake)
     except engine.BatchTwoError as exc:
         raise EvidenceError(f"step {step}: {exc}") from None
     raise EvidenceError(f"unknown step {step!r}")

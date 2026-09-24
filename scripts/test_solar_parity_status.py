@@ -153,8 +153,9 @@ def test_empty_seed_ledger_fails_row_count(tmp_path, capsys):
     assert result["ok"] is False
 
 
-def test_shipped_ledger_is_reconciled_and_wave_one_is_open():
-    """The shipped ledger reconciles all 394 registrations (w0 passes) while W1 still owes receipts."""
+def test_shipped_ledger_is_reconciled_and_every_production_row_has_a_receipt():
+    """The shipped ledger reconciles all 394 registrations (w0 passes), and since 2026-09-24 (leaf-platform-webview,
+    the last receipt) W1 and all-production pass too: every production T or F row has a passing receipt."""
     proc = subprocess.run(
         [sys.executable, str(SCRIPT), "--require", "w0", "--json"],
         capture_output=True,
@@ -171,16 +172,17 @@ def test_shipped_ledger_is_reconciled_and_wave_one_is_open():
     assert ledger["registrations_expected"] == 394
     assert len(ledger["rows"]) == 394
     assert len({row["global"] for row in ledger["rows"]}) == 394
-    proc = subprocess.run(
-        [sys.executable, str(SCRIPT), "--require", "w1", "--json"],
-        capture_output=True,
-        text=True,
-        cwd=str(REPO_ROOT),
-    )
-    assert proc.returncode == 1, proc.stderr
-    result = json.loads(proc.stdout)
-    assert result["counts"]["duty_rows_in_scope"] > 0
-    assert all(code in {"RECEIPT_MISSING", "RECEIPT_FAIL", "RECEIPT_STALE"} for code in finding_codes(result))
+    for requirement in ("w1", "all-production"):
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT), "--require", requirement, "--json"],
+            capture_output=True,
+            text=True,
+            cwd=str(REPO_ROOT),
+        )
+        assert proc.returncode == 0, (requirement, proc.stderr)
+        result = json.loads(proc.stdout)
+        assert result["ok"] is True and finding_codes(result) == [], requirement
+        assert result["counts"]["duty_rows_in_scope"] > 0
 
 
 def test_valid_three_row_ledger_passes_all_production(tmp_path, capsys):

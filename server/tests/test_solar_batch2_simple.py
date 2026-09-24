@@ -302,3 +302,17 @@ def test_open_customer_flows_and_skips():
                                                                              "ProjectName": "Customer Review"}
     with pytest.raises(eng.BatchTwoError):
         eng.open_customer_dwg(dict(customer_intake(), opened_via_command=False))
+
+
+# --- Leaf Platform palette (p1) -----------------------------------------------------------------------------------
+
+def test_platform_webview_commits_nothing():
+    assert eng.platform_webview_rows({"origin_overridden": False, "bound": False}) == {}
+    assert eng.platform_webview_rows({"origin_overridden": True, "bound": True}) == {}
+
+
+def test_platform_webview_intake_fails_closed():
+    for bad in (None, {}, {"origin_overridden": False}, {"origin_overridden": 0, "bound": False},
+                {"origin_overridden": False, "bound": False, "host": "x"}):
+        with pytest.raises(eng.BatchTwoError, match="platform intake"):
+            eng.platform_webview_rows(bad)
