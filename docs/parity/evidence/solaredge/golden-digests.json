@@ -1,0 +1,71 @@
+{
+  "schema": "leaf.solaredge-golden-digests.v1",
+  "golden_schema": "solaredge-golden-v1",
+  "pdfpig": "0.1.13.0",
+  "base_name": "solaredge_1to1_demo",
+  "golden_sha256": "737f42311401bd878a77bcf3c3796b72fca701c98b766573e084cf2ffec3e3ff",
+  "pdf_sha256": "2e8076086b8e494295e5523b3bb94325924b3196d069e62d2f517275d678a1c1",
+  "canonicalization": "sha256 of json.dumps(sort_keys, compact, ascii) after rounding floats to 9 decimals, -0 to 0, integral floats to ints; golden path colour strings parsed to [r,g,b]; list order exact",
+  "sections": {
+    "lines": {
+      "count": 21355,
+      "sha256": "3e3c07d24d8f23c0aad01d775afa38df3c05f2d386c16c31353d9afafe229d3a"
+    },
+    "curves": {
+      "count": 46502,
+      "sha256": "339caf276c2f85ab0b427562de9089e1d6a1b77b5db3010f1ddf237f249e9bd0"
+    },
+    "letters": {
+      "count": 8618,
+      "sha256": "cd8ea232fac403c73e22aaa91884c68db513b2a118f08f991e81d882c4088de3"
+    },
+    "paths": {
+      "count": 24988,
+      "sha256": "e725fa47a71e1df459d46f348de12cceacc786bff58bc0a1e6ee00a43a007bd0"
+    },
+    "panels": {
+      "count": 3526,
+      "sha256": "5bb0c6ac51489f602211cf2698c2ec9c0bb2549683af6a36ebd7ff5e19e16f96"
+    },
+    "optimizers": {
+      "count": 3526,
+      "sha256": "25bb7c94e41b424dcc1c7f9697d34ec75b30466cd283005542b2675812f46037"
+    },
+    "grids": {
+      "count": 14,
+      "sha256": "2a7b57b485064fc2125b0caba83cd51634df542ea24df9dd5b272a3f42ddfbd7"
+    },
+    "matrices": {
+      "count": 14,
+      "sha256": "d636582a45309adffcefb68b0bb654f2a90a212805e436066d0eed47f5cb04c8"
+    },
+    "panel_layout": {
+      "count": 3526,
+      "sha256": "5069c2f3b17c1ecdade5495360e5fbc8538cc8844275710403bc323cf3d4031e"
+    },
+    "inverter_strings": {
+      "count": 13,
+      "sha256": "a6936ca8ddb4dae77a33abe4b0ef5caaf610ff1ab80845563485a73bb04c55aa"
+    },
+    "all_string_infos": {
+      "count": 116,
+      "sha256": "c40c4a70cf6edc250c1378e211f1d42592d3a83e25dec1dfe9633573f9719b67"
+    },
+    "inverter_pdf_colors": {
+      "count": 13,
+      "sha256": "1b07328a4096210c8e538d91b3f23738a456a5362ecae4ce8338c242bd5ac5bf"
+    }
+  },
+  "scalars": {
+    "page_width": 7946.8,
+    "page_height": 2609.09,
+    "legend_threshold": 7311.056,
+    "has_position_keywords": true,
+    "optimizer_ratio": {
+      "type": "1:1",
+      "frequency": 1,
+      "two_panel": 0,
+      "one_panel": 3526
+    }
+  }
+}
