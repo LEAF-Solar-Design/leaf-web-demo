@@ -5,6 +5,7 @@ import {
   createOrg,
   createProject,
   getDrawingIntake,
+  getDrawingVersions,
   getJob,
   getSession,
   isWorkspaceBootstrapRequired,
@@ -113,6 +114,20 @@ export function panelErrorText(value) {
       ? humanizeError(value)
       : MSG_GENERIC
   return text.slice(0, 300)
+}
+
+// The drawing state a session load seats. Pure, never throws: a versions
+// summary is adopted only when head is an integer >= 1 and latest an integer
+// >= head (no coercion, "3" is not a head); anything else seats head 1, the
+// only honest default when the drawing's real version facts are unknown.
+export function sessionDrawingState(drawingId, summary) {
+  const head = summary && typeof summary === 'object' ? summary.head : undefined
+  const latest = summary && typeof summary === 'object' ? summary.latest : undefined
+  if (!Number.isInteger(head) || head < 1 || !Number.isInteger(latest) || latest < head) {
+    return { drawing_id: drawingId, version: 1, head: 1, latest: 1 }
+  }
+  const version = Number.isInteger(summary.version) && summary.version >= 1 ? summary.version : head
+  return { drawing_id: drawingId, version, head, latest }
 }
 
 const CAT_REQUEST = 'Rearrange the existing panels in this drawing into the shape of a sitting cat. Preserve every panel, create a new version, and show me the proposed change before anything runs.'
@@ -528,20 +543,30 @@ export default function ToolCast({
     setWorkspaceBootstrapRequired(false)
     setPhase('loading')
     getSession(PUBLIC_DEMO, drawingSource)
-      .then((data) => {
+      .then(async (data) => {
         if (!live) return
+        // A 200 from /api/session IS the platform session: publish it before
+        // the versions read below can report a newer auth failure (App.jsx).
+        accountSessionObservedRef.current = true
+        platformSession.actions.activate(data)
+        // /api/session serves the HEAD intake without its version facts; seat
+        // the real head from the versions summary, as App.jsx does. A failed
+        // read seats head 1 and never fails a drawing that loaded fine.
+        let summary = null
+        if (!PUBLIC_DEMO) {
+          summary = await getDrawingVersions(false, requestedDrawingId).catch(() => null)
+          if (!live) return
+        }
         if (PUBLIC_DEMO) mockVersions.seedBase(data.intake)
         seatIntake(data.intake, {
           drawingId: requestedDrawingId,
-          drawingState: { drawing_id: requestedDrawingId, version: 1, head: 1, latest: 1 },
+          drawingState: sessionDrawingState(requestedDrawingId, summary),
           apply: true,
         })
         setTenantId(data.tenant || 'try-surface')
         setGuestDrawing(null)
         setSessionTier(data.tier || null)
         setSessionOrg(data.org || null)
-        accountSessionObservedRef.current = true
-        platformSession.actions.activate(data)
         setPhase('ready')
       })
       .catch((cause) => {
