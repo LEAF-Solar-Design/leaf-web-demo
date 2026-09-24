@@ -175,3 +175,61 @@ def test_assign_refuses_a_missing_zone_or_reference():
     bad = dict(intake, panels=[{"panel": "not-hex", "size": None, "colour": 7}])
     with pytest.raises(eng.BatchTwoError):
         eng.zone_assign_panels(bad, zones, "Zone 1", "7FA3")
+
+
+# --- string midpoint connection (m1) and customer open (o1) --------------------------------------------------------
+
+def grid_intake(columns=4, rows=1, dx=10.0, dy=6.0):
+    panels = [{"handle": f"P{r}{c}", "x": c * dx, "y": r * dy} for r in range(rows) for c in range(columns)]
+    return {"panels": panels, "half_extents": [4.0, 2.0], "diagonal": 8.944272}
+
+
+def test_mid_path_follows_a_row_and_labels_the_middle_panel():
+    (row_id, fields), = eng.string_midpoint_rows(grid_intake(5), "P00", "P04")
+    assert row_id == "mid-string-1" and fields["panels"] == ["P00", "P01", "P02", "P03", "P04"]
+    assert fields["label_index"] == 2 and fields["label_position"] == [20.0, 0.0]
+    assert fields["label_height"] == round(8.944272 * 0.4, 6) and fields["vertices"][0] == [0.0, 0.0]
+
+
+def test_mid_path_ties_break_by_handle_and_refusals():
+    path, index = eng.string_midpoint_path(grid_intake(3, 2), "P00", "P02")   # P01 and P11 tie; P01 sorts first
+    assert path == ["P00", "P01", "P02"] and index == 1
+    with pytest.raises(eng.BatchTwoError, match="too short"):
+        eng.string_midpoint_path(grid_intake(3), "P00", "P01")
+    far = grid_intake(2, dx=100.0)
+    with pytest.raises(eng.BatchTwoError, match="no adjacency path"):
+        eng.string_midpoint_path(far, "P00", "P01")
+    with pytest.raises(eng.BatchTwoError, match="same panel"):
+        eng.string_midpoint_path(grid_intake(3), "P00", "p00")
+    with pytest.raises(eng.BatchTwoError):
+        eng.string_midpoint_path(dict(grid_intake(3), half_extents=[0, 2.0]), "P00", "P02")
+
+
+def customer_intake(**settings):
+    base = {"ProjectName": "", "ProjectZipCode": "", "InstallationDesign": "Roof", "LeafProjectCanceled": False,
+            "CustomerWelcomeDismissed": False}
+    base.update(settings)
+    return {"file_name": "customer_review.dwg", "opened_via_command": True, "settings": base,
+            "scan": {"pvcase_area_entities": 0, "pvcase_tracker_blocks": 0, "pvcase_xdata_blocks": 0,
+                     "branch_tracker_polylines": 0}}
+
+
+def test_open_customer_names_the_project_and_keeps_a_roof():
+    assert eng.open_customer_dwg(customer_intake()) == {"ProjectName": "Customer Review"}
+    assert eng.open_customer_dwg(customer_intake(ProjectName="Kept")) == {}
+    assert eng.suggest_project_name("north-lot_B.DWG") == "North Lot B"
+    assert eng.suggest_project_name(".dwg") == "Customer DWG"
+
+
+def test_open_customer_flows_and_skips():
+    ground = dict(customer_intake(), file_name="site_groundmount.dwg")
+    assert eng.open_customer_dwg(ground) == {"InstallationDesign": "Ground", "ProjectName": "Site Groundmount"}
+    pv = customer_intake(ProjectName="X")
+    pv["scan"]["pvcase_tracker_blocks"] = 3
+    assert eng.open_customer_dwg(pv) == {"InstallationDesign": "Ground"}
+    assert eng.infer_flow("solaredge_demo.dwg", customer_intake()["scan"]) == "SolarEdge"
+    assert eng.open_customer_dwg(customer_intake(CustomerWelcomeDismissed=True)) == {}
+    assert eng.open_customer_dwg(customer_intake(InstallationDesign="")) == {"InstallationDesign": "Roof",
+                                                                             "ProjectName": "Customer Review"}
+    with pytest.raises(eng.BatchTwoError):
+        eng.open_customer_dwg(dict(customer_intake(), opened_via_command=False))

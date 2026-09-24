@@ -529,7 +529,7 @@ def build_suites() -> List[Suite]:
         # exact collected count on every runner: 14 (11 + the three zone-assign cases, G36 addendum),
         # 10 + 5 parametrizations = 15, 8 + 8 = 16.
         Suite("server-solar-batch2-simple", "server tests/test_solar_batch2_simple.py",
-              "pytest", SERVER, _py_pytest("tests/test_solar_batch2_simple.py"), 14),
+              "pytest", SERVER, _py_pytest("tests/test_solar_batch2_simple.py"), 18),
         Suite("server-solar-guardrails", "server tests/test_solar_guardrails.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_guardrails.py"), 15),
         Suite("server-solar-pile-block-mapping", "server tests/test_solar_pile_block_mapping.py",
@@ -1947,7 +1947,7 @@ def build_suites() -> List[Suite]:
         # W5 batch 2 evidence (2026-09-24, contract G36): the producers over synthetic intakes authored in
         # the file, so each floor is the exact collected count: 6 (with z2 and z3), 5 and 3.
         Suite("scripts-solar-batch2-simple-evidence", "scripts test_solar_batch2_simple_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_batch2_simple_evidence.py"), 6),
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_batch2_simple_evidence.py"), 7),
         Suite("scripts-solar-guardrails-evidence", "scripts test_solar_guardrails_evidence.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_guardrails_evidence.py"), 5),
         Suite("scripts-solar-pile-block-mapping-evidence", "scripts test_solar_pile_block_mapping_evidence.py",
