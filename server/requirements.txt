@@ -17,7 +17,7 @@ pydantic
 requests
 boto3>=1.34,<2
 cryptography>=42
-pdfminer.six==20251107  # SolarEdge stringing-report import (solar_solaredge_pdf)
+pdfminer.six==20251230  # SolarEdge stringing-report import (solar_solaredge_pdf)
 python-multipart  # multipart parsing for POST /api/drawings/upload (§19); was installed-but-undeclared
 # Managed completion recipes use the matching installed Chromium revision.
 playwright==1.60.0
