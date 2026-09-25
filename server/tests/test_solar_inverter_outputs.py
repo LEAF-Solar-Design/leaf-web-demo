@@ -2,7 +2,9 @@
 
 Covered: the polyline projection, the centroid and the trench grid router (a straight route, an obstacle
 skirted, the per-axis cap, the metric grid options in drawing units, R27); LEAFTRENCHAUTO (panel-group
-INSERTs routed, none on the layer, every metric route over the cap, the same layout routed in inches); LEAFCABLETOTRAYAUTO (a cable snapped, idempotent, none without a trench); LEAFCABLETOTRAY
+INSERTs routed, none on the layer, every metric route over the cap, the same layout routed in inches, the
+INSERT outline rule, the plugin's heap tie order, and the committed rooftop i6 against the plugin's committed
+trenches, R27d); LEAFCABLETOTRAYAUTO (a cable snapped, idempotent, none without a trench); LEAFCABLETOTRAY
 (no trench, the one settings save, no cable); HomerunAdjust and LEAFDEVICESPATTERN (their reports and
 refusals); AddLBD and LEAFPLACELBD (the offset marker, the closest point on the feeder); InsertSchedules
 (the string, combiner and equipment cell grids, the stacked positions, the index order, the standard
@@ -200,6 +202,119 @@ def test_trench_auto_in_inches_routes_what_the_unconverted_grid_failed(kwargs):
     assert lines == ["LEAFTRENCHAUTO: routed 2 panel groups; 0 skipped (existing); 0 failed."]
     assert len(after["_trenches"]) == 2
     assert [r["type"] for r in out.trench_rows(state, after)] == ["trench", "trench"]
+
+
+def test_panel_group_outline_single_closed_boundary_else_extents():
+    closed = [[0.0, 0.0], [10.0, 0.0], [10.0, 4.0], [0.0, 4.0]]
+    open_loop = [[20.0, 0.0], [30.0, 0.0], [30.0, 8.0], [20.0, 8.0], [20.0, 0.0]]   # ends on its first vertex
+    assert out.panel_group_outline([closed]) == [tuple(p) for p in closed]
+    assert out.panel_group_outline([closed, open_loop]) == [tuple(p) for p in closed]
+    # Two Closed boundaries, or none, take the extents rectangle over every outline.
+    assert out.panel_group_outline([closed, shifted(closed, 20.0)]) == [(0.0, 0.0), (30.0, 0.0), (30.0, 4.0),
+                                                                        (0.0, 4.0)]
+    assert out.panel_group_outline([closed + [[0.0, 0.0]], open_loop]) == [(0.0, 0.0), (30.0, 0.0), (30.0, 8.0),
+                                                                           (0.0, 8.0)]
+    assert out.panel_group_outline([]) == []
+
+
+def test_cs_binary_heap_pops_equal_keys_in_the_plugins_heap_order():
+    heap = out._CsBinaryHeap()
+    for node in (5, 3, 4):
+        heap.push(node, 1.0)
+    assert [heap.pop() for _ in range(3)] == [(5, 1.0), (4, 1.0), (3, 1.0)]   # heapq would give 3, 4, 5
+    for node, key in ((7, 2.0), (6, 1.0), (8, 0.5)):
+        heap.push(node, key)
+    assert [heap.pop() for _ in range(3)] == [(8, 0.5), (6, 1.0), (7, 2.0)]
+    assert not heap.keys
+
+
+# The plugin's i6 trenches on test build 10 (Branch2025 master 2e8700d7, with the #332 alignment band), read
+# from C:/tmp/solar-parity/specs/i6-plugin-trenches-tb10.json (after.rows, 11 `trench` rows): each trench is
+# its first vertex and its lattice moves, one digit per vertex, 0..7 = N, NE, E, SE, S, SW, W, NW
+# (TrenchRouting.cs dCol/dRow), one grid step (1 m in inches) each, written as runs. Every route ends on the
+# hub cell. The shared corridor (the staircase NE to y 3108, east to the hub column, down to the hub) is one
+# string, _I6_STAIR.
+PLUGIN_I6_HUB_CELL = (17814.3406440856, 2911.501706684358)
+_I6_EAST_TO_HUB = "2" * 18 + "3" + "4444"
+_I6_STAIR = "1" + "22" + "1" + "222" + "122" * 6 + "1111" + _I6_EAST_TO_HUB
+_I6_WEST_TO_HUB = "7" * 8 + "6" * 15 + "5" + "4444"
+PLUGIN_I6_TRENCHES = {
+    "A63B": ((18050.56111652654, 1730.399344479633),
+             "6" * 18 + "55" + "6" + "5" + "666" + "5" + "6" + "555" + "6" * 7 + "5" + "66" + "5" + "6" + "5"
+             + "70" + "700" * 2 + "7000" + "700" * 7 + _I6_STAIR),
+    "A5DE": ((14861.58473857378, 2045.359974400893), "2" * 21 + "1" + "0" * 9 + "1" * 5 + _I6_STAIR),
+    "A608": ((16593.86820314071, 2163.470210621365),
+             "6666" + "5" + "6" * 6 + "5" + "6" + "00" + "700" * 4 + _I6_STAIR),
+    "A5F4": ((20491.50599841631, 2360.320604322152),
+             "4" * 8 + "5" * 4 + "6" * 29 + "7" * 11 + "0" * 12 + _I6_WEST_TO_HUB),
+    "A631": ((17735.60048660528, 2557.17099802294), "010001000"),
+    "A612": ((19231.66347873126, 2714.65131298357),
+             "444" + "33" + "4" + "5" + "666" + "5" + "66" + "555" + "666" + "7" + "0" * 12 + _I6_WEST_TO_HUB),
+    "A5FE": ((20845.83670707772, 3344.57257282609),
+             "6" * 8 + "5" + "6" * 46 + "5" * 5 + "6" * 16 + "5" + "4444"),
+    "A646": ((16278.90757321945, 3659.53320274735),
+             "1" + "3" + "4" * 8 + "3" * 10 + "2" * 4 + "1" * 4 + _I6_EAST_TO_HUB),
+    "A61D": ((17578.12017164465, 3659.53320274735), "1" + "33" + "4" * 11 + "333" + "4444"),
+    "A627": ((19507.25402991237, 3659.53320274735),
+             "4" * 8 + "5" + "6" * 20 + "5" * 4 + "6" + "5" + "6" * 15 + "5" + "4444"),
+    "A5EA": ((14782.84458109347, 4013.863911408767),
+             "2" * 23 + "3" * 28 + "1" + "22" + "1111" + _I6_EAST_TO_HUB),
+}
+# The groups whose whole route Studio reproduces on the tb10 target (8 of 11). The other three, A608, A631
+# and A612, take the same moves on the tb10 capture as on the pre-#332 test build 4 capture, so the band is
+# not what parts them. Each parts within a few cells of its start at a choice between equal-length lattice
+# paths (A608 vertex 4, A631 vertices 2, 4 and 5, A612 vertex 3), where the edges run inside the group's own
+# obstacle and weigh base * (1 + ObstaclePenalty): the choice then turns on 1e6-scaled rounding in the
+# lattice coordinates, that is on the exact bits of the grid origin and obstacle outlines (inferred, not yet
+# measured). Reported as residuals, not pinned to Studio's routes; the assertion prints the per-trench map.
+STUDIO_MATCHES_PLUGIN = ("A63B", "A5DE", "A5F4", "A5FE", "A646", "A61D", "A627", "A5EA")
+_MOVES = [(0, 1), (1, 1), (1, 0), (1, -1), (0, -1), (-1, -1), (-1, 0), (-1, 1)]
+
+
+def _plugin_vertices(start, moves, step):
+    points, (x0, y0), (c, r) = [start], start, (0, 0)
+    for digit in moves:
+        dc, dr = _MOVES[int(digit)]
+        c, r = c + dc, r + dr
+        points.append((x0 + c * step, y0 + r * step))
+    return points
+
+
+def _rooftop_i6():
+    import json
+    state = st.load_state(ROOT / "docs" / "parity" / "evidence" / "rooftop" / "inverters" / "state-i5.json")
+    intake = json.loads((ROOT / "docs" / "parity" / "evidence" / "rooftop" / "chain" / "intake.json")
+                        .read_text(encoding="utf-8"))
+    groups = [{"handle": g["handle"], "outlines": g["outlines"]} for g in intake["panel_groups"]]
+    after, lines = out.trench_routing_auto(state, groups, units="in")
+    return groups, after, lines
+
+
+def test_trench_auto_rooftop_starts_hub_and_routes_match_the_plugin():
+    groups, after, lines = _rooftop_i6()
+    assert lines == ["LEAFTRENCHAUTO: routed 11 panel groups; 0 skipped (existing); 0 failed."]
+    step = out.routing_options_for_units("in")["grid_step"]
+    trenches = [[tuple(p) for p in t["vertices"]] for t in after["_trenches"]]
+    assert len(trenches) == len(groups) == len(PLUGIN_I6_TRENCHES)
+    matches = {}
+    for group, got in zip(groups, trenches):                     # routed in the intake's (handle) order
+        start, moves = PLUGIN_I6_TRENCHES[group["handle"]]
+        assert got[0] == pytest.approx(start, abs=1e-6), group["handle"]
+        assert got[-1] == pytest.approx(PLUGIN_I6_HUB_CELL, abs=1e-6), group["handle"]
+        want = _plugin_vertices(start, moves, step)
+        assert want[-1] == pytest.approx(PLUGIN_I6_HUB_CELL, abs=1e-6), group["handle"]   # the target's own ends
+        matches[group["handle"]] = len(got) == len(want) and all(
+            abs(a[0] - b[0]) <= 1e-6 and abs(a[1] - b[1]) <= 1e-6 for a, b in zip(got, want))
+    assert all(matches[h] for h in STUDIO_MATCHES_PLUGIN), matches   # the message is the per-trench map
+
+
+def test_alignment_band_takes_a_midpoint_half_a_cell_away_whatever_its_last_bits():
+    half = 19.68503937007874                                     # half of 1 m in inches
+    assert out.within_alignment_band(half, half)
+    assert out.within_alignment_band(math.nextafter(half, math.inf), half)   # bare d <= half: False
+    assert out.within_alignment_band(half * (1 + 1e-9), half)
+    assert not out.within_alignment_band(half * (1 + 1e-8), half)
+    assert not out.within_alignment_band(2 * half, half)
 
 
 def test_cable_to_tray_auto_snaps_the_interior_vertices():

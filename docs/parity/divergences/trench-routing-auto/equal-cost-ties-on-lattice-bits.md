@@ -1,0 +1,9 @@
+# Trench routing: three equal-cost ties decided by lattice-origin bits the drawing export does not carry
+
+Capability `trench-routing-auto`, fixture `rooftop-inverters-i6`, receipt `docs/parity/receipts/trench-routing-auto/rooftop-inverters-i6.json`.
+
+On the plugin with the metric grid fix (Branch2025 #326) and the alignment band tolerance (#332), LEAFTRENCHAUTO routes all 11 panel groups (test build 10, 2026-09-25). Studio's port of `TrenchRouting.RoutePath` and the LEAFTRENCHAUTO loop reproduces 8 of the 11 trenches vertex for vertex: start cell, hub cell, grid origin and padding, neighbour order, the binary heap's push and pop order, edge weight summation order, the alignment band and the order earlier trenches join it were compared line by line and match.
+
+The other three (the evidence rows 2, 4 and 5: panel groups A608, A631 and A612) leave the plugin's path within a few cells of their start by exactly one grid cell (39.370 in) at one to three vertices, with the same vertex count and the same length. Their captured moves are identical before and after #332, so the band is not the cause. Near the start the edges run inside the group's own obstacle outline, where every edge weighs about a million times its length, so the last bits of the lattice coordinates decide between equal-length paths. Those bits come from the grid origin and the obstacle outlines: the plugin takes them from transformed block-definition corners and GeometricExtents, which the rooftop intake does not carry at full precision.
+
+Declared diffs: exactly the five vertex positions the comparator reports on those three rows. Studio's routes are equal-cost alternatives to the plugin's, not errors. Retiring it needs either the definition geometry at full precision in the intake, or a deterministic tie rule in the plugin that does not depend on float bits (for example preferring the lower (row, col) cell on an exact cost tie).
