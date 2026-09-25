@@ -3,6 +3,10 @@ import { createHmac, webcrypto } from 'node:crypto'
 import { TextEncoder } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createLeafHostBridge, DISPATCH_MODE, LEAF_PLATFORM_CONTRACT_VERSION, PROTOCOL_VERSION } from './hostBridge.js'
+import { createDiagnostics } from './diagnostics.js'
+import { track } from '../telemetry.js'
+
+vi.mock('../telemetry.js', () => ({ track: vi.fn() }))
 
 const identity = {
   platformTenantId: '11111111-1111-4111-8111-111111111111',
@@ -93,6 +97,246 @@ const invalidHandles = [
   ['case-insensitive duplicate', ['2f4a', '2F4A']],
   ['too many', Array.from({ length: 1001 }, (_, index) => index.toString(16))],
 ]
+
+describe('Studio bridge diagnostics and telemetry', () => {
+  let bridge, channel, diagnostics, clock
+  beforeEach(() => {
+    vi.stubGlobal('crypto', webcrypto)
+    vi.stubGlobal('TextEncoder', TextEncoder)
+    track.mockReset()
+    clock = 0
+    diagnostics = createDiagnostics({ now: () => clock })
+    channel = fakeChannel()
+    bridge = createLeafHostBridge({ channel, location, diagnostics, now: () => clock })
+  })
+  afterEach(() => {
+    bridge.stop()
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+  const detailsFor = (diagnostics, phase) => diagnostics.entries().filter((entry) => entry.phase === phase).map((entry) => entry.detail)
+  const eventsFor = (phase) => track.mock.calls.filter(([name, props]) => name === 'leaf_platform_bridge' && props.phase === phase).map(([, props]) => props)
+
+  it('records startup, hello, handshake and both handshake rejection categories', async () => {
+    const absent = createLeafHostBridge({ channel: null, diagnostics })
+    absent.start()
+    bridge.start()
+    await bridge.receive({ ...ready(), origin: 'https://foreign.example' })
+    await bridge.receive({ ...ready(), sessionKey: 'bad' })
+    await bridge.receive(unbound())
+    await bridge.receive(ready())
+    expect(detailsFor(diagnostics, 'start')).toEqual([{ kind: 'none' }, { kind: 'webview' }])
+    expect(detailsFor(diagnostics, 'hello-sent')).toEqual([{}])
+    expect(detailsFor(diagnostics, 'handshake-rejected')).toEqual([{ reason: 'origin' }, { reason: 'shape' }])
+    expect(detailsFor(diagnostics, 'handshake')).toEqual([{ kind: 'unbound' }, { kind: 'ready' }])
+    expect(track.mock.calls.map(([, props]) => props.phase)).toEqual(['handshake'])
+  })
+
+  it.each([
+    ['timestamp-format', { issuedAt: 'not-a-timestamp' }],
+    ['timestamp-format', { expiresAt: 42 }],
+    ['lifetime', { expiresAt: '2000-01-01T00:00:00.0000000+00:00' }],
+    ['signature', { signature: '0'.repeat(64) }],
+    ['session', { sessionId: 'foreign-session' }],
+    ['session', { origin: 'https://foreign.example' }],
+    ['session', { drawingRevision: identity.projectId }],
+    ['verb', { verb: 'drawing.erase' }],
+    ['shape', { protocolVersion: 'other' }],
+    ['shape', { messageId: 1 }],
+  ])('records envelope rejection %s without accepting the message', async (reason, patch) => {
+    bridge.start()
+    await bridge.receive(unbound())
+    await bridge.receive({ ...envelope(unbound()), ...patch })
+    expect(detailsFor(diagnostics, 'envelope-rejected')).toEqual([{ reason }])
+    expect(bridge.state.bindingResult).toBeNull()
+  })
+
+  it('records replay and capacity rejections including simultaneous delivery', async () => {
+    bridge.start()
+    await bridge.receive(unbound())
+    bridge.replayCapacity = 1
+    const message = envelope(unbound())
+    await Promise.all([bridge.receive(message), bridge.receive(message)])
+    await bridge.receive(message)
+    await bridge.receive(envelope(unbound()))
+    expect(detailsFor(diagnostics, 'envelope-rejected')).toEqual([
+      { reason: 'replay' }, { reason: 'replay' }, { reason: 'capacity' },
+    ])
+    expect(detailsFor(diagnostics, 'bind-result')).toHaveLength(1)
+  })
+
+  it('records an ignored malformed callback and selection payload as shape', async () => {
+    bridge.start()
+    await bridge.receive(ready())
+    await bridge.receive(callback(webcrypto.randomUUID()))
+    await bridge.receive(envelope(ready(), { verb: 'drawing.selection_changed', payload: {} }))
+    expect(detailsFor(diagnostics, 'envelope-rejected')).toEqual([{ reason: 'shape' }, { reason: 'shape' }])
+  })
+
+  it('records expiry and session changes across asynchronous verification', async () => {
+    vi.useFakeTimers()
+    bridge.start()
+    await bridge.receive(ready())
+    for (const reason of ['lifetime', 'session']) {
+      let finishVerification, startedVerification
+      const started = new Promise((resolve) => { startedVerification = resolve })
+      const verify = vi.spyOn(webcrypto.subtle, 'verify').mockImplementation(() => {
+        startedVerification()
+        return new Promise((resolve) => { finishVerification = resolve })
+      })
+      const receiving = bridge.receive(selection({ objectId: 'panel:private' }))
+      await started
+      if (reason === 'lifetime') vi.advanceTimersByTime(60_001)
+      else await bridge.receive(ready())
+      finishVerification(true)
+      await receiving
+      verify.mockRestore()
+      expect(detailsFor(diagnostics, 'envelope-rejected').at(-1)).toEqual({ reason })
+    }
+    expect(bridge.state.selectedObjectId).toBeNull()
+  })
+
+  it('records sanitized bind and command outcomes without keys, signatures or identities', async () => {
+    bridge.start()
+    await bridge.receive(unbound())
+    await bridge.bindDrawing(identity)
+    await bridge.receive(envelope(unbound(), { payload: { accepted: true, reason: 'accepted' } }))
+    await bridge.receive(envelope(unbound(), { payload: { accepted: false, reason: sessionKey } }))
+    expect(detailsFor(diagnostics, 'bind-sent')).toEqual([{}])
+    expect(detailsFor(diagnostics, 'bind-result')).toEqual([
+      { status: 'accepted', reason: 'accepted' }, { status: 'rejected', reason: 'other' },
+    ])
+    await bridge.receive(ready())
+    const messages = []
+    for (const [status, reason, sanitized] of [
+      ['applied', null, 'other'], ['stale', 'stale_document', 'stale_document'],
+      ['rejected', identity.drawingId, 'other'], ['rejected', 'https://private.example/token', 'other'],
+    ]) {
+      const { sent, outcome } = await startCommand(bridge, channel, { objectHandles: ['2F4A'] })
+      const response = callback(sent.payload.commandId, status, reason)
+      messages.push(sent, response)
+      await bridge.receive(response)
+      await outcome
+      expect(detailsFor(diagnostics, 'command-outcome').at(-1)).toEqual({ status, reason: sanitized })
+    }
+    expect(detailsFor(diagnostics, 'command-sent')).toEqual(Array(4).fill({ action: 'focus' }))
+    const output = JSON.stringify(diagnostics.entries()) + diagnostics.snapshot() + JSON.stringify(track.mock.calls)
+    for (const secret of [sessionKey, ...Object.values(identity), common.sessionId,
+      common.documentFingerprint, '2F4A', 'https://private.example/token',
+      ...messages.flatMap((message) => [message.signature, message.messageId])]) {
+      expect(output).not.toContain(secret)
+    }
+  })
+
+  it('records handshake, bind and command timeouts without discarding a late result', async () => {
+    vi.useFakeTimers()
+    bridge.start()
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(bridge.state.status).toBe('connecting')
+    await bridge.receive(unbound())
+    await bridge.bindDrawing(identity)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(bridge.state.status).toBe('unbound')
+    await bridge.receive(envelope(unbound()))
+    expect(bridge.state.bindingResult).toContain('DWG connected.')
+    await bridge.receive(ready())
+    const { outcome } = await startCommand(bridge, channel)
+    await vi.advanceTimersByTimeAsync(15_000)
+    await expect(outcome).resolves.toMatchObject({ status: 'unknown', reason: 'timeout' })
+    expect(detailsFor(diagnostics, 'timeout')).toEqual([
+      { kind: 'handshake' }, { kind: 'bind' }, { kind: 'command' },
+    ])
+  })
+
+  it('cancels diagnostic timeouts on results, replacement sessions and stop', async () => {
+    vi.useFakeTimers()
+    bridge.start()
+    await bridge.receive(unbound())
+    await bridge.bindDrawing(identity)
+    await bridge.receive(envelope(unbound()))
+    await bridge.bindDrawing(identity)
+    await bridge.receive(ready())
+    bridge.stop()
+    bridge.start()
+    bridge.stop()
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(detailsFor(diagnostics, 'timeout')).toEqual([])
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('limits lifecycle telemetry by phase and status for ten seconds, including restarts', async () => {
+    bridge.start()
+    await bridge.receive(unbound())
+    await bridge.receive(ready())
+    clock = 9999
+    await bridge.receive(ready())
+    expect(eventsFor('handshake')).toHaveLength(1)
+    clock = 10_000
+    bridge.stop()
+    bridge.start()
+    await bridge.receive(unbound())
+    expect(eventsFor('handshake')).toHaveLength(2)
+    for (const accepted of [true, true, false, false]) {
+      await bridge.receive(envelope(unbound(), { payload: { accepted, reason: 'confirmed' } }))
+    }
+    expect(eventsFor('bind-result').map((event) => event.status)).toEqual(['accepted', 'rejected'])
+    clock = 20_000
+    await bridge.receive(envelope(unbound()))
+    expect(eventsFor('bind-result')).toHaveLength(3)
+    await bridge.receive(ready())
+    for (const status of ['applied', 'applied', 'rejected', 'rejected']) {
+      const { sent, outcome } = await startCommand(bridge, channel)
+      await bridge.receive(callback(sent.payload.commandId, status, null))
+      await outcome
+    }
+    expect(eventsFor('command-outcome').map((event) => event.status)).toEqual(['applied', 'rejected'])
+    clock = 30_000
+    await completeCommand(bridge, channel, 'panel:A1')
+    expect(eventsFor('command-outcome')).toHaveLength(3)
+  })
+
+  it('limits timeout telemetry by phase while retaining every local timeout', async () => {
+    vi.useFakeTimers()
+    bridge.start()
+    await vi.advanceTimersByTimeAsync(10_000)
+    bridge.retryHello()
+    clock = 9999
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(eventsFor('timeout')).toHaveLength(1)
+    bridge.retryHello()
+    clock = 10_000
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(eventsFor('timeout')).toHaveLength(2)
+    expect(detailsFor(diagnostics, 'timeout')).toHaveLength(3)
+  })
+
+  it('sends only a counted rejection summary at most once per minute', async () => {
+    bridge.start()
+    await bridge.receive(ready())
+    await bridge.receive(null)
+    for (let i = 0; i < 250; i += 1) await bridge.receive({ signature: sessionKey, payload: identity })
+    clock = 59_999
+    await bridge.receive(null)
+    expect(eventsFor('envelope-rejected')).toEqual([{ phase: 'envelope-rejected', count: 1 }])
+    clock = 60_000
+    await bridge.receive(null)
+    expect(eventsFor('envelope-rejected')).toEqual([
+      { phase: 'envelope-rejected', count: 1 }, { phase: 'envelope-rejected', count: 252 },
+    ])
+    expect(diagnostics.entries()).toHaveLength(200)
+  })
+
+  it('keeps the bridge working if a diagnostic or telemetry sink fails', async () => {
+    diagnostics.record = vi.fn(() => { throw new Error('Local sink failed') })
+    track.mockImplementation(() => { throw new Error('Telemetry failed') })
+    bridge.start()
+    await bridge.receive(ready())
+    expect(bridge.state.status).toBe('connected')
+    await completeCommand(bridge, channel, 'panel:A1')
+    expect(bridge.state.lastCommand.status).toBe('applied')
+  })
+})
 
 describe('Studio AutoCAD host bridge', () => {
   let bridge, channel, observe, state
@@ -368,58 +612,83 @@ describe('Studio AutoCAD host bridge', () => {
     expect(state.selectedHandles).toBeNull()
   })
 
-  it('retains unexpired replay IDs after more than 1024 other messages', async () => {
-    bridge.start()
-    await bridge.receive(ready())
+  it('retains unexpired replay IDs after more messages than the replay capacity', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-09-25T12:00:00.000Z'))
+    const capacity = 8
+    const diagnostics = createDiagnostics()
+    const replayBridge = createLeafHostBridge({ channel: fakeChannel(), location, replayCapacity: capacity, diagnostics })
+    bridge.stop()
+    bridge = replayBridge
+    const published = vi.fn()
+    replayBridge.subscribe(published)
+    replayBridge.start()
+    await replayBridge.receive(ready())
     const original = selection({ objectId: 'panel:original' })
-    await bridge.receive(original)
-    for (let index = 0; index < 1025; index += 1) {
-      await bridge.receive(selection({ objectId: `panel:${index}` }))
+    await replayBridge.receive(original)
+    for (let index = 0; index < capacity + 1; index += 1) {
+      const message = selection({ objectId: `panel:${index}` })
+      await replayBridge.receive(message)
+      expect(replayBridge.seenHostMessages.has(message.messageId)).toBe(index < capacity - 1)
+      expect(replayBridge.seenHostMessages.get(original.messageId)).toBe(Date.parse(original.expiresAt))
     }
-    observe.mockClear()
-    await bridge.receive(original)
-    expect(observe).not.toHaveBeenCalled()
-    expect(state.selectedObjectId).toBe('panel:1024')
-    expect(bridge.seenHostMessages.size).toBe(1026)
-    expect(bridge.seenHostMessages.get(original.messageId)).toBe(Date.parse(original.expiresAt))
+    published.mockClear()
+    await replayBridge.receive(original)
+    expect(published).not.toHaveBeenCalled()
+    expect(replayBridge.state.selectedObjectId).toBe('panel:6')
+    expect(replayBridge.seenHostMessages.size).toBe(capacity)
+    expect(diagnostics.entries().at(-1)).toMatchObject({ phase: 'envelope-rejected', detail: { reason: 'replay' } })
   })
 
   it('rejects new messages at capacity and frees only expired replay IDs', async () => {
     vi.useFakeTimers()
-    bridge = createLeafHostBridge({ channel, location, replayCapacity: 8 })
-    bridge.subscribe(observe)
-    bridge.start()
-    await bridge.receive(ready())
+    const start = Date.parse('2026-09-25T12:00:00.000Z')
+    vi.setSystemTime(start)
+    const capacity = 8
+    const diagnostics = createDiagnostics()
+    const replayBridge = createLeafHostBridge({ channel: fakeChannel(), location, replayCapacity: capacity, diagnostics })
+    bridge.stop()
+    bridge = replayBridge
+    const published = vi.fn()
+    replayBridge.subscribe(published)
+    replayBridge.start()
+    await replayBridge.receive(ready())
     const original = selection({ objectId: 'panel:original' })
-    await bridge.receive(original)
-    vi.advanceTimersByTime(30_000)
+    await replayBridge.receive(original)
+    vi.setSystemTime(start + 30_000)
     const retained = []
-    for (let index = 0; index < 7; index += 1) {
+    for (let index = 0; index < capacity - 1; index += 1) {
       const message = selection({ objectId: `panel:${index}` })
       retained.push(message)
-      await bridge.receive(message)
+      await replayBridge.receive(message)
     }
     const overflow = selection({ objectId: 'panel:overflow' })
-    observe.mockClear()
-    await bridge.receive(overflow)
-    await bridge.receive(original)
-    expect(observe).not.toHaveBeenCalled()
-    expect(state.selectedObjectId).toBe('panel:6')
-    expect(bridge.seenHostMessages.get(original.messageId)).toBe(Date.parse(original.expiresAt))
-    expect(bridge.seenHostMessages.has(overflow.messageId)).toBe(false)
-    expect(bridge.seenHostMessages.size).toBe(8)
-    vi.advanceTimersByTime(30_001)
-    await bridge.receive(selection({ objectId: 'panel:new' }))
-    expect(state.selectedObjectId).toBe('panel:new')
-    expect(bridge.seenHostMessages.has(original.messageId)).toBe(false)
-    expect(bridge.seenHostMessages.size).toBe(8)
+    published.mockClear()
+    await replayBridge.receive(overflow)
+    expect(diagnostics.entries().at(-1)).toMatchObject({ phase: 'envelope-rejected', detail: { reason: 'capacity' } })
+    await replayBridge.receive(original)
+    expect(diagnostics.entries().at(-1)).toMatchObject({ phase: 'envelope-rejected', detail: { reason: 'replay' } })
+    expect(published).not.toHaveBeenCalled()
+    expect(replayBridge.state.selectedObjectId).toBe('panel:6')
+    expect(replayBridge.seenHostMessages.get(original.messageId)).toBe(Date.parse(original.expiresAt))
+    expect(replayBridge.seenHostMessages.has(overflow.messageId)).toBe(false)
+    expect(replayBridge.seenHostMessages.size).toBe(capacity)
+    vi.setSystemTime(start + 60_000)
+    const replacement = selection({ objectId: 'panel:new' })
+    await replayBridge.receive(replacement)
+    expect(published).toHaveBeenCalledTimes(1)
+    expect(replayBridge.state.selectedObjectId).toBe('panel:new')
+    expect(replayBridge.seenHostMessages.has(original.messageId)).toBe(false)
+    expect(replayBridge.seenHostMessages.get(replacement.messageId)).toBe(Date.parse(replacement.expiresAt))
+    expect(replayBridge.seenHostMessages.size).toBe(capacity)
     for (const message of retained) {
-      expect(bridge.seenHostMessages.get(message.messageId)).toBe(Date.parse(message.expiresAt))
+      expect(replayBridge.seenHostMessages.get(message.messageId)).toBe(Date.parse(message.expiresAt))
     }
-    observe.mockClear()
-    await bridge.receive(retained[0])
-    expect(observe).not.toHaveBeenCalled()
-    expect(state.selectedObjectId).toBe('panel:new')
+    published.mockClear()
+    await replayBridge.receive(retained[0])
+    expect(published).not.toHaveBeenCalled()
+    expect(replayBridge.state.selectedObjectId).toBe('panel:new')
+    expect(diagnostics.entries().at(-1)).toMatchObject({ phase: 'envelope-rejected', detail: { reason: 'replay' } })
   })
 
   it.each([
