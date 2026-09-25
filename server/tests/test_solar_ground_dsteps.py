@@ -345,3 +345,22 @@ def test_trackers_to_panel_groups_reads_row_fields_by_name():
     assert out == {"trackers": 2, "panel_groups_created": 2, "panel_group_slots": 96}
     with pytest.raises(ds.DStepsInputError):
         ds.trackers_to_panel_groups("not a list")
+
+
+def test_panel_group_counters_use_drawing_values_without_palette_wrap():
+    assert ds.panel_group_settings(237) == {"PanelGroupNumber": 238, "PanelGroupColour": 237}
+    stored = {"PanelGroupNumber": 238, "PanelGroupColour": 237}
+    assert ds.panel_group_settings(237, stored) == {"PanelGroupNumber": 475, "PanelGroupColour": 474}
+    assert ds.panel_group_settings(0, stored) == stored
+    assert stored == {"PanelGroupNumber": 238, "PanelGroupColour": 237}
+
+
+def test_committed_terrain_d3_counts_and_settings():
+    evidence = _load("solar_ground_dsteps_evidence", ROOT / "scripts" / "solar_ground_dsteps_evidence.py")
+    intake = json.loads((ROOT / "docs" / "parity" / "evidence" / "ground" / "terrain" / "intake.json")
+                        .read_text(encoding="utf-8"))
+    state = evidence.b18_state(intake)
+    result = ds.trackers_to_panel_groups(evidence.bev.tracker_entities(state), evidence.bev.MPU)
+    assert result == {"trackers": 237, "panel_groups_created": 237, "panel_group_slots": 69678}
+    assert ds.panel_group_settings(result["panel_groups_created"], state.get("settings")) == {
+        "PanelGroupNumber": 238, "PanelGroupColour": 237}

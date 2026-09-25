@@ -1,8 +1,8 @@
 """Studio's G28 d-step evidence (d3, d4, d6, d7, d8).
 
 A small synthetic terrain intake runs the whole chain (t1 to t7, the a-steps, the b-steps the
-d-steps read, then d3 to d8) so every row kind is built on every runner: d3's report rows
-(a terminal step that commits nothing), the d4 trench, the d6 preview and d7 removal, the d8 file
+d-steps read, then d3 to d8) so every row kind is built on every runner: d3's report and
+setting rows, the d4 trench, the d6 preview and d7 removal, the d8 file
 rows in zip entry order with the manifest's host fields blanked, the parameters' answers, the
 comparator accepting every document against itself, and refusals. The committed terrain
 intake (inputs only) runs the chain once more: the trench, the preview of the array d5
@@ -91,14 +91,29 @@ def test_every_step_in_order_with_its_capability_and_answers(run):
         assert set(doc["parameters"]) == {"units_keyword", "grid_cells_long_axis", "active_preset", "answers"}
 
 
-def test_d3_reports_and_commits_nothing(run):
+def test_d3_reports_and_commits_counters(run):
     docs, state, _ = run
     rows = rows_of(docs["d3"])
-    assert [r["name"] for r in rows] == ["panel-group-slots", "panel-groups-created"]
+    assert [r["name"] for r in rows] == ["panel-group-slots", "panel-groups-created",
+                                        "PanelGroupColour", "PanelGroupNumber"]
     assert all(type(r["value"]) is int for r in rows)
-    before = repr(state)
-    dev.step_rows("d3", state, terrain_intake())
-    assert repr(state) == before
+    state = deepcopy(state)
+    before = deepcopy(state)
+    repeated = dev.step_rows("d3", state, terrain_intake())
+    count = next(r["value"] for r in repeated if r["name"] == "panel-groups-created")
+    for name in ("PanelGroupNumber", "PanelGroupColour"):
+        assert state["settings"][name] == before["settings"][name] + count
+        before["settings"][name] += count
+    assert state == before
+
+
+def test_d3_without_trackers_leaves_settings_unchanged():
+    state = dev.with_dstep_store({"grid": None, "frames": [], "settings": {
+        "PanelGroupNumber": 238, "PanelGroupColour": 237}})
+    before = deepcopy(state)
+    rows = dev.step_rows("d3", state, terrain_intake())
+    assert all(r["type"] == "report" and r["value"] == 0 for r in rows)
+    assert state == before
 
 
 def test_d4_trench_row(run):
@@ -213,4 +228,9 @@ def test_licensed_trench_preview_and_yield_totals(licensed):
     overview = dict(entries)["bom_project_overview.csv"].decode("utf-8")
     assert '"Total capacity, kWp",27871.2\r\n' in overview and "Module quantity,69678\r\n" in overview
     d3 = {r["name"]: r["value"] for r in rows_of(docs["d3"])}
-    assert d3["panel-group-slots"] == 69678 and d3["panel-groups-created"] > 0
+    assert d3 == {"panel-group-slots": 69678, "panel-groups-created": 237,
+                  "PanelGroupNumber": 238, "PanelGroupColour": 237}
+    assert rows_of(docs["d3"], "setting") == [
+        {"id": {"entity_id": f"setting-{name}"}, "type": "setting", "quantity": 1,
+         "unit": "each", "name": name, "value": value}
+        for name, value in (("PanelGroupColour", 237), ("PanelGroupNumber", 238))]
