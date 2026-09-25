@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi, type TestContext } from "vitest";
 import { ProjectForgeAuthority, ProjectForgePublicationError,
   createProjectForgeAuthorityFromEnv, createProjectRepositoryEditsForService,
   type ProjectForgeAuthorityOptions } from "../src/ports/impl/projectForgeAuthority.js";
@@ -26,18 +26,24 @@ const authority: ProjectRepositoryAuthority = {
 const actor = "66666666-6666-4666-8666-666666666666";
 const confirmation = "77777777-7777-4777-8777-777777777777";
 const leaseId = "88888888-8888-4888-8888-888888888888";
-const roots: string[] = [];
+const cases = new WeakMap<TestContext["task"], { root: string; pending: Promise<unknown> }>();
+function isolated(run: (root: string) => unknown) {
+  return (context: TestContext) => {
+    const root = mkdtempSync(join(tmpdir(), "project-forge-test-"));
+    const pending = Promise.resolve().then(() => run(root));
+    cases.set(context.task, { root, pending });
+    return pending;
+  };
+}
 const hash = (s: string) => createHash("sha256").update(s).digest("hex");
-function temporary(): string {
-  const dir = mkdtempSync(join(tmpdir(), "project-forge-test-"));
-  roots.push(dir);
-  return dir;
+function temporary(root: string): string {
+  return mkdtempSync(join(root, "fixture-"));
 }
 function git(dir: string, args: string[]): string {
   return execFileSync("git", args, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
-function fixture(a = authority) {
-  const root = temporary();
+function fixture(parent: string, a = authority) {
+  const root = temporary(parent);
   const work = join(root, "seed");
   const bareBase = join(root, "bare");
   mkdirSync(bareBase);
@@ -68,15 +74,20 @@ function fixture(a = authority) {
     locate: async () => remote, credentials };
   return { root, bare, bareBase, remote, base, repo, stage, credentials, options };
 }
-afterEach(() => {
+afterEach(async ({ task }) => {
+  const testCase = cases.get(task);
+  if (!testCase) return;
+  // A timeout must not remove repositories while the test is still using them.
+  await Promise.allSettled([testCase.pending]);
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  rmSync(testCase.root, { recursive: true, force: true });
+  cases.delete(task);
 });
 
 describe("project Forge authority with real bare repositories", () => {
-  it("proves publication before cache advance, preserves private refs and cache metadata", async () => {
-    const f = fixture();
+  it("proves publication before cache advance, preserves private refs and cache metadata", isolated(async (root) => {
+    const f = fixture(root);
     const change = f.stage();
     const config = readFileSync(join(f.bare, "config"), "utf8");
     const marker = readFileSync(join(f.bare, ".leaf-source-owner.json"), "utf8");
@@ -89,20 +100,20 @@ describe("project Forge authority with real bare repositories", () => {
     expect(f.repo.readRef(change.ref)).toBe(change.stagedSha);
     expect(readFileSync(join(f.bare, "config"), "utf8")).toBe(config);
     expect(readFileSync(join(f.bare, ".leaf-source-owner.json"), "utf8")).toBe(marker);
-  });
+  }));
 
-  it("allows exactly one expected-head race winner", async () => {
-    const f = fixture();
+  it("allows exactly one expected-head race winner", isolated(async (root) => {
+    const f = fixture(root);
     const changes = [f.stage("one\n"), f.stage("two\n")];
     const bound = new ProjectForgeAuthority(f.options).bind(authority, f.bare);
     const results = await Promise.allSettled(changes.map(c => bound.publishAuthoritatively(c, f.base)));
     expect(results.filter(r => r.status === "fulfilled")).toHaveLength(1);
     expect(results.filter(r => r.status === "rejected")).toHaveLength(1);
     expect(f.repo.readRef("refs/heads/main")).toBe(f.base);
-  });
+  }));
 
-  it("rechecks revoked credentials on an accepted retry and refresh", async () => {
-    const f = fixture();
+  it("rechecks revoked credentials on an accepted retry and refresh", isolated(async (root) => {
+    const f = fixture(root);
     let revoked = false;
     const credentials = vi.fn(async (a: ProjectRepositoryAuthority, remoteUrl: string) =>
       revoked ? null : { authority: a, remoteUrl });
@@ -116,12 +127,12 @@ describe("project Forge authority with real bare repositories", () => {
     expect(f.repo.readRef("refs/heads/main")).toBe(f.base);
     revoked = false;
     await expect(bound.publishAuthoritatively(change, f.base)).resolves.toEqual({ commit: change.stagedSha });
-  });
+  }));
 
-  it("keeps same-tenant projects on distinct origins and rejects cross-project credentials", async () => {
+  it("keeps same-tenant projects on distinct origins and rejects cross-project credentials", isolated(async (root) => {
     const other = { ...authority, projectId: randomUUID(), repoKey: randomUUID() };
-    const first = fixture();
-    const second = fixture(other);
+    const first = fixture(root);
+    const second = fixture(root, other);
     const forge = new ProjectForgeAuthority({ allowLocalPathsForTests: true,
       locate: async a => a.repoKey === authority.repoKey ? first.remote : second.remote,
       credentials: async (a, remoteUrl) => ({ authority: a, remoteUrl }) });
@@ -135,10 +146,10 @@ describe("project Forge authority with real bare repositories", () => {
       credentials: async (_a, remoteUrl) => ({ authority, remoteUrl }) });
     await expect(wrong.bind(other, second.bare).publishAuthoritatively(two, second.base))
       .rejects.toMatchObject({ state: "refused" });
-  });
+  }));
 
-  it("keeps lost readback unknown without advancing local main, then recovers exact acceptance", async () => {
-    const f = fixture();
+  it("keeps lost readback unknown without advancing local main, then recovers exact acceptance", isolated(async (root) => {
+    const f = fixture(root);
     class LostReadback extends ProjectForgeAuthority {
       lost = false;
       override async execute(args: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<string> {
@@ -160,10 +171,10 @@ describe("project Forge authority with real bare repositories", () => {
     forge.lost = false;
     await expect(bound.publishAuthoritatively(change, f.base)).resolves.toEqual({ commit: change.stagedSha });
     expect(f.credentials).toHaveBeenCalledTimes(2);
-  });
+  }));
 
-  it("refuses wrong staged identities and does not rewind a divergent cache", async () => {
-    const f = fixture();
+  it("refuses wrong staged identities and does not rewind a divergent cache", isolated(async (root) => {
+    const f = fixture(root);
     const bound = new ProjectForgeAuthority(f.options).bind(authority, f.bare);
     const change = f.stage();
     for (const bad of [{ ...change, id: "bad" }, { ...change, ref: "refs/heads/main" },
@@ -173,10 +184,10 @@ describe("project Forge authority with real bare repositories", () => {
     f.repo.publishToMainObserved(change, f.base);
     await expect(bound.refreshMain()).rejects.toBeInstanceOf(ProjectForgePublicationError);
     expect(f.repo.readRef("refs/heads/main")).toBe(change.stagedSha);
-  });
+  }));
 
-  it("copies closed authority and discards supplier errors", async () => {
-    const f = fixture();
+  it("copies closed authority and discards supplier errors", isolated(async (root) => {
+    const f = fixture(root);
     const mutable = { ...authority };
     const bound = new ProjectForgeAuthority(f.options).bind(mutable, f.bare);
     mutable.projectId = randomUUID();
@@ -186,10 +197,10 @@ describe("project Forge authority with real bare repositories", () => {
       .toThrow("project Forge publication refused");
     const refused = new ProjectForgeAuthority({ ...f.options, locate: async () => { throw new Error("secret"); } });
     await expect(refused.bind(authority, f.bare).refreshMain()).rejects.toMatchObject({ message: "project Forge publication refused" });
-  });
+  }));
 
-  it("rechecks the exact origin on an accepted retry", async () => {
-    const f = fixture();
+  it("rechecks the exact origin on an accepted retry", isolated(async (root) => {
+    const f = fixture(root);
     let remote = f.remote;
     const forge = new ProjectForgeAuthority({ ...f.options, locate: async () => remote });
     const bound = forge.bind(authority, f.bare);
@@ -198,10 +209,10 @@ describe("project Forge authority with real bare repositories", () => {
     remote = join(f.root, "other.git");
     await expect(bound.publishAuthoritatively(change, f.base)).rejects.toMatchObject({ state: "refused" });
     expect(f.repo.readRef("refs/heads/main")).toBe(f.base);
-  });
+  }));
 
-  it("keeps scoped auth out of argv and isolates ambient Git and proxy settings", async () => {
-    const f = fixture();
+  it("keeps scoped auth out of argv and isolates ambient Git and proxy settings", isolated(async (root) => {
+    const f = fixture(root);
     const token = "fixture_scoped_token";
     let networkCalls = 0;
     class InspectTransport extends ProjectForgeAuthority {
@@ -226,36 +237,36 @@ describe("project Forge authority with real bare repositories", () => {
     const forge = new InspectTransport({ ...f.options, credentials: async (a, remoteUrl) => ({ authority: a, remoteUrl, token }) });
     await forge.bind(authority, f.bare).publishAuthoritatively(f.stage(), f.base);
     expect(networkCalls).toBeGreaterThan(0);
-  });
+  }));
 });
 
 describe("trusted project Forge environment mapping", () => {
-  function config(entries: unknown[] = [{ authority, remoteUrl: "https://forge.leafdesign.ai/team/project.git" }]) {
-    const dir = temporary();
+  function config(root: string, entries: unknown[] = [{ authority, remoteUrl: "https://forge.leafdesign.ai/team/project.git" }]) {
+    const dir = temporary(root);
     const map = join(dir, "origins.json");
     writeFileSync(map, JSON.stringify({ version: 1, repositories: entries }));
     return { dir, map, env: { LEAF_FORGE_ORIGIN_MAP: map, LEAF_FORGE_CREDENTIAL_DIR: dir } };
   }
-  it("is absent only with neither setting, and rejects partial or invalid topology", () => {
+  it("is absent only with neither setting, and rejects partial or invalid topology", isolated((root) => {
     expect(createProjectForgeAuthorityFromEnv({})).toBeUndefined();
     expect(() => createProjectForgeAuthorityFromEnv({ LEAF_FORGE_ORIGIN_MAP: "" })).toThrow();
-    const c = config();
+    const c = config(root);
     expect(createProjectForgeAuthorityFromEnv(c.env)).toBeInstanceOf(ProjectForgeAuthority);
     expect(() => createProjectForgeAuthorityFromEnv({ ...c.env, LEAF_FORGE_CREDENTIAL_DIR: "relative" })).toThrow();
     for (const remoteUrl of ["http://forge.leafdesign.ai/a/b.git", "https://elsewhere.test/a/b.git",
       "https://forge.leafdesign.ai/a/../b.git", "https://forge.leafdesign.ai/a/b.git?q=1",
       "https://user:token@forge.leafdesign.ai/a/b.git", c.dir]) {
-      expect(() => createProjectForgeAuthorityFromEnv(config([{ authority, remoteUrl }]).env)).toThrow();
+      expect(() => createProjectForgeAuthorityFromEnv(config(root, [{ authority, remoteUrl }]).env)).toThrow();
     }
     const first = { authority, remoteUrl: "https://forge.leafdesign.ai/a/b.git" };
     for (const second of [first, { ...first, authority: { ...authority, projectId: randomUUID() } },
       { ...first, authority: { ...authority, projectId: randomUUID(), repoKey: randomUUID() } }]) {
-      expect(() => createProjectForgeAuthorityFromEnv(config([first, second]).env)).toThrow();
+      expect(() => createProjectForgeAuthorityFromEnv(config(root, [first, second]).env)).toThrow();
     }
-  });
+  }));
 
-  it("loads mapping once and reads revoked, malformed and misbound credentials anew", async () => {
-    const c = config();
+  it("loads mapping once and reads revoked, malformed and misbound credentials anew", isolated(async (root) => {
+    const c = config(root);
     const forge = createProjectForgeAuthorityFromEnv(c.env)!;
     const bound = forge.bind(authority, c.dir);
     const credential = join(c.dir, `${authority.repoKey}.json`);
@@ -273,11 +284,11 @@ describe("trusted project Forge environment mapping", () => {
     await expect(bound.refreshMain()).rejects.toMatchObject({ state: "unknown" });
     rmSync(credential);
     await expect(bound.refreshMain()).rejects.toMatchObject({ state: "refused" });
-  });
+  }));
 });
 
-function coordinatedFixture() {
-  const f = fixture();
+function coordinatedFixture(root: string) {
+  const f = fixture(root);
   let fenceNumber = 0;
   let activeFence = 0;
   let loseLocalFence = false;
@@ -322,23 +333,23 @@ function coordinatedFixture() {
 }
 
 describe("project coordinator remote publication fences", () => {
-  it("uses separate remote and local fences", async () => {
-    const f = coordinatedFixture();
+  it("uses separate remote and local fences", isolated(async (root) => {
+    const f = coordinatedFixture(root);
     await f.service.publishEdit(f.publish);
     expect(f.fences().remoteFence).toBeGreaterThan(0);
     expect(f.fences().localFence).toBeGreaterThan(f.fences().remoteFence);
     expect(f.repo.readRef("refs/heads/main")).toBe(f.change.stagedSha);
-  });
-  it("preserves remote acceptance when the local fence is lost", async () => {
-    const f = coordinatedFixture();
+  }));
+  it("preserves remote acceptance when the local fence is lost", isolated(async (root) => {
+    const f = coordinatedFixture(root);
     f.loseFence();
     await expect(f.service.publishEdit(f.publish)).rejects.toThrow("lease lost");
     expect(git(f.remote, ["rev-parse", "main"])).toBe(f.change.stagedSha);
     expect(f.repo.readRef("refs/heads/main")).toBe(f.base);
     expect(f.coordination.settlePublish).not.toHaveBeenCalled();
-  });
-  it("rechecks remote proof for alreadyPublished recovery and resumes an accepted remote", async () => {
-    const f = coordinatedFixture();
+  }));
+  it("rechecks remote proof for alreadyPublished recovery and resumes an accepted remote", isolated(async (root) => {
+    const f = coordinatedFixture(root);
     await new ProjectForgeAuthority(f.options).bind(authority, f.bare).publishAuthoritatively(f.change, f.base);
     await f.service.recoverEdit(f.recover);
     expect(f.fences().localFence).toBeGreaterThan(f.fences().remoteFence);
@@ -348,20 +359,20 @@ describe("project coordinator remote publication fences", () => {
     f.credentials.mockImplementation(async () => { throw new Error("revoked"); });
     await expect(f.service.recoverEdit(f.recover)).rejects.toMatchObject({ state: "refused" });
     expect(f.coordination.recoverPublish).toHaveBeenCalledTimes(2);
-  });
-  it("does not publish an unrelated recovery matrix", async () => {
-    const f = coordinatedFixture();
+  }));
+  it("does not publish an unrelated recovery matrix", isolated(async (root) => {
+    const f = coordinatedFixture(root);
     const other = f.stage("unrelated\n");
     f.repo.publishToMainObserved(other, f.base);
     await f.service.recoverEdit(f.recover);
     expect(f.credentials).not.toHaveBeenCalled();
     expect(git(f.remote, ["rev-parse", "main"])).toBe(f.base);
-  });
+  }));
 });
 
 describe("live service composition helper", () => {
-  it("mounts the actual provider, project lease and coordination client in a working HTTP stage route", async () => {
-    const f = coordinatedFixture();
+  it("mounts the actual provider, project lease and coordination client in a working HTTP stage route", isolated(async (root) => {
+    const f = coordinatedFixture(root);
     expect(createProjectRepositoryEditsForService(f.provider, {})).toBeUndefined();
     const nativeFetch = globalThis.fetch;
     const editId = randomUUID();
@@ -389,5 +400,5 @@ describe("live service composition helper", () => {
       expect(f.credentials).toHaveBeenCalledTimes(1);
       expect(f.repo.readRef("refs/heads/main")).toBe(f.base);
     } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
-  });
+  }));
 });
