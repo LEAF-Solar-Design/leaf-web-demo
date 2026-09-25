@@ -132,7 +132,7 @@ class SelectionAdapterTests(unittest.TestCase):
                     })
                     command = RUNNER.reporting_command(suite, suite.argv, env)
                     self.assertNotIn("pytest_selection", command)  # S8c: plain pytest off tracing builds
-                    self.assertEqual(command[command.index("--leaf-repo") + 1], str(RUNNER.REPO))
+                    self.assertEqual(command, [str(a) for a in suite.argv])  # S8c: the original argv, untouched
 
     def test_suite_trace_env_passes_through_parent_readset_dir_and_root(self):
         suite = RUNNER.Suite("trace-fixture", "trace fixture", "script", self.work,
