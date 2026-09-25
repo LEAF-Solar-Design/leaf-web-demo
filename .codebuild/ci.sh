@@ -139,24 +139,35 @@ LEAF_SELECTION_FALLBACK
 fi
 
 # Capture helpers share the frozen commit. Missing capture never grants coverage.
-capture_ready=1
-[[ -s "$selection_dir/select_tests.py" ]] || capture_ready=0
-for helper in sitecustomize.py trace_reads.py pytest_selection.py; do
+reporters_ready=1
+tracing_helpers_ready=1
+[[ -s "$selection_dir/select_tests.py" ]] || tracing_helpers_ready=0
+for helper in sitecustomize.py trace_reads.py; do
   if git --no-replace-objects show "$TRUSTED_SHA:scripts/ci/$helper" > "$selection_dir/$helper"; then
     chmod 400 "$selection_dir/$helper"
   else
-    capture_ready=0
+    tracing_helpers_ready=0
   fi
 done
+if git --no-replace-objects show "$TRUSTED_SHA:scripts/ci/pytest_selection.py" > "$selection_dir/pytest_selection.py"; then
+  chmod 400 "$selection_dir/pytest_selection.py"
+else
+  reporters_ready=0
+fi
 for reporter in vitest-leaf.mjs playwright-leaf.mjs; do
   if git --no-replace-objects show "$TRUSTED_SHA:scripts/ci/reporters/$reporter" > "$selection_dir/$reporter"; then
     chmod 400 "$selection_dir/$reporter"
   else
-    capture_ready=0
+    reporters_ready=0
   fi
 done
+# Only explicit tracing proofs enable capture; webhook builds stay fast.
+tracing_ready=0
+if [[ "$tracing_helpers_ready" == 1 && "${LEAF_PROOF_TRACING:-}" == 1 ]]; then
+  tracing_ready=1
+fi
 export TRUSTED_SHA HEAD_SHA
-if ! python -I -B - "$selection_dir" <<'LEAF_SELECTION_RECEIPTS'
+if ! python -I -B - "$selection_dir" "$tracing_ready" "$reporters_ready" <<'LEAF_SELECTION_RECEIPTS'
 import datetime
 import json
 import os
@@ -214,6 +225,7 @@ detail = dict(decision, schema="leaf.ci.selection.v1", repo=receipt["repo"],
               trusted_sha=receipt["trusted_policy_sha"], selector_sha=receipt["selector_sha"],
               map_sha=receipt["map_sha"], ci_blob_sha=blob(".codebuild/ci.sh"),
               phase=policy.get("phase"), event_class=event, fallback_reason=fallback,
+              tracing_active=sys.argv[2] == "1", reporters_active=sys.argv[3] == "1",
               runner_catalog_sha256=catalog.get("catalog_sha256"),
               catalog_suite_ids=[row["id"] for row in catalog.get("suites", [])],
               execution_complete=False, collection_complete=False, started_at=receipt["written_at"],
@@ -470,13 +482,20 @@ echo "--- 6/6 Run unsharded test gate and print scoreboard"
 export LEAF_AUTOFILL_SOLVER_ABSENT_OK=1
 export LEAF_MANAGED_WEB_BROWSER_MODE=trusted-template-container
 mkdir -p /tmp/gate-results
-export LEAF_READSET_DIR=/tmp/gate-logs/readsets
-export LEAF_READSET_RUN="${CODEBUILD_BUILD_ID:-}"
-export LEAF_READSET_ROOT="$CODEBUILD_SRC_DIR"
-export LEAF_READSET_SOURCE_SHA="$HEAD_SHA"
-export LEAF_READSET_SOURCE_TREE="$(git --no-replace-objects rev-parse "$HEAD_SHA^{tree}" 2>/dev/null || true)"
-export LEAF_READSET_CAPTURE_SHA="$(git --no-replace-objects rev-parse "$TRUSTED_SHA:scripts/ci/trace_reads.py" 2>/dev/null || true)"
-export LEAF_READSET_CATALOG_SHA256="$(python -I -B - "$selection_dir/detail.json" <<'LEAF_CAPTURE_ID'
+if [[ "$reporters_ready" == 1 ]]; then
+  export LEAF_TRUSTED_CI_DIR="$selection_dir"
+else
+  unset LEAF_TRUSTED_CI_DIR
+fi
+export PYTHONPATH="$selection_dir"
+if [[ "$tracing_ready" == 1 ]]; then
+  export LEAF_READSET_DIR=/tmp/gate-logs/readsets
+  export LEAF_READSET_RUN="${CODEBUILD_BUILD_ID:-}"
+  export LEAF_READSET_ROOT="$CODEBUILD_SRC_DIR"
+  export LEAF_READSET_SOURCE_SHA="$HEAD_SHA"
+  export LEAF_READSET_SOURCE_TREE="$(git --no-replace-objects rev-parse "$HEAD_SHA^{tree}" 2>/dev/null || true)"
+  export LEAF_READSET_CAPTURE_SHA="$(git --no-replace-objects rev-parse "$TRUSTED_SHA:scripts/ci/trace_reads.py" 2>/dev/null || true)"
+  export LEAF_READSET_CATALOG_SHA256="$(python -I -B - "$selection_dir/detail.json" <<'LEAF_CAPTURE_ID'
 import json
 import sys
 try:
@@ -485,11 +504,13 @@ except (OSError, ValueError):
     print("")
 LEAF_CAPTURE_ID
 )"
-if [[ "$capture_ready" == 1 ]]; then
-  export LEAF_TRUSTED_CI_DIR="$selection_dir"
-  export PYTHONPATH="$selection_dir"
 else
-  unset LEAF_TRUSTED_CI_DIR
+  unset "${!LEAF_READSET_@}"
+  if [[ "$tracing_helpers_ready" == 1 && "$reporters_ready" == 1 ]]; then
+    echo 'INFO: read-set tracing skipped (not a tracing build)' >&2
+  fi
+fi
+if [[ "$tracing_helpers_ready" != 1 || "$reporters_ready" != 1 ]]; then
   echo 'WARNING: trusted capture unavailable; readsets and test reports remain incomplete' >&2
 fi
 gate_status=0
@@ -509,7 +530,7 @@ python scripts/ci/change_impact_job.py --repo . --head "${CODEBUILD_RESOLVED_SOU
   --event "${CODEBUILD_WEBHOOK_EVENT:-manual}" --gate-result /tmp/gate-results/gate-result.json \
   --receipt-dir /tmp/impact || echo "change-impact: helper exit $? (advisory)"
 echo "LEAF_T end change-impact $(date +%s%3N) rc=0"
-python -I -B - "$selection_dir" "$gate_status" <<'LEAF_SELECTION_FINALIZE' || echo 'WARNING: selection evidence finalization failed' >&2
+python -I -B - "$selection_dir" "$gate_status" "$tracing_ready" "$reporters_ready" <<'LEAF_SELECTION_FINALIZE' || echo 'WARNING: selection evidence finalization failed' >&2
 import datetime
 import hashlib
 import json
@@ -553,6 +574,7 @@ reporting = (valid and bool(expected) and observed == expected and len(first) ==
              and all(row.get("test_report_complete") is True for row in first))
 complete = reporting and all(row.get("status") in ("PASS", "FAIL") for row in first)
 detail.update(execution_complete=complete, test_exit_code=int(sys.argv[2]),
+              tracing_active=sys.argv[3] == "1", reporters_active=sys.argv[4] == "1",
               build_exit_code=int(sys.argv[2]), collection_complete=reporting,
               collection_ids_sha256=hashlib.sha256(canonical(all_ids).encode("utf-8")).hexdigest(),
               attempts_ref=str(attempts_path), attempts_sha256=hashlib.sha256(raw).hexdigest(),
@@ -570,6 +592,7 @@ if detail.get("phase") == "shadow":
               "collection_ids_sha256": detail["collection_ids_sha256"],
               "attempts_ref": detail["attempts_ref"], "attempts_sha256": detail["attempts_sha256"],
               "full_run_complete": detail["full_run_complete"],
+              "tracing_active": detail["tracing_active"], "reporters_active": detail["reporters_active"],
               "test_id_reporting_complete": reporting, "synthetic": False,
               "fallback_reason": detail.get("fallback_reason"),
               "assigned_arm": detail.get("assigned_arm"), "execution_mode": detail.get("execution_mode")}

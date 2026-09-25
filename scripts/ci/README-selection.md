@@ -54,6 +54,21 @@ Non-Python suites stay unmappable and always selected.
 
 ## Environment contract
 
+Test-ID reporters stay active on all build classes when their files and
+`pytest_selection.py` load from `TRUSTED_SHA`, through `LEAF_TRUSTED_CI_DIR`.
+Read-set tracing requires the trusted capture helpers and the explicit
+`LEAF_PROOF_TRACING=1` override. PR, merge-group and main-push builds keep
+reporters but skip tracing; a status-off proof without the override does the
+same. Every build exports `PYTHONPATH` to the trusted helper directory so
+pytest can load `pytest_selection`. Only tracing builds export `LEAF_READSET_*`;
+other builds unset them. The plugin enables capture only when `LEAF_READSET_DIR`
+is set. This keeps webhook verdicts fast and avoids tracing-induced test
+failures on shared CI while dedicated proofs collect read sets for the map
+builder. The detail receipt and `LEAF_SHADOW` record `tracing_active` and
+`reporters_active` separately.
+
+The runner adds `LEAF_READSET_DIR` and `LEAF_READSET_ROOT` to suite environments only when the parent carries `LEAF_READSET_DIR`; otherwise it supplies only suite, attempt, run and test-report directory metadata so reporting cannot re-enable tracing through defaults.
+
 Interpreter isolation (`-I -B`) is for trusted processes only. The gate run
 inherits no interpreter flags and explicitly unsets `PYTHONSAFEPATH`. The runner
 owns each suite environment: it removes `PYTHONSAFEPATH` even if the parent sets
@@ -98,7 +113,7 @@ by suite. Failures from an internal retry are retained. Collection errors,
 crashes, missing reports and scripts without actual test IDs are incomplete;
 they never become synthetic test failures for containment.
 
-Each child receives `LEAF_READSET_DIR`, `LEAF_READSET_SUITE`,
+On tracing builds, each child receives `LEAF_READSET_DIR`, `LEAF_READSET_SUITE`,
 `LEAF_READSET_ATTEMPT`, `LEAF_READSET_ROOT` and `LEAF_READSET_RUN`. The trusted
 directory is supplied through `PYTHONPATH`. Startup capture writes
 per-process shards under `readsets/<encoded-suite>/<attempt>/`. Python `-I`

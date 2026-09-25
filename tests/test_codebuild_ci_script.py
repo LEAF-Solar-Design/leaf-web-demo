@@ -62,6 +62,62 @@ class TestCodebuildCiScript(unittest.TestCase):
             self.assertTrue(any(line.startswith("cd ") for line in lines[max(0, i - 3):i]),
                             f"Step must reset cwd: {lines[i]}")
 
+    def test_capture_environment_scope(self):
+        script = CI_PATH.read_text(encoding="utf-8")
+        start = script.index('if [[ "$tracing_ready" == 1 ]]; then')
+        stop = script.index('\nelse\n', start)
+        tracing = script[start:stop]
+        exports = re.findall(r"(?m)^\s*export LEAF_READSET_\w+=.*$", script)
+        self.assertTrue(exports)
+        for export in exports:
+            self.assertIn(export, tracing)
+        self.assertIn('\nfi\nexport PYTHONPATH="$selection_dir"\n', script[:start])
+        self.assertEqual(script.count('export PYTHONPATH="$selection_dir"'), 1)
+        self.assertNotIn('export PYTHONPATH=', tracing)
+        self.assertIn('export LEAF_READSET_DIR=/tmp/gate-logs/readsets', tracing)
+        self.assertIn('if [[ "$reporters_ready" == 1 ]]; then\n'
+                      '  export LEAF_TRUSTED_CI_DIR="$selection_dir"\n'
+                      'else\n  unset LEAF_TRUSTED_CI_DIR\nfi', script[:start])
+        skipped = script[stop:script.index('\ngate_status=0', stop)]
+        self.assertNotIn('unset PYTHONPATH', script)
+        self.assertIn('unset "${!LEAF_READSET_@}"', skipped)
+        self.assertIn('INFO: read-set tracing skipped (not a tracing build)', skipped)
+        self.assertIn('WARNING: trusted capture unavailable;', skipped)
+        self.assertIn('unset PYTHONSAFEPATH\npython scripts/run-all-gates.py', script)
+        self.assertIn('tracing_active=sys.argv[2] == "1", reporters_active=sys.argv[3] == "1"', script)
+        self.assertIn('"tracing_active": detail["tracing_active"]', script)
+        self.assertIn('"reporters_active": detail["reporters_active"]', script)
+
+    @unittest.skipUnless(BASH, "bash is not on PATH; tracing event check requires bash")
+    def test_tracing_build_classes(self):
+        script = CI_PATH.read_text(encoding="utf-8")
+        start = script.index('tracing_ready=0\n')
+        eligibility = script[start:script.index('\nexport TRUSTED_SHA HEAD_SHA', start)]
+        self.assertNotIn('CODEBUILD_WEBHOOK_EVENT', eligibility)
+        self.assertNotIn('CODEBUILD_WEBHOOK_HEAD_REF', eligibility)
+        self.assertIn('${LEAF_PROOF_TRACING:-}', eligibility)
+        cases = [
+            ("PUSH", "refs/heads/main", "", "1", "0"),
+            ("PUSH", "refs/heads/gh-readonly-queue/main/pr-1", "", "1", "0"),
+            ("PUSH", "refs/heads/main-extra", "", "1", "0"),
+            ("PULL_REQUEST_UPDATED", "refs/heads/main", "", "1", "0"),
+            ("", "", "", "1", "0"),
+            ("", "", "1", "1", "1"),
+            ("", "", "0", "1", "0"),
+            ("", "", "2", "1", "0"),
+            ("PUSH", "refs/heads/main", "", "0", "0"),
+            ("", "", "1", "0", "0"),
+        ]
+        for event, ref, proof, helpers, expected in cases:
+            with self.subTest(event=event, ref=ref, proof=proof, helpers=helpers):
+                command = ('CODEBUILD_WEBHOOK_EVENT="$1"\nCODEBUILD_WEBHOOK_HEAD_REF="$2"\n'
+                           'LEAF_PROOF_TRACING="$3"\ntracing_helpers_ready="$4"\n'
+                           + eligibility + '\nprintf "%s" "$tracing_ready"\n')
+                result = subprocess.run([BASH, "-c", command, "tracing-scope", event, ref, proof, helpers],
+                                        cwd=ROOT, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, expected)
+
     @unittest.skipUnless(BASH, "bash is not on PATH; shell syntax check requires bash")
     def test_bash_syntax(self):
         for path in (".codebuild/ci.sh", "scripts/ci/pr-codebuild-project.sh"):

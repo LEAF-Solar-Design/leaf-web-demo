@@ -178,9 +178,11 @@ class SelectionContracts(unittest.TestCase):
             self.assertIn(reason, decision["reasons"])
         self.assertEqual((self.out / "only-args.nul").read_bytes(), b"")
 
-    def run_pytest(self, extra=()):
+    def run_pytest(self, extra=(), tracing=True):
         evidence = self.work / ("pytest-evidence-" + str(len(list(self.work.glob("pytest-evidence-*")))))
         env = dict(self.env, PYTHONPATH=str(self.inputs))
+        if tracing is not None:
+            env["LEAF_READSET_DIR"] = str(evidence / "readsets") if tracing else ""
         result = subprocess.run(
             [sys.executable, "-B", "-m", "pytest", "-q", "-p", "no:cacheprovider",
              "--rootdir", str(self.repo),
@@ -214,6 +216,12 @@ class SelectionContracts(unittest.TestCase):
         self.assertIn("a", decision["expanded_suite_ids"])
         result, completion, evidence = self.run_pytest()
         self.assertEqual(result.returncode, 1)
+        self.assertTrue(completion["decision"]["tracing_active"])
+        final = [json.loads(line.removeprefix("LEAF_SELECTION_FINAL "))
+                 for line in result.stderr.decode().splitlines()
+                 if line.startswith("LEAF_SELECTION_FINAL ")]
+        self.assertEqual(len(final), 1)
+        self.assertTrue(final[0]["tracing_active"])
         self.assertTrue(any(row["nodeid"] == "tests/test_a.py::test_a" and row["outcome"] == "failed"
                             for row in completion["attempts"]), completion["attempts"])
         docs = [json.loads(path.read_text()) for path in evidence.glob("readsets/a/*/*.json")
@@ -226,6 +234,30 @@ class SelectionContracts(unittest.TestCase):
                          "tests/test_a.py")
         self.assertEqual(trace_reads.repo_nodeid(self.repo, "tests/test_a.py::test_a[x/y]"),
                          "tests/test_a.py::test_a[x/y]")
+
+    def test_plugin_without_readset_dir_records_outcomes(self):
+        self.change("src/a.py", "bad\n")
+        self.choose(event={})
+        for tracing in (None, False):
+            with self.subTest(readset_dir="unset" if tracing is None else "empty"):
+                result, completion, evidence = self.run_pytest(tracing=tracing)
+                self.assertEqual(result.returncode, 1, result.stderr.decode(errors="replace"))
+                self.assertFalse(completion["decision"]["tracing_active"])
+                self.assertTrue(completion["test_id_reporting_complete"])
+                self.assertTrue(completion["full_run_complete"])
+                attempts = [json.loads(line) for path in evidence.glob("attempts-*.jsonl")
+                            for line in path.read_text(encoding="utf-8").splitlines()]
+                self.assertEqual(attempts, completion["attempts"])
+                self.assertEqual({row["nodeid"] for row in attempts},
+                                 {tid for suite in self.catalog["suites"] for tid in suite["test_ids"]})
+                self.assertEqual({row["nodeid"] for row in attempts if row["outcome"] == "failed"},
+                                 {"tests/test_a.py::test_a"})
+                final = [json.loads(line.removeprefix("LEAF_SELECTION_FINAL "))
+                         for line in result.stderr.decode().splitlines()
+                         if line.startswith("LEAF_SELECTION_FINAL ")]
+                self.assertEqual(len(final), 1)
+                self.assertFalse(final[0]["tracing_active"])
+                self.assertFalse((evidence / "readsets").exists())
 
     def test_rename(self):
         self.git("mv", "data/old.json", "data/unknown.json")
