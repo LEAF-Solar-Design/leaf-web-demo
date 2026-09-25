@@ -36,3 +36,7 @@ its id, and one entity-mapping value follows the group id.
 Filed to the Branch2025 lane on 2026-09-23. A fix: key the snapshot by a stable group identity
 (for example the smallest member handle), or remap old to new handles during Phase 4. When the
 plugin is fixed, this divergence should become an ordinary passing receipt.
+
+## Retired
+
+Retired by Branch2025 #314 (AUTOFILLREVERT remaps the snapshot to the groups AutoFill rebuilt): recaptured 2026-09-25 on an unsigned test build of master a94db8d9 from the same pre-AutoFill drawing (28 panels removed), AUTOFILL moved one panel (Group 6 71 to 70, Group 8 137 to 138) and AUTOFILLREVERT printed "Revert complete: 2 group(s) restored." After save and reopen the sizes are back to 71 and 137 and the receipt passes with no declared diffs. The signed release carrying the fix is pending the operator (Solar residuals R23).
