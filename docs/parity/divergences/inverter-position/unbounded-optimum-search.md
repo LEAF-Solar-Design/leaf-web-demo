@@ -18,3 +18,7 @@ The plugin's evidence is the unchanged i16 state plus one `report` row (`unbound
 scoring over a bounded grid (named point and time budgets, failing closed past either), moves the inverter to the
 best point and reroutes its homerun legs. The declared diffs are exactly the comparator's. When the plugin bounds its
 search, this capability can be recaptured for an ordinary receipt.
+
+## Retired
+
+Retired 2026-09-25 by Branch2025 #312 (the optimum search is bounded: 9800 checks in 0.22 s on test build 9), #334 (an inverter with no linked strings stays where it is instead of moving to the empty-extents sentinel) and #335, with Studio selecting strings by number. On test build 10 PositionInv on block A9D5 reports "Inverter 14 has no connected strings; its position is unchanged." and leaves the drawing unchanged; Studio reports no-connected-strings and the position receipt compares with no diffs. The signed release is pending the operator (R23).

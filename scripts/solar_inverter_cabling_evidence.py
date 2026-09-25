@@ -87,11 +87,11 @@ STEP_ANSWERS = {"i5": [], "i11": [], "i12": [], "i13": [], "i17": ["A9D5", "2015
                 "position": ["A9D5"], "l1": [], "l2": []}
 STEP_FORM_VALUES = {"i5": {"combiner_input_plan": "Apply"},
                     "l2": {"cabling_redesign_simulate": "Simulate", "cabling_redesign_commit": "Commit"}}
-# G35b: the engine's MOVEINV point is the point the jig acquired, not the typed text: the capture typed
-# "20153.4,3589.19,0" under running object snaps and AutoCAD delivered the snapped panel vertex below
-# (the committed device position; InverterMoveJig.cs:51-69 takes it as is). Object snap is host input no
-# state carries, so both sides use the acquired point; the recorded parameters stay the G22 answers.
-ACQUIRED_MOVE_POINT = "20150.90569654952,3589.187227900471"
+# G35b: the engine's MOVEINV point is the point the jig acquired. Since the 2026-09-25 recapture (test build 10) the
+# capture sets OSMODE 0 before typing "20153.4,3589.19,0", so the jig acquires the typed point exactly (earlier
+# captures ran under object snaps and acquired the panel vertex 20150.906,3589.187). Object snap is host input no
+# state carries; the recorded parameters stay the G22 answers.
+ACQUIRED_MOVE_POINT = "20153.4,3589.19"
 ENGINE_ANSWERS = {"i17": ["A9D5", ACQUIRED_MOVE_POINT]}
 
 # HOST INPUTS: the capture host's per-user settings and the picked entities the commands read, none of

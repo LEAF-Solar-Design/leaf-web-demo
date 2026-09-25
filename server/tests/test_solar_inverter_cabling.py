@@ -7,7 +7,8 @@ adopted: nothing drawn, the one save, the report; a missing feeder drawn as a co
 LEAFLITEFEEDERS (the tail-biased assignment, lane-less comb paths, stored length 0, the refusals);
 MOVEINV (the device moved, its homerun legs rerouted, one save, declared); the POSITIONINV search on
 the plugin's bounded plan (InverterMoveSearchTests' cases, the first strictly shortest candidate outside
-the outline band, the plugin's failure line, the time bound failing closed); and LEAFCOMBINERAUTO
+the outline band, the plugin's failure line, the time bound failing closed); MOVEINV and POSITIONINV selecting strings by
+the device number a row records (R35b: exactly those rerouted, none selected, unrecorded unchanged); and LEAFCOMBINERAUTO
 (the seeded MPPT inputs; the committed i4 state and combiner intake reproducing the committed i5 delta
 row for row; its refusals). States are synthetic and authored here, except the LEAFCOMBINERAUTO
 fixture, which is the committed G35 chain (docs/parity/evidence/rooftop).
@@ -348,6 +349,99 @@ def test_inverter_position_reports_the_plugins_failure_when_the_band_covers_the_
     assert after == before
 
 
+def numbered(state, circuits=None):
+    """R35b: the combiners' rows record their int `number` (the Branch2025 adapter, R35a); `circuits`
+    rewrites string circuits {string: circuit}."""
+    state = copy.deepcopy(state)
+    for d in state["rows"]["device"]:
+        if d["role"] == "combiner":
+            d["number"] = {CB_1: 1, CB_2: 2}[tuple(st.point_of(d["position"]))]
+    for row in state["rows"]["string-assignment"]:
+        if row["string"] in (circuits or {}):
+            row["_detail"]["circuit"] = circuits[row["string"]]
+    return state
+
+
+def shared_state():
+    """Both strings' homeruns attached to combiner 1 by their end; A02's circuit still names 2."""
+    state = make_state()
+    for row in cables_of(state, "dc-homerun"):
+        if row["from"] == "A02":
+            row["vertices"][-1] = st.coordinate(*CB_1)
+    return state
+
+
+def combiner_positions(state):
+    return sorted(tuple(st.point_of(d["position"])) for d in state["rows"]["device"] if d["role"] == "combiner")
+
+
+def test_inverter_move_by_number_with_no_selected_string_erases_and_routes_none():
+    # StringHomeRunCmd.cs:821, :1007-1015: no string circuit names 1, so its attached homeruns are erased
+    # and none is drawn; the device still moves (the fixture's MOVEINV of CB-A14).
+    before = numbered(make_state(), {"A01": "+1/5a"})
+    after, lines = cab.inverter_move(before, HOST, ["A9D5", "300,200,0"])
+    assert lines == ["No strings selected.", "Inverter 1 moved; 0 homerun(s) rerouted."]
+    assert combiner_positions(after) == [(300.0, 200.0), CB_2]
+    assert [r for r in cables_of(after, "dc-homerun") if r["from"] == "A01"] == []
+    untouched = [r for r in cables_of(after, "dc-homerun") if r["from"] == "A02"]
+    assert len(untouched) == 2 and all(points(r)[1] == CB_2 for r in untouched)
+    # Nothing routed, so no drawing-properties save (measured: the plugin's i17 catalog does not grow).
+    assert after["setting"] == before["setting"]
+    rows, settings = st.step_rows("i17", before, after, lines)
+    assert settings == []
+    assert not [r for r in rows if r["type"] == "setting"]
+
+
+def test_inverter_position_by_number_with_no_selected_string_changes_nothing_and_reports():
+    # StringHomeRunCmd.cs:839-847 (Branch2025 #334): nothing is searched, erased or moved.
+    before = numbered(make_state(), {"A01": "+1/5a"})
+    after, lines = cab.inverter_position(before, [], HOST)
+    assert lines == ["Inverter 1 has no connected strings; its position is unchanged."]
+    assert after == before
+    rows, settings = st.step_rows("position", before, after, lines)
+    assert settings == []
+    assert [(r["type"], r["name"], r["value"]) for r in rows] == [("report", "message", "no-connected-strings")]
+
+
+def test_inverter_move_by_number_reroutes_exactly_the_selected_strings():
+    before = numbered(shared_state())
+    after, lines = cab.inverter_move(before, HOST, ["A9D5", "300,200,0"])
+    assert lines == ["Inverter 1 moved; 2 homerun(s) rerouted."]
+    homeruns = cables_of(after, "dc-homerun")
+    assert sorted((r["from"], r["segment"]) for r in homeruns) == [("A01", "end"), ("A01", "start")]
+    assert all(points(r)[1] == (300.0, 200.0) for r in homeruns)
+    assert sorted(points(r)[0] for r in homeruns) == [(50.0, 400.0), (150.0, 400.0)]
+    assert len(after["setting"]["HomerunRouting"]["CableCatalog"]) == 4   # a string routed: the one save
+
+
+def test_inverter_position_by_number_searches_and_reroutes_exactly_the_selected_strings():
+    before = numbered(shared_state())
+    # The bounded plan over A01 alone (its legs and polyline grown 50), not the attached A02 legs.
+    assert reference_optimum([(50.0, 400.0), (150.0, 400.0)], (0.0, 350.0, 200.0, 450.0), [])[0] == (100.0, 390.0)
+    after, lines = cab.inverter_position(before, [], HOST)
+    assert combiner_positions(after) == [(100.0, 390.0), CB_2]
+    homeruns = cables_of(after, "dc-homerun")
+    assert sorted((r["from"], points(r)[1]) for r in homeruns) == [("A01", (100.0, 390.0))] * 2
+    assert lines[0].startswith("Inverter 1 positioned; 2 homerun(s) rerouted;")
+
+
+def test_unrecorded_numbers_keep_the_handle_attached_selection():
+    before = shared_state()
+    assert all(d["number"] is None for d in before["rows"]["device"])
+    after, lines = cab.inverter_move(before, HOST, ["A9D5", "300,200,0"])
+    assert lines == ["Inverter 1 moved; 4 homerun(s) rerouted."]
+    assert sorted(r["from"] for r in cables_of(after, "dc-homerun")) == ["A01", "A01", "A02", "A02"]
+    assert all(points(r)[1] == (300.0, 200.0) for r in cables_of(after, "dc-homerun"))
+    # The circuits of the no-selected-string case, numbers unrecorded: the handle-attached search still runs.
+    before = make_state()
+    for row in before["rows"]["string-assignment"]:
+        if row["string"] == "A01":
+            row["_detail"]["circuit"] = "+1/5a"
+    after, lines = cab.inverter_position(before, [], HOST)
+    assert lines[0].startswith("Inverter 1 positioned; 2 homerun(s) rerouted;")
+    assert combiner_positions(after) == [(100.0, 390.0), CB_2]
+
+
 def test_position_search_fails_closed_past_its_time_and_never_changes_a_finished_answer():
     ticks = iter(range(10 ** 6))
     with pytest.raises(cab.InverterCablingError, match="exceeded"):
@@ -358,12 +452,56 @@ def test_position_search_fails_closed_past_its_time_and_never_changes_a_finished
         cab.optimum_position(legs, extents, [], budget_s=math.inf) == reference_optimum(legs, extents, [])
 
 
-def test_inverter_position_on_the_committed_chain_picks_the_plan_optimum():
-    # The G35 POSITIONINV fixture: device L1 14 of the committed state-i16 against the chain intake's
-    # panel groups (scripts/solar_inverter_cabling_evidence.py CAPTURE_HOST PositionDevice).
+def committed_i16():
     chain = json.loads((EVIDENCE / "chain" / "intake.json").read_text(encoding="utf-8"))
     groups = [{"handle": g.get("handle"), "outlines": g.get("outlines") or []} for g in chain["panel_groups"]]
-    before = st.load_state(EVIDENCE / "inverters" / "state-i16.json")
+    return st.load_state(EVIDENCE / "inverters" / "state-i16.json"), groups
+
+
+def test_inverter_position_on_the_committed_chain_reports_no_connected_strings():
+    # The G35 POSITIONINV fixture: device L1 14 (block A9D5, CB-A14) of the committed state-i16, whose
+    # rows record their numbers (test build 10). No string circuit names 14, so the plugin changes
+    # nothing and prints its line (StringHomeRunCmd.cs:821, :839-847; measured on VM-C, test build 10).
+    before, groups = committed_i16()
+    target = cab._find_device(before, "L1", 14)
+    assert target["row"]["number"] == 14
+    assert cab._numbered_strings(before, target) == set()
+    assert len(cab._device_homerun_legs(before, target["position"])) == 24
+    after, lines = cab.inverter_position(before, groups, dict(HOST, PositionDevice=["L1", 14]))
+    assert lines == ["Inverter 14 has no connected strings; its position is unchanged."]
+    assert after == before
+    rows, settings = st.step_rows("position", before, after, lines)
+    assert settings == []
+    assert [(r["type"], r["name"], r["value"]) for r in rows] == [("report", "message", "no-connected-strings")]
+
+
+def test_inverter_move_on_the_committed_chain_erases_the_homeruns_and_routes_none():
+    # The fixture's MOVEINV (i17) of CB-A14: moved, its 24 handle-attached homeruns erased
+    # (StringHomeRunCmd.cs:1007-1015), no string selected so none drawn and no drawing-properties save.
+    before, _ = committed_i16()
+    target = cab._find_device(before, "L1", 14)
+    old = target["position"]
+    after, lines = cab.inverter_move(before, dict(HOST, MovedDevice=["L1", 14]), ["A9D5", "20100,3600"])
+    assert lines == ["No strings selected.", "Inverter 14 moved; 0 homerun(s) rerouted."]
+    before_positions = sorted(tuple(st.point_of(d["position"])) for d in before["rows"]["device"])
+    after_positions = sorted(tuple(st.point_of(d["position"])) for d in after["rows"]["device"])
+    vacated = list(before_positions)
+    vacated.remove(old)
+    assert after_positions == sorted(vacated + [(20100.0, 3600.0)])
+    assert cab._device_homerun_legs(after, old) == [] and cab._device_homerun_legs(after, (20100.0, 3600.0)) == []
+    assert len(cables_of(after, "dc-homerun")) == len(cables_of(before, "dc-homerun")) - 24
+    assert after["setting"] == before["setting"]
+    rows, settings = st.step_rows("i17", before, after, lines)
+    assert settings == []
+    assert not [r for r in rows if r["type"] == "setting"]
+
+
+def test_inverter_position_on_the_committed_chain_unrecorded_picks_the_plan_optimum():
+    # The same fixture with its device numbers unrecorded keeps the handle-attached selection: the bounded
+    # search over the plugin's plan (scripts/solar_inverter_cabling_evidence.py CAPTURE_HOST PositionDevice).
+    before, groups = committed_i16()
+    for d in before["rows"]["device"]:
+        d["number"] = None
     host = dict(HOST, PositionDevice=["L1", 14])
     target = cab._find_device(before, "L1", 14)
     legs = cab._device_homerun_legs(before, target["position"])

@@ -133,7 +133,7 @@ def test_the_producer_writes_every_step(chain, tmp_path, capsys):
     assert docs["position"]["versions"]["engine"] == "server-builtin"
     moved = rows_of(docs["i17"], "device")
     # G35b: the acquired point, as is.
-    assert len(moved) == 1 and moved[0]["position"]["value"] == [20150.90569654952, 3589.187227900471]
+    assert len(moved) == 1 and moved[0]["position"]["value"] == [20153.4, 3589.19]
     assert len(rows_of(docs["i17"], "cable")) == 2
     # G36: the cabling studio on the committed i19 state. l1 opens it (the save's catalog pair, the report);
     # l2 opens it, Simulates and Commits: 173 combiners, 173 routed homeruns, 173 comb feeders, the 14 earlier
