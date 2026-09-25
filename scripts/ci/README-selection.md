@@ -59,6 +59,8 @@ inherits no interpreter flags and explicitly unsets `PYTHONSAFEPATH`. The runner
 owns each suite environment: it removes `PYTHONSAFEPATH` even if the parent sets
 it, and keeps `PYTHONPATH` for capture. Report injection failures retain the
 original command and environment and mark test-report evidence incomplete.
+Vitest reporters run inside the Vite root from a per-attempt trusted copy at `node_modules/.leaf-ci/vitest-leaf.mjs`; copy failure injects nothing and records `reporter_copy_failed:<ExceptionType>`.
+An injected attempt that exits nonzero with zero executed tests retries with the original command, un-instrumented, and records incomplete evidence with `reporter_startup_failure`.
 
 ## Receipts and result evidence
 
