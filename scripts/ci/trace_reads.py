@@ -1,4 +1,10 @@
-"""Process-local Python read observation, never a security or native-child sandbox."""
+"""Process-local Python read observation, never a security or native-child sandbox.
+
+A scope's read set is process_reads united with its own module_reads. Module
+snapshots add new or changed origins to both the process and the active scope,
+so each documented scope depends on every module observed by document time.
+This is a safe superset of per-scope snapshots: it can only over-select tests.
+"""
 
 from contextlib import contextmanager
 import hashlib
@@ -45,6 +51,8 @@ class Capture:
         self.active = None
         self.process_reads = set()
         self.module_reads = {}
+        self._snapshot_seen = {}
+        self._path_cache = {}
         self.incomplete = set()
         self.module_incomplete = {}
         self.external = set()
@@ -88,6 +96,18 @@ class Capture:
             return []
         try:
             raw = os.fsdecode(raw)
+        except (TypeError, ValueError, OSError, UnicodeError, RuntimeError):
+            self.mark_incomplete("path_normalization_error")
+            return []
+        cached = self._path_cache.get(raw)
+        if cached is not None:
+            results, reasons = cached
+            for reason in reasons:
+                self.mark_incomplete(reason)
+            return list(results)
+        results = []
+        reasons = []
+        try:
             raw.encode("utf-8", "strict")
             if "\x00" in raw:
                 raise ValueError("nul")
@@ -96,24 +116,28 @@ class Capture:
             lexical = Path(os.path.abspath(path))
             resolved = lexical.resolve(strict=False)
         except (TypeError, ValueError, OSError, UnicodeError, RuntimeError):
-            self.mark_incomplete("path_normalization_error")
-            return []
-        results = []
-        for candidate in (lexical, resolved):
-            try:
-                rel = repo_relative_path(self.root, candidate)
-            except ValueError:
-                self.external.add("python-environment")
-                if relative:
-                    self.mark_incomplete("path_escape")
-                continue
-            if rel not in results:
-                results.append(rel)
-        if lexical != resolved and len(results) < 2:
-            self.mark_incomplete("symlink_escape")
+            reasons.append("path_normalization_error")
+        else:
+            for candidate in (lexical, resolved):
+                try:
+                    rel = repo_relative_path(self.root, candidate)
+                except ValueError:
+                    self.external.add("python-environment")
+                    if relative:
+                        reasons.append("path_escape")
+                    continue
+                if rel not in results:
+                    results.append(rel)
+            if lexical != resolved and len(results) < 2:
+                reasons.append("symlink_escape")
+        if len(self._path_cache) >= 50000:
+            self._path_cache.clear()
+        self._path_cache[raw] = (list(results), reasons)
+        for reason in reasons:
+            self.mark_incomplete(reason)
         return results
 
-    def record_path(self, raw, kind):
+    def record_path(self, raw, kind, process=False):
         module = self.scope()
         if threading.get_ident() != self.owner:
             self.mark_incomplete("background_thread_shared")
@@ -123,6 +147,8 @@ class Capture:
                       if module else self.process_reads)
             for path in normalized:
                 bucket.add((kind, path))
+                if process:
+                    self.process_reads.add((kind, path))
             # Retain both bytecode and source identities; never discard data files.
             if isinstance(raw, (str, bytes)) and os.fsdecode(raw).endswith(".pyc"):
                 try:
@@ -131,6 +157,8 @@ class Capture:
                     source = os.fsdecode(raw)[:-1]
                 for path in self.paths(source):
                     bucket.add(("import", path))
+                    if process:
+                        self.process_reads.add(("import", path))
 
     def audit(self, event, args):
         if not self.enabled or getattr(self.local, "busy", False):
@@ -154,8 +182,12 @@ class Capture:
     def snapshot_modules(self):
         with self.suspended():
             try:
-                modules = list(sys.modules.values())
-                for module in modules:
+                modules = list(sys.modules.items())
+            except Exception:
+                self.mark_incomplete("module_snapshot_error", self.scope())
+                return
+            for name, module in modules:
+                try:
                     if module is None:
                         continue
                     attrs = vars(module)
@@ -163,14 +195,17 @@ class Capture:
                     spec = attrs.get("__spec__")
                     if not origin and spec is not None:
                         origin = getattr(spec, "origin", None)
+                    if name in self._snapshot_seen and self._snapshot_seen[name] == origin:
+                        continue
                     if isinstance(origin, str) and origin not in ("built-in", "frozen"):
-                        self.record_path(origin, "import")
+                        self.record_path(origin, "import", process=True)
                     loader = attrs.get("__loader__")
                     archive = getattr(loader, "archive", None)
                     if isinstance(archive, str):
-                        self.record_path(archive, "archive")
-            except Exception:
-                self.mark_incomplete("module_snapshot_error", self.scope())
+                        self.record_path(archive, "archive", process=True)
+                    self._snapshot_seen[name] = origin
+                except Exception:
+                    self.mark_incomplete("module_snapshot_error", self.scope())
 
     def begin_module(self, module, nodeid=None):
         module = repo_relative_path(self.root, module)

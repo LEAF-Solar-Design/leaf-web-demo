@@ -584,5 +584,99 @@ class SelectionContracts(unittest.TestCase):
         self.assertEqual(attempts[-1]["outcome"], "passed")
 
 
+class IncrementalCaptureContracts(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="incremental-capture-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.capture = trace_reads.Capture(self.root).install()
+        self.addCleanup(self.capture.close)
+
+    def test_stable_snapshots_record_only_new_or_changed_origins(self):
+        modules = {}
+        for index in range(8):
+            modules["generated_" + str(index)] = types.SimpleNamespace(
+                __file__=str(self.root / ("module_" + str(index) + ".py")))
+        capture = self.capture
+        with capture.suspended(), mock.patch.object(sys, "modules", modules), \
+                mock.patch.object(capture, "record_path", wraps=capture.record_path) as record:
+            for cycle in range(200):
+                capture.begin_module("tests/test_generated.py")
+                capture.end_module()
+                self.assertEqual(record.call_count, len(modules) if cycle == 0 else 0)
+                record.reset_mock()
+            origin = str(self.root / "package.zip" / "new.py")
+            archive = str(self.root / "package.zip")
+            modules["new"] = types.SimpleNamespace(
+                __spec__=types.SimpleNamespace(origin=origin),
+                __loader__=types.SimpleNamespace(archive=archive))
+            capture.begin_module("tests/test_later.py")
+            capture.end_module()
+            self.assertEqual([call.args for call in record.call_args_list],
+                             [(origin, "import"), (archive, "archive")])
+            record.reset_mock()
+            replacement = str(self.root / "replacement.py")
+            modules["generated_0"].__file__ = replacement
+            capture.begin_module("tests/test_changed.py")
+            capture.end_module()
+            self.assertEqual([call.args for call in record.call_args_list],
+                             [(replacement, "import")])
+
+    def test_module_reads_are_shared_with_every_documented_scope(self):
+        capture = self.capture
+        modules = {}
+        with capture.suspended(), mock.patch.object(sys, "modules", modules):
+            capture.begin_module("tests/test_a.py")
+            modules["during_a"] = types.SimpleNamespace(
+                __file__=str(self.root / "during_a.py"))
+            capture.end_module()
+            edge = ("import", "during_a.py")
+            self.assertIn(edge, capture.module_reads["tests/test_a.py"])
+            self.assertIn(edge, capture.process_reads)
+            capture.begin_module("tests/test_b.py")
+            modules["during_b"] = types.SimpleNamespace(
+                __file__=str(self.root / "during_b.py"))
+            capture.end_module()
+            self.assertNotIn(edge, capture.module_reads["tests/test_b.py"])
+            for scope in ("a", "b"):
+                document = capture.document(scope, module="tests/test_" + scope + ".py")
+                paths = {row["path"] for row in document["reads"]}
+                self.assertTrue({"during_a.py", "during_b.py"}.issubset(paths))
+
+    def test_cached_symlink_escape_replays_incomplete_reason(self):
+        capture = self.capture
+        raw = str(self.root / "link.txt")
+        # Model a symlink without requiring Windows symlink privileges.
+        with capture.suspended(), mock.patch.object(
+                Path, "resolve", return_value=self.root.parent / "outside.txt") as resolve, \
+                mock.patch.object(capture, "mark_incomplete", wraps=capture.mark_incomplete) as mark:
+            self.assertEqual(capture.paths(raw), ["link.txt"])
+            first_calls = list(mark.call_args_list)
+            self.assertEqual(first_calls, [mock.call("symlink_escape")])
+            capture.incomplete.clear()
+            mark.reset_mock()
+            resolve.reset_mock()
+            self.assertEqual(capture.paths(raw), ["link.txt"])
+            resolve.assert_not_called()
+            self.assertEqual(mark.call_args_list, first_calls)
+            self.assertIn("symlink_escape", capture.incomplete)
+
+    def test_bad_module_does_not_stop_snapshot(self):
+        class BadModule:
+            @property
+            def __dict__(self):
+                raise RuntimeError("synthetic module inspection failure")
+
+        capture = self.capture
+        modules = {"bad": BadModule(), "good": types.SimpleNamespace(
+            __file__=str(self.root / "good.py"))}
+        with capture.suspended(), mock.patch.object(sys, "modules", modules):
+            capture.begin_module("tests/test_bad.py")
+            capture.end_module()
+        self.assertIn("module_snapshot_error", capture.module_incomplete["tests/test_bad.py"])
+        self.assertIn(("import", "good.py"), capture.process_reads)
+        self.assertIn(("import", "good.py"), capture.module_reads["tests/test_bad.py"])
+
+
 if __name__ == "__main__":
     unittest.main()
