@@ -7,7 +7,7 @@ LeafSolarDesign.Core/Guardrails/Rules, registered and run in GuardrailEngine.Reg
 (GuardrailEngine.cs:32-60), ordered for display by OrderForDisplay (:157-199), and summarised the way
 the palette's health banner prints it (HealthBanner.cs:80-125).
 
-Two list modes, because the plugin validates only its L1 inverter list. Document activation rebuilds the lists from
+Two list modes. The historical plugin capture validates only its L1 inverter list. Document activation rebuilds the lists from
 the drawing (DocumentEventHandler.GetAllInverters, :233-276), and AddInverter files every L2 device in a separate
 collector list (:305-313) that the snapshot collector never reads (DesignSnapshotCollector.cs:166-189):
   plugin   the L1 list as the plugin builds it. This intake version carries it only when it is empty (every device
@@ -15,6 +15,12 @@ collector list (:305-313) that the snapshot collector never reads (DesignSnapsho
   drawing  every inverter the drawing's string assignments name, L1 or L2, in number order. Studio validates the
            design it actually holds, so this is the mode its evidence uses; the difference is the declared
            divergence of G36.
+
+After Branch2025 #311 the collector reads both levels. The clean-host R31b capture
+still reports the empty-design verdicts; this historical `plugin` mode is not a
+model of that new collector. Drawing verdicts remain backed by the intake's strings
+and catalog. See docs/parity/divergences/guardrails-monitoring/clean-host-empty-snapshot.md
+for the branch trace and the unresolved runtime collection cause.
 
 Pure and bounded: every function reads its inputs, allocates at most O(strings), and raises
 GuardrailError on a malformed intake. Nothing here reads a database; the catalog row arrives in the

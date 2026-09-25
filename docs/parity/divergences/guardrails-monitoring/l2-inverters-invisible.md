@@ -1,5 +1,10 @@
 # guardrails-monitoring: the guardrails never see L2 inverters
 
+Historical finding, before Branch2025 #311. The collector now reads both lists.
+For the post-fix clean-host capture and remaining runtime-data discrepancy, see
+[clean-host-empty-snapshot.md](clean-host-empty-snapshot.md). The diagnosis below
+is retained as the basis of Studio's historical `plugin` list mode.
+
 **Plugin:** Branch2025 `Guardrails/UI/DesignSnapshotCollector.cs` 166-189 (the snapshot reads only the L1 inverter
 list) with `DocumentEventHandler.cs` 233-313 (`GetAllInverters` rebuilds the lists when a drawing is activated, and
 `AddInverter` files every L2 device in the separate L2 collector list). Filed on Branch2025 issue #281.

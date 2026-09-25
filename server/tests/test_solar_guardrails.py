@@ -1,6 +1,7 @@
 """Tests for server/solar_guardrails.py (G36 guardrails: the plugin's 14 rules, display order and health banner)."""
 import copy
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -137,3 +138,37 @@ def test_plugin_mode_reads_only_l1_devices():
 def test_unknown_mode_refuses():
     with pytest.raises(eng.GuardrailError):
         eng.guardrail_rows(intake(), "memory")
+
+
+def test_committed_clean_host_intake_retains_supported_drawing_verdicts():
+    path = _PATH.parents[1] / "docs/parity/evidence/batch2/g0-intake.json"
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    snapshot = eng.build_snapshot(doc, "drawing")
+    assert len(doc["devices"]) == 23
+    assert len(snapshot["strings"]) == 173
+    assert sum(s["panel_count"] for s in snapshot["strings"]) == 2345
+    assert snapshot["inverter_count"] == 5
+    assert snapshot["dc_inputs_per_mppt"] == 2
+    assert eng.dc_ac_ratio(snapshot) == [eng.PASS]
+    assert eng.strings_per_mppt(snapshot) == [eng.ERROR] * 29
+    assert eng.mppt_balance(snapshot) == [eng.WARNING]
+    rows = eng.guardrail_rows(doc, "drawing")
+    assert report(rows) == {"status": "ERRORS DETECTED", "error-count": 29,
+                            "warning-count": 1, "pass-count": 13}
+    assert report(eng.guardrail_rows(doc, "plugin")) == {
+        "status": "HEALTHY", "info-count": 2, "pass-count": 13}
+
+
+def test_empty_string_buckets_do_not_explain_clean_host_plugin_verdicts():
+    # R31b: missing mStrings alone cannot yield INFO / INFO / PASS.
+    snapshot = eng.build_snapshot(intake(), "drawing")
+    snapshot["strings"] = []
+    snapshot["summaries"][0]["strings_by_mppt"] = {}
+    assert eng.dc_ac_ratio(snapshot) == [eng.WARNING]  # positive count enables the fallback
+    assert eng.strings_per_mppt(snapshot) == [eng.PASS]  # capacity is known
+    assert eng.mppt_balance(snapshot) == [eng.INFO]     # zero buckets is single-MPPT
+    snapshot["summaries"] = []
+    snapshot["inverter_count"] = 0
+    assert eng.dc_ac_ratio(snapshot) == [eng.INFO]
+    assert eng.strings_per_mppt(snapshot) == [eng.INFO]
+    assert eng.mppt_balance(snapshot) == [eng.PASS]

@@ -541,7 +541,7 @@ def build_suites() -> List[Suite]:
         Suite("server-solar-solaredge-import", "server tests/test_solar_solaredge_import.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_solaredge_import.py"), 11),
         Suite("server-solar-guardrails", "server tests/test_solar_guardrails.py",
-              "pytest", SERVER, _py_pytest("tests/test_solar_guardrails.py"), 15),
+              "pytest", SERVER, _py_pytest("tests/test_solar_guardrails.py"), 17),  # R31b: two intake/branch cases
         Suite("server-solar-pile-block-mapping", "server tests/test_solar_pile_block_mapping.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_pile_block_mapping.py"), 16),
         # W5 cabling studio (2026-09-24, contract G36): server/solar_lite_cabling.py, the plugin's lightweight
