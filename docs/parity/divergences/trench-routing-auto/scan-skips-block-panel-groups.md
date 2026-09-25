@@ -18,3 +18,7 @@ and then runs the plugin's own star routing unchanged. On this fixture every rou
 grid cap (a metre-sized grid step applied to a drawing in inches), so Studio routes nothing either and reports
 `no-change` where the plugin reports `no-panel-groups`. The declared diff is exactly the comparator's: that one
 report value. When the plugin scans block references, this capability can be recaptured for an ordinary receipt.
+
+## Retired
+
+Retired by Branch2025 #313 (the scan accepts panel-group block references): recaptured 2026-09-25 on an unsigned test build of master a94db8d9 (inverter chain i6, i5 reopened on the same build), LEAFTRENCHAUTO now finds all 11 block panel groups and, like Studio, routes none of them because of the router's grid cap, so both sides report no change and the receipt passes with no declared diffs. The grid step being applied in drawing units is a separate defect on both sides (Solar residuals R27). The signed release carrying #313 is pending the operator (R23).
