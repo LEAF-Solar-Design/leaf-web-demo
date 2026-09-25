@@ -2914,7 +2914,10 @@ def reporting_command(suite: Suite, argv: List[str], trace_env: dict) -> List[st
     directory = Path(trusted)
     output = Path(trace_env["LEAF_TEST_REPORT_DIR"])
     output.mkdir(parents=True, exist_ok=True)
-    if suite.kind == "pytest" and "pytest" in argv and "-I" not in argv:
+    # S8c (measured 2026-09-25, proofs E3 and 148574c1): the shadow plugin's per-test outcome path costs about 150 ms per
+    # test in CI (a 356-test suite 0.5 s -> 54 s), so pytest loads it only on tracing builds, where the parent carries
+    # LEAF_READSET_DIR. PR and merge-group suites run plain pytest; their attempt records stay reporting-incomplete.
+    if suite.kind == "pytest" and "pytest" in argv and "-I" not in argv and os.environ.get("LEAF_READSET_DIR"):
         # Report-only inputs deliberately cannot enable the core's module filter.
         decision = output / "report-only.json"
         catalog = output / "report-catalog.json"

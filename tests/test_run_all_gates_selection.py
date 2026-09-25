@@ -131,7 +131,7 @@ class SelectionAdapterTests(unittest.TestCase):
                         "LEAF_TEST_REPORT_DIR": str(self.logs.resolve() / "test-reports" / suite.id / "2"),
                     })
                     command = RUNNER.reporting_command(suite, suite.argv, env)
-                    self.assertIn("pytest_selection", command)
+                    self.assertNotIn("pytest_selection", command)  # S8c: plain pytest off tracing builds
                     self.assertEqual(command[command.index("--leaf-repo") + 1], str(RUNNER.REPO))
 
     def test_suite_trace_env_passes_through_parent_readset_dir_and_root(self):
