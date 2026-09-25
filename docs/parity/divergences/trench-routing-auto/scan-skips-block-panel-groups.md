@@ -22,3 +22,7 @@ report value. When the plugin scans block references, this capability can be rec
 ## Retired
 
 Retired by Branch2025 #313 (the scan accepts panel-group block references): recaptured 2026-09-25 on an unsigned test build of master a94db8d9 (inverter chain i6, i5 reopened on the same build), LEAFTRENCHAUTO now finds all 11 block panel groups and, like Studio, routes none of them because of the router's grid cap, so both sides report no change and the receipt passes with no declared diffs. The grid step being applied in drawing units is a separate defect on both sides (Solar residuals R27). The signed release carrying #313 is pending the operator (R23).
+
+## Retired
+
+Retired 2026-09-25 by Branch2025 #313 and #326 (block panel groups are scanned and the grid step is converted to drawing units): on test build 10 LEAFTRENCHAUTO routes all 11 panel groups. The remaining differences are three equal-cost ties, declared in equal-cost-ties-on-lattice-bits.md.

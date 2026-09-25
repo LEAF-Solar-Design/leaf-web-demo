@@ -11,23 +11,29 @@ step's answers, and returns (after state, printed lines); the step's evidence is
                        (the cell grid, row height, column widths), :149-201 (one point, tables stacked down)
   AddLBD               LeafLBDCommand.cs:51-131, LBDPlacement.cs:96-123 (the offset), :53, :65, :68
   LEAFPLACELBD         Commands.cs:5314-5383 (the closest point on the picked feeder)
-  LEAFTRENCHAUTO       Commands.cs:6199-6486 (scan, hub, idempotency, star routing), :6741-6780 (centroid),
-                       TrenchRouting.cs:153-188 (options), :240-459 (the grid Dijkstra), :480-494 (inside)
+  LEAFTRENCHAUTO       Commands.cs:6199-6528 (scan, hub, idempotency, star routing), :6793-6809 (the INSERT
+                       outline), :6815-6852 (centroid); TrenchRouting.cs:153-196 (options), :310-529 (the
+                       grid Dijkstra), :550-564 (inside), :601-662 (its binary heap); read 2026-09-25 at
+                       C:/tmp/solar-parity/wt-b25-main (Branch2025 master bdfd7f19, test build 4)
   LEAFCABLETOTRAYAUTO  Commands.cs:6505-6718 (every cable, nearest trench to its middle vertex, snap)
   LEAFCABLETOTRAY      Commands.cs:5960-6182 (one picked cable, the nearest trench within 5 m)
   HomerunAdjust        OptiAdjustCmd.cs:150-155 (no trunk layer: nothing to adjust)
   LEAFDEVICESPATTERN   PatternDevicePlacementCmd.cs:94-99 (no tracker rows: nothing placed)
 
 Declared divergences (G35, each emits exactly the diffs it explains):
-  trench-routing-auto  The plugin scans only Polyline entities on the panel-group layer
-                       (Commands.cs:6248-6269), so a drawing whose panel groups are block INSERTs (every
-                       rooftop drawing, G35a) routes nothing and prints "no panel groups". Studio also takes
-                       each panel-group INSERT, from its block definition's outlines (the chain intake, as
-                       AddAllInverters' fallback reads them), as one group: its centroid is the area-weighted
-                       centroid of its outlines and every outline is an obstacle. The rest is the plugin's
-                       own star routing, grid limits included: on the rooftop fixture every route exceeds the
-                       200-cell grid cap (TrenchRouting.cs:296-300, 1.0-unit cells over an extent of
-                       thousands of inches) and fails, so the step routes none and reports no-change.
+  trench-routing-auto  Each panel-group INSERT is one group, as the fixed plugin reads it (F6): its one
+                       Closed definition boundary, else the definition extents rectangle, taken from the
+                       chain intake's outlines (panel_group_outline; the Closed flag is read from the
+                       vertices, inferred). Routed in the intake's order with the plugin's own star
+                       routing, heap and grid limits (200 cells per axis); the metric grid options are
+                       converted to drawing units as the plugin fix F16 does (R27). On the rooftop fixture
+                       every start and the hub cell match the plugin's. The alignment test uses the band
+                       of Branch2025 PR #332 (within_alignment_band). Against the test build 10 capture
+                       (master 2e8700d7, with #332) eight of the eleven routes match; A608, A631 and A612
+                       part a few cells from their start at a choice between equal-length paths whose
+                       edges lie inside the group's own obstacle, where the 1e6 penalty scales the last
+                       bits of the lattice coordinates; declared in
+                       docs/parity/divergences/trench-routing-auto/equal-cost-ties-on-lattice-bits.md.
   cable-export         Until Branch2025 #309 the plugin's EPPlus save threw and wrote nothing. Studio writes
                        the Export All workbook the export form writes (StringHomerunExportForm.cs:349-413,
                        read 2026-09-25 at C:/tmp/solar-parity/wt-b25-main, master a94db8d9: Homeruns,
@@ -50,7 +56,6 @@ from __future__ import annotations
 
 import copy
 from decimal import ROUND_HALF_EVEN, ROUND_HALF_UP, Decimal, InvalidOperation
-import heapq
 import importlib.util
 import io
 import math
@@ -75,6 +80,8 @@ def _load_sibling(name):
 
 st = _load_sibling("solar_inverter_state")
 devices = _load_sibling("solar_inverter_devices")
+_load_sibling("solar_design_graph")             # solar_interchange's import, resolved from sys.modules at any cwd
+interchange = _load_sibling("solar_interchange")
 
 
 class InverterOutputError(ValueError):
@@ -94,6 +101,8 @@ DEFAULT_TRENCH_LAYER = "LEAF-PVCASE-TRENCH"
 # Commands.cs:6344: a group already served by a trench within this distance is skipped.
 IDEMPOTENCY_THRESHOLD = 1.0
 # Commands.cs:6368-6372 and TrenchRouting.cs:158-187 (the options the command sets and the defaults).
+# grid_step and grid_padding are METRES (GridStepM, GridPaddingM); routing_options_for_units converts them
+# to drawing units before route_path, whose arithmetic is all in drawing units (F16, R27).
 ROUTING_OPTIONS = {"grid_step": 1.0, "grid_padding": 5.0, "obstacle_penalty": 1_000_000.0,
                    "alignment_bonus": 0.5, "min_edge_weight": 1e-3, "max_cells_per_axis": 200}
 # TrenchXData.DefaultWidthM, the trench width the alignment bonus reads (Commands.cs:6292-6293).
@@ -264,8 +273,8 @@ def polyline_length(pts, bulges=None, closed=False):
 
 
 def centroid(verts):
-    """ComputeCentroid (Commands.cs:6741-6780): signed-area centroid, the bounding-box centre when the
-    polygon is degenerate."""
+    """Commands.cs ComputeCentroid (:6815-6852) to the bit: signed-area centroid, the sums times
+    1 / (3 * area2), the bounding-box centre when |area2| < 1e-9 (degenerate)."""
     if not verts:
         return 0.0, 0.0
     if len(verts) == 1:
@@ -282,26 +291,42 @@ def centroid(verts):
         cy += (yi + yj) * cross
         j = i
     if abs(area2) < 1e-9:
-        xs, ys = [v[0] for v in verts], [v[1] for v in verts]
-        return (min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0
-    return cx / (3.0 * area2), cy / (3.0 * area2)
+        x0, y0, x1, y1 = _bbox(verts)
+        return 0.5 * (x0 + x1), 0.5 * (y0 + y1)
+    inv = 1.0 / (3.0 * area2)
+    return cx * inv, cy * inv
 
 
-def _group_centroid(outlines):
-    """Studio (declared): one panel-group INSERT's centroid, its outlines' centroids weighted by area."""
-    weight = sx = sy = 0.0
-    for outline in outlines:
-        if len(outline) < 3:
-            continue
-        area = abs(sum(outline[i - 1][0] * outline[i][1] - outline[i][0] * outline[i - 1][1]
-                       for i in range(len(outline)))) / 2.0
-        x, y = centroid(outline)
-        weight += area
-        sx += area * x
-        sy += area * y
-    if weight > 1e-12:
-        return sx / weight, sy / weight
-    return centroid([p for outline in outlines for p in outline])
+# An outline whose last vertex lies within this of its first repeats it: the plugin's open joined loop.
+OPEN_LOOP_TOLERANCE = 1e-6
+
+
+def _is_closed_boundary(outline):
+    """Whether an intake outline stands for a Closed definition polyline (Commands.cs:6313 counts only
+    `Closed && NumberOfVertices >= 3`). The intake carries no Closed flag; Studio reads it from the
+    vertices (inferred, measured on the committed rooftop intake): a loop drawn open ends on a copy of
+    its first vertex (gap < 1e-8 on every such outline there), a Closed one does not (gap > 28)."""
+    if len(outline) < 3:
+        return False
+    (x0, y0), (x1, y1) = outline[0], outline[-1]
+    return math.hypot(x1 - x0, y1 - y0) > OPEN_LOOP_TOLERANCE
+
+
+def panel_group_outline(outlines):
+    """The one routing outline LEAFTRENCHAUTO takes per panel-group INSERT (Commands.cs:6309-6350,
+    ExtractTrenchBlockOutline :6793-6809): the definition's Closed boundary when it holds exactly one
+    (_is_closed_boundary), else the definition extents as a rectangle (min, (max.x, min.y), max,
+    (min.x, max.y)). Studio reads the extents over every outline the intake carries (inferred: the
+    definition's other children lie inside them); the outlines are world coordinates, so the corners
+    are too. On the rooftop intake this puts every group's start on the plugin's start cell."""
+    rings = [o for o in outlines if len(o) >= 3]
+    closed = [o for o in rings if _is_closed_boundary(o)]
+    if len(closed) == 1:
+        return [tuple(p) for p in closed[0]]
+    if not rings:
+        return []
+    x0, y0, x1, y1 = _bbox([p for ring in rings for p in ring])
+    return [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
 
 
 def point_in_polygon(px, py, outline):
@@ -329,11 +354,86 @@ def distance_point_to_segment(px, py, ax, ay, bx, by):
     return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
 
 
+def routing_options_for_units(units, options=None):
+    """The routing options with the metric grid step and padding in drawing units (F16, R27):
+    grid_step / metres_per_unit and grid_padding / metres_per_unit, metres_per_unit read from
+    solar_interchange.UNIT_SCALES (drawing_units -> meters_per_unit). Unitless or unknown units keep the
+    metric values (1 unit = 1 m), so metric drawings are unchanged. Every other option is untouched."""
+    o = dict(ROUTING_OPTIONS, **(options or {}))
+    scale = interchange.UNIT_SCALES.get(units) if isinstance(units, str) else None
+    if scale:
+        o["grid_step"] = o["grid_step"] / scale
+        o["grid_padding"] = o["grid_padding"] / scale
+    return o
+
+
+class _CsBinaryHeap:
+    """TrenchRouting.BinaryHeap (:601-662), entry for entry: push appends and sifts up while strictly
+    smaller than the parent; pop moves the last entry to the root and sifts down to the strictly smaller
+    child, left first. Equal keys therefore pop in the plugin's heap-position order, not by node id, which
+    decides every tie between equal-cost lattice paths."""
+    __slots__ = ("keys", "nodes")
+
+    def __init__(self):
+        self.keys, self.nodes = [], []
+
+    def push(self, node, key):
+        keys, nodes = self.keys, self.nodes
+        i = len(keys)
+        keys.append(key)
+        nodes.append(node)
+        while i > 0:
+            parent = (i - 1) // 2
+            if key < keys[parent]:
+                keys[i], nodes[i] = keys[parent], nodes[parent]
+                i = parent
+            else:
+                break
+        keys[i], nodes[i] = key, node
+
+    def pop(self):
+        keys, nodes = self.keys, self.nodes
+        node, key = nodes[0], keys[0]
+        last_key, last_node = keys.pop(), nodes.pop()
+        count = len(keys)
+        if count:
+            i = 0
+            while True:
+                left = 2 * i + 1
+                right = left + 1
+                smallest, small_key = i, last_key
+                if left < count and keys[left] < small_key:
+                    smallest, small_key = left, keys[left]
+                if right < count and keys[right] < small_key:
+                    smallest = right
+                if smallest == i:
+                    break
+                keys[i], nodes[i] = keys[smallest], nodes[smallest]
+                i = smallest
+            keys[i], nodes[i] = last_key, last_node
+        return node, key
+
+
+def _bbox(points):
+    xs, ys = [p[0] for p in points], [p[1] for p in points]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def within_alignment_band(d, half):
+    """TrenchRouting.WithinAlignmentBand (Branch2025 PR #332, replacing the bare `d <= half` at
+    TrenchRouting.cs:469): a midpoint exactly half a cell from a trench is inside the band whatever the
+    last bits of the lattice origin, so the alignment bonus no longer turns on float noise."""
+    return d <= half * (1 + 1e-9)
+
+
 def route_path(start, end, obstacles, trenches, options=None):
-    """TrenchRouting.RoutePath (:240-459): (ok, segments [(a, b)], message). An 8-connected lattice over
+    """TrenchRouting.RoutePath (:310-529): (ok, segments [(a, b)], message). An 8-connected lattice over
     the padded bounding box of the ends, obstacles and trenches, refused past the per-axis cap; edge
     weight is its length, times the obstacle penalty when its midpoint is inside an obstacle, less the
-    alignment bonus near a trench, floored; Dijkstra keyed by (distance, node)."""
+    alignment bonus within the band of a trench (within_alignment_band), floored; Dijkstra on the plugin's own binary heap (_CsBinaryHeap), so
+    equal-cost ties resolve as the plugin's do. The obstacle and trench tests are the plugin's exact
+    float tests behind bounding-box prefilters that only skip what the exact test would reject, so the
+    lattice work is bounded by the settled cells, not cells x trench segments."""
     o = dict(ROUTING_OPTIONS, **(options or {}))
     (sx, sy), (ex, ey) = start, end
     if math.hypot(ex - sx, ey - sy) < 1e-9:
@@ -362,18 +462,60 @@ def route_path(start, end, obstacles, trenches, options=None):
 
     start_id = cell(sy, min_y, rows) * cols + cell(sx, min_x, cols)
     end_id = cell(ey, min_y, rows) * cols + cell(ex, min_x, cols)
-    outlines = [outline for outline in obstacles if len(outline) >= 3]
-    live = [seg for seg in trenches if math.hypot(seg[1][0] - seg[0][0], seg[1][1] - seg[0][1]) > 1e-9]
+    # Outside an outline's bounding box (with a margin for the crossing arithmetic) the ray cast finds an
+    # even crossing count, so the prefilter never changes an answer.
+    outlines = []
+    for outline in obstacles:
+        if len(outline) >= 3:
+            x0, y0, x1, y1 = _bbox(outline)
+            margin = 1e-9 * (1.0 + abs(x0) + abs(x1) + abs(y0) + abs(y1))
+            outlines.append((x0 - margin, y0 - margin, x1 + margin, y1 + margin, outline))
+    # Trench segments bucketed on the lattice by their bounding box grown by their bonus half-width (and
+    # a margin), so a midpoint is tested exactly against every segment that could be within reach.
+    buckets = {}
+    for seg in trenches:
+        (ax, ay), (bx, by) = seg[0], seg[1]
+        dx, dy = bx - ax, by - ay
+        if not math.sqrt(dx * dx + dy * dy) > 1e-9:
+            continue
+        half = 0.5 * max(seg[2], step)
+        reach = half + 1e-9 * (1.0 + abs(ax) + abs(ay) + abs(bx) + abs(by) + half)
+        c0 = int(math.floor((min(ax, bx) - reach - min_x) / step))
+        c1 = int(math.floor((max(ax, bx) + reach - min_x) / step))
+        r0 = int(math.floor((min(ay, by) - reach - min_y) / step))
+        r1 = int(math.floor((max(ay, by) + reach - min_y) / step))
+        if (c1 - c0 + 1) * (r1 - r0 + 1) > 4 * cols * rows:
+            raise InverterOutputError("a trench segment spans more of the lattice than it holds")
+        entry = (ax, ay, bx, by, half)
+        for r in range(r0, r1 + 1):
+            for c in range(c0, c1 + 1):
+                buckets.setdefault((c, r), []).append(entry)
+    penalty, bonus_factor, floor = o["obstacle_penalty"], o["alignment_bonus"], o["min_edge_weight"]
+
+    def blocked(px, py):
+        for x0, y0, x1, y1, outline in outlines:
+            if x0 <= px <= x1 and y0 <= py <= y1 and point_in_polygon(px, py, outline):
+                return True
+        return False
+
+    def aligned(px, py):
+        for ax, ay, bx, by, half in buckets.get((int(math.floor((px - min_x) / step)),
+                                                 int(math.floor((py - min_y) / step))), ()):
+            if within_alignment_band(distance_point_to_segment(px, py, ax, ay, bx, by), half):
+                return True
+        return False
+
     d_col = (0, 1, 1, 1, 0, -1, -1, -1)
     d_row = (1, 1, 0, -1, -1, -1, 0, 1)
     n = cols * rows
     dist = [math.inf] * n
     prev = [-1] * n
     dist[start_id] = 0.0
-    heap = [(0.0, start_id)]
+    heap = _CsBinaryHeap()
+    heap.push(start_id, 0.0)
     reached = False
-    while heap:
-        du, u = heapq.heappop(heap)
+    while heap.keys:
+        u, du = heap.pop()
         if du > dist[u]:
             continue
         if u == end_id:
@@ -388,22 +530,22 @@ def route_path(start, end, obstacles, trenches, options=None):
             v = vr * cols + vc
             vx, vy = min_x + vc * step, min_y + vr * step
             mid_x, mid_y = 0.5 * (ux + vx), 0.5 * (uy + vy)
-            base = math.sqrt((vx - ux) ** 2 + (vy - uy) ** 2)
+            dx, dy = vx - ux, vy - uy
+            base = math.sqrt(dx * dx + dy * dy)
             weight = base
-            if any(point_in_polygon(mid_x, mid_y, outline) for outline in outlines):
-                weight += base * o["obstacle_penalty"]
-            best_bonus = 0.0
-            for (ax, ay), (bx, by), width in live:
-                if distance_point_to_segment(mid_x, mid_y, ax, ay, bx, by) <= 0.5 * max(width, step):
-                    best_bonus = max(best_bonus, base * o["alignment_bonus"])
-            weight -= best_bonus
-            if weight < o["min_edge_weight"]:
-                weight = o["min_edge_weight"]
+            if blocked(mid_x, mid_y):
+                weight += base * penalty
+            if aligned(mid_x, mid_y):
+                bonus = base * bonus_factor
+                if bonus > 0.0:
+                    weight -= bonus
+            if weight < floor:
+                weight = floor
             alt = du + weight
             if alt < dist[v]:
                 dist[v] = alt
                 prev[v] = u
-                heapq.heappush(heap, (alt, v))
+                heap.push(v, alt)
     if not reached or math.isinf(dist[end_id]):
         return False, [], "destination unreachable - obstacles fully enclose start or end"
     path = [end_id]
@@ -497,9 +639,12 @@ def _snap(pts, trench):
 
 # ------------------------------------------------------------------ trenches --
 
-def trench_routing_auto(state, panel_groups, host=None):
+def trench_routing_auto(state, panel_groups, host=None, units=st.UNITS):
     """LEAFTRENCHAUTO (Commands.cs:6199-6486) with panel-group INSERTs taken too (declared, see the
-    module docstring). `panel_groups` is [{handle, outlines}] for the state's panel groups."""
+    module docstring). `panel_groups` is [{handle, outlines}] for the state's panel groups; `units` is the
+    drawing's units (the chain intake's `units` field, "in" on the rooftop fixture, which is the G35
+    state's unit), by which the metric grid options become drawing units."""
+    options = routing_options_for_units(units)
     after = copy.deepcopy(state)
     layer = _setting(after, "PanelGroupLayer")
     if not isinstance(layer, str) or not layer:
@@ -507,11 +652,11 @@ def trench_routing_auto(state, panel_groups, host=None):
     groups = devices.validate_panel_groups(panel_groups, after) if after["geometry"]["panel_groups"] else []
     centroids, obstacles = [], []
     for group in groups:
-        outlines = [o for o in group["outlines"] if len(o) >= 3]
-        if not outlines:
+        outline = panel_group_outline(group["outlines"])
+        if not outline:
             continue
-        obstacles.extend(outlines)
-        centroids.append(_group_centroid(outlines))
+        obstacles.append(outline)
+        centroids.append(centroid(outline))
     # Inverter blocks are obstacles by their extents (Commands.cs:6298-6317). The state carries no block
     # extents; Studio uses the declared InverterBlockSize times the device scale, centred (inferred).
     size = _setting(after, "InverterBlockSize")
@@ -523,7 +668,12 @@ def trench_routing_auto(state, panel_groups, host=None):
             obstacles.append([(x - half, y - half), (x + half, y - half), (x + half, y + half), (x - half, y + half)])
     if not centroids:
         return after, [f"LEAFTRENCHAUTO: no panel groups on layer '{layer}'. Nothing to route."]
-    hub = (sum(c[0] for c in centroids) / len(centroids), sum(c[1] for c in centroids) / len(centroids))
+    # Commands.cs:6386-6393: a plain running sum, then one divide (builtin sum() compensates since 3.12).
+    hub_x = hub_y = 0.0
+    for cx, cy in centroids:
+        hub_x += cx
+        hub_y += cy
+    hub = (hub_x / len(centroids), hub_y / len(centroids))
     existing = _trenches(after)
     segments = [(a, b, TRENCH_WIDTH) for poly in existing for a, b in zip(poly, poly[1:])]
     routed = skipped = failed = 0
@@ -535,7 +685,7 @@ def trench_routing_auto(state, panel_groups, host=None):
         if math.hypot(cx - hub[0], cy - hub[1]) < 1e-6:
             skipped += 1
             continue
-        ok, path, _ = route_path((cx, cy), hub, obstacles, segments)
+        ok, path, _ = route_path((cx, cy), hub, obstacles, segments, options)
         if not ok or not path:
             failed += 1
             continue
