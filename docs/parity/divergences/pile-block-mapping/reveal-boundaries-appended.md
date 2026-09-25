@@ -27,3 +27,7 @@ the entity mapping.
 
 The divergence goes away when the store reads templates with `ObjectCreationHandling.Replace` (or clears the list
 before populating it), so a load and save round trip leaves the boundaries unchanged.
+
+## Retired
+
+Retired by Branch2025 #308 (saved lists replace defaults on load): recaptured 2026-09-25 on an unsigned test build of master a94db8d9 with the host pile_templates store restored to the original pre-s6 snapshot, LEAFPILEBLOCKMAP's Save mapping leaves the store byte-identical (the reveal boundaries no longer grow) and the receipt passes with no declared diffs. The signed release carrying the fix is pending the operator (Solar residuals R23).
