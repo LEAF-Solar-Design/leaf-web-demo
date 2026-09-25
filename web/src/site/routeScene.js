@@ -21,6 +21,7 @@ export function activeCastForScene(scene) {
 }
 
 export function sceneForPath(path) {
+  if (path === '/app/leaf-platform' || path === '/app/leaf-platform/') return 'leaf-platform'
   if (
     path === '/ty'
     || path.startsWith('/ty/')

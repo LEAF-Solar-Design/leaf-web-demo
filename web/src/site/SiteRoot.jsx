@@ -48,6 +48,7 @@ import './cockpit.css'
 const App = React.lazy(() => import('../App.jsx'))
 // Built by a sibling agent (src/site/sheets/** is theirs) — referenced only.
 const SheetsPage = React.lazy(() => import('./sheets/SheetsPage.jsx'))
+const LeafPlatformScene = React.lazy(() => import('../leafPlatform/LeafPlatformScene.jsx'))
 
 const isEditable = (el) =>
   !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)
@@ -198,7 +199,7 @@ export default function SiteRoot() {
   // stays App's engine mount.
   return (
     <DrawingIdentityProvider
-      mode={scene === 'app' ? DRAWING_MODE_CONSOLE : DRAWING_MODE_OPERATOR}
+      mode={scene === 'app' || scene === 'leaf-platform' ? DRAWING_MODE_CONSOLE : DRAWING_MODE_OPERATOR}
       search={BOOT_SEARCH}
       publicDemo={DEMO.publicDemo}
       liveDemo={DEMO.liveDemo}
@@ -226,6 +227,10 @@ export default function SiteRoot() {
             </WorkspaceControllerProvider>
           </StudioGroundContext.Provider>
         </div>
+      ) : scene === 'leaf-platform' ? (
+        <Suspense fallback={null}>
+          <LeafPlatformScene />
+        </Suspense>
       ) : scene === 'sheets' ? (
         <Suspense fallback={null}>
           <SheetsPage />
