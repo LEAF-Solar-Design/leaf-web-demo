@@ -36,8 +36,8 @@ function envelope(handshake, overrides = {}) {
   const now = Date.now()
   return sign({
     protocolVersion: PROTOCOL_VERSION, sessionId: handshake.sessionId,
-    messageId: webcrypto.randomUUID(), issuedAt: new Date(now - 1000).toISOString(),
-    expiresAt: new Date(now + 60_000).toISOString(), origin: location.origin,
+    messageId: webcrypto.randomUUID(), issuedAt: new Date(now - 1000).toISOString().replace('Z', '0000+00:00'),
+    expiresAt: new Date(now + 60_000).toISOString().replace('Z', '0000+00:00'), origin: location.origin,
     verb: 'drawing.bind_result', drawingFingerprint: handshake.documentFingerprint,
     drawingRevision: handshake.drawingRevision ?? handshake.drawingVersionId,
     payload: { accepted: true }, ...overrides,
@@ -62,6 +62,29 @@ function selection(payload) {
   })
 }
 
+function callback(commandId, status = 'applied', reason = null) {
+  return envelope(ready(), {
+    verb: 'host.callback',
+    payload: { kind: 'callback', contractVersion: LEAF_PLATFORM_CONTRACT_VERSION,
+      commandId, ...identity, nonce: webcrypto.randomUUID(), handledAt: new Date().toISOString(),
+      status, reason, provenance: { source: 'autocad' } },
+  })
+}
+
+async function startCommand(bridge, channel, target = 'panel:A1', action = 'focus') {
+  let posted
+  const sent = new Promise((resolve) => { posted = resolve })
+  channel.postMessage.mockImplementationOnce(posted)
+  const outcome = bridge.focusObject(target, action)
+  return { sent: await sent, outcome }
+}
+
+async function completeCommand(bridge, channel, target, action) {
+  const { sent, outcome } = await startCommand(bridge, channel, target, action)
+  await bridge.receive(callback(sent.payload.commandId))
+  await outcome
+}
+
 const invalidHandles = [
   ['missing', undefined], ['null', null], ['string', '2F4A'], ['empty', []],
   ['non-string', [123]], ['empty handle', ['']], ['non-hex', ['2G4A']],
@@ -83,6 +106,7 @@ describe('Studio AutoCAD host bridge', () => {
   })
   afterEach(() => {
     bridge.stop()
+    vi.useRealTimers()
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
   })
@@ -221,9 +245,9 @@ describe('Studio AutoCAD host bridge', () => {
     const invalid = [
       { ...valid, payload: { accepted: false } },
       { ...valid, signature: '0'.repeat(64) },
-      envelope(unbound(), { issuedAt: new Date(now - 60_000).toISOString(), expiresAt: new Date(now - 1).toISOString() }),
-      envelope(unbound(), { expiresAt: new Date(now + 121_000).toISOString() }),
-      envelope(unbound(), { issuedAt: new Date(now + 16_000).toISOString() }),
+      envelope(unbound(), { issuedAt: new Date(now - 60_000).toISOString().replace('Z', '0000+00:00'), expiresAt: new Date(now - 1).toISOString().replace('Z', '0000+00:00') }),
+      envelope(unbound(), { expiresAt: new Date(now + 121_000).toISOString().replace('Z', '0000+00:00') }),
+      envelope(unbound(), { issuedAt: new Date(now + 16_000).toISOString().replace('Z', '0000+00:00') }),
       envelope(unbound(), { origin: 'https://foreign.example' }),
     ]
     observe.mockClear()
@@ -245,7 +269,7 @@ describe('Studio AutoCAD host bridge', () => {
     expect(state.selectedHandles).toBeNull()
     await expect(bridge.focusObject('invalid object!')).rejects.toThrow('Invalid drawing object identity')
     for (const action of ['select', 'focus']) {
-      await bridge.focusObject('panel:A1', action)
+      await completeCommand(bridge, channel, 'panel:A1', action)
       const { signature, ...body } = channel.postMessage.mock.calls.at(-1)[0]
       expect(signature).toBe(sign(body).signature)
       expect(body.verb).toBe('drawing.focus_objects')
@@ -269,7 +293,7 @@ describe('Studio AutoCAD host bridge', () => {
     expect(state.selectedObjectId).toBeNull()
     expect(state.selectedHandles).toEqual(normalized)
     for (const action of ['select', 'focus']) {
-      await bridge.focusObject({ objectHandles: handles }, action)
+      await completeCommand(bridge, channel, { objectHandles: handles }, action)
       const { signature, ...body } = channel.postMessage.mock.calls.at(-1)[0]
       expect(signature).toBe(sign(body).signature)
       expect(body.verb).toBe('drawing.focus_objects')
@@ -344,15 +368,211 @@ describe('Studio AutoCAD host bridge', () => {
     expect(state.selectedHandles).toBeNull()
   })
 
-  it('bounds the replay cache to the newest 1024 messages', async () => {
+  it('retains unexpired replay IDs after more than 1024 other messages', async () => {
     bridge.start()
     await bridge.receive(ready())
+    const original = selection({ objectId: 'panel:original' })
+    await bridge.receive(original)
     for (let index = 0; index < 1025; index += 1) {
-      await bridge.receive(envelope(ready(), { messageId: `message-${index}`, verb: 'host.callback' }))
+      await bridge.receive(selection({ objectId: `panel:${index}` }))
     }
-    expect(bridge.seenHostMessages.size).toBe(1024)
-    expect(bridge.seenHostMessages.has('message-0')).toBe(false)
-    expect(bridge.seenHostMessages.has('message-1024')).toBe(true)
+    observe.mockClear()
+    await bridge.receive(original)
+    expect(observe).not.toHaveBeenCalled()
+    expect(state.selectedObjectId).toBe('panel:1024')
+    expect(bridge.seenHostMessages.size).toBe(1026)
+    expect(bridge.seenHostMessages.get(original.messageId)).toBe(Date.parse(original.expiresAt))
+  })
+
+  it('rejects new messages at capacity and frees only expired replay IDs', async () => {
+    vi.useFakeTimers()
+    bridge = createLeafHostBridge({ channel, location, replayCapacity: 8 })
+    bridge.subscribe(observe)
+    bridge.start()
+    await bridge.receive(ready())
+    const original = selection({ objectId: 'panel:original' })
+    await bridge.receive(original)
+    vi.advanceTimersByTime(30_000)
+    const retained = []
+    for (let index = 0; index < 7; index += 1) {
+      const message = selection({ objectId: `panel:${index}` })
+      retained.push(message)
+      await bridge.receive(message)
+    }
+    const overflow = selection({ objectId: 'panel:overflow' })
+    observe.mockClear()
+    await bridge.receive(overflow)
+    await bridge.receive(original)
+    expect(observe).not.toHaveBeenCalled()
+    expect(state.selectedObjectId).toBe('panel:6')
+    expect(bridge.seenHostMessages.get(original.messageId)).toBe(Date.parse(original.expiresAt))
+    expect(bridge.seenHostMessages.has(overflow.messageId)).toBe(false)
+    expect(bridge.seenHostMessages.size).toBe(8)
+    vi.advanceTimersByTime(30_001)
+    await bridge.receive(selection({ objectId: 'panel:new' }))
+    expect(state.selectedObjectId).toBe('panel:new')
+    expect(bridge.seenHostMessages.has(original.messageId)).toBe(false)
+    expect(bridge.seenHostMessages.size).toBe(8)
+    for (const message of retained) {
+      expect(bridge.seenHostMessages.get(message.messageId)).toBe(Date.parse(message.expiresAt))
+    }
+    observe.mockClear()
+    await bridge.receive(retained[0])
+    expect(observe).not.toHaveBeenCalled()
+    expect(state.selectedObjectId).toBe('panel:new')
+  })
+
+  it.each([
+    ['.1230000+00:00', '.123+00:00'],
+    ['.0000000+00:00', '+00:00'],
+    ['.1234567+00:00', '.1234567Z'],
+  ])('verifies host timestamps signed as %s and delivered as %s', async (signed, delivered) => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-09-25T12:34:56.500Z'))
+    bridge.start()
+    await bridge.receive(ready())
+    const message = envelope(ready(), {
+      issuedAt: `2026-09-25T12:34:56${signed}`, expiresAt: `2026-09-25T12:35:56${signed}`,
+      verb: 'drawing.selection_changed', payload: { kind: 'selection_event', payload: { objectId: 'panel:A1' } },
+    })
+    await bridge.receive({ ...message, issuedAt: `2026-09-25T12:34:56${delivered}`, expiresAt: `2026-09-25T12:35:56${delivered}` })
+    expect(state.selectedObjectId).toBe('panel:A1')
+  })
+
+  it.each(['issuedAt', 'expiresAt'])('rejects malformed %s even when Date.parse accepts it', async (field) => {
+    bridge.start()
+    await bridge.receive(ready())
+    const malformed = new Date(Date.now() + (field === 'expiresAt' ? 60_000 : -1000)).toISOString().replace('T', ' ')
+    expect(Number.isFinite(Date.parse(malformed))).toBe(true)
+    const message = envelope(ready(), {
+      [field]: malformed, verb: 'drawing.selection_changed',
+      payload: { kind: 'selection_event', payload: { objectId: 'panel:A1' } },
+    })
+    observe.mockClear()
+    await bridge.receive(message)
+    expect(observe).not.toHaveBeenCalled()
+    expect(state.selectedObjectId).toBeNull()
+  })
+
+  it('rechecks expiry after asynchronous signature verification', async () => {
+    vi.useFakeTimers()
+    bridge.start()
+    await bridge.receive(ready())
+    let finishVerification
+    let verificationStarted
+    const started = new Promise((resolve) => { verificationStarted = resolve })
+    vi.spyOn(webcrypto.subtle, 'verify').mockImplementation(() => {
+      verificationStarted()
+      return new Promise((resolve) => { finishVerification = resolve })
+    })
+    const message = selection({ objectId: 'panel:expired' })
+    const receiving = bridge.receive(message)
+    await started
+    vi.advanceTimersByTime(60_001)
+    finishVerification(true)
+    await receiving
+    expect(state.selectedObjectId).toBeNull()
+    expect(bridge.seenHostMessages.has(message.messageId)).toBe(false)
+  })
+
+  it('accepts version 7 and other D-format GUIDs for ready and binding identities', async () => {
+    const anyVersion = Object.fromEntries(Object.entries(identity).map(([key, value]) => [key, value.replace(/-4/g, '-7')]))
+    bridge.start()
+    await bridge.receive({ ...ready(), ...anyVersion })
+    expect(state.status).toBe('connected')
+    await bridge.receive(unbound())
+    await bridge.bindDrawing(anyVersion)
+    expect(channel.postMessage.mock.calls.at(-1)[0].payload).toMatchObject(anyVersion)
+  })
+
+  it.each([['applied', null], ['stale', 'stale_document'], ['rejected', 'selection_apply_failed']])(
+    'resolves a matching signed callback as %s', async (status, reason) => {
+      bridge.start()
+      await bridge.receive(ready())
+      const { sent, outcome } = await startCommand(bridge, channel)
+      await bridge.receive(callback(sent.payload.commandId, status, reason))
+      await expect(outcome).resolves.toEqual({ action: 'focus', status, reason })
+      expect(state.lastCommand).toEqual({ action: 'focus', status, reason })
+    },
+  )
+
+  it('ignores another command ID and resolves unknown after 15 seconds', async () => {
+    vi.useFakeTimers()
+    bridge.start()
+    await bridge.receive(ready())
+    const { outcome } = await startCommand(bridge, channel, 'panel:A1', 'select')
+    const resolved = vi.fn()
+    void outcome.then(resolved)
+    await bridge.receive(callback(webcrypto.randomUUID()))
+    await vi.advanceTimersByTimeAsync(14_999)
+    expect(resolved).not.toHaveBeenCalled()
+    expect(state.lastCommand).toBeNull()
+    await vi.advanceTimersByTimeAsync(1)
+    await expect(outcome).resolves.toEqual({ action: 'select', status: 'unknown', reason: 'timeout' })
+    expect(state.lastCommand).toEqual({ action: 'select', status: 'unknown', reason: 'timeout' })
+  })
+
+  it('supersedes pending commands and clears timers on callbacks, new sessions and stop', async () => {
+    vi.useFakeTimers()
+    bridge.start()
+    await bridge.receive(ready())
+    const first = await startCommand(bridge, channel)
+    const second = await startCommand(bridge, channel, 'panel:B1', 'select')
+    await expect(first.outcome).resolves.toEqual({ action: 'focus', status: 'superseded', reason: null })
+    expect(vi.getTimerCount()).toBe(1)
+    await bridge.receive(callback(first.sent.payload.commandId))
+    await bridge.receive(callback(second.sent.payload.commandId))
+    await expect(second.outcome).resolves.toMatchObject({ status: 'applied', action: 'select' })
+    expect(vi.getTimerCount()).toBe(0)
+    const third = await startCommand(bridge, channel)
+    await bridge.receive(ready())
+    await expect(third.outcome).resolves.toMatchObject({ status: 'superseded' })
+    expect(state.lastCommand).toBeNull()
+    expect(vi.getTimerCount()).toBe(0)
+    const fourth = await startCommand(bridge, channel)
+    bridge.stop()
+    await expect(fourth.outcome).resolves.toMatchObject({ status: 'superseded' })
+    expect(state.lastCommand).toBeNull()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('times out even while signing and never sends the command afterward', async () => {
+    vi.useFakeTimers()
+    bridge.start()
+    await bridge.receive(ready())
+    let finishSigning, signingStarted
+    const started = new Promise((resolve) => { signingStarted = resolve })
+    vi.spyOn(webcrypto.subtle, 'sign').mockImplementation(() => {
+      signingStarted()
+      return new Promise((resolve) => { finishSigning = resolve })
+    })
+    const outcome = bridge.focusObject('panel:A1')
+    await started
+    await vi.advanceTimersByTimeAsync(15_000)
+    await expect(outcome).resolves.toEqual({ action: 'focus', status: 'unknown', reason: 'timeout' })
+    finishSigning(new Uint8Array(32).buffer)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(channel.postMessage).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('retries hello with a fresh timestamp without discarding an existing session', async () => {
+    vi.useFakeTimers()
+    bridge.retryHello()
+    expect(channel.postMessage).not.toHaveBeenCalled()
+    bridge.start()
+    const firstHello = state.helloSentAt
+    vi.advanceTimersByTime(10_000)
+    bridge.retryHello()
+    expect(state.helloSentAt).toBe(firstHello + 10_000)
+    expect(state.status).toBe('connecting')
+    expect(channel.postMessage).toHaveBeenCalledTimes(2)
+    await bridge.receive(ready())
+    const session = state.ready
+    bridge.retryHello()
+    expect(state.status).toBe('connected')
+    expect(state.ready).toBe(session)
+    expect(channel.postMessage.mock.calls.at(-1)[0]).toEqual({ kind: 'host_bridge_hello', contractVersion: LEAF_PLATFORM_CONTRACT_VERSION })
   })
 
   it('does not publish an old result or send a command after stop', async () => {
@@ -377,7 +597,7 @@ describe('Studio AutoCAD host bridge', () => {
     await bridge.bindDrawing(identity)
     await bridge.receive(envelope(unbound()))
     await bridge.receive(ready())
-    await bridge.focusObject('panel:A1')
+    await completeCommand(bridge, channel, 'panel:A1')
     bridge.stop()
     expect(stored).not.toHaveBeenCalled()
     expect({ ...localStorage }).toEqual(localBefore)
