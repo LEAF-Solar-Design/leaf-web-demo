@@ -235,7 +235,6 @@ class SelectionPlugin:
                    "outcome": report.outcome, "worker": self.worker, "pid": os.getpid()}
             self.attempts.append(row)
             self.attempt_stream.write(selection.canonical(row) + b"\n")
-            os.fsync(self.attempt_stream.fileno())
 
     @hook(optionalhook=True)
     def pytest_testnodeready(self, node):

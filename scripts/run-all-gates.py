@@ -2893,14 +2893,16 @@ def encoded_suite_id(suite_id: str) -> str:
 def suite_trace_env(suite: Suite, log_dir: Path, attempt: int) -> dict:
     """Attribute each child, including children which cannot load Python hooks."""
     output = log_dir.resolve() / "test-reports" / encoded_suite_id(suite.id) / str(attempt)
-    return {
-        "LEAF_READSET_DIR": os.environ.get("LEAF_READSET_DIR", str(log_dir.resolve() / "readsets")),
+    env = {
         "LEAF_READSET_SUITE": suite.id,
         "LEAF_READSET_ATTEMPT": str(attempt),
-        "LEAF_READSET_ROOT": os.environ.get("LEAF_READSET_ROOT", str(REPO)),
         "LEAF_READSET_RUN": os.environ.get("LEAF_READSET_RUN", os.environ.get("CODEBUILD_BUILD_ID", "")),
         "LEAF_TEST_REPORT_DIR": str(output),
     }
+    if "LEAF_READSET_DIR" in os.environ:
+        env["LEAF_READSET_DIR"] = os.environ["LEAF_READSET_DIR"]
+        env["LEAF_READSET_ROOT"] = os.environ.get("LEAF_READSET_ROOT", str(REPO))
+    return env
 
 
 def reporting_command(suite: Suite, argv: List[str], trace_env: dict) -> List[str]:
@@ -2922,7 +2924,7 @@ def reporting_command(suite: Suite, argv: List[str], trace_env: dict) -> List[st
         catalog.write_text(json.dumps({"schema": "leaf.ci.test-catalog.v1",
                                       "kind": "pytest", "suites": []}), encoding="utf-8")
         return argv + ["-p", "pytest_selection", "--leaf-output", str(output),
-                       "--leaf-repo", trace_env["LEAF_READSET_ROOT"],
+                       "--leaf-repo", trace_env.get("LEAF_READSET_ROOT", str(REPO)),
                        "--leaf-selection", str(decision), "--leaf-catalog", str(catalog)]
     if suite.kind == "vitest":
         try:

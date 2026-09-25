@@ -67,6 +67,8 @@ failures on shared CI while dedicated proofs collect read sets for the map
 builder. The detail receipt and `LEAF_SHADOW` record `tracing_active` and
 `reporters_active` separately.
 
+The runner adds `LEAF_READSET_DIR` and `LEAF_READSET_ROOT` to suite environments only when the parent carries `LEAF_READSET_DIR`; otherwise it supplies only suite, attempt, run and test-report directory metadata so reporting cannot re-enable tracing through defaults.
+
 Interpreter isolation (`-I -B`) is for trusted processes only. The gate run
 inherits no interpreter flags and explicitly unsets `PYTHONSAFEPATH`. The runner
 owns each suite environment: it removes `PYTHONSAFEPATH` even if the parent sets

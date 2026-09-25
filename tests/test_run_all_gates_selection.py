@@ -111,6 +111,39 @@ class SelectionAdapterTests(unittest.TestCase):
                 self.assertEqual(final["status"], "PASS")
                 self.assertEqual(final["seconds"], 5.0)
 
+    def test_suite_trace_env_without_parent_readset_dir_keeps_reporting_only(self):
+        suite = RUNNER.Suite("report-only", "report-only fixture", "pytest", self.work,
+                             [sys.executable, "-m", "pytest", "test_sample.py"], None)
+        parent = self.trusted_env()
+        parent.pop("LEAF_READSET_DIR")
+        for has_root in (True, False):
+            with self.subTest(has_root=has_root):
+                if not has_root:
+                    parent.pop("LEAF_READSET_ROOT")
+                with mock.patch.dict(os.environ, parent, clear=True):
+                    env = RUNNER.suite_trace_env(suite, self.logs, 2)
+                    self.assertNotIn("LEAF_READSET_DIR", env)
+                    self.assertNotIn("LEAF_READSET_ROOT", env)
+                    self.assertEqual(env, {
+                        "LEAF_READSET_SUITE": suite.id,
+                        "LEAF_READSET_ATTEMPT": "2",
+                        "LEAF_READSET_RUN": "fixture-run",
+                        "LEAF_TEST_REPORT_DIR": str(self.logs.resolve() / "test-reports" / suite.id / "2"),
+                    })
+                    command = RUNNER.reporting_command(suite, suite.argv, env)
+                    self.assertIn("pytest_selection", command)
+                    self.assertEqual(command[command.index("--leaf-repo") + 1], str(RUNNER.REPO))
+
+    def test_suite_trace_env_passes_through_parent_readset_dir_and_root(self):
+        suite = RUNNER.Suite("trace-fixture", "trace fixture", "script", self.work,
+                             [sys.executable, "-c", "pass"], None)
+        parent = {"LEAF_READSET_DIR": str(self.work / "capture"),
+                  "LEAF_READSET_ROOT": str(self.work / "source")}
+        with mock.patch.dict(os.environ, parent, clear=True):
+            env = RUNNER.suite_trace_env(suite, self.logs, 1)
+        self.assertEqual(env["LEAF_READSET_DIR"], parent["LEAF_READSET_DIR"])
+        self.assertEqual(env["LEAF_READSET_ROOT"], parent["LEAF_READSET_ROOT"])
+
     def test_child_trace_environment_and_isolated_incompleteness(self):
         child = "import json,os; print(json.dumps({k:v for k,v in os.environ.items() if k.startswith('LEAF_READSET_')}))"
         with mock.patch.dict(os.environ, self.trusted_env()):
