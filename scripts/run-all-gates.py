@@ -102,7 +102,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
-from urllib.parse import quote
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 REPO = SCRIPTS_DIR.parent               # .../leaf-web-demo
@@ -164,7 +163,6 @@ class Result:
     note: str = ""
     log_path: Optional[Path] = None
     counts: dict = field(default_factory=dict)
-    test_report: dict = field(default_factory=dict)
 
 
 def _py_pytest(target: str) -> List[str]:
@@ -2879,172 +2877,6 @@ def clean_env() -> dict:
     return env
 
 
-def encoded_suite_id(suite_id: str) -> str:
-    return quote(suite_id, safe="").replace(".", "%2E") or "%00"
-
-
-def suite_trace_env(suite: Suite, log_dir: Path, attempt: int) -> dict:
-    """Attribute each child, including children which cannot load Python hooks."""
-    output = log_dir.resolve() / "test-reports" / encoded_suite_id(suite.id) / str(attempt)
-    return {
-        "LEAF_READSET_DIR": os.environ.get("LEAF_READSET_DIR", str(log_dir.resolve() / "readsets")),
-        "LEAF_READSET_SUITE": suite.id,
-        "LEAF_READSET_ATTEMPT": str(attempt),
-        "LEAF_READSET_ROOT": os.environ.get("LEAF_READSET_ROOT", str(REPO)),
-        "LEAF_READSET_RUN": os.environ.get("LEAF_READSET_RUN", os.environ.get("CODEBUILD_BUILD_ID", "")),
-        "LEAF_TEST_REPORT_DIR": str(output),
-    }
-
-
-def reporting_command(suite: Suite, argv: List[str], trace_env: dict) -> List[str]:
-    """Add reporting only; pytest selection remains at the runner's suite level."""
-    trusted = os.environ.get("LEAF_TRUSTED_CI_DIR")
-    if not trusted:
-        return argv
-    directory = Path(trusted)
-    output = Path(trace_env["LEAF_TEST_REPORT_DIR"])
-    output.mkdir(parents=True, exist_ok=True)
-    if suite.kind == "pytest" and "pytest" in argv and "-I" not in argv:
-        # Report-only inputs deliberately cannot enable the core's module filter.
-        decision = output / "report-only.json"
-        catalog = output / "report-catalog.json"
-        decision.write_text(json.dumps({"schema": "leaf.ci.selection-decision.v1",
-                                       "execution_mode": "full", "selection_mode": "full",
-                                       "apply_filter": False, "reasons": []}), encoding="utf-8")
-        catalog.write_text(json.dumps({"schema": "leaf.ci.test-catalog.v1",
-                                      "kind": "pytest", "suites": []}), encoding="utf-8")
-        return argv + ["-p", "pytest_selection", "--leaf-output", str(output),
-                       "--leaf-repo", trace_env["LEAF_READSET_ROOT"],
-                       "--leaf-selection", str(decision), "--leaf-catalog", str(catalog)]
-    if suite.kind == "vitest":
-        # npm forwards these after '--'; retain Vitest's normal count reporter.
-        extra = [] if "--" in argv else ["--"]
-        return argv + extra + ["--reporter=default", "--reporter=" + str(directory / "vitest-leaf.mjs")]
-    if "playwright" in argv and "test" in argv:
-        # CLI reporters are retained. With a config, append through a wrapper so
-        # its HTML reporter and output paths survive as well as console parsing.
-        command = list(argv)
-        reporter = str(directory / "playwright-leaf.mjs")
-        for index, word in enumerate(command):
-            if word.startswith("--reporter="):
-                command[index] = word + "," + reporter
-                return command
-            if word == "--reporter" and index + 1 < len(command):
-                command[index + 1] += "," + reporter
-                return command
-        if "--config" in command:
-            index = command.index("--config") + 1
-            config = (suite.cwd / command[index]).resolve()
-            wrapper = output / "playwright-reporting.config.mjs"
-            wrapper.write_text(
-                "import config from " + json.dumps(config.as_uri()) + ";\n"
-                "import { resolve, isAbsolute } from 'node:path';\n"
-                "const base = " + json.dumps(str(config.parent)) + ";\n"
-                "const rebase = value => isAbsolute(value) ? value : resolve(base, value);\n"
-                "const paths = item => { const copy = {...item};\n"
-                "  for (const key of ['testDir', 'outputDir', 'snapshotDir', 'tsconfig'])\n"
-                "    if (typeof copy[key] === 'string') copy[key] = rebase(copy[key]);\n"
-                "  return copy; };\n"
-                "const entries = typeof config.reporter === 'string'\n"
-                "  ? [[config.reporter]] : (config.reporter || [['list']]);\n"
-                "const reporters = entries.map(([name, options]) => {\n"
-                "  if (name.startsWith('.')) name = rebase(name);\n"
-                "  if (options?.outputFolder) options = {...options, outputFolder: rebase(options.outputFolder)};\n"
-                "  return options ? [name, options] : [name]; });\n"
-                "export default {...paths(config), testDir: rebase(config.testDir || '.'),\n"
-                "  ...(config.projects ? {projects: config.projects.map(paths)} : {}),\n"
-                "  reporter: [...reporters, [" + json.dumps(reporter) + "]]};\n",
-                encoding="utf-8")
-            command[index] = str(wrapper)
-            return command
-        return command + ["--reporter=list," + reporter]
-    return argv
-
-
-def read_test_report(suite: Suite, log_dir: Path, attempt: int) -> dict:
-    """Missing/crashed producers never count as complete test-ID evidence."""
-    directory = log_dir.resolve() / "test-reports" / encoded_suite_id(suite.id) / str(attempt)
-    result = {"failed_test_ids": [], "test_ids": [], "collection_ids_sha256": None,
-              "test_report_complete": False, "test_report_refs": []}
-    try:
-        completions = sorted(directory.glob("completion-*.json"))
-        if suite.kind == "pytest" and completions:
-            docs = [json.loads(path.read_text(encoding="utf-8")) for path in completions]
-            manifests = [json.loads(path.read_text(encoding="utf-8"))
-                         for path in sorted(directory.glob("collection-*.json"))]
-            ids = {tid for doc in manifests for tid in doc["test_ids"]}
-            rows = [row for doc in docs for row in doc["attempts"]]
-            failed = {row["nodeid"] for row in rows
-                      if row.get("attempt") == 1 and row["outcome"] in ("failed", "rerun")}
-            complete = (bool(ids) and all(doc.get("completion_marker") is True and
-                        doc.get("test_id_reporting_complete") is True and
-                        doc.get("full_run_complete") is True for doc in docs) and
-                        bool(manifests) and all(set(doc["test_ids"]) == ids for doc in manifests))
-            result["test_ids"] = sorted(suite.id + "::" + tid for tid in ids)
-            result["failed_test_ids"] = sorted(suite.id + "::" + tid for tid in failed)
-            result["test_report_complete"] = complete
-            result["test_report_refs"] = [str(path.relative_to(log_dir.resolve())) for path in completions]
-        else:
-            paths = sorted(directory.glob("tests-*.json"))
-            docs = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
-            if docs:
-                if any(doc.get("suite_id") != suite.id or doc.get("attempt") != attempt or
-                       doc.get("schema") != "leaf.ci.test-report.v1" for doc in docs):
-                    return result
-                result["test_ids"] = sorted({tid for doc in docs for tid in doc["test_ids"]})
-                result["failed_test_ids"] = sorted({tid for doc in docs for tid in doc["failed_test_ids"]})
-                result["test_report_complete"] = bool(result["test_ids"]) and all(
-                    doc.get("complete") is True for doc in docs)
-                result["test_report_refs"] = [str(path.relative_to(log_dir.resolve())) for path in paths]
-        if result["test_ids"]:
-            raw = json.dumps(result["test_ids"], sort_keys=True, separators=(",", ":"))
-            result["collection_ids_sha256"] = hashlib.sha256(raw.encode("utf-8")).hexdigest()
-    except (OSError, ValueError, TypeError, KeyError, AttributeError):
-        result["test_report_complete"] = False
-    return result
-
-
-def record_attempt(result: Result, log_dir: Path, attempt: int) -> None:
-    """Append before retries replace Result or add cumulative durations."""
-    try:
-        report = read_test_report(result.suite, log_dir, attempt)
-        result.test_report = report
-        row = dict(report, suite_id=result.suite.id, attempt=attempt,
-                   status=result.status, seconds=result.seconds,
-                   run_id=os.environ.get("LEAF_READSET_RUN", ""),
-                   log_path=(os.path.relpath(result.log_path, log_dir).replace("\\", "/")
-                             if result.log_path else None))
-        readsets = Path(suite_trace_env(result.suite, log_dir, attempt)["LEAF_READSET_DIR"])
-        shards = sorted((readsets / encoded_suite_id(result.suite.id) / str(attempt)).glob("*.json"))
-        row["readsets_ref"] = str(readsets / encoded_suite_id(result.suite.id) / str(attempt))
-        row["trace_complete"] = False
-        row["trace_incomplete_reasons"] = [
-            "isolated_python" if "-I" in result.suite.argv else "missing_or_unsupported_trace"]
-        if shards:
-            try:
-                traces = [json.loads(path.read_text(encoding="utf-8")) for path in shards]
-                row["trace_complete"] = all(doc.get("capture_complete") is True and
-                                             doc.get("children_complete") is True and
-                                             doc.get("suite_id") == result.suite.id and
-                                             doc.get("run_id") == row["run_id"] for doc in traces)
-                row["trace_incomplete_reasons"] = sorted({reason for doc in traces
-                    for reason in doc.get("incomplete_reasons", [])})
-            except (OSError, ValueError, TypeError, AttributeError):
-                row["trace_incomplete_reasons"] = ["unreadable_trace"]
-        directory = log_dir / "attempts"
-        directory.mkdir(parents=True, exist_ok=True)
-        path = directory / (encoded_suite_id(result.suite.id) + ".jsonl")
-        with path.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-    except Exception as exc:
-        # Evidence failure cannot replace the existing gate verdict.
-        result.test_report = {"test_report_complete": False}
-        print(f"WARNING: attempt evidence unavailable for {result.suite.id}: {type(exc).__name__}",
-              file=sys.stderr)
-
-
 # --------------------------------------------------------------------------- #
 # platform DB reachability probe (runs from REPO_PARENT to dodge the shadow)
 # --------------------------------------------------------------------------- #
@@ -3413,8 +3245,7 @@ def _lockfile_blob_sha(cwd: Path) -> str:
         return ""
 
 
-def _run_npm_audit_attempt(argv: List[str], cwd: Path, logf, attempt: int,
-                           trace_env: Optional[dict] = None) -> tuple:
+def _run_npm_audit_attempt(argv: List[str], cwd: Path, logf, attempt: int) -> tuple:
     """One bounded npm-audit subprocess call. Returns
     (rc, stdout, stderr, timed_out, spawn_err)."""
     spawn_command, use_shell, shell_executable = normalize_spawn_command(argv)
@@ -3426,7 +3257,7 @@ def _run_npm_audit_attempt(argv: List[str], cwd: Path, logf, attempt: int,
     spawn_err = ""
     try:
         proc = subprocess.run(
-            spawn_command, cwd=str(cwd), env={**clean_env(), **(trace_env or {})},
+            spawn_command, cwd=str(cwd), env=clean_env(),
             capture_output=True, text=True, timeout=AUDIT_SUBPROCESS_TIMEOUT_S,
             shell=use_shell, executable=shell_executable,
             encoding="utf-8", errors="replace",
@@ -3457,7 +3288,7 @@ def run_npm_audit_suite(suite: Suite, log_path: Path) -> Result:
     with open(log_path, "w", encoding="utf-8", errors="replace") as logf:
         for i in range(1, AUDIT_MAX_ATTEMPTS + 1):
             rc, stdout, stderr, timed_out, spawn_err = _run_npm_audit_attempt(
-                argv, suite.cwd, logf, i, trace_env=suite_trace_env(suite, log_path.parent, i))
+                argv, suite.cwd, logf, i)
             if spawn_err:
                 status, note = "FAIL", f"spawn failure: {spawn_err}"
             else:
@@ -3538,8 +3369,6 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
 
     t0 = time.perf_counter()
     argv = [str(a) for a in suite.argv]
-    trace_env = suite_trace_env(suite, log_dir, attempt)
-    argv = reporting_command(suite, argv, trace_env)
     # Fault-injection drill: LEAF_GATE_FAULT_INJECT="<suite-id>:spawn" points
     # this suite's FIRST attempt at a nonexistent binary, exercising the real
     # spawn-failure path end to end (attempt 2+ runs the real argv, so the
@@ -3556,7 +3385,7 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
         try:
             proc = subprocess.run(
                 spawn_command,
-                cwd=str(suite.cwd), env={**clean_env(), **db_env, **trace_env},
+                cwd=str(suite.cwd), env={**clean_env(), **db_env},
                 capture_output=True, text=True, timeout=suite.timeout_s,
                 shell=use_shell, executable=shell_executable,
                 # text=True without an explicit encoding decodes with the system
@@ -4041,14 +3870,12 @@ def _run_parallel_suite(suite: Suite, log_dir: Path, retry: int) -> tuple[Result
                           note=f"runner error: {type(exc).__name__}: {str(exc)[:160]}")
 
     res = attempt(1)
-    record_attempt(res, log_dir, 1)
     attempts = 1
     while res.status == "FAIL" and attempts <= retry:
         attempts += 1
         prev_secs = res.seconds
         prev_note = res.note
         res = attempt(attempts)
-        record_attempt(res, log_dir, attempts)
         res.seconds += prev_secs
         if res.status == "PASS":
             res.note = (f"flaked; passed on attempt {attempts}/{retry + 1}"
@@ -4282,42 +4109,6 @@ def catalog_fingerprint(suites: List[Suite]) -> str:
     } for s in suites]
     blob = json.dumps(entries, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
-
-
-def selection_catalog(root: Path) -> dict:
-    """List declarations without importing checkout code or collecting tests."""
-    global REPO, REPO_PARENT, SERVER, DA, HARNESS, WEB, AUTHORED_TOOLS, SCRIPTS_DIR
-    previous = REPO, REPO_PARENT, SERVER, DA, HARNESS, WEB, AUTHORED_TOOLS, SCRIPTS_DIR
-    try:
-        REPO = root.absolute()
-        REPO_PARENT = REPO.parent
-        SCRIPTS_DIR = REPO / "scripts"
-        SERVER, DA, HARNESS, WEB = (REPO / name for name in ("server", "da", "harness", "web"))
-        AUTHORED_TOOLS = SERVER / "authored_tools.json"
-        suites = build_suites()
-        if duplicate_suite_ids(suites):
-            raise ValueError("duplicate_catalog_id")
-        rows = []
-        for suite in suites:
-            command = _fingerprint_argv(suite.argv)
-            python_child = command[0] == "<PYTHON>" and "-I" not in command
-            row = {
-                "id": suite.id, "label": suite.label, "kind": suite.kind,
-                "command": command, "cwd": _fingerprint_cwd(suite.cwd),
-                "expected": suite.expected, "timeout_s": suite.timeout_s,
-                "reset_authored": suite.reset_authored,
-                "skip_rules": {"allowed_skip_reasons": list(suite.allowed_skip_reasons),
-                               "allowed_vitest_skips": [list(pair) for pair in suite.allowed_vitest_skips],
-                               "db_gated": suite.db_gated, "opt_in_env": suite.opt_in_env},
-                "collection_identity": None, "test_ids": [], "collection_complete": False,
-                "trace_kind": "python" if python_child else "unsupported",
-                "python_only": False, "classification": "unclassified",
-            }
-            rows.append(row)
-        return {"schema": "leaf.ci.catalog.v1", "kind": "web",
-                "catalog_sha256": catalog_fingerprint(suites), "suites": rows}
-    finally:
-        REPO, REPO_PARENT, SERVER, DA, HARNESS, WEB, AUTHORED_TOOLS, SCRIPTS_DIR = previous
 
 
 # --------------------------------------------------------------------------- #
@@ -4590,7 +4381,6 @@ def write_result_json(path: str, *, fingerprint: str, total: int,
             "attempts": attempts_by_id.get(r.suite.id, 1),
             "seconds": round(r.seconds, 1),
             "note": r.note,
-            "test_report": r.test_report,
         })
     payload = {
         "schema": 1,
@@ -5156,9 +4946,6 @@ def _jobs_count(value: str) -> int | str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Leaf web demo full gate runner")
-    ap.add_argument("--list", action="store_true", help="print the suite catalog; execute nothing")
-    ap.add_argument("--catalog-root", default=None, metavar="DIR",
-                    help="checkout root used to normalize --list declarations")
     ap.add_argument("--fail-fast", action="store_true",
                     help="stop at the first failing gate (default: run all). With "
                          "--jobs > 1, stop dispatching new suites and wait for "
@@ -5224,17 +5011,6 @@ def main() -> int:
                     help="the 40-hex git tree id --verify-gate-proof must find in "
                          "the proof document.")
     args = ap.parse_args()
-
-    if args.list:
-        try:
-            document = selection_catalog(Path(args.catalog_root) if args.catalog_root else REPO)
-        except ValueError as exc:
-            print(str(exc), file=sys.stderr)
-            return 2
-        print(json.dumps(document, sort_keys=True, separators=(",", ":")))
-        return 0
-    if args.catalog_root:
-        ap.error("--catalog-root requires --list")
 
     if args.jobs == "auto":
         cpus = _effective_cpus()
@@ -5364,7 +5140,6 @@ def main() -> int:
       for suite in suites if args.jobs == 1 else ():
         print(f"  ... {suite.id:<22} ", end="", flush=True)
         res = run_suite_guarded(suite, log_dir, attempt=1)
-        record_attempt(res, log_dir, 1)
         attempts = 1
         # Retry a FAILED integration suite (these boot real servers -> load
         # flakes), including spawn failures — a child that never started is
@@ -5374,7 +5149,6 @@ def main() -> int:
             prev_secs = res.seconds
             prev_note = res.note
             res = run_suite_guarded(suite, log_dir, attempt=attempts)
-            record_attempt(res, log_dir, attempts)
             res.seconds += prev_secs  # cumulative time spent on this row
             if res.status == "PASS":
                 res.note = (f"flaked; passed on attempt {attempts}/{args.retry + 1}"
