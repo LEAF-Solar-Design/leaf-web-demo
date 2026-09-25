@@ -5,8 +5,10 @@ balanced nearest assignment with the no-pass rule and the swap pass; RouteL2Feed
 adopted: nothing drawn, the one save, the report; a missing feeder drawn as a comb path); HomerunsAuto
 (each string's legs redrawn identical, so the step reports no change; the nearest-combiner fallback);
 LEAFLITEFEEDERS (the tail-biased assignment, lane-less comb paths, stored length 0, the refusals);
-MOVEINV (the device moved, its homerun legs rerouted, one save, declared); the bounded POSITIONINV
-search (outside the outline band, never worse, the time bound failing closed); and LEAFCOMBINERAUTO
+MOVEINV (the device moved, its homerun legs rerouted, one save, declared); the POSITIONINV search on
+the plugin's bounded plan (InverterMoveSearchTests' cases, the first strictly shortest candidate outside
+the outline band, the plugin's failure line, the time bound failing closed); MOVEINV and POSITIONINV selecting strings by
+the device number a row records (R35b: exactly those rerouted, none selected, unrecorded unchanged); and LEAFCOMBINERAUTO
 (the seeded MPPT inputs; the committed i4 state and combiner intake reproducing the committed i5 delta
 row for row; its refusals). States are synthetic and authored here, except the LEAFCOMBINERAUTO
 fixture, which is the committed G35 chain (docs/parity/evidence/rooftop).
@@ -252,26 +254,279 @@ def test_inverter_move_takes_the_acquired_point_as_is():
     assert (150.0, 400.0) not in [tuple(st.point_of(d["position"])) for d in after["rows"]["device"]]
 
 
-def test_inverter_position_stays_outside_the_outline_band_and_never_worsens():
+# InverterMoveSearchTests.cs:11-25 (Branch2025 #312): (width, height, cap) from (-100, -200).
+@pytest.mark.parametrize("width, height, cap", [(2000000, 3000000, 10000), (2000000, 1, 10000),
+                                                (1, 3000000, 10000), (2000000, 3000000, 1), (201, 301, 17)])
+def test_position_plan_large_or_narrow_extent_respects_the_cap(width, height, cap):
+    plan = cab.position_plan(-100, -200, width - 100, height - 200, 20, cap)
+    assert 1 <= len(plan) <= cap
+    assert plan[0] == (-100.0, -200.0)
+    assert all(-100 <= x < width - 100 and -200 <= y < height - 200 for x, y in plan)
+    assert len(set(plan)) == len(plan)
+    assert plan == sorted(plan, key=lambda p: (p[1], p[0]))  # row-major: rows of y, x ascending in each
+
+
+def test_position_plan_small_extent_keeps_the_twenty_unit_step_and_row_order():
+    # InverterMoveSearchTests.cs:27-37.
+    assert cab.position_plan(10, 30, 70, 70, 20, cab.POSITION_MAX_CANDIDATES) == [
+        (10.0, 30.0), (30.0, 30.0), (50.0, 30.0), (10.0, 50.0), (30.0, 50.0), (50.0, 50.0)]
+    assert (cab.POSITION_STEP, cab.POSITION_MAX_CANDIDATES) == (20.0, 10000)
+
+
+def test_position_plan_non_multiple_extent_includes_the_last_partial_cell():
+    # InverterMoveSearchTests.cs:39-45.
+    plan = cab.position_plan(0, 0, 41, 21, 20, 6)
+    assert len(plan) == 6 and plan[-1] == (40.0, 20.0)
+
+
+def test_position_plan_empty_extent_and_invalid_arguments():
+    # InverterMoveSearchTests.cs:47-60: empty for a zero extent; the plugin's throws fail closed here.
+    assert cab.position_plan(0, 0, 0, 100, 20, 10) == []
+    assert cab.position_plan(0, 0, 100, 0, 20, 10) == []
+    for args in [(0, 0, 10, 10, 0, 10), (0, 0, 10, 10, 20, 0), (10, 0, 0, 10, 20, 10),
+                 (0, 0, math.inf, 10, 20, 10), (0, 0, 10, 10, math.nan, 10), (0, 0, 10, 10, 20, 1.5)]:
+        with pytest.raises(cab.InverterCablingError):
+            cab.position_plan(*args)
+
+
+def test_position_plan_doubles_the_step_until_the_cap_holds():
+    # 11 x 16 = 176 > 17 -> step 40 (6 x 8 = 48) -> step 80 (3 x 4 = 12).
+    plan = cab.position_plan(-100, -200, 101, 101, 20, 17)
+    assert plan == [(-100.0 + 80.0 * c, -200.0 + 80.0 * r) for r in range(4) for c in range(3)]
+    # A tiny step on a huge extent terminates at the one-cell plan (the step capped at the longer side).
+    assert cab.position_plan(0, 0, 1e300, 1e300, 1e-300, 1) == [(0.0, 0.0)]
+
+
+def reference_optimum(legs, extents, outlines, literal=True):
+    """StringHomeRunCmd.cs:845-882: over the plan in order, reject by outline, keep the first strictly
+    shorter. literal=False tests the outline only for a would-be winner (a rejected point never updates
+    the best, so the accepted sequence is the same) to keep the committed-chain run fast."""
+    best, best_cost = None, None
+    for p in cab.position_plan(*extents, cab.POSITION_STEP, cab.POSITION_MAX_CANDIDATES):
+        if literal and cab._near_outline(p[0], p[1], outlines, cab.OUTLINE_BUFFER):
+            continue
+        value = sum(cab._dist(p, leg) for leg in legs)
+        if (best_cost is None or value < best_cost) and \
+                (literal or not cab._near_outline(p[0], p[1], outlines, cab.OUTLINE_BUFFER)):
+            best, best_cost = p, value
+    return best, best_cost
+
+
+def test_position_search_keeps_the_first_strictly_shortest_planned_point():
+    legs = [(0.0, 0.0), (100.0, 0.0)]
+    # Rows y = -50, -30, -10, 10, 30: (50, -10) and (50, 10) score exactly the same; the first row wins.
+    best, cost = cab.optimum_position(legs, (-50.0, -50.0, 150.0, 50.0), [])
+    assert best == (50.0, -10.0) and cost == 2 * math.sqrt(2600.0)
+    # An outline band around the winner moves it to the first strictly shortest point outside the band.
+    outlines = [[(40.0, -20.0), (60.0, -20.0), (60.0, 0.0), (40.0, 0.0)]]
+    best, cost = cab.optimum_position(legs, (-50.0, -50.0, 150.0, 50.0), outlines)
+    assert best == reference_optimum(legs, (-50.0, -50.0, 150.0, 50.0), outlines)[0]
+    assert not cab._near_outline(best[0], best[1], outlines, cab.OUTLINE_BUFFER)
+    # No planned point survives the band: no position (the plugin's failure branch).
+    everywhere = [[(-1e4, -1e4), (1e4, -1e4), (1e4, 1e4), (-1e4, 1e4)]]
+    assert cab.optimum_position(legs, (-50.0, -50.0, 150.0, 50.0), everywhere) == (None, None)
+    assert cab.optimum_position(legs, (0.0, 0.0, 0.0, 50.0), []) == (None, None)
+
+
+def test_inverter_position_moves_to_the_plan_optimum():
+    # The strings' extents [50, 150] x [400, 400] grown 50: x 0..180, y 350..430; (100, 390) is the
+    # first of the two shortest points (y 390 and 410 tie).
+    before = make_state()
+    after, lines = cab.inverter_position(before, [], HOST)
+    positions = [tuple(st.point_of(d["position"])) for d in after["rows"]["device"] if d["role"] == "combiner"]
+    assert sorted(positions) == [(100.0, 390.0), CB_2]
+    rerouted = [r for r in cables_of(after, "dc-homerun") if r["from"] == "A01"]
+    assert sorted(points(r)[1] for r in rerouted) == [(100.0, 390.0), (100.0, 390.0)]
+    assert lines[0].startswith("Inverter 1 positioned; 2 homerun(s) rerouted;")
+
+
+def test_inverter_position_reports_the_plugins_failure_when_the_band_covers_the_plan():
+    # Changed (R09b): the plan spans only the strings' extents grown 50, all inside the A5 band, so the
+    # plugin finds no position and moves nothing; the old 64 x 64 grid reached below the band.
     before = make_state()
     after, lines = cab.inverter_position(before, GROUPS, HOST)
-    cb = [d for d in after["rows"]["device"] if d["role"] == "combiner" and st.point_of(d["position"])[0] < 500]
-    x, y = st.point_of(cb[0]["position"])
-    assert y <= 300.0 - cab.OUTLINE_BUFFER + 1e-9
-    legs = [(50.0, 400.0), (150.0, 400.0)]
-    assert sum(math.dist((x, y), p) for p in legs) <= sum(math.dist(CB_1, p) for p in legs)
-    assert "positioned" in lines[0] or "already" in lines[0]
+    assert lines == ["Failed to find optimum position for Inverter: 1"]
+    assert after == before
 
 
-def test_position_search_is_bounded_and_fails_closed_past_its_time():
+def numbered(state, circuits=None):
+    """R35b: the combiners' rows record their int `number` (the Branch2025 adapter, R35a); `circuits`
+    rewrites string circuits {string: circuit}."""
+    state = copy.deepcopy(state)
+    for d in state["rows"]["device"]:
+        if d["role"] == "combiner":
+            d["number"] = {CB_1: 1, CB_2: 2}[tuple(st.point_of(d["position"]))]
+    for row in state["rows"]["string-assignment"]:
+        if row["string"] in (circuits or {}):
+            row["_detail"]["circuit"] = circuits[row["string"]]
+    return state
+
+
+def shared_state():
+    """Both strings' homeruns attached to combiner 1 by their end; A02's circuit still names 2."""
+    state = make_state()
+    for row in cables_of(state, "dc-homerun"):
+        if row["from"] == "A02":
+            row["vertices"][-1] = st.coordinate(*CB_1)
+    return state
+
+
+def combiner_positions(state):
+    return sorted(tuple(st.point_of(d["position"])) for d in state["rows"]["device"] if d["role"] == "combiner")
+
+
+def test_inverter_move_by_number_with_no_selected_string_erases_and_routes_none():
+    # StringHomeRunCmd.cs:821, :1007-1015: no string circuit names 1, so its attached homeruns are erased
+    # and none is drawn; the device still moves (the fixture's MOVEINV of CB-A14).
+    before = numbered(make_state(), {"A01": "+1/5a"})
+    after, lines = cab.inverter_move(before, HOST, ["A9D5", "300,200,0"])
+    assert lines == ["No strings selected.", "Inverter 1 moved; 0 homerun(s) rerouted."]
+    assert combiner_positions(after) == [(300.0, 200.0), CB_2]
+    assert [r for r in cables_of(after, "dc-homerun") if r["from"] == "A01"] == []
+    untouched = [r for r in cables_of(after, "dc-homerun") if r["from"] == "A02"]
+    assert len(untouched) == 2 and all(points(r)[1] == CB_2 for r in untouched)
+    # Nothing routed, so no drawing-properties save (measured: the plugin's i17 catalog does not grow).
+    assert after["setting"] == before["setting"]
+    rows, settings = st.step_rows("i17", before, after, lines)
+    assert settings == []
+    assert not [r for r in rows if r["type"] == "setting"]
+
+
+def test_inverter_position_by_number_with_no_selected_string_changes_nothing_and_reports():
+    # StringHomeRunCmd.cs:839-847 (Branch2025 #334): nothing is searched, erased or moved.
+    before = numbered(make_state(), {"A01": "+1/5a"})
+    after, lines = cab.inverter_position(before, [], HOST)
+    assert lines == ["Inverter 1 has no connected strings; its position is unchanged."]
+    assert after == before
+    rows, settings = st.step_rows("position", before, after, lines)
+    assert settings == []
+    assert [(r["type"], r["name"], r["value"]) for r in rows] == [("report", "message", "no-connected-strings")]
+
+
+def test_inverter_move_by_number_reroutes_exactly_the_selected_strings():
+    before = numbered(shared_state())
+    after, lines = cab.inverter_move(before, HOST, ["A9D5", "300,200,0"])
+    assert lines == ["Inverter 1 moved; 2 homerun(s) rerouted."]
+    homeruns = cables_of(after, "dc-homerun")
+    assert sorted((r["from"], r["segment"]) for r in homeruns) == [("A01", "end"), ("A01", "start")]
+    assert all(points(r)[1] == (300.0, 200.0) for r in homeruns)
+    assert sorted(points(r)[0] for r in homeruns) == [(50.0, 400.0), (150.0, 400.0)]
+    assert len(after["setting"]["HomerunRouting"]["CableCatalog"]) == 4   # a string routed: the one save
+
+
+def test_inverter_position_by_number_searches_and_reroutes_exactly_the_selected_strings():
+    before = numbered(shared_state())
+    # The bounded plan over A01 alone (its legs and polyline grown 50), not the attached A02 legs.
+    assert reference_optimum([(50.0, 400.0), (150.0, 400.0)], (0.0, 350.0, 200.0, 450.0), [])[0] == (100.0, 390.0)
+    after, lines = cab.inverter_position(before, [], HOST)
+    assert combiner_positions(after) == [(100.0, 390.0), CB_2]
+    homeruns = cables_of(after, "dc-homerun")
+    assert sorted((r["from"], points(r)[1]) for r in homeruns) == [("A01", (100.0, 390.0))] * 2
+    assert lines[0].startswith("Inverter 1 positioned; 2 homerun(s) rerouted;")
+
+
+def test_unrecorded_numbers_keep_the_handle_attached_selection():
+    before = shared_state()
+    assert all(d["number"] is None for d in before["rows"]["device"])
+    after, lines = cab.inverter_move(before, HOST, ["A9D5", "300,200,0"])
+    assert lines == ["Inverter 1 moved; 4 homerun(s) rerouted."]
+    assert sorted(r["from"] for r in cables_of(after, "dc-homerun")) == ["A01", "A01", "A02", "A02"]
+    assert all(points(r)[1] == (300.0, 200.0) for r in cables_of(after, "dc-homerun"))
+    # The circuits of the no-selected-string case, numbers unrecorded: the handle-attached search still runs.
+    before = make_state()
+    for row in before["rows"]["string-assignment"]:
+        if row["string"] == "A01":
+            row["_detail"]["circuit"] = "+1/5a"
+    after, lines = cab.inverter_position(before, [], HOST)
+    assert lines[0].startswith("Inverter 1 positioned; 2 homerun(s) rerouted;")
+    assert combiner_positions(after) == [(100.0, 390.0), CB_2]
+
+
+def test_position_search_fails_closed_past_its_time_and_never_changes_a_finished_answer():
     ticks = iter(range(10 ** 6))
-    with pytest.raises(cab.InverterCablingError):
-        cab.optimum_position([(0.0, 0.0), (10.0, 0.0)], (5.0, 5.0), [], budget_s=3.0,
+    with pytest.raises(cab.InverterCablingError, match="exceeded"):
+        cab.optimum_position([(0.0, 0.0), (10.0, 0.0)], (-50.0, -50.0, 60.0, 50.0), [], budget_s=3.0,
                              clock=lambda: float(next(ticks)))
-    with pytest.raises(cab.InverterCablingError):
-        cab.optimum_position([(0.0, 0.0)], (5.0, 5.0), [], grid_side=cab.POSITION_GRID_SIDE + 1)
-    best, cost = cab.optimum_position([(5.0, 0.0)], (5.0, 5.0), [], grid_side=3)
-    assert best == (5.0, 0.0) and cost == 0.0
+    legs, extents = [(0.0, 0.0), (10.0, 0.0)], (-50.0, -50.0, 60.0, 50.0)
+    assert cab.optimum_position(legs, extents, [], clock=lambda: 0.0) == \
+        cab.optimum_position(legs, extents, [], budget_s=math.inf) == reference_optimum(legs, extents, [])
+
+
+def committed_i16():
+    chain = json.loads((EVIDENCE / "chain" / "intake.json").read_text(encoding="utf-8"))
+    groups = [{"handle": g.get("handle"), "outlines": g.get("outlines") or []} for g in chain["panel_groups"]]
+    return st.load_state(EVIDENCE / "inverters" / "state-i16.json"), groups
+
+
+def test_inverter_position_on_the_committed_chain_reports_no_connected_strings():
+    # The G35 POSITIONINV fixture: device L1 14 (block A9D5, CB-A14) of the committed state-i16, whose
+    # rows record their numbers (test build 10). No string circuit names 14, so the plugin changes
+    # nothing and prints its line (StringHomeRunCmd.cs:821, :839-847; measured on VM-C, test build 10).
+    before, groups = committed_i16()
+    target = cab._find_device(before, "L1", 14)
+    assert target["row"]["number"] == 14
+    assert cab._numbered_strings(before, target) == set()
+    assert len(cab._device_homerun_legs(before, target["position"])) == 24
+    after, lines = cab.inverter_position(before, groups, dict(HOST, PositionDevice=["L1", 14]))
+    assert lines == ["Inverter 14 has no connected strings; its position is unchanged."]
+    assert after == before
+    rows, settings = st.step_rows("position", before, after, lines)
+    assert settings == []
+    assert [(r["type"], r["name"], r["value"]) for r in rows] == [("report", "message", "no-connected-strings")]
+
+
+def test_inverter_move_on_the_committed_chain_erases_the_homeruns_and_routes_none():
+    # The fixture's MOVEINV (i17) of CB-A14: moved, its 24 handle-attached homeruns erased
+    # (StringHomeRunCmd.cs:1007-1015), no string selected so none drawn and no drawing-properties save.
+    before, _ = committed_i16()
+    target = cab._find_device(before, "L1", 14)
+    old = target["position"]
+    after, lines = cab.inverter_move(before, dict(HOST, MovedDevice=["L1", 14]), ["A9D5", "20100,3600"])
+    assert lines == ["No strings selected.", "Inverter 14 moved; 0 homerun(s) rerouted."]
+    before_positions = sorted(tuple(st.point_of(d["position"])) for d in before["rows"]["device"])
+    after_positions = sorted(tuple(st.point_of(d["position"])) for d in after["rows"]["device"])
+    vacated = list(before_positions)
+    vacated.remove(old)
+    assert after_positions == sorted(vacated + [(20100.0, 3600.0)])
+    assert cab._device_homerun_legs(after, old) == [] and cab._device_homerun_legs(after, (20100.0, 3600.0)) == []
+    assert len(cables_of(after, "dc-homerun")) == len(cables_of(before, "dc-homerun")) - 24
+    assert after["setting"] == before["setting"]
+    rows, settings = st.step_rows("i17", before, after, lines)
+    assert settings == []
+    assert not [r for r in rows if r["type"] == "setting"]
+
+
+def test_inverter_position_on_the_committed_chain_unrecorded_picks_the_plan_optimum():
+    # The same fixture with its device numbers unrecorded keeps the handle-attached selection: the bounded
+    # search over the plugin's plan (scripts/solar_inverter_cabling_evidence.py CAPTURE_HOST PositionDevice).
+    before, groups = committed_i16()
+    for d in before["rows"]["device"]:
+        d["number"] = None
+    host = dict(HOST, PositionDevice=["L1", 14])
+    target = cab._find_device(before, "L1", 14)
+    legs = cab._device_homerun_legs(before, target["position"])
+    assert legs
+    extents = cab._position_extents(before, target["position"], legs)
+    outlines = cab.validate_outlines(groups)
+    expected, _ = reference_optimum(legs, extents, outlines, literal=False)
+    plan = cab.position_plan(*extents)
+    assert 1 <= len(plan) <= cab.POSITION_MAX_CANDIDATES
+    after, lines = cab.inverter_position(before, groups, host)
+    if expected is None:
+        assert lines == ["Failed to find optimum position for Inverter: 14"]
+    elif expected == target["position"]:
+        assert lines == ["Inverter 14 is already at its optimum position."]
+    else:
+        # The moved device leaves the feeder vertex that numbered it (levels), so it is found by position:
+        # exactly the picked device moved, to the plan optimum, and its homerun legs now end there.
+        before_positions = sorted(tuple(st.point_of(d["position"])) for d in before["rows"]["device"])
+        after_positions = sorted(tuple(st.point_of(d["position"])) for d in after["rows"]["device"])
+        vacated = list(before_positions)
+        vacated.remove(target["position"])
+        assert after_positions == sorted(vacated + [expected])
+        assert "positioned" in lines[0] and f"{len(legs)} homerun(s) rerouted" in lines[0]
+        assert sorted(cab._device_homerun_legs(after, expected)) == sorted(legs)
+        assert expected in plan
 
 
 # ------------------------------------------------------------------ combiner-auto-place --

@@ -78,11 +78,25 @@ Declared divergences (G35; findings under docs/parity/divergences/):
     snap already applied by the host, so no snap runs here), then reroutes each erased homerun with the
     ported direct router (one straight leg from the same string endpoint to the moved device), and saves
     once. The device row matches; the homerun rows are the declared divergence.
-  inverter-position: the plugin's POSITIONINV optimum search is unbounded (it hung the capture host and
-    saved nothing). Studio searches a bounded grid (POSITION_GRID_SIDE x POSITION_GRID_SIDE candidates,
-    POSITION_TIME_BUDGET_S seconds, fails closed past either) for the point that minimises the device's
-    total homerun length outside every panel-group outline and its OUTLINE_BUFFER band
-    (StringHomeRunCmd.cs:415-436 expands each outline by 50), then moves and reroutes as inverter-move.
+  inverter-position: the plugin's POSITIONINV optimum search is bounded since Branch2025 #312
+    (InverterMoveSearch.Plan, StringHomeRunCmd.cs:29-74: a 20-unit grid over the device's string extents
+    grown 50 each side, :821-831, doubled until at most MaxCandidatePoints 10000). Studio searches exactly
+    that plan (position_plan) in the same row-major order and keeps the first strictly shortest candidate
+    outside every panel-group outline and its OUTLINE_BUFFER band (:853-882; :736 expands each outline by
+    50), then moves and reroutes as inverter-move. The declared part: the score is Studio's rerouted
+    straight-leg total, not the jig's axis route (InverterMoveJig.cs:155-240), and POSITION_TIME_BUDGET_S
+    is a Studio-only safety bound that fails closed and never changes a finished search's answer.
+  inverter-move and inverter-position, by device number (Branch2025 a5f5e1d5, #334): the plugin selects
+    the moved inverter's strings by number, mStringList.Where(c => c.mInverterNumber == inverter.mNumber)
+    (StringHomeRunCmd.cs:821; Cable.mInverterNumber is the circuit's number, Cable.cs:36-41), erases the
+    homeruns attached to the block by handle (inverter.mHomeRuns, :1007-1015) and routes only the selected
+    strings. When the moved device's row records its int `number`, Studio does the same: the attached
+    homeruns of a selected string are rerouted as above, every other attached homerun is erased. MOVEINV
+    with no selected string moves the device, erases its homeruns and routes none ("No strings selected."),
+    with no drawing-properties save (the plugin saves only when it routes a string);
+    POSITIONINV with none (:839-847) changes nothing and prints the plugin's line, reported as
+    no-connected-strings. A device whose number is unrecorded (absent or None) keeps the handle-attached
+    selection.
 
 HOST INPUTS: values the commands read that the drawing state does not carry (host per-user settings,
 block attributes, the picked entity); named by the plugin value they stand for. The producer records
@@ -146,8 +160,10 @@ INCHES_PER_FOOT = 12.0
 LITE_CAP_PER_INVERTER, LITE_TAIL_BIAS, LITE_DIRECT = 36, True, False
 # StringHomeRunCmd.cs:426: the buffer kept around every panel-group outline by the optimum search.
 OUTLINE_BUFFER = 50.0
-# inverter-position (declared): the hard bounds of the Studio search.
-POSITION_GRID_SIDE = 64                        # 4096 candidate points at most
+# StringHomeRunCmd.cs:31, :824-831 (Branch2025 #312): the plugin's POSITIONINV plan, a 20-unit step over
+# the string extents grown 50 each side, at most 10000 candidates.
+POSITION_STEP, POSITION_EXTENTS_MARGIN, POSITION_MAX_CANDIDATES = 20.0, 50.0, 10_000
+# inverter-position (declared): Studio's safety bound; fails closed, never changes a finished answer.
 POSITION_TIME_BUDGET_S = 10.0
 MAX_OUTLINE_VERTICES_TOTAL = 1_000_000
 MAX_DEVICES = 10_000
@@ -162,6 +178,10 @@ INPUT_PLAN_APPLY = "Apply"
 # inverter_evidence.py:116-117: the circuits a homerun and a feeder carry.
 _HOMERUN_CIRCUIT = re.compile(r"[+-]?(?P<string>[0-9]+)/(?P<type>[A-Za-z]?)(?P<device>[0-9]+)(?P<mppt>[A-Za-z]*)")
 _FEEDER_CIRCUIT = re.compile(r"F(?P<source>[0-9]+)/(?P<target>[0-9]+)")
+# StringHomeRunCmd.cs:846 (Branch2025 #334): POSITIONINV's line when the device has no connected strings, and
+# its G35 report class for the evidence step "position" (registered once with the state's report rules).
+POSITION_NO_STRINGS_RULE = (r"has no connected strings; its position is unchanged", "no-connected-strings")
+st.REPORT_RULES.setdefault("position", ((POSITION_NO_STRINGS_RULE,), "no-change"))
 
 
 class InverterCablingError(ValueError):
@@ -712,14 +732,33 @@ def lite_feeders(state, host):
 
 # ------------------------------------------------ inverter move and position --
 
-def _move_and_reroute(new, target, x, y):
+def _numbered_strings(state, target):
+    """The strings the plugin selects for the device (StringHomeRunCmd.cs:821): those whose circuit names
+    the device's number (Cable.mInverterNumber, Cable.cs:36-41), as a set of string ids. None when the
+    device's row does not record an int `number`: the caller keeps the handle-attached selection."""
+    number = target["row"].get("number")
+    if type(number) is not int:
+        return None
+    selected = set()
+    for row in state["rows"]["string-assignment"]:
+        detail = row.get("_detail") if isinstance(row.get("_detail"), dict) else {}
+        if _homerun_to(detail.get("circuit")) == number:
+            selected.add(row["string"])
+    return selected
+
+
+def _move_and_reroute(new, target, x, y, strings=None):
     """Move the device to (x, y) and reroute every homerun ending at its old insertion point as one
-    straight leg from the same string endpoint (the ported direct router). Returns rerouted count."""
+    straight leg from the same string endpoint (the ported direct router). With `strings` (the by-number
+    selection), an attached homerun of any other string is erased (StringHomeRunCmd.cs:1007-1015) and
+    not rerouted. Returns rerouted count."""
     old = target["position"]
     rerouted = 0
     cables = []
     for row in new["rows"]["cable"]:
         if row.get("cable_kind") == "dc-homerun" and _xy(row["vertices"][-1], "homerun vertex") == old:
+            if strings is not None and row.get("from") not in strings:
+                continue
             leg = _xy(row["vertices"][0], "homerun vertex")
             detail = row.get("_detail") if isinstance(row.get("_detail"), dict) else {}
             fresh = _homerun_row(new, row["from"], row.get("segment"), detail.get("circuit"), leg, (x, y),
@@ -734,15 +773,20 @@ def _move_and_reroute(new, target, x, y):
     return rerouted
 
 
-def _device_homerun_legs(state, position):
+def _device_homerun_legs(state, position, strings=None):
+    """The string-end legs of the homeruns attached to the device at `position`; with `strings`, only
+    those of the selected strings."""
     return [_xy(row["vertices"][0], "homerun vertex") for row in state["rows"]["cable"]
-            if row.get("cable_kind") == "dc-homerun" and _xy(row["vertices"][-1], "homerun vertex") == position]
+            if row.get("cable_kind") == "dc-homerun" and _xy(row["vertices"][-1], "homerun vertex") == position
+            and (strings is None or row.get("from") in strings)]
 
 
 def inverter_move(state, host, answers):
     """MOVEINV (i17, declared) on the Studio state. `answers`: [picked entity, acquired point] (G22,
     G35b: the point the jig acquired, taken as is); the picked entity is resolved through host
-    MovedDevice (the handle names an entity the state does not carry). Returns (new state, printed lines)."""
+    MovedDevice (the handle names an entity the state does not carry). A device whose row records its
+    number reroutes only the strings that number selects (StringHomeRunCmd.cs:821, :1007-1015); none
+    selected: moved, homeruns erased, none routed. Returns (new state, printed lines)."""
     host = _host(host)
     if not isinstance(answers, (list, tuple)) or len(answers) != 2 or not all(isinstance(a, str) for a in answers):
         raise InverterCablingError("MOVEINV takes two answers: the inverter and the new point")
@@ -755,10 +799,17 @@ def inverter_move(state, host, answers):
     target = _find_device(new, level, number)
     if not _device_homerun_legs(new, target["position"]):
         return new, ["The selected inverter has no homeruns to move."]
-    rerouted = _move_and_reroute(new, target, x, y)
-    st.save_drawing_properties(new)
+    strings = _numbered_strings(new, target)
+    rerouted = _move_and_reroute(new, target, x, y, strings)
+    if rerouted:
+        # The plugin saves the drawing properties only when it routes a string (measured on VM-C test
+        # build 10, i16 -> i17 with no string selected: the cable catalog does not grow).
+        st.save_drawing_properties(new)
     st.sort_rows(new)
-    return new, [f"Inverter {number} moved; {rerouted} homerun(s) rerouted."]
+    lines = [f"Inverter {number} moved; {rerouted} homerun(s) rerouted."]
+    if strings is not None and not strings:
+        lines.insert(0, "No strings selected.")
+    return new, lines
 
 
 def _near_outline(x, y, outlines, buffer):
@@ -776,35 +827,88 @@ def _near_outline(x, y, outlines, buffer):
     return False
 
 
-def optimum_position(legs, current, outlines, grid_side=POSITION_GRID_SIDE, budget_s=POSITION_TIME_BUDGET_S,
-                     clock=time.monotonic):
-    """The bounded optimum search (declared): over a grid_side x grid_side grid spanning the legs and
-    the current point, the candidate with the least total leg length outside every outline and its
-    OUTLINE_BUFFER band; the current point when none beats it. Fails closed past the time budget."""
-    if type(grid_side) is not int or not 2 <= grid_side <= POSITION_GRID_SIDE:
-        raise InverterCablingError(f"the grid side must be an integer in 2..{POSITION_GRID_SIDE}")
-    deadline = clock() + budget_s
-    xs = [p[0] for p in legs] + [current[0]]
-    ys = [p[1] for p in legs] + [current[1]]
-    min_x, max_x, min_y, max_y = min(xs), max(xs), min(ys), max(ys)
+def _plan_count(extent, step):
+    """Math.Max(1, Math.Ceiling(extent / step)) in doubles; an overflowed quotient stays infinite."""
+    quotient = extent / step
+    return max(1.0, quotient if math.isinf(quotient) else float(math.ceil(quotient)))
 
-    def cost(p):
-        return sum(_dist(p, leg) for leg in legs)
-    best, best_cost = current, cost(current)
-    for r in range(grid_side):
-        for c in range(grid_side):
-            if clock() > deadline:
-                raise InverterCablingError(f"the position search exceeded {budget_s} s")
-            p = (min_x + (max_x - min_x) * c / (grid_side - 1), min_y + (max_y - min_y) * r / (grid_side - 1))
-            value = cost(p)
-            if value < best_cost and not _near_outline(p[0], p[1], outlines, OUTLINE_BUFFER):
-                best, best_cost = p, value
+
+def position_plan(min_x, min_y, max_x, max_y, step=POSITION_STEP, cap=POSITION_MAX_CANDIDATES):
+    """InverterMoveSearch.Plan (StringHomeRunCmd.cs:35-68): the step doubles (capped at the longer side)
+    until columns x rows <= cap, then the row-major points (min_x + column * step, min_y + row * step) kept
+    only inside the half-open extents; none for a zero width or height. At most cap points, O(cap).
+    Fails closed with InverterCablingError where the plugin throws (:38-46)."""
+    if type(step) not in (int, float) or not math.isfinite(step) or step <= 0:
+        raise InverterCablingError("the position search step must be a finite positive number")
+    if type(cap) is not int or cap < 1:
+        raise InverterCablingError("the position search cap must be a positive integer")
+    bounds = (min_x, min_y, max_x, max_y)
+    if any(type(v) not in (int, float) or not math.isfinite(v) for v in bounds):
+        raise InverterCablingError("the position search extents must be finite and ordered")
+    min_x, min_y, max_x, max_y = (float(v) for v in bounds)
+    width, height = max_x - min_x, max_y - min_y
+    if not math.isfinite(width) or not math.isfinite(height) or width < 0 or height < 0:
+        raise InverterCablingError("the position search extents must be finite and ordered")
+    points = []
+    if width == 0 or height == 0:
+        return points
+    step = float(step)
+    columns, rows = _plan_count(width, step), _plan_count(height, step)
+    while columns * rows > cap:
+        step = min(step * 2, max(width, height))
+        columns, rows = _plan_count(width, step), _plan_count(height, step)
+    for row in range(int(rows)):
+        for column in range(int(columns)):
+            x, y = min_x + column * step, min_y + row * step
+            if x < max_x and y < max_y:
+                points.append((x, y))
+    return points
+
+
+def _position_extents(state, position, legs, strings=None):
+    """The plan extents of StringHomeRunCmd.cs:804-826: the extents of the device's strings (`strings`, the
+    by-number selection of :821, else those whose homeruns end at it), each string's polyline vertices and
+    its homerun legs, grown POSITION_EXTENTS_MARGIN each side. Returns (min_x, min_y, max_x, max_y)."""
+    names = strings if strings is not None else \
+        {row.get("from") for row in state["rows"]["cable"]
+         if row.get("cable_kind") == "dc-homerun" and _xy(row["vertices"][-1], "homerun vertex") == position}
+    points = list(legs)
+    for g in state["geometry"]["strings"]:
+        if isinstance(g, dict) and g.get("string") in names:
+            try:
+                points += [dev._finite_xy(v, "string vertex") for v in g.get("vertices") or []]
+            except dev.InverterDeviceError as exc:
+                raise InverterCablingError(str(exc)) from None
+    xs, ys = [p[0] for p in points], [p[1] for p in points]
+    return (min(xs) - POSITION_EXTENTS_MARGIN, min(ys) - POSITION_EXTENTS_MARGIN,
+            max(xs) + POSITION_EXTENTS_MARGIN, max(ys) + POSITION_EXTENTS_MARGIN)
+
+
+def optimum_position(legs, extents, outlines, budget_s=POSITION_TIME_BUDGET_S, clock=time.monotonic):
+    """The plugin's optimum search (StringHomeRunCmd.cs:828-882) over position_plan(*extents): each
+    planned point in row-major order, outside every outline and its OUTLINE_BUFFER band (:853-863),
+    scored and kept only when strictly shorter than the best so far (:872, first of equals wins; the
+    score is the rerouted straight-leg total, identical for both axis toggles of :865). Returns
+    (point, score), or (None, None) when no planned point survives (:911-913). The time budget is a
+    Studio safety bound: past it the search fails closed; within it the answer is the plan's."""
+    deadline = clock() + budget_s
+    best, best_cost = None, None
+    for p in position_plan(*extents):
+        if clock() > deadline:
+            raise InverterCablingError(f"the position search exceeded {budget_s} s")
+        value = sum(_dist(p, leg) for leg in legs)
+        # The outline test only for a would-be winner: the same accepted sequence, fewer polygon walks.
+        if (best_cost is None or value < best_cost) and not _near_outline(p[0], p[1], outlines, OUTLINE_BUFFER):
+            best, best_cost = p, value
     return best, best_cost
 
 
 def inverter_position(state, panel_groups, host):
     """POSITIONINV (declared) on the Studio state: the device named by host PositionDevice moved to the
-    bounded optimum and its homeruns rerouted. Returns (new state, printed lines)."""
+    plugin plan's optimum and its homeruns rerouted. A device whose row records its number searches over
+    and reroutes only the strings that number selects (StringHomeRunCmd.cs:821); with no selected string
+    that has geometry (InverterPositionGuard.CanSearch, :839-847) nothing changes and the plugin's line is
+    printed. Returns (new state, printed lines)."""
     host = _host(host)
     outlines = validate_outlines(panel_groups)
     level, number = _host_device(host, "PositionDevice")
@@ -813,12 +917,24 @@ def inverter_position(state, panel_groups, host):
     legs = _device_homerun_legs(new, target["position"])
     if not legs:
         return new, ["The selected inverter has no homeruns to position."]
+    strings = _numbered_strings(new, target)
+    if strings is not None:
+        linked = [g for g in new["geometry"]["strings"]
+                  if isinstance(g, dict) and g.get("string") in strings and g.get("vertices")]
+        if not linked:
+            return new, [f"Inverter {number} has no connected strings; its position is unchanged."]
+        legs = _device_homerun_legs(new, target["position"], strings)
     before = sum(_dist(target["position"], leg) for leg in legs)
-    (x, y), after = optimum_position(legs, target["position"], outlines)
+    best, after = optimum_position(legs, _position_extents(new, target["position"], legs, strings), outlines)
+    if best is None:
+        # StringHomeRunCmd.cs:911-913: nothing moves.
+        return new, [f"Failed to find optimum position for Inverter: {number}"]
+    x, y = best
     if (x, y) == target["position"]:
         return new, [f"Inverter {number} is already at its optimum position."]
-    rerouted = _move_and_reroute(new, target, x, y)
-    st.save_drawing_properties(new)
+    rerouted = _move_and_reroute(new, target, x, y, strings)
+    if rerouted:
+        st.save_drawing_properties(new)   # only when a string is routed, as in inverter_move
     st.sort_rows(new)
     return new, [f"Inverter {number} positioned; {rerouted} homerun(s) rerouted; total homerun length "
                  f"{before / INCHES_PER_FOOT:.1f} ft -> {after / INCHES_PER_FOOT:.1f} ft."]
