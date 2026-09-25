@@ -26,7 +26,7 @@ function setBridgeState(next) {
 
 beforeEach(() => {
   vi.resetAllMocks()
-  state = { status: 'unavailable', ready: null, selectedObjectId: null }
+  state = { status: 'unavailable', ready: null, selectedObjectId: null, selectedHandles: null }
   bridge = {
     subscribe: vi.fn((fn) => { listener = fn; fn(state); return vi.fn() }),
     start: vi.fn(), stop: vi.fn(), bindDrawing: vi.fn().mockResolvedValue(undefined),
@@ -120,6 +120,26 @@ describe('AutoCAD palette scene in Studio', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Zoom to' }))
     await waitFor(() => expect(bridge.focusObject).toHaveBeenCalledWith('panel:A1', 'focus'))
     expect(document.body.innerHTML).not.toContain(sessionKey)
+  })
+
+  it.each([
+    [['2F4A'], '2F4A'],
+    [['2F4A', '2F4B', '2F4C'], '2F4A and 2 more'],
+  ])('shows handle selection %j and sends handles for drawing actions', async (objectHandles, label) => {
+    state = { status: 'connected', ready, selectedObjectId: null, selectedHandles: objectHandles }
+    render(<LeafPlatformScene />)
+    expect(screen.getByText(label).parentElement.textContent).toBe(`Selected object: ${label}`)
+    expect(screen.getByRole('button', { name: 'Select' }).disabled).toBe(false)
+    expect(screen.getByRole('button', { name: 'Zoom to' }).disabled).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom to' }))
+    await waitFor(() => expect(bridge.focusObject).toHaveBeenCalledWith({ objectHandles }, 'focus'))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Select' }).disabled).toBe(false))
+    fireEvent.click(screen.getByRole('button', { name: 'Select' }))
+    await waitFor(() => expect(bridge.focusObject).toHaveBeenCalledWith({ objectHandles }, 'select'))
+    setBridgeState({ ...state, selectedHandles: null })
+    expect(screen.getByText('None')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Select' }).disabled).toBe(true)
+    expect(screen.getByRole('button', { name: 'Zoom to' }).disabled).toBe(true)
   })
 
   it('offers no actions for a DWG in another workspace', () => {

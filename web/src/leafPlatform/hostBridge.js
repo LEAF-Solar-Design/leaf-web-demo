@@ -4,8 +4,23 @@ export const DISPATCH_MODE = 'autocad_idle_document_lock'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const IDENTITY_KEYS = ['platformTenantId', 'projectId', 'drawingId', 'drawingVersionId']
-const unavailable = () => ({ status: 'unavailable', ready: null, selectedObjectId: null })
+const unavailable = () => ({ status: 'unavailable', ready: null, selectedObjectId: null, selectedHandles: null })
 const isRecord = (value) => !!value && typeof value === 'object' && !Array.isArray(value)
+const isObjectId = (value) => typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,200}$/.test(value) && value === value.trim()
+
+function normalizeHandles(value) {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 1000) return null
+  const handles = []
+  const seen = new Set()
+  for (const handle of value) {
+    if (typeof handle !== 'string' || !/^[0-9A-Fa-f]{1,16}$/.test(handle) || handle !== handle.trim()) return null
+    const normalized = handle.toUpperCase()
+    if (seen.has(normalized)) return null
+    seen.add(normalized)
+    handles.push(normalized)
+  }
+  return handles
+}
 
 function dotNetTimestamp(date) {
   return date.toISOString().replace('Z', '0000+00:00')
@@ -102,7 +117,7 @@ export class LeafHostBridge {
     if (this.channel) return this.state
     this.channel = this.injectedChannel === undefined ? globalThis.window?.chrome?.webview ?? null : this.injectedChannel
     if (!this.channel) return this.state
-    this.state = { status: 'connecting', ready: null, selectedObjectId: null }
+    this.state = { status: 'connecting', ready: null, selectedObjectId: null, selectedHandles: null }
     this.channel.addEventListener('message', this.onMessage)
     this.channel.postMessage({ kind: 'host_bridge_hello', contractVersion: LEAF_PLATFORM_CONTRACT_VERSION })
     this.publish()
@@ -123,9 +138,12 @@ export class LeafHostBridge {
     return () => this.listeners.delete(listener)
   }
 
-  async focusObject(objectId, action = 'focus') {
+  async focusObject(target, action = 'focus') {
     if (this.state.status !== 'connected' || !this.channel) throw new Error('AutoCAD bridge unavailable')
-    if (typeof objectId !== 'string' || !/^[A-Za-z0-9_.:-]{1,200}$/.test(objectId)) throw new Error('Invalid drawing object identity')
+    const objectHandles = isRecord(target) && Object.keys(target).length === 1 && Object.hasOwn(target, 'objectHandles')
+      ? normalizeHandles(target.objectHandles) : null
+    const payload = isObjectId(target) ? { objectId: target } : objectHandles ? { objectHandles } : null
+    if (!payload) throw new Error('Invalid drawing object identity')
     if (!['select', 'focus'].includes(action)) throw new Error('Invalid drawing action')
     const ready = this.state.ready
     const channel = this.channel
@@ -137,7 +155,7 @@ export class LeafHostBridge {
       projectId: ready.projectId, drawingId: ready.drawingId,
       drawingVersionId: ready.drawingVersionId, nonce: crypto.randomUUID(),
       issuedAt: dotNetTimestamp(now), expiresAt: dotNetTimestamp(expires), action,
-      dispatchMode: DISPATCH_MODE, payload: { objectId },
+      dispatchMode: DISPATCH_MODE, payload,
     }
     const body = {
       protocolVersion: PROTOCOL_VERSION, sessionId: ready.sessionId,
@@ -185,8 +203,8 @@ export class LeafHostBridge {
       if (value.origin !== origin) return
       this.seenHostMessages.clear()
       this.state = isReady(value)
-        ? { status: 'connected', ready: value, selectedObjectId: null }
-        : { status: 'unbound', ready: value, selectedObjectId: null, bindingResult: null }
+        ? { status: 'connected', ready: value, selectedObjectId: null, selectedHandles: null }
+        : { status: 'unbound', ready: value, selectedObjectId: null, selectedHandles: null, bindingResult: null }
       this.publish()
       return
     }
@@ -223,9 +241,10 @@ export class LeafHostBridge {
       this.publish()
     } else if (envelope.verb === 'drawing.selection_changed' &&
         isRecord(envelope.payload) && envelope.payload.kind === 'selection_event') {
-      const selectedObjectId = typeof envelope.payload.payload?.objectId === 'string'
+      const selectedObjectId = isObjectId(envelope.payload.payload?.objectId)
         ? envelope.payload.payload.objectId : null
-      this.state = { ...this.state, selectedObjectId }
+      const selectedHandles = selectedObjectId ? null : normalizeHandles(envelope.payload.payload?.objectHandles)
+      this.state = { ...this.state, selectedObjectId, selectedHandles }
       this.publish()
     }
   }
