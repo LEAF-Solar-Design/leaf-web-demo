@@ -515,6 +515,29 @@ if [[ "$tracing_helpers_ready" != 1 || "$reporters_ready" != 1 ]]; then
 fi
 gate_status=0
 unset PYTHONSAFEPATH
+echo "=== EXPERIMENT E5: unbuffered append latency by location"
+python - <<'LEAF_E5'
+import os, time
+src = os.environ.get("CODEBUILD_SRC_DIR", "/tmp")
+for d in ("/tmp/gate-logs/test-reports/e5", "/tmp/e5", src + "/e5", "/dev/shm/e5"):
+    try:
+        os.makedirs(d, exist_ok=True)
+        f = open(d + "/a.jsonl", "ab", buffering=0)
+        t = time.perf_counter()
+        for i in range(300):
+            f.write(b'{"schema":"leaf.ci.test-attempt.v1","nodeid":"tests/x.py::test_y","phase":"call","outcome":"passed"}
+')
+        dt = time.perf_counter() - t
+        f.close()
+        print(f"{d}: 300 unbuffered appends {dt*1000:.1f} ms ({dt/300*1000:.2f} ms each)")
+    except Exception as exc:
+        print(d, "error", type(exc).__name__, exc)
+LEAF_E5
+( cd server && time python -m pytest -q -p no:cacheprovider tests/test_solar_terrain.py 2>&1 | tail -n 2 ) 2>&1 || true
+( cd server && time python -m pytest -q -p no:cacheprovider -p pytest_selection --leaf-output /tmp/e5-plg --leaf-repo "$CODEBUILD_SRC_DIR" --leaf-selection "$selection_dir/decision.json" --leaf-catalog "$selection_dir/catalog.json" tests/test_solar_terrain.py 2>&1 | tail -n 2 ) 2>&1 || true
+( cd server && time python -m pytest -q -p no:cacheprovider -p pytest_selection --leaf-output /dev/shm/e5-plg --leaf-repo "$CODEBUILD_SRC_DIR" --leaf-selection "$selection_dir/decision.json" --leaf-catalog "$selection_dir/catalog.json" tests/test_solar_terrain.py 2>&1 | tail -n 2 ) 2>&1 || true
+mount | grep -E " / | /tmp | /dev/shm |/codebuild" | cut -c1-160
+echo "=== END E5"
 python scripts/run-all-gates.py --jobs "${LEAF_GATE_JOBS:-auto}" --retry 1 --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs "${only_args[@]}" || gate_status=$?
 echo "LEAF_T end gate $(date +%s%3N) rc=$gate_status"
 if [[ -f /tmp/gate-results/gate-result.json ]]; then
