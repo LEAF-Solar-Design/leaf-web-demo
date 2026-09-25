@@ -10,8 +10,7 @@ write a slope map, files and face colours, b3 to b14 write heatmap markers, file
 records (none on a layer the d-steps read), b18 tunes the host. Nothing here reads plugin
 output. The engines are server/solar_ground_dsteps.py.
 
-  d3  trackers-to-panelgroups  LEAFTRACKERSTOPANELGROUPS  report rows (a terminal step: its result
-                                                          is not chained into d4)
+  d3  trackers-to-panelgroups  LEAFTRACKERSTOPANELGROUPS  report rows and drawing counters
   d4  trench-routing           LEAFTRENCH                 trench row (start 20,20; end 120,70)
   d5  (define-array, not receipted: it only feeds d6)    LEAFDEFINEARRAY, centre 250,250
   d6  show-export-preview      LEAFSHOWEXPORT             export-preview rows (and `removed`)
@@ -28,6 +27,7 @@ Rows (family exports, G12/G17/G21/G24/G28; every row {id, type, quantity: 1, uni
                   G20 normalization, the manifest's host fields blanked (G28, listed in
                   synthetic_fields), G21 chunks or the G24 digest by size
   report          d3: panel-groups-created and panel-group-slots (ints)
+  setting         d3: changed PanelGroupNumber and PanelGroupColour, sorted by name
   unexpected-change   d8 whose committed state moved (the G20 read-only rule)
 Rows are emitted sorted by type, then id (G9). Parameters are G17's plus the G22 `answers`.
 
@@ -99,7 +99,7 @@ class EvidenceError(ValueError):
 # ------------------------------------------------------------------- state --
 
 def with_dstep_store(state):
-    """Studio's state plus what the d-steps commit: trench polylines and the export preview.
+    """Studio's state plus what the d-steps commit: counters, trenches and the export preview.
     Adds missing keys in place."""
     if not isinstance(state, dict) or "grid" not in state or "frames" not in state:
         raise EvidenceError("studio state must be the terrain producer's state")
@@ -242,10 +242,18 @@ def _answer_point(text):
 # ------------------------------------------------------------------- steps --
 
 def step_trackers_to_panel_groups(state, intake, ctx):
-    """d3: the tracker rows through the key-aware reader; a terminal step, nothing is committed."""
+    """d3: read tracker rows and commit the drawing's panel-group counters."""
     result = dsteps.trackers_to_panel_groups(bev.tracker_entities(state), bev.MPU)
+    before = state.get("settings") or {}
+    after = dsteps.panel_group_settings(result["panel_groups_created"], before)
+    defaults = {"PanelGroupNumber": 1, "PanelGroupColour": 0}
+    # Follow b15 / analysis_ev.setting_rows: changed values only, sorted by name.
+    settings = [_row(f"setting-{name}", "setting", name=name, value=after[name])
+                for name in sorted(after) if after[name] != before.get(name, defaults[name])]
+    if settings:
+        state["settings"] = dict(before, **after)
     return [report_row("panel-groups-created", result["panel_groups_created"]),
-            report_row("panel-group-slots", result["panel_group_slots"])]
+            report_row("panel-group-slots", result["panel_group_slots"])] + settings
 
 
 def step_trench(state, intake, ctx):
@@ -310,8 +318,8 @@ STEPS = {"d3": step_trackers_to_panel_groups, "d4": step_trench, "d5": step_defi
 
 
 def step_rows(step_id, studio_state, intake, ctx=None):
-    """G28 rows for one d-step, computed from Studio's state (updated in place, G13; d3
-    commits nothing). A read-only step whose state moved also emits `unexpected-change`."""
+    """G28 rows for one d-step, computed from Studio's state (updated in place, G13).
+    A read-only step whose state moved also emits `unexpected-change`."""
     if step_id not in STEPS:
         raise EvidenceError(f"step {step_id!r} is not one of {tuple(STEPS)}")
     ev.validate_intake(intake, KIND)

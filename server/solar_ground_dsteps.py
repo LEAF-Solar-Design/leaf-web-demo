@@ -636,6 +636,18 @@ def hide_export(preview_count):
 #  LEAFTRACKERSTOPANELGROUPS (LeafTrackersToPanelGroupsCommand.cs, as intended)
 # ---------------------------------------------------------------------------
 
+def panel_group_settings(created, stored=None):
+    """Drawing counters after creating direct terrain tracker groups."""
+    stored = {} if stored is None else stored
+    created = _int(created, "panel groups created")
+    # LeafSolarDesign.Core/BranchCmdCore.cs:645 increments the group number.
+    number = _int(stored.get("PanelGroupNumber", 1), "PanelGroupNumber")
+    # BranchCmdCore.cs:527 loads the DRAWING colour counter, :646 increments it,
+    # and :674 saves it. Only the palette lookup (:580) wraps, not the counter.
+    colour = _int(stored.get("PanelGroupColour", 0), "PanelGroupColour")
+    return {"PanelGroupNumber": number + created, "PanelGroupColour": colour + created}
+
+
 def trackers_to_panel_groups(tracker_entities, meters_per_unit=1.0):
     """LEAFTRACKERSTOPANELGROUPS as INTENDED (G28): CollectTrackers (:251-317) keeps every
     tracker with module slots, reading each tracker's row fields through the key-aware row

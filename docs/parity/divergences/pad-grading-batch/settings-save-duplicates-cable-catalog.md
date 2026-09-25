@@ -25,3 +25,7 @@ when reading (for example `ObjectCreationHandling.Replace` on the property), or 
 Studio's multi-pad grading computes the same pad, elevation and label and writes no catalog, so the only
 disagreement is the plugin's `HomerunRouting` setting row and its entity-mapping entry. When the plugin stops
 growing the catalog, this divergence becomes an ordinary passing receipt.
+
+## Retired
+
+Retired by Branch2025 #308 (saved lists replace defaults on load): recaptured 2026-09-24 on an unsigned test build of master 09b5b741 (terrain chain step b15, b14 reopened on the same build), the receipt now passes with no declared diffs. The signed release carrying the fix is pending the operator (Solar residuals R23).
