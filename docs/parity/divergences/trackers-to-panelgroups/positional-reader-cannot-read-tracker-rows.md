@@ -20,3 +20,7 @@ Studio reads the same tracker rows through the key-aware reader and converts the
 many groups and slots it created; the plugin's evidence is its empty delta plus the `command-error` report row. The
 declared diffs are exactly the comparator's. When the plugin reads tracker rows by key, this capability can be
 recaptured for an ordinary receipt.
+
+## Retired
+
+Retired by Branch2025 #310 (tracker XData read by key), with #319 removing an unrelated open-time ProjectName write: recaptured 2026-09-25 on an unsigned test build of master a94db8d9 (terrain chain d3, d2 reopened on the same build), LEAFTRACKERSTOPANELGROUPS creates 237 panel groups from 69,678 module slots and the receipt passes with no declared diffs (Studio's counters from #1441, the plugin adapter's success path from Branch2025 #317). The signed release carrying the fix is pending the operator (Solar residuals R23).

@@ -38,3 +38,7 @@ Studio's pad grading writes only the grading elevation. The receipt's declared d
 extra `setting` rows the plugin commits and the entity-mapping entries that follow them; the grade pad,
 its label and the elevation agree. Filed to the Branch2025 lane on 2026-09-23. When the plugin writes only
 the grading settings, this divergence should become an ordinary passing receipt.
+
+## Retired
+
+Retired by Branch2025 #319 (opening a drawing no longer resets its settings): the extra settings were never written by LEAFGRADE; they were the open-time flow reset that each save carried. Recaptured 2026-09-25 on an unsigned test build of master a94db8d9 (terrain chain a10, a9 reopened on the same build), the receipt passes with no declared diffs: the delta is the graded pad and GradingElevationM only. The signed release carrying the fix is pending the operator (Solar residuals R23).
