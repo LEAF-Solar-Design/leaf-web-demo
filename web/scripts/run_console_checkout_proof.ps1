@@ -3,13 +3,15 @@ param(
   [int]$AppPort = 8230,
   [int]$BrokerPort = 8240,
   [int]$HarnessPort = 8250,
-  [string]$Spec = ''
+  [string]$Spec = '',
+  [switch]$KeepRunRoot
 )
 
 # A thin sibling of run_unified_local_proof.ps1 for iterating on ONE local spec:
 # same managed stack, same env, but the playwright invocation is a parameter so
 # a single file can be re-run without the whole e2e/local directory.
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'lib\proof-runtime.ps1')
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $runId = Get-Date -Format 'yyyyMMdd-HHmmss'
 $runRoot = Join-Path ([System.IO.Path]::GetTempPath()) "leaf-console-checkout-$runId"
@@ -38,6 +40,8 @@ function Wait-Json([string]$Url, [scriptblock]$Accept, [int]$Seconds = 120) {
 foreach ($port in @($WebPort, $AppPort, $BrokerPort, $HarnessPort)) {
   if (Test-PortOpen $port) { throw "Port $port is already in use" }
 }
+
+try { Invoke-ProofRetentionPrune | Out-Null } catch { Write-Host "Local proof retention prune skipped: $($_.Exception.Message)" }
 
 New-Item -ItemType Directory -Path $runRoot | Out-Null
 foreach ($name in @('drawings', 'guest-drawings', 'uploads', 'grants', 'tenants', 'tenant-git')) {
@@ -79,12 +83,11 @@ $stderr = Join-Path $runRoot 'stack.err.log'
 $proofExitCode = 1
 
 try {
-  $managedVenv = Join-Path $runRoot 'python-runtime'
-  uv venv $managedVenv --python 3.13 | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw 'Could not create the managed proof Python runtime' }
-  $launcherFile = Join-Path $managedVenv 'Scripts\python.exe'
-  & uv pip install --python $launcherFile -r (Join-Path $repoRoot 'server\requirements.txt') -r (Join-Path $repoRoot 'platform\requirements.txt') | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw 'Could not install the managed proof Python dependencies' }
+  $reqs = @(
+    (Join-Path $repoRoot 'server\requirements.txt'),
+    (Join-Path $repoRoot 'platform\requirements.txt')
+  )
+  $launcherFile = Get-ProofRuntime -RequirementFiles $reqs
   $launcherArgs = @(
     'scripts/start-leaf.py',
     '--broker-port', $BrokerPort,
@@ -109,7 +112,11 @@ try {
     Stop-Process -Id $launcher.Id
     $launcher.WaitForExit(10000) | Out-Null
   }
-  Write-Host "Local proof runtime retained at $runRoot"
+  if ($proofExitCode -eq 0 -and -not $KeepRunRoot -and (Remove-ProofRunRoot -Path $runRoot)) {
+    Write-Host 'Local proof runtime removed (passing run)'
+  } else {
+    Write-Host "Local proof runtime retained at $runRoot"
+  }
 }
 
 exit $proofExitCode
