@@ -4,6 +4,7 @@ Load with -p pytest_selection from an extracted trusted directory. The adapter
 supplies --leaf-selection, --leaf-catalog, --leaf-repo and --leaf-output.
 """
 
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
@@ -129,8 +130,10 @@ class SelectionPlugin:
         if distributed:
             selection.full(self.decision, "xdist_full_until_consensus")
         self.attempt_stream = (self.output / ("attempts-" + self.shard + ".jsonl")).open("ab", buffering=0)
-        self.capture = trace_reads.Capture(self.root).install()
-        self.capture.snapshot_modules()
+        self.capture = None
+        if os.environ.get("LEAF_READSET_DIR"):
+            self.capture = trace_reads.Capture(self.root).install()
+            self.capture.snapshot_modules()
 
     def test_id(self, nodeid, path=None):
         if nodeid not in self.nodeids:
@@ -139,7 +142,8 @@ class SelectionPlugin:
                     self.root, nodeid, base=self.config.rootpath, path=path)
             except (TypeError, ValueError, OSError, UnicodeError):
                 selection.full(self.decision, "module_identity_drift")
-                self.capture.mark_incomplete("module_identity_drift")
+                if self.capture is not None:
+                    self.capture.mark_incomplete("module_identity_drift")
                 self.nodeids[nodeid] = nodeid
         return self.nodeids[nodeid]
 
@@ -148,7 +152,7 @@ class SelectionPlugin:
         # The wrapper enters before existing quarantine hooks and leaves after them.
         self.collection = [self.test_id(item.nodeid, item.path) for item in items]
         yield
-        with self.capture.suspended():
+        with self.capture.suspended() if self.capture is not None else nullcontext():
             # Some exclusion hooks only change items. Account for their actual
             # removals before our filter, not merely requested --deselect values.
             remaining = {self.test_id(item.nodeid, item.path) for item in items}
@@ -181,7 +185,8 @@ class SelectionPlugin:
                         "execution_mode": self.decision.get("execution_mode"),
                         "reasons": self.decision.get("reasons", [])}
             selection.write_json(self.output / ("collection-" + self.shard + ".json"), manifest)
-        self.capture.snapshot_modules()
+        if self.capture is not None:
+            self.capture.snapshot_modules()
 
     def pytest_deselected(self, items):
         if not self.filtering:
@@ -190,21 +195,24 @@ class SelectionPlugin:
     def pytest_collectreport(self, report):
         if report.failed:
             self.collection_errors.append(report.nodeid)
-            self.capture.mark_incomplete("collection_failed")
+            if self.capture is not None:
+                self.capture.mark_incomplete("collection_failed")
 
     @hook(hookwrapper=True, tryfirst=True)
     def pytest_runtest_protocol(self, item, nextitem):
         nodeid = self.test_id(item.nodeid, item.path)
         module = nodeid.split("::", 1)[0]
-        self.capture.begin_module(module, nodeid)
+        if self.capture is not None:
+            self.capture.begin_module(module, nodeid)
         try:
             yield
         finally:
-            self.capture.end_module()
+            if self.capture is not None:
+                self.capture.end_module()
 
     @hook(hookwrapper=True)
     def pytest_fixture_setup(self, fixturedef, request):
-        if fixturedef.scope not in ("function", "class", "module"):
+        if self.capture is not None and fixturedef.scope not in ("function", "class", "module"):
             with self.capture.shared_scope():
                 yield
         else:
@@ -213,11 +221,11 @@ class SelectionPlugin:
     @hook(hookwrapper=True, tryfirst=True)
     def pytest_runtest_teardown(self, item, nextitem):
         # A finalizer can outlive its apparent test/module scope. Share all reads.
-        with self.capture.shared_scope():
+        with self.capture.shared_scope() if self.capture is not None else nullcontext():
             yield
 
     def pytest_runtest_logreport(self, report):
-        with self.capture.suspended():
+        with self.capture.suspended() if self.capture is not None else nullcontext():
             nodeid = self.test_id(report.nodeid)
             if report.when == "setup" or nodeid not in self.attempt_numbers:
                 self.attempt_numbers[nodeid] = self.attempt_numbers.get(nodeid, 0) + 1
@@ -249,8 +257,9 @@ class SelectionPlugin:
             self.worker_completions[node.gateway.id] = output
 
     def pytest_sessionfinish(self, session, exitstatus):
-        with self.capture.suspended():
-            self.capture.snapshot_modules()
+        with self.capture.suspended() if self.capture is not None else nullcontext():
+            if self.capture is not None:
+                self.capture.snapshot_modules()
             self.attempt_stream.close()
             if self.is_controller:
                 expected = sorted(tid for entry in self.catalog.get("suites", [])
@@ -268,9 +277,9 @@ class SelectionPlugin:
             if self.is_controller:
                 complete = complete and all(row.get("full_run_complete") is True
                                             for row in self.worker_completions.values())
-            if not complete:
+            if not complete and self.capture is not None:
                 self.capture.mark_incomplete("session_incomplete")
-            entries = self.catalog.get("suites", [])
+            entries = self.catalog.get("suites", []) if self.capture is not None else []
             for entry in entries:
                 module = entry.get("module")
                 if not module:
@@ -301,7 +310,8 @@ class SelectionPlugin:
                     selection.write_json(destination.with_suffix(".misses.json"), {"misses": misses})
                     for miss in misses:
                         print("SELECTION_MISS " + selection.canonical(miss).decode("ascii"), file=sys.stderr)
-            self.decision.update(execution_complete=complete, test_exit_code=int(exitstatus))
+            self.decision.update(execution_complete=complete, test_exit_code=int(exitstatus),
+                                 tracing_active=self.capture is not None)
             phases = {}
             for row in self.attempts:
                 phases.setdefault((row["nodeid"], row["attempt"]), set()).add(row["phase"])
@@ -332,9 +342,11 @@ class SelectionPlugin:
             detail = dict(self.decision, schema="leaf.ci.selection.v1")
             print("LEAF_SELECTION_FINAL " + selection.canonical(detail).decode("ascii"),
                   file=sys.stderr)
-            self.capture.close()
+            if self.capture is not None:
+                self.capture.close()
 
     def pytest_unconfigure(self, config):
-        self.capture.close()
+        if self.capture is not None:
+            self.capture.close()
         if not self.attempt_stream.closed:
             self.attempt_stream.close()
