@@ -1,5 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
+echo "LEAF_EVENT $(python3 -I -c '
+import os, subprocess, sys, urllib.parse
+e = os.environ
+raw = e.get("CODEBUILD_WEBHOOK_EVENT", "")
+allowed = {"PULL_REQUEST_CREATED", "PULL_REQUEST_UPDATED", "PULL_REQUEST_REOPENED", "PUSH"}
+initiator = e.get("CODEBUILD_INITIATOR", "")
+event = raw if raw in allowed else (
+    "manual" if not raw and initiator and initiator != "GitHub-Hookshot"
+    and not e.get("CODEBUILD_WEBHOOK_TRIGGER") else "unknown"
+)
+q = lambda value: urllib.parse.quote(value, safe="/:@._-+")
+p = subprocess.run(
+    ["git", "hash-object", "--no-filters", sys.argv[1]],
+    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+)
+blob = p.stdout.strip() if p.returncode == 0 else "unknown"
+fields = [
+    ("event", event),
+    ("head_ref", e.get("CODEBUILD_WEBHOOK_HEAD_REF", "")),
+    ("base_ref", e.get("CODEBUILD_WEBHOOK_BASE_REF", "")),
+    ("source_version", e.get("CODEBUILD_SOURCE_VERSION", "")),
+    ("resolved", e.get("CODEBUILD_RESOLVED_SOURCE_VERSION", "")),
+    ("ci_blob", blob),
+    ("mode", "none"),
+    ("workers", sys.argv[2]),
+    ("image", e.get("CODEBUILD_BUILD_IMAGE", "")),
+    ("compute", "unknown"),
+]
+print(" ".join(k + "=" + q(v) for k, v in fields))
+' "${BASH_SOURCE[0]}" "$(case "${LEAF_GATE_JOBS:-auto}" in ''|*[!0-9]*|0*) echo unknown ;; *) echo "$LEAF_GATE_JOBS" ;; esac)")"
+echo "LEAF_T start setup $(date +%s%3N)"
 
 # Playwright supplies Chromium. The unused Chrome apt index must not prevent
 # Ubuntu from supplying its OS libraries; signature/hash checks stay enabled.
@@ -77,7 +108,9 @@ BASE_REF="${CODEBUILD_WEBHOOK_BASE_REF:-}"; BASE_REF="${BASE_REF##refs/heads/}";
 if git rev-parse --verify -q "origin/$BASE_REF" >/dev/null; then echo "origin/$BASE_REF"; elif git rev-parse --verify -q "$BASE_REF" >/dev/null; then echo "$BASE_REF"; else echo "FATAL: base ref $BASE_REF not in clone"; git branch -a | head -20; exit 1; fi > /tmp/base_ref
 echo "base=$(cat /tmp/base_ref) head=$(git rev-parse --short HEAD) event=${CODEBUILD_WEBHOOK_EVENT:-manual}"
 export BASE="$(cat /tmp/base_ref)"
+echo "LEAF_T end setup $(date +%s%3N) rc=0"
 
+echo "LEAF_T start contract $(date +%s%3N)"
 echo "=== job contract ==="
 cd "$CODEBUILD_SRC_DIR"
 echo "--- 1/2 Install contract test dependencies"
@@ -87,22 +120,30 @@ echo "--- 2/2 Run workflow shape contract"
 PYTHONSAFEPATH=1 python -m pytest -q \
   tests/test_contract_workflow_shape.py \
   tests/test_dispatch_staging_deploys_shape.py
+echo "LEAF_T end contract $(date +%s%3N) rc=0"
 
 echo "=== job license-fence ==="
+echo "LEAF_T start webdeps $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR/web"
 echo "--- 1/4 Install web dependencies"
 npm ci
+echo "LEAF_T end webdeps $(date +%s%3N) rc=0"
+echo "LEAF_T start webbundle $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR/web"
 echo "--- 2/4 Build web bundle"
 npm run build
+echo "LEAF_T end webbundle $(date +%s%3N) rc=0"
+echo "LEAF_T start license-fence $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR"
 echo "--- 3/4 License fence self-test"
 python scripts/check_license_fence.py --self-test
 cd "$CODEBUILD_SRC_DIR"
 echo "--- 4/4 License fence scan"
 python scripts/check_license_fence.py .
+echo "LEAF_T end license-fence $(date +%s%3N) rc=0"
 
 echo "=== job test-gate ==="
+echo "LEAF_T start pydeps $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR"
 echo "--- 1/6 Upgrade pip"
 python -m pip install --upgrade pip
@@ -116,13 +157,17 @@ python -m pip install \
   -r scripts/requirements-ci.txt \
   -r executor/control_plane/requirements.txt \
   -r executor/runtime/requirements.txt
+echo "LEAF_T end pydeps $(date +%s%3N) rc=0"
+echo "LEAF_T start harness-deps $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR/harness"
 echo "--- 3/6 Install harness dependencies"
 npm ci
+echo "LEAF_T end harness-deps $(date +%s%3N) rc=0"
 cd "$CODEBUILD_SRC_DIR/web"
 echo "--- 4/6 Reuse web dependencies"
 # The license-fence job installed a clean web tree in this same build.
 # No intervening step changes its dependencies, so reuse that npm ci.
+echo "LEAF_T start chromium $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR/web"
 echo "--- 5/6 Install Chromium for browser proofs"
 # LEAF_CI_BROWSER_INSTALL_BEGIN
@@ -160,7 +205,9 @@ install_ci_browser() {
 install_ci_browser npx playwright
 # Install the Python producer's pinned browser with the gate interpreter too.
 install_ci_browser python -m playwright
+echo "LEAF_T end chromium $(date +%s%3N) rc=0"
 # LEAF_CI_BROWSER_INSTALL_END
+echo "LEAF_T start gate $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR"
 echo "--- 6/6 Run unsharded test gate and print scoreboard"
 export LEAF_AUTOFILL_SOLVER_ABSENT_OK=1
@@ -168,15 +215,18 @@ export LEAF_MANAGED_WEB_BROWSER_MODE=trusted-template-container
 mkdir -p /tmp/gate-results
 gate_status=0
 python scripts/run-all-gates.py --jobs "${LEAF_GATE_JOBS:-auto}" --retry 1 --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs || gate_status=$?
+echo "LEAF_T end gate $(date +%s%3N) rc=$gate_status"
 if [[ -f /tmp/gate-results/gate-result.json ]]; then
   tail -n 200 /tmp/gate-results/gate-result.json || true
 else
   echo "No gate result JSON was written (runner exit $gate_status)"
 fi
+echo "LEAF_T start change-impact $(date +%s%3N)"
 echo "=== job change-impact ==="
 # Advisory in S1: prints the assessment, never changes gate_status. Kill switch honoured.
 python scripts/ci/change_impact_job.py --repo . --head "${CODEBUILD_RESOLVED_SOURCE_VERSION:-HEAD}" \
   --base-ref "${CODEBUILD_WEBHOOK_BASE_REF:-}" --head-ref "${CODEBUILD_WEBHOOK_HEAD_REF:-}" \
   --event "${CODEBUILD_WEBHOOK_EVENT:-manual}" --gate-result /tmp/gate-results/gate-result.json \
   --receipt-dir /tmp/impact || echo "change-impact: helper exit $? (advisory)"
+echo "LEAF_T end change-impact $(date +%s%3N) rc=0"
 exit "$gate_status"

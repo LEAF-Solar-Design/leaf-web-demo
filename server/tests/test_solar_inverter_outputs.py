@@ -18,6 +18,7 @@ import importlib.util
 import io
 import math
 from pathlib import Path
+import random
 import sys
 import zipfile
 
@@ -455,14 +456,30 @@ def test_insert_schedules_refuses_a_bad_point():
 # ------------------------------------------------------------- cable export --
 
 def test_cable_export_writes_the_workbook_and_its_file_row():
+    # R03b: the export form's own sheets (StringHomerunExportForm.cs:349-413), not the InsertSchedules tables;
+    # L2 collectors on and L1ToL2Assignments held, so a Feeder Schedule (no session feeders: header only).
     state = schedule_state()
     after, lines, workbook = out.cable_export(state, HOST, {"branch_string_export": "Export All"})
     assert st.publish(after) == st.publish(state)
     names = [name for name, _ in workbook["sheets"]]
-    assert names == ["Equipment Schedule", "Combiner Inverter Schedule", "String Schedule"]
+    assert names == ["Homeruns", "Equipment Schedule", "Inverter Schedule", "String Schedule", "Feeder Schedule"]
+    assert lines == ["CableExport: wrote 5 sheet(s)."]
+    text = workbook["text"].split("\n")
+    assert text[:5] == ["# Homeruns", "\t".join(out.HOMERUN_HEADERS),       # SelectAll: the homerun first
+                        "1 - a\t1\tEnd Homerun\tNA\t20.00\t30.00\t15.00",
+                        "1 - a\t1\tString\t14\t10.00\t30.00\t15.00",
+                        "1 - a\t2\tString\t13\t10.00\t10.00\t5.00"]
+    assert "INV-1\tA\t2\t2/2\t14, 13\t27\t-\t-\t1500\t-\t" in text
+    assert "INV-2\tB\t1\t1/2\t12\t12\t-\t-\t1500\t-\t" in text
+    assert "2 - b\t3\tString\t12\t10.00\t10.00\t5.00" in text
+    assert "INV-1..1" not in workbook["text"] and "INV-1\tString Inverter\tMaker\tM250\t1\t" \
+        "250.0kW AC, 800V, 180.5A\tUL 1741\t690.4" in text
+    assert "S1-A1\t1\tA\t-\t14\t-\t717.6\t1500\t782.4\t-\t-\t-\t-\t30\t-\t-\t-\tP99.5 Voc" in text
+    assert "TOTAL\t\t3 strings\t\t39" in text
+    assert text[-3:] == ["# Feeder Schedule", "Combiner Box #\tInverter #\tFeeder Length (ft)", ""]
     with zipfile.ZipFile(io.BytesIO(workbook["bytes"])) as archive:
-        assert "xl/worksheets/sheet3.xml" in archive.namelist()
-        assert "P99.5 Voc" in archive.read("xl/worksheets/sheet3.xml").decode("utf-8")
+        assert "xl/worksheets/sheet5.xml" in archive.namelist()
+        assert "P99.5 Voc" in archive.read("xl/worksheets/sheet4.xml").decode("utf-8")
     assert out.write_workbook(workbook["sheets"]) == workbook["bytes"]      # deterministic
     row = out.file_row(workbook["text"])
     assert "".join(row["chunks"]) == workbook["text"] and row["role"] == "string-export-xlsx"
@@ -486,3 +503,154 @@ def test_cs_number_formats():
     assert out.cs_text(112.0) == "112" and out.cs_text(163.3) == "163.3"
     assert out.safe_format("abc", "N0") == "abc" and out.safe_format_int("12") == "12"
     assert out.device_number_of("+22/1d") == 1 and out.device_number_of("-") == -1
+    assert out.cs_fixed(6.1, 2) == "6.10" and out.cs_fixed(0.125, 2) == "0.13" and out.cs_fixed(2.675, 2) == "2.67"
+    with pytest.raises(out.InverterOutputError):
+        out.cs_fixed(float("nan"), 2)
+
+
+# ------------------------------------------------ .NET 8 List<T>.Sort port --
+
+def by_key(a, b):
+    return (a[0] > b[0]) - (a[0] < b[0])
+
+
+def test_dotnet_sort_three_elements_is_unstable_like_net():
+    # size 3: SwapIfGreater(0,1), (0,2), (1,2); the tied pair ends reversed.
+    assert out.dotnet_list_sort([(1, "a"), (1, "b"), (0, "c")], by_key) == [(0, "c"), (1, "b"), (1, "a")]
+    assert out.dotnet_list_sort([(2, "a"), (1, "b")], by_key) == [(1, "b"), (2, "a")]
+    assert out.dotnet_list_sort([], by_key) == [] and out.dotnet_list_sort([(5, "x")], by_key) == [(5, "x")]
+
+
+def test_dotnet_sort_partitions_seventeen_ties_like_net():
+    # One PickPivotAndPartition over 17 equal keys (pivot index 8 parked at 15, the Hoare scan swapping
+    # 1..7 with 14..8), then two insertion-sorted halves that keep their order.
+    keys = [(0, n) for n in range(17)]
+    assert [n for _, n in out.dotnet_list_sort(keys, by_key)] == \
+        [0, 14, 13, 12, 11, 10, 9, 15, 8, 6, 5, 4, 3, 2, 1, 7, 16]
+
+
+def test_dotnet_sort_heap_and_insertion_paths():
+    keys = [(0, n) for n in range(4)]
+    out._heap_sort(keys, 0, 4, by_key)
+    assert [n for _, n in keys] == [1, 2, 3, 0]
+    keys = [(0, n) for n in range(10)]
+    out._insertion_sort(keys, 0, 10, by_key)                  # stable on ties
+    assert [n for _, n in keys] == list(range(10))
+
+
+def test_dotnet_sort_orders_every_input():
+    rng = random.Random(2026)
+    for size in list(range(0, 40)) + [100, 533, 1000]:
+        for spread in (1, 3, 1000):
+            keys = [(rng.randrange(spread), n) for n in range(size)]
+            result = out.dotnet_list_sort(list(keys), by_key)
+            assert [k for k, _ in result] == sorted(k for k, _ in keys) and sorted(result) == sorted(keys)
+            heap = list(keys)
+            out._intro_sort(heap, 0, len(heap), 0, by_key)    # depth limit 0: HeapSort
+            assert [k for k, _ in heap] == sorted(k for k, _ in keys) and sorted(heap) == sorted(keys)
+
+
+# ------------------------------------------------ i9 against the plugin workbook --
+# R03b: the committed i8 state (the i9 step's input) on the i9 host of the evidence producer, against the
+# workbook test build 5 of the fixed plugin saved (receipt w9-testbuild5-20260925, i9-homeruns.xlsx; Branch2025
+# #327 reads maxACPower as kW), rendered by workbook_text's rule. Every row, the Homeruns feeders included (their
+# SelectAll order from RouteL2Feeders' drawing order), in place.
+FEEDER_ROWS = 14
+
+I8_STATE = ROOT / "docs" / "parity" / "evidence" / "rooftop" / "inverters" / "state-i8.json"
+PLUGIN_WORKBOOK_TEXT = ROOT / "docs" / "parity" / "evidence" / "rooftop" / "inverters" / "i9-plugin-workbook.txt"
+STUDIO_RATING_ROW = "INV-1..5\tString Inverter\tSungrow\tSG250HX\t5\t250.0kW AC, 800V, 180.5A\tUL 1741\t690.4"
+VOC_COLD = "Voc \u00d7 (1 + \u03b2voc/100 \u00d7 (Tmin \u2212 25\u00b0C)), Tmin = -40\u00b0C"
+EXPECTED_EQUIPMENT = [
+    "EQUIPMENT SCHEDULE", "", "Tag\tDescription\tManufacturer\tModel\tQty\tRating\tListing\tNEC Ref",
+    STUDIO_RATING_ROW,
+    "DC-DISC\tDC Disconnect\t(by installer)\t-\t5\t1500V, 30A\tUL 98\t690.13",
+    "AC-DISC\tAC Disconnect\t(by installer)\t-\t5\t800V, 226A\tUL 98\t690.54", "",
+    "DESIGN PARAMETERS", "Design Min Temp\t-40\u00b0C per NEC 690.7(A)(3)", "", "NEC REFERENCES",
+    "690.4 - Installation requirements for PV equipment",
+    "690.7(A)(3) - Maximum system voltage: Voc corrected for lowest expected ambient temperature",
+    "690.8(A) - Maximum circuit current: Isc \u00d7 1.25 for continuous duty",
+    "690.13 - DC photovoltaic disconnecting means",
+    "690.54 - Interactive system point of interconnection"]
+
+
+@pytest.fixture(scope="module")
+def i9_text():
+    ev = _load("solar_inverter_outputs_evidence", ROOT / "scripts" / "solar_inverter_outputs_evidence.py")
+    state = st.load_state(I8_STATE)
+    _, _, workbook = out.cable_export(state, ev.host_for("i9"), {"branch_string_export": "Export All"})
+    return workbook["text"]
+
+
+def sections(text):
+    """[(sheet name, its lines)] of a workbook_text rendering."""
+    out_sections = []
+    for line in text.splitlines():
+        if line.startswith("# "):
+            out_sections.append((line[2:], []))
+        else:
+            out_sections[-1][1].append(line)
+    return out_sections
+
+
+def test_i9_workbook_sheets_and_the_rows_the_plugin_wrote(i9_text):
+    sheets = dict(sections(i9_text))
+    assert [name for name, _ in sections(i9_text)] == \
+        ["Homeruns", "Equipment Schedule", "Inverter Schedule", "String Schedule"]
+    assert sheets["Equipment Schedule"] == EXPECTED_EQUIPMENT
+    homeruns = sheets["Homeruns"]
+    assert len(homeruns) == 534 and homeruns[0] == "\t".join(out.HOMERUN_HEADERS)
+    # The unstable sort's order inside a circuit (List.Sort over the SelectAll order).
+    assert homeruns[1:13] == ["1 - a\t1\tEnd Homerun\tNA\t29.69\t163.26\t81.63",
+                              "1 - a\t1\tString\t14\t82.05\t163.26\t81.63",
+                              "1 - a\t1\tStart Homerun\tNA\t51.53\t163.26\t81.63",
+                              "1 - a\t2\tString\t14\t82.07\t199.62\t99.81",
+                              "1 - a\t2\tStart Homerun\tNA\t69.05\t199.62\t99.81",
+                              "1 - a\t2\tEnd Homerun\tNA\t48.51\t199.62\t99.81",
+                              "1 - a\t3\tString\t14\t80.45\t169.62\t84.81",
+                              "1 - a\t3\tStart Homerun\tNA\t40.53\t169.62\t84.81",
+                              "1 - a\t3\tEnd Homerun\tNA\t48.65\t169.62\t84.81",
+                              "1 - a\t4\tEnd Homerun\tNA\t73.15\t226.45\t113.22",
+                              "1 - a\t4\tStart Homerun\tNA\t71.23\t226.45\t113.22",
+                              "1 - a\t4\tString\t14\t82.07\t226.45\t113.22"]
+    feeders = [line.split("\t") for line in homeruns if line.startswith("-\t-\tFeeder\t")]
+    # The plugin's order: the feeders enter the sort newest drawn first (F6/3 ... F8/5, handles AB46 down
+    # to AB39 in raw/i9.txt), and the introsort leaves them in this order.
+    assert [float(cells[4]) for cells in feeders] == \
+        [165.42, 211.06, 410.57, 243.43, 203.66, 272.37, 201.43, 163.30, 36.42, 164.29, 248.35, 66.27,
+         172.94, 88.37]
+    assert all(cells[3:] == ["NA", cells[4], "N/A", "N/A"] for cells in feeders) and homeruns[-14:] == \
+        ["\t".join(cells) for cells in feeders]
+    inverters = sheets["Inverter Schedule"]
+    assert len(inverters) == 39 and inverters[:8] == [
+        "Inverter\tMPPT\tStrings\tInputs\tMod/String\tModules\tDC (kW)\tVoc_cold (V)\tMax Vdc\tIsc\u00d71.25 (A)\tStatus",
+        "INV-1\tA\t6\t6/2\t14\t84\t-\t-\t1500\t-\t",
+        "INV-1\tB\t6\t6/2\t13, 14, 13, 13, 13, 14\t80\t-\t-\t1500\t-\t",
+        "INV-1\tC\t6\t6/2\t14, 14, 14, 14, 14, 13\t83\t-\t-\t1500\t-\t",
+        "INV-1\tD\t6\t6/2\t14, 13, 13, 14, 14, 14\t82\t-\t-\t1500\t-\t",
+        "INV-1\tE\t6\t6/2\t14\t84\t-\t-\t1500\t-\t",
+        "INV-1\tF\t6\t6/2\t13, 13, 14, 14, 14, 13\t81\t-\t-\t1500\t-\t",
+        "INV-1 Total\t\t36\t\t\t494\t-\t\t\t\tDC/AC: -"]
+    assert inverters[-6:] == ["INV-7\tE\t5\t5/2\t13, 12, 13, 13, 13\t64\t-\t-\t1500\t-\t",
+                              "INV-7 Total\t\t29\t\t\t386\t-\t\t\t\tDC/AC: -", "",
+                              "GRAND TOTAL\t\t173\t\t\t2345\t-\t\t\t\tDC/AC: -", "",
+                              "Voc_cold calculated per NEC 690.7(A)(3): " + VOC_COLD]
+    strings = sheets["String Schedule"]
+    assert len(strings) == 179 and strings[0].split("\t") == list(out.EXPORT_STRING_HEADERS)
+    assert strings[1] == "S1-A1\t1\tA\t-\t14\t-\t717.6\t1500\t782.4\t-\t-\t-\t-\t163.3\t-\t-\t-\tP99.5 Voc"
+    assert strings[7] == "S1-B7\t1\tB\t-\t13\t-\t666.3\t1500\t833.7\t-\t-\t-\t-\t112\t-\t-\t-\tP99.5 Voc"
+    assert strings[173] == "S7-E173\t7\tE\t-\t13\t-\t666.3\t1500\t833.7\t-\t-\t-\t-\t334\t-\t-\t-\tP99.5 Voc"
+    assert strings[174:] == [
+        "", "TOTAL\t\t173 strings\t\t2345", "",
+        "Voc_cold per NEC 690.7(A)(3): " + VOC_COLD + " | Isc\u00d71.25 per NEC 690.8(A)(1) continuous duty",
+        "Cable sizing per NEC 310.16 (ampacity) + NEC 210.19 FPN (voltage drop \u2264 2% recommended)"]
+
+
+def test_i9_workbook_equals_the_plugin_workbook(i9_text):
+    plugin = sections(PLUGIN_WORKBOOK_TEXT.read_text(encoding="utf-8-sig"))
+    studio = sections(i9_text)
+    assert [name for name, _ in studio] == [name for name, _ in plugin]
+    for (name, studio_lines), (_, plugin_lines) in zip(studio, plugin):
+        if name == "Homeruns":
+            assert all(line.startswith("-\t-\tFeeder\t") for line in plugin_lines[-FEEDER_ROWS:])
+        assert studio_lines == plugin_lines, name

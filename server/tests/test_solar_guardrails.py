@@ -140,23 +140,109 @@ def test_unknown_mode_refuses():
         eng.guardrail_rows(intake(), "memory")
 
 
-def test_committed_clean_host_intake_retains_supported_drawing_verdicts():
+def test_committed_intake_links_no_string_by_device_number():
+    # The committed g0 intake records the i19 device numbers (9..31); its string circuits name 1, 2, 5, 6 and 7,
+    # which step i18's fixed-L2 adoption renumbered away (Solar residuals R33), so the plugin's collector links no
+    # string and the captured palette is 1 warning (DC/AC fallback), 1 info, 13 pass (receipt batch2-g1).
     path = _PATH.parents[1] / "docs/parity/evidence/batch2/g0-intake.json"
     doc = json.loads(path.read_text(encoding="utf-8"))
+    assert doc["device_numbers_recorded"] is True
+    assert sorted(device["number"] for device in doc["devices"]) == list(range(9, 32))
+    assert len(doc["strings"]) == 173 and sum(s["panel_count"] for s in doc["strings"]) == 2345
     snapshot = eng.build_snapshot(doc, "drawing")
-    assert len(doc["devices"]) == 23
-    assert len(snapshot["strings"]) == 173
-    assert sum(s["panel_count"] for s in snapshot["strings"]) == 2345
-    assert snapshot["inverter_count"] == 5
+    assert snapshot["strings"] == []
+    assert snapshot["inverter_count"] == 23
     assert snapshot["dc_inputs_per_mppt"] == 2
-    assert eng.dc_ac_ratio(snapshot) == [eng.PASS]
-    assert eng.strings_per_mppt(snapshot) == [eng.ERROR] * 29
-    assert eng.mppt_balance(snapshot) == [eng.WARNING]
+    assert eng.dc_ac_ratio(snapshot) == [eng.WARNING]
+    assert eng.strings_per_mppt(snapshot) == [eng.PASS]
+    assert eng.mppt_balance(snapshot) == [eng.INFO]
     rows = eng.guardrail_rows(doc, "drawing")
-    assert report(rows) == {"status": "ERRORS DETECTED", "error-count": 29,
-                            "warning-count": 1, "pass-count": 13}
+    assert report(rows) == {"status": "WARNINGS", "warning-count": 1, "info-count": 1, "pass-count": 13}
     assert report(eng.guardrail_rows(doc, "plugin")) == {
         "status": "HEALTHY", "info-count": 2, "pass-count": 13}
+
+
+def numbered(numbers, strings):
+    doc = intake(strings)
+    doc["device_numbers_recorded"] = True
+    doc["devices"] = [{"is_l2": True, "role": "l2-inverter", "type_key": "A", "number": n} for n in numbers]
+    return doc
+
+
+def test_recorded_devices_with_no_matching_strings_take_the_no_strings_fallback():
+    snapshot = eng.build_snapshot(numbered([9, 10], [string(1, "a"), string(2, "b")]), "drawing")
+    assert [summary["number"] for summary in snapshot["summaries"]] == [9, 10]
+    assert all(summary["strings_by_mppt"] == {} for summary in snapshot["summaries"])
+    assert snapshot["strings"] == [] and snapshot["inverter_count"] == 2
+    assert eng.dc_ac_ratio(snapshot) == [eng.WARNING]       # 2 x 12 x 2 x 14 x 595 W = 399.8 kW against 500 kW
+    assert eng.strings_per_mppt(snapshot) == [eng.PASS]
+    assert eng.mppt_balance(snapshot) == [eng.INFO]
+
+
+def test_recorded_devices_follow_intake_order_and_link_strings_by_number():
+    strings = [string(1, "a"), string(3, "a"), string(1, "b"), string(3, "b", panels=12)]
+    snapshot = eng.build_snapshot(numbered([3, 1, 4], strings), "drawing")
+    assert [summary["number"] for summary in snapshot["summaries"]] == [3, 1, 4]
+    assert snapshot["summaries"][0]["strings_by_mppt"] == {"a": [14], "b": [12]}
+    assert snapshot["summaries"][2]["strings_by_mppt"] == {}
+    assert [(item["inverter"], item["mppt"]) for item in snapshot["strings"]] == [(3, "a"), (3, "b"), (1, "a"), (1, "b")]
+    assert snapshot["inverter_count"] == 3
+
+
+def test_two_devices_sharing_a_number_both_get_the_strings():
+    snapshot = eng.build_snapshot(numbered([5, 5], [string(5, "a"), string(5, "b")]), "drawing")
+    assert [summary["strings_by_mppt"] for summary in snapshot["summaries"]] == [{"a": [14], "b": [14]}] * 2
+    assert len(snapshot["strings"]) == 4 and snapshot["inverter_count"] == 2
+
+
+def test_a_string_naming_no_device_adds_nothing():
+    snapshot = eng.build_snapshot(numbered([1], [string(1, "a"), string(9, "a"), string(9, "b")]), "drawing")
+    assert len(snapshot["summaries"]) == 1
+    assert sum(item["panel_count"] for item in snapshot["strings"]) == 14
+
+
+def test_unrecorded_device_numbers_keep_the_string_derived_summaries():
+    strings = [string(2, "a"), string(1, "a"), string(1, "b")]
+    base = eng.build_snapshot(intake(strings), "drawing")
+    for flag in (None, False):
+        doc = numbered([7, 8, 9], strings)
+        if flag is None:
+            del doc["device_numbers_recorded"]
+        else:
+            doc["device_numbers_recorded"] = flag
+        snapshot = eng.build_snapshot(doc, "drawing")
+        assert [summary["number"] for summary in snapshot["summaries"]] == [1, 2]
+        assert snapshot["summaries"] == base["summaries"] and snapshot["strings"] == base["strings"]
+        assert snapshot["inverter_count"] == 2
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda d: d["devices"][0].update(number=-1),
+    lambda d: d["devices"][0].update(number="3"),
+    lambda d: d["devices"][0].update(number=True),
+    lambda d: d["devices"][0].update(number=2.0),
+    lambda d: d["devices"][0].pop("number"),
+    lambda d: d["devices"].append(None),
+    lambda d: d.update(device_numbers_recorded="yes"),
+])
+def test_malformed_recorded_device_numbers_refuse(mutate):
+    doc = numbered([1, 2], [string(1, "a")])
+    mutate(doc)
+    with pytest.raises(eng.GuardrailError):
+        eng.guardrail_rows(doc, "drawing")
+
+
+def test_committed_intake_with_recorded_device_numbers_links_no_string():
+    # R34: the fixture's 23 devices carry numbers 9..31 while its strings name 1, 2, 5, 6 and 7.
+    path = _PATH.parents[1] / "docs/parity/evidence/batch2/g0-intake.json"
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc["device_numbers_recorded"] = True
+    for number, device in zip(range(9, 32), doc["devices"]):
+        device["number"] = number
+    snapshot = eng.build_snapshot(doc, "drawing")
+    assert snapshot["inverter_count"] == 23 and snapshot["strings"] == []
+    assert report(eng.guardrail_rows(doc, "drawing")) == {
+        "status": "WARNINGS", "warning-count": 1, "info-count": 1, "pass-count": 13}
 
 
 def test_empty_string_buckets_do_not_explain_clean_host_plugin_verdicts():

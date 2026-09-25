@@ -92,3 +92,7 @@ drawing's assignments and these checks evaluate them, or replace this finding
 with the exact consumed-input mismatch. Empty string buckets alone are not a
 sufficient explanation. No existing test expectations were changed; two cases
 pin the committed intake verdicts and distinguish empty buckets from empty lists.
+
+## Retired
+
+Retired 2026-09-25 by Branch2025 #323 (the inverters of a drawing open at plugin load are scanned), #330 and #331 (the cable and tag dictionaries are built and the strings linked at load and after the activation rescan), #333 (the g0 intake carries each device's Number) and this change (Studio's snapshot builds one summary per device and links strings by number, as the plugin's collector does). Recaptured on test build 5 (master 1d4f900f plus #327 and #330), the plugin summarises all 23 L2 inverters and both batch-2 guardrails receipts (g1, g2) compare with no diffs. On this fixture no device's number matches the numbers the string circuits name (step i18's fixed-L2 adoption renumbered the colliding combiner-box and inverter numbers, Solar residuals R33), so both sides link no string and take the DC/AC no-strings fallback. The signed release carrying the plugin fixes is pending the operator (R23).

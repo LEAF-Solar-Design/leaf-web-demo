@@ -10,7 +10,8 @@ writes step N's delta in the plugin adapter's shape (server/solar_inverter_state
                                                      route exceeds the plugin's grid cap here, no-change
   i7   cable-to-tray-snap-auto  LEAFCABLETOTRAYAUTO  no trench: none-snapped
   i8   insert-schedules         InsertSchedules      the three tables at 22000,5500
-  i9   cable-export             CableExport          declared: the Export All workbook as a `file` row
+  i9   cable-export             CableExport          declared: the Export All workbook as a `file` row (the
+                                                     export form's sheets, on the i9 host: STEP_HOST)
   i14  lbd-placement            AddLBD               the marker beside the picked combiner
   i15  lbd-placement            LEAFPLACELBD         the block on feeder BA99
   i16  homerun-adjust           HomerunAdjust        no HOMERUN-TRUNK layer: report
@@ -122,6 +123,24 @@ CAPTURE_HOST = {
     # the adapter): LEAFPLACELBD's block lies on it, the closest point of BA99 to the pick.
     "CablePicks": {"BA99": [14596.33277007084, 3970.289594996278]},
 }
+# A step's own host settings over CAPTURE_HOST. i9: the only saved Export All workbook was written by test
+# build 2 of the fixed plugin (Branch2025 #309, receipt w7-testbuild2-20260925, i9-homeruns.xlsx), whose
+# host differs from the G34b capture host in these per-user settings:
+STEP_HOST = {"i9": {
+    # UseL2Collectors off: the saved workbook has no Feeder Schedule although the drawing holds fourteen
+    # L1ToL2Assignments (StringHomerunExportForm.cs:373 and :713-716 write one whenever the setting is on).
+    "UseL2Collectors": False,
+    # SuggestedInverterCount, the equipment rows' Qty and INV tag (StringHomerunExportForm.cs:148-149).
+    "SuggestedInverterCount": 5,
+    # No project location resolved an ASHRAE design low: the form's -40 C default (:43, :126-147).
+    "DesignMinTempC": -40.0,
+    "ProjectLocation": None,
+}}
+
+
+def host_for(step, host=None):
+    """The host a step runs on: CAPTURE_HOST (or `host`) with the step's own settings over it."""
+    return dict(CAPTURE_HOST if host is None else host, **STEP_HOST.get(step, {}))
 
 
 class EvidenceError(ValueError):
@@ -260,7 +279,6 @@ def run_steps(states_dir, panel_groups, host=None, revision=None, only=None):
     """({step: document}, workbook bytes or None) for every owned step (or only `only`), each from
     state-i(N-1).json."""
     states_dir = Path(states_dir)
-    host = dict(CAPTURE_HOST if host is None else host)
     if only is not None and only not in STEPS:
         raise EvidenceError(f"step {only!r} is not one of {STEP_IDS}")
     try:
@@ -271,7 +289,7 @@ def run_steps(states_dir, panel_groups, host=None, revision=None, only=None):
                 continue
             number = int(step[1:])
             before = st.load_state(states_dir / f"state-i{number - 1}.json")
-            after, lines, workbook = run_engine(step, before, panel_groups, host)
+            after, lines, workbook = run_engine(step, before, panel_groups, host_for(step, host))
             rows, settings = evidence_rows(step, before, after, lines, workbook)
             out[step] = build_document(step, fixture, before, after, rows, settings, revision)
             if workbook is not None:

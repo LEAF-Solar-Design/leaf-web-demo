@@ -28,3 +28,7 @@ entity mapping they shift.
 
 The divergence goes away when the store reads presets with `ObjectCreationHandling.Replace` (or the getter stops
 building a default the deserializer then appends to), so a loaded preset's pack equals the saved one.
+
+## Retired
+
+Retired by Branch2025 #308 (saved lists replace defaults on load): recaptured 2026-09-25 on an unsigned test build of master a94db8d9 with the host frame stores equal to the original f0 snapshot, LEAFFRAME's OK on the unchanged TinyTest preset is accepted (the pack no longer doubles), the preset is saved with identical bytes (write time recorded before and after, read by the adapter from Branch2025 #324), and the receipt passes with no declared diffs. The signed release carrying the fix is pending the operator (Solar residuals R23).
