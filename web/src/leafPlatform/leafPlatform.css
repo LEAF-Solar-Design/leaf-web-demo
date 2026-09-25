@@ -1,0 +1,35 @@
+.leaf-platform {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 480px;
+  min-height: 100dvh;
+  margin: 0 auto;
+  padding: 20px 16px;
+  background: var(--surface, #fafaf8);
+  color: var(--ink, #202622);
+  font: 15px/1.5 system-ui, sans-serif;
+  overflow-wrap: anywhere;
+}
+
+.leaf-platform h1 { margin: 0 0 20px; font-size: 22px; line-height: 1.2; }
+.leaf-platform-context { margin: 0 0 6px; font-size: 13px; }
+.leaf-platform section { display: grid; gap: 14px; }
+.leaf-platform p { margin: 0 0 12px; }
+.leaf-platform label { display: grid; gap: 6px; font-weight: 600; }
+.leaf-platform select,
+.leaf-platform button {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  padding: 9px 12px;
+  border: 1px solid #7c877e;
+  border-radius: 6px;
+  font: inherit;
+}
+.leaf-platform select { background: #fff; color: #202622; }
+.leaf-platform button { background: #244c36; color: #fff; cursor: pointer; }
+.leaf-platform button:disabled { background: #e5e9e5; color: #596159; cursor: default; }
+.leaf-platform a { color: #244c36; }
+.leaf-platform :is(button, select, a):focus-visible { outline: 3px solid #427455; outline-offset: 3px; }
+.leaf-platform-actions { display: flex; gap: 10px; }

@@ -5,6 +5,16 @@ import { describe, it } from 'node:test'
 import { activeCastForScene, sceneAllowsMarketingEject, sceneForPath } from './routeScene.js'
 
 describe('site route scenes', () => {
+  it('reserves only the exact palette path for the host bridge', () => {
+    assert.equal(sceneForPath('/app/leaf-platform'), 'leaf-platform')
+    assert.equal(sceneForPath('/app/leaf-platform/'), 'leaf-platform')
+    for (const path of ['/app/leaf-platform-x', '/app/leaf-platformx', '/app/project', '/app/leaf-platform/child']) {
+      assert.equal(sceneForPath(path), 'app')
+    }
+    assert.equal(activeCastForScene('leaf-platform'), null)
+    assert.equal(sceneAllowsMarketingEject('leaf-platform'), false)
+  })
+
   it('renders /ty through the same application scene as /app', () => {
     assert.equal(sceneForPath('/app'), 'app')
     assert.equal(sceneForPath('/ty'), sceneForPath('/app'))
