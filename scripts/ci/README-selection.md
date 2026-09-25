@@ -8,10 +8,10 @@ CodeBuild gate. It does not activate selection.
 
 Before installing candidate dependencies, `.codebuild/ci.sh` freezes the commits
 at `refs/remotes/origin/main` and `HEAD`. A supplied `LEAF_LOADER_TRUSTED_SHA`
-must match. The script extracts the selector, map, runner and capture helpers
+must match unless the proof override below is active. The script extracts the selector, map, runner and capture helpers
 from that commit with replacement objects disabled. It uses a private temporary
 directory and read-only helper files. It never fetches or changes Git credential
-configuration. Candidate selector and map files are never imported.
+configuration. Candidate selector and map files are imported only with that proof override.
 
 The extracted runner's `--list --catalog-root DIR` interface emits
 `leaf.ci.catalog.v1`. It lists every suite, normalized command and working
@@ -53,6 +53,21 @@ the runner. Existing database conditions, opt-ins and skip rules still apply.
 Non-Python suites stay unmappable and always selected.
 
 ## Environment contract
+
+A status-off proof may load the candidate's own `scripts/ci` by passing
+`--env LEAF_PROOF_TRUSTED_SHA=<sha>` to `proof_build.py`. The value must be
+exactly 40 hexadecimal characters and equal `HEAD_SHA` as a string, and all
+three variables `CODEBUILD_WEBHOOK_EVENT`, `CODEBUILD_WEBHOOK_HEAD_REF` and
+`CODEBUILD_WEBHOOK_TRIGGER` must be unset. Webhook builds ignore the override
+so a candidate cannot change the selector that judges it. Any supplied but
+ineligible value produces one stderr `WARNING: LEAF_PROOF_TRUSTED_SHA ignored
+(<reason>)` line and leaves the normal trusted load and loader check in place.
+An active override sets `TRUSTED_SHA` to `HEAD_SHA`, skips the loader check with
+`loader_check="override"`, and records `trusted_sha_override=true` in the mode
+receipt, detail, `LEAF_SELECTION`, `LEAF_SELECTION_FINAL` and `LEAF_SHADOW`.
+Otherwise the flag is false. Override receipts prove candidate helper behavior;
+they are never trusted selection evidence and must be excluded from shadow and
+mode cohorts by the collector.
 
 Test-ID reporters stay active on all build classes when their files and
 `pytest_selection.py` load from `TRUSTED_SHA`, through `LEAF_TRUSTED_CI_DIR`.

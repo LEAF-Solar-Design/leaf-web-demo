@@ -3,6 +3,9 @@ set -euo pipefail
 # Freeze policy before any candidate installation, import, or test collection.
 TRUSTED_SHA=""
 HEAD_SHA=""
+trusted_sha_override=0
+proof_override_reason=trusted_load_failed
+loader_check=not_supplied
 selection_ready=0
 selection_bootstrap_reason=trusted_load_failed
 selection_force_full_reason=""
@@ -12,7 +15,24 @@ selection_dir="$(mktemp -d /tmp/leaf-selection.XXXXXXXX)"
 chmod 700 "$selection_dir"
 if TRUSTED_SHA="$(git --no-replace-objects rev-parse --verify 'refs/remotes/origin/main^{commit}')" \
    && HEAD_SHA="$(git --no-replace-objects rev-parse --verify 'HEAD^{commit}')"; then
-  if [[ -n "${LEAF_LOADER_TRUSTED_SHA:-}" && "$TRUSTED_SHA" != "$LEAF_LOADER_TRUSTED_SHA" ]]; then
+  if [[ "${LEAF_PROOF_TRUSTED_SHA+x}" == x ]]; then
+    if [[ "${CODEBUILD_WEBHOOK_EVENT+x}" == x || "${CODEBUILD_WEBHOOK_HEAD_REF+x}" == x || "${CODEBUILD_WEBHOOK_TRIGGER+x}" == x ]]; then
+      proof_override_reason=webhook_build
+    elif [[ ! "$LEAF_PROOF_TRUSTED_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+      proof_override_reason=malformed_sha
+    elif [[ "$LEAF_PROOF_TRUSTED_SHA" != "$HEAD_SHA" ]]; then
+      proof_override_reason=head_sha_mismatch
+    else
+      TRUSTED_SHA="$HEAD_SHA"
+      trusted_sha_override=1
+      loader_check=override
+    fi
+  fi
+  if [[ "$trusted_sha_override" != 1 && -n "${LEAF_LOADER_TRUSTED_SHA:-}" ]]; then
+    loader_check=checked
+  fi
+  if [[ "$trusted_sha_override" != 1 && -n "${LEAF_LOADER_TRUSTED_SHA:-}" && "$TRUSTED_SHA" != "$LEAF_LOADER_TRUSTED_SHA" ]]; then
+    loader_check=loader_sha_mismatch
     selection_bootstrap_reason=loader_sha_mismatch
   elif git --no-replace-objects show "$TRUSTED_SHA:scripts/ci/select_tests.py" > "$selection_dir/select_tests.py" \
     && git --no-replace-objects show "$TRUSTED_SHA:scripts/ci/test-selection-map.json" > "$selection_dir/test-selection-map.json" \
@@ -80,6 +100,10 @@ LEAF_SELECTION_INPUTS
       selection_bootstrap_reason=catalog_load_failed
     fi
   fi
+fi
+
+if [[ "${LEAF_PROOF_TRUSTED_SHA+x}" == x && "$trusted_sha_override" != 1 ]]; then
+  echo "WARNING: LEAF_PROOF_TRUSTED_SHA ignored ($proof_override_reason)" >&2
 fi
 
 # The emitter independently validates substring-union closure and writes NULs.
@@ -166,7 +190,7 @@ tracing_ready=0
 if [[ "$tracing_helpers_ready" == 1 && "${LEAF_PROOF_TRACING:-}" == 1 ]]; then
   tracing_ready=1
 fi
-export TRUSTED_SHA HEAD_SHA
+export TRUSTED_SHA HEAD_SHA trusted_sha_override loader_check
 if ! python -I -B - "$selection_dir" "$tracing_ready" "$reporters_ready" <<'LEAF_SELECTION_RECEIPTS'
 import datetime
 import json
@@ -215,6 +239,8 @@ receipt = {"schema": "leaf.ci-selection-mode.v1", "repo": "LEAF-Solar-Design/lea
            "project": e.get("CODEBUILD_PROJECT_NAME") or e.get("CODEBUILD_BUILD_ID", "").split(":")[0],
            "sha": e.get("HEAD_SHA", ""), "source_version": source, "event": event,
            "mode": decision["execution_mode"], "trusted_policy_sha": e.get("TRUSTED_SHA", ""),
+           "trusted_sha_override": e.get("trusted_sha_override") == "1",
+           "loader_check": e.get("loader_check"),
            "selector_sha": blob("scripts/ci/select_tests.py"),
            "map_sha": blob("scripts/ci/test-selection-map.json"),
            "selected_count": len(ids) if isinstance(ids, list) else None,
@@ -223,6 +249,7 @@ receipt = {"schema": "leaf.ci-selection-mode.v1", "repo": "LEAF-Solar-Design/lea
 detail = dict(decision, schema="leaf.ci.selection.v1", repo=receipt["repo"],
               build_id=receipt["build_id"], head_sha=receipt["sha"],
               trusted_sha=receipt["trusted_policy_sha"], selector_sha=receipt["selector_sha"],
+              trusted_sha_override=receipt["trusted_sha_override"], loader_check=receipt["loader_check"],
               map_sha=receipt["map_sha"], ci_blob_sha=blob(".codebuild/ci.sh"),
               phase=policy.get("phase"), event_class=event, fallback_reason=fallback,
               tracing_active=sys.argv[2] == "1", reporters_active=sys.argv[3] == "1",
@@ -247,7 +274,7 @@ then
   # Invalid receipt preparation cannot leave selected arguments executable.
   only_args=()
   selection_ready=0
-  echo 'LEAF_SELECTION {"execution_mode":"full","reasons":["receipt_prepare_failed"],"apply_filter":false}'
+  echo "LEAF_SELECTION {\"execution_mode\":\"full\",\"reasons\":[\"receipt_prepare_failed\"],\"apply_filter\":false,\"trusted_sha_override\":$([[ "$trusted_sha_override" == 1 ]] && echo true || echo false),\"loader_check\":\"$loader_check\"}"
 fi
 if [[ -f "$selection_dir/execution-mode" ]]; then
   selection_mode="$(<"$selection_dir/execution-mode")"
@@ -530,7 +557,7 @@ python scripts/ci/change_impact_job.py --repo . --head "${CODEBUILD_RESOLVED_SOU
   --event "${CODEBUILD_WEBHOOK_EVENT:-manual}" --gate-result /tmp/gate-results/gate-result.json \
   --receipt-dir /tmp/impact || echo "change-impact: helper exit $? (advisory)"
 echo "LEAF_T end change-impact $(date +%s%3N) rc=0"
-python -I -B - "$selection_dir" "$gate_status" "$tracing_ready" "$reporters_ready" <<'LEAF_SELECTION_FINALIZE' || echo 'WARNING: selection evidence finalization failed' >&2
+python -I -B - "$selection_dir" "$gate_status" "$tracing_ready" "$reporters_ready" "$trusted_sha_override" "$loader_check" <<'LEAF_SELECTION_FINALIZE' || echo 'WARNING: selection evidence finalization failed' >&2
 import datetime
 import hashlib
 import json
@@ -574,6 +601,7 @@ reporting = (valid and bool(expected) and observed == expected and len(first) ==
              and all(row.get("test_report_complete") is True for row in first))
 complete = reporting and all(row.get("status") in ("PASS", "FAIL") for row in first)
 detail.update(execution_complete=complete, test_exit_code=int(sys.argv[2]),
+              trusted_sha_override=sys.argv[5] == "1", loader_check=sys.argv[6],
               tracing_active=sys.argv[3] == "1", reporters_active=sys.argv[4] == "1",
               build_exit_code=int(sys.argv[2]), collection_complete=reporting,
               collection_ids_sha256=hashlib.sha256(canonical(all_ids).encode("utf-8")).hexdigest(),
@@ -584,6 +612,8 @@ detail.update(execution_complete=complete, test_exit_code=int(sys.argv[2]),
 print("LEAF_SELECTION_FINAL " + canonical(detail))
 if detail.get("phase") == "shadow":
     shadow = {"id": detail.get("build_id"), "sha": detail.get("head_sha"),
+              "trusted_sha_override": detail["trusted_sha_override"],
+              "loader_check": detail["loader_check"],
               "selector_sha": detail.get("selector_sha"), "map_sha": detail.get("map_sha"),
               "selected_ids": len(selected), "full_failed_ids": failed,
               "contained": set(failed) <= set(selected), "first_attempt": True,
