@@ -488,7 +488,7 @@ if [[ "$reporters_ready" == 1 ]]; then
 else
   unset LEAF_TRUSTED_CI_DIR
 fi
-export PYTHONPATH="$selection_dir"
+unset PYTHONPATH  # EXPERIMENT E2: no trusted dir on the path, no sitecustomize
 if [[ "$tracing_ready" == 1 ]]; then
   export LEAF_READSET_DIR=/tmp/gate-logs/readsets
   export LEAF_READSET_RUN="${CODEBUILD_BUILD_ID:-}"
