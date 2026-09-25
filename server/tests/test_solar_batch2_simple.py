@@ -311,13 +311,21 @@ def test_sizer_non_integral_length_refuses():
         form_outcome(value, "pick-shorter")
 
 
-def test_sizer_uses_present_mintemp():
+def test_sizer_uses_present_min_temp():
     value = committed_sizer_result()
-    value["mintemp"] = 25.0
+    value["min_temp"] = 25.0
     _, changed = form_outcome(value)
     assert changed["PanelsInSequence"] == 41 and changed["VocColdPasses"] is True
     assert changed["VocColdPerModule"] == 36.3
     assert changed["VocColdStringVoltage"] == 36.3 * 41
+
+
+def test_sizer_ignores_the_legacy_mintemp_key():
+    # FunctionResults maps only "min_temp"; a bare "mintemp" is not read, so the default of zero applies.
+    value = committed_sizer_result()
+    value["mintemp"] = 25.0
+    _, changed = form_outcome(value, "pick-shorter")
+    assert changed["PanelsInSequence"] == 39 and changed["VocColdPerModule"] == 37.505023875
 
 
 # --- string midpoint connection (m1) and customer open (o1) --------------------------------------------------------

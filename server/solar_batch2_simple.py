@@ -474,9 +474,10 @@ def string_sizer_outcome(intake, response, form=None):
     vmax = sim.get("string_design_voltage")
     _require(_is_number(vmax) and float(vmax).is_integer(), "the design voltage must be an integer")
     voc, bvoc = float(value["voc"]), float(value["bvoc"])
-    # R28: today's response omits mintemp; FunctionResults defaults that field to zero.
-    tmin = value.get("mintemp", 0.0)
-    _require(_is_number(tmin), "mintemp must be a finite number")
+    # The plugin reads the design minimum temperature from "min_temp" (FunctionResults.cs, JsonProperty "min_temp");
+    # a response without it (the AWS service before R28) leaves FunctionResults' default of zero.
+    tmin = value.get("min_temp", 0.0)
+    _require(_is_number(tmin), "min_temp must be a finite number")
     vmax = float(vmax)
 
     def evaluate(n):

@@ -530,7 +530,7 @@ def build_suites() -> List[Suite]:
         # G36 addendum),
         # 10 + 5 parametrizations = 15, 8 + 8 = 16.
         Suite("server-solar-batch2-simple", "server tests/test_solar_batch2_simple.py",
-              "pytest", SERVER, _py_pytest("tests/test_solar_batch2_simple.py"), 32),
+              "pytest", SERVER, _py_pytest("tests/test_solar_batch2_simple.py"), 33),
         # ImportSolarEdgePDF parity (2026-09-24): the PDF reader (pdfminer.six hooks reproducing PdfPig's raw
         # operators, paths and letters) and the SolarEdgePdfConverter port, both held to the plugin's golden dump by
         # committed digests over data/solaredge_1to1_demo.pdf. Hermetic, so each floor is the exact count: 21, 19.
