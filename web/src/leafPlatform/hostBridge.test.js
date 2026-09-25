@@ -96,6 +96,56 @@ describe('Studio AutoCAD host bridge', () => {
   })
 
   it.each([
+    { pipeName: 'leaf-platform-bridge', hostVersion: '1.0.0', hostProcessId: 1234, readySentinelPath: 'C:/Leaf/ready.json' },
+    {},
+    { pipeName: '' },
+    { pipeName: 'p'.repeat(512), hostVersion: 'v'.repeat(512), readySentinelPath: 's'.repeat(512), hostProcessId: Number.MAX_SAFE_INTEGER },
+  ])('connects a bound DWG with a valid bridgeEndpoint: %j', async (bridgeEndpoint) => {
+    bridge.start()
+    await bridge.receive(unbound())
+    expect(state.status).toBe('unbound')
+    channel.emit({ ...ready(), bridgeEndpoint })
+    expect(state.status).toBe('connected')
+    expect(state.selectedObjectId).toBeNull()
+  })
+
+  it.each([
+    { pipeName: 'leaf-platform-bridge', extra: true },
+    { hostProcessId: '1234' },
+    null,
+    [],
+    'endpoint',
+    undefined,
+    new Date(),
+    { hostProcessId: 0 },
+    { hostProcessId: -1 },
+    { hostProcessId: 1.5 },
+    { hostProcessId: Number.MAX_SAFE_INTEGER + 1 },
+    { pipeName: 123 },
+    { hostVersion: null },
+    { readySentinelPath: false },
+    { pipeName: 'p'.repeat(513) },
+    { hostVersion: 'v'.repeat(513) },
+    { readySentinelPath: 's'.repeat(513) },
+  ].map((bridgeEndpoint) => [bridgeEndpoint]))('ignores a ready message with malformed bridgeEndpoint: %j', async (bridgeEndpoint) => {
+    bridge.start()
+    observe.mockClear()
+    await bridge.receive({ ...ready(), bridgeEndpoint })
+    expect(state.status).toBe('connecting')
+    expect(state.ready).toBeNull()
+    expect(observe).not.toHaveBeenCalled()
+  })
+
+  it('ignores an unbound message with bridgeEndpoint', async () => {
+    bridge.start()
+    observe.mockClear()
+    await bridge.receive({ ...unbound(), bridgeEndpoint: { pipeName: 'leaf-platform-bridge' } })
+    expect(state.status).toBe('connecting')
+    expect(state.ready).toBeNull()
+    expect(observe).not.toHaveBeenCalled()
+  })
+
+  it.each([
     { origin: 'https://foreign.example' }, { extra: true },
     { drawingId: 'not-a-uuid' }, { sessionKey: 'short' },
   ])('ignores invalid ready messages: %j', async (patch) => {

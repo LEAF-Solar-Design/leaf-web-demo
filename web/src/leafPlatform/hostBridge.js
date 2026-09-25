@@ -64,8 +64,21 @@ function isHandshake(value, kind, extra) {
     /^sha256:[a-f0-9]{64}$/.test(value.documentFingerprint)
 }
 
+function isBridgeEndpoint(value) {
+  if (!isRecord(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  if (prototype !== Object.prototype && prototype !== null) return false
+  return Reflect.ownKeys(value).every((key) => key === 'hostProcessId'
+    ? Number.isSafeInteger(value[key]) && value[key] > 0
+    : ['pipeName', 'hostVersion', 'readySentinelPath'].includes(key) &&
+      typeof value[key] === 'string' && value[key].length <= 512)
+}
+
 function isReady(value) {
-  return isHandshake(value, 'host_bridge_ready', IDENTITY_KEYS) &&
+  if (!isRecord(value)) return false
+  const hasEndpoint = Object.hasOwn(value, 'bridgeEndpoint')
+  return isHandshake(value, 'host_bridge_ready', hasEndpoint ? [...IDENTITY_KEYS, 'bridgeEndpoint'] : IDENTITY_KEYS) &&
+    (!hasEndpoint || isBridgeEndpoint(value.bridgeEndpoint)) &&
     IDENTITY_KEYS.every((key) => typeof value[key] === 'string' && UUID.test(value[key]))
 }
 
