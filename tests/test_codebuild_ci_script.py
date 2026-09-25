@@ -1,6 +1,7 @@
 """Pin the leaf-web-demo native CodeBuild CI rail without parsing YAML."""
 
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -123,6 +124,72 @@ class TestCodebuildCiScript(unittest.TestCase):
         for path in (".codebuild/ci.sh", "scripts/ci/pr-codebuild-project.sh"):
             result = subprocess.run([BASH, "-n", path], cwd=ROOT, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_proof_trusted_sha_receipt_contract(self):
+        script = CI_PATH.read_text(encoding="utf-8")
+        self.assertIn('trusted_sha_override=0', script)
+        self.assertLess(script.index('TRUSTED_SHA="$HEAD_SHA"'),
+                        script.index('show "$TRUSTED_SHA:scripts/ci/select_tests.py"'))
+        self.assertIn('export TRUSTED_SHA HEAD_SHA trusted_sha_override loader_check', script)
+        receipt = script.split("<<'LEAF_SELECTION_RECEIPTS'\n", 1)[1].split(
+            '\nLEAF_SELECTION_RECEIPTS', 1)[0]
+        self.assertIn('"trusted_sha_override": e.get("trusted_sha_override") == "1"', receipt)
+        self.assertIn('"loader_check": e.get("loader_check")', receipt)
+        self.assertIn('trusted_sha_override=receipt["trusted_sha_override"]', receipt)
+        self.assertIn('loader_check=receipt["loader_check"]', receipt)
+        self.assertIn('print("LEAF_SELECTION " + canonical(detail))', receipt)
+        finalize = script.split("<<'LEAF_SELECTION_FINALIZE'", 1)[1]
+        self.assertIn('"$reporters_ready" "$trusted_sha_override" "$loader_check" '
+                      "<<'LEAF_SELECTION_FINALIZE'", script)
+        self.assertIn('trusted_sha_override=sys.argv[5] == "1", loader_check=sys.argv[6]', finalize)
+        self.assertIn('print("LEAF_SELECTION_FINAL " + canonical(detail))', finalize)
+        self.assertIn('"trusted_sha_override": detail["trusted_sha_override"]', finalize)
+        self.assertIn('print("LEAF_SHADOW " + canonical(shadow))', finalize)
+
+    @unittest.skipUnless(BASH, "bash is not on PATH; proof trust check requires bash")
+    def test_proof_trusted_sha_build_classes(self):
+        script = CI_PATH.read_text(encoding="utf-8")
+        start = script.index('  if [[ "${LEAF_PROOF_TRUSTED_SHA+x}" == x ]]; then')
+        # Exercise the real override and loader guard without loading helpers or installing dependencies.
+        guard = script[start:script.index('  elif git ', start)] + '\n  fi\n'
+        warning_start = script.index('if [[ "${LEAF_PROOF_TRUSTED_SHA+x}" == x &&')
+        warning = script[warning_start:script.index('\n\n# The emitter', warning_start)]
+        main_sha, head_sha = "a" * 40, "b" * 40
+        webhook_names = ("CODEBUILD_WEBHOOK_EVENT", "CODEBUILD_WEBHOOK_HEAD_REF",
+                         "CODEBUILD_WEBHOOK_TRIGGER")
+        cases = [
+            ({}, head_sha, head_sha, "1", "override", ""),
+            ({}, main_sha, main_sha, "0", "loader_sha_mismatch", "head_sha_mismatch"),
+            ({}, "not-a-sha", main_sha, "0", "loader_sha_mismatch", "malformed_sha"),
+            ({}, "", main_sha, "0", "loader_sha_mismatch", "malformed_sha"),
+            ({}, head_sha.upper(), main_sha, "0", "loader_sha_mismatch", "head_sha_mismatch"),
+            ({}, None, main_sha, "0", "loader_sha_mismatch", ""),
+        ]
+        for name in webhook_names:
+            for value in ("present", ""):
+                cases.append(({name: value}, head_sha, main_sha, "0",
+                              "loader_sha_mismatch", "webhook_build"))
+        env = {key: value for key, value in os.environ.items()
+               if key not in (*webhook_names, "LEAF_PROOF_TRUSTED_SHA", "LEAF_LOADER_TRUSTED_SHA")}
+        for webhook, proof, expected_sha, expected_flag, expected_loader, reason in cases:
+            with self.subTest(webhook=webhook, proof=proof):
+                case_env = dict(env, **webhook)
+                if proof is not None:
+                    case_env["LEAF_PROOF_TRUSTED_SHA"] = proof
+                # Deliberately disagree with main to prove the loader check still runs unless overridden.
+                case_env["LEAF_LOADER_TRUSTED_SHA"] = "c" * 40
+                command = ('set -eu\nTRUSTED_SHA="$1"\nHEAD_SHA="$2"\n'
+                           'trusted_sha_override=0\nloader_check=not_supplied\n'
+                           'proof_override_reason=trusted_load_failed\n'
+                           'selection_bootstrap_reason=trusted_load_failed\n'
+                           + guard + warning
+                           + '\nprintf "%s\\n" "$TRUSTED_SHA" "$trusted_sha_override" "$loader_check"\n')
+                result = subprocess.run([BASH, "-c", command, "proof-trust", main_sha, head_sha],
+                                        cwd=ROOT, env=case_env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.splitlines(), [expected_sha, expected_flag, expected_loader])
+                self.assertEqual(result.stderr, f"WARNING: LEAF_PROOF_TRUSTED_SHA ignored ({reason})\n"
+                                 if reason else "")
 
 
 class TestPrCodebuildProject(unittest.TestCase):
