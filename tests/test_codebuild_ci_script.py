@@ -94,15 +94,24 @@ class TestPrCodebuildProject(unittest.TestCase):
         self.assertEqual(project["timeoutInMinutes"], 60)
         self.assertEqual(project["artifacts"], {"type": "NO_ARTIFACTS"})
         self.assertFalse(project["environment"].get("environmentVariables"))
-        self.assertEqual(project["environment"]["image"], "aws/codebuild/standard:7.0")
-        self.assertEqual(project["environment"]["computeType"], "BUILD_GENERAL1_LARGE")
+        self.assertEqual(project["environment"]["image"],
+                         "807034087062.dkr.ecr.us-east-1.amazonaws.com/leaf-ci-base:"
+                         "web-ad9b9375382ab004bf640594c7a6a22f0258f918")
+        self.assertEqual(project["environment"]["computeType"], "BUILD_GENERAL1_XLARGE")
+        self.assertEqual(project["environment"]["imagePullCredentialsType"], "SERVICE_ROLE")
+        self.assertEqual(project["environment"]["fleet"], {
+            "fleetArn": "arn:aws:codebuild:us-east-1:807034087062:fleet/leaf-ci-heavy-pilot:"
+                        "f625198b-4219-4066-9edb-f68655cf7b0a"})
+        self.assertEqual(project["cache"], {"type": "LOCAL", "modes": ["LOCAL_SOURCE_CACHE", "LOCAL_CUSTOM_CACHE"]})
         self.assertEqual(project["logsConfig"]["cloudWatchLogs"]["groupName"], "/codebuild/leaf-ci-leaf-web-demo")
         self.assertEqual(project["source"]["gitCloneDepth"], 0)
         self.assertIs(project["source"]["reportBuildStatus"], True)
         loader = project["source"]["buildspec"]
-        for text in (".codebuild/ci.sh", "origin/main", "nodejs: 20", "python: 3.12",
-                     "shell: bash", 'git show "$REF:.codebuild/ci.sh" > /tmp/ci.sh', "bash /tmp/ci.sh"):
+        for text in (".codebuild/ci.sh", "origin/main",
+                     "shell: bash", 'git show "$REF:.codebuild/ci.sh" > /tmp/ci.sh', "bash /tmp/ci.sh",
+                     "/root/.cache/ms-playwright/**/*", "/root/.npm/**/*", "/root/.cache/pip/**/*"):
             self.assertIn(text, loader)
+        self.assertNotIn("runtime-versions", loader)
         self.assertNotIn("git fetch", loader)
         self.assertEqual(document["webhook"], {
             "projectName": "leaf-ci-leaf-web-demo",
@@ -111,5 +120,15 @@ class TestPrCodebuildProject(unittest.TestCase):
                  {"type": "HEAD_REF", "pattern": "^refs/heads/main$"}],
                 [{"type": "EVENT", "pattern": "PULL_REQUEST_CREATED,PULL_REQUEST_UPDATED,PULL_REQUEST_REOPENED"},
                  {"type": "BASE_REF", "pattern": "^refs/heads/main$"}],
+                [{"type": "EVENT", "pattern": "PUSH"},
+                 {"type": "HEAD_REF", "pattern": "^refs/heads/gh-readonly-queue/"}],
             ],
         })
+
+    @unittest.skipUnless(BASH, "bash is not on PATH; project usage check requires bash")
+    def test_usage_mentions_no_webhook(self):
+        result = subprocess.run(
+            [BASH, "scripts/ci/pr-codebuild-project.sh", "--bogus"],
+            cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("--no-webhook", result.stderr)
