@@ -134,6 +134,30 @@ class SelectionAdapterTests(unittest.TestCase):
                     self.assertNotIn("pytest_selection", command)  # S8c: plain pytest off tracing builds
                     self.assertEqual(command, [str(a) for a in suite.argv])  # S8c: the original argv, untouched
 
+    def test_tracing_pytest_plugin_options_are_one_token_each(self):
+        # S9b: xdist workers pre-parse argv before -p registers --leaf-*, so a two-token value becomes a path.
+        suite = RUNNER.Suite("trace-pytest", "tracing pytest fixture", "pytest", self.work,
+                             [sys.executable, "-m", "pytest", "test_sample.py"], None)
+        env = self.trusted_env()
+        with mock.patch.dict(os.environ, env, clear=True):
+            trace_env = RUNNER.suite_trace_env(suite, self.logs, 1)
+            command = RUNNER.reporting_command(suite, suite.argv, trace_env)
+        base = [str(a) for a in suite.argv]
+        self.assertEqual(command[:len(base)], base)
+        added = command[len(base):]
+        output = Path(trace_env["LEAF_TEST_REPORT_DIR"])
+        self.assertEqual(added, ["-p", "pytest_selection",
+                                 "--leaf-output=" + str(output),
+                                 "--leaf-repo=" + env["LEAF_READSET_ROOT"],
+                                 "--leaf-selection=" + str(output / "report-only.json"),
+                                 "--leaf-catalog=" + str(output / "report-catalog.json")])
+        for index, word in enumerate(command):
+            if word.startswith("--leaf-"):
+                self.assertIn("=", word)
+                if index + 1 < len(command):
+                    self.assertTrue(command[index + 1].startswith("--leaf-"), command[index + 1])
+        self.assertNotIn("--rootdir", command)
+
     def test_suite_trace_env_passes_through_parent_readset_dir_and_root(self):
         suite = RUNNER.Suite("trace-fixture", "trace fixture", "script", self.work,
                              [sys.executable, "-c", "pass"], None)

@@ -128,6 +128,15 @@ by suite. Failures from an internal retry are retained. Collection errors,
 crashes, missing reports and scripts without actual test IDs are incomplete;
 they never become synthetic test failures for containment.
 
+Every `--leaf-*` plugin option is passed as one `--leaf-x=value` token, for
+example `--leaf-output=DIR`. An xdist worker rebuilds its config from the raw
+argv and pre-parses it before `-p pytest_selection` has registered the
+`--leaf-*` options. A path-valued option passed as two tokens therefore has its
+value read as a positional path, pytest's rootdir moves to the common ancestor
+of those paths, every node id gains a prefix, and `--deselect` silently matches
+nothing. Measured 2026-09-25 on terraform tracing proofs, where the quarantine
+ran and failed 109 tests.
+
 On tracing builds, each child receives `LEAF_READSET_DIR`, `LEAF_READSET_SUITE`,
 `LEAF_READSET_ATTEMPT`, `LEAF_READSET_ROOT` and `LEAF_READSET_RUN`. The trusted
 directory is supplied through `PYTHONPATH`. Startup capture writes
