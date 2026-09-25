@@ -15,7 +15,6 @@ import copy
 import importlib.util
 import io
 import math
-import os
 from pathlib import Path
 import random
 import sys
@@ -402,8 +401,7 @@ def test_dotnet_sort_orders_every_input():
 FEEDER_ROWS = 14
 
 I8_STATE = ROOT / "docs" / "parity" / "evidence" / "rooftop" / "inverters" / "state-i8.json"
-PLUGIN_WORKBOOK_TEXT = Path(os.environ.get("SOLAR_I9_PLUGIN_WORKBOOK",
-                                           "C:/tmp/solar-parity/specs/i9-plugin-workbook.txt"))
+PLUGIN_WORKBOOK_TEXT = ROOT / "docs" / "parity" / "evidence" / "rooftop" / "inverters" / "i9-plugin-workbook-tb2.txt"
 PLUGIN_RATING_ROW = "INV-1..5\tString Inverter\tSungrow\tSG250HX\t5\t0.2kW AC, 800V, 180.5A\tUL 1741\t690.4"
 STUDIO_RATING_ROW = "INV-1..5\tString Inverter\tSungrow\tSG250HX\t5\t250.0kW AC, 800V, 180.5A\tUL 1741\t690.4"
 DECLARED_ROWS = {PLUGIN_RATING_ROW: STUDIO_RATING_ROW}
@@ -494,8 +492,6 @@ def test_i9_workbook_sheets_and_the_rows_the_plugin_wrote(i9_text):
 
 
 def test_i9_workbook_equals_the_plugin_workbook_but_the_declared_rows(i9_text):
-    if not PLUGIN_WORKBOOK_TEXT.is_file():
-        pytest.skip(f"the plugin workbook text {PLUGIN_WORKBOOK_TEXT} is not on this host")
     plugin = sections(PLUGIN_WORKBOOK_TEXT.read_text(encoding="utf-8-sig"))
     studio = sections(i9_text)
     assert [name for name, _ in studio] == [name for name, _ in plugin]
