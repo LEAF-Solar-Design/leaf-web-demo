@@ -517,6 +517,8 @@ gate_status=0
 unset PYTHONSAFEPATH
 python scripts/run-all-gates.py --jobs "${LEAF_GATE_JOBS:-auto}" --retry 1 --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs "${only_args[@]}" || gate_status=$?
 echo "LEAF_T end gate $(date +%s%3N) rc=$gate_status"
+for exp_suite in server-solar-terrain server-w1-local-graph-jobs scripts-solar-w1-studio-string-add; do echo "=== EXPERIMENT E3 suite log: $exp_suite"; head -n 6 "/tmp/gate-logs/$exp_suite.log" 2>/dev/null; echo "..."; tail -n 25 "/tmp/gate-logs/$exp_suite.log" 2>/dev/null | cut -c1-200; done
+ls -la /tmp/gate-logs/test-reports 2>/dev/null | head -5; ls -la /tmp/leaf-selection.* 2>/dev/null | head -20; df -h /tmp /codebuild/output 2>/dev/null
 if [[ -f /tmp/gate-results/gate-result.json ]]; then
   tail -n 200 /tmp/gate-results/gate-result.json || true
 else
