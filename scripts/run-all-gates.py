@@ -2925,9 +2925,16 @@ def reporting_command(suite: Suite, argv: List[str], trace_env: dict) -> List[st
                        "--leaf-repo", trace_env["LEAF_READSET_ROOT"],
                        "--leaf-selection", str(decision), "--leaf-catalog", str(catalog)]
     if suite.kind == "vitest":
+        try:
+            reporter = suite.cwd.resolve() / "node_modules" / ".leaf-ci" / "vitest-leaf.mjs"
+            reporter.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(directory / reporter.name, reporter)
+        except Exception as exc:
+            trace_env["LEAF_TEST_REPORT_INCOMPLETE_REASON"] = f"reporter_copy_failed:{type(exc).__name__}"
+            return argv
         # npm forwards these after '--'; retain Vitest's normal count reporter.
         extra = [] if "--" in argv else ["--"]
-        return argv + extra + ["--reporter=default", "--reporter=" + str(directory / "vitest-leaf.mjs")]
+        return argv + extra + ["--reporter=default", "--reporter=" + str(reporter)]
     if "playwright" in argv and "test" in argv:
         # CLI reporters are retained. With a config, append through a wrapper so
         # its HTML reporter and output paths survive as well as console parsing.
@@ -3513,7 +3520,8 @@ def reset_authored_tools(log_dir: Path) -> str:
     return note
 
 
-def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
+def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
+              reporting_disabled: bool = False) -> Result:
     log_path = log_dir / (f"{suite.id}.log" if attempt == 1
                           else f"{suite.id}.retry{attempt - 1}.log")
 
@@ -3553,12 +3561,27 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
     argv = [os.fsdecode(a) for a in suite.argv]
     trace_env = {}
     report_failure = {}
+    reporting_injected = False
     try:
         # Commit both only after report setup succeeds; partial injection must
         # not change the command or environment of the original suite.
-        reporting_env = suite_trace_env(suite, log_dir, attempt)
-        reporting_argv = reporting_command(suite, list(argv), reporting_env)
-        argv, trace_env = reporting_argv, reporting_env
+        if reporting_disabled:
+            report_failure = {
+                "test_report_complete": False, "reporting_injected": False,
+                "test_report_incomplete_reasons": ["reporter_startup_failure"],
+            }
+        else:
+            reporting_env = suite_trace_env(suite, log_dir, attempt)
+            reporting_argv = reporting_command(suite, list(argv), reporting_env)
+            copy_failure = reporting_env.pop("LEAF_TEST_REPORT_INCOMPLETE_REASON", None)
+            if copy_failure:
+                report_failure = {
+                    "test_report_complete": False, "reporting_injected": False,
+                    "test_report_incomplete_reasons": [copy_failure],
+                }
+            else:
+                reporting_injected = reporting_argv != argv
+                argv, trace_env = reporting_argv, reporting_env
     except Exception as exc:
         report_failure = {
             "test_report_complete": False,
@@ -3608,6 +3631,15 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
             rc = 127
         logf.write(out)
     seconds = time.perf_counter() - t0
+
+    if reporting_injected and rc != 0:
+        # Playwright's list reporter uses the same passed/failed count words.
+        counts = parse_pytest(out) if suite.kind == "pytest" else parse_vitest(out)
+        if counts["got"] - counts.get("skipped", 0) == 0:
+            report_failure = {
+                "test_report_complete": False, "reporting_injected": True,
+                "test_report_incomplete_reasons": ["reporter_startup_failure"],
+            }
 
     # Rows with no test output get an explicit hint so a bare nonzero exit is
     # diagnosable from the scoreboard alone: a spawn failure names its OS
@@ -3709,13 +3741,15 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
                   log_path=log_path, counts={}, test_report=report_failure)
 
 
-def run_suite_guarded(suite: Suite, log_dir: Path, attempt: int) -> Result:
+def run_suite_guarded(suite: Suite, log_dir: Path, attempt: int,
+                      reporting_disabled: bool = False) -> Result:
     """One suite must never take down the whole gate: any unexpected
     runner-side exception (parse bug, log-dir I/O, ...) becomes a FAIL row on
     the scoreboard instead of an uncaught crash that loses every remaining
     suite and the scoreboard itself."""
     try:
-        return run_suite(suite, log_dir, attempt=attempt)
+        return run_suite(suite, log_dir, attempt=attempt,
+                         **({"reporting_disabled": True} if reporting_disabled else {}))
     except Exception as exc:  # noqa: BLE001 — the scoreboard is the contract
         return Result(suite, "FAIL", "err", 0.0,
                       note=f"runner error: {type(exc).__name__}: {str(exc)[:160]}")
@@ -4061,9 +4095,10 @@ def plan_parallel_phases(suites: List[Suite]) -> tuple[List[Suite], List[Suite]]
 
 def _run_parallel_suite(suite: Suite, log_dir: Path, retry: int) -> tuple[Result, int]:
     # Mirror the serial retry contract without changing the default code path.
-    def attempt(number: int) -> Result:
+    def attempt(number: int, reporting_disabled: bool = False) -> Result:
         try:
-            return run_suite_guarded(suite, log_dir, attempt=number)
+            return run_suite_guarded(suite, log_dir, attempt=number,
+                                    **({"reporting_disabled": True} if reporting_disabled else {}))
         except Exception as exc:
             return Result(suite, "FAIL", "err", 0.0,
                           note=f"runner error: {type(exc).__name__}: {str(exc)[:160]}")
@@ -4075,7 +4110,8 @@ def _run_parallel_suite(suite: Suite, log_dir: Path, retry: int) -> tuple[Result
         attempts += 1
         prev_secs = res.seconds
         prev_note = res.note
-        res = attempt(attempts)
+        res = attempt(attempts, reporting_disabled="reporter_startup_failure" in
+                      res.test_report.get("test_report_incomplete_reasons", []))
         record_attempt(res, log_dir, attempts)
         res.seconds += prev_secs
         if res.status == "PASS":
@@ -5401,7 +5437,9 @@ def main() -> int:
             attempts += 1
             prev_secs = res.seconds
             prev_note = res.note
-            res = run_suite_guarded(suite, log_dir, attempt=attempts)
+            retry_options = ({"reporting_disabled": True} if "reporter_startup_failure" in
+                             res.test_report.get("test_report_incomplete_reasons", []) else {})
+            res = run_suite_guarded(suite, log_dir, attempt=attempts, **retry_options)
             record_attempt(res, log_dir, attempts)
             res.seconds += prev_secs  # cumulative time spent on this row
             if res.status == "PASS":

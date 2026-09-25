@@ -46,6 +46,8 @@ class SelectionAdapterTests(unittest.TestCase):
         trusted.mkdir(exist_ok=True)
         for name in ("sitecustomize.py", "trace_reads.py", "pytest_selection.py", "select_tests.py"):
             shutil.copyfile(ROOT / "scripts/ci" / name, trusted / name)
+        for name in ("vitest-leaf.mjs", "playwright-leaf.mjs"):
+            shutil.copyfile(ROOT / "scripts/ci/reporters" / name, trusted / name)
         return {"LEAF_TRUSTED_CI_DIR": str(trusted), "PYTHONPATH": str(trusted),
                 "PYTHONSAFEPATH": "1", "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
                 "LEAF_READSET_RUN": "fixture-run", "LEAF_READSET_ROOT": str(self.work),
@@ -275,6 +277,91 @@ reporter.onEnd({status: 'passed'});
                         self.assertIn("--reporter=default", command)
                     else:
                         self.assertEqual(command, argv)
+
+    def test_vitest_reporter_copy_is_inside_suite_cwd_and_overwritten_per_attempt(self):
+        env = self.trusted_env()
+        source = Path(env["LEAF_TRUSTED_CI_DIR"]) / "vitest-leaf.mjs"
+        cwd = self.work / "web"
+        suite = RUNNER.Suite("vitest-copy", "copy fixture", "vitest", cwd,
+                             ["npm", "test"], None)
+        destination = cwd / "node_modules/.leaf-ci/vitest-leaf.mjs"
+        with mock.patch.dict(os.environ, env):
+            for attempt in (1, 2):
+                if attempt == 2:
+                    source.write_bytes(source.read_bytes() + b"\n// second attempt\r\n")
+                command = RUNNER.reporting_command(
+                    suite, suite.argv, RUNNER.suite_trace_env(suite, self.logs, attempt))
+                self.assertEqual(command, suite.argv + ["--", "--reporter=default",
+                                                       "--reporter=" + str(destination)])
+                self.assertNotIn("--reporter=" + str(source), command)
+                self.assertEqual(destination.read_bytes(), source.read_bytes())
+
+    def test_vitest_reporter_copy_failed_runs_original_and_records_incomplete(self):
+        for missing in (True, False):
+            with self.subTest(missing=missing):
+                env = self.trusted_env()
+                if missing:
+                    (Path(env["LEAF_TRUSTED_CI_DIR"]) / "vitest-leaf.mjs").unlink()
+                reason = "reporter_copy_failed:" + ("FileNotFoundError" if missing else "PermissionError")
+                suite = RUNNER.Suite("copy-failure-" + str(missing), "copy failure", "vitest",
+                                     self.work, ["npm", "test"], 1)
+                copy = (contextlib.nullcontext() if missing else
+                        mock.patch.object(RUNNER.shutil, "copyfile", side_effect=PermissionError("fixture")))
+                with mock.patch.dict(os.environ, env), copy:
+                    trace_env = RUNNER.suite_trace_env(suite, self.logs, 1)
+                    self.assertEqual(RUNNER.reporting_command(suite, suite.argv, trace_env), suite.argv)
+                    self.assertEqual(trace_env["LEAF_TEST_REPORT_INCOMPLETE_REASON"], reason)
+                    with mock.patch.object(RUNNER.subprocess, "run", return_value=
+                                           subprocess.CompletedProcess(suite.argv, 0, "Tests  1 passed (1)", "")) as spawn, \
+                         mock.patch.object(RUNNER, "read_test_report", return_value={"test_report_complete": True}):
+                        result = RUNNER.run_suite_guarded(suite, self.logs, 1)
+                        RUNNER.record_attempt(result, self.logs, 1)
+                    self.assertEqual(spawn.call_args.args[0], suite.argv)
+                    self.assertEqual(spawn.call_args.kwargs["env"], RUNNER.clean_env())
+                self.assertEqual(result.status, "PASS", result.note)
+                row = json.loads((self.logs / "attempts" / (suite.id + ".jsonl")).read_text(encoding="utf-8"))
+                self.assertFalse(row["test_report_complete"])
+                self.assertFalse(row["reporting_injected"])
+                self.assertEqual(row["test_report_incomplete_reasons"], [reason])
+
+    def test_reporter_startup_failure_retries_uninstrumented_in_both_schedulers(self):
+        for jobs in (1, 2):
+            for kind, command in (("vitest", ["npm", "test"]),
+                                  ("script", ["npx", "playwright", "test", "--reporter=list"])):
+                for first_output, startup_failure in (("reporter failed to load", True),
+                                                       ("Tests  0 passed (0)", True),
+                                                       ("Tests  1 failed (1)", False)):
+                    with self.subTest(jobs=jobs, kind=kind, first_output=first_output):
+                        log_dir = self.logs / f"{jobs}-{kind}-{first_output.split()[1]}"
+                        suite = RUNNER.Suite("reporter-retry", "reporter retry", kind,
+                                             self.work, command, 1 if kind == "vitest" else None)
+                        processes = [subprocess.CompletedProcess(command, 1, first_output, ""),
+                                     subprocess.CompletedProcess(command, 0, "Tests  1 passed (1)", "")]
+                        argv = [str(RUNNER_PATH), "--jobs", str(jobs), "--retry", "1",
+                                "--log-dir", str(log_dir)]
+                        with mock.patch.dict(os.environ, self.trusted_env()), \
+                             mock.patch.object(RUNNER, "build_suites", return_value=[suite]), \
+                             mock.patch.object(RUNNER.subprocess, "run", side_effect=processes) as spawn, \
+                             mock.patch.object(RUNNER, "read_test_report", return_value={"test_report_complete": True}), \
+                             mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(io.StringIO()):
+                            self.assertEqual(RUNNER.main(), 0)
+                        self.assertEqual(spawn.call_count, 2)
+                        first, retry = [call.args[0] for call in spawn.call_args_list]
+                        # Prove injection took before judging the retry behavior.
+                        self.assertNotEqual(first, command)
+                        self.assertTrue(any("-leaf.mjs" in word for word in first))
+                        self.assertEqual(retry, command if startup_failure else first)
+                        rows = [json.loads(line) for path in (log_dir / "attempts").glob("*.jsonl")
+                                for line in path.read_text(encoding="utf-8").splitlines()]
+                        self.assertEqual([row["status"] for row in rows], ["FAIL", "PASS"])
+                        if startup_failure:
+                            self.assertTrue(rows[0]["reporting_injected"])
+                            self.assertFalse(rows[1]["reporting_injected"])
+                            for row in rows:
+                                self.assertFalse(row["test_report_complete"])
+                                self.assertEqual(row["test_report_incomplete_reasons"], ["reporter_startup_failure"])
+                        else:
+                            self.assertNotIn("reporter_startup_failure", rows[1].get("test_report_incomplete_reasons", []))
 
     def test_reporting_injection_failure_runs_original_and_records_incomplete(self):
         def broken_reporting(suite, argv, env):
