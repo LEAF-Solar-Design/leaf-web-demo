@@ -7,7 +7,7 @@ import './leafPlatform.css'
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const isUuid = (value) => typeof value === 'string' && UUID.test(value)
 const sameId = (a, b) => typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase()
-const initial = { status: 'unavailable', ready: null, selectedObjectId: null }
+const initial = { status: 'unavailable', ready: null, selectedObjectId: null, selectedHandles: null }
 
 export default function LeafPlatformScene() {
   const [bridge] = useState(getLeafHostBridge)
@@ -121,6 +121,9 @@ export default function LeafPlatformScene() {
 
   const otherWorkspace = state.status === 'connected' && signedIn && isUuid(orgId) && !sameId(state.ready.platformTenantId, orgId)
   const boundProject = projects.find((project) => sameId(project.project_id, state.ready?.projectId))
+  const selectedTarget = state.selectedObjectId || (state.selectedHandles?.length ? { objectHandles: state.selectedHandles } : null)
+  const selectedLabel = state.selectedObjectId || (state.selectedHandles?.length
+    ? `${state.selectedHandles[0]}${state.selectedHandles.length > 1 ? ` and ${state.selectedHandles.length - 1} more` : ''}` : 'None')
 
   return (
     <main className="leaf-platform" aria-labelledby="leaf-platform-title">
@@ -167,10 +170,10 @@ export default function LeafPlatformScene() {
         </> : !isUuid(orgId) ? <p>Choose a workspace in Studio, then reopen this palette.</p>
           : otherWorkspace ? <p>This DWG belongs to another workspace. Open that workspace in Studio to use this connection.</p> : <>
           <p>Connected to {boundProject?.name || state.ready.drawingId.slice(0, 8)}.</p>
-          <p>Selected object: <span>{state.selectedObjectId || 'None'}</span></p>
+          <p>Selected object: <span>{selectedLabel}</span></p>
           <div className="leaf-platform-actions">
-            <button type="button" disabled={!state.selectedObjectId || working} onClick={() => runAction(() => bridge.focusObject(state.selectedObjectId, 'select'))}>Select</button>
-            <button type="button" disabled={!state.selectedObjectId || working} onClick={() => runAction(() => bridge.focusObject(state.selectedObjectId, 'focus'))}>Zoom to</button>
+            <button type="button" disabled={!selectedTarget || working} onClick={() => runAction(() => bridge.focusObject(selectedTarget, 'select'))}>Select</button>
+            <button type="button" disabled={!selectedTarget || working} onClick={() => runAction(() => bridge.focusObject(selectedTarget, 'focus'))}>Zoom to</button>
           </div>
         </>}
       </section>}

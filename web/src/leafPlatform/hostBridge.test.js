@@ -54,6 +54,23 @@ function fakeChannel() {
   }
 }
 
+function selection(payload) {
+  return envelope(ready(), {
+    verb: 'drawing.selection_changed',
+    payload: { kind: 'selection_event', contractVersion: LEAF_PLATFORM_CONTRACT_VERSION,
+      drawingVersionId: identity.drawingVersionId, payload },
+  })
+}
+
+const invalidHandles = [
+  ['missing', undefined], ['null', null], ['string', '2F4A'], ['empty', []],
+  ['non-string', [123]], ['empty handle', ['']], ['non-hex', ['2G4A']],
+  ['whitespace', [' 2F4A']], ['trailing newline', ['2F4A\n']],
+  ['too long', ['A'.repeat(17)]], ['duplicate', ['2F4A', '2F4A']],
+  ['case-insensitive duplicate', ['2f4a', '2F4A']],
+  ['too many', Array.from({ length: 1001 }, (_, index) => index.toString(16))],
+]
+
 describe('Studio AutoCAD host bridge', () => {
   let bridge, channel, observe, state
   beforeEach(() => {
@@ -93,6 +110,56 @@ describe('Studio AutoCAD host bridge', () => {
     channel.emit(ready())
     expect(state.status).toBe('connected')
     expect(state.selectedObjectId).toBeNull()
+  })
+
+  it.each([
+    { pipeName: 'leaf-platform-bridge', hostVersion: '1.0.0', hostProcessId: 1234, readySentinelPath: 'C:/Leaf/ready.json' },
+    {},
+    { pipeName: '' },
+    { pipeName: 'p'.repeat(512), hostVersion: 'v'.repeat(512), readySentinelPath: 's'.repeat(512), hostProcessId: Number.MAX_SAFE_INTEGER },
+  ])('connects a bound DWG with a valid bridgeEndpoint: %j', async (bridgeEndpoint) => {
+    bridge.start()
+    await bridge.receive(unbound())
+    expect(state.status).toBe('unbound')
+    channel.emit({ ...ready(), bridgeEndpoint })
+    expect(state.status).toBe('connected')
+    expect(state.selectedObjectId).toBeNull()
+  })
+
+  it.each([
+    { pipeName: 'leaf-platform-bridge', extra: true },
+    { hostProcessId: '1234' },
+    null,
+    [],
+    'endpoint',
+    undefined,
+    new Date(),
+    { hostProcessId: 0 },
+    { hostProcessId: -1 },
+    { hostProcessId: 1.5 },
+    { hostProcessId: Number.MAX_SAFE_INTEGER + 1 },
+    { pipeName: 123 },
+    { hostVersion: null },
+    { readySentinelPath: false },
+    { pipeName: 'p'.repeat(513) },
+    { hostVersion: 'v'.repeat(513) },
+    { readySentinelPath: 's'.repeat(513) },
+  ].map((bridgeEndpoint) => [bridgeEndpoint]))('ignores a ready message with malformed bridgeEndpoint: %j', async (bridgeEndpoint) => {
+    bridge.start()
+    observe.mockClear()
+    await bridge.receive({ ...ready(), bridgeEndpoint })
+    expect(state.status).toBe('connecting')
+    expect(state.ready).toBeNull()
+    expect(observe).not.toHaveBeenCalled()
+  })
+
+  it('ignores an unbound message with bridgeEndpoint', async () => {
+    bridge.start()
+    observe.mockClear()
+    await bridge.receive({ ...unbound(), bridgeEndpoint: { pipeName: 'leaf-platform-bridge' } })
+    expect(state.status).toBe('connecting')
+    expect(state.ready).toBeNull()
+    expect(observe).not.toHaveBeenCalled()
   })
 
   it.each([
@@ -175,6 +242,7 @@ describe('Studio AutoCAD host bridge', () => {
     })
     await bridge.receive(selected)
     expect(state.selectedObjectId).toBe('panel:A1')
+    expect(state.selectedHandles).toBeNull()
     await expect(bridge.focusObject('invalid object!')).rejects.toThrow('Invalid drawing object identity')
     for (const action of ['select', 'focus']) {
       await bridge.focusObject('panel:A1', action)
@@ -186,6 +254,94 @@ describe('Studio AutoCAD host bridge', () => {
       expect(body.payload.payload).toEqual({ objectId: 'panel:A1' })
       expect(body.drawingRevision).toBe(identity.drawingVersionId)
     }
+  })
+
+  it.each([
+    ['single', ['2f4a']],
+    ['multiple with maximum handle length', ['2f4a', 'aBcDeF0123456789']],
+    ['maximum count', Array.from({ length: 1000 }, (_, index) => index.toString(16))],
+  ])('takes a signed %s handle selection and signs select and focus commands', async (_, handles) => {
+    bridge.start()
+    await bridge.receive(ready())
+    await bridge.receive(selection({ objectId: 'panel:A1' }))
+    await bridge.receive(selection({ objectHandles: handles }))
+    const normalized = handles.map((handle) => handle.toUpperCase())
+    expect(state.selectedObjectId).toBeNull()
+    expect(state.selectedHandles).toEqual(normalized)
+    for (const action of ['select', 'focus']) {
+      await bridge.focusObject({ objectHandles: handles }, action)
+      const { signature, ...body } = channel.postMessage.mock.calls.at(-1)[0]
+      expect(signature).toBe(sign(body).signature)
+      expect(body.verb).toBe('drawing.focus_objects')
+      expect(body.payload.action).toBe(action)
+      expect(body.payload.dispatchMode).toBe(DISPATCH_MODE)
+      expect(body.payload.payload).toEqual({ objectHandles: normalized })
+      expect(body.drawingRevision).toBe(identity.drawingVersionId)
+      expect(body.issuedAt).toMatch(/\.\d{7}\+00:00$/)
+      expect(Date.parse(body.expiresAt) - Date.parse(body.issuedAt)).toBe(60_000)
+    }
+  })
+
+  it('prefers a valid object id and falls back to handles for an invalid object id', async () => {
+    bridge.start()
+    await bridge.receive(ready())
+    await bridge.receive(selection({ objectHandles: ['2f4a'] }))
+    await bridge.receive(selection({ objectId: 'panel:A1', objectHandles: ['2f4a'] }))
+    expect(state.selectedObjectId).toBe('panel:A1')
+    expect(state.selectedHandles).toBeNull()
+    await bridge.receive(selection({ objectId: 'invalid object!', objectHandles: ['2f4a'] }))
+    expect(state.selectedObjectId).toBeNull()
+    expect(state.selectedHandles).toEqual(['2F4A'])
+    await bridge.receive(selection({ objectId: 'invalid object!' }))
+    expect(state.selectedObjectId).toBeNull()
+    expect(state.selectedHandles).toBeNull()
+  })
+
+  it.each(invalidHandles)('clears selection for %s handles', async (_, objectHandles) => {
+    bridge.start()
+    await bridge.receive(ready())
+    for (const previous of [{ objectId: 'panel:A1' }, { objectHandles: ['2F4A'] }]) {
+      await bridge.receive(selection(previous))
+      await bridge.receive(selection({ objectHandles }))
+      expect(state.selectedObjectId).toBeNull()
+      expect(state.selectedHandles).toBeNull()
+    }
+  })
+
+  it.each(invalidHandles)('rejects focus commands with %s handles without sending', async (_, objectHandles) => {
+    bridge.start()
+    await bridge.receive(ready())
+    channel.postMessage.mockClear()
+    await expect(bridge.focusObject({ objectHandles })).rejects.toThrow('Invalid drawing object identity')
+    expect(channel.postMessage).not.toHaveBeenCalled()
+  })
+
+  it('rejects malformed focus targets and invalid actions with handles', async () => {
+    bridge.start()
+    await bridge.receive(ready())
+    channel.postMessage.mockClear()
+    for (const target of [null, [], {}, { objectId: 'panel:A1' },
+      { objectHandles: ['2F4A'], objectId: 'panel:A1' }, { objectHandles: ['2F4A'], extra: true }]) {
+      await expect(bridge.focusObject(target)).rejects.toThrow('Invalid drawing object identity')
+    }
+    await expect(bridge.focusObject({ objectHandles: ['2F4A'] }, 'erase')).rejects.toThrow('Invalid drawing action')
+    expect(channel.postMessage).not.toHaveBeenCalled()
+  })
+
+  it('clears handles when the drawing session changes or stops', async () => {
+    expect(state.selectedHandles).toBeNull()
+    bridge.start()
+    expect(state.selectedHandles).toBeNull()
+    for (const next of [ready(), unbound()]) {
+      await bridge.receive(ready())
+      await bridge.receive(selection({ objectHandles: ['2F4A'] }))
+      await bridge.receive(next)
+      expect(state.selectedHandles).toBeNull()
+    }
+    await bridge.receive(ready())
+    await bridge.receive(selection({ objectHandles: ['2F4A'] }))
+    bridge.stop()
+    expect(state.selectedHandles).toBeNull()
   })
 
   it('bounds the replay cache to the newest 1024 messages', async () => {
