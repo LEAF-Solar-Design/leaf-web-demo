@@ -485,7 +485,6 @@ except (OSError, ValueError):
     print("")
 LEAF_CAPTURE_ID
 )"
-export PYTHONSAFEPATH=1
 if [[ "$capture_ready" == 1 ]]; then
   export LEAF_TRUSTED_CI_DIR="$selection_dir"
   export PYTHONPATH="$selection_dir"
@@ -494,6 +493,7 @@ else
   echo 'WARNING: trusted capture unavailable; readsets and test reports remain incomplete' >&2
 fi
 gate_status=0
+unset PYTHONSAFEPATH
 python scripts/run-all-gates.py --jobs "${LEAF_GATE_JOBS:-auto}" --retry 1 --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs "${only_args[@]}" || gate_status=$?
 echo "LEAF_T end gate $(date +%s%3N) rc=$gate_status"
 if [[ -f /tmp/gate-results/gate-result.json ]]; then

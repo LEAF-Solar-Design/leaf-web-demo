@@ -52,6 +52,14 @@ Workflow contracts, web build and license checks remain unconditional outside
 the runner. Existing database conditions, opt-ins and skip rules still apply.
 Non-Python suites stay unmappable and always selected.
 
+## Environment contract
+
+Interpreter isolation (`-I -B`) is for trusted processes only. The gate run
+inherits no interpreter flags and explicitly unsets `PYTHONSAFEPATH`. The runner
+owns each suite environment: it removes `PYTHONSAFEPATH` even if the parent sets
+it, and keeps `PYTHONPATH` for capture. Report injection failures retain the
+original command and environment and mark test-report evidence incomplete.
+
 ## Receipts and result evidence
 
 `LEAF_SELECTION`, `SELECTION` and `SELECTION_ARM` describe the final decision
@@ -90,8 +98,7 @@ they never become synthetic test failures for containment.
 
 Each child receives `LEAF_READSET_DIR`, `LEAF_READSET_SUITE`,
 `LEAF_READSET_ATTEMPT`, `LEAF_READSET_ROOT` and `LEAF_READSET_RUN`. The trusted
-directory is supplied through `PYTHONPATH`; `PYTHONSAFEPATH=1` avoids the repo's
-`platform/` package shadowing the standard library. Startup capture writes
+directory is supplied through `PYTHONPATH`. Startup capture writes
 per-process shards under `readsets/<encoded-suite>/<attempt>/`. Python `-I`
 ignores the startup hook and is explicitly incomplete. Native reads, Node,
 shells, browsers and escaped children do not gain Python-only completeness.
@@ -116,9 +123,9 @@ The planner owns verification through
 `C:/Users/ehaug/.claude/program/ci-test-selection-20260925/specs/verify_s3_web_adapter.py`.
 The adapter contracts in `tests/test_run_all_gates_selection.py` cover listing,
 both retry schedulers, child attribution, isolated Python, pytest IDs and the
-Node reporters. Run Python with `-I -B` for standalone helpers, or use
-`PYTHONSAFEPATH=1` and `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` with
-`python -B -m pytest`.
+Node reporters, suite environment isolation, timeout output and report-injection
+fallback. Use `-I -B` only for trusted helpers; suite tests keep their normal
+interpreter flags.
 
 The trusted map already disables selection. To remove filtering entirely,
 remove `"${only_args[@]}"` from the single runner invocation. That restores

@@ -2851,6 +2851,7 @@ def build_suites() -> List[Suite]:
 # env hygiene: strip cross-contaminating toggles so each suite sees defaults
 # --------------------------------------------------------------------------- #
 _ENV_DENYLIST = (
+    "PYTHONSAFEPATH",
     "LEAF_AUTH_LIVE", "APS_LIVE", "APS_CRED", "JOBS_DB", "SESSIONS_DB", "JOB_MAX_S",
     "LEAF_STORE_DIR", "LEAF_ENTITLEMENTS_FILE", "LEAF_AUTHOR_HARNESS_URL",
     "LEAF_CONVERSE_HARNESS_URL",
@@ -2879,6 +2880,12 @@ def clean_env() -> dict:
     return env
 
 
+def _text(value) -> str:
+    if value is None:
+        return ""
+    return value.decode("utf-8", "replace") if isinstance(value, bytes) else value
+
+
 def encoded_suite_id(suite_id: str) -> str:
     return quote(suite_id, safe="").replace(".", "%2E") or "%00"
 
@@ -2898,6 +2905,7 @@ def suite_trace_env(suite: Suite, log_dir: Path, attempt: int) -> dict:
 
 def reporting_command(suite: Suite, argv: List[str], trace_env: dict) -> List[str]:
     """Add reporting only; pytest selection remains at the runner's suite level."""
+    argv = [os.fsdecode(word) for word in argv]
     trusted = os.environ.get("LEAF_TRUSTED_CI_DIR")
     if not trusted:
         return argv
@@ -2927,10 +2935,13 @@ def reporting_command(suite: Suite, argv: List[str], trace_env: dict) -> List[st
         reporter = str(directory / "playwright-leaf.mjs")
         for index, word in enumerate(command):
             if word.startswith("--reporter="):
-                command[index] = word + "," + reporter
+                command = command[:index] + command[index + 1:]
+                command.append(word + "," + reporter)
                 return command
             if word == "--reporter" and index + 1 < len(command):
-                command[index + 1] += "," + reporter
+                reporters = command[index + 1]
+                command = command[:index] + command[index + 2:]
+                command.append("--reporter=" + reporters + "," + reporter)
                 return command
         if "--config" in command:
             index = command.index("--config") + 1
@@ -3008,13 +3019,15 @@ def record_attempt(result: Result, log_dir: Path, attempt: int) -> None:
     """Append before retries replace Result or add cumulative durations."""
     try:
         report = read_test_report(result.suite, log_dir, attempt)
+        if result.test_report.get("test_report_incomplete_reasons"):
+            report.update(result.test_report)
         result.test_report = report
         row = dict(report, suite_id=result.suite.id, attempt=attempt,
                    status=result.status, seconds=result.seconds,
                    run_id=os.environ.get("LEAF_READSET_RUN", ""),
                    log_path=(os.path.relpath(result.log_path, log_dir).replace("\\", "/")
                              if result.log_path else None))
-        readsets = Path(suite_trace_env(result.suite, log_dir, attempt)["LEAF_READSET_DIR"])
+        readsets = Path(os.environ.get("LEAF_READSET_DIR", str(log_dir.resolve() / "readsets")))
         shards = sorted((readsets / encoded_suite_id(result.suite.id) / str(attempt)).glob("*.json"))
         row["readsets_ref"] = str(readsets / encoded_suite_id(result.suite.id) / str(attempt))
         row["trace_complete"] = False
@@ -3431,10 +3444,10 @@ def _run_npm_audit_attempt(argv: List[str], cwd: Path, logf, attempt: int,
             shell=use_shell, executable=shell_executable,
             encoding="utf-8", errors="replace",
         )
-        stdout, stderr, rc = proc.stdout or "", proc.stderr or "", proc.returncode
+        stdout, stderr, rc = _text(proc.stdout), _text(proc.stderr), proc.returncode
     except subprocess.TimeoutExpired as exc:
-        stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
-        stderr = ((exc.stderr or "") if isinstance(exc.stderr, str) else "") + \
+        stdout = _text(exc.stdout)
+        stderr = _text(exc.stderr) + \
             f"\n[TIMEOUT >{AUDIT_SUBPROCESS_TIMEOUT_S}s]"
         rc, timed_out = 124, True
     except OSError as exc:
@@ -3537,9 +3550,20 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
         pre_note = reset_authored_tools(log_dir)
 
     t0 = time.perf_counter()
-    argv = [str(a) for a in suite.argv]
-    trace_env = suite_trace_env(suite, log_dir, attempt)
-    argv = reporting_command(suite, argv, trace_env)
+    argv = [os.fsdecode(a) for a in suite.argv]
+    trace_env = {}
+    report_failure = {}
+    try:
+        # Commit both only after report setup succeeds; partial injection must
+        # not change the command or environment of the original suite.
+        reporting_env = suite_trace_env(suite, log_dir, attempt)
+        reporting_argv = reporting_command(suite, list(argv), reporting_env)
+        argv, trace_env = reporting_argv, reporting_env
+    except Exception as exc:
+        report_failure = {
+            "test_report_complete": False,
+            "test_report_incomplete_reasons": [f"reporting_injection_failed:{type(exc).__name__}"],
+        }
     # Fault-injection drill: LEAF_GATE_FAULT_INJECT="<suite-id>:spawn" points
     # this suite's FIRST attempt at a nonexistent binary, exercising the real
     # spawn-failure path end to end (attempt 2+ runs the real argv, so the
@@ -3552,6 +3576,8 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
     with open(log_path, "w", encoding="utf-8", errors="replace") as logf:
         logf.write(f"$ (cwd={suite.cwd})\n$ {' '.join(argv)}\n"
                    f"$ attempt {attempt} @ {time.strftime('%Y-%m-%dT%H:%M:%S')}\n\n")
+        if report_failure:
+            logf.write("WARNING: " + report_failure["test_report_incomplete_reasons"][0] + "\n")
         logf.flush()
         try:
             proc = subprocess.run(
@@ -3566,10 +3592,10 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
                 # — the acceptance instrument itself failing on output encoding.
                 encoding="utf-8", errors="replace",
             )
-            out = (proc.stdout or "") + "\n" + (proc.stderr or "")
+            out = _text(proc.stdout) + "\n" + _text(proc.stderr)
             rc = proc.returncode
         except subprocess.TimeoutExpired as exc:
-            out = ((exc.stdout or "") + "\n" + (exc.stderr or "")
+            out = (_text(exc.stdout) + "\n" + _text(exc.stderr)
                    + f"\n[TIMEOUT >{suite.timeout_s}s]")
             rc = 124
         except OSError as exc:
@@ -3591,6 +3617,8 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
     fail_hint = ""
     if spawn_err:
         fail_hint = f"spawn failure: {spawn_err}"
+    elif rc == 124 and f"[TIMEOUT >{suite.timeout_s}s]" in out:
+        fail_hint = f"[TIMEOUT >{suite.timeout_s}s]"
     elif rc != 0 and not out.strip():
         fail_hint = f"no output (exit {rc}): child failed to start or was killed externally"
 
@@ -3627,7 +3655,7 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
         if not passed and not note:
             note = "suite FAILED"
         return Result(suite, "PASS" if passed else "FAIL", str(c["got"]), seconds,
-                      note=note.strip(), log_path=log_path, counts=c)
+                      note=note.strip(), log_path=log_path, counts=c, test_report=report_failure)
 
     if suite.kind == "vitest":
         c = parse_vitest(out)
@@ -3658,7 +3686,7 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
         if not passed and not note:
             note = "suite FAILED"
         return Result(suite, "PASS" if passed else "FAIL", str(c["got"]), seconds,
-                      note=note.strip(), log_path=log_path, counts=c)
+                      note=note.strip(), log_path=log_path, counts=c, test_report=report_failure)
 
     if suite.kind == "script":
         # Optional scripts are skipped before spawn through opt_in_env. Once a
@@ -3667,18 +3695,18 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1) -> Result:
             last = next((ln for ln in out.strip().splitlines() if ln.strip()), "")
             return Result(suite, "FAIL", "err", seconds,
                           note=last[:120] or "required environment unavailable",
-                          log_path=log_path, counts={})
+                          log_path=log_path, counts={}, test_report=report_failure)
         return Result(suite, "PASS" if rc == 0 else "FAIL",
                       "ok" if rc == 0 else "err", seconds,
                       note=("" if rc == 0 else (fail_hint or f"exit {rc}")),
-                      log_path=log_path, counts={})
+                      log_path=log_path, counts={}, test_report=report_failure)
 
     # tsc: pass/fail on exit code only
     passed = rc == 0
     return Result(suite, "PASS" if passed else "FAIL",
                   "ok" if passed else "err", seconds,
                   note=("" if passed else (fail_hint or f"tsc exit {rc}")),
-                  log_path=log_path, counts={})
+                  log_path=log_path, counts={}, test_report=report_failure)
 
 
 def run_suite_guarded(suite: Suite, log_dir: Path, attempt: int) -> Result:

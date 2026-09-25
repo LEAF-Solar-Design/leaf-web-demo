@@ -193,6 +193,124 @@ reporter.onEnd({status: 'passed'});
         self.assertEqual(set(mapping["mandatory_suite_ids"]), {suite.id for suite in RUNNER.build_suites()})
         self.assertEqual(mapping["unresolved_mandatory"], [])
 
+    def test_suite_environment_scrubs_pythonsafepath_and_keeps_pythonpath(self):
+        suite = RUNNER.Suite("env-fixture", "environment fixture", "script", self.work,
+                             [sys.executable, "-c", "pass"], None)
+        with mock.patch.dict(os.environ, {"PYTHONSAFEPATH": "1", "PYTHONPATH": "capture-path"}), \
+             mock.patch.object(RUNNER.subprocess, "run", return_value=
+                               subprocess.CompletedProcess(suite.argv, 0, "", "")) as spawn:
+            self.assertNotIn("PYTHONSAFEPATH", RUNNER.clean_env())
+            self.assertEqual(RUNNER.clean_env()["PYTHONPATH"], "capture-path")
+            result = RUNNER.run_suite_guarded(suite, self.logs, 1)
+        self.assertEqual(result.status, "PASS", result.note)
+        self.assertNotIn("PYTHONSAFEPATH", spawn.call_args.kwargs["env"])
+        self.assertEqual(spawn.call_args.kwargs["env"]["PYTHONPATH"], "capture-path")
+
+    def test_timeout_decodes_partial_bytes_and_preserves_fail_note(self):
+        for kind in ("script", "pytest", "vitest", "tsc"):
+            with self.subTest(kind=kind):
+                suite = RUNNER.Suite("timeout-" + kind, "timeout fixture", kind, self.work,
+                                     [sys.executable, "-c", "pass"], None, timeout_s=1)
+                timeout = subprocess.TimeoutExpired(suite.argv, 1, output=b"partial \xff", stderr=b"err")
+                with mock.patch.object(RUNNER.subprocess, "run", side_effect=timeout):
+                    result = RUNNER.run_suite_guarded(suite, self.logs, 1)
+                self.assertEqual(result.status, "FAIL")
+                self.assertIn("[TIMEOUT >1s]", result.note)
+                self.assertIn("partial \ufffd\nerr", result.log_path.read_text(encoding="utf-8"))
+
+    def test_audit_timeout_and_spawn_output_decode_bytes(self):
+        argv = ["npm", "audit"]
+        timeout = subprocess.TimeoutExpired(argv, 1, output=b"partial \xff", stderr=b"err")
+        log = io.StringIO()
+        with mock.patch.object(RUNNER.subprocess, "run", side_effect=timeout):
+            rc, stdout, stderr, timed_out, spawn_err = RUNNER._run_npm_audit_attempt(
+                argv, self.work, log, 1)
+        self.assertEqual(rc, 124)
+        self.assertEqual(stdout, "partial \ufffd")
+        self.assertIn("err\n[TIMEOUT >", stderr)
+        self.assertTrue(timed_out)
+        self.assertEqual(spawn_err, "")
+        suite = RUNNER.Suite("bytes-output", "bytes output fixture", "script", self.work,
+                             [sys.executable, "-c", "pass"], None)
+        with mock.patch.object(RUNNER.subprocess, "run", return_value=
+                               subprocess.CompletedProcess(suite.argv, 0, b"partial \xff", b"err")):
+            result = RUNNER.run_suite_guarded(suite, self.logs, 1)
+        self.assertEqual(result.status, "PASS", result.note)
+        self.assertIn("partial \ufffd\nerr", result.log_path.read_text(encoding="utf-8"))
+
+    def test_reporting_normalizes_playwright_bytes_and_paths(self):
+        commands = [
+            ["npx", "playwright", "test", "--reporter", b"list,html"],
+            [Path("npx"), Path("playwright"), Path("test"), Path("--reporter"), Path("list")],
+            [b"npx", b"playwright", b"test", b"--reporter=list"],
+        ]
+        with mock.patch.dict(os.environ, self.trusted_env()):
+            for argv in commands:
+                with self.subTest(argv=argv):
+                    original = list(argv)
+                    suite = RUNNER.Suite("reporter-fixture", "reporter fixture", "script",
+                                         self.work, argv, None)
+                    command = RUNNER.reporting_command(
+                        suite, argv, RUNNER.suite_trace_env(suite, self.logs, 1))
+                    self.assertEqual(argv, original)
+                    self.assertTrue(all(isinstance(word, str) for word in command))
+                    reporter = next(word for word in command if word.startswith("--reporter="))
+                    self.assertTrue(reporter.startswith("--reporter=list"))
+                    self.assertIn("playwright-leaf.mjs", reporter)
+                    if b"list,html" in original:
+                        self.assertIn("list,html,", reporter)
+
+    def test_reporting_preserves_vitest_separator_and_isolated_pytest(self):
+        with mock.patch.dict(os.environ, self.trusted_env()):
+            for kind, argv in (
+                ("vitest", ["npm", "test", "--", "--run"]),
+                ("pytest", [sys.executable, "-I", "-m", "pytest", "test_sample.py"]),
+            ):
+                with self.subTest(kind=kind):
+                    suite = RUNNER.Suite("flags-fixture", "flags fixture", kind, self.work, argv, None)
+                    command = RUNNER.reporting_command(
+                        suite, argv, RUNNER.suite_trace_env(suite, self.logs, 1))
+                    if kind == "vitest":
+                        self.assertEqual(command.count("--"), 1)
+                        self.assertIn("--reporter=default", command)
+                    else:
+                        self.assertEqual(command, argv)
+
+    def test_reporting_injection_failure_runs_original_and_records_incomplete(self):
+        def broken_reporting(suite, argv, env):
+            argv.append("--must-not-reach-child")
+            env["REPORTING_PARTIAL"] = "1"
+            raise TypeError("reporter fixture")
+
+        for helper, failure in (("reporting_command", broken_reporting),
+                                ("suite_trace_env", OSError("environment fixture"))):
+            with self.subTest(helper=helper):
+                suite = RUNNER.Suite("fallback-" + helper, "fallback fixture", "script", self.work,
+                                     [sys.executable, "-c", "pass"], None)
+                reason = "reporting_injection_failed:" + ("TypeError" if callable(failure) else "OSError")
+                original_env = RUNNER.clean_env()
+                with mock.patch.object(RUNNER, helper, side_effect=failure), \
+                     mock.patch.object(RUNNER.subprocess, "run", return_value=
+                                       subprocess.CompletedProcess(suite.argv, 0, "", "")) as spawn, \
+                     mock.patch.object(RUNNER, "read_test_report", return_value={"test_report_complete": True}):
+                    result = RUNNER.run_suite_guarded(suite, self.logs, 1)
+                    RUNNER.record_attempt(result, self.logs, 1)
+                self.assertEqual(result.status, "PASS", result.note)
+                self.assertEqual(spawn.call_args.args[0], suite.argv)
+                self.assertEqual(spawn.call_args.kwargs["env"], original_env)
+                self.assertEqual(result.log_path.read_text(encoding="utf-8").count(reason), 1)
+                row = json.loads((self.logs / "attempts" / (suite.id + ".jsonl")).read_text(encoding="utf-8"))
+                self.assertFalse(row["test_report_complete"])
+                self.assertEqual(row["test_report_incomplete_reasons"], [reason])
+
+    def test_ci_unsets_pythonsafepath_before_gate(self):
+        lines = (ROOT / ".codebuild/ci.sh").read_text(encoding="utf-8").splitlines()
+        self.assertFalse(any(line.startswith("export PYTHONSAFEPATH") for line in lines))
+        unset_index = lines.index("unset PYTHONSAFEPATH")
+        gate_index = next(index for index, line in enumerate(lines)
+                          if line.startswith("python scripts/run-all-gates.py"))
+        self.assertLess(unset_index, gate_index)
+
 
 if __name__ == "__main__":
     unittest.main()
