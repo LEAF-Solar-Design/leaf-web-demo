@@ -16,7 +16,7 @@ const A = "11111111-1111-4111-8111-111111111111";
 const B = "22222222-2222-4222-8222-222222222222";
 const identity = { name: "Leaf test", email: "test@example.invalid" };
 const cases = new WeakMap<TestContext["task"], { root: string; pending: Promise<unknown> }>();
-function isolated(run: (root: string) => unknown) {
+function isolated(run: (root: string) => void | Promise<void>) {
   return (context: TestContext) => {
     const root = mkdtempSync(join(tmpdir(), "forge-publication-test-"));
     const pending = Promise.resolve().then(() => run(root));
@@ -147,7 +147,7 @@ describe("Forge remote artifact authority", () => {
     expect(git(f.seed, ["rev-parse", "main"])).toBe(f.base);
   }));
 
-  it("rejects unsafe production URLs and implicit local paths", isolated(async (root) => {
+  it("rejects unsafe production URLs and implicit local paths", isolated(async () => {
     for (const remote of ["http://forge.invalid/team/repo.git", "https://token@forge.invalid/team/repo.git",
       "https://forge.invalid/team/repo.git?q=token", "https://forge.invalid/team/repo.git#token",
       "https://forge.invalid/team/../repo.git", "/tmp/remote.git"]) {
@@ -314,7 +314,7 @@ it("retains only explicitly local tenant checkout during migration", isolated(as
   await expect(provider.bare("unknown")).rejects.toThrow("unknown tenant refused");
 }));
 
-it("refuses remote checkout without a durable catalog pin before legacy clone", isolated(async (root) => {
+it("refuses remote checkout without a durable catalog pin before legacy clone", isolated(async () => {
   let locatorCalls = 0;
   let credentialCalls = 0;
   const authority = new ForgeRemoteAuthority({
