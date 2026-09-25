@@ -15,3 +15,7 @@ Studio follows it; the installed plugin predates it.
 
 Exactly the comparator's: the README text chunk and the manifest text chunk. Nothing about the layout, the bill
 of materials, the cable and feeder tables, the shading tables, the pile grouping or the manifest counts differs.
+
+## Retired
+
+Retired by Branch2025 #307 (the yield exporter names the company Leaf Automation): recaptured 2026-09-25 on an unsigned test build of master a94db8d9 (terrain chain d8, d7 reopened on the same build, the bundle written through the Export to Yield dialog), every bundle entry matches Studio's after the G28 normalization and the receipt passes with no declared diffs. The signed release carrying the fix is pending the operator (Solar residuals R23).
