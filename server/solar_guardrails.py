@@ -14,7 +14,10 @@ collector list (:305-313) that the snapshot collector never reads (DesignSnapsho
            is L2), which reproduces the capture and pins the port.
   drawing  every inverter the drawing's string assignments name, L1 or L2, in number order. Studio validates the
            design it actually holds, so this is the mode its evidence uses; the difference is the declared
-           divergence of G36.
+           divergence of G36. When the intake records device numbers (`device_numbers_recorded`, R34), it is
+           instead one summary per device in intake order, linked to strings by number as the plugin does
+           (DesignSnapshotCollector.BuildInverterSummaries and GetDistinctInverters; Inverter.FindConnectedCables,
+           Inverter.cs:361), so InverterCount is the device count.
 
 After Branch2025 #311 the collector reads both levels. The clean-host R31b capture
 still reports the empty-design verdicts; this historical `plugin` mode is not a
@@ -158,6 +161,8 @@ def build_snapshot(intake, mode):
         if config["is_solar_edge"]:
             _require(not host.get("OptimizerModel"), "SolarEdge optimizer data is not carried by this intake version")
             break
+    numbers_recorded = intake.get("device_numbers_recorded", False)
+    _require(isinstance(numbers_recorded, bool), "the intake's device_numbers_recorded flag is invalid")
     if mode == "drawing":
         use_combiner = bool(host.get("UseCombinerBox"))
         by_inverter = {}
@@ -170,12 +175,26 @@ def build_snapshot(intake, mode):
             _require(circuit is None or isinstance(circuit, str), "an intake string's circuit is invalid")
             letter = mppt_letter(circuit)
             by_inverter.setdefault(number, []).append((letter, _int(item.get("panel_count")), item.get("circuit")))
-        for number in sorted(by_inverter):
+        if numbers_recorded:
+            # One summary per distinct inverter DEVICE, in intake order (the adapter lists L1 then L2), as
+            # DesignSnapshotCollector.BuildInverterSummaries walks GetDistinctInverters. A device gets every string
+            # whose inverter number equals its own (Inverter.FindConnectedCables, Inverter.cs:361): a number two
+            # devices share gives both the strings, and a string whose number no device has joins no summary.
+            numbers = []
+            for device in devices:
+                _require(isinstance(device, dict), "an intake device is invalid")
+                number = device.get("number")
+                _require(isinstance(number, int) and not isinstance(number, bool) and number >= 0,
+                         "an intake device's number is invalid")
+                numbers.append(number)
+        else:
+            numbers = sorted(by_inverter)
+        for number in numbers:
             config = snap["inverter_types"].get("A")
             solar_edge = bool(config and config["is_solar_edge"])
             summary = {"number": number, "type_key": "A", "is_solar_edge": solar_edge,
                        "is_combiner_box": use_combiner and not solar_edge, "strings_by_mppt": {}}
-            for letter, count, circuit in by_inverter[number]:
+            for letter, count, circuit in by_inverter.get(number, ()):
                 summary["strings_by_mppt"].setdefault(letter, []).append(count)
                 snap["strings"].append({"panel_count": count, "inverter": number, "mppt": letter,
                                         "type_key": "A", "circuit": circuit})
