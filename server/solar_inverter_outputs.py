@@ -28,10 +28,16 @@ Declared divergences (G35, each emits exactly the diffs it explains):
                        own star routing, grid limits included: on the rooftop fixture every route exceeds the
                        200-cell grid cap (TrenchRouting.cs:296-300, 1.0-unit cells over an extent of
                        thousands of inches) and fails, so the step routes none and reports no-change.
-  cable-export         The plugin's EPPlus save throws on the capture host and writes nothing. Studio
-                       writes the Export All workbook (stdlib zip and XML, one sheet per schedule the export
-                       form fills, the same tables InsertSchedules builds) and the evidence carries it as a
-                       G20/G21 `file` row.
+  cable-export         Until Branch2025 #309 the plugin's EPPlus save threw and wrote nothing. Studio writes
+                       the Export All workbook the export form writes (StringHomerunExportForm.cs:349-413,
+                       read 2026-09-25 at C:/tmp/solar-parity/wt-b25-main, master a94db8d9: Homeruns,
+                       Equipment, Inverter and String Schedule, a Feeder Schedule under L2 collectors; stdlib
+                       zip and XML) and the evidence carries it as a G20/G21 `file` row. Against the plugin's
+                       saved workbook it differs in one row only: the inverter rating's AC power, which the
+                       plugin divides by 1000 as if the catalog's kW were watts
+                       (docs/parity/divergences/cable-export/inverter-rating-units.md). The Homeruns row
+                       order (an unstable sort over SelectAll order) is reproduced, the feeders' place in it
+                       from the order RouteL2Feeders drew them in.
 
 Host inputs (per-user settings, catalog rows and AutoCAD text layout that no drawing state carries) come in
 as `host`; the producer names each and its evidence. Trench polylines, the HOMERUN-TRUNK layer and tracker
@@ -152,6 +158,19 @@ def cs_format(value, pattern):
     decimals = int(pattern[1:]) if pattern.startswith("N") else 0
     quantized = _decimal(value).quantize(Decimal(1).scaleb(-decimals), rounding=ROUND_HALF_UP)
     return f"{quantized:,.{decimals}f}" if pattern.startswith("N") else f"{quantized:.{decimals}f}"
+
+
+def cs_fixed(value, digits):
+    """d.ToString("F<digits>") on .NET 8 (the AutoCAD 2025 host that saved the workbook): the exact binary
+    value rounded half away from zero, no group separators. Fails closed on a non-finite or huge value."""
+    value = float(value)
+    if not math.isfinite(value):
+        raise InverterOutputError("an export number must be finite")
+    try:
+        quantized = Decimal(value).quantize(Decimal(1).scaleb(-digits), rounding=ROUND_HALF_UP)
+    except InvalidOperation:
+        raise InverterOutputError(f"{value!r} is out of the export's number range") from None
+    return f"{quantized:.{digits}f}"
 
 
 def safe_format(value, pattern):
@@ -709,7 +728,8 @@ def device_number_of(circuit):
 
 def _cables(state):
     """FindHomeruns (InsertSchedulesCmd.cs:123-148): every polyline carrying a cable record, with its
-    record kind, circuit, panel count and Polyline.Length (drawing units)."""
+    record kind, circuit, panel count and Polyline.Length (drawing units); `source` is the string's
+    handle (a string) or the row's from end (a cable)."""
     by_handle = {g.get("string"): g for g in state["geometry"]["strings"] if isinstance(g, dict)}
     out = []
     for item in state["rows"]["string-assignment"]:
@@ -717,11 +737,13 @@ def _cables(state):
         geometry = by_handle.get(item["string"]) if item["string"] is not None else None
         pts = _points(geometry["vertices"], "string vertices") if geometry else []
         out.append({"kind": STRING_KIND, "circuit": detail.get("circuit"), "panels": detail.get("panel_count"),
+                    "segment": None, "source": item["string"],
                     "length": polyline_length(pts) if len(pts) > 1 else 0.0})
     for item in state["rows"]["cable"]:
         detail = item.get("_detail") or {}
         pts = _points(item["vertices"], "cable vertices")
         out.append({"kind": item["cable_kind"], "circuit": detail.get("circuit"), "panels": None,
+                    "segment": item.get("segment"), "source": item.get("from"),
                     "length": polyline_length(pts, item.get("bulges"), bool(detail.get("closed")))})
     return out
 
@@ -1139,22 +1161,395 @@ def file_row(text, role=WORKBOOK_ROLE, number=1):
             "role": role, "chunks": g21_chunks(text), "lines": lines}
 
 
+# ----------------------------------------------------------- export sheets --
+# StringHomerunExportForm.cs (Branch2025 master a94db8d9, read 2026-09-25). A sheet is a list of rows, each
+# row the cells the form sets from column A through the last one it sets (a row it skips is empty), so
+# workbook_text renders exactly the cells the plugin wrote.
+
+# :181-187, the list view's columns (no elevation or electrical zone columns: the G35 state carries neither).
+HOMERUN_HEADERS = ("Inverter/MPPT", "Circuit", "Which", "Mod / String", "Length (ft)", "Circuit Length (ft)",
+                   "One-Way Length (ft)")
+# CableData.mCableType, the list view's "Which" (:2606), per G35 cable kind and homerun segment.
+HOMERUN_WHICH = {("dc-homerun", "start"): "Start Homerun", ("dc-homerun", "end"): "End Homerun",
+                 ("feeder", None): "Feeder"}
+# CableData.mNumPanels of every cable that is not a string, the list view's "Mod / String" (:2607).
+NO_PANELS = "NA"
+# AppConstants.UnassignedCircuitText (LeafSolarDesign.Core/AppConstants.cs:33): each such cable is its own
+# circuit, after the grouped ones (StringCalculations.cs:34-45).
+UNASSIGNED_CIRCUIT = "-"
+# ListViewItemCircuitComparer's key of a row whose circuit does not match (:2577-2578, :2682-2684).
+INT_MAX = 2**31 - 1
+# Array.IntrosortSizeThreshold (.NET 8): partitions this small are insertion sorted.
+INTROSORT_SIZE_THRESHOLD = 16
+# :772.
+EXPORT_EQUIPMENT_HEADERS = ("Tag", "Description", "Manufacturer", "Model", "Qty", "Rating", "Listing", "NEC Ref")
+# :865, the AC disconnect's OCPD sizes (above the last, the ceiling of 125 % of the current, :867).
+AC_OCPD_SIZES = (15, 20, 25, 30, 35, 40, 45, 50, 60, 70, 80, 90, 100, 125, 150, 175, 200)
+# :908-914.
+NEC_FOOTNOTES = ("690.4 - Installation requirements for PV equipment",
+                 "690.7(A)(3) - Maximum system voltage: Voc corrected for lowest expected ambient temperature",
+                 "690.8(A) - Maximum circuit current: Isc × 1.25 for continuous duty",
+                 "690.13 - DC photovoltaic disconnecting means",
+                 "690.54 - Interactive system point of interconnection")
+# :942-943.
+EXPORT_INVERTER_HEADERS = ("Inverter", "MPPT", "Strings", "Inputs", "Mod/String", "Modules", "DC (kW)",
+                           "Voc_cold (V)", "Max Vdc", "Isc×1.25 (A)", "Status")
+# :1088-1092.
+EXPORT_STRING_HEADERS = ("String ID", "Inv", "MPPT", "Elec Zone", "Modules", "Voc (V)", "Voc_cold (V)",
+                         "Inv Vmax (V)", "Margin (V)", "Vmp (V)", "Isc (A)", "Isc×1.25 (A)", "Power (W)",
+                         "HR Length (ft)", "Wire Gauge", "Ampacity (A)", "Vdrop (%)", "Design Std")
+# :43, the design low when no project location resolves an ASHRAE temperature (:126-147).
+DEFAULT_DESIGN_MIN_TEMP_C = -40.0
+_VOC_COLD_RULE = "Voc × (1 + βvoc/100 × (Tmin − 25°C)), Tmin = "
+
+
+def _export_host(host):
+    """(inverter count, design low in C, project location) the export form reads (:43, :126-149): the
+    SuggestedInverterCount setting (1 when not positive), the design low and the location."""
+    count = host.get("SuggestedInverterCount")
+    count = 0 if count is None else count
+    if isinstance(count, bool) or not isinstance(count, int):
+        raise InverterOutputError("SuggestedInverterCount must be an integer")
+    low = host.get("DesignMinTempC", DEFAULT_DESIGN_MIN_TEMP_C)
+    if isinstance(low, bool) or not isinstance(low, (int, float)) or not math.isfinite(low):
+        raise InverterOutputError("DesignMinTempC must be a finite number")
+    location = host.get("ProjectLocation")
+    if location is not None and not isinstance(location, str):
+        raise InverterOutputError("ProjectLocation must be text")
+    return (count if count > 0 else 1), float(low), location or None
+
+
+def _catalog_ac_kw(inverter):
+    """The inverter's AC power in kW. The catalog stores maxACPower in kW (the SG250HX row reads 250 beside
+    a maxDCPower of 375); the export form divides it by 1000 as if it were watts (:799, :948). Declared
+    divergence: Studio keeps the kW (docs/parity/divergences/cable-export/inverter-rating-units.md)."""
+    return safe_parse_double(inverter.get("maxACPower")) if inverter is not None else 0.0
+
+
+# --------------------------------------------- .NET 8 List<T>.Sort(IComparer<T>) --
+# List<T>.Sort -> Array.Sort -> ArraySortHelper<T>.Sort -> IntrospectiveSort (dotnet/runtime release/8.0,
+# src/libraries/System.Private.CoreLib/src/System/Collections/Generic/ArraySortHelper.cs). The plugin runs
+# on AutoCAD 2025 (LeafSolarDesign2025.csproj: net8.0-windows). Unstable: rows the comparer ties keep the
+# positions this exact algorithm leaves them in, so it is ported step for step. Every function works on the
+# window keys[lo:lo + size] in place; recursion depth is bounded by the depth limit (2 * (log2 n + 1)).
+
+def _swap_if_greater(keys, compare, i, j):
+    if compare(keys[i], keys[j]) > 0:
+        keys[i], keys[j] = keys[j], keys[i]
+
+
+def _insertion_sort(keys, lo, size, compare):
+    for i in range(size - 1):
+        t = keys[lo + i + 1]
+        j = i
+        while j >= 0 and compare(t, keys[lo + j]) < 0:
+            keys[lo + j + 1] = keys[lo + j]
+            j -= 1
+        keys[lo + j + 1] = t
+
+
+def _down_heap(keys, lo, i, n, compare):
+    d = keys[lo + i - 1]
+    while i <= n >> 1:
+        child = 2 * i
+        if child < n and compare(keys[lo + child - 1], keys[lo + child]) < 0:
+            child += 1
+        if not compare(d, keys[lo + child - 1]) < 0:
+            break
+        keys[lo + i - 1] = keys[lo + child - 1]
+        i = child
+    keys[lo + i - 1] = d
+
+
+def _heap_sort(keys, lo, size, compare):
+    for i in range(size >> 1, 0, -1):
+        _down_heap(keys, lo, i, size, compare)
+    for i in range(size, 1, -1):
+        keys[lo], keys[lo + i - 1] = keys[lo + i - 1], keys[lo]
+        _down_heap(keys, lo, 1, i - 1, compare)
+
+
+def _pick_pivot_and_partition(keys, lo, size, compare):
+    """Median of three (low, middle, high) put in order, the middle the pivot parked at hi - 1, then the
+    Hoare scan; returns the pivot's final index relative to lo."""
+    hi = size - 1
+    middle = hi >> 1
+    _swap_if_greater(keys, compare, lo, lo + middle)
+    _swap_if_greater(keys, compare, lo, lo + hi)
+    _swap_if_greater(keys, compare, lo + middle, lo + hi)
+    pivot = keys[lo + middle]
+    keys[lo + middle], keys[lo + hi - 1] = keys[lo + hi - 1], keys[lo + middle]
+    left, right = 0, hi - 1
+    while left < right:
+        left += 1
+        while compare(keys[lo + left], pivot) < 0:
+            left += 1
+        right -= 1
+        while compare(pivot, keys[lo + right]) < 0:
+            right -= 1
+        if left >= right:
+            break
+        keys[lo + left], keys[lo + right] = keys[lo + right], keys[lo + left]
+    if left != hi - 1:
+        keys[lo + left], keys[lo + hi - 1] = keys[lo + hi - 1], keys[lo + left]
+    return left
+
+
+def _intro_sort(keys, lo, size, depth_limit, compare):
+    while size > 1:
+        if size <= INTROSORT_SIZE_THRESHOLD:
+            if size == 2:
+                _swap_if_greater(keys, compare, lo, lo + 1)
+            elif size == 3:
+                _swap_if_greater(keys, compare, lo, lo + 1)
+                _swap_if_greater(keys, compare, lo, lo + 2)
+                _swap_if_greater(keys, compare, lo + 1, lo + 2)
+            else:
+                _insertion_sort(keys, lo, size, compare)
+            return
+        if depth_limit == 0:
+            _heap_sort(keys, lo, size, compare)
+            return
+        depth_limit -= 1
+        p = _pick_pivot_and_partition(keys, lo, size, compare)
+        _intro_sort(keys, lo + p + 1, size - p - 1, depth_limit, compare)
+        size = p
+
+
+def dotnet_list_sort(keys, compare):
+    """List<T>.Sort(IComparer<T>) on .NET 8, in place: IntrospectiveSort with the depth limit
+    2 * (Log2(n) + 1). `compare(a, b)` is IComparer<T>.Compare (negative, zero, positive). O(n log n)."""
+    if len(keys) > 1:
+        _intro_sort(keys, 0, len(keys), 2 * len(keys).bit_length(), compare)
+    return keys
+
+
+def _handle_value(handle):
+    """A drawing handle's number, None when it is not hex text."""
+    return int(handle, 16) if isinstance(handle, str) and re.fullmatch(r"[0-9A-Fa-f]{1,16}", handle) else None
+
+
+def _feeder_creation_ranks(state):
+    """{L1 number: the order its feeder was drawn in}: RouteL2Feeders draws one feeder per assignment in
+    the assignment dictionary's insertion order (OptiHomerunCmd.cs:1271-1305 via :1080-1135), which is the
+    L1 list List.Sort'ed by the distance to the nearest L2 after the phantom guard (:1051, :1085-1096).
+    Measured: on the plugin drawing (raw/i9.txt) the feeder handles AB39..AB46 ascend in exactly this
+    order (F8, F12, F7, F1, F5, F4, F11, F14, F2, F9, F13, F3, F10, F6). O(L1 * L2)."""
+    cab = _load_sibling("solar_inverter_cabling")
+    try:
+        l1, l2 = cab.levels(state)
+        l2, _ = cab.filter_phantom_l2(l1, l2)
+    except cab.InverterCablingError as exc:
+        raise InverterOutputError(str(exc)) from None
+    keyed = [(min((cab._dist(item["position"], other["position"]) for other in l2), default=math.inf),
+              item["number"]) for item in l1 if item["number"] is not None]
+    dotnet_list_sort(keyed, lambda a, b: (a[0] > b[0]) - (a[0] < b[0]))
+    return {number: rank for rank, (_, number) in enumerate(keyed)}
+
+
+def _select_all_order(cable, feeder_ranks):
+    """Where Editor.SelectAll puts a cable polyline (StringCalculations.cs:51-92): the database's newest
+    entity first. Measured on the plugin drawing CableExport read (receipt w7-testbuild2-20260925,
+    raw/i9.txt, ssget "X" in the same order): the 14 feeders first, newest drawn first (feeder_ranks,
+    _feeder_creation_ranks), then the homeruns, string by string in ascending string handle, each
+    circuit's end homerun before its start homerun, then the string polylines in descending handle. A
+    feeder whose L1 is not ranked follows the ranked ones in state order."""
+    if cable["kind"] == "feeder":
+        rank = feeder_ranks.get(cable["source"]) if type(cable["source"]) is int else None
+        return (0, 0, -rank) if rank is not None else (0, 1, 0)
+    handle = _handle_value(cable["source"])
+    if cable["kind"] == STRING_KIND:
+        return (2, 0, -handle) if handle is not None else (2, 1, 0)
+    segment = {"end": 0, "start": 1}.get(cable["segment"], 2)
+    return (1, 0, handle, segment) if handle is not None else (1, 1, 0, segment)
+
+
+def _compare_circuit_keys(a, b):
+    """ListViewItemCircuitComparer (:2572-2581): the circuit number only."""
+    return (a[0] > b[0]) - (a[0] < b[0])
+
+
+def homeruns_sheet(state):
+    """WriteHomerunsSheet (:1862-1888) over the detailed view PreCalculateViewItems builds (:2457-2552,
+    CreateListViewItem :2584-2689): the header, then one row per cable. The rows are built in mCables
+    order (StringCalculations.performCalc, :87-88): the cables in SelectAll order (_select_all_order),
+    grouped by circuit in order of first appearance, each group's cables in that order, the unassigned
+    ("-") cables after as groups of one (StringCalculations.cs:34-45); then List.Sort by the circuit
+    number, int.MaxValue for an unmatched circuit (:2540-2542), which is .NET's unstable introsort
+    (dotnet_list_sort). The permutation it applies depends only on the key sequence, so with the feeders
+    entering in the plugin's SelectAll order every row lands where the plugin's does. Fails closed on a
+    cable kind the plugin has no name for."""
+    cables = [cable for cable in _cables(state) if cable["circuit"] is not None]           # None: never collected
+    feeder_ranks = _feeder_creation_ranks(state) if any(c["kind"] == "feeder" for c in cables) else {}
+    ordered = sorted(cables, key=lambda cable: _select_all_order(cable, feeder_ranks))
+    groups, unassigned = {}, []
+    for cable in ordered:
+        if cable["circuit"] == UNASSIGNED_CIRCUIT:
+            unassigned.append([cable])
+        else:
+            groups.setdefault(cable["circuit"], []).append(cable)
+    items = []
+    for members in list(groups.values()) + unassigned:
+        circuit = members[0]["circuit"]
+        match = CIRCUIT_REGEX.search(circuit)
+        total_ft = sum(cable["length"] for cable in members) / 12.0
+        for cable in members:
+            if cable["kind"] == STRING_KIND:
+                which, panels = STRING_KIND, "" if cable["panels"] is None else str(cable["panels"])
+            else:
+                which, panels = HOMERUN_WHICH.get((cable["kind"], cable["segment"])), NO_PANELS
+                if which is None:
+                    raise InverterOutputError(f"cable kind {cable['kind']!r} ({cable['segment']!r}) has no "
+                                              "export name")
+            length = cs_fixed(cable["length"] / 12.0, 2)
+            if match:
+                items.append((int(match.group(1)),
+                              [f"{device_number_of(circuit)} - {match.group(2)}", match.group(1), which, panels,
+                               length, cs_fixed(total_ft, 2), cs_fixed(total_ft / 2, 2)]))
+            else:
+                items.append((INT_MAX, ["-", "-", which, panels, length, "N/A", "N/A"]))
+            if len(items) > MAX_SCHEDULE_ROWS:
+                raise InverterOutputError(f"the homerun sheet exceeds {MAX_SCHEDULE_ROWS} rows")
+    dotnet_list_sort(items, _compare_circuit_keys)
+    return [list(HOMERUN_HEADERS)] + [row for _, row in items]
+
+
+def export_equipment_sheet(inverter, count, low, location):
+    """WriteEquipmentSchedule (:757-925) with no module and no optimizer (cable_export refuses both): the
+    title merged over eight columns, a gap row, the tagged inverter and disconnect rows, a gap row, DESIGN
+    PARAMETERS, a gap row and NEC REFERENCES. None when there is no inverter (:759)."""
+    if inverter is None:
+        return None
+    ac_v = safe_parse_double(inverter.get("nominalACVoltage"))
+    ac_a = safe_parse_double(inverter.get("maxACCurrent"))
+    max_dc = safe_parse_double(inverter.get("maxDCVoltage"))
+    rating = (cs_format(_catalog_ac_kw(inverter), "N1") + "kW AC, " + cs_format(ac_v, "0") + "V, "
+              + cs_format(ac_a, "N1") + "A")
+    ocpd = next((size for size in AC_OCPD_SIZES if size >= ac_a * 1.25), 0) or math.ceil(ac_a * 1.25)
+    grid = [["EQUIPMENT SCHEDULE"], [], list(EXPORT_EQUIPMENT_HEADERS),
+            [f"INV-1..{count}" if count > 1 else "INV-1", "String Inverter", inverter.get("companyName") or "",
+             inverter.get("modelName") or "", str(count), rating,
+             "UL 1741 SA" if inverter.get("solarEdgeOptimized") is True else "UL 1741", "690.4"],
+            ["DC-DISC", "DC Disconnect", "(by installer)", "-", str(count),
+             cs_format(max_dc, "0") + "V, 30A" if max_dc > 0 else "Per inverter spec", "UL 98", "690.13"],
+            ["AC-DISC", "AC Disconnect", "(by installer)", "-", str(count),
+             cs_format(ac_v, "0") + "V, " + str(ocpd) + "A", "UL 98", "690.54"],
+            [], ["DESIGN PARAMETERS"],
+            ["Design Min Temp", cs_format(low, "0") + "°C per NEC 690.7(A)(3)"]]
+    if location:
+        grid.append(["Project Location", location])
+    return grid + [[], ["NEC REFERENCES"]] + [[note] for note in NEC_FOOTNOTES]
+
+
+def _by(records, key):
+    groups = {}
+    for record in records:
+        groups.setdefault(record[key], []).append(record)
+    return groups
+
+
+def _modules_per_string(group):
+    counts = list(dict.fromkeys(r["modules"] for r in group))
+    return str(counts[0]) if len(counts) == 1 else ", ".join(str(r["modules"]) for r in group)
+
+
+def export_inverter_sheet(inverter, records, low):
+    """WriteInverterScheduleCD (:927-1075) with no module, so every module column prints "-" and no row
+    has a status: one row per inverter and MPPT, each inverter's subtotal, a gap row, the grand total, a
+    gap row and the Voc_cold footnote. None without string records (:929)."""
+    if not records:
+        return None
+    max_dc = safe_parse_double(inverter.get("maxDCVoltage")) if inverter is not None else 0.0
+    inputs = _int_or_zero(inverter.get("DCInputers")) if inverter is not None else 0
+    mppts = _int_or_zero(inverter.get("numMpptTrackers")) if inverter is not None else 0
+    per_mppt = -(-inputs // mppts) if (mppts > 0 and inputs > 0) else 0
+    ac_kw = _catalog_ac_kw(inverter)
+    grid = [list(EXPORT_INVERTER_HEADERS)]
+    grand_strings = grand_modules = 0
+    by_inverter = _by(records, "inverter")
+    for number in sorted(by_inverter):
+        inverter_strings = inverter_modules = 0
+        by_mppt = _by(by_inverter[number], "mppt")
+        for letter in sorted(by_mppt):
+            group = by_mppt[letter]
+            modules = sum(r["modules"] for r in group)
+            grid.append([f"INV-{number}", letter, str(len(group)),
+                         f"{len(group)}/{per_mppt}" if per_mppt > 0 else str(len(group)),
+                         _modules_per_string(group), str(modules), "-", "-",
+                         cs_text(max_dc) if max_dc > 0 else "-", "-", ""])
+            inverter_strings += len(group)
+            inverter_modules += modules
+        grid.append([f"INV-{number} Total", "", str(inverter_strings), "", "", str(inverter_modules), "-",
+                     "", "", "", "DC/AC: -" if ac_kw > 0 else ""])
+        grand_strings += inverter_strings
+        grand_modules += inverter_modules
+    grid += [[], ["GRAND TOTAL", "", str(grand_strings), "", "", str(grand_modules), "-", "", "", "",
+                  "DC/AC: -" if ac_kw * len(by_inverter) > 0 else ""],
+             [], ["Voc_cold calculated per NEC 690.7(A)(3): " + _VOC_COLD_RULE + cs_format(low, "0") + "°C"]]
+    return grid
+
+
+def export_string_sheet(inverter, records, low):
+    """WriteStringSchedule (:1077-1284) with no module: one row per string record (the sizer's cold Voc,
+    the inverter's Vmax, the homerun length), a gap row, the total, a gap row and two footnotes. Cable
+    sizing runs only with a module (:635), and the legacy fallback's key <inv>/<mppt><string> (:1160)
+    never names a stored +<string>/<device><mppt> circuit, so gauge, ampacity and Vdrop print "-". None
+    without string records (:1079)."""
+    if not records:
+        return None
+    max_dc = safe_parse_double(inverter.get("maxDCVoltage")) if inverter is not None else 0.0
+    grid = [list(EXPORT_STRING_HEADERS)]
+    total_modules = 0
+    for r in records:
+        voc_cold = r["modules"] * r["cold_voc_per_module"] if r["cold_voc_per_module"] > 0 else 0.0
+        vmax = r["vmax"] if r["vmax"] > 0 else int(max_dc)
+        grid.append([f"S{r['inverter']}-{r['mppt']}{r['string']}", str(r["inverter"]), r["mppt"],
+                     r["zone"] or "-", str(r["modules"]), "-",
+                     cs_text(cs_round(voc_cold, 1)) if voc_cold > 0 else "-",
+                     str(vmax) if vmax > 0 else "-",
+                     cs_text(cs_round(vmax - voc_cold, 1)) if (voc_cold > 0 and vmax > 0) else "-",
+                     "-", "-", "-", "-", cs_text(cs_round(r["homerun_inches"] / 12.0, 1)), "-", "-", "-",
+                     r["standard"] or "-"])
+        total_modules += r["modules"]
+    return grid + [[], ["TOTAL", "", f"{len(records)} strings", "", str(total_modules)], [],
+                   ["Voc_cold per NEC 690.7(A)(3): " + _VOC_COLD_RULE + cs_format(low, "0")
+                    + "°C | Isc×1.25 per NEC 690.8(A)(1) continuous duty"],
+                   ["Cable sizing per NEC 310.16 (ampacity) + NEC 210.19 FPN (voltage drop ≤ 2% recommended)"]]
+
+
 def cable_export(state, host, form_values):
-    """CableExport, Export All (StringExportCmd.cs:33-94; declared, see the module docstring): the
-    homerun cables found, the workbook written. Returns (after state, printed lines, workbook or None),
-    the workbook {"sheets", "bytes", "text"}; the drawing is unchanged."""
+    """CableExport, Export All (StringExportCmd.cs:33-94, StringHomerunExportForm.cs:318-413; declared, see
+    the module docstring): the homerun cables found, the workbook the form writes, in its sheet order:
+    Homeruns, Equipment, Inverter and String Schedule, then the Feeder Schedule when L2 collectors are on
+    and the drawing holds L1ToL2Assignments (:373, :710-755). A module (its columns and the Cable Sizing
+    Schedule) or an optimizer is not ported and is refused. Returns (after state, printed lines, workbook
+    or None), the workbook {"sheets", "bytes", "text"}; the drawing is unchanged."""
     after = copy.deepcopy(state)
     if (form_values or {}).get("branch_string_export") != "Export All":
         raise InverterOutputError("CableExport's dialog answer must be Export All")
     if not any(True for cable in _cables(after) if cable["circuit"] is not None):
         return after, ["No homerun polylines found."], None
-    sheet_names = {"EQUIPMENT SCHEDULE": "Equipment Schedule", "INVERTER SCHEDULE": "Inverter Schedule",
-                   "COMBINER / INVERTER SCHEDULE": "Combiner Inverter Schedule",
-                   "STRING SCHEDULE": "String Schedule", "FEEDER SCHEDULE": "Feeder Schedule"}
-    sheets = [(sheet_names[t["title"]], [list(t["headers"])] + [list(r) for r in table_cells(t)[2:]])
-              for t in build_schedules(after, host)]
-    if not sheets:
-        return after, ["No schedule data found."], None
+    if host.get("ModuleCatalogRecord") is not None:
+        raise InverterOutputError("the export's module columns and cable sizing are not ported: the capture "
+                                  "host resolves no module")
+    if host.get("UseOptimizers"):
+        raise InverterOutputError("the export's optimizer row is not ported: the capture host has no optimizers")
+    inverter = host.get("InverterCatalogRecord")
+    count, low, location = _export_host(host)
+    records = string_records(after, host)
+    sheets = [("Homeruns", homeruns_sheet(after))]
+    for name, grid in (("Equipment Schedule", export_equipment_sheet(inverter, count, low, location)),
+                       ("Inverter Schedule", export_inverter_sheet(inverter, records, low)),
+                       ("String Schedule", export_string_sheet(inverter, records, low))):
+        if grid is not None:
+            sheets.append((name, grid))
+    l1_to_l2 = _l1_to_l2(after, host)
+    if l1_to_l2:
+        sheets.append(("Feeder Schedule", [list(FEEDER_HEADERS)] + feeder_schedule(after, host, l1_to_l2)["rows"]))
+    if sum(len(grid) for _, grid in sheets) > MAX_SCHEDULE_ROWS:
+        raise InverterOutputError(f"the workbook exceeds {MAX_SCHEDULE_ROWS} rows")
+    if any(len(text) > MAX_CELL_CHARS for _, grid in sheets for row_cells in grid for text in row_cells):
+        raise InverterOutputError("a workbook cell exceeds the comparator's string bound")
     data = write_workbook(sheets)
     return after, [f"CableExport: wrote {len(sheets)} sheet(s)."], \
         {"sheets": sheets, "bytes": data, "text": workbook_text(sheets)}

@@ -114,6 +114,21 @@ def test_the_step_rows_carry_the_changed_objects(inputs):
     assert "# String Schedule\n" in "".join(rows[0]["chunks"])
 
 
+def test_the_i9_workbook_is_the_export_form_s_on_the_i9_host(inputs):
+    _, docs = run(inputs)
+    (row,) = docs["i9"]["after"]["rows"]
+    lines = "".join(row["chunks"]).split("\n")
+    assert [line for line in lines if line.startswith("# ")] == \
+        ["# Homeruns", "# Equipment Schedule", "# Inverter Schedule", "# String Schedule"]   # no feeders: L2 off
+    assert lines[2:6] == ["1 - a\t1\tEnd Homerun\tNA\t20.00\t30.00\t15.00",     # SelectAll: newest first
+                          "1 - a\t1\tString\t14\t10.00\t30.00\t15.00",
+                          "1 - a\t2\tString\t13\t10.00\t10.00\t5.00",
+                          "-\t-\tFeeder\tNA\t8.33\tN/A\tN/A"]
+    assert "INV-1..5\tString Inverter\tSungrow\tSG250HX\t5\t250.0kW AC, 800V, 180.5A\tUL 1741\t690.4" in lines
+    assert "INV-1\tA\t2\t2/2\t14, 13\t27\t-\t-\t1500\t-\t" in lines
+    assert ev.host_for("i9")["UseL2Collectors"] is False and ev.host_for("i8")["UseL2Collectors"] is True
+
+
 def test_the_envelope_follows_the_adapter(inputs):
     _, docs = run(inputs)
     assert docs["i8"]["parameters"] == {"answers": ["22000,5500"]}
