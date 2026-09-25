@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, type TestContext } from "vitest";
 import { ForgePublicationError, ForgeRemoteAuthority } from "../src/vendor/mushy-author/ports/impl/forgeRemoteAuthority.js";
 import type { ForgeRemoteAuthorityOptions } from "../src/vendor/mushy-author/ports/impl/forgeRemoteAuthority.js";
 import { TenantChangeRepo } from "../src/vendor/mushy-author/ports/impl/tenantChangeRepo.js";
@@ -15,16 +15,29 @@ const TENANT = "tenant-a";
 const A = "11111111-1111-4111-8111-111111111111";
 const B = "22222222-2222-4222-8222-222222222222";
 const identity = { name: "Leaf test", email: "test@example.invalid" };
-const roots: string[] = [];
-afterEach(() => { for (const dir of roots.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+const cases = new WeakMap<TestContext["task"], { root: string; pending: Promise<unknown> }>();
+function isolated(run: (root: string) => unknown) {
+  return (context: TestContext) => {
+    const root = mkdtempSync(join(tmpdir(), "forge-publication-test-"));
+    const pending = Promise.resolve().then(() => run(root));
+    cases.set(context.task, { root, pending });
+    return pending;
+  };
+}
+afterEach(async ({ task }) => {
+  const testCase = cases.get(task);
+  if (!testCase) return;
+  // A timeout must not remove repositories while the test is still using them.
+  await Promise.allSettled([testCase.pending]);
+  rmSync(testCase.root, { recursive: true, force: true });
+  cases.delete(task);
+});
 
 function git(dir: string, args: string[]) {
   return execFileSync("git", args, { cwd: dir, encoding: "utf8" }).trim();
 }
 
-function fixture() {
-  const root = mkdtempSync(join(tmpdir(), "forge-publication-test-"));
-  roots.push(root);
+function fixture(root: string) {
   const seed = join(root, "seed");
   git(root, ["init", "-b", "main", seed]);
   writeFileSync(join(seed, "registry.json"), '{"tools":[]}\n');
@@ -84,8 +97,8 @@ class InterruptedAuthority extends ForgeRemoteAuthority {
 }
 
 describe("Forge remote artifact authority", () => {
-  it("publishes exact staged bytes with protected fast-forward CAS and leaves local main unchanged", async () => {
-    const f = fixture();
+  it("publishes exact staged bytes with protected fast-forward CAS and leaves local main unchanged", isolated(async (root) => {
+    const f = fixture(root);
     const request = f.stage();
     const repo = f.authority.bind(TENANT, f.cache, f.remote);
     await expect(repo.publishAuthoritatively!(request)).resolves.toEqual({ commit: request.stagedCommit });
@@ -96,10 +109,10 @@ describe("Forge remote artifact authority", () => {
     await expect(repo.publishAuthoritatively!(request)).resolves.toEqual({ commit: request.stagedCommit });
     f.revoke();
     await expect(repo.publishAuthoritatively!(request)).rejects.toMatchObject({ state: "refused" });
-  });
+  }));
 
-  it("has one winner across two caches at the same expected remote head", async () => {
-    const f = fixture();
+  it("has one winner across two caches at the same expected remote head", isolated(async (root) => {
+    const f = fixture(root);
     const cacheB = join(f.root, "cache-b.git");
     git(f.root, ["clone", "--bare", f.remote, cacheB]);
     const a = f.stage();
@@ -116,10 +129,10 @@ describe("Forge remote artifact authority", () => {
     await expect(f.authority.bind(TENANT, loserDir, f.remote).publishAuthoritatively!(loser)).rejects.toThrow("Git ref conflict");
     expect(git(f.remote, ["rev-parse", "main"])).toBe(winner);
     expect(git(f.cache, ["rev-parse", "main"])).toBe(f.base);
-  }, 60_000);
+  }), 60_000);
 
-  it("refuses wrong tenant, origin, private ref and credential binding before remote mutation", async () => {
-    const f = fixture();
+  it("refuses wrong tenant, origin, private ref and credential binding before remote mutation", isolated(async (root) => {
+    const f = fixture(root);
     const request = f.stage();
     const repo = f.authority.bind(TENANT, f.cache, f.remote);
     await expect(repo.publishAuthoritatively!({ ...request, tenantId: "tenant-b" })).rejects.toThrow("refused");
@@ -132,28 +145,28 @@ describe("Forge remote artifact authority", () => {
     await expect(repo.publishAuthoritatively!(request)).rejects.toThrow("refused");
     expect(git(f.remote, ["rev-parse", "main"])).toBe(f.base);
     expect(git(f.seed, ["rev-parse", "main"])).toBe(f.base);
-  });
+  }));
 
-  it("rejects unsafe production URLs and implicit local paths", async () => {
+  it("rejects unsafe production URLs and implicit local paths", isolated(async (root) => {
     for (const remote of ["http://forge.invalid/team/repo.git", "https://token@forge.invalid/team/repo.git",
       "https://forge.invalid/team/repo.git?q=token", "https://forge.invalid/team/repo.git#token",
       "https://forge.invalid/team/../repo.git", "/tmp/remote.git"]) {
       const authority = new ForgeRemoteAuthority({ locate: async () => remote, credentials: async () => null });
       await expect(authority.canonicalRemote(TENANT, remote)).rejects.toThrow("refused");
     }
-  });
+  }));
 
-  it("reconciles a lost push reply only from exact authoritative readback", async () => {
-    const f = fixture();
+  it("reconciles a lost push reply only from exact authoritative readback", isolated(async (root) => {
+    const f = fixture(root);
     const request = f.stage();
     const authority = new InterruptedAuthority(f.options);
     await expect(authority.bind(TENANT, f.cache, f.remote).publishAuthoritatively!(request))
       .resolves.toEqual({ commit: request.stagedCommit });
     expect(git(f.cache, ["rev-parse", "main"])).toBe(f.base);
-  });
+  }));
 
-  it("reports expected old head as not published and preserves its staged ref", async () => {
-    const f = fixture();
+  it("reports expected old head as not published and preserves its staged ref", isolated(async (root) => {
+    const f = fixture(root);
     const request = f.stage();
     const authority = new InterruptedAuthority(f.options);
     authority.mode = "before-push";
@@ -161,10 +174,10 @@ describe("Forge remote artifact authority", () => {
       .rejects.toMatchObject({ state: "not-published" });
     expect(git(f.remote, ["rev-parse", "main"])).toBe(f.base);
     expect(git(f.cache, ["rev-parse", request.changeRef])).toBe(request.stagedCommit);
-  });
+  }));
 
-  it("keeps failed readback unknown after successful remote acceptance, then retries proof", async () => {
-    const f = fixture();
+  it("keeps failed readback unknown after successful remote acceptance, then retries proof", isolated(async (root) => {
+    const f = fixture(root);
     const request = f.stage();
     const authority = new InterruptedAuthority(f.options);
     authority.mode = "readback";
@@ -174,19 +187,19 @@ describe("Forge remote artifact authority", () => {
     expect(git(f.cache, ["rev-parse", "main"])).toBe(f.base);
     await expect(f.authority.bind(TENANT, f.cache, f.remote).publishAuthoritatively!(request))
       .resolves.toEqual({ commit: request.stagedCommit });
-  });
+  }));
 
-  it("refuses a conflicting remote private ref without overwriting it", async () => {
-    const f = fixture();
+  it("refuses a conflicting remote private ref without overwriting it", isolated(async (root) => {
+    const f = fixture(root);
     const request = f.stage();
     git(f.remote, ["update-ref", request.changeRef, f.base]);
     await expect(f.authority.bind(TENANT, f.cache, f.remote).publishAuthoritatively!(request)).rejects.toThrow("Git ref conflict");
     expect(git(f.remote, ["rev-parse", request.changeRef])).toBe(f.base);
     expect(git(f.remote, ["rev-parse", "main"])).toBe(f.base);
-  });
+  }));
 
-  it("never rewinds accepted history even with an expected-head lease", async () => {
-    const f = fixture();
+  it("never rewinds accepted history even with an expected-head lease", isolated(async (root) => {
+    const f = fixture(root);
     const request = f.stage();
     await f.authority.bind(TENANT, f.cache, f.remote).publishAuthoritatively!(request);
     git(f.cache, ["update-ref", request.changeRef, f.base]);
@@ -194,10 +207,10 @@ describe("Forge remote artifact authority", () => {
       receipt: { ...request.receipt, base_commit: request.stagedCommit, staged_commit: f.base } };
     await expect(f.authority.bind(TENANT, f.cache, f.remote).publishAuthoritatively!(rewind)).rejects.toThrow("Git ref conflict");
     expect(git(f.remote, ["rev-parse", "main"])).toBe(request.stagedCommit);
-  });
+  }));
 
-  it("fast-forwards a fresh-stage cache, keeps private refs and refuses divergent cache history", async () => {
-    const f = fixture();
+  it("fast-forwards a fresh-stage cache, keeps private refs and refuses divergent cache history", isolated(async (root) => {
+    const f = fixture(root);
     const a = f.stage();
     const b = f.stage(B);
     const repo = f.authority.bind(TENANT, f.cache, f.remote);
@@ -208,19 +221,19 @@ describe("Forge remote artifact authority", () => {
     git(f.cache, ["update-ref", "refs/heads/main", b.stagedCommit]);
     await expect(repo.refreshMain!()).rejects.toThrow("Git ref conflict");
     expect(git(f.cache, ["rev-parse", "main"])).toBe(b.stagedCommit);
-  });
+  }));
 
-  it("fails closed for a missing remote", async () => {
-    const f = fixture();
+  it("fails closed for a missing remote", isolated(async (root) => {
+    const f = fixture(root);
     const request = f.stage();
     rmSync(f.remote, { recursive: true, force: true });
     await expect(f.authority.bind(TENANT, f.cache, f.remote).publishAuthoritatively!(request))
       .rejects.toMatchObject({ state: "unknown" });
     expect(git(f.cache, ["rev-parse", "main"])).toBe(f.base);
-  });
+  }));
 
-  it("ignores cached URL rewrites and inherited Git config without exposing credentials in argv", async () => {
-    const f = fixture();
+  it("ignores cached URL rewrites and inherited Git config without exposing credentials in argv", isolated(async (root) => {
+    const f = fixture(root);
     const request = f.stage();
     git(f.cache, ["config", `url.${f.seed}.insteadOf`, f.remote]);
     const token = "fixture_token_not_a_real_credential";
@@ -257,10 +270,10 @@ describe("Forge remote artifact authority", () => {
     expect(git(f.remote, ["rev-parse", "main"])).toBe(request.stagedCommit);
     expect(git(f.seed, ["rev-parse", "main"])).toBe(f.base);
     expect(git(f.cache, ["config", "--list"])).not.toContain(token);
-  });
+  }));
 
-  it("bootstraps and refreshes the provider cache only within its existing lease", async () => {
-    const f = fixture();
+  it("bootstraps and refreshes the provider cache only within its existing lease", isolated(async (root) => {
+    const f = fixture(root);
     const lease = {
       withLease: async <T>(tenantId: string, action: (lease: unknown) => Promise<T>) =>
         action({ tenantId, lost: false, repoDirs: new Set<string>() }),
@@ -282,12 +295,12 @@ describe("Forge remote artifact authority", () => {
       await expect(fence(() => cache.refreshMain!())).rejects.toThrow("refused");
       expect(git(cache.dir, ["rev-parse", "main"])).toBe(staged.stagedCommit);
     });
-  });
+  }));
 });
 
 
-it("retains only explicitly local tenant checkout during migration", async () => {
-  const f = fixture();
+it("retains only explicitly local tenant checkout during migration", isolated(async (root) => {
+  const f = fixture(root);
   const provider = new TenantRepoProviderImpl({
     locator: { repoRef: async () => f.seed }, remoteAuthority: f.authority,
     isRemoteTenant: tenant => {
@@ -299,9 +312,9 @@ it("retains only explicitly local tenant checkout during migration", async () =>
   expect((await provider.checkout(TENANT)).dir).toBe(f.seed);
   await expect(provider.checkout("unknown")).rejects.toThrow("unknown tenant refused");
   await expect(provider.bare("unknown")).rejects.toThrow("unknown tenant refused");
-});
+}));
 
-it("refuses remote checkout without a durable catalog pin before legacy clone", async () => {
+it("refuses remote checkout without a durable catalog pin before legacy clone", isolated(async (root) => {
   let locatorCalls = 0;
   let credentialCalls = 0;
   const authority = new ForgeRemoteAuthority({
@@ -315,7 +328,7 @@ it("refuses remote checkout without a durable catalog pin before legacy clone", 
   await expect(provider.checkout(TENANT)).rejects.toThrow("durable effective catalog resolver");
   expect(locatorCalls).toBe(0);
   expect(credentialCalls).toBe(0);
-});
+}));
 
 
 function effectiveProvider(f: ReturnType<typeof fixture>,
@@ -333,8 +346,8 @@ function effectiveProvider(f: ReturnType<typeof fixture>,
   });
 }
 
-it("checks out the durable old pin privately while remote main advances", async () => {
-  const f = fixture();
+it("checks out the durable old pin privately while remote main advances", isolated(async (root) => {
+  const f = fixture(root);
   const digest = createHash("sha256").update(readFileSync(join(f.seed, "registry.json"))).digest("hex");
   const provider = effectiveProvider(f, async () => ({ catalogCommit: f.base, catalogDigest: digest }));
   const staged = f.stage();
@@ -351,11 +364,11 @@ it("checks out the durable old pin privately while remote main advances", async 
   });
   expect(existsSync(checkout)).toBe(false);
   expect(git(join(f.root, "effective-bare", `${TENANT}.git`), ["rev-parse", "main"])).toBe(f.base);
-});
+}));
 
-it.each(["missing", "malformed", "digest", "absent-object", "unknown-tenant"])(
-  "refuses %s effective catalog without selecting remote HEAD", async (fault) => {
-    const f = fixture();
+it.for(["missing", "malformed", "digest", "absent-object", "unknown-tenant"])(
+  "refuses %s effective catalog without selecting remote HEAD", (fault, context) => isolated(async (root) => {
+    const f = fixture(root);
     const digest = createHash("sha256").update(readFileSync(join(f.seed, "registry.json"))).digest("hex");
     const provider = effectiveProvider(f, async (tenantId) => {
       if (fault === "missing" || tenantId !== TENANT) throw new Error("no durable pointer");
@@ -365,10 +378,10 @@ it.each(["missing", "malformed", "digest", "absent-object", "unknown-tenant"])(
     const tenant = fault === "unknown-tenant" ? "tenant-unknown" : TENANT;
     await expect(provider.withTenantReadLease(tenant, () => provider.checkout(tenant))).rejects.toThrow();
     expect(git(f.remote, ["rev-parse", "main"])).toBe(f.base);
-  });
+  })(context));
 
-it("cleans a private effective checkout at the writer lease boundary", async () => {
-  const f = fixture();
+it("cleans a private effective checkout at the writer lease boundary", isolated(async (root) => {
+  const f = fixture(root);
   const digest = createHash("sha256").update(readFileSync(join(f.seed, "registry.json"))).digest("hex");
   const provider = effectiveProvider(f, async () => ({ catalogCommit: f.base, catalogDigest: digest }));
   let dir = "";
@@ -379,4 +392,4 @@ it("cleans a private effective checkout at the writer lease boundary", async () 
   });
   expect(existsSync(dir)).toBe(false);
   expect(git(f.remote, ["rev-parse", "main"])).toBe(f.base);
-});
+}));
