@@ -34,3 +34,7 @@ The AC disconnect row reads "800V, 226A": 125 % of 180.5 A is 225.6 A, above the
 (200 A, line 865), so the form takes the ceiling (line 867). NEC 240.6(A) lists 225 and 250 A as standard sizes, so
 the next standard size is 250 A. Studio prints the plugin's 226 A because it is the form's documented fallback
 rule rather than a units error; it is recorded here for review.
+
+## Retired
+
+Retired by Branch2025 #327 (every reader of the catalog `maxACPower` takes it as kW through `InverterRating.AcKw`, the equipment schedule, the inverter schedule's DC/AC ratio and the balancing form alike): recaptured 2026-09-25 on an unsigned test build of master 1d4f900f plus #327 and #330 (inverter chain i9, i8 reopened on the same build). The Equipment Schedule now rates the SG250HX "250.0kW AC, 800V, 180.5A", the workbook text equals the committed test-build-2 text except for that one row, and the receipt compares with no diffs. The signed release carrying #327 is pending the operator (Solar residuals R23).

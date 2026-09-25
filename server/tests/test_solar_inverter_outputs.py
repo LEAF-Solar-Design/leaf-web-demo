@@ -395,16 +395,14 @@ def test_dotnet_sort_orders_every_input():
 
 # ------------------------------------------------ i9 against the plugin workbook --
 # R03b: the committed i8 state (the i9 step's input) on the i9 host of the evidence producer, against the
-# workbook test build 2 of the fixed plugin saved (receipt w7-testbuild2-20260925, i9-homeruns.xlsx), rendered
-# by workbook_text's rule. Declared: the inverter rating row (inverter-rating-units.md). Every other row,
-# the Homeruns feeders included (their SelectAll order from RouteL2Feeders' drawing order), in place.
+# workbook test build 5 of the fixed plugin saved (receipt w9-testbuild5-20260925, i9-homeruns.xlsx; Branch2025
+# #327 reads maxACPower as kW), rendered by workbook_text's rule. Every row, the Homeruns feeders included (their
+# SelectAll order from RouteL2Feeders' drawing order), in place.
 FEEDER_ROWS = 14
 
 I8_STATE = ROOT / "docs" / "parity" / "evidence" / "rooftop" / "inverters" / "state-i8.json"
-PLUGIN_WORKBOOK_TEXT = ROOT / "docs" / "parity" / "evidence" / "rooftop" / "inverters" / "i9-plugin-workbook-tb2.txt"
-PLUGIN_RATING_ROW = "INV-1..5\tString Inverter\tSungrow\tSG250HX\t5\t0.2kW AC, 800V, 180.5A\tUL 1741\t690.4"
+PLUGIN_WORKBOOK_TEXT = ROOT / "docs" / "parity" / "evidence" / "rooftop" / "inverters" / "i9-plugin-workbook.txt"
 STUDIO_RATING_ROW = "INV-1..5\tString Inverter\tSungrow\tSG250HX\t5\t250.0kW AC, 800V, 180.5A\tUL 1741\t690.4"
-DECLARED_ROWS = {PLUGIN_RATING_ROW: STUDIO_RATING_ROW}
 VOC_COLD = "Voc \u00d7 (1 + \u03b2voc/100 \u00d7 (Tmin \u2212 25\u00b0C)), Tmin = -40\u00b0C"
 EXPECTED_EQUIPMENT = [
     "EQUIPMENT SCHEDULE", "", "Tag\tDescription\tManufacturer\tModel\tQty\tRating\tListing\tNEC Ref",
@@ -491,12 +489,11 @@ def test_i9_workbook_sheets_and_the_rows_the_plugin_wrote(i9_text):
         "Cable sizing per NEC 310.16 (ampacity) + NEC 210.19 FPN (voltage drop \u2264 2% recommended)"]
 
 
-def test_i9_workbook_equals_the_plugin_workbook_but_the_declared_rows(i9_text):
+def test_i9_workbook_equals_the_plugin_workbook(i9_text):
     plugin = sections(PLUGIN_WORKBOOK_TEXT.read_text(encoding="utf-8-sig"))
     studio = sections(i9_text)
     assert [name for name, _ in studio] == [name for name, _ in plugin]
     for (name, studio_lines), (_, plugin_lines) in zip(studio, plugin):
         if name == "Homeruns":
             assert all(line.startswith("-\t-\tFeeder\t") for line in plugin_lines[-FEEDER_ROWS:])
-        assert studio_lines == [DECLARED_ROWS.get(line, line) for line in plugin_lines], name
-    assert sum(line in DECLARED_ROWS for _, lines in plugin for line in lines) == 1
+        assert studio_lines == plugin_lines, name
