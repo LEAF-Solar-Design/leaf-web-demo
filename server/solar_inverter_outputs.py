@@ -33,9 +33,9 @@ Declared divergences (G35, each emits exactly the diffs it explains):
                        read 2026-09-25 at C:/tmp/solar-parity/wt-b25-main, master a94db8d9: Homeruns,
                        Equipment, Inverter and String Schedule, a Feeder Schedule under L2 collectors; stdlib
                        zip and XML) and the evidence carries it as a G20/G21 `file` row. Against the plugin's
-                       saved workbook it differs in one row only: the inverter rating's AC power, which the
-                       plugin divides by 1000 as if the catalog's kW were watts
-                       (docs/parity/divergences/cable-export/inverter-rating-units.md). The Homeruns row
+                       saved workbook it matches row for row since Branch2025 #327 reads the catalog's AC power
+                       as kW (the retired docs/parity/divergences/cable-export/inverter-rating-units.md).
+                       The Homeruns row
                        order (an unstable sort over SelectAll order) is reproduced, the feeders' place in it
                        from the order RouteL2Feeders drew them in.
 
@@ -1221,8 +1221,8 @@ def _export_host(host):
 
 def _catalog_ac_kw(inverter):
     """The inverter's AC power in kW. The catalog stores maxACPower in kW (the SG250HX row reads 250 beside
-    a maxDCPower of 375); the export form divides it by 1000 as if it were watts (:799, :948). Declared
-    divergence: Studio keeps the kW (docs/parity/divergences/cable-export/inverter-rating-units.md)."""
+    a maxDCPower of 375), and the export form reads it as kW since Branch2025 #327 (the retired
+    docs/parity/divergences/cable-export/inverter-rating-units.md)."""
     return safe_parse_double(inverter.get("maxACPower")) if inverter is not None else 0.0
 
 
