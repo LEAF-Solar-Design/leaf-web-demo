@@ -482,6 +482,7 @@ echo "--- 6/6 Run unsharded test gate and print scoreboard"
 export LEAF_AUTOFILL_SOLVER_ABSENT_OK=1
 export LEAF_MANAGED_WEB_BROWSER_MODE=trusted-template-container
 mkdir -p /tmp/gate-results
+reporters_ready=0  # EXPERIMENT E1: no reporters, no plugin args; PYTHONPATH and sitecustomize stay
 if [[ "$reporters_ready" == 1 ]]; then
   export LEAF_TRUSTED_CI_DIR="$selection_dir"
 else
