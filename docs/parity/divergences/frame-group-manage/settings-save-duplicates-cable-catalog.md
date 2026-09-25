@@ -12,3 +12,7 @@ The list step (c5, LEAFFRAMEGROUPLIST) writes nothing and passes with zero diffs
 Studio's rename and delete write the same FrameGroups setting and no catalog, so in c4 and c7 the only
 disagreement is the plugin's `HomerunRouting` setting row and its entity-mapping entry. When the plugin stops
 growing the catalog, both become ordinary passing receipts.
+
+## Retired
+
+Retired by Branch2025 #308 (saved lists replace defaults on load): recaptured 2026-09-24 on an unsigned test build of master 09b5b741 (same chain steps, c2 and c10 reopened on the same build), the receipt now passes with no declared diffs. The signed release carrying the fix is pending the operator (Solar residuals R23).

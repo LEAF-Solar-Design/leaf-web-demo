@@ -12,3 +12,7 @@ Studio's frame-group create writes the same FrameGroups setting (name, colour in
 LastModifiedTicks is synthetic) and no catalog, so the only disagreement is the plugin's `HomerunRouting` setting
 row and its entity-mapping entry. When the plugin stops growing the catalog, this becomes an ordinary passing
 receipt.
+
+## Retired
+
+Retired by Branch2025 #308 (saved lists replace defaults on load): recaptured 2026-09-24 on an unsigned test build of master 09b5b741 (same chain steps, c2 and c10 reopened on the same build), the receipt now passes with no declared diffs. The signed release carrying the fix is pending the operator (Solar residuals R23).
