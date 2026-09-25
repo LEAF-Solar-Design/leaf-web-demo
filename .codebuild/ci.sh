@@ -515,6 +515,20 @@ if [[ "$tracing_helpers_ready" != 1 || "$reporters_ready" != 1 ]]; then
 fi
 gate_status=0
 unset PYTHONSAFEPATH
+echo "=== EXPERIMENT E4: python startup with and without PYTHONPATH"
+echo "PYTHONPATH=${PYTHONPATH:-<unset>}"
+( time python -c "import sys; print('sys.path', sys.path[:5])" ) 2>&1
+( time python -c "import sitecustomize, sys; print('sitecustomize', getattr(sitecustomize, '__file__', None))" ) 2>&1
+( unset PYTHONPATH; time python -c "import sitecustomize, sys; print('sitecustomize (no PYTHONPATH)', getattr(sitecustomize, '__file__', None))" ) 2>&1
+( unset PYTHONPATH; time python -c pass ) 2>&1
+( unset PYTHONPATH; python -X importtime -c pass 2>&1 | sort -t'|' -k2 -n | tail -n 12 ) 2>&1
+( unset PYTHONPATH; cd server && time python -m pytest --co -q tests 2>&1 | tail -n 3 ) 2>&1
+( cd server && time python -m pytest --co -q tests 2>&1 | tail -n 3 ) 2>&1
+( unset PYTHONPATH; cd server && time python -m pytest -q -p no:cacheprovider tests/test_solar_terrain.py 2>&1 | tail -n 3 ) 2>&1 || true
+( cd server && time python -m pytest -q -p no:cacheprovider tests/test_solar_terrain.py 2>&1 | tail -n 3 ) 2>&1 || true
+env | grep -E "^(PYTHON|LEAF_|PYTEST|PIP_|VIRTUAL|CONDA)" | sort | cut -c1-160
+python -c "import site; print('site-packages', site.getsitepackages()); import glob; print('pth files', glob.glob(site.getsitepackages()[0] + '/*.pth'))"
+echo "=== END E4"
 python scripts/run-all-gates.py --jobs "${LEAF_GATE_JOBS:-auto}" --retry 1 --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs "${only_args[@]}" || gate_status=$?
 echo "LEAF_T end gate $(date +%s%3N) rc=$gate_status"
 if [[ -f /tmp/gate-results/gate-result.json ]]; then
