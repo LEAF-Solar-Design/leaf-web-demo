@@ -5,10 +5,12 @@ param(
   [int]$HarnessPort = 8250,
   [string]$TestGrep = '',
   [ValidateSet('account', 'guest')]
-  [string]$Mode = 'account'
+  [string]$Mode = 'account',
+  [switch]$KeepRunRoot
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'lib\proof-runtime.ps1')
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $runId = Get-Date -Format 'yyyyMMdd-HHmmss'
 $artifactTier = if ($Mode -eq 'guest') { 'guest' } else { 'local' }
@@ -43,6 +45,8 @@ function Wait-Json([string]$Url, [scriptblock]$Accept, [int]$Seconds = 60) {
 foreach ($port in @($WebPort, $AppPort, $BrokerPort, $HarnessPort)) {
   if (Test-PortOpen $port) { throw "Port $port is already in use" }
 }
+
+try { Invoke-ProofRetentionPrune | Out-Null } catch { Write-Host "Local proof retention prune skipped: $($_.Exception.Message)" }
 
 New-Item -ItemType Directory -Path $runRoot, $artifactRoot | Out-Null
 foreach ($name in @('drawings', 'guest-drawings', 'uploads', 'grants', 'tenants', 'tenant-git', 'tenant-mcp', 'marathon-runs')) {
@@ -148,20 +152,14 @@ try {
     $env:LEAF_CAD_ENGINE_PKG_DIR = $enginePkgDir
   }
 
-  $managedVenv = Join-Path $runRoot 'python-runtime'
-  uv venv $managedVenv --python 3.13 | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw 'Could not create the managed proof Python runtime' }
-  $launcherFile = Join-Path $managedVenv 'Scripts\python.exe'
-  $requirementArgs = @(
-    'pip', 'install', '--python', $launcherFile,
-    '-r', (Join-Path $repoRoot 'server\requirements.txt'),
-    '-r', (Join-Path $repoRoot 'platform\requirements.txt')
+  $reqs = @(
+    (Join-Path $repoRoot 'server\requirements.txt'),
+    (Join-Path $repoRoot 'platform\requirements.txt')
   )
   if ($Mode -eq 'guest') {
-    $requirementArgs += @('-r', (Join-Path $repoRoot 'server\requirements-auth.txt'))
+    $reqs += (Join-Path $repoRoot 'server\requirements-auth.txt')
   }
-  & uv @requirementArgs | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw 'Could not install the managed proof Python dependencies' }
+  $launcherFile = Get-ProofRuntime -RequirementFiles $reqs
   $launcherArgs = @(
     'scripts/start-leaf.py', '--with-harness',
     '--broker-port', $BrokerPort,
@@ -195,7 +193,11 @@ try {
   }
   if (Test-Path -LiteralPath $stdout) { Copy-Item -LiteralPath $stdout -Destination $artifactRoot }
   if (Test-Path -LiteralPath $stderr) { Copy-Item -LiteralPath $stderr -Destination $artifactRoot }
-  Write-Host "Local proof runtime retained at $runRoot"
+  if ($proofExitCode -eq 0 -and -not $KeepRunRoot -and (Remove-ProofRunRoot -Path $runRoot)) {
+    Write-Host 'Local proof runtime removed (passing run)'
+  } else {
+    Write-Host "Local proof runtime retained at $runRoot"
+  }
   Write-Host "Redacted stack logs copied to $artifactRoot"
 }
 
