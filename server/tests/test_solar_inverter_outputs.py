@@ -1,8 +1,8 @@
 """Studio's inverter output engines against the plugin source they port (contract G35).
 
 Covered: the polyline projection, the centroid and the trench grid router (a straight route, an obstacle
-skirted, the per-axis cap); LEAFTRENCHAUTO (panel-group INSERTs routed, none on the layer, every route
-over the cap); LEAFCABLETOTRAYAUTO (a cable snapped, idempotent, none without a trench); LEAFCABLETOTRAY
+skirted, the per-axis cap, the metric grid options in drawing units, R27); LEAFTRENCHAUTO (panel-group
+INSERTs routed, none on the layer, every metric route over the cap, the same layout routed in inches); LEAFCABLETOTRAYAUTO (a cable snapped, idempotent, none without a trench); LEAFCABLETOTRAY
 (no trench, the one settings save, no cable); HomerunAdjust and LEAFDEVICESPATTERN (their reports and
 refusals); AddLBD and LEAFPLACELBD (the offset marker, the closest point on the feeder); InsertSchedules
 (the string, combiner and equipment cell grids, the stacked positions, the index order, the standard
@@ -129,19 +129,49 @@ def test_route_path_refuses_past_the_grid_cap():
     assert not ok and path == [] and "exceeds MaxGridCellsPerAxis (200)" in message
 
 
+def test_routing_options_convert_metres_to_inches():
+    o = out.routing_options_for_units("in")
+    assert o["grid_step"] == pytest.approx(39.37007874015748, rel=1e-12)
+    assert o["grid_padding"] == pytest.approx(196.8503937007874, rel=1e-12)
+    rest = {k: v for k, v in o.items() if k not in ("grid_step", "grid_padding")}
+    assert rest == {k: v for k, v in out.ROUTING_OPTIONS.items() if k not in ("grid_step", "grid_padding")}
+    assert out.ROUTING_OPTIONS["grid_step"] == 1.0 and out.ROUTING_OPTIONS["grid_padding"] == 5.0
+
+
+def test_routing_options_other_units():
+    mm = out.routing_options_for_units("mm")
+    assert mm["grid_step"] == pytest.approx(1000.0) and mm["grid_padding"] == pytest.approx(5000.0)
+    ft = out.routing_options_for_units("ft")
+    assert ft["grid_step"] == pytest.approx(1.0 / 0.3048) and ft["grid_padding"] == pytest.approx(5.0 / 0.3048)
+
+
+@pytest.mark.parametrize("units", ["m", None, "", "Unitless", "furlong", 0, 6, ["in"]])
+def test_routing_options_metres_and_unknown_units_unchanged(units):
+    assert out.routing_options_for_units(units) == out.ROUTING_OPTIONS
+
+
+def test_route_path_in_inches_routes_what_the_unconverted_grid_refused():
+    ok, path, message = out.route_path((0.0, 0.0), (1000.0, 0.0), [], [], out.routing_options_for_units("in"))
+    assert ok and message == "" and path
+    step = out.routing_options_for_units("in")["grid_step"]
+    assert path[0][0][0] == pytest.approx(0.0, abs=1e-9) and path[0][0][1] == pytest.approx(0.0, abs=1e-9)
+    assert abs(path[-1][1][0] - 1000.0) <= step / 2 and path[-1][1][1] == pytest.approx(0.0, abs=1e-9)
+
+
 # ------------------------------------------------------------------ trenches --
 
 def test_trench_auto_routes_panel_group_inserts():
+    # A metric drawing (R27: metres keep the 1-unit grid; the default is the G35 state's inches).
     state = make_state(groups=("A5", "A6"))
     groups = [{"handle": "A5", "outlines": [SQUARE]}, {"handle": "A6", "outlines": [shifted(SQUARE, 30.0)]}]
-    after, lines = out.trench_routing_auto(state, groups)
+    after, lines = out.trench_routing_auto(state, groups, units="m")
     assert lines == ["LEAFTRENCHAUTO: routed 2 panel groups; 0 skipped (existing); 0 failed."]
     assert len(after["_trenches"]) == 2
     rows = out.trench_rows(state, after)
     assert [r["id"]["entity_id"] for r in rows] == ["trench-1", "trench-2"]
     assert all(r["type"] == "trench" for r in rows)
     assert "_trenches" not in state and "_trenches" not in st.publish(after)
-    again, lines = out.trench_routing_auto(after, groups)     # idempotent: both served already
+    again, lines = out.trench_routing_auto(after, groups, units="m")     # idempotent: both served already
     assert lines == ["LEAFTRENCHAUTO: routed 0 panel groups; 2 skipped (existing); 0 failed."]
 
 
@@ -152,12 +182,24 @@ def test_trench_auto_without_panel_groups_reports_the_plugins_outcome():
 
 
 def test_trench_auto_over_the_grid_cap_fails_every_route():
+    # Metres: 5000 m over 1 m cells is past the cap (R27 leaves metric drawings unchanged).
     state = make_state(groups=("A5", "A6"))
     groups = [{"handle": "A5", "outlines": [SQUARE]}, {"handle": "A6", "outlines": [shifted(SQUARE, 5000.0)]}]
-    after, lines = out.trench_routing_auto(state, groups)
+    after, lines = out.trench_routing_auto(state, groups, units="m")
     assert lines == ["LEAFTRENCHAUTO: routed 0 panel groups; 0 skipped (existing); 2 failed."]
     rows, _ = st.step_rows("i6", state, after, lines)
     assert [(r["type"], r["value"]) for r in rows] == [("report", "no-change")]
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"units": "in"}])
+def test_trench_auto_in_inches_routes_what_the_unconverted_grid_failed(kwargs):
+    # The same 5000-unit layout in inches (the default, the G35 state's unit): 39.37 in cells fit the cap.
+    state = make_state(groups=("A5", "A6"))
+    groups = [{"handle": "A5", "outlines": [SQUARE]}, {"handle": "A6", "outlines": [shifted(SQUARE, 5000.0)]}]
+    after, lines = out.trench_routing_auto(state, groups, **kwargs)
+    assert lines == ["LEAFTRENCHAUTO: routed 2 panel groups; 0 skipped (existing); 0 failed."]
+    assert len(after["_trenches"]) == 2
+    assert [r["type"] for r in out.trench_rows(state, after)] == ["trench", "trench"]
 
 
 def test_cable_to_tray_auto_snaps_the_interior_vertices():

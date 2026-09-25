@@ -25,9 +25,11 @@ Declared divergences (G35, each emits exactly the diffs it explains):
                        each panel-group INSERT, from its block definition's outlines (the chain intake, as
                        AddAllInverters' fallback reads them), as one group: its centroid is the area-weighted
                        centroid of its outlines and every outline is an obstacle. The rest is the plugin's
-                       own star routing, grid limits included: on the rooftop fixture every route exceeds the
-                       200-cell grid cap (TrenchRouting.cs:296-300, 1.0-unit cells over an extent of
-                       thousands of inches) and fails, so the step routes none and reports no-change.
+                       own star routing, grid limits included (TrenchRouting.cs:296-300, 200 cells per axis).
+                       The metric grid options (GridStepM 1.0, GridPaddingM 5.0) are converted to drawing
+                       units by the drawing's units before routing, as the plugin fix F16 does (R27): on the
+                       inches rooftop fixture a 1 m cell is 39.37 in, where the unconverted 1-inch cell put
+                       every route over the cap.
   cable-export         The plugin's EPPlus save throws on the capture host and writes nothing. Studio
                        writes the Export All workbook (stdlib zip and XML, one sheet per schedule the export
                        form fills, the same tables InsertSchedules builds) and the evidence carries it as a
@@ -69,6 +71,8 @@ def _load_sibling(name):
 
 st = _load_sibling("solar_inverter_state")
 devices = _load_sibling("solar_inverter_devices")
+_load_sibling("solar_design_graph")             # solar_interchange's import, resolved from sys.modules at any cwd
+interchange = _load_sibling("solar_interchange")
 
 
 class InverterOutputError(ValueError):
@@ -88,6 +92,8 @@ DEFAULT_TRENCH_LAYER = "LEAF-PVCASE-TRENCH"
 # Commands.cs:6344: a group already served by a trench within this distance is skipped.
 IDEMPOTENCY_THRESHOLD = 1.0
 # Commands.cs:6368-6372 and TrenchRouting.cs:158-187 (the options the command sets and the defaults).
+# grid_step and grid_padding are METRES (GridStepM, GridPaddingM); routing_options_for_units converts them
+# to drawing units before route_path, whose arithmetic is all in drawing units (F16, R27).
 ROUTING_OPTIONS = {"grid_step": 1.0, "grid_padding": 5.0, "obstacle_penalty": 1_000_000.0,
                    "alignment_bonus": 0.5, "min_edge_weight": 1e-3, "max_cells_per_axis": 200}
 # TrenchXData.DefaultWidthM, the trench width the alignment bonus reads (Commands.cs:6292-6293).
@@ -310,6 +316,19 @@ def distance_point_to_segment(px, py, ax, ay, bx, by):
     return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
 
 
+def routing_options_for_units(units, options=None):
+    """The routing options with the metric grid step and padding in drawing units (F16, R27):
+    grid_step / metres_per_unit and grid_padding / metres_per_unit, metres_per_unit read from
+    solar_interchange.UNIT_SCALES (drawing_units -> meters_per_unit). Unitless or unknown units keep the
+    metric values (1 unit = 1 m), so metric drawings are unchanged. Every other option is untouched."""
+    o = dict(ROUTING_OPTIONS, **(options or {}))
+    scale = interchange.UNIT_SCALES.get(units) if isinstance(units, str) else None
+    if scale:
+        o["grid_step"] = o["grid_step"] / scale
+        o["grid_padding"] = o["grid_padding"] / scale
+    return o
+
+
 def route_path(start, end, obstacles, trenches, options=None):
     """TrenchRouting.RoutePath (:240-459): (ok, segments [(a, b)], message). An 8-connected lattice over
     the padded bounding box of the ends, obstacles and trenches, refused past the per-axis cap; edge
@@ -478,9 +497,12 @@ def _snap(pts, trench):
 
 # ------------------------------------------------------------------ trenches --
 
-def trench_routing_auto(state, panel_groups, host=None):
+def trench_routing_auto(state, panel_groups, host=None, units=st.UNITS):
     """LEAFTRENCHAUTO (Commands.cs:6199-6486) with panel-group INSERTs taken too (declared, see the
-    module docstring). `panel_groups` is [{handle, outlines}] for the state's panel groups."""
+    module docstring). `panel_groups` is [{handle, outlines}] for the state's panel groups; `units` is the
+    drawing's units (the chain intake's `units` field, "in" on the rooftop fixture, which is the G35
+    state's unit), by which the metric grid options become drawing units."""
+    options = routing_options_for_units(units)
     after = copy.deepcopy(state)
     layer = _setting(after, "PanelGroupLayer")
     if not isinstance(layer, str) or not layer:
@@ -516,7 +538,7 @@ def trench_routing_auto(state, panel_groups, host=None):
         if math.hypot(cx - hub[0], cy - hub[1]) < 1e-6:
             skipped += 1
             continue
-        ok, path, _ = route_path((cx, cy), hub, obstacles, segments)
+        ok, path, _ = route_path((cx, cy), hub, obstacles, segments, options)
         if not ok or not path:
             failed += 1
             continue
