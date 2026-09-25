@@ -2,9 +2,9 @@ export const LEAF_PLATFORM_CONTRACT_VERSION = 'leaf.platform.v1alpha1'
 export const PROTOCOL_VERSION = 'leaf.web-bridge.v1'
 export const DISPATCH_MODE = 'autocad_idle_document_lock'
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const IDENTITY_KEYS = ['platformTenantId', 'projectId', 'drawingId', 'drawingVersionId']
-const unavailable = () => ({ status: 'unavailable', ready: null, selectedObjectId: null, selectedHandles: null })
+const unavailable = () => ({ status: 'unavailable', ready: null, selectedObjectId: null, selectedHandles: null, lastCommand: null, helloSentAt: null })
 const isRecord = (value) => !!value && typeof value === 'object' && !Array.isArray(value)
 const isObjectId = (value) => typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,200}$/.test(value) && value === value.trim()
 
@@ -24,6 +24,12 @@ function normalizeHandles(value) {
 
 function dotNetTimestamp(date) {
   return date.toISOString().replace('Z', '0000+00:00')
+}
+
+function signedTimestamp(value) {
+  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,7}))?(Z|[+-]\d{2}:\d{2})$/.exec(value)
+  if (!match || match[0] !== value) return null
+  return `${match[1]}.${(match[2] || '').padEnd(7, '0')}${match[3] === 'Z' ? '+00:00' : match[3]}`
 }
 
 function canonical(value) {
@@ -57,11 +63,14 @@ async function signature(value, keyBase64) {
 
 async function signatureIsValid(value, supplied, keyBase64) {
   if (!/^[a-f0-9]{64}$/.test(supplied)) return false
+  const issuedAt = signedTimestamp(value.issuedAt)
+  const expiresAt = signedTimestamp(value.expiresAt)
+  if (!issuedAt || !expiresAt) return false
   const bytes = Uint8Array.from(supplied.match(/.{2}/g), (pair) => Number.parseInt(pair, 16))
   const key = await crypto.subtle.importKey('raw', base64Bytes(keyBase64),
     { name: 'HMAC', hash: 'SHA-256' }, false, ['verify'])
   return crypto.subtle.verify('HMAC', key, bytes,
-    new TextEncoder().encode(canonical(unsigned(value))))
+    new TextEncoder().encode(canonical({ ...unsigned(value), issuedAt, expiresAt })))
 }
 
 function isHandshake(value, kind, extra) {
@@ -104,27 +113,37 @@ function isUnbound(value) {
 
 /** Signed WebView2 channel. Session keys stay in memory and are used only for HMAC. */
 export class LeafHostBridge {
-  constructor({ channel, location } = {}) {
+  constructor({ channel, location, replayCapacity = 4096 } = {}) {
     this.injectedChannel = channel
     this.location = location
+    this.replayCapacity = replayCapacity
     this.channel = null
     this.state = unavailable()
     this.listeners = new Set()
-    this.seenHostMessages = new Set()
+    this.seenHostMessages = new Map()
+    this.pendingCommand = null
   }
 
   start() {
     if (this.channel) return this.state
     this.channel = this.injectedChannel === undefined ? globalThis.window?.chrome?.webview ?? null : this.injectedChannel
     if (!this.channel) return this.state
-    this.state = { status: 'connecting', ready: null, selectedObjectId: null, selectedHandles: null }
+    this.state = { ...unavailable(), status: 'connecting' }
     this.channel.addEventListener('message', this.onMessage)
-    this.channel.postMessage({ kind: 'host_bridge_hello', contractVersion: LEAF_PLATFORM_CONTRACT_VERSION })
-    this.publish()
+    this.retryHello()
     return this.state
   }
 
+  retryHello() {
+    if (!this.channel) return
+    this.state = { ...this.state, helloSentAt: Date.now(),
+      status: this.state.ready ? this.state.status : 'connecting' }
+    this.channel.postMessage({ kind: 'host_bridge_hello', contractVersion: LEAF_PLATFORM_CONTRACT_VERSION })
+    this.publish()
+  }
+
   stop() {
+    this.finishCommand('superseded', null, false)
     this.channel?.removeEventListener('message', this.onMessage)
     this.channel = null
     this.seenHostMessages.clear()
@@ -136,6 +155,19 @@ export class LeafHostBridge {
     this.listeners.add(listener)
     listener(this.state)
     return () => this.listeners.delete(listener)
+  }
+
+  finishCommand(status, reason, publish = true) {
+    const pending = this.pendingCommand
+    if (!pending) return
+    clearTimeout(pending.timer)
+    this.pendingCommand = null
+    const outcome = { action: pending.action, status, reason }
+    if (publish) {
+      this.state = { ...this.state, lastCommand: outcome }
+      this.publish()
+    }
+    pending.resolve(outcome)
   }
 
   async focusObject(target, action = 'focus') {
@@ -164,9 +196,25 @@ export class LeafHostBridge {
       verb: 'drawing.focus_objects', drawingFingerprint: ready.documentFingerprint,
       drawingRevision: ready.drawingVersionId, payload: command,
     }
-    const signed = await signature(body, ready.sessionKey)
-    if (this.channel !== channel || this.state.ready !== ready) throw new Error('AutoCAD connection changed')
-    channel.postMessage({ ...body, signature: signed })
+    this.finishCommand('superseded', null)
+    let resolve, reject
+    const result = new Promise((done, fail) => { resolve = done; reject = fail })
+    const pending = { commandId: command.commandId, action, resolve, timer: null }
+    this.pendingCommand = pending
+    pending.timer = setTimeout(() => {
+      if (this.pendingCommand === pending) this.finishCommand('unknown', 'timeout')
+    }, 15_000)
+    void signature(body, ready.sessionKey).then((signed) => {
+      if (this.pendingCommand !== pending) return
+      if (this.channel !== channel || this.state.ready !== ready) throw new Error('AutoCAD connection changed')
+      channel.postMessage({ ...body, signature: signed })
+    }).catch((error) => {
+      if (this.pendingCommand !== pending) return
+      clearTimeout(pending.timer)
+      this.pendingCommand = null
+      reject(error)
+    })
+    return result
   }
 
   async bindDrawing(identity) {
@@ -201,10 +249,11 @@ export class LeafHostBridge {
     const origin = (this.location ?? globalThis.window?.location)?.origin
     if (isReady(value) || isUnbound(value)) {
       if (value.origin !== origin) return
+      this.finishCommand('superseded', null, false)
       this.seenHostMessages.clear()
       this.state = isReady(value)
-        ? { status: 'connected', ready: value, selectedObjectId: null, selectedHandles: null }
-        : { status: 'unbound', ready: value, selectedObjectId: null, selectedHandles: null, bindingResult: null }
+        ? { ...unavailable(), status: 'connected', ready: value }
+        : { ...unavailable(), status: 'unbound', ready: value, bindingResult: null }
       this.publish()
       return
     }
@@ -217,7 +266,7 @@ export class LeafHostBridge {
         envelope.drawingRevision !== (unbound ? ready.drawingRevision : ready.drawingVersionId) ||
         envelope.drawingFingerprint !== ready.documentFingerprint ||
         !(unbound ? ['drawing.bind_result'] : ['drawing.selection_changed', 'host.callback']).includes(envelope.verb) ||
-        typeof envelope.messageId !== 'string' || this.seenHostMessages.has(envelope.messageId) ||
+        typeof envelope.messageId !== 'string' || this.seenHostMessages.get(envelope.messageId) > Date.now() ||
         typeof envelope.issuedAt !== 'string' || typeof envelope.expiresAt !== 'string' ||
         typeof envelope.signature !== 'string') return
     const now = Date.now()
@@ -228,9 +277,13 @@ export class LeafHostBridge {
         expiresAt - issuedAt > 120_000) return
     if (!await signatureIsValid(envelope, envelope.signature, ready.sessionKey)) return
     // Verification yields. A new session or concurrent duplicate must not cross it.
-    if (this.state.ready !== ready || !this.channel || this.seenHostMessages.has(envelope.messageId)) return
-    this.seenHostMessages.add(envelope.messageId)
-    if (this.seenHostMessages.size > 1024) this.seenHostMessages.delete(this.seenHostMessages.values().next().value)
+    const verifiedAt = Date.now()
+    if (this.state.ready !== ready || !this.channel || expiresAt <= verifiedAt) return
+    for (const [messageId, expiry] of this.seenHostMessages) {
+      if (expiry <= verifiedAt) this.seenHostMessages.delete(messageId)
+    }
+    if (this.seenHostMessages.has(envelope.messageId) || this.seenHostMessages.size >= this.replayCapacity) return
+    this.seenHostMessages.set(envelope.messageId, expiresAt)
     if (unbound) {
       const accepted = isRecord(envelope.payload) && envelope.payload.accepted === true
       const reason = isRecord(envelope.payload) && typeof envelope.payload.reason === 'string'
@@ -239,6 +292,17 @@ export class LeafHostBridge {
         ? 'DWG connected. Starting the signed cross-probe session.'
         : `DWG connection was not changed (${reason.replaceAll('_', ' ')}).` }
       this.publish()
+    } else if (envelope.verb === 'host.callback') {
+      const callback = envelope.payload
+      if (!isRecord(callback) || callback.kind !== 'callback' ||
+          callback.contractVersion !== LEAF_PLATFORM_CONTRACT_VERSION ||
+          typeof callback.commandId !== 'string' || !UUID.test(callback.commandId) ||
+          callback.commandId.toLowerCase() !== this.pendingCommand?.commandId.toLowerCase() ||
+          !['applied', 'stale', 'rejected'].includes(callback.status) ||
+          !(callback.reason === null || typeof callback.reason === 'string') ||
+          !IDENTITY_KEYS.every((key) => typeof callback[key] === 'string' &&
+            callback[key].toLowerCase() === ready[key].toLowerCase())) return
+      this.finishCommand(callback.status, callback.reason)
     } else if (envelope.verb === 'drawing.selection_changed' &&
         isRecord(envelope.payload) && envelope.payload.kind === 'selection_event') {
       const selectedObjectId = isObjectId(envelope.payload.payload?.objectId)
