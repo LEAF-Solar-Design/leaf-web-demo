@@ -9,6 +9,22 @@ const isUuid = (value) => typeof value === 'string' && UUID.test(value)
 const sameId = (a, b) => typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase()
 const initial = { status: 'unavailable', ready: null, selectedObjectId: null, selectedHandles: null, lastCommand: null, helloSentAt: null }
 
+function drawingName(version, drawings) {
+  const name = drawings.find((drawing) => sameId(drawing?.drawing_id, version.drawing_id))?.name
+  return typeof name === 'string' && name.trim() ? name : `Drawing ${version.drawing_id.slice(0, 8)}`
+}
+
+function versionLabel(version, drawings) {
+  const date = typeof version.created_at === 'string' && version.created_at.trim()
+    ? new Date(version.created_at) : null
+  const suffix = date && !Number.isNaN(date.getTime()) ? `, ${date.toISOString().slice(0, 10)}` : ''
+  return `Version ${version.seq ?? '?'}: ${drawingName(version, drawings)}${suffix}`
+}
+
+function StudioRecovery() {
+  return <p><a href="/app">Open Leaf Automation Studio</a>{' '}Then run LEAFPLATFORM again in AutoCAD to come back.</p>
+}
+
 function commandMessage(outcome) {
   if (!outcome || outcome.status === 'superseded') return null
   if (outcome.status === 'applied') return outcome.action === 'select'
@@ -27,6 +43,8 @@ export default function LeafPlatformScene() {
   const [projects, setProjects] = useState([])
   const [projectId, setProjectId] = useState('')
   const [versions, setVersions] = useState([])
+  const [drawings, setDrawings] = useState([])
+  const [boundDetail, setBoundDetail] = useState(null)
   const [versionId, setVersionId] = useState('')
   const [catalogMessage, setCatalogMessage] = useState('')
   const [versionMessage, setVersionMessage] = useState('')
@@ -39,12 +57,21 @@ export default function LeafPlatformScene() {
   const [actionMessage, setActionMessage] = useState('')
   const [binding, setBinding] = useState(false)
   const [working, setWorking] = useState(false)
+  const [focusConnect, setFocusConnect] = useState(false)
+  const headingRef = useRef(null)
+  const connectRef = useRef(null)
+  const bindingPending = useRef(false)
+  const boundRequests = useRef(new Map())
   const actionInFlight = useRef(false)
   const previousConnection = useRef(initial)
   const signedIn = isSignedIn()
   const orgId = getStoredOrgId()
   const otherWorkspace = state.status === 'connected' && signedIn && isUuid(orgId) && !sameId(state.ready.platformTenantId, orgId)
   const boundProject = projects.find((project) => sameId(project.project_id, state.ready?.projectId))
+  const chosenProject = projects.find((project) => sameId(project.project_id, projectId))
+  const chosenVersion = versions.find((version) => version.version_id === versionId)
+  const boundIdentity = state.status === 'connected' && signedIn && isUuid(orgId) && !otherWorkspace
+    ? JSON.stringify([orgId, state.ready.projectId, state.ready.drawingId, state.ready.drawingVersionId].map((id) => id.toLowerCase())) : null
 
   useEffect(() => {
     const unsubscribe = bridge.subscribe(setState)
@@ -82,6 +109,7 @@ export default function LeafPlatformScene() {
 
   useEffect(() => {
     setVersions([])
+    setDrawings([])
     setVersionId('')
     setVersionMessage('')
     setVersionsFailed(false)
@@ -95,6 +123,7 @@ export default function LeafPlatformScene() {
         [item?.version_id, item?.drawing_id, item?.project_id, item?.org_id].every(isUuid) &&
         sameId(item.org_id, orgId) && sameId(item.project_id, projectId)) : []
       setVersions(available)
+      setDrawings(Array.isArray(project?.drawing_artifacts) ? project.drawing_artifacts : [])
       setVersionMessage(available.length ? '' : 'This project has no drawing versions available to connect.')
     }).catch(() => {
       if (live) {
@@ -106,17 +135,37 @@ export default function LeafPlatformScene() {
   }, [projectId, orgId, signedIn, state.status, versionsAttempt])
 
   useEffect(() => {
+    if (!boundIdentity) return undefined
+    let live = true
+    const [tenantId, boundProjectId, boundDrawingId, boundVersionId] = JSON.parse(boundIdentity)
+    if (!boundRequests.current.has(boundIdentity)) {
+      boundRequests.current.set(boundIdentity, Promise.resolve().then(() => openProject(boundProjectId, tenantId)).then((project) => {
+        const version = Array.isArray(project?.drawing_versions) && project.drawing_versions.find((item) =>
+          sameId(item?.version_id, boundVersionId) && sameId(item?.drawing_id, boundDrawingId) &&
+          sameId(item?.project_id, boundProjectId) && sameId(item?.org_id, tenantId))
+        return version ? `${drawingName(version, Array.isArray(project.drawing_artifacts) ? project.drawing_artifacts : [])}, Version ${version.seq ?? '?'}` : null
+      }).catch(() => null))
+    }
+    boundRequests.current.get(boundIdentity).then((label) => {
+      if (live) setBoundDetail({ identity: boundIdentity, label })
+    })
+    return () => { live = false }
+  }, [boundIdentity])
+
+  useEffect(() => {
+    if (bindingPending.current && state.status === 'connected') headingRef.current?.focus()
+    bindingPending.current = false
     actionInFlight.current = false
     setBinding(false)
     setWorking(false)
-  }, [state.ready])
+  }, [state.ready, state.status])
 
   useEffect(() => {
     const previous = previousConnection.current
     previousConnection.current = { status: state.status, fingerprint: state.ready?.documentFingerprint }
     if (state.status === 'connected') {
       setActionMessage(signedIn && isUuid(orgId) && !otherWorkspace
-        ? `Connected to ${boundProject?.name || state.ready.drawingId.slice(0, 8)}.` : '')
+        ? 'DWG connected.' : '')
     } else if (state.status !== previous.status || state.ready?.documentFingerprint !== previous.fingerprint) {
       setActionMessage('')
     }
@@ -141,6 +190,10 @@ export default function LeafPlatformScene() {
   useEffect(() => {
     if (state.bindingResult) setActionMessage(state.bindingResult)
     if (state.status !== 'unbound' || (state.bindingResult && state.bindingResult !== 'Waiting for confirmation in AutoCAD.')) {
+      if (state.bindingResult !== 'DWG connected. Starting the signed cross-probe session.') {
+        if (bindingPending.current && state.status === 'unbound') setFocusConnect(true)
+        bindingPending.current = false
+      }
       setBinding(false)
     }
   }, [state.status, state.bindingResult])
@@ -149,6 +202,8 @@ export default function LeafPlatformScene() {
     if (!binding) return undefined
     const timer = setTimeout(() => {
       actionInFlight.current = false
+      bindingPending.current = false
+      setFocusConnect(true)
       setBinding(false)
       bridge.retryHello()
       setActionMessage('AutoCAD did not answer. Look for a confirmation window in AutoCAD, then try again.')
@@ -156,11 +211,18 @@ export default function LeafPlatformScene() {
     return () => clearTimeout(timer)
   }, [binding, bridge])
 
+  useEffect(() => {
+    if (!focusConnect || binding) return
+    if (connectRef.current && !connectRef.current.disabled) connectRef.current.focus()
+    setFocusConnect(false)
+  }, [focusConnect, binding])
+
   async function connect(chosenVersionId) {
     const version = versions.find((item) => item.version_id === chosenVersionId)
     if (!version || binding || actionInFlight.current) return
     const operation = {}
     actionInFlight.current = operation
+    bindingPending.current = true
     setBinding(true)
     setActionMessage('Waiting for confirmation in AutoCAD.')
     try {
@@ -170,6 +232,8 @@ export default function LeafPlatformScene() {
       })
     } catch {
       if (actionInFlight.current !== operation) return
+      bindingPending.current = false
+      setFocusConnect(true)
       setBinding(false)
       setActionMessage('The drawing could not be connected. Please try again.')
     } finally {
@@ -205,7 +269,7 @@ export default function LeafPlatformScene() {
     <main className="leaf-platform" aria-labelledby="leaf-platform-title">
       <header>
         <p className="leaf-platform-context">Studio in AutoCAD</p>
-        <h1 id="leaf-platform-title">Drawing connection</h1>
+        <h1 id="leaf-platform-title" ref={headingRef} tabIndex={-1}>Drawing connection</h1>
       </header>
       <p role="status" aria-live="polite" className="leaf-platform-status">{actionMessage}</p>
       {state.status === 'unavailable' && <section>
@@ -221,6 +285,7 @@ export default function LeafPlatformScene() {
         <p>Connect this DWG to a drawing version in your workspace.</p>
         {!signedIn ? <button type="button" disabled={working} onClick={() => runAction(() => login())}>Sign in</button> : <>
           {catalogMessage && <p>{catalogMessage}</p>}
+          {(!isUuid(orgId) || catalogMessage === 'This workspace has no projects yet.') && <StudioRecovery />}
           {projectsFailed && <button type="button" disabled={binding} onClick={() => setProjectsAttempt((attempt) => attempt + 1)}>Try again</button>}
           {projects.length > 0 && <label>
             Project
@@ -230,6 +295,7 @@ export default function LeafPlatformScene() {
             </select>
           </label>}
           {versionMessage && <p>{versionMessage}</p>}
+          {versionMessage === 'This project has no drawing versions available to connect.' && <StudioRecovery />}
           {versionsFailed && <button type="button" disabled={binding} onClick={() => setVersionsAttempt((attempt) => attempt + 1)}>Try again</button>}
           {versions.length > 0 && <>
             <label>
@@ -237,11 +303,12 @@ export default function LeafPlatformScene() {
               <select value={versionId} disabled={binding} onChange={(event) => setVersionId(event.target.value)}>
                 <option value="">Choose a drawing version</option>
                 {versions.map((version) => <option key={version.version_id} value={version.version_id}>
-                  {`Version ${version.seq ?? '?'} (${version.drawing_id.slice(0, 8)})`}
+                  {versionLabel(version, drawings)}
                 </option>)}
               </select>
             </label>
-            <button type="button" disabled={!versionId || binding} onClick={() => connect(versionId)}>Connect drawing</button>
+            {chosenVersion && <p className="leaf-platform-summary">Connect this DWG to {typeof chosenProject?.name === 'string' && chosenProject.name.trim() ? chosenProject.name : 'Untitled project'} / {drawingName(chosenVersion, drawings)} / Version {chosenVersion.seq ?? '?'}. You cannot change this from the palette later.</p>}
+            <button ref={connectRef} type="button" disabled={!versionId || binding} onClick={() => connect(versionId)}>Connect drawing</button>
           </>}
         </>}
       </section>}
@@ -249,9 +316,10 @@ export default function LeafPlatformScene() {
         {!signedIn ? <>
           <p>This DWG is connected. Sign in to use this connection.</p>
           <button type="button" disabled={working} onClick={() => runAction(() => login())}>Sign in</button>
-        </> : !isUuid(orgId) ? <p>Choose a workspace in Studio, then reopen this palette.</p>
-          : otherWorkspace ? <p>This DWG belongs to another workspace. Open that workspace in Studio to use this connection.</p> : <>
+        </> : !isUuid(orgId) ? <><p>Choose a workspace in Studio, then reopen this palette.</p><StudioRecovery /></>
+          : otherWorkspace ? <><p>This DWG belongs to another workspace. Open that workspace in Studio to use this connection.</p><StudioRecovery /></> : <>
           <p>Connected to {boundProject?.name || state.ready.drawingId.slice(0, 8)}.</p>
+          {boundDetail?.identity === boundIdentity && boundDetail.label && <p>{boundDetail.label}</p>}
           <p>{selectedLabel ? <>Selected object: <span>{selectedLabel}</span></> : state.selectedHandles?.length
             ? `${state.selectedHandles.length} objects selected (${state.selectedHandles.slice(0, 3).join(', ')}${state.selectedHandles.length > 3 ? `, and ${state.selectedHandles.length - 3} more` : ''})`
             : 'Select objects in your AutoCAD drawing to use these buttons.'}</p>

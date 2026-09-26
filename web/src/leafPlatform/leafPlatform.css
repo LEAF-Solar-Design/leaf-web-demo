@@ -32,5 +32,5 @@
 .leaf-platform button { background: #244c36; color: #fff; cursor: pointer; }
 .leaf-platform button:disabled { background: #e5e9e5; color: #596159; cursor: default; }
 .leaf-platform a { color: #244c36; }
-.leaf-platform :is(button, select, a):focus-visible { outline: 3px solid #427455; outline-offset: 3px; }
+.leaf-platform :is(h1, button, select, a):focus-visible { outline: 3px solid #427455; outline-offset: 3px; }
 .leaf-platform-actions { display: flex; gap: 10px; }
