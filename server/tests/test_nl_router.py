@@ -89,19 +89,117 @@ def test_make_me_a_tool_to_flag_small_panels():
 
 
 # --------------------------------------------------------------------------- #
-# SOLVE lane — explicit optimisation intent (future lane)
+# SOLVE lane — explicit optimisation intent binds by capability
 # --------------------------------------------------------------------------- #
 def test_solve_phrase_routes_solve_lane():
+    solve_names = {
+        tool["name"] for tool in CATALOG
+        if isinstance(tool.get("capabilities"), (list, tuple))
+        and "solve" in tool["capabilities"]
+    }
     r = _c("optimize the panel layout to maximize energy production")
     assert r["lane"] == LANE_SOLVE
     assert r["tool"] is None
-    assert "solve" in r["rationale"].lower()        # honestly says the lane is future
+    assert "solve" in r["rationale"].lower()
+    assert r["alternatives"]
+    assert all(alt["tool"] in solve_names for alt in r["alternatives"])
 
 
 def test_plain_solve_verb_routes_solve():
+    solve_names = {
+        tool["name"] for tool in CATALOG
+        if isinstance(tool.get("capabilities"), (list, tuple))
+        and "solve" in tool["capabilities"]
+    }
     r = _c("solve the string sizing for this array")
     assert r["lane"] == LANE_SOLVE
+    assert r["tool"] in solve_names
+
+
+def test_solve_lane_binds_solve_capable_tool():
+    catalog = [
+        {"name": "string-sizer", "capabilities": ["solve"],
+         "description": "Sizes strings for an array.",
+         "params": {"type": "object", "properties": {
+             "panelsPerString": {"type": "integer"},
+         }}},
+        {"name": "array-planner", "capabilities": ("solve",),
+         "description": "Plans an array."},
+        {"name": "string-sizing-array", "capabilities": ["drawing.write"]},
+    ]
+    r = classify("solve the string sizing for this array with 12 panels", catalog)
+    assert r["lane"] == LANE_SOLVE
+    assert r["tool"] == "string-sizer"
+    assert r["params"] == {"panelsPerString": 12}
+    assert r["confidence"] > 0.15
+    assert "string-sizer" in r["rationale"]
+    assert "confirm" in r["rationale"].lower()
+    assert [alt["tool"] for alt in r["alternatives"]] == ["array-planner"]
+
+
+def test_solve_lane_without_solve_tool_stays_honest():
+    catalog = [
+        {"name": "string-sizing", "capabilities": ["drawing.write"]},
+        {"name": "invalid-text", "capabilities": "solve"},
+        {"name": "invalid-map", "capabilities": {"solve": True}},
+        {"name": "different-case", "capabilities": ["Solve"]},
+    ]
+    text = "solve the string sizing"
+    r = classify(text, catalog)
+    assert r["lane"] == LANE_SOLVE
     assert r["tool"] is None
+    assert r["params"] == {"description": text}
+    assert r["confidence"] == 0.80
+    assert "not available" in r["rationale"].lower()
+    assert r["alternatives"][0]["tool"] == "string-sizing"
+
+
+def test_solve_lane_binding_keys_on_capability_not_name():
+    catalog = [
+        {"name": "solar-solve-proposal", "capabilities": ["drawing.write"]},
+        {"name": "array-planner", "capabilities": ["solve"],
+         "description": "Plans strings for an array."},
+    ]
+    r = classify("solve solar solve proposal", catalog)
+    assert r["lane"] == LANE_SOLVE
+    assert r["tool"] == "array-planner"
+    assert r["alternatives"] == []
+
+
+def test_solve_lane_ignores_internal_solve_tools():
+    catalog = [
+        {"name": "string-sizer", "internal": True, "capabilities": ["solve"]},
+        {"name": "qa-string-sizer", "capabilities": ["solve"]},
+        {"name": "_string-sizer", "capabilities": ["solve"]},
+    ]
+    r = classify("solve string sizing", catalog)
+    assert r["lane"] == LANE_SOLVE
+    assert r["tool"] is None
+    assert r["alternatives"] == []
+    assert "not available" in r["rationale"].lower()
+
+
+def test_solve_lane_without_overlap_offers_solvers_as_alternatives():
+    catalog = [
+        {"name": "delta", "capabilities": ["solve"]},
+        {"name": "beta", "capabilities": ["solve"]},
+        {"name": "alpha", "capabilities": ("solve",)},
+        {"name": "gamma", "capabilities": ["solve"]},
+        {"name": "optimize-orbits", "capabilities": ["drawing.write"]},
+    ]
+    text = "optimize orbits"
+    r = classify(text, catalog)
+    assert r["lane"] == LANE_SOLVE
+    assert r["tool"] is None
+    assert r["params"] == {"description": text}
+    assert r["confidence"] == 0.80
+    assert "solver" in r["rationale"].lower()
+    assert "pick" in r["rationale"].lower()
+    assert r["alternatives"] == [
+        {"tool": "alpha", "confidence": 0.15},
+        {"tool": "beta", "confidence": 0.15},
+        {"tool": "delta", "confidence": 0.15},
+    ]
 
 
 # --------------------------------------------------------------------------- #
