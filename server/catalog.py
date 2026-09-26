@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 import tool_record_fields
+import solar_tools
 
 SERVER_DIR = Path(__file__).resolve().parent
 FAMILIES_FILE = SERVER_DIR / "capability_families.json"
@@ -149,12 +150,12 @@ def apply_live_aps_runtime_authority(
     ]
 
 
-def _capability_entry(tool: Dict[str, Any]) -> Dict[str, Any]:
+def _capability_entry(tool: Dict[str, Any], solar_snapshot=None) -> Dict[str, Any]:
     effective_digest = tool.get("effective_catalog_digest")
     if (tool.get("execution_class") == "instant" and isinstance(effective_digest, str)
             and len(effective_digest) == 64 and not effective_digest.startswith("sha256:")):
         effective_digest = "sha256:" + effective_digest
-    return {
+    entry = {
         "name": tool.get("name"),
         "version": tool.get("version", "1.0.0"),
         "description": tool.get("description", ""),
@@ -184,6 +185,10 @@ def _capability_entry(tool: Dict[str, Any]) -> Dict[str, Any]:
         # rather than breaking the whole catalog on one bad tool.
         **tool_record_fields.sanitize_optional_fields(tool),
     }
+    solar = solar_tools.catalog_view(tool, snapshot=solar_snapshot)
+    if solar is not None:
+        entry["solar"] = solar
+    return entry
 
 
 def build_catalog(tools, include_internal=False):
@@ -194,12 +199,13 @@ def build_catalog(tools, include_internal=False):
     cfg = _load_config()
     rules = cfg.get("filter_rules", {})
     source = list(tools) + seed_tools()
+    solar_snapshot = solar_tools.trusted_snapshot()
 
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     for tool in source:
         if not include_internal and is_internal(tool, rules):
             continue
-        entry = _capability_entry(tool)
+        entry = _capability_entry(tool, solar_snapshot)
         grouped.setdefault(_family_for(tool, cfg, rules), []).append(entry)
 
     families: List[Dict[str, Any]] = []

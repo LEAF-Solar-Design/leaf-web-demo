@@ -3233,9 +3233,8 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
 
     local_graph = is_local_graph_commit(tool)
     if local_graph:
-        with (SERVER_DIR / "write_tools.json").open(encoding="utf-8") as stream:
-            canonical = next((row for row in json.load(stream)["tools"]
-                              if row["name"] == tool.get("name")), None)
+        import solar_tools
+        canonical = solar_tools.trusted_record(tool.get("name"))
         if canonical is None or tool != canonical or req.aps_live or req.test_source is not None or req.file_only:
             return _classified_bad_params(
                 "local_graph_commit_invalid", "local graph commit requires its trusted catalog capability",

@@ -18,6 +18,7 @@ if str(SERVER_DIR) not in sys.path:
 import catalog  # noqa: E402
 import deps  # noqa: E402
 import entitlements  # noqa: E402
+import solar_tools  # noqa: E402
 
 FIXTURE = SERVER_DIR.parent / "web" / "src" / "site" / "familyCapabilities.json"
 
@@ -25,6 +26,8 @@ FIXTURE = SERVER_DIR.parent / "web" / "src" / "site" / "familyCapabilities.json"
 def _family_capabilities(loaded):
     by_name = {}
     for tool in loaded:
+        if (solar_tools.get(tool["name"]) or {}).get("record_store") == "registry":
+            continue
         by_name.setdefault(tool["name"], tool)
     families = catalog.build_catalog(list(by_name.values()))
     for tool in catalog.seed_tools():

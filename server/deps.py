@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import Depends, Header, Request, HTTPException
+import solar_tools
 
 
 def require_campaign_worker(request: Request):
@@ -136,13 +137,18 @@ def load_seed_write_tools() -> List[Dict[str, Any]]:
     """Tracked server-lane seed tools (drawing.write, M2). Kept separate from the
     engine registry (Lane B) and the gitignored authored store so a fresh checkout
     always resolves the write tool by name via /api/run."""
+    write_tools = []
     if WRITE_TOOLS_STORE.exists():
         try:
             tools = json.loads(WRITE_TOOLS_STORE.read_text(encoding="utf-8")).get("tools", [])
-            return [t for t in tools if isinstance(t, dict) and t.get("name")]
+            write_tools = [t for t in tools if isinstance(t, dict) and t.get("name")]
         except Exception as exc:  # pragma: no cover - defensive
             print(f"[leaf-demo] bad write_tools.json: {exc}", file=sys.stderr)
-    return []
+    records = solar_tools.registry_records()
+    if records:
+        _check_registry_record_collisions(
+            records, write_tools, load_seed_catalog_tools(), load_engine_registry_tools())
+    return write_tools + records
 
 
 def load_seed_catalog_tools() -> List[Dict[str, Any]]:
@@ -456,6 +462,18 @@ EFFECTIVE_TOOL_SOURCE_PRECEDENCE = (
 )
 
 
+def _check_registry_record_collisions(records, *legacy_tiers):
+    if not records:
+        return
+    names = {row["name"] for row in records}
+    for tools in legacy_tiers:
+        for tool in tools:
+            if (isinstance(tool, dict) and isinstance(tool.get("name"), str)
+                    and tool["name"] in names):
+                raise ToolCatalogCollisionError(
+                    f"solar registry record collides with a legacy tool: {tool['name']!r}")
+
+
 def _check_global_seed_collisions(tiers: List[Tuple[str, List[Dict[str, Any]]]]) -> None:
     """Fail LOUDLY (raise) on a name collision across the GLOBAL, non-per-tenant,
     non-authored catalog tiers (engine registry, general-catalog seed, write seed).
@@ -671,6 +689,9 @@ def _strict_provenance_tiers(
     )
     write_tools = _strict_store_tools(
         WRITE_TOOLS_STORE, TOOL_SOURCE_WRITE_SEED)
+    records = solar_tools.registry_records()
+    _check_registry_record_collisions(records, write_tools, catalog_tools, engine_tools)
+    write_tools = write_tools + records
     authored_tools = _strict_store_tools(
         AUTHORED_STORE,
         TOOL_SOURCE_AUTHORED,

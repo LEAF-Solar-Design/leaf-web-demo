@@ -29,6 +29,51 @@
       "family_id": "placement",
       "label": "Equipment placement",
       "description": "Provisional family for inverter/combiner placement tools. No member is registered in the catalog yet; entries below are reservations for the R2 registry-promotion lane."
+    },
+    {
+      "family_id": "settings",
+      "label": "Settings",
+      "description": "Drawing-owned solar project settings."
+    },
+    {
+      "family_id": "solve",
+      "label": "Solve",
+      "description": "Solar design proposals and solve results."
+    },
+    {
+      "family_id": "equipment",
+      "label": "Equipment",
+      "description": "Solar equipment assignment and configuration."
+    },
+    {
+      "family_id": "routing",
+      "label": "Routing",
+      "description": "Solar wiring routes and homeruns."
+    },
+    {
+      "family_id": "schedules",
+      "label": "Schedules",
+      "description": "Solar equipment and wiring schedules."
+    },
+    {
+      "family_id": "imports",
+      "label": "Imports",
+      "description": "Solar design data imports."
+    },
+    {
+      "family_id": "terrain",
+      "label": "Terrain",
+      "description": "Terrain data for solar layouts."
+    },
+    {
+      "family_id": "shade",
+      "label": "Shade",
+      "description": "Solar shading analysis."
+    },
+    {
+      "family_id": "evidence",
+      "label": "Evidence",
+      "description": "Solar design evidence and reports."
     }
   ],
   "tool_families": {

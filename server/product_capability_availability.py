@@ -90,25 +90,21 @@ Run:  cd server && python -m pytest tests/test_product_capability_availability.p
 from __future__ import annotations
 
 import copy
+import importlib.util
 import math
 import re
+import solar_tools
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 CONTRACT_VERSION = "leaf.platform.v1alpha1"
 
 # W1 uses the ordinary tool catalog, independently of the platform lease catalog.
-W1_CAPABILITIES = {
-    "solar-settings": {"requires_persisted_graph": True, "adapter": "local-graph-commit"},
-    "solar-size-strings": {"requires_persisted_graph": True, "adapter": None},
-    "solar-panel-groups": {"requires_persisted_graph": True, "adapter": None},
-    "solar-solve-proposal": {"requires_persisted_graph": False, "adapter": "cloud-proposal"},
-    "solar-commit-solve": {"requires_persisted_graph": True, "adapter": None},
-    "solar-correct-string": {"requires_persisted_graph": True, "adapter": "local-graph-commit"},
-    "solar-assign-equipment": {"requires_persisted_graph": True, "adapter": None},
-    "solar-homeruns": {"requires_persisted_graph": True, "adapter": None},
-    "solar-schedule": {"requires_persisted_graph": True, "adapter": None},
-}
+SOLAR_CAPABILITIES = solar_tools.capability_table()
+W1_CAPABILITIES = {name: row for name, row in SOLAR_CAPABILITIES.items()
+                   if row["scenario"] == "w1-rooftop"}
 
 CLOUD_PROPOSAL_ADAPTER = "cloud-proposal"
 LOCAL_GRAPH_COMMIT_ADAPTER = "local-graph-commit"
@@ -121,7 +117,7 @@ def capability_adapter(name):
     An unknown or non-string name answers None (never raises): routing sites hand it
     arbitrary tool records.
     """
-    row = W1_CAPABILITIES.get(name) if isinstance(name, str) else None
+    row = SOLAR_CAPABILITIES.get(name) if isinstance(name, str) else None
     return row.get("adapter") if isinstance(row, dict) else None
 
 
@@ -154,7 +150,7 @@ def annotate_w1_availability(families, tenant, drawing_id=None, *,
     resolved = False
     for family in families:
         for row in family.get("capabilities") or []:
-            if row.get("name") not in W1_CAPABILITIES:
+            if row.get("name") not in SOLAR_CAPABILITIES:
                 continue
             if not resolved:
                 inputs = w1_input_readiness(
@@ -174,14 +170,14 @@ def w1_input_readiness(tenant, drawing_id=None, *, project_id=None, version="hea
     """Read persisted drawing context and apply each adapter's format contract."""
     def seed_overrides(readiness):
         if seed_request is not NO_SEED_REQUEST:
-            for name in W1_CAPABILITIES:
-                if name != "solar-settings" and capability_adapter(name) == LOCAL_GRAPH_COMMIT_ADAPTER:
+            for name in SOLAR_CAPABILITIES:
+                if not SOLAR_CAPABILITIES[name]["seedable"] and capability_adapter(name) == LOCAL_GRAPH_COMMIT_ADAPTER:
                     readiness[name] = {"input_ready": False, "input_reason": "invalid_seed_request"}
         return readiness
 
     def unavailable(reason):
         return seed_overrides({name: {"input_ready": False, "input_reason": reason}
-                               for name in W1_CAPABILITIES})
+                               for name in SOLAR_CAPABILITIES})
 
     if drawing_id is None:
         return unavailable("drawing_context_required")
@@ -243,15 +239,16 @@ def w1_input_readiness(tenant, drawing_id=None, *, project_id=None, version="hea
                         reason = seed_error.code.lower()
                 except Exception:
                     pass
-            readiness["solar-settings"] = {"input_ready": ready, "input_reason": reason}
+            readiness[solar_tools.seed_tool()] = {"input_ready": ready, "input_reason": reason}
             return readiness
         graph = context["graph"]
+        readiness = unavailable("persisted_graph_unavailable")
         try:
-            readiness = w1_graph_readiness(graph)
+            readiness.update(w1_graph_readiness(graph))
         except (KeyError, ValueError, TypeError):
             readiness = unavailable("persisted_graph_unavailable")
         readiness.update(w1_local_commit_inputs(graph))
-        for name in W1_CAPABILITIES:
+        for name in SOLAR_CAPABILITIES:
             if capability_adapter(name) == LOCAL_GRAPH_COMMIT_ADAPTER:
                 if not context["local_commit_ready"]:
                     readiness[name] = {"input_ready": False,
@@ -260,27 +257,43 @@ def w1_input_readiness(tenant, drawing_id=None, *, project_id=None, version="hea
                 readiness[name] = {"input_ready": False,
                                    "input_reason": "persisted_graph_unavailable"}
         if seed_request is not NO_SEED_REQUEST and context["representation"] == "intake":
-            readiness["solar-settings"] = {
+            readiness[solar_tools.seed_tool()] = {
                 "input_ready": False, "input_reason": "graph_already_embedded"}
         return seed_overrides(readiness)
     except (KeyError, ValueError, TypeError, OSError):
         return unavailable("persisted_graph_unavailable")
 
 
+@lru_cache(maxsize=solar_tools.MAX_DECLARATIONS)
+def _load_readiness_builtin(builtin):
+    path = Path(__file__).resolve().parent / builtin
+    spec = importlib.util.spec_from_file_location("_solar_readiness_" + path.stem, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def w1_local_commit_inputs(graph):
     """Input readiness of the local graph commit tools, read from the graph alone."""
     from solar_sizing_client import units_resolved
 
-    if not units_resolved(graph):
-        return {name: {"input_ready": False, "input_reason": "unresolved_units"}
-                for name in ("solar-settings", "solar-correct-string")}
-    # Corrections must remain possible when an existing string is stale.
-    return {
-        "solar-settings": {"input_ready": True, "input_reason": None},
-        "solar-correct-string": {
-            "input_ready": bool(graph["strings"]),
-            "input_reason": None if graph["strings"] else "strings_required"},
-    }
+    result = {}
+    resolved = units_resolved(graph)
+    for declaration in solar_tools.entries():
+        readiness = declaration["readiness"]
+        if readiness["kind"] not in ("facets", "hook"):
+            continue
+        name = declaration["name"]
+        if not resolved:
+            result[name] = {"input_ready": False, "input_reason": "unresolved_units"}
+        elif readiness["kind"] == "hook":
+            result[name] = _load_readiness_builtin(declaration["builtin"]).input_readiness(graph)
+        else:
+            # Facet presence allows correction even when an existing value is stale.
+            missing = next((facet for facet in readiness["facets"] if not graph[facet]), None)
+            result[name] = {"input_ready": missing is None,
+                            "input_reason": None if missing is None else missing + "_required"}
+    return result
 
 
 def w1_graph_readiness(graph):
@@ -350,7 +363,7 @@ def w1_graph_readiness(graph):
 
 def w1_availability(name, *, entitled, inputs):
     """Implementation presence does not imply a reachable broker engine."""
-    if not W1_CAPABILITIES[name]["requires_persisted_graph"]:
+    if not SOLAR_CAPABILITIES[name]["requires_persisted_graph"]:
         # Params are validated on submission by the capability's own validator.
         inputs = {"input_ready": True, "input_reason": None}
     engine_ready = capability_adapter(name) is not None

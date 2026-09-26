@@ -480,7 +480,7 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
         )
 
     if binding is not None and (
-        (tool.get("name") in capability_catalog.W1_CAPABILITIES
+        (tool.get("name") in capability_catalog.SOLAR_CAPABILITIES
          and capability_catalog.capability_adapter(tool.get("name")) != capability_catalog.CLOUD_PROPOSAL_ADAPTER)
         or tool.get("canonical_only")
         or x_org_id is not None or x_project_id is not None
