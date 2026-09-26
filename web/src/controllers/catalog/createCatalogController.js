@@ -7,13 +7,9 @@ import {
 } from './catalogRouting.js'
 import { track } from '../../telemetry.js'
 import { isSecretRefused } from '../../lib/secretGuardTransport.js'
+import { solarView } from '../../solar/solarView.js'
 
 const DEFAULT_THRESHOLDS = { CHIP_ONLY: 0.8, RACE_MIN: 0.55 }
-const SOLAR_TOOLS = new Set([
-  'solar-settings', 'solar-size-strings', 'solar-panel-groups', 'solar-solve-proposal',
-  'solar-commit-solve', 'solar-correct-string', 'solar-assign-equipment',
-  'solar-homeruns', 'solar-schedule',
-])
 const AVAILABILITY_KEYS = ['entitled', 'engine_ready', 'input_ready', 'implemented']
 
 const initialState = Object.freeze({
@@ -75,6 +71,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
   let catalogRequest = 0
   let snapshot = null
   const listeners = new Set()
+  const learnedSolar = new Map()
 
   const humanizeError = adapters.humanizeError || defaultHumanize
   const isUnauthorized = adapters.isUnauthorized || defaultUnauthorized
@@ -109,12 +106,20 @@ export function createCatalogController({ services, adapters = {}, context = {} 
   }
 
   const solarRefusal = (name) => {
-    if (!SOLAR_TOOLS.has(name)) return null
     const entry = (state.catalog.families || [])
       .flatMap((family) => family.capabilities || []).find((tool) => tool.name === name)
+    let required
+    if (entry) {
+      const result = solarView(entry)
+      if (result.state === 'absent') return null
+      if (result.state === 'invalid') return 'capability_availability_unavailable'
+      required = result.view.entitlement
+    } else {
+      if (!learnedSolar.has(name)) return null
+      required = learnedSolar.get(name)
+    }
     const availability = entry?.availability
     if (!availability) return 'capability_availability_unavailable'
-    const required = name === 'solar-solve-proposal' ? 'solve' : 'run_write'
     if (!entitlementAllows(current.entitlements, required)) return 'entitlement_required'
     if (AVAILABILITY_KEYS.every((key) => availability[key] === true)) return null
     const reasons = availability.refusal_reasons
@@ -183,6 +188,10 @@ export function createCatalogController({ services, adapters = {}, context = {} 
       const openFamilies = { ...state.openFamilies }
       for (const family of catalog.families || []) {
         if (!(family.family_id in openFamilies)) openFamilies[family.family_id] = false
+        for (const row of family.capabilities || []) {
+          const result = solarView(row)
+          if (result.state === 'valid') learnedSolar.set(row.name, result.view.entitlement)
+        }
       }
       publish({ catalog, openFamilies })
       return catalog

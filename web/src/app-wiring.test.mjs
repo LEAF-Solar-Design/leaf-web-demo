@@ -20,6 +20,34 @@ import esbuild from 'esbuild'
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
 const viewerSource = readFileSync(new URL('./components/Viewer.jsx', import.meta.url), 'utf8')
 
+describe('solar-ui-rail wiring', () => {
+  it('passes the solar rail only under the engine flag on a drafting surface', () => {
+    assert.match(appSource, /solarRail: ENV_CAD_EDIT && drafting \? \{\s*families: catalog\.families, openName: solarFormTool\?\.name \?\? null, onOpenForm: setSolarFormTool,?\s*\} : null/)
+    const memo = appSource.slice(appSource.indexOf('const profileTabs = useMemo'), appSource.indexOf('const previousRibbonProfile'))
+    const deps = memo.slice(memo.lastIndexOf('}, ['))
+    for (const dependency of ['catalog.families', 'solarFormTool', 'drafting']) assert.ok(deps.includes(dependency))
+    assert.ok(memo.includes('solar: { status: solarRoutesStatus, shown: showSolarStrings'))
+  })
+
+  it('mounts SolarToolForm before the drafting ribbon under the engine flag', () => {
+    assert.ok(appSource.includes("{ENV_CAD_EDIT && drafting && surfaceSlots.toolbar.profile === 'solar' && solarFormTool && ("))
+    const card = appSource.indexOf('className="workspace-card enter"')
+    const form = appSource.indexOf('<SolarToolForm')
+    const ribbon = appSource.indexOf('{studioShell && surfaceSlots.toolbar.ribbon && studioRibbonHost && createPortal(')
+    assert.ok(card >= 0 && form > card && ribbon > form)
+    assert.match(appSource.slice(form, ribbon), /key=\{solarFormTool\.name\}/)
+    assert.ok(appSource.includes("activeRibbonTab === 'solar' ? ['solar-panels']"))
+    assert.ok(appSource.includes('id="cockpit-solar-panels-slot"'))
+  })
+
+  it('commits the form through the catalog run path', () => {
+    const form = appSource.slice(appSource.indexOf('<SolarToolForm'), appSource.indexOf('{/* W4c-V1: the drafting ribbon'))
+    assert.ok(form.includes("onSubmit={(tool, params) => onRequestCatalogRun(tool, params, RIBBON_RATIONALE, 'ribbon')}"))
+    assert.ok(form.includes('onClose={() => setSolarFormTool(null)}'))
+    assert.ok(appSource.includes('const [solarFormTool, setSolarFormTool] = useState(null)'))
+  })
+})
+
 describe('J1 Browser composition', () => {
   const compiled = esbuild.transformSync(appSource, { loader: 'jsx' }).code
   const mount = (name) => {

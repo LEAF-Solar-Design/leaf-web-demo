@@ -22,6 +22,7 @@ import { familiesForSurface, familyMonogram } from './lib/surfaceRails.js'
 import { byId, ladderListener, slashCommandHandlers } from './lib/actionRegistry.js'
 import { REASONS, RIBBON_RATIONALE, profileRibbonTabs, profileEntryTab, solarRouteStatus, solarRouteDisplay, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels } from './lib/ribbonClusters.js'
 import { isWriteTool } from './lib/toolRecord.js'
+import SolarToolForm from './solar/SolarToolForm.jsx'
 import { resolvePublishedCatalogTool } from './site/publishedCatalogTool.js'
 import { entityGeometry } from './lib/entityMetrics.js'
 import { setCredentialMountAvailable } from './lib/secretGuardTransport.js'
@@ -362,6 +363,7 @@ export default function App() {
   const [drawingLoad, setDrawingLoad] = useState({ drawingId: REQUESTED_DRAWING_ID, state: 'pending' })
   const [intakeRetryKey, setIntakeRetryKey] = useState(0) // X3 Retry — bumping re-runs the intake load effect
   const [selectedTool, setSelectedTool] = useState(null)
+  const [solarFormTool, setSolarFormTool] = useState(null)
   const [selectedHandle, setSelectedHandle] = useState(null)
   const canvasPickRef = useRef(null)
   const registerCanvasPick = useCallback((fn) => { canvasPickRef.current = fn }, [])
@@ -2911,6 +2913,9 @@ export default function App() {
     return profileRibbonTabs(surfaceSlots.toolbar.profile, {
       families: railFamilies,
       solar: { status: solarRoutesStatus, shown: showSolarStrings, onToggle: () => setShowSolarStrings((shown) => !shown) },
+      solarRail: ENV_CAD_EDIT && drafting ? {
+        families: catalog.families, openName: solarFormTool?.name ?? null, onOpenForm: setSolarFormTool,
+      } : null,
       selectedHandle, onClearSelection: () => setSelectedHandle(null),
       onRun: (tool) => onRequestCatalogRun(tool, null, RIBBON_RATIONALE, 'ribbon'),
       catalogOptions: {
@@ -2936,7 +2941,7 @@ export default function App() {
     running, previewing, writeLocked, canRunWrite, engineDirty, mock, signedIn, projectsErr,
     orgId, openProjectId, projectBusy, onCreateProject, agentDisabled, routing, clearAgentSession,
     openAgentMode, jobs.length, ship, setNavExpanded, setJobRailExpanded,
-    solarRoutesStatus, showSolarStrings, selectedHandle])
+    solarRoutesStatus, showSolarStrings, selectedHandle, drafting, catalog.families, solarFormTool])
   const previousRibbonProfile = useRef(null)
   const entryRibbonTab = profileEntryTab(previousRibbonProfile.current, surfaceSlots.toolbar.profile, ribbonTab, surfaceSlots.toolbar.home)
   const activeRibbonTab = profileTabs.some((tab) => tab.id === entryRibbonTab)
@@ -3774,6 +3779,14 @@ export default function App() {
                 Retry loading
               </button>
             </div>
+          )}
+          {ENV_CAD_EDIT && drafting && surfaceSlots.toolbar.profile === 'solar' && solarFormTool && (
+            <SolarToolForm
+              key={solarFormTool.name}
+              tool={solarFormTool}
+              onSubmit={(tool, params) => onRequestCatalogRun(tool, params, RIBBON_RATIONALE, 'ribbon')}
+              onClose={() => setSolarFormTool(null)}
+            />
           )}
           {/* W4c-V1: the drafting ribbon — the drawing window's command
               strip, in the cockpit grammar. Studio-only (nothing renders
