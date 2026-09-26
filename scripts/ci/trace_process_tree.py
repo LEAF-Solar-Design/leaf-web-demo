@@ -18,19 +18,32 @@ from dataclasses import dataclass, field
 
 
 BINDINGS = ("run_id", "source_sha", "source_tree", "capture_sha", "catalog_sha256")
-PARSER_VERSION = "s15a-2"
+PARSER_VERSION = "s15a-3"
+# max_state_bytes: 2 GiB; the first real capture tripped 256 MiB at 478,810 syscalls.
 LIMITS = dict(max_tasks=16384, max_fds_per_task=65536, max_record_bytes=1048576,
-              max_dependencies=1000000, max_state_bytes=268435456, max_reasons=256)
+              max_dependencies=1000000, max_state_bytes=2 * 1024 ** 3, max_reasons=256)
+# Calibration instrument bounds: distinct sanitized shapes kept, names counted, names reported.
+SAMPLE_LIMIT, NAME_LIMIT, NAME_REPORT = 32, 4096, 32
 POLICY = {
-    "path": "open openat creat execve execveat readlink readlinkat access faccessat stat lstat fstat newfstatat statfs fstatfs statx getcwd chdir fchdir".split(),
-    "descriptor": "read pread64 readv preadv preadv2 mmap mremap munmap mprotect lseek dup dup2 dup3 fcntl close pipe pipe2 socketpair write pwrite64 writev pwritev pwritev2 truncate ftruncate fsync fdatasync".split(),
+    # Amendment 4: unconditional-allow, argument-independent syscalls filtered at the tracer
+    # (`-e trace=!<noise>`). Digested with the policy and bound into the epoch through the argv.
+    "noise": ("brk madvise mprotect munmap arch_prctl set_tid_address set_robust_list get_robust_list rseq rt_sigaction "
+              "rt_sigprocmask rt_sigreturn sigaltstack rt_sigsuspend rt_sigtimedwait rt_sigpending restart_syscall "
+              "sched_yield nanosleep clock_nanosleep getpid getppid gettid getuid geteuid getgid getegid getgroups "
+              "getrlimit prlimit64 getrusage times clock_gettime gettimeofday time getrandom sched_getaffinity "
+              "sched_getparam sched_getscheduler futex").split(),
+    "path": "open openat creat execve execveat readlink readlinkat access faccessat stat lstat fstat newfstatat statfs fstatfs statx getcwd chdir fchdir getxattr lgetxattr listxattr llistxattr".split(),
+    "descriptor": "read pread64 readv preadv preadv2 mmap mremap munmap mprotect lseek dup dup2 dup3 fcntl close pipe pipe2 socketpair write pwrite64 writev pwritev pwritev2 truncate ftruncate fsync fdatasync fadvise64 posix_fadvise readahead sync_file_range flock fgetxattr flistxattr".split(),
+    "metadata_mutation": "chmod fchmod fchmodat chown fchown fchownat lchown utimensat futimesat".split(),
+    "internal_object": "memfd_create timerfd_create".split(),
+    "filesystem_events": "inotify_init inotify_init1 inotify_add_watch inotify_rm_watch".split(),
     "directory": "getdents getdents64 mkdir mkdirat rmdir unlink unlinkat rename renameat renameat2 link linkat symlink symlinkat".split(),
     "process": "fork vfork clone wait4 waitid exit exit_group setsid setpgid getpid getppid gettid".split(),
     "network": "socket connect bind listen accept accept4 sendto recvfrom sendmsg recvmsg sendmmsg recvmmsg getsockopt getpeername getsockname shutdown".split(),
     "namespace": "unshare setns chroot pivot_root mount umount2".split(),
     "reject": "ptrace process_vm_readv process_vm_writev io_setup io_submit io_getevents io_cancel io_destroy io_uring_setup io_uring_enter io_uring_register open_by_handle_at name_to_handle_at splice tee vmsplice sendfile copy_file_range bpf userfaultfd shmget shmat shmdt shmctl semget semop semctl msgget msgsnd msgrcv msgctl".split(),
     "abi": "openat2 clone3 close_range pidfd_open pidfd_getfd".split(),
-    "runtime": "brk madvise arch_prctl set_tid_address set_robust_list get_robust_list futex rseq rt_sigaction rt_sigprocmask rt_sigreturn sigaltstack rt_sigsuspend rt_sigtimedwait rt_sigpending restart_syscall kill tkill tgkill sched_yield nanosleep clock_nanosleep poll ppoll select pselect6 epoll_create epoll_create1 epoll_ctl epoll_wait epoll_pwait eventfd eventfd2 alarm setitimer getitimer getuid geteuid getgid getegid getgroups uname getrlimit prlimit64 getrusage times umask clock_gettime gettimeofday time getrandom sched_getaffinity sched_getparam sched_getscheduler prctl ioctl".split(),
+    "runtime": "brk madvise arch_prctl set_tid_address set_robust_list get_robust_list futex rseq rt_sigaction rt_sigprocmask rt_sigreturn sigaltstack rt_sigsuspend rt_sigtimedwait rt_sigpending restart_syscall kill tkill tgkill sched_yield nanosleep clock_nanosleep poll ppoll select pselect6 epoll_create epoll_create1 epoll_ctl epoll_wait epoll_pwait eventfd eventfd2 alarm setitimer getitimer getuid geteuid getgid getegid getgroups uname getrlimit prlimit64 getrusage times umask clock_gettime gettimeofday time getrandom sched_getaffinity sched_getparam sched_getscheduler prctl ioctl sysinfo getpgrp getpgid setrlimit capget sched_setaffinity timer_create timer_settime timer_gettime timer_delete timerfd_settime timerfd_gettime mincore msync mlock munlock".split(),
     "ioctl": "TCGETS TCSETS TCSETSW TCSETSF TIOCGWINSZ TIOCGPGRP TIOCSPGRP FIONBIO FIOCLEX FIONCLEX FIONREAD".split(),
     "prctl": "PR_SET_NAME PR_GET_NAME PR_SET_PDEATHSIG PR_GET_DUMPABLE PR_SET_DUMPABLE PR_CAPBSET_READ PR_SET_NO_NEW_PRIVS PR_GET_NO_NEW_PRIVS".split(),
     "fcntl": "F_DUPFD F_DUPFD_CLOEXEC F_SETFD F_GETFD F_GETFL F_SETFL F_GETLK F_SETLK F_SETLKW F_OFD_GETLK F_OFD_SETLK F_OFD_SETLKW".split(),
@@ -39,22 +52,52 @@ POLICY = {
     "nondeterminism_boundary": ["clock", "randomness", "scheduling"],
 }
 PATH_ARGS = {
-    **{n: (0,) for n in "open creat execve readlink access stat lstat statfs chdir truncate mkdir rmdir unlink chroot".split()},
-    **{n: (1,) for n in "openat openat2 execveat readlinkat faccessat newfstatat statx mkdirat unlinkat".split()},
+    **{n: (0,) for n in "open creat execve readlink access stat lstat statfs chdir truncate mkdir rmdir unlink chroot getxattr lgetxattr listxattr llistxattr chmod chown lchown".split()},
+    **{n: (1,) for n in "openat openat2 execveat readlinkat faccessat newfstatat statx mkdirat unlinkat fchmodat fchownat utimensat futimesat".split()},
     "rename": (0, 1), "link": (0, 1), "symlink": (0, 1),
     "renameat": (1, 3), "renameat2": (1, 3), "linkat": (1, 3), "symlinkat": (0, 2),
 }
 FD_ARGS = {
     **{n: (0,) for n in "read pread64 readv preadv preadv2 write pwrite64 writev pwritev pwritev2 fstat fstatfs fchdir lseek dup fcntl close getdents getdents64 ioctl ftruncate fsync fdatasync connect bind listen accept accept4 sendto recvfrom sendmsg recvmsg sendmmsg recvmmsg getsockopt getpeername getsockname shutdown".split()},
     **{n: (0,) for n in "openat openat2 execveat readlinkat faccessat newfstatat statx mkdirat unlinkat".split()},
+    **{n: (0,) for n in "fadvise64 posix_fadvise readahead sync_file_range flock fgetxattr flistxattr fchmod fchown fchmodat fchownat utimensat futimesat".split()},
     "dup2": (0, 1), "dup3": (0, 1), "mmap": (4,), "renameat": (0, 2),
     "renameat2": (0, 2), "linkat": (0, 2), "symlinkat": (1,), "epoll_ctl": (0, 2),
     "epoll_wait": (0,), "epoll_pwait": (0,),
 }
 READS = set("read pread64 readv preadv preadv2".split())
 WRITES = set("write pwrite64 writev pwritev pwritev2 ftruncate fsync fdatasync".split())
-LOOKUPS = set("stat lstat newfstatat statx access faccessat readlink readlinkat statfs".split())
+LOOKUPS = set("stat lstat newfstatat statx access faccessat readlink readlinkat statfs getxattr lgetxattr listxattr llistxattr".split())
 MUTATIONS = set(POLICY["directory"]) - {"getdents", "getdents64"}
+METADATA_MUTATIONS = set(POLICY["metadata_mutation"])
+FD_LOOKUPS = {"fstat", "fstatfs", "fgetxattr", "flistxattr"}
+KNOWN = frozenset().union(*(POLICY[k] for k in ("path", "descriptor", "directory", "process", "network", "namespace", "runtime",
+                                                "metadata_mutation", "internal_object", "filesystem_events", "noise")))
+QUOTED = re.compile(r'"(?:\\.|[^"\\])*(?:"|\\?$)')
+# Each alternative stops at the next '<', so the substitution stays linear in the line.
+ANNOTATION = re.compile(r"<[^<]*?>(?=[\s,)\]}]|$)|<[^<>]*$")
+LEADING = re.compile(r"(?:\[pid +\d+\] |\d+ +)?(?:\d+\.\d+ )?(?:<\.\.\. ([A-Za-z_]\w*) resumed>|([A-Za-z_]\w*)\(|(\+\+\+)|(---)|(strace:))")
+
+
+def malformed_shape(line):
+    """Sanitized shape of an undecodable line: never carries a quoted string's content.
+
+    Quoted strings (terminated or not) collapse first, then annotations, hex, digits;
+    truncation happens only after every substitution.
+    """
+    shape = QUOTED.sub('"…"', line)
+    shape = ANNOTATION.sub("<…>", shape)
+    shape = re.sub(r"0x[0-9a-fA-F]+", "0xN", shape)
+    shape = re.sub(r"\d+", "N", shape)
+    return shape[:200]
+
+
+def line_kind(line):
+    """Leading syscall name, or a line kind, for the malformed counters."""
+    m = LEADING.match(line)
+    if not m:
+        return "other"
+    return m[1] or m[2] or ("terminal" if m[3] else "signal" if m[4] else "strace")
 
 
 def canonical(value):
@@ -122,7 +165,7 @@ def _split(raw):
     """Split arguments without retaining any quoted buffers in the result event."""
     items, start, depth, angle = [], 0, 0, False
     quoted = escaped = False
-    quote_start = 0
+    quote_start = inner = 0
     for i, c in enumerate(raw):
         if quoted:
             if escaped:
@@ -135,10 +178,17 @@ def _split(raw):
         elif c == '"':
             quoted = True
             quote_start = i
+        elif angle:
+            # Socket annotations carry '->' inside brackets (<TCP:[a->b]>): only a
+            # '>' outside the annotation's own brackets closes it.
+            if c == "[":
+                inner += 1
+            elif c == "]":
+                inner -= 1
+            elif c == ">" and inner <= 0:
+                angle = False
         elif c == "<":
-            angle = True
-        elif c == ">":
-            angle = False
+            angle, inner = True, 0
         elif not angle:
             if c in "([{":
                 depth += 1
@@ -160,7 +210,8 @@ def _fd(raw):
     if not match:
         raise ValueError("unresolved_file_descriptor")
     annotation = match[2]
-    if annotation and annotation.startswith("\\x"):
+    # -xx escapes every path byte; -x escapes only non-ASCII bytes, anywhere in the path.
+    if annotation and (annotation.startswith("\\x") or (annotation.startswith("/") and "\\" in annotation)):
         annotation = _string('"' + annotation + '"')
     deleted = bool(annotation and annotation.endswith(" (deleted)"))
     if deleted:
@@ -201,7 +252,8 @@ def _args(event, raw, resumed=False):
     if resumed:
         return
     for i in PATH_ARGS.get(name, ()):
-        if i < len(args) and args[i]:
+        # utimensat(fd, NULL, ...) names the descriptor itself, not a path.
+        if i < len(args) and args[i] and args[i] != "NULL":
             event["paths"][i] = _string(args[i])
     for i in FD_ARGS.get(name, ()):
         if i < len(args) and args[i]:
@@ -244,11 +296,14 @@ def _parse_line(line, sequence):
     if m:
         event.update(pid=int(m[1]), kind=m[2])
         return event
-    m = re.fullmatch(r"(\d+) (\d+\.\d+) (.*)", line)
+    # strace -f -o prints no pid until a second process exists (pid None: the root);
+    # pids are left-justified in five columns; stderr output uses "[pid N] ".
+    m = re.fullmatch(r"(?:\[pid +(\d+)\] |(\d+) +)?(\d+\.\d+) (.*)", line)
     if not m:
         raise ValueError("malformed_line")
-    event.update(pid=int(m[1]), time=m[2])
-    body = m[3]
+    pid = m[1] or m[2]
+    event.update(pid=None if pid is None else int(pid), time=m[3])
+    body = m[4]
     terminal = re.fullmatch(r"\+\+\+ exited with (\d+) \+\+\+", body)
     if terminal:
         event.update(kind="exit", status=int(terminal[1]))
@@ -257,7 +312,7 @@ def _parse_line(line, sequence):
     if terminal:
         event.update(kind="killed", signal=terminal[1])
         return event
-    signal = re.fullmatch(r"--- (SIG[A-Z0-9]+)(?: \{.*\})? ---", body)
+    signal = re.fullmatch(r"--- (?:stopped by )?(SIG[A-Z0-9]+)(?: \{.*\})? ---", body)
     if signal:
         event.update(kind="signal", signal=signal[1])
         return event
@@ -272,13 +327,20 @@ def _parse_line(line, sequence):
         event["kind"] = "unfinished"
         _args(event, rest[:-17])
         return event
-    returned = re.fullmatch(r"(.*)\)\s+=\s+(\?|0x[0-9a-fA-F]+|-?\d+)(?:<(.*?)>)?(?: ([A-Z][A-Z0-9_]+)(?: \([^\n]*\))?)?(?: <(\d+\.\d+)>)?", rest)
+    # The return annotation ends at a '>' followed by a space or end of line, never
+    # at a '>' inside it (<TCP:[a->b]>, <UNIX:[1->2]>).
+    returned = re.fullmatch(r"(.*)\)\s+=\s+(\?|0x[0-9a-fA-F]+|-?\d+)(?:<(.*?)>(?= |$))?(?: ([A-Z][A-Z0-9_]+)(?: \([^\n]*\))?)?(?: <(\d+\.\d+|unavailable)>)?", rest)
     if not returned:
         raise ValueError("malformed_line")
     ret = returned[2]
+    duration = None if returned[5] == "unavailable" else returned[5]
     event.update(return_value=None if ret == "?" else int(ret, 16 if ret.startswith("0x") else 10),
-                 errno=returned[4], duration=returned[5])
-    if ret == "?" and event["name"] not in {"exit", "exit_group", "rt_sigreturn"}:
+                 errno=returned[4], duration=duration)
+    # '?' is legal for exits, for a syscall a signal interrupted (= ? ERESTARTSYS ...),
+    # and for one whose task vanished (<unfinished ...>) = ?, <unavailable>).
+    interrupted = (returned[4] is not None or returned[5] == "unavailable"
+                   or returned[1].rstrip().endswith("<unfinished ...>"))
+    if ret == "?" and event["name"] not in {"exit", "exit_group", "rt_sigreturn"} and not interrupted:
         raise ValueError("malformed_line")
     if ret != "?" and returned[5] is None:
         raise ValueError("malformed_line")
@@ -321,6 +383,9 @@ def parse_stream(data):
                 pending.discard(key)
             elif event["kind"] == "detached":
                 reasons.append("trace_loss")
+            elif event["kind"] in {"exit", "killed"}:
+                # A task that exits mid-syscall never resumes it.
+                pending = {k for k in pending if k[0] != event["pid"]}
         except (ValueError, UnicodeError) as exc:
             reasons.append("malformed_string" if isinstance(exc, UnicodeError) else str(exc))
     if pending:
@@ -496,6 +561,8 @@ class _Decoder:
         self.unix_peers, self.unix_sockets = {}, []
         self.event_count = self.syscall_count = 0
         self.loss = dict(unpaired=0, malformed=0, unknown_syscalls=0, oversize=0, unknown_descriptors=0)
+        # Calibration instrument: sanitized shapes and bounded name counters.
+        self.malformed_samples, self.malformed_by_name, self.unsupported_by_name = {}, {}, {}
         self.root = None
         # Under strace the tracee pid is known only from the stream; strace -f
         # always opens with the tracee's execve, so the first event names it.
@@ -519,6 +586,42 @@ class _Decoder:
                     desc["path"] = desc["resolution"].absolute
                 self.putfd(self.root, int(fd), desc, bool(seed.get("cloexec")))
 
+    @staticmethod
+    def count(table, key):
+        if key in table or len(table) < NAME_LIMIT:
+            table[key] = table.get(key, 0) + 1
+        else:
+            table["(other)"] = table.get("(other)", 0) + 1
+
+    def malformed(self, raw, reason):
+        """Count an undecodable line by leading name and sanitized shape; never keep the line."""
+        text = raw.decode("ascii", "replace")
+        self.count(self.malformed_by_name, line_kind(text))
+        shape = malformed_shape(text)
+        if shape in self.malformed_samples or len(self.malformed_samples) < SAMPLE_LIMIT:
+            self.malformed_samples[shape] = self.malformed_samples.get(shape, 0) + 1
+        self.reason(reason)
+
+    def claims_root(self, event, pid):
+        """Is an unknown prefixed pid the unprefixed root rather than an unborn child?
+
+        It is the root when it resumes a syscall the root left unfinished, or when no
+        traced task has a fork in flight (no unborn child can exist). Otherwise the
+        event waits as pending; an unresolved wait ends as unexplained_pid.
+        """
+        if pid in self.pending:
+            return False
+        if event["kind"] == "resumed" and (None, event["name"]) in self.unfinished:
+            return True
+        return not any(name in {"clone", "fork", "vfork"} for _, name in self.unfinished)
+
+    def name_root(self, pid):
+        record = self.root["record"]
+        record["pid"] = pid
+        self.active[pid] = self.active.pop(None)
+        for key in [key for key in self.unfinished if key[0] is None]:
+            self.unfinished[(pid, key[1])] = self.unfinished.pop(key)
+
     def reason(self, value):
         if value == "trace_loss":
             self.trace_lost = True
@@ -528,6 +631,7 @@ class _Decoder:
             self.loss["malformed"] += 1
         elif value.startswith("unsupported_syscall"):
             self.loss["unknown_syscalls"] += 1
+            self.count(self.unsupported_by_name, value[len("unsupported_syscall:"):])
         elif value == "unresolved_file_descriptor":
             self.loss["unknown_descriptors"] += 1
         if value in self.reasons:
@@ -718,8 +822,8 @@ class _Decoder:
             if event["errno"] != "ENOSYS":
                 self.reason("unsupported_kernel_abi")
             return False
-        known = set().union(*(set(POLICY[k]) for k in ("path", "descriptor", "directory", "process", "network", "namespace", "runtime")))
-        if name in POLICY["reject"] or name not in known:
+        # syscall_0xNN / syscall_NNN (unnamed by strace) are never known.
+        if name in POLICY["reject"] or name not in KNOWN:
             self.reason("unsupported_syscall:" + name)
             return False
         if name in {"ioctl", "fcntl", "prctl"}:
@@ -737,14 +841,38 @@ class _Decoder:
                 self.reason("unsupported_kernel_abi")
         if name == "clone" and any(flag not in POLICY["clone_flags"] and not flag.startswith("CLONE_NEW") for flag in flags):
             self.reason("unsupported_kernel_abi")
-        if name == "futex" and not any("PRIVATE" in flag for flag in flags):
-            self.reason("unsupported_syscall:futex:shared")
+        # Amendment 4 withdrew the shared-futex rule: a futex is not a file input.
         for fd in event.get("poll_fds", []):
             self.fd(task, {"fd": fd})
         if name in POLICY["network"]:
             if event.get("rights"):
                 self.reason("unsupported_syscall:" + name + ":SCM_RIGHTS")
         return True
+
+    def filesystem_events(self):
+        """inotify is an external input the capture cannot bind: an unresolved marker row."""
+        row = _external("filesystem-events", {"external_roots": {}})
+        row.update({"class": "filesystem-events", "origin_category": "filesystem-events"})
+        self.external[("filesystem-events", row["path_token"])] = row
+
+    def metadata_mutation(self, task, event):
+        """chmod/chown/utimensat families write metadata: the target counts as written."""
+        name, flags = event["name"], event["flags"]
+        index = PATH_ARGS.get(name, (None,))[0]
+        if index is not None and index in event["paths"]:
+            nofollow = name == "lchown" or "AT_SYMLINK_NOFOLLOW" in flags
+            path = self.resolve(task, event, index, nofollow=nofollow).absolute
+        else:
+            # fchmod/fchown, and utimensat(fd, NULL, ...), act on the descriptor.
+            argument = event["fds"].get(0)
+            if argument is None or argument["fd"] == "AT_FDCWD":
+                self.reason("unknown_path_base")
+                return
+            desc = self.fd(task, argument)
+            path = desc.get("path") if desc else None
+        if path and event["return_value"] is not None and event["return_value"] >= 0:
+            self.written_paths.add(path)
+            self.retain(64)
 
     def network_input(self):
         row = _external("network", {"external_roots": {}})
@@ -802,6 +930,22 @@ class _Decoder:
         if name in POLICY["network"]:
             self.network(task, event)
             return
+        if name in POLICY["internal_object"]:
+            if success:
+                if name == "memfd_create":
+                    self.internal.add(digest([event["pid"], event["sequence"], ret])[:16])
+                    self.retain(64)
+                self.putfd(task, ret, {"kind": "internal" if name == "memfd_create" else "endpoint"},
+                           "MFD_CLOEXEC" in flags or "TFD_CLOEXEC" in flags)
+            return
+        if name in POLICY["filesystem_events"]:
+            if name.startswith("inotify_init") and success:
+                self.putfd(task, ret, {"kind": "endpoint"}, "IN_CLOEXEC" in flags)
+            self.filesystem_events()
+            return
+        if name in METADATA_MUTATIONS:
+            self.metadata_mutation(task, event)
+            return
         if name in {"open", "openat", "creat"}:
             if success and "O_TMPFILE" in flags:
                 token = digest([event["pid"], event["sequence"], ret])[:16]
@@ -846,7 +990,7 @@ class _Decoder:
             return
         if name in LOOKUPS:
             index = 1 if name in {"newfstatat", "statx", "faccessat", "readlinkat"} else 0
-            nofollow = name in {"readlink", "readlinkat", "lstat"} or "AT_SYMLINK_NOFOLLOW" in flags
+            nofollow = name in {"readlink", "readlinkat", "lstat", "lgetxattr", "llistxattr"} or "AT_SYMLINK_NOFOLLOW" in flags
             resolution = self.resolve(task, event, index, nofollow=nofollow)
             self.edge(resolution, "readlink" if name.startswith("readlink") else "stat", event)
             if success and name.startswith("readlink"):
@@ -906,7 +1050,7 @@ class _Decoder:
         if desc is None:
             return
         fd = argument["fd"]
-        if name in READS | {"mmap", "fstat", "fstatfs"} and success:
+        if name in READS | FD_LOOKUPS | {"mmap"} and success:
             if desc["kind"] == "file":
                 if name == "fstat" and "observed_size" in event and desc["path"] not in self.observed_sizes:
                     self.observed_sizes[desc["path"]] = event["observed_size"]
@@ -914,7 +1058,7 @@ class _Decoder:
                 if name == "mmap" and "MAP_SHARED" in flags and "PROT_WRITE" in flags:
                     self.written_paths.add(desc["path"])
                     self.retain(64)
-                self.edge(desc["resolution"], "mmap" if name == "mmap" else "stat" if name.startswith("fstat") else "open", event)
+                self.edge(desc["resolution"], "mmap" if name == "mmap" else "stat" if name in FD_LOOKUPS else "open", event)
             elif desc["kind"] not in {"devnull", "supervisor", "endpoint", "internal"}:
                 self.reason("unresolved_file_descriptor")
         elif name in WRITES and success:
@@ -958,10 +1102,23 @@ class _Decoder:
         if self.stopped:
             return
         kind, pid = event["kind"], event["pid"]
-        if self.adopt_root:
-            self.birth_root(pid)
-            if self.stopped:
+        if pid is None:
+            # No pid prefix: strace has traced one process so far, so the line is the
+            # root's. The first such line births a root whose pid is learned later.
+            if self.adopt_root:
+                self.birth_root(None)
+            if self.root is None:
+                if not self.stopped:
+                    self.reason("unexplained_pid")
                 return
+            pid = event["pid"] = self.root["record"]["pid"]
+        elif self.adopt_root:
+            self.birth_root(pid)
+        elif self.root is not None and self.root["record"]["pid"] is None and pid not in self.active:
+            if kind != "attached" and self.claims_root(event, pid):
+                self.name_root(pid)
+        if self.stopped:
+            return
         if kind == "attached":
             return
         if kind == "detached":
@@ -973,6 +1130,9 @@ class _Decoder:
             self.retain(len(canonical(event)))
             return
         if kind in {"exit", "killed"}:
+            # A syscall still unfinished when its task exits never resumes: not unpaired.
+            for key in [key for key in self.unfinished if key[0] == pid]:
+                del self.unfinished[key]
             task["record"]["exit"] = dict(kind=kind, sequence=event["sequence"])
             task["record"]["exit"].update({"status": event["status"]} if kind == "exit" else {"signal": event["signal"]})
             if kind == "killed":
@@ -1046,6 +1206,10 @@ def _chunk_lines(chunks, decoder, counters):
         yield sequence + 1, bytes(partial), False
 
 
+def _ranked(table):
+    return sorted(table.items(), key=lambda row: (-row[1], row[0]))
+
+
 def decode_stream(chunks, context, limits=None):
     _validate(context)
     caps = dict(LIMITS)
@@ -1071,7 +1235,11 @@ def decode_stream(chunks, context, limits=None):
                 decoder.syscall_count += 1
             decoder.process(event)
         except (ValueError, UnicodeError) as exc:
-            decoder.reason("malformed_string" if isinstance(exc, UnicodeError) else str(exc))
+            reason = "malformed_string" if isinstance(exc, UnicodeError) else str(exc)
+            if reason.startswith("malformed"):
+                decoder.malformed(raw, reason)
+            else:
+                decoder.reason(reason)
     if decoder.unfinished:
         decoder.reason("unpaired_syscall")
     if decoder.pending:
@@ -1122,6 +1290,9 @@ def decode_stream(chunks, context, limits=None):
                        transcript_bytes=counters["byte_count"], transcript_sha256=sha, receipt_matched=matched,
                        capture_epoch=context.get("capture_epoch"), capture_epoch_manifest=context.get("capture_epoch_manifest"),
                        syscall_policy_digest=digest(POLICY), loss_counters=decoder.loss,
+                       malformed_samples=[{"shape": shape, "count": n} for shape, n in _ranked(decoder.malformed_samples)],
+                       malformed_by_name=dict(_ranked(decoder.malformed_by_name)[:NAME_REPORT]),
+                       unsupported_by_name=dict(_ranked(decoder.unsupported_by_name)),
                        internal_objects={"count": len(decoder.internal), "sample": sorted(decoder.internal)[:32]},
                        supervisor_reads=decoder.supervisor_reads,
                        reasons=reasons, reasons_truncated=decoder.reason_count > len(reasons),

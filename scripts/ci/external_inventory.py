@@ -3,7 +3,7 @@
 The digest binds every installed file under an admissible root by relative
 path, size and SHA-256, so a changed installed byte changes the capture epoch.
 Walks are bounded (files and bytes per root) and never follow a symlink out of
-the root. Bytecode is skipped: it is derived from sources the walk covers and
+the admissible roots. Bytecode is skipped: it is derived from sources the walk covers and
 carries install-time mtimes.
 """
 
@@ -82,45 +82,63 @@ def _hash_file(path, budget):
     return size, hasher.hexdigest()
 
 
-def _inside(path, root_real):
-    real = os.path.realpath(path)
+def _within(real, root_real):
     return real == root_real or real.startswith(root_real.rstrip(os.sep) + os.sep)
 
 
-def digest_root(root, limits=None):
-    """Return {files, bytes, sha256, complete, reason} for one root; never raises on I/O."""
+def digest_root(root, limits=None, admissible=()):
+    """Return {files, bytes, sha256, complete, reason, symlinks_outside} for one root; never raises on I/O.
+
+    A root that is itself a symlink (merged-usr farms, /etc/localtime) is walked at its
+    realpath and records it as target. A symlink inside the root whose target lies in
+    this root or another admissible root (realpaths in admissible) is followed and hashed
+    as content; one whose target lies outside every admissible root is bound by its link
+    text and counted in symlinks_outside (a read through it is its own external input).
+    A missing root is complete and empty.
+    """
     caps = dict(LIMITS)
     caps.update(limits or {})
-    row = {"files": 0, "bytes": 0, "sha256": None, "complete": False, "reason": None}
+    row = {"files": 0, "bytes": 0, "sha256": None, "complete": False, "reason": None, "symlinks_outside": 0}
     if not isinstance(root, str) or not root or "${" in root:
         row["reason"] = "root_unresolved"
         return row
     try:
-        info = os.lstat(root)
-    except OSError:
-        row["reason"] = "root_missing"
+        os.lstat(root)
+        real = os.path.realpath(root)
+        info = os.stat(real)
+    except (OSError, ValueError):
+        row.update(reason="root_missing", complete=True, sha256=hashlib.sha256(_canonical([])).hexdigest())
         return row
+    if os.path.normcase(real) != os.path.normcase(os.path.abspath(root)):
+        row["target"] = real.replace(os.sep, "/")
+    targets = [real] + [r for r in admissible if r != real]
     entries = []
     try:
         if stat.S_ISREG(info.st_mode):
-            size, sha = _hash_file(root, caps["max_bytes"])
+            size, sha = _hash_file(real, caps["max_bytes"])
             entries.append([os.path.basename(root), size, sha])
             row.update(files=1, bytes=size)
         elif stat.S_ISDIR(info.st_mode):
-            root_real = os.path.realpath(root)
-            for directory, dirnames, filenames in os.walk(root, followlinks=False):
+            for directory, dirnames, filenames in os.walk(real, followlinks=False):
                 dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
                 names = [(d, True) for d in dirnames] + [(f, False) for f in sorted(filenames)]
                 keep = []
                 for name, is_dir in names:
                     full = os.path.join(directory, name)
-                    relative = os.path.relpath(full, root).replace(os.sep, "/")
+                    relative = os.path.relpath(full, real).replace(os.sep, "/")
                     if os.path.islink(full):
-                        # A link is bound by its target text; never follow it out.
-                        if not _inside(full, root_real):
-                            row["reason"] = "symlink_escape"
-                            return row
-                        entries.append([relative, "symlink", os.readlink(full)])
+                        target = os.path.realpath(full)
+                        if not any(_within(target, r) for r in targets):
+                            # Bound by its text only; never followed out of the admissible set.
+                            row["symlinks_outside"] += 1
+                            entries.append([relative, "symlink", os.readlink(full)])
+                        elif not is_dir and os.path.isfile(target):
+                            size, sha = _hash_file(target, caps["max_bytes"] - row["bytes"])
+                            entries.append([relative, size, sha])
+                            row["bytes"] += size
+                        else:
+                            # A directory or dangling target: its content is walked where it lives.
+                            entries.append([relative, "symlink", os.readlink(full)])
                         row["files"] += 1
                     elif is_dir:
                         keep.append(name)
@@ -152,11 +170,15 @@ def digest_roots(table, limits=None):
     """Digest every admissible root of an external-roots table, keyed by the table's root."""
     if not isinstance(table, dict):
         raise ValueError("invalid_external_roots")
-    result = {}
-    for root in sorted(table):
-        kind = root_class(table[root])
-        if kind not in ADMISSIBLE_CLASSES:
+    roots = [root for root in sorted(table) if root_class(table[root]) in ADMISSIBLE_CLASSES]
+    admissible = []
+    for root in roots:
+        try:
+            admissible.append(os.path.realpath(root))
+        except (OSError, ValueError, TypeError):
             continue
-        row = digest_root(root, limits)
-        result[root] = dict(row, **{"class": kind})
+    result = {}
+    for root in roots:
+        row = digest_root(root, limits, admissible)
+        result[root] = dict(row, **{"class": root_class(table[root])})
     return result

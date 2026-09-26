@@ -8,6 +8,7 @@ import math
 import os
 import select
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -23,7 +24,11 @@ except ImportError:
     import trace_process_tree as tree
 
 
-TRACE_FLAGS = ["-f", "-ttt", "-T", "-v", "-xx", "-yy", "-s", "65536", "-e", "trace=all"]
+# Amendment 4: -x escapes non-ASCII bytes only, -s 4096 covers PATH_MAX, and the noise
+# list (policy data, digested into syscall_policy_digest) is filtered at the tracer.
+TRACE_FLAGS = ["-f", "-ttt", "-T", "-v", "-x", "-yy", "-s", "4096", "-e", "trace=!" + ",".join(tree.POLICY["noise"])]
+TERM, KILL = signal.SIGTERM, getattr(signal, "SIGKILL", 9)
+KILL_GRACE = 10  # seconds between SIGTERM and SIGKILL of the tracer's group [guessed]
 ADMISSION_POLICY = {
     "python-installation": True, "os-image": True, "terraform-provider-cache": True,
     "generated": False, "generated-input": False, "device": False, "network": False,
@@ -162,8 +167,61 @@ def _command_child(argv):
     return code
 
 
+def _signal_group(process, sig):
+    """Signal the tracer's process group (POSIX) or the tracer (Windows); False once gone."""
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, sig)
+        elif sig == 0:
+            return process.poll() is None
+        elif sig == KILL:
+            process.kill()
+        else:
+            process.terminate()
+        return True
+    except OSError:
+        # ESRCH: the group is empty. EPERM: only zombies remain (macOS).
+        return False
+
+
+def terminate_tree(process, grace, send=None, escalate=None):
+    """SIGTERM the tracer's group, wait up to grace seconds for it to empty, then SIGKILL it.
+
+    Bounded: never waits longer than grace. escalate() turning true (a second signal)
+    ends the grace at once. Returns the signals sent, in order.
+    """
+    send = send or _signal_group
+    send(process, TERM)
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline and not (escalate and escalate()):
+        if process.poll() is not None and not send(process, 0):
+            break
+        time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+    # Survivors of the group (a tracee that ignored SIGTERM) never outlive the grace.
+    send(process, KILL)
+    return [TERM, KILL]
+
+
+def _install_forwarding(handler):
+    previous = {}
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            previous[sig] = signal.signal(sig, handler)
+        except (ValueError, OSError):
+            # Not the main thread: nothing can be forwarded from here.
+            pass
+    return previous
+
+
+def _restore_forwarding(previous):
+    for sig, handler in previous.items():
+        signal.signal(sig, handler if handler is not None else signal.SIG_DFL)
+
+
 def _stream_file(path, process, grace, errors):
-    process.wait()
+    # Poll, never block in wait(): a forwarded signal's handler must be able to reap.
+    while process.poll() is None:
+        time.sleep(0.02)
     try:
         with open(path, "rb") as stream:
             # A regular file has no writer-close notification. Observe one
@@ -233,7 +291,11 @@ def load_suites(path):
         return None
 
 
-def run(context, out_dir, command, tracer=None, sink=None, limits=None, descendant_grace=30, suites_file=None):
+def run(context, out_dir, command, tracer=None, sink=None, limits=None, descendant_grace=30, suites_file=None,
+        kill_grace=KILL_GRACE):
+    """Capture COMMAND under the tracer. SIGTERM/SIGINT during the capture are forwarded to
+    the tracer's process group (terminate_tree); outputs and receipt are still written, and
+    the exit is 124 when the command's status never arrived."""
     context = copy.deepcopy(context)
     # The tracee pid exists only once the tracer runs: the decoder adopts the
     # stream's first pid as root, never a producer-supplied guess.
@@ -247,6 +309,8 @@ def run(context, out_dir, command, tracer=None, sink=None, limits=None, descenda
             raise ValueError("invalid_limit")
     if not command or not math.isfinite(descendant_grace) or descendant_grace < 0:
         raise ValueError("invalid_command_or_grace")
+    if type(kill_grace) not in (int, float) or not math.isfinite(kill_grace) or kill_grace < 0:
+        raise ValueError("invalid_kill_grace")
     sink = sink or ("fifo" if os.name == "posix" else "file")
     if sink not in {"fifo", "file"}:
         raise ValueError("invalid_sink")
@@ -272,8 +336,10 @@ def run(context, out_dir, command, tracer=None, sink=None, limits=None, descenda
                    byte_count=0, sha256=hashlib.sha256(b"").hexdigest(), elapsed_seconds=None,
                    baseline_elapsed_seconds=context.get("baseline_elapsed_seconds"),
                    decoder_complete=False, capture_complete=False, capture_errors=[],
-                   sanitized_trace_bytes=0, decoded_evidence_bytes=0, decoder_peak_bytes=0)
+                   sanitized_trace_bytes=0, decoded_evidence_bytes=0, decoder_peak_bytes=0,
+                   terminated_by=None, kill_grace_seconds=kill_grace)
     receipt_path = out / "reports" / ("trace-receipt-" + context["capture_group"] + ".json")
+    state = {"process": None, "signal": None, "escalate": False, "terminated": False}
     if not facility["available"]:
         receipt["capture_errors"] = [facility["reason"]]
         receipt["command_exit_code"] = _command(command)
@@ -281,6 +347,21 @@ def run(context, out_dir, command, tracer=None, sink=None, limits=None, descenda
         manifest = build_epoch_manifest(context, facility, trace_argv)
         context.update(capture_epoch=capture_epoch(manifest), capture_epoch_manifest=manifest)
         errors = receipt["capture_errors"]
+
+        def forward(signum, _frame):
+            # The runner's timeout reached us: stop the tracer's whole group, then let
+            # the capture finish on the bytes it got. A second signal skips the grace.
+            if state["signal"] is not None:
+                state["escalate"] = True
+                if state["process"] is not None:
+                    _signal_group(state["process"], KILL)
+                return
+            state["signal"] = signal.Signals(signum).name
+            errors.append("command_timeout")
+            if state["process"] is not None:
+                state["terminated"] = True
+                terminate_tree(state["process"], kill_grace, escalate=lambda: state["escalate"])
+
         with tempfile.TemporaryDirectory(prefix=".trace-", dir=out) as private:
             path = os.path.join(private, "sink")
             status_path = os.path.join(private, "command-exit.json")
@@ -291,14 +372,23 @@ def run(context, out_dir, command, tracer=None, sink=None, limits=None, descenda
             wrapped = [sys.executable, os.path.abspath(__file__), "_command", status_path] + command
             actual_argv = tracer + TRACE_FLAGS + ["-o", path, "--"] + wrapped
             receipt["tracer"]["argv"] = tracer + TRACE_FLAGS + ["-o", path, "--"]
+            # Handlers live exactly around the launch and capture; removed in finally.
+            previous = _install_forwarding(forward)
             try:
-                try:
-                    process = subprocess.Popen(actual_argv, stdin=subprocess.DEVNULL)
-                except OSError:
-                    receipt.update(facility_available=False, facility_reason="tracer_launch_failed")
-                    errors.append("tracer_launch_failed")
-                    receipt["command_exit_code"] = _command(command)
-                    process = None
+                process = None
+                if state["signal"] is None:
+                    try:
+                        # Own session and group: the forwarded signal reaches every tracee.
+                        process = subprocess.Popen(actual_argv, stdin=subprocess.DEVNULL,
+                                                   start_new_session=os.name == "posix")
+                    except OSError:
+                        receipt.update(facility_available=False, facility_reason="tracer_launch_failed")
+                        errors.append("tracer_launch_failed")
+                        receipt["command_exit_code"] = _command(command)
+                state["process"] = process
+                if process is not None and state["signal"] is not None and not state["terminated"]:
+                    # The signal landed while the tracer was being launched.
+                    terminate_tree(process, kill_grace, escalate=lambda: state["escalate"])
                 if process is not None:
                     hasher, count = hashlib.sha256(), 0
 
@@ -322,16 +412,23 @@ def run(context, out_dir, command, tracer=None, sink=None, limits=None, descenda
 
                     result = tree.decode_stream(chunks(), context, limits)
                     receipt["tracer_exit_code"] = process.wait()
+                    code = None
                     try:
                         code = json.loads(Path(status_path).read_text())["command_exit_code"]
                         if type(code) is not int:
+                            code = None
                             raise ValueError("invalid_command_status")
                         receipt["command_exit_code"] = code
                     except (OSError, ValueError, KeyError):
                         errors.append("command_outcome_unavailable")
-                        receipt["command_exit_code"] = receipt["tracer_exit_code"] or 127
-                    if receipt["tracer_exit_code"] != 0:
+                        # A terminated command has no status; run() exits 124 for it.
+                        receipt["command_exit_code"] = (None if state["signal"] is not None
+                                                        else receipt["tracer_exit_code"] or 127)
+                    # strace exits with its tracee's status: only a tracer exit that differs
+                    # from the command's recorded status is the tracer's own failure.
+                    if receipt["tracer_exit_code"] != 0 and receipt["tracer_exit_code"] != code:
                         errors.append("tracer_nonzero_exit")
+                    receipt["terminated_by"] = state["signal"]
                     tree.bind_external_identities(result, external_identities(result))
                     _incomplete(result, errors)
                     tree.write_outputs(result, out)
@@ -343,10 +440,17 @@ def run(context, out_dir, command, tracer=None, sink=None, limits=None, descenda
                                    decoder_peak_bytes=result["decoder_peak_bytes"],
                                    decoded_evidence_bytes=sum(len(tree.canonical(value)) + 1 for value in [certificate] + result["shards"]))
             finally:
+                _restore_forwarding(previous)
                 if fd is not None:
                     os.close(fd)
+    if state["signal"] is not None:
+        # Also covers a signal that landed after the outputs were built.
+        receipt.update(terminated_by=state["signal"], capture_complete=False,
+                       capture_errors=sorted(set(receipt["capture_errors"]) | {"command_timeout"}))
     receipt["elapsed_seconds"] = time.monotonic() - started
     tree._atomic(receipt_path, receipt)
+    if receipt["command_exit_code"] is None:
+        return 124
     return receipt["command_exit_code"]
 
 
@@ -364,10 +468,15 @@ def main(argv=None):
     launch.add_argument("--limit", action="append", default=[])
     launch.add_argument("--descendant-grace", type=float, default=30)
     launch.add_argument("--suites-file", help="JSON suite list the plugin writes at session finish")
+    launch.add_argument("--kill-grace", type=float, default=KILL_GRACE, metavar="SECONDS",
+                        help="seconds between forwarding SIGTERM to the tracer's group and SIGKILL")
     # Split explicitly so a multi-token tracer cannot swallow COMMAND.
     boundary = argv.index("--") if "--" in argv else len(argv)
     args = parser.parse_args(argv[:boundary])
     command = argv[boundary + 1:]
+    if not math.isfinite(args.kill_grace) or args.kill_grace < 0:
+        print("trace_supervisor: --kill-grace must be a finite, non-negative number of seconds", file=sys.stderr)
+        return 2
     try:
         context = json.loads(Path(args.context).read_text(encoding="utf-8"), object_pairs_hook=tree._pairs)
         limits = {}
@@ -375,7 +484,7 @@ def main(argv=None):
             name, value = item.split("=", 1)
             limits[name] = int(value)
         return run(context, args.out, command, args.tracer, args.sink, limits, args.descendant_grace,
-                   args.suites_file)
+                   args.suites_file, args.kill_grace)
     except (OSError, ValueError, TypeError, KeyError, UnicodeError):
         if args.sink == "fifo" and os.name == "nt":
             print("trace_supervisor: fifo sink is unavailable on Windows; use --sink file", file=sys.stderr)
