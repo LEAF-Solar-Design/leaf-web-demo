@@ -5,6 +5,7 @@ export default function DiagnosticsDetails({ diagnostics = getDiagnostics() }) {
   const [text, setText] = useState(() => diagnostics.snapshot())
   const [status, setStatus] = useState('')
   const textarea = useRef(null)
+  const open = useRef(false)
 
   async function copy() {
     try {
@@ -18,7 +19,10 @@ export default function DiagnosticsDetails({ diagnostics = getDiagnostics() }) {
   }
 
   return <details onToggle={(event) => {
-    if (event.currentTarget.open) {
+    const nextOpen = event.currentTarget.open
+    if (nextOpen === open.current) return
+    open.current = nextOpen
+    if (nextOpen) {
       setText(diagnostics.snapshot())
       setStatus('')
     }

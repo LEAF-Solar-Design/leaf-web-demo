@@ -60,10 +60,13 @@ describe('connection details', () => {
       writeText: vi.fn().mockRejectedValue(new Error('Denied')),
     })
     const { container } = render(<DiagnosticsDetails diagnostics={createDiagnostics()} />)
-    openDetails(container)
+    const details = openDetails(container)
     const textarea = screen.getByRole('textbox')
     fireEvent.click(screen.getByRole('button', { name: 'Copy connection details' }))
     await waitFor(() => expect(screen.getByRole('status').textContent).toBe('Select the text above and copy it.'))
+    // A queued native toggle can arrive after the copy attempt completes.
+    fireEvent(details, new Event('toggle'))
+    expect(screen.getByRole('status').textContent).toBe('Select the text above and copy it.')
     expect(document.activeElement).toBe(textarea)
     expect(textarea.selectionStart).toBe(0)
     expect(textarea.selectionEnd).toBe(textarea.value.length)
