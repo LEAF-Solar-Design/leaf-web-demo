@@ -509,6 +509,8 @@ def build_suites() -> List[Suite]:
         # 26 tests + 32 more parametrizations = 58 passed.
         Suite("server-solar-pvcase-solve", "server tests/test_solar_pvcase_solve.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_pvcase_solve.py"), 58),
+        Suite("server-solar-registry", "server tests/test_solar_registry.py", "pytest", SERVER,
+              _py_pytest("tests/test_solar_registry.py"), 112),
         # W5 inverter family (2026-09-24, contract G35): the shared state and delta module and the
         # device, string and output engines (literal ports of the plugin's inverter commands). Inputs
         # are authored in each file, so each floor is the exact count on every runner. MEASURED.
