@@ -52,6 +52,57 @@ def _lines(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
+def test_run_with_job_id_writes_it_on_the_ledger_line(ledgered_client):
+    client, ledger = ledgered_client
+    response = client.post("/broker/run", json={
+        "tenant_id": "t1", "job_id": "job-123",
+        "tool": {"name": "t", "engine_op": "op", "params_schema": {"type": "object"}},
+        "params": {}, "dwg": "rooftop_demo", "aps_live": False})
+    assert response.status_code == 200
+    lines = _lines(ledger)
+    assert len(lines) == 1
+    jsonschema.validate(lines[0], SCHEMA)
+    assert lines[0]["job_id"] == "job-123"
+
+
+def test_run_without_job_id_writes_null_job_id(ledgered_client):
+    client, ledger = ledgered_client
+    response = client.post("/broker/run", json={
+        "tenant_id": "t1",
+        "tool": {"name": "t", "engine_op": "op", "params_schema": {"type": "object"}},
+        "params": {}, "dwg": "rooftop_demo", "aps_live": False})
+    assert response.status_code == 200
+    lines = _lines(ledger)
+    assert len(lines) == 1
+    jsonschema.validate(lines[0], SCHEMA)
+    assert lines[0]["job_id"] is None
+
+
+def test_conform_nulls_non_string_empty_or_oversized_job_id():
+    assert broker._conform_ledger_entry({})["job_id"] is None
+    for value in (None, 123, True, [], {}, object(), "", "x" * 129):
+        entry = {"job_id": value}
+        assert broker._conform_ledger_entry(entry) is entry
+        assert entry["job_id"] is None
+    for value in ("x", "job-123", "Job_123.part:run-1", "x" * 128):
+        assert broker._conform_ledger_entry({"job_id": value})["job_id"] == value
+
+
+@pytest.mark.parametrize("job_id", ["job\x00id", "job id", "job\nid", "j\u00f6b", "", "x" * 129])
+def test_conform_nulls_a_job_id_outside_the_closed_grammar(ledgered_client, job_id):
+    assert broker._conform_ledger_entry({"job_id": job_id})["job_id"] is None
+    client, ledger = ledgered_client
+    response = client.post("/broker/run", json={
+        "tenant_id": "t1", "job_id": job_id,
+        "tool": {"name": "t", "engine_op": "op", "params_schema": {"type": "object"}},
+        "params": {}, "dwg": "rooftop_demo", "aps_live": False})
+    assert response.status_code == 200
+    lines = _lines(ledger)
+    assert len(lines) == 1
+    jsonschema.validate(lines[0], SCHEMA)
+    assert lines[0]["job_id"] is None
+
+
 def test_no_name_denials_still_append_schema_valid_lines(ledgered_client):
     """`{"engine_op": null}` / `{}` -> BAD_PARAMS, but the appended line must
     conform: tool null, engine_op '' (string), all nine frozen keys present."""

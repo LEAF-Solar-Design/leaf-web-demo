@@ -16,6 +16,10 @@
     "status"
   ],
   "properties": {
+    "job_id": {
+      "type": ["string", "null"],
+      "description": "The /broker/run or /broker/run-plan request job_id, a string of 1 to 128 characters drawn only from [A-Za-z0-9._:-], or null when absent or unusable. Added 2026-09-26 as an optional field."
+    },
     "ts": {
       "type": "number",
       "description": "Append time, UNIX epoch seconds (time.time()). The UTC-day bucket key for the daily run quota and the today/total split in /api/usage."

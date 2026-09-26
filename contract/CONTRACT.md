@@ -195,6 +195,11 @@ unset; `/broker/health` stays open for liveness).
 JSONL line to `server/broker_ledger.jsonl` (env `BROKER_LEDGER`), frozen
 schema `leaf.broker-ledger-line.v1`:
 `{ts, tenant_id, tool, engine_op, aps_endpoint, aps_live, engine_seconds, usd_est, status}`.
+Optional `job_id` (added 2026-09-26) carries the `/broker/run` or
+`/broker/run-plan` request `job_id` when it is a string of 1 to 128 characters
+drawn only from `[A-Za-z0-9._:-]`, or `null` when absent or unusable (including
+NUL, other control characters, whitespace, and non-ASCII text).
+Every newly written ledger line includes it.
 New keys only as additive optional fields; frozen keys never renamed, retyped,
 or dropped. Preflight order on `/broker/run` (tested): kill-switch → spend cap
 (402) → tool shape → tier entitlement re-check → daily run quota (429, live
