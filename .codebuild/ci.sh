@@ -563,6 +563,7 @@ LEAF_CAPTURE_ID
   fi
   # The base context holds everything every suite shares; the runner adds the per-suite fields.
   # Fails closed: any defect leaves no file, and without it every suite spawns untraced.
+  export LEAF_TRACE_INTERPRETER="$(command -v python)"
   if [[ "$capture_tracer_ready" == 1 ]] && mkdir -p "$selection_dir/capture" \
     && python -I -B - "$selection_dir" "$CODEBUILD_SRC_DIR" "$HEAD_SHA" "$LEAF_READSET_RUN" "$LEAF_READSET_SOURCE_TREE" \
       "$LEAF_READSET_CAPTURE_SHA" "$LEAF_READSET_CATALOG_SHA256" "${CODEBUILD_BUILD_IMAGE:-}" <<'LEAF_CAPTURE_BASE' >&2
@@ -682,6 +683,14 @@ LEAF_CAPTURE_BASE
   then
     export LEAF_PROCESS_CAPTURE=1
     export LEAF_CAPTURE_CONTEXT_DIR="$selection_dir/capture"
+    echo "LEAF_T start tracing_smoke $(date +%s%3N)" >&2
+    tracing_smoke_rc=0
+    LEAF_TRUSTED_CI_DIR="$selection_dir" python -I -B -m pytest tests/test_trace_smoke_linux.py -q -p no:cacheprovider || tracing_smoke_rc=$?
+    echo "LEAF_T end tracing_smoke $(date +%s%3N) rc=$tracing_smoke_rc" >&2
+    if [[ "$tracing_smoke_rc" != 0 ]]; then
+      echo "LEAF_EVENT tracing_smoke result=failed" >&2
+      exit "$tracing_smoke_rc"
+    fi
   elif [[ "$capture_tracer_ready" == 1 ]]; then
     rm -f -- "$selection_dir/capture/base-context.json"
     echo 'WARNING tracing: capture_context_failed; suites run without the process tracer' >&2

@@ -11,6 +11,8 @@ import hashlib
 import json
 import os
 import stat
+import subprocess
+import sys
 
 
 ADMISSIBLE_CLASSES = ("python-installation", "os-image", "terraform-provider-cache")
@@ -51,17 +53,59 @@ def root_class(value):
     return "unresolved_external"
 
 
-def resolve_default_roots(environ=None, table=None):
-    """Replace ${NAME} root keys from the producer environment; drop unset names."""
+PYTHON_ROOTS_TIMEOUT = 20
+_PYTHON_ROOTS_PROBE = """import json, os, site, sys, sysconfig
+paths = sysconfig.get_paths()
+roots = [paths[key] for key in ('stdlib', 'platstdlib', 'purelib', 'platlib')]
+roots.extend(site.getsitepackages())
+user = site.getusersitepackages()
+if user and os.path.exists(user):
+    roots.append(user)
+roots.append(os.path.dirname(os.path.realpath(sys.executable)))
+print(json.dumps([os.path.realpath(root) for root in roots]))
+"""
+
+
+def resolve_default_roots(environ=None, interpreter=None, table=None):
+    """Resolve Python roots with the suite interpreter and expose any fallback."""
     environ = os.environ if environ is None else environ
+    interpreter = interpreter if interpreter is not None else environ.get("LEAF_TRACE_INTERPRETER", sys.executable)
+    report = {"roots_source": "fallback", "roots_interpreter": interpreter, "error_class": None}
+    python_roots = {root: value for root, value in DEFAULT_ROOTS.items()
+                    if root_class(value) == "python-installation"}
+    try:
+        if not isinstance(interpreter, str) or not os.path.isabs(interpreter):
+            raise ValueError("interpreter_must_be_absolute")
+        probe = subprocess.run([interpreter, "-I", "-c", _PYTHON_ROOTS_PROBE],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               timeout=PYTHON_ROOTS_TIMEOUT, check=True)
+        paths = json.loads(probe.stdout)
+        if (not isinstance(paths, list) or not paths
+                or any(not isinstance(path, str) or not os.path.isabs(path) or "\x00" in path for path in paths)):
+            raise ValueError("invalid_python_roots")
+        roots = []
+        for path in sorted({os.path.realpath(path) for path in paths}, key=lambda path: (len(path), path)):
+            if not any(_within(os.path.normcase(path), os.path.normcase(root)) for root in roots):
+                roots.append(path)
+        python_roots = {root: {"class": "python-installation", "origin_category": "python-installation"}
+                        for root in roots}
+        report["roots_source"] = "interpreter"
+    except (OSError, ValueError, UnicodeError, subprocess.SubprocessError) as exc:
+        report["error_class"] = type(exc).__name__
+    resolve_default_roots.last_report = report
     result = {}
     for root, value in (DEFAULT_ROOTS if table is None else table).items():
+        if root_class(value) == "python-installation":
+            continue
         if root.startswith("${") and root.endswith("}"):
             resolved = environ.get(root[2:-1])
             if not resolved or not resolved.startswith("/"):
                 continue
             root = resolved.rstrip("/") or "/"
         result[root] = value
+    for root, value in python_roots.items():
+        # Preserve explicit non-Python policy for a shared directory such as /usr/bin.
+        result.setdefault(root, value)
     return result
 
 

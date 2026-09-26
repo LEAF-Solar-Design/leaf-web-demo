@@ -1,4 +1,8 @@
-"""Trusted process-trace capture wrapper. Capture failure never decides CI."""
+"""Trusted process-trace capture wrapper. Capture failure never decides CI.
+
+Amendment 6: positive TRACED flags omit -v and negation and bind the capture epoch.
+Amendment 7: seed exactly stdio and every passed descriptor; record the table in the receipt.
+"""
 
 import argparse
 import copy
@@ -24,11 +28,8 @@ except ImportError:
     import trace_process_tree as tree
 
 
-# Amendment 5: -x escapes non-ASCII bytes only, -s 4096 covers PATH_MAX, and the noise list
-# (policy data, digested into syscall_policy_digest) is filtered in the kernel by
-# --seccomp-bpf, so those syscalls cost no ptrace stop. No durations, no fd annotations:
-# sequence orders events and the descriptor table supplies provenance.
-TRACE_FLAGS = ["-f", "-ttt", "-v", "-x", "-s", "4096", "--seccomp-bpf", "-e", "trace=!" + ",".join(tree.POLICY["noise"])]
+# Amendment 6: only the positive set reaches ptrace; directory buffers stay abbreviated.
+TRACE_FLAGS = ["-f", "-ttt", "-x", "-s", "4096", "--seccomp-bpf", "-e", "trace=" + ",".join(tree.TRACED)]
 TERM, KILL = signal.SIGTERM, getattr(signal, "SIGKILL", 9)
 KILL_GRACE = 10  # seconds between SIGTERM and SIGKILL of the tracer's group [guessed]
 STDERR_TAIL = 4096  # bytes of strace's own diagnostics copied into the receipt
@@ -110,6 +111,8 @@ def build_epoch_manifest(context, facility, tracer_argv, inventory_limits=None):
         "image_manifest_digest": context.get("image_manifest_digest"),
         "distribution_list_digest": context.get("distribution_list_digest"),
         "interpreter_identity": context.get("interpreter_identity"),
+        "roots_source": context.get("roots_source"),
+        "roots_interpreter": context.get("roots_interpreter"),
     }
 
 
@@ -373,7 +376,18 @@ def run(context, out_dir, command, tracer=None, sink=None, limits=None, descenda
     tracer = list(tracer or ["strace"])
     if not tracer:
         raise ValueError("invalid_tracer")
-    context["seed_fds"]["0"] = {"kind": "devnull"}
+    # Producers bind the suite executable in interpreter_identity. Reuse it,
+    # including a failed path, instead of probing a different Python silently.
+    identity = context.get("interpreter_identity")
+    interpreter = identity.get("executable") if isinstance(identity, dict) else identity
+    if interpreter is None:
+        interpreter = os.environ.get("LEAF_TRACE_INTERPRETER", sys.executable)
+        context["interpreter_identity"] = {"executable": interpreter}
+    context["external_roots"] = inventory.resolve_default_roots(
+        os.environ, interpreter=interpreter, table=context["external_roots"])
+    roots_report = inventory.resolve_default_roots.last_report.copy()
+    context.update(roots_source=roots_report["roots_source"], roots_interpreter=roots_report["roots_interpreter"])
+    context["seed_fds"] = {"0": {"kind": "devnull"}, "1": {"kind": "supervisor"}, "2": {"kind": "supervisor"}}
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
@@ -383,6 +397,9 @@ def run(context, out_dir, command, tracer=None, sink=None, limits=None, descenda
     trace_argv = tracer + TRACE_FLAGS + ["-o", "<private-" + sink + ">", "--"]
     receipt = {key: context[key] for key in tree.BINDINGS}
     receipt.update(schema="leaf.ci.trace-receipt.v1", capture_group=context["capture_group"],
+                   interpreter_identity=context.get("interpreter_identity"),
+                   roots_source=context["roots_source"], roots_interpreter=context["roots_interpreter"],
+                   roots_error_class=roots_report["error_class"],
                    facility_available=facility["available"], facility_profile=facility["facility_profile"],
                    facility_reason=facility["reason"], kernel_release=facility["kernel_release"], machine=facility["machine"],
                    tracer={"argv": trace_argv, "version": facility["version"], "exe_sha256": facility["exe_sha256"]},
@@ -392,7 +409,7 @@ def run(context, out_dir, command, tracer=None, sink=None, limits=None, descenda
                    decoder_complete=False, capture_complete=False, capture_errors=[],
                    sanitized_trace_bytes=0, decoded_evidence_bytes=0, decoder_peak_bytes=0,
                    terminated_by=None, kill_grace_seconds=kill_grace,
-                   tracer_stderr_tail=None, tracer_stderr_withheld=False)
+                   tracer_stderr_tail=None, tracer_stderr_withheld=False, seed_fds=context["seed_fds"])
     receipt_path = out / "reports" / ("trace-receipt-" + context["capture_group"] + ".json")
     state = {"process": None, "signal": None, "escalate": False, "terminated": False}
     if not facility["available"]:
@@ -426,6 +443,8 @@ def run(context, out_dir, command, tracer=None, sink=None, limits=None, descenda
                 os.mkfifo(path, 0o600)
                 fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
             stderr_fd, token = _stderr_token()
+            if stderr_fd is not None:
+                context["seed_fds"][str(stderr_fd)] = {"kind": "supervisor"}
             wrapped = [sys.executable, os.path.abspath(__file__), "_command", status_path, token] + command
             actual_argv = tracer + TRACE_FLAGS + ["-o", path, "--"] + wrapped
             receipt["tracer"]["argv"] = tracer + TRACE_FLAGS + ["-o", path, "--"]

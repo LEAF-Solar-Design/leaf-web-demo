@@ -3,6 +3,20 @@
 Only local input/output filenames reach the host filesystem. Traced names are
 POSIX strings interpreted against the launch inventory, never against this host.
 Completeness is evidence in the documents, not the decode command's exit status.
+Amendment 6: a positive POLICY-derived TRACED set is bound into syscall_policy_digest.
+Amendment 6: successful path calls are dependencies; writable opens are also generated outputs.
+Amendment 6: directory membership comes from the launch inventory, never d_name buffers.
+Amendment 6: unknown descriptors are counters unless needed to resolve a path.
+Amendment 6: interrupted calls touch no descriptors or dependencies and are not malformed.
+Amendment 6: pairing uses (pid, name), one slot per pid; only path or creator gaps are reasons.
+Amendment 6: live and total task caps are separate; reports retain at most 65,536 task records.
+Amendment 6: PR_SET_VMA remains compatible and parser version s15a-6 changes the epoch.
+Amendment 7: AT_EMPTY_PATH stats use descriptors and retain st_size or stx_size evidence.
+Amendment 7: getdents proves directoryness; only consumed repo listings require EOF.
+Amendment 7: indexed inventory directories and source-attributed bytecode are inputs.
+Amendment 7: unlisted inputs are unresolved generated inputs, not capture loss.
+Amendment 7: resumed endpoint outputs survive pairing; alias races require prior use.
+Amendment 7: unknown fd samples are bounded; creation evidence (A7-10) is deferred.
 """
 
 import argparse
@@ -23,10 +37,10 @@ except ImportError:  # Windows: the live-state counter stands in for measured RS
 
 
 BINDINGS = ("run_id", "source_sha", "source_tree", "capture_sha", "catalog_sha256")
-PARSER_VERSION = "s15a-5"
+PARSER_VERSION = "s15a-7"
 # max_state_bytes: 2 GiB, compared against measured peak RSS (Amendment 5); the counter it
 # replaced only ever added, so a 40 M-line stream tripped it on cumulative allocation.
-LIMITS = dict(max_tasks=16384, max_fds_per_task=65536, max_record_bytes=1048576,
+LIMITS = dict(max_live_tasks=65536, max_total_tasks=4194304, max_fds_per_task=65536, max_record_bytes=1048576,
               max_dependencies=1000000, max_state_bytes=2 * 1024 ** 3, max_reasons=256)
 # ru_maxrss is KiB on Linux, bytes on macOS; sampled once per RSS_INTERVAL lines.
 RSS_SCALE, RSS_INTERVAL = (1 if sys.platform == "darwin" else 1024), 65536
@@ -35,17 +49,19 @@ SAMPLE_LIMIT, NAME_LIMIT, NAME_REPORT = 32, 4096, 32
 # Raw bytes kept per sampled line; shaping collapses any quoted string the cut leaves open.
 SAMPLE_PREFIX = 512
 POLICY = {
-    # Amendment 4: unconditional-allow, argument-independent syscalls filtered at the tracer
-    # (`-e trace=!<noise>`). Digested with the policy and bound into the epoch through the argv.
+    # Legacy decoder compatibility; the capture selects only the positive TRACED set below.
     "noise": ("brk madvise mprotect munmap arch_prctl set_tid_address set_robust_list get_robust_list rseq rt_sigaction "
               "rt_sigprocmask rt_sigreturn sigaltstack rt_sigsuspend rt_sigtimedwait rt_sigpending restart_syscall "
               "sched_yield nanosleep clock_nanosleep getpid getppid gettid getuid geteuid getgid getegid getgroups "
               "getrlimit prlimit64 getrusage times clock_gettime gettimeofday time getrandom sched_getaffinity "
               "sched_getparam sched_getscheduler futex").split(),
-    "path": "open openat creat execve execveat readlink readlinkat access faccessat stat lstat fstat newfstatat statfs fstatfs statx getcwd chdir fchdir getxattr lgetxattr listxattr llistxattr".split(),
+    "path": "open openat openat2 creat execve execveat readlink readlinkat access faccessat faccessat2 stat lstat newfstatat statx statfs getcwd chdir fchdir getxattr lgetxattr listxattr llistxattr truncate".split(),
     "descriptor": "read pread64 readv preadv preadv2 mmap mremap munmap mprotect lseek dup dup2 dup3 fcntl close pipe pipe2 socketpair write pwrite64 writev pwritev pwritev2 truncate ftruncate fsync fdatasync fadvise64 posix_fadvise readahead sync_file_range flock fgetxattr flistxattr sendfile copy_file_range".split(),
     "metadata_mutation": "chmod fchmod fchmodat chown fchown fchownat lchown utimensat futimesat".split(),
-    "internal_object": "memfd_create timerfd_create".split(),
+    "internal_object": "memfd_create timerfd_create signalfd signalfd4".split(),
+    "fd_table": "dup dup2 dup3 fcntl close close_range pipe pipe2 socketpair socket accept accept4 memfd_create timerfd_create eventfd eventfd2 epoll_create epoll_create1 signalfd signalfd4 inotify_init inotify_init1 inotify_add_watch inotify_rm_watch pidfd_open pidfd_getfd".split(),
+    "lifecycle": "fork vfork clone clone3 exit exit_group".split(),
+    "legacy_stat": "fstat fstatfs".split(),
     "filesystem_events": "inotify_init inotify_init1 inotify_add_watch inotify_rm_watch".split(),
     "directory": "getdents getdents64 mkdir mkdirat rmdir unlink unlinkat rename renameat renameat2 link linkat symlink symlinkat".split(),
     "process": "fork vfork clone wait4 waitid exit exit_group setsid setpgid getpid getppid gettid".split(),
@@ -58,13 +74,19 @@ POLICY = {
     "ioctl": "TCGETS TCSETS TCSETSW TCSETSF TIOCGWINSZ TIOCGPGRP TIOCSPGRP FIONBIO FIOCLEX FIONCLEX FIONREAD".split(),
     "prctl": ("PR_SET_NAME PR_GET_NAME PR_SET_PDEATHSIG PR_GET_DUMPABLE PR_SET_DUMPABLE PR_CAPBSET_READ PR_SET_NO_NEW_PRIVS "
               "PR_GET_NO_NEW_PRIVS PR_SET_CHILD_SUBREAPER PR_GET_CHILD_SUBREAPER PR_SET_KEEPCAPS PR_GET_SECCOMP "
-              "PR_SET_TIMERSLACK PR_GET_TIMERSLACK PR_SET_PTRACER").split(),
+              "PR_SET_TIMERSLACK PR_GET_TIMERSLACK PR_SET_PTRACER PR_SET_VMA 0x53564d41").split(),
     "fcntl": ("F_DUPFD F_DUPFD_CLOEXEC F_SETFD F_GETFD F_GETFL F_SETFL F_GETLK F_SETLK F_SETLKW F_OFD_GETLK F_OFD_SETLK "
               "F_OFD_SETLKW F_GETPIPE_SZ F_SETPIPE_SZ F_GETOWN F_SETOWN F_GETSIG F_SETSIG F_ADD_SEALS F_GET_SEALS").split(),
     "open_flags": "O_RDONLY O_WRONLY O_RDWR O_APPEND O_ASYNC O_CLOEXEC O_CREAT O_DIRECT O_DIRECTORY O_DSYNC O_EXCL O_LARGEFILE O_NOATIME O_NOCTTY O_NOFOLLOW O_NONBLOCK O_NDELAY O_PATH O_SYNC O_TRUNC O_RSYNC O_TMPFILE".split(),
     "clone_flags": "CLONE_VM CLONE_FS CLONE_FILES CLONE_SIGHAND CLONE_PTRACE CLONE_VFORK CLONE_PARENT CLONE_THREAD CLONE_SYSVSEM CLONE_SETTLS CLONE_PARENT_SETTID CLONE_CHILD_CLEARTID CLONE_DETACHED CLONE_UNTRACED CLONE_CHILD_SETTID CLONE_IO SIGCHLD".split(),
     "nondeterminism_boundary": ["clock", "randomness", "scheduling"],
 }
+TRACED = list(dict.fromkeys(
+    POLICY["path"] + POLICY["directory"] + POLICY["metadata_mutation"] + POLICY["lifecycle"]
+    + POLICY["fd_table"] + [name for name in POLICY["network"] if name in {"connect", "bind"}]
+    + POLICY["namespace"] + POLICY["reject"]))
+# Both the policy and its ordered capture projection participate in the epoch digest.
+POLICY["traced"] = TRACED
 PATH_ARGS = {
     **{n: (0,) for n in "open creat execve readlink access stat lstat statfs chdir truncate mkdir rmdir unlink chroot getxattr lgetxattr listxattr llistxattr chmod chown lchown".split()},
     **{n: (1,) for n in "openat openat2 execveat readlinkat faccessat newfstatat statx mkdirat unlinkat fchmodat fchownat utimensat futimesat".split()},
@@ -90,7 +112,9 @@ MUTATIONS = set(POLICY["directory"]) - {"getdents", "getdents64"}
 METADATA_MUTATIONS = set(POLICY["metadata_mutation"])
 FD_LOOKUPS = {"fstat", "fstatfs", "fgetxattr", "flistxattr"}
 KNOWN = frozenset().union(*(POLICY[k] for k in ("path", "descriptor", "directory", "process", "network", "namespace", "runtime",
-                                                "metadata_mutation", "internal_object", "filesystem_events", "noise")))
+                                                "metadata_mutation", "internal_object", "filesystem_events", "noise", "legacy_stat")))
+FD_CREATORS = set(POLICY["fd_table"]) - {"close", "close_range", "inotify_add_watch", "inotify_rm_watch"}
+PAIR_REQUIRED = set(PATH_ARGS) | set(POLICY["path"]) | {"connect", "bind", "fork", "vfork", "clone", "clone3"} | FD_CREATORS
 QUOTED = re.compile(r'"(?:\\.|[^"\\])*(?:"|\\?$)')
 # Each alternative stops at the next '<', so the substitution stays linear in the line.
 ANNOTATION = re.compile(r"<[^<]*?>(?=[\s,)\]}]|$)|<[^<>]*$")
@@ -292,13 +316,19 @@ def _args(event, raw, resumed=False):
     args = _split(raw)
     name = event["name"]
     event.update(paths={}, fds={}, scalars={}, flags=[], entries=None, endpoints=[])
-    if name == "fstat":
-        size = re.search(r"\bst_size=(\d+)(?:,|\})", raw)
+    if name in {"fstat", "newfstatat", "statx"}:
+        size = re.search(r"\b(?:st_size|stx_size)=(\d+)(?:,|\})", raw)
         if size:
             event["observed_size"] = int(size[1])
     # A resumed tail carries no trustworthy argument indices. Entry arguments
     # are already sanitized in its unfinished partner.
     if resumed:
+        if name in {"pipe", "pipe2", "socketpair"}:
+            for token in args:
+                if re.fullmatch(r"\[\s*\d+(?:<[^>]*>)?\s*,\s*\d+(?:<[^>]*>)?\s*\]", token):
+                    event["endpoints"] = [_fd(x) for x in _split(token[1:-1])]
+                elif re.fullmatch(r"[A-Z][A-Z0-9_]*(?:\|[A-Z][A-Z0-9_]*)*", token):
+                    event["flags"].extend(token.split("|"))
         return
     for i in PATH_ARGS.get(name, ()):
         # utimensat(fd, NULL, ...) names the descriptor itself, not a path.
@@ -325,8 +355,7 @@ def _args(event, raw, resumed=False):
         if not m:
             raise ValueError("unsupported_kernel_abi")
         event["flags"] = m[1].split("|")
-    if name in {"getdents", "getdents64"} and len(args) > 1:
-        event["entries"] = _entries(args[1])
+    # Amendment 6: getdents buffers, including abbreviated and resumed ones, are not evidence.
     if name in {"pipe", "pipe2", "socketpair"}:
         index = 3 if name == "socketpair" else 0
         if len(args) > index and args[index].startswith("["):
@@ -358,6 +387,9 @@ def _parse_line(line, sequence):
     pid = m[1] or m[2]
     event.update(pid=None if pid is None else int(pid), time=m[3])
     body = m[4]
+    if body.startswith("????("):
+        event.update(kind="interrupted", name="????")
+        return event
     terminal = re.fullmatch(r"\+\+\+ exited with (\d+) \+\+\+", body)
     if terminal:
         event.update(kind="exit", status=int(terminal[1]))
@@ -396,12 +428,10 @@ def _parse_line(line, sequence):
     ret, errno, duration = returned[2], trailer[1], trailer[2]
     event.update(return_value=None if ret == "?" else int(ret, 16 if ret.startswith("0x") else 10),
                  errno=errno, duration=None if duration == "unavailable" else duration)
-    # '?' is legal for exits, for a syscall a signal interrupted (= ? ERESTARTSYS ...),
-    # and for one whose task vanished (<unfinished ...>) = ?[ <unavailable>]).
-    interrupted = (errno is not None or duration == "unavailable"
-                   or returned[1].rstrip().endswith("<unfinished ...>"))
-    if ret == "?" and event["name"] not in {"exit", "exit_group", "rt_sigreturn"} and not interrupted:
-        raise ValueError("malformed_line")
+    # Dying tasks can leave arbitrary argument fragments, including a resumed tail.
+    if ret == "?":
+        event["kind"] = "interrupted"
+        return event
     _args(event, returned[1], resumed=bool(resumed))
     if returned[3] is not None:
         event["return_fd"] = _fd(ret + "<" + returned[3] + ">")
@@ -422,7 +452,7 @@ def _stream(data):
 
 
 def parse_stream(data):
-    events, reasons, pending = [], [], set()
+    events, reasons, pending = [], [], {}
     for sequence, raw, terminated in _stream(data):
         if not terminated:
             reasons.append("trace_loss")
@@ -432,21 +462,22 @@ def parse_stream(data):
             events.append(event)
             key = (event["pid"], event["name"])
             if event["kind"] == "unfinished":
-                if key in pending:
+                previous = pending.get(event["pid"])
+                if previous is not None and previous[1] in PAIR_REQUIRED:
                     reasons.append("unpaired_syscall")
-                pending.add(key)
+                pending[event["pid"]] = key
             elif event["kind"] == "resumed":
-                if key not in pending:
+                previous = pending.pop(event["pid"], None)
+                if previous != key and (event["name"] in PAIR_REQUIRED or previous and previous[1] in PAIR_REQUIRED):
                     reasons.append("unpaired_syscall")
-                pending.discard(key)
             elif event["kind"] == "detached":
                 reasons.append("trace_loss")
-            elif event["kind"] in {"exit", "killed"}:
+            elif event["kind"] in {"exit", "killed", "interrupted"}:
                 # A task that exits mid-syscall never resumes it.
-                pending = {k for k in pending if k[0] != event["pid"]}
+                pending.pop(event["pid"], None)
         except (ValueError, UnicodeError) as exc:
             reasons.append("malformed_string" if isinstance(exc, UnicodeError) else str(exc))
-    if pending:
+    if any(key[1] in PAIR_REQUIRED for key in pending.values()):
         reasons.append("unpaired_syscall")
     return events, sorted(set(reasons))
 
@@ -476,6 +507,7 @@ class Resolution:
     path: str = None
     external: dict = None
     aliases: list = field(default_factory=list)
+    followed_links: list = field(default_factory=list)
     reasons: list = field(default_factory=list)
 
 
@@ -534,6 +566,7 @@ def resolve_path(cwd, dirfd_path, raw, context, state):
         parts.append(part)
         prefix = "/" + "/".join(parts)
         if prefix in links and not (state.get("nofollow") and not todo):
+            result.followed_links.append(prefix)
             count += 1
             if count > 40:
                 result.reasons.append("symlink_loop")
@@ -616,14 +649,34 @@ class _Decoder:
         self.syscall_name, self.line = "other", (0, b"")
         self.trace_lost = False
         self.tasks, self.active, self.pending, self.unfinished = [], {}, {}, {}
+        self.tasks_total = self.observed_exits = 0
         self.reads, self.external, self.negative, self.aliases = {}, {}, [], {}
         self.external_paths, self.written_paths, self.observed_sizes = {}, set(), {}
         self.directories, self.enumerations, self.created, self.internal = {}, [], set(), set()
+        source = context["source_root"].rstrip("/")
+        def relative(path):
+            return path[len(source) + 1:] if path.startswith(source + "/") else path
+        self.files = frozenset(relative(path) for path in context["inventory"]["files"])
+        self.inventory_links = frozenset(relative(path) for path in context["inventory"]["symlinks"])
+        self.dirs, self.children = {"."}, {}
+        for path in self.files | self.inventory_links:
+            parts = path.split("/")
+            for i in range(len(parts)):
+                parent = "/".join(parts[:i]) or "."
+                self.dirs.add(parent)
+                self.children.setdefault(parent, set()).add("/".join(parts[:i + 1]))
+        self.children = {path: sorted(members) for path, members in self.children.items()}
+        self.cache_dirs = frozenset((path.rsplit("/", 1)[0] + "/" if "/" in path else "") + "__pycache__"
+                                    for path in self.files if path.endswith(".py"))
+        self.generated_inputs, self.listings, self.consumed_directories = {}, {}, set()
+        self.followed_links = set()
         self.links = {}
         self.supervisor_reads = 0
         self.unix_peers, self.unix_sockets = {}, []
         self.event_count = self.syscall_count = 0
-        self.loss = dict(unpaired=0, malformed=0, unknown_syscalls=0, oversize=0, unknown_descriptors=0)
+        self.loss = dict(unpaired=0, malformed=0, interrupted=0, unknown_syscalls=0, oversize=0, unknown_descriptors=0)
+        self.loss["unknown_fd_samples"] = []
+        self.fd_sample = None
         # Calibration instrument: sanitized shapes and bounded name counters.
         self.malformed_samples, self.malformed_by_name, self.unsupported_by_name = {}, {}, {}
         self.unpaired_samples, self.unpaired_by_name, self.unknown_fd_by_name = {}, {}, {}
@@ -675,7 +728,12 @@ class _Decoder:
     def unpaired(self, name, raw):
         self.count(self.unpaired_by_name, name)
         self.sample(self.unpaired_samples, raw)
-        self.reason("unpaired_syscall")
+        if name in POLICY["reject"]:
+            self.reason("unsupported_syscall:" + name)
+        if name in PAIR_REQUIRED:
+            self.reason("unpaired_syscall")
+        else:
+            self.loss["unpaired"] += 1
 
     def claims_root(self, event, pid):
         """Is an unknown prefixed pid the unprefixed root rather than an unborn child?
@@ -710,6 +768,7 @@ class _Decoder:
         elif value == "unresolved_file_descriptor":
             self.loss["unknown_descriptors"] += 1
             self.count(self.unknown_fd_by_name, self.syscall_name)
+            self.sample_fd()
         if value in self.reasons:
             return
         self.reason_count += 1
@@ -778,8 +837,11 @@ class _Decoder:
         return True
 
     def birth(self, pid, sequence, parent, flags):
-        if len(self.tasks) >= self.limits["max_tasks"]:
-            self.cap("max_tasks")
+        if len(self.active) >= self.limits["max_live_tasks"]:
+            self.cap("max_live_tasks")
+            return None
+        if self.tasks_total >= self.limits["max_total_tasks"]:
+            self.cap("max_total_tasks")
             return None
         if pid in self.active and self.active[pid]["record"]["exit"] is None:
             self.reason("unexplained_pid")
@@ -793,8 +855,10 @@ class _Decoder:
         else:
             cwd = parent["cwd"] if "CLONE_FS" in flags else dict(parent["cwd"])
             fds = parent["fds"] if "CLONE_FILES" in flags else {k: dict(v) for k, v in parent["fds"].items()}
-        task = dict(record=record, cwd=cwd, fds=fds, last=None)
-        self.tasks.append(task)
+        task = dict(record=record, cwd=cwd, fds=fds, last=None, retained=self.tasks_total < 65536)
+        self.tasks_total += 1
+        if len(self.tasks) < 65536:
+            self.tasks.append(task)
         self.active[pid] = task
         self.hold(fds)
         self.retain(256 + (0 if parent is not None and "CLONE_FILES" in flags else 128 * len(fds)))
@@ -814,13 +878,19 @@ class _Decoder:
         if task["fds"].pop(fd, None) is not None:
             self.release(128)
 
-    def fd(self, task, argument):
-        if argument is None or argument["fd"] not in task["fds"]:
-            self.reason("unresolved_file_descriptor")
-            return None
-        desc = task["fds"][argument["fd"]]["description"]
-        if desc["kind"] == "deleted":
-            self.reason("unresolved_file_descriptor")
+    def fd(self, task, argument, required=False):
+        entry = task["fds"].get(argument["fd"]) if argument is not None else None
+        desc = entry["description"] if entry else None
+        if desc is None or desc["kind"] in {"deleted", "unknown"}:
+            self.fd_sample = {"fd": argument["fd"] if argument else None, "syscall": self.syscall_name,
+                              "root": task is self.root, "sequence": self.syscall_sequence}
+            if required:
+                self.reason("unresolved_file_descriptor")
+            else:
+                self.loss["unknown_descriptors"] += 1
+                self.count(self.unknown_fd_by_name, self.syscall_name)
+                self.sample_fd()
+            self.fd_sample = None
             return None
         annotation = argument.get("annotation")
         if annotation:
@@ -835,6 +905,11 @@ class _Decoder:
                     self.reason("descriptor_annotation_mismatch")
         return desc
 
+    def sample_fd(self):
+        if len(self.loss["unknown_fd_samples"]) < SAMPLE_LIMIT:
+            self.loss["unknown_fd_samples"].append(self.fd_sample or {
+                "fd": None, "syscall": self.syscall_name, "root": None, "sequence": self.line[0]})
+
     def resolve(self, task, event, index, nofollow=False):
         raw = event["paths"].get(index)
         if raw is None:
@@ -844,7 +919,7 @@ class _Decoder:
         if not raw.startswith("/") and index > 0 and index - 1 in event["fds"]:
             arg = event["fds"][index - 1]
             if arg["fd"] != "AT_FDCWD":
-                desc = self.fd(task, arg)
+                desc = self.fd(task, arg, required=True)
                 base = desc.get("path") if desc else None
                 if base is None:
                     self.reason("unknown_path_base")
@@ -858,7 +933,28 @@ class _Decoder:
             self.reason(reason)
         for alias in resolution.aliases:
             self.aliases[canonical(alias)] = alias
+        self.followed_links.update(link for link in resolution.followed_links
+                                   if _under(link, self.context["source_root"]))
         return resolution
+
+    def directory(self, path):
+        if path not in self.directories:
+            members = self.children.get(path, [])
+            self.directories[path] = members
+            self.retain(160 + sum(64 + len(member.encode("utf-8")) for member in members))
+
+    def bytecode_source(self, path):
+        match = re.fullmatch(r"(?:(.*)/)?__pycache__/([^/]+?)\.[^.\/]+(?:\.opt-\d+)?(?:-pytest-[\d.]+)?\.pyc", path)
+        if match:
+            source = (match[1] + "/" if match[1] else "") + match[2] + ".py"
+            if source in self.files:
+                return source
+        return None
+
+    def observed_size(self, resolution, event):
+        if resolution.absolute and "observed_size" in event and resolution.absolute not in self.observed_sizes:
+            self.observed_sizes[resolution.absolute] = event["observed_size"]
+            self.retain(64)
 
     def edge(self, resolution, kind, event, allow_missing=False):
         if not resolution.absolute or self.stopped:
@@ -874,16 +970,34 @@ class _Decoder:
                                   "scope": "repo" if resolution.path is not None else "external",
                                   "errno": error, "syscall": event["name"], "sequence": event["sequence"]})
             added = True
-        elif resolution.absolute in self.created:
+        elif resolution.absolute in self.created and resolution.path is None:
             token = digest(resolution.absolute)[:16]
             added = token not in self.internal
             self.internal.add(token)
         elif resolution.path is not None:
-            files = self.context["inventory"]["files"]
-            symlinks = self.context["inventory"]["symlinks"]
-            if resolution.path not in files and resolution.absolute not in files and resolution.path not in symlinks and resolution.absolute not in symlinks and not allow_missing:
-                self.reason("unlisted_repo_path")
-            row = {"path": resolution.path, "kind": kind}
+            path = resolution.path
+            source = self.bytecode_source(path)
+            directory = path in self.dirs or path in self.cache_dirs or path in self.directories
+            if directory:
+                self.directory(path)
+            elif resolution.absolute not in self.created and resolution.absolute not in self.written_paths:
+                if not error:
+                    parts = path.split("/")
+                    for i in range(len(parts)):
+                        parent = "/".join(parts[:i]) or "."
+                        if parent in self.listings:
+                            self.consumed_directories.add(parent)
+                if source:
+                    path, kind = source, "bytecode"
+                elif path not in self.files and path not in self.inventory_links and not allow_missing:
+                    if path not in self.generated_inputs:
+                        self.generated_inputs[path] = {"path": path, "resolved": False}
+                        self.retain(160)
+                    if (len(self.generated_inputs) + len(self.reads) + len(self.external) + len(self.negative)
+                            + len(self.directories) > self.limits["max_dependencies"]):
+                        self.cap("max_dependencies")
+                    return
+            row = {"path": path, "kind": kind}
             if error:
                 row["errno"] = error
             key = canonical(row)
@@ -896,7 +1010,7 @@ class _Decoder:
             if row["path_token"] not in self.external_paths:
                 self.external_paths[row["path_token"]] = {"path": resolution.absolute, "class": row["class"]}
                 self.retain(len(resolution.absolute.encode("utf-8")) + 128)
-        if len(self.reads) + len(self.external) + len(self.negative) + len(self.directories) > self.limits["max_dependencies"]:
+        if len(self.reads) + len(self.external) + len(self.negative) + len(self.directories) + len(self.generated_inputs) > self.limits["max_dependencies"]:
             self.cap("max_dependencies")
         if added:
             self.retain(160)
@@ -906,45 +1020,34 @@ class _Decoder:
             self.written_paths.add(path)
             self.retain(64)
 
-    def mutate(self, resolution):
-        if not resolution.absolute:
-            return
-        parent = resolution.absolute.rsplit("/", 1)[0] or "/"
-        for enumeration in self.enumerations:
-            if not enumeration["eof"] and enumeration["path"] == parent:
-                enumeration["invalid"] = True
-                self.reason("directory_enumeration_incomplete")
-
     def enumerate(self, desc, event):
-        if not desc or desc["kind"] != "file" or not desc.get("directory"):
-            self.reason("directory_enumeration_incomplete")
+        ret = event["return_value"]
+        if ret is None or ret < 0:
             return
+        if not desc or desc["kind"] != "file":
+            return
+        path = desc["resolution"].path
+        if not desc.get("directory"):
+            if desc.get("read_or_seek"):
+                if path is not None:
+                    self.directory(path)
+                    self.listings.setdefault(path, False)
+                return
+            desc["directory"] = True
+        if "enumeration" not in desc:
+            desc["enumeration"] = dict(path=desc["path"], eof=False, started=False)
+            self.enumerations.append(desc["enumeration"])
         enumeration = desc["enumeration"]
         enumeration["started"] = True
-        ret, entries = event["return_value"], event.get("entries")
-        if ret is None or ret < 0 or entries is None or sum(e["reclen"] for e in entries) != ret or enumeration["eof"]:
-            self.reason("directory_enumeration_incomplete")
-            enumeration["invalid"] = True
-            return
-        for entry in entries:
-            name = entry["name"]
-            if name not in {".", ".."}:
-                if name not in enumeration["members"]:
-                    self.retain(64 + len(name.encode("utf-8")))
-                enumeration["members"].add(name)
-        if ret == 0:
-            enumeration["eof"] = True
-            path = desc["resolution"].path
-            if not enumeration["invalid"] and path is not None:
-                members = sorted(("" if path == "." else path + "/") + n for n in enumeration["members"])
-                if path in self.directories and self.directories[path] != members:
-                    self.reason("directory_membership_conflict")
-                else:
-                    self.directories[path] = members
-                if sum(len(m) for m in self.directories.values()) + len(self.reads) + len(self.external) + len(self.negative) > self.limits["max_dependencies"]:
-                    self.cap("max_dependencies")
-            elif path is None:
-                self.edge(desc["resolution"], "stat", event)
+        enumeration["eof"] |= ret == 0
+        if path is not None:
+            self.directory(path)
+            self.generated_inputs.pop(path, None)
+            self.listings[path] = self.listings.get(path, False) or enumeration["eof"]
+            if sum(len(m) for m in self.directories.values()) + len(self.reads) + len(self.external) + len(self.negative) > self.limits["max_dependencies"]:
+                self.cap("max_dependencies")
+        else:
+            self.edge(desc["resolution"], "stat", event)
 
     def policy(self, event, task):
         name, flags = event["name"], event["flags"]
@@ -960,6 +1063,8 @@ class _Decoder:
             return False
         if name in {"ioctl", "fcntl", "prctl"}:
             subtype = event["scalars"].get(0 if name == "prctl" else 1, "unknown")
+            if name == "prctl" and event.get("subtype_label") in {"PR_SET_VMA", "0x53564d41"}:
+                subtype = event["subtype_label"]
             if subtype not in POLICY[name]:
                 if name in self.subtypes:
                     # The reason keeps the bounded ':unknown' form; the counter keeps the name.
@@ -1003,7 +1108,7 @@ class _Decoder:
             if argument is None or argument["fd"] == "AT_FDCWD":
                 self.reason("unknown_path_base")
                 return
-            desc = self.fd(task, argument)
+            desc = self.fd(task, argument, required=name in {"fchmodat", "fchownat", "utimensat", "futimesat"})
             path = desc.get("path") if desc else None
         if path and event["return_value"] is not None and event["return_value"] >= 0:
             self.written(path)
@@ -1075,6 +1180,7 @@ class _Decoder:
         name, ret, flags = event["name"], event["return_value"], event["flags"]
         success = ret is not None and ret >= 0
         self.syscall_name = name
+        self.syscall_sequence = event["sequence"]
         if not self.policy(event, task):
             return
         if name in {"fork", "vfork", "clone"} and success and ret > 0:
@@ -1096,7 +1202,7 @@ class _Decoder:
                     self.internal.add(digest([event["pid"], event["sequence"], ret])[:16])
                     self.retain(64)
                 self.putfd(task, ret, {"kind": "internal" if name == "memfd_create" else "endpoint"},
-                           "MFD_CLOEXEC" in flags or "TFD_CLOEXEC" in flags)
+                           any(flag in flags for flag in ("MFD_CLOEXEC", "TFD_CLOEXEC", "SFD_CLOEXEC")))
             return
         if name in POLICY["filesystem_events"]:
             if name.startswith("inotify_init") and success:
@@ -1108,36 +1214,35 @@ class _Decoder:
             return
         if name in {"open", "openat", "creat"}:
             if success and "O_TMPFILE" in flags:
+                resolution = self.resolve(task, event, 1 if name == "openat" else 0)
+                if resolution.path is not None:
+                    self.edge(resolution, "open", event, allow_missing=True)
+                    self.written(resolution.absolute)
                 token = digest([event["pid"], event["sequence"], ret])[:16]
                 self.internal.add(token)
                 self.putfd(task, ret, {"kind": "internal"}, "O_CLOEXEC" in flags)
                 return
             index = 1 if name == "openat" else 0
             resolution = self.resolve(task, event, index, nofollow="O_NOFOLLOW" in flags)
-            if success and ("O_TRUNC" in flags or name == "creat"):
+            writable = name == "creat" or bool(set(flags) & {"O_WRONLY", "O_RDWR", "O_CREAT", "O_TRUNC"}) or event["scalars"].get(index + 1) in {1, 2}
+            if success and writable:
                 self.written(resolution.absolute)
             if "O_CREAT" in flags or name == "creat":
-                self.mutate(resolution)
                 if success:
-                    if name == "creat" or "O_EXCL" in flags or "O_TRUNC" in flags:
+                    if name == "creat" or "O_EXCL" in flags or "O_TRUNC" in flags or resolution.path not in self.files:
                         self.created.add(resolution.absolute)
-                    elif (resolution.path not in self.context["inventory"]["files"] and resolution.absolute not in self.created
-                          and not _is_supervisor(resolution)):
-                        self.reason("ambiguous_creation")
             if not success:
                 self.edge(resolution, "open", event)
             else:
                 desc = dict(kind="file", path=resolution.absolute, resolution=resolution, flags=flags,
-                            deleted=False, written=False, directory="O_DIRECTORY" in flags)
-                if desc["directory"]:
-                    enumeration = dict(path=resolution.absolute, members=set(), eof=False, started=False, invalid=False)
-                    desc["enumeration"] = enumeration
-                    self.enumerations.append(enumeration)
+                            deleted=False, written=False,
+                            directory="O_DIRECTORY" in flags or resolution.path in self.dirs or resolution.path in self.cache_dirs)
+                if desc["directory"] and resolution.path is not None:
+                    self.directory(resolution.path)
                 self.putfd(task, ret, desc, "O_CLOEXEC" in flags)
                 if "return_fd" in event:
                     self.fd(task, event["return_fd"])
-                if not desc["directory"]:
-                    self.edge(resolution, "open", event)
+                self.edge(resolution, "open", event, allow_missing=desc["directory"] or resolution.absolute in self.created)
             return
         if name in {"execve", "execveat"}:
             resolution = self.resolve(task, event, 1 if name == "execveat" else 0)
@@ -1153,9 +1258,18 @@ class _Decoder:
             return
         if name in LOOKUPS:
             index = 1 if name in {"newfstatat", "statx", "faccessat", "readlinkat"} else 0
+            if event["paths"].get(index) == "" and "AT_EMPTY_PATH" in flags:
+                desc = self.fd(task, event["fds"].get(index - 1))
+                if desc and desc["kind"] == "file":
+                    self.edge(desc["resolution"], "stat", event)
+                    if success:
+                        self.observed_size(desc["resolution"], event)
+                return
             nofollow = name in {"readlink", "readlinkat", "lstat", "lgetxattr", "llistxattr"} or "AT_SYMLINK_NOFOLLOW" in flags
             resolution = self.resolve(task, event, index, nofollow=nofollow)
             self.edge(resolution, "readlink" if name.startswith("readlink") else "stat", event)
+            if success:
+                self.observed_size(resolution, event)
             if success and name.startswith("readlink"):
                 followed = self.resolve(task, event, index)
                 for alias in followed.aliases:
@@ -1169,12 +1283,15 @@ class _Decoder:
             task["cwd"]["path"] = resolution.absolute
             return
         if name in MUTATIONS or name == "truncate":
-            resolutions = [self.resolve(task, event, i, nofollow=True) for i in PATH_ARGS.get(name, ())]
+            indices = PATH_ARGS.get(name, ())
+            if name.startswith("symlink"):
+                indices = indices[-1:]
+            resolutions = [self.resolve(task, event, i, nofollow=True) for i in indices]
             for resolution in resolutions:
-                self.mutate(resolution)
-                if success:
+                if success and (not name.startswith(("link", "symlink")) or resolution is resolutions[-1]):
                     self.written(resolution.absolute)
-                if resolution.path in self.context["inventory"]["symlinks"] or resolution.absolute in self.links:
+                if success and (resolution.path in self.inventory_links or
+                                resolution.path is not None and resolution.absolute in self.followed_links):
                     self.reason("unsupported_alias_race")
             if success and resolutions:
                 if name.startswith(("mkdir", "rename", "link", "symlink")):
@@ -1184,16 +1301,25 @@ class _Decoder:
                         self.links[target.absolute] = event["paths"][0]
                     if name.startswith("link"):
                         origin = resolutions[0]
-                        files = self.context["inventory"]["files"]
-                        if origin.absolute in self.created:
+                        if origin.absolute in self.links:
+                            self.links[target.absolute] = self.links[origin.absolute]
+                        elif origin.absolute in self.created:
                             pass
-                        elif origin.path is not None and (origin.path in files or origin.absolute in files):
+                        elif origin.path in self.files:
                             # The new name carries the inventory file's bytes: the origin is read.
                             self.edge(origin, "open", event)
                         else:
                             self.reason("unsupported_syscall:" + name + ":unwitnessed_origin")
+                    if name.startswith("rename"):
+                        origin = resolutions[0]
+                        link = self.links.pop(origin.absolute, None)
+                        self.links.pop(target.absolute, None)
+                        if link is not None:
+                            self.links[target.absolute] = link
+                if name.startswith("unlink"):
+                    self.links.pop(resolutions[0].absolute, None)
                 if name.startswith(("unlink", "rename")):
-                    for owner in self.tasks:
+                    for owner in self.active.values():
                         for entry in owner["fds"].values():
                             if entry["description"].get("path") == resolutions[0].absolute:
                                 entry["description"]["deleted"] = True
@@ -1216,15 +1342,17 @@ class _Decoder:
         argument = event["fds"].get(4 if name == "mmap" else 0)
         if argument is None or argument["fd"] == "AT_FDCWD":
             return
-        desc = self.fd(task, argument)
+        desc = self.fd(task, argument, required=name == "fchdir")
         if desc is None:
+            if success and (name in {"dup", "dup2", "dup3"} or name == "fcntl" and event["scalars"].get(1) in {"F_DUPFD", "F_DUPFD_CLOEXEC"}):
+                self.closefd(task, ret)
             return
         fd = argument["fd"]
         if name in READS | FD_LOOKUPS | {"mmap"} and success:
             if desc["kind"] == "file":
-                if name == "fstat" and "observed_size" in event and desc["path"] not in self.observed_sizes:
-                    self.observed_sizes[desc["path"]] = event["observed_size"]
-                    self.retain(64)
+                if name in READS:
+                    desc["read_or_seek"] = True
+                self.observed_size(desc["resolution"], event)
                 if name == "mmap" and "MAP_SHARED" in flags and "PROT_WRITE" in flags:
                     self.written(desc["path"])
                 self.edge(desc["resolution"], "mmap" if name == "mmap" else "stat" if name in FD_LOOKUPS else "open", event)
@@ -1258,12 +1386,9 @@ class _Decoder:
             task["fds"][fd]["cloexec"] = event["scalars"][1] == "FIOCLEX"
         elif name in {"getdents", "getdents64"}:
             self.enumerate(desc, event)
-        elif name == "lseek" and desc.get("directory") and not desc["enumeration"]["eof"]:
-            desc["enumeration"]["invalid"] = True
-            self.reason("directory_enumeration_incomplete")
+        elif name == "lseek" and success:
+            desc["read_or_seek"] = True
         elif name == "close" and success:
-            if desc.get("directory") and desc["enumeration"]["started"] and not desc["enumeration"]["eof"]:
-                self.reason("directory_enumeration_incomplete")
             self.closefd(task, fd)
 
     def process(self, event):
@@ -1309,16 +1434,26 @@ class _Decoder:
             # A descendant killed by a signal is an ordinary exit record; only the root's is fatal.
             if kind == "killed" and task is self.root:
                 self.reason("root_killed")
-            if self.drop(task["fds"]):
-                task["fds"] = {}
+            self.drop(task["fds"])
+            task["fds"] = {}
+            self.active.pop(pid)
+            self.observed_exits += 1
+            if not task["retained"]:
+                self.release(256)
             return
         if kind == "signal":
             return
         key = (pid, event["name"])
+        if kind == "interrupted":
+            self.loss["interrupted"] += 1
+            for previous in [key for key in self.unfinished if key[0] == pid]:
+                self.release(self.unfinished.pop(previous)[5])
+            return
         if kind == "unfinished":
-            if key in self.unfinished:
-                self.release(self.unfinished[key][5])
-                self.unpaired(event["name"], self.unfinished[key][4])
+            for previous in [key for key in self.unfinished if key[0] == pid]:
+                old = self.unfinished.pop(previous)
+                self.release(old[5])
+                self.unpaired(previous[1], old[4])
             # Capture the entry cwd and the descriptions of the descriptors this call uses only.
             snapshot = {fd: (task["fds"].get(fd) or {}).get("description") for fd in self.used_fds(event)}
             amount = 256 + len(raw) + 64 * len(snapshot)
@@ -1328,6 +1463,10 @@ class _Decoder:
         if kind == "resumed":
             pending = self.unfinished.pop(key, None)
             if pending is None:
+                for previous in [key for key in self.unfinished if key[0] == pid]:
+                    old = self.unfinished.pop(previous)
+                    self.release(old[5])
+                    self.unpaired(previous[1], old[4])
                 self.unpaired(event["name"], raw)
                 return
             original, cwd, snapshot, owner, _, amount = pending
@@ -1336,6 +1475,9 @@ class _Decoder:
             for field_name in ("return_value", "return_fd", "errno", "duration", "observed_size"):
                 if field_name in event:
                     joined[field_name] = event[field_name]
+            if event["endpoints"]:
+                joined["endpoints"] = event["endpoints"]
+            joined["flags"] = list(dict.fromkeys(original["flags"] + event["flags"]))
             joined["kind"] = "syscall"
             joined["entry_cwd"] = cwd
             # Sibling threads may change unrelated table rows; only this call's own inputs matter.
@@ -1442,7 +1584,7 @@ def decode_stream(chunks, context, limits=None):
     if decoder.root is None and not decoder.stopped:
         decoder.reason("missing_terminal")
     missing_exits = []
-    for task in decoder.tasks:
+    for task in decoder.active.values():
         if task["record"]["exit"] is None:
             decoder.reason("missing_terminal" if task is decoder.root else "descendant_outlived_tree")
             if len(missing_exits) < SAMPLE_LIMIT:
@@ -1451,11 +1593,10 @@ def decode_stream(chunks, context, limits=None):
                                       "parent_pid": record["parent"]["pid"] if record["parent"] else None,
                                       "last_sequence": last[0] if last else None,
                                       "last_shape": malformed_shape(last[1].decode("ascii", "replace")) if last else None})
-    for enumeration in decoder.enumerations:
-        if enumeration["started"] and not enumeration["eof"]:
-            decoder.reason("directory_enumeration_incomplete")
     if not decoder.stopped and any(not desc["verified_peer"] for desc in decoder.unix_sockets):
         decoder.network_input()
+    if not decoder.stopped and any(not decoder.listings[path] for path in decoder.consumed_directories):
+        decoder.reason("directory_enumeration_incomplete")
     sha = counters["hash"].hexdigest()
     receipt = context.get("terminal_receipt", {})
     matched = isinstance(receipt, dict) and receipt.get("byte_count") == counters["byte_count"] and receipt.get("sha256") == sha
@@ -1469,9 +1610,9 @@ def decode_stream(chunks, context, limits=None):
         decoder.directories.clear()
     reasons = sorted(decoder.reasons)
     records = [task["record"] for task in decoder.tasks]
-    exits = sum(record["exit"] is not None for record in records)
-    children = all(task["record"]["exit"] is not None for task in decoder.tasks if task is not decoder.root) and not decoder.pending and not decoder.stopped
-    complete = decoder.reason_count == 0 and matched and exits == len(records) and decoder.root is not None
+    exits = decoder.observed_exits
+    children = not any(task is not decoder.root for task in decoder.active.values()) and not decoder.pending and not decoder.stopped
+    complete = decoder.reason_count == 0 and matched and exits == decoder.tasks_total and decoder.root is not None
     seeds = {}
     for fd, seed in context["seed_fds"].items():
         row = {"kind": seed["kind"]}
@@ -1487,7 +1628,8 @@ def decode_stream(chunks, context, limits=None):
                        root={"pid": decoder.root["record"]["pid"] if decoder.root is not None else context.get("root_pid"),
                              "birth_sequence": 0},
                        initial_cwd=cwd.path if cwd.path is not None else {"class": cwd.external["class"]},
-                       seed_fds=seeds, tasks=records, expected_exits=len(records), observed_exits=exits,
+                       seed_fds=seeds, tasks=records, tasks_total=decoder.tasks_total,
+                       tasks_truncated=decoder.tasks_total > len(records), expected_exits=decoder.tasks_total, observed_exits=exits,
                        event_count=decoder.event_count, syscall_count=decoder.syscall_count,
                        transcript_bytes=counters["byte_count"], transcript_sha256=sha, receipt_matched=matched,
                        capture_epoch=context.get("capture_epoch"), capture_epoch_manifest=context.get("capture_epoch_manifest"),
@@ -1508,8 +1650,20 @@ def decode_stream(chunks, context, limits=None):
                        decoder_complete=not decoder.stopped and decoder.loss["malformed"] == 0,
                        complete=complete)
     # The tree union lives once, in the certificate; shards reference it (union_ref).
-    certificate.update(reads=sorted(decoder.reads.values(), key=lambda r: (r["path"], r["kind"], r.get("errno", ""))),
-                       directory_reads=[{"path": p, "members": m} for p, m in sorted(decoder.directories.items())],
+    generated = []
+    generated_inputs = []
+    if not decoder.stopped:
+        for path in sorted(p for p in decoder.written_paths if p is not None):
+            resolution = resolve_path(None, None, path, context, {})
+            if resolution.path is not None:
+                generated.append({"path": resolution.path})
+        generated_inputs = [row for path, row in sorted(decoder.generated_inputs.items())
+                            if context["source_root"].rstrip("/") + "/" + path not in decoder.written_paths]
+    certificate.update(generated_outputs=generated,
+                       generated_inputs=generated_inputs, generated_inputs_resolved=not generated_inputs,
+                       reads=sorted(decoder.reads.values(), key=lambda r: (r["path"], r["kind"], r.get("errno", ""))),
+                       directory_reads=[{"path": p, "members": m, "complete": decoder.listings.get(p, True)}
+                                        for p, m in sorted(decoder.directories.items())],
                        external_inputs=[r for _, r in sorted(decoder.external.items())],
                        external_inputs_resolved=all(r["resolved"] for r in decoder.external.values()),
                        negative_lookups=sorted(decoder.negative, key=lambda r: (r["path_or_class"], r["sequence"])),
@@ -1526,7 +1680,7 @@ def decode_stream(chunks, context, limits=None):
                      process_tree_ref=reference, union_ref=reference,
                      process_tree_sha256=digest(certificate), attribution_scope="tree-union",
                      reads=[], directory_reads=[], external_inputs=[], negative_lookups=[], path_aliases=[],
-                     generated_inputs=[], generated_inputs_resolved=True,
+                     generated_inputs=generated_inputs, generated_inputs_resolved=not generated_inputs,
                      shared_state_dependencies=[], shared_state_closure_resolved=True,
                      external_dependency_classes=[],
                      external_inputs_resolved=certificate["external_inputs_resolved"], children_complete=children,
