@@ -74,12 +74,15 @@ class TestCodebuildCiScript(unittest.TestCase):
         self.assertLess(script.rindex('(out / "detail.json").write_text'),
                         script.index('# LEAF_GATE_PROOF_BEGIN'))
         base = dict(schema="leaf.ci.selection.v1", execution_mode="full",
-                    selection_mode="full", phase="enforce", trusted_sha_override=False)
+                    selection_mode="full", phase="enforce", trusted_sha_override=False,
+                    apply_filter=False)
         cases = [
             ("full", {}, 0),
-            ("sel", dict(execution_mode="selected"), 1),
-            ("shadow", dict(selection_mode="shadow"), 1),
-            ("phase", dict(phase="shadow"), 1),
+            ("sel", dict(execution_mode="selected", apply_filter=True), 1),
+            ("shadow", dict(selection_mode="shadow"), 0),
+            ("phase", dict(phase="shadow"), 0),
+            ("filter", dict(apply_filter=True), 1),
+            ("nofilter", dict(apply_filter=None), 1),
             ("override", dict(trusted_sha_override=True), 1),
             ("missing", dict(trusted_sha_override=None), 1),
             ("mode", dict(execution_mode=None), 1),

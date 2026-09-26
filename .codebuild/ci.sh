@@ -687,6 +687,7 @@ if detail.get("phase") == "shadow":
 LEAF_SELECTION_FINALIZE
 # LEAF_GATE_PROOF_BEGIN
 # Reuse only this run's result. Proof publication is advisory to the CI verdict.
+# Eligibility follows what executed (full, unfiltered, no trusted-SHA override), never the selector's phase.
 if [[ "$gate_status" == 0 ]] && python -I -B - "$selection_dir/detail.json" <<'LEAF_GATE_PROOF_ELIGIBLE'
 import json
 import sys
@@ -695,8 +696,7 @@ try:
         receipt = json.load(source)
     eligible = (receipt.get("schema") == "leaf.ci.selection.v1"
                 and receipt.get("execution_mode") == "full"
-                and receipt.get("selection_mode") == "full"
-                and receipt.get("phase") != "shadow"
+                and receipt.get("apply_filter") is False
                 and receipt.get("trusted_sha_override") is False)
 except (OSError, ValueError, AttributeError):
     eligible = False
