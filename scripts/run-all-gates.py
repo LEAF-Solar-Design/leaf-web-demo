@@ -3041,6 +3041,8 @@ def read_test_report(suite: Suite, log_dir: Path, attempt: int, status: str = ""
                 result["failed_test_ids"] = sorted({tid for doc in docs for tid in doc["failed_test_ids"]})
                 result["test_report_complete"] = bool(result["test_ids"]) and all(
                     doc.get("complete") is True for doc in docs)
+                result["test_report_reasons"] = sorted({reason for doc in docs
+                    for reason in doc.get("incomplete_reasons", [])})
                 result["test_report_refs"] = [str(path.relative_to(log_dir.resolve())) for path in paths]
         if result["test_ids"]:
             raw = json.dumps(result["test_ids"], sort_keys=True, separators=(",", ":"))

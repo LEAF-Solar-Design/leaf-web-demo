@@ -230,14 +230,37 @@ class SelectionAdapterTests(unittest.TestCase):
         directory.mkdir(parents=True)
         path = directory / "tests-main.json"
         for complete in (False, True):
+            reasons = [] if complete else ["task_without_result:2"]
             path.write_text(json.dumps({
                 "schema": "leaf.ci.test-report.v1", "suite_id": suite.id, "attempt": 1,
-                "complete": complete, "test_ids": [suite.id + "::test_ok"], "failed_test_ids": []}))
+                "complete": complete, "incomplete_reasons": reasons,
+                "test_ids": [suite.id + "::test_ok"], "failed_test_ids": []}))
             report = RUNNER.read_test_report(suite, self.logs, 1, "PASS")
             self.assertEqual(report["test_report_complete"], complete)
             self.assertEqual(report["test_id_granularity"], "test")
+            self.assertEqual(report["test_report_reasons"], reasons)
+            RUNNER.record_attempt(RUNNER.Result(suite, "PASS", "1", 0.0), self.logs, 1)
+            row = json.loads((self.logs / "attempts" / (suite.id + ".jsonl")).read_text().splitlines()[-1])
+            self.assertEqual(row["test_report_complete"], complete)
+            self.assertEqual(row["test_report_reasons"], reasons)
         path.write_text("not json")
         self.assertFalse(RUNNER.read_test_report(suite, self.logs, 1, "PASS")["test_report_complete"])
+
+    def test_vitest_skipped_tasks_only_document_is_complete(self):
+        suite = RUNNER.Suite("vitest-skips", "skipped tasks fixture", "vitest", self.work, [], None)
+        directory = self.logs / "test-reports" / suite.id / "1"
+        directory.mkdir(parents=True)
+        ids = [suite.id + "::case.test.js::" + name for name in ("skip", "state-skip", "todo")]
+        (directory / "tests-vitest-123.json").write_text(json.dumps({
+            "schema": "leaf.ci.test-report.v1", "suite_id": suite.id, "attempt": 1,
+            "complete": True, "incomplete_reasons": [], "test_ids": ids, "failed_test_ids": []}))
+        RUNNER.record_attempt(RUNNER.Result(suite, "PASS", "0", 0.0), self.logs, 1)
+        row = json.loads((self.logs / "attempts" / (suite.id + ".jsonl")).read_text())
+        self.assertTrue(row["test_report_complete"])
+        self.assertEqual(row["test_report_reasons"], [])
+        self.assertEqual(row["test_id_granularity"], "test")
+        self.assertEqual(row["test_ids"], ids)
+        self.assertEqual(row["failed_test_ids"], [])
 
     def test_only_skips_produced_by_catalog_gates_are_complete(self):
         for rule in ("db_gated", "opt_in_env", ""):

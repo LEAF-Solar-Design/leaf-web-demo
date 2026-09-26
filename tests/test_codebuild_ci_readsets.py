@@ -38,7 +38,7 @@ class TestCodebuildCiReadsets(unittest.TestCase):
     def run_publication(self, *, tracing=True, aws_status=0, gate_status=0,
                         missing_decision=False, malformed_manifest=False, foreign_shards=False,
                         foreign_attempts=False, missing_completion=False, differing_collection=False,
-                        extra_attempts=()):
+                        extra_attempts=(), vitest_reports=None):
         script = CI_PATH.read_text(encoding="utf-8")
         export_start = script.index('  export LEAF_READSET_CATALOG_SHA256=')
         export_end = script.index('LEAF_CAPTURE_ID\n)"', export_start) + len('LEAF_CAPTURE_ID\n)"')
@@ -115,6 +115,11 @@ class TestCodebuildCiReadsets(unittest.TestCase):
             rows = [attempt]
             for sid, kind, status, rule in extra_attempts:
                 extra_suite = RUNNER.Suite(sid, sid, kind, root, [], None)
+                if sid in (vitest_reports or {}):
+                    extra_reports = logs / "test-reports" / RUNNER.encoded_suite_id(sid) / "1"
+                    extra_reports.mkdir(parents=True)
+                    (extra_reports / "tests-vitest-123.json").write_text(
+                        json.dumps(vitest_reports[sid]), encoding="utf-8")
                 report = RUNNER.read_test_report(extra_suite, logs, 1, status)
                 if rule:
                     report.update(skipped_by_gate=rule, test_report_complete=True)
@@ -210,7 +215,8 @@ class TestCodebuildCiReadsets(unittest.TestCase):
             by_suite = {row["suite_id"]: row for row in accepted}
             self.assertEqual(by_suite["sample"]["test_id_granularity"], "test")
             for sid, kind, status, rule in extra_attempts:
-                self.assertEqual(by_suite[sid]["test_id_granularity"], "test" if kind == "pytest" else "suite")
+                self.assertEqual(by_suite[sid]["test_id_granularity"],
+                                 "test" if kind == "pytest" or sid in (vitest_reports or {}) else "suite")
             self.assertEqual(final["readsets_rejected_shards"], 2 if foreign_shards and tracing else 0)
             if foreign_shards and tracing:
                 for member in rejected_members:
@@ -328,12 +334,46 @@ class TestCodebuildCiReadsets(unittest.TestCase):
         self.assertFalse(final["full_run_complete"])
         self.assertEqual(final["suites_skipped_by_gate"], [])
         self.assertEqual(final["completeness_reasons"],
-                         ["suite_status_not_final:1", "test_report_incomplete:1"])
+                         ["suite_status_not_final:1:other-skip", "test_report_incomplete:1:other-skip"])
+
+    def test_incomplete_vitest_reports_name_suites_and_pack_reasons(self):
+        suite_ids = ["web-vitest", "harness-vitest"]
+        reports = {sid: {"schema": "leaf.ci.test-report.v1", "suite_id": sid, "attempt": 1,
+                         "test_ids": [sid + "::case.test.js::pending"], "failed_test_ids": [],
+                         "complete": False, "incomplete_reasons": ["task_without_result:1"]}
+                   for sid in suite_ids}
+        _, final, _, archive, _ = self.run_publication(
+            extra_attempts=[(sid, "vitest", "PASS", "") for sid in suite_ids], vitest_reports=reports)
+        self.assertFalse(final["full_run_complete"])
+        self.assertEqual(final["completeness_reasons"],
+                         ["test_report_incomplete:2:harness-vitest,web-vitest"])
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as packed:
+            for sid in suite_ids:
+                member = f"reports/{RUNNER.encoded_suite_id(sid)}/1/tests-vitest-123.json"
+                self.assertIn(member, final["readsets_archive_members"])
+                self.assertEqual(json.loads(packed.extractfile(member).read()), reports[sid])
+
+    def test_suite_reasons_are_sorted_and_capped_at_400_characters(self):
+        for suite_ids in (["z-skip", "a-skip"], [f"skip-{n:03d}" for n in reversed(range(50))]):
+            with self.subTest(suite_ids=suite_ids):
+                _, final, _, _, _ = self.run_publication(
+                    extra_attempts=[(sid, "script", "SKIP", "") for sid in suite_ids])
+                reasons = final["completeness_reasons"]
+                if len(suite_ids) == 2:
+                    self.assertEqual(reasons, ["suite_status_not_final:2:a-skip,z-skip",
+                                               "test_report_incomplete:2:a-skip,z-skip"])
+                else:
+                    self.assertEqual(len(reasons), 2)
+                    for reason, prefix in zip(reasons, ("suite_status_not_final", "test_report_incomplete")):
+                        self.assertEqual(len(reason), 400)
+                        self.assertTrue(reason.startswith(prefix + ":50:skip-000,skip-001,"))
+                        self.assertTrue(reason.endswith(",..."))
+                        self.assertNotIn("skip-049", reason)
 
     def test_missing_completion_records_the_failed_predicate(self):
         _, final, _, archive, _ = self.run_publication(missing_completion=True)
         self.assertFalse(final["collection_complete"])
-        self.assertEqual(final["completeness_reasons"], ["test_report_incomplete:1"])
+        self.assertEqual(final["completeness_reasons"], ["test_report_incomplete:1:sample"])
         with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as packed:
             self.assertNotIn(REPORT_MEMBERS[2], packed.getnames())
             manifest = json.loads(packed.extractfile("full-run.json").read())
