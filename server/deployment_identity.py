@@ -10,6 +10,34 @@ _SOURCE_SHA = re.compile(r"^[0-9a-f]{40}$")
 _IMAGE_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SERVICES = {"app", "broker", "canonical-worker", "harness", "web"}
 
+RELEASE_IDENTITY_MAX_CHARS = 16384
+SOURCE_IDENTITY_STATES = ("built", "adopted", "build_unknown", "unattested")
+
+
+def release_source_identity(env: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """Reconcile the baked build commit with the receipt-attested release commit.
+
+    No I/O, never raises, O(len(receipt)) with the receipt capped at
+    RELEASE_IDENTITY_MAX_CHARS. Returns {"release_source_sha", "source_identity"}.
+    Informational only: not digest-bound (see /api/deployment-identity).
+    """
+    current = os.environ if env is None else env
+    baked = current.get("LEAF_SOURCE_SHA", "")
+    raw = current.get("LEAF_DEPLOYMENT_IDENTITY", "")
+    release = None
+    if isinstance(raw, str) and raw and len(raw) <= RELEASE_IDENTITY_MAX_CHARS:
+        try:
+            release = deployment_identity(current)["source_revision"]
+        except (ValueError, TypeError, RecursionError):
+            release = None
+    if release is None:
+        status = "unattested"
+    elif not isinstance(baked, str) or not _SOURCE_SHA.fullmatch(baked):
+        status = "build_unknown"
+    else:
+        status = "built" if baked == release else "adopted"
+    return {"release_source_sha": release, "source_identity": status}
+
 
 def deployment_identity(env: Mapping[str, str] | None = None) -> dict[str, Any]:
     """Read only the deployment controller's immutable runtime receipt.

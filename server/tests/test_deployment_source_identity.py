@@ -1,13 +1,162 @@
 import json
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 import app as app_module
 from deployment_identity import deployment_identity
+from deployment_identity import release_source_identity
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+_A = "a" * 40
+_B = "b" * 40
+
+
+def _release_identity_receipt(revision, environment="staging", *, mixed=False, pad=None):
+    receipt = {
+        "schema": "leaf.deployment-identity.v1",
+        "environment": environment,
+        "source_revision": revision,
+        "services": {
+            name: {
+                "image_digest": "sha256:" + "1" * 64,
+                "source_revision": revision,
+            }
+            for name in ("app", "broker", "canonical-worker", "harness", "web")
+        },
+    }
+    if mixed:
+        receipt["services"]["app"]["source_revision"] = _A
+    if pad is not None:
+        receipt["pad"] = pad
+    return json.dumps(receipt)
+
+
+@pytest.mark.parametrize(
+    "env, expected_release, expected_state",
+    [
+        ({"LEAF_SOURCE_SHA": _A}, None, "unattested"),
+        (
+            {"LEAF_SOURCE_SHA": _A, "LEAF_DEPLOYMENT_IDENTITY": _release_identity_receipt(_B)},
+            _B, "adopted",
+        ),
+        (
+            {"LEAF_SOURCE_SHA": _B, "LEAF_DEPLOYMENT_IDENTITY": _release_identity_receipt(_B)},
+            _B, "built",
+        ),
+        (
+            {"LEAF_DEPLOYMENT_IDENTITY": _release_identity_receipt(_B)},
+            _B, "build_unknown",
+        ),
+        (
+            {"LEAF_SOURCE_SHA": "A" * 40, "LEAF_DEPLOYMENT_IDENTITY": _release_identity_receipt(_B)},
+            _B, "build_unknown",
+        ),
+        ({"LEAF_SOURCE_SHA": _A, "LEAF_DEPLOYMENT_IDENTITY": "{"}, None, "unattested"),
+        (
+            {
+                "LEAF_SOURCE_SHA": _A,
+                "LEAF_DEPLOYMENT_IDENTITY": _release_identity_receipt(_B, mixed=True),
+            },
+            None, "unattested",
+        ),
+        (
+            {
+                "LEAF_SOURCE_SHA": _A,
+                "LEAF_DEPLOYMENT_IDENTITY": _release_identity_receipt(_B, "production"),
+            },
+            None, "unattested",
+        ),
+        (
+            {
+                "LEAF_SOURCE_SHA": _A,
+                "LEAF_DEPLOYMENT_IDENTITY": _release_identity_receipt(_B, "production"),
+                "LEAF_RUNTIME_ENV": "production",
+                "LEAF_DEPLOYMENT_ENVIRONMENT": "production",
+            },
+            _B, "adopted",
+        ),
+        (
+            {"LEAF_SOURCE_SHA": _A, "LEAF_DEPLOYMENT_IDENTITY": "[" * 5000 + "]" * 5000},
+            None, "unattested",
+        ),
+        (
+            {
+                "LEAF_SOURCE_SHA": _A,
+                "LEAF_DEPLOYMENT_IDENTITY": _release_identity_receipt(_B, pad="x" * 17000),
+            },
+            None, "unattested",
+        ),
+    ],
+    ids=[
+        "no-receipt",
+        "adopted",
+        "built",
+        "baked-absent",
+        "baked-uppercase",
+        "malformed-json",
+        "mixed-revision",
+        "wrong-environment",
+        "production",
+        "deep-nesting",
+        "over-cap",
+    ],
+)
+def test_release_source_identity_case_table(env, expected_release, expected_state):
+    assert release_source_identity(env) == {
+        "release_source_sha": expected_release,
+        "source_identity": expected_state,
+    }
+
+
+def test_health_reconciles_an_adopted_image(monkeypatch):
+    monkeypatch.delenv("LEAF_RUNTIME_ENV", raising=False)
+    monkeypatch.delenv("LEAF_DEPLOYMENT_ENVIRONMENT", raising=False)
+    monkeypatch.delenv("LEAF_DEPLOYMENT_IDENTITY", raising=False)
+    monkeypatch.setenv("LEAF_SOURCE_SHA", _A)
+    monkeypatch.setenv("LEAF_DEPLOYMENT_IDENTITY", _release_identity_receipt(_B))
+
+    response = TestClient(app_module.app).get("/api/health")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["source_sha"] == _A
+    assert body["release_source_sha"] == _B
+    assert body["source_identity"] == "adopted"
+
+
+def test_health_reports_unattested_without_a_receipt(monkeypatch):
+    monkeypatch.delenv("LEAF_RUNTIME_ENV", raising=False)
+    monkeypatch.delenv("LEAF_DEPLOYMENT_ENVIRONMENT", raising=False)
+    monkeypatch.delenv("LEAF_DEPLOYMENT_IDENTITY", raising=False)
+    monkeypatch.setenv("LEAF_SOURCE_SHA", _A)
+
+    response = TestClient(app_module.app).get("/api/health")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["release_source_sha"] is None
+    assert body["source_identity"] == "unattested"
+
+
+def test_health_source_sha_stays_the_baked_build_commit(monkeypatch):
+    monkeypatch.delenv("LEAF_RUNTIME_ENV", raising=False)
+    monkeypatch.delenv("LEAF_DEPLOYMENT_ENVIRONMENT", raising=False)
+    monkeypatch.delenv("LEAF_DEPLOYMENT_IDENTITY", raising=False)
+    monkeypatch.setenv("LEAF_SOURCE_SHA", _B)
+    monkeypatch.setenv("LEAF_DEPLOYMENT_IDENTITY", _release_identity_receipt(_B))
+
+    response = TestClient(app_module.app).get("/api/health")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["source_sha"] == _B
+    assert body["release_source_sha"] == _B
+    assert body["source_identity"] == "built"
 
 
 def test_health_reports_image_source_sha(monkeypatch):
