@@ -19,6 +19,8 @@ param schemas, capabilities) using normalised token/synonym overlap, with a
 name-token-dominant weighting so grouping intent ("count panels PER LAYER" ->
 `count-by-layer`) beats a shallower panel-name match. Numeric values and DWG
 handles are lifted straight out of the text into the matched tool's params.
+Explicit solve intent binds the best matching tool declaring the solve capability
+for confirmation, or offers available solvers when none matches the request.
 
     ┌─────────────────────── LLM-classifier seam (documented, OFF in v1) ───────┐
     │ `classify(..., llm_classifier=fn)` lets a FUTURE lane inject an optional  │
@@ -119,7 +121,7 @@ _BUILD_SCAFFOLD: Set[str] = {
     "something",
 }
 
-# explicit optimisation / solver intent (the future Solve lane).
+# explicit optimisation / solver intent (binds solve-capable catalog tools).
 _SOLVE_VERBS: Set[str] = {
     "optimize", "optimise", "solve", "maximize", "maximise",
     "minimize", "minimise", "pack", "arrange", "reposition",
@@ -167,6 +169,11 @@ def _is_internal(tool: Dict[str, Any]) -> bool:
         return True
     name = str(tool.get("name", ""))
     return name.startswith("qa-") or name.startswith("_")
+
+
+def _solve_capable(tool: Dict[str, Any]) -> bool:
+    capabilities = tool.get("capabilities")
+    return isinstance(capabilities, (list, tuple)) and "solve" in capabilities
 
 
 # --------------------------------------------------------------------------- #
@@ -258,8 +265,8 @@ def _ranked(q: Set[str], q_seq: List[str], docs: List[_ToolDoc]) -> List[_Score]
 
 def _alternatives(ranked: List[_Score], exclude_first: bool) -> List[Dict[str, Any]]:
     """Top ≤3 non-winning tool matches as [{tool, confidence}] (Contract 4a). For a
-    RUN match the winner is ranked[0] (excluded); for build/solve there is no winning
-    tool, so the top matches are all 'non-winning'. May be empty."""
+    bound RUN or SOLVE match the winner is ranked[0] (excluded); without a winning
+    tool, the top matches are all 'non-winning'. May be empty."""
     items = ranked[1:] if exclude_first else ranked
     out: List[Dict[str, Any]] = []
     seen: Set[str] = set()
@@ -390,7 +397,7 @@ def classify(
     ranked = _ranked(q, q_seq, docs)
     best = ranked[0] if ranked else None
 
-    result = _decide(text, q_seq, raw_toks, best, ranked)
+    result = _decide(text, q_seq, raw_toks, best, ranked, docs)
 
     # --- documented LLM-classifier seam (OFF in v1) -------------------------- #
     if llm_classifier is not None and result.confidence < LLM_ESCALATION_CONF:
@@ -418,6 +425,7 @@ def _decide(
     raw_toks: List[str],
     best: Optional[_Score],
     ranked: List[_Score],
+    docs: List[_ToolDoc],
 ) -> Classification:
     # 1. AUTHORING intent -> Build lane (unless the user named an EXISTING tool
     #    almost exactly, in which case honour the run match).
@@ -443,16 +451,40 @@ def _decide(
                 alternatives=_alternatives(ranked, exclude_first=False),
             )
 
-    # 2. Explicit SOLVE / optimisation intent -> Solve lane (future).
+    # 2. Explicit SOLVE / optimisation intent -> bind a solve-capable tool.
     if _is_solve(raw_toks):
+        solvers = [doc for doc in docs if _solve_capable(doc.tool)]
+        if not solvers:
+            return Classification(
+                lane=LANE_SOLVE,
+                tool=None,
+                params={"description": text},
+                confidence=0.80,
+                rationale="A solver is not available in this catalog, so nothing runs.",
+                alternatives=_alternatives(ranked, exclude_first=False),
+            )
+        ranking = _ranked(set(q_seq), q_seq, solvers)
+        if ranking:
+            best = ranking[0]
+            tool_name = str(best.doc.tool.get("name"))
+            return Classification(
+                lane=LANE_SOLVE,
+                tool=tool_name,
+                params=_extract_params(best.doc.tool, text),
+                confidence=_confidence(best),
+                rationale=f"Matched the '{tool_name}' solver capability; confirm before it runs.",
+                alternatives=_alternatives(ranking, exclude_first=True),
+            )
         return Classification(
             lane=LANE_SOLVE,
             tool=None,
             params={"description": text},
             confidence=0.80,
-            rationale=("This is an optimisation request. The Solve lane is not "
-                       "available yet, so nothing runs — it is routed for when it lands."),
-            alternatives=_alternatives(ranked, exclude_first=False),
+            rationale="No solver matches this request; please pick one of the available solvers.",
+            alternatives=[
+                {"tool": str(doc.tool.get("name")), "confidence": 0.15}
+                for doc in sorted(solvers, key=lambda doc: str(doc.tool.get("name")))[:3]
+            ],
         )
 
     # 3. RUN lane — a catalog match (possibly low confidence).
