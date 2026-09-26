@@ -246,6 +246,28 @@ class SelectionAdapterTests(unittest.TestCase):
         path.write_text("not json")
         self.assertFalse(RUNNER.read_test_report(suite, self.logs, 1, "PASS")["test_report_complete"])
 
+    def test_vitest_renamed_ids_are_carried_into_attempt(self):
+        suite = RUNNER.Suite("vitest-renamed", "repeated titles fixture", "vitest", self.work, [], None)
+        directory = self.logs / "test-reports" / suite.id / "1"
+        directory.mkdir(parents=True)
+        path = directory / "tests-vitest-123.json"
+        ids = [suite.id + "::case.test.js::same" + suffix for suffix in ("", "#2", "#3")]
+        document = {
+            "schema": "leaf.ci.test-report.v1", "suite_id": suite.id, "attempt": 1,
+            "complete": True, "incomplete_reasons": [], "test_ids": ids,
+            "failed_test_ids": [ids[1]], "renamed_duplicate_ids": 2}
+        for renamed in (2, 0):
+            if renamed == 0:
+                document.pop("renamed_duplicate_ids")
+            path.write_text(json.dumps(document), encoding="utf-8")
+            RUNNER.record_attempt(RUNNER.Result(suite, "PASS", "3", 0.0), self.logs, 1)
+            row = json.loads((self.logs / "attempts" / (suite.id + ".jsonl")).read_text().splitlines()[-1])
+            self.assertEqual(row["test_report_renamed_ids"], renamed)
+            self.assertIsInstance(row["test_report_renamed_ids"], int)
+            self.assertTrue(row["test_report_complete"])
+            self.assertEqual(row["test_ids"], ids)
+            self.assertEqual(row["failed_test_ids"], [ids[1]])
+
     def test_vitest_skipped_tasks_only_document_is_complete(self):
         suite = RUNNER.Suite("vitest-skips", "skipped tasks fixture", "vitest", self.work, [], None)
         directory = self.logs / "test-reports" / suite.id / "1"
