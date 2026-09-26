@@ -165,6 +165,7 @@ class Result:
     log_path: Optional[Path] = None
     counts: dict = field(default_factory=dict)
     test_report: dict = field(default_factory=dict)
+    skipped_by_gate: str = ""
 
 
 def _py_pytest(target: str) -> List[str]:
@@ -2986,14 +2987,20 @@ def reporting_command(suite: Suite, argv: List[str], trace_env: dict) -> List[st
     return argv
 
 
-def read_test_report(suite: Suite, log_dir: Path, attempt: int) -> dict:
-    """Missing/crashed producers never count as complete test-ID evidence."""
+def read_test_report(suite: Suite, log_dir: Path, attempt: int, status: str = "") -> dict:
+    """Keep suite completion distinct from complete test-ID evidence."""
     directory = log_dir.resolve() / "test-reports" / encoded_suite_id(suite.id) / str(attempt)
     result = {"failed_test_ids": [], "test_ids": [], "collection_ids_sha256": None,
-              "test_report_complete": False, "test_report_refs": []}
+              "test_report_complete": False, "test_report_refs": [],
+              "test_id_granularity": "test"}
+    if suite.kind in ("script", "tsc", "npm-audit"):
+        result.update(test_report_complete=status in ("PASS", "FAIL"), test_id_granularity="suite")
+        return result
     try:
         completions = sorted(directory.glob("completion-*.json"))
-        if suite.kind == "pytest" and completions:
+        if suite.kind == "pytest":
+            if not completions:
+                return result
             docs = [json.loads(path.read_text(encoding="utf-8")) for path in completions]
             manifests = [json.loads(path.read_text(encoding="utf-8"))
                          for path in sorted(directory.glob("collection-*.json"))]
@@ -3011,6 +3018,9 @@ def read_test_report(suite: Suite, log_dir: Path, attempt: int) -> dict:
             result["test_report_refs"] = [str(path.relative_to(log_dir.resolve())) for path in completions]
         else:
             paths = sorted(directory.glob("tests-*.json"))
+            if suite.kind == "vitest" and not paths:
+                result.update(test_report_complete=status in ("PASS", "FAIL"), test_id_granularity="suite")
+                return result
             docs = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
             if docs:
                 if any(doc.get("suite_id") != suite.id or doc.get("attempt") != attempt or
@@ -3032,9 +3042,14 @@ def read_test_report(suite: Suite, log_dir: Path, attempt: int) -> dict:
 def record_attempt(result: Result, log_dir: Path, attempt: int) -> None:
     """Append before retries replace Result or add cumulative durations."""
     try:
-        report = read_test_report(result.suite, log_dir, attempt)
+        report = read_test_report(result.suite, log_dir, attempt, result.status)
         if result.test_report.get("test_report_incomplete_reasons"):
             report.update(result.test_report)
+        if result.status == "SKIP" and (
+                (result.skipped_by_gate == "db_gated" and result.suite.db_gated) or
+                (result.skipped_by_gate == "opt_in_env" and result.suite.opt_in_env)):
+            report.update(skipped_by_gate=result.skipped_by_gate, test_report_complete=True,
+                          test_ids=[], failed_test_ids=[], collection_ids_sha256=None, test_report_refs=[])
         result.test_report = report
         row = dict(report, suite_id=result.suite.id, attempt=attempt,
                    status=result.status, seconds=result.seconds,
@@ -3554,7 +3569,8 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
         ok, msg, dsn = probe_platform_db()
         if not ok:
             return Result(suite, "SKIP", "skip", 0.0,
-                          note=f"platform DB unreachable ({msg})", log_path=None)
+                          note=f"platform DB unreachable ({msg})", log_path=None,
+                          skipped_by_gate="db_gated")
         if dsn:
             db_env["DATABASE_URL"] = dsn
 
@@ -3563,7 +3579,7 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
             not in ("1", "true", "yes", "on"):
         return Result(suite, "SKIP", "skip", 0.0,
                       note=f"opt-in: set {suite.opt_in_env}=1 (needs Docker)",
-                      log_path=None)
+                      log_path=None, skipped_by_gate="opt_in_env")
 
     # npm-audit runs its OWN bounded, backed-off attempt loop (see
     # run_npm_audit_suite): a registry outage must never masquerade as a

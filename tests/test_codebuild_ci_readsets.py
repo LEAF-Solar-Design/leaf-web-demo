@@ -24,10 +24,10 @@ REPORT_MEMBERS = ["reports", "reports/sample/1/collection-main-123.json",
                   "reports/sample/1/completion-main-123.json"]
 
 
-def fixture_catalog():
+def fixture_catalog(extra_suites=()):
     catalog = {"schema": "leaf.ci.test-catalog.v1", "kind": "web",
                "runner_catalog_sha256": "e" * 64,
-               "suites": [{"id": "sample", "test_ids": []}]}
+               "suites": [{"id": "sample", "test_ids": []}, *extra_suites]}
     catalog["catalog_sha256"] = hashlib.sha256(json.dumps(
         catalog, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return catalog
@@ -37,7 +37,8 @@ def fixture_catalog():
 class TestCodebuildCiReadsets(unittest.TestCase):
     def run_publication(self, *, tracing=True, aws_status=0, gate_status=0,
                         missing_decision=False, malformed_manifest=False, foreign_shards=False,
-                        foreign_attempts=False, missing_completion=False, differing_collection=False):
+                        foreign_attempts=False, missing_completion=False, differing_collection=False,
+                        extra_attempts=()):
         script = CI_PATH.read_text(encoding="utf-8")
         export_start = script.index('  export LEAF_READSET_CATALOG_SHA256=')
         export_end = script.index('LEAF_CAPTURE_ID\n)"', export_start) + len('LEAF_CAPTURE_ID\n)"')
@@ -53,7 +54,12 @@ class TestCodebuildCiReadsets(unittest.TestCase):
             for directory in (selection, logs / "readsets" / "sample" / "1",
                               logs / "attempts", logs / "test-reports" / "sample" / "1", results, binaries):
                 directory.mkdir(parents=True, exist_ok=True)
-            catalog = fixture_catalog()
+            extra_suites = [{"id": sid, "kind": kind, "test_ids": [],
+                             "skip_rules": {"db_gated": rule == "db_gated",
+                                            "opt_in_env": "LEAF_FIXTURE_OPT_IN" if rule == "opt_in_env" else ""}}
+                            for sid, kind, status, rule in extra_attempts]
+            catalog = fixture_catalog(extra_suites)
+            suite_ids = sorted(suite["id"] for suite in catalog["suites"])
             shard = {"schema": "leaf.ci.readset.v1", "suite_id": "sample", "worker": "main",
                      "run_id": BUILD_ID, "source_sha": "b" * 40, "source_tree": "c" * 40,
                      "capture_sha": "d" * 40, "catalog_sha256": catalog["catalog_sha256"],
@@ -107,6 +113,13 @@ class TestCodebuildCiReadsets(unittest.TestCase):
             attempt = dict(RUNNER.read_test_report(suite, logs, 1),
                            suite_id="sample", run_id=build_id, attempt=1, status="PASS")
             rows = [attempt]
+            for sid, kind, status, rule in extra_attempts:
+                extra_suite = RUNNER.Suite(sid, sid, kind, root, [], None)
+                report = RUNNER.read_test_report(extra_suite, logs, 1, status)
+                if rule:
+                    report.update(skipped_by_gate=rule, test_report_complete=True)
+                rows.append(dict(report, suite_id=sid, run_id=build_id, attempt=1, status=status))
+            expected_rows = list(rows)
             if foreign_attempts:
                 rows.extend([dict(attempt, run_id="build:foreign", test_ids=None, status="ERROR"),
                              dict(attempt, suite_id="fixture-suite", failed_test_ids=None, status="ERROR")])
@@ -119,7 +132,7 @@ class TestCodebuildCiReadsets(unittest.TestCase):
             (selection / "detail.json").write_text(json.dumps({
                 "schema": "leaf.ci.selection.v1", "phase": "shadow",
                 "build_id": build_id, "execution_mode": "full",
-                "executed_suite_ids": ["sample"], "readsets_ref": str(logs / "readsets"),
+                "executed_suite_ids": suite_ids, "readsets_ref": str(logs / "readsets"),
             }), encoding="utf-8")
             aws = binaries / "aws"
             aws.write_bytes(b'#!/usr/bin/env bash\n'
@@ -169,18 +182,23 @@ class TestCodebuildCiReadsets(unittest.TestCase):
                 self.assertTrue(manifest["provider_bound"])
                 self.assertEqual(manifest["catalog_sha256"], catalog["catalog_sha256"])
                 self.assertEqual(manifest["execution_mode"], "full")
-                self.assertEqual(manifest["full_run_complete"], not missing_completion and not differing_collection)
-                self.assertEqual(manifest["test_id_reporting_complete"], not missing_completion and not differing_collection)
+                reporting_complete = (not missing_completion and not differing_collection and
+                                      all(row["test_report_complete"] for row in expected_rows))
+                execution_complete = reporting_complete and all(
+                    row["status"] in ("PASS", "FAIL") or row.get("skipped_by_gate") in ("db_gated", "opt_in_env")
+                    for row in expected_rows)
+                self.assertEqual(manifest["full_run_complete"], execution_complete)
+                self.assertEqual(manifest["test_id_reporting_complete"], reporting_complete)
                 self.assertEqual(manifest["collection_ids_by_suite"], {} if differing_collection else
                                  {"sample": ["sample::" + tid for tid in COLLECTION_IDS]})
-                self.assertEqual(manifest["suite_ids"], ["sample"])
+                self.assertEqual(manifest["suite_ids"], suite_ids)
                 self.assertEqual(manifest["workers_by_suite"], {"sample": ["main"]})
                 self.assertRegex(manifest["toolchain_fingerprint"], r"^[0-9a-f]{64}$")
             else:
                 self.assertFalse((selection / "full-run.json").exists())
             for field in ("readsets_object", "readsets_sha256", "readsets_bytes", "readsets_status",
                           "readsets_archive_members", "readsets_rejected_shards",
-                          "completeness_reasons", "attempt_rows_rejected"):
+                          "completeness_reasons", "attempt_rows_rejected", "suites_skipped_by_gate"):
                 self.assertEqual(final[field], shadow[field])
                 self.assertEqual(final[field], detail[field])
             self.assertIsInstance(final["completeness_reasons"], list)
@@ -188,7 +206,11 @@ class TestCodebuildCiReadsets(unittest.TestCase):
             self.assertEqual(final["attempt_rows_rejected"], 2 if foreign_attempts else 0)
             accepted = [json.loads(line) for line in (results / "selection-attempts.jsonl").read_text(
                 encoding="utf-8").splitlines()]
-            self.assertEqual(accepted, [attempt])
+            self.assertEqual(accepted, expected_rows)
+            by_suite = {row["suite_id"]: row for row in accepted}
+            self.assertEqual(by_suite["sample"]["test_id_granularity"], "test")
+            for sid, kind, status, rule in extra_attempts:
+                self.assertEqual(by_suite[sid]["test_id_granularity"], "test" if kind == "pytest" else "suite")
             self.assertEqual(final["readsets_rejected_shards"], 2 if foreign_shards and tracing else 0)
             if foreign_shards and tracing:
                 for member in rejected_members:
@@ -205,6 +227,9 @@ class TestCodebuildCiReadsets(unittest.TestCase):
 
     def test_tracing_upload_is_immutable_and_receipted(self):
         result, final, calls, archive, tar_calls = self.run_publication()
+        self.assertEqual(final["completeness_reasons"], [])
+        self.assertTrue(final["full_run_complete"])
+        self.assertEqual(final["suites_skipped_by_gate"], [])
         self.assertEqual(final["readsets_status"], "uploaded")
         self.assertRegex(final["readsets_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(final["readsets_sha256"], hashlib.sha256(archive).hexdigest())
@@ -283,6 +308,27 @@ class TestCodebuildCiReadsets(unittest.TestCase):
         self.assertEqual(final["completeness_reasons"], [])
         with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as packed:
             self.assertFalse(any("fixture-suite" in name for name in packed.getnames()))
+
+    def test_suite_kinds_and_gate_skips_preserve_full_run_completeness(self):
+        extra_attempts = [(kind, kind, "PASS", "") for kind in ("script", "tsc", "npm-audit", "vitest")]
+        extra_attempts.extend([("db-skip", "pytest", "SKIP", "db_gated"),
+                               ("opt-in-skip", "script", "SKIP", "opt_in_env")])
+        _, final, _, archive, _ = self.run_publication(extra_attempts=extra_attempts)
+        self.assertTrue(final["full_run_complete"])
+        self.assertEqual(final["completeness_reasons"], [])
+        self.assertEqual(final["suites_skipped_by_gate"], ["db-skip", "opt-in-skip"])
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as packed:
+            manifest = json.loads(packed.extractfile("full-run.json").read())
+            self.assertTrue(manifest["full_run_complete"])
+            self.assertEqual(manifest["collection_ids_by_suite"],
+                             {"sample": ["sample::" + tid for tid in COLLECTION_IDS]})
+
+    def test_non_gate_skip_stays_nonfinal(self):
+        _, final, _, _, _ = self.run_publication(extra_attempts=[("other-skip", "script", "SKIP", "")])
+        self.assertFalse(final["full_run_complete"])
+        self.assertEqual(final["suites_skipped_by_gate"], [])
+        self.assertEqual(final["completeness_reasons"],
+                         ["suite_status_not_final:1", "test_report_incomplete:1"])
 
     def test_missing_completion_records_the_failed_predicate(self):
         _, final, _, archive, _ = self.run_publication(missing_completion=True)
