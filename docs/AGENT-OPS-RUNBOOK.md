@@ -271,11 +271,13 @@ durable trace beside the audit log; leave them (they are evidence, and
 ## Drill 4: rate-state reset
 
 Semantics: budgets are per-tenant per-hour by category (`rate_limits` in the
-catalog: low 120, medium 60, high 10). The snapshot file is the authority:
-every check re-reads it, spends the unit, and rewrites it under an OS file
-lock held on the sibling `agent_rate_state.json.lock`. A MISSING snapshot is a
-genuinely empty budget; a present-but-corrupt one DENIES every call
-(`rate_state_unreadable`) until reset. Never hand-edit it.
+catalog: low 120, medium 60, high 10). With `LEAF_AGENT_STORE=postgres`, the
+shared PostgreSQL counters are the authority. In legacy mode (unset or
+`legacy`), the snapshot file is the authority: every check re-reads it,
+spends the unit, and rewrites it under an OS file lock held on the sibling
+`agent_rate_state.json.lock`. A MISSING snapshot is a genuinely empty budget;
+a present-but-corrupt one DENIES every call (`rate_state_unreadable`) until
+corrupt-snapshot recovery below. Never hand-edit it.
 
 Exhaust the `medium` budget for this run's throwaway tenant (`run_read_tool` is
 an auto-policy medium-category action, so this is 61 pure gate decisions; `$RT`
@@ -288,16 +290,45 @@ done | tail -n 2
 ```
 
 The last line must be a deny with `"reason":"rate_limit_exceeded: medium (60/60)"`.
-Inspect the spent budget:
+In legacy mode, inspect the spent budget:
 
 ```bash
 docker compose exec app sh -c 'cat /data/state/agent_rate_state.json; echo'
 ```
 
-Reset. WARNING: this hands the full budget back to EVERY tenant (there is no
-per-tenant reset tooling; Phase-2 gap); do it deliberately, typically after a
-drill, a runaway-loop incident you have already stopped, or a
-corrupt-snapshot deny. Two rules make the reset race-free:
+Default reset: reset only the affected tenant after the drill or after stopping
+its runaway loop. Replace `<tenant>` with the exact tenant id (the drill's
+`$RT`) and `<operator>` with your operator name. Run inside the app container
+so the command uses the app's configured authority in either storage mode:
+
+```bash
+docker compose exec app python -c 'import agent_gate; print(agent_gate.reset_tenant_rate_state("<tenant>", by="<operator>"))'
+```
+
+The result reports `removed_categories` and `removed_stamps` in legacy mode,
+or `removed_rows` in PostgreSQL mode. Other tenants keep their budgets. Each
+successful reset, including a reset with zero removals, appends one
+`rate_reset` audit event with the tenant, operator, and counts. PostgreSQL
+deletes and audits in one serializable transaction. Legacy resets hold both
+the thread lock and snapshot lock across the read and atomic replacement.
+A legacy reset stages the new snapshot, writes the audit event, then applies it.
+A failed audit write leaves the budget untouched. A failure to apply after the
+audit is recorded as `rate_reset_not_applied`; if that second audit write also
+fails, the audit contains a reset that did not apply. Both failures are reported
+to the operator.
+Concurrent calls can spend budget again after the reset.
+
+Verify that the same call allows again:
+
+```bash
+gate "{\"tenant_id\":\"$RT\",\"session_id\":\"$SID\",\"turn_id\":\"r62\",\"action\":\"run_read_tool\",\"args\":{\"tool\":\"probe\"}}"
+```
+
+Corrupt-snapshot recovery (legacy mode only): the per-tenant command refuses
+unreadable snapshots and leaves their bytes unchanged. Use the whole-snapshot
+reset below only to recover from `rate_state_unreadable`. WARNING: this hands
+the full budget back to EVERY tenant. It does not reset PostgreSQL counters.
+Two rules make this recovery race-free:
 
 * Delete the snapshot UNDER THE MODULE'S OWN LOCK. The gate's entire
   read-check-write is atomic inside `_snapshot_lock`

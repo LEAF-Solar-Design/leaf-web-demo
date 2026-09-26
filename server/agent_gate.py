@@ -44,6 +44,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import agent_audit
 import agent_policy
+import tenant_id_validator
 from agent_policy import AgentAction, AgentPolicy, PolicyError
 
 SERVER_DIR = Path(__file__).resolve().parent
@@ -616,6 +617,65 @@ def _read_rate_snapshot(path: Path) -> Dict[str, Dict[str, List[float]]]:
                         f"rate snapshot bucket {tenant!r}.{cat!r} carries a non-finite stamp")
             buckets.setdefault(str(tenant), {})[str(cat)] = [float(t) for t in stamps]
     return buckets
+
+
+def _append_rate_reset_audit(event: Dict[str, Any]) -> None:
+    """Operator resets require a successful audit write, unlike request audits."""
+    record = dict(event)
+    record.setdefault("ts", agent_audit._now_iso())
+    line = json.dumps(record, separators=(",", ":"), sort_keys=True, default=str)
+    target = agent_audit.audit_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with agent_audit._write_lock:
+        with target.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+
+
+def reset_tenant_rate_state(tenant_id: str, *, by: str) -> Dict[str, Any]:
+    """Reset one tenant's budget without repairing unreadable rate state."""
+    tenant_id_validator.validate_tenant_id(tenant_id)
+    if not isinstance(by, str) or not by.strip() or len(by) > 200:
+        raise ValueError("by must be a non-empty string of at most 200 characters")
+    if _using_postgres():
+        return _pg_store().reset_tenant_rate(tenant_id, by=by)
+
+    result = {"tenant_id": tenant_id, "store": "legacy",
+              "removed_categories": 0, "removed_stamps": 0}
+    with _state_lock:
+        path = rate_file()
+        with _snapshot_lock(path):
+            buckets = _read_rate_snapshot(path)
+            tmp = None
+            if tenant_id in buckets:
+                removed = buckets.pop(tenant_id)
+                result["removed_categories"] = len(removed)
+                result["removed_stamps"] = sum(len(stamps) for stamps in removed.values())
+                tmp = path.with_name(path.name + ".tmp")
+                try:
+                    tmp.write_text(json.dumps(buckets), encoding="utf-8")
+                except Exception as exc:
+                    with contextlib.suppress(OSError):
+                        tmp.unlink(missing_ok=True)
+                    raise RuntimeError("rate reset failed: snapshot write failed") from exc
+            try:
+                _append_rate_reset_audit(dict(result, kind="rate_reset", by=by))
+            except Exception as exc:
+                if tmp is not None:
+                    with contextlib.suppress(OSError):
+                        tmp.unlink(missing_ok=True)
+                raise RuntimeError("rate reset failed: audit write failed") from exc
+            if tmp is not None:
+                try:
+                    tmp.replace(path)
+                except Exception as exc:
+                    with contextlib.suppress(Exception):
+                        _append_rate_reset_audit(dict(result, kind="rate_reset_not_applied", by=by))
+                    with contextlib.suppress(OSError):
+                        tmp.unlink(missing_ok=True)
+                    raise RuntimeError(
+                        "rate reset failed: snapshot replace failed after the audit event was written"
+                    ) from exc
+    return result
 
 
 def _rate_check_and_record(tenant_id: str, category: str,

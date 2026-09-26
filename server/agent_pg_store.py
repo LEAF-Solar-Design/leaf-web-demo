@@ -16,6 +16,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from psycopg.types.json import Jsonb
 
+import tenant_id_validator
+
 _platform_modules: Optional[tuple] = None
 _counter_store = None
 _USAGE_FIELDS = frozenset({
@@ -370,6 +372,33 @@ def _consume_rate_in_transaction(
         key=counter_key,
         limit=limit,
     )
+
+
+_RESET_TENANT_RATE_SQL = """
+    DELETE FROM agent_rate_counters
+    WHERE left(namespace, 11) = 'agent_rate:'
+      AND split_part(counter_key, ':', 1) = %(tenant_id)s
+"""
+
+
+def reset_tenant_rate(tenant_id: str, *, by: str) -> Dict[str, Any]:
+    """Delete a tenant's rate counters and audit the reset atomically."""
+    tenant_id_validator.validate_tenant_id(tenant_id)
+    if not isinstance(by, str) or not by.strip() or len(by) > 200:
+        raise ValueError("by must be a non-empty string of at most 200 characters")
+    db, _counter_type = _load_platform()
+
+    def operation(conn):
+        deleted = conn.execute(
+            _RESET_TENANT_RATE_SQL,
+            {"tenant_id": tenant_id},
+        )
+        result = {"tenant_id": tenant_id, "store": "postgres",
+                  "removed_rows": deleted.rowcount}
+        _append_audit_in_transaction(conn, dict(result, kind="rate_reset", by=by))
+        return result
+
+    return db.run_transaction(operation, isolation="serializable")
 
 
 def consume_rate_and_audit(

@@ -267,6 +267,291 @@ def test_rate_limit_is_per_tenant(tmp_path, monkeypatch):
     assert _gate("run_read_tool", {"tool": "x"}, tenant="t-b")["decision"] == "allow"
 
 
+def test_reset_tenant_rate_state_clears_only_that_tenant(tmp_path, monkeypatch):
+    monkeypatch.setenv("LEAF_AGENT_STORE", "legacy")
+    _custom_policy(tmp_path, monkeypatch,
+                   lambda raw: raw["rate_limits"].update({"medium_per_hour": 1}))
+    for tenant in ("acme_corp", "acme-corp", "acmexcorp"):
+        assert _gate("run_read_tool", {"tool": "x"}, tenant=tenant)["decision"] == "allow"
+    path = agent_gate.rate_file()
+    buckets = json.loads(path.read_text(encoding="utf-8"))
+    buckets["acme_corp"]["high"] = [1.25, 2.5]
+    buckets["acme-corp"]["low"] = [0.0, 1.23456789012345]
+    path.write_text(json.dumps(buckets), encoding="utf-8")
+    assert agent_gate.reset_tenant_rate_state("acme_corp", by="operator") == {
+        "tenant_id": "acme_corp", "store": "legacy",
+        "removed_categories": 2, "removed_stamps": 3,
+    }
+    del buckets["acme_corp"]
+    assert json.loads(path.read_text(encoding="utf-8")) == buckets
+    assert _gate("run_read_tool", {"tool": "x"}, tenant="acme_corp")["decision"] == "allow"
+    for tenant in buckets:
+        assert _gate("run_read_tool", {"tool": "x"}, tenant=tenant)["decision"] == "deny"
+    before = path.read_bytes()
+    assert agent_gate.reset_tenant_rate_state("absent", by="operator") == {
+        "tenant_id": "absent", "store": "legacy",
+        "removed_categories": 0, "removed_stamps": 0,
+    }
+    assert path.read_bytes() == before
+
+
+def test_reset_tenant_rate_state_rejects_invalid_tenant_id_without_touching_snapshot(monkeypatch):
+    path = agent_gate.rate_file()
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid input must fail before selecting a store, reading or locking")
+
+    monkeypatch.setattr(agent_gate, "_using_postgres", forbidden)
+    monkeypatch.setattr(agent_gate, "rate_file", forbidden)
+    monkeypatch.setattr(agent_gate, "_snapshot_lock", forbidden)
+    monkeypatch.setattr(agent_gate, "_read_rate_snapshot", forbidden)
+    monkeypatch.setattr(agent_gate, "_audit_append", forbidden)
+    monkeypatch.setattr(agent_gate, "_append_rate_reset_audit", forbidden)
+    monkeypatch.setattr(agent_gate, "_state_lock", None)
+    for present in (False, True):
+        if present:
+            path.write_bytes(b'{"other": {"low": [1.25]}}\n')
+        before = path.read_bytes() if present else None
+        for tenant in ("Acme Corp", "", "../x", 123):
+            with pytest.raises(ValueError):
+                agent_gate.reset_tenant_rate_state(tenant, by="operator")
+        for by in ("", "   ", None, 123, "x" * 201):
+            with pytest.raises(ValueError):
+                agent_gate.reset_tenant_rate_state("acme_corp", by=by)
+        assert (path.read_bytes() if path.exists() else None) == before
+        assert not path.with_name(path.name + ".lock").exists()
+
+
+def test_reset_tenant_rate_state_refuses_corrupt_snapshot_and_leaves_it_byte_identical(monkeypatch):
+    monkeypatch.setenv("LEAF_AGENT_STORE", "legacy")
+    path = agent_gate.rate_file()
+    events = []
+    monkeypatch.setattr(agent_gate, "_audit_append", events.append)
+    monkeypatch.setattr(agent_gate, "_append_rate_reset_audit", events.append)
+    for corrupt in (
+        b"{nope", b"[]", b'{"t-gate": []}', b'{"t-gate": {"low": 1}}',
+        b'{"t-gate": {"low": [true]}}', b'{"other": {"low": ["bad"]}}',
+        b'{"t-gate": {"low": [NaN]}}', b'{"t-gate": {"low": [1e999]}}',
+    ):
+        path.write_bytes(corrupt)
+        events.clear()
+        with pytest.raises(ValueError):
+            agent_gate.reset_tenant_rate_state("t-gate", by="operator")
+        assert path.read_bytes() == corrupt
+        assert events == []
+        result = _gate("read_platform_state")
+        assert result["decision"] == "deny"
+        assert result["reason"].startswith("rate_state_unreadable")
+        assert path.read_bytes() == corrupt
+
+
+def test_reset_tenant_rate_state_holds_the_snapshot_lock_for_read_and_write(monkeypatch):
+    from contextlib import contextmanager
+
+    monkeypatch.setenv("LEAF_AGENT_STORE", "legacy")
+    path = agent_gate.rate_file()
+    path.write_text('{"target": {"low": [1.0]}, "other": {"low": [2.0]}}',
+                    encoding="utf-8")
+    real_lock = agent_gate._snapshot_lock
+    real_read = agent_gate._read_rate_snapshot
+    real_write = Path.write_text
+    real_replace = Path.replace
+    held = False
+    operations = []
+
+    @contextmanager
+    def spy_lock(locked_path):
+        nonlocal held
+        assert locked_path == path
+        assert agent_gate._state_lock.locked()
+        with real_lock(locked_path):
+            held = True
+            try:
+                yield
+            finally:
+                held = False
+
+    def read(locked_path):
+        assert held and agent_gate._state_lock.locked()
+        operations.append("read")
+        return real_read(locked_path)
+
+    def write(tmp, *args, **kwargs):
+        assert held and agent_gate._state_lock.locked()
+        assert tmp == path.with_name(path.name + ".tmp")
+        operations.append("write")
+        return real_write(tmp, *args, **kwargs)
+
+    def replace(tmp, target):
+        assert held and agent_gate._state_lock.locked()
+        assert tmp == path.with_name(path.name + ".tmp") and target == path
+        operations.append("replace")
+        return real_replace(tmp, target)
+
+    monkeypatch.setattr(agent_gate, "_snapshot_lock", spy_lock)
+    monkeypatch.setattr(agent_gate, "_read_rate_snapshot", read)
+    monkeypatch.setattr(Path, "write_text", write)
+    monkeypatch.setattr(Path, "replace", replace)
+    monkeypatch.setattr(agent_gate, "_audit_append", lambda event: None)
+    agent_gate.reset_tenant_rate_state("target", by="operator")
+    assert operations == ["read", "write", "replace"]
+    assert not held
+    assert path.with_name(path.name + ".lock").exists()
+
+
+def test_reset_tenant_rate_state_missing_snapshot_is_a_noop(monkeypatch):
+    monkeypatch.delenv("LEAF_AGENT_STORE", raising=False)
+    path = agent_gate.rate_file()
+    assert not path.exists()
+    assert agent_gate.reset_tenant_rate_state("target", by="operator") == {
+        "tenant_id": "target", "store": "legacy",
+        "removed_categories": 0, "removed_stamps": 0,
+    }
+    assert not path.exists()
+    assert not path.with_name(path.name + ".tmp").exists()
+
+
+def test_reset_tenant_rate_state_audits_the_reset(agent_env, monkeypatch):
+    monkeypatch.setenv("LEAF_AGENT_STORE", "legacy")
+    agent_gate.rate_file().write_text('{"target": {"low": [1.0, 2.0]}}', encoding="utf-8")
+    for expected_stamps in (2, 0):
+        result = agent_gate.reset_tenant_rate_state("target", by="o" * 200)
+        assert result["removed_stamps"] == expected_stamps
+    events = [json.loads(line) for line in
+              (agent_env / "audit.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(events) == 2
+    for event, count in zip(events, (2, 0)):
+        assert event["kind"] == "rate_reset"
+        assert event["tenant_id"] == "target"
+        assert event["by"] == "o" * 200
+        assert event["store"] == "legacy"
+        assert event["removed_stamps"] == count
+        assert event["removed_categories"] == (1 if count else 0)
+
+
+def test_reset_tenant_rate_state_disk_full_after_staging_leaves_budget_and_no_audit(
+    agent_env, monkeypatch,
+):
+    import errno
+
+    monkeypatch.setenv("LEAF_AGENT_STORE", "legacy")
+    path = agent_gate.rate_file()
+    before = b'{\n  "target": {"low": [1.25, 2.5]}, "other": {"high": [3.75]}\n}\n'
+    path.write_bytes(before)
+    tmp = path.with_name(path.name + ".tmp")
+    audit_path = agent_env / "audit.jsonl"
+    audit_error = OSError(errno.ENOSPC, "audit volume full")
+
+    def disk_full(*args, **kwargs):
+        raise OSError(errno.ENOSPC, "volume still full")
+
+    def fail_audit(event):
+        assert json.loads(tmp.read_text(encoding="utf-8")) == {
+            "other": {"high": [3.75]},
+        }
+        monkeypatch.setattr(Path, "write_bytes", disk_full)
+        monkeypatch.setattr(Path, "write_text", disk_full)
+        raise audit_error
+
+    monkeypatch.setattr(agent_gate, "_append_rate_reset_audit", fail_audit)
+    with pytest.raises(RuntimeError, match="audit write failed") as raised:
+        agent_gate.reset_tenant_rate_state("target", by="operator")
+
+    assert raised.value.__cause__ is audit_error
+    assert path.read_bytes() == before
+    assert agent_gate._read_rate_snapshot(path)["target"]["low"] == [1.25, 2.5]
+    assert not audit_path.exists()
+    assert not tmp.exists()
+
+
+def test_reset_tenant_rate_state_staging_failure_changes_nothing(agent_env, monkeypatch):
+    import errno
+
+    monkeypatch.setenv("LEAF_AGENT_STORE", "legacy")
+    path = agent_gate.rate_file()
+    before = b'{"target": {"low": [1.25, 2.5]}, "other": {"high": [3.75]}}\n'
+    path.write_bytes(before)
+    tmp = path.with_name(path.name + ".tmp")
+    real_write = Path.write_text
+    staging_error = OSError(errno.ENOSPC, "snapshot volume full")
+
+    def fail_staging(target, *args, **kwargs):
+        assert target == tmp
+        real_write(target, "{", encoding="utf-8")
+        raise staging_error
+
+    def forbidden_audit(event):
+        pytest.fail("staging failure must not attempt an audit write")
+
+    monkeypatch.setattr(Path, "write_text", fail_staging)
+    monkeypatch.setattr(agent_gate, "_append_rate_reset_audit", forbidden_audit)
+    with pytest.raises(RuntimeError, match="snapshot write failed") as raised:
+        agent_gate.reset_tenant_rate_state("target", by="operator")
+
+    assert raised.value.__cause__ is staging_error
+    assert path.read_bytes() == before
+    assert not (agent_env / "audit.jsonl").exists()
+    assert not tmp.exists()
+
+
+def test_reset_tenant_rate_state_replace_failure_after_audit_records_not_applied(
+    agent_env, monkeypatch,
+):
+    monkeypatch.setenv("LEAF_AGENT_STORE", "legacy")
+    path = agent_gate.rate_file()
+    before = b'{"target": {"low": [1.25, 2.5]}, "other": {"high": [3.75]}}\n'
+    path.write_bytes(before)
+    tmp = path.with_name(path.name + ".tmp")
+    audit_path = agent_env / "audit.jsonl"
+    replace_error = OSError("snapshot replace refused")
+
+    def fail_replace(source, target):
+        assert source == tmp and target == path
+        events = [json.loads(line) for line in
+                  audit_path.read_text(encoding="utf-8").splitlines()]
+        assert len(events) == 1 and events[0]["kind"] == "rate_reset"
+        raise replace_error
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+    with pytest.raises(RuntimeError, match="snapshot replace failed after the audit event was written") as raised:
+        agent_gate.reset_tenant_rate_state("target", by="operator")
+
+    assert raised.value.__cause__ is replace_error
+    assert path.read_bytes() == before
+    events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    assert [event["kind"] for event in events] == ["rate_reset", "rate_reset_not_applied"]
+    for event in events:
+        assert event["tenant_id"] == "target"
+        assert event["by"] == "operator"
+        assert event["store"] == "legacy"
+        assert event["removed_categories"] == 1
+        assert event["removed_stamps"] == 2
+    assert not tmp.exists()
+
+
+def test_reset_tenant_rate_state_restores_the_snapshot_when_the_audit_write_fails(
+    agent_env, monkeypatch,
+):
+    monkeypatch.setenv("LEAF_AGENT_STORE", "legacy")
+    path = agent_gate.rate_file()
+    before = b'{\n  "target": {"low": [1.25, 2.5]}, "other": {"high": [3.75]}\n}\n'
+    path.write_bytes(before)
+    audit_path = agent_env / "audit.jsonl"
+    # A file cannot be an audit directory, on Windows or POSIX.
+    blocked_parent = agent_env / "not-a-directory"
+    blocked_parent.write_bytes(b"blocked")
+    monkeypatch.setenv("LEAF_AGENT_AUDIT", str(blocked_parent / "audit.jsonl"))
+
+    with pytest.raises(RuntimeError, match="audit write failed"):
+        agent_gate.reset_tenant_rate_state("target", by="operator")
+
+    assert path.read_bytes() == before
+    assert agent_gate._read_rate_snapshot(path)["target"]["low"] == [1.25, 2.5]
+    assert not audit_path.exists()
+    assert not (blocked_parent / "audit.jsonl").exists()
+    assert blocked_parent.read_bytes() == b"blocked"
+
+
 def test_tenant_agent_disabled_denies():
     agent_policy.set_tenant_agent_disabled("t-off", True)
     res = _gate("read_platform_state", tenant="t-off")

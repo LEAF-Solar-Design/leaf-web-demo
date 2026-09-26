@@ -37,6 +37,170 @@ def test_postgres_authority_is_explicit_and_legacy_is_default(monkeypatch):
         agent_gate._using_postgres()
 
 
+@pytest.fixture
+def rate_reset_database(monkeypatch):
+    from types import SimpleNamespace
+
+    rows = {
+        ("agent_rate:low", "acme_corp:2026092601"): 10,
+        ("agent_rate:high", "acme_corp:2026092602"): 3,
+        ("agent_rate:low", "acmexcorp:2026092601"): 11,
+        ("agent_rate:low", "acme_corp_extra:2026092601"): 12,
+        ("agent_rate:low", "acme-corp:2026092601"): 13,
+        ("other", "acme_corp:2026092601"): 14,
+        ("other:agent_rate:low", "acme_corp:2026092601"): 15,
+    }
+    original = dict(rows)
+    calls = []
+    transactions = []
+    events = []
+    audit_connections = []
+    state = SimpleNamespace(fail_audit=False)
+    in_transaction = False
+
+    class Connection:
+        def execute(self, sql, params):
+            assert in_transaction
+            statement = " ".join(sql.split())
+            calls.append((statement, params))
+            if statement.startswith("DELETE FROM agent_rate_counters"):
+                assert "LIKE" not in statement.upper()
+                assert statement == (
+                    "DELETE FROM agent_rate_counters "
+                    "WHERE left(namespace, 11) = 'agent_rate:' "
+                    "AND split_part(counter_key, ':', 1) = %(tenant_id)s"
+                ), "unexpected DELETE predicate"
+                assert "acme_corp" not in statement
+                assert params == {"tenant_id": "acme_corp"}
+                removed = [key for key in rows if key[0].startswith("agent_rate:")
+                           and key[1].split(":", 1)[0] == params["tenant_id"]]
+                for key in removed:
+                    del rows[key]
+                return SimpleNamespace(rowcount=len(removed))
+            assert statement.startswith("INSERT INTO agent_gate_audit_events")
+            if state.fail_audit:
+                raise RuntimeError("audit unavailable")
+            events.append(dict(params["event"].obj))
+            return SimpleNamespace(rowcount=1)
+
+    conn = Connection()
+
+    class Database:
+        @staticmethod
+        def run_transaction(operation, **kwargs):
+            nonlocal in_transaction
+            assert kwargs == {"isolation": "serializable"}
+            transactions.append(kwargs)
+            before = dict(rows)
+            in_transaction = True
+            try:
+                return operation(conn)
+            except Exception:
+                rows.clear()
+                rows.update(before)
+                raise
+            finally:
+                in_transaction = False
+
+    real_audit = agent_pg_store._append_audit_in_transaction
+
+    def audit(connection, event):
+        assert in_transaction and connection is conn
+        audit_connections.append(connection)
+        real_audit(connection, event)
+
+    monkeypatch.setattr(agent_pg_store, "_load_platform", lambda: (Database, None))
+    monkeypatch.setattr(agent_pg_store, "_append_audit_in_transaction", audit)
+    state.rows = rows
+    state.original = original
+    state.calls = calls
+    state.transactions = transactions
+    state.events = events
+    state.audit_connections = audit_connections
+    state.conn = conn
+    return state
+
+
+def test_postgres_reset_tenant_rate_deletes_only_that_tenant_without_like(rate_reset_database):
+    database = rate_reset_database
+    rows, original = database.rows, database.original
+    calls, transactions = database.calls, database.transactions
+    events, audit_connections = database.events, database.audit_connections
+    conn = database.conn
+    database.fail_audit = True
+    with pytest.raises(RuntimeError, match="audit unavailable"):
+        agent_pg_store.reset_tenant_rate("acme_corp", by="operator")
+    assert rows == original
+    assert events == []
+    database.fail_audit = False
+    calls.clear()
+    transactions.clear()
+    audit_connections.clear()
+    result = agent_pg_store.reset_tenant_rate("acme_corp", by="operator")
+    assert result == {"tenant_id": "acme_corp", "store": "postgres", "removed_rows": 2}
+    assert rows == {key: value for key, value in original.items()
+                    if key not in (("agent_rate:low", "acme_corp:2026092601"),
+                                   ("agent_rate:high", "acme_corp:2026092602"))}
+    assert len(transactions) == 1
+    assert len(calls) == 2
+    assert audit_connections == [conn]
+    assert events == [dict(result, kind="rate_reset", by="operator")]
+    assert agent_pg_store.reset_tenant_rate("acme_corp", by="operator")["removed_rows"] == 0
+    assert len(events) == 2
+    assert events[1] == dict(result, removed_rows=0, kind="rate_reset", by="operator")
+
+
+def test_postgres_reset_tenant_rate_refuses_any_other_delete_predicate(
+    rate_reset_database, monkeypatch,
+):
+    database = rate_reset_database
+    monkeypatch.setattr(
+        agent_pg_store, "_RESET_TENANT_RATE_SQL",
+        agent_pg_store._RESET_TENANT_RATE_SQL + " OR TRUE",
+    )
+    with pytest.raises(AssertionError, match="unexpected DELETE predicate"):
+        agent_pg_store.reset_tenant_rate("acme_corp", by="operator")
+    assert database.rows == database.original
+    assert database.rows[("agent_rate:low", "acmexcorp:2026092601")] == 11
+    assert database.events == []
+    assert len(database.calls) == 1
+    assert database.calls[0][0].endswith(" OR TRUE")
+
+
+def test_reset_tenant_rate_state_routes_to_postgres_store_in_postgres_mode(tmp_path, monkeypatch):
+    path = tmp_path / "rate.json"
+    path.write_bytes(b"{corrupt legacy snapshot}")
+    monkeypatch.setenv("LEAF_AGENT_STORE", "postgres")
+    monkeypatch.setenv("LEAF_AGENT_RATE_FILE", str(path))
+    calls = []
+    result = {"tenant_id": "acme_corp", "store": "postgres", "removed_rows": 4}
+
+    def reset(tenant_id, *, by):
+        calls.append((tenant_id, by))
+        return result
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("postgres reset must not use legacy state or append a second audit")
+
+    monkeypatch.setattr(agent_pg_store, "reset_tenant_rate", reset)
+    monkeypatch.setattr(agent_gate, "rate_file", forbidden)
+    monkeypatch.setattr(agent_gate, "_snapshot_lock", forbidden)
+    monkeypatch.setattr(agent_gate, "_read_rate_snapshot", forbidden)
+    monkeypatch.setattr(agent_gate, "_audit_append", forbidden)
+    monkeypatch.setattr(agent_gate, "_state_lock", None)
+    for tenant in ("Acme Corp", "", "../x", 123):
+        with pytest.raises(ValueError):
+            agent_gate.reset_tenant_rate_state(tenant, by="operator")
+    for by in ("", None, "x" * 201):
+        with pytest.raises(ValueError):
+            agent_gate.reset_tenant_rate_state("acme_corp", by=by)
+    assert calls == []
+    assert agent_gate.reset_tenant_rate_state("acme_corp", by="operator") is result
+    assert calls == [("acme_corp", "operator")]
+    assert path.read_bytes() == b"{corrupt legacy snapshot}"
+    assert list(tmp_path.iterdir()) == [path]
+
+
 def test_agent_migration_covers_every_shared_authority():
     sql = (PROJECT_ROOT / "platform" / "migrations" /
            "0013_agent_state.sql").read_text(encoding="utf-8")
