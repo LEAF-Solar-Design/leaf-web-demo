@@ -521,7 +521,11 @@ export function reasonlessDisabled(src, mapsByName = new Map()) {
 // resolvable PROFILE_REASONS branches: shipReceipts and approvedRevision.
 // ribbonClusters.test.js J2 rows 10-12 pin rejection, verbatim values and the
 // runtime phase/setup-state vocabulary for both guarded sites.
-const UNVERIFIABLE_REASON_BUDGET = 21
+// solar-ui-rail (receipt): 21 -> 22 for solarRailTools in web/src/lib/ribbonClusters.js.
+// Its one tool record combines the existing transient ladder with server
+// availability sentences. The solar-ui-rail cases in ribbonClusters.test.js
+// pin priority, missing readiness, ordered refusal codes and unknown codes.
+const UNVERIFIABLE_REASON_BUDGET = 22
 
 /**
  * Whether an "unverifiable reason expressions" count holds against its

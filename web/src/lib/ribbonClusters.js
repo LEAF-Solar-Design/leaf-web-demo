@@ -25,6 +25,7 @@ import { iosSourceApprovalState } from '../site/iosShipReadiness.js'
 import { RIBBON_TABS } from '../site/CockpitTopBand.jsx'
 import { DEFERRED_REASONS, REASONS, forCluster, ribbonTool } from './actionRegistry.js'
 import { DEFAULT_TOOL_ICON, isWriteTool, toolIcon, toolMcpSource, toolPlacementSize, toolPlacementTab } from './toolRecord.js'
+import { solarFormKeys, solarView } from '../solar/solarView.js'
 
 // The reason vocabulary moved to the action registry with slice 10a, because
 // `when(ctx)` is the registry's half of the honesty contract this file's header
@@ -38,6 +39,43 @@ export const ZOOM_OUT = 0.8
 // A drawing can carry hundreds of layers; the ribbon is a strip, not a
 // palette. Past this the cluster says how many more live in the pane.
 export const MAX_LAYER_TOOLS = 10
+
+export const SOLAR_REFUSAL_REASONS = Object.freeze({
+  entitlement_required: 'Your plan does not include this solar tool',
+  entitlement_policy_unavailable: 'The plan policy could not be read, so this tool stays off',
+  broker_adapter_unavailable: 'No engine runs this solar tool yet',
+  drawing_context_required: 'Open a drawing to use this solar tool',
+  invalid_drawing_context: 'The open drawing context is not valid for solar tools',
+  persisted_graph_unavailable: 'This drawing has no saved solar design yet',
+  graph_seed_required: 'Start the solar design with Solar settings first',
+  not_current_head: 'Open the latest drawing version to start a solar design',
+  seed_project_scope_unsupported: 'A project drawing cannot start a solar design yet',
+  invalid_seed_request: 'The solar design start request is not valid',
+  graph_already_embedded: 'This drawing already carries a solar design',
+  unresolved_units: 'Set the drawing units in Solar settings first',
+  strings_required: 'Create strings before correcting one',
+  valid_settings_required: 'Complete valid Solar settings first',
+  sizing_confirmation_required: 'Confirm the string sizing first',
+  sized_panel_groups_required: 'Create sized panel groups first',
+  valid_strings_required: 'Solve valid strings first',
+  equipment_assignment_required: 'Assign inverter equipment first',
+  complete_routing_required: 'Route every homerun first',
+  capability_availability_unavailable: 'Tool readiness has not loaded for this drawing',
+  capability_not_ready: 'This solar tool is not ready for this drawing',
+  unlisted: 'The server refused this solar tool',
+})
+
+export function solarRailReason(availability) {
+  if (!availability || typeof availability !== 'object' || Array.isArray(availability)) {
+    return SOLAR_REFUSAL_REASONS.capability_availability_unavailable
+  }
+  if (['entitled', 'engine_ready', 'input_ready', 'implemented'].every((key) => availability[key] === true)) return ''
+  const codes = availability.refusal_reasons
+  if (!Array.isArray(codes) || codes.length === 0) return SOLAR_REFUSAL_REASONS.capability_not_ready
+  return codes.map((code) => Object.hasOwn(SOLAR_REFUSAL_REASONS, code)
+    ? SOLAR_REFUSAL_REASONS[code]
+    : `${SOLAR_REFUSAL_REASONS.unlisted} (${code})`).join('; ')
+}
 
 // Every catalog tool used to be one hardcoded icon and one hardcoded size. The
 // record now answers both, and a record that answers neither renders exactly as
@@ -220,6 +258,58 @@ export function profileEntryTab(previousProfile, profile, selected, home) {
   return profile === 'solar' && previousProfile !== profile ? home : selected
 }
 
+function solarRailTools(rows, gate, { openName, onOpenForm }, onRun) {
+  const { running, previewing, writeLocked, writeEntitled, writeLockNote, engineDirty } = gate
+  return rows.map((row) => ({ row, result: solarView(row) }))
+    .filter(({ result }) => result.state !== 'absent')
+    .sort((a, b) => (a.result.view?.wave ?? Infinity) - (b.result.view?.wave ?? Infinity)
+      || (a.result.view?.order ?? Infinity) - (b.result.view?.order ?? Infinity)
+      || a.row.name.localeCompare(b.row.name))
+    .map(({ row, result }) => {
+      const isWrite = isWriteTool(row)
+      const locked = !!writeLocked && isWrite
+      const entBlocked = isWrite && !writeEntitled
+      const dirtyBlocked = isWrite && !!engineDirty
+      const mcpSource = toolMcpSource(row)
+      const reason = mcpSource
+        ? REASONS.mcpToolNotWired
+        : running
+          ? REASONS.running
+          : previewing
+            ? REASONS.previewing
+            : locked
+              ? (writeLockNote || REASONS.writeLocked)
+              : entBlocked
+                ? REASONS.writeUnentitled
+                : dirtyBlocked
+                  ? REASONS.unsavedEngineEdits
+                  : result.state === 'invalid'
+                    ? SOLAR_REFUSAL_REASONS.capability_availability_unavailable
+                    : solarRailReason(row.availability)
+      const formMode = result.view?.interaction.mode === 'form'
+      return {
+        id: row.name,
+        label: row.name,
+        text: row.label || row.name,
+        icon: toolIcon(row),
+        size: toolPlacementSize(row),
+        title: row.description || row.name,
+        write: isWrite,
+        disabled: !!reason,
+        reason,
+        expanded: formMode ? openName === row.name : undefined,
+        controls: formMode ? 'solar-tool-form' : undefined,
+        onClick: () => {
+          if (formMode && solarFormKeys(row, result.view).length > 0) {
+            onOpenForm(openName === row.name ? null : row)
+          } else {
+            onRun(row)
+          }
+        },
+      }
+    })
+}
+
 /** Tab strips for the shared workspace profiles; drafting keeps its caller's panels. */
 export function profileRibbonTabs(profile, ctx = {}) {
   const drafting = () => RIBBON_TABS.map((tab) => ({ ...tab, clusters: [] }))
@@ -244,6 +334,15 @@ export function profileRibbonTabs(profile, ctx = {}) {
   }
   if (profile === 'solar') {
     const onRun = profileHandler(context.onRun)
+    const solarRail = context.solarRail ? profileRecord(context.solarRail) : null
+    const railFamilies = (Array.isArray(solarRail?.families) ? solarRail.families : [])
+      .filter((family) => family && typeof family === 'object' && !Array.isArray(family))
+      .map((family) => ({
+        ...family,
+        family_id: typeof family.family_id === 'string' ? family.family_id : family.id,
+        capabilities: (Array.isArray(family.capabilities) ? family.capabilities : [])
+          .filter((row) => row && typeof row === 'object' && !Array.isArray(row) && typeof row.name === 'string' && row.name.trim()),
+      }))
     const gate = {
       ...catalogOptions,
       writeEntitled: catalogOptions.writeEntitled ?? true,
@@ -251,6 +350,14 @@ export function profileRibbonTabs(profile, ctx = {}) {
     }
     const familyTools = (id) => {
       const family = families.find((item) => item.family_id === id)
+      if (solarRail) {
+        const source = railFamilies.find((item) => item.family_id === id) || family
+        if (!source?.capabilities.length) return null
+        return [
+          ...solarRailTools(source.capabilities, gate, solarRail, onRun),
+          ...familyCluster(source, source.capabilities.filter((row) => solarView(row).state === 'absent'), gate, null).tools,
+        ]
+      }
       return family?.capabilities.length ? familyCluster(family, family.capabilities, gate, null).tools : null
     }
     // An absent or empty family is ONE honest disabled tool, never a fabricated command.
@@ -280,10 +387,16 @@ export function profileRibbonTabs(profile, ctx = {}) {
       profileGroup('placement', 'Equipment placement', placement),
       profileGroup('measurement', 'Measure', measurement),
       profileGroup('selection', 'Select', [
-        ...selection,
+        ...(solarRail ? [] : selection),
         { ...profileBase('solar-clear-selection', 'Clear selection'), icon: 'delete',
           disabled: !context.selectedHandle || !onClear, reason: 'Select an entity first', onClick: onClear ?? undefined },
+        ...(solarRail ? selection : []),
       ]),
+      ...(solarRail ? railFamilies
+        .filter((family) => !['stringing', 'placement', 'measurement', 'selection'].includes(family.family_id))
+        .map((family) => profileGroup(`solar-rail:${family.family_id}`, family.label,
+          solarRailTools(family.capabilities, gate, solarRail, onRun)))
+        .filter((cluster) => cluster.tools.length > 0) : []),
     ] })
     return tabs
   }

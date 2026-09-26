@@ -33,6 +33,182 @@ import {
   viewCluster,
 } from './ribbonClusters.js'
 
+describe('solar-ui-rail', () => {
+  const ready = { entitled: true, implemented: true, input_ready: true, engine_ready: true, refusal_reasons: [] }
+  const solarRow = (name, overrides = {}) => ({
+    name, capabilities: ['drawing.write'],
+    params: { properties: { expected_rev: { type: 'integer' }, changes: { type: 'object' } } },
+    solar: { schema: 'leaf.solar-tool-view.v1', name, family: 'stringing', wave: 1, order: 10,
+      entitlement: 'run_write', interaction: { mode: 'form' } },
+    availability: ready,
+    ...overrides,
+  })
+  const familyOf = (rows) => ({ family_id: 'stringing', label: 'Stringing', capabilities: rows })
+  const project = (rows, { gate = {}, openName = null, onRun = vi.fn(), onOpenForm = vi.fn() } = {}) => {
+    const families = [familyOf(rows)]
+    return profileRibbonTabs('solar', { families, onRun, catalogOptions: gate,
+      solarRail: { families, openName, onOpenForm } })[1].clusters[1].tools
+  }
+
+  it('a null solarRail leaves the Solar tab byte-identical', () => {
+    const rows = [solarRow('solar-settings'), solarRow('solar-size-strings', {
+      availability: { ...ready, engine_ready: false, refusal_reasons: ['broker_adapter_unavailable'] },
+    })]
+    const plainRows = rows.map(({ solar, ...row }) => row)
+    const onRun = vi.fn()
+    const plainRun = vi.fn()
+    const plain = profileRibbonTabs('solar', { families: [familyOf(plainRows)], onRun: plainRun })
+    for (const options of [{ solarRail: null }, {}]) {
+      const tabs = profileRibbonTabs('solar', { families: [familyOf(rows)], onRun, ...options })
+      expect(JSON.stringify(tabs)).toBe(JSON.stringify(plain))
+      rows.forEach((row) => {
+        tabs[1].clusters[1].tools.find((tool) => tool.id === row.name).onClick()
+        expect(onRun).toHaveBeenLastCalledWith(row)
+      })
+    }
+    plainRows.forEach((row) => {
+      plain[1].clusters[1].tools.find((tool) => tool.id === row.name).onClick()
+      expect(plainRun).toHaveBeenLastCalledWith(row)
+    })
+    expect(onRun).toHaveBeenCalledTimes(4)
+    expect(plainRun).toHaveBeenCalledTimes(2)
+  })
+
+  it('a solar row names its own refusal from availability', () => {
+    const settings = solarRow('solar-settings')
+    const size = solarRow('solar-size-strings', {
+      availability: { ...ready, engine_ready: false, refusal_reasons: ['broker_adapter_unavailable'] },
+    })
+    size.solar = { ...size.solar, order: 20 }
+    const tools = project([{ name: 'string-autofill-opt' }, size, settings])
+    expect(tools.map((tool) => tool.id)).toEqual(['solar-strings', 'solar-settings', 'solar-size-strings', 'string-autofill-opt'])
+    expect(tools[1]).toMatchObject({ disabled: false, reason: '' })
+    expect(tools[2]).toMatchObject({ disabled: true, reason: 'No engine runs this solar tool yet' })
+    const ordered = solarRow('ordered-refusal', {
+      availability: { ...ready, input_ready: false, refusal_reasons: ['valid_settings_required', 'entitlement_required'] },
+    })
+    expect(project([ordered])[1].reason).toBe('Complete valid Solar settings first; Your plan does not include this solar tool')
+    for (const availability of [undefined, null, false, 'ready', []]) {
+      expect(project([solarRow('missing-readiness', { availability })])[1])
+        .toMatchObject({ disabled: true, reason: 'Tool readiness has not loaded for this drawing' })
+    }
+    for (const refusal_reasons of [[], null, 'not-an-array']) {
+      expect(project([solarRow('empty-refusal', { availability: { ...ready, input_ready: false, refusal_reasons } })])[1])
+        .toMatchObject({ disabled: true, reason: 'This solar tool is not ready for this drawing' })
+    }
+    expect(project([solarRow('invalid-view', { solar: { schema: 'x' } })])[1])
+      .toMatchObject({ disabled: true, reason: 'Tool readiness has not loaded for this drawing' })
+  })
+
+  it('transient gates keep the Draw catalog reason ahead of availability', () => {
+    const row = solarRow('solar-settings', {
+      availability: { ...ready, engine_ready: false, refusal_reasons: ['broker_adapter_unavailable'] },
+    })
+    for (const [gate, expected] of [
+      [{ running: true, previewing: true, writeLocked: true, writeEntitled: false, engineDirty: true }, REASONS.running],
+      [{ previewing: true, writeLocked: true, writeEntitled: false, engineDirty: true }, REASONS.previewing],
+      [{ writeLocked: true, writeEntitled: false, engineDirty: true }, REASONS.writeLocked],
+      [{ writeLocked: true, writeLockNote: 'Held by another editor', writeEntitled: false }, 'Held by another editor'],
+      [{ writeEntitled: false, engineDirty: true }, REASONS.writeUnentitled],
+      [{ engineDirty: true }, REASONS.unsavedEngineEdits],
+    ]) {
+      const tool = project([row], { gate })[1]
+      expect(tool.disabled).toBe(true)
+      expect(tool.reason).toBe(expected)
+      expect(tool.reason).toBe(catalogClusters([familyOf([row])], gate)[0].tools[0].reason)
+    }
+    const mcp = { ...row, mcp_source: { server_id: 'abcdef0123456789abcdef01', tool: 'list-items' } }
+    expect(project([mcp], { gate: { running: true } })[1])
+      .toMatchObject({ disabled: true, reason: REASONS.mcpToolNotWired })
+    const readyRow = solarRow('solar-settings')
+    expect(project([readyRow], { gate: { running: true } })[1].reason).toBe(REASONS.running)
+    expect(project([readyRow], { gate: { writeEntitled: false } })[1].reason).toBe(REASONS.writeUnentitled)
+  })
+
+  it('an unlisted refusal code is named, never dropped', () => {
+    const row = solarRow('future-refusal', {
+      availability: { ...ready, input_ready: false, refusal_reasons: ['constructor'] },
+    })
+    expect(project([row])[1]).toMatchObject({ disabled: true, reason: 'The server refused this solar tool (constructor)' })
+  })
+
+  it('solar rows sort by wave, order and name inside their C-04B seat', () => {
+    const rows = [solarRow('wave-two'), solarRow('later'), solarRow('beta'), solarRow('alpha')]
+    rows[0].solar = { ...rows[0].solar, wave: 2, order: 0 }
+    rows[1].solar = { ...rows[1].solar, order: 20 }
+    const plain = [{ name: 'plain-z' }, { name: 'plain-a' }]
+    for (const family_id of ['stringing', 'placement', 'measurement', 'selection']) {
+      const familyRows = rows.map((row) => ({ ...row, solar: { ...row.solar, family: family_id } }))
+      const families = [{ family_id, label: family_id, capabilities: [plain[0], ...familyRows, plain[1]] }]
+      const onRun = vi.fn()
+      const tab = profileRibbonTabs('solar', { families, onRun, solarRail: { families, onOpenForm: vi.fn() } })[1]
+      const tools = tab.clusters.find((cluster) => cluster.id === family_id).tools
+      const local = family_id === 'stringing' ? ['solar-strings'] : family_id === 'selection' ? ['solar-clear-selection'] : []
+      expect(tools.map((tool) => tool.id)).toEqual([...local, 'alpha', 'beta', 'later', 'wave-two', 'plain-z', 'plain-a'])
+      for (const row of plain) {
+        const tool = tools.find((item) => item.id === row.name)
+        const original = catalogClusters([{ ...families[0], capabilities: plain }])[0].tools.find((item) => item.id === row.name)
+        expect(JSON.stringify(tool)).toBe(JSON.stringify(original))
+        tool.onClick()
+        expect(onRun).toHaveBeenLastCalledWith(row)
+      }
+      expect(tab.clusters.map((cluster) => cluster.id)).toEqual(['solar-panels', 'stringing', 'placement', 'measurement', 'selection'])
+    }
+  })
+
+  it('a family without a C-04B seat appends one cluster after Select', () => {
+    const row = solarRow('equipment-extra')
+    row.solar = { ...row.solar, family: 'equipment' }
+    const stringing = familyOf([solarRow('solar-settings')])
+    const equipment = { family_id: 'equipment', label: 'Equipment', capabilities: [row] }
+    const ctx = { families: [stringing], solarRail: { families: [stringing, equipment], onOpenForm: vi.fn() } }
+    const clusters = profileRibbonTabs('solar', ctx)[1].clusters
+    expect(clusters.map((cluster) => cluster.id))
+      .toEqual(['solar-panels', 'stringing', 'placement', 'measurement', 'selection', 'solar-rail:equipment'])
+    expect(clusters[5]).toMatchObject({ label: 'Equipment', kind: 'group' })
+    expect(clusters[5].tools.map((tool) => tool.id)).toEqual(['equipment-extra'])
+    expect(clusters.filter((cluster) => cluster.id === 'stringing')).toHaveLength(1)
+    expect(clusters.some((cluster) => cluster.id === 'solar-rail:stringing')).toBe(false)
+    const later = solarRow('later-extra')
+    later.solar = { ...later.solar, family: 'later-family' }
+    ctx.solarRail.families.push({ family_id: 'later-family', label: 'Later family', capabilities: [later] })
+    expect(profileRibbonTabs('solar', ctx)[1].clusters.slice(5).map((cluster) => cluster.id))
+      .toEqual(['solar-rail:equipment', 'solar-rail:later-family'])
+  })
+
+  it('a form tool with visible params opens the form, others arm directly', () => {
+    const row = solarRow('solar-settings')
+    const onOpenForm = vi.fn()
+    const onRun = vi.fn()
+    const closed = project([row], { onOpenForm, onRun })[1]
+    expect(closed).toMatchObject({ expanded: false, controls: 'solar-tool-form' })
+    closed.onClick()
+    expect(onOpenForm).toHaveBeenLastCalledWith(row)
+    expect(onRun).not.toHaveBeenCalled()
+    const open = project([row], { onOpenForm, onRun, openName: row.name })[1]
+    expect(open.expanded).toBe(true)
+    open.onClick()
+    expect(onOpenForm).toHaveBeenLastCalledWith(null)
+    onOpenForm.mockClear()
+    const drawingOnly = solarRow('drawing-only', { params: { properties: { drawing_id: { type: 'string' } } } })
+    const none = solarRow('no-form')
+    none.solar = { ...none.solar, interaction: { mode: 'none' } }
+    const pick = solarRow('pick-mode')
+    pick.solar = { ...pick.solar, interaction: { mode: 'pick' } }
+    for (const tool of [drawingOnly, none, pick]) {
+      const projected = project([tool], { onOpenForm, onRun })[1]
+      projected.onClick()
+      expect(onRun).toHaveBeenLastCalledWith(tool)
+      if (tool !== drawingOnly) {
+        expect(projected.expanded).toBeUndefined()
+        expect(projected.controls).toBeUndefined()
+      }
+    }
+    expect(onRun).toHaveBeenCalledTimes(3)
+    expect(onOpenForm).not.toHaveBeenCalled()
+  })
+})
+
 const approvalSources = ['a', 'b', 'c'].map((letter) => ({ source_revision: letter.repeat(40) }))
 const approvalShip = (overrides = {}) => ({ controllerLive: true, revision: 'r1', canApprove: true,
   sources: approvalSources, approvals: [], approve: vi.fn(), ...overrides })
