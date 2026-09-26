@@ -47,6 +47,11 @@ function mountUnbound() {
   return render(<LeafPlatformScene />)
 }
 
+function expectStudioRecovery() {
+  expect(screen.getByRole('link', { name: 'Open Leaf Automation Studio' }).getAttribute('href')).toBe('/app')
+  expect(screen.getByText(/Then run LEAFPLATFORM again in AutoCAD to come back\./)).toBeTruthy()
+}
+
 describe('AutoCAD palette scene in Studio', () => {
   it('explains how to open the palette when WebView is unavailable', () => {
     render(<LeafPlatformScene />)
@@ -90,9 +95,11 @@ describe('AutoCAD palette scene in Studio', () => {
     setBridgeState({ ...state, bindingResult: 'Waiting for confirmation in AutoCAD.' })
     expect(screen.getByText('Waiting for confirmation in AutoCAD.')).toBeTruthy()
     expect(connect.disabled).toBe(true)
+    screen.getByRole('heading', { level: 1 }).focus()
     setBridgeState({ ...state, bindingResult: 'DWG connection was not changed (cancelled).' })
     expect(screen.getByText('DWG connection was not changed (cancelled).')).toBeTruthy()
     expect(connect.disabled).toBe(false)
+    expect(document.activeElement).toBe(connect)
     expect(document.body.innerHTML).not.toContain(sessionKey)
   })
 
@@ -107,6 +114,95 @@ describe('AutoCAD palette scene in Studio', () => {
     const picker = await screen.findByLabelText('Drawing version')
     expect(picker.options.length).toBe(2)
     expect(picker.options[1].value).toBe(versionId)
+  })
+
+  it.each([
+    ['Roof plan', '2026-09-25T12:34:56Z', 'Roof plan, 2026-09-25'],
+    ['Roof plan', undefined, 'Roof plan'],
+    [undefined, '2026-09-25T12:34:56Z', 'Drawing 33333333, 2026-09-25'],
+    [undefined, undefined, 'Drawing 33333333'],
+    [42, 'invalid-date', 'Drawing 33333333'],
+    ['', null, 'Drawing 33333333'],
+  ])('labels versions with drawing name %s and date %s', async (name, created_at, label) => {
+    openProject.mockResolvedValue({
+      drawing_versions: [{ ...version, created_at }],
+      drawing_artifacts: [{ drawing_id: projectId, name: 'Other drawing' }, { drawing_id: drawingId, name }],
+    })
+    mountUnbound()
+    fireEvent.change(await screen.findByLabelText('Project'), { target: { value: projectId } })
+    const picker = await screen.findByLabelText('Drawing version')
+    expect(picker.options[1].textContent).toBe(`Version 3: ${label}`)
+    expect(picker.options[1].value).toBe(versionId)
+  })
+
+  it.each([
+    ['Roof project', 'Roof plan', 'Roof project / Roof plan'],
+    [null, null, 'Untitled project / Drawing 33333333'],
+  ])('summarizes the chosen connection with project %s and drawing %s', async (name, drawing, summary) => {
+    listProjects.mockResolvedValue([{ project_id: projectId, name }])
+    openProject.mockResolvedValue({ drawing_versions: [version], drawing_artifacts: [{ drawing_id: drawingId, name: drawing }] })
+    mountUnbound()
+    fireEvent.change(await screen.findByLabelText('Project'), { target: { value: projectId } })
+    const picker = await screen.findByLabelText('Drawing version')
+    expect(screen.queryByText(/You cannot change this from the palette later/)).toBeNull()
+    fireEvent.change(picker, { target: { value: versionId } })
+    const text = screen.getByText(`Connect this DWG to ${summary} / Version 3. You cannot change this from the palette later.`)
+    expect(text.nextElementSibling).toBe(screen.getByRole('button', { name: 'Connect drawing' }))
+    fireEvent.change(picker, { target: { value: '' } })
+    expect(screen.queryByText(/You cannot change this from the palette later/)).toBeNull()
+  })
+
+  it('loads the bound drawing identity once and does not move focus for selection or catalog updates', async () => {
+    let finish
+    openProject.mockImplementation(() => new Promise((resolve) => { finish = resolve }))
+    state = { status: 'connected', ready, selectedObjectId: 'panel:A1' }
+    render(<LeafPlatformScene />)
+    const select = screen.getByRole('button', { name: 'Select' })
+    select.focus()
+    await screen.findByText('Connected to Roof project.', { selector: 'section p' })
+    expect(document.activeElement).toBe(select)
+    await act(async () => { finish({
+      drawing_versions: [{ ...version, version_id: orgId, seq: 9 }, version],
+      drawing_artifacts: [{ drawing_id: drawingId, name: 'Roof plan' }],
+    }) })
+    expect(screen.getByText('Roof plan, Version 3')).toBeTruthy()
+    expect(document.activeElement).toBe(select)
+    setBridgeState({ ...state, ready: { ...ready }, selectedObjectId: 'panel:A2' })
+    await act(async () => {})
+    expect(document.activeElement).toBe(select)
+    expect(openProject).toHaveBeenCalledTimes(1)
+    expect(openProject).toHaveBeenCalledWith(projectId, orgId)
+  })
+
+  it.each(['failure', 'missing'])('omits the bound version line quietly on %s', async (result) => {
+    if (result === 'failure') openProject.mockRejectedValue(new Error('private catalog error'))
+    else openProject.mockResolvedValue({ drawing_versions: [{ ...version, version_id: orgId }] })
+    state = { status: 'connected', ready, selectedObjectId: null }
+    render(<LeafPlatformScene />)
+    await act(async () => {})
+    expect(screen.queryByText(/, Version/)).toBeNull()
+    expect(screen.getByRole('status').textContent).toBe('DWG connected.')
+    expect(document.body.textContent).not.toContain('private catalog error')
+  })
+
+  it('focuses the heading only after a user-initiated bind becomes connected', async () => {
+    mountUnbound()
+    const region = screen.getByRole('status')
+    fireEvent.change(await screen.findByLabelText('Project'), { target: { value: projectId } })
+    fireEvent.change(await screen.findByLabelText('Drawing version'), { target: { value: versionId } })
+    const heading = screen.getByRole('heading', { level: 1 })
+    expect(heading.getAttribute('tabindex')).toBe('-1')
+    fireEvent.click(screen.getByRole('button', { name: 'Connect drawing' }))
+    await act(async () => {})
+    setBridgeState({ ...state, bindingResult: 'DWG connected. Starting the signed cross-probe session.' })
+    expect(document.activeElement).not.toBe(heading)
+    setBridgeState({ status: 'connected', ready, selectedObjectId: null })
+    expect(document.activeElement).toBe(heading)
+    await act(async () => {})
+    expect(document.activeElement).toBe(heading)
+    expect(screen.getAllByText('Connected to Roof project.')).toHaveLength(1)
+    expect(screen.getByRole('status')).toBe(region)
+    expect(region.textContent).toBe('DWG connected.')
   })
 
   it('disables selection actions until an object is selected', async () => {
@@ -149,6 +245,8 @@ describe('AutoCAD palette scene in Studio', () => {
     state = { status: 'connected', ready: { ...ready, platformTenantId: projectId }, selectedObjectId: 'panel:A1' }
     render(<LeafPlatformScene />)
     expect(screen.getByText(/belongs to another workspace/)).toBeTruthy()
+    expectStudioRecovery()
+    expect(openProject).not.toHaveBeenCalled()
     expect(screen.queryByRole('button')).toBeNull()
     expect(document.body.innerHTML).not.toContain(sessionKey)
   })
@@ -166,6 +264,7 @@ describe('AutoCAD palette scene in Studio', () => {
     await waitFor(() => expect(login).toHaveBeenCalledTimes(1))
     expect(listProjects).not.toHaveBeenCalled()
     expect(bridge.focusObject).not.toHaveBeenCalled()
+    expect(openProject).not.toHaveBeenCalled()
     expect(document.body.innerHTML).not.toContain(sessionKey)
   })
 
@@ -174,6 +273,8 @@ describe('AutoCAD palette scene in Studio', () => {
     state = { status: 'connected', ready, selectedObjectId: 'panel:A1' }
     render(<LeafPlatformScene />)
     expect(screen.getByText('Choose a workspace in Studio, then reopen this palette.')).toBeTruthy()
+    expectStudioRecovery()
+    expect(openProject).not.toHaveBeenCalled()
     expect(screen.queryByText(/belongs to another workspace/)).toBeNull()
     expect(screen.queryByRole('button')).toBeNull()
     expect(listProjects).not.toHaveBeenCalled()
@@ -185,7 +286,8 @@ describe('AutoCAD palette scene in Studio', () => {
     render(<LeafPlatformScene />)
     expect(await screen.findByText('Connected to Roof project.', { selector: 'section p' })).toBeTruthy()
     expect(listProjects).toHaveBeenCalledWith(orgId)
-    expect(openProject).not.toHaveBeenCalled()
+    expect(openProject).toHaveBeenCalledTimes(1)
+    expect(openProject).toHaveBeenCalledWith(projectId, orgId)
     expect(document.body.innerHTML).not.toContain(sessionKey)
   })
 
@@ -203,6 +305,7 @@ describe('AutoCAD palette scene in Studio', () => {
     getStoredOrgId.mockReturnValue(null)
     mountUnbound()
     expect(screen.getByText(/Choose a workspace in Studio/)).toBeTruthy()
+    expectStudioRecovery()
     expect(listProjects).not.toHaveBeenCalled()
   })
 
@@ -210,6 +313,7 @@ describe('AutoCAD palette scene in Studio', () => {
     listProjects.mockResolvedValue(projects)
     mountUnbound()
     expect(await screen.findByText('This workspace has no projects yet.')).toBeTruthy()
+    expectStudioRecovery()
   })
 
   it('keeps API error details out of the palette', async () => {
@@ -224,6 +328,7 @@ describe('AutoCAD palette scene in Studio', () => {
     mountUnbound()
     fireEvent.change(await screen.findByLabelText('Project'), { target: { value: projectId } })
     expect(await screen.findByText(/no drawing versions available/)).toBeTruthy()
+    expectStudioRecovery()
   })
 
   it('handles version request failure without raw errors', async () => {
@@ -243,6 +348,7 @@ describe('AutoCAD palette scene in Studio', () => {
     expect(await screen.findByText(/drawing could not be connected/)).toBeTruthy()
     expect(screen.getByLabelText('Drawing version').value).toBe(versionId)
     expect(screen.getByRole('button', { name: 'Connect drawing' }).disabled).toBe(false)
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Connect drawing' }))
     expect(document.body.textContent).not.toContain('private host error')
   })
 
@@ -294,7 +400,7 @@ describe('AutoCAD palette scene in Studio', () => {
     setBridgeState({ status: 'connected', ready, selectedObjectId: null })
     await act(async () => { vi.advanceTimersByTime(10_000) })
     expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull()
-    expect(screen.getByRole('status').textContent).toBe('Connected to Roof project.')
+    expect(screen.getByRole('status').textContent).toBe('DWG connected.')
   })
 
   it('retries projects after a catalog error', async () => {
@@ -331,9 +437,11 @@ describe('AutoCAD palette scene in Studio', () => {
     await act(async () => { vi.advanceTimersByTime(59_999) })
     expect(screen.getByRole('button', { name: 'Connect drawing' }).disabled).toBe(true)
     expect(bridge.retryHello).not.toHaveBeenCalled()
+    screen.getByRole('heading', { level: 1 }).focus()
     await act(async () => { vi.advanceTimersByTime(1) })
     expect(screen.getByRole('status').textContent).toBe('AutoCAD did not answer. Look for a confirmation window in AutoCAD, then try again.')
     expect(screen.getByRole('button', { name: 'Connect drawing' }).disabled).toBe(false)
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Connect drawing' }))
     expect(screen.getByLabelText('Project').disabled).toBe(false)
     expect(screen.getByLabelText('Drawing version').value).toBe(versionId)
     expect(bridge.retryHello).toHaveBeenCalledTimes(1)
@@ -398,7 +506,8 @@ describe('AutoCAD palette scene in Studio', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Zoom to' }))
     await waitFor(() => expect(region.textContent).toBe('AutoCAD could not find those objects. Select them again in AutoCAD.'))
     expect(screen.getByText(connectionText)).toBe(connection)
-    expect(connection.nextElementSibling.textContent).toBe('Selected object: panel:A1')
+    expect(connection.nextElementSibling.textContent).toBe('Drawing 33333333, Version 3')
+    expect(connection.nextElementSibling.nextElementSibling.textContent).toBe('Selected object: panel:A1')
     expect(region).not.toBe(connection)
     for (const element of [connection, region]) {
       expect(element.hidden).toBe(false)
