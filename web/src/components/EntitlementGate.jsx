@@ -29,14 +29,10 @@ import { START_BOARD_COPY } from '../site/startBoardCopy.js'
 // says what the switch does not touch, because a toggle that silently also
 // governed crash reporting would be the same lie in the other direction.
 //
-// PRESENT TENSE, deliberately: no usage emitter exists in the tree yet (grep
-// trackUsage across web/src and only telemetry.js and its own specs answer),
-// so copy reading "Share how you use the studio" would promise a viewer who
-// turns this on that something starts flowing today. It does not. The switch
-// is the permission, and the permission is real now; the signals arrive with
-// the emitters slices 10-13 add.
+// The switch grants permission for menu picks, palette picks and searches.
+// Those emitters call trackUsage, so they share the existing consent gate.
 export const CONSENT_LABEL = 'Usage telemetry'
-export const CONSENT_COPY = 'Allow sharing how you use the studio (menu picks, searches) once those signals exist. Product events are unaffected.'
+export const CONSENT_COPY = 'Allow sharing how you use the studio (menu picks, palette picks, searches). Product events are unaffected.'
 
 // REASONS style: one sentence naming why the control cannot be used, never a
 // disabled control with no explanation. Exact-string tested — a reworded
