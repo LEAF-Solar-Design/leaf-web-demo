@@ -2796,9 +2796,10 @@ def _broker_run_request(req: Union[BrokerRunRequest, BrokerPlanRunRequest]) -> J
         "status": "unknown",
         "job_id": req.job_id,
     }
-    from product_capability_availability import is_cloud_proposal, is_local_graph_commit
+    from product_capability_availability import is_cloud_proposal, is_local_graph_commit, is_local_graph_read
     if (isinstance(req, BrokerRunRequest) and req.entity_scope is not None
-            and (is_local_graph_commit(tool) or req.file_only or req.test_source is not None)):
+            and (is_local_graph_commit(tool) or is_local_graph_read(tool)
+                 or req.file_only or req.test_source is not None)):
         env, status = _classified_bad_params(
             "entity_scope_mutation_unsupported",
             "Entity-scoped turns can only read or run supported drawing writes.",
@@ -2811,6 +2812,8 @@ def _broker_run_request(req: Union[BrokerRunRequest, BrokerPlanRunRequest]) -> J
         entry["aps_live"] = False
         entry["cloud_endpoint"] = "https://api.leafdesign.ai/api/ml/"
     if is_local_graph_commit(tool):
+        entry["aps_live"] = False
+    if is_local_graph_read(tool):
         entry["aps_live"] = False
     postgres_mode = _broker_store_mode() == "postgres"
     ledger_event_key = req.ledger_event_key or str(uuid.uuid4())
@@ -3220,7 +3223,7 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
                 tool=tool.get("name"),
             ), DEFAULT_HTTP_STATUS[ErrorCode.BAD_PARAMS])
 
-    from product_capability_availability import is_cloud_proposal, is_local_graph_commit
+    from product_capability_availability import is_cloud_proposal, is_local_graph_commit, is_local_graph_read
     cloud_proposal = is_cloud_proposal(tool)
     if cloud_proposal:
         with (SERVER_DIR / "catalog_tools.json").open(encoding="utf-8") as stream:
@@ -3240,6 +3243,15 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
                 "local_graph_commit_invalid", "local graph commit requires its trusted catalog capability",
                 tool=tool.get("name"))
 
+    local_read = is_local_graph_read(tool)
+    if local_read:
+        import solar_tools
+        canonical = solar_tools.trusted_record(tool.get("name"))
+        if canonical is None or tool != canonical or req.aps_live or req.test_source is not None or req.file_only:
+            return _classified_bad_params(
+                "local_graph_read_invalid", "local graph read requires its trusted catalog capability",
+                tool=tool.get("name"))
+
     # Phase 0 deployed-posture gate: tracked builtins and APS-only tools remain
     # available, but a tenant-controlled Python file cannot load in this
     # credential-bearing process unless authored execution is enabled AND a
@@ -3251,6 +3263,7 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
         _deployed_runtime()
         and not cloud_proposal
         and not local_graph  # The proven tracked record loads its packaged builtin by file path, never through the tenant repository.
+        and not local_read
         and not _is_blank_dwg_request(req, tool)
         and not is_trusted_builtin_tool(tool, req.tenant_id)
     ):
@@ -3394,7 +3407,7 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
     # so a tenant can't starve the shared worker pool with a large sleep in prod.
     # A local graph commit never honours the QA key, because its params are bound to the terminal proof.
     qa_sleep = None
-    if not local_graph:
+    if not local_graph and not local_read:
         qa_sleep = params.pop("_qa_sleep_s", None)
     if qa_sleep is not None and not _qa_hooks_enabled():
         qa_sleep = None
@@ -3418,6 +3431,37 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
             code = (env.get("error") or {}).get("error_code", ErrorCode.INTERNAL)
             return env, DEFAULT_HTTP_STATUS.get(code, 500)
         return env, 200
+
+    if local_read:
+        from solar_design_graph import GraphValidationError
+        from solar_local_read import run_local_graph_read
+
+        if not isinstance(req.job_id, str) or not req.job_id:
+            return _graph_commit_refused("JOB_IDENTITY_MISSING", tool=tool["name"])
+        if type(req.dwg_version) is not int or req.dwg_version < 1:
+            return _graph_commit_refused("INVALID_SOURCE_VERSION", tool=tool["name"])
+        if (not isinstance(req.dwg, str) or not req.dwg
+                or ("drawing_id" in params and params["drawing_id"] != req.dwg)):
+            return _graph_commit_refused("DRAWING_ID_CONFLICT", tool=tool["name"])
+        try:
+            _start_admitted_execution(req, admission, aps_submission=False)
+            try:
+                backend = write_loop.backend_for_tenant(req.tenant_id, aps_live=False, da=None)
+            except (RuntimeError, OSError):
+                env = err_envelope(ErrorCode.INTERNAL, "graph store unavailable",
+                                   retryable=True, tool=tool["name"])
+                env["error"]["reason_code"] = "GRAPH_STORE_UNAVAILABLE"
+                env["degraded_mode"] = False
+                return env, DEFAULT_HTTP_STATUS[ErrorCode.INTERNAL]
+            result = run_local_graph_read(
+                backend, req.tenant_id, tool["name"], params,
+                drawing_id=req.dwg, source_version=req.dwg_version, job_id=req.job_id)
+            env = ok_envelope(tool["name"], tool["version"], result, None,
+                              int((time.perf_counter() - t0) * 1000))
+            env["degraded_mode"] = False
+            return env, 200
+        except GraphValidationError as exc:
+            return _graph_commit_refused(exc.code, tool=tool["name"])
 
     if local_graph:
         import store

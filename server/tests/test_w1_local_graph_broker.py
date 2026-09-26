@@ -359,4 +359,4 @@ def test_qa_key_is_refused(enabled, monkeypatch, qa_hooks):
 
 def test_other_kinds_still_pop_qa_key():
     source = (SERVER / "broker.py").read_text(encoding="utf-8")
-    assert '    if not local_graph:\n        qa_sleep = params.pop("_qa_sleep_s", None)\n' in source
+    assert '    if not local_graph and not local_read:\n        qa_sleep = params.pop("_qa_sleep_s", None)\n' in source

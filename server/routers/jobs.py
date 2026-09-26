@@ -542,10 +542,31 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
     params = dict(tool.get("default_params", {}))
     params.update(req.params or {})
 
+    if (capability_catalog.is_local_graph_read(tool) and "drawing_id" in params
+            and (not isinstance(params["drawing_id"], str) or params["drawing_id"] != req.dwg)):
+        return JSONResponse(status_code=409, content=with_envelope_fields({
+            "error": error_obj(ErrorCode.BAD_PARAMS, "DRAWING_ID_CONFLICT", retryable=False),
+            "reason_code": "DRAWING_ID_CONFLICT",
+        }))
+
+    availability_version = req.dwg_version if req.dwg_version is not None else "head"
+    if capability_catalog.is_local_graph_read(tool) and req.dwg_version is None:
+        try:
+            backend = write_loop.backend_for_tenant(str(tenant_id), aps_live=False, da=None)
+            availability_version = _store().load_manifest(
+                backend, str(tenant_id), params.get("drawing_id") or req.dwg)["head"]
+            if type(availability_version) is not int or availability_version < 1:
+                raise ValueError()
+        except (KeyError, AttributeError, TypeError, ValueError, OSError, RecursionError, RuntimeError):
+            return JSONResponse(status_code=409, content=with_envelope_fields({
+                "error": error_obj(ErrorCode.BAD_PARAMS, "GRAPH_CONTEXT_UNAVAILABLE", retryable=False),
+                "reason_code": "GRAPH_CONTEXT_UNAVAILABLE",
+            }))
+
     from product_capability_availability import NO_SEED_REQUEST
     availability = entitlements.w1_tool_availability(
         tool, tenant_id, params.get("drawing_id") or req.dwg,
-        project_id=x_project_id, version=req.dwg_version if req.dwg_version is not None else "head",
+        project_id=x_project_id, version=availability_version,
         seed_request=params["initialize"] if "initialize" in params else NO_SEED_REQUEST)
     if availability is not None and not availability["runnable"]:
         return JSONResponse(status_code=409, content=with_envelope_fields({
@@ -556,7 +577,7 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
             "reason_code": availability["refusal_reasons"][0],
         }))
 
-    from product_capability_availability import is_cloud_proposal, is_local_graph_commit
+    from product_capability_availability import is_cloud_proposal, is_local_graph_commit, is_local_graph_read
     if is_cloud_proposal(tool):
         from leaf_cloud_client import validate_params as validate_cloud_params
         from leaf_cloud_grants import CloudError
@@ -570,7 +591,7 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
             return error_response(ErrorCode.BAD_PARAMS, exc.classification,
                                   retryable=False, status_code=400)
 
-    if is_local_graph_commit(tool):
+    if is_local_graph_commit(tool) or is_local_graph_read(tool):
         if "drawing_id" not in params:
             params["drawing_id"] = req.dwg
         elif not isinstance(params["drawing_id"], str) or params["drawing_id"] != req.dwg:
@@ -586,8 +607,11 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
     # (which names the intake source). Asking it means the capability is verified
     # against the drawing that will actually be published to.
     target_drawing_id = write_loop.target_drawing_id(params)
-    checkout_holder, checkout_fence = _checkout_identity(
-        tenant_id, target_drawing_id, x_checkout_capability)
+    if is_local_graph_read(tool):
+        checkout_holder, checkout_fence = _store().ANONYMOUS_HOLDER, None
+    else:
+        checkout_holder, checkout_fence = _checkout_identity(
+            tenant_id, target_drawing_id, x_checkout_capability)
 
     dwg_version = req.dwg_version
     if is_local_graph_commit(tool):
@@ -608,6 +632,9 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
                     "error": error_obj(ErrorCode.BAD_PARAMS, "GRAPH_CONTEXT_UNAVAILABLE", retryable=False),
                     "reason_code": "GRAPH_CONTEXT_UNAVAILABLE",
                 }))
+
+    if is_local_graph_read(tool):
+        dwg_version = availability_version
 
     aps_live_authorized = False
     try:
@@ -695,7 +722,7 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
                 ):
                     raise ValueError(
                         "effective catalog changed after approval; refresh tools and confirm again")
-                if is_local_graph_commit(tool):
+                if is_local_graph_commit(tool) or is_local_graph_read(tool):
                     try:
                         backend = write_loop.backend_for_tenant(str(tenant_id), aps_live=False, da=None)
                         current_head = _store().load_manifest(backend, str(tenant_id), target_drawing_id)["head"]
@@ -742,7 +769,7 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
                     deps.TOOL_SOURCE_OPERATOR_OWNED_ENGINE
                 ),
             )
-            if is_local_graph_commit(tool):
+            if is_local_graph_commit(tool) or is_local_graph_read(tool):
                 aps_live_authorized = False
             job_id = jobs.submit_job(
                 tenant_id, tool, params, req.dwg,

@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from typing import Any, Dict, Optional
 
 import requests
@@ -124,7 +125,7 @@ def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
     ``file_only`` and ``test_source`` are server-owned completion inputs. Omit
     them for ordinary requests to preserve their existing wire identity.
     """
-    from product_capability_availability import is_cloud_proposal, is_local_graph_commit
+    from product_capability_availability import is_cloud_proposal, is_local_graph_commit, is_local_graph_read
     if is_cloud_proposal(tool):
         from leaf_cloud_client import validate_params as validate_cloud_params
 
@@ -144,6 +145,13 @@ def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
             raise ValueError("local graph commit requires a job, a pinned version and a checkout")
         if params.get("drawing_id") != dwg:
             raise ValueError("local graph commit drawing id must equal the drawing")
+    if is_local_graph_read(tool):
+        if aps_live or file_only or test_source is not None:
+            raise ValueError("local graph read requires ordinary broker execution without APS")
+        if not job_id or type(dwg_version) is not int or dwg_version < 1:
+            raise ValueError("local graph read requires a job and a pinned version")
+        if params.get("drawing_id") != dwg:
+            raise ValueError("local graph read drawing id must equal the drawing")
     payload = {"tenant_id": tenant_id, "tool": tool, "params": params,
                   "dwg": dwg, "aps_live": bool(aps_live), "dwg_version": dwg_version,
                   "ledger_event_key": ledger_event_key,
@@ -188,6 +196,29 @@ def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
             elif ok is not False:
                 raise BrokerReceiptRejected()
             return body
+        if is_local_graph_read(tool):
+            status = getattr(resp, "status_code", None)
+            body = resp.json()
+            if not isinstance(body, dict):
+                raise BrokerReceiptRejected()
+            ok = body.get("ok")
+            if ok is True:
+                result = body.get("result")
+                if (type(status) is not int or not 200 <= status <= 299
+                        or not isinstance(result, dict)
+                        or result.get("schema_version") != "leaf.solar-graph-read.v1"
+                        or result.get("adapter") != "local-graph-read"
+                        or result.get("tenant_id") != tenant_id or result.get("job_id") != job_id
+                        or result.get("tool") != tool["name"]
+                        or type(result.get("source_version")) is not int
+                        or result["source_version"] != dwg_version
+                        or not isinstance(result.get("output"), dict)
+                        or not isinstance(result.get("output_sha256"), str)
+                        or re.fullmatch(r"[0-9a-f]{64}", result["output_sha256"]) is None):
+                    raise BrokerReceiptRejected()
+            elif ok is not False:
+                raise BrokerReceiptRejected()
+            return body
         return resp.json()
     except (requests.ConnectionError, requests.Timeout) as exc:
         if file_only:
@@ -195,6 +226,8 @@ def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
             raise BrokerUnreachable("file-only broker request unavailable", reason=reason) from None
         raise BrokerUnreachable(f"broker at {broker_url()} unreachable: {exc}") from exc
     except ValueError as exc:  # non-JSON body
+        if is_local_graph_read(tool):
+            raise BrokerReceiptRejected() from None
         if is_local_graph_commit(tool):
             raise BrokerReceiptRejected() from None
         if file_only:
