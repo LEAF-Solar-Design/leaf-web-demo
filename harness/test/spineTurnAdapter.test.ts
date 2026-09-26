@@ -109,6 +109,111 @@ describe("SpineTurnAdapter — wire vocabulary and gate discipline", () => {
     expect(runner.runs[0].userMessage).toContain("earlier question");
   });
 
+  it("wire context_packet reaches the model prompt with the wire drawing_id authoritative", async () => {
+    const { adapter, runner } = makeAdapter();
+    const context_packet = {
+      drawing_id: "untrusted-packet-drawing",
+      catalog: [{ name: "panel-count", capabilities: ["drawing.read"] }],
+      drawing: { id: "rooftop_demo", entity_total: 42 },
+      entitlements: { run_write: false },
+      classifier_hint: { lane: "run" },
+      prior_messages: [{ role: "user", text: "packet history must not win" }],
+    };
+    const messages: ConverseTurnInput["messages"] = [{ role: "user", text: "wire history" }];
+    await drain(adapter.runTurn(turnInput({ text: "hello", messages, context_packet })));
+    const prompt = runner.runs[0].userMessage;
+    const packet = JSON.parse(prompt.slice(prompt.indexOf("\n") + 1).split("\n\n=== USER MESSAGE ===")[0]);
+    expect(packet).toEqual({ ...context_packet, drawing_id: "rooftop_demo", prior_messages: messages });
+    expect(prompt).not.toContain("untrusted-packet-drawing");
+    expect(prompt).not.toContain("packet history must not win");
+    expect(context_packet.drawing_id).toBe("untrusted-packet-drawing");
+  });
+
+  it("context_packet string values are stripped of grant secrets before the model sees them", async () => {
+    const { adapter, runner } = makeAdapter();
+    const secret = "sk-ant-api03-FAKE-context-packet-secret-for-test";
+    const context_packet = {
+      label: `before ${secret} after`,
+      nested: { rows: [secret, { value: `nested ${secret}` }, 7, false, null] },
+      classifier_hint: { rationale: secret },
+      grant: { kind: "api_key", degraded: false },
+    };
+    await drain(adapter.runTurn(turnInput({
+      text: "hello",
+      context_packet,
+      credential_grant: { kind: "api_key", api_key: secret },
+    })));
+    const prompt = runner.runs[0].userMessage;
+    const packet = JSON.parse(prompt.slice(prompt.indexOf("\n") + 1).split("\n\n=== USER MESSAGE ===")[0]);
+    expect(prompt).not.toContain(secret);
+    expect(packet.label).toContain("before ");
+    expect(packet.label).toContain(" after");
+    expect(packet.nested.rows).toHaveLength(5);
+    expect(packet.nested.rows.slice(2)).toEqual([7, false, null]);
+    expect(packet.grant).toEqual({ kind: "api_key", degraded: false });
+    expect(context_packet.nested.rows[0]).toBe(secret);
+  });
+
+  it("a context_packet nested 3000 deep is scrubbed without a stack overflow", async () => {
+    const { adapter, runner } = makeAdapter();
+    const secret = "sk-ant-api03-FAKE-context-packet-deep-secret-for-test";
+    let nested: unknown = secret;
+    for (let depth = 0; depth < 3000; depth++) nested = [nested];
+    await drain(adapter.runTurn(turnInput({
+      text: "hello",
+      context_packet: { nested },
+      credential_grant: { kind: "api_key", api_key: secret },
+    })));
+    expect(runner.runs).toHaveLength(1);
+    const prompt = runner.runs[0].userMessage;
+    expect(prompt).not.toContain(secret);
+    const packet = JSON.parse(prompt.slice(prompt.indexOf("\n") + 1).split("\n\n=== USER MESSAGE ===")[0]);
+    let value = packet.nested;
+    for (let depth = 0; depth < 31; depth++) {
+      expect(Array.isArray(value)).toBe(true);
+      expect(value.length).toBe(1);
+      value = value[0];
+    }
+    expect(value).toBe("[context_packet truncated at depth 32]");
+  });
+
+  it("a context_packet nested 3000 deep without a grant secret is capped before the prompt", async () => {
+    const { adapter, runner } = makeAdapter({
+      oauth: new FakeOAuthGrantProvider({ kind: "oauth", oauthToken: "" }),
+    });
+    let nested: unknown = "x";
+    for (let depth = 0; depth < 3000; depth++) nested = [nested];
+    await drain(adapter.runTurn(turnInput({ text: "hello", context_packet: { nested } })));
+    expect(runner.runs).toHaveLength(1);
+    const prompt = runner.runs[0].userMessage;
+    const packet = JSON.parse(prompt.slice(prompt.indexOf("\n") + 1).split("\n\n=== USER MESSAGE ===")[0]);
+    let value = packet.nested;
+    for (let depth = 0; depth < 31; depth++) {
+      expect(Array.isArray(value)).toBe(true);
+      expect(value.length).toBe(1);
+      value = value[0];
+    }
+    expect(value).toBe("[context_packet truncated at depth 32]");
+  });
+
+  it("a context_packet at the boundary depth reaches the prompt unchanged", async () => {
+    const { adapter, runner } = makeAdapter();
+    let nested: unknown = "x";
+    for (let depth = 0; depth < 31; depth++) nested = [nested];
+    await drain(adapter.runTurn(turnInput({ text: "hello", context_packet: { nested } })));
+    expect(runner.runs).toHaveLength(1);
+    const prompt = runner.runs[0].userMessage;
+    const packet = JSON.parse(prompt.slice(prompt.indexOf("\n") + 1).split("\n\n=== USER MESSAGE ===")[0]);
+    let value = packet.nested;
+    for (let depth = 0; depth < 31; depth++) {
+      expect(Array.isArray(value)).toBe(true);
+      expect(value.length).toBe(1);
+      value = value[0];
+    }
+    expect(value).toBe("x");
+    expect(prompt).not.toContain("[context_packet truncated at depth 32]");
+  });
+
   it("a resumed turn keeps bounded visible history ready for stale-session recovery", async () => {
     const { adapter, runner } = makeAdapter();
     await drain(adapter.runTurn(turnInput({ text: "first turn" })));

@@ -155,6 +155,46 @@ class _FakeResp:
     def json(self):
         return self._body
 
+    def iter_content(self, chunk_size):
+        yield json.dumps(self._body).encode("utf-8")
+
+    def close(self):
+        pass
+
+
+def test_build_packet_entitlements_override_skips_tier_resolution(monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("an entitlement override must skip principal resolution")
+
+    monkeypatch.setattr(context_packet.entitlements, "resolve_tier", forbidden)
+    monkeypatch.setattr(context_packet.entitlements, "resolve_roles", forbidden)
+    for override in ({"converse": True, "run_write": False}, {}):
+        packet = _build(monkeypatch, _tools(1), entitlements_override=override)
+        assert packet["entitlements"] == override
+        assert packet["entitlements"] is not override
+
+
+def test_build_packet_grant_timeout_is_forwarded(monkeypatch):
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://harness.test")
+    calls = []
+
+    def get(url, **kwargs):
+        calls.append((url, kwargs))
+        return _FakeResp({"linked": True, "kind": "oauth"})
+
+    monkeypatch.setattr("requests.get", get)
+    assert _build(monkeypatch, [], grant_timeout_s=2.0)["grant"] == {
+        "kind": "oauth", "degraded": False,
+    }
+    _build(monkeypatch, [])
+    assert len(calls) == 2
+    for (url, kwargs), grant_timeout_s in zip(calls, (2.0, 10.0)):
+        assert url == f"http://harness.test/grants/{TENANT}"
+        assert kwargs["stream"] is True
+        timeout = kwargs["timeout"]
+        assert isinstance(timeout, tuple) and len(timeout) == 2
+        assert all(0 < part <= grant_timeout_s for part in timeout)
+
 
 def test_grant_projection_never_carries_token(monkeypatch):
     monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://harness.test")
@@ -297,6 +337,78 @@ def test_active_jobs_list_present_and_capped_shape(monkeypatch):
     p = _build(monkeypatch, _tools(3))
     assert isinstance(p["active_jobs"], list)
     assert len(p["active_jobs"]) <= context_packet.ACTIVE_JOBS_CAP
+
+
+# --------------------------------------------------------------------------- #
+# loopback grant read regressions
+# --------------------------------------------------------------------------- #
+def _serve_grant_body(monkeypatch, *, slow):
+    import http.server
+    import threading
+    import time
+    import broker_client
+
+    stop = threading.Event()
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            try:
+                if slow:
+                    end = time.monotonic() + 5.0
+                    while time.monotonic() < end and not stop.is_set():
+                        self.wfile.write(b" ")
+                        self.wfile.flush()
+                        stop.wait(0.2)
+                else:
+                    self.wfile.write(json.dumps({
+                        "linked": True, "kind": "oauth", "padding": "x" * (200 * 1024),
+                    }).encode("utf-8"))
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", f"http://127.0.0.1:{server.server_port}")
+    monkeypatch.setattr(broker_client, "harness_headers", lambda: {})
+    return server, thread, stop
+
+
+def test_grant_read_is_bounded_by_total_elapsed_deadline(monkeypatch):
+    import time
+
+    server, thread, stop = _serve_grant_body(monkeypatch, slow=True)
+    try:
+        start = time.monotonic()
+        result = context_packet._grant_status(TENANT, grant_timeout_s=1.0)
+        elapsed = time.monotonic() - start
+        assert result == {"kind": "missing", "degraded": True}
+        assert elapsed < 1.8
+    finally:
+        stop.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_grant_read_refuses_an_oversized_body(monkeypatch):
+    server, thread, stop = _serve_grant_body(monkeypatch, slow=False)
+    try:
+        assert context_packet._grant_status(TENANT, grant_timeout_s=1.0) == {
+            "kind": "missing", "degraded": True,
+        }
+    finally:
+        stop.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 # --------------------------------------------------------------------------- #

@@ -76,6 +76,7 @@ import requests
 import agent_gate
 import agent_ledger
 import broker_client
+import context_packet
 import deps
 import emf_metrics
 import entitlements
@@ -102,6 +103,8 @@ ALLOWED_MODELS = frozenset({
     "claude-haiku-4-5",
     "claude-fable-5",
 })
+
+CONTEXT_PACKET_GRANT_TIMEOUT_S = 2.0
 
 
 def is_allowed_model(model: Optional[str]) -> bool:
@@ -688,15 +691,14 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
 
     # The durable transcript source: whatever drove this turn (a fresh user
     # message OR the resume of a halted turn), plus the optional dispatcher
-    # hint — classifier_hint is recorded here for the durable log ONLY, it is
-    # NOT part of ConverseTurnInput (frozen shape has no such field).
+    # hint. classifier_hint stays off the top-level wire body and rides only
+    # inside the optional app-built context_packet.
     # Strip a pasted BYO credential BEFORE the transcript append below, so it is
     # never durable here and never rides the wire. See _scrub_secret.
     _secret = _grant_secret(credential_grant)
     if _secret:
         text = _scrub_secret(text, _secret)
-        # classifier_hint is durable-log-only and never reaches the harness, so
-        # this is the only chance to strip it (see _scrub_tree).
+        # Scrub before both the durable log and context packet (see _scrub_tree).
         if classifier_hint is not None:
             classifier_hint = _scrub_tree(classifier_hint, _secret)
         # Image base64 is deliberately NOT scrubbed. Literal secret scanning is
@@ -849,6 +851,16 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
                             "instant assignment header is too large",
                             pre_harness=True)
         harness_headers["x-leaf-instant-assignment"] = header
+
+    try:
+        payload["context_packet"] = context_packet.build_packet(
+            tenant_id, sess["drawing_id"], classifier_hint=classifier_hint,
+            entitlements_override=entitlements.entitlements_for(
+                entitlement_tier, entitlement_roles, entitlement_elevated),
+            grant_timeout_s=CONTEXT_PACKET_GRANT_TIMEOUT_S,
+        )
+    except Exception as exc:  # noqa: BLE001 - advisory grounding must not fail a turn
+        print(f"[leaf-agent] context packet omitted: {type(exc).__name__}", file=sys.stderr)
 
     # Encoded HERE rather than via `json=`, because requests' default encoder
     # sets ensure_ascii=True and escapes every non-ASCII character to \uXXXX.

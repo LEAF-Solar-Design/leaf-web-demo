@@ -32,6 +32,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import socket
+import threading
+import time
 from typing import Any, Dict, List, Optional
 
 import catalog as catalog_mod
@@ -135,9 +138,8 @@ def _drawing_sections(tenant_id: str, drawing_id: str) -> Dict[str, Any]:
     # and `co.get("holder")` stays truthy the whole time. Publishing that named a
     # holder for a lock the store re-grants to anyone — the same defect
     # GET /versions carried (`routers/drawings.py` `_checkout_view`), where a
-    # lease measured 827 minutes dead was still reported as held. This module is
-    # parked (no live caller yet, schema frozen), so no packet ever shipped one,
-    # and the fix lands WITH the read's so the two cannot be wired up disagreeing.
+    # lease measured 827 minutes dead was still reported as held. Both this live
+    # packet and the versions read use the same expiry rule.
     # The shape stays frozen at {held_by, expires_at}: an elapsed lease nulls
     # both fields, it never drops or renames them.
     co = m.get("checkout")
@@ -185,7 +187,7 @@ def _active_jobs(tenant_id: str) -> List[Dict[str, Any]]:
             for r in live[:ACTIVE_JOBS_CAP]]
 
 
-def _grant_status(tenant_id: str) -> Dict[str, Any]:
+def _grant_status(tenant_id: str, grant_timeout_s: float = 10.0) -> Dict[str, Any]:
     """{kind, degraded} projected from the harness grant store — the SAME read
     routers/tenant.py performs, minus everything but the credential KIND. Token
     values never reach this process (the harness status body carries none, and
@@ -194,20 +196,67 @@ def _grant_status(tenant_id: str) -> Dict[str, Any]:
     kind: "oauth" | "api_key" | "missing"; degraded=True means the grant store
     could not be consulted (harness down/unconfigured), not that the grant is bad.
     """
+    deadline = time.monotonic() + grant_timeout_s
     base = (os.environ.get("LEAF_AUTHOR_HARNESS_URL")
             or os.environ.get("LEAF_CONVERSE_HARNESS_URL") or "").rstrip("/")
     if not base:
         return {"kind": "missing", "degraded": True}
-    try:
-        import urllib.parse
+    done = threading.Event()
+    result: List[Any] = []
+    responses: List[Any] = []
 
-        import broker_client
-        import requests
-        r = requests.get(f"{base}/grants/{urllib.parse.quote(str(tenant_id), safe='')}",
-                         headers=broker_client.harness_headers(), timeout=10)
-        hj = r.json()
-    except Exception:  # noqa: BLE001 - unreachable/non-JSON -> degraded, never raises
+    def read_status() -> None:
+        r = None
+        try:
+            import urllib.parse
+
+            import broker_client
+            import requests
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            timeout = max(0.001, remaining)
+            r = requests.get(f"{base}/grants/{urllib.parse.quote(str(tenant_id), safe='')}",
+                             headers=broker_client.harness_headers(), stream=True,
+                             timeout=(timeout, timeout))
+            responses.append(r)
+            if time.monotonic() >= deadline:
+                return
+            body = bytearray()
+            for chunk in r.iter_content(chunk_size=8192):
+                if time.monotonic() >= deadline or len(body) + len(chunk) > 64 * 1024:
+                    return
+                body.extend(chunk)
+            if time.monotonic() < deadline:
+                result.append(json.loads(body))
+        except Exception:  # noqa: BLE001 - unreachable/non-JSON -> degraded
+            pass
+        finally:
+            try:
+                if r is not None:
+                    r.close()
+            except Exception:  # noqa: BLE001 - cleanup failure also degrades
+                result.clear()
+            finally:
+                done.set()
+
+    # iter_content can wait for a whole chunk while a peer dribbles bytes.
+    # Bound the caller as well as each socket operation by the same deadline.
+    worker = threading.Thread(target=read_status, daemon=True)
+    try:
+        worker.start()
+    except Exception:  # noqa: BLE001 - unavailable worker must not fail the turn
         return {"kind": "missing", "degraded": True}
+    done.wait(max(0.0, deadline - time.monotonic()))
+    if not done.is_set() or time.monotonic() >= deadline or not result:
+        if responses:
+            try:
+                # Interrupt a blocked body read; the worker owns response.close().
+                responses[0].raw._fp.fp.raw._sock.shutdown(socket.SHUT_RDWR)
+            except Exception:  # noqa: BLE001 - already closed or no socket
+                pass
+        return {"kind": "missing", "degraded": True}
+    hj = result[0]
     if not isinstance(hj, dict) or not hj.get("linked"):
         return {"kind": "missing", "degraded": False}
     kind = hj.get("kind")
@@ -222,23 +271,30 @@ def _serialize(packet: Dict[str, Any]) -> str:
 
 
 def build_packet(tenant_id: Any, drawing_id: str,
-                 classifier_hint: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                 classifier_hint: Optional[Dict[str, Any]] = None, *,
+                 entitlements_override: Optional[Dict[str, bool]] = None,
+                 grant_timeout_s: float = 10.0) -> Dict[str, Any]:
     """Assemble the §4 ContextPacket for one turn. Pure reads; no writes.
 
     `tenant_id` may be the plain str or the TenantContext (it IS its tenant_id
-    string) — the tier resolution needs the object when auth is live.
+    string) — the tier resolution needs the object when auth is live, unless
+    `entitlements_override` carries the turn's already-resolved snapshot.
     """
     tools = _visible_tools(str(tenant_id))
     entries = _catalog_entries(tools)
 
-    tier = entitlements.resolve_tier(tenant_id)
-    roles, elevated = entitlements.resolve_roles(tenant_id)
+    if entitlements_override is not None:
+        capabilities = dict(entitlements_override)
+    else:
+        tier = entitlements.resolve_tier(tenant_id)
+        roles, elevated = entitlements.resolve_roles(tenant_id)
+        capabilities = entitlements.entitlements_for(tier, roles, elevated)
     packet: Dict[str, Any] = {
         "catalog": _capped_catalog(entries, CATALOG_CAP),
         "catalog_hash": _catalog_hash(tools),
-        "entitlements": entitlements.entitlements_for(tier, roles, elevated),
+        "entitlements": capabilities,
         "active_jobs": _active_jobs(str(tenant_id)),
-        "grant": _grant_status(str(tenant_id)),
+        "grant": _grant_status(str(tenant_id), grant_timeout_s=grant_timeout_s),
         "classifier_hint": classifier_hint if classifier_hint else None,
     }
     packet.update(_drawing_sections(str(tenant_id), drawing_id))

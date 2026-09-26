@@ -1,6 +1,10 @@
 {
   "contract": "leaf.vendor-pin.v1",
   "downstream_overlays": {
+    "ports/converse.ts": {
+      "reason": "Optional app-built ContextPacket grounding on the live POST /turn wire; absent-safe downstream addition for platform-context-packet-live-caller.",
+      "sha256": "e50572559b61124d7281a356d81f1ac00b4b1bf5fc123a386ef63427c5effa54"
+    },
     "ports/fakes/fakeSessionStore.ts": {
       "reason": "Isolate SDK transcript bindings by authenticated app conversation in leaf-web-demo (rebased onto mushy-code ad209705 by AD4; upstream candidate)",
       "sha256": "ad67275b16d64bd7525ec520dd36b2a6a7bd533107f6ec8132f2392e7e83afda"
@@ -49,7 +53,7 @@
     "browser/conversationWorkspace.ts": "3bb8c517ff9ceb0db3510a5869e4383a4c04dcc0567268075f6db4c0dfadb7fa",
     "browser/historyFeed.ts": "504c16d2a1b2deb923b6b5ef2e0d2c12311e3966ca7c62ef2472d311e3cfa816",
     "index.ts": "b201a546958d8d25e8dd0b6e675484d564f9f716ad0baf668b7c15809b1d9d5d",
-    "ports/converse.ts": "31223db386cf719c6ae400aa7aa5f44a2414d2293355d290a407b7a8c98df1bd",
+    "ports/converse.ts": "e50572559b61124d7281a356d81f1ac00b4b1bf5fc123a386ef63427c5effa54",
     "ports/fakes/fakeAgentRunner.ts": "bcd81974277d1934dd6a6e5a660203b248b5b3caefb0a594d32f4905a449d3ef",
     "ports/fakes/fakeConverseRunner.ts": "8a7b076759ad4f7fea0c6ec4de078c32f3cc556252a9328668c41881b7f75f41",
     "ports/fakes/fakeIntentSynthesizer.ts": "c7d32cc3b6a677e17688ba768c660afde238778a4eba18eefab82852398a153c",

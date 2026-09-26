@@ -980,12 +980,14 @@ Session: `agent-spine-phase1`, 2026-07-20. The contract for the conversational s
 durable per-drawing agent sessions, streamed turns, and gated dispatch into the existing
 deterministic job chain. **FROZEN (2026-07-23, census #12 chip 5)** — promoted
 proposed→frozen under the same discipline as §11–§17, AS THE LIVE WIRE IS: 18.1 app
-routes with their implementation notes (the §2.1 sessions wire, `ConverseTurnInput`
-with NO ContextPacket field), 18.2 parked by decision, 18.3 event vocabulary, 18.4
-codes, 18.5 back edge. The ContextPacket module (`server/context_packet.py`) is frozen
-as a PARKED schema: no live caller today, and its field set + `MAX_PACKET_CHARS`
-size discipline are pinned by `server/tests/test_contract_freeze.py` so the parked
-module cannot drift while it awaits spine unification. Design rationale lives in
+routes with their implementation notes (the §2.1 sessions wire, `ConverseTurnInput`),
+18.2 parked by decision, 18.3 event vocabulary, 18.4 codes, 18.5 back edge.
+**Supersession (2026-09-26, platform-context-packet-live-caller):** the wire now carries
+the optional additive `context_packet`, built by `turn_runner.start_turn` from
+`server/context_packet.py`. The schema and `MAX_PACKET_CHARS` size discipline stay
+frozen. The port addition is pinned by
+`test_s21_turn_input_field_set_frozen_with_optional_packet`; the live body is pinned
+by `test_forwarded_turn_body_is_frozen_shape_with_packet`. Design rationale lives in
 `docs/AGENT-SPINE-DESIGN.md`. Verification: Phase-1 implementation + tests in this
 change set; freeze gate: `tests/test_contract_freeze.py` (registered suite
 `server-contract-freeze`).
@@ -1012,15 +1014,17 @@ Two ground rules frame everything below:
 > are LIVE (shapes as documented); `GET /api/sessions` (list) and
 > `DELETE /api/sessions/{id}` (archive) are PARKED — not served — until spine
 > unification. The normative wire spec is `leaf-backend-gaps.md` §2.1.
-> **Wire correction (census #12 chip 2, 2026-07-23):** the messages row's "app
-> assembles the ContextPacket and forwards it" sentence is the superseded
-> §18-era proxy design. The live wire forwards the frozen §2.1
-> `ConverseTurnInput` — `{tenant_id, session_id, turn_id, drawing_id, messages,
-> text|confirm, images?}` — with NO ContextPacket field; `server/context_packet.py` has
-> no live caller. Pinned by `server/tests/test_sessions_router.py`
-> (no-packet body assertion); FROZEN by chip 5 (2026-07-23) —
-> `tests/test_contract_freeze.py` pins the port field set and the parked
-> packet schema.
+> **Wire correction superseded (2026-09-26):** the census #12 chip 2 no-packet
+> decision of 2026-07-23 is replaced by an optional additive `context_packet`
+> on §2.1 `ConverseTurnInput`. `turn_runner.start_turn` builds it from
+> `server/context_packet.py` using the turn's entitlement snapshot and scrubbed
+> classifier hint. Build failure omits it; older apps may omit it and older
+> harnesses may ignore it. The harness validates its object shape and size and
+> scrubs grant secrets before model grounding. The wire drawing id stays
+> authoritative. Pinned by `test_forwarded_turn_body_is_frozen_shape_with_packet`
+> in `tests/test_sessions_router.py` and
+> `test_s21_turn_input_field_set_frozen_with_optional_packet` in
+> `tests/test_contract_freeze.py`; the packet schema remains frozen.
 
 All `/api/*` routes resolve the tenant via the existing `require_tenant` dependency
 (`server/deps.py:251–277`; off-auth header stub, live-auth verified JWT — unchanged).
@@ -1031,7 +1035,7 @@ All response bodies carry the §10 envelope fields (`error`, `degraded_mode`;
 |---|---|---|
 | POST | `/api/sessions` | `{drawing_id, model?, policy?}` → `{session_id, status, created_at, model, policy, instant_ready, instant_reason}`. (`project_id` was listed here historically but is **not** a field on `CreateSessionRequest`; pydantic drops it silently.) Idempotent per (tenant, drawing). `model` is the per-session "mount your LLM" choice (§18.7): validated against the allowlist and persisted, so later turns inherit it; an unknown id is 400 `BAD_PARAMS`. Omitting `model` on a repeat POST leaves the stored choice untouched. Requires the `converse` entitlement; denial is the standard 403 `ENTITLEMENT_REQUIRED` shape (`server/entitlements.py:123–134`). |
 | GET | `/api/sessions?drawing_id=` | `{sessions:[…]}`, own-tenant only. |
-| POST | `/api/sessions/{id}/messages` | `{text?, images?, confirm?, classifier_hint?, model?, credential_grant?, queue?}` (exactly one of *user message* / confirm, where a user message is text and/or images) → 202 `{turn_id, status:"started"}` \| 409 `TURN_IN_PROGRESS` \| 401 `GRANT_REQUIRED` \| 413 `BAD_PARAMS` \| 429 `LLM_QUOTA_EXHAUSTED` \| 429 `LLM_RATE_LIMITED`. The 413 has three sources that are indistinguishable to the caller and mean the same thing: the app's own body-cap middleware, the app measuring its own encoded forward, and a 413 relayed from the harness. All three are `approval_unredeemed`, so a confirm turn refused this way keeps its approval and can be retried with a smaller payload. The same holds for 401 and 429, which are also refused before anything can redeem a confirmation. Forwards the frozen §2.1 `ConverseTurnInput` to the harness with the resolved tenant id. (The superseded §18-era sentence about assembling a ContextPacket is removed here: the wire-correction note above is the live behaviour, and `server/context_packet.py` has no live caller.) |
+| POST | `/api/sessions/{id}/messages` | `{text?, images?, confirm?, classifier_hint?, model?, credential_grant?, queue?}` (exactly one of *user message* / confirm, where a user message is text and/or images) → 202 `{turn_id, status:"started"}` \| 409 `TURN_IN_PROGRESS` \| 401 `GRANT_REQUIRED` \| 413 `BAD_PARAMS` \| 429 `LLM_QUOTA_EXHAUSTED` \| 429 `LLM_RATE_LIMITED`. The 413 has three sources that are indistinguishable to the caller and mean the same thing: the app's own body-cap middleware, the app measuring its own encoded forward, and a 413 relayed from the harness. All three are `approval_unredeemed`, so a confirm turn refused this way keeps its approval and can be retried with a smaller payload. The same holds for 401 and 429, which are also refused before anything can redeem a confirmation. Forwards the frozen §2.1 `ConverseTurnInput` to the harness with the resolved tenant id. Supersession (2026-09-26): the wire includes optional additive `context_packet`, built by `turn_runner.start_turn` from `server/context_packet.py`, pinned by `test_forwarded_turn_body_is_frozen_shape_with_packet` and `test_s21_turn_input_field_set_frozen_with_optional_packet` as noted above. |
 | GET | `/api/sessions/{id}/stream?after_seq=` | SSE relay of the harness stream (§18.3). One upstream connection per session, fan-out to N clients; `after_seq` passes through for replay. |
 | GET | `/api/sessions/{id}/transcript?limit=` | Passthrough of the harness transcript (most recent N events, ascending seq). |
 | DELETE | `/api/sessions/{id}` | Archive; passthrough → `{archived:true}`. |

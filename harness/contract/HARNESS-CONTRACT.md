@@ -27,9 +27,12 @@ does not re-freeze — `contract/CONTRACT.md` (§1–§6), `server/CONTRACT-ADDE
 > additive rule. The PARKED `/converse/*` spec in §1 stays parked, not frozen —
 > the live conversational surface is `POST /turn`. Sibling freeze: ADDENDUM
 > §15/§16/§17 (same date); ADDENDUM §18 FROZEN 2026-07-23 (census #12 chip 5):
-> the `ConverseTurnInput` field set (no packet field), the `HarnessTurnEvent`
-> union, `StopReason`, and the parked ContextPacket schema are pinned by
-> `server/tests/test_contract_freeze.py`.
+> the `ConverseTurnInput` field set, the `HarnessTurnEvent` union, `StopReason`,
+> and the ContextPacket schema are pinned by `server/tests/test_contract_freeze.py`.
+> Supersession (2026-09-26): optional additive `context_packet` now carries the
+> app-built §4 grounding from `turn_runner.start_turn` and `server/context_packet.py`,
+> pinned by `test_s21_turn_input_field_set_frozen_with_optional_packet` and
+> `test_forwarded_turn_body_is_frozen_shape_with_packet`, with packet-lite when absent.
 
 > **v3 supersession (2026-07-26, structured authored-source boundary).**
 > This note supersedes the old introduction and the section 3 and section 8
