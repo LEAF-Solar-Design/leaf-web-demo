@@ -150,6 +150,7 @@ export default function ProjectLifecyclePanel({
               onInvite={actions.invite}
               onChangeRole={actions.changeRole}
               onRevoke={actions.revoke}
+              onSetLabel={actions.setLabel}
               identities={availableIdentities}
             />
             {lifecycle.authority?.can_invite && identityLoader && (

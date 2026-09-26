@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 import uuid
 from pathlib import PurePosixPath
 from typing import Any, Dict, Optional
@@ -381,6 +382,53 @@ _IDENTITY_LABEL_SQL = (
 )
 
 
+DISPLAY_NAME_MAX_CHARS = 100
+
+
+def normalize_display_name(value):
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("display name must be text")
+    value = value.strip()
+    if not value:
+        return None
+    if len(value) > DISPLAY_NAME_MAX_CHARS:
+        raise ValueError("A display name can be at most 100 characters.")
+    if any(unicodedata.category(char) in {"Cc", "Cf"} for char in value):
+        raise ValueError("display name must not contain control or format characters")
+    return value
+
+
+def set_identity_display_name(
+    org_id: uuid.UUID, actor_binding_id: uuid.UUID, binding_id: uuid.UUID,
+    display_name: Optional[str],
+) -> dict:
+    display_name = normalize_display_name(display_name)
+
+    def operation(conn: Any) -> dict:
+        with conn.cursor() as cur:
+            if _actor_tenant_role(cur, org_id, actor_binding_id) != "owner":
+                raise LifecycleForbidden("organization owner role required")
+            cur.execute(
+                "UPDATE identity_bindings AS b SET display_name = %(display_name)s "
+                "WHERE b.platform_tenant_id = %(org_id)s "
+                "AND b.binding_id = %(binding_id)s AND b.status = 'active' "
+                "RETURNING b.binding_id, b.role, b.created_at, "
+                + _IDENTITY_LABEL_SQL + " AS label",
+                {"org_id": org_id, "binding_id": binding_id, "display_name": display_name},
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise LifecycleUnavailable()
+            return {
+                "binding_id": str(row["binding_id"]), "label": str(row["label"]),
+                "role": str(row["role"]), "created_at": row["created_at"].isoformat(),
+            }
+
+    return run_transaction(operation, isolation="serializable")
+
+
 def list_org_identities(org_id: uuid.UUID) -> list[Dict[str, str]]:
     """Existing active bindings only, with a bounded, stable display order."""
     def operation(conn: Any) -> list[Dict[str, str]]:
@@ -524,10 +572,14 @@ def project_snapshot(
                 "role": viewer_role,
                 "can_invite": viewer_role in WRITE_ROLES,
                 "can_manage": viewer_role in WRITE_ROLES,
+                "can_label_identities": _actor_tenant_role(
+                    cur, org_id, actor_binding_id, lock=False,
+                ) == "owner",
             }
             return {
                 "project": {
                     "project_id": str(project["project_id"]),
+                    "org_id": str(org_id),
                     "name": project["name"],
                     "status": project["status"],
                     "profile": "blank_browser",

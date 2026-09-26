@@ -286,6 +286,7 @@ _REQUIRED_COLUMNS = {
     },
     "identity_bindings": {
         "binding_id", "platform_tenant_id", "role", "status",
+        "display_name",  # 0068 (B5)
     },
     "history_operations": {"operation_id", "org_id", "project_id", "hash_value"},
     "history_edges": {"edge_id", "org_id", "project_id"},
@@ -648,6 +649,8 @@ def _catalog_contract(relation: str, *definition_fragments: str) -> Dict[str, An
 # stores, the project lifecycle is part of the canonical platform API whenever
 # this application image is running.
 _REQUIRED_CONSTRAINTS = {
+    "identity_bindings_display_name_check": _catalog_contract(
+        "identity_bindings", "char_length(display_name) <= 100", "btrim(display_name)"),
     "campaign_developer_allocations_pkey": _catalog_contract(
         "campaign_developer_allocations", "PRIMARY KEY (org_id, project_id, campaign_id)"),
     "campaign_developer_operations_pkey": _catalog_contract(

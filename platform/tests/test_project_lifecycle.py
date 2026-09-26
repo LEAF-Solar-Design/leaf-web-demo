@@ -13,9 +13,9 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from jwt.algorithms import RSAAlgorithm
-from psycopg.errors import ObjectNotInPrerequisiteState
+from psycopg.errors import CheckViolation, ObjectNotInPrerequisiteState
 
-from leaf_platform import project_lifecycle, store
+from leaf_platform import db, project_lifecycle, store
 from leaf_platform.db import cursor
 
 
@@ -96,6 +96,136 @@ def _headers(org_id, binding_id, key: str | None = None):
     if key is not None:
         headers["Idempotency-Key"] = key
     return headers
+
+
+def _label_fixture(client, make_org):
+    org = make_org("B5 labels")
+    owner = _binding(org.org_id, f"b5-owner-{uuid.uuid4()}", "owner")
+    member = _binding(org.org_id, f"b5-member-{uuid.uuid4()}", "editor")
+    created = client.post(
+        "/api/projects/blank", json={"name": f"B5 {uuid.uuid4()}"},
+        headers=_headers(org.org_id, owner.binding_id, f"create-{uuid.uuid4()}"),
+    )
+    assert created.status_code == 201, created.text
+    project_id = created.json()["project"]["project_id"]
+    invited = client.post(
+        f"/api/projects/{project_id}/members",
+        json={"binding_id": str(member.binding_id), "role": "read_only"},
+        headers=_headers(org.org_id, owner.binding_id, f"invite-{uuid.uuid4()}"),
+    )
+    assert invited.status_code == 201, invited.text
+    return org, owner, member, project_id
+
+
+def _stored_display_name(org_id, binding_id):
+    with cursor() as cur:
+        cur.execute(
+            "SELECT display_name FROM identity_bindings "
+            "WHERE platform_tenant_id = %(org_id)s AND binding_id = %(binding_id)s",
+            {"org_id": org_id, "binding_id": binding_id},
+        )
+        return cur.fetchone()["display_name"]
+
+
+def test_owner_sets_member_display_name_and_picker_and_roster_read_it(client, make_org):
+    org, owner, member, project_id = _label_fixture(client, make_org)
+    response = client.put(
+        f"/api/orgs/{org.org_id}/identities/{member.binding_id}/label",
+        json={"display_name": "  Ada Lovelace  "},
+        headers=_headers(org.org_id, owner.binding_id),
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["identity"]["label"] == "Ada Lovelace"
+    assert _stored_display_name(org.org_id, member.binding_id) == "Ada Lovelace"
+    picker = client.get(
+        f"/api/orgs/{org.org_id}/identities", headers=_headers(org.org_id, owner.binding_id),
+    )
+    assert picker.status_code == 200, picker.text
+    row = next(r for r in picker.json()["identities"] if r["binding_id"] == str(member.binding_id))
+    assert row["label"] == "Ada Lovelace"
+    assert set(row) == {"binding_id", "label", "role", "created_at"}
+    snapshot = client.get(
+        f"/api/projects/{project_id}/lifecycle", headers=_headers(org.org_id, owner.binding_id),
+    )
+    assert snapshot.status_code == 200, snapshot.text
+    row = next(r for r in snapshot.json()["members"] if r["binding_id"] == str(member.binding_id))
+    assert row["label"] == "Ada Lovelace"
+
+
+def test_clearing_display_name_falls_back_to_short_form(client, make_org):
+    org, owner, member, _project_id = _label_fixture(client, make_org)
+    for blank in (None, "   "):
+        project_lifecycle.set_identity_display_name(
+            org.org_id, owner.binding_id, member.binding_id, "Ada Lovelace",
+        )
+        response = client.put(
+            f"/api/orgs/{org.org_id}/identities/{member.binding_id}/label",
+            json={"display_name": blank}, headers=_headers(org.org_id, owner.binding_id),
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["identity"]["label"] == f"Member {str(member.binding_id)[:8]}"
+        assert _stored_display_name(org.org_id, member.binding_id) is None
+
+
+def test_non_owner_cannot_set_display_name(client, make_org):
+    org, owner, member, _project_id = _label_fixture(client, make_org)
+    project_lifecycle.set_identity_display_name(
+        org.org_id, owner.binding_id, member.binding_id, "Original",
+    )
+    response = client.put(
+        f"/api/orgs/{org.org_id}/identities/{member.binding_id}/label",
+        json={"display_name": "Changed"}, headers=_headers(org.org_id, member.binding_id),
+    )
+    assert response.status_code == 403, response.text
+    assert _stored_display_name(org.org_id, member.binding_id) == "Original"
+
+
+def test_display_name_for_another_orgs_binding_is_404(client, make_org):
+    org_a = make_org("B5 org A")
+    org_b = make_org("B5 org B")
+    owner_a = _binding(org_a.org_id, f"b5-a-{uuid.uuid4()}", "owner")
+    owner_b = _binding(org_b.org_id, f"b5-b-{uuid.uuid4()}", "owner")
+    project_lifecycle.set_identity_display_name(
+        org_b.org_id, owner_b.binding_id, owner_b.binding_id, "Original",
+    )
+    response = client.put(
+        f"/api/orgs/{org_a.org_id}/identities/{owner_b.binding_id}/label",
+        json={"display_name": "Changed"}, headers=_headers(org_a.org_id, owner_a.binding_id),
+    )
+    assert response.status_code == 404, response.text
+    assert response.json() == {"detail": "identity not found"}
+    assert _stored_display_name(org_b.org_id, owner_b.binding_id) == "Original"
+
+
+def test_database_check_rejects_overlong_display_name(make_org):
+    org = make_org("B5 database bound")
+    owner = _binding(org.org_id, f"b5-check-{uuid.uuid4()}", "owner")
+    with pytest.raises(CheckViolation):
+        with cursor() as cur:
+            cur.execute(
+                "UPDATE identity_bindings SET display_name = %(name)s "
+                "WHERE platform_tenant_id = %(org_id)s AND binding_id = %(binding_id)s",
+                {"name": "a" * 101, "org_id": org.org_id, "binding_id": owner.binding_id},
+            )
+    assert _stored_display_name(org.org_id, owner.binding_id) is None
+    status = db.schema_status()
+    assert "identity_bindings" not in status["missing"]
+    assert "identity_bindings_display_name_check" not in status["invalid_constraints"]
+
+
+def test_snapshot_project_carries_org_id_and_viewer_can_label_identities(client, make_org):
+    org, owner, member, project_id = _label_fixture(client, make_org)
+    for actor, can_label in ((owner, True), (member, False)):
+        response = client.get(
+            f"/api/projects/{project_id}/lifecycle",
+            headers=_headers(org.org_id, actor.binding_id),
+        )
+        assert response.status_code == 200, response.text
+        snapshot = response.json()
+        assert snapshot["project"]["org_id"] == str(org.org_id)
+        assert snapshot["viewer"]["can_label_identities"] is can_label
+        if actor is member:
+            assert snapshot["viewer"]["role"] == "read_only"
 
 
 def test_blank_project_members_files_and_immediate_revoke(client, make_org):

@@ -171,6 +171,20 @@ export async function getOrgIdentities(orgId) {
   return request(`/api/orgs/${id}/identities`, { orgId: id })
 }
 
+// PUT an owner-entered label on an existing organization binding.
+export async function setIdentityDisplayName(orgId, bindingId, displayName) {
+  const org = requireUuid(orgId, 'organization')
+  const binding = requireUuid(bindingId, 'member binding')
+  const trimmed = String(displayName ?? '').trim()
+  if (Array.from(trimmed).length > 100) {
+    throw new Error('A display name can be at most 100 characters.')
+  }
+  const display_name = trimmed || null
+  return request(`/api/orgs/${org}/identities/${binding}/label`, {
+    ...mutation('PUT', { display_name }), orgId: org,
+  })
+}
+
 // GET /api/projects/{id}/lifecycle -> {project, members, files, receipts}.
 // The single read every lifecycle component is fed from; see
 // useProjectLifecycle.js for the one-fetch/refetch-after-mutation contract.

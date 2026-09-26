@@ -10,6 +10,7 @@ vi.mock('./api.js', () => ({
   inviteMember: vi.fn(),
   resetProject: vi.fn(),
   revokeMember: vi.fn(),
+  setIdentityDisplayName: vi.fn(),
 }))
 
 import { getOrgIdentities, getProjectLifecycle } from './api.js'
