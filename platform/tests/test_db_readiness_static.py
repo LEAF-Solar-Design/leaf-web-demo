@@ -119,12 +119,12 @@ def test_annotation_migration_is_in_the_unconditional_readiness_inventory():
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
     assert "0042_annotation_batches.sql" in manifest_names
     _assert_closed_world_pin(
-        manifest_names[-1], "0066_harness_confirmations_consumed.sql",
+        manifest_names[-1], "0067_broker_ledger_job_id.sql",
         "Update this pin to the new last migration filename once main adds "
         "one (and the migration_ids pin below to match).",
     )
     _assert_closed_world_pin(
-        inventory["scope"]["migration_ids"][-1], "0066",
+        inventory["scope"]["migration_ids"][-1], "0067",
         "Update this pin (and authority-inventory.json's "
         "scope.migration_ids) to the new last migration id.",
     )
@@ -405,6 +405,24 @@ def test_migration_id_tail_pin_drift_names_the_pin_line_and_remediation():
         "Update this pin (and authority-inventory.json's "
         "scope.migration_ids) to the new last migration id." in message
     )
+
+
+def test_broker_ledger_job_id_migration_is_expand_only():
+    migration = (
+        db._PKG_DIR / "migrations" / "0067_broker_ledger_job_id.sql"
+    ).read_text(encoding="utf-8")
+    statements = [
+        " ".join(line.split())
+        for line in migration.splitlines()
+        if line.strip() and not line.lstrip().startswith("--")
+    ]
+    assert statements == [
+        "ALTER TABLE broker_usage_ledger ADD COLUMN IF NOT EXISTS job_id TEXT;",
+    ]
+    assert "expand-contract:" not in migration
+    required = db.required_columns_for_selected_authorities(
+        {"LEAF_BROKER_STORE": "postgres"})
+    assert "job_id" in required["broker_usage_ledger"]
 
 
 def test_harness_confirmation_consume_columns_are_expand_only():

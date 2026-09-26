@@ -1,20 +1,26 @@
 """PostgreSQL authority for broker tenant state and usage accounting.
 
-The module is imported only when ``LEAF_BROKER_STORE=postgres``. This keeps the
-database-free broker demo unchanged and avoids loading platform dependencies in
-legacy mode.
+Platform dependencies are loaded only when the PostgreSQL store is created.
+The shared ledger job-id normalizer also serves the database-free broker.
 """
 from __future__ import annotations
 
 import importlib.util
 import json
 import math
+import re
 import sys
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 _store: Optional["PostgresBrokerStore"] = None
+JOB_ID_RE = re.compile(r"[A-Za-z0-9._:-]{1,128}")
+
+
+def normalize_ledger_job_id(value: Any) -> Optional[str]:
+    """Keep only job IDs that are safe for both JSONL and PostgreSQL text."""
+    return value if isinstance(value, str) and JOB_ID_RE.fullmatch(value) else None
 
 
 def _load_db():
@@ -60,7 +66,7 @@ class PostgresBrokerStore:
             "broker_usage_ledger": {
                 "event_key", "ts", "tenant_id", "tool", "engine_op",
                 "aps_endpoint", "aps_live", "engine_seconds", "usd_est",
-                "status", "inserted_at",
+                "status", "inserted_at", "job_id",
             },
             "broker_aps_slots": {
                 "event_key", "tenant_id", "state", "acquired_at",
@@ -454,6 +460,8 @@ class PostgresBrokerStore:
         """Atomically append accounting and publish the replayable terminal result."""
         key = str(event_key).strip()
         values = dict(entry)
+        values.setdefault("job_id", None)
+        values["job_id"] = normalize_ledger_job_id(values["job_id"])
         self._validate_ledger_numbers(values)
         values["event_key"] = key
         values.update({
@@ -486,10 +494,10 @@ class PostgresBrokerStore:
             conn.execute(
                 "INSERT INTO broker_usage_ledger "
                 "(event_key, ts, tenant_id, tool, engine_op, aps_endpoint, "
-                "aps_live, engine_seconds, usd_est, status) "
+                "aps_live, engine_seconds, usd_est, status, job_id) "
                 "VALUES (%(event_key)s, %(ts)s, %(tenant_id)s, %(tool)s, "
                 "%(engine_op)s, %(aps_endpoint)s, %(aps_live)s, "
-                "%(engine_seconds)s, %(usd_est)s, %(status)s) "
+                "%(engine_seconds)s, %(usd_est)s, %(status)s, %(job_id)s) "
                 "ON CONFLICT (event_key) DO NOTHING",
                 values,
             )
@@ -639,6 +647,8 @@ class PostgresBrokerStore:
         """Terminalize an executing admission with immutable operator evidence."""
         key, tenant = str(event_key), str(tenant_id)
         values = dict(entry)
+        values.setdefault("job_id", None)
+        values["job_id"] = normalize_ledger_job_id(values["job_id"])
         self._validate_ledger_numbers(values)
         values.update({
             "event_key": key,
@@ -674,10 +684,10 @@ class PostgresBrokerStore:
             conn.execute(
                 "INSERT INTO broker_usage_ledger "
                 "(event_key, ts, tenant_id, tool, engine_op, aps_endpoint, "
-                "aps_live, engine_seconds, usd_est, status) "
+                "aps_live, engine_seconds, usd_est, status, job_id) "
                 "VALUES (%(event_key)s, %(ts)s, %(tenant_id)s, %(tool)s, "
                 "%(engine_op)s, %(aps_endpoint)s, %(aps_live)s, "
-                "%(engine_seconds)s, %(usd_est)s, %(status)s)",
+                "%(engine_seconds)s, %(usd_est)s, %(status)s, %(job_id)s)",
                 values,
             )
             updated = conn.execute(

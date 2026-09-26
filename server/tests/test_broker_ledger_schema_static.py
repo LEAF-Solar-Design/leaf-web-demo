@@ -26,6 +26,7 @@ SCHEMA_PATH = SERVER_DIR / "broker_ledger.schema.json"
 
 FROZEN_KEYS = ["ts", "tenant_id", "tool", "engine_op", "aps_endpoint",
                "aps_live", "engine_seconds", "usd_est", "status"]
+OPTIONAL_KEYS = ["job_id"]
 
 
 def _schema() -> dict:
@@ -42,7 +43,21 @@ def test_schema_parses_and_freezes_exactly_the_nine_keys():
     s = _schema()
     assert s["$id"] == "leaf.broker-ledger-line.v1"
     assert sorted(s["required"]) == sorted(FROZEN_KEYS)
-    assert sorted(s["properties"].keys()) == sorted(FROZEN_KEYS)
+    assert sorted(s["properties"].keys()) == sorted(FROZEN_KEYS + OPTIONAL_KEYS)
+
+
+def test_schema_declares_job_id_as_the_only_optional_key():
+    schema = _schema()
+    assert set(schema["properties"]) - set(schema["required"]) == set(OPTIONAL_KEYS)
+    assert schema["properties"]["job_id"]["type"] == ["string", "null"]
+    description = schema["properties"]["job_id"]["description"]
+    assert "/broker/run" in description
+    assert "/broker/run-plan" in description
+    assert "2026-09-26" in description
+    for job_id in ("job-123", None):
+        jsonschema.validate(dict(_ok_line(), job_id=job_id), schema)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(dict(_ok_line(), job_id=123), schema)
 
 
 def test_broker_entry_literal_initializes_every_frozen_key():
@@ -66,7 +81,7 @@ def test_broker_entry_literal_initializes_every_frozen_key():
                     if "ts" in keys and "tenant_id" in keys:
                         literals.append(keys)
     assert literals, "the broker run path's ledger entry literal not found"
-    assert sorted(literals[0]) == sorted(FROZEN_KEYS)
+    assert sorted(literals[0]) == sorted(FROZEN_KEYS + OPTIONAL_KEYS)
 
 
 def test_ok_and_denial_lines_validate():

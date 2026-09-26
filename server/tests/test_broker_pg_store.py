@@ -45,6 +45,8 @@ class _Connection:
 
     def execute(self, sql, params=None):
         params = params or {}
+        if any(isinstance(value, str) and "\x00" in value for value in params.values()):
+            raise ValueError("PostgreSQL text parameters cannot contain NUL bytes")
         if sql.startswith("SELECT pg_advisory_xact_lock"):
             return _Result({"pg_advisory_xact_lock": None})
         if sql.startswith("SELECT table_name, column_name"):
@@ -62,7 +64,7 @@ class _Connection:
                 "broker_usage_ledger": {
                     "event_key", "ts", "tenant_id", "tool", "engine_op",
                     "aps_endpoint", "aps_live", "engine_seconds", "usd_est",
-                    "status", "inserted_at",
+                    "status", "inserted_at", "job_id",
                 },
                 "broker_aps_slots": {
                     "event_key", "tenant_id", "state", "acquired_at",
@@ -819,6 +821,153 @@ def _executing_store(key="stuck-run"):
     admitted = _admit(store, key)
     store.mark_execution_started(key, "tenant-a", admitted["lease_token"])
     return db, store
+
+
+def test_postgres_terminal_ledger_row_carries_job_id(monkeypatch):
+    for terminal_path in ("complete", "reconcile"):
+        db, store = _executing_store()
+        original = db.pool.conn.execute
+        inserts = []
+
+        def capture(sql, params=None):
+            if sql.startswith("INSERT INTO broker_usage_ledger"):
+                inserts.append(sql)
+            return original(sql, params)
+
+        monkeypatch.setattr(db.pool.conn, "execute", capture)
+        entry = dict(_entry(), job_id="job-123")
+        result = {"ok": True, "error": None, "degraded_mode": False}
+        if terminal_path == "complete":
+            store.complete_run(
+                "stuck-run", "tenant-a", db.pool.conn.admissions["stuck-run"]["lease_token"],
+                entry, result, 200,
+            )
+        else:
+            store.reconcile_executing(
+                "stuck-run", "tenant-a", resolution="verified_terminal",
+                operator_id="ops@example.test", reason="verified terminal receipt",
+                evidence_ref="aps://workitems/workitem-123",
+                entry=entry, result=result, http_status=200,
+            )
+        assert len(inserts) == 1
+        assert "job_id)" in inserts[0]
+        assert "%(job_id)s" in inserts[0]
+        assert db.pool.conn.ledger["stuck-run"]["job_id"] == "job-123"
+
+
+@pytest.mark.parametrize("terminal_path", ["run", "complete", "reconcile"])
+def test_postgres_terminal_row_survives_a_nul_job_id(monkeypatch, terminal_path):
+    if terminal_path == "run":
+        db = _Db()
+        store = broker_pg_store.PostgresBrokerStore(db)
+        monkeypatch.setenv("LEAF_BROKER_STORE", "postgres")
+        monkeypatch.delenv("LEAF_TENANT_CAP_USD", raising=False)
+        monkeypatch.setattr(broker, "_pg_store", store)
+        calls = []
+
+        def execute(req, _tool, _engine_op, _t0, entry, **kwargs):
+            broker._start_admitted_execution(req, kwargs["admission"])
+            calls.append(req.job_id)
+            entry.update(engine_seconds=1.0, usd_est=0.02)
+            return {
+                "ok": True, "tool": "count", "version": "1.0.0",
+                "result": {"count": 1}, "overlay": None, "timing_ms": 1,
+                "cost": {"engine_seconds": 1.0, "usd_est": 0.02},
+                "error": None, "degraded_mode": False,
+            }, 200
+
+        monkeypatch.setattr(broker, "_execute", execute)
+        response = broker.broker_run(broker.BrokerRunRequest(
+            tenant_id="tenant-a", job_id="job\x00id",
+            tool={"name": "count", "engine_op": "count"},
+            ledger_event_key="stuck-run",
+        ))
+        assert response.status_code == 200
+        assert calls == ["job\x00id"]
+    else:
+        db, store = _executing_store()
+        entry = dict(_entry(), job_id="job\x00id")
+        result = {"ok": True, "error": None, "degraded_mode": False}
+        if terminal_path == "complete":
+            store.complete_run(
+                "stuck-run", "tenant-a", db.pool.conn.admissions["stuck-run"]["lease_token"],
+                entry, result, 200,
+            )
+        else:
+            conformed = broker._validated_reconciliation_ledger(
+                entry, tenant_id="tenant-a", aps_live=True)
+            assert conformed["job_id"] is None
+            # Pass the raw entry to exercise the store's own normalization too.
+            store.reconcile_executing(
+                "stuck-run", "tenant-a", resolution="verified_terminal",
+                operator_id="ops@example.test", reason="verified terminal receipt",
+                evidence_ref="aps://workitems/workitem-123",
+                entry=entry, result=result, http_status=200,
+            )
+    assert len(db.pool.conn.ledger) == 1
+    assert db.pool.conn.ledger["stuck-run"]["job_id"] is None
+    assert db.pool.conn.ledger["stuck-run"]["usd_est"] == 0.02
+    assert db.pool.conn.admissions["stuck-run"]["state"] == "terminal"
+    assert db.pool.conn.admissions["stuck-run"]["http_status"] == 200
+
+
+def test_postgres_ledger_row_without_job_id_stores_null():
+    for terminal_path in ("complete", "reconcile"):
+        db, store = _executing_store()
+        entry = _entry()
+        result = {"ok": True, "error": None, "degraded_mode": False}
+        if terminal_path == "complete":
+            store.complete_run(
+                "stuck-run", "tenant-a", db.pool.conn.admissions["stuck-run"]["lease_token"],
+                entry, result, 200,
+            )
+        else:
+            store.reconcile_executing(
+                "stuck-run", "tenant-a", resolution="verified_terminal",
+                operator_id="ops@example.test", reason="verified terminal receipt",
+                evidence_ref="aps://workitems/workitem-123",
+                entry=entry, result=result, http_status=200,
+            )
+        assert db.pool.conn.ledger["stuck-run"]["job_id"] is None
+        assert "job_id" not in entry
+
+
+def test_reconciliation_ledger_accepts_nine_keys_or_nine_plus_job_id_only():
+    for raw in (_entry(), dict(_entry(), job_id="job-123"), dict(_entry(), job_id=None)):
+        entry = broker._validated_reconciliation_ledger(
+            raw, tenant_id="tenant-a", aps_live=True)
+        assert entry["job_id"] == raw.get("job_id")
+        assert set(entry) == broker._FROZEN_LEDGER_KEYS | {"job_id"}
+    invalid = [dict(_entry(), unexpected=True), dict(_entry(), job_id=None, unexpected=True)]
+    for key in broker._FROZEN_LEDGER_KEYS:
+        raw = dict(_entry(), job_id="job-123")
+        del raw[key]
+        invalid.append(raw)
+    invalid.extend(dict(_entry(), job_id=value) for value in (123, True, [], {}))
+    for raw in invalid:
+        with pytest.raises(broker.HTTPException) as exc:
+            broker._validated_reconciliation_ledger(raw, tenant_id="tenant-a", aps_live=True)
+        assert exc.value.status_code == 400
+
+
+def test_schema_readiness_requires_ledger_job_id_column(monkeypatch):
+    db = _Db()
+    store = broker_pg_store.PostgresBrokerStore(db)
+    store.validate_schema()
+    original = db.pool.conn.execute
+
+    def incomplete(sql, params=None):
+        result = original(sql, params)
+        if sql.startswith("SELECT table_name, column_name"):
+            return _Result(many=[
+                row for row in result.fetchall()
+                if (row["table_name"], row["column_name"]) != ("broker_usage_ledger", "job_id")
+            ])
+        return result
+
+    monkeypatch.setattr(db.pool.conn, "execute", incomplete)
+    with pytest.raises(RuntimeError, match="broker_usage_ledger.*job_id"):
+        store.validate_schema()
 
 
 def test_operator_resolution_is_atomic_audited_and_never_reexecutes():

@@ -465,6 +465,7 @@ _AUTHORITY_REQUIRED_COLUMNS = {
         "broker_usage_ledger": {
             "event_key", "ts", "tenant_id", "tool", "engine_op", "aps_endpoint",
             "aps_live", "engine_seconds", "usd_est", "status", "inserted_at",
+            "job_id",  # 0067_broker_ledger_job_id.sql
         },
         "broker_run_admissions": {
             "event_key", "tenant_id", "request_fingerprint", "state", "lease_token",

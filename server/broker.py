@@ -89,6 +89,7 @@ from tool_validate import validate_params  # noqa: E402
 import write_loop  # noqa: E402  (M2 write branch; never imports da.* at top)
 import platform_link  # noqa: E402  (collision-safe leaf_platform store loader)
 from jobs import PLAN_TOOL, PLAN_TOOL_NAME  # noqa: E402
+from broker_pg_store import normalize_ledger_job_id  # noqa: E402
 
 try:  # noqa: E402 - APS domain metrics via CloudWatch EMF; best-effort, optional
     import emf_metrics
@@ -335,6 +336,7 @@ def _conform_ledger_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
     — ok, denial, or garbage-input — is schema-valid."""
     tool = entry.get("tool")
     entry["tool"] = tool if isinstance(tool, str) else None
+    entry["job_id"] = normalize_ledger_job_id(entry.get("job_id"))
     engine_op = entry.get("engine_op")
     entry["engine_op"] = engine_op if isinstance(engine_op, str) else ""
     # A tool envelope is unchecked input too: `error: {error_code: null}` would
@@ -1961,11 +1963,13 @@ _FROZEN_LEDGER_KEYS = {
 def _validated_reconciliation_ledger(
     raw: Dict[str, Any], *, tenant_id: str, aps_live: bool,
 ) -> Dict[str, Any]:
-    if set(raw) != _FROZEN_LEDGER_KEYS:
+    if set(raw) not in (_FROZEN_LEDGER_KEYS, _FROZEN_LEDGER_KEYS | {"job_id"}):
         raise HTTPException(
             status_code=400,
-            detail="verified terminal ledger_entry must contain the frozen nine keys",
+            detail="verified terminal ledger_entry must contain the frozen nine keys and optional job_id only",
         )
+    if raw.get("job_id") is not None and not isinstance(raw["job_id"], str):
+        raise HTTPException(status_code=400, detail="ledger job_id must be a string or null")
     if raw.get("tenant_id") != tenant_id or raw.get("aps_live") is not aps_live:
         raise HTTPException(
             status_code=400,
@@ -2135,6 +2139,7 @@ def resolve_executing_admission(
             "engine_seconds": None,
             "usd_est": None,
             "status": "RECONCILED_FAILED_NO_CHARGE",
+            "job_id": None,
         }
     else:
         if request.result is None or request.ledger_entry is None:
@@ -2789,6 +2794,7 @@ def _broker_run_request(req: Union[BrokerRunRequest, BrokerPlanRunRequest]) -> J
         "engine_seconds": None,
         "usd_est": None,
         "status": "unknown",
+        "job_id": req.job_id,
     }
     from product_capability_availability import is_cloud_proposal, is_local_graph_commit
     if (isinstance(req, BrokerRunRequest) and req.entity_scope is not None
