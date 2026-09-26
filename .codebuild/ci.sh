@@ -572,8 +572,10 @@ import datetime
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
+from urllib.parse import quote
 
 out = Path(sys.argv[1])
 canonical = lambda value: json.dumps(value, sort_keys=True, separators=(",", ":"))
@@ -584,26 +586,36 @@ except (OSError, ValueError):
               "fallback_reason": "receipt_prepare_failed"}
 records = []
 raw = b""
-valid = True
+expected = set(detail.get("executed_suite_ids", []))
+attempt_rows_invalid = 0
+attempt_rows_rejected = 0
 for path in sorted(Path("/tmp/gate-logs/attempts").glob("*.jsonl")):
     try:
         data = path.read_bytes()
-        rows = [json.loads(line) for line in data.splitlines()]
-        if any(not isinstance(row, dict) or not isinstance(row.get("test_ids", []), list) or
-               not isinstance(row.get("failed_test_ids", []), list) or
-               any(not isinstance(tid, str) for tid in row.get("test_ids", []) + row.get("failed_test_ids", []))
-               for row in rows):
-            raise ValueError("invalid_attempt_record")
-        if any(row.get("run_id") != detail.get("build_id", "") for row in rows):
-            valid = False
-        records.extend(rows)
-        raw += data
-    except (OSError, ValueError, TypeError):
-        valid = False
+    except OSError:
+        attempt_rows_invalid += 1
+        continue
+    for line in data.splitlines():
+        try:
+            row = json.loads(line)
+        except (ValueError, UnicodeError):
+            attempt_rows_invalid += 1
+            continue
+        if (not isinstance(row, dict) or row.get("run_id") != sys.argv[7] or
+                not isinstance(row.get("suite_id"), str) or row["suite_id"] not in expected):
+            attempt_rows_rejected += 1
+            continue
+        raw += line + b"\n"
+        if (not isinstance(row.get("test_ids", []), list) or
+                not isinstance(row.get("failed_test_ids", []), list) or
+                any(not isinstance(tid, str) for tid in row.get("test_ids", []) + row.get("failed_test_ids", []))):
+            attempt_rows_invalid += 1
+            continue
+        records.append(row)
+valid = attempt_rows_invalid == 0
 attempts_path = Path("/tmp/gate-results/selection-attempts.jsonl")
 attempts_path.write_bytes(raw)
 first = [row for row in records if row.get("attempt") == 1]
-expected = set(detail.get("executed_suite_ids", []))
 observed = {row.get("suite_id") for row in first}
 all_ids = sorted({tid for row in first for tid in row.get("test_ids", [])})
 failed = sorted({tid for row in first for tid in row.get("failed_test_ids", [])})
@@ -611,6 +623,25 @@ selected = sorted(set(detail.get("selected_test_ids", [])))
 reporting = (valid and bool(expected) and observed == expected and len(first) == len(expected)
              and all(row.get("test_report_complete") is True for row in first))
 complete = reporting and all(row.get("status") in ("PASS", "FAIL") for row in first)
+completeness_reasons = []
+if not valid:
+    completeness_reasons.append(f"attempt_rows_invalid:{attempt_rows_invalid}")
+if not expected:
+    completeness_reasons.append("expected_suites_empty")
+if expected - observed:
+    completeness_reasons.append(f"observed_suites_missing:{len(expected - observed)}")
+if observed - expected:
+    completeness_reasons.append(f"observed_suites_extra:{len(observed - expected)}")
+if len(first) != len(expected):
+    completeness_reasons.append(f"first_attempt_rows_mismatch:{len(first)}/{len(expected)}")
+incomplete_reports = {row["suite_id"] for row in first if row.get("test_report_complete") is not True}
+if incomplete_reports:
+    completeness_reasons.append(f"test_report_incomplete:{len(incomplete_reports)}")
+nonfinal = sum(row.get("status") not in ("PASS", "FAIL") for row in first)
+if nonfinal:
+    completeness_reasons.append(f"suite_status_not_final:{nonfinal}")
+if detail.get("execution_mode") != "full":
+    completeness_reasons.append("execution_mode:" + str(detail.get("execution_mode")))
 rejected_shards = 0
 if sys.argv[3] == "1":
     sys.path.insert(0, str(out))
@@ -619,6 +650,32 @@ if sys.argv[3] == "1":
     rejected_shards = full_run_manifest.partition_readsets(
         Path("/tmp/gate-logs/readsets"), out / "readsets-rejected", packed_catalog, sys.argv[7])
     (out / "readsets-partitioned").write_text("ready\n", encoding="ascii")
+    collection_ids_by_suite = {}
+    reports = out / "reports"
+    reports.mkdir(exist_ok=True)
+    for suite in packed_catalog.get("suites", []):
+        sid = suite["id"]
+        encoded = quote(sid, safe="").replace(".", "%2E") or "%00"
+        directory = Path("/tmp/gate-logs/test-reports") / encoded
+        collections = []
+        for pattern in ("*/collection-*.json", "*/completion-*.json"):
+            for path in sorted(directory.glob(pattern)):
+                if sid in expected:
+                    destination = reports / encoded / path.parent.name / path.name
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(path, destination)
+                if path.name.startswith("collection-"):
+                    doc = json.loads(path.read_text(encoding="utf-8"))
+                    ids = doc["test_ids"]
+                    if not isinstance(ids, list) or any(not isinstance(tid, str) or not tid for tid in ids):
+                        raise ValueError("invalid_collection_ids:" + sid)
+                    collections.append(sorted(set(ids)))
+        if collections and any(ids != collections[0] for ids in collections):
+            completeness_reasons.append("collection_ids_differ:" + sid)
+            reporting = complete = False
+        elif collections and collections[0]:
+            collection_ids_by_suite[sid] = [sid + "::" + tid for tid in collections[0]]
+    (out / "collection-ids.json").write_text(canonical(collection_ids_by_suite) + "\n", encoding="utf-8")
 detail.update(execution_complete=complete, test_exit_code=int(sys.argv[2]),
               trusted_sha_override=sys.argv[5] == "1", loader_check=sys.argv[6],
               tracing_active=sys.argv[3] == "1", reporters_active=sys.argv[4] == "1",
@@ -626,6 +683,8 @@ detail.update(execution_complete=complete, test_exit_code=int(sys.argv[2]),
               collection_ids_sha256=hashlib.sha256(canonical(all_ids).encode("utf-8")).hexdigest(),
               attempts_ref=str(attempts_path), attempts_sha256=hashlib.sha256(raw).hexdigest(),
               test_id_reporting_complete=reporting,
+              completeness_reasons=sorted(completeness_reasons),
+              attempt_rows_rejected=attempt_rows_rejected,
               readsets_rejected_shards=rejected_shards,
               full_run_complete=complete and detail.get("execution_mode") == "full",
               finished_at=datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"))
@@ -642,6 +701,8 @@ if detail.get("phase") == "shadow":
               "collection_ids_sha256": detail["collection_ids_sha256"],
               "attempts_ref": detail["attempts_ref"], "attempts_sha256": detail["attempts_sha256"],
               "full_run_complete": detail["full_run_complete"],
+              "completeness_reasons": detail["completeness_reasons"],
+              "attempt_rows_rejected": detail["attempt_rows_rejected"],
               "tracing_active": detail["tracing_active"], "reporters_active": detail["reporters_active"],
               "test_id_reporting_complete": reporting, "synthetic": False,
               "fallback_reason": detail.get("fallback_reason"),
@@ -659,6 +720,7 @@ if sys.argv[3] == "1":
     result = subprocess.run([sys.executable, "-I", "-B", str(helper),
                              "--catalog", str(out / "catalog.json"),
                              "--readsets", "/tmp/gate-logs/readsets",
+                             "--collection", str(out / "collection-ids.json"),
                              "--output", str(out / "full-run.json")],
                             input=canonical(inputs), text=True)
     if result.returncode == 0 and not (out / "full-run.json").is_file():
@@ -690,15 +752,21 @@ if [[ "$tracing_ready" == 1 ]]; then
       [[ ! -f "$selection_dir/$member" ]] || selection_members+=("$member")
     done
     # Name each document once, including the outcome streams shards reference.
-    local -a attempt_members=() shard_members=()
+    local -a attempt_members=() shard_members=() report_members=()
     while IFS= read -r -d '' member; do
       attempt_members+=("${member#/tmp/gate-logs/}")
     done < <(find /tmp/gate-logs/readsets -type f -name 'attempts*.jsonl' -print0)
     while IFS= read -r -d '' member; do
       shard_members+=("${member#/tmp/gate-logs/}")
     done < <(find /tmp/gate-logs/readsets -type f ! -name 'attempts*.jsonl' -print0)
-    tar -czf "$archive" --no-recursion -C /tmp/gate-logs readsets -C "$selection_dir" "${selection_members[@]}" -C /tmp/gate-logs "${shard_members[@]}" "${attempt_members[@]}" 2>/dev/null || return 1
-    readsets_archive_members="readsets ${selection_members[*]} ${attempt_members[*]}"
+    if [[ -d "$selection_dir/reports" ]]; then
+      report_members+=(reports)
+      while IFS= read -r -d '' member; do
+        report_members+=("${member#"$selection_dir/"}")
+      done < <(find "$selection_dir/reports" -type f \( -name 'collection-*.json' -o -name 'completion-*.json' \) -print0 | sort -z)
+    fi
+    tar -czf "$archive" --no-recursion -C /tmp/gate-logs readsets -C "$selection_dir" "${selection_members[@]}" "${report_members[@]}" -C /tmp/gate-logs "${shard_members[@]}" "${attempt_members[@]}" 2>/dev/null || return 1
+    readsets_archive_members="readsets ${selection_members[*]} ${report_members[*]} ${attempt_members[*]}"
     readsets_error="archive measurement failed"
     readsets_bytes="$(wc -c < "$archive")" || return 1
     readsets_bytes="${readsets_bytes//[[:space:]]/}"
