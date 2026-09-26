@@ -51,6 +51,19 @@ export function usageCost(usage) {
   return finiteOrNull(usage?.total_cost_usd)
 }
 
+/** Metered tokens first, with any API-rate dollar value labelled as an estimate. */
+export function usageCostLabel(tokens, usd) {
+  const tokenCount = finiteOrNull(tokens)
+  const cost = finiteOrNull(usd)
+  const parts = []
+  if (tokenCount !== null && tokenCount >= 0) parts.push(`${tokenCount.toLocaleString()} tokens`)
+  if (cost !== null && cost >= 0) {
+    const usdText = cost > 0 && cost < 0.01 ? cost.toFixed(4) : cost.toFixed(3)
+    parts.push(`~$${usdText} est`)
+  }
+  return parts.length ? parts.join(' · ') : orDash(null)
+}
+
 /** Render helper: a known reading, or the honest em dash. */
 export function orDash(value, format = (v) => String(v)) {
   return value === null || value === undefined ? '·' : format(value)
