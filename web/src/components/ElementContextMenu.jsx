@@ -57,6 +57,7 @@ import { actionRow } from '../lib/palette.js'
 import { ensureSession, postMessage } from '../converse.js'
 import { isSecretRefused } from '../lib/secretGuardTransport.js'
 import { useAnnotations } from '../useAnnotations.js'
+import { trackUsage } from '../telemetry.js'
 import ChangeCapsule from './ChangeCapsule.jsx'
 
 const LONG_PRESS_MS = 500
@@ -141,7 +142,7 @@ export function rowsForIdentity(identity, ctx = {}) {
       kbd: action.kbd,
       disabled: !!reason,
       reason,
-      onSelect: () => action.run(ctx),
+      onSelect: () => { trackUsage('context_menu.action', { action_id: action.id, element_kind: identity.kind }); return action.run(ctx) },
     }
   })
   return shaped.filter((action) => typeof action.id === 'string').map(actionRow)

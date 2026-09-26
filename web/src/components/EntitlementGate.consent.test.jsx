@@ -76,19 +76,17 @@ describe('the consent row', () => {
   it('carries the exact honest copy, both halves of it', () => {
     render(<EntitlementGate tier="team" entitlements={PAID} />)
     expect(screen.getByText(CONSENT_COPY).textContent).toBe(
-      'Allow sharing how you use the studio (menu picks, searches) once those signals exist.'
+      'Allow sharing how you use the studio (menu picks, palette picks, searches).'
       + ' Product events are unaffected.',
     )
   })
 
-  it('says "once those signals exist" while no usage emitter exists yet', () => {
-    // The honesty half of the copy, pinned as its own spec because it is the
-    // one clause that must change when slices 10-13 land an emitter: today a
-    // viewer who turns this on shares nothing, and "Share how you use the
-    // studio" would say otherwise.
+  it('names the signals the emitters send, now that usage emitters exist', () => {
     render(<EntitlementGate tier="team" entitlements={PAID} />)
-    expect(screen.getByText(CONSENT_COPY).textContent).toMatch(/once those signals exist/)
-    expect(CONSENT_COPY.startsWith('Allow sharing')).toBe(true)
+    const copy = screen.getByText(CONSENT_COPY).textContent
+    expect(copy).not.toMatch(/once those signals exist/)
+    expect(copy).toContain('menu picks, palette picks, searches')
+    expect(copy.startsWith('Allow sharing')).toBe(true)
   })
 
   it('points aria-describedby at the copy, so the focused switch announces it', () => {

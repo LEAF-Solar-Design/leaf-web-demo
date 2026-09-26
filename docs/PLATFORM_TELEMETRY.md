@@ -346,6 +346,14 @@ C-2 (this change):
 | `degraded.shown` | DegradedBanner mount | source (workspace/toolcast), never the free-text reason |
 | `drawing.version_navigated` | undo/redo success, History open, preview click | action (undo/redo/history/preview) |
 
+### Usage-shaped events (consent-gated, `trackUsage`)
+
+| Event | Choke point | Labels |
+|---|---|---|
+| `palette.pick` | `PromptBox.runPaletteRow`, after the disabled-row guard | `scope` (act/find), `row_kind`, `query_hash` (`digest(value.trim())`), plus `action_id` (`row.id`) for action rows or `row_hash` (`digest(row.id)`) for other rows |
+| `find.query` | PromptBox find-scope search effect, immediately before each debounced `searchIndex` request | `query_hash` (`digest(q)`, where `q` is the trimmed query) |
+| `context_menu.action` | `ElementContextMenu.rowsForIdentity`, the registry row's `onSelect` | `action_id` (`action.id`), `element_kind` (`identity.kind`) |
+
 Only the pre-auth allowlist (`gate.choice`, `site.demo_viewed`,
 `tour.started`, `auth.completed`, `client.exception`) is accepted
 anonymously at the ingest door; every other client event identifies like any

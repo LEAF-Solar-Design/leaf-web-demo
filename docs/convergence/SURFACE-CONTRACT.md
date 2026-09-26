@@ -598,9 +598,9 @@ purge would miss them. Each send seam (the 5 s flush, `flushNow`, the pagehide b
 the switch went off is destroyed rather than posted, and a re-grant inside the retry window
 cannot resurrect it. The one thing a revoke cannot recall is a request that already left the
 browser under a valid grant; that request was consented when it was sent. The switch is the permission, not a data tap:
-no usage emitter exists in the tree yet, so its copy is present-tense honest about that
-("Allow sharing how you use the studio (menu picks, searches) once those signals exist"),
-and the emitters slices 10-13 add are what start flowing under an existing yes. When the
+`palette.pick` and `find.query` in `web/src/components/PromptBox.jsx`, and
+`context_menu.action` in `web/src/components/ElementContextMenu.jsx`, flow through `trackUsage` under an existing yes.
+The switch says "Allow sharing how you use the studio (menu picks, palette picks, searches). Product events are unaffected." When the
 build-time kill switch is on, nothing usage-shaped can leave whatever is stored, and the row
 says exactly that in text ("Telemetry is off for this build.") rather than being a dead
 control: a stored grant stays visible and stays revocable, with the second reason naming

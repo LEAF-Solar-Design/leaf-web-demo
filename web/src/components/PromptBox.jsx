@@ -25,6 +25,8 @@
 
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import useExit from '../useExit.js'
+import { digest, trackUsage } from '../telemetry.js'
+import { byId } from '../lib/actionRegistry.js'
 import { authHeaders, config, getDrawingVersions, listOperatorSessions, noteUnauthorized, searchIndex } from '../api.js'
 import { modChord } from '../lib/keys.js'
 import { SECRET_REASONS, SECRET_REASONS_NO_MOUNT } from '../lib/secretPatterns.js'
@@ -278,6 +280,7 @@ export default function PromptBox({
     if (!q) { setFindResults(null); return undefined }
     let live = true
     const timer = setTimeout(() => {
+      trackUsage('find.query', { query_hash: digest(q) })
       searchIndex(false, q, { drawingId }).then((data) => { if (live) setFindResults(data) })
     }, 150)
     return () => { live = false; clearTimeout(timer) }
@@ -528,6 +531,15 @@ export default function PromptBox({
   }
   const runPaletteRow = (row) => {
     if (row.disabled) return
+    const labels = {
+      scope: activeScope,
+      row_kind: row.kind,
+      query_hash: digest(value.trim()),
+      ...(row.kind === 'action'
+        ? (byId(row.id) ? { action_id: row.id } : { action_id: 'unregistered', row_hash: digest(row.id) })
+        : { row_hash: digest(row.id) }),
+    }
+    trackUsage('palette.pick', labels)
     if (row.kind === 'action') { row.onSelect?.(); changePrompt(''); setActiveScope(null); return }
     // An artifact or find-result row has no run handler of its own yet
     // (slice 10b/10c ship the index, not per-kind navigation): it completes
