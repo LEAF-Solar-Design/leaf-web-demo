@@ -79,13 +79,15 @@ export default defineConfig(({ mode }) => ({
     fs: { allow: [HERE, path.resolve(HERE, '..', 'vendor')] },
   },
   build: {
+    manifest: true,
     rollupOptions: {
       output: {
-        // Split the heavy 3D + react-dom payload into its own vendor chunk so
-        // first paint isn't blocked behind the viewer bundle.
+        // ReactDOM is needed at boot. Keep it separate from three so the
+        // palette does not load the viewer through the entry's renderer.
         manualChunks(id) {
           if (!id.includes('node_modules')) return undefined
-          if (/[\/]node_modules[\/](three|react-dom)([\/]|$)/.test(id)) return 'vendor-viewer'
+          if (/[/\\]node_modules[/\\]three([/\\]|$)/.test(id)) return 'vendor-viewer'
+          if (/[/\\]node_modules[/\\](react|react-dom|scheduler)([/\\]|$)/.test(id)) return 'vendor-react'
           return undefined
         },
       },
