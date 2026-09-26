@@ -107,3 +107,15 @@ export function alternativeDecision(previous, name) {
     source: previous?.source,
   }
 }
+
+// A solve decision the server router bound to a solve-capable catalog tool
+// (server/nl_router.py solve branch) is a confirmable RUN of that tool. Pure:
+// returns a NEW run-lane decision marked routedLane 'solve', or the SAME
+// reference for anything else (run, build, an unbound solve, a non-object).
+// Never runs anything and never raises confidence.
+export function solveRunDecision(decision) {
+  if (!decision || decision.lane !== 'solve') return decision
+  const tool = typeof decision.tool === 'string' ? decision.tool.trim() : ''
+  if (!tool) return decision
+  return { ...decision, lane: 'run', tool, routedLane: 'solve' }
+}
