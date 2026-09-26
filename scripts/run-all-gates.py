@@ -819,7 +819,7 @@ def build_suites() -> List[Suite]:
         Suite("server-billing-tiers", "server tests/test_billing_tiers.py", "pytest", SERVER,
               _py_pytest("tests/test_billing_tiers.py"), 30),
         Suite("server-broker-admission-reconciler", "server tests/test_broker_admission_reconciler.py", "pytest", SERVER,
-              _py_pytest("tests/test_broker_admission_reconciler.py"), 46),
+              _py_pytest("tests/test_broker_admission_reconciler.py"), 52),
         # The per-tenant DAILY AUTHORING cap. Shipped without a gate entry, the
         # same gap the site-demo lane above had: only the WEB half of this
         # feature (web-author-quota-gate) was registered, so every server-side
