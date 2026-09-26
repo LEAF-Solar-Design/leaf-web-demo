@@ -284,11 +284,10 @@ function Tabs() {
  * ProductSurfaceFrame, under its declared slot.
  *
  * The console gate is `contract.chrome.productFrame` (App.jsx:2898). The stage
- * gate is `contract.chrome.stageBranch === 'frame'`, which is the arm ToolCast
- * already falls through to (ToolCast.jsx:2138-2147) — the two scenes genuinely
- * diverge here (the stage gives iOS its own rail instead of the frame, D1 in
- * the contract doc), and slice 4a preserves that divergence rather than
- * inventing a merge. Both terms are declared slots, never surface ids.
+ * takes the frame for its declared frame branch and for the declared
+ * ios-surface project slot when productFrame is true. This closes D1: the
+ * stage's iOS ship lane now fills the frame's project slot. Every term is a
+ * declared slot, never a surface id.
  */
 function Frame() {
   const frame = useSlot()
@@ -296,6 +295,7 @@ function Frame() {
   const declared = isConsole(frame)
     ? frame.contract.chrome.productFrame
     : frame.contract.chrome.stageBranch === 'frame'
+      || (frame.contract.chrome.productFrame === true && frame.contract.chrome.projectSlot === 'ios-surface')
   if (!declared) return null
   if (isConsole(frame) && frame.studioShell && frame.contract.chrome.shell === 'cockpit') {
     const project = frame.workspaceProject

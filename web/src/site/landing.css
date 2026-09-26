@@ -272,6 +272,17 @@
 .tc-product-frame h1 { max-width: 780px; margin: 18px 0 8px; color: #fff; font: 600 clamp(30px, 5vw, 58px)/1.02 'Inter Tight', sans-serif; letter-spacing: -.035em; }
 .tc-product-frame > p { max-width: 680px; color: #a1a1aa; font-size: 14px; line-height: 1.6; }
 .tc-product-project { margin: 24px 0; }
+.tc-product-project .tc-ios-ship-lane {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 12px;
+  width: 100%; max-width: 680px; min-width: 0; box-sizing: border-box;
+  padding: 18px; border: 1px solid #27272a; border-radius: 10px; background: #141416;
+  overflow-wrap: anywhere;
+}
+.tc-ios-ship-lane > * { min-width: 0; max-width: 100%; box-sizing: border-box; }
+.tc-ios-ship-lane .tc-rail-note { margin: 0; color: #a1a1aa; font-size: 13px; line-height: 1.6; }
+.tc-ios-ship-lane .tc-solve { flex-wrap: wrap; white-space: normal; }
+.tc-ios-ship-lane :is(.tc-back, .tc-run) { min-height: 44px; height: auto; white-space: normal; text-align: left; }
+.tc-ios-ship-lane [data-testid="ios-ship-receipt"] { width: 100%; }
 .tc-product-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 320px)); gap: 18px; margin-top: 28px; }
 .tc-product-columns > div { padding: 18px; border: 1px solid #27272a; border-radius: 10px; background: #141416; }
 .tc-product-columns h2 { margin: 0 0 12px; color: #d4d4d8; font: 600 13px 'Inter Tight', sans-serif; }

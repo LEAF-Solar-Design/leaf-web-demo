@@ -258,9 +258,8 @@ const CONTRACT_FIXTURE = {
     versions: 'none',
     conversations: { scope: 'drawing' },
     integrations: { link: 'standard-flow' },
-    // The console carries NO ship-lane launch control (IosSurface.jsx:3-4 is
-    // props-only); the repo's only one is the stage's ToolCast.jsx:2114.
-    builds: { routes: ['one-shot'], card: 'job-rail' },
+    // Both shells expose a ship-lane launch through useIosShipController.
+    builds: { routes: ['one-shot', 'ship-lane'], card: 'job-rail' },
     // contextMenu: the device stage's ship-lane rungs plus the chat rows.
     contextMenu: ['rung', 'turn', 'approval', 'item'],
     shortcuts: null,
@@ -304,6 +303,13 @@ const CONTRACT_FIXTURE = {
 }
 
 const SURFACE_IDS = ['browser', 'cad', 'solar', 'ios', 'sheets']
+
+it('D2 ios declares the ship-lane route and it is the only surface that does', () => {
+  expect(surfaceContract('ios').builds.routes).toEqual(['one-shot', 'ship-lane'])
+  for (const id of SURFACE_IDS.filter((id) => id !== 'ios')) {
+    expect(surfaceContract(id).builds.routes).not.toContain('ship-lane')
+  }
+})
 
 // The four the STUDIO hosts (`scene: 'app'`). Kept separate from SURFACE_IDS
 // so a row about the console cannot silently start asserting about a surface

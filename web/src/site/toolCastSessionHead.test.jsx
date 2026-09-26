@@ -83,6 +83,8 @@ vi.mock('./SurfaceFrame.jsx', async () => {
   const Context = createContext(null)
   function Frame({ children, toast }) { return <Context.Provider value={toast}>{children}</Context.Provider> }
   Frame.Tabs = () => null
+  // The iOS stage branch renders <SurfaceFrame.Frame /> (the declared frame slot).
+  Frame.Frame = () => null
   Frame.Toast = () => {
     const value = useContext(Context)
     return <Toast {...value} />

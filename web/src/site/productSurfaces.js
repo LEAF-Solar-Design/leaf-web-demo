@@ -447,8 +447,8 @@ export const PRODUCT_SURFACES = Object.freeze([
       chrome: {
         // Static shell/profile slots are not overlay-authorable; the schema stays closed.
         shell: 'cockpit',
-        // productFrame: App.jsx:2838 -> true (with the iOS project slot).
-        //   Stage divergence: ToolCast.jsx:2077 gives ios its own rail instead.
+        // productFrame: both App.jsx and ToolCast.jsx render the declared frame
+        //   with the iOS ship lane in its ios-surface project slot.
         productFrame: true,
         // workspaceCard: App.jsx:2859 -> hidden.
         workspaceCard: false,
@@ -479,13 +479,10 @@ export const PRODUCT_SURFACES = Object.freeze([
       conversations: { scope: 'drawing' }, // converse.js:129-134
       integrations: { link: 'standard-flow' }, // slice 8c, see the browser record's note
       builds: {
-        // routes: the console mounts IosSurface, which is props-only and
-        //   carries NO launch control (IosSurface.jsx:3-4 "no fetch, no
-        //   polling, no client-side state math"); the only ship-lane launch
-        //   in the repo is the STAGE's (ToolCast.jsx:2114
-        //   data-testid="ios-ship-launch"). Recorded as a divergence in the
-        //   doc, never invented into the console contract.
-        routes: ['one-shot'],
+        // routes: the console's App.jsx:3283 IosSurface onLaunch control and
+        //   the stage's ToolCast.jsx data-testid="ios-ship-launch" control
+        //   both launch through the shared useIosShipController.
+        routes: ['one-shot', 'ship-lane'],
         // card: slice 11a, the job monitor hosts the card (expanded here,
         //   rails.right 'job-rail'), on the stage's Jobs tab as well.
         card: 'job-rail',

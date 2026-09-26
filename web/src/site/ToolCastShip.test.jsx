@@ -40,7 +40,7 @@ vi.mock('../controllers/upload/useDrawingUploadController.js', () => ({ default:
 vi.mock('../useTenantMcpRegistry.js', () => ({ default: () => fixture.registry }))
 vi.mock('../ios/useIosSurface.js', () => ({ default: () => ({}) }))
 vi.mock('./useSurfaceContract.js', () => ({ useSurfaceContract: () => ({
-  chrome: { stageBranch: 'ios' }, authoring: false, versions: 'none',
+  chrome: { stageBranch: 'ios', productFrame: true, projectSlot: 'ios-surface' }, authoring: false, versions: 'none',
 }) }))
 vi.mock('../components/ConversationList.jsx', () => ({ resumeHref: () => null }))
 vi.mock('../components/LiveRegion.jsx', () => ({ default: () => null, HIDE_WITH_CLASS: 'hidden' }))
@@ -76,16 +76,40 @@ vi.mock('./SurfaceFrame.jsx', async () => {
   const { createContext, useContext } = await import('react')
   const { default: Toast } = await import('../components/Toast.jsx')
   const Context = createContext(null)
-  function Frame({ children, toast }) { return <Context.Provider value={toast}>{children}</Context.Provider> }
+  function Frame({ children, toast, projectSlot }) { return <Context.Provider value={{ toast, projectSlot }}>{children}</Context.Provider> }
   Frame.Tabs = () => null
+  Frame.Frame = () => {
+    const value = useContext(Context)
+    return <div data-testid="frame-project-slot">{value.projectSlot}</div>
+  }
   Frame.Toast = () => {
     const value = useContext(Context)
-    return <Toast {...value} />
+    return <Toast {...value.toast} />
   }
   return { default: Frame }
 })
 
 afterEach(() => { cleanup(); notificationBus.clearVisible(); vi.unstubAllGlobals() })
+
+it('D1 row1 the stage ios ship lane and its launch control mount only through the frame project slot', async () => {
+  const { TextEncoder, TextDecoder } = await import('node:util')
+  vi.stubGlobal('TextEncoder', TextEncoder)
+  vi.stubGlobal('TextDecoder', TextDecoder)
+  const { default: ToolCast } = await import('./ToolCast.jsx')
+  fixture.ship = {
+    readiness: validateIosShipReadiness({
+      record_kind: 'leaf.ios-ship-readiness.v1', project_id: 'p1', healthy: true, launchable: true,
+      grant_status: 'healthy', dispatch_available: true,
+      approved_launch: { approval_id: 'a1', revision: 'r1', source_revision: 'source1',
+        source_sha256: 'a'.repeat(64), bundle_identifier: 'com.leaf.test', marketing_version: '1.0', build_number: '12' },
+    }, { projectId: 'p1', revision: 'r1' }),
+    launch: vi.fn(), refresh: vi.fn(), phase: 'ready', busy: false, error: null, execution: null, receipt: null,
+  }
+  render(<ToolCast active={false} />)
+  const slot = screen.getByTestId('frame-project-slot')
+  expect(slot).toContainElement(screen.getByTestId('ios-ship-lane'))
+  expect(slot).toContainElement(screen.getByTestId('ios-ship-launch'))
+})
 
 it('I1 row10 renders controller launch delegation, acceptance toast, errors and request-only busy', async () => {
   // Load the real component only after jsdom's encoding constructors are aligned.
