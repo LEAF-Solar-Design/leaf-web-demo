@@ -60,7 +60,8 @@ class TestCodebuildCiReadsets(unittest.TestCase):
                        f'python() {{ {shlex.quote(Path(sys.executable).as_posix())} "$@"; }}\n'
                        'tar() { printf "tar\\n" >> "$READSETS_TAR_CALLS"; command tar "$@"; }\n'
                        + script)
-            result = subprocess.run([BASH, "-c", command], cwd=ROOT, env=env,
+            # bash -s reads the script from stdin: a long -c argument is mangled by argv quoting under MSYS bash on Windows.
+            result = subprocess.run([BASH, "-s"], input=command, cwd=ROOT, env=env,
                                     capture_output=True, text=True)
             self.assertEqual(result.returncode, gate_status, result.stdout + result.stderr)
             final = next(json.loads(line.removeprefix("LEAF_SELECTION_FINAL "))
