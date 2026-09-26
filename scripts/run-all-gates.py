@@ -3050,6 +3050,19 @@ def record_attempt(result: Result, log_dir: Path, attempt: int) -> None:
         if shards:
             try:
                 traces = [json.loads(path.read_text(encoding="utf-8")) for path in shards]
+                # sitecustomize records the absolute test-report directory.
+                # Resolve it after the process exits, without changing capture.
+                reports = log_dir.resolve() / "test-reports" / encoded_suite_id(result.suite.id) / str(attempt)
+                attempt_files = sorted(reports.glob("attempts-*.jsonl"))
+                outcome_path = shards[0].parent / "attempts.jsonl"
+                outcome_path.write_bytes(b"".join(path.read_bytes() for path in attempt_files))
+                outcome_ref = (Path("readsets") / encoded_suite_id(result.suite.id) /
+                               str(attempt) / outcome_path.name).as_posix()
+                for path, doc in zip(shards, traces):
+                    if doc.get("outcomes_ref") == str(reports):
+                        doc["outcomes_ref"] = outcome_ref
+                        path.write_text(json.dumps(doc, sort_keys=True, separators=(",", ":")) + "\n",
+                                        encoding="utf-8")
                 row["trace_complete"] = all(doc.get("capture_complete") is True and
                                              doc.get("children_complete") is True and
                                              doc.get("suite_id") == result.suite.id and

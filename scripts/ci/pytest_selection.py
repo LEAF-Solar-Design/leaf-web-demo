@@ -8,6 +8,7 @@ from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 
 try:
@@ -260,6 +261,16 @@ class SelectionPlugin:
             if self.capture is not None:
                 self.capture.snapshot_modules()
             self.attempt_stream.close()
+            # Web report-only catalogs have no module entries. Keep the real
+            # attempt stream beside the startup shards for archive publication.
+            web_suite = os.environ.get("LEAF_READSET_SUITE")
+            if self.capture is not None and web_suite:
+                archive_dir = (Path(os.environ["LEAF_READSET_DIR"]) /
+                               trace_reads.encoded_suite(web_suite) /
+                               str(int(os.environ.get("LEAF_READSET_ATTEMPT", "1"))))
+                archive_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(self.output / ("attempts-" + self.shard + ".jsonl"),
+                                archive_dir / ("attempts-" + self.shard + ".jsonl"))
             if self.is_controller:
                 expected = sorted(tid for entry in self.catalog.get("suites", [])
                                   for tid in entry.get("test_ids", []))

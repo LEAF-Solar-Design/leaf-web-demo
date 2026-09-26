@@ -207,6 +207,19 @@ class SelectionAdapterTests(unittest.TestCase):
         self.assertTrue(result.test_report["test_report_complete"], result.log_path.read_text(encoding="utf-8"))
         self.assertEqual(result.test_report["failed_test_ids"], ["sample::test_sample.py::test_case[bad]"])
         self.assertEqual(len(result.test_report["test_ids"]), 2)
+        shards = list((self.logs / "readsets" / "sample" / "1").glob("*.json"))
+        self.assertTrue(shards)
+        for path in shards:
+            ref = json.loads(path.read_text(encoding="utf-8"))["outcomes_ref"]
+            self.assertFalse(Path(ref).is_absolute())
+            self.assertNotIn("..", Path(ref).parts)
+            self.assertTrue(ref.startswith("readsets/sample/1/attempts"))
+            rows = [json.loads(line) for line in (self.logs / ref).read_text(
+                encoding="utf-8").splitlines()]
+            self.assertTrue(rows)
+            self.assertTrue(all(row["schema"] == "leaf.ci.test-attempt.v1" for row in rows))
+            self.assertTrue(any(row["outcome"] == "failed" for row in rows))
+        self.assertTrue(list((self.logs / "readsets" / "sample" / "1").glob("attempts-*.jsonl")))
 
     @unittest.skipUnless(shutil.which("node"), "Node is required for reporter contracts")
     def test_node_reporters_preserve_ids_and_first_failure(self):
