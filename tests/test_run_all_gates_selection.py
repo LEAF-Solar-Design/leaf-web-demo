@@ -268,6 +268,31 @@ class SelectionAdapterTests(unittest.TestCase):
             self.assertEqual(row["test_ids"], ids)
             self.assertEqual(row["failed_test_ids"], [ids[1]])
 
+    def test_process_capture_receipt_fields_reach_the_attempt_record(self):
+        suite = RUNNER.Suite("captured-script", "capture fixture", "script", self.work, [], None)
+        with mock.patch.dict(os.environ, {"LEAF_PROCESS_CAPTURE": "1"}):
+            RUNNER.record_attempt(RUNNER.Result(suite, "PASS", "ok", 0.0), self.logs, 1)
+            receipt = (self.logs / "test-reports" / suite.id / "1" / "reports" /
+                       ("trace-receipt-" + suite.id + "-1.json"))
+            receipt.parent.mkdir(parents=True)
+            receipt.write_text(json.dumps({
+                "schema": "leaf.ci.trace-receipt.v1", "capture_group": suite.id + "-1",
+                "facility_available": True, "capture_complete": False,
+                "capture_errors": ["descendant_outlived_tree"], "tracer_exit_code": 0}), encoding="utf-8")
+            RUNNER.record_attempt(RUNNER.Result(suite, "PASS", "ok", 0.0), self.logs, 1)
+        missing, present = [json.loads(line) for line in
+                            (self.logs / "attempts" / (suite.id + ".jsonl")).read_text().splitlines()]
+        self.assertEqual(missing["capture_errors"], ["capture_receipt_missing"])
+        self.assertIs(missing["capture_facility_available"], False)
+        self.assertEqual({k: present[k] for k in ("capture_facility_available", "capture_complete",
+                                                   "capture_errors", "tracer_exit_code")},
+                         {"capture_facility_available": True, "capture_complete": False,
+                          "capture_errors": ["descendant_outlived_tree"], "tracer_exit_code": 0})
+        self.assertTrue(present["test_report_complete"])
+        RUNNER.record_attempt(RUNNER.Result(suite, "PASS", "ok", 0.0), self.logs, 2)
+        plain = json.loads((self.logs / "attempts" / (suite.id + ".jsonl")).read_text().splitlines()[-1])
+        self.assertNotIn("capture_errors", plain)
+
     def test_vitest_skipped_tasks_only_document_is_complete(self):
         suite = RUNNER.Suite("vitest-skips", "skipped tasks fixture", "vitest", self.work, [], None)
         directory = self.logs / "test-reports" / suite.id / "1"

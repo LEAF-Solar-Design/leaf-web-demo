@@ -50,6 +50,21 @@ export function testReport(files, errors, root, vitestRoot, suite, attempt) {
   };
 }
 
+// The runner's encoded_suite_id: Python quote(id, safe='') with '.' as %2E.
+export function encodedSuiteId(suite) {
+  return encodeURIComponent(suite).replace(/[!'()*.]/g,
+    c => '%' + c.charCodeAt(0).toString(16).toUpperCase()) || '%00';
+}
+
+// S15a: the one-row suite list the trace supervisor reads at stream end. The IDs are the
+// document's own (unique since S14d3); outcomes_ref is that document relative to the archive root.
+export function captureSuites(report, documentName) {
+  return [{
+    suite_id: report.suite_id, attempt: report.attempt, worker: 'tree', test_ids: report.test_ids,
+    outcomes_ref: `reports/${encodedSuiteId(report.suite_id)}/${report.attempt}/${documentName}`,
+  }];
+}
+
 // Add alongside the existing reporter. Never write test names to stdout.
 export default class LeafVitestReporter {
   onInit(ctx) { this.root = ctx.config?.root || process.cwd(); }
@@ -64,12 +79,22 @@ export default class LeafVitestReporter {
     if (!report.complete) {
       process.stderr.write(`WARNING: leaf Vitest report incomplete: ${report.incomplete_reasons.join(',')}\n`);
     }
+    const documentName = `tests-vitest-${process.pid}.json`;
     try {
       mkdirSync(directory, { recursive: true });
-      writeFileSync(resolve(directory, `tests-vitest-${process.pid}.json`), JSON.stringify(report) +
+      writeFileSync(resolve(directory, documentName), JSON.stringify(report) +
                     '\n', { encoding: 'utf8', flag: 'wx' });
     } catch {
       process.stderr.write('WARNING: leaf Vitest report incomplete: report_write_failed\n');
+    }
+    if (process.env.LEAF_PROCESS_CAPTURE === '1') {
+      try {
+        writeFileSync(resolve(directory, 'capture-suites.json'),
+                      JSON.stringify(captureSuites(report, documentName)) + '\n', { encoding: 'utf8' });
+      } catch {
+        // The supervisor then records suites_unavailable; the verdict is unchanged.
+        process.stderr.write('WARNING: leaf Vitest capture suites unavailable\n');
+      }
     }
   }
 }
@@ -101,5 +126,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   const retried = testReport([file([test('retry', { result: { state: 'pass', retryCount: 1 } })])],
                             [], root, root, 'fixture', 1);
   deepStrictEqual(retried.failed_test_ids, retried.test_ids);
+  const rows = captureSuites(testReport([file([test('a', { result: { state: 'pass' } })])], [], root, root,
+                                        'web.vitest/unit', 2), 'tests-vitest-7.json');
+  deepStrictEqual(rows, [{ suite_id: 'web.vitest/unit', attempt: 2, worker: 'tree',
+                           test_ids: ['web.vitest/unit::case.test.js::a'],
+                           outcomes_ref: 'reports/web%2Evitest%2Funit/2/tests-vitest-7.json' }]);
   process.stdout.write('leaf Vitest reporter self-test passed\n');
 }

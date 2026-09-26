@@ -93,6 +93,13 @@ def shadow_evidence(attempts, selected_test_ids, assigned_arm, execution_mode):
             "test_id_reporting_complete": reporting_complete}
 
 
+def capture_suites(suite, attempt, collected, outcomes_ref):
+    """One row for the runner's suite: [{suite_id, attempt, worker: "tree", test_ids, outcomes_ref}]."""
+    ids = sorted({suite + "::" + tid for tid in collected if isinstance(tid, str) and tid})
+    return [{"suite_id": suite, "attempt": attempt, "worker": "tree", "test_ids": ids,
+             "outcomes_ref": outcomes_ref}]
+
+
 class SelectionPlugin:
     def __init__(self, config):
         self.config = config
@@ -356,11 +363,32 @@ class SelectionPlugin:
             if hasattr(self.config, "workeroutput"):
                 self.config.workeroutput["leaf_selection_completion"] = completion
             selection.write_json(self.output / ("completion-" + self.shard + ".json"), completion)
+            if (os.environ.get("LEAF_PROCESS_CAPTURE") == "1" and web_suite and
+                    not hasattr(self.config, "workerinput")):
+                self.write_capture_suites(web_suite)
             detail = dict(self.decision, schema="leaf.ci.selection.v1")
             print("LEAF_SELECTION_FINAL " + selection.canonical(detail).decode("ascii"),
                   file=sys.stderr)
             if self.capture is not None:
                 self.capture.close()
+
+    def write_capture_suites(self, suite):
+        """S15a: the one-row suite list the trace supervisor reads when its stream ends.
+
+        Test IDs are suite-qualified as collection_ids_by_suite has them; outcomes_ref names this
+        process's attempt stream relative to the archive run root. A failed write leaves the
+        supervisor's suites_unavailable, never a changed verdict.
+        """
+        try:
+            collected = ({tid for ids in self.worker_collections.values() for tid in ids}
+                         if self.is_controller else set(self.collection))
+            attempt = int(os.environ.get("LEAF_READSET_ATTEMPT", "1"))
+            outcomes_ref = (Path("readsets") / trace_reads.encoded_suite(suite) / str(attempt) /
+                            ("attempts-" + self.shard + ".jsonl")).as_posix()
+            selection.write_json(self.output / "capture-suites.json", capture_suites(
+                suite, attempt, collected, outcomes_ref))
+        except (OSError, TypeError, ValueError, AttributeError):
+            print("WARNING selection: capture_suites_write_failed", file=sys.stderr)
 
     def pytest_unconfigure(self, config):
         if self.capture is not None:

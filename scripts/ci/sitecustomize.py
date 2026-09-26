@@ -16,6 +16,10 @@ def _install():
     output = os.environ.get("LEAF_READSET_DIR")
     if not (root and suite and output):
         return
+    if os.environ.get("LEAF_PROCESS_CAPTURE") == "1":
+        # S15a: readsets/ holds only the supervisor's *-process.json shards; the Python read sets
+        # become diagnostics beside it, content unchanged.
+        output = str(Path(output).parent / "diagnostics" / "readsets")
     # This file and trace_reads.py are extracted from the same frozen commit.
     import trace_reads
 

@@ -310,9 +310,33 @@ def _eligible_suite(row):
             not row.get("capture_errors") and not row.get("incomplete_reasons"))
 
 
+PROCESS_TRACE_KIND = "linux-process-tree"
+
+
+def _process_entry(entry):
+    return entry.get("trace_kind") == PROCESS_TRACE_KIND and entry.get("python_only") is False
+
+
+def verify_capture_epoch(mapping, manifest_path):
+    """The selecting build's epoch and external-root digests must equal the map's."""
+    if manifest_path is None:
+        raise InvalidInput("epoch_unavailable")
+    try:
+        manifest, _ = load_json(manifest_path)
+    except InvalidInput as exc:
+        raise InvalidInput("epoch_unavailable") from exc
+    if (manifest.get("schema") != "leaf.ci.capture-epoch.v1" or
+            not isinstance(mapping.get("capture_epoch"), str) or
+            digest(manifest) != mapping["capture_epoch"] or
+            not isinstance(manifest.get("external_root_digests"), dict) or
+            manifest["external_root_digests"] != mapping.get("external_root_digests")):
+        raise InvalidInput("epoch_mismatch")
+    return manifest
+
+
 def decide(repo, trusted_sha, head_sha, map_path, event_evidence=None, policy_path=None,
            catalog_path=None, repo_slug=None, pr_number=None, window_path=None,
-           environ=None, now=None):
+           environ=None, now=None, capture_epoch_manifest=None):
     decision = {
         "schema": DECISION_SCHEMA, "selection_mode": "full", "execution_mode": "full",
         "assigned_arm": None, "assignment_bucket": None, "assignment_rule": "sha256-pr-v1",
@@ -420,13 +444,20 @@ def decide(repo, trusted_sha, head_sha, map_path, event_evidence=None, policy_pa
         decision["mandatory_suite_ids"] = sorted(mandatory)
         decision["known_read_paths"] = {}
         edges = {}
+        lookups = {}
         shared = {}
+        # Process entries need a process map whose epoch the selecting build
+        # reproduces; absent or changed identity is a full run, never a selection.
+        process_map = mapping.get("trace_kind") == PROCESS_TRACE_KIND
+        if process_map and any(_process_entry(entry) for entry in entries.values()):
+            verify_capture_epoch(mapping, capture_epoch_manifest)
         for sid, entry in entries.items():
             row = suites.get(sid, {})
             if not isinstance(row, dict):
                 raise InvalidInput("invalid_map")
-            if (not _eligible_suite(row) or entry.get("trace_kind") != "python" or
-                    entry.get("python_only") is not True or
+            python_entry = entry.get("trace_kind") == "python" and entry.get("python_only") is True
+            if (not _eligible_suite(row) or
+                    not (python_entry or (process_map and _process_entry(entry))) or
                     entry.get("classification") not in ("mapped", "mandatory") or
                     entry.get("classification") == "mandatory" or entry.get("contract_assertions")):
                 required.add(sid)
@@ -452,13 +483,17 @@ def decide(repo, trusted_sha, head_sha, map_path, event_evidence=None, policy_pa
                     raise InvalidInput("ambiguous_read_path")
                 edges.setdefault(path, set()).add(sid)
             decision["known_read_paths"][sid] = sorted(reads)
+            # An observed missing path: adding it later selects the suite.
+            for path in strings(row.get("negative_lookup_paths", []), "invalid_map"):
+                lookups.setdefault(repo_path(path), set()).add(sid)
             shared[sid] = set(strings(row.get("shared_state_dependencies", [])))
             if not shared[sid] <= set(entries):
                 raise InvalidInput("shared_closure_incomplete")
         for path in paths:
-            if path not in edges:
+            hits = edges.get(path, set()) | lookups.get(path, set())
+            if not hits:
                 raise InvalidInput("unknown_path")
-            required.update(edges[path])
+            required.update(hits)
         # Shared state is conservatively undirected: either endpoint requires both.
         while True:
             previous = set(required)
@@ -565,6 +600,8 @@ def main(argv=None):
         choose.add_argument(option, required=True)
     for name in ("event-evidence", "policy", "catalog", "repo-slug", "pr-number", "window"):
         choose.add_argument("--" + name)
+    # Written at bootstrap by trace_supervisor.build_epoch_manifest on the selecting build.
+    choose.add_argument("--capture-epoch-manifest")
     emit = commands.add_parser("emit-web-args")
     for name in ("decision", "catalog", "out"):
         emit.add_argument("--" + name, required=True)
@@ -577,7 +614,8 @@ def main(argv=None):
         atomic_write(out / "only-args.nul", b"")
         decision = decide(args.repo, args.trusted_sha, args.head_sha, args.map,
                           args.event_evidence, args.policy, args.catalog, args.repo_slug,
-                          args.pr_number, args.window)
+                          args.pr_number, args.window,
+                          capture_epoch_manifest=args.capture_epoch_manifest)
         if decision.get("catalog_kind") == "web" and decision["apply_filter"]:
             catalog, _ = load_json(args.catalog)
             atomic_write(out / "only-args.nul", validated_web_args(decision, catalog))

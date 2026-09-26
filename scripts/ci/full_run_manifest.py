@@ -22,11 +22,33 @@ def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
 
 
+PROCESS_TRACE_KIND = "linux-process-tree"
+PROCESS_TREE_SCHEMA = "leaf.ci.process-tree.v1"
+
+
+def toolchain_fingerprint(image, capture_sha):
+    """The one fingerprint rule; ci.sh's capture base context imports it so both sides agree."""
+    return hashlib.sha256(canonical({"schema": "leaf.ci.toolchain.v1", "python": platform.python_version(),
+                                     "image": image, "capture_sha": capture_sha})).hexdigest()
+
+
+def is_capture_report(relative):
+    """S15a: the supervisor's certificate and receipt are reports, never shards."""
+    parts = Path(relative).parts
+    return (len(parts) >= 2 and parts[-2] == "reports" and parts[-1].endswith(".json") and
+            (parts[-1].startswith("process-tree-") or parts[-1].startswith("trace-receipt-")))
+
+
 def partition_readsets(readsets, rejected, catalog, run_id):
-    """Quarantine foreign shards and their outcomes before manifest validation."""
+    """Quarantine foreign shards and their outcomes before manifest validation.
+
+    diagnostics/ (a capture run's Python read sets) is never partitioned; capture reports stay put.
+    """
     entries, _ = select_tests.catalog_info(catalog)
     readsets, rejected = Path(readsets), Path(rejected)
-    files = sorted(path for path in readsets.rglob("*") if path.is_file())
+    files = sorted(path for path in readsets.rglob("*") if path.is_file() and
+                   "diagnostics" not in path.relative_to(readsets).parts and
+                   not is_capture_report(path.relative_to(readsets)))
     members = {path.relative_to(readsets.parent).as_posix(): path for path in files}
     accepted = set()
     rejected_files = set()
@@ -74,7 +96,28 @@ def partition_readsets(readsets, rejected, catalog, run_id):
     return count
 
 
-def build_manifest(inputs, catalog, shards=(), collection_ids_by_suite=COLLECTION_UNSET):
+def capture_epoch_of(certificates, manifest):
+    """Return (epoch, epoch_manifest, reasons) agreed by every bound certificate; fails closed on foreign ones."""
+    epochs = {}
+    for certificate in certificates:
+        if not isinstance(certificate, dict) or certificate.get("schema") != PROCESS_TREE_SCHEMA:
+            raise ValueError("invalid_process_tree")
+        if any(certificate.get(key) != manifest[key] for key in BINDING_FIELDS):
+            raise ValueError("process_tree_binding_mismatch")
+        epoch = certificate.get("capture_epoch")
+        epochs.setdefault(epoch if isinstance(epoch, str) else None, certificate.get("capture_epoch_manifest"))
+    if not epochs:
+        return None, None, []
+    if len(epochs) > 1:
+        return None, None, ["mixed_capture_epoch"]
+    (epoch, epoch_manifest), = epochs.items()
+    if epoch is None or not re.fullmatch(r"[0-9a-f]{64}", epoch) or not isinstance(epoch_manifest, dict):
+        return None, None, ["capture_epoch_unavailable"]
+    return epoch, epoch_manifest, []
+
+
+def build_manifest(inputs, catalog, shards=(), collection_ids_by_suite=COLLECTION_UNSET, certificates=()):
+    """certificates: the supervisor's per-suite process-tree documents; their shared epoch binds the manifest."""
     if not isinstance(inputs, dict):
         raise ValueError("invalid_manifest_inputs")
     entries, fingerprint = select_tests.catalog_info(catalog)
@@ -116,10 +159,16 @@ def build_manifest(inputs, catalog, shards=(), collection_ids_by_suite=COLLECTIO
     manifest.update(schema="leaf.ci.full-run.v1", catalog_sha256=fingerprint,
                     provider_bound=True, suite_ids=suite_ids,
                     collection_ids_by_suite=collection_ids_by_suite,
-                    toolchain_fingerprint=hashlib.sha256(canonical({
-                        "schema": "leaf.ci.toolchain.v1", "python": platform.python_version(),
-                        "image": image, "capture_sha": inputs["capture_sha"]})).hexdigest())
+                    toolchain_fingerprint=toolchain_fingerprint(image, inputs["capture_sha"]))
     manifest["provider_binding"] = {key: manifest[key] for key in BINDING_FIELDS}
+    epoch, epoch_manifest, epoch_reasons = capture_epoch_of(list(certificates), manifest)
+    if epoch is not None:
+        manifest.update(capture_epoch=epoch, capture_epoch_manifest=epoch_manifest)
+        manifest["provider_binding"].update(capture_epoch=epoch,
+                                            toolchain_fingerprint=manifest["toolchain_fingerprint"])
+    if epoch_reasons:
+        # A run whose suites disagree on the capture identity is not one full run.
+        manifest.update(full_run_complete=False, completeness_reasons=epoch_reasons)
     workers = {}
     for shard in shards:
         if not isinstance(shard, dict) or shard.get("schema") != "leaf.ci.readset.v1":
@@ -129,6 +178,9 @@ def build_manifest(inputs, catalog, shards=(), collection_ids_by_suite=COLLECTIO
             raise ValueError("invalid_shard_worker")
         if any(shard.get(key) != manifest[key] for key in BINDING_FIELDS):
             raise ValueError("shard_binding_mismatch")
+        if (epoch is not None and shard.get("trace_kind") == PROCESS_TRACE_KIND and
+                shard.get("capture_epoch") != epoch):
+            raise ValueError("shard_epoch_mismatch")
         workers.setdefault(sid, set()).add(worker)
     if workers:
         manifest["workers_by_suite"] = {sid: sorted(names) for sid, names in sorted(workers.items())}
@@ -141,6 +193,8 @@ def main(argv=None):
     parser.add_argument("--readsets", required=True)
     parser.add_argument("--collection", help="Path to the collected IDs by suite JSON object")
     parser.add_argument("--output", required=True)
+    # Default: reports/ beside the read sets; process-tree-*.json there bind the capture epoch.
+    parser.add_argument("--reports", help="Directory holding the supervisor's process-tree certificates")
     args = parser.parse_args(argv)
     try:
         inputs = json.load(sys.stdin)
@@ -151,11 +205,17 @@ def main(argv=None):
             if not isinstance(collection, dict):
                 raise ValueError("invalid_collection_ids_by_suite")
         shards = []
-        for path in sorted(Path(args.readsets).rglob("*.json")):
-            if path.name.endswith(".misses.json"):
+        readsets = Path(args.readsets)
+        for path in sorted(readsets.rglob("*.json")):
+            relative = path.relative_to(readsets)
+            if (path.name.endswith(".misses.json") or "diagnostics" in relative.parts or
+                    is_capture_report(relative)):
                 continue
             shards.append(json.loads(path.read_text(encoding="utf-8")))
-        manifest = build_manifest(inputs, catalog, shards, collection)
+        reports = Path(args.reports) if args.reports else readsets.parent / "reports"
+        certificates = [json.loads(path.read_text(encoding="utf-8"))
+                        for path in sorted(reports.glob("process-tree-*.json"))]
+        manifest = build_manifest(inputs, catalog, shards, collection, certificates)
         # Validate everything before touching the output.
         raw = canonical(manifest) + b"\n"
         Path(args.output).write_bytes(raw)

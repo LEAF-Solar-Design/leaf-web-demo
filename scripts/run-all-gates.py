@@ -2998,8 +2998,143 @@ def reporting_command(suite: Suite, argv: List[str], trace_env: dict) -> List[st
     return argv
 
 
+# S15a: per-suite process-tree capture. Only ci.sh sets LEAF_PROCESS_CAPTURE=1, on tracing builds after the tracer
+# installed; every other build spawns exactly as before. Capture failure never decides a suite's verdict.
+CAPTURE_WRAPPER = ("import sys; sys.path.insert(0, sys.argv.pop(1)); "
+                   "from trace_supervisor import main; sys.exit(main())")
+CAPTURE_GROUP_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
+CAPTURE_ERROR_LIMIT = 16
+_TRUSTED_TRACE_TREE: dict = {}
+
+
+def process_capture_enabled() -> bool:
+    return os.environ.get("LEAF_PROCESS_CAPTURE") == "1"
+
+
+def capture_group(suite_id: str, attempt: int) -> str:
+    return encoded_suite_id(suite_id) + "-" + str(attempt)
+
+
+def validate_capture_context(trusted: Path, context: dict) -> bool:
+    """The supervisor's own context check, run first: a context it would refuse exits 2 without running the suite."""
+    try:
+        key = str(trusted)
+        if key not in _TRUSTED_TRACE_TREE:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("leaf_trusted_trace_process_tree",
+                                                          trusted / "trace_process_tree.py")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _TRUSTED_TRACE_TREE[key] = module
+        _TRUSTED_TRACE_TREE[key]._validate(context)
+        return True
+    except Exception:
+        return False
+
+
+def capture_spawn(suite: Suite, attempt: int, trace_env: dict, spawn_command, use_shell: bool,
+                  shell_executable: Optional[str]):
+    """Return (argv, False, None) wrapping the suite in the trace supervisor, or None to spawn untraced.
+
+    Fails open: a missing helper, context or report directory leaves the spawn byte-identical to main.
+    The supervisor returns the child's exit code, so rc stays the suite's own.
+    """
+    if not process_capture_enabled():
+        return None
+    try:
+        trusted = os.environ.get("LEAF_TRUSTED_CI_DIR")
+        context_dir = os.environ.get("LEAF_CAPTURE_CONTEXT_DIR")
+        report_dir = trace_env.get("LEAF_TEST_REPORT_DIR")
+        group = capture_group(suite.id, attempt)
+        if not (trusted and context_dir and report_dir) or not CAPTURE_GROUP_PATTERN.fullmatch(group):
+            return None
+        base = json.loads((Path(context_dir) / "base-context.json").read_text(encoding="utf-8"))
+        if not isinstance(base, dict):
+            return None
+        context = dict(base, capture_group=group, suites=[], suites_deferred=True,
+                       seed_fds={"1": {"kind": "supervisor"}, "2": {"kind": "supervisor"}},
+                       initial_cwd=str(suite.cwd.resolve()))
+        # The decoder adopts the stream's first pid as root, never a producer-supplied one.
+        context.pop("root_pid", None)
+        if not validate_capture_context(Path(trusted), context):
+            print(f"WARNING: process capture context refused for {suite.id}", file=sys.stderr)
+            return None
+        output = Path(report_dir)
+        output.mkdir(parents=True, exist_ok=True)
+        context_path = output / "capture-context.json"
+        suites_path = output / "capture-suites.json"
+        # A suites file left by an earlier process must never be read as this attempt's.
+        suites_path.unlink(missing_ok=True)
+        context_path.write_text(json.dumps(context, sort_keys=True, separators=(",", ":")) + "\n",
+                                encoding="utf-8")
+        command = ([shell_executable or "/bin/sh", "-c", spawn_command] if use_shell
+                   else [str(word) for word in spawn_command])
+        return ([sys.executable, "-I", "-B", "-c", CAPTURE_WRAPPER, trusted, "run",
+                 "--context", str(context_path), "--out", str(output),
+                 "--suites-file", str(suites_path), "--"] + command, False, None)
+    except Exception as exc:
+        print(f"WARNING: process capture unavailable for {suite.id}: {type(exc).__name__}", file=sys.stderr)
+        return None
+
+
+def relocate_capture_shards(trace_env: dict) -> None:
+    """Move the supervisor's *-process.json shards beside the run's read sets.
+
+    Certificates and receipts stay in the attempt's reports/ directory, where read_test_report and ci.sh find them.
+    """
+    readsets = os.environ.get("LEAF_READSET_DIR")
+    report_dir = trace_env.get("LEAF_TEST_REPORT_DIR")
+    if not readsets or not report_dir:
+        return
+    source = Path(report_dir) / "readsets"
+    try:
+        for path in sorted(source.rglob("*-process.json")):
+            destination = Path(readsets) / path.relative_to(source)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(path, destination)
+    except OSError as exc:
+        print(f"WARNING: process shards not relocated: {type(exc).__name__}", file=sys.stderr)
+
+
+def read_capture_receipt(suite: Suite, log_dir: Path, attempt: int) -> dict:
+    """Carry the supervisor receipt's facts into the attempt record; bounded, never raw."""
+    group = capture_group(suite.id, attempt)
+    path = (log_dir.resolve() / "test-reports" / encoded_suite_id(suite.id) / str(attempt) / "reports" /
+            ("trace-receipt-" + group + ".json"))
+    fields = {"capture_facility_available": False, "capture_complete": False,
+              "capture_errors": ["capture_receipt_missing"], "tracer_exit_code": None}
+    if not path.is_file():
+        return fields
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+        if (not isinstance(receipt, dict) or receipt.get("schema") != "leaf.ci.trace-receipt.v1" or
+                receipt.get("capture_group") != group):
+            fields["capture_errors"] = ["capture_receipt_mismatch"]
+            return fields
+        raw = receipt.get("capture_errors")
+        errors = (sorted({error for error in raw if isinstance(error, str)}) if isinstance(raw, list)
+                  else ["capture_errors_invalid"])
+        if len(errors) > CAPTURE_ERROR_LIMIT:
+            errors = errors[:CAPTURE_ERROR_LIMIT] + ["capture_errors_truncated"]
+        tracer = receipt.get("tracer_exit_code")
+        fields.update(capture_facility_available=receipt.get("facility_available") is True,
+                      capture_complete=receipt.get("capture_complete") is True,
+                      capture_errors=errors, tracer_exit_code=tracer if type(tracer) is int else None)
+    except (OSError, ValueError, UnicodeError):
+        fields["capture_errors"] = ["capture_receipt_unreadable"]
+    return fields
+
+
 def read_test_report(suite: Suite, log_dir: Path, attempt: int, status: str = "") -> dict:
     """Keep suite completion distinct from complete test-ID evidence."""
+    result = read_suite_report(suite, log_dir, attempt, status)
+    # npm-audit never reaches the wrapped spawn, and a catalog-gate SKIP never spawns at all.
+    if process_capture_enabled() and suite.kind != "npm-audit" and status != "SKIP":
+        result.update(read_capture_receipt(suite, log_dir, attempt))
+    return result
+
+
+def read_suite_report(suite: Suite, log_dir: Path, attempt: int, status: str = "") -> dict:
     directory = log_dir.resolve() / "test-reports" / encoded_suite_id(suite.id) / str(attempt)
     result = {"failed_test_ids": [], "test_ids": [], "collection_ids_sha256": None,
               "test_report_complete": False, "test_report_refs": [],
@@ -3647,6 +3782,10 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
     if fault and attempt == 1 and fault == f"{suite.id}:spawn":
         argv = [argv[0] + ".fault-injected-missing.exe"] + argv[1:]
     spawn_command, use_shell, shell_executable = normalize_spawn_command(argv)
+    # S15a: None unless ci.sh enabled process capture; then the supervisor wraps the exact spawn.
+    captured = capture_spawn(suite, attempt, trace_env, spawn_command, use_shell, shell_executable)
+    if captured is not None:
+        spawn_command, use_shell, shell_executable = captured
     spawn_err = ""
     with open(log_path, "w", encoding="utf-8", errors="replace") as logf:
         logf.write(f"$ (cwd={suite.cwd})\n$ {' '.join(argv)}\n"
@@ -3683,6 +3822,8 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
             rc = 127
         logf.write(out)
     seconds = time.perf_counter() - t0
+    if captured is not None:
+        relocate_capture_shards(trace_env)
 
     if reporting_injected and rc != 0:
         # Playwright's list reporter uses the same passed/failed count words.
@@ -4429,6 +4570,9 @@ def selection_catalog(root: Path) -> dict:
                 "trace_kind": "python" if python_child else "unsupported",
                 "python_only": False, "classification": "unclassified",
             }
+            # S15a: declares the mechanism only; eligibility stays the selector's (trace_kind, epoch match).
+            if os.environ.get("LEAF_PROCESS_CAPTURE") == "1":
+                row["capture"] = "linux-process-tree"
             rows.append(row)
         return {"schema": "leaf.ci.catalog.v1", "kind": "web",
                 "catalog_sha256": catalog_fingerprint(suites), "suites": rows}
