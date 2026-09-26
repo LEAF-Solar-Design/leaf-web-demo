@@ -15,6 +15,7 @@ import select_tests
 
 
 BINDING_FIELDS = ("run_id", "source_sha", "source_tree", "capture_sha", "catalog_sha256")
+COLLECTION_UNSET = object()
 
 
 def canonical(value):
@@ -73,7 +74,7 @@ def partition_readsets(readsets, rejected, catalog, run_id):
     return count
 
 
-def build_manifest(inputs, catalog, shards=()):
+def build_manifest(inputs, catalog, shards=(), collection_ids_by_suite=COLLECTION_UNSET):
     if not isinstance(inputs, dict):
         raise ValueError("invalid_manifest_inputs")
     entries, fingerprint = select_tests.catalog_info(catalog)
@@ -101,10 +102,20 @@ def build_manifest(inputs, catalog, shards=()):
     suite_ids = sorted(entries)
     if not suite_ids or any(not isinstance(sid, str) or not sid.strip() for sid in suite_ids):
         raise ValueError("invalid_suite_ids")
+    if collection_ids_by_suite is COLLECTION_UNSET:
+        collection_ids_by_suite = {}
+    if not isinstance(collection_ids_by_suite, dict):
+        raise ValueError("invalid_collection_ids_by_suite")
+    for sid, ids in collection_ids_by_suite.items():
+        if (sid not in entries or not isinstance(ids, list) or not ids or
+                any(not isinstance(tid, str) or not tid.startswith(sid + "::") or
+                    not tid[len(sid) + 2:] for tid in ids) or ids != sorted(set(ids))):
+            raise ValueError("invalid_collection_ids_by_suite")
     manifest = {key: inputs[key] for key in ("repo", "run_id", "source_sha", "source_tree",
                 "capture_sha", "execution_mode", "full_run_complete", "test_id_reporting_complete")}
     manifest.update(schema="leaf.ci.full-run.v1", catalog_sha256=fingerprint,
                     provider_bound=True, suite_ids=suite_ids,
+                    collection_ids_by_suite=collection_ids_by_suite,
                     toolchain_fingerprint=hashlib.sha256(canonical({
                         "schema": "leaf.ci.toolchain.v1", "python": platform.python_version(),
                         "image": image, "capture_sha": inputs["capture_sha"]})).hexdigest())
@@ -128,17 +139,23 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--catalog", required=True)
     parser.add_argument("--readsets", required=True)
+    parser.add_argument("--collection", help="Path to the collected IDs by suite JSON object")
     parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
     try:
         inputs = json.load(sys.stdin)
         catalog = json.loads(Path(args.catalog).read_text(encoding="utf-8"))
+        collection = {}
+        if args.collection:
+            collection = json.loads(Path(args.collection).read_text(encoding="utf-8"))
+            if not isinstance(collection, dict):
+                raise ValueError("invalid_collection_ids_by_suite")
         shards = []
         for path in sorted(Path(args.readsets).rglob("*.json")):
             if path.name.endswith(".misses.json"):
                 continue
             shards.append(json.loads(path.read_text(encoding="utf-8")))
-        manifest = build_manifest(inputs, catalog, shards)
+        manifest = build_manifest(inputs, catalog, shards, collection)
         # Validate everything before touching the output.
         raw = canonical(manifest) + b"\n"
         Path(args.output).write_bytes(raw)

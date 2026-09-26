@@ -14,16 +14,20 @@ import tempfile
 import unittest
 
 from test_codebuild_ci_script import BASH, CI_PATH, ROOT
+from test_run_all_gates_selection import RUNNER
 
 
 BUILD_ID = "leaf-ci-leaf-web-demo:12345678-1234-1234-1234-123456789abc"
 ATTEMPTS_REF = "readsets/sample/1/attempts-main-123.jsonl"
+COLLECTION_IDS = ["test_sample.py::test_ok"]
+REPORT_MEMBERS = ["reports", "reports/sample/1/collection-main-123.json",
+                  "reports/sample/1/completion-main-123.json"]
 
 
 def fixture_catalog():
     catalog = {"schema": "leaf.ci.test-catalog.v1", "kind": "web",
                "runner_catalog_sha256": "e" * 64,
-               "suites": [{"id": "sample", "test_ids": ["sample::test_sample.py::test_ok"]}]}
+               "suites": [{"id": "sample", "test_ids": []}]}
     catalog["catalog_sha256"] = hashlib.sha256(json.dumps(
         catalog, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return catalog
@@ -32,7 +36,8 @@ def fixture_catalog():
 @unittest.skipUnless(BASH, "bash is not on PATH; read-set publication requires bash")
 class TestCodebuildCiReadsets(unittest.TestCase):
     def run_publication(self, *, tracing=True, aws_status=0, gate_status=0,
-                        missing_decision=False, malformed_manifest=False, foreign_shards=False):
+                        missing_decision=False, malformed_manifest=False, foreign_shards=False,
+                        foreign_attempts=False, missing_completion=False, differing_collection=False):
         script = CI_PATH.read_text(encoding="utf-8")
         export_start = script.index('  export LEAF_READSET_CATALOG_SHA256=')
         export_end = script.index('LEAF_CAPTURE_ID\n)"', export_start) + len('LEAF_CAPTURE_ID\n)"')
@@ -46,7 +51,7 @@ class TestCodebuildCiReadsets(unittest.TestCase):
             results = root / "gate-results"
             binaries = root / "bin"
             for directory in (selection, logs / "readsets" / "sample" / "1",
-                              logs / "attempts", results, binaries):
+                              logs / "attempts", logs / "test-reports" / "sample" / "1", results, binaries):
                 directory.mkdir(parents=True, exist_ok=True)
             catalog = fixture_catalog()
             shard = {"schema": "leaf.ci.readset.v1", "suite_id": "sample", "worker": "main",
@@ -82,10 +87,35 @@ class TestCodebuildCiReadsets(unittest.TestCase):
             if missing_decision:
                 (selection / "decision.json").unlink()
             build_id = BUILD_ID
-            (logs / "attempts" / "sample.jsonl").write_text(json.dumps({
-                "suite_id": "sample", "run_id": build_id, "attempt": 1,
-                "test_ids": ["sample::test_sample.py::test_ok"], "failed_test_ids": [],
-                "test_report_complete": True, "status": "PASS"}) + "\n")
+            reports = logs / "test-reports" / "sample" / "1"
+            collection = {"schema": "leaf.ci.collection.v1", "test_ids": COLLECTION_IDS}
+            (reports / "collection-main-123.json").write_text(json.dumps(collection), encoding="utf-8")
+            completion = {"schema": "leaf.ci.selection-completion.v1", "completion_marker": True,
+                          "test_id_reporting_complete": True, "full_run_complete": True,
+                          "attempts": [{"nodeid": COLLECTION_IDS[0], "attempt": 1,
+                                        "phase": "call", "outcome": "passed"}]}
+            completion_path = reports / "completion-main-123.json"
+            completion_path.write_text(json.dumps(completion), encoding="utf-8")
+            if missing_completion:
+                completion_path.unlink()
+            if differing_collection:
+                retry_reports = reports.parent / "2"
+                retry_reports.mkdir()
+                (retry_reports / "collection-main-456.json").write_text(json.dumps(
+                    dict(collection, test_ids=["test_sample.py::test_other"])), encoding="utf-8")
+            suite = RUNNER.Suite("sample", "sample fixture", "pytest", root, [], 1)
+            attempt = dict(RUNNER.read_test_report(suite, logs, 1),
+                           suite_id="sample", run_id=build_id, attempt=1, status="PASS")
+            rows = [attempt]
+            if foreign_attempts:
+                rows.extend([dict(attempt, run_id="build:foreign", test_ids=None, status="ERROR"),
+                             dict(attempt, suite_id="fixture-suite", failed_test_ids=None, status="ERROR")])
+                foreign_reports = logs / "test-reports" / "fixture-suite" / "1"
+                foreign_reports.mkdir(parents=True)
+                (foreign_reports / "collection-fixture.json").write_text(json.dumps(collection))
+                (foreign_reports / "completion-fixture.json").write_text(json.dumps(completion))
+            (logs / "attempts" / "sample.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
             (selection / "detail.json").write_text(json.dumps({
                 "schema": "leaf.ci.selection.v1", "phase": "shadow",
                 "build_id": build_id, "execution_mode": "full",
@@ -139,17 +169,26 @@ class TestCodebuildCiReadsets(unittest.TestCase):
                 self.assertTrue(manifest["provider_bound"])
                 self.assertEqual(manifest["catalog_sha256"], catalog["catalog_sha256"])
                 self.assertEqual(manifest["execution_mode"], "full")
-                self.assertTrue(manifest["full_run_complete"])
-                self.assertTrue(manifest["test_id_reporting_complete"])
+                self.assertEqual(manifest["full_run_complete"], not missing_completion and not differing_collection)
+                self.assertEqual(manifest["test_id_reporting_complete"], not missing_completion and not differing_collection)
+                self.assertEqual(manifest["collection_ids_by_suite"], {} if differing_collection else
+                                 {"sample": ["sample::" + tid for tid in COLLECTION_IDS]})
                 self.assertEqual(manifest["suite_ids"], ["sample"])
                 self.assertEqual(manifest["workers_by_suite"], {"sample": ["main"]})
                 self.assertRegex(manifest["toolchain_fingerprint"], r"^[0-9a-f]{64}$")
             else:
                 self.assertFalse((selection / "full-run.json").exists())
             for field in ("readsets_object", "readsets_sha256", "readsets_bytes", "readsets_status",
-                          "readsets_archive_members", "readsets_rejected_shards"):
+                          "readsets_archive_members", "readsets_rejected_shards",
+                          "completeness_reasons", "attempt_rows_rejected"):
                 self.assertEqual(final[field], shadow[field])
                 self.assertEqual(final[field], detail[field])
+            self.assertIsInstance(final["completeness_reasons"], list)
+            self.assertEqual(final["completeness_reasons"], sorted(final["completeness_reasons"]))
+            self.assertEqual(final["attempt_rows_rejected"], 2 if foreign_attempts else 0)
+            accepted = [json.loads(line) for line in (results / "selection-attempts.jsonl").read_text(
+                encoding="utf-8").splitlines()]
+            self.assertEqual(accepted, [attempt])
             self.assertEqual(final["readsets_rejected_shards"], 2 if foreign_shards and tracing else 0)
             if foreign_shards and tracing:
                 for member in rejected_members:
@@ -170,7 +209,7 @@ class TestCodebuildCiReadsets(unittest.TestCase):
         self.assertRegex(final["readsets_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(final["readsets_sha256"], hashlib.sha256(archive).hexdigest())
         self.assertEqual(final["readsets_bytes"], len(archive))
-        members = ["readsets", "catalog.json", "decision.json", "full-run.json", ATTEMPTS_REF]
+        members = ["readsets", "catalog.json", "decision.json", "full-run.json", *REPORT_MEMBERS, ATTEMPTS_REF]
         self.assertEqual(final["readsets_archive_members"], members)
         self.assertEqual(tar_calls.splitlines().count("tar"), 1)
         self.assertEqual([arg for arg in tar_calls.splitlines() if arg in members], members)
@@ -196,13 +235,18 @@ class TestCodebuildCiReadsets(unittest.TestCase):
             self.assertEqual(json.loads(packed.extractfile("catalog.json").read()), fixture_catalog())
             manifest = json.loads(packed.extractfile("full-run.json").read())
             self.assertTrue(manifest["full_run_complete"])
+            self.assertEqual(manifest["collection_ids_by_suite"],
+                             {"sample": ["sample::" + tid for tid in COLLECTION_IDS]})
+            self.assertEqual(json.loads(packed.extractfile(REPORT_MEMBERS[1]).read())["test_ids"],
+                             COLLECTION_IDS)
+            self.assertTrue(json.loads(packed.extractfile(REPORT_MEMBERS[2]).read())["completion_marker"])
             self.assertEqual(json.loads(packed.extractfile("decision.json").read()), {"execution_mode": "full"})
         self.assertNotIn("WARNING: readsets upload failed", result.stderr)
 
     def test_missing_decision_still_uploads_available_members(self):
         result, final, calls, archive, tar_calls = self.run_publication(missing_decision=True)
         self.assertEqual(final["readsets_status"], "uploaded")
-        members = ["readsets", "catalog.json", "full-run.json", ATTEMPTS_REF]
+        members = ["readsets", "catalog.json", "full-run.json", *REPORT_MEMBERS, ATTEMPTS_REF]
         self.assertEqual(final["readsets_archive_members"], members)
         self.assertEqual([arg for arg in tar_calls.splitlines() if arg in members], members)
         self.assertNotIn("decision.json", tar_calls.splitlines())
@@ -218,7 +262,7 @@ class TestCodebuildCiReadsets(unittest.TestCase):
         self.assertEqual(final["readsets_rejected_shards"], 2)
         self.assertEqual(calls.count("put-object"), 1)
         self.assertEqual(final["readsets_archive_members"],
-                         ["readsets", "catalog.json", "decision.json", "full-run.json", ATTEMPTS_REF])
+                         ["readsets", "catalog.json", "decision.json", "full-run.json", *REPORT_MEMBERS, ATTEMPTS_REF])
         with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as packed:
             names = packed.getnames()
             self.assertIn("full-run.json", names)
@@ -230,6 +274,33 @@ class TestCodebuildCiReadsets(unittest.TestCase):
             self.assertEqual(manifest["workers_by_suite"], {"sample": ["main"]})
             self.assertTrue(manifest["full_run_complete"])
         self.assertNotIn("manifest failed", result.stderr)
+
+    def test_foreign_attempt_rows_are_rejected_without_affecting_completeness(self):
+        _, final, _, archive, _ = self.run_publication(foreign_attempts=True)
+        self.assertEqual(final["attempt_rows_rejected"], 2)
+        self.assertTrue(final["collection_complete"])
+        self.assertTrue(final["full_run_complete"])
+        self.assertEqual(final["completeness_reasons"], [])
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as packed:
+            self.assertFalse(any("fixture-suite" in name for name in packed.getnames()))
+
+    def test_missing_completion_records_the_failed_predicate(self):
+        _, final, _, archive, _ = self.run_publication(missing_completion=True)
+        self.assertFalse(final["collection_complete"])
+        self.assertEqual(final["completeness_reasons"], ["test_report_incomplete:1"])
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as packed:
+            self.assertNotIn(REPORT_MEMBERS[2], packed.getnames())
+            manifest = json.loads(packed.extractfile("full-run.json").read())
+            self.assertFalse(manifest["full_run_complete"])
+
+    def test_disagreeing_collections_are_omitted_from_manifest(self):
+        _, final, _, archive, _ = self.run_publication(differing_collection=True)
+        self.assertFalse(final["collection_complete"])
+        self.assertEqual(final["completeness_reasons"],
+                         ["collection_ids_differ:sample"])
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as packed:
+            manifest = json.loads(packed.extractfile("full-run.json").read())
+            self.assertEqual(manifest["collection_ids_by_suite"], {})
 
     def test_malformed_manifest_still_uploads_readsets(self):
         result, final, calls, archive, tar_calls = self.run_publication(malformed_manifest=True)

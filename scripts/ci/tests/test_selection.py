@@ -66,6 +66,22 @@ class FullRunManifestContracts(unittest.TestCase):
             with self.assertRaises(ValueError):
                 full_run_manifest.build_manifest(self.inputs(), catalog)
 
+    def test_collection_ids_by_suite_is_qualified_sorted_and_nonempty(self):
+        collection = {"sample": ["sample::test_sample.py::test_a", "sample::test_sample.py::test_b"]}
+        manifest = full_run_manifest.build_manifest(
+            self.inputs(), self.catalog(), collection_ids_by_suite=collection)
+        self.assertEqual(manifest["collection_ids_by_suite"], collection)
+        self.assertNotIn("unobserved", manifest["collection_ids_by_suite"])
+        for malformed in (None, [], {"sample": []}, {"sample": "sample::test_a"},
+                          {"sample": ["test_sample.py::test_a"]}, {"sample": ["sample::"]},
+                          {"sample": [42]}, {"foreign": ["foreign::test_a"]},
+                          {"sample": list(reversed(collection["sample"]))},
+                          {"sample": [collection["sample"][0]] * 2}):
+            with self.subTest(collection=malformed), self.assertRaisesRegex(
+                    ValueError, "invalid_collection_ids_by_suite"):
+                full_run_manifest.build_manifest(
+                    self.inputs(), self.catalog(), collection_ids_by_suite=malformed)
+
     def test_cli_malformed_input_writes_nothing(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -74,9 +90,12 @@ class FullRunManifestContracts(unittest.TestCase):
                 (root / name).write_bytes((source / name).read_bytes())
             (root / "catalog.json").write_text(json.dumps(self.catalog()), encoding="utf-8")
             (root / "readsets").mkdir()
+            collection_path = root / "collection.json"
+            collection_path.write_text("{}", encoding="utf-8")
             output = root / "full-run.json"
             command = [sys.executable, "-I", "-B", str(root / "full_run_manifest.py"),
                        "--catalog", str(root / "catalog.json"), "--readsets", str(root / "readsets"),
+                       "--collection", str(collection_path),
                        "--output", str(output)]
             inputs = self.inputs()
             for key, value in (("source_tree", "bad"), ("run_id", ""),
@@ -86,11 +105,21 @@ class FullRunManifestContracts(unittest.TestCase):
                                         capture_output=True, cwd=root)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse(output.exists())
+            for malformed in (None, [], {"sample": []}, {"sample": ["unqualified"]}):
+                collection_path.write_text(json.dumps(malformed), encoding="utf-8")
+                result = subprocess.run(command, input=json.dumps(inputs), text=True,
+                                        capture_output=True, cwd=root)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("invalid_collection_ids_by_suite", result.stderr)
+                self.assertFalse(output.exists())
+            collection = {"sample": ["sample::test_sample.py::test_ok"]}
+            collection_path.write_text(json.dumps(collection), encoding="utf-8")
             result = subprocess.run(command, input=json.dumps(inputs), text=True,
                                     capture_output=True, cwd=root)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(output.read_text())["catalog_sha256"],
                              self.catalog()["catalog_sha256"])
+            self.assertEqual(json.loads(output.read_text())["collection_ids_by_suite"], collection)
 
 
 class PluginBindingContracts(unittest.TestCase):

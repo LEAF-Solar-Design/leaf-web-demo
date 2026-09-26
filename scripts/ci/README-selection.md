@@ -94,6 +94,22 @@ with the catalog's own `catalog_sha256`. Shards now receive that canonical
 fingerprint through `LEAF_READSET_CATALOG_SHA256`; the shadow row retains the
 separate runner fingerprint.
 
+Step A judges only attempt rows whose run ID matches the build and whose suite
+is in `executed_suite_ids`. Other rows increment `attempt_rows_rejected` and
+are excluded from the combined attempt stream and completeness calculations.
+The detail document, `LEAF_SELECTION_FINAL`, and `LEAF_SHADOW` carry sorted
+`completeness_reasons`, naming each failed predicate and its count where
+applicable, or an empty list for a complete full run. The archive includes
+explicit `reports/<encoded-suite>/<attempt>/collection-*.json` and
+`completion-*.json` members for accepted suites, and `readsets_archive_members`
+lists `reports`. The manifest's `collection_ids_by_suite` supplies sorted,
+non-empty `<suite_id>::<nodeid>` lists from collection documents when the
+catalog has no test IDs. Suites without collected IDs are omitted. All
+collection documents for a suite must agree; a mismatch omits that suite,
+marks completeness false, and adds `collection_ids_differ:<suite>`.
+The manifest helper reads this mapping from `--collection <path>` and rejects
+malformed, empty, unsorted, duplicate, or incorrectly qualified ID lists.
+
 Before the manifest and archive, Step A partitions read sets using the packed
 catalog and `CODEBUILD_BUILD_ID`. Only shards whose suite is in that catalog
 and whose run ID matches the build stay in `readsets/`. Other shards and their
