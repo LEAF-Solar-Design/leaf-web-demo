@@ -1,0 +1,70 @@
+{
+  "schema": "leaf.web-bridge.golden.v1",
+  "protocolVersion": "leaf.web-bridge.v1",
+  "testOnly": true,
+  "session": {
+    "hostSecretHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "sessionId": "11111111-1111-4111-8111-111111111111",
+    "nonce": "22222222-2222-4222-8222-222222222222",
+    "origin": "https://platform-staging.leafdesign.ai",
+    "sessionKeyHex": "05497940abf2fbd52540578859947fd87fc2bc6dae5f135b895901b86125cec5"
+  },
+  "cases": [
+    {
+      "name": "ready",
+      "kind": "ready-object",
+      "verb": "ready",
+      "wire": "{\"kind\":\"host_bridge_ready\",\"protocolVersion\":\"leaf.web-bridge.v1\",\"contractVersion\":\"leaf.platform.v1alpha1\",\"sessionId\":\"11111111-1111-4111-8111-111111111111\",\"nonce\":\"22222222-2222-4222-8222-222222222222\",\"origin\":\"https://platform-staging.leafdesign.ai\",\"sessionKey\":\"BUl5QKvy+9UlQFeIWZR/2H/CvG2uXxNbiVkBuGElzsU=\",\"connectedAt\":\"2026-09-25T12:00:00+00:00\",\"platformTenantId\":\"11111111-1111-1111-1111-111111111111\",\"projectId\":\"22222222-2222-2222-2222-222222222222\",\"drawingId\":\"33333333-3333-3333-3333-333333333333\",\"drawingVersionId\":\"44444444-4444-4444-4444-444444444444\",\"documentFingerprint\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"bridgeEndpoint\":{\"pipeName\":\"leaf-golden-pipe\",\"hostVersion\":\"2025\",\"hostProcessId\":4242,\"readySentinelPath\":\"C:/test-only/pipe-ready-golden.txt\"}}",
+      "signature": null
+    },
+    {
+      "name": "selection-handles",
+      "kind": "envelope",
+      "verb": "drawing.selection_changed",
+      "wire": "{\"drawingFingerprint\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"drawingRevision\":\"44444444-4444-4444-4444-444444444444\",\"expiresAt\":\"2026-09-25T12:01:00.1234567+00:00\",\"issuedAt\":\"2026-09-25T12:00:00.1234567+00:00\",\"messageId\":\"golden-selection-handles\",\"origin\":\"https://platform-staging.leafdesign.ai\",\"payload\":{\"contractVersion\":\"leaf.platform.v1alpha1\",\"drawingId\":\"33333333-3333-3333-3333-333333333333\",\"drawingVersionId\":\"44444444-4444-4444-4444-444444444444\",\"eventId\":\"55555555-5555-5555-5555-555555555555\",\"kind\":\"selection_event\",\"observedAt\":\"2026-09-25T12:00:00.1234567+00:00\",\"payload\":{\"objectHandles\":[\"A1\",\"B2\"]},\"platformTenantId\":\"11111111-1111-1111-1111-111111111111\",\"projectId\":\"22222222-2222-2222-2222-222222222222\",\"provenance\":{\"autocadVersion\":\"2025\",\"documentFingerprint\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"pluginVersion\":\"test-only\"}},\"protocolVersion\":\"leaf.web-bridge.v1\",\"sessionId\":\"11111111-1111-4111-8111-111111111111\",\"verb\":\"drawing.selection_changed\",\"signature\":\"623b6146b89c29fb4e8d39de357d570ac493aa9f6a5a3f555be4eb9c0fa9f1e9\"}",
+      "signature": "623b6146b89c29fb4e8d39de357d570ac493aa9f6a5a3f555be4eb9c0fa9f1e9"
+    },
+    {
+      "name": "selection-empty",
+      "kind": "envelope",
+      "verb": "drawing.selection_changed",
+      "wire": "{\"drawingFingerprint\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"drawingRevision\":\"44444444-4444-4444-4444-444444444444\",\"expiresAt\":\"2026-09-25T12:01:00.1200000+00:00\",\"issuedAt\":\"2026-09-25T12:00:00.1200000+00:00\",\"messageId\":\"golden-selection-empty\",\"origin\":\"https://platform-staging.leafdesign.ai\",\"payload\":{\"contractVersion\":\"leaf.platform.v1alpha1\",\"drawingId\":\"33333333-3333-3333-3333-333333333333\",\"drawingVersionId\":\"44444444-4444-4444-4444-444444444444\",\"eventId\":\"66666666-6666-6666-6666-666666666666\",\"kind\":\"selection_event\",\"observedAt\":\"2026-09-25T12:00:00.12+00:00\",\"payload\":{\"objectHandles\":[]},\"platformTenantId\":\"11111111-1111-1111-1111-111111111111\",\"projectId\":\"22222222-2222-2222-2222-222222222222\",\"provenance\":{\"autocadVersion\":\"2025\",\"documentFingerprint\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"pluginVersion\":\"test-only\"}},\"protocolVersion\":\"leaf.web-bridge.v1\",\"sessionId\":\"11111111-1111-4111-8111-111111111111\",\"verb\":\"drawing.selection_changed\",\"signature\":\"ff1e8f851386e4e68f593df48c1e46a2f73900d47a0a4619eff61df42d282d8b\"}",
+      "signature": "ff1e8f851386e4e68f593df48c1e46a2f73900d47a0a4619eff61df42d282d8b"
+    },
+    {
+      "name": "bind-accepted",
+      "kind": "envelope",
+      "verb": "drawing.bind_result",
+      "wire": "{\"drawingFingerprint\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"drawingRevision\":\"00000000-0000-0000-0000-000000000000\",\"expiresAt\":\"2026-09-25T12:01:00.0000000+00:00\",\"issuedAt\":\"2026-09-25T12:00:00.0000000+00:00\",\"messageId\":\"golden-bind-accepted\",\"origin\":\"https://platform-staging.leafdesign.ai\",\"payload\":{\"accepted\":true,\"reason\":null},\"protocolVersion\":\"leaf.web-bridge.v1\",\"sessionId\":\"11111111-1111-4111-8111-111111111111\",\"verb\":\"drawing.bind_result\",\"signature\":\"635c23b71610975a233a9d8ea046b5eda069e5fc043f6e69faf03399c37eb2fb\"}",
+      "signature": "635c23b71610975a233a9d8ea046b5eda069e5fc043f6e69faf03399c37eb2fb"
+    },
+    {
+      "name": "bind-rejected",
+      "kind": "envelope",
+      "verb": "drawing.bind_result",
+      "wire": "{\"drawingFingerprint\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"drawingRevision\":\"00000000-0000-0000-0000-000000000000\",\"expiresAt\":\"2026-09-25T12:01:00.1200000+00:00\",\"issuedAt\":\"2026-09-25T12:00:00.1200000+00:00\",\"messageId\":\"golden-bind-rejected\",\"origin\":\"https://platform-staging.leafdesign.ai\",\"payload\":{\"accepted\":false,\"reason\":\"user_declined\"},\"protocolVersion\":\"leaf.web-bridge.v1\",\"sessionId\":\"11111111-1111-4111-8111-111111111111\",\"verb\":\"drawing.bind_result\",\"signature\":\"7f5aff1f1a33f49f09db98e7747e2b79996ad4cc98b9dd638eae018209b63e5f\"}",
+      "signature": "7f5aff1f1a33f49f09db98e7747e2b79996ad4cc98b9dd638eae018209b63e5f"
+    },
+    {
+      "name": "callback-applied",
+      "kind": "envelope",
+      "verb": "host.callback",
+      "wire": "{\"drawingFingerprint\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"drawingRevision\":\"44444444-4444-4444-4444-444444444444\",\"expiresAt\":\"2026-09-25T12:01:00.0000000+00:00\",\"issuedAt\":\"2026-09-25T12:00:00.0000000+00:00\",\"messageId\":\"golden-callback-applied\",\"origin\":\"https://platform-staging.leafdesign.ai\",\"payload\":{\"commandId\":\"77777777-7777-7777-7777-777777777777\",\"contractVersion\":\"leaf.platform.v1alpha1\",\"drawingId\":\"33333333-3333-3333-3333-333333333333\",\"drawingVersionId\":\"44444444-4444-4444-4444-444444444444\",\"handledAt\":\"2026-09-25T12:00:00+00:00\",\"kind\":\"callback\",\"nonce\":\"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn\",\"platformTenantId\":\"11111111-1111-1111-1111-111111111111\",\"projectId\":\"22222222-2222-2222-2222-222222222222\",\"provenance\":{\"autocadVersion\":\"2025\",\"documentFingerprint\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"pluginVersion\":\"test-only\"},\"reason\":null,\"status\":\"applied\"},\"protocolVersion\":\"leaf.web-bridge.v1\",\"sessionId\":\"11111111-1111-4111-8111-111111111111\",\"verb\":\"host.callback\",\"signature\":\"14153aa5357d1593f59314b3ced97ca1394ab044730121737d15333ba412c81d\"}",
+      "signature": "14153aa5357d1593f59314b3ced97ca1394ab044730121737d15333ba412c81d"
+    },
+    {
+      "name": "callback-stale",
+      "kind": "envelope",
+      "verb": "host.callback",
+      "wire": "{\"drawingFingerprint\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"drawingRevision\":\"44444444-4444-4444-4444-444444444444\",\"expiresAt\":\"2026-09-25T12:01:00.0000000+00:00\",\"issuedAt\":\"2026-09-25T12:00:00.0000000+00:00\",\"messageId\":\"golden-callback-stale\",\"origin\":\"https://platform-staging.leafdesign.ai\",\"payload\":{\"commandId\":\"77777777-7777-7777-7777-777777777777\",\"contractVersion\":\"leaf.platform.v1alpha1\",\"drawingId\":\"33333333-3333-3333-3333-333333333333\",\"drawingVersionId\":\"44444444-4444-4444-4444-444444444444\",\"handledAt\":\"2026-09-25T12:00:00+00:00\",\"kind\":\"callback\",\"nonce\":\"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn\",\"platformTenantId\":\"11111111-1111-1111-1111-111111111111\",\"projectId\":\"22222222-2222-2222-2222-222222222222\",\"provenance\":{\"autocadVersion\":\"2025\",\"documentFingerprint\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"pluginVersion\":\"test-only\"},\"reason\":\"stale_document\",\"status\":\"stale\"},\"protocolVersion\":\"leaf.web-bridge.v1\",\"sessionId\":\"11111111-1111-4111-8111-111111111111\",\"verb\":\"host.callback\",\"signature\":\"c54d410d114c58374a39ec6a31509eaa1847d38715b6f69b184ab0fdafe6e44e\"}",
+      "signature": "c54d410d114c58374a39ec6a31509eaa1847d38715b6f69b184ab0fdafe6e44e"
+    },
+    {
+      "name": "callback-rejected",
+      "kind": "envelope",
+      "verb": "host.callback",
+      "wire": "{\"drawingFingerprint\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"drawingRevision\":\"44444444-4444-4444-4444-444444444444\",\"expiresAt\":\"2026-09-25T12:01:00.0000000+00:00\",\"issuedAt\":\"2026-09-25T12:00:00.0000000+00:00\",\"messageId\":\"golden-callback-rejected\",\"origin\":\"https://platform-staging.leafdesign.ai\",\"payload\":{\"commandId\":\"77777777-7777-7777-7777-777777777777\",\"contractVersion\":\"leaf.platform.v1alpha1\",\"drawingId\":\"33333333-3333-3333-3333-333333333333\",\"drawingVersionId\":\"44444444-4444-4444-4444-444444444444\",\"handledAt\":\"2026-09-25T12:00:00+00:00\",\"kind\":\"callback\",\"nonce\":\"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn\",\"platformTenantId\":\"11111111-1111-1111-1111-111111111111\",\"projectId\":\"22222222-2222-2222-2222-222222222222\",\"provenance\":{\"autocadVersion\":\"2025\",\"documentFingerprint\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"pluginVersion\":\"test-only\"},\"reason\":\"action_not_allowed\",\"status\":\"rejected\"},\"protocolVersion\":\"leaf.web-bridge.v1\",\"sessionId\":\"11111111-1111-4111-8111-111111111111\",\"verb\":\"host.callback\",\"signature\":\"621baafbbb8ebca0938e91b2f92568e73a26232cf4ee5ac333e1779412efa534\"}",
+      "signature": "621baafbbb8ebca0938e91b2f92568e73a26232cf4ee5ac333e1779412efa534"
+    }
+  ]
+}
