@@ -609,6 +609,7 @@ detail.update(execution_complete=complete, test_exit_code=int(sys.argv[2]),
               test_id_reporting_complete=reporting,
               full_run_complete=complete and detail.get("execution_mode") == "full",
               finished_at=datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"))
+(out / "final.json").write_text(canonical(detail) + "\n", encoding="utf-8")
 print("LEAF_SELECTION_FINAL " + canonical(detail))
 if detail.get("phase") == "shadow":
     shadow = {"id": detail.get("build_id"), "sha": detail.get("head_sha"),
@@ -628,4 +629,46 @@ if detail.get("phase") == "shadow":
               "assigned_arm": detail.get("assigned_arm"), "execution_mode": detail.get("execution_mode")}
     print("LEAF_SHADOW " + canonical(shadow))
 LEAF_SELECTION_FINALIZE
+# LEAF_GATE_PROOF_BEGIN
+# Reuse only this run's result. Proof publication is advisory to the CI verdict.
+if [[ "$gate_status" == 0 ]] && python -I -B - "$selection_dir/final.json" <<'LEAF_GATE_PROOF_ELIGIBLE'
+import json
+import sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as source:
+        receipt = json.load(source)
+    eligible = (receipt.get("schema") == "leaf.ci.selection.v1"
+                and receipt.get("execution_mode") == "full"
+                and receipt.get("selection_mode") == "full"
+                and receipt.get("phase") != "shadow"
+                and receipt.get("trusted_sha_override") is False)
+except (OSError, ValueError, AttributeError):
+    eligible = False
+raise SystemExit(0 if eligible else 1)
+LEAF_GATE_PROOF_ELIGIBLE
+then
+  gate_proof="$selection_dir/gate-proof.json"
+  if gate_tree="$(git rev-parse 'HEAD^{tree}')" \
+    && python scripts/run-all-gates.py --verify-shard-results /tmp/gate-results --emit-proof "$gate_proof" \
+    && python scripts/run-all-gates.py --verify-gate-proof "$gate_proof" --expect-tree "$gate_tree"; then
+    if [[ -n "${CODEBUILD_BUILD_ID:-}" ]]; then
+      if aws s3api put-object --bucket leaf-mq-transport-807034087062-us-east-1 \
+        --key "mq/leaf-web-demo/selection/gate-proof/${gate_tree}.json" --body "$gate_proof" \
+        --content-type application/json --if-none-match '*' --checksum-algorithm SHA256 \
+        --metadata "producer-build-id=${CODEBUILD_BUILD_ID},producer-project=leaf-ci-leaf-web-demo,tree=${gate_tree}" \
+        > "$selection_dir/gate-proof-put.log" 2>&1; then
+        echo 'INFO: gate proof published'
+      elif grep -Eq '412|PreconditionFailed' "$selection_dir/gate-proof-put.log"; then
+        echo 'INFO: gate proof already exists; immutable object retained'
+      else
+        echo 'WARNING: gate proof put failed; build verdict unchanged' >&2
+      fi
+    else
+      echo 'WARNING: gate proof put skipped without build identity; build verdict unchanged' >&2
+    fi
+  else
+    echo 'WARNING: gate proof mint or verification failed; build verdict unchanged' >&2
+  fi
+fi
+# LEAF_GATE_PROOF_END
 exit "$gate_status"

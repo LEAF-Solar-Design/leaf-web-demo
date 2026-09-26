@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import unittest
+from unittest.mock import mock_open, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,20 +28,29 @@ class TestCodebuildCiScript(unittest.TestCase):
                         script.index("##refs/heads/"))
         self.assertNotIn("git fetch", script)
         invocations = re.findall(
-            r"^python scripts/run-all-gates\.py\b[^\n]*(?:\\\n[^\n]*)*",
-            script, re.MULTILINE)
-        self.assertEqual(len(invocations), 1)
+            r"\bpython scripts/run-all-gates\.py\b(?:(?!\bpython scripts/run-all-gates\.py\b)[^\n])*",
+            re.sub(r"\\\n\s*", " ", script))
+        gate_runs = [call for call in invocations
+                     if "--verify-shard-results" not in call and "--verify-gate-proof" not in call]
+        self.assertEqual(gate_runs, [invocations[0]])
         for flag in ("--retry 1", "--result-json", "--log-dir"):
             self.assertIn(flag, invocations[0])
-        for flag in ("--shard-count", "--shard-index", "--verify-shard-results"):
+        for flag in ("--shard-count", "--shard-index"):
             self.assertNotIn(flag, script)
+        proof = script.split("# LEAF_GATE_PROOF_BEGIN\n", 1)[1].split(
+            "# LEAF_GATE_PROOF_END", 1)[0]
+        self.assertEqual(script.count("--verify-shard-results"), 1)
+        result_path = re.search(r"--result-json (\S+)", gate_runs[0]).group(1)
+        results_dir = re.search(r"--verify-shard-results (\S+)", proof).group(1)
+        self.assertEqual(result_path.rsplit("/", 1)[0], results_dir)
 
         workflow = (ROOT / ".github/workflows/test-gate.yml").read_text(encoding="utf-8-sig")
         requirements = re.findall(r"^\s*-r\s+(\S+)", workflow, re.MULTILINE)
         self.assertTrue(requirements, "No workflow requirement lines found")
         installed = re.findall(r"^\s*-r\s+(\S+)", script, re.MULTILINE)
         self.assertEqual(installed, requirements)
-        self.assertEqual(script.splitlines().count("npx playwright install --with-deps chromium"), 1)
+        self.assertEqual(script.splitlines().count("install_ci_browser npx playwright"), 1)
+        self.assertEqual(script.splitlines().count("install_ci_browser python -m playwright"), 1)
         self.assertRegex(workflow, r"(?m)^[ \t]*(?:run:[ \t]*)?npx playwright install chromium\b[ \t]*$")
         self.assertIn("check_license_fence.py --self-test", script)
         self.assertIn("check_license_fence.py .", script)
@@ -54,6 +64,65 @@ class TestCodebuildCiScript(unittest.TestCase):
         self.assertIn("export LEAF_AUTOFILL_SOLVER_ABSENT_OK=1", script)
         self.assertLess(script.index("=== job contract ==="), script.index("=== job license-fence ==="))
         self.assertLess(script.index("=== job license-fence ==="), script.index("=== job test-gate ==="))
+
+    def test_gate_proof_receipt_guard(self):
+        script = CI_PATH.read_text(encoding="utf-8")
+        guard = script.split("<<'LEAF_GATE_PROOF_ELIGIBLE'\n", 1)[1].split(
+            "\nLEAF_GATE_PROOF_ELIGIBLE", 1)[0]
+        self.assertIn('python -I -B - "$selection_dir/final.json"', script)
+        self.assertIn('(out / "final.json").write_text(canonical(detail)', script)
+        self.assertLess(script.index('(out / "final.json").write_text'),
+                        script.index('# LEAF_GATE_PROOF_BEGIN'))
+        base = dict(schema="leaf.ci.selection.v1", execution_mode="full",
+                    selection_mode="full", phase="enforce", trusted_sha_override=False)
+        cases = [
+            ("full", {}, 0),
+            ("sel", dict(execution_mode="selected"), 1),
+            ("shadow", dict(selection_mode="shadow"), 1),
+            ("phase", dict(phase="shadow"), 1),
+            ("override", dict(trusted_sha_override=True), 1),
+            ("missing", dict(trusted_sha_override=None), 1),
+            ("mode", dict(execution_mode=None), 1),
+            ("schema", dict(schema="other"), 1),
+        ]
+        for name, changes, expected in cases:
+            with self.subTest(name=name):
+                # Environment claims must not override receipt eligibility.
+                with patch.dict(os.environ, LEAF_SELECTION_EXECUTION_MODE="full",
+                                trusted_sha_override="0", LEAF_PROOF_TRUSTED_SHA=""), \
+                     patch("sys.argv", ["guard", "receipt.json"]), \
+                     patch("builtins.open", mock_open(read_data=json.dumps(dict(base, **changes)))), \
+                     self.assertRaises(SystemExit) as stopped:
+                    exec(compile(guard, "receipt-guard", "exec"), {})
+                self.assertEqual(stopped.exception.code, expected)
+        self.assertNotIn("environ", guard)
+
+    def test_gate_proof_publication_contract(self):
+        script = CI_PATH.read_text(encoding="utf-8")
+        proof = script.split("# LEAF_GATE_PROOF_BEGIN\n", 1)[1].split(
+            "# LEAF_GATE_PROOF_END", 1)[0]
+        self.assertIn('if [[ "$gate_status" == 0 ]] && python', proof)
+        self.assertIn("git rev-parse 'HEAD^{tree}'", proof)
+        self.assertIn('--emit-proof "$gate_proof"', proof)
+        self.assertIn('--verify-gate-proof "$gate_proof" --expect-tree "$gate_tree"; then', proof)
+        self.assertLess(proof.index("--emit-proof"), proof.index("--verify-gate-proof"))
+        self.assertLess(proof.index("--verify-gate-proof"), proof.index("aws s3api put-object"))
+        self.assertIn('--bucket leaf-mq-transport-807034087062-us-east-1', proof)
+        self.assertIn('--key "mq/leaf-web-demo/selection/gate-proof/${gate_tree}.json"', proof)
+        self.assertIn('--body "$gate_proof"', proof)
+        self.assertIn("--if-none-match '*' --checksum-algorithm SHA256", proof)
+        self.assertIn('--metadata "producer-build-id=${CODEBUILD_BUILD_ID},'
+                      'producer-project=leaf-ci-leaf-web-demo,tree=${gate_tree}"', proof)
+        self.assertIn('if gate_tree=', proof)
+        self.assertIn('&& python scripts/run-all-gates.py --verify-shard-results', proof)
+        self.assertIn('&& python scripts/run-all-gates.py --verify-gate-proof', proof)
+        self.assertIn('if aws s3api put-object', proof)
+        self.assertIn("'412|PreconditionFailed'", proof)
+        self.assertIn('gate proof mint or verification failed; build verdict unchanged', proof)
+        self.assertIn('gate proof put failed; build verdict unchanged', proof)
+        self.assertNotRegex(proof, r"\bgate_status=")
+        self.assertNotRegex(proof, r"\b(?:exit|return)\s")
+        self.assertTrue(script.endswith('# LEAF_GATE_PROOF_END\nexit "$gate_status"\n'))
 
     def test_steps_reset_directory(self):
         lines = CI_PATH.read_text(encoding="utf-8").splitlines()
