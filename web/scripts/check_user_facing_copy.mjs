@@ -3,12 +3,13 @@
 // customer carries a placeholder marker, a TODO, lorem ipsum, statistics
 // notation (n = 18) or an em or en dash. No parser and no dependency: bounded
 // regular expressions over web/src and web/index.html, deterministic order.
+// Naming law: Leaf Automation; rules from ~/.claude/scripts/prose-check.sh.
 // Fails closed: an unreadable, non-UTF-8 or oversize file counts as a hit, and
 // an allowlist entry that matches nothing is itself a failure.
 //
 // `--strict` widens the extractor to every quoted literal (template literal
 // segments, ternary branches inside JSX expression containers, arguments to the
-// UI's own message helpers) and runs the dash markers over that set.
+// UI's own message helpers) and runs the dash and naming markers over that set.
 // `check:copy` runs the strict pass as the gate (since #1308).
 import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
 import { join, relative, dirname, extname, sep, resolve } from 'node:path';
@@ -42,6 +43,11 @@ const OBJECT_KEY_RE = new RegExp(
 // next tag open. Bounded to 2000 chars so a stray `>` cannot swallow a file.
 const JSX_TEXT_RE = /(?<![\s=\-])>([^<>]{1,2000})<(?=[A-Za-z/>])/g;
 
+function pathShaped(token) {
+  if (/^(?:~|\.\.?|[A-Za-z]:)?[/\\]/.test(token)) return true;
+  return (token.match(/[/\\]/g) || []).length >= 2;
+}
+
 const MARKERS = [
   { name: 'placeholder', re: /\bplaceholder\b/i },
   { name: 'todo', re: /\btodo\b/i },
@@ -55,13 +61,33 @@ const MARKERS = [
   { name: 'n=', re: /\bn\s*=\s*\d/i },
   { name: 'em dash', re: /\u2014|&mdash;|&#8212;|&#x2014;|\\u2014/i },
   { name: 'en dash', re: /\u2013|&ndash;|&#8211;|&#x2013;|\\u2013/i },
+  { name: 'naming casing', re: /LEAF Automation/ },
+  {
+    name: 'naming standalone',
+    re: {
+      test(prose) {
+        for (const match of prose.matchAll(/(?<![-A-Za-z0-9_.*])LEAF(?![-A-Za-z0-9_.*])/g)) {
+          const end = match.index + match[0].length;
+          let beg = match.index;
+          while (beg > 0 && /\S/.test(prose[beg - 1])) beg -= 1;
+          let stop = end;
+          while (stop < prose.length && /\S/.test(prose[stop])) stop += 1;
+          if (!pathShaped(prose.slice(beg, stop))) return true;
+        }
+        return false;
+      },
+    },
+  },
+  { name: 'naming retired', re: /Leaf Solar Design/ },
+  { name: 'internal name', re: /(?<![A-Za-z0-9_])(?:cadwalk|claudewalk)(?![A-Za-z0-9_])/i },
 ];
 
-// Only these markers run over the strict pass's widened set. A dash cannot
-// appear in an identifier, a state value, a CSS token or a hyphenated word, so
-// the pass cannot false-positive on code; `todo`, `wip`, `xxx` and `n=` are
-// ordinary words and numbers that would flag internal strings on sight.
-const STRICT_MARKERS = MARKERS.filter((m) => m.name === 'em dash' || m.name === 'en dash');
+// Dash and naming markers run over the strict pass's widened set; `todo`,
+// `wip`, `xxx` and `n=` are ordinary words and numbers that would flag internal
+// strings on sight. Naming rules retain their identifier and path exemptions.
+const STRICT_MARKERS = MARKERS.filter((m) => [
+  'em dash', 'en dash', 'naming casing', 'naming standalone', 'naming retired', 'internal name',
+].includes(m.name));
 
 // Contexts whose literal is never customer copy, tested against the 80 source
 // characters immediately before it, so the check is O(1) per literal and the
@@ -144,7 +170,7 @@ export function extractStrings(text, relPath = '', { strict = false } = {}) {
     }
   }
 
-  // Strict: every remaining quoted literal, dash markers only. This is what
+  // Strict: every remaining quoted literal, dash and naming markers. This is what
   // sees a ternary branch inside a JSX expression container, a template
   // literal's segments, and a string handed to the UI's own message helpers.
   if (strict) {
