@@ -1,13 +1,18 @@
 """Admission recovery contracts using the real resolver and PostgreSQL store."""
 from copy import deepcopy
+from decimal import Decimal
+from fractions import Fraction
 import json
+import threading
+import time
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 import uuid
 
 import pytest
 import requests
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 import broker
 import broker_admission_reconciler as reconciler
@@ -566,3 +571,473 @@ def test_run_forever_waits_interruptibly_and_does_not_run_after_stop(monkeypatch
     stop.is_set.return_value = True
     reconciler.run_forever(60, stop, aps_client=client)
     run.assert_not_called()
+
+
+@pytest.fixture
+def arming_environment(environment, monkeypatch):
+    for name in (
+        reconciler.ARM_ENV, reconciler.INTERVAL_ENV, reconciler.MAX_APS_CHECKS_ENV,
+        "LEAF_DRAWING_STORE", "LEAF_JOBS_STORE", "LEAF_CALLBACK_REPLAY_STORE",
+        "LEAF_RUNTIME_ENV", "LEAF_AUTHORED_EXECUTION",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(reconciler, "_RUNNING", None)
+    return environment
+
+
+def _reconciler_threads():
+    return [thread for thread in threading.enumerate()
+            if thread.name == reconciler.THREAD_NAME and thread.is_alive()]
+
+
+@pytest.mark.parametrize("environ, expected, error", [
+    pytest.param({}, None, None, id="off-empty"),
+    pytest.param({reconciler.ARM_ENV: "0"}, None, None, id="off-zero"),
+    pytest.param({reconciler.ARM_ENV: "  "}, None, None, id="off-blank"),
+    pytest.param({reconciler.ARM_ENV: "0", reconciler.INTERVAL_ENV: "5"},
+                 None, None, id="off-ignores-knobs"),
+    pytest.param({reconciler.ARM_ENV: "1"},
+                 {"interval_s": 300, "max_aps_checks": 20}, None, id="defaults"),
+    pytest.param({reconciler.ARM_ENV: " 1 ", reconciler.INTERVAL_ENV: "60",
+                  reconciler.MAX_APS_CHECKS_ENV: "1"},
+                 {"interval_s": 60, "max_aps_checks": 1}, None, id="low-bounds"),
+    pytest.param({reconciler.ARM_ENV: "1", reconciler.INTERVAL_ENV: "3600",
+                  reconciler.MAX_APS_CHECKS_ENV: "20"},
+                 {"interval_s": 3600, "max_aps_checks": 20}, None, id="high-bounds"),
+    pytest.param({reconciler.ARM_ENV: "1", reconciler.INTERVAL_ENV: "",
+                  reconciler.MAX_APS_CHECKS_ENV: " "},
+                 {"interval_s": 300, "max_aps_checks": 20}, None, id="blank-knobs"),
+    pytest.param({reconciler.ARM_ENV: "true"}, None,
+                 "LEAF_BROKER_RECONCILER must be unset", id="arm-true"),
+    pytest.param({reconciler.ARM_ENV: "1", reconciler.INTERVAL_ENV: "59"}, None,
+                 "LEAF_BROKER_RECONCILER_INTERVAL_S must be", id="int-59"),
+    pytest.param({reconciler.ARM_ENV: "1", reconciler.INTERVAL_ENV: "3601"}, None,
+                 "LEAF_BROKER_RECONCILER_INTERVAL_S must be", id="int-3601"),
+    pytest.param({reconciler.ARM_ENV: "1", reconciler.INTERVAL_ENV: "300.5"}, None,
+                 "LEAF_BROKER_RECONCILER_INTERVAL_S must be", id="int-float"),
+    pytest.param({reconciler.ARM_ENV: "1", reconciler.INTERVAL_ENV: "1e3"}, None,
+                 "LEAF_BROKER_RECONCILER_INTERVAL_S must be", id="int-exp"),
+    pytest.param({reconciler.ARM_ENV: "1", reconciler.INTERVAL_ENV: "nan"}, None,
+                 "LEAF_BROKER_RECONCILER_INTERVAL_S must be", id="int-nan"),
+    pytest.param({reconciler.ARM_ENV: "1", reconciler.INTERVAL_ENV: "\uff13\uff10\uff10"}, None,
+                 "LEAF_BROKER_RECONCILER_INTERVAL_S must be", id="int-fullwidth"),
+    pytest.param({reconciler.ARM_ENV: "1", reconciler.MAX_APS_CHECKS_ENV: "0"}, None,
+                 "LEAF_BROKER_RECONCILER_MAX_APS_CHECKS must be", id="max-0"),
+    pytest.param({reconciler.ARM_ENV: "1", reconciler.MAX_APS_CHECKS_ENV: "21"}, None,
+                 "LEAF_BROKER_RECONCILER_MAX_APS_CHECKS must be", id="max-21"),
+    pytest.param({reconciler.ARM_ENV: "1", reconciler.MAX_APS_CHECKS_ENV: "-1"}, None,
+                 "LEAF_BROKER_RECONCILER_MAX_APS_CHECKS must be", id="max-neg"),
+])
+def test_reconciler_config_parser_accepts_only_bounded_integers(environ, expected, error):
+    before = dict(environ)
+    if error is not None:
+        with pytest.raises(RuntimeError, match=error):
+            reconciler.load_config(environ)
+    else:
+        assert reconciler.load_config(environ) == expected
+    assert environ == before
+
+
+def test_lifespan_arms_reconciler_and_resolves_a_stale_admission(
+        arming_environment, monkeypatch):
+    conn, store = arming_environment
+    monkeypatch.setenv(reconciler.ARM_ENV, "1")
+    start(store, "non-live-run", live=False)
+    list_executing = store.list_executing
+
+    def stale_rows(limit):
+        return [dict(row, age_seconds=7200.0) for row in list_executing(limit)]
+
+    monkeypatch.setattr(store, "list_executing", stale_rows)
+    lines = []
+    monkeypatch.setattr(reconciler, "_emit_line", lines.append)
+    with TestClient(broker.app) as client:
+        assert client.get("/broker/health").status_code == 200
+        deadline = time.monotonic() + 5
+        while not any(line.startswith("TICK ") for line in lines):
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, lines
+            time.sleep(min(0.01, remaining))
+    assert lines == [
+        'ARMED {"alarm_only": false, "interval_s": 300, "list_limit": 100, '
+        '"max_aps_checks": 20, "min_age_s": 3600}',
+        'RESOLVED {"event_key": "non-live-run", '
+        '"evidence_ref": "non-live-admission:non-live-run", '
+        '"resolution": "confirmed_failed_no_charge", "tenant_id": "tenant-a"}',
+        'TICK {"alarmed": 0, "checked": 1, "resolved": 1, "skipped_young": 0}',
+        'STOPPED {"thread": "leaf-broker-reconciler"}',
+    ]
+    assert conn.admissions["non-live-run"]["state"] == "terminal"
+    assert len(conn.audits) == 1
+    assert conn.audits[0]["operator_id"] == "reconciler"
+    assert _reconciler_threads() == []
+
+
+@pytest.mark.parametrize("arm", [None, "0"], ids=["unset", "zero"])
+def test_lifespan_without_flag_starts_no_reconciler(arming_environment, monkeypatch, arm):
+    conn, store = arming_environment
+    if arm is not None:
+        monkeypatch.setenv(reconciler.ARM_ENV, arm)
+    start(store, "non-live-run", live=False)
+    lines = []
+    monkeypatch.setattr(reconciler, "_emit_line", lines.append)
+    monkeypatch.setattr(reconciler, "start_background", pytest.fail)
+    with TestClient(broker.app) as client:
+        assert client.get("/broker/health").status_code == 200
+        assert _reconciler_threads() == []
+    assert lines == []
+    assert conn.admissions["non-live-run"]["state"] == "executing"
+
+
+@pytest.mark.parametrize("environ, error", [
+    ({reconciler.ARM_ENV: "yes"}, "LEAF_BROKER_RECONCILER must be unset"),
+    ({reconciler.ARM_ENV: "1", reconciler.INTERVAL_ENV: "59"},
+     "LEAF_BROKER_RECONCILER_INTERVAL_S must be"),
+    ({reconciler.ARM_ENV: "1", reconciler.MAX_APS_CHECKS_ENV: "21"},
+     "LEAF_BROKER_RECONCILER_MAX_APS_CHECKS must be"),
+    ({reconciler.ARM_ENV: "1", "LEAF_BROKER_STORE": "legacy"},
+     "requires LEAF_BROKER_STORE=postgres"),
+], ids=["arm", "interval", "batch", "legacy"])
+def test_lifespan_refuses_to_start_on_malformed_reconciler_config(
+        arming_environment, monkeypatch, environ, error):
+    for name, value in environ.items():
+        monkeypatch.setenv(name, value)
+    with pytest.raises(RuntimeError, match=error):
+        with TestClient(broker.app):
+            pytest.fail("broker started with invalid reconciler configuration")
+    assert _reconciler_threads() == []
+
+
+def test_armed_loop_survives_a_failing_tick_and_logs_one_line_per_action(monkeypatch):
+    stop = Mock()
+    stop.is_set.return_value = False
+    stop.wait.side_effect = [False, True]
+    client = FakeAps()
+    run = Mock(side_effect=[RuntimeError("db down"), {
+        "mode": "postgres", "checked": 2, "skipped_young": 1,
+        "resolved": [{"event_key": "k", "tenant_id": "t",
+                      "resolution": "confirmed_failed_no_charge",
+                      "evidence_ref": "non-live-admission:k"}],
+        "alarmed": [{"reason": "aps_not_terminal"}],
+    }])
+    monkeypatch.setattr(reconciler, "reconcile_once", run)
+    lines = []
+    monkeypatch.setattr(reconciler, "_emit_line", lines.append)
+    reconciler._serve(stop, interval_s=300, max_aps_checks=7, aps_client=client)
+    assert lines == [
+        'TICK_FAILED {"error": "RuntimeError"}',
+        'RESOLVED {"event_key": "k", "evidence_ref": "non-live-admission:k", '
+        '"resolution": "confirmed_failed_no_charge", "tenant_id": "t"}',
+        'TICK {"alarmed": 1, "checked": 2, "resolved": 1, "skipped_young": 1}',
+        'STOPPED {"thread": "leaf-broker-reconciler"}',
+    ]
+    assert run.call_args_list == [
+        call(aps_client=client, max_aps_checks=7),
+        call(aps_client=client, max_aps_checks=7),
+    ]
+    assert stop.wait.call_args_list == [call(300), call(300)]
+    assert all("db down" not in line for line in lines)
+
+
+@pytest.mark.parametrize("age", [Decimal("7200.0"), Fraction(7200, 1)],
+                         ids=["postgres-decimal", "other-number"])
+@pytest.mark.parametrize("fail_alarm", [False, True], ids=["normal", "sink-failure"])
+def test_armed_tick_keeps_resolution_lines_after_a_numeric_alarm(
+        arming_environment, monkeypatch, age, fail_alarm):
+    conn, store = arming_environment
+    start(store, "non-live-run", live=False)
+    start(store, "unbound-live-run", live=True)
+    list_executing = store.list_executing
+    monkeypatch.setattr(store, "list_executing", lambda limit: [
+        dict(row, age_seconds=age) for row in list_executing(limit)])
+    lines = []
+
+    def emit(text):
+        if fail_alarm and text.startswith("ALARM "):
+            raise OSError("private sink details")
+        lines.append(text)
+
+    monkeypatch.setattr(reconciler, "_emit_line", emit)
+    stop = Mock()
+    stop.is_set.return_value = False
+    stop.wait.return_value = True
+    client = FakeAps()
+    reconciler._serve(stop, interval_s=300, max_aps_checks=7, aps_client=client)
+    alarm_line = (
+        'ALARM {"event": "broker_admission_reconcile_alarm", '
+        '"event_key": "unbound-live-run", "tenant_id": "tenant-a", '
+        '"reason": "event_key_not_job_bound", "age_seconds": 7200.0}')
+    assert lines == [
+        'TICK_FAILED {"error": "OSError"}' if fail_alarm else alarm_line,
+        'RESOLVED {"event_key": "non-live-run", '
+        '"evidence_ref": "non-live-admission:non-live-run", '
+        '"resolution": "confirmed_failed_no_charge", "tenant_id": "tenant-a"}',
+        'TICK {"alarmed": 1, "checked": 2, "resolved": 1, "skipped_young": 0}',
+        'STOPPED {"thread": "leaf-broker-reconciler"}',
+    ]
+    if not fail_alarm:
+        assert not any(line.startswith("TICK_FAILED ") for line in lines)
+    assert all("private sink details" not in line for line in lines)
+    assert conn.admissions["non-live-run"]["state"] == "terminal"
+    assert conn.admissions["unbound-live-run"]["state"] == "executing"
+    assert len(conn.audits) == 1
+    assert conn.audits[0]["operator_id"] == "reconciler"
+    assert client.calls == []
+
+
+@pytest.mark.parametrize("value", [
+    Decimal("Infinity"), Decimal("-Infinity"), Decimal("NaN"),
+    float("inf"), float("-inf"), float("nan"),
+], ids=["decimal-inf", "decimal-neg-inf", "decimal-nan",
+        "float-inf", "float-neg-inf", "float-nan"])
+def test_log_json_normalizes_nested_non_finite_numbers(value):
+    payload = reconciler._json_record({
+        "nested": [{"age_seconds": value}, (value,)], "live": True,
+    })
+    assert json.loads(payload, parse_constant=lambda token: pytest.fail(token)) == {
+        "nested": [{"age_seconds": None}, [None]], "live": True,
+    }
+
+
+def test_armed_tick_emits_strict_json_for_non_finite_alarm_ages(
+        arming_environment, monkeypatch):
+    conn, store = arming_environment
+    start(store, "unbound-live-run", live=True)
+    start(store)
+    before = snapshot(conn)
+    rows = [dict(row, age_seconds=Decimal("Infinity")
+                 if row["event_key"] == "unbound-live-run" else Decimal("7200.0"))
+            for row in store.list_executing(100)]
+    monkeypatch.setattr(store, "list_executing", lambda limit: rows)
+    monkeypatch.setattr(reconciler, "read_sidecar_correlations",
+                        lambda path: {JOB_ID: "workitem-123"})
+    monkeypatch.setattr(broker, "active_workitem_for", lambda job_id: None)
+
+    def alarm_with_nan(workitem_id):
+        # NaN cannot pass the age comparison. Supply it after eligibility so
+        # this exercises the real alarm path without changing that decision.
+        next(row for row in rows if row["event_key"] == EVENT_KEY)[
+            "age_seconds"] = Decimal("NaN")
+        return {"status": "success"}
+
+    client = SimpleNamespace(get_workitem_status=Mock(side_effect=alarm_with_nan))
+    stop = Mock()
+    stop.is_set.return_value = False
+    stop.wait.return_value = True
+    lines = []
+    monkeypatch.setattr(reconciler, "_emit_line", lines.append)
+    reconciler._serve(stop, interval_s=300, max_aps_checks=7, aps_client=client)
+    records = [(kind, json.loads(payload, parse_constant=lambda token: pytest.fail(token)))
+               for kind, payload in (line.split(" ", 1) for line in lines)]
+    assert [kind for kind, record in records] == ["ALARM", "ALARM", "TICK", "STOPPED"]
+    assert {record["event_key"]: (record["reason"], record["age_seconds"])
+            for kind, record in records if kind == "ALARM"} == {
+        "unbound-live-run": ("event_key_not_job_bound", None),
+        EVENT_KEY: ("aps_succeeded_needs_operator", None),
+    }
+    assert records[-2:] == [
+        ("TICK", {"alarmed": 2, "checked": 2, "resolved": 0, "skipped_young": 0}),
+        ("STOPPED", {"thread": reconciler.THREAD_NAME}),
+    ]
+    client.get_workitem_status.assert_called_once_with("workitem-123")
+    assert snapshot(conn) == before
+
+
+def test_cli_once_emits_strict_json_for_decimal_alarm_age(
+        environment, monkeypatch, capsys):
+    conn, store = environment
+    start(store, "unbound-live-run", live=True)
+    before = snapshot(conn)
+    rows = [dict(row, age_seconds=Decimal("7200.0"))
+            for row in store.list_executing(100)]
+    monkeypatch.setattr(store, "list_executing", lambda limit: rows)
+    client = FakeAps()
+    monkeypatch.setattr(reconciler, "ApsWorkitemStatusClient", lambda: client)
+    monkeypatch.setattr(reconciler.sys, "argv", ["broker_admission_reconciler", "--once"])
+    assert reconciler.main() == 0
+    captured = capsys.readouterr()
+    assert len(captured.out.splitlines()) == 1
+    summary = json.loads(captured.out, parse_constant=lambda token: pytest.fail(token))
+    assert summary == {
+        "mode": "postgres", "checked": 1, "skipped_young": 0, "resolved": [],
+        "alarmed": [{"event": "broker_admission_reconcile_alarm",
+                     "event_key": "unbound-live-run", "tenant_id": "tenant-a",
+                     "reason": "event_key_not_job_bound", "age_seconds": 7200.0}],
+    }
+    assert isinstance(summary["alarmed"][0]["age_seconds"], float)
+    alarm_lines = captured.err.splitlines()
+    assert len(alarm_lines) == 1
+    prefix = "[leaf-broker-reconciler] ALARM "
+    assert alarm_lines[0].startswith(prefix)
+    assert json.loads(alarm_lines[0][len(prefix):],
+                      parse_constant=lambda token: pytest.fail(token)) == summary["alarmed"][0]
+    assert client.calls == []
+    assert snapshot(conn) == before
+
+
+def test_armed_loop_survives_a_malformed_summary(monkeypatch):
+    stop = Mock()
+    stop.is_set.return_value = False
+    stop.wait.side_effect = [False, True]
+    client = FakeAps()
+    run = Mock(side_effect=[None, {
+        "mode": "postgres", "checked": Decimal("2"),
+        "skipped_young": Fraction(1, 1), "resolved": [], "alarmed": [],
+    }])
+    monkeypatch.setattr(reconciler, "reconcile_once", run)
+    lines = []
+    monkeypatch.setattr(reconciler, "_emit_line", lines.append)
+    reconciler._serve(stop, interval_s=300, max_aps_checks=7, aps_client=client)
+    assert lines == [
+        'TICK_FAILED {"error": "AttributeError"}',
+        'TICK {"alarmed": 0, "checked": 2.0, "resolved": 0, "skipped_young": 1.0}',
+        'STOPPED {"thread": "leaf-broker-reconciler"}',
+    ]
+    assert run.call_args_list == [
+        call(aps_client=client, max_aps_checks=7),
+        call(aps_client=client, max_aps_checks=7),
+    ]
+    assert stop.wait.call_args_list == [call(300), call(300)]
+
+
+def test_bad_resolution_log_does_not_drop_other_completed_actions(monkeypatch):
+    stop = Mock()
+    stop.is_set.return_value = False
+    stop.wait.return_value = True
+    monkeypatch.setattr(reconciler, "reconcile_once", Mock(return_value={
+        "checked": 3, "skipped_young": 0, "alarmed": [],
+        "resolved": [{"event_key": "first"}, {"bad": object()},
+                     {"event_key": "last", "live": False, "age": Decimal("7200.0")}],
+    }))
+    lines = []
+    monkeypatch.setattr(reconciler, "_emit_line", lines.append)
+    reconciler._serve(stop, interval_s=300, max_aps_checks=7, aps_client=FakeAps())
+    assert lines == [
+        'RESOLVED {"event_key": "first"}',
+        'TICK_FAILED {"error": "TypeError"}',
+        'RESOLVED {"age": 7200.0, "event_key": "last", "live": false}',
+        'TICK {"alarmed": 0, "checked": 3, "resolved": 3, "skipped_young": 0}',
+        'STOPPED {"thread": "leaf-broker-reconciler"}',
+    ]
+
+
+def test_concurrent_starts_arm_exactly_one_loop(arming_environment, monkeypatch):
+    callers_ready = threading.Barrier(3, timeout=2)
+    constructors_ready = threading.Barrier(2, timeout=0.5)
+    handles, errors, lines = [None, None], [], []
+    run = Mock(return_value={"mode": "postgres", "checked": 0, "skipped_young": 0,
+                             "resolved": [], "alarmed": []})
+    monkeypatch.setattr(reconciler, "reconcile_once", run)
+    monkeypatch.setattr(reconciler, "_emit_line", lines.append)
+
+    def make_client():
+        # Pause after the liveness check and before publishing _RUNNING. With
+        # the lock only one caller gets here; without it both cross this barrier.
+        try:
+            constructors_ready.wait()
+        except threading.BrokenBarrierError:
+            pass
+        return FakeAps()
+
+    monkeypatch.setattr(reconciler, "ApsWorkitemStatusClient", make_client)
+
+    def start_racing(index):
+        try:
+            callers_ready.wait()
+            handles[index] = reconciler.start_background({reconciler.ARM_ENV: "1"})
+        except Exception as exc:
+            errors.append(exc)
+
+    callers = [threading.Thread(target=start_racing, args=(index,)) for index in range(2)]
+    try:
+        for caller in callers:
+            caller.start()
+        callers_ready.wait()
+        deadline = time.monotonic() + 3
+        for caller in callers:
+            caller.join(max(0, deadline - time.monotonic()))
+        assert not any(caller.is_alive() for caller in callers)
+        assert errors == []
+        armed = [handle for handle in handles if handle is not None]
+        assert len(armed) == 1
+        assert _reconciler_threads() == [armed[0].thread]
+        assert sum(line.startswith("ARMED ") for line in lines) == 1
+        assert lines.count('NOT_ARMED {"reason": "already_running"}') == 1
+    finally:
+        callers_ready.abort()
+        constructors_ready.abort()
+        for caller in callers:
+            if caller.ident is not None:
+                caller.join(2)
+        for handle in handles:
+            if handle is not None:
+                assert handle.stop(timeout=2) is True
+    assert _reconciler_threads() == []
+
+
+def test_second_start_in_one_process_does_not_start_a_second_loop(
+        arming_environment, monkeypatch):
+    run = Mock(return_value={"mode": "postgres", "checked": 0, "skipped_young": 0,
+                             "resolved": [], "alarmed": []})
+    monkeypatch.setattr(reconciler, "reconcile_once", run)
+    lines = []
+    monkeypatch.setattr(reconciler, "_emit_line", lines.append)
+    first = second = third = None
+    try:
+        first = reconciler.start_background({reconciler.ARM_ENV: "1"}, aps_client=FakeAps())
+        assert isinstance(first, reconciler.ReconcilerHandle)
+        assert first.thread.daemon is True
+        second = reconciler.start_background({reconciler.ARM_ENV: "1"}, aps_client=FakeAps())
+        assert second is None
+        assert 'NOT_ARMED {"reason": "already_running"}' in lines
+        assert _reconciler_threads() == [first.thread]
+        assert first.stop() is True
+        third = reconciler.start_background({reconciler.ARM_ENV: "1"}, aps_client=FakeAps())
+        assert isinstance(third, reconciler.ReconcilerHandle)
+        assert third.stop() is True
+    finally:
+        for handle in (first, second, third):
+            if handle is not None:
+                handle.stop(timeout=5)
+    assert _reconciler_threads() == []
+
+
+def test_stop_is_bounded_when_a_tick_hangs(arming_environment, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    thread_errors = []
+    monkeypatch.setattr(threading, "excepthook", thread_errors.append)
+
+    def hang(*, aps_client, max_aps_checks):
+        entered.set()
+        release.wait(5)
+        return {"mode": "postgres", "checked": 0, "skipped_young": 0,
+                "resolved": [], "alarmed": []}
+
+    run = Mock(side_effect=hang)
+    monkeypatch.setattr(reconciler, "reconcile_once", run)
+    lines = []
+    monkeypatch.setattr(reconciler, "_emit_line", lines.append)
+    handle = second = None
+    try:
+        handle = reconciler.start_background({reconciler.ARM_ENV: "1"}, aps_client=FakeAps())
+        assert isinstance(handle, reconciler.ReconcilerHandle)
+        assert entered.wait(5)
+        assert handle.stop(timeout=0.2) is False
+        assert 'STOP_TIMEOUT {"join_timeout_s": 0.2}' in lines
+        second = reconciler.start_background({reconciler.ARM_ENV: "1"}, aps_client=FakeAps())
+        assert second is None
+        assert 'NOT_ARMED {"reason": "already_running"}' in lines
+    finally:
+        release.set()
+        for current in (handle, second):
+            if current is not None:
+                current.stop(timeout=5)
+    assert not handle.thread.is_alive()
+    assert lines[-2:] == [
+        'TICK {"alarmed": 0, "checked": 0, "resolved": 0, "skipped_young": 0}',
+        'STOPPED {"thread": "leaf-broker-reconciler"}',
+    ]
+    assert not any(line.startswith("TICK_FAILED ") for line in lines)
+    assert run.call_count == 1
+    assert thread_errors == []
+    assert _reconciler_threads() == []

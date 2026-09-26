@@ -805,6 +805,21 @@ def validate_runtime_safety() -> None:
         )
 
 
+BROKER_RECONCILER_ENV = "LEAF_BROKER_RECONCILER"
+
+
+def _start_admission_reconciler():
+    """Arm the stuck-admission reconciler only when LEAF_BROKER_RECONCILER is set; default off, no import, fails closed."""
+    if os.environ.get(BROKER_RECONCILER_ENV, "").strip() in ("", "0"):
+        return None
+    if sys.modules.get("broker") is not sys.modules.get(__name__):
+        raise RuntimeError(
+            "LEAF_BROKER_RECONCILER requires the broker to run as module 'broker' "
+            "(uvicorn broker:app); refusing to load a second broker copy")
+    import broker_admission_reconciler
+    return broker_admission_reconciler.start_background(os.environ)
+
+
 @asynccontextmanager
 async def _broker_lifespan(_app: FastAPI):
     """Run deployment safety checks on supported FastAPI and Starlette releases."""
@@ -818,7 +833,12 @@ async def _broker_lifespan(_app: FastAPI):
         callbacks.validate_replay_store_startup()
     import jobs
     jobs.validate_store_startup()
-    yield
+    reconciler = _start_admission_reconciler()
+    try:
+        yield
+    finally:
+        if reconciler is not None:
+            reconciler.stop()
 
 
 # --------------------------------------------------------------------------- #
