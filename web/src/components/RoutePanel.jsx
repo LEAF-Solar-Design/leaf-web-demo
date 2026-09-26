@@ -27,6 +27,15 @@ function paramsSummary(params) {
   return entries.map(([k, v]) => `${humanKey(k)} ${String(v)}`).join(' · ')
 }
 
+// A bound solve (routedLane 'solve', converted by the catalog controller) is
+// judged against its own floor: probed bindings sit at 0.43 to 0.47, below the
+// run floor, while a single description-token overlap binds near 0.15 to 0.23.
+const MIN_SOLVE_MATCH_CONF = 0.3
+function belowConfirmFloor(route) {
+  const floor = route.routedLane === 'solve' ? MIN_SOLVE_MATCH_CONF : MIN_RUN_MATCH_CONF
+  return route.confidence < floor
+}
+
 export default function RoutePanel({
   route: liveRoute, tools, running, writeLocked, writeEntitled = true,
   // Why the write is paused, supplied by the surface that owns the lock. /app
@@ -61,7 +70,7 @@ export default function RoutePanel({
   // doesn't include. Distinct from `locked` (another session holds the checkout).
   const entBlocked = isWrite && !writeEntitled
   const requestRun = () => {
-    if (outage || route.confidence < MIN_RUN_MATCH_CONF) return
+    if (outage || belowConfirmFloor(route)) return
     if (route.runIntent) onConfirmIntent(route.runIntent, toolObj, params)
     else if (toolObj) onPickAlternative(toolObj.name)
   }
@@ -72,7 +81,7 @@ export default function RoutePanel({
   // so resolve descriptions from the catalog; the stub's inline one wins.
   const rows = useMemo(() => {
     if (!route || (!outage && route.lane !== 'run') || (confident && toolObj)) return []
-    if (outage || !route.tool || route.confidence < MIN_RUN_MATCH_CONF) {
+    if (outage || !route.tool || belowConfirmFloor(route)) {
       return tools.map((t) => ({ kind: 'pick', tool: t.name, description: t.description || '' }))
     }
     const descOf = (name) => tools.find((t) => t.name === name)?.description || ''
@@ -151,16 +160,28 @@ export default function RoutePanel({
     )
   }
 
-  // ---- SOLVE lane: honest not-wired advisory strip --------------------------
+  // ---- SOLVE lane, unbound: the router bound no solver ----------------------
+  // A bound solve arrives as a run (routedLane 'solve'). Here only catalog
+  // tools declaring the 'solve' capability are offered; a pick arms a normal
+  // confirmable run through onPickAlternative.
   if (!outage && route.lane === 'solve') {
+    const solverPicks = (route.alternatives || []).filter((alt) =>
+      tools.some((t) => t.name === alt.tool && (t.capabilities || []).includes('solve')))
     return (
       <div className={`strip-decision ${motion}`}>
         <span className="dot square" aria-hidden="true" />
         <span className="strip-sentence">
-          <span className="route-title">Solve lane</span>: string / combiner / route jobs run on
-          the cloud solver, which is not connected in this demo. Nothing was
-          executed.
+          <span className="route-title">Solve</span>
+          {solverPicks.length > 0
+            ? ': no solver matched this request. Pick one to review it before it runs.'
+            : ': no solver is available for this request. Nothing was executed.'}
         </span>
+        {solverPicks.map((alt) => (
+          <button key={alt.tool} type="button" className="chip-neutral"
+            aria-label={`Pick solver ${alt.tool}`} onClick={() => onPickAlternative(alt.tool)}>
+            {alt.tool}
+          </button>
+        ))}
         <span className="key">Esc</span>
       </div>
     )
@@ -175,7 +196,7 @@ export default function RoutePanel({
       <div className={`strip-decision ${motion}`}>
         <span className="dot square" aria-hidden="true" />
         <span className="strip-sentence">
-          Run <span className="route-tool">{route.tool}</span>
+          {route.routedLane === 'solve' ? 'Solve with ' : 'Run '}<span className="route-tool">{route.tool}</span>
           {isWrite && <> <span className="cap write">drawing.write</span></>}
           {summary && <span className="dim"> · {summary}</span>}
           <span className="dim">
@@ -206,6 +227,9 @@ export default function RoutePanel({
   }
 
   // ---- RUN lane, low confidence / not in this catalog: resolver rows --------
+  const summary = route.runIntent
+    ? `params ${JSON.stringify(route.runIntent.params)}`
+    : paramsSummary(params)
   const conf = Math.round((route.confidence || 0) * 100)
   return (
     <div ref={resolverRef} className={`resolver ${motion}`} role="listbox" aria-label="Route resolver">
@@ -218,7 +242,9 @@ export default function RoutePanel({
               ? 'No matching tool in this demo. Try another description or browse available tools.'
               : 'No matching capability. Try another description or browse available tools.'}{route.repeat >= 2 ? ` Still no match after ${route.repeat} tries.` : ''}</span>
             : toolObj
-          ? <>Catalog match · {conf}% match</>
+          ? route.routedLane === 'solve'
+            ? <>Solver match · {conf}% match</>
+            : <>Catalog match · {conf}% match</>
           : route.slash
             ? <>“/{route.tool}” isn’t a tool in this catalog. Pick an alternative:</>
             : <>“{route.tool}” is live-only, not in this catalog. Pick an alternative:</>}
@@ -245,6 +271,7 @@ export default function RoutePanel({
           <span className="label">
             <span className="route-tool">{row.tool}</span>
             {row.description && <span className="dim"> · {row.description}</span>}
+            {row.kind === 'run' && summary && <span className="dim"> · {summary}</span>}
           </span>
           <span className="count">
             {typeof row.confidence === 'number' ? `${Math.round(row.confidence * 100)}%` : ''}
