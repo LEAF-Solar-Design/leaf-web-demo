@@ -24,11 +24,14 @@ except ImportError:
     import trace_process_tree as tree
 
 
-# Amendment 4: -x escapes non-ASCII bytes only, -s 4096 covers PATH_MAX, and the noise
-# list (policy data, digested into syscall_policy_digest) is filtered at the tracer.
-TRACE_FLAGS = ["-f", "-ttt", "-T", "-v", "-x", "-yy", "-s", "4096", "-e", "trace=!" + ",".join(tree.POLICY["noise"])]
+# Amendment 5: -x escapes non-ASCII bytes only, -s 4096 covers PATH_MAX, and the noise list
+# (policy data, digested into syscall_policy_digest) is filtered in the kernel by
+# --seccomp-bpf, so those syscalls cost no ptrace stop. No durations, no fd annotations:
+# sequence orders events and the descriptor table supplies provenance.
+TRACE_FLAGS = ["-f", "-ttt", "-v", "-x", "-s", "4096", "--seccomp-bpf", "-e", "trace=!" + ",".join(tree.POLICY["noise"])]
 TERM, KILL = signal.SIGTERM, getattr(signal, "SIGKILL", 9)
 KILL_GRACE = 10  # seconds between SIGTERM and SIGKILL of the tracer's group [guessed]
+STDERR_TAIL = 4096  # bytes of strace's own diagnostics copied into the receipt
 ADMISSION_POLICY = {
     "python-installation": True, "os-image": True, "terraform-provider-cache": True,
     "generated": False, "generated-input": False, "device": False, "network": False,
@@ -151,20 +154,71 @@ def external_identities(result):
     return table
 
 
-def _command(command):
+def _command(command, stderr=None):
     try:
-        return subprocess.run(command, stdin=subprocess.DEVNULL, check=False).returncode
+        return subprocess.run(command, stdin=subprocess.DEVNULL, stderr=stderr, check=False).returncode
     except OSError:
         return 127
+
+
+def _stderr_token():
+    """Duplicate this process's stderr for the command wrapper: (fd, token), or (None, "-").
+
+    strace's own stderr goes to a private file; the wrapper hands the command this
+    duplicate so tracee output reaches the CI log and never the receipt.
+    """
+    try:
+        fd = os.dup(2)
+    except OSError:
+        return None, "-"
+    try:
+        if os.name == "nt":
+            import msvcrt
+            handle = msvcrt.get_osfhandle(fd)
+            os.set_handle_inheritable(handle, True)
+            return fd, "h" + str(handle)
+        os.set_inheritable(fd, True)
+        info = os.fstat(fd)
+        return fd, "%d:%d:%d" % (fd, info.st_dev, info.st_ino)
+    except (OSError, ValueError):
+        os.close(fd)
+        return None, "-"
+
+
+def _restored_stderr(token):
+    """The supervisor's stderr duplicate, or None when it did not survive the tracer (fails closed)."""
+    try:
+        if token.startswith("h"):
+            import msvcrt
+            return msvcrt.open_osfhandle(int(token[1:]), 0)
+        fd, dev, ino = (int(part) for part in token.split(":"))
+        info = os.fstat(fd)
+        # A reused descriptor number is not our stderr.
+        return fd if (info.st_dev, info.st_ino) == (dev, ino) else None
+    except (OSError, ValueError, ImportError):
+        return None
 
 
 def _command_child(argv):
     # The tracer's status need not be the test's status. A small wrapper waits
     # for the command and records only its numeric outcome in the private dir.
-    status_path, command = argv[0], argv[1:]
-    code = _command(command)
-    tree._atomic(Path(status_path), {"command_exit_code": code})
+    status_path, token, command = argv[0], argv[1], argv[2:]
+    stderr = _restored_stderr(token)
+    code = _command(command, stderr)
+    tree._atomic(Path(status_path), {"command_exit_code": code, "stderr_restored": stderr is not None})
     return code
+
+
+def _stderr_tail(path, limit=STDERR_TAIL):
+    """Last limit bytes of the tracer's stderr as printable ASCII (one char per byte), or None."""
+    try:
+        with open(path, "rb") as stream:
+            size = stream.seek(0, os.SEEK_END)
+            stream.seek(max(0, size - limit))
+            data = stream.read(limit)
+    except OSError:
+        return None
+    return "".join(c if c in "\n\r\t" or " " <= c <= "~" else "?" for c in data.decode("latin-1"))
 
 
 def _signal_group(process, sig):
@@ -337,7 +391,8 @@ def run(context, out_dir, command, tracer=None, sink=None, limits=None, descenda
                    baseline_elapsed_seconds=context.get("baseline_elapsed_seconds"),
                    decoder_complete=False, capture_complete=False, capture_errors=[],
                    sanitized_trace_bytes=0, decoded_evidence_bytes=0, decoder_peak_bytes=0,
-                   terminated_by=None, kill_grace_seconds=kill_grace)
+                   terminated_by=None, kill_grace_seconds=kill_grace,
+                   tracer_stderr_tail=None, tracer_stderr_withheld=False)
     receipt_path = out / "reports" / ("trace-receipt-" + context["capture_group"] + ".json")
     state = {"process": None, "signal": None, "escalate": False, "terminated": False}
     if not facility["available"]:
@@ -365,11 +420,13 @@ def run(context, out_dir, command, tracer=None, sink=None, limits=None, descenda
         with tempfile.TemporaryDirectory(prefix=".trace-", dir=out) as private:
             path = os.path.join(private, "sink")
             status_path = os.path.join(private, "command-exit.json")
+            stderr_path = os.path.join(private, "tracer-stderr")
             fd = None
             if sink == "fifo":
                 os.mkfifo(path, 0o600)
                 fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
-            wrapped = [sys.executable, os.path.abspath(__file__), "_command", status_path] + command
+            stderr_fd, token = _stderr_token()
+            wrapped = [sys.executable, os.path.abspath(__file__), "_command", status_path, token] + command
             actual_argv = tracer + TRACE_FLAGS + ["-o", path, "--"] + wrapped
             receipt["tracer"]["argv"] = tracer + TRACE_FLAGS + ["-o", path, "--"]
             # Handlers live exactly around the launch and capture; removed in finally.
@@ -379,12 +436,19 @@ def run(context, out_dir, command, tracer=None, sink=None, limits=None, descenda
                 if state["signal"] is None:
                     try:
                         # Own session and group: the forwarded signal reaches every tracee.
-                        process = subprocess.Popen(actual_argv, stdin=subprocess.DEVNULL,
-                                                   start_new_session=os.name == "posix")
+                        # strace's stderr is private; the stderr duplicate rides to the wrapper.
+                        with open(stderr_path, "wb") as tracer_stderr:
+                            inherit = ({"pass_fds": (stderr_fd,)} if os.name == "posix" and stderr_fd is not None
+                                       else {"close_fds": False} if stderr_fd is not None else {})
+                            process = subprocess.Popen(actual_argv, stdin=subprocess.DEVNULL, stderr=tracer_stderr,
+                                                       start_new_session=os.name == "posix", **inherit)
                     except OSError:
                         receipt.update(facility_available=False, facility_reason="tracer_launch_failed")
                         errors.append("tracer_launch_failed")
                         receipt["command_exit_code"] = _command(command)
+                if stderr_fd is not None:
+                    os.close(stderr_fd)
+                    stderr_fd = None
                 state["process"] = process
                 if process is not None and state["signal"] is not None and not state["terminated"]:
                     # The signal landed while the tracer was being launched.
@@ -412,9 +476,10 @@ def run(context, out_dir, command, tracer=None, sink=None, limits=None, descenda
 
                     result = tree.decode_stream(chunks(), context, limits)
                     receipt["tracer_exit_code"] = process.wait()
-                    code = None
+                    code, restored = None, False
                     try:
-                        code = json.loads(Path(status_path).read_text())["command_exit_code"]
+                        status = json.loads(Path(status_path).read_text())
+                        code, restored = status["command_exit_code"], status.get("stderr_restored") is True
                         if type(code) is not int:
                             code = None
                             raise ValueError("invalid_command_status")
@@ -428,6 +493,12 @@ def run(context, out_dir, command, tracer=None, sink=None, limits=None, descenda
                     # from the command's recorded status is the tracer's own failure.
                     if receipt["tracer_exit_code"] != 0 and receipt["tracer_exit_code"] != code:
                         errors.append("tracer_nonzero_exit")
+                    # Only strace's diagnostics ("seccomp-bpf not enabled"), never tracee output:
+                    # withheld unless the wrapper confirms the command wrote to our stderr.
+                    if restored:
+                        receipt["tracer_stderr_tail"] = _stderr_tail(stderr_path)
+                    else:
+                        receipt["tracer_stderr_withheld"] = True
                     receipt["terminated_by"] = state["signal"]
                     tree.bind_external_identities(result, external_identities(result))
                     _incomplete(result, errors)
@@ -443,6 +514,8 @@ def run(context, out_dir, command, tracer=None, sink=None, limits=None, descenda
                 _restore_forwarding(previous)
                 if fd is not None:
                     os.close(fd)
+                if stderr_fd is not None:
+                    os.close(stderr_fd)
     if state["signal"] is not None:
         # Also covers a signal that landed after the outputs were built.
         receipt.update(terminated_by=state["signal"], capture_complete=False,

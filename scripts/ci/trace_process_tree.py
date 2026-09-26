@@ -16,14 +16,24 @@ from pathlib import Path
 from urllib.parse import quote
 from dataclasses import dataclass, field
 
+try:
+    import resource
+except ImportError:  # Windows: the live-state counter stands in for measured RSS.
+    resource = None
+
 
 BINDINGS = ("run_id", "source_sha", "source_tree", "capture_sha", "catalog_sha256")
-PARSER_VERSION = "s15a-3"
-# max_state_bytes: 2 GiB; the first real capture tripped 256 MiB at 478,810 syscalls.
+PARSER_VERSION = "s15a-5"
+# max_state_bytes: 2 GiB, compared against measured peak RSS (Amendment 5); the counter it
+# replaced only ever added, so a 40 M-line stream tripped it on cumulative allocation.
 LIMITS = dict(max_tasks=16384, max_fds_per_task=65536, max_record_bytes=1048576,
               max_dependencies=1000000, max_state_bytes=2 * 1024 ** 3, max_reasons=256)
+# ru_maxrss is KiB on Linux, bytes on macOS; sampled once per RSS_INTERVAL lines.
+RSS_SCALE, RSS_INTERVAL = (1 if sys.platform == "darwin" else 1024), 65536
 # Calibration instrument bounds: distinct sanitized shapes kept, names counted, names reported.
 SAMPLE_LIMIT, NAME_LIMIT, NAME_REPORT = 32, 4096, 32
+# Raw bytes kept per sampled line; shaping collapses any quoted string the cut leaves open.
+SAMPLE_PREFIX = 512
 POLICY = {
     # Amendment 4: unconditional-allow, argument-independent syscalls filtered at the tracer
     # (`-e trace=!<noise>`). Digested with the policy and bound into the epoch through the argv.
@@ -33,20 +43,24 @@ POLICY = {
               "getrlimit prlimit64 getrusage times clock_gettime gettimeofday time getrandom sched_getaffinity "
               "sched_getparam sched_getscheduler futex").split(),
     "path": "open openat creat execve execveat readlink readlinkat access faccessat stat lstat fstat newfstatat statfs fstatfs statx getcwd chdir fchdir getxattr lgetxattr listxattr llistxattr".split(),
-    "descriptor": "read pread64 readv preadv preadv2 mmap mremap munmap mprotect lseek dup dup2 dup3 fcntl close pipe pipe2 socketpair write pwrite64 writev pwritev pwritev2 truncate ftruncate fsync fdatasync fadvise64 posix_fadvise readahead sync_file_range flock fgetxattr flistxattr".split(),
+    "descriptor": "read pread64 readv preadv preadv2 mmap mremap munmap mprotect lseek dup dup2 dup3 fcntl close pipe pipe2 socketpair write pwrite64 writev pwritev pwritev2 truncate ftruncate fsync fdatasync fadvise64 posix_fadvise readahead sync_file_range flock fgetxattr flistxattr sendfile copy_file_range".split(),
     "metadata_mutation": "chmod fchmod fchmodat chown fchown fchownat lchown utimensat futimesat".split(),
     "internal_object": "memfd_create timerfd_create".split(),
     "filesystem_events": "inotify_init inotify_init1 inotify_add_watch inotify_rm_watch".split(),
     "directory": "getdents getdents64 mkdir mkdirat rmdir unlink unlinkat rename renameat renameat2 link linkat symlink symlinkat".split(),
     "process": "fork vfork clone wait4 waitid exit exit_group setsid setpgid getpid getppid gettid".split(),
-    "network": "socket connect bind listen accept accept4 sendto recvfrom sendmsg recvmsg sendmmsg recvmmsg getsockopt getpeername getsockname shutdown".split(),
+    "network": "socket connect bind listen accept accept4 sendto recvfrom sendmsg recvmsg sendmmsg recvmmsg getsockopt setsockopt getpeername getsockname shutdown".split(),
     "namespace": "unshare setns chroot pivot_root mount umount2".split(),
-    "reject": "ptrace process_vm_readv process_vm_writev io_setup io_submit io_getevents io_cancel io_destroy io_uring_setup io_uring_enter io_uring_register open_by_handle_at name_to_handle_at splice tee vmsplice sendfile copy_file_range bpf userfaultfd shmget shmat shmdt shmctl semget semop semctl msgget msgsnd msgrcv msgctl".split(),
-    "abi": "openat2 clone3 close_range pidfd_open pidfd_getfd".split(),
-    "runtime": "brk madvise arch_prctl set_tid_address set_robust_list get_robust_list futex rseq rt_sigaction rt_sigprocmask rt_sigreturn sigaltstack rt_sigsuspend rt_sigtimedwait rt_sigpending restart_syscall kill tkill tgkill sched_yield nanosleep clock_nanosleep poll ppoll select pselect6 epoll_create epoll_create1 epoll_ctl epoll_wait epoll_pwait eventfd eventfd2 alarm setitimer getitimer getuid geteuid getgid getegid getgroups uname getrlimit prlimit64 getrusage times umask clock_gettime gettimeofday time getrandom sched_getaffinity sched_getparam sched_getscheduler prctl ioctl sysinfo getpgrp getpgid setrlimit capget sched_setaffinity timer_create timer_settime timer_gettime timer_delete timerfd_settime timerfd_gettime mincore msync mlock munlock".split(),
+    "reject": "ptrace process_vm_readv process_vm_writev io_setup io_submit io_getevents io_cancel io_destroy io_uring_setup io_uring_enter io_uring_register open_by_handle_at name_to_handle_at splice tee vmsplice bpf userfaultfd shmget shmat shmdt shmctl semget semop semctl msgget msgsnd msgrcv msgctl".split(),
+    # faccessat2: glibc's probe, ENOSYS on 4.14 kernels.
+    "abi": "openat2 clone3 close_range pidfd_open pidfd_getfd faccessat2".split(),
+    "runtime": "brk madvise arch_prctl set_tid_address set_robust_list get_robust_list futex rseq rt_sigaction rt_sigprocmask rt_sigreturn sigaltstack rt_sigsuspend rt_sigtimedwait rt_sigpending restart_syscall kill tkill tgkill sched_yield nanosleep clock_nanosleep poll ppoll select pselect6 epoll_create epoll_create1 epoll_ctl epoll_wait epoll_pwait eventfd eventfd2 alarm setitimer getitimer getuid geteuid getgid getegid getgroups uname getrlimit prlimit64 getrusage times umask clock_gettime clock_getres gettimeofday time getrandom sched_getaffinity sched_getparam sched_getscheduler prctl ioctl sysinfo getpgrp getpgid setrlimit capget sched_setaffinity timer_create timer_settime timer_gettime timer_delete timerfd_settime timerfd_gettime mincore msync mlock munlock".split(),
     "ioctl": "TCGETS TCSETS TCSETSW TCSETSF TIOCGWINSZ TIOCGPGRP TIOCSPGRP FIONBIO FIOCLEX FIONCLEX FIONREAD".split(),
-    "prctl": "PR_SET_NAME PR_GET_NAME PR_SET_PDEATHSIG PR_GET_DUMPABLE PR_SET_DUMPABLE PR_CAPBSET_READ PR_SET_NO_NEW_PRIVS PR_GET_NO_NEW_PRIVS".split(),
-    "fcntl": "F_DUPFD F_DUPFD_CLOEXEC F_SETFD F_GETFD F_GETFL F_SETFL F_GETLK F_SETLK F_SETLKW F_OFD_GETLK F_OFD_SETLK F_OFD_SETLKW".split(),
+    "prctl": ("PR_SET_NAME PR_GET_NAME PR_SET_PDEATHSIG PR_GET_DUMPABLE PR_SET_DUMPABLE PR_CAPBSET_READ PR_SET_NO_NEW_PRIVS "
+              "PR_GET_NO_NEW_PRIVS PR_SET_CHILD_SUBREAPER PR_GET_CHILD_SUBREAPER PR_SET_KEEPCAPS PR_GET_SECCOMP "
+              "PR_SET_TIMERSLACK PR_GET_TIMERSLACK PR_SET_PTRACER").split(),
+    "fcntl": ("F_DUPFD F_DUPFD_CLOEXEC F_SETFD F_GETFD F_GETFL F_SETFL F_GETLK F_SETLK F_SETLKW F_OFD_GETLK F_OFD_SETLK "
+              "F_OFD_SETLKW F_GETPIPE_SZ F_SETPIPE_SZ F_GETOWN F_SETOWN F_GETSIG F_SETSIG F_ADD_SEALS F_GET_SEALS").split(),
     "open_flags": "O_RDONLY O_WRONLY O_RDWR O_APPEND O_ASYNC O_CLOEXEC O_CREAT O_DIRECT O_DIRECTORY O_DSYNC O_EXCL O_LARGEFILE O_NOATIME O_NOCTTY O_NOFOLLOW O_NONBLOCK O_NDELAY O_PATH O_SYNC O_TRUNC O_RSYNC O_TMPFILE".split(),
     "clone_flags": "CLONE_VM CLONE_FS CLONE_FILES CLONE_SIGHAND CLONE_PTRACE CLONE_VFORK CLONE_PARENT CLONE_THREAD CLONE_SYSVSEM CLONE_SETTLS CLONE_PARENT_SETTID CLONE_CHILD_CLEARTID CLONE_DETACHED CLONE_UNTRACED CLONE_CHILD_SETTID CLONE_IO SIGCHLD".split(),
     "nondeterminism_boundary": ["clock", "randomness", "scheduling"],
@@ -58,13 +72,17 @@ PATH_ARGS = {
     "renameat": (1, 3), "renameat2": (1, 3), "linkat": (1, 3), "symlinkat": (0, 2),
 }
 FD_ARGS = {
-    **{n: (0,) for n in "read pread64 readv preadv preadv2 write pwrite64 writev pwritev pwritev2 fstat fstatfs fchdir lseek dup fcntl close getdents getdents64 ioctl ftruncate fsync fdatasync connect bind listen accept accept4 sendto recvfrom sendmsg recvmsg sendmmsg recvmmsg getsockopt getpeername getsockname shutdown".split()},
+    **{n: (0,) for n in "read pread64 readv preadv preadv2 write pwrite64 writev pwritev pwritev2 fstat fstatfs fchdir lseek dup fcntl close getdents getdents64 ioctl ftruncate fsync fdatasync connect bind listen accept accept4 sendto recvfrom sendmsg recvmsg sendmmsg recvmmsg getsockopt setsockopt getpeername getsockname shutdown".split()},
     **{n: (0,) for n in "openat openat2 execveat readlinkat faccessat newfstatat statx mkdirat unlinkat".split()},
     **{n: (0,) for n in "fadvise64 posix_fadvise readahead sync_file_range flock fgetxattr flistxattr fchmod fchown fchmodat fchownat utimensat futimesat".split()},
     "dup2": (0, 1), "dup3": (0, 1), "mmap": (4,), "renameat": (0, 2),
     "renameat2": (0, 2), "linkat": (0, 2), "symlinkat": (1,), "epoll_ctl": (0, 2),
     "epoll_wait": (0,), "epoll_pwait": (0,),
+    # sendfile(out, in, ...), copy_file_range(in, off, out, ...).
+    "sendfile": (0, 1), "copy_file_range": (0, 2),
 }
+# (in, out) descriptor argument indices of the in-kernel copy calls.
+COPIES = {"sendfile": (1, 0), "copy_file_range": (0, 2)}
 READS = set("read pread64 readv preadv preadv2".split())
 WRITES = set("write pwrite64 writev pwritev pwritev2 ftruncate fsync fdatasync".split())
 LOOKUPS = set("stat lstat newfstatat statx access faccessat readlink readlinkat statfs getxattr lgetxattr listxattr llistxattr".split())
@@ -77,6 +95,37 @@ QUOTED = re.compile(r'"(?:\\.|[^"\\])*(?:"|\\?$)')
 # Each alternative stops at the next '<', so the substitution stays linear in the line.
 ANNOTATION = re.compile(r"<[^<]*?>(?=[\s,)\]}]|$)|<[^<>]*$")
 LEADING = re.compile(r"(?:\[pid +\d+\] |\d+ +)?(?:\d+\.\d+ )?(?:<\.\.\. ([A-Za-z_]\w*) resumed>|([A-Za-z_]\w*)\(|(\+\+\+)|(---)|(strace:))")
+# Arguments, return value, optional return annotation, then the tail (aux, errno, duration).
+RETURNED = re.compile(r"(.*)\)\s+=\s+(\?|0x[0-9a-fA-F]+|-?\d+)(?:<(.*?)>(?= |$))?(.*)")
+# Amendment 5 drops -T: the duration is optional, still accepted when present.
+TRAILER = re.compile(r"(?: ([A-Z][A-Z0-9_]+)(?: \([^\n]*\))?)?(?: <(\d+\.\d+|unavailable)>)?")
+CLOSERS = {")": "(", "]": "[", "}": "{"}
+
+
+def _balanced(text, start):
+    """End (exclusive) of the bracket group opening at text[start]; quoted strings are skipped.
+
+    Linear in the text; raises malformed_line on a mismatched or unclosed bracket.
+    """
+    stack, quoted, i = [], False, start
+    while i < len(text):
+        c = text[i]
+        if quoted:
+            if c == "\\":
+                i += 1
+            elif c == '"':
+                quoted = False
+        elif c == '"':
+            quoted = True
+        elif c in "([{":
+            stack.append(c)
+        elif c in CLOSERS:
+            if not stack or stack.pop() != CLOSERS[c]:
+                raise ValueError("malformed_line")
+            if not stack:
+                return i + 1
+        i += 1
+    raise ValueError("malformed_line")
 
 
 def malformed_shape(line):
@@ -266,6 +315,11 @@ def _args(event, raw, resumed=False):
         elif re.fullmatch(r"[A-Z][A-Z0-9_]*(?:\|[A-Z][A-Z0-9_]*)*", token):
             event["scalars"][i] = token
             event["flags"].extend(token.split("|"))
+    if name in {"ioctl", "fcntl", "prctl"}:
+        # Leading identifier or number of the subtype argument, for the subtype counters only.
+        index = 0 if name == "prctl" else 1
+        label = re.match(r"[A-Za-z0-9_]{1,64}", args[index]) if index < len(args) else None
+        event["subtype_label"] = label[0] if label else "unknown"
     if name == "clone":
         m = re.search(r"(?:^|,\s*)flags=([A-Z0-9_|]+)(?:,|$)", raw)
         if not m:
@@ -329,20 +383,24 @@ def _parse_line(line, sequence):
         return event
     # The return annotation ends at a '>' followed by a space or end of line, never
     # at a '>' inside it (<TCP:[a->b]>, <UNIX:[1->2]>).
-    returned = re.fullmatch(r"(.*)\)\s+=\s+(\?|0x[0-9a-fA-F]+|-?\d+)(?:<(.*?)>(?= |$))?(?: ([A-Z][A-Z0-9_]+)(?: \([^\n]*\))?)?(?: <(\d+\.\d+|unavailable)>)?", rest)
+    returned = RETURNED.fullmatch(rest)
     if not returned:
         raise ValueError("malformed_line")
-    ret = returned[2]
-    duration = None if returned[5] == "unavailable" else returned[5]
+    tail = returned[4]
+    if tail.startswith(" ("):
+        # Auxiliary return decoding: = 1 ([{fd=5, revents=POLLIN}]), = 0x8000 (flags O_RDONLY).
+        tail = tail[_balanced(tail, 1):]
+    trailer = TRAILER.fullmatch(tail)
+    if not trailer:
+        raise ValueError("malformed_line")
+    ret, errno, duration = returned[2], trailer[1], trailer[2]
     event.update(return_value=None if ret == "?" else int(ret, 16 if ret.startswith("0x") else 10),
-                 errno=returned[4], duration=duration)
+                 errno=errno, duration=None if duration == "unavailable" else duration)
     # '?' is legal for exits, for a syscall a signal interrupted (= ? ERESTARTSYS ...),
-    # and for one whose task vanished (<unfinished ...>) = ?, <unavailable>).
-    interrupted = (returned[4] is not None or returned[5] == "unavailable"
+    # and for one whose task vanished (<unfinished ...>) = ?[ <unavailable>]).
+    interrupted = (errno is not None or duration == "unavailable"
                    or returned[1].rstrip().endswith("<unfinished ...>"))
     if ret == "?" and event["name"] not in {"exit", "exit_group", "rt_sigreturn"} and not interrupted:
-        raise ValueError("malformed_line")
-    if ret != "?" and returned[5] is None:
         raise ValueError("malformed_line")
     _args(event, returned[1], resumed=bool(resumed))
     if returned[3] is not None:
@@ -550,7 +608,12 @@ class _Decoder:
         self.context, self.limits = context, limits
         self.reasons, self.reason_count = set(), 0
         self.stopped = False
-        self.state_bytes = 0
+        # Live-state estimate: rises on retain, falls on release; the cap reads measured RSS
+        # where resource exists and this counter's peak only where it does not.
+        self.state_bytes = self.state_peak = self.measured_peak = 0
+        # Descriptor tables by identity: [table, live holders]; released when the last holder goes.
+        self.tables = {}
+        self.syscall_name, self.line = "other", (0, b"")
         self.trace_lost = False
         self.tasks, self.active, self.pending, self.unfinished = [], {}, {}, {}
         self.reads, self.external, self.negative, self.aliases = {}, {}, [], {}
@@ -563,6 +626,8 @@ class _Decoder:
         self.loss = dict(unpaired=0, malformed=0, unknown_syscalls=0, oversize=0, unknown_descriptors=0)
         # Calibration instrument: sanitized shapes and bounded name counters.
         self.malformed_samples, self.malformed_by_name, self.unsupported_by_name = {}, {}, {}
+        self.unpaired_samples, self.unpaired_by_name, self.unknown_fd_by_name = {}, {}, {}
+        self.subtypes = {"prctl": {}, "fcntl": {}}
         self.root = None
         # Under strace the tracee pid is known only from the stream; strace -f
         # always opens with the tracee's execve, so the first event names it.
@@ -593,14 +658,24 @@ class _Decoder:
         else:
             table["(other)"] = table.get("(other)", 0) + 1
 
+    @staticmethod
+    def sample(table, raw):
+        """Count a line's sanitized shape; at most SAMPLE_LIMIT distinct shapes are kept."""
+        shape = malformed_shape(raw[:SAMPLE_PREFIX].decode("ascii", "replace"))
+        if shape in table or len(table) < SAMPLE_LIMIT:
+            table[shape] = table.get(shape, 0) + 1
+
     def malformed(self, raw, reason):
         """Count an undecodable line by leading name and sanitized shape; never keep the line."""
         text = raw.decode("ascii", "replace")
         self.count(self.malformed_by_name, line_kind(text))
-        shape = malformed_shape(text)
-        if shape in self.malformed_samples or len(self.malformed_samples) < SAMPLE_LIMIT:
-            self.malformed_samples[shape] = self.malformed_samples.get(shape, 0) + 1
+        self.sample(self.malformed_samples, raw)
         self.reason(reason)
+
+    def unpaired(self, name, raw):
+        self.count(self.unpaired_by_name, name)
+        self.sample(self.unpaired_samples, raw)
+        self.reason("unpaired_syscall")
 
     def claims_root(self, event, pid):
         """Is an unknown prefixed pid the unprefixed root rather than an unborn child?
@@ -634,6 +709,7 @@ class _Decoder:
             self.count(self.unsupported_by_name, value[len("unsupported_syscall:"):])
         elif value == "unresolved_file_descriptor":
             self.loss["unknown_descriptors"] += 1
+            self.count(self.unknown_fd_by_name, self.syscall_name)
         if value in self.reasons:
             return
         self.reason_count += 1
@@ -661,8 +737,45 @@ class _Decoder:
 
     def retain(self, amount):
         self.state_bytes += amount
-        if self.state_bytes > self.limits["max_state_bytes"]:
+        if self.state_bytes > self.state_peak:
+            self.state_peak = self.state_bytes
+            if resource is None and self.state_bytes > self.limits["max_state_bytes"] and not self.stopped:
+                self.cap("max_state_bytes")
+
+    def release(self, amount):
+        self.state_bytes = max(0, self.state_bytes - amount)
+
+    def measure(self):
+        """Live cap: this process's measured peak RSS against max_state_bytes (no-op without resource)."""
+        if resource is None:
+            return
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * RSS_SCALE
+        self.measured_peak = max(self.measured_peak, peak)
+        if peak > self.limits["max_state_bytes"] and not self.stopped:
             self.cap("max_state_bytes")
+
+    @property
+    def peak_bytes(self):
+        return self.measured_peak if resource is not None else self.state_peak
+
+    def hold(self, table):
+        entry = self.tables.get(id(table))
+        if entry is None:
+            self.tables[id(table)] = [table, 1]
+        else:
+            entry[1] += 1
+
+    def drop(self, table):
+        """One holder of a descriptor table is gone; True when it was the last and the table is released."""
+        entry = self.tables.get(id(table))
+        if entry is None:
+            return False
+        entry[1] -= 1
+        if entry[1] > 0:
+            return False
+        del self.tables[id(table)]
+        self.release(128 * len(table))
+        return True
 
     def birth(self, pid, sequence, parent, flags):
         if len(self.tasks) >= self.limits["max_tasks"]:
@@ -680,20 +793,26 @@ class _Decoder:
         else:
             cwd = parent["cwd"] if "CLONE_FS" in flags else dict(parent["cwd"])
             fds = parent["fds"] if "CLONE_FILES" in flags else {k: dict(v) for k, v in parent["fds"].items()}
-        task = dict(record=record, cwd=cwd, fds=fds)
+        task = dict(record=record, cwd=cwd, fds=fds, last=None)
         self.tasks.append(task)
         self.active[pid] = task
-        self.retain(256 + 64 * len(fds))
+        self.hold(fds)
+        self.retain(256 + (0 if parent is not None and "CLONE_FILES" in flags else 128 * len(fds)))
         return task
 
     def putfd(self, task, fd, desc, cloexec=False):
         if self.stopped:
             return
-        if fd not in task["fds"] and len(task["fds"]) >= self.limits["max_fds_per_task"]:
-            self.cap("max_fds_per_task")
-            return
+        if fd not in task["fds"]:
+            if len(task["fds"]) >= self.limits["max_fds_per_task"]:
+                self.cap("max_fds_per_task")
+                return
+            self.retain(128)
         task["fds"][fd] = {"description": desc, "cloexec": cloexec}
-        self.retain(128)
+
+    def closefd(self, task, fd):
+        if task["fds"].pop(fd, None) is not None:
+            self.release(128)
 
     def fd(self, task, argument):
         if argument is None or argument["fd"] not in task["fds"]:
@@ -749,12 +868,16 @@ class _Decoder:
             self.supervisor_reads += 1
             return
         error = event.get("errno")
+        added = False
         if error in {"ENOENT", "ENOTDIR"}:
             self.negative.append({"path_or_class": resolution.path if resolution.path is not None else resolution.external["class"],
                                   "scope": "repo" if resolution.path is not None else "external",
                                   "errno": error, "syscall": event["name"], "sequence": event["sequence"]})
+            added = True
         elif resolution.absolute in self.created:
-            self.internal.add(digest(resolution.absolute)[:16])
+            token = digest(resolution.absolute)[:16]
+            added = token not in self.internal
+            self.internal.add(token)
         elif resolution.path is not None:
             files = self.context["inventory"]["files"]
             symlinks = self.context["inventory"]["symlinks"]
@@ -763,16 +886,25 @@ class _Decoder:
             row = {"path": resolution.path, "kind": kind}
             if error:
                 row["errno"] = error
-            self.reads[canonical(row)] = row
+            key = canonical(row)
+            added = key not in self.reads
+            self.reads[key] = row
         elif resolution.external:
             row = resolution.external
+            added = (row["class"], row["path_token"]) not in self.external
             self.external[(row["class"], row["path_token"])] = row
             if row["path_token"] not in self.external_paths:
                 self.external_paths[row["path_token"]] = {"path": resolution.absolute, "class": row["class"]}
                 self.retain(len(resolution.absolute.encode("utf-8")) + 128)
         if len(self.reads) + len(self.external) + len(self.negative) + len(self.directories) > self.limits["max_dependencies"]:
             self.cap("max_dependencies")
-        self.retain(160)
+        if added:
+            self.retain(160)
+
+    def written(self, path):
+        if path not in self.written_paths:
+            self.written_paths.add(path)
+            self.retain(64)
 
     def mutate(self, resolution):
         if not resolution.absolute:
@@ -829,6 +961,9 @@ class _Decoder:
         if name in {"ioctl", "fcntl", "prctl"}:
             subtype = event["scalars"].get(0 if name == "prctl" else 1, "unknown")
             if subtype not in POLICY[name]:
+                if name in self.subtypes:
+                    # The reason keeps the bounded ':unknown' form; the counter keeps the name.
+                    self.count(self.subtypes[name], event.get("subtype_label", "unknown"))
                 self.reason("unsupported_syscall:" + name + ":" + str(subtype))
                 return False
         if name in {"open", "openat"}:
@@ -871,8 +1006,7 @@ class _Decoder:
             desc = self.fd(task, argument)
             path = desc.get("path") if desc else None
         if path and event["return_value"] is not None and event["return_value"] >= 0:
-            self.written_paths.add(path)
-            self.retain(64)
+            self.written(path)
 
     def network_input(self):
         row = _external("network", {"external_roots": {}})
@@ -890,6 +1024,11 @@ class _Decoder:
                     self.unix_sockets.append(desc)
                     return
             self.network_input()
+            return
+        if name == "setsockopt":
+            # Socket configuration is a no-op for inputs; the descriptor must still resolve.
+            if 0 in event["fds"]:
+                self.fd(task, event["fds"][0])
             return
         entry = task["fds"].get(event["fds"].get(0, {}).get("fd"))
         desc = entry["description"] if entry else None
@@ -916,16 +1055,37 @@ class _Decoder:
         if name in {"accept", "accept4"} and success:
             self.putfd(task, ret, {"kind": "network"}, "SOCK_CLOEXEC" in event["flags"])
 
+    def copy(self, task, event):
+        """sendfile/copy_file_range: a read edge for the in-descriptor's path, a write for the out's."""
+        ret = event["return_value"]
+        source, sink = (event["fds"].get(i) for i in COPIES[event["name"]])
+        if source is None or sink is None:
+            self.reason("unresolved_file_descriptor")
+            return
+        into, out = self.fd(task, source), self.fd(task, sink)
+        if into is None or out is None or ret is None or ret < 0:
+            return
+        if into["kind"] == "file":
+            self.edge(into["resolution"], "open", event)
+        if out["kind"] == "file":
+            out["written"] = True
+            self.written(out["path"])
+
     def syscall(self, task, event):
         name, ret, flags = event["name"], event["return_value"], event["flags"]
         success = ret is not None and ret >= 0
+        self.syscall_name = name
         if not self.policy(event, task):
             return
         if name in {"fork", "vfork", "clone"} and success and ret > 0:
             child = self.birth(ret, event["sequence"], task, flags)
             if child:
-                for queued in self.pending.pop(ret, []):
+                for queued, amount in self.pending.pop(ret, []):
+                    self.release(amount)
                     self.process(queued)
+            return
+        if name in COPIES:
+            self.copy(task, event)
             return
         if name in POLICY["network"]:
             self.network(task, event)
@@ -955,8 +1115,7 @@ class _Decoder:
             index = 1 if name == "openat" else 0
             resolution = self.resolve(task, event, index, nofollow="O_NOFOLLOW" in flags)
             if success and ("O_TRUNC" in flags or name == "creat"):
-                self.written_paths.add(resolution.absolute)
-                self.retain(64)
+                self.written(resolution.absolute)
             if "O_CREAT" in flags or name == "creat":
                 self.mutate(resolution)
                 if success:
@@ -986,7 +1145,11 @@ class _Decoder:
             if success:
                 task["record"]["exec_count"] += 1
                 # Exec unshares the descriptor table, then closes its CLOEXEC fds.
-                task["fds"] = {fd: dict(v) for fd, v in task["fds"].items() if not v["cloexec"]}
+                table = {fd: dict(v) for fd, v in task["fds"].items() if not v["cloexec"]}
+                self.drop(task["fds"])
+                task["fds"] = table
+                self.hold(table)
+                self.retain(128 * len(table))
             return
         if name in LOOKUPS:
             index = 1 if name in {"newfstatat", "statx", "faccessat", "readlinkat"} else 0
@@ -1010,8 +1173,7 @@ class _Decoder:
             for resolution in resolutions:
                 self.mutate(resolution)
                 if success:
-                    self.written_paths.add(resolution.absolute)
-                    self.retain(64)
+                    self.written(resolution.absolute)
                 if resolution.path in self.context["inventory"]["symlinks"] or resolution.absolute in self.links:
                     self.reason("unsupported_alias_race")
             if success and resolutions:
@@ -1020,8 +1182,16 @@ class _Decoder:
                     self.created.add(target.absolute)
                     if name.startswith("symlink"):
                         self.links[target.absolute] = event["paths"][0]
-                    if name.startswith("link") and resolutions[0].absolute not in self.created:
-                        self.reason("unsupported_syscall:" + name + ":unwitnessed_origin")
+                    if name.startswith("link"):
+                        origin = resolutions[0]
+                        files = self.context["inventory"]["files"]
+                        if origin.absolute in self.created:
+                            pass
+                        elif origin.path is not None and (origin.path in files or origin.absolute in files):
+                            # The new name carries the inventory file's bytes: the origin is read.
+                            self.edge(origin, "open", event)
+                        else:
+                            self.reason("unsupported_syscall:" + name + ":unwitnessed_origin")
                 if name.startswith(("unlink", "rename")):
                     for owner in self.tasks:
                         for entry in owner["fds"].values():
@@ -1056,16 +1226,14 @@ class _Decoder:
                     self.observed_sizes[desc["path"]] = event["observed_size"]
                     self.retain(64)
                 if name == "mmap" and "MAP_SHARED" in flags and "PROT_WRITE" in flags:
-                    self.written_paths.add(desc["path"])
-                    self.retain(64)
+                    self.written(desc["path"])
                 self.edge(desc["resolution"], "mmap" if name == "mmap" else "stat" if name in FD_LOOKUPS else "open", event)
             elif desc["kind"] not in {"devnull", "supervisor", "endpoint", "internal"}:
                 self.reason("unresolved_file_descriptor")
         elif name in WRITES and success:
             desc["written"] = True
             if desc.get("path"):
-                self.written_paths.add(desc["path"])
-                self.retain(64)
+                self.written(desc["path"])
         elif name == "fchdir" and success:
             if desc["kind"] != "file" or not desc.get("directory"):
                 self.reason("unknown_path_base")
@@ -1096,7 +1264,7 @@ class _Decoder:
         elif name == "close" and success:
             if desc.get("directory") and desc["enumeration"]["started"] and not desc["enumeration"]["eof"]:
                 self.reason("directory_enumeration_incomplete")
-            task["fds"].pop(fd, None)
+            self.closefd(task, fd)
 
     def process(self, event):
         if self.stopped:
@@ -1126,46 +1294,68 @@ class _Decoder:
             return
         task = self.active.get(pid)
         if task is None or task["record"]["exit"] is not None:
-            self.pending.setdefault(pid, []).append(event)
-            self.retain(len(canonical(event)))
+            amount = len(canonical(event))
+            self.pending.setdefault(pid, []).append((event, amount))
+            self.retain(amount)
             return
+        raw = self.raw_of(event)
+        task["last"] = (event["sequence"], raw)
         if kind in {"exit", "killed"}:
             # A syscall still unfinished when its task exits never resumes: not unpaired.
             for key in [key for key in self.unfinished if key[0] == pid]:
-                del self.unfinished[key]
+                self.release(self.unfinished.pop(key)[5])
             task["record"]["exit"] = dict(kind=kind, sequence=event["sequence"])
             task["record"]["exit"].update({"status": event["status"]} if kind == "exit" else {"signal": event["signal"]})
-            if kind == "killed":
-                self.reason("tree_killed")
+            # A descendant killed by a signal is an ordinary exit record; only the root's is fatal.
+            if kind == "killed" and task is self.root:
+                self.reason("root_killed")
+            if self.drop(task["fds"]):
+                task["fds"] = {}
             return
         if kind == "signal":
             return
         key = (pid, event["name"])
         if kind == "unfinished":
             if key in self.unfinished:
-                self.reason("unpaired_syscall")
-            # Capture entry cwd and descriptor generations, not future table values.
-            entry_task = dict(record=task["record"], cwd=dict(task["cwd"]), fds={k: dict(v) for k, v in task["fds"].items()})
-            self.unfinished[key] = (event, entry_task, task)
-            self.retain(len(canonical(event)) + 64 * len(entry_task["fds"]))
+                self.release(self.unfinished[key][5])
+                self.unpaired(event["name"], self.unfinished[key][4])
+            # Capture the entry cwd and the descriptions of the descriptors this call uses only.
+            snapshot = {fd: (task["fds"].get(fd) or {}).get("description") for fd in self.used_fds(event)}
+            amount = 256 + len(raw) + 64 * len(snapshot)
+            self.unfinished[key] = (event, task["cwd"]["path"], snapshot, task, raw, amount)
+            self.retain(amount)
             return
         if kind == "resumed":
             pending = self.unfinished.pop(key, None)
             if pending is None:
-                self.reason("unpaired_syscall")
+                self.unpaired(event["name"], raw)
                 return
-            original, entry_task, owner = pending
+            original, cwd, snapshot, owner, _, amount = pending
+            self.release(amount)
             joined = dict(original)
             for field_name in ("return_value", "return_fd", "errno", "duration", "observed_size"):
                 if field_name in event:
                     joined[field_name] = event[field_name]
             joined["kind"] = "syscall"
-            joined["entry_cwd"] = entry_task["cwd"]["path"]
-            if entry_task["cwd"] != owner["cwd"] or entry_task["fds"] != owner["fds"]:
+            joined["entry_cwd"] = cwd
+            # Sibling threads may change unrelated table rows; only this call's own inputs matter.
+            relative = any(not p.startswith("/") for p in original["paths"].values())
+            if ((relative and cwd != owner["cwd"]["path"])
+                    or any((owner["fds"].get(fd) or {}).get("description") is not desc for fd, desc in snapshot.items())):
                 self.reason("ambiguous_shared_state")
             self.syscall(owner, joined)
             return
         self.syscall(task, event)
+
+    def raw_of(self, event):
+        """Bounded raw prefix of the event's own line; empty for a replayed pending event."""
+        sequence, raw = self.line
+        return raw[:SAMPLE_PREFIX] if sequence == event["sequence"] else b""
+
+    @staticmethod
+    def used_fds(event):
+        used = [a["fd"] for a in event["fds"].values() if a["fd"] != "AT_FDCWD"]
+        return used + [fd for fd in event.get("poll_fds", ()) if fd not in used]
 
 
 def decode(data, context, limits=None):
@@ -1221,6 +1411,8 @@ def decode_stream(chunks, context, limits=None):
     counters = {"hash": hashlib.sha256(), "byte_count": 0, "terminated": False}
     for sequence, raw, terminated in _chunk_lines(chunks, decoder, counters):
         decoder.event_count = sequence
+        if sequence % RSS_INTERVAL == 1:
+            decoder.measure()
         if not terminated:
             decoder.reason("trace_loss")
             continue
@@ -1229,6 +1421,7 @@ def decode_stream(chunks, context, limits=None):
             decoder.cap("max_record_bytes")
         if decoder.stopped:
             continue
+        decoder.line = (sequence, raw)
         try:
             event = _parse_line(raw.decode("ascii", "strict"), sequence)
             if event["kind"] in {"syscall", "unfinished"}:
@@ -1239,16 +1432,25 @@ def decode_stream(chunks, context, limits=None):
             if reason.startswith("malformed"):
                 decoder.malformed(raw, reason)
             else:
+                decoder.syscall_name = line_kind(raw[:SAMPLE_PREFIX].decode("ascii", "replace"))
                 decoder.reason(reason)
-    if decoder.unfinished:
-        decoder.reason("unpaired_syscall")
+    decoder.measure()
+    for (_, name), pending in list(decoder.unfinished.items()):
+        decoder.unpaired(name, pending[4])
     if decoder.pending:
         decoder.reason("unexplained_pid")
     if decoder.root is None and not decoder.stopped:
         decoder.reason("missing_terminal")
+    missing_exits = []
     for task in decoder.tasks:
         if task["record"]["exit"] is None:
             decoder.reason("missing_terminal" if task is decoder.root else "descendant_outlived_tree")
+            if len(missing_exits) < SAMPLE_LIMIT:
+                record, last = task["record"], task["last"]
+                missing_exits.append({"pid": record["pid"], "birth_sequence": record["birth_sequence"],
+                                      "parent_pid": record["parent"]["pid"] if record["parent"] else None,
+                                      "last_sequence": last[0] if last else None,
+                                      "last_shape": malformed_shape(last[1].decode("ascii", "replace")) if last else None})
     for enumeration in decoder.enumerations:
         if enumeration["started"] and not enumeration["eof"]:
             decoder.reason("directory_enumeration_incomplete")
@@ -1293,6 +1495,12 @@ def decode_stream(chunks, context, limits=None):
                        malformed_samples=[{"shape": shape, "count": n} for shape, n in _ranked(decoder.malformed_samples)],
                        malformed_by_name=dict(_ranked(decoder.malformed_by_name)[:NAME_REPORT]),
                        unsupported_by_name=dict(_ranked(decoder.unsupported_by_name)),
+                       unpaired_samples=[{"shape": shape, "count": n} for shape, n in _ranked(decoder.unpaired_samples)],
+                       unpaired_by_name=dict(_ranked(decoder.unpaired_by_name)[:NAME_REPORT]),
+                       unknown_fd_by_name=dict(_ranked(decoder.unknown_fd_by_name)[:NAME_REPORT]),
+                       missing_exit_samples=missing_exits,
+                       prctl_subtypes=dict(_ranked(decoder.subtypes["prctl"])[:NAME_REPORT]),
+                       fcntl_subtypes=dict(_ranked(decoder.subtypes["fcntl"])[:NAME_REPORT]),
                        internal_objects={"count": len(decoder.internal), "sample": sorted(decoder.internal)[:32]},
                        supervisor_reads=decoder.supervisor_reads,
                        reasons=reasons, reasons_truncated=decoder.reason_count > len(reasons),
@@ -1330,7 +1538,7 @@ def decode_stream(chunks, context, limits=None):
     for row in paths.values():
         row.update(size=decoder.observed_sizes.get(row["path"]), written=row["path"] in decoder.written_paths)
     return {"certificate": certificate, "shards": shards, "external_paths": paths,
-            "decoder_peak_bytes": decoder.state_bytes}
+            "decoder_peak_bytes": decoder.peak_bytes}
 
 
 def bind_external_identities(result, table):
