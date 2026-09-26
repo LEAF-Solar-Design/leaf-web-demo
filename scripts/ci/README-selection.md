@@ -84,7 +84,8 @@ builder. The detail receipt and `LEAF_SHADOW` record `tracing_active` and
 
 The runner adds `LEAF_READSET_DIR` and `LEAF_READSET_ROOT` to suite environments only when the parent carries `LEAF_READSET_DIR`; otherwise it supplies only suite, attempt, run and test-report directory metadata so reporting cannot re-enable tracing through defaults.
 
-After the gate, tracing builds pack `readsets` into a gzip tar and publish it to
+After the gate, tracing builds pack `readsets` plus `catalog.json` and
+`decision.json` from the selection directory at the root of a gzip tar and publish it to
 `s3://leaf-mq-transport-807034087062-us-east-1/mq/leaf-web-demo/selection/<build-uuid>.readsets.tar.gz`,
 where the UUID is the part after the colon in `CODEBUILD_BUILD_ID`. The immutable
 put uses `--if-none-match '*'`, `--checksum-algorithm SHA256`, and metadata
@@ -92,6 +93,8 @@ put uses `--if-none-match '*'`, `--checksum-algorithm SHA256`, and metadata
 200 MiB are not uploaded. The final detail document, `LEAF_SELECTION_FINAL`, and
 `LEAF_SHADOW` carry `readsets_object`, `readsets_sha256`, `readsets_bytes`, and
 `readsets_status`: `uploaded`, `empty`, `too_large`, or `upload_failed`.
+They also carry `readsets_archive_members`, the list of packed root members.
+Missing `catalog.json` or `decision.json` files are skipped without failing the upload.
 Upload failures produce one warning and preserve the gate result. Non-tracing
 builds report `not_traced` and never pack or upload read sets.
 

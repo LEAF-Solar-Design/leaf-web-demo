@@ -17,7 +17,7 @@ from test_codebuild_ci_script import BASH, CI_PATH, ROOT
 
 @unittest.skipUnless(BASH, "bash is not on PATH; read-set publication requires bash")
 class TestCodebuildCiReadsets(unittest.TestCase):
-    def run_publication(self, *, tracing=True, aws_status=0, gate_status=0):
+    def run_publication(self, *, tracing=True, aws_status=0, gate_status=0, missing_decision=False):
         script = CI_PATH.read_text(encoding="utf-8")
         # Run the real post-gate publication and finalizer with isolated log paths.
         script = script[script.index("# Read-set publication is advisory"):]
@@ -31,6 +31,10 @@ class TestCodebuildCiReadsets(unittest.TestCase):
                 directory.mkdir(parents=True, exist_ok=True)
             shard = b'{"read":"server/app.py"}\n'
             (logs / "readsets" / "shard.jsonl").write_bytes(shard)
+            (selection / "catalog.json").write_bytes(b'{"suites": []}\n')
+            (selection / "decision.json").write_bytes(b'{"execution_mode": "full"}\n')
+            if missing_decision:
+                (selection / "decision.json").unlink()
             build_id = "leaf-ci-leaf-web-demo:12345678-1234-1234-1234-123456789abc"
             (selection / "detail.json").write_text(json.dumps({
                 "schema": "leaf.ci.selection.v1", "phase": "shadow",
@@ -56,11 +60,12 @@ class TestCodebuildCiReadsets(unittest.TestCase):
                 "/tmp/gate-results", results.as_posix())
             command = ('set -euo pipefail\n'
                        f'cd {shlex.quote(root.as_posix())}\n'
+                       'selection_dir="$PWD/selection"\n'
                        'export PATH="$PWD/bin:$PATH"\n'
                        f'python() {{ {shlex.quote(Path(sys.executable).as_posix())} "$@"; }}\n'
-                       'tar() { printf "tar\\n" >> "$READSETS_TAR_CALLS"; command tar "$@"; }\n'
+                       'tar() { printf "%s\\n" tar "$@" >> "$READSETS_TAR_CALLS"; command tar "$@"; }\n'
                        + script)
-            result = subprocess.run([BASH, "-c", command], cwd=ROOT, env=env,
+            result = subprocess.run([BASH, "-s"], input=command, cwd=ROOT, env=env,
                                     capture_output=True, text=True)
             self.assertEqual(result.returncode, gate_status, result.stdout + result.stderr)
             final = next(json.loads(line.removeprefix("LEAF_SELECTION_FINAL "))
@@ -70,7 +75,8 @@ class TestCodebuildCiReadsets(unittest.TestCase):
                           for line in result.stdout.splitlines()
                           if line.startswith("LEAF_SHADOW "))
             detail = json.loads((selection / "detail.json").read_text(encoding="utf-8"))
-            for field in ("readsets_object", "readsets_sha256", "readsets_bytes", "readsets_status"):
+            for field in ("readsets_object", "readsets_sha256", "readsets_bytes", "readsets_status",
+                          "readsets_archive_members"):
                 self.assertEqual(final[field], shadow[field])
                 self.assertEqual(final[field], detail[field])
             self.assertEqual(final["test_exit_code"], gate_status)
@@ -87,7 +93,10 @@ class TestCodebuildCiReadsets(unittest.TestCase):
         self.assertRegex(final["readsets_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(final["readsets_sha256"], hashlib.sha256(archive).hexdigest())
         self.assertEqual(final["readsets_bytes"], len(archive))
-        self.assertEqual(tar_calls, "tar\n")
+        members = ["readsets", "catalog.json", "decision.json"]
+        self.assertEqual(final["readsets_archive_members"], members)
+        self.assertEqual(tar_calls.splitlines().count("tar"), 1)
+        self.assertEqual([arg for arg in tar_calls.splitlines() if arg in members], members)
         self.assertEqual(calls[:2], ["s3api", "put-object"])
         self.assertEqual(calls.count("put-object"), 1)
         self.assertEqual(calls[calls.index("--if-none-match") + 1], "*")
@@ -106,6 +115,21 @@ class TestCodebuildCiReadsets(unittest.TestCase):
         with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as packed:
             self.assertEqual(packed.extractfile("readsets/shard.jsonl").read(),
                              b'{"read":"server/app.py"}\n')
+            self.assertEqual(json.loads(packed.extractfile("catalog.json").read()), {"suites": []})
+            self.assertEqual(json.loads(packed.extractfile("decision.json").read()), {"execution_mode": "full"})
+        self.assertNotIn("WARNING: readsets upload failed", result.stderr)
+
+    def test_missing_decision_still_uploads_available_members(self):
+        result, final, calls, archive, tar_calls = self.run_publication(missing_decision=True)
+        self.assertEqual(final["readsets_status"], "uploaded")
+        members = ["readsets", "catalog.json"]
+        self.assertEqual(final["readsets_archive_members"], members)
+        self.assertEqual([arg for arg in tar_calls.splitlines() if arg in members], members)
+        self.assertNotIn("decision.json", tar_calls.splitlines())
+        self.assertEqual(calls.count("put-object"), 1)
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as packed:
+            self.assertEqual(sorted({name.split("/")[0] for name in packed.getnames()}),
+                             sorted(members))
         self.assertNotIn("WARNING: readsets upload failed", result.stderr)
 
     def test_failed_upload_preserves_gate_result(self):
@@ -124,6 +148,7 @@ class TestCodebuildCiReadsets(unittest.TestCase):
     def test_non_tracing_skips_archive_and_upload(self):
         result, final, calls, archive, tar_calls = self.run_publication(tracing=False)
         self.assertEqual(final["readsets_status"], "not_traced")
+        self.assertEqual(final["readsets_archive_members"], [])
         for field in ("readsets_object", "readsets_sha256", "readsets_bytes"):
             self.assertIsNone(final[field])
         self.assertEqual(calls, [])

@@ -562,16 +562,22 @@ readsets_object=""
 readsets_sha256=""
 readsets_bytes=""
 readsets_status=not_traced
+readsets_archive_members=""
 if [[ "$tracing_ready" == 1 ]]; then
   publish_readsets() {
-    local archive="$selection_dir/readsets.tar.gz" entry digest build_uuid key
+    local archive="$selection_dir/readsets.tar.gz" entry digest build_uuid key member
+    local -a selection_members=()
     readsets_status=empty
     [[ -d /tmp/gate-logs/readsets ]] || return 0
     readsets_error="directory scan failed"
     entry="$(find /tmp/gate-logs/readsets -type f -print -quit)" || return 1
     [[ -n "$entry" ]] || return 0
     readsets_error="archive creation failed"
-    tar -C /tmp/gate-logs -czf "$archive" readsets 2>/dev/null || return 1
+    for member in catalog.json decision.json; do
+      [[ ! -f "$selection_dir/$member" ]] || selection_members+=("$member")
+    done
+    tar -czf "$archive" -C /tmp/gate-logs readsets -C "$selection_dir" "${selection_members[@]}" 2>/dev/null || return 1
+    readsets_archive_members="readsets ${selection_members[*]}"
     readsets_error="archive measurement failed"
     readsets_bytes="$(wc -c < "$archive")" || return 1
     readsets_bytes="${readsets_bytes//[[:space:]]/}"
@@ -597,7 +603,7 @@ if [[ "$tracing_ready" == 1 ]]; then
     echo "WARNING: readsets upload failed ($readsets_error)" >&2
   fi
 fi
-export readsets_object readsets_sha256 readsets_bytes readsets_status
+export readsets_object readsets_sha256 readsets_bytes readsets_status readsets_archive_members
 python -I -B - "$selection_dir" "$gate_status" "$tracing_ready" "$reporters_ready" "$trusted_sha_override" "$loader_check" <<'LEAF_SELECTION_FINALIZE' || echo 'WARNING: selection evidence finalization failed' >&2
 import datetime
 import hashlib
@@ -647,6 +653,7 @@ detail.update(execution_complete=complete, test_exit_code=int(sys.argv[2]),
               readsets_sha256=os.environ.get("readsets_sha256") or None,
               readsets_bytes=int(os.environ["readsets_bytes"]) if os.environ.get("readsets_bytes") else None,
               readsets_status=os.environ["readsets_status"],
+              readsets_archive_members=os.environ["readsets_archive_members"].split(),
               trusted_sha_override=sys.argv[5] == "1", loader_check=sys.argv[6],
               tracing_active=sys.argv[3] == "1", reporters_active=sys.argv[4] == "1",
               build_exit_code=int(sys.argv[2]), collection_complete=reporting,
@@ -670,6 +677,7 @@ if detail.get("phase") == "shadow":
               "attempts_ref": detail["attempts_ref"], "attempts_sha256": detail["attempts_sha256"],
               "readsets_object": detail["readsets_object"], "readsets_sha256": detail["readsets_sha256"],
               "readsets_bytes": detail["readsets_bytes"], "readsets_status": detail["readsets_status"],
+              "readsets_archive_members": detail["readsets_archive_members"],
               "full_run_complete": detail["full_run_complete"],
               "tracing_active": detail["tracing_active"], "reporters_active": detail["reporters_active"],
               "test_id_reporting_complete": reporting, "synthetic": False,
