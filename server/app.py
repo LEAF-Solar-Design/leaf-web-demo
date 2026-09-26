@@ -44,6 +44,7 @@ import jobs as job_store
 import write_loop
 from customization_flags import RolloutMode, mode as customization_mode
 from customization_service import CustomizationService
+from deployment_identity import release_source_identity
 import customization_stage_worker
 from envelopes import install_error_handlers, with_envelope_fields
 from routers import (
@@ -514,6 +515,7 @@ def _ecs_task_definition_arn() -> str:
 
 @app.get("/api/health")
 def health() -> Dict[str, Any]:
+    identity = release_source_identity()
     return with_envelope_fields({
         "ok": True,
         "aps_live": deps.APS_LIVE,
@@ -526,6 +528,8 @@ def health() -> Dict[str, Any]:
         "n_tools": len(deps.shared_tools()),
         "n_authored": len(deps._AUTHORED),
         "source_sha": os.environ.get("LEAF_SOURCE_SHA", "unknown"),
+        "release_source_sha": identity["release_source_sha"],
+        "source_identity": identity["source_identity"],
         "drawing_mutation_fence_state": _drawing_mutation_fence_state(),
         "drawing_store_authority": os.environ.get(
             "LEAF_DRAWING_STORE", "legacy"

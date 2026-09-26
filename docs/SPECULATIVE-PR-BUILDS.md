@@ -97,11 +97,24 @@ not minutes.
 
 ## Identity and the supply set
 
-Adopted images bake the merge PREVIEW commit's `LEAF_SOURCE_SHA` (the tree
-is identical; the commit envelope differs). That is the D3 trade, stated
-plainly: live health endpoints report the preview commit until the next
-non-adopted deploy. The deploy path only verifies live `source_sha` in
-`mode=build` deploys, which the relay never uses, so nothing red arises. The
+Adopted images bake the commit that BUILT them (a merge group head,
+formerly the PR preview) as `LEAF_SOURCE_SHA` (the tree is identical;
+the commit envelope differs). That is the D3 trade, stated plainly: the
+baked commit may differ from the release commit. `/api/health` reports
+both. `source_sha` is the baked build commit, unchanged, and the deploy
+verifiers compare it with the build manifest. `release_source_sha` is
+the release commit attested by the `LEAF_DEPLOYMENT_IDENTITY` receipt in
+the app task definition, and `source_identity` names the relation:
+`adopted` when the two differ, `built` when they are equal,
+`build_unknown` when the baked value is not a full commit, and
+`unattested` when no valid receipt is present. Forward and rollback
+deploys strip the receipt until the next identity stamping
+configuration deploy, and production has no receipt writer, so
+production reads `unattested`. These fields are informational and not
+digest-bound; the digest-bound live answer is the authenticated
+`/api/deployment-identity`. The deploy path only verifies live
+`source_sha` in `mode=build` deploys, which the relay never uses, so
+nothing red arises. The
 authoritative record is the supply-set manifest: adopted runs stamp
 `leaf.staging-supply-set.v2` — the v1 deployable fields unchanged (the relay
 reads `build_tag`/`source_revision` identically), plus `source_tree` and the
