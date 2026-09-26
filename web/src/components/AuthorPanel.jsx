@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { errorActorLabel, errorPresentation } from '../errorPresentation.js'
 import { authorTool } from '../api'
 import { isSecretRefused } from '../lib/secretGuardTransport.js'
+import { finiteOrNull, orDash, usageCostLabel } from '../usage.js'
 
 // "Author a tool" — a text description -> POST /api/author -> a generated
 // tool card + code preview, added to the tool list so it's immediately
@@ -82,19 +83,16 @@ function authoredProvLine(res) {
 // total_cost_usd, models[] }. It is ABSENT for template + fallback authoring, so
 // this renders nothing unless genuine agent metrics are present (absent-safe). No
 // alarm, no spinner — a quiet receipt of what the agent actually did.
-function fmtAgentCost(usd) {
-  const n = Number(usd)
-  if (!Number.isFinite(n) || n <= 0) return null
-  return n < 0.01 ? `~$${n.toFixed(4)}` : `~$${n.toFixed(2)}`
-}
 function TelemetryChip({ telemetry }) {
   if (!telemetry || typeof telemetry !== 'object') return null
   const turns = Number(telemetry.turns)
-  const cost = fmtAgentCost(telemetry.total_cost_usd)
+  const tokenCounts = [telemetry.input_tokens, telemetry.output_tokens].map(finiteOrNull).filter((n) => n !== null)
+  const tokens = tokenCounts.length ? tokenCounts.reduce((sum, n) => sum + n, 0) : null
+  const cost = usageCostLabel(tokens, telemetry.total_cost_usd)
   const model = Array.isArray(telemetry.models) && telemetry.models.length ? telemetry.models[0] : null
   const parts = ['agent']
   if (Number.isFinite(turns)) parts.push(`${turns} turn${turns === 1 ? '' : 's'}`)
-  if (cost) parts.push(cost)
+  if (cost !== orDash(null)) parts.push(cost)
   if (model) parts.push(model)
   // Nothing beyond the bare "agent" tag -> stay silent (absent-safe).
   if (parts.length <= 1) return null

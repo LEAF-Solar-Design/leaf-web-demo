@@ -34,7 +34,7 @@ import { REASONS } from '../lib/actionRegistry.js'
 import { isSecretRefused } from '../lib/secretGuardTransport.js'
 import Markdown from './Markdown.jsx'
 import LiveRegion from './LiveRegion.jsx'
-import { contextPct, fmtDetail, orDash, usageCost, usageModel } from '../usage.js'
+import { contextPct, fmtDetail, orDash, usageCost, usageCostLabel, usageModel } from '../usage.js'
 import { errorActorLabel, errorPresentation } from '../errorPresentation.js'
 
 // Calm inline parameter summary — the same rendering RoutePanel gives a
@@ -145,10 +145,8 @@ const shortId = (s) => String(s || '').slice(0, 8)
 // Per-turn spend tick (turn_usage event): cost_tokens is the metered number;
 // total_cost_usd is optional and always an estimate (no balance API exists).
 function fmtUsage(u) {
-  const parts = []
-  if (Number.isFinite(Number(u.cost_tokens))) parts.push(`${Number(u.cost_tokens).toLocaleString()} tokens`)
-  if (Number.isFinite(Number(u.total_cost_usd))) parts.push(`~$${Number(u.total_cost_usd).toFixed(3)} est`)
-  return parts.join(' · ')
+  const label = usageCostLabel(u.cost_tokens, u.total_cost_usd)
+  return label === orDash(null) ? '' : label
 }
 
 // Status-strip readings and expanded-chip formatting live in usage.js so they
@@ -912,7 +910,7 @@ export default function ConversePanel({
           <span className="dim"> · context </span>
           <span className="route-tool">{orDash(contextPct(model.latestUsage), (p) => `${p}%`)}</span>
           <span className="dim"> · </span>
-          <span className="route-tool">{orDash(usageCost(model.latestUsage), (c) => `~$${c.toFixed(3)}`)}</span>
+          <span className="route-tool">{usageCostLabel(model.latestUsage?.cost_tokens, usageCost(model.latestUsage))}</span>
         </span>
         <button type="button" className="chip-neutral" onClick={dismiss}>Hide</button>
       </div>
