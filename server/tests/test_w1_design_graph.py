@@ -335,3 +335,152 @@ class TestValidationMemo:
         with pytest.raises(GraphValidationError, match="STRING_COUNT_MISMATCH"):
             validate_graph(graph)
         assert len(calls) == 1
+
+
+def _four_state_capabilities(monkeypatch):
+    import product_capability_availability as availability
+
+    table = {
+        "synthetic-adapter": {
+            "requires_persisted_graph": True,
+            "adapter": availability.LOCAL_GRAPH_COMMIT_ADAPTER,
+        },
+        "synthetic-no-adapter": {
+            "requires_persisted_graph": True,
+            "adapter": None,
+        },
+    }
+    monkeypatch.setattr(availability, "W1_CAPABILITIES", table)
+    return table
+
+
+def test_four_state_runnable_requires_entitled_engine_ready_implemented_and_input_ready(monkeypatch):
+    import product_capability_availability as availability
+
+    table = _four_state_capabilities(monkeypatch)
+    for entitled in (True, False):
+        for name, row in table.items():
+            adapter = row["adapter"]
+            for input_ready in (True, False):
+                state = availability.w1_availability(
+                    name, entitled=entitled,
+                    inputs={"input_ready": input_ready,
+                            "input_reason": None if input_ready else "strings_required"},
+                )
+                assert state["implemented"] is True
+                assert state["engine_ready"] == (adapter is not None)
+                assert state["runnable"] == (entitled and adapter is not None and input_ready)
+
+
+def test_four_state_refusal_reasons_follow_entitlement_implementation_engine_input_order(monkeypatch):
+    import product_capability_availability as availability
+
+    _four_state_capabilities(monkeypatch)
+    state = availability.w1_availability(
+        "synthetic-no-adapter", entitled=False,
+        inputs={"input_ready": False, "input_reason": "strings_required"},
+    )
+    assert state["refusal_reasons"] == [
+        "entitlement_required", "broker_adapter_unavailable", "strings_required",
+    ]
+    assert state["implementation_reason"] is None
+    ready = availability.w1_availability(
+        "synthetic-adapter", entitled=True,
+        inputs={"input_ready": True, "input_reason": None},
+    )
+    assert ready["refusal_reasons"] == []
+
+
+def test_four_state_graphless_capability_is_input_ready_regardless_of_inputs(monkeypatch):
+    import product_capability_availability as availability
+
+    monkeypatch.setattr(availability, "W1_CAPABILITIES", {
+        "synthetic-graphless": {
+            "requires_persisted_graph": False,
+            "adapter": availability.CLOUD_PROPOSAL_ADAPTER,
+        },
+    })
+    state = availability.w1_availability(
+        "synthetic-graphless", entitled=True,
+        inputs={"input_ready": False, "input_reason": "x"},
+    )
+    assert state["input_ready"] is True
+    assert state["input_reason"] is None
+    assert state["runnable"] is True
+
+
+def test_four_state_entitled_must_be_exactly_true(monkeypatch):
+    import product_capability_availability as availability
+
+    _four_state_capabilities(monkeypatch)
+    for entitled in (1, "yes"):
+        state = availability.w1_availability(
+            "synthetic-adapter", entitled=entitled,
+            inputs={"input_ready": True, "input_reason": None},
+        )
+        assert state["entitled"] is False
+        assert state["runnable"] is False
+
+
+def test_four_state_every_w1_capability_is_engine_ready_iff_it_has_an_adapter():
+    import product_capability_availability as availability
+
+    for name in availability.W1_CAPABILITIES:
+        state = availability.w1_availability(
+            name, entitled=True,
+            inputs={"input_ready": True, "input_reason": None},
+        )
+        assert state["engine_ready"] == (availability.capability_adapter(name) is not None)
+        assert state["runnable"] == state["engine_ready"]
+
+
+def test_four_state_tool_availability_unknown_tool_is_none():
+    import entitlements
+
+    assert entitlements.w1_tool_availability({"name": "not-a-w1-tool"}, "tenant-x") is None
+
+
+def test_four_state_tool_availability_policy_error_fails_closed_with_named_reason(monkeypatch):
+    import entitlements
+
+    _four_state_capabilities(monkeypatch)
+    monkeypatch.setattr(entitlements, "resolve_roles", lambda tenant: ((), False))
+    monkeypatch.setattr(entitlements, "resolve_tier", lambda tenant: "hosted_starter")
+
+    def unavailable_policy(tier, roles, elevated):
+        raise entitlements.EntitlementsError("synthetic policy unavailable")
+
+    monkeypatch.setattr(entitlements, "entitlements_for", unavailable_policy)
+    name = "synthetic-adapter"
+    state = entitlements.w1_tool_availability(
+        {"name": name}, "tenant-x",
+        inputs={name: {"input_ready": True, "input_reason": None}},
+    )
+    assert state["entitled"] is False
+    assert state["entitlement_reason"] == "entitlement_policy_unavailable"
+    assert state["refusal_reasons"][0] == "entitlement_policy_unavailable"
+    assert state["runnable"] is False
+
+
+def test_four_state_tool_availability_entitled_tool_with_adapter_and_inputs_is_runnable(monkeypatch):
+    import entitlements
+
+    _four_state_capabilities(monkeypatch)
+    monkeypatch.setattr(entitlements, "resolve_roles", lambda tenant: ((), False))
+    monkeypatch.setattr(entitlements, "resolve_tier", lambda tenant: "hosted_starter")
+    monkeypatch.setattr(entitlements, "entitlements_for",
+                        lambda tier, roles, elevated: {"run_write": True})
+    name = "synthetic-adapter"
+    state = entitlements.w1_tool_availability(
+        {"name": name}, "tenant-x",
+        inputs={name: {"input_ready": True, "input_reason": None}},
+    )
+    assert state["runnable"] is True
+    assert state["refusal_reasons"] == []
+    name = "synthetic-no-adapter"
+    state = entitlements.w1_tool_availability(
+        {"name": name}, "tenant-x",
+        inputs={name: {"input_ready": True, "input_reason": None}},
+    )
+    assert state["runnable"] is False
+    assert "broker_adapter_unavailable" in state["refusal_reasons"]
