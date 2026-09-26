@@ -82,7 +82,7 @@ test('strict mode reads a message helper argument and an assigned literal', () =
   assert.deepEqual(strictMarkersOf("const LEDE = 'Fast \u2014 and honest';\n"), ['em dash']);
 });
 
-test('strict mode runs the dash markers only, so code strings stay clean', () => {
+test('strict mode runs the dash and naming markers, so code strings stay clean', () => {
   // The widened set is every literal in the file, so a marker that is an
   // ordinary word would flag internal state values on sight.
   assert.deepEqual(strictMarkersOf("const S = 'wip';\nconst T = 'xxx';\nconst U = 'n=1';\n"), []);
@@ -98,6 +98,102 @@ test('strict mode skips imports, class names, ids and URLs', () => {
 
 test('code comments are not copy', () => {
   assert.deepEqual(markersOf('const A = () => (\n  <div>\n    {/* TODO — later */}\n  </div>\n);\n// TODO\n'), []);
+});
+
+const joined = (...parts) => parts.join('');
+const companyCases = [
+  [joined('LE', 'AF Automation'), ['naming casing', 'naming standalone'], 'leaf automation'],
+  [joined('LE', 'AF'), ['naming standalone'], 'Leaf'],
+  [joined('Leaf Solar', ' Design'), ['naming retired'], 'leaf solar design'],
+];
+const internalNames = [joined('cad', 'walk'), joined('claude', 'walk')];
+const copyContexts = [
+  (copy) => `<p>${copy}</p>`,
+  (copy) => `<input title="${copy}" />`,
+  (copy) => `const S = { label: "${copy}" };`,
+];
+
+test('naming: each company-name rule is a hit in JSX text, an attribute and an object key', () => {
+  for (const scan of [markersOf, strictMarkersOf]) {
+    for (const context of copyContexts) {
+      for (const [copy, expected, clean] of companyCases) {
+        assert.deepEqual(scan(context(copy)), expected, copy);
+        assert.deepEqual(scan(context(clean)), [], clean);
+      }
+    }
+  }
+});
+
+test('naming: identifiers, real paths and code comments carrying the name are not hits', () => {
+  const name = joined('LE', 'AF');
+  const paths = [
+    `/${name}`, `\\${name}`, `~/${name}`, `./${name}`, `../${name}`,
+    `~\\${name}`, `.\\${name}`, `..\\${name}`, `C:/${name}`, `C:\\${name}`,
+    `ops/${name}/x`, `ops\\${name}\\x`, `ops/${name}\\x`,
+  ];
+  const identifiers = [...'-Aa09_.*'].flatMap((glue) => [`${glue}${name}`, `${name}${glue}`]);
+  for (const scan of [markersOf, strictMarkersOf]) {
+    for (const copy of [...paths, ...identifiers]) {
+      for (const context of copyContexts) assert.deepEqual(scan(context(copy)), [], copy);
+    }
+    for (const copy of [name, `Solar/${name}`, `Solar\\${name}`, `${name}/Solar`, `${name}\\Solar`, `(${name})`, `/${name} ${name}`]) {
+      assert.deepEqual(scan(`<p>${copy}</p>`), ['naming standalone'], copy);
+    }
+    for (const [copy, expected] of companyCases) {
+      assert.deepEqual(scan(`<p>${copy}</p>`), expected);
+      assert.deepEqual(scan(`// <p>${copy}</p>\nconst S = 'clean';`), []);
+      assert.deepEqual(scan(`const A = () => <div>{/* <p>${copy}</p> */}</div>;`), []);
+      assert.deepEqual(scan(`<!-- <p>${copy}</p> -->`, 'index.html'), []);
+    }
+  }
+});
+
+test('naming: cadwalk and claudewalk in copy are hits, inside an identifier they are not', () => {
+  for (const scan of [markersOf, strictMarkersOf]) {
+    for (const name of internalNames) {
+      for (const context of copyContexts) {
+        for (const copy of [name, name.toUpperCase(), `(${name})`, `${name}-run`]) {
+          assert.deepEqual(scan(context(copy)), ['internal name'], copy);
+        }
+        for (const glue of ['a', 'Z', '0', '_']) {
+          assert.deepEqual(scan(context(`${glue}${name}`)), []);
+          assert.deepEqual(scan(context(`${name}${glue}`)), []);
+        }
+      }
+      assert.deepEqual(scan(`// <p>${name}</p>\n/* title="${name}" */`), []);
+    }
+  }
+});
+
+test('naming: strict mode runs the naming markers over every literal', () => {
+  const contexts = [
+    (copy) => `const S = "${copy}";`,
+    (copy) => `notify('${copy}');`,
+    (copy) => `const A = () => <p>{ok ? "${copy}" : 'Ready'}</p>;`,
+    (copy) => 'const M = (n) => `Saved ${n} with ' + copy + '`;',
+    (copy) => '<div title={`Saved ${n} with ' + copy + '`} />',
+  ];
+  const cases = [...companyCases, ...internalNames.map((name) => [name, ['internal name'], `_${name}`])];
+  for (const context of contexts) {
+    for (const [copy, expected, clean] of cases) {
+      assert.deepEqual(markersOf(context(copy)), []);
+      assert.deepEqual(strictMarkersOf(context(copy)), expected, copy);
+      assert.deepEqual(strictMarkersOf(context(clean)), [], clean);
+      assert.deepEqual(strictMarkersOf(`${context(copy)}\n${context(copy)}`), [...expected, ...expected]);
+    }
+  }
+});
+
+test('naming: the canonical company name is clean', () => {
+  for (const scan of [markersOf, strictMarkersOf]) {
+    for (const context of copyContexts) {
+      assert.deepEqual(scan(context('Leaf Automation')), []);
+      assert.deepEqual(scan(context('Leaf Automation Studio')), []);
+      for (const [copy, expected] of companyCases) assert.deepEqual(scan(context(copy)), expected);
+      for (const name of internalNames) assert.deepEqual(scan(context(name)), ['internal name']);
+    }
+  }
+  assert.deepEqual(strictMarkersOf("notify('Leaf Automation');"), []);
 });
 
 function fixture(files, entries) {
