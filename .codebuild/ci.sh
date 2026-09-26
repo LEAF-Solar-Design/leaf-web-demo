@@ -622,7 +622,13 @@ failed = sorted({tid for row in first for tid in row.get("failed_test_ids", [])}
 selected = sorted(set(detail.get("selected_test_ids", [])))
 reporting = (valid and bool(expected) and observed == expected and len(first) == len(expected)
              and all(row.get("test_report_complete") is True for row in first))
-complete = reporting and all(row.get("status") in ("PASS", "FAIL") for row in first)
+def skipped_by_gate(row):
+    return (row.get("status") == "SKIP" and row.get("skipped_by_gate") in ("db_gated", "opt_in_env")
+            and row.get("test_report_complete") is True and row.get("test_ids") == []
+            and row.get("test_id_granularity") in ("test", "suite"))
+
+suites_skipped_by_gate = sorted({row["suite_id"] for row in first if skipped_by_gate(row)})
+complete = reporting and all(row.get("status") in ("PASS", "FAIL") or skipped_by_gate(row) for row in first)
 completeness_reasons = []
 if not valid:
     completeness_reasons.append(f"attempt_rows_invalid:{attempt_rows_invalid}")
@@ -637,7 +643,7 @@ if len(first) != len(expected):
 incomplete_reports = {row["suite_id"] for row in first if row.get("test_report_complete") is not True}
 if incomplete_reports:
     completeness_reasons.append(f"test_report_incomplete:{len(incomplete_reports)}")
-nonfinal = sum(row.get("status") not in ("PASS", "FAIL") for row in first)
+nonfinal = sum(row.get("status") not in ("PASS", "FAIL") and not skipped_by_gate(row) for row in first)
 if nonfinal:
     completeness_reasons.append(f"suite_status_not_final:{nonfinal}")
 if detail.get("execution_mode") != "full":
@@ -684,6 +690,7 @@ detail.update(execution_complete=complete, test_exit_code=int(sys.argv[2]),
               attempts_ref=str(attempts_path), attempts_sha256=hashlib.sha256(raw).hexdigest(),
               test_id_reporting_complete=reporting,
               completeness_reasons=sorted(completeness_reasons),
+              suites_skipped_by_gate=suites_skipped_by_gate,
               attempt_rows_rejected=attempt_rows_rejected,
               readsets_rejected_shards=rejected_shards,
               full_run_complete=complete and detail.get("execution_mode") == "full",
@@ -702,6 +709,7 @@ if detail.get("phase") == "shadow":
               "attempts_ref": detail["attempts_ref"], "attempts_sha256": detail["attempts_sha256"],
               "full_run_complete": detail["full_run_complete"],
               "completeness_reasons": detail["completeness_reasons"],
+              "suites_skipped_by_gate": detail["suites_skipped_by_gate"],
               "attempt_rows_rejected": detail["attempt_rows_rejected"],
               "tracing_active": detail["tracing_active"], "reporters_active": detail["reporters_active"],
               "test_id_reporting_complete": reporting, "synthetic": False,

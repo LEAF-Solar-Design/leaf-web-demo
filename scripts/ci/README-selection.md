@@ -199,9 +199,20 @@ It cannot deselect individual tests. Vitest keeps its default reporter and
 adds `vitest-leaf.mjs`. Playwright keeps explicit CLI reporters, or uses a
 runtime config wrapper to retain its configured list/HTML reporters and
 relative output paths while adding `playwright-leaf.mjs`. IDs are namespaced
-by suite. Failures from an internal retry are retained. Collection errors,
-crashes, missing reports and scripts without actual test IDs are incomplete;
-they never become synthetic test failures for containment.
+by suite. Failures from an internal retry are retained. Collection errors and
+incomplete reporter documents never become synthetic test failures for containment.
+
+Completeness follows the suite kind. Pytest requires complete completion and
+collection documents and records `test_id_granularity: "test"`. Script, tsc and
+npm-audit attempts use `test_id_granularity: "suite"`: PASS or FAIL is complete,
+with empty test IDs and report references. Vitest uses test granularity when a
+reporter document exists and suite granularity when none exists. An explicit
+reporter setup or startup failure still leaves reporting incomplete. A SKIP
+caused by the suite's own unmet `db_gated` or `opt_in_env` rule records
+`skipped_by_gate`, complete reporting and empty test IDs. The final receipt
+counts these as final and lists their IDs in `suites_skipped_by_gate`. Other
+SKIPs remain nonfinal. Suite completeness does not imply test-ID or read-set
+coverage, and the existing completeness-reason vocabulary is unchanged.
 
 Every `--leaf-*` plugin option is passed as one `--leaf-x=value` token, for
 example `--leaf-output=DIR`. An xdist worker rebuilds its config from the raw

@@ -186,12 +186,80 @@ class SelectionAdapterTests(unittest.TestCase):
                 self.assertEqual(env["LEAF_READSET_ROOT"], str(self.work))
                 ledger = self.logs / "attempts" / (sid + ".jsonl")
                 row = json.loads(ledger.read_text(encoding="utf-8"))
-                self.assertFalse(row["test_report_complete"])
+                self.assertTrue(row["test_report_complete"])
+                self.assertEqual(row["test_id_granularity"], "suite")
                 self.assertFalse(row["trace_complete"])
                 shards = list((self.logs / "readsets" / sid / "1").glob("*.json"))
                 self.assertEqual(bool(shards), not isolated)
                 if isolated:
                     self.assertIn("isolated_python", row["trace_incomplete_reasons"])
+
+    def test_suite_granularity_requires_a_final_attempt(self):
+        for kind in ("script", "tsc", "npm-audit", "vitest"):
+            for status in ("PASS", "FAIL", "SKIP", "UNAVAILABLE"):
+                with self.subTest(kind=kind, status=status):
+                    suite = RUNNER.Suite(kind + "-" + status, "suite fixture", kind,
+                                         self.work, [], None)
+                    report = RUNNER.read_test_report(suite, self.logs, 1, status)
+                    self.assertEqual(report["test_report_complete"], status in ("PASS", "FAIL"))
+                    self.assertEqual(report["test_id_granularity"], "suite")
+                    self.assertEqual(report["test_ids"], [])
+                    self.assertEqual(report["test_report_refs"], [])
+                    result = RUNNER.Result(suite, status, "-", 0.0)
+                    RUNNER.record_attempt(result, self.logs, 1)
+                    row = json.loads((self.logs / "attempts" / (suite.id + ".jsonl")).read_text())
+                    self.assertEqual(row["test_id_granularity"], "suite")
+                    self.assertEqual(row["test_report_complete"], status in ("PASS", "FAIL"))
+
+    def test_pytest_requires_completion_documents_even_with_a_generic_report(self):
+        suite = RUNNER.Suite("missing-pytest", "pytest fixture", "pytest", self.work, [], None)
+        directory = self.logs / "test-reports" / suite.id / "1"
+        directory.mkdir(parents=True)
+        for generic in (False, True):
+            if generic:
+                (directory / "tests-main.json").write_text(json.dumps({
+                    "schema": "leaf.ci.test-report.v1", "suite_id": suite.id, "attempt": 1,
+                    "complete": True, "test_ids": [suite.id + "::test_ok"], "failed_test_ids": []}))
+            report = RUNNER.read_test_report(suite, self.logs, 1, "PASS")
+            self.assertFalse(report["test_report_complete"])
+            self.assertEqual(report["test_id_granularity"], "test")
+
+    def test_vitest_document_does_not_fall_back_to_suite_completeness(self):
+        suite = RUNNER.Suite("vitest-document", "vitest fixture", "vitest", self.work, [], None)
+        directory = self.logs / "test-reports" / suite.id / "1"
+        directory.mkdir(parents=True)
+        path = directory / "tests-main.json"
+        for complete in (False, True):
+            path.write_text(json.dumps({
+                "schema": "leaf.ci.test-report.v1", "suite_id": suite.id, "attempt": 1,
+                "complete": complete, "test_ids": [suite.id + "::test_ok"], "failed_test_ids": []}))
+            report = RUNNER.read_test_report(suite, self.logs, 1, "PASS")
+            self.assertEqual(report["test_report_complete"], complete)
+            self.assertEqual(report["test_id_granularity"], "test")
+        path.write_text("not json")
+        self.assertFalse(RUNNER.read_test_report(suite, self.logs, 1, "PASS")["test_report_complete"])
+
+    def test_only_skips_produced_by_catalog_gates_are_complete(self):
+        for rule in ("db_gated", "opt_in_env", ""):
+            with self.subTest(rule=rule):
+                suite = RUNNER.Suite("skip-" + (rule or "other"), "skip fixture", "pytest",
+                                     self.work, [], None, db_gated=rule == "db_gated",
+                                     opt_in_env="LEAF_FIXTURE_OPT_IN" if rule == "opt_in_env" else "")
+                with mock.patch.dict(os.environ, {}, clear=True), \
+                     mock.patch.object(RUNNER, "probe_platform_db", return_value=(False, "no DB", "")), \
+                     mock.patch.object(RUNNER.subprocess, "run", side_effect=AssertionError("must not spawn")):
+                    result = (RUNNER.run_suite_guarded(suite, self.logs, 1) if rule else
+                              RUNNER.Result(suite, "SKIP", "skip", 0.0, note="not a catalog gate"))
+                    RUNNER.record_attempt(result, self.logs, 1)
+                row = json.loads((self.logs / "attempts" / (suite.id + ".jsonl")).read_text())
+                self.assertEqual(row["status"], "SKIP")
+                self.assertEqual(row["test_report_complete"], bool(rule))
+                self.assertEqual(row["test_ids"], [])
+                self.assertEqual(row["test_id_granularity"], "test")
+                if rule:
+                    self.assertEqual(row["skipped_by_gate"], rule)
+                else:
+                    self.assertNotIn("skipped_by_gate", row)
 
     def test_pytest_plugin_reports_exact_parameterized_failure(self):
         (self.work / "test_sample.py").write_text(
