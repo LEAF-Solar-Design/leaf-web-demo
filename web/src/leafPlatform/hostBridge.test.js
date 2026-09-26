@@ -136,6 +136,54 @@ describe('Studio bridge diagnostics and telemetry', () => {
   })
 
   it.each([
+    ['absent', {}, null],
+    ['version 1', { bindingGrantVersion: 1 }, 1],
+  ])('accepts an unbound handshake with %s binding grant capability', async (_, extra, expected) => {
+    bridge.start()
+    await bridge.receive({ ...unbound(), ...extra })
+    expect(bridge.state.status).toBe('unbound')
+    expect(bridge.state.bindingGrantVersion).toBe(expected)
+    expect(detailsFor(diagnostics, 'handshake')).toEqual([{ kind: 'unbound' }])
+    expect(detailsFor(diagnostics, 'handshake-rejected')).toEqual([])
+  })
+
+  it.each([0, 2, '1', 1.5, null, true, {}, undefined])(
+    'rejects an unbound handshake with invalid bindingGrantVersion %j', async (bindingGrantVersion) => {
+      bridge.start()
+      await bridge.receive({ ...unbound(), bindingGrantVersion })
+      expect(bridge.state.status).toBe('connecting')
+      expect(bridge.state.ready).toBeNull()
+      expect(bridge.state.bindingGrantVersion).toBeNull()
+      expect(detailsFor(diagnostics, 'handshake-rejected')).toEqual([{ reason: 'shape' }])
+    },
+  )
+
+  it.each([
+    { ...unbound(), extra: true },
+    { ...unbound(), bindingGrantVersion: 1, extra: true },
+    { ...ready(), bindingGrantVersion: 1 },
+  ])('rejects unexpected handshake keys: %j', async (handshake) => {
+    bridge.start()
+    await bridge.receive(handshake)
+    expect(bridge.state.status).toBe('connecting')
+    expect(bridge.state.ready).toBeNull()
+    expect(detailsFor(diagnostics, 'handshake-rejected')).toEqual([{ reason: 'shape' }])
+  })
+
+  it('clears the binding grant capability on replacement handshakes and stop', async () => {
+    expect(bridge.state.bindingGrantVersion).toBeNull()
+    bridge.start()
+    for (const handshake of [unbound(), ready()]) {
+      await bridge.receive({ ...unbound(), bindingGrantVersion: 1 })
+      await bridge.receive(handshake)
+      expect(bridge.state.bindingGrantVersion).toBeNull()
+    }
+    await bridge.receive({ ...unbound(), bindingGrantVersion: 1 })
+    bridge.stop()
+    expect(bridge.state.bindingGrantVersion).toBeNull()
+  })
+
+  it.each([
     ['timestamp-format', { issuedAt: 'not-a-timestamp' }],
     ['timestamp-format', { expiresAt: 42 }],
     ['lifetime', { expiresAt: '2000-01-01T00:00:00.0000000+00:00' }],
