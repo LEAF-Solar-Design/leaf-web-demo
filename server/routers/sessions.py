@@ -110,6 +110,7 @@ import entity_scope
 import instant_execution
 import platform_link
 import request_journal
+import session_fanout
 import session_policy
 import session_store
 import turn_runner
@@ -1562,32 +1563,48 @@ async def stream_session(session_id: str, after_seq: int = 0,
         return _session_not_found(session_id)
 
     async def event_stream():
-        cursor = int(after_seq)
         deadline = time.time() + STREAM_DEADLINE_S
         last_activity = time.time()
-        while time.time() < deadline:
-            try:
-                current = await asyncio.to_thread(
-                    _require_owned_session, session_id, tenant,
-                )
-            except platform_link.ProjectSessionForbidden:
-                break
-            if current is None:
-                break
-            events = await asyncio.to_thread(
-                session_store.events_after, session_id, cursor, 500
+        try:
+            current = await asyncio.to_thread(
+                _require_owned_session, session_id, tenant,
             )
-            if events:
-                for ev in events:
-                    cursor = ev["seq"]
-                    yield f"event: {ev['type']}\ndata: {json.dumps(ev)}\n\n"
-                last_activity = time.time()
-            else:
-                now = time.time()
-                if now - last_activity >= STREAM_PING_S:
-                    yield ": ping\n\n"
-                    last_activity = now
-            await asyncio.sleep(STREAM_POLL_S)
+        except platform_link.ProjectSessionForbidden:
+            return
+        if current is None:
+            return
+        async with session_fanout.subscribe(
+            session_id, int(after_seq), read=session_store.events_after,
+            poll_s=STREAM_POLL_S,
+        ) as subscription:
+            while time.time() < deadline:
+                tick_started = time.monotonic()
+                events = await subscription.next_batch(
+                    timeout=min(STREAM_POLL_S, max(0, deadline - time.time())),
+                )
+                if events is None or time.time() >= deadline:
+                    break
+                try:
+                    current = await asyncio.to_thread(
+                        _require_owned_session, session_id, tenant,
+                    )
+                except platform_link.ProjectSessionForbidden:
+                    break
+                if current is None:
+                    break
+                if events:
+                    for ev in events:
+                        yield f"event: {ev['type']}\ndata: {json.dumps(ev)}\n\n"
+                    last_activity = time.time()
+                else:
+                    now = time.time()
+                    if now - last_activity >= STREAM_PING_S:
+                        yield ": ping\n\n"
+                        last_activity = now
+                await asyncio.sleep(min(
+                    max(0, STREAM_POLL_S - (time.monotonic() - tick_started)),
+                    max(0, deadline - time.time()),
+                ))
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
