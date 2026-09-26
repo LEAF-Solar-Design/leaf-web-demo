@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import platform
 import re
+import shutil
 import sys
 
 # -I omits the script directory. Only this extracted, trusted directory is added.
@@ -18,6 +19,58 @@ BINDING_FIELDS = ("run_id", "source_sha", "source_tree", "capture_sha", "catalog
 
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+
+
+def partition_readsets(readsets, rejected, catalog, run_id):
+    """Quarantine foreign shards and their outcomes before manifest validation."""
+    entries, _ = select_tests.catalog_info(catalog)
+    readsets, rejected = Path(readsets), Path(rejected)
+    files = sorted(path for path in readsets.rglob("*") if path.is_file())
+    members = {path.relative_to(readsets.parent).as_posix(): path for path in files}
+    accepted = set()
+    rejected_files = set()
+    accepted_dirs = set()
+    accepted_outcomes = set()
+    count = 0
+    for path in files:
+        if path.suffix != ".json" or path.name.endswith(".misses.json"):
+            continue
+        try:
+            shard = json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, UnicodeError):
+            shard = {}
+        if not isinstance(shard, dict):
+            shard = {}
+        ref = shard.get("outcomes_ref")
+        outcomes = members.get(ref) if isinstance(ref, str) else None
+        # Older plugin shards used a filename relative to the shard directory.
+        if outcomes is None and isinstance(ref, str) and Path(ref).name == ref:
+            candidate = path.parent / ref
+            if candidate in files:
+                outcomes = candidate
+        sid = shard.get("suite_id")
+        if isinstance(sid, str) and sid in entries and run_id and shard.get("run_id") == run_id:
+            accepted.add(path)
+            accepted.add(path.with_suffix(".misses.json"))
+            accepted_dirs.add(path.parent)
+            if outcomes is not None:
+                accepted_outcomes.add(outcomes)
+        else:
+            count += 1
+            rejected_files.update((path, path.with_suffix(".misses.json"),
+                                   path.parent / ("attempts-" + path.stem + ".jsonl")))
+            if outcomes is not None:
+                rejected_files.add(outcomes)
+    for path in files:
+        if path in accepted or path in accepted_outcomes:
+            continue
+        if (path.parent in accepted_dirs and path not in rejected_files and
+                path.name.startswith("attempts") and path.suffix == ".jsonl"):
+            continue
+        destination = rejected / path.relative_to(readsets)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(path), str(destination))
+    return count
 
 
 def build_manifest(inputs, catalog, shards=()):

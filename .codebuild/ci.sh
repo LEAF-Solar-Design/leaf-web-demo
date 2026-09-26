@@ -611,6 +611,14 @@ selected = sorted(set(detail.get("selected_test_ids", [])))
 reporting = (valid and bool(expected) and observed == expected and len(first) == len(expected)
              and all(row.get("test_report_complete") is True for row in first))
 complete = reporting and all(row.get("status") in ("PASS", "FAIL") for row in first)
+rejected_shards = 0
+if sys.argv[3] == "1":
+    sys.path.insert(0, str(out))
+    import full_run_manifest
+    packed_catalog = json.loads((out / "catalog.json").read_text(encoding="utf-8"))
+    rejected_shards = full_run_manifest.partition_readsets(
+        Path("/tmp/gate-logs/readsets"), out / "readsets-rejected", packed_catalog, sys.argv[7])
+    (out / "readsets-partitioned").write_text("ready\n", encoding="ascii")
 detail.update(execution_complete=complete, test_exit_code=int(sys.argv[2]),
               trusted_sha_override=sys.argv[5] == "1", loader_check=sys.argv[6],
               tracing_active=sys.argv[3] == "1", reporters_active=sys.argv[4] == "1",
@@ -618,6 +626,7 @@ detail.update(execution_complete=complete, test_exit_code=int(sys.argv[2]),
               collection_ids_sha256=hashlib.sha256(canonical(all_ids).encode("utf-8")).hexdigest(),
               attempts_ref=str(attempts_path), attempts_sha256=hashlib.sha256(raw).hexdigest(),
               test_id_reporting_complete=reporting,
+              readsets_rejected_shards=rejected_shards,
               full_run_complete=complete and detail.get("execution_mode") == "full",
               finished_at=datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"))
 (out / "detail.json").write_text(canonical(detail) + "\n", encoding="utf-8")
@@ -670,6 +679,8 @@ if [[ "$tracing_ready" == 1 ]]; then
     local archive="$selection_dir/readsets.tar.gz" entry digest build_uuid key member
     local -a selection_members=()
     readsets_status=empty
+    readsets_error="read-set partition failed"
+    [[ -f "$selection_dir/readsets-partitioned" ]] || return 1
     [[ -d /tmp/gate-logs/readsets ]] || return 0
     readsets_error="directory scan failed"
     entry="$(find /tmp/gate-logs/readsets -type f -print -quit)" || return 1
@@ -730,6 +741,7 @@ publication = {"readsets_object": os.environ.get("readsets_object") or None,
                "readsets_sha256": os.environ.get("readsets_sha256") or None,
                "readsets_bytes": int(os.environ["readsets_bytes"]) if os.environ.get("readsets_bytes") else None,
                "readsets_status": os.environ["readsets_status"],
+               "readsets_rejected_shards": detail.get("readsets_rejected_shards", 0),
                "readsets_archive_members": os.environ["readsets_archive_members"].split()}
 detail.update(publication)
 (out / "detail.json").write_text(canonical(detail) + "\n", encoding="utf-8")

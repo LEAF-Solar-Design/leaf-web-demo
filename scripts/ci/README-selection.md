@@ -94,6 +94,16 @@ with the catalog's own `catalog_sha256`. Shards now receive that canonical
 fingerprint through `LEAF_READSET_CATALOG_SHA256`; the shadow row retains the
 separate runner fingerprint.
 
+Before the manifest and archive, Step A partitions read sets using the packed
+catalog and `CODEBUILD_BUILD_ID`. Only shards whose suite is in that catalog
+and whose run ID matches the build stay in `readsets/`. Other shards and their
+attempt streams move to `$selection_dir/readsets-rejected/`, which is never
+packed. Shared outcome streams referenced by accepted shards stay with those
+shards. The detail document, `LEAF_SELECTION_FINAL`, and `LEAF_SHADOW` report
+the count as `readsets_rejected_shards` (zero without tracing). If partitioning
+fails, no archive is published. The manifest still rejects accepted shards
+with missing or mismatched provenance.
+
 The `leaf.ci.full-run.v1` manifest binds run, source, tree, capture and catalog
 through `provider_binding`. It records the execution mode, completeness flags,
 catalog suite IDs, observed workers per suite, and `toolchain_fingerprint` over
@@ -109,12 +119,12 @@ put uses `--if-none-match '*'`, `--checksum-algorithm SHA256`, and metadata
 200 MiB are not uploaded. The final detail document, `LEAF_SELECTION_FINAL`, and
 `LEAF_SHADOW` carry `readsets_object`, `readsets_sha256`, `readsets_bytes`, and
 `readsets_status`: `uploaded`, `empty`, `too_large`, `upload_failed`, or
-`manifest_failed`. A manifest failure still packs and uploads available read
-sets and preserves the gate exit code. Publication fields are merged into
+`manifest_failed`. After a successful partition, a manifest failure still packs
+and uploads accepted read sets and preserves the gate exit code. Publication fields are merged into
 `detail.json` only after the upload attempt, then the final and shadow rows print.
 They also carry `readsets_archive_members`, including the manifest and the
 archive-relative attempt paths.
-Missing `catalog.json` or `decision.json` files are skipped without failing the upload.
+Missing `decision.json` is skipped without failing the upload; the partition requires `catalog.json`.
 Upload failures produce one warning and preserve the gate result. Non-tracing
 builds report `not_traced` and never pack or upload read sets.
 
@@ -126,8 +136,12 @@ that absolute reference in startup shards with the archive-relative document
 path. `pytest_selection.py` also copies each completed per-process stream to
 `readsets/<encoded-suite>/<attempt>/attempts-<shard>.jsonl`. Empty or missing
 reports do not become complete evidence. The plugin's module-catalog path uses
-decision/catalog provenance, while `sitecustomize.py` passes the exported
-provenance to `trace_reads.write_readset`, which requires all five binding fields.
+decision/catalog provenance when present and otherwise takes each binding from
+`LEAF_READSET_RUN`, `LEAF_READSET_SOURCE_SHA`, `LEAF_READSET_SOURCE_TREE`,
+`LEAF_READSET_CAPTURE_SHA`, and `LEAF_READSET_CATALOG_SHA256`. Its `outcomes_ref`
+names the copied stream as `readsets/<encoded-suite>/<attempt>/attempts-<shard>.jsonl`.
+`sitecustomize.py` passes the exported provenance to `trace_reads.write_readset`,
+which requires all five binding fields.
 
 Interpreter isolation (`-I -B`) is for trusted processes only. The gate run
 inherits no interpreter flags and explicitly unsets `PYTHONSAFEPATH`. The runner

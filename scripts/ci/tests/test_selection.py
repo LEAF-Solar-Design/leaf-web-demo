@@ -93,6 +93,64 @@ class FullRunManifestContracts(unittest.TestCase):
                              self.catalog()["catalog_sha256"])
 
 
+class PluginBindingContracts(unittest.TestCase):
+    def test_plugin_binding_falls_back_to_environment_and_preserves_explicit_values(self):
+        for explicit in (False, True):
+            with self.subTest(explicit=explicit), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                output = root / "evidence"
+                nodeid = "test_sample.py::test_ok"
+                sid = "sample/suite"
+                (root / "test_sample.py").write_text("def test_ok(): pass\n", encoding="utf-8")
+                decision = {"schema": selector.DECISION_SCHEMA, "execution_mode": "full",
+                            "selection_mode": "full", "apply_filter": False, "reasons": []}
+                catalog = {"suites": [{"id": sid, "module": "test_sample.py", "python_only": True}]}
+                binding = {"run_id": "build:environment", "source_sha": "a" * 40,
+                           "source_tree": "b" * 40, "capture_sha": "c" * 40,
+                           "catalog_sha256": "d" * 64}
+                env = {"LEAF_READSET_DIR": str(output / "readsets"),
+                       "LEAF_READSET_RUN": binding["run_id"],
+                       "LEAF_READSET_SOURCE_SHA": binding["source_sha"],
+                       "LEAF_READSET_SOURCE_TREE": binding["source_tree"],
+                       "LEAF_READSET_CAPTURE_SHA": binding["capture_sha"],
+                       "LEAF_READSET_CATALOG_SHA256": binding["catalog_sha256"]}
+                if explicit:
+                    binding = {"run_id": "build:decision", "source_sha": "e" * 40,
+                               "source_tree": "f" * 40, "capture_sha": "1" * 40,
+                               "catalog_sha256": "2" * 64}
+                    decision.update(build_id=binding["run_id"], head_sha=binding["source_sha"],
+                                    head_tree=binding["source_tree"], catalog_sha256=binding["catalog_sha256"])
+                    catalog.update(capture_sha=binding["capture_sha"], catalog_sha256="3" * 64)
+                (root / "decision.json").write_text(json.dumps(decision), encoding="utf-8")
+                (root / "catalog.json").write_text(json.dumps(catalog), encoding="utf-8")
+                options = {"leaf_repo": str(root), "leaf_output": str(output),
+                           "leaf_selection": str(root / "decision.json"),
+                           "leaf_catalog": str(root / "catalog.json")}
+                config = types.SimpleNamespace(rootpath=root, getoption=options.get,
+                                               option=types.SimpleNamespace(numprocesses=0))
+                with mock.patch.dict(os.environ, env, clear=True), \
+                     mock.patch.object(trace_reads.Capture, "install", lambda capture: capture):
+                    state = plugin.SelectionPlugin(config)
+                    try:
+                        state.capture.test_ids["test_sample.py"] = {nodeid}
+                        state.executable_ids = [nodeid]
+                        for phase in ("setup", "call", "teardown"):
+                            state.pytest_runtest_logreport(types.SimpleNamespace(
+                                nodeid=nodeid, when=phase, outcome="passed"))
+                        state.pytest_sessionfinish(None, 0)
+                    finally:
+                        state.pytest_unconfigure(config)
+                directory = output / "readsets" / trace_reads.encoded_suite(sid) / "1"
+                doc = json.loads((directory / (state.shard + ".json")).read_text(encoding="utf-8"))
+                self.assertEqual({key: doc[key] for key in binding}, binding)
+                self.assertNotIn("missing_provenance", doc["incomplete_reasons"])
+                expected_ref = "readsets/sample%2Fsuite/1/attempts-" + state.shard + ".jsonl"
+                self.assertEqual(doc["outcomes_ref"], expected_ref)
+                rows = [json.loads(line) for line in (output / expected_ref).read_text(
+                    encoding="utf-8").splitlines()]
+                self.assertEqual(rows, state.attempts)
+
+
 class SelectionContracts(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="selection-contract-",

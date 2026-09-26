@@ -32,7 +32,7 @@ def fixture_catalog():
 @unittest.skipUnless(BASH, "bash is not on PATH; read-set publication requires bash")
 class TestCodebuildCiReadsets(unittest.TestCase):
     def run_publication(self, *, tracing=True, aws_status=0, gate_status=0,
-                        missing_decision=False, malformed_manifest=False):
+                        missing_decision=False, malformed_manifest=False, foreign_shards=False):
         script = CI_PATH.read_text(encoding="utf-8")
         export_start = script.index('  export LEAF_READSET_CATALOG_SHA256=')
         export_end = script.index('LEAF_CAPTURE_ID\n)"', export_start) + len('LEAF_CAPTURE_ID\n)"')
@@ -57,6 +57,24 @@ class TestCodebuildCiReadsets(unittest.TestCase):
             (logs / ATTEMPTS_REF).write_text(json.dumps({
                 "schema": "leaf.ci.test-attempt.v1", "nodeid": "test_sample.py::test_ok",
                 "attempt": 1, "phase": "call", "outcome": "passed"}) + "\n")
+            rejected_members = []
+            if foreign_shards:
+                for suite, name, bound in (("pool-0", "main-fixture", True),
+                                           ("sample", "main-unbound", False)):
+                    directory = logs / "readsets" / suite / "1"
+                    directory.mkdir(parents=True, exist_ok=True)
+                    attempt_path = directory / ("attempts-" + name + ".jsonl")
+                    foreign = dict(shard, suite_id=suite,
+                                   outcomes_ref=attempt_path.relative_to(logs).as_posix())
+                    if not bound:
+                        foreign.update({key: None for key in (
+                            "run_id", "source_sha", "source_tree", "capture_sha",
+                            "catalog_sha256", "outcomes_ref")})
+                    shard_path = directory / (name + ".json")
+                    shard_path.write_text(json.dumps(foreign), encoding="utf-8")
+                    attempt_path.write_bytes((logs / ATTEMPTS_REF).read_bytes())
+                    rejected_members.extend(path.relative_to(logs).as_posix()
+                                            for path in (shard_path, attempt_path))
             (selection / "catalog.json").write_text(json.dumps(catalog))
             for name in ("select_tests.py", "full_run_manifest.py"):
                 shutil.copyfile(ROOT / "scripts" / "ci" / name, selection / name)
@@ -129,9 +147,15 @@ class TestCodebuildCiReadsets(unittest.TestCase):
             else:
                 self.assertFalse((selection / "full-run.json").exists())
             for field in ("readsets_object", "readsets_sha256", "readsets_bytes", "readsets_status",
-                          "readsets_archive_members"):
+                          "readsets_archive_members", "readsets_rejected_shards"):
                 self.assertEqual(final[field], shadow[field])
                 self.assertEqual(final[field], detail[field])
+            self.assertEqual(final["readsets_rejected_shards"], 2 if foreign_shards and tracing else 0)
+            if foreign_shards and tracing:
+                for member in rejected_members:
+                    self.assertFalse((logs / member).exists())
+                    self.assertTrue((selection / "readsets-rejected" /
+                                     Path(member).relative_to("readsets")).is_file())
             self.assertEqual(final["test_exit_code"], gate_status)
             self.assertEqual(final["build_exit_code"], gate_status)
             self.assertEqual(final["readsets_ref"], str(logs / "readsets"))
@@ -187,6 +211,25 @@ class TestCodebuildCiReadsets(unittest.TestCase):
             self.assertEqual(sorted({name.split("/")[0] for name in packed.getnames()}),
                              sorted({name.split("/")[0] for name in members}))
         self.assertNotIn("WARNING: readsets upload failed", result.stderr)
+
+    def test_partition_excludes_unknown_and_unbound_shards_before_manifest(self):
+        result, final, calls, archive, _ = self.run_publication(foreign_shards=True)
+        self.assertEqual(final["readsets_status"], "uploaded")
+        self.assertEqual(final["readsets_rejected_shards"], 2)
+        self.assertEqual(calls.count("put-object"), 1)
+        self.assertEqual(final["readsets_archive_members"],
+                         ["readsets", "catalog.json", "decision.json", "full-run.json", ATTEMPTS_REF])
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as packed:
+            names = packed.getnames()
+            self.assertIn("full-run.json", names)
+            self.assertIn("readsets/sample/1/main-123.json", names)
+            self.assertIn(ATTEMPTS_REF, names)
+            self.assertFalse(any("pool-0" in name or "main-unbound" in name or
+                                 "readsets-rejected" in name for name in names), names)
+            manifest = json.loads(packed.extractfile("full-run.json").read())
+            self.assertEqual(manifest["workers_by_suite"], {"sample": ["main"]})
+            self.assertTrue(manifest["full_run_complete"])
+        self.assertNotIn("manifest failed", result.stderr)
 
     def test_malformed_manifest_still_uploads_readsets(self):
         result, final, calls, archive, tar_calls = self.run_publication(malformed_manifest=True)
