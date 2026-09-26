@@ -21,7 +21,7 @@ SPEC.loader.exec_module(reprobe)
 
 MARKER = "PRIVATE_RESPONSE_BODY_MUST_NOT_APPEAR"
 VALID_SHA = "0123456789abcdef0123456789abcdef01234567"
-EXPECTED_REQUESTS = [
+EXPECTED_CHECKS = [
     ("GET", "/api/jobs"),
     ("GET", "/api/jobs?tenant_id=leaf-redhat-reprobe-foreign"),
     ("GET", "/api/jobs/00000000-0000-4000-8000-000000000000"),
@@ -31,6 +31,9 @@ EXPECTED_REQUESTS = [
     ("OPTIONS", "/api/health"),
     ("GET", "/api/health"),
 ]
+# The reachability check goes first, then every finding's checks.
+EXPECTED_REQUESTS = [("GET", "/api/health"), *EXPECTED_CHECKS]
+EDGE_BODY = b"error code: 1010"
 
 
 @pytest.fixture
@@ -40,12 +43,14 @@ def stub():
         "health_status": 200, "preflight_status": 400,
         "source_sha": VALID_SHA, "delay": 0, "seen": [],
         "location": "/redirect-target", "status_by_path": {}, "health_body": None,
-        "acao_by_method": {}, "malformed_health_chunks": False,
+        "acao_by_method": {}, "malformed_health_chunks": False, "malformed_preflight_chunks": False,
+        "agents": [], "edge_agent": None, "body_by_path": {}, "headers_by_path": {},
     }
 
     class Handler(BaseHTTPRequestHandler):
         def respond(self):
             state["seen"].append((self.command, self.path, dict(self.headers)))
+            state["agents"].append(self.headers.get_all("User-Agent") or [])
             body = MARKER.encode()
             acao = None
             if self.path.startswith("/api/jobs"):
@@ -67,17 +72,24 @@ def stub():
             else:
                 status = 200
             status = state["status_by_path"].get(self.path, status)
+            body = state["body_by_path"].get(self.path, body)
+            extra_headers = state["headers_by_path"].get(self.path, {})
+            if state["edge_agent"] is not None and self.headers.get("User-Agent") != state["edge_agent"]:
+                # Cloudflare's browser integrity check answers before the app sees the request.
+                status, body, acao, extra_headers = 403, EDGE_BODY, None, {}
             self.send_response(status)
             if status == 302:
                 self.send_header("Location", state["location"])
             if acao is not None:
                 self.send_header("Access-Control-Allow-Origin", acao)
+            for name, value in extra_headers.items():
+                self.send_header(name, value)
             self.send_header("X-Private-Header", MARKER)
             self.send_header("Set-Cookie", "private_cookie=" + MARKER)
             self.send_header("Content-Type", "application/json")
-            malformed_chunks = (
-                self.command == "GET" and self.path == "/api/health"
-                and state["malformed_health_chunks"]
+            malformed_chunks = self.path == "/api/health" and (
+                (self.command == "GET" and state["malformed_health_chunks"])
+                or (self.command == "OPTIONS" and state["malformed_preflight_chunks"])
             )
             if malformed_chunks:
                 self.send_header("Transfer-Encoding", "chunked")
@@ -206,12 +218,15 @@ def test_malformed_health_body_after_wildcard_acao_keeps_the_cors_failure(stub, 
 
 def test_health_body_of_exactly_64_kib_keeps_its_source_sha(stub, capsys):
     body = json.dumps({"source_sha": VALID_SHA}).encode()
-    for size, expected_sha in ((65536, VALID_SHA), (65537, None)):
+    # An overflowing health body is not a readable JSON object, so the reachability precondition fails.
+    for size, expected_sha, expected_code, expected_overall in (
+        (65536, VALID_SHA, 0, "PASS"), (65537, None, 3, "UNREADABLE"),
+    ):
         stub["health_body"] = body.ljust(size, b" ")
         assert len(stub["health_body"]) == size
         code, receipt = _cli(stub, capsys)
-        assert code == 0
-        assert receipt["overall"] == "PASS"
+        assert code == expected_code
+        assert receipt["overall"] == expected_overall
         assert receipt["source_sha"] == expected_sha
 
 
@@ -231,7 +246,8 @@ def test_f17_passes_when_a_different_origin_is_allowed(stub):
     stub["F17"] = "https://trusted.invalid"
     stub["health_status"] = 503
     receipt = _probe(stub)
-    assert receipt["findings"]["F17"]["verdict"] == receipt["overall"] == "PASS"
+    # A 503 health answer fails the reachability precondition, so no finding can pass.
+    assert receipt["findings"]["F17"]["verdict"] == receipt["overall"] == "UNREADABLE"
     assert all(check["acao"] == stub["F17"] for check in receipt["findings"]["F17"]["checks"])
 
 
@@ -283,8 +299,10 @@ def test_deeply_nested_health_body_yields_a_null_source_sha(stub, capsys, tmp_pa
     stub["health_body"] = b"[" * 10000 + b"0" + b"]" * 10000
     out = tmp_path / "nested-health.json"
     code, receipt = _cli(stub, capsys, "--out", str(out))
-    assert code == 0
-    assert receipt["overall"] == "PASS"
+    # An unparseable health body fails the reachability precondition.
+    assert code == 3
+    assert receipt["overall"] == "UNREADABLE"
+    assert receipt["reachability"]["verdict"] == "UNREADABLE"
     assert receipt["source_sha"] is None
     assert [(method, path) for method, path, _ in stub["seen"]] == EXPECTED_REQUESTS
     assert json.loads(out.read_text(encoding="utf-8")) == receipt
@@ -304,7 +322,7 @@ def test_health_read_is_bounded_and_protected_bodies_are_never_read(stub, monkey
 
         def recording_read(*read_args, **read_kwargs):
             record = {
-                "method": request.get_method(), "url": request.full_url,
+                "method": request.get_method(), "url": request.full_url, "status": response.code,
                 "args": read_args, "kwargs": read_kwargs, "bytes": 0,
             }
             reads.append(record)
@@ -330,20 +348,29 @@ def test_health_read_is_bounded_and_protected_bodies_are_never_read(stub, monkey
         assert receipt["source_sha"] == (None if oversized else VALID_SHA)
         assert [(method, path) for method, path, _ in stub["seen"]] == EXPECTED_REQUESTS
         assert reads
+        health_reads = []
         for record in reads:
-            assert (record["method"], record["url"]) == ("GET", stub["origin"] + "/api/health")
             assert len(record["args"]) == 1 and not record["kwargs"]
             assert isinstance(record["args"][0], int)
-            assert 0 < record["args"][0] <= reprobe.MAX_BODY_BYTES + 1
-        assert sum(record["bytes"] for record in reads) <= reprobe.MAX_BODY_BYTES + 1
-        assert sum(record["bytes"] for record in reads) > 0
+            if record["url"] == stub["origin"] + "/api/health":
+                assert record["method"] == "GET"
+                assert 0 < record["args"][0] <= reprobe.MAX_BODY_BYTES + 1
+                health_reads.append(record)
+            else:
+                # Only a bounded denial body is ever read, never a 2xx protected body.
+                assert record["status"] in reprobe.EDGE_STATUSES
+                assert 0 < record["args"][0] <= reprobe.EDGE_BODY_BYTES
+        assert sum(record["bytes"] for record in health_reads) <= reprobe.MAX_BODY_BYTES + 1
+        assert sum(record["bytes"] for record in health_reads) > 0
 
 
 def test_probe_never_sends_a_mutating_method(stub):
     _probe(stub)
     assert [(method, path) for method, path, _ in stub["seen"]] == EXPECTED_REQUESTS
     assert {method for method, _, _ in stub["seen"]} == {"GET", "OPTIONS"}
-    for method, path, headers in stub["seen"]:
+    # The reachability check carries no Origin; every F17 check carries the foreign one.
+    assert "origin" not in {key.lower() for key in stub["seen"][0][2]}
+    for method, path, headers in stub["seen"][1:]:
         headers = {key.lower(): value for key, value in headers.items()}
         assert "authorization" not in headers
         assert "proxy-authorization" not in headers
@@ -357,12 +384,21 @@ def test_probe_never_sends_a_mutating_method(stub):
 def test_receipt_carries_no_bodies_and_a_validated_source_sha(stub):
     receipt = _probe(stub)
     assert receipt["source_sha"] == VALID_SHA
-    assert set(receipt) == {"schema", "origin", "probed_at", "source_sha", "findings", "overall"}
+    assert set(receipt) == {
+        "schema", "origin", "probed_at", "source_sha", "reachability", "findings", "overall",
+    }
+    assert receipt["reachability"] == {
+        "method": "GET", "path": "/api/health", "status": 200, "verdict": "PASS",
+    }
     assert MARKER not in json.dumps(receipt)
     for name, finding in receipt["findings"].items():
         assert set(finding) == {"verdict", "checks"}
         for check in finding["checks"]:
-            assert set(check) == {"method", "path", "status", "verdict"} | ({"acao"} if name == "F17" else set())
+            assert set(check) == (
+                {"method", "path", "status", "verdict"}
+                | ({"acao"} if name == "F17" else set())
+                | ({"edge_blocked"} if check["status"] in reprobe.EDGE_STATUSES else set())
+            )
     for invalid in ("unknown", "ABCDEF0", "abcdef", "f" * 41, "abcdef0\n", None, 1234567):
         stub["source_sha"] = invalid
         assert _probe(stub)["source_sha"] is None
@@ -419,4 +455,186 @@ def test_probe_routes_exist_in_server_source(stub):
         for decorator in decorators:
             assert decorator in source, (relative, decorator)
     assert [(check["method"], check["path"]) for finding in _probe(stub)["findings"].values()
-            for check in finding["checks"]] == EXPECTED_REQUESTS
+            for check in finding["checks"]] == EXPECTED_CHECKS
+
+
+def _record_reads(monkeypatch):
+    reads = []
+    original_open = reprobe.urllib.request.OpenerDirector.open
+
+    def recording_open(opener, request, *args, **kwargs):
+        error = None
+        try:
+            response = original_open(opener, request, *args, **kwargs)
+        except reprobe.urllib.error.HTTPError as exc:
+            response = error = exc
+        original_read = response.read
+
+        def recording_read(*read_args, **read_kwargs):
+            record = {"url": request.full_url, "bytes": 0}
+            reads.append(record)
+            body = original_read(*read_args, **read_kwargs)
+            record["bytes"] = len(body)
+            return body
+
+        response.read = recording_read
+        if error is not None:
+            raise error
+        return response
+
+    monkeypatch.setattr(reprobe.urllib.request.OpenerDirector, "open", recording_open)
+    return reads
+
+
+def test_every_request_carries_the_fixed_user_agent(stub):
+    assert reprobe.USER_AGENT == "leaf-redhat-reprobe/1.0"
+    _probe(stub)
+    assert [(method, path) for method, path, _ in stub["seen"]] == EXPECTED_REQUESTS
+    # Reachability plus the eight finding checks, each with exactly one agent header.
+    assert len(stub["agents"]) == len(stub["seen"]) == len(EXPECTED_REQUESTS)
+    assert stub["agents"] == [["leaf-redhat-reprobe/1.0"]] * len(EXPECTED_REQUESTS)
+
+
+def test_case_headers_cannot_override_the_user_agent(stub, monkeypatch):
+    original_cases = reprobe._cases
+
+    def spoofed_cases(foreign_origin):
+        return {
+            finding: [
+                (method, path, {**headers, "User-Agent": "spoofed/0", "user-agent": "spoofed/1"})
+                for method, path, headers in cases
+            ]
+            for finding, cases in original_cases(foreign_origin).items()
+        }
+
+    monkeypatch.setattr(reprobe, "_cases", spoofed_cases)
+    receipt = _probe(stub)
+    assert receipt["overall"] == "PASS"
+    assert stub["agents"] == [["leaf-redhat-reprobe/1.0"]] * len(EXPECTED_REQUESTS)
+
+
+def test_edge_block_on_every_route_is_unreadable_not_pass(stub, capsys, monkeypatch):
+    stub["edge_agent"] = "leaf-redhat-reprobe/1.0"
+    monkeypatch.setattr(reprobe, "USER_AGENT", "Python-urllib/3.13")
+    code, receipt = _cli(stub, capsys)
+    assert code == 3
+    assert receipt["overall"] == "UNREADABLE"
+    assert receipt["reachability"]["verdict"] == "UNREADABLE"
+    assert receipt["reachability"]["status"] == 403
+    assert receipt["source_sha"] is None
+    assert stub["agents"] == [["Python-urllib/3.13"]] * len(EXPECTED_REQUESTS)
+    for name, finding in receipt["findings"].items():
+        assert finding["verdict"] == "UNREADABLE"
+        for check in finding["checks"]:
+            assert check["status"] == 403
+            assert check["edge_blocked"] is True
+            assert check["verdict"] == "UNREADABLE"
+    for name in ("F1", "F6", "F7"):
+        assert all(check["edge_blocked"] is True for check in receipt["findings"][name]["checks"])
+
+
+def test_fixed_agent_passes_the_same_edge(stub, capsys):
+    stub["edge_agent"] = "leaf-redhat-reprobe/1.0"
+    code, receipt = _cli(stub, capsys)
+    assert code == 0
+    assert receipt["overall"] == "PASS"
+    assert receipt["reachability"] == {
+        "method": "GET", "path": "/api/health", "status": 200, "verdict": "PASS",
+    }
+    assert receipt["source_sha"] == VALID_SHA
+    checks = [check for finding in receipt["findings"].values() for check in finding["checks"]]
+    assert not any(check.get("edge_blocked") for check in checks)
+
+
+def test_cf_mitigated_header_marks_edge_block(stub):
+    stub["F6"] = 403
+    stub["headers_by_path"]["/api/projects"] = {"cf-mitigated": "challenge"}
+    stub["body_by_path"]["/api/projects"] = b"<!DOCTYPE html><html><body>Just a moment...</body></html>"
+    receipt = _probe(stub)
+    check = receipt["findings"]["F6"]["checks"][0]
+    assert check["status"] == 403
+    assert check["edge_blocked"] is True
+    assert check["verdict"] == "UNREADABLE"
+    assert receipt["findings"]["F6"]["verdict"] == receipt["overall"] == "UNREADABLE"
+
+
+def test_app_403_json_body_still_passes(stub):
+    stub["F6"] = 403
+    stub["body_by_path"]["/api/projects"] = b'{"error":{"code":"FORBIDDEN"}}'
+    receipt = _probe(stub)
+    check = receipt["findings"]["F6"]["checks"][0]
+    assert check["status"] == 403
+    assert check["edge_blocked"] is False
+    assert check["verdict"] == "PASS"
+    assert receipt["findings"]["F6"]["verdict"] == receipt["overall"] == "PASS"
+
+
+def test_unreachable_health_forces_unreadable_findings(stub, capsys):
+    stub.update(F1=403, F6=403, F7=403, health_status=503)
+    secure = b'{"error":{"code":"FORBIDDEN"}}'
+    for _, path in EXPECTED_CHECKS[:6]:
+        stub["body_by_path"][path] = secure
+    code, receipt = _cli(stub, capsys)
+    assert code == 3
+    assert receipt["reachability"] == {
+        "method": "GET", "path": "/api/health", "status": 503, "verdict": "UNREADABLE",
+    }
+    assert receipt["source_sha"] is None
+    for name in ("F1", "F6", "F7"):
+        assert all(check["verdict"] == "PASS" and check["edge_blocked"] is False
+                   for check in receipt["findings"][name]["checks"])
+    assert all(finding["verdict"] == "UNREADABLE" for finding in receipt["findings"].values())
+    assert receipt["overall"] == "UNREADABLE"
+
+
+def test_health_non_json_forces_unreadable(stub, capsys):
+    stub["health_body"] = b"ok"
+    code, receipt = _cli(stub, capsys)
+    assert code == 3
+    assert receipt["reachability"]["status"] == 200
+    assert receipt["reachability"]["verdict"] == "UNREADABLE"
+    assert receipt["source_sha"] is None
+    assert all(finding["verdict"] == "UNREADABLE" for finding in receipt["findings"].values())
+    assert receipt["overall"] == "UNREADABLE"
+
+
+def test_leak_still_fails_when_health_is_unreachable(stub, capsys):
+    stub["health_status"] = 503
+    stub["F1"] = 200
+    code, receipt = _cli(stub, capsys)
+    assert code == 1
+    assert receipt["reachability"]["verdict"] == "UNREADABLE"
+    assert receipt["findings"]["F1"]["verdict"] == "FAIL"
+    assert all(check["verdict"] == "FAIL" for check in receipt["findings"]["F1"]["checks"])
+    assert receipt["overall"] == "FAIL"
+
+
+def test_edge_block_body_read_is_bounded(stub, monkeypatch):
+    reads = _record_reads(monkeypatch)
+    stub["F6"] = 403
+    stub["body_by_path"]["/api/projects"] = b"x" * (4 * 1024 * 1024)
+    receipt = _probe(stub)
+    project_reads = [record for record in reads if record["url"] == stub["origin"] + "/api/projects"]
+    assert project_reads
+    assert sum(record["bytes"] for record in project_reads) <= reprobe.EDGE_BODY_BYTES == 512
+    check = receipt["findings"]["F6"]["checks"][0]
+    assert check["status"] == 403
+    assert check["edge_blocked"] is False
+    assert check["verdict"] == "PASS"
+    assert receipt["overall"] == "PASS"
+
+
+def test_unreadable_body_keeps_observed_cors_leak_fail(stub, capsys):
+    stub.update(F1=401, F6=401, F7=401, preflight_status=403, malformed_preflight_chunks=True)
+    stub["acao_by_method"] = {"OPTIONS": "*", "GET": None}
+    for _, path in EXPECTED_CHECKS[:6]:
+        stub["body_by_path"][path] = b'{"error":{"code":"UNAUTHORIZED"}}'
+    code, receipt = _cli(stub, capsys)
+    assert receipt["reachability"]["verdict"] == "PASS"
+    preflight = receipt["findings"]["F17"]["checks"][0]
+    assert preflight["method"] == "OPTIONS" and preflight["status"] == 403
+    assert preflight["acao"] == "*"
+    assert preflight["edge_blocked"] is not True
+    assert preflight["verdict"] == "FAIL"
+    assert receipt["findings"]["F17"]["verdict"] == receipt["overall"] == "FAIL"
+    assert code == 1
