@@ -43,6 +43,7 @@ afterEach(() => {
 
 // `flagValue` undefined means the global is absent.
 async function mountAppRoute(flagValue) {
+  cleanup()
   vi.resetModules()
   if (flagValue === undefined) delete globalThis.__LEAF_FLAGS
   else globalThis.__LEAF_FLAGS = { oneShell: flagValue }
@@ -55,6 +56,7 @@ async function mountAppRoute(flagValue) {
 }
 
 describe('SiteRoot renders the one studio shell', () => {
+  // Cold dynamic imports of the SiteRoot graph after vi.resetModules() can take several seconds on a loaded runner.
   it('SSD1-B row1: a passive decision strip never blocks the Escape eject, an owned one still does', async () => {
     vi.resetModules()
     window.history.pushState({}, '', '/try')
@@ -80,7 +82,7 @@ describe('SiteRoot renders the one studio shell', () => {
       strip.remove()
       navigate.mockRestore()
     }
-  })
+  }, 20_000)
 
   it('absent, 0 and 1 legacy flag values all mount the console INSIDE the one studio shell with its ground', async () => {
     for (const flagValue of [undefined, '0', '1']) {
@@ -97,5 +99,5 @@ describe('SiteRoot renders the one studio shell', () => {
       expect(document.querySelector('.stage-stub'), label).toBeNull()
       cleanup()
     }
-  })
+  }, 20_000)
 })
