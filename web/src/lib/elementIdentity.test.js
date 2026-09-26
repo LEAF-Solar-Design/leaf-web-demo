@@ -3,10 +3,26 @@ import { describe, expect, it } from 'vitest'
 
 import {
   ELEMENT_KINDS, MAX_ELEMENT_ID_CHARS, closestElementIdentity,
-  formatElementId, isValidElementKind, parseElementId,
+  formatElementId, isValidElementKind, parseElementId, elementRefOf,
 } from './elementIdentity.js'
 
 describe('elementIdentity', () => {
+  it('elementRefOf returns a well formed ref and null otherwise', () => {
+    const el = document.createElement('button')
+    el.setAttribute('data-element-ref', '1b582fc4fe99')
+    expect(elementRefOf(el)).toBe('1b582fc4fe99')
+    for (const value of ['1B582FC4FE99', '1b582fc4fe9', 'src/site/X.jsx:Y', '']) {
+      el.setAttribute('data-element-ref', value)
+      expect(elementRefOf(el)).toBeNull()
+    }
+    el.removeAttribute('data-element-ref')
+    expect(elementRefOf(el)).toBeNull()
+    for (const value of [null, {}, 'str', { getAttribute: () => 123 }, { getAttribute() { throw new Error('unreadable') } }]) {
+      expect(elementRefOf(value)).toBeNull()
+    }
+    expect(elementRefOf({ get getAttribute() { throw new Error('unreadable') } })).toBeNull()
+  })
+
   it('freezes the exact kind vocabulary this slice uses', () => {
     expect(ELEMENT_KINDS).toEqual([
       'tool', 'version', 'job', 'family', 'rung', 'turn', 'approval', 'item', 'entity',

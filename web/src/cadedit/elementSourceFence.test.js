@@ -19,6 +19,7 @@ function buildWithMode(mode, fenceRoot, envOverride = {}) {
   const outDir = join(fenceRoot, mode)
   const env = { ...process.env, VITE_CAD_EDIT: '1' }
   delete env.NODE_ENV
+  delete env.LEAF_ELEMENT_REF_STAMP
   // Vite build defaults to production even with --mode development.
   // Keep the dev runtime and its source variable names for the positive control.
   Object.assign(env, envOverride)
@@ -64,6 +65,7 @@ function chunksContaining(chunks, outDir, marker) {
 describe('element source stamp build fence', () => {
   let fenceRoot
   let stagingDir
+  let productionDir
   let stagingChunks
   let productionChunks
 
@@ -72,7 +74,8 @@ describe('element source stamp build fence', () => {
     fenceRoot = mkdtempSync(join(tmpdir(), 'leaf-element-source-fence-'))
     stagingDir = buildWithMode('staging', fenceRoot)
     stagingChunks = emittedJavaScript(stagingDir)
-    productionChunks = emittedJavaScript(buildWithMode('production', fenceRoot))
+    productionDir = buildWithMode('production', fenceRoot)
+    productionChunks = emittedJavaScript(productionDir)
   }, 600_000)
 
   afterAll(() => {
@@ -93,6 +96,29 @@ describe('element source stamp build fence', () => {
 
   it('ships zero source attributes, source paths or site fragments in production', () => {
     for (const marker of MARKERS) expect((allText(productionChunks).match(marker) ?? []).length).toBe(0)
+  })
+
+  it('ships opaque element refs in reachable production chunks', () => {
+    const marker = /["']data-element-ref["']\s*:\s*["']([^"'\\]*)["']/g
+    const values = [...allText(productionChunks).matchAll(marker)].map((match) => match[1])
+    expect(values.length).toBeGreaterThan(0)
+    for (const value of values) expect(value).toMatch(/^[0-9a-f]{12}$/)
+    const hits = chunksContaining(productionChunks, productionDir, marker)
+    expect(hits.length).toBeGreaterThan(0)
+    for (const hit of hits) expect(hit.referencedBy.length).toBeGreaterThan(0)
+  })
+
+  it('production refs equal the hashed staging source stamps', async () => {
+    const { elementRef } = await import('../../vite-plugins/elementSourceStamp.js')
+    const refMarker = /["']data-element-ref["']\s*:\s*["']([^"'\\]*)["']/g
+    const sourceMarker = /["']data-element-source["']\s*:\s*["']([^"'\\]*)["']/g
+    const productionRefs = new Set([...allText(productionChunks).matchAll(refMarker)].map((match) => match[1]))
+    const stagingRefs = new Set([...allText(stagingChunks).matchAll(refMarker)].map((match) => match[1]))
+    const stagingSourceValues = [...allText(stagingChunks).matchAll(sourceMarker)].map((match) => match[1])
+    expect(productionRefs.size).toBeGreaterThan(0)
+    expect(stagingSourceValues.length).toBeGreaterThan(0)
+    expect(productionRefs).toEqual(stagingRefs)
+    expect(stagingRefs).toEqual(new Set(stagingSourceValues.map(elementRef)))
   })
 
   it('ships no development JSX runtime markers in production', () => {
