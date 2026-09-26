@@ -1162,6 +1162,8 @@ def build_suites() -> List[Suite]:
         # a durable replay ledger, so it must not share another broker suite.
         Suite("server-da-callback", "server tests/test_da_callback.py", "pytest",
               SERVER, _py_pytest("tests/test_da_callback.py"), 15),
+        Suite("server-data-lifecycle-matrix", "server tests/test_data_lifecycle_matrix.py", "pytest", SERVER,
+              _py_pytest("tests/test_data_lifecycle_matrix.py"), 11),
         Suite("server-aps-callback-adapter", "server tests/test_aps_callback_adapter.py",
               "pytest", SERVER, _py_pytest("tests/test_aps_callback_adapter.py"), 50),
         # --- modules that were registered in NO suite at all --- #
