@@ -8,6 +8,8 @@ import { track } from '../telemetry.js'
 
 vi.mock('../telemetry.js', () => ({ track: vi.fn() }))
 
+// Fake only the bridge clock and deadlines; keep worker scheduling and performance time real.
+
 const identity = {
   platformTenantId: '11111111-1111-4111-8111-111111111111',
   projectId: '22222222-2222-4222-8222-222222222222',
@@ -175,7 +177,7 @@ describe('Studio bridge diagnostics and telemetry', () => {
   })
 
   it('records expiry and session changes across asynchronous verification', async () => {
-    vi.useFakeTimers()
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] })
     bridge.start()
     await bridge.receive(ready())
     for (const reason of ['lifetime', 'session']) {
@@ -230,7 +232,7 @@ describe('Studio bridge diagnostics and telemetry', () => {
   })
 
   it('records handshake, bind and command timeouts without discarding a late result', async () => {
-    vi.useFakeTimers()
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] })
     bridge.start()
     await vi.advanceTimersByTimeAsync(10_000)
     expect(bridge.state.status).toBe('connecting')
@@ -250,7 +252,7 @@ describe('Studio bridge diagnostics and telemetry', () => {
   })
 
   it('cancels diagnostic timeouts on results, replacement sessions and stop', async () => {
-    vi.useFakeTimers()
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] })
     bridge.start()
     await bridge.receive(unbound())
     await bridge.bindDrawing(identity)
@@ -297,7 +299,7 @@ describe('Studio bridge diagnostics and telemetry', () => {
   })
 
   it('limits timeout telemetry by phase while retaining every local timeout', async () => {
-    vi.useFakeTimers()
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] })
     bridge.start()
     await vi.advanceTimersByTimeAsync(10_000)
     bridge.retryHello()
@@ -613,7 +615,7 @@ describe('Studio AutoCAD host bridge', () => {
   })
 
   it('retains unexpired replay IDs after more messages than the replay capacity', async () => {
-    vi.useFakeTimers()
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] })
     vi.setSystemTime(new Date('2026-09-25T12:00:00.000Z'))
     const capacity = 8
     const diagnostics = createDiagnostics()
@@ -641,7 +643,7 @@ describe('Studio AutoCAD host bridge', () => {
   })
 
   it('rejects new messages at capacity and frees only expired replay IDs', async () => {
-    vi.useFakeTimers()
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] })
     const start = Date.parse('2026-09-25T12:00:00.000Z')
     vi.setSystemTime(start)
     const capacity = 8
@@ -696,7 +698,7 @@ describe('Studio AutoCAD host bridge', () => {
     ['.0000000+00:00', '+00:00'],
     ['.1234567+00:00', '.1234567Z'],
   ])('verifies host timestamps signed as %s and delivered as %s', async (signed, delivered) => {
-    vi.useFakeTimers()
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] })
     vi.setSystemTime(new Date('2026-09-25T12:34:56.500Z'))
     bridge.start()
     await bridge.receive(ready())
@@ -724,7 +726,7 @@ describe('Studio AutoCAD host bridge', () => {
   })
 
   it('rechecks expiry after asynchronous signature verification', async () => {
-    vi.useFakeTimers()
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] })
     bridge.start()
     await bridge.receive(ready())
     let finishVerification
@@ -766,7 +768,7 @@ describe('Studio AutoCAD host bridge', () => {
   )
 
   it('ignores another command ID and resolves unknown after 15 seconds', async () => {
-    vi.useFakeTimers()
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] })
     bridge.start()
     await bridge.receive(ready())
     const { outcome } = await startCommand(bridge, channel, 'panel:A1', 'select')
@@ -782,7 +784,7 @@ describe('Studio AutoCAD host bridge', () => {
   })
 
   it('supersedes pending commands and clears timers on callbacks, new sessions and stop', async () => {
-    vi.useFakeTimers()
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] })
     bridge.start()
     await bridge.receive(ready())
     const first = await startCommand(bridge, channel)
@@ -806,7 +808,7 @@ describe('Studio AutoCAD host bridge', () => {
   })
 
   it('times out even while signing and never sends the command afterward', async () => {
-    vi.useFakeTimers()
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] })
     bridge.start()
     await bridge.receive(ready())
     let finishSigning, signingStarted
@@ -826,7 +828,7 @@ describe('Studio AutoCAD host bridge', () => {
   })
 
   it('retries hello with a fresh timestamp without discarding an existing session', async () => {
-    vi.useFakeTimers()
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] })
     bridge.retryHello()
     expect(channel.postMessage).not.toHaveBeenCalled()
     bridge.start()

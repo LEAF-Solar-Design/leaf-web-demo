@@ -5,7 +5,19 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import DiagnosticsDetails from './DiagnosticsDetails.jsx'
 import { createDiagnostics } from './diagnostics.js'
 
-afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
+const clipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+
+afterEach(() => {
+  cleanup()
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+  if (clipboardDescriptor) Object.defineProperty(navigator, 'clipboard', clipboardDescriptor)
+  else delete navigator.clipboard
+})
+
+function stubClipboard(clipboard) {
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: clipboard })
+}
 
 function openDetails(container) {
   const details = container.querySelector('details')
@@ -34,7 +46,7 @@ describe('connection details', () => {
 
   it('copies the displayed snapshot and announces success', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
-    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    stubClipboard({ writeText })
     const diagnostics = createDiagnostics()
     const { container } = render(<DiagnosticsDetails diagnostics={diagnostics} />)
     openDetails(container)
@@ -44,8 +56,8 @@ describe('connection details', () => {
   })
 
   it.each(['missing', 'rejected'])('selects the text when clipboard access is %s', async (mode) => {
-    vi.stubGlobal('navigator', mode === 'missing' ? {} : {
-      clipboard: { writeText: vi.fn().mockRejectedValue(new Error('Denied')) },
+    stubClipboard(mode === 'missing' ? undefined : {
+      writeText: vi.fn().mockRejectedValue(new Error('Denied')),
     })
     const { container } = render(<DiagnosticsDetails diagnostics={createDiagnostics()} />)
     openDetails(container)
