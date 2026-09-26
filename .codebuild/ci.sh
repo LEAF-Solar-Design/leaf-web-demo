@@ -640,12 +640,17 @@ if observed - expected:
     completeness_reasons.append(f"observed_suites_extra:{len(observed - expected)}")
 if len(first) != len(expected):
     completeness_reasons.append(f"first_attempt_rows_mismatch:{len(first)}/{len(expected)}")
+def suite_reason(reason, suite_ids):
+    text = f"{reason}:{len(suite_ids)}:" + ",".join(sorted(suite_ids))
+    return text if len(text) <= 400 else text[:396] + ",..."
+
 incomplete_reports = {row["suite_id"] for row in first if row.get("test_report_complete") is not True}
 if incomplete_reports:
-    completeness_reasons.append(f"test_report_incomplete:{len(incomplete_reports)}")
-nonfinal = sum(row.get("status") not in ("PASS", "FAIL") and not skipped_by_gate(row) for row in first)
+    completeness_reasons.append(suite_reason("test_report_incomplete", incomplete_reports))
+nonfinal = {row["suite_id"] for row in first
+            if row.get("status") not in ("PASS", "FAIL") and not skipped_by_gate(row)}
 if nonfinal:
-    completeness_reasons.append(f"suite_status_not_final:{nonfinal}")
+    completeness_reasons.append(suite_reason("suite_status_not_final", nonfinal))
 if detail.get("execution_mode") != "full":
     completeness_reasons.append("execution_mode:" + str(detail.get("execution_mode")))
 rejected_shards = 0
@@ -664,7 +669,7 @@ if sys.argv[3] == "1":
         encoded = quote(sid, safe="").replace(".", "%2E") or "%00"
         directory = Path("/tmp/gate-logs/test-reports") / encoded
         collections = []
-        for pattern in ("*/collection-*.json", "*/completion-*.json"):
+        for pattern in ("*/collection-*.json", "*/completion-*.json", "*/tests-*.json"):
             for path in sorted(directory.glob(pattern)):
                 if sid in expected:
                     destination = reports / encoded / path.parent.name / path.name
@@ -771,7 +776,7 @@ if [[ "$tracing_ready" == 1 ]]; then
       report_members+=(reports)
       while IFS= read -r -d '' member; do
         report_members+=("${member#"$selection_dir/"}")
-      done < <(find "$selection_dir/reports" -type f \( -name 'collection-*.json' -o -name 'completion-*.json' \) -print0 | sort -z)
+      done < <(find "$selection_dir/reports" -type f \( -name 'collection-*.json' -o -name 'completion-*.json' -o -name 'tests-*.json' \) -print0 | sort -z)
     fi
     tar -czf "$archive" --no-recursion -C /tmp/gate-logs readsets -C "$selection_dir" "${selection_members[@]}" "${report_members[@]}" -C /tmp/gate-logs "${shard_members[@]}" "${attempt_members[@]}" 2>/dev/null || return 1
     readsets_archive_members="readsets ${selection_members[*]} ${report_members[*]} ${attempt_members[*]}"

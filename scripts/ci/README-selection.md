@@ -100,8 +100,8 @@ are excluded from the combined attempt stream and completeness calculations.
 The detail document, `LEAF_SELECTION_FINAL`, and `LEAF_SHADOW` carry sorted
 `completeness_reasons`, naming each failed predicate and its count where
 applicable, or an empty list for a complete full run. The archive includes
-explicit `reports/<encoded-suite>/<attempt>/collection-*.json` and
-`completion-*.json` members for accepted suites, and `readsets_archive_members`
+explicit `reports/<encoded-suite>/<attempt>/collection-*.json`,
+`completion-*.json` and `tests-*.json` members for accepted suites, and `readsets_archive_members`
 lists `reports`. The manifest's `collection_ids_by_suite` supplies sorted,
 non-empty `<suite_id>::<nodeid>` lists from collection documents when the
 catalog has no test IDs. Suites without collected IDs are omitted. All
@@ -213,6 +213,8 @@ caused by the suite's own unmet `db_gated` or `opt_in_env` rule records
 counts these as final and lists their IDs in `suites_skipped_by_gate`. Other
 SKIPs remain nonfinal. Suite completeness does not imply test-ID or read-set
 coverage, and the existing completeness-reason vocabulary is unchanged.
+The `test_report_incomplete:<count>:<ids>` and `suite_status_not_final:<count>:<ids>` reasons name sorted, comma-separated suite IDs, with each reason capped at 400 characters and ending in `,...` when truncated.
+Vitest documents carry sorted `incomplete_reasons`, copied to attempt records as `test_report_reasons`; skipped and todo tasks need no result, and `complete` is true only when no reasons remain.
 
 Every `--leaf-*` plugin option is passed as one `--leaf-x=value` token, for
 example `--leaf-output=DIR`. An xdist worker rebuilds its config from the raw
