@@ -125,6 +125,48 @@ def test_oversized_non_catalog_field_fails_loudly(monkeypatch):
         _build(monkeypatch, _tools(3), classifier_hint=hint)
 
 
+@pytest.mark.parametrize("wraps", [32, 31])
+def test_packet_drops_an_over_deep_classifier_hint(monkeypatch, wraps):
+    hint = {"leaf": 0}
+    for _ in range(wraps):
+        hint = {"nested": hint}
+    baseline = _build(monkeypatch, _tools(3))
+    packet = _build(monkeypatch, _tools(3), classifier_hint=hint)
+    assert packet["classifier_hint"] is None
+    assert packet == baseline
+    assert context_packet._container_depth(packet) <= 32
+
+
+def test_packet_keeps_a_classifier_hint_at_the_depth_bound(monkeypatch):
+    hint = {"leaf": 0}
+    for _ in range(30):
+        hint = {"nested": hint}
+    packet = _build(monkeypatch, _tools(3), classifier_hint=hint)
+    assert packet["classifier_hint"] is hint
+    assert context_packet._container_depth(packet) == 32
+
+
+def test_packet_refuses_a_non_hint_field_past_the_depth_bound(monkeypatch):
+    drawing = {"leaf": 0}
+    for _ in range(31):
+        drawing = {"nested": drawing}
+    monkeypatch.setattr(context_packet, "_drawing_sections",
+                        lambda *args: {"drawing": drawing})
+    with pytest.raises(ValueError, match="32"):
+        _build(monkeypatch, _tools(3))
+
+
+def test_container_depth_follows_the_harness_rule():
+    assert context_packet._container_depth(1) == 0
+    assert context_packet._container_depth({}) == 1
+    assert context_packet._container_depth([[1]]) == 2
+    assert context_packet._container_depth({"a": {"b": 1}, "c": [1]}) == 2
+    nested = []
+    for _ in range(3000):
+        nested = [nested]
+    assert context_packet._container_depth(nested) == 3001
+
+
 def test_classifier_hint_passthrough(monkeypatch):
     hint = {"lane": "run", "tool": "tool-001", "confidence": 0.62, "rationale": "name match"}
     p = _build(monkeypatch, _tools(3), classifier_hint=hint)
@@ -193,7 +235,8 @@ def test_build_packet_grant_timeout_is_forwarded(monkeypatch):
         assert kwargs["stream"] is True
         timeout = kwargs["timeout"]
         assert isinstance(timeout, tuple) and len(timeout) == 2
-        assert all(0 < part <= grant_timeout_s for part in timeout)
+        assert timeout[0] == timeout[1]
+        assert all(grant_timeout_s - 0.5 < part <= grant_timeout_s for part in timeout)
 
 
 def test_grant_projection_never_carries_token(monkeypatch):

@@ -52,6 +52,8 @@ LAYERS_CAP = 20  # top-N layers by entity count, then {"more": N} (catalog patte
 # cap. Tightening is a coordinated cross-lane change (the harness prompt budget
 # is sized against this constant); tracked as a contract-vs-code discrepancy.
 MAX_PACKET_CHARS = 8000
+# Mirrors the container depth rule in harness/src/server.ts.
+MAX_CONTEXT_PACKET_DEPTH = 32
 # One-liner descriptions only — a long docstring must not eat the packet budget.
 DESCRIPTION_CAP = 140
 
@@ -270,6 +272,21 @@ def _serialize(packet: Dict[str, Any]) -> str:
     return json.dumps(packet, separators=(",", ":"), default=str)
 
 
+def _container_depth(value: Any) -> int:
+    """Maximum JSON object/array depth; scalar roots have depth zero."""
+    maximum = 0
+    stack = [(value, 1)]
+    while stack:
+        current, depth = stack.pop()
+        if not isinstance(current, (dict, list)):
+            continue
+        maximum = max(maximum, depth)
+        children = current.values() if isinstance(current, dict) else current
+        stack.extend((child, depth + 1) for child in children
+                     if isinstance(child, (dict, list)))
+    return maximum
+
+
 def build_packet(tenant_id: Any, drawing_id: str,
                  classifier_hint: Optional[Dict[str, Any]] = None, *,
                  entitlements_override: Optional[Dict[str, bool]] = None,
@@ -295,9 +312,18 @@ def build_packet(tenant_id: Any, drawing_id: str,
         "entitlements": capabilities,
         "active_jobs": _active_jobs(str(tenant_id)),
         "grant": _grant_status(str(tenant_id), grant_timeout_s=grant_timeout_s),
-        "classifier_hint": classifier_hint if classifier_hint else None,
+        "classifier_hint": classifier_hint,
     }
     packet.update(_drawing_sections(str(tenant_id), drawing_id))
+
+    if _container_depth(packet) > MAX_CONTEXT_PACKET_DEPTH:
+        packet["classifier_hint"] = None
+        depth = _container_depth(packet)
+        if depth > MAX_CONTEXT_PACKET_DEPTH:
+            raise ValueError(
+                f"ContextPacket container depth is {depth}, exceeding the bound "
+                f"of {MAX_CONTEXT_PACKET_DEPTH}."
+            )
 
     # HARD CAP: truncate the catalog FIRST (the only unbounded field), then assert.
     keep = min(len(entries), CATALOG_CAP)
