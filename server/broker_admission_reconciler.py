@@ -6,13 +6,14 @@ from collections import Counter
 from collections.abc import Mapping
 import json
 import math
+from numbers import Integral, Number
 import os
 from pathlib import Path
 import re
 import sys
 import threading
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from urllib.parse import quote
 
 import requests
@@ -23,6 +24,17 @@ import broker
 DEFAULT_MIN_AGE_S = 3600
 MAX_APS_CHECKS_PER_TICK = 20
 APS_STATUS_TIMEOUT_S = 10
+ARM_ENV = "LEAF_BROKER_RECONCILER"
+INTERVAL_ENV = "LEAF_BROKER_RECONCILER_INTERVAL_S"
+MAX_APS_CHECKS_ENV = "LEAF_BROKER_RECONCILER_MAX_APS_CHECKS"
+DEFAULT_INTERVAL_S = 300
+MIN_INTERVAL_S = 60
+MAX_INTERVAL_S = 3600
+STOP_JOIN_TIMEOUT_S = 15
+THREAD_NAME = "leaf-broker-reconciler"
+LIST_LIMIT = 100
+_ARM_LOCK = threading.Lock()
+_RUNNING = None
 _MAX_SIDECAR_BYTES = 16 * 1024 * 1024
 _JOB_EVENT = re.compile(r"^(?P<job_id>[0-9a-f-]{36}):broker-(run|fallback)$")
 _TERMINAL_FAILURES = frozenset({
@@ -87,9 +99,132 @@ class ApsWorkitemStatusClient:
             response.close()
 
 
+def _emit_line(text: str) -> None:
+    print("[leaf-broker-reconciler] " + text, file=sys.stderr, flush=True)
+
+
+def _json_record(record, *, sort_keys=False):
+    def normalize(value):
+        if isinstance(value, dict):
+            return {key: normalize(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [normalize(item) for item in value]
+        if isinstance(value, Number) and not isinstance(value, bool):
+            if isinstance(value, Integral):
+                return int(value)
+            number = float(value)
+            return number if math.isfinite(number) else None
+        return value
+
+    return json.dumps(normalize(record), sort_keys=sort_keys, allow_nan=False)
+
+
+def _emit_action(kind, record, *, sort_keys=False):
+    # A bad action record must not discard other actions from the same tick.
+    try:
+        _emit_line(kind + " " + _json_record(record, sort_keys=sort_keys))
+    except Exception as exc:
+        _emit_line("TICK_FAILED " + _json_record(
+            {"error": type(exc).__name__}, sort_keys=True))
+
+
 def _print_alarm(record):
-    print("[leaf-broker-reconciler] ALARM " + json.dumps(record),
-          file=sys.stderr, flush=True)
+    _emit_action("ALARM", record)
+
+
+def load_config(environ: Mapping) -> Optional[Dict[str, int]]:
+    """Parse only the supported arming flag and bounded integer knobs."""
+    arm = str(environ.get(ARM_ENV, "")).strip()
+    if arm in ("", "0"):
+        return None
+    if arm != "1":
+        raise RuntimeError("LEAF_BROKER_RECONCILER must be unset, '0' or '1'")
+
+    def bounded_integer(name, default, minimum, maximum):
+        raw = str(environ.get(name, "")).strip()
+        if not raw:
+            return default
+        if re.fullmatch(r"[0-9]{1,6}", raw):
+            value = int(raw)
+            if minimum <= value <= maximum:
+                return value
+        raise RuntimeError(
+            f"{name} must be an integer from {minimum} to {maximum}")
+
+    return {
+        "interval_s": bounded_integer(
+            INTERVAL_ENV, DEFAULT_INTERVAL_S, MIN_INTERVAL_S, MAX_INTERVAL_S),
+        "max_aps_checks": bounded_integer(
+            MAX_APS_CHECKS_ENV, MAX_APS_CHECKS_PER_TICK, 1, MAX_APS_CHECKS_PER_TICK),
+    }
+
+
+class ReconcilerHandle:
+    def __init__(self, thread, stop_event):
+        self.thread = thread
+        self.stop_event = stop_event
+
+    def stop(self, timeout=STOP_JOIN_TIMEOUT_S) -> bool:
+        self.stop_event.set()
+        self.thread.join(timeout)
+        if self.thread.is_alive():
+            _emit_line("STOP_TIMEOUT " + _json_record(
+                {"join_timeout_s": timeout}, sort_keys=True))
+            return False
+        return True
+
+
+def start_background(environ=None, *, aps_client=None) -> Optional[ReconcilerHandle]:
+    config = load_config(os.environ if environ is None else environ)
+    if config is None:
+        return None
+    if broker._broker_store_mode() != "postgres":
+        raise RuntimeError(
+            "LEAF_BROKER_RECONCILER=1 requires LEAF_BROKER_STORE=postgres")
+    global _RUNNING
+    with _ARM_LOCK:
+        if _RUNNING is not None and _RUNNING.is_alive():
+            _emit_line('NOT_ARMED {"reason": "already_running"}')
+            return None
+        stop_event = threading.Event()
+        client = aps_client if aps_client is not None else ApsWorkitemStatusClient()
+        thread = threading.Thread(
+            target=_serve, name=THREAD_NAME, args=(stop_event,),
+            kwargs={"interval_s": config["interval_s"],
+                    "max_aps_checks": config["max_aps_checks"], "aps_client": client},
+            daemon=True,
+        )
+        _RUNNING = thread
+        _emit_line("ARMED " + _json_record({
+            "alarm_only": os.environ.get("LEAF_BROKER_RECONCILER_ALARM_ONLY") == "1",
+            "interval_s": config["interval_s"], "list_limit": LIST_LIMIT,
+            "max_aps_checks": config["max_aps_checks"], "min_age_s": DEFAULT_MIN_AGE_S,
+        }, sort_keys=True))
+        thread.start()
+        return ReconcilerHandle(thread, stop_event)
+
+
+def _serve(stop_event, *, interval_s, max_aps_checks, aps_client) -> None:
+    try:
+        while not stop_event.is_set():
+            try:
+                summary = reconcile_once(
+                    aps_client=aps_client, max_aps_checks=max_aps_checks)
+                for item in summary.get("resolved", []):
+                    _emit_action("RESOLVED", item, sort_keys=True)
+                _emit_line("TICK " + _json_record({
+                    "alarmed": len(summary.get("alarmed", [])),
+                    "checked": summary.get("checked", 0),
+                    "resolved": len(summary.get("resolved", [])),
+                    "skipped_young": summary.get("skipped_young", 0),
+                }, sort_keys=True))
+            except Exception as exc:
+                _emit_line("TICK_FAILED " + _json_record(
+                    {"error": type(exc).__name__}, sort_keys=True))
+            if stop_event.wait(interval_s):
+                break
+    finally:
+        _emit_line("STOPPED " + _json_record({"thread": THREAD_NAME}, sort_keys=True))
 
 
 def reconcile_once(*, aps_client, correlation=None, alarm=None, now=None,
@@ -257,7 +392,7 @@ def main():
     args = parser.parse_args()
     client = ApsWorkitemStatusClient()
     if args.once:
-        print(json.dumps(reconcile_once(aps_client=client)))
+        print(_json_record(reconcile_once(aps_client=client)))
     else:
         if not math.isfinite(args.interval_s) or args.interval_s <= 0:
             parser.error("--interval-s must be finite and positive")
