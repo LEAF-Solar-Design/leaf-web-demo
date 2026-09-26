@@ -21,9 +21,17 @@ existing result-envelope keys unchanged.
 | `output_inspection` | Download, parse, and effect verification of the intake produced by reopening the saved DWG inside the mutation WorkItem | Server monotonic clock |
 | `version_write` | Immutable drawing version write | Server monotonic clock |
 | `publish` | Intake-cache publication and read-back proof | Server monotonic clock |
-| `client_delivery` | Terminal result delivery to the browser | Unavailable until the job-status route records first delivery |
+| `client_delivery` | first terminal job-status read minus `finished_at`, from `client_delivered_at` in the job provenance | App wall clock |
 
 Every unavailable measurement is `null` and is named in `unavailable_spans`.
 Consumers must not treat a missing provider measurement as zero. `total_ms`
 remains the existing server execution duration. `provider_accounted_ms` covers
 the measured APS portion from local submit through APS output upload.
+
+`GET /api/jobs/{job_id}` stamps the first authorized terminal CAD result read.
+`POST /api/run?wait=1` also stamps when it returns a completed CAD result.
+The timestamp is first-writer-wins in both job stores. `GET /api/jobs` lists
+history without stamping, and `GET /api/jobs/{id}/stream` carries status without
+a result and does not stamp. A negative difference caused by clock skew between
+the finishing host and the app leaves `client_delivery` null. `image_pull`
+remains unavailable.

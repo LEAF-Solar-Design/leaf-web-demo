@@ -229,6 +229,28 @@ class TerminalCallback(BaseModel):
     provenance: Dict[str, Any]
 
 
+def _with_client_delivery(rec):
+    """Stamp terminal CAD result delivery and enrich only the served copy."""
+    provenance = rec.get("provenance")
+    if (rec.get("status") not in jobs.TERMINAL
+            or not isinstance(provenance, dict)
+            or not isinstance(provenance.get("cad_timing"), dict)):
+        return rec
+    stamp = jobs.record_first_delivery(rec["job_id"])
+    served = dict(rec)
+    served["provenance"] = dict(provenance)
+    served["provenance"]["cad_timing"] = write_loop.apply_client_delivery(
+        provenance["cad_timing"], rec.get("finished_at"), stamp)
+    result = rec.get("result")
+    execution = result.get("execution_provenance") if isinstance(result, dict) else None
+    if isinstance(execution, dict) and "cad_timing" in execution:
+        served["result"] = dict(result)
+        served["result"]["execution_provenance"] = dict(execution)
+        served["result"]["execution_provenance"]["cad_timing"] = write_loop.apply_client_delivery(
+            execution["cad_timing"], rec.get("finished_at"), stamp)
+    return served
+
+
 def _record_body(rec: Dict[str, Any]) -> Dict[str, Any]:
     """Job record -> response body. Top-level `error` is the JOB's error (null
     unless failed); degraded_mode comes from the result envelope when present.
@@ -764,6 +786,7 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
         if rec is None:
             return error_response(ErrorCode.INTERNAL, "job record vanished", retryable=False)
         if rec["status"] == "complete":
+            rec = _with_client_delivery(rec)
             return JSONResponse(status_code=200, content=rec["result"])
         env = jobs.failed_envelope_from(rec)
         code = env["error"]["error_code"]
@@ -793,7 +816,7 @@ def get_job(job_id: str, tenant=Depends(deps.require_tenant)):
         return error_response(ErrorCode.BAD_PARAMS, f"unknown job_id: {job_id}",
                               retryable=False, status_code=404)
     denied = _access_error(rec, tenant, job_id)
-    return denied if denied is not None else _record_body(rec)
+    return denied if denied is not None else _record_body(_with_client_delivery(rec))
 
 
 @router.post("/internal/jobs/{job_id}/callback")

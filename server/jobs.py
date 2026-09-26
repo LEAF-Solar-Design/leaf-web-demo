@@ -831,6 +831,38 @@ def list_jobs(tenant_id: Optional[str] = None, limit: int = 20) -> List[Dict[str
 
 TERMINAL = ("complete", "failed")
 
+
+def record_first_delivery(job_id: str, now: Optional[float] = None) -> Optional[float]:
+    """Persist the first terminal result delivery without replacing provenance."""
+    now = time.time() if now is None else now
+    if job_store_mode() == "postgres":
+        return _pg_store.record_first_delivery(job_id, now)
+    with _lock:
+        conn = _db()
+        row = conn.execute(
+            "SELECT provenance_json FROM jobs "
+            "WHERE job_id = ? AND status IN ('complete','failed')", (job_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        original = row["provenance_json"]
+        provenance = json.loads(original) if original else {}
+        if "client_delivered_at" not in provenance:
+            provenance["client_delivered_at"] = now
+            conn.execute(
+                "UPDATE jobs SET provenance_json = ? "
+                "WHERE job_id = ? AND status IN ('complete','failed') AND provenance_json IS ?",
+                (json.dumps(provenance), job_id, original),
+            )
+            conn.commit()
+        row = conn.execute(
+            "SELECT provenance_json FROM jobs "
+            "WHERE job_id = ? AND status IN ('complete','failed')", (job_id,),
+        ).fetchone()
+        return (json.loads(row["provenance_json"] or "{}").get("client_delivered_at")
+                if row is not None else None)
+
+
 # progress sentinel: an in-flight job whose owning tab/session was closed. The
 # orphan reaper fails such jobs on its next sweep (tab-close -> reap seam).
 CLOSED_PROGRESS = "closed"
