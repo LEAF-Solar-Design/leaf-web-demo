@@ -273,6 +273,43 @@ it('usage emitters row6 a palette pick of an action row posts exactly one palett
   expect(wire).not.toContain('tool:fit')
 })
 
+it('usage emitters row8 a context-menu action on a stamped element adds its opaque element_ref', () => {
+  const element = document.createElement('button')
+  element.setAttribute('data-element-id', 'tool:fit')
+  element.setAttribute('data-element-ref', '1b582fc4fe99')
+  const onFit = vi.fn(() => 'fitted')
+  const rows = rowsForIdentity({ kind: 'tool', id: 'fit', element }, { hasDrawing: true, onFit })
+  expect(rows).toHaveLength(1)
+  expect(rows[0].disabled).toBe(false)
+  rows[0].onSelect()
+  flushNow()
+  expect(postedEvents('context_menu.action')).toHaveLength(0)
+  setUsageConsent(true)
+  expect(rows[0].onSelect()).toBe('fitted')
+  expect(onFit).toHaveBeenCalledTimes(2)
+  flushNow()
+  expectEvent('context_menu.action', { action_id: 'fit', element_kind: 'tool', element_ref: '1b582fc4fe99' })
+})
+
+it('usage emitters row9 a malformed ref on the element is dropped and nothing path-shaped posts', () => {
+  setUsageConsent(true)
+  const element = document.createElement('button')
+  element.setAttribute('data-element-id', 'tool:fit')
+  element.setAttribute('data-element-ref', 'src/site/X.jsx:Y')
+  const onFit = vi.fn(() => 'fitted')
+  const rows = rowsForIdentity({ kind: 'tool', id: 'fit', element }, { hasDrawing: true, onFit })
+  expect(rows).toHaveLength(1)
+  expect(rows[0].disabled).toBe(false)
+  expect(rows[0].onSelect()).toBe('fitted')
+  expect(onFit).toHaveBeenCalledTimes(1)
+  flushNow()
+  expectEvent('context_menu.action', { action_id: 'fit', element_kind: 'tool' })
+  const wire = JSON.stringify(postedBodies())
+  expect(wire).not.toContain('src/site')
+  expect(wire).not.toContain('.jsx')
+  expect(wire).not.toContain('tool:fit')
+})
+
 it('usage emitters row7 a published tool in the palette never sends its name', async () => {
   setUsageConsent(true)
   const name = 'private_customer_roof'

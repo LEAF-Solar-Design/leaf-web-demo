@@ -352,7 +352,7 @@ C-2 (this change):
 |---|---|---|
 | `palette.pick` | `PromptBox.runPaletteRow`, after the disabled-row guard | `scope` (act/find), `row_kind`, `query_hash` (`digest(value.trim())`), plus `action_id` (`row.id`) for action rows or `row_hash` (`digest(row.id)`) for other rows |
 | `find.query` | PromptBox find-scope search effect, immediately before each debounced `searchIndex` request | `query_hash` (`digest(q)`, where `q` is the trimmed query) |
-| `context_menu.action` | `ElementContextMenu.rowsForIdentity`, the registry row's `onSelect` | `action_id` (`action.id`), `element_kind` (`identity.kind`) |
+| `context_menu.action` | `ElementContextMenu.rowsForIdentity`, the registry row's `onSelect` | `action_id` (`action.id`), `element_kind` (`identity.kind`), plus `element_ref` (the element's opaque `data-element-ref`, twelve lowercase hex; resolve with `web/scripts/resolve_element_ref.mjs` at the served `source_sha`) when the element carries a well formed one |
 
 Only the pre-auth allowlist (`gate.choice`, `site.demo_viewed`,
 `tour.started`, `auth.completed`, `client.exception`) is accepted

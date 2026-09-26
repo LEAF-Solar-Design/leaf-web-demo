@@ -86,6 +86,17 @@ export function parseElementId(value) {
   return { kind, id }
 }
 
+/** Read an opaque build ref without throwing on absent or malformed input. */
+export function elementRefOf(el) {
+  try {
+    if (!el || typeof el.getAttribute !== 'function') return null
+    const value = el.getAttribute('data-element-ref')
+    return typeof value === 'string' && /^[0-9a-f]{12}$/.test(value) ? value : null
+  } catch {
+    return null
+  }
+}
+
 /**
  * The nearest ancestor (inclusive) carrying a well-formed `data-element-id`,
  * starting from `target`. Returns `null` on anything that is not a real

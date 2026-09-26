@@ -52,7 +52,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import * as RadixContextMenu from '@radix-ui/react-context-menu'
 
 import { accessibleName, byId, forCluster, forGroup } from '../lib/actionRegistry.js'
-import { closestElementIdentity } from '../lib/elementIdentity.js'
+import { closestElementIdentity, elementRefOf } from '../lib/elementIdentity.js'
 import { actionRow } from '../lib/palette.js'
 import { ensureSession, postMessage } from '../converse.js'
 import { isSecretRefused } from '../lib/secretGuardTransport.js'
@@ -133,6 +133,7 @@ export function actionsForKind(kind, id) {
 export function rowsForIdentity(identity, ctx = {}) {
   if (!identity) return []
   const actions = actionsForKind(identity.kind, identity.id)
+  const elementRef = elementRefOf(identity.element)
   const shaped = actions.map((action) => {
     const reason = action.gated ? action.when(ctx) : ''
     return {
@@ -142,7 +143,7 @@ export function rowsForIdentity(identity, ctx = {}) {
       kbd: action.kbd,
       disabled: !!reason,
       reason,
-      onSelect: () => { trackUsage('context_menu.action', { action_id: action.id, element_kind: identity.kind }); return action.run(ctx) },
+      onSelect: () => { trackUsage('context_menu.action', { action_id: action.id, element_kind: identity.kind, ...(elementRef ? { element_ref: elementRef } : {}) }); return action.run(ctx) },
     }
   })
   return shaped.filter((action) => typeof action.id === 'string').map(actionRow)

@@ -8,6 +8,14 @@ import elementSourceStamp from './vite-plugins/elementSourceStamp.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 
+// LEAF_ELEMENT_REF_STAMP covers host-side builds only; the Dockerfile image does not pass it.
+function elementRefEnabled(env = process.env) {
+  const raw = env.LEAF_ELEMENT_REF_STAMP
+  if (raw === undefined || raw === '' || raw === '1') return true
+  if (raw === '0') return false
+  throw new Error('LEAF_ELEMENT_REF_STAMP must be 0 or 1, got ' + JSON.stringify(String(raw).slice(0, 32)))
+}
+
 // Card F-3: serve the compiled CAD engine to the dev server at /engine/*.
 // The engine worker (spawned from the vendored boundary path) loads
 // /engine/engine.js + /engine/engine_bg.wasm at runtime; in production those
@@ -65,8 +73,11 @@ function buildHash() {
 // Lane C frontend. Dev server on 5175 so it never collides with the
 // Lane D backend (8130). API base + mock mode are controlled via env
 // (see src/api.js): VITE_MOCK=1 (default) demos with no backend.
-export default defineConfig(({ mode }) => ({
-  plugins: [react(), cadEngineDevServer(), ...(mode !== 'production' ? [elementSourceStamp({ root: HERE })] : [])],
+export default defineConfig(({ mode }) => {
+  const source = mode !== 'production'
+  const ref = elementRefEnabled()
+  return {
+  plugins: [react(), cadEngineDevServer(), ...(source || ref ? [elementSourceStamp({ root: HERE, source, ref })] : [])],
   define: {
     __BUILD_HASH__: JSON.stringify(buildHash()),
   },
@@ -93,4 +104,5 @@ export default defineConfig(({ mode }) => ({
       },
     },
   },
-}))
+  }
+})
