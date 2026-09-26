@@ -86,19 +86,45 @@ block is dropped at load time, in any policy file.
 `org_admin` / `org_member` are reserved empty presets for the
 org-configuration phase — assigning them today grants nothing extra.
 
-## Auth0 dashboard deploy (manual, like every Action change)
+## Auth0 Action drift check and confirmed deploy
 
-Editing the Action files on disk changes nothing live. Re-paste/redeploy:
+Use `scripts/deploy_auth0_actions.py` to compare the two tenant-claim Actions
+with their deployed versions, then deploy only confirmed drift. Credentials
+come from `LEAF_AUTH0_ACTIONS_CLIENT_ID` and `LEAF_AUTH0_ACTIONS_CLIENT_SECRET`
+in the process environment. Never put credential values in command arguments.
+Check mode needs `read:actions read:triggers`. Deploy mode also needs
+`update:actions create:actions`; Auth0 requires `create:actions` to deploy an
+existing Action. The operator mints that deploy credential. Creating credentials
+and wiring this check into CI are separate operator steps.
 
-1. Actions → Library → the Post-Login action ←
-   `server/auth0-actions/post-login-add-tenant-claim.js` → Deploy (stays in
-   the Login flow).
-2. Actions → the credentials-exchange action ←
-   `server/auth0-actions/credentials-exchange-add-tenant-claim.js` → Deploy.
-3. Verify locally first: `node post-login-add-tenant-claim.js` (dry-run
-   cases), `node post-login-add-tenant-claim.test.js`, and
-   `node credentials-exchange-add-tenant-claim.test.js` (both must print
-   "tests passed").
+Verify locally first from `server/auth0-actions/`: run
+`node post-login-add-tenant-claim.js` (dry-run cases),
+`node post-login-add-tenant-claim.test.js`, and
+`node credentials-exchange-add-tenant-claim.test.js` (both tests must print
+"tests passed"). Then run from the repo root, replacing the example host with
+the intended Auth0 tenant host:
+
+```text
+python scripts/deploy_auth0_actions.py --check --domain your-tenant.us.auth0.com
+python scripts/deploy_auth0_actions.py --deploy --domain your-tenant.us.auth0.com --confirm DIGEST
+```
+
+Check is the default mode. It exits 0 for a match, 1 for drift or a missing
+Action, and 2 for an error. Copy the `plan_digest` from the check output in
+place of `DIGEST` after reviewing the intended changes. Deploy recomputes the
+plan and refuses a changed digest before any write. It updates only drifting
+Actions, waits for each draft to build, and reads back each new deployed version.
+The build wait polls once per second under a single 60-second deadline. A failed
+build or an expired deadline exits 2 with the Action name and last status, without
+deploying that draft. A readback mismatch exits 1; a failed operation or an
+unobserved deployment exits 2.
+
+If a target reports `missing`, check its live Action name and trigger binding.
+The live dashboard name may differ from the file stem in `TARGETS`. Rename the
+intended live Action to match, or update `TARGETS` to its verified name, then
+rerun the check. The script does not create Actions or change trigger bindings.
+It never deploys `server/auth0-actions/pre-user-registration-selfserve.js`,
+which is PROPOSED and relaxes the live signup gate.
 
 Tokens minted before the redeploy simply lack the roles claim → no roles →
 tier baseline (safe).
