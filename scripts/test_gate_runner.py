@@ -610,7 +610,7 @@ def test_test_gate_workflow_tree_identity_reuse_shape():
     shards_at = workflow.index("\n  shards:\n")
     gate_at = workflow.index("\n  gate:\n")
     assert probe_at < shards_at < gate_at
-    probe_block = workflow[probe_at:shards_at]
+    probe_block = workflow[probe_at:workflow.index("\n  s3-proof:\n")]
     assert "continue-on-error: true" in probe_block
     # Provenance comes from artifact metadata, never from the file: same-repo
     # origin and the gate-workflow allowlist are both checked in the probe.
@@ -625,13 +625,13 @@ def test_test_gate_workflow_tree_identity_reuse_shape():
     # Shards skip ONLY on a verified reuse; a skipped/failed probe falls
     # through to the full gate.
     shards_block = workflow[shards_at:gate_at]
-    assert "needs: probe" in shards_block
-    assert "if: ${{ !cancelled() && needs.probe.outputs.reuse != 'true' }}" \
+    assert "needs: [probe, s3-proof]" in shards_block
+    assert "if: ${{ !cancelled() && needs.probe.outputs.reuse != 'true' && needs.s3-proof.outputs.reuse != 'true' }}" \
         in shards_block
     # Fan-in: reuse path re-verifies the proof against its own checkout and
     # requires the shards to have been SKIPPED, not failed.
     gate_block = workflow[gate_at:]
-    assert "needs: [probe, shards]" in gate_block
+    assert "needs: [probe, s3-proof, shards]" in gate_block
     assert "--verify-gate-proof" in gate_block
     assert "--expect-tree" in gate_block
     assert 'test "$SHARD_JOB_RESULT" = "skipped"' in gate_block
@@ -647,6 +647,91 @@ def test_test_gate_workflow_tree_identity_reuse_shape():
     assert "value: ${{ jobs.gate.outputs.proven_tree }}" in workflow
     # The probe and fan-in read cross-run artifacts through the Actions API.
     assert "actions: read" in workflow
+
+
+def _s3_proof_job():
+    workflow = (REPO / ".github/workflows/test-gate.yml").read_text(encoding="utf-8")
+    return workflow.split("\n  s3-proof:\n", 1)[1].split("\n  shards:\n", 1)[0]
+
+
+def test_s3_proof_workflow_boundary_and_skip_shape():
+    workflow = (REPO / ".github/workflows/test-gate.yml").read_text(encoding="utf-8")
+    job = _s3_proof_job()
+    header = job.split("    steps:\n", 1)[0]
+    trusted = ("github.ref == 'refs/heads/main' && (inputs.ref == '' || inputs.ref == github.sha) "
+               "&& (github.event_name == 'push' || github.event_name == 'workflow_dispatch')")
+    assert "if: ${{ !cancelled() && needs.probe.outputs.reuse != 'true' && " + trusted + " }}" in header
+    assert "continue-on-error: true" in header
+    assert "needs: probe" in header
+    assert "ref: ${{ github.sha }}" in job
+    assert "role-to-assume: ${{ secrets.AWS_ECR_PUSH_ROLE }}" in job
+    assert "aws-actions/configure-aws-credentials@v6.1.0" in job
+    assert "aws-region: us-east-1" in job
+    assert '"aws", "s3api", "get-object"' in job
+    assert '"--key", f"mq/leaf-web-demo/selection/gate-proof/{tree}.json"' in job
+    assert "list-objects" not in job
+    assert 'metadata.get("tree") != tree' in job
+    assert 'metadata.get("producer-project") != "leaf-ci-leaf-web-demo"' in job
+    assert '"--verify-gate-proof", str(path)' in job
+    assert '"--expect-tree", tree' in job
+    both_miss = "needs.probe.outputs.reuse != 'true' && needs.s3-proof.outputs.reuse != 'true'"
+    shards = workflow.split("\n  shards:\n", 1)[1].split("\n  gate:\n", 1)[0]
+    assert "if: ${{ !cancelled() && " + both_miss + " }}" in shards
+    for name in ("Retrieve all eight main", "Download shard results", "Verify the complete gate",
+                 "Download recent gate-proof", "Store this run's tree-bound", "Publish the tree-bound"):
+        step = next(s for s in workflow.split("      - name: ") if s.startswith(name))
+        assert both_miss in next(line for line in step.splitlines() if line.strip().startswith("if:"))
+    step = next(s for s in workflow.split("      - name: ") if s.startswith("Re-verify the S3"))
+    assert "needs.s3-proof.outputs.reuse == 'true'" in step
+    assert "--verify-gate-proof" in step and '--expect-tree "$TREE"' in step
+    assert 'test "$SHARD_JOB_RESULT" = "skipped"' in step
+    assert "Gate proof source: s3" in step
+
+
+@pytest.mark.parametrize("case", ["hit", "miss", "denied", "tree", "project", "invalid", "error"],
+                         ids=["hit", "miss", "denied", "tree", "project", "invalid", "error"])
+def test_s3_proof_decision_falls_back_on_every_failure(case, tmp_path, monkeypatch, capsys):
+    import json
+    import textwrap
+
+    script = textwrap.dedent(_s3_proof_job().split("        run: |\n", 1)[1])
+    tree = "a" * 40
+    output = tmp_path / "output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    monkeypatch.setenv("RUNNER_TEMP", str(tmp_path))
+    monkeypatch.setattr(subprocess, "check_output", lambda *a, **kw: tree + "\n")
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        assert kwargs["check"] is True
+        assert kwargs["timeout"] == 60
+        if command[0] == "aws":
+            assert command[:3] == ["aws", "s3api", "get-object"]
+            assert command[command.index("--bucket") + 1] == "leaf-mq-transport-807034087062-us-east-1"
+            assert command[command.index("--key") + 1] == f"mq/leaf-web-demo/selection/gate-proof/{tree}.json"
+            if case in ("miss", "denied"):
+                raise subprocess.CalledProcessError(1, command, stderr=case)
+            if case == "error":
+                return SimpleNamespace(stdout="not-json")
+            Path(command[7]).write_text('{"kind":"leaf-gate-proof"}', encoding="utf-8")
+            return SimpleNamespace(stdout=json.dumps({"Metadata": {
+                "tree": "b" * 40 if case == "tree" else tree,
+                "producer-project": "foreign" if case == "project" else "leaf-ci-leaf-web-demo",
+            }}))
+        assert command == ["python", "scripts/run-all-gates.py", "--verify-gate-proof",
+                           str(tmp_path / "s3-gate-proof.json"), "--expect-tree", tree]
+        if case == "invalid":
+            raise subprocess.CalledProcessError(1, command)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    exec(compile(script, "s3-proof-step", "exec"), {})
+    result = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+    assert result["reuse"] == ("true" if case == "hit" else "false")
+    assert bool(result["proof"]) == (case == "hit")
+    assert len(calls) == (2 if case in ("hit", "invalid") else 1)
+    assert len(capsys.readouterr().out.splitlines()) == (0 if case == "hit" else 1)
 
 
 def test_spawn_failure_is_retryable_fail_row(tmp_path):

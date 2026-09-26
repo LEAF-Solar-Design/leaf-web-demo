@@ -241,6 +241,71 @@ jobs:
           fi
           exit 0
 
+  s3-proof:
+    name: gate-s3-proof
+    environment: ${{ github.ref == 'refs/heads/main' && (inputs.ref == '' || inputs.ref == github.sha) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && 'ecr-release' || '' }}
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    needs: probe
+    if: ${{ !cancelled() && needs.probe.outputs.reuse != 'true' && github.ref == 'refs/heads/main' && (inputs.ref == '' || inputs.ref == github.sha) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 10
+    continue-on-error: true
+    outputs:
+      reuse: ${{ steps.decide.outputs.reuse }}
+      proof: ${{ steps.decide.outputs.proof }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Configure AWS for main gate proof
+        uses: aws-actions/configure-aws-credentials@v6.1.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ECR_PUSH_ROLE }}
+          aws-region: us-east-1
+          role-session-name: GHA-GateProof-${{ github.run_id }}
+      - name: Read and verify the exact S3 gate proof
+        id: decide
+        shell: python
+        run: |
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+
+          reuse = "false"
+          proof = ""
+          try:
+              tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], text=True).strip()
+              if len(tree) != 40 or any(c not in "0123456789abcdef" for c in tree):
+                  raise ValueError("invalid tree")
+              path = Path(os.environ["RUNNER_TEMP"]) / "s3-gate-proof.json"
+              result = subprocess.run([
+                  "aws", "s3api", "get-object",
+                  "--bucket", "leaf-mq-transport-807034087062-us-east-1",
+                  "--key", f"mq/leaf-web-demo/selection/gate-proof/{tree}.json",
+                  str(path), "--output", "json",
+              ], check=True, capture_output=True, text=True, timeout=60)
+              metadata = json.loads(result.stdout)["Metadata"]
+              if metadata.get("tree") != tree or metadata.get("producer-project") != "leaf-ci-leaf-web-demo":
+                  raise ValueError("metadata mismatch")
+              subprocess.run([
+                  "python", "scripts/run-all-gates.py", "--verify-gate-proof", str(path),
+                  "--expect-tree", tree,
+              ], check=True, capture_output=True, text=True, timeout=60)
+              proof = json.dumps(json.loads(path.read_text(encoding="utf-8")), separators=(",", ":"))
+              reuse = "true"
+          except Exception:
+              print("S3 gate proof not proven; running the full gate")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"reuse={reuse}\nproof={proof}\n")
+
   shards:
     name: gate-shard-${{ matrix.shard }}
     # The environment subject is the role boundary, before any source runs.
@@ -249,12 +314,12 @@ jobs:
       contents: read
       actions: read
       id-token: write
-    needs: probe
+    needs: [probe, s3-proof]
     # `!cancelled()` and not the implicit success(): when the probe is SKIPPED
     # (pull_request and bare-dispatch runs never probe) the shards must still
     # run, and every probe failure mode falls through to reuse != 'true' —
     # the full gate. Only a verified tree-bound proof skips the suites.
-    if: ${{ !cancelled() && needs.probe.outputs.reuse != 'true' }}
+    if: ${{ !cancelled() && needs.probe.outputs.reuse != 'true' && needs.s3-proof.outputs.reuse != 'true' }}
     # Ephemeral CodeBuild runner in the Leaf AWS account (tf: shared/
     # github-iam/codebuild_runners.tf, project leaf-gha-runner-web-demo).
     # The shards request medium (4 vCPU / 7 GiB) with CodeBuild's single-label
@@ -607,7 +672,7 @@ jobs:
       contents: read
       actions: read
       id-token: write
-    needs: [probe, shards]
+    needs: [probe, s3-proof, shards]
     # always(): when a shard fails this job must still run and FAIL with the
     # verifier's naming of what broke, not report as skipped.
     if: ${{ always() }}
@@ -686,9 +751,23 @@ jobs:
             echo "no suite was re-run. Any tree skew runs the full gate."
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Re-verify the S3 gate proof (tree-identity skip)
+        if: ${{ needs.probe.outputs.reuse != 'true' && needs.s3-proof.outputs.reuse == 'true' }}
+        env:
+          PROOF: ${{ needs.s3-proof.outputs.proof }}
+          SHARD_JOB_RESULT: ${{ needs.shards.result }}
+          TREE: ${{ steps.tree.outputs.value }}
+        run: |
+          set -euo pipefail
+          test "$SHARD_JOB_RESULT" = "skipped"
+          printf '%s' "$PROOF" > "$RUNNER_TEMP/s3-gate-proof.json"
+          python scripts/run-all-gates.py \
+            --verify-gate-proof "$RUNNER_TEMP/s3-gate-proof.json" --expect-tree "$TREE"
+          echo "Gate proof source: s3 (tree $TREE)" >> "$GITHUB_STEP_SUMMARY"
+
       # ---- full path: verify the shard set, then mint this tree's proof --- #
       - name: Configure AWS for main gate fan-in
-        if: ${{ !cancelled() && needs.probe.outputs.reuse != 'true' && github.ref == 'refs/heads/main' && (inputs.ref == '' || inputs.ref == github.sha) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+        if: ${{ !cancelled() && needs.probe.outputs.reuse != 'true' && needs.s3-proof.outputs.reuse != 'true' && github.ref == 'refs/heads/main' && (inputs.ref == '' || inputs.ref == github.sha) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
         uses: aws-actions/configure-aws-credentials@v6.1.0
         with:
           role-to-assume: ${{ secrets.AWS_ECR_PUSH_ROLE }}
@@ -696,7 +775,7 @@ jobs:
           role-session-name: GHA-GateFanin-${{ github.run_id }}
 
       - name: Retrieve all eight main shard results from S3
-        if: ${{ !cancelled() && needs.probe.outputs.reuse != 'true' && github.ref == 'refs/heads/main' && (inputs.ref == '' || inputs.ref == github.sha) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+        if: ${{ !cancelled() && needs.probe.outputs.reuse != 'true' && needs.s3-proof.outputs.reuse != 'true' && github.ref == 'refs/heads/main' && (inputs.ref == '' || inputs.ref == github.sha) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
         run: >-
           python scripts/gate_result_transport.py download-shards
           --source "${{ github.sha }}" --run "${{ github.run_id }}"
@@ -704,7 +783,7 @@ jobs:
           --output "$RUNNER_TEMP/shard-results"
 
       - name: Download shard results
-        if: ${{ needs.probe.outputs.reuse != 'true' && !(github.ref == 'refs/heads/main' && (inputs.ref == '' || inputs.ref == github.sha) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')) }}
+        if: ${{ needs.probe.outputs.reuse != 'true' && needs.s3-proof.outputs.reuse != 'true' && !(github.ref == 'refs/heads/main' && (inputs.ref == '' || inputs.ref == github.sha) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')) }}
         uses: actions/download-artifact@v4
         with:
           pattern: gate-shard-*-${{ github.run_id }}
@@ -724,7 +803,7 @@ jobs:
       # above, because this feeds a security-relevant "already proven clean"
       # claim, never a red->green.
       - name: Download recent gate-proof artifacts (lockfile transitivity input)
-        if: ${{ needs.probe.outputs.reuse != 'true' }}
+        if: ${{ needs.probe.outputs.reuse != 'true' && needs.s3-proof.outputs.reuse != 'true' }}
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -774,7 +853,7 @@ jobs:
           exit 0
 
       - name: Verify the complete gate
-        if: ${{ needs.probe.outputs.reuse != 'true' }}
+        if: ${{ needs.probe.outputs.reuse != 'true' && needs.s3-proof.outputs.reuse != 'true' }}
         env:
           SHARD_JOB_RESULT: ${{ needs.shards.result }}
         # Two independent conditions, both required:
@@ -798,7 +877,7 @@ jobs:
       # Runs only when the step above passed BOTH conditions (implicit
       # success() on the if:), so a proof can never outlive a red verdict.
       - name: Store this run's tree-bound gate proof in S3
-        if: ${{ needs.probe.outputs.reuse != 'true' && github.ref == 'refs/heads/main' && (inputs.ref == '' || inputs.ref == github.sha) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+        if: ${{ needs.probe.outputs.reuse != 'true' && needs.s3-proof.outputs.reuse != 'true' && github.ref == 'refs/heads/main' && (inputs.ref == '' || inputs.ref == github.sha) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
         run: >-
           python scripts/gate_result_transport.py upload-proof
           --source "${{ github.sha }}" --run "${{ github.run_id }}"
@@ -806,7 +885,7 @@ jobs:
           --file "$RUNNER_TEMP/gate-proof/gate-proof.json"
 
       - name: Publish the tree-bound gate proof
-        if: ${{ needs.probe.outputs.reuse != 'true' }}
+        if: ${{ needs.probe.outputs.reuse != 'true' && needs.s3-proof.outputs.reuse != 'true' }}
         continue-on-error: ${{ github.ref == 'refs/heads/main' && (inputs.ref == '' || inputs.ref == github.sha) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
         uses: actions/upload-artifact@v4
         with:

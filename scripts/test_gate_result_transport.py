@@ -241,12 +241,13 @@ class WorkflowBoundaryTests(unittest.TestCase):
         workflows = Path(__file__).resolve().parents[1] / ".github/workflows"
         gate = (workflows / "test-gate.yml").read_text(encoding="utf-8")
         build = (workflows / "build-platform-images.yml").read_text(encoding="utf-8")
-        probe = gate.split("\n  probe:\n", 1)[1].split("\n  shards:\n", 1)[0]
+        probe = gate.split("\n  probe:\n", 1)[1].split("\n  s3-proof:\n", 1)[0]
         self.assertNotIn("id-token: write", probe)
         self.assertNotIn("environment:", probe)
-        for job in ("shards", "gate"):
+        for job in ("s3-proof", "shards", "gate"):
             header = gate.split(f"\n  {job}:\n", 1)[1].split("    steps:\n", 1)[0]
             self.assertIn("environment: ${{ " + TRUSTED + " && 'ecr-release' || '' }}", header)
+            self.assertIn("id-token: write", header)
         steps = gate.split("      - name: ")
         for name in ("Configure AWS for main gate transport", "Store main shard result",
                      "Configure AWS for main gate fan-in", "Retrieve all eight main"):
