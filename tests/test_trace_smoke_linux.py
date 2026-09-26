@@ -113,12 +113,19 @@ def test_real_supervisor_complete(tmp_path, monkeypatch, case):
     monkeypatch.delenv("PYTEST_ADDOPTS", raising=False)
     code = supervisor.run(context, output, commands[case], descendant_grace=2)
     receipt = json.loads((output / "reports" / "trace-receipt-smoke.json").read_text())
-    assert code == 0, receipt
-    assert receipt["capture_complete"] is True, receipt
-    certificate = json.loads((output / "reports" / "process-tree-smoke.json").read_text())
-    assert certificate["complete"] is True
-    assert certificate["loss_counters"]["unknown_descriptors"] == 0
-    assert certificate["reasons"] == []
-    assert certificate["seed_fds"] == receipt["seed_fds"]
+    certificate_path = output / "reports" / "process-tree-smoke.json"
+    certificate = json.loads(certificate_path.read_text()) if certificate_path.exists() else {}
+    diagnostics = json.dumps({"case": case, "code": code, "receipt": receipt,
+                              "loss_counters": certificate.get("loss_counters"),
+                              "unknown_fd_samples": certificate.get("loss_counters", {}).get("unknown_fd_samples"),
+                              "reasons": certificate.get("reasons"),
+                              "capture_errors": receipt.get("capture_errors"),
+                              "tasks": certificate.get("tasks")}, sort_keys=True)
+    assert code == 0, diagnostics
+    assert receipt["capture_complete"] is True, diagnostics
+    assert certificate.get("complete") is True, diagnostics
+    assert certificate["loss_counters"]["unknown_descriptors"] == 0, diagnostics
+    assert certificate["reasons"] == [], diagnostics
+    assert certificate["seed_fds"] == receipt["seed_fds"], diagnostics
     if case == "pytest":
-        assert {"path": "test_smoke.py", "kind": "bytecode"} in certificate["reads"]
+        assert {"path": "test_smoke.py", "kind": "bytecode"} in certificate["reads"], diagnostics

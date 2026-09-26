@@ -37,7 +37,7 @@ except ImportError:  # Windows: the live-state counter stands in for measured RS
 
 
 BINDINGS = ("run_id", "source_sha", "source_tree", "capture_sha", "catalog_sha256")
-PARSER_VERSION = "s15a-7"
+PARSER_VERSION = "s15a-9"
 # max_state_bytes: 2 GiB, compared against measured peak RSS (Amendment 5); the counter it
 # replaced only ever added, so a 40 M-line stream tripped it on cumulative allocation.
 LIMITS = dict(max_live_tasks=65536, max_total_tasks=4194304, max_fds_per_task=65536, max_record_bytes=1048576,
@@ -68,7 +68,7 @@ POLICY = {
     "network": "socket connect bind listen accept accept4 sendto recvfrom sendmsg recvmsg sendmmsg recvmmsg getsockopt setsockopt getpeername getsockname shutdown".split(),
     "namespace": "unshare setns chroot pivot_root mount umount2".split(),
     "reject": "ptrace process_vm_readv process_vm_writev io_setup io_submit io_getevents io_cancel io_destroy io_uring_setup io_uring_enter io_uring_register open_by_handle_at name_to_handle_at splice tee vmsplice bpf userfaultfd shmget shmat shmdt shmctl semget semop semctl msgget msgsnd msgrcv msgctl".split(),
-    # faccessat2: glibc's probe, ENOSYS on 4.14 kernels.
+    # Modern calls decode normally; ENOSYS probes on older kernels are no-ops.
     "abi": "openat2 clone3 close_range pidfd_open pidfd_getfd faccessat2".split(),
     "runtime": "brk madvise arch_prctl set_tid_address set_robust_list get_robust_list futex rseq rt_sigaction rt_sigprocmask rt_sigreturn sigaltstack rt_sigsuspend rt_sigtimedwait rt_sigpending restart_syscall kill tkill tgkill sched_yield nanosleep clock_nanosleep poll ppoll select pselect6 epoll_create epoll_create1 epoll_ctl epoll_wait epoll_pwait eventfd eventfd2 alarm setitimer getitimer getuid geteuid getgid getegid getgroups uname getrlimit prlimit64 getrusage times umask clock_gettime clock_getres gettimeofday time getrandom sched_getaffinity sched_getparam sched_getscheduler prctl ioctl sysinfo getpgrp getpgid setrlimit capget sched_setaffinity timer_create timer_settime timer_gettime timer_delete timerfd_settime timerfd_gettime mincore msync mlock munlock".split(),
     "ioctl": "TCGETS TCSETS TCSETSW TCSETSF TIOCGWINSZ TIOCGPGRP TIOCSPGRP FIONBIO FIOCLEX FIONCLEX FIONREAD".split(),
@@ -89,13 +89,13 @@ TRACED = list(dict.fromkeys(
 POLICY["traced"] = TRACED
 PATH_ARGS = {
     **{n: (0,) for n in "open creat execve readlink access stat lstat statfs chdir truncate mkdir rmdir unlink chroot getxattr lgetxattr listxattr llistxattr chmod chown lchown".split()},
-    **{n: (1,) for n in "openat openat2 execveat readlinkat faccessat newfstatat statx mkdirat unlinkat fchmodat fchownat utimensat futimesat".split()},
+    **{n: (1,) for n in "openat openat2 execveat readlinkat faccessat faccessat2 newfstatat statx mkdirat unlinkat fchmodat fchownat utimensat futimesat".split()},
     "rename": (0, 1), "link": (0, 1), "symlink": (0, 1),
     "renameat": (1, 3), "renameat2": (1, 3), "linkat": (1, 3), "symlinkat": (0, 2),
 }
 FD_ARGS = {
     **{n: (0,) for n in "read pread64 readv preadv preadv2 write pwrite64 writev pwritev pwritev2 fstat fstatfs fchdir lseek dup fcntl close getdents getdents64 ioctl ftruncate fsync fdatasync connect bind listen accept accept4 sendto recvfrom sendmsg recvmsg sendmmsg recvmmsg getsockopt setsockopt getpeername getsockname shutdown".split()},
-    **{n: (0,) for n in "openat openat2 execveat readlinkat faccessat newfstatat statx mkdirat unlinkat".split()},
+    **{n: (0,) for n in "openat openat2 execveat readlinkat faccessat faccessat2 newfstatat statx mkdirat unlinkat pidfd_getfd".split()},
     **{n: (0,) for n in "fadvise64 posix_fadvise readahead sync_file_range flock fgetxattr flistxattr fchmod fchown fchmodat fchownat utimensat futimesat".split()},
     "dup2": (0, 1), "dup3": (0, 1), "mmap": (4,), "renameat": (0, 2),
     "renameat2": (0, 2), "linkat": (0, 2), "symlinkat": (1,), "epoll_ctl": (0, 2),
@@ -107,12 +107,12 @@ FD_ARGS = {
 COPIES = {"sendfile": (1, 0), "copy_file_range": (0, 2)}
 READS = set("read pread64 readv preadv preadv2".split())
 WRITES = set("write pwrite64 writev pwritev pwritev2 ftruncate fsync fdatasync".split())
-LOOKUPS = set("stat lstat newfstatat statx access faccessat readlink readlinkat statfs getxattr lgetxattr listxattr llistxattr".split())
+LOOKUPS = set("stat lstat newfstatat statx access faccessat faccessat2 readlink readlinkat statfs getxattr lgetxattr listxattr llistxattr".split())
 MUTATIONS = set(POLICY["directory"]) - {"getdents", "getdents64"}
 METADATA_MUTATIONS = set(POLICY["metadata_mutation"])
 FD_LOOKUPS = {"fstat", "fstatfs", "fgetxattr", "flistxattr"}
 KNOWN = frozenset().union(*(POLICY[k] for k in ("path", "descriptor", "directory", "process", "network", "namespace", "runtime",
-                                                "metadata_mutation", "internal_object", "filesystem_events", "noise", "legacy_stat")))
+                                                "metadata_mutation", "internal_object", "filesystem_events", "noise", "legacy_stat", "abi")))
 FD_CREATORS = set(POLICY["fd_table"]) - {"close", "close_range", "inotify_add_watch", "inotify_rm_watch"}
 PAIR_REQUIRED = set(PATH_ARGS) | set(POLICY["path"]) | {"connect", "bind", "fork", "vfork", "clone", "clone3"} | FD_CREATORS
 QUOTED = re.compile(r'"(?:\\.|[^"\\])*(?:"|\\?$)')
@@ -316,6 +316,8 @@ def _args(event, raw, resumed=False):
     args = _split(raw)
     name = event["name"]
     event.update(paths={}, fds={}, scalars={}, flags=[], entries=None, endpoints=[])
+    if name in POLICY["abi"] and event["errno"] == "ENOSYS":
+        return
     if name in {"fstat", "newfstatat", "statx"}:
         size = re.search(r"\b(?:st_size|stx_size)=(\d+)(?:,|\})", raw)
         if size:
@@ -350,11 +352,28 @@ def _args(event, raw, resumed=False):
         index = 0 if name == "prctl" else 1
         label = re.match(r"[A-Za-z0-9_]{1,64}", args[index]) if index < len(args) else None
         event["subtype_label"] = label[0] if label else "unknown"
-    if name == "clone":
-        m = re.search(r"(?:^|,\s*)flags=([A-Z0-9_|]+)(?:,|$)", raw)
+    if name in {"clone", "clone3", "openat2"}:
+        token = args[0] if name == "clone3" else args[2] if name == "openat2" and len(args) > 2 else raw
+        m = re.search(r"(?:^|[,{]\s*)flags=([^,}]+)(?:[,}]|$)", token)
         if not m:
-            raise ValueError("unsupported_kernel_abi")
-        event["flags"] = m[1].split("|")
+            if name == "clone":
+                raise ValueError("unsupported_kernel_abi")
+            if event["errno"] is None:
+                raise ValueError("malformed_line")
+        else:
+            value = m[1].strip()
+            # Keep flag literals only, never arbitrary struct text or pointers.
+            if not re.fullmatch(r"(?:[A-Z][A-Z0-9_]*|[0-9]+)(?:\|[A-Z][A-Z0-9_]*)*", value):
+                value = "unknown"
+            event["flags"] = [] if value == "0" else value.split("|")
+            if name == "openat2":
+                event["scalars"][2] = int(value) if value.isdecimal() else value
+    if name == "close_range":
+        for i, token in enumerate(args[:2]):
+            if token == "~0U":
+                event["scalars"][i] = 4294967295
+            elif re.fullmatch(r"0x[0-9a-fA-F]+", token):
+                event["scalars"][i] = int(token, 16)
     # Amendment 6: getdents buffers, including abbreviated and resumed ones, are not evidence.
     if name in {"pipe", "pipe2", "socketpair"}:
         index = 3 if name == "socketpair" else 0
@@ -443,11 +462,11 @@ def _stream(data):
     start, sequence = 0, 0
     while start < len(data):
         end = data.find(b"\n", start)
-        sequence += 1
         if end < 0:
             yield sequence, data[start:], False
             return
         yield sequence, data[start:end], True
+        sequence += 1
         start = end + 1
 
 
@@ -674,7 +693,8 @@ class _Decoder:
         self.supervisor_reads = 0
         self.unix_peers, self.unix_sockets = {}, []
         self.event_count = self.syscall_count = 0
-        self.loss = dict(unpaired=0, malformed=0, interrupted=0, unknown_syscalls=0, oversize=0, unknown_descriptors=0)
+        self.loss = dict(unpaired=0, malformed=0, interrupted=0, unknown_syscalls=0, oversize=0,
+                         unknown_descriptors=0, failed_fd_ops=0)
         self.loss["unknown_fd_samples"] = []
         self.fd_sample = None
         # Calibration instrument: sanitized shapes and bounded name counters.
@@ -746,7 +766,7 @@ class _Decoder:
             return False
         if event["kind"] == "resumed" and (None, event["name"]) in self.unfinished:
             return True
-        return not any(name in {"clone", "fork", "vfork"} for _, name in self.unfinished)
+        return not any(name in {"clone", "clone3", "fork", "vfork"} for _, name in self.unfinished)
 
     def name_root(self, pid):
         record = self.root["record"]
@@ -1053,9 +1073,7 @@ class _Decoder:
         name, flags = event["name"], event["flags"]
         if name in POLICY["namespace"] or any(f.startswith("CLONE_NEW") for f in flags):
             self.reason("namespace_change")
-        if name in POLICY["abi"]:
-            if event["errno"] != "ENOSYS":
-                self.reason("unsupported_kernel_abi")
+        if name in POLICY["abi"] and event["errno"] == "ENOSYS":
             return False
         # syscall_0xNN / syscall_NNN (unnamed by strace) are never known.
         if name in POLICY["reject"] or name not in KNOWN:
@@ -1071,15 +1089,15 @@ class _Decoder:
                     self.count(self.subtypes[name], event.get("subtype_label", "unknown"))
                 self.reason("unsupported_syscall:" + name + ":" + str(subtype))
                 return False
-        if name in {"open", "openat"}:
-            index = 2 if name == "openat" else 1
+        if name in {"open", "openat", "openat2"}:
+            index = 2 if name in {"openat", "openat2"} else 1
             value = event["scalars"].get(index)
             if isinstance(value, str):
                 if any(flag not in POLICY["open_flags"] for flag in value.split("|")):
                     self.reason("unsupported_kernel_abi")
-            elif value not in {0, 1, 2}:
+            elif value not in {0, 1, 2} and not (name == "openat2" and event["errno"]):
                 self.reason("unsupported_kernel_abi")
-        if name == "clone" and any(flag not in POLICY["clone_flags"] and not flag.startswith("CLONE_NEW") for flag in flags):
+        if name in {"clone", "clone3"} and any(flag not in POLICY["clone_flags"] and not flag.startswith("CLONE_NEW") for flag in flags):
             self.reason("unsupported_kernel_abi")
         # Amendment 4 withdrew the shared-futex rule: a futex is not a file input.
         for fd in event.get("poll_fds", []):
@@ -1181,14 +1199,49 @@ class _Decoder:
         success = ret is not None and ret >= 0
         self.syscall_name = name
         self.syscall_sequence = event["sequence"]
+        if name in POLICY["abi"] and event["errno"] == "ENOSYS":
+            return
+        if event["errno"]:
+            # A failed operation cannot prove that an absent descriptor was open.
+            # dup2/dup3's destination is an output, not a required input.
+            inputs = [arg["fd"] for i, arg in event["fds"].items()
+                      if arg["fd"] != "AT_FDCWD" and not (name in {"dup2", "dup3"} and i == 1)
+                      and not (name == "mmap" and "MAP_ANONYMOUS" in flags)]
+            inputs.extend(event.get("poll_fds", []))
+            if any(fd not in task["fds"] for fd in inputs):
+                self.loss["failed_fd_ops"] += 1
+                return
         if not self.policy(event, task):
             return
-        if name in {"fork", "vfork", "clone"} and success and ret > 0:
+        if name in {"fork", "vfork", "clone", "clone3"} and success and ret > 0:
             child = self.birth(ret, event["sequence"], task, flags)
             if child:
                 for queued, amount in self.pending.pop(ret, []):
                     self.release(amount)
                     self.process(queued)
+            return
+        if name in {"pidfd_open", "pidfd_getfd"}:
+            if success:
+                self.putfd(task, ret, {"kind": "internal"}, True)
+            return
+        if name == "close_range":
+            if success:
+                first, last = event["scalars"].get(0), event["scalars"].get(1)
+                if not isinstance(first, int) or not isinstance(last, int):
+                    self.reason("malformed_line")
+                    return
+                if "CLOSE_RANGE_UNSHARE" in flags:
+                    table = {fd: dict(entry) for fd, entry in task["fds"].items()}
+                    self.drop(task["fds"])
+                    task["fds"] = table
+                    self.hold(table)
+                    self.retain(128 * len(table))
+                for fd in list(task["fds"]):
+                    if first <= fd <= last:
+                        if "CLOSE_RANGE_CLOEXEC" in flags:
+                            task["fds"][fd]["cloexec"] = True
+                        else:
+                            self.closefd(task, fd)
             return
         if name in COPIES:
             self.copy(task, event)
@@ -1212,9 +1265,9 @@ class _Decoder:
         if name in METADATA_MUTATIONS:
             self.metadata_mutation(task, event)
             return
-        if name in {"open", "openat", "creat"}:
+        if name in {"open", "openat", "openat2", "creat"}:
             if success and "O_TMPFILE" in flags:
-                resolution = self.resolve(task, event, 1 if name == "openat" else 0)
+                resolution = self.resolve(task, event, 1 if name in {"openat", "openat2"} else 0)
                 if resolution.path is not None:
                     self.edge(resolution, "open", event, allow_missing=True)
                     self.written(resolution.absolute)
@@ -1222,7 +1275,7 @@ class _Decoder:
                 self.internal.add(token)
                 self.putfd(task, ret, {"kind": "internal"}, "O_CLOEXEC" in flags)
                 return
-            index = 1 if name == "openat" else 0
+            index = 1 if name in {"openat", "openat2"} else 0
             resolution = self.resolve(task, event, index, nofollow="O_NOFOLLOW" in flags)
             writable = name == "creat" or bool(set(flags) & {"O_WRONLY", "O_RDWR", "O_CREAT", "O_TRUNC"}) or event["scalars"].get(index + 1) in {1, 2}
             if success and writable:
@@ -1257,7 +1310,7 @@ class _Decoder:
                 self.retain(128 * len(table))
             return
         if name in LOOKUPS:
-            index = 1 if name in {"newfstatat", "statx", "faccessat", "readlinkat"} else 0
+            index = 1 if name in {"newfstatat", "statx", "faccessat", "faccessat2", "readlinkat"} else 0
             if event["paths"].get(index) == "" and "AT_EMPTY_PATH" in flags:
                 desc = self.fd(task, event["fds"].get(index - 1))
                 if desc and desc["kind"] == "file":
@@ -1523,11 +1576,11 @@ def _chunk_lines(chunks, decoder, counters):
                 partial.clear()
             if end < 0:
                 break
-            sequence += 1
             if length > decoder.limits["max_record_bytes"]:
                 decoder.loss["oversize"] += 1
                 decoder.cap("max_record_bytes")
             yield sequence, bytes(partial), True
+            sequence += 1
             partial.clear()
             length = 0
             start = end + 1
@@ -1535,7 +1588,7 @@ def _chunk_lines(chunks, decoder, counters):
         if length > decoder.limits["max_record_bytes"]:
             decoder.loss["oversize"] += 1
             decoder.cap("max_record_bytes")
-        yield sequence + 1, bytes(partial), False
+        yield sequence, bytes(partial), False
 
 
 def _ranked(table):
@@ -1552,8 +1605,8 @@ def decode_stream(chunks, context, limits=None):
     decoder = _Decoder(context, caps)
     counters = {"hash": hashlib.sha256(), "byte_count": 0, "terminated": False}
     for sequence, raw, terminated in _chunk_lines(chunks, decoder, counters):
-        decoder.event_count = sequence
-        if sequence % RSS_INTERVAL == 1:
+        decoder.event_count = sequence + 1
+        if sequence % RSS_INTERVAL == 0:
             decoder.measure()
         if not terminated:
             decoder.reason("trace_loss")
