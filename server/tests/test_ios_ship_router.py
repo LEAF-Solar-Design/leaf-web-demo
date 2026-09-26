@@ -268,6 +268,44 @@ def test_provider_unavailable_and_unhealthy_refresh_hide_the_launch(monkeypatch)
     assert store.grants[-1][2]["status"] == "unavailable"
 
 
+def test_mini_busy_refresh_keeps_the_grant_healthy_and_projects_the_action(monkeypatch):
+    store = FakeStore()
+    monkeypatch.setattr(router, "_store", lambda: store)
+    router.set_dispatch(lambda _: {"status": "dispatched"})
+    router.set_provider_readiness(lambda _: {
+        "healthy": False, "reported_at": "2026-08-13T12:00:00+00:00",
+        "grant_id": str(uuid.uuid4()), "grant_revision": "7",
+        "grant_expires_at": "2026-08-14T12:00:00+00:00",
+        "setup_action": "mini-busy", "dispatch_available": False})
+    response = _client(VerifiedTenant(ORG, ORG, "auth0|user")).get(
+        "/api/ios-ship/readiness", params={"project_id": PROJECT, "revision": "r1"})
+    assert response.status_code == 200
+    assert store.grants[-1][2]["status"] == "healthy"
+    assert store.readiness_records[-1]["healthy"] is False
+    assert store.readiness_records[-1]["dispatch"]["action"] == "mini-busy"
+    assert response.json()["readiness"]["launchable"] is False
+    assert response.json()["readiness"]["setup_action"] == "mini-busy"
+
+
+def test_mini_unavailable_refresh_keeps_the_grant_healthy_and_projects_the_action(monkeypatch):
+    store = FakeStore()
+    monkeypatch.setattr(router, "_store", lambda: store)
+    router.set_dispatch(lambda _: {"status": "dispatched"})
+    router.set_provider_readiness(lambda _: {
+        "healthy": False, "reported_at": "2026-08-13T12:00:00+00:00",
+        "grant_id": str(uuid.uuid4()), "grant_revision": "7",
+        "grant_expires_at": "2026-08-14T12:00:00+00:00",
+        "setup_action": "mini-unavailable", "dispatch_available": False})
+    response = _client(VerifiedTenant(ORG, ORG, "auth0|user")).get(
+        "/api/ios-ship/readiness", params={"project_id": PROJECT, "revision": "r1"})
+    assert response.status_code == 200
+    assert store.grants[-1][2]["status"] == "healthy"
+    assert store.readiness_records[-1]["healthy"] is False
+    assert store.readiness_records[-1]["dispatch"]["action"] == "mini-unavailable"
+    assert response.json()["readiness"]["launchable"] is False
+    assert response.json()["readiness"]["setup_action"] == "mini-unavailable"
+
+
 @pytest.mark.parametrize("color", ["", "blue", "PRIMARY"])
 def test_readiness_and_launch_fail_closed_without_a_valid_server_app_color(monkeypatch, color):
     store = FakeStore()

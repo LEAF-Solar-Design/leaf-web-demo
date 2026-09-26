@@ -25,6 +25,7 @@ _DISPATCH: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None
 _PROVIDER_READINESS: Optional[Callable[[Dict[str, str]], Dict[str, Any]]] = None
 _PROVIDER_CATALOG: Optional[Callable[[str], Dict[str, Any]]] = None
 _SETUP_ACTION = "mount-apple-ship-dispatch"
+_MINI_SETUP_ACTIONS = frozenset({"mini-busy", "mini-unavailable"})
 _READINESS_KIND = "leaf.ios-ship-readiness.v1"
 _SECRET_KEY_RE = re.compile(
     r"(password|passwd|two.?factor|2fa|otp|p8|\.p8|private[_ -]?key|certificate|"
@@ -304,9 +305,10 @@ def _refresh_readiness(store: Any, org_id: Any, tenant_id: str, project_id: str,
         action = getattr(exc, "setup_action", _SETUP_ACTION)
         return _closed_readiness(project_id, "provider_unavailable", action)
     setup_action = provider["setup_action"]
+    # claudewalk scripts/ios_ship_provider_service.py:746-796 proves the grant before probing the mini.
     store.record_grant(org_id, tenant_id, {
         "grant_id": provider["grant_id"],
-        "status": "healthy" if provider["healthy"] else "unavailable",
+        "status": "healthy" if provider["healthy"] or setup_action in _MINI_SETUP_ACTIONS else "unavailable",
         "expires_at": provider["grant_expires_at"],
     })
     store.upsert_readiness({

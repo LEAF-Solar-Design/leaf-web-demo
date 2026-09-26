@@ -458,6 +458,39 @@ it('I1 row1 maps named setup states and transport failures', async () => {
   expect(shipSetupState({ setupAction: 'renew-grant' })).toBe('grant-not-ready')
 })
 
+it('ios-mini-states row1 setup action mini-busy reads executor-busy ahead of the grant branch', () => {
+  expect(shipSetupState({ reason: 'unhealthy', setupAction: 'mini-busy' })).toBe('executor-busy')
+  expect(shipSetupState({ reason: 'unhealthy', setup_action: 'mini-busy' })).toBe('executor-busy')
+  expect(shipSetupState({ reason: 'unhealthy', setupAction: 'mini-busy', grantStatus: 'unavailable' })).toBe('executor-busy')
+  expect(shipSetupState({ reason: 'unhealthy', setup_action: 'mini-busy', grant_status: 'unavailable' })).toBe('executor-busy')
+  expect(shipSetupState({ reason: 'no_approved_project_revision', setupAction: 'mini-busy' })).toBe('no-approved-revision')
+})
+
+it('ios-mini-states row2 setup action mini-unavailable reads executor-unavailable ahead of the grant branch', () => {
+  expect(shipSetupState({ reason: 'unhealthy', setupAction: 'mini-unavailable' })).toBe('executor-unavailable')
+  expect(shipSetupState({ reason: 'unhealthy', setup_action: 'mini-unavailable' })).toBe('executor-unavailable')
+  expect(shipSetupState({ reason: 'unhealthy', setupAction: 'mini-unavailable', grantStatus: 'unavailable' })).toBe('executor-unavailable')
+  expect(shipSetupState({ reason: 'unhealthy', setup_action: 'mini-unavailable', grant_status: 'unavailable' })).toBe('executor-unavailable')
+  expect(shipSetupState({ reason: 'no_approved_project_revision', setupAction: 'mini-unavailable' })).toBe('no-approved-revision')
+})
+
+it('ios-mini-states row3 a server-shaped mini readiness reaches the hook as its named state', async () => {
+  for (const [setupAction, setupState] of [
+    ['mini-busy', 'executor-busy'],
+    ['mini-unavailable', 'executor-unavailable'],
+  ]) {
+    fetchIosShipReadiness.mockResolvedValue(validateIosShipReadiness({
+      record_kind: 'leaf.ios-ship-readiness.v1', healthy: false, launchable: false,
+      reason: 'unhealthy', grant_status: null, setup_action: setupAction,
+    }, { projectId: 'p1' }))
+    const { result, unmount } = mount()
+    await flush()
+    expect(result.current.readiness.setupState).toBe(setupState)
+    expect(result.current.phase).toBe('setup-required')
+    unmount()
+  }
+})
+
 it('I1 row2 synchronously locks launch before awaiting one request', async () => {
   let resolveLaunch
   requestIosShipLaunch.mockReturnValue(new Promise((resolve) => { resolveLaunch = resolve }))
