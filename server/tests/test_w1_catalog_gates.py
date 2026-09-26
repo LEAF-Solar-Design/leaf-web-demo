@@ -420,6 +420,8 @@ def test_ordinary_embedded_graph_readiness_unchanged(graph, tmp_path, monkeypatc
     expected.update({name: availability.w1_graph_readiness(graph)[name] for name in availability.W1_CAPABILITIES
                      if availability.capability_adapter(name) == availability.LOCAL_GRAPH_COMMIT_ADAPTER
                      and name not in ("solar-settings", "solar-correct-string")})
+    expected.update({name: availability.w1_graph_readiness(graph)[name] for name in availability.SOLAR_CAPABILITIES
+                     if availability.capability_adapter(name) == availability.LOCAL_GRAPH_READ_ADAPTER})
     assert seed_readiness() == expected
 
 

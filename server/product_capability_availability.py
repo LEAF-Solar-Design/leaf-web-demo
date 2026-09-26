@@ -108,6 +108,7 @@ W1_CAPABILITIES = {name: row for name, row in SOLAR_CAPABILITIES.items()
 
 CLOUD_PROPOSAL_ADAPTER = "cloud-proposal"
 LOCAL_GRAPH_COMMIT_ADAPTER = "local-graph-commit"
+LOCAL_GRAPH_READ_ADAPTER = "local-graph-read"
 
 
 def capability_adapter(name):
@@ -139,6 +140,13 @@ def is_local_graph_commit(tool):
     if not isinstance(tool, Mapping):
         raise TypeError("tool record must be a mapping")
     return capability_adapter(tool.get("name")) == LOCAL_GRAPH_COMMIT_ADAPTER
+
+
+def is_local_graph_read(tool):
+    """True only for a mapping tool record with the local graph read kind."""
+    if not isinstance(tool, Mapping):
+        raise TypeError("tool record must be a mapping")
+    return capability_adapter(tool.get("name")) == LOCAL_GRAPH_READ_ADAPTER
 
 
 def annotate_w1_availability(families, tenant, drawing_id=None, *,
@@ -253,6 +261,8 @@ def w1_input_readiness(tenant, drawing_id=None, *, project_id=None, version="hea
                 if not context["local_commit_ready"]:
                     readiness[name] = {"input_ready": False,
                                        "input_reason": context["refusal_reason"]}
+            elif capability_adapter(name) == LOCAL_GRAPH_READ_ADAPTER:
+                pass
             elif context["representation"] == "intake":
                 readiness[name] = {"input_ready": False,
                                    "input_reason": "persisted_graph_unavailable"}

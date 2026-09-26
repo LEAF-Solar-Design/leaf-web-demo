@@ -19,6 +19,7 @@ import deps
 import entitlements
 import product_capability_availability as availability
 import solar_local_graph
+import solar_local_read
 import solar_tools
 from test_w1_design_graph import graph  # noqa: F401
 from test_w1_local_graph_broker import rails, enabled  # noqa: F401
@@ -287,6 +288,73 @@ def test_local_graph_tools_derive_from_declarations():
         row["name"] for row in solar_tools.entries() if row["adapter"] == "local-graph-commit")
 
 
+@pytest.mark.parametrize("field,value,message", [
+    ("invalid_request_code", None, "read adapter requires invalid_request_code"),
+    ("entitlement", "run_write", "read adapter requires run_read"),
+    ("requires_persisted_graph", False, "read adapter requires a persisted graph"),
+    ("readiness", {"kind": "w1-chain"}, "read adapter requires facets or hook readiness"),
+    ("seedable", True, "seed must use local adapter"),
+    ("trusted_inputs", ["untrusted"], "read adapter takes no trusted inputs"),
+])
+def test_read_declaration_rules_are_enforced(package, monkeypatch, field, value, message):
+    declaration = solar_tools.get("solar-select-by-zone")
+    declaration[field] = value
+    monkeypatch.setattr(solar_tools, "TRUSTED_INPUTS", ("untrusted",))
+    write_declaration(package, declaration)
+    with pytest.raises(solar_tools.SolarRegistryError, match=message):
+        load_package(package)
+
+
+def test_local_graph_read_tools_derive_from_declarations():
+    expected = tuple(row["name"] for row in solar_tools.entries()
+                     if row["adapter"] == "local-graph-read")
+    assert solar_tools.local_graph_read_tools() == expected == ("solar-select-by-zone",)
+    assert solar_local_read.LOCAL_GRAPH_READ_TOOLS == expected
+    assert solar_local_read.local_graph_read_tools() == expected
+    assert "solar-select-by-zone" not in solar_tools.local_graph_tools()
+
+
+def test_extra_read_declaration_needs_no_shared_edit(package, monkeypatch, graph):
+    declaration = solar_tools.get("solar-select-by-zone")
+    declaration.update(name="solar-example-read", builtin="builtins/solar_example_read.py",
+                       order=5, readiness={"kind": "hook"})
+    declaration["record"].update(name=declaration["name"], entry=declaration["builtin"],
+                                 engine_op="solar_example_read")
+    write_declaration(package, declaration)
+    registry = load_package(package)
+    table = registry.capability_table()
+    assert {name: row for name, row in table.items()
+            if row["scenario"] == "w1-rooftop"} == availability.W1_CAPABILITIES
+    assert declaration["name"] in registry.local_graph_read_tools()
+    assert declaration["name"] not in registry.local_graph_tools()
+    monkeypatch.setattr(solar_tools, "_REGISTRY", registry)
+    monkeypatch.setattr(availability, "SOLAR_CAPABILITIES", table)
+    monkeypatch.setattr(solar_local_read, "__file__", str(package[0] / "solar_local_read.py"))
+    monkeypatch.setattr(solar_local_read, "resolve_graph_context", lambda *a, **k: {
+        "resolved_version": 1, "representation": "intake", "graph": graph,
+        "graph_sha256": solar_local_read.digest(graph), "project_id": graph["project"]["id"],
+    })
+    solar_local_graph._load_builtin.cache_clear()
+    solar_local_read._load_builtin.cache_clear()
+    try:
+        assert availability.is_local_graph_read({"name": declaration["name"]})
+        module = solar_local_read._load_builtin(declaration["name"])
+        assert callable(module.run)
+        assert Path(module.__file__).resolve() == (package[0] / declaration["builtin"]).resolve()
+        params = {"drawing_id": "solar", "zone_name": "Roof"}
+        result = solar_local_read.run_local_graph_read(
+            {}, "fixture-tenant", declaration["name"], params, drawing_id="solar",
+            source_version=1, job_id="read-job")
+        assert result["output"] == module.results[0]
+        assert solar_local_read.graph_read_provenance(
+            result, params, "fixture-tenant", "read-job", declaration["name"], 1,
+            backend={})["output_sha256"] == solar_local_read.digest(module.results[0])
+    finally:
+        solar_local_graph._load_builtin.cache_clear()
+        solar_local_read._load_builtin.cache_clear()
+
+
+
 def test_one_seed_tool(package):
     assert [row["name"] for row in solar_tools.entries() if row["seedable"]] == [solar_tools.seed_tool()]
     declaration = solar_tools.get("solar-correct-string")
@@ -297,7 +365,8 @@ def test_one_seed_tool(package):
 
 
 def test_every_adapter_is_known_and_bound():
-    assert solar_tools.ADAPTER_KINDS == (solar_local_graph.ADAPTER_KIND, availability.CLOUD_PROPOSAL_ADAPTER)
+    assert solar_tools.ADAPTER_KINDS == (
+        solar_local_graph.ADAPTER_KIND, availability.CLOUD_PROPOSAL_ADAPTER, solar_local_read.ADAPTER_KIND)
     for row in solar_tools.entries():
         assert row["adapter"] is None or row["adapter"] in solar_tools.ADAPTER_KINDS
         if row["adapter"] == solar_local_graph.ADAPTER_KIND:
@@ -305,6 +374,10 @@ def test_every_adapter_is_known_and_bound():
             assert availability.is_local_graph_commit({"name": row["name"]})
         elif row["adapter"] == availability.CLOUD_PROPOSAL_ADAPTER:
             assert availability.is_cloud_proposal({"name": row["name"]})
+        elif row["adapter"] == solar_local_read.ADAPTER_KIND:
+            name = row["name"]
+            assert callable(solar_local_read._load_builtin(name).run)
+            assert availability.is_local_graph_read({"name": name})
 
 
 def test_declared_entitlement_matches_record_class(package, monkeypatch):
@@ -324,7 +397,8 @@ def test_registry_record_folds_into_write_seed(package, monkeypatch):
     registry = load_package(package)
     bind_records(monkeypatch, registry)
     legacy = json.loads(deps.WRITE_TOOLS_STORE.read_text(encoding="utf-8"))["tools"]
-    assert deps.load_seed_write_tools() == legacy + [declaration["record"]]
+    assert deps.load_seed_write_tools() == legacy + registry.registry_records()
+    assert declaration["record"] in registry.registry_records()
     assert declaration["record"] in deps.all_tools("solar-registry-test")
     rows = deps.effective_tools_with_provenance("solar-registry-test")
     assert (declaration["record"], deps.TOOL_SOURCE_WRITE_SEED) in rows
