@@ -1,0 +1,29 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-correct-string",
+  "builtin": "builtins/solar_correct_string.py",
+  "family": "stringing",
+  "adapter": "local-graph-commit",
+  "entitlement": "run_write",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_CORRECTION",
+  "readiness": {
+    "kind": "facets",
+    "facets": [
+      "strings"
+    ]
+  },
+  "engine": "server-builtin",
+  "interaction": {
+    "mode": "form"
+  },
+  "record_store": "write_seed",
+  "record": null,
+  "ledger": [],
+  "trusted_inputs": [],
+  "maturity": "production",
+  "wave": 1,
+  "order": 60,
+  "scenario": "w1-rooftop"
+}

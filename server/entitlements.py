@@ -295,9 +295,9 @@ def tool_required_capability(tool: Dict[str, Any]) -> str:
     # read-only one: we cannot tell what the tool does, so it takes the
     # MORE-restrictive capability. Absent is still legitimately read-only.
     record = tool or {}
-    from product_capability_availability import W1_CAPABILITIES
-    if record.get("name") in W1_CAPABILITIES:
-        return "solve" if record["name"] == "solar-solve-proposal" else "run_write"
+    from product_capability_availability import SOLAR_CAPABILITIES
+    if record.get("name") in SOLAR_CAPABILITIES:
+        return SOLAR_CAPABILITIES[record["name"]]["entitlement"]
     if "capabilities" not in record:
         return "run_read"
     caps = record["capabilities"]
@@ -315,10 +315,10 @@ def w1_tool_availability(tool, tenant, drawing_id=None, *, project_id=None,
                          version="head", inputs=None, seed_request=NO_SEED_REQUEST):
     """Shared catalog/run projection, using the existing tier and role policy."""
     from product_capability_availability import (
-        W1_CAPABILITIES, w1_availability, w1_input_readiness,
+        SOLAR_CAPABILITIES, w1_availability, w1_input_readiness,
     )
     name = tool.get("name")
-    if name not in W1_CAPABILITIES:
+    if name not in SOLAR_CAPABILITIES:
         return None
     roles, elevated = resolve_roles(tenant)
     try:
@@ -329,7 +329,7 @@ def w1_tool_availability(tool, tenant, drawing_id=None, *, project_id=None,
         policy_unavailable = True
     else:
         policy_unavailable = False
-    if not W1_CAPABILITIES[name]["requires_persisted_graph"]:
+    if not SOLAR_CAPABILITIES[name]["requires_persisted_graph"]:
         inputs = {name: {"input_ready": True, "input_reason": None}}
     elif inputs is None:
         inputs = w1_input_readiness(tenant, drawing_id, project_id=project_id, version=version,

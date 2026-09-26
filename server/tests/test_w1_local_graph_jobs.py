@@ -74,7 +74,8 @@ def proof(result, backend, **overrides):
 
 def test_kind_is_inert_until_enabled(monkeypatch):
     for name in local.LOCAL_GRAPH_TOOLS:
-        monkeypatch.setitem(W1_CAPABILITIES[name], "adapter", None)
+        import product_capability_availability as availability
+        monkeypatch.setitem(availability.SOLAR_CAPABILITIES[name], "adapter", None)
     assert LOCAL_GRAPH_COMMIT_ADAPTER == local.ADAPTER_KIND
     for name in local.LOCAL_GRAPH_TOOLS:
         assert not is_local_graph_commit({"name": name})

@@ -1,0 +1,28 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-solve-proposal",
+  "builtin": "builtins/solar_solve_proposal.py",
+  "family": "stringing",
+  "adapter": "cloud-proposal",
+  "entitlement": "solve",
+  "requires_persisted_graph": false,
+  "seedable": false,
+  "invalid_request_code": null,
+  "readiness": {
+    "kind": "w1-chain"
+  },
+  "engine": "cloud-service",
+  "interaction": {
+    "mode": "form"
+  },
+  "record_store": "catalog_seed",
+  "record": null,
+  "ledger": [
+    "solve"
+  ],
+  "trusted_inputs": [],
+  "maturity": "production",
+  "wave": 1,
+  "order": 40,
+  "scenario": "w1-rooftop"
+}

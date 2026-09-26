@@ -9,6 +9,7 @@ from pathlib import Path
 
 import write_loop
 import store
+import solar_tools
 from solar_design_graph import GraphValidationError, _bounded_json
 from solar_graph_context import resolve_graph_context
 from solar_graph_seed import new_empty_graph, resolve_seed_context, validate_seed_request
@@ -18,17 +19,24 @@ from solar_solve_results import publish_version
 ADAPTER_KIND = "local-graph-commit"
 RESULT_SCHEMA = "leaf.solar-graph-commit.v1"
 SEED_RESULT_SCHEMA = "leaf.solar-graph-seed.v1"
-LOCAL_GRAPH_TOOLS = ("solar-settings", "solar-correct-string")
 
 
-@lru_cache(maxsize=2)
+def local_graph_tools():
+    """Return the local tools from the current validated registry."""
+    return tuple(solar_tools.local_graph_tools())
+
+
+LOCAL_GRAPH_TOOLS = local_graph_tools()
+
+
+@lru_cache(maxsize=solar_tools.MAX_DECLARATIONS)
 def _load_builtin(tool):
-    filenames = {"solar-settings": "solar_settings", "solar-correct-string": "solar_correct_string"}
-    if tool not in LOCAL_GRAPH_TOOLS:
+    if tool not in local_graph_tools():
         raise GraphValidationError("UNKNOWN_LOCAL_GRAPH_TOOL")
-    name = filenames[tool]
+    builtin = solar_tools.get(tool)["builtin"]
+    name = Path(builtin).stem
     spec = importlib.util.spec_from_file_location(
-        "_local_graph_" + name, Path(__file__).resolve().parent / "builtins" / (name + ".py"))
+        "_local_graph_" + name, Path(__file__).resolve().parent / builtin)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -68,7 +76,7 @@ def graph_commit_provenance(result, params, tenant_id, job_id, tool, source_vers
         if isinstance(params, dict) and "initialize" in params:
             raise ValueError()
         if (not isinstance(result, dict) or result["schema_version"] != RESULT_SCHEMA
-                or result["adapter"] != ADAPTER_KIND or tool not in LOCAL_GRAPH_TOOLS
+                or result["adapter"] != ADAPTER_KIND or tool not in local_graph_tools()
                 or result["tool"] != tool or result["tenant_id"] != tenant_id
                 or not isinstance(job_id, str) or not job_id or result["job_id"] != job_id
                 or not isinstance(params, dict) or not isinstance(params["drawing_id"], str)
@@ -119,7 +127,7 @@ def graph_commit_provenance(result, params, tenant_id, job_id, tool, source_vers
 
 
 def _seed_provenance(result, params, tenant_id, job_id, tool, source_version, *, backend):
-    if (result["adapter"] != ADAPTER_KIND or tool != "solar-settings"
+    if (result["adapter"] != ADAPTER_KIND or not (solar_tools.get(tool) or {}).get("seedable")
             or result["tool"] != tool or result["tenant_id"] != tenant_id
             or not isinstance(job_id, str) or not job_id or result["job_id"] != job_id
             or not isinstance(params, dict) or not isinstance(params["drawing_id"], str)
@@ -186,12 +194,11 @@ def _seed_provenance(result, params, tenant_id, job_id, tool, source_version, *,
 
 def run_local_graph_commit(backend, tenant_id, tool, params, *, drawing_id, source_version,
                            holder, fence, job_id, project_id=None):
-    if tool not in LOCAL_GRAPH_TOOLS:
+    if tool not in local_graph_tools():
         raise GraphValidationError("UNKNOWN_LOCAL_GRAPH_TOOL")
     _bounded_json(params)
     if type(params) is not dict:
-        raise GraphValidationError("INVALID_SETTINGS_REQUEST" if tool == "solar-settings"
-                                   else "INVALID_CORRECTION")
+        raise GraphValidationError(solar_tools.get(tool)["invalid_request_code"])
     if not stable_numbers(params):
         raise GraphValidationError("INVALID_NUMERIC_PARAM")
     if type(source_version) is not int or source_version < 1:
@@ -203,7 +210,7 @@ def run_local_graph_commit(backend, tenant_id, tool, params, *, drawing_id, sour
     builtin_params.pop("drawing_id", None)
     initializing = "initialize" in builtin_params
     if initializing:
-        if tool != "solar-settings":
+        if not solar_tools.get(tool)["seedable"]:
             raise GraphValidationError("INVALID_SEED_REQUEST")
         if project_id is not None:
             raise GraphValidationError("SEED_PROJECT_SCOPE_UNSUPPORTED")

@@ -337,10 +337,30 @@ class TestValidationMemo:
         assert len(calls) == 1
 
 
-def _four_state_capabilities(monkeypatch):
+def _install_capabilities(monkeypatch, rows):
+    """Install synthetic rows in the registry's shape, in both tables.
+
+    Since the solar registry, the evaluator, capability_adapter and
+    entitlements.w1_tool_availability read SOLAR_CAPABILITIES (the whole
+    registry); W1_CAPABILITIES is its w1-rooftop subset. A row carries the
+    registry's fields, so the tool's entitlement is read from it as for a real
+    declaration.
+    """
     import product_capability_availability as availability
 
     table = {
+        name: {"entitlement": "run_write", "scenario": "w1-rooftop", "seedable": False, **row}
+        for name, row in rows.items()
+    }
+    monkeypatch.setattr(availability, "SOLAR_CAPABILITIES", table)
+    monkeypatch.setattr(availability, "W1_CAPABILITIES", table)
+    return table
+
+
+def _four_state_capabilities(monkeypatch):
+    import product_capability_availability as availability
+
+    return _install_capabilities(monkeypatch, {
         "synthetic-adapter": {
             "requires_persisted_graph": True,
             "adapter": availability.LOCAL_GRAPH_COMMIT_ADAPTER,
@@ -349,9 +369,7 @@ def _four_state_capabilities(monkeypatch):
             "requires_persisted_graph": True,
             "adapter": None,
         },
-    }
-    monkeypatch.setattr(availability, "W1_CAPABILITIES", table)
-    return table
+    })
 
 
 def test_four_state_runnable_requires_entitled_engine_ready_implemented_and_input_ready(monkeypatch):
@@ -394,7 +412,7 @@ def test_four_state_refusal_reasons_follow_entitlement_implementation_engine_inp
 def test_four_state_graphless_capability_is_input_ready_regardless_of_inputs(monkeypatch):
     import product_capability_availability as availability
 
-    monkeypatch.setattr(availability, "W1_CAPABILITIES", {
+    _install_capabilities(monkeypatch, {
         "synthetic-graphless": {
             "requires_persisted_graph": False,
             "adapter": availability.CLOUD_PROPOSAL_ADAPTER,

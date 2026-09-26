@@ -1,0 +1,28 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-size-strings",
+  "builtin": "builtins/solar_size_strings.py",
+  "family": "stringing",
+  "adapter": null,
+  "entitlement": "run_write",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": null,
+  "readiness": {
+    "kind": "w1-chain"
+  },
+  "engine": "cloud-service",
+  "interaction": {
+    "mode": "form"
+  },
+  "record_store": "write_seed",
+  "record": null,
+  "ledger": [
+    "string-sizer"
+  ],
+  "trusted_inputs": [],
+  "maturity": "production",
+  "wave": 1,
+  "order": 20,
+  "scenario": "w1-rooftop"
+}
