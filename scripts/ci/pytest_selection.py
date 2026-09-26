@@ -8,6 +8,7 @@ from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 
 try:
@@ -260,6 +261,16 @@ class SelectionPlugin:
             if self.capture is not None:
                 self.capture.snapshot_modules()
             self.attempt_stream.close()
+            # Web report-only catalogs have no module entries. Keep the real
+            # attempt stream beside the startup shards for archive publication.
+            web_suite = os.environ.get("LEAF_READSET_SUITE")
+            if self.capture is not None and web_suite:
+                archive_dir = (Path(os.environ["LEAF_READSET_DIR"]) /
+                               trace_reads.encoded_suite(web_suite) /
+                               str(int(os.environ.get("LEAF_READSET_ATTEMPT", "1"))))
+                archive_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(self.output / ("attempts-" + self.shard + ".jsonl"),
+                                archive_dir / ("attempts-" + self.shard + ".jsonl"))
             if self.is_controller:
                 expected = sorted(tid for entry in self.catalog.get("suites", [])
                                   for tid in entry.get("test_ids", []))
@@ -293,14 +304,21 @@ class SelectionPlugin:
                     self.capture.mark_incomplete("retry_readsets_combined", module)
                 destination = (self.output / "readsets" / trace_reads.encoded_suite(sid) /
                                str(attempt) / (self.shard + ".json"))
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                outcomes_name = "attempts-" + self.shard + ".jsonl"
+                shutil.copyfile(self.output / outcomes_name, destination.parent / outcomes_name)
+                outcomes_ref = (Path("readsets") / trace_reads.encoded_suite(sid) /
+                                str(attempt) / outcomes_name).as_posix()
                 readset = trace_reads.write_readset(
                     destination, capture=self.capture, suite_id=sid, module=module,
-                    complete=complete, run_id=self.decision.get("build_id"),
-                    source_sha=self.decision.get("head_sha"), source_tree=self.decision.get("head_tree"),
-                    capture_sha=self.catalog.get("capture_sha"),
-                    catalog_sha256=self.decision.get("catalog_sha256"),
+                    complete=complete, run_id=self.decision.get("build_id") or os.environ.get("LEAF_READSET_RUN"),
+                    source_sha=self.decision.get("head_sha") or os.environ.get("LEAF_READSET_SOURCE_SHA"),
+                    source_tree=self.decision.get("head_tree") or os.environ.get("LEAF_READSET_SOURCE_TREE"),
+                    capture_sha=self.catalog.get("capture_sha") or os.environ.get("LEAF_READSET_CAPTURE_SHA"),
+                    catalog_sha256=self.decision.get("catalog_sha256") or
+                    self.catalog.get("catalog_sha256") or os.environ.get("LEAF_READSET_CATALOG_SHA256"),
                     attempt=attempt, worker=self.worker, python_only=entry.get("python_only") is True,
-                    outcomes_ref="attempts-" + self.shard + ".jsonl")
+                    outcomes_ref=outcomes_ref)
                 # Runtime observations cannot re-enable a map. The collector
                 # authenticates any miss request before changing trusted state.
                 known = self.decision.get("known_read_paths", {}).get(sid)

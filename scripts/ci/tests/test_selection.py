@@ -20,6 +20,135 @@ from unittest import mock
 import select_tests as selector
 import pytest_selection as plugin
 import trace_reads
+import full_run_manifest
+
+
+class FullRunManifestContracts(unittest.TestCase):
+    def inputs(self):
+        return {"repo": "leaf-web-demo", "run_id": "build:fixture",
+                "source_sha": "a" * 40, "source_tree": "b" * 40, "capture_sha": "c" * 40,
+                "execution_mode": "full", "full_run_complete": True,
+                "test_id_reporting_complete": True, "image": "fixture-image"}
+
+    def catalog(self):
+        catalog = {"schema": "leaf.ci.test-catalog.v1", "kind": "web",
+                   "suites": [{"id": "sample", "test_ids": []}, {"id": "unobserved", "test_ids": []}]}
+        catalog["catalog_sha256"] = selector.catalog_info(catalog)[1]
+        return catalog
+
+    def test_binding_and_observed_workers(self):
+        inputs, catalog = self.inputs(), self.catalog()
+        binding = {key: inputs[key] for key in full_run_manifest.BINDING_FIELDS if key in inputs}
+        binding["catalog_sha256"] = catalog["catalog_sha256"]
+        shards = [dict(binding, schema="leaf.ci.readset.v1", suite_id="sample", worker=worker)
+                  for worker in ("gw1", "gw0", "gw1")]
+        doc = full_run_manifest.build_manifest(inputs, catalog, shards)
+        self.assertEqual(doc["schema"], "leaf.ci.full-run.v1")
+        self.assertTrue(doc["provider_bound"])
+        self.assertEqual(doc["provider_binding"], binding)
+        self.assertEqual(doc["suite_ids"], ["sample", "unobserved"])
+        self.assertEqual(doc["workers_by_suite"], {"sample": ["gw0", "gw1"]})
+        expected = selector.digest({"schema": "leaf.ci.toolchain.v1",
+                                    "python": full_run_manifest.platform.python_version(),
+                                    "image": inputs["image"], "capture_sha": inputs["capture_sha"]})
+        self.assertEqual(doc["toolchain_fingerprint"], expected)
+        shards[0]["catalog_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "shard_binding_mismatch"):
+            full_run_manifest.build_manifest(inputs, catalog, shards)
+
+    def test_catalog_equality_is_required(self):
+        for value in (None, "0" * 64):
+            catalog = self.catalog()
+            if value is None:
+                del catalog["catalog_sha256"]
+            else:
+                catalog["catalog_sha256"] = value
+            with self.assertRaises(ValueError):
+                full_run_manifest.build_manifest(self.inputs(), catalog)
+
+    def test_cli_malformed_input_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = Path(__file__).resolve().parents[1]
+            for name in ("full_run_manifest.py", "select_tests.py"):
+                (root / name).write_bytes((source / name).read_bytes())
+            (root / "catalog.json").write_text(json.dumps(self.catalog()), encoding="utf-8")
+            (root / "readsets").mkdir()
+            output = root / "full-run.json"
+            command = [sys.executable, "-I", "-B", str(root / "full_run_manifest.py"),
+                       "--catalog", str(root / "catalog.json"), "--readsets", str(root / "readsets"),
+                       "--output", str(output)]
+            inputs = self.inputs()
+            for key, value in (("source_tree", "bad"), ("run_id", ""),
+                               ("full_run_complete", "true")):
+                bad = dict(inputs, **{key: value})
+                result = subprocess.run(command, input=json.dumps(bad), text=True,
+                                        capture_output=True, cwd=root)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(output.exists())
+            result = subprocess.run(command, input=json.dumps(inputs), text=True,
+                                    capture_output=True, cwd=root)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(output.read_text())["catalog_sha256"],
+                             self.catalog()["catalog_sha256"])
+
+
+class PluginBindingContracts(unittest.TestCase):
+    def test_plugin_binding_falls_back_to_environment_and_preserves_explicit_values(self):
+        for explicit in (False, True):
+            with self.subTest(explicit=explicit), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                output = root / "evidence"
+                nodeid = "test_sample.py::test_ok"
+                sid = "sample/suite"
+                (root / "test_sample.py").write_text("def test_ok(): pass\n", encoding="utf-8")
+                decision = {"schema": selector.DECISION_SCHEMA, "execution_mode": "full",
+                            "selection_mode": "full", "apply_filter": False, "reasons": []}
+                catalog = {"suites": [{"id": sid, "module": "test_sample.py", "python_only": True}]}
+                binding = {"run_id": "build:environment", "source_sha": "a" * 40,
+                           "source_tree": "b" * 40, "capture_sha": "c" * 40,
+                           "catalog_sha256": "d" * 64}
+                env = {"LEAF_READSET_DIR": str(output / "readsets"),
+                       "LEAF_READSET_RUN": binding["run_id"],
+                       "LEAF_READSET_SOURCE_SHA": binding["source_sha"],
+                       "LEAF_READSET_SOURCE_TREE": binding["source_tree"],
+                       "LEAF_READSET_CAPTURE_SHA": binding["capture_sha"],
+                       "LEAF_READSET_CATALOG_SHA256": binding["catalog_sha256"]}
+                if explicit:
+                    binding = {"run_id": "build:decision", "source_sha": "e" * 40,
+                               "source_tree": "f" * 40, "capture_sha": "1" * 40,
+                               "catalog_sha256": "2" * 64}
+                    decision.update(build_id=binding["run_id"], head_sha=binding["source_sha"],
+                                    head_tree=binding["source_tree"], catalog_sha256=binding["catalog_sha256"])
+                    catalog.update(capture_sha=binding["capture_sha"], catalog_sha256="3" * 64)
+                (root / "decision.json").write_text(json.dumps(decision), encoding="utf-8")
+                (root / "catalog.json").write_text(json.dumps(catalog), encoding="utf-8")
+                options = {"leaf_repo": str(root), "leaf_output": str(output),
+                           "leaf_selection": str(root / "decision.json"),
+                           "leaf_catalog": str(root / "catalog.json")}
+                config = types.SimpleNamespace(rootpath=root, getoption=options.get,
+                                               option=types.SimpleNamespace(numprocesses=0))
+                with mock.patch.dict(os.environ, env, clear=True), \
+                     mock.patch.object(trace_reads.Capture, "install", lambda capture: capture):
+                    state = plugin.SelectionPlugin(config)
+                    try:
+                        state.capture.test_ids["test_sample.py"] = {nodeid}
+                        state.executable_ids = [nodeid]
+                        for phase in ("setup", "call", "teardown"):
+                            state.pytest_runtest_logreport(types.SimpleNamespace(
+                                nodeid=nodeid, when=phase, outcome="passed"))
+                        state.pytest_sessionfinish(None, 0)
+                    finally:
+                        state.pytest_unconfigure(config)
+                directory = output / "readsets" / trace_reads.encoded_suite(sid) / "1"
+                doc = json.loads((directory / (state.shard + ".json")).read_text(encoding="utf-8"))
+                self.assertEqual({key: doc[key] for key in binding}, binding)
+                self.assertNotIn("missing_provenance", doc["incomplete_reasons"])
+                expected_ref = "readsets/sample%2Fsuite/1/attempts-" + state.shard + ".jsonl"
+                self.assertEqual(doc["outcomes_ref"], expected_ref)
+                rows = [json.loads(line) for line in (output / expected_ref).read_text(
+                    encoding="utf-8").splitlines()]
+                self.assertEqual(rows, state.attempts)
 
 
 class SelectionContracts(unittest.TestCase):

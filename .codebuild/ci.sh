@@ -185,6 +185,12 @@ for reporter in vitest-leaf.mjs playwright-leaf.mjs; do
     reporters_ready=0
   fi
 done
+# The manifest helper is advisory; its absence must not disable read capture.
+if git --no-replace-objects show "$TRUSTED_SHA:scripts/ci/full_run_manifest.py" > "$selection_dir/full_run_manifest.py"; then
+  chmod 400 "$selection_dir/full_run_manifest.py"
+else
+  echo 'WARNING: trusted full-run manifest helper unavailable' >&2
+fi
 # Only explicit tracing proofs enable capture; webhook builds stay fast.
 tracing_ready=0
 if [[ "$tracing_helpers_ready" == 1 && "${LEAF_PROOF_TRACING:-}" == 1 ]]; then
@@ -522,11 +528,11 @@ if [[ "$tracing_ready" == 1 ]]; then
   export LEAF_READSET_SOURCE_SHA="$HEAD_SHA"
   export LEAF_READSET_SOURCE_TREE="$(git --no-replace-objects rev-parse "$HEAD_SHA^{tree}" 2>/dev/null || true)"
   export LEAF_READSET_CAPTURE_SHA="$(git --no-replace-objects rev-parse "$TRUSTED_SHA:scripts/ci/trace_reads.py" 2>/dev/null || true)"
-  export LEAF_READSET_CATALOG_SHA256="$(python -I -B - "$selection_dir/detail.json" <<'LEAF_CAPTURE_ID'
+  export LEAF_READSET_CATALOG_SHA256="$(python -I -B - "$selection_dir/catalog.json" <<'LEAF_CAPTURE_ID'
 import json
 import sys
 try:
-    print(json.load(open(sys.argv[1], encoding="utf-8")).get("runner_catalog_sha256") or "")
+    print(json.load(open(sys.argv[1], encoding="utf-8")).get("catalog_sha256") or "")
 except (OSError, ValueError):
     print("")
 LEAF_CAPTURE_ID
@@ -558,58 +564,15 @@ python scripts/ci/change_impact_job.py --repo . --head "${CODEBUILD_RESOLVED_SOU
   --receipt-dir /tmp/impact || echo "change-impact: helper exit $? (advisory)"
 echo "LEAF_T end change-impact $(date +%s%3N) rc=0"
 # Read-set publication is advisory and only runs after a traced gate.
-readsets_object=""
-readsets_sha256=""
-readsets_bytes=""
-readsets_status=not_traced
-readsets_archive_members=""
-if [[ "$tracing_ready" == 1 ]]; then
-  publish_readsets() {
-    local archive="$selection_dir/readsets.tar.gz" entry digest build_uuid key member
-    local -a selection_members=()
-    readsets_status=empty
-    [[ -d /tmp/gate-logs/readsets ]] || return 0
-    readsets_error="directory scan failed"
-    entry="$(find /tmp/gate-logs/readsets -type f -print -quit)" || return 1
-    [[ -n "$entry" ]] || return 0
-    readsets_error="archive creation failed"
-    for member in catalog.json decision.json; do
-      [[ ! -f "$selection_dir/$member" ]] || selection_members+=("$member")
-    done
-    tar -czf "$archive" -C /tmp/gate-logs readsets -C "$selection_dir" "${selection_members[@]}" 2>/dev/null || return 1
-    readsets_archive_members="readsets ${selection_members[*]}"
-    readsets_error="archive measurement failed"
-    readsets_bytes="$(wc -c < "$archive")" || return 1
-    readsets_bytes="${readsets_bytes//[[:space:]]/}"
-    digest="$(sha256sum "$archive")" || return 1
-    readsets_sha256="${digest%% *}"
-    if (( readsets_bytes > 200 * 1024 * 1024 )); then
-      readsets_status=too_large
-      return 0
-    fi
-    readsets_error="missing build id"
-    [[ -n "${CODEBUILD_BUILD_ID:-}" ]] || return 1
-    build_uuid="${CODEBUILD_BUILD_ID#*:}"
-    key="mq/leaf-web-demo/selection/${build_uuid}.readsets.tar.gz"
-    aws s3api put-object --bucket leaf-mq-transport-807034087062-us-east-1 \
-      --key "$key" --body "$archive" --if-none-match '*' --checksum-algorithm SHA256 \
-      --metadata "build_id=${CODEBUILD_BUILD_ID},head_sha=${HEAD_SHA},trusted_sha=${TRUSTED_SHA},trusted_sha_override=${trusted_sha_override}" \
-      >/dev/null 2>&1 || { readsets_error="put-object exit $?"; return 1; }
-    readsets_object="s3://leaf-mq-transport-807034087062-us-east-1/$key"
-    readsets_status=uploaded
-  }
-  if ! publish_readsets; then
-    readsets_status=upload_failed
-    echo "WARNING: readsets upload failed ($readsets_error)" >&2
-  fi
-fi
-export readsets_object readsets_sha256 readsets_bytes readsets_status readsets_archive_members
-python -I -B - "$selection_dir" "$gate_status" "$tracing_ready" "$reporters_ready" "$trusted_sha_override" "$loader_check" <<'LEAF_SELECTION_FINALIZE' || echo 'WARNING: selection evidence finalization failed' >&2
+# Compute completeness and the full-run binding before packing any evidence.
+manifest_failed=0
+if ! python -I -B - "$selection_dir" "$gate_status" "$tracing_ready" "$reporters_ready" "$trusted_sha_override" "$loader_check" \
+  "${CODEBUILD_BUILD_ID:-}" "${HEAD_SHA:-}" "${LEAF_READSET_SOURCE_TREE:-}" "${LEAF_READSET_CAPTURE_SHA:-}" "${CODEBUILD_BUILD_IMAGE:-}" <<'LEAF_SELECTION_FINALIZE'
 import datetime
 import hashlib
 import json
-import os
 from pathlib import Path
+import subprocess
 import sys
 
 out = Path(sys.argv[1])
@@ -648,22 +611,25 @@ selected = sorted(set(detail.get("selected_test_ids", [])))
 reporting = (valid and bool(expected) and observed == expected and len(first) == len(expected)
              and all(row.get("test_report_complete") is True for row in first))
 complete = reporting and all(row.get("status") in ("PASS", "FAIL") for row in first)
+rejected_shards = 0
+if sys.argv[3] == "1":
+    sys.path.insert(0, str(out))
+    import full_run_manifest
+    packed_catalog = json.loads((out / "catalog.json").read_text(encoding="utf-8"))
+    rejected_shards = full_run_manifest.partition_readsets(
+        Path("/tmp/gate-logs/readsets"), out / "readsets-rejected", packed_catalog, sys.argv[7])
+    (out / "readsets-partitioned").write_text("ready\n", encoding="ascii")
 detail.update(execution_complete=complete, test_exit_code=int(sys.argv[2]),
-              readsets_object=os.environ.get("readsets_object") or None,
-              readsets_sha256=os.environ.get("readsets_sha256") or None,
-              readsets_bytes=int(os.environ["readsets_bytes"]) if os.environ.get("readsets_bytes") else None,
-              readsets_status=os.environ["readsets_status"],
-              readsets_archive_members=os.environ["readsets_archive_members"].split(),
               trusted_sha_override=sys.argv[5] == "1", loader_check=sys.argv[6],
               tracing_active=sys.argv[3] == "1", reporters_active=sys.argv[4] == "1",
               build_exit_code=int(sys.argv[2]), collection_complete=reporting,
               collection_ids_sha256=hashlib.sha256(canonical(all_ids).encode("utf-8")).hexdigest(),
               attempts_ref=str(attempts_path), attempts_sha256=hashlib.sha256(raw).hexdigest(),
               test_id_reporting_complete=reporting,
+              readsets_rejected_shards=rejected_shards,
               full_run_complete=complete and detail.get("execution_mode") == "full",
               finished_at=datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"))
 (out / "detail.json").write_text(canonical(detail) + "\n", encoding="utf-8")
-print("LEAF_SELECTION_FINAL " + canonical(detail))
 if detail.get("phase") == "shadow":
     shadow = {"id": detail.get("build_id"), "sha": detail.get("head_sha"),
               "trusted_sha_override": detail["trusted_sha_override"],
@@ -675,16 +641,116 @@ if detail.get("phase") == "shadow":
               "catalog_sha256": detail.get("runner_catalog_sha256"),
               "collection_ids_sha256": detail["collection_ids_sha256"],
               "attempts_ref": detail["attempts_ref"], "attempts_sha256": detail["attempts_sha256"],
-              "readsets_object": detail["readsets_object"], "readsets_sha256": detail["readsets_sha256"],
-              "readsets_bytes": detail["readsets_bytes"], "readsets_status": detail["readsets_status"],
-              "readsets_archive_members": detail["readsets_archive_members"],
               "full_run_complete": detail["full_run_complete"],
               "tracing_active": detail["tracing_active"], "reporters_active": detail["reporters_active"],
               "test_id_reporting_complete": reporting, "synthetic": False,
               "fallback_reason": detail.get("fallback_reason"),
               "assigned_arm": detail.get("assigned_arm"), "execution_mode": detail.get("execution_mode")}
-    print("LEAF_SHADOW " + canonical(shadow))
+    (out / "shadow.json").write_text(canonical(shadow) + "\n", encoding="utf-8")
+if sys.argv[3] == "1":
+    helper = out / "full_run_manifest.py"
+    if not helper.is_file() or not helper.stat().st_size:
+        raise ValueError("manifest_helper_unavailable")
+    inputs = {"repo": "leaf-web-demo", "run_id": sys.argv[7], "source_sha": sys.argv[8],
+              "source_tree": sys.argv[9], "capture_sha": sys.argv[10], "image": sys.argv[11],
+              "execution_mode": detail["execution_mode"],
+              "full_run_complete": detail["full_run_complete"],
+              "test_id_reporting_complete": detail["test_id_reporting_complete"]}
+    result = subprocess.run([sys.executable, "-I", "-B", str(helper),
+                             "--catalog", str(out / "catalog.json"),
+                             "--readsets", "/tmp/gate-logs/readsets",
+                             "--output", str(out / "full-run.json")],
+                            input=canonical(inputs), text=True)
+    if result.returncode == 0 and not (out / "full-run.json").is_file():
+        raise ValueError("manifest_output_missing")
+    raise SystemExit(result.returncode)
 LEAF_SELECTION_FINALIZE
+then
+  manifest_failed=1
+  echo 'WARNING: selection evidence finalization or full-run manifest failed' >&2
+fi
+readsets_object=""
+readsets_sha256=""
+readsets_bytes=""
+readsets_status=not_traced
+readsets_archive_members=""
+if [[ "$tracing_ready" == 1 ]]; then
+  publish_readsets() {
+    local archive="$selection_dir/readsets.tar.gz" entry digest build_uuid key member
+    local -a selection_members=()
+    readsets_status=empty
+    readsets_error="read-set partition failed"
+    [[ -f "$selection_dir/readsets-partitioned" ]] || return 1
+    [[ -d /tmp/gate-logs/readsets ]] || return 0
+    readsets_error="directory scan failed"
+    entry="$(find /tmp/gate-logs/readsets -type f -print -quit)" || return 1
+    [[ -n "$entry" ]] || return 0
+    readsets_error="archive creation failed"
+    for member in catalog.json decision.json full-run.json; do
+      [[ ! -f "$selection_dir/$member" ]] || selection_members+=("$member")
+    done
+    # Name each document once, including the outcome streams shards reference.
+    local -a attempt_members=() shard_members=()
+    while IFS= read -r -d '' member; do
+      attempt_members+=("${member#/tmp/gate-logs/}")
+    done < <(find /tmp/gate-logs/readsets -type f -name 'attempts*.jsonl' -print0)
+    while IFS= read -r -d '' member; do
+      shard_members+=("${member#/tmp/gate-logs/}")
+    done < <(find /tmp/gate-logs/readsets -type f ! -name 'attempts*.jsonl' -print0)
+    tar -czf "$archive" --no-recursion -C /tmp/gate-logs readsets -C "$selection_dir" "${selection_members[@]}" -C /tmp/gate-logs "${shard_members[@]}" "${attempt_members[@]}" 2>/dev/null || return 1
+    readsets_archive_members="readsets ${selection_members[*]} ${attempt_members[*]}"
+    readsets_error="archive measurement failed"
+    readsets_bytes="$(wc -c < "$archive")" || return 1
+    readsets_bytes="${readsets_bytes//[[:space:]]/}"
+    digest="$(sha256sum "$archive")" || return 1
+    readsets_sha256="${digest%% *}"
+    if (( readsets_bytes > 200 * 1024 * 1024 )); then
+      readsets_status=too_large
+      return 0
+    fi
+    readsets_error="missing build id"
+    [[ -n "${CODEBUILD_BUILD_ID:-}" ]] || return 1
+    build_uuid="${CODEBUILD_BUILD_ID#*:}"
+    key="mq/leaf-web-demo/selection/${build_uuid}.readsets.tar.gz"
+    aws s3api put-object --bucket leaf-mq-transport-807034087062-us-east-1 \
+      --key "$key" --body "$archive" --if-none-match '*' --checksum-algorithm SHA256 \
+      --metadata "build_id=${CODEBUILD_BUILD_ID},head_sha=${HEAD_SHA},trusted_sha=${TRUSTED_SHA},trusted_sha_override=${trusted_sha_override}" \
+      >/dev/null 2>&1 || { readsets_error="put-object exit $?"; return 1; }
+    readsets_object="s3://leaf-mq-transport-807034087062-us-east-1/$key"
+    readsets_status=uploaded
+  }
+  if ! publish_readsets; then
+    readsets_status=upload_failed
+    echo "WARNING: readsets upload failed ($readsets_error)" >&2
+  fi
+fi
+if [[ "$tracing_ready" == 1 && "$manifest_failed" == 1 ]]; then
+  readsets_status=manifest_failed
+fi
+export readsets_object readsets_sha256 readsets_bytes readsets_status readsets_archive_members
+python -I -B - "$selection_dir" <<'LEAF_SELECTION_PUBLISHED' || echo 'WARNING: selection evidence finalization failed' >&2
+import json
+import os
+from pathlib import Path
+import sys
+
+out = Path(sys.argv[1])
+canonical = lambda value: json.dumps(value, sort_keys=True, separators=(",", ":"))
+detail = json.loads((out / "detail.json").read_text(encoding="utf-8"))
+publication = {"readsets_object": os.environ.get("readsets_object") or None,
+               "readsets_sha256": os.environ.get("readsets_sha256") or None,
+               "readsets_bytes": int(os.environ["readsets_bytes"]) if os.environ.get("readsets_bytes") else None,
+               "readsets_status": os.environ["readsets_status"],
+               "readsets_rejected_shards": detail.get("readsets_rejected_shards", 0),
+               "readsets_archive_members": os.environ["readsets_archive_members"].split()}
+detail.update(publication)
+(out / "detail.json").write_text(canonical(detail) + "\n", encoding="utf-8")
+print("LEAF_SELECTION_FINAL " + canonical(detail))
+if detail.get("phase") == "shadow":
+    shadow = json.loads((out / "shadow.json").read_text(encoding="utf-8"))
+    shadow.update(publication)
+    print("LEAF_SHADOW " + canonical(shadow))
+LEAF_SELECTION_PUBLISHED
 # LEAF_GATE_PROOF_BEGIN
 # Reuse only this run's result. Proof publication is advisory to the CI verdict.
 # Eligibility follows what executed (full, unfiltered, no trusted-SHA override), never the selector's phase.
