@@ -290,8 +290,8 @@ function todayConsole(activeSurface) {
   }
 }
 
-/** ToolCast.jsx's stage mounts. No posture, no cockpit band; the frame arm is
- *  contract.chrome.stageBranch === 'frame' (ToolCast.jsx:1434/2077/2138). */
+/** ToolCast.jsx's stage mounts. No posture, no cockpit band; the frame covers
+ *  the declared frame branch and the ios-surface project slot (D1). */
 function todayStage(activeSurface) {
   const slots = surfaceContract(activeSurface)
   return {
@@ -307,7 +307,8 @@ function todayStage(activeSurface) {
       </Published>
     ),
     // ToolCast.jsx:2138-2147
-    frame: slots.chrome.stageBranch === 'frame' ? (
+    frame: (slots.chrome.stageBranch === 'frame'
+      || (slots.chrome.productFrame && slots.chrome.projectSlot === 'ios-surface')) ? (
       <ProductSurfaceFrame
         activeSurface={activeSurface}
         states={STATES}
@@ -438,6 +439,42 @@ if (CAPTURE) {
 // scene:surface:slot at a time, with the reason. Every row not listed is
 // still compared against the frozen bytes, unchanged.
 const DIVERGENCES = {
+  // D1, ios-shell-convergence: the stage now renders the declared iOS frame.
+  // Real render of the declared iOS product frame captured on this tree; the frozen fixture stays evidence from the untouched worktree.
+  'stage:ios': { frame: [
+    'section|tc-product-frame|',
+    'div|tc-product-morph|',
+    'div|tc-product-frame-head|',
+    'span||',
+    'strong||',
+    'h1||',
+    'p||',
+    'div|tc-product-project|',
+    'div|tc-product-columns|',
+    'div||',
+    'h2||',
+    'ul||',
+    'li||',
+    'li||',
+    'li||',
+    'li||',
+    'li||',
+    'li||',
+    'li||',
+    'li||',
+    'div||',
+    'h2||',
+    'div||surface-capabilities-live',
+    'p|tc-product-catalog-count|',
+    'ul||',
+    'li||',
+    'strong||',
+    'span||',
+    'li||',
+    'strong||',
+    'span||',
+    'p|tc-product-note|',
+  ] },
   // P1 studio-shell pass: solar declared chrome.productFrame TRUE, which put
   // a 450px opaque marketing card in the console's flow over solar's OWN
   // ribbon, document band and canvas (measured y=28..478 at 1512x950; ground
@@ -561,6 +598,18 @@ describe.skipIf(CAPTURE)('SurfaceFrame — zero visual change against the captur
 })
 
 describe.skipIf(CAPTURE)('SurfaceFrame — the gates it now owns', () => {
+  it('D1 stage ios renders the declared product frame with the ios project slot inside it', () => {
+    const { container, getByTestId } = render(
+      <SurfaceFrame scene="stage" activeSurface="ios" states={STATES}
+        catalog={CATALOG} workspaceProject={EMPTY_WORKSPACE_PROJECT} projectSlot={PROJECT_SLOT}>
+        <SurfaceFrame.Frame />
+      </SurfaceFrame>,
+    )
+    const frame = container.querySelector('.tc-product-frame')
+    expect(frame).not.toBeNull()
+    expect(frame).toContainElement(getByTestId('ios-project-slot'))
+  })
+
   it('a slot mounted outside a frame renders nothing instead of throwing', () => {
     // Fail closed. The alternative is a ReferenceError inside a scene's tree.
     for (const Slot of [

@@ -1507,6 +1507,58 @@ export default function ToolCast({
     />
   )
 
+  const iosShipLane = (
+    <div className="tc-ios-ship-lane" role="region" aria-label="iOS ship lane" data-testid="ios-ship-lane">
+      {projectSlot}
+      <span className="tc-solve" data-testid="ios-ship-status">
+        <span className={`dot ${iosShip.launchable ? 'live' : 'hollow'}`} />
+        {iosShip.launchable ? 'Ship lane ready' : 'Ship lane setup required'}
+      </span>
+      <button type="button" className="tc-back" onClick={() => navigate('/')}>Back to the site</button>
+      <p className="tc-rail-note">
+        Turn an approved project revision into a TestFlight build through the mounted Apple
+        ship lane. Apple passwords, two-factor codes, keys, certificates, and profiles never
+        enter this browser.
+      </p>
+      {!iosShip.launchable && (
+        <p className="tc-rail-note" data-testid="ios-ship-setup">
+          {iosShip.setupAction
+            ? `Setup action: ${iosShip.setupAction}`
+            : 'The ship lane is not ready. No launch control is available.'}
+        </p>
+      )}
+      {iosShipLaunchAffordance(iosShip, {
+        projectId: workspace.openProjectId,
+        revision: workspace.canonicalVersionId,
+        sessionActive: platformSession.status === 'active',
+      }) && (
+        <button
+          type="button"
+          className="tc-run"
+          data-testid="ios-ship-launch"
+          disabled={iosShipBusy}
+          onClick={launchIosShip}
+        >
+          {iosShipBusy ? 'Launching' : 'Launch TestFlight build'}
+        </button>
+      )}
+      {iosShipExecution && (
+        <p className="tc-rail-note" data-testid="ios-ship-execution">
+          Build {iosShipExecution.build_number} · {iosShipExecution.status}
+          {iosShipExecution.failed_stage ? ` at ${iosShipExecution.failed_stage}` : ''}
+        </p>
+      )}
+      {iosShipReceipt && (
+        <div className="tc-rail-note" data-testid="ios-ship-receipt">
+          <strong>TestFlight receipt</strong>
+          <div>{iosShipReceipt.bundle_identifier} · {iosShipReceipt.marketing_version} ({iosShipReceipt.build_number})</div>
+          <div>{iosShipReceipt.app_store_connect_result?.status} · {iosShipReceipt.app_store_connect_result?.build_id}</div>
+        </div>
+      )}
+      {iosShipError && <p className="tc-rail-note" data-testid="ios-ship-error">{iosShipError}</p>}
+    </div>
+  )
+
   // Slice 13d: the stage's own act-scope palette row for the console's
   // shortcut sheet (stageRunReasons.js's stageHelpPaletteRow, built off the
   // SAME byId('bar:shortcuts') registry record the console's row reads).
@@ -1689,6 +1741,8 @@ export default function ToolCast({
   // Standardization slice 8c. Precomputed like commandBarBlock above: the
   // <SurfaceFrame> tag stays compact so the sign-out pin (a bounded 0-2000
   // char span to `signedIn=`) keeps holding as slots accrete.
+  const stageProjectSlot = surfaceSlots.chrome.projectSlot === 'ios-surface' ? iosShipLane : projectSlot
+
   const integrationsBlock = {
     mock: transportMock,
     servers: mcpRegistry.servers,
@@ -1720,7 +1774,7 @@ export default function ToolCast({
       workspaceProject={workspaceProjectState}
       onSelect={selectProductSurface}
       onCreateProject={createWorkspaceProject}
-      projectSlot={projectSlot}
+      projectSlot={stageProjectSlot}
       session={platformSession}
       posture={null}
       entitlement={{
@@ -1796,64 +1850,7 @@ export default function ToolCast({
           no open drawing, so no further gating was added to it. */}
       {stageBranch === 'ios' ? (
       <>
-      <div className="tc-topcluster tc-topcluster-product" data-cast="tool" style={{ '--rank': 3 }}>
-        {projectSlot}
-        <span className="tc-solve" data-testid="ios-ship-status">
-          <span className={`dot ${iosShip.launchable ? 'live' : 'hollow'}`} />
-          {iosShip.launchable ? 'Ship lane ready' : 'Ship lane setup required'}
-        </span>
-        <button type="button" className="tc-back" onClick={() => navigate('/')}>Back to the site</button>
-        <span className="key">Esc</span>
-      </div>
-      <aside className="tc-rail tc-rail-l tc-operator-rail" aria-label="iOS ship lane" data-cast="tool" data-testid="ios-ship-lane" style={{ '--rank': 0 }}>
-        <div className="tc-rail-head">
-          <span className="tc-rail-title">iOS ship lane</span>
-          <span className="tc-rail-sub">readiness · launch · receipt</span>
-        </div>
-        <div className="tc-rail-body">
-          <p className="tc-rail-note">
-            Turn an approved project revision into a TestFlight build through the mounted Apple
-            ship lane. Apple passwords, two-factor codes, keys, certificates, and profiles never
-            enter this browser.
-          </p>
-          {!iosShip.launchable && (
-            <p className="tc-rail-note" data-testid="ios-ship-setup">
-              {iosShip.setupAction
-                ? `Setup action: ${iosShip.setupAction}`
-                : 'The ship lane is not ready. No launch control is available.'}
-            </p>
-          )}
-          {iosShipLaunchAffordance(iosShip, {
-            projectId: workspace.openProjectId,
-            revision: workspace.canonicalVersionId,
-            sessionActive: platformSession.status === 'active',
-          }) && (
-            <button
-              type="button"
-              className="tc-run"
-              data-testid="ios-ship-launch"
-              disabled={iosShipBusy}
-              onClick={launchIosShip}
-            >
-              {iosShipBusy ? 'Launching' : 'Launch TestFlight build'}
-            </button>
-          )}
-          {iosShipExecution && (
-            <p className="tc-rail-note" data-testid="ios-ship-execution">
-              Build {iosShipExecution.build_number} · {iosShipExecution.status}
-              {iosShipExecution.failed_stage ? ` at ${iosShipExecution.failed_stage}` : ''}
-            </p>
-          )}
-          {iosShipReceipt && (
-            <div className="tc-rail-note" data-testid="ios-ship-receipt">
-              <strong>TestFlight receipt</strong>
-              <div>{iosShipReceipt.bundle_identifier} · {iosShipReceipt.marketing_version} ({iosShipReceipt.build_number})</div>
-              <div>{iosShipReceipt.app_store_connect_result?.status} · {iosShipReceipt.app_store_connect_result?.build_id}</div>
-            </div>
-          )}
-          {iosShipError && <p className="tc-rail-note" data-testid="ios-ship-error">{iosShipError}</p>}
-        </div>
-      </aside>
+      <SurfaceFrame.Frame />
       <SurfaceFrame.Toast />
       </>
       ) : authoringOnStage ? (

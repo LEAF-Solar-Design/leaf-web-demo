@@ -13,9 +13,9 @@ comparing `activeSurface` to a string literal any more. Behaviour is unchanged, 
 a test rather than a claim: `web/src/site/surfaceGates.test.js` pins every derived gate
 equal to the literal predicate it replaced, for all four surface ids, with the old
 predicates written out as literals so a later edit to a default fails loudly instead of
-agreeing with itself. The three console/stage divergences (D1, D2, D3) and the solar
-`productFrame` quirk are PRESERVED, each still a later-slice item. From here on, editing a
-value in the manifest changes the product.
+agreeing with itself. The console/stage divergences D1 and D2 are closed by
+ios-shell-convergence; D3 was closed by slice 7a. The solar `productFrame` quirk is
+recorded below. From here on, editing a value in the manifest changes the product.
 
 The operator rule the contract exists to serve, verbatim:
 
@@ -218,8 +218,8 @@ overlay, never drawing entities or certified equipment data.
   rail, which is not surface-gated. On cad and solar the rail collapses to a spine by
   default, so the panel is reached through the ribbon's author cluster (`App.jsx:2429`)
   rather than the rail itself.
-- **`builds.routes` carries no `ship-lane` on iOS.** See the divergence table: the console
-  mounts `IosSurface`, which is props-only with no launch control.
+- **`builds.routes` declares `ship-lane` on iOS.** The console's `IosSurface onLaunch`
+  and the stage's `ios-ship-launch` both use the shared `useIosShipController`.
 - **`conversations.scope` is `drawing` even where there is no drawing.**
   `sessionCacheKey` falls back to the literal `'default'` drawing key
   (`converse.js:132`), so the scope shape is drawing-keyed on every surface.
@@ -287,14 +287,14 @@ and `solar` with a fifth row present.
 ## Divergences between the two shells
 
 The console (`App.jsx`, `/app`) and the stage (`ToolCast.jsx`, `/try`) used to disagree on
-three rows. The manifest carries the console value; D1 and D2 are still open, each a
-later-slice item. D3 is CLOSED (standardization slice 7a); its row below records how.
+three rows. D1 and D2 are CLOSED (ios-shell-convergence), and D3 is CLOSED
+(standardization slice 7a). Their rows below record how.
 
 | # | surface | slot | console (`App.jsx`) | stage (`ToolCast.jsx`) | slice-2 action |
 | --- | --- | --- | --- | --- | --- |
-| D1 | ios | `chrome.productFrame` / `chrome.projectSlot` | `true` with `projectSlot: 'ios-surface'`: the frame renders and `IosSurface` fills its slot (`App.jsx:2838`, `:2846-2847`) | `false`: the ios arm of the ternary (`ToolCast.jsx:2077`) renders its own top cluster and `tc-operator-rail` ship lane instead of the frame | one wrapper renders the declared frame; the ios ship lane becomes a declared slot, not a hard-coded branch |
-| D2 | ios | `builds.routes` | `['one-shot']`: `IosSurface.jsx:3-4` is props-only ("no fetch, no polling, no client-side state math") and carries NO launch control | additionally a real ship-lane launch: `ToolCast.jsx:2114` `data-testid="ios-ship-launch"` -> `launchIosShip` | promote `ship-lane` to a declared route and mount ONE control from it, so the two shells stop disagreeing about whether a user can ship |
-| D3 (CLOSED, slice 7a) | cad | `authoring` reach | `true` on all four surfaces (`App.jsx:2735`, un-gated rail) | was cad only: the Workspace rail's Author tab and `CapabilityCatalog` lived inside the `activeSurface === 'cad'` arm (pre-7a `ToolCast.jsx:1434`, `:1523`) | **closed**: the stage's workspace rail now mounts wherever `surfaceContract(activeSurface).authoring === true` (`ToolCast.jsx`, the `authoringOnStage` binding beside `stageBranch`), so cad, solar and browser all reach it, scoped to each surface's `familyIds` through the Catalog tab exactly as before. ios is excepted structurally, not by a contract flip: `stageBranch === 'ios'` is the FIRST arm of the render ternary, so ios's stage keeps its own untouched ship-lane rail even though ios's own `authoring` slot stays `true` (it genuinely is reachable from the console's un-gated rail, so declaring it `false` would misstate the console's own behaviour). Still exactly ONE `authoring` slot; no `authoringStage` slot was added. The guided tour walk (`STAGE_TOUR_ANCHORS`, declared `null` on every non-cad surface below) stays keyed on `stageBranch === 'cad'` inside the widened arm |
+| D1 (CLOSED, ios-shell-convergence) | ios | `chrome.productFrame` / `chrome.projectSlot` | `true` with `projectSlot: 'ios-surface'`: the frame renders and `IosSurface` fills its slot | the first ios arm renders `<SurfaceFrame.Frame />` with `iosShipLane` in its project slot | closed: the stage frame gate accepts the declared `productFrame` and `ios-surface` project slot; `iosShipLane` supplies the project switcher, readiness, launch and receipt in that slot |
+| D2 (CLOSED, ios-shell-convergence) | ios | `builds.routes` | `['one-shot', 'ship-lane']`: `App.jsx:3283` wires `IosSurface onLaunch` | `ToolCast.jsx` mounts `data-testid="ios-ship-launch"` with `launchIosShip` | closed: `ship-lane` is a declared route and both launch controls use the shared `useIosShipController` |
+| D3 (CLOSED, slice 7a) | cad | `authoring` reach | `true` on all four surfaces (`App.jsx:2735`, un-gated rail) | was cad only: the Workspace rail's Author tab and `CapabilityCatalog` lived inside the `activeSurface === 'cad'` arm (pre-7a `ToolCast.jsx:1434`, `:1523`) | **closed**: the stage's workspace rail now mounts wherever `surfaceContract(activeSurface).authoring === true` (`ToolCast.jsx`, the `authoringOnStage` binding beside `stageBranch`), so cad, solar and browser all reach it, scoped to each surface's `familyIds` through the Catalog tab exactly as before. ios is excepted structurally, not by a contract flip: `stageBranch === 'ios'` is the FIRST arm of the render ternary, so ios's first arm now renders the declared frame even though ios's own `authoring` slot stays `true` (it genuinely is reachable from the console's un-gated rail, so declaring it `false` would misstate the console's own behaviour). Still exactly ONE `authoring` slot; no `authoringStage` slot was added. The guided tour walk (`STAGE_TOUR_ANCHORS`, declared `null` on every non-cad surface below) stays keyed on `stageBranch === 'cad'` inside the widened arm |
 
 A fourth, weaker mismatch: solar's `chrome.stageBranch` is `'frame'` (unchanged by slice 7a),
 so the stage gives Solar CAD no drafting cockpit at all while the console does

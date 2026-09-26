@@ -9,6 +9,19 @@ import { describe, expect, it } from 'vitest'
 const read = (name) => readFileSync(new URL(name, import.meta.url), 'utf8').replace(/\r\n/g, '\n')
 const toolCast = read('./ToolCast.jsx')
 
+it('D1 the stage ios arm renders the declared frame, not a hand-built rail', () => {
+  const start = toolCast.indexOf("{stageBranch === 'ios' ? (")
+  const end = toolCast.indexOf(') : authoringOnStage ? (', start)
+  expect(start).toBeGreaterThan(0)
+  expect(end).toBeGreaterThan(start)
+  const iosArm = toolCast.slice(start, end)
+  expect(iosArm).toContain('<SurfaceFrame.Frame />')
+  expect(iosArm).not.toContain('tc-operator-rail')
+  expect(iosArm).not.toContain('tc-topcluster')
+  expect(iosArm).not.toContain('<aside')
+  expect(toolCast).toContain("projectSlot === 'ios-surface' ? iosShipLane")
+})
+
 describe('no-drawing Catalog browse wiring', () => {
   it('wires the session controller into the persistent product-nav sign-out control', () => {
     // Slice 4a: the <ProductSurfaceTabs> element moved into
