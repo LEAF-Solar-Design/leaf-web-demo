@@ -172,6 +172,25 @@ class PostgresJobStore:
             row = cur.fetchone()
         return _record(row) if row else None
 
+    def record_first_delivery(self, job_id: str, now: float) -> Optional[float]:
+        """Atomically stamp a terminal job once across application processes."""
+        db = _db()
+        with db.transaction() as conn:
+            conn.execute(
+                "UPDATE async_jobs SET provenance_json = "
+                "COALESCE(provenance_json, '{}'::jsonb) || "
+                "jsonb_build_object('client_delivered_at', %s::float8) "
+                "WHERE job_id = %s AND status IN ('complete','failed') "
+                "AND NOT (COALESCE(provenance_json, '{}'::jsonb) ? 'client_delivered_at')",
+                (now, job_id),
+            )
+            row = conn.execute(
+                "SELECT provenance_json FROM async_jobs "
+                "WHERE job_id = %s AND status IN ('complete','failed')", (job_id,),
+            ).fetchone()
+            return ((_json(row["provenance_json"]) or {}).get("client_delivered_at")
+                    if row is not None else None)
+
     def list(self, tenant_id: Optional[str], limit: int) -> List[Dict[str, Any]]:
         db = _db()
         with db.cursor() as cur:

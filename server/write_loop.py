@@ -3298,6 +3298,23 @@ def _apply_plan_live(*, tenant_id: str, drawing_id: str, head_v: int,
     return envelope, 200
 
 
+def apply_client_delivery(cad_timing, finished_at, delivered_at) -> dict:
+    """Add first-delivery timing to a served copy of an execution-time record."""
+    result = copy.deepcopy(cad_timing) if isinstance(cad_timing, dict) else {}
+    if (result.get("contract") != "leaf.cad-timing.v1"
+            or not isinstance(result.get("spans_ms"), dict)):
+        return result
+    if any(isinstance(value, bool) or not isinstance(value, (int, float))
+           or not math.isfinite(value) for value in (finished_at, delivered_at)):
+        return result
+    if delivered_at < finished_at:
+        return result
+    spans = result["spans_ms"]
+    spans["client_delivery"] = int(round((delivered_at - finished_at) * 1000))
+    result["unavailable_spans"] = [name for name, value in spans.items() if value is None]
+    return result
+
+
 def run_write_live(tool: Dict[str, Any], params: Dict[str, Any], tenant_id: str, *,
                    backend, da: Any, t0: float, run_tool_dynamic_fn=None,
                    ledger_entry: Optional[Dict[str, Any]] = None,
