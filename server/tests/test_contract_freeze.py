@@ -456,14 +456,14 @@ def test_overlay_event_names_come_from_the_module_that_emits_them():
         t for t in NON_TURN_STREAM_TYPES if t.startswith("overlay_")}
 
 
-def test_s21_turn_input_field_set_frozen_no_packet():
+def test_s21_turn_input_field_set_frozen_with_optional_packet():
     """The live wire is §2.1 ConverseTurnInput. The field SET is exact: an added
     field fails, not just a removed one. `model` + `credential_grant` are the
     ADDITIVE, OPTIONAL "mount your LLM" fields (both absent-safe on the wire);
     `images` is the same kind of addition for inline vision blocks, optional and
-    absent-safe, carried for one turn and never stored as prior context. A
-    ContextPacket field remains explicitly forbidden (that is the §2.1 packet
-    decision, distinct from these per-session additions).
+    absent-safe, carried for one turn and never stored as prior context.
+    Supersession (2026-09-26): the app-built `context_packet` is now an optional,
+    additive grounding field, replacing the §18 no-packet decision.
     `reasoning_id` arrived with the mushy-code ad209705 re-pin (magpie AD4),
     an optional catalog reasoning selection validated against the effective
     model, absent-safe on the wire.
@@ -475,11 +475,9 @@ def test_s21_turn_input_field_set_frozen_no_packet():
     assert _ts_field_names(block) == {"tenant_id", "session_id", "turn_id",
                                       "drawing_id", "messages", "text",
                                       "confirm", "model", "credential_grant",
-                                      "images", "reasoning_id"}, (
+                                      "images", "reasoning_id", "context_packet"}, (
         f"ConverseTurnInput field set drifted: {sorted(_ts_field_names(block))}")
-    assert "contextPacket" not in block and "context_packet" not in block, (
-        "ConverseTurnInput grew a packet field — that is a §2.1 wire change, "
-        "not a drive-by")
+    assert "context_packet?:" in block, "ContextPacket must remain optional"
 
 
 def test_context_packet_schema_frozen(monkeypatch, tmp_path):

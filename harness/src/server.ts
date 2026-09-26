@@ -582,6 +582,9 @@ function validateImages(value: unknown): { ok: true; images: NonNullable<Convers
  * defaults to [] when absent/malformed (the turn engine always sends it, but a
  * missing array here should not be a reason to reject the whole request).
  */
+const MAX_CONTEXT_PACKET_CHARS = 16_384;
+const MAX_CONTEXT_PACKET_DEPTH = 32;
+
 function validateConverseTurnInput(body: Record<string, unknown>): ConverseTurnValidation {
   const tenant_id = typeof body.tenant_id === "string" ? body.tenant_id.trim() : "";
   const session_id = typeof body.session_id === "string" ? body.session_id.trim() : "";
@@ -619,6 +622,28 @@ function validateConverseTurnInput(body: Record<string, unknown>): ConverseTurnV
     : [];
 
   const input: ConverseTurnInput = { tenant_id, session_id, turn_id, drawing_id, messages };
+  if (body.context_packet !== undefined) {
+    if (!isRecord(body.context_packet)) {
+      return { ok: false, message: "context_packet must be an object of at most 16384 serialized chars" };
+    }
+    try {
+      if (JSON.stringify(body.context_packet).length > MAX_CONTEXT_PACKET_CHARS) {
+        return { ok: false, message: "context_packet must be an object of at most 16384 serialized chars" };
+      }
+    } catch {
+      return { ok: false, message: "context_packet must be an object of at most 16384 serialized chars" };
+    }
+    const pending: Array<{ value: unknown; depth: number }> = [{ value: body.context_packet, depth: 1 }];
+    while (pending.length) {
+      const { value, depth } = pending.pop()!;
+      if (value === null || typeof value !== "object") continue;
+      if (depth > MAX_CONTEXT_PACKET_DEPTH) {
+        return { ok: false, message: "context_packet must be an object of at most 16384 serialized chars" };
+      }
+      for (const child of Object.values(value)) pending.push({ value: child, depth: depth + 1 });
+    }
+    input.context_packet = body.context_packet;
+  }
   if (hasText) input.text = body.text as string;
   if (images?.length) input.images = images;
   if (hasConfirm) input.confirm = rawConfirm as ConverseTurnInput["confirm"];

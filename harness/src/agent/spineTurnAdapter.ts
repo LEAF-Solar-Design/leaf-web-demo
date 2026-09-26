@@ -29,9 +29,9 @@
  * on ConfirmationInvalid and burn the approval opaquely. Either way: fail-safe,
  * never rogue-allow; the user re-proposes and gets a fresh chip.
  *
- * Context: the frozen wire carries no ContextPacket field (the app-side
- * server/context_packet.py has no live caller yet — recorded chip-2/5 work). The
- * adapter builds a packet-lite from wire fields. Under its turn lock, the loop
+ * Context: the app builds an optional ContextPacket in server/context_packet.py
+ * for each turn. The adapter scrubs it and adds authoritative wire fields,
+ * falling back to packet-lite when absent. Under its turn lock, the loop
  * uses the scoped SDK mapping to decide whether the app's bounded `messages`
  * seed a fresh model conversation or remain available for missing-session recovery.
  *
@@ -107,6 +107,33 @@ export interface SpineTurnAdapterOptions {
   confirmationTtlS?: number;
 }
 
+// Mirrors MAX_CONTEXT_PACKET_DEPTH in harness/src/server.ts: the packet object
+// itself is depth 1; each child container is its parent's depth plus 1.
+const CONTEXT_PACKET_MAX_DEPTH = 32;
+
+function capContextPacketDepth(value: unknown): unknown {
+  const root: Record<string, unknown> = {};
+  const pending: Array<{ value: unknown; target: object; key: string; depth: number }> = [
+    { value, target: root, key: "value", depth: 1 },
+  ];
+  while (pending.length) {
+    const { value: child, target, key, depth } = pending.pop()!;
+    const container = child !== null && typeof child === "object"
+      && (Array.isArray(child) || Object.getPrototypeOf(child) === Object.prototype
+        || Object.getPrototypeOf(child) === null);
+    const truncated = container && depth > CONTEXT_PACKET_MAX_DEPTH;
+    const result = truncated ? "[context_packet truncated at depth 32]"
+      : container ? (Array.isArray(child) ? new Array(child.length) : {}) : child;
+    Object.defineProperty(target, key, { value: result, enumerable: true, writable: true, configurable: true });
+    if (container && !truncated) {
+      for (const [childKey, entry] of Object.entries(child as object)) {
+        pending.push({ value: entry, target: result as object, key: childKey, depth: depth + 1 });
+      }
+    }
+  }
+  return root.value;
+}
+
 export class SpineTurnAdapter implements ConverseRunner {
   constructor(
     private readonly ports: SpineTurnAdapterPorts,
@@ -147,7 +174,7 @@ export class SpineTurnAdapter implements ConverseRunner {
     //
     // Scrubbing the SOURCE has neither failure mode. Every downstream copy is
     // derived from this one scrubbed input, so they all agree by construction
-    // and no hash can mismatch. It touches only `text` strings — never a key,
+    // and no hash can mismatch. It touches only string values, never a key,
     // never a structure — so it cannot drop a field or pollute a prototype. And
     // because the model never receives the credential, it cannot echo it back
     // into a text_delta or propose a tool parameter containing it.
@@ -157,12 +184,42 @@ export class SpineTurnAdapter implements ConverseRunner {
     // (stripSecrets, not redactSecrets): the pattern pass would rewrite any 40-char
     // token-shaped run, e.g. a Git SHA the user legitimately pasted, before the
     // model saw it. (sol-critic PR #123 round 7, blocker 2.)
+    if (input.context_packet !== undefined) {
+      input = {
+        ...input,
+        context_packet: capContextPacketDepth(input.context_packet) as Record<string, unknown>,
+      };
+    }
     const secrets = grantSecrets(grant).filter(isRedactableSecret);
     if (secrets.length) {
+      const scrubPacket = (value: unknown): unknown => {
+        const root: Record<string, unknown> = {};
+        const pending: Array<{ value: unknown; target: object; key: string }> = [
+          { value, target: root, key: "value" },
+        ];
+        while (pending.length) {
+          const { value: child, target, key } = pending.pop()!;
+          const container = child !== null && typeof child === "object"
+            && (Array.isArray(child) || Object.getPrototypeOf(child) === Object.prototype
+              || Object.getPrototypeOf(child) === null);
+          const result = container ? (Array.isArray(child) ? new Array(child.length) : {})
+            : typeof child === "string" ? stripSecrets(child, secrets) : child;
+          Object.defineProperty(target, key, { value: result, enumerable: true, writable: true, configurable: true });
+          if (container) {
+            for (const [childKey, entry] of Object.entries(child as object)) {
+              pending.push({ value: entry, target: result as object, key: childKey });
+            }
+          }
+        }
+        return root.value;
+      };
       input = {
         ...input,
         ...(input.text !== undefined ? { text: stripSecrets(input.text, secrets) } : {}),
         messages: input.messages.map((m) => ({ ...m, text: stripSecrets(m.text, secrets) })),
+        ...(input.context_packet !== undefined
+          ? { context_packet: scrubPacket(input.context_packet) as Record<string, unknown> }
+          : {}),
       };
     }
 
@@ -211,12 +268,13 @@ export class SpineTurnAdapter implements ConverseRunner {
       },
     );
 
-    // 4. Packet-lite (see header): wire fields only, prior messages as data.
+    // 4. App grounding (or packet-lite), with authoritative wire fields.
     const priorMessages =
       !session.sdk_session_id && input.messages.length
         ? { prior_messages: input.messages }
         : {};
     const contextPacket: Record<string, unknown> = {
+      ...input.context_packet,
       drawing_id: input.drawing_id,
       ...priorMessages,
     };

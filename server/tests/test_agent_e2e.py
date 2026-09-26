@@ -242,8 +242,8 @@ def test_full_split_turn_journey(fake_harness):
                   headers=_h("t-alpha")).json()["session_id"] == sid
 
     # 2. post the user text with the stream GATED open — the frozen
-    #    ConverseTurnInput rides the wire (no ContextPacket: deliberate
-    #    census #12 contract decision — the frozen shape has no packet field).
+    #    ConverseTurnInput rides the wire with the optional app-built
+    #    ContextPacket (2026-09-26 supersession of the no-packet decision).
     state.release.clear()
     hint = {"lane": "run", "tool": "add-panel", "confidence": 0.61, "rationale": "match"}
     r = c.post(f"/api/sessions/{sid}/messages",
@@ -254,7 +254,7 @@ def test_full_split_turn_journey(fake_harness):
     assert _wait_until(lambda: state.bodies), "harness never saw POST /turn"
     body = state.bodies[0]
     assert set(body) == {"tenant_id", "session_id", "turn_id", "drawing_id",
-                        "messages", "text"}
+                        "messages", "text", "context_packet"}
     assert body["tenant_id"] == "t-alpha" and body["session_id"] == sid
     assert body["turn_id"] == turn_id and body["drawing_id"] == "demo"
     assert body["text"] == "add a panel on the roof"

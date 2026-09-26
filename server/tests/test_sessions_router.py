@@ -19,13 +19,11 @@ What makes this suite distinct from its two live siblings:
         scripts/start-leaf.py; single-var deploys keep working);
       - the frozen ConverseTurnInput body on the wire: {tenant_id, session_id,
         turn_id, drawing_id, messages, text|confirm, images?, model?,
-        credential_grant?} and NOTHING else (`images` is the additive,
+        credential_grant?, context_packet?} and NOTHING else (`images` is the additive,
         optional, absent-safe vision field, see CONTRACT-ADDENDUM §2.1
         "Inline images"; `model`/`credential_grant` are the mount-your-LLM
-        fields) — no
-        ContextPacket/packet field (deliberate contract decision, census #12:
-        ContextPacket has no live caller; chip 5 freezes this), no
-        classifier_hint (durable-log-only);
+        fields); classifier_hint is not a top-level wire field, but rides
+        inside the app-built context_packet as well as the durable log;
       - the confirm resume carries the DURABLE approval row's proposal and
         stored `approved`, never the client's claim;
       - the NDJSON relay lands events durably (transcript/stream serve them),
@@ -354,11 +352,10 @@ def test_neither_env_configured_502_names_the_env_pair(client, stub, monkeypatch
 # =========================================================================== #
 # the frozen ConverseTurnInput body on the wire
 # =========================================================================== #
-def test_forwarded_turn_body_is_frozen_shape_no_packet(client, wired):
+def test_forwarded_turn_body_is_frozen_shape_with_packet(client, wired):
     """POST /turn carries EXACTLY the frozen ConverseTurnInput fields for a
-    text turn. Pins the deliberate census #12 contract decision: NO
-    ContextPacket rides this wire (ContextPacket has no live caller; the
-    frozen shape has no packet field — chip 5 freezes this)."""
+    text turn. The optional app-built ContextPacket supersedes the census #12
+    no-packet decision (2026-09-26)."""
     url, state = wired
     sess = _new_session()
     r = _post_text(client, sess, text="add a panel")
@@ -367,11 +364,12 @@ def test_forwarded_turn_body_is_frozen_shape_no_packet(client, wired):
 
     body = state.bodies[0]
     assert set(body) == {"tenant_id", "session_id", "turn_id", "drawing_id",
-                        "messages", "text"}
+                        "messages", "text", "context_packet"}
     assert body["tenant_id"] == sess["tenant_id"]
     assert body["session_id"] == sess["session_id"]
     assert body["turn_id"] == r.json()["turn_id"]
     assert body["drawing_id"] == sess["drawing_id"]
+    assert body["context_packet"]["drawing"]["id"] == sess["drawing_id"]
     assert body["text"] == "add a panel"
     assert body["messages"] == []  # first turn: no prior context
 

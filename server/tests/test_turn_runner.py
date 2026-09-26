@@ -182,6 +182,142 @@ def _wait_until(predicate, timeout_s: float = 3.0, poll_s: float = 0.02):
 # =========================================================================== #
 # (a) happy path — monotonic seq, CAS released on turn_complete
 # =========================================================================== #
+def test_start_turn_posts_context_packet_once_per_turn(monkeypatch, turn_stub, tmp_path):
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_CONVERSE_HARNESS_URL", url)
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("LEAF_STORE_DIR", str(tmp_path / "store"))
+    monkeypatch.setattr(deps, "all_tools", lambda tid=None: [])
+    stub.SCRIPT = [{"type": "turn_complete", "data": {"stop_reason": "end_turn"}}]
+    sess = _new_session("tenant-packet")
+    build = turn_runner.context_packet.build_packet
+    calls = []
+
+    def record(*args, **kwargs):
+        packet = build(*args, **kwargs)
+        calls.append((args, kwargs, packet))
+        return packet
+
+    monkeypatch.setattr(turn_runner.context_packet, "build_packet", record)
+    hint = {"lane": "run", "tool": "count-by-layer"}
+    for i in range(2):
+        turn_runner.start_turn("tenant-packet", sess["session_id"],
+                               text=f"turn {i}", classifier_hint=hint)
+        assert _wait_until(lambda: session_store.get_session(sess["session_id"])["active_turn_id"] is None)
+        assert len(calls) == i + 1
+        args, kwargs, packet = calls[-1]
+        assert args == ("tenant-packet", sess["drawing_id"])
+        assert kwargs["grant_timeout_s"] == turn_runner.CONTEXT_PACKET_GRANT_TIMEOUT_S == 2.0
+        assert kwargs["classifier_hint"] == hint
+        assert stub.LAST_BODY["context_packet"] == packet
+        assert packet["drawing"]["id"] == sess["drawing_id"]
+        assert packet["classifier_hint"] == hint
+        assert "classifier_hint" not in stub.LAST_BODY
+
+
+@pytest.mark.parametrize("queued", [False, True])
+def test_start_turn_context_packet_uses_entitlement_snapshot(monkeypatch, turn_stub, tmp_path, queued):
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_CONVERSE_HARNESS_URL", url)
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("LEAF_STORE_DIR", str(tmp_path / "store"))
+    monkeypatch.setattr(deps, "all_tools", lambda tid=None: [])
+    stub.SCRIPT = [{"type": "turn_complete", "data": {"stop_reason": "end_turn"}}]
+    tenant = deps.TenantContext("tenant-packet-snapshot", tier="restricted",
+                                roles=("packet-reader",), elevated=True)
+    sess = _new_session(str(tenant))
+    expected = turn_runner.entitlements.entitlements_for("restricted", tenant.roles, True)
+    kwargs = {"entitlement_tier": "restricted", "entitlement_roles": tenant.roles,
+              "entitlement_elevated": True} if queued else {}
+    tier_calls, role_calls = [], []
+    capability_calls = []
+    entitlements_for = turn_runner.entitlements.entitlements_for
+    resolve_tier = turn_runner.entitlements.resolve_tier
+    resolve_roles = turn_runner.entitlements.resolve_roles
+
+    def tier(value):
+        tier_calls.append(value)
+        assert value is tenant, "must not re-resolve a flattened tenant id"
+        return resolve_tier(value)
+
+    def roles(value):
+        role_calls.append(value)
+        assert value is tenant, "must not re-resolve a flattened tenant id"
+        return resolve_roles(value)
+
+    def capabilities(tier, roles=(), elevated=False):
+        capability_calls.append((tier, roles, elevated))
+        return entitlements_for(tier, roles, elevated)
+
+    monkeypatch.setattr(turn_runner.entitlements, "resolve_tier", tier)
+    monkeypatch.setattr(turn_runner.entitlements, "resolve_roles", roles)
+    monkeypatch.setattr(turn_runner.entitlements, "entitlements_for", capabilities)
+    turn_runner.start_turn(str(tenant) if queued else tenant, sess["session_id"],
+                           text="hello", **kwargs)
+    assert _wait_until(lambda: session_store.get_session(sess["session_id"])["active_turn_id"] is None)
+    assert stub.LAST_BODY["context_packet"]["entitlements"] == expected
+    assert expected["run_write"] is False
+    assert capability_calls[0] == ("restricted", tenant.roles, True)
+    assert len(tier_calls) == len(role_calls) == (0 if queued else 1)
+
+
+@pytest.mark.parametrize("error", [RuntimeError, ValueError])
+def test_start_turn_omits_context_packet_when_build_fails(monkeypatch, turn_stub, capsys, error):
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_CONVERSE_HARNESS_URL", url)
+    stub.SCRIPT = [{"type": "turn_complete", "data": {"stop_reason": "end_turn"}}]
+    calls = []
+
+    def fail(*args, **kwargs):
+        calls.append(args)
+        raise error("sensitive detail must not be logged")
+
+    monkeypatch.setattr(turn_runner.context_packet, "build_packet", fail)
+    sess = _new_session("tenant-packet-failure")
+    turn_runner.start_turn("tenant-packet-failure", sess["session_id"], text="hello")
+    assert _wait_until(lambda: session_store.get_session(sess["session_id"])["active_turn_id"] is None)
+    assert len(calls) == 1
+    assert "context_packet" not in stub.LAST_BODY
+    assert stub.LAST_BODY["text"] == "hello"
+    assert capsys.readouterr().err.splitlines() == [
+        f"[leaf-agent] context packet omitted: {error.__name__}",
+    ]
+
+
+def test_start_turn_context_packet_never_carries_byo_secret(monkeypatch, turn_stub, tmp_path):
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_CONVERSE_HARNESS_URL", url)
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("LEAF_STORE_DIR", str(tmp_path / "store"))
+    monkeypatch.setattr(deps, "all_tools", lambda tid=None: [])
+    stub.SCRIPT = [{"type": "turn_complete", "data": {"stop_reason": "end_turn"}}]
+    secret = "sk-ant-api03-FAKE-packet-secret-never-forward"
+
+    class GrantStatus:
+        def json(self):
+            return {"linked": True, "kind": "api_key", "api_key": secret}
+
+        def iter_content(self, chunk_size=8192):
+            yield json.dumps(self.json()).encode("utf-8")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(turn_runner.requests, "get", lambda *a, **k: GrantStatus())
+    sess = _new_session("tenant-packet-secret")
+    turn_runner.start_turn(
+        "tenant-packet-secret", sess["session_id"], text=f"inspect {secret}",
+        classifier_hint={"rationale": f"inspect {secret}", "nested": [{"value": secret}]},
+        credential_grant={"kind": "api_key", "api_key": secret},
+    )
+    assert _wait_until(lambda: session_store.get_session(sess["session_id"])["active_turn_id"] is None)
+    packet = stub.LAST_BODY["context_packet"]
+    assert secret not in json.dumps(packet)
+    assert packet["grant"] == {"kind": "api_key", "degraded": False}
+    assert packet["classifier_hint"]["nested"][0]["value"] != secret
+    assert "classifier_hint" not in stub.LAST_BODY
+
+
 def test_streamed_turn_lands_events_with_monotonic_seq_and_releases_cas(monkeypatch, turn_stub):
     url, stub = turn_stub
     monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
