@@ -84,6 +84,17 @@ builder. The detail receipt and `LEAF_SHADOW` record `tracing_active` and
 
 The runner adds `LEAF_READSET_DIR` and `LEAF_READSET_ROOT` to suite environments only when the parent carries `LEAF_READSET_DIR`; otherwise it supplies only suite, attempt, run and test-report directory metadata so reporting cannot re-enable tracing through defaults.
 
+After the gate, tracing builds pack `readsets` into a gzip tar and publish it to
+`s3://leaf-mq-transport-807034087062-us-east-1/mq/leaf-web-demo/selection/<build-uuid>.readsets.tar.gz`,
+where the UUID is the part after the colon in `CODEBUILD_BUILD_ID`. The immutable
+put uses `--if-none-match '*'`, `--checksum-algorithm SHA256`, and metadata
+`build_id`, `head_sha`, `trusted_sha`, and `trusted_sha_override`. Archives over
+200 MiB are not uploaded. The final detail document, `LEAF_SELECTION_FINAL`, and
+`LEAF_SHADOW` carry `readsets_object`, `readsets_sha256`, `readsets_bytes`, and
+`readsets_status`: `uploaded`, `empty`, `too_large`, or `upload_failed`.
+Upload failures produce one warning and preserve the gate result. Non-tracing
+builds report `not_traced` and never pack or upload read sets.
+
 Interpreter isolation (`-I -B`) is for trusted processes only. The gate run
 inherits no interpreter flags and explicitly unsets `PYTHONSAFEPATH`. The runner
 owns each suite environment: it removes `PYTHONSAFEPATH` even if the parent sets
@@ -127,6 +138,15 @@ relative output paths while adding `playwright-leaf.mjs`. IDs are namespaced
 by suite. Failures from an internal retry are retained. Collection errors,
 crashes, missing reports and scripts without actual test IDs are incomplete;
 they never become synthetic test failures for containment.
+
+Every `--leaf-*` plugin option is passed as one `--leaf-x=value` token, for
+example `--leaf-output=DIR`. An xdist worker rebuilds its config from the raw
+argv and pre-parses it before `-p pytest_selection` has registered the
+`--leaf-*` options. A path-valued option passed as two tokens therefore has its
+value read as a positional path, pytest's rootdir moves to the common ancestor
+of those paths, every node id gains a prefix, and `--deselect` silently matches
+nothing. Measured 2026-09-25 on terraform tracing proofs, where the quarantine
+ran and failed 109 tests.
 
 On tracing builds, each child receives `LEAF_READSET_DIR`, `LEAF_READSET_SUITE`,
 `LEAF_READSET_ATTEMPT`, `LEAF_READSET_ROOT` and `LEAF_READSET_RUN`. The trusted

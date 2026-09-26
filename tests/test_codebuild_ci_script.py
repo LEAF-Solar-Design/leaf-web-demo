@@ -69,9 +69,9 @@ class TestCodebuildCiScript(unittest.TestCase):
         script = CI_PATH.read_text(encoding="utf-8")
         guard = script.split("<<'LEAF_GATE_PROOF_ELIGIBLE'\n", 1)[1].split(
             "\nLEAF_GATE_PROOF_ELIGIBLE", 1)[0]
-        self.assertIn('python -I -B - "$selection_dir/final.json"', script)
-        self.assertIn('(out / "final.json").write_text(canonical(detail)', script)
-        self.assertLess(script.index('(out / "final.json").write_text'),
+        self.assertIn('python -I -B - "$selection_dir/detail.json"', script)
+        self.assertIn('(out / "detail.json").write_text(canonical(detail)', script)
+        self.assertLess(script.rindex('(out / "detail.json").write_text'),
                         script.index('# LEAF_GATE_PROOF_BEGIN'))
         base = dict(schema="leaf.ci.selection.v1", execution_mode="full",
                     selection_mode="full", phase="enforce", trusted_sha_override=False)

@@ -2926,9 +2926,11 @@ def reporting_command(suite: Suite, argv: List[str], trace_env: dict) -> List[st
                                        "apply_filter": False, "reasons": []}), encoding="utf-8")
         catalog.write_text(json.dumps({"schema": "leaf.ci.test-catalog.v1",
                                       "kind": "pytest", "suites": []}), encoding="utf-8")
-        return argv + ["-p", "pytest_selection", "--leaf-output", str(output),
-                       "--leaf-repo", trace_env.get("LEAF_READSET_ROOT", str(REPO)),
-                       "--leaf-selection", str(decision), "--leaf-catalog", str(catalog)]
+        # S9b: one token per option. xdist workers pre-parse the raw argv before -p registers --leaf-*, so a
+        # separate value reads as a positional path, moves the rootdir and silently defeats --deselect.
+        return argv + ["-p", "pytest_selection", "--leaf-output=" + str(output),
+                       "--leaf-repo=" + trace_env.get("LEAF_READSET_ROOT", str(REPO)),
+                       "--leaf-selection=" + str(decision), "--leaf-catalog=" + str(catalog)]
     if suite.kind == "vitest":
         try:
             reporter = suite.cwd.resolve() / "node_modules" / ".leaf-ci" / "vitest-leaf.mjs"
