@@ -3,8 +3,11 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-function testReport(files, errors, root, vitestRoot, suite, attempt) {
+export function testReport(files, errors, root, vitestRoot, suite, attempt) {
   const ids = [];
+  const issued = new Set();
+  const occurrences = new Map();
+  let renamed_duplicate_ids = 0;
   const failed = new Set();
   const counts = new Map();
   const count = (reason, n = 1) => counts.set(reason, (counts.get(reason) || 0) + n);
@@ -15,7 +18,13 @@ function testReport(files, errors, root, vitestRoot, suite, attempt) {
     if (task.type === 'test') {
       const path = relative(root, resolve(vitestRoot, file)).split(sep).join('/');
       if (path === '..' || path.startsWith('../') || isAbsolute(path)) count('path_escape');
-      const id = `${suite}::${path}::${names.join('::')}`;
+      const base = `${suite}::${path}::${names.join('::')}`;
+      let ordinal = (occurrences.get(base) || 0) + 1;
+      let id = ordinal === 1 ? base : `${base}#${ordinal}`;
+      while (issued.has(id)) id = `${base}#${++ordinal}`;
+      occurrences.set(base, ordinal);
+      issued.add(id);
+      if (id !== base) renamed_duplicate_ids++;
       ids.push(id);
       // Preserve the first failure even if Vitest's internal retry passes.
       if (task.result?.state === 'fail' || task.result?.retryCount > 0) failed.add(id);
@@ -36,6 +45,7 @@ function testReport(files, errors, root, vitestRoot, suite, attempt) {
   return {
     schema: 'leaf.ci.test-report.v1', suite_id: suite, attempt,
     test_ids: [...new Set(ids)].sort(), failed_test_ids: [...failed].sort(),
+    renamed_duplicate_ids,
     complete: incomplete_reasons.length === 0, incomplete_reasons,
   };
 }
@@ -79,7 +89,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     { files: [file([test('pending'), test('running', { result: { state: 'run' } })])],
       reasons: ['task_without_result:2'] },
     { files: [file([test('same', { mode: 'skip' }), test('same', { mode: 'todo' })])],
-      reasons: ['duplicate_ids:1'] },
+      reasons: [] },
     { files: [file([test('outside', { mode: 'skip' })], { filepath: resolve(root, '../outside.js') })],
       reasons: ['path_escape:1'] },
   ];

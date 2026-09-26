@@ -3003,6 +3003,7 @@ def read_test_report(suite: Suite, log_dir: Path, attempt: int, status: str = ""
     directory = log_dir.resolve() / "test-reports" / encoded_suite_id(suite.id) / str(attempt)
     result = {"failed_test_ids": [], "test_ids": [], "collection_ids_sha256": None,
               "test_report_complete": False, "test_report_refs": [],
+              "test_report_renamed_ids": 0,
               "test_id_granularity": "test"}
     if suite.kind in ("script", "tsc", "npm-audit"):
         result.update(test_report_complete=status in ("PASS", "FAIL"), test_id_granularity="suite")
@@ -3043,6 +3044,8 @@ def read_test_report(suite: Suite, log_dir: Path, attempt: int, status: str = ""
                     doc.get("complete") is True for doc in docs)
                 result["test_report_reasons"] = sorted({reason for doc in docs
                     for reason in doc.get("incomplete_reasons", [])})
+                result["test_report_renamed_ids"] = sum(
+                    int(doc.get("renamed_duplicate_ids", 0)) for doc in docs)
                 result["test_report_refs"] = [str(path.relative_to(log_dir.resolve())) for path in paths]
         if result["test_ids"]:
             raw = json.dumps(result["test_ids"], sort_keys=True, separators=(",", ":"))

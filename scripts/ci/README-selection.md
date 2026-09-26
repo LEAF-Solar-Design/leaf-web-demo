@@ -215,6 +215,8 @@ SKIPs remain nonfinal. Suite completeness does not imply test-ID or read-set
 coverage, and the existing completeness-reason vocabulary is unchanged.
 The `test_report_incomplete:<count>:<ids>` and `suite_status_not_final:<count>:<ids>` reasons name sorted, comma-separated suite IDs, with each reason capped at 400 characters and ending in `,...` when truncated.
 Vitest documents carry sorted `incomplete_reasons`, copied to attempt records as `test_report_reasons`; skipped and todo tasks need no result, and `complete` is true only when no reasons remain.
+Repeated Vitest IDs keep the first bare ID and receive encounter-order ordinal suffixes `#2`, `#3`, and so on (advancing past any already issued ID), with `renamed_duplicate_ids` copied to attempts as `test_report_renamed_ids`.
+This assumes Vitest collects each file's tasks in deterministic order; reordering same-titled tests moves outcomes between suffixes, which the map treats as a changed test ID.
 
 Every `--leaf-*` plugin option is passed as one `--leaf-x=value` token, for
 example `--leaf-output=DIR`. An xdist worker rebuilds its config from the raw
