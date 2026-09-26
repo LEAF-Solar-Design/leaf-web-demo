@@ -39,11 +39,12 @@ function errorMessage(e, fallback) {
 
 export default function Membership({
   viewerId,
-  authority, // server truth: { role, can_invite, can_manage } — never computed here
+  authority, // server truth: { role, can_invite, can_manage, can_label }, never computed here
   members,   // server truth: [{ member_id, name, email, role }]
   onInvite,      // async (identifier, role) => void
   onChangeRole,  // async (memberId, role) => void
   onRevoke,      // async (memberId) => void
+  onSetLabel,    // async (memberId, displayName) => void
   identities, // existing bindings in this organization only
 }) {
   const [inviteBinding, setInviteBinding] = useState('')
@@ -53,6 +54,9 @@ export default function Membership({
   const invitingRef = useRef(false)
   const [pendingRoleIds, setPendingRoleIds] = useState(() => new Set())
   const [pendingRevokeIds, setPendingRevokeIds] = useState(() => new Set())
+  const [labelDrafts, setLabelDrafts] = useState({})
+  const [pendingLabelIds, setPendingLabelIds] = useState(() => new Set())
+  const pendingLabelsRef = useRef(new Set())
   const [error, setError] = useState(null)
 
   if (!authority) return null // no server authority read yet — render nothing, never a guessed matrix
@@ -74,6 +78,7 @@ export default function Membership({
 
   const canInvite = authority.can_invite === true
   const canManage = authority.can_manage === true
+  const canLabel = authority.can_label === true && typeof onSetLabel === 'function'
   const choices = identities || []
   const filteredChoices = choices.filter((identity) =>
     identityText(identity).toLowerCase().includes(search.trim().toLowerCase()))
@@ -111,6 +116,36 @@ export default function Membership({
     } finally {
       invitingRef.current = false
       setInviting(false)
+    }
+  }
+
+  const saveLabel = async (member) => {
+    const id = member.member_id
+    if (pendingLabelsRef.current.has(id)) return
+    const trimmed = (labelDrafts[id] ?? memberLabel(member)).trim()
+    setError(null)
+    if (Array.from(trimmed).length > 100) {
+      setError('A display name can be at most 100 characters.')
+      return
+    }
+    pendingLabelsRef.current.add(id)
+    setPendingLabelIds((prev) => new Set(prev).add(id))
+    try {
+      await onSetLabel(id, trimmed)
+      setLabelDrafts((prev) => {
+        const next = { ...prev }
+        delete next[id]
+        return next
+      })
+    } catch (e) {
+      setError(errorMessage(e, 'The name was not saved. Nothing changed.'))
+    } finally {
+      pendingLabelsRef.current.delete(id)
+      setPendingLabelIds((prev) => {
+        const next = new Set(prev)
+        next.delete(id)
+        return next
+      })
     }
   }
 
@@ -185,6 +220,25 @@ export default function Membership({
             <li key={id} className="membership-row">
               <span className="membership-member">{label}{member.created_at && ` · joined ${member.created_at.slice(0, 10)}`}</span>
               {id === viewerId && <span className="membership-self"> (you)</span>}
+              {canLabel && (
+                <>
+                  <input
+                    aria-label={`Display name for ${label}`}
+                    value={labelDrafts[id] ?? label}
+                    onChange={(event) => setLabelDrafts((prev) => ({ ...prev, [id]: event.target.value }))}
+                    disabled={pendingLabelIds.has(id)}
+                  />
+                  <button
+                    type="button"
+                    className="chip-act"
+                    aria-label={`Save display name for ${label}`}
+                    disabled={pendingLabelIds.has(id)}
+                    onClick={() => saveLabel(member)}
+                  >
+                    {pendingLabelIds.has(id) ? 'Saving…' : 'Save display name'}
+                  </button>
+                </>
+              )}
               {canManage ? (
                 <>
                   <select

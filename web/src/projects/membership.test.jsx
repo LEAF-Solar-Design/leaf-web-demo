@@ -34,11 +34,54 @@ function setup(over = {}) {
       onInvite={onInvite}
       onChangeRole={onChangeRole}
       onRevoke={onRevoke}
+      onSetLabel={over.onSetLabel}
       identities={Object.hasOwn(over, 'identities') ? over.identities : [{ binding_id: 'binding-new', label: 'New Member' }]}
     />,
   )
   return { onInvite, onChangeRole, onRevoke, ...rendered }
 }
+
+it('B5 an org owner saves a display name for a roster member', async () => {
+  const onSetLabel = vi.fn().mockResolvedValue(undefined)
+  setup({ authority: { ...OWNER_AUTHORITY, can_label: true }, onSetLabel })
+  fireEvent.change(screen.getByLabelText('Display name for Editor Two'), {
+    target: { value: '  Ada Lovelace  ' },
+  })
+  fireEvent.click(screen.getByRole('button', { name: 'Save display name for Editor Two' }))
+  await waitFor(() => expect(onSetLabel).toHaveBeenCalledWith('u-editor', 'Ada Lovelace'))
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save display name for Editor Two' }).disabled).toBe(false))
+  fireEvent.change(screen.getByLabelText('Display name for Editor Two'), { target: { value: '   ' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Save display name for Editor Two' }))
+  await waitFor(() => expect(onSetLabel).toHaveBeenLastCalledWith('u-editor', ''))
+})
+
+it('B5 the display name editor is absent unless the server grants can_label', () => {
+  const onSetLabel = vi.fn()
+  const { rerender } = setup({ onSetLabel })
+  expect(screen.queryByLabelText('Display name for Editor Two')).toBeNull()
+  rerender(<Membership members={MEMBERS} authority={{ ...OWNER_AUTHORITY, can_label: false }} onSetLabel={onSetLabel} />)
+  expect(screen.queryByLabelText('Display name for Editor Two')).toBeNull()
+  rerender(<Membership members={MEMBERS} authority={{ ...OWNER_AUTHORITY, can_label: true }} />)
+  expect(screen.queryByLabelText('Display name for Editor Two')).toBeNull()
+})
+
+it('B5 a refused display name shows the server message', async () => {
+  const onSetLabel = vi.fn().mockRejectedValue({ body: { detail: 'only the organization owner can name members' } })
+  setup({ authority: { ...OWNER_AUTHORITY, can_label: true }, onSetLabel })
+  fireEvent.change(screen.getByLabelText('Display name for Editor Two'), { target: { value: 'Ada Lovelace' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Save display name for Editor Two' }))
+  expect((await screen.findByRole('alert')).textContent).toBe('only the organization owner can name members')
+  expect(screen.getByLabelText('Display name for Editor Two').value).toBe('Ada Lovelace')
+})
+
+it('B5 a display name over 100 characters is refused before sending', () => {
+  const onSetLabel = vi.fn()
+  setup({ authority: { ...OWNER_AUTHORITY, can_label: true }, onSetLabel })
+  fireEvent.change(screen.getByLabelText('Display name for Editor Two'), { target: { value: 'a'.repeat(101) } })
+  fireEvent.click(screen.getByRole('button', { name: 'Save display name for Editor Two' }))
+  expect(screen.getByRole('alert').textContent).toBe('A display name can be at most 100 characters.')
+  expect(onSetLabel).not.toHaveBeenCalled()
+})
 
 describe('acceptance #1: owner invites/demotes/revokes; revoked member drops the project on next read', () => {
   it('an owner invites an existing organization binding by label and role', async () => {

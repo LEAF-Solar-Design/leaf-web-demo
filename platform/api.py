@@ -78,6 +78,17 @@ class InviteProjectMemberBody(BaseModel):
     role: Literal["owner", "editor", "reviewer", "read_only"]
 
 
+class SetIdentityDisplayNameBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: Optional[str] = Field(max_length=400)
+
+    @field_validator("display_name")
+    @classmethod
+    def validate_display_name(cls, value):
+        return project_lifecycle.normalize_display_name(value)
+
+
 class PutProjectFileBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -285,6 +296,28 @@ def _lifecycle_response(operation):
         raise HTTPException(status_code=409, detail=str(exc)) from None
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
+
+
+@router.put("/orgs/{org_id}/identities/{binding_id}/label")
+def set_identity_display_name(
+    org_id: uuid.UUID, binding_id: uuid.UUID, body: SetIdentityDisplayNameBody,
+    actor: _LifecycleActor = Depends(_get_lifecycle_actor),
+):
+    if org_id != actor.org_id:
+        raise HTTPException(status_code=404, detail="org not found")
+    try:
+        identity = project_lifecycle.set_identity_display_name(
+            org_id, actor.binding_id, binding_id, body.display_name,
+        )
+    except project_lifecycle.LifecycleForbidden:
+        raise HTTPException(
+            status_code=403, detail="only the organization owner can name members",
+        ) from None
+    except project_lifecycle.LifecycleUnavailable:
+        raise HTTPException(status_code=404, detail="identity not found") from None
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    return {"identity": identity}
 
 
 @router.post("/projects")

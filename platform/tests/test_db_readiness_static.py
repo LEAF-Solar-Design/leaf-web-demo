@@ -119,12 +119,12 @@ def test_annotation_migration_is_in_the_unconditional_readiness_inventory():
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
     assert "0042_annotation_batches.sql" in manifest_names
     _assert_closed_world_pin(
-        manifest_names[-1], "0067_broker_ledger_job_id.sql",
+        manifest_names[-1], "0068_identity_binding_display_name.sql",
         "Update this pin to the new last migration filename once main adds "
         "one (and the migration_ids pin below to match).",
     )
     _assert_closed_world_pin(
-        inventory["scope"]["migration_ids"][-1], "0067",
+        inventory["scope"]["migration_ids"][-1], "0068",
         "Update this pin (and authority-inventory.json's "
         "scope.migration_ids) to the new last migration id.",
     )
@@ -405,6 +405,30 @@ def test_migration_id_tail_pin_drift_names_the_pin_line_and_remediation():
         "Update this pin (and authority-inventory.json's "
         "scope.migration_ids) to the new last migration id." in message
     )
+
+
+def test_identity_binding_display_name_migration_is_expand_only():
+    migration = (
+        db._PKG_DIR / "migrations" / "0068_identity_binding_display_name.sql"
+    ).read_text(encoding="utf-8")
+    statements = [
+        " ".join(line.split())
+        for line in migration.splitlines()
+        if line.strip() and not line.lstrip().startswith("--")
+    ]
+    assert statements == [
+        "ALTER TABLE identity_bindings ADD COLUMN IF NOT EXISTS display_name TEXT CONSTRAINT identity_bindings_display_name_check CHECK (display_name IS NULL OR (char_length(display_name) BETWEEN 1 AND 100 AND display_name = btrim(display_name) AND display_name !~ '[[:cntrl:]]'));",
+    ]
+    assert "expand-contract:" not in migration
+    assert "display_name" in db._REQUIRED_COLUMNS["identity_bindings"]
+    contract = db._REQUIRED_CONSTRAINTS["identity_bindings_display_name_check"]
+    assert contract["relation"] == "identity_bindings"
+    for deparse in (
+        "CHECK (display_name IS NULL OR char_length(display_name) >= 1 AND char_length(display_name) <= 100 AND display_name = btrim(display_name) AND display_name !~ '[[:cntrl:]]'::text)",
+        "CHECK (((display_name IS NULL) OR ((char_length(display_name) >= 1) AND (char_length(display_name) <= 100) AND (display_name = btrim(display_name)) AND (display_name !~ '[[:cntrl:]]'::text))))",
+    ):
+        assert all(db._catalog_fragment_matches(f, deparse)
+                   for f in contract["definition_fragments"])
 
 
 def test_broker_ledger_job_id_migration_is_expand_only():

@@ -39,6 +39,7 @@ import {
   inviteMember,
   resetProject,
   revokeMember,
+  setIdentityDisplayName,
 } from './api.js'
 
 export function toUiRole(role) {
@@ -82,6 +83,7 @@ function adaptAuthority(viewer) {
     role: toUiRole(viewer.role),
     can_invite: viewer.can_invite === true,
     can_manage: viewer.can_manage === true,
+    can_label: viewer.can_label_identities === true,
   }
 }
 
@@ -100,6 +102,11 @@ export default function useProjectLifecycle(projectId, { enabled = true } = {}) 
   const [identities, setIdentities] = useState(null)
   const [identitiesStatus, setIdentitiesStatus] = useState('idle')
   const identitiesGenerationRef = useRef(0)
+  const currentProjectRef = useRef(projectId)
+  currentProjectRef.current = projectId
+  // Keep sequences across project switches so returning to a project cannot
+  // make an older response current again after a newer save was issued.
+  const labelSaveSequencesRef = useRef(new Map())
 
   useEffect(() => {
     identitiesGenerationRef.current += 1
@@ -208,11 +215,36 @@ export default function useProjectLifecycle(projectId, { enabled = true } = {}) 
     changeRole: (memberId, uiRole) =>
       runThenRefetch(() => inviteMember(projectId, bindingFor(memberId), toApiRole(uiRole))),
     revoke: (memberId) => runThenRefetch(() => revokeMember(projectId, memberId)),
+    setLabel: async (memberId, displayName) => {
+      const bindingId = bindingFor(memberId)
+      const saveKey = `${projectId}:${bindingId}`
+      const sequence = (labelSaveSequencesRef.current.get(saveKey) || 0) + 1
+      labelSaveSequencesRef.current.set(saveKey, sequence)
+      const result = await setIdentityDisplayName(data.project?.org_id, bindingId, displayName)
+      if (currentProjectRef.current !== projectId
+        || labelSaveSequencesRef.current.get(saveKey) !== sequence) return result
+      // A read started before this saved row must not put its old label back.
+      identitiesGenerationRef.current += 1
+      setIdentitiesStatus((current) => current === 'loading' ? 'idle' : current)
+      const identity = result?.identity
+      if (identity?.binding_id) {
+        // The PUT row is saved server truth even if the following read fails.
+        // Keep project roles intact: the identity row carries an org role.
+        setData((current) => current.project?.project_id === projectId
+          ? { ...current, members: current.members.map((member) => member.binding_id === identity.binding_id
+            ? { ...member, label: identity.label } : member) }
+          : current)
+        setIdentities((current) => current == null ? current : current.map((member) =>
+          member.binding_id === identity.binding_id ? { ...member, label: identity.label } : member))
+      }
+      await load({ refresh: true })
+      return result
+    },
     clone: (name) => runThenRefetch(() => cloneProject(projectId, name)),
     export: (options) => runThenRefetch(() => exportProject(projectId, options)),
     reset: () => runThenRefetch(() => resetProject(projectId)),
     remove: () => deleteProject(projectId), // no refetch: the project is gone
-  }), [bindingFor, projectId, runThenRefetch])
+  }), [bindingFor, data.project?.org_id, load, projectId, runThenRefetch])
 
   return { status, refreshing, error, refetch: load, actions, identities, identitiesStatus, loadIdentities, ...data }
 }

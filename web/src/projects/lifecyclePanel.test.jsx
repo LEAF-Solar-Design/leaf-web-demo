@@ -19,7 +19,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 
 vi.mock('./api.js', () => ({
   createBlankProject: vi.fn(),
@@ -31,11 +31,12 @@ vi.mock('./api.js', () => ({
   inviteMember: vi.fn(),
   resetProject: vi.fn(),
   revokeMember: vi.fn(),
+  setIdentityDisplayName: vi.fn(),
 }))
 
 vi.mock('./flag.js', () => ({ ENV_LIFECYCLE_UI: true }))
 
-import { cloneProject, deleteProject, exportProject, getOrgIdentities, getProjectLifecycle, inviteMember, resetProject } from './api.js'
+import { cloneProject, deleteProject, exportProject, getOrgIdentities, getProjectLifecycle, inviteMember, resetProject, setIdentityDisplayName } from './api.js'
 import { renderHook } from '@testing-library/react'
 import useProjectLifecycle from './useProjectLifecycle.js'
 import ProjectLifecyclePanel from './ProjectLifecyclePanel.jsx'
@@ -65,6 +66,127 @@ const SNAPSHOT = {
     { receipt_id: 'r-1', project_id: PROJECT_ID, action: 'project_created', input_digest: 'd'.repeat(64), created_at: '2026-08-01T00:00:00+00:00' },
   ],
 }
+
+it('B5 an org owner names a member from the lifecycle panel', async () => {
+  const orgId = 'cccccccc-dddd-4eee-8fff-111111111111'
+  const memberBindingId = SNAPSHOT.members[1].binding_id
+  const initial = {
+    ...SNAPSHOT,
+    project: { ...SNAPSHOT.project, org_id: orgId },
+    viewer: { ...SNAPSHOT.viewer, can_label_identities: true },
+  }
+  getProjectLifecycle.mockResolvedValue(initial)
+  setIdentityDisplayName.mockImplementation(async () => {
+    getProjectLifecycle.mockResolvedValue({
+      ...initial,
+      members: initial.members.map((member) => member.binding_id === memberBindingId
+        ? { ...member, label: 'Ada Lovelace' } : member),
+    })
+    return { identity: { binding_id: memberBindingId, label: 'Ada Lovelace' } }
+  })
+  render(<ProjectLifecyclePanel enabled projectId={PROJECT_ID} projectName="Rooftop Array" />)
+  const input = await screen.findByLabelText('Display name for Member bbbbbbbb')
+  fireEvent.change(input, { target: { value: '  Ada Lovelace  ' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Save display name for Member bbbbbbbb' }))
+  await waitFor(() => expect(setIdentityDisplayName).toHaveBeenCalledWith(orgId, memberBindingId, 'Ada Lovelace'))
+  await waitFor(() => expect(screen.getByText('Ada Lovelace · joined 2026-08-02')).toBeTruthy())
+})
+
+it('B5 a rename updates the loaded picker without another request', async () => {
+  const orgId = 'cccccccc-dddd-4eee-8fff-111111111111'
+  const initial = {
+    ...SNAPSHOT,
+    project: { ...SNAPSHOT.project, org_id: orgId },
+    viewer: { ...SNAPSHOT.viewer, can_label_identities: true },
+  }
+  const identity = { binding_id: VIEWER_BINDING, label: 'Ada Lovelace', role: 'owner',
+    created_at: SNAPSHOT.members[0].created_at }
+  let finishRefresh
+  const refresh = new Promise((resolve) => { finishRefresh = resolve })
+  getProjectLifecycle.mockReset().mockResolvedValueOnce(initial).mockReturnValueOnce(refresh)
+  getOrgIdentities.mockReset().mockResolvedValue({ identities: [
+    { ...identity, label: 'Member aaaaaaaa' },
+    { binding_id: SNAPSHOT.members[1].binding_id, label: 'Other member' },
+  ] })
+  setIdentityDisplayName.mockReset().mockResolvedValue({ identity })
+  render(<ProjectLifecyclePanel enabled projectId={PROJECT_ID} />)
+  fireEvent.click(await screen.findByRole('button', { name: 'Load organization members' }))
+  await screen.findByRole('option', { name: /^Member aaaaaaaa/ })
+  expect(getOrgIdentities).toHaveBeenCalledTimes(1)
+  fireEvent.change(screen.getByLabelText('Display name for Member aaaaaaaa'), { target: { value: 'Ada Lovelace' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Save display name for Member aaaaaaaa' }))
+
+  // Both views use the PUT row while the lifecycle read is still pending.
+  await screen.findByRole('option', { name: /^Ada Lovelace/ })
+  expect(screen.getByText('Ada Lovelace · joined 2026-08-01')).toBeTruthy()
+  expect(screen.getByRole('option', { name: 'Other member' })).toBeTruthy()
+  expect(screen.queryByRole('option', { name: /^Member aaaaaaaa/ })).toBeNull()
+  fireEvent.change(screen.getByLabelText('Search organization members'), { target: { value: 'Ada' } })
+  expect(screen.getByRole('option', { name: /^Ada Lovelace/ }).value).toBe(VIEWER_BINDING)
+  expect(screen.queryByRole('option', { name: 'Other member' })).toBeNull()
+  expect(getOrgIdentities).toHaveBeenCalledTimes(1)
+
+  await act(async () => {
+    finishRefresh({ ...initial, members: initial.members.map((member) =>
+      member.binding_id === identity.binding_id ? { ...member, label: identity.label } : member) })
+  })
+  await waitFor(() => expect(screen.getByLabelText('Display name for Ada Lovelace')).not.toBeDisabled())
+  expect(getProjectLifecycle).toHaveBeenCalledTimes(2)
+  expect(getOrgIdentities).toHaveBeenCalledTimes(1)
+  expect(setIdentityDisplayName).toHaveBeenCalledTimes(1)
+})
+
+it('B5 a failed refresh after a save keeps the saved name', async () => {
+  const orgId = 'cccccccc-dddd-4eee-8fff-111111111111'
+  const initial = {
+    ...SNAPSHOT,
+    project: { ...SNAPSHOT.project, org_id: orgId },
+    viewer: { ...SNAPSHOT.viewer, can_label_identities: true },
+    members: SNAPSHOT.members.map((member) => member.binding_id === VIEWER_BINDING
+      ? { ...member, label: 'Ada Lovelace' } : member),
+  }
+  getProjectLifecycle.mockReset().mockResolvedValueOnce(initial)
+    .mockRejectedValueOnce(new Error('The project could not be refreshed.'))
+  getOrgIdentities.mockReset()
+  setIdentityDisplayName.mockReset().mockResolvedValue({ identity: {
+    binding_id: VIEWER_BINDING, label: 'Grace Hopper', role: 'owner',
+    created_at: SNAPSHOT.members[0].created_at,
+  } })
+  render(<ProjectLifecyclePanel enabled projectId={PROJECT_ID} />)
+  fireEvent.change(await screen.findByLabelText('Display name for Ada Lovelace'), { target: { value: 'Grace Hopper' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Save display name for Ada Lovelace' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('The project could not be refreshed.')
+  await waitFor(() => expect(screen.getByLabelText('Display name for Grace Hopper')).not.toBeDisabled())
+  expect(screen.getByLabelText('Display name for Grace Hopper').value).toBe('Grace Hopper')
+  expect(screen.getByText('Grace Hopper · joined 2026-08-01')).toBeTruthy()
+  expect(screen.queryByLabelText('Display name for Ada Lovelace')).toBeNull()
+  expect(getProjectLifecycle).toHaveBeenCalledTimes(2)
+  expect(getOrgIdentities).not.toHaveBeenCalled()
+  expect(setIdentityDisplayName).toHaveBeenCalledTimes(1)
+  expect(setIdentityDisplayName).toHaveBeenCalledWith(orgId, VIEWER_BINDING, 'Grace Hopper')
+})
+
+it('B5 a failed save keeps the draft', async () => {
+  const orgId = 'cccccccc-dddd-4eee-8fff-111111111111'
+  getProjectLifecycle.mockReset().mockResolvedValue({
+    ...SNAPSHOT,
+    project: { ...SNAPSHOT.project, org_id: orgId },
+    viewer: { ...SNAPSHOT.viewer, can_label_identities: true },
+    members: SNAPSHOT.members.map((member) => member.binding_id === VIEWER_BINDING
+      ? { ...member, label: 'Ada Lovelace' } : member),
+  })
+  setIdentityDisplayName.mockReset().mockRejectedValue(new Error('The name could not be saved.'))
+  render(<ProjectLifecyclePanel enabled projectId={PROJECT_ID} />)
+  fireEvent.change(await screen.findByLabelText('Display name for Ada Lovelace'), { target: { value: '  Grace Hopper  ' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Save display name for Ada Lovelace' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('The name could not be saved.')
+  expect(screen.getByLabelText('Display name for Ada Lovelace').value).toBe('  Grace Hopper  ')
+  expect(screen.getByLabelText('Display name for Ada Lovelace')).not.toBeDisabled()
+  expect(screen.getByText('Ada Lovelace · joined 2026-08-01')).toBeTruthy()
+  expect(getProjectLifecycle).toHaveBeenCalledTimes(1)
+  expect(setIdentityDisplayName).toHaveBeenCalledTimes(1)
+  expect(setIdentityDisplayName).toHaveBeenCalledWith(orgId, VIEWER_BINDING, 'Grace Hopper')
+})
 
 describe('lifecycle block renders for an open project with the flag on', () => {
   it('mounts membership, the timeline, the danger zone, and the clone/export affordances', async () => {
