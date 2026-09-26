@@ -211,7 +211,12 @@ def test_mutation_gate_prevents_commit(api, monkeypatch):
 def test_other_persisted_capabilities_refuse_before_submission(api, name):
     response = api[0].post("/api/run?wait=1", json=body(api, name))
     assert response.status_code == 409, response.text
-    assert "broker_adapter_unavailable" in response.json()["availability"]["refusal_reasons"]
+    state = response.json()["availability"]
+    unwired = availability.capability_adapter(name) is None
+    assert ("broker_adapter_unavailable" in state["refusal_reasons"]) is unwired
+    if not unwired:
+        assert state["engine_ready"] is True
+        assert state["input_ready"] is False
     assert not jobs._query("SELECT job_id FROM jobs")
     assert store.load_manifest(api[1], TENANT, "solar")["head"] == 1
 
@@ -224,7 +229,7 @@ def test_catalog_engine_readiness(api, graph):
               for row in family["capabilities"] if row["name"] in availability.W1_CAPABILITIES}
     assert states["solar-settings"]["engine_ready"] is True
     assert states["solar-correct-string"]["engine_ready"] is True
-    assert sum(state["engine_ready"] is True for state in states.values()) == 3
+    assert sum(state["engine_ready"] is True for state in states.values()) == sum(availability.capability_adapter(name) is not None for name in states)
 
 
 def test_intake_catalog_uses_adapter_format(api, graph):
