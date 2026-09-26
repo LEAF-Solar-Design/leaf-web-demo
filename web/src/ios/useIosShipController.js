@@ -62,6 +62,8 @@ export function shipSetupState(readiness) {
   if (['no_approved_project_revision', 'revision_mismatch'].includes(reason)) return 'no-approved-revision'
   if (['executor_busy', 'mini_busy'].includes(reason)) return 'executor-busy'
   if (['provider_unavailable', 'dispatch_unavailable', 'app_color_unavailable'].includes(reason)) return 'executor-unavailable'
+  if (readiness?.setupAction === 'mini-busy' || readiness?.setup_action === 'mini-busy') return 'executor-busy'
+  if (readiness?.setupAction === 'mini-unavailable' || readiness?.setup_action === 'mini-unavailable') return 'executor-unavailable'
   const grant = readiness?.grantStatus ?? readiness?.grant_status
   if ((grant && grant !== 'healthy') || /grant/i.test(readiness?.setupAction || readiness?.setup_action || '')) return 'grant-not-ready'
   return 'none'
