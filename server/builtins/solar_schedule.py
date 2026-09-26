@@ -1,12 +1,13 @@
-"""Typed W1 circuit schedule for licensed persistence and versioned reopen."""
+"""Typed W1 circuit schedule for local and licensed persistence."""
 import math
+import uuid
 
 from solar_design_graph import GraphValidationError, _bounded_json
-from solar_sizing_client import advance, checked_graph
+from solar_sizing_client import advance, checked_graph, digest
 from solar_wiring_client import entity, licensed_preview, local_routes, point
 
 
-def create_schedule(intake, params, *, licensed_write=None):
+def _schedule(intake, params):
     _bounded_json(params)
     if (type(params) is not dict
             or set(params) - {"expected_rev", "insertion_point", "cancel"}
@@ -14,7 +15,7 @@ def create_schedule(intake, params, *, licensed_write=None):
         raise GraphValidationError("INVALID_SCHEDULE_REQUEST")
     graph = checked_graph(intake, params.get("expected_rev"))
     if params.get("cancel", False):
-        return {"graph": graph, "cancelled": True}
+        return graph, None
     insertion = point(params.get("insertion_point"))
     expected = local_routes(graph)
     actual = {(r["from_ref"], r["route_kind"]): r for r in graph["routes"]}
@@ -45,11 +46,30 @@ def create_schedule(intake, params, *, licensed_write=None):
         column_units=[None, "count", None, "ft", "ft", "ft"],
         extra={"column_types": ["string", "integer", "string", "number", "number", "number"],
                "row_source_refs": [s["id"] for s in graph["strings"]]})
+    return graph, schedule
+
+
+def create_schedule(intake, params, *, licensed_write=None):
+    graph, schedule = _schedule(intake, params)
+    if schedule is None:
+        return {"graph": graph, "cancelled": True}
     graph["schedules"].append(schedule)
     candidate = advance(graph, [schedule], "solar-schedule")
     receipt = licensed_preview(intake, candidate, [schedule], licensed_write)
     return {"graph": candidate, "receipt": receipt, "cancelled": False}
 
 
-def run(intake, params):
-    raise RuntimeError("solar-schedule requires the licensed mutation broker")
+def run(graph, params):
+    graph, schedule = _schedule(graph, params)
+    if schedule is None:
+        return graph
+    identity = digest({"tool": "solar-schedule", "source_graph_sha256": digest(graph),
+                       "insertion_point": schedule["insertion_point"]})
+    schedule["id"] = "leaf:schedule:" + str(
+        uuid.UUID(bytes=bytes.fromhex(identity)[:16], version=4))
+    lead = next(route for route in graph["routes"]
+                if route["from_ref"] == graph["strings"][0]["id"]
+                and route["route_kind"] == "start homerun")
+    schedule["provenance"]["created_at"] = lead["provenance"]["created_at"]
+    graph["schedules"].append(schedule)
+    return advance(graph, [schedule], "solar-schedule")

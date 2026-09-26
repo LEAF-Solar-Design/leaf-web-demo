@@ -131,8 +131,8 @@ def _assert_shipped_declarations(registry):
          {"kind": "w1-chain"}, "autocad-lane", "write_seed", ["inverter-add"]),
         ("solar-homeruns", 80, None, "run_write", True, False, None,
          {"kind": "w1-chain"}, "autocad-lane", "write_seed", ["homeruns"]),
-        ("solar-schedule", 90, None, "run_write", True, False, None,
-         {"kind": "w1-chain"}, "autocad-lane", "write_seed", []),
+        ("solar-schedule", 90, "local-graph-commit", "run_write", True, False, "INVALID_SCHEDULE_REQUEST",
+         {"kind": "w1-chain"}, "server-builtin", "write_seed", []),
     ]
     keys = ("name", "order", "adapter", "entitlement", "requires_persisted_graph", "seedable",
             "invalid_request_code", "readiness", "engine", "record_store", "ledger")

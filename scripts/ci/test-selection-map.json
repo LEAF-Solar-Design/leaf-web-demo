@@ -410,6 +410,7 @@
     "server-solar-solaredge-parse",
     "server-solar-solaredge-pdf",
     "server-solar-terrain",
+    "server-solar-tool-solar-schedule",
     "server-solar-workflow-flow",
     "server-solar-xlsx",
     "server-start-leaf-harness-config",
