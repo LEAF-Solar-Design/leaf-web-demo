@@ -308,7 +308,7 @@ def w1_local_commit_inputs(graph):
 
 def w1_graph_readiness(graph):
     """Project persisted producer contracts without making a mutation or a call."""
-    from solar_design_graph import validate_graph
+    from solar_design_graph import GraphValidationError, validate_graph
     from solar_sizing_client import require_sizing
     from solar_equipment import equipment_ready
     from solar_solve_results import coverage, upstream_basis
@@ -351,10 +351,17 @@ def w1_graph_readiness(graph):
     mark(["solar-assign-equipment"], strings_valid, "valid_strings_required")
     assigned = strings_valid and equipment_ready(graph)
     mark(["solar-homeruns"], assigned, "equipment_assignment_required")
-    routed = False
+    expected = None
     if assigned:
         try:
             expected = local_routes(graph)
+        except GraphValidationError as error:
+            mark(["solar-homeruns"], False, error.code.lower())
+        except (KeyError, TypeError, ValueError):
+            mark(["solar-homeruns"], False, "routing_topology_required")
+    routed = False
+    if expected is not None:
+        try:
             actual = {(r["from_ref"], r["route_kind"]): r for r in graph["routes"]}
             routed = len(actual) == len(expected) == len(graph["routes"])
             for route in expected:

@@ -130,8 +130,8 @@ def _assert_shipped_declarations(registry):
          "INVALID_CORRECTION", {"kind": "facets", "facets": ["strings"]}, "server-builtin", "write_seed", []),
         ("solar-assign-equipment", 70, None, "run_write", True, False, None,
          {"kind": "w1-chain"}, "autocad-lane", "write_seed", ["inverter-add"]),
-        ("solar-homeruns", 80, None, "run_write", True, False, None,
-         {"kind": "w1-chain"}, "autocad-lane", "write_seed", ["homeruns"]),
+        ("solar-homeruns", 80, "local-graph-commit", "run_write", True, False, "INVALID_ROUTING_REQUEST",
+         {"kind": "w1-chain"}, "server-builtin", "write_seed", ["homeruns"]),
         ("solar-schedule", 90, "local-graph-commit", "run_write", True, False, "INVALID_SCHEDULE_REQUEST",
          {"kind": "w1-chain"}, "server-builtin", "write_seed", []),
     ]

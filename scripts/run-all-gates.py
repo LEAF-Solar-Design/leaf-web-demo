@@ -516,6 +516,9 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_solar_pvcase_solve.py"), 58),
         Suite("server-solar-registry", "server tests/test_solar_registry.py", "pytest", SERVER,
               _py_pytest("tests/test_solar_registry.py"), 120),
+        # solar-homeruns-local: 30 cases for the builtin and the local graph commit rail.
+        Suite("server-solar-tool-homeruns", "server tests/test_solar_tool_solar_homeruns.py", "pytest", SERVER,
+              _py_pytest("tests/test_solar_tool_solar_homeruns.py"), 30),
         Suite("server-solar-tool-solar-schedule", "server tests/test_solar_tool_solar_schedule.py", "pytest", SERVER,
               _py_pytest("tests/test_solar_tool_solar_schedule.py"), 30),
         # W5 inverter family (2026-09-24, contract G35): the shared state and delta module and the
