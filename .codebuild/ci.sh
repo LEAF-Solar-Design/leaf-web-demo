@@ -986,6 +986,41 @@ if [[ "$tracing_ready" == 1 ]]; then
     readsets_object="s3://leaf-mq-transport-807034087062-us-east-1/$key"
     readsets_status=uploaded
   }
+  if [[ "$tracing_ready" == 1 ]]; then
+    python -I -B - <<'LEAF_TRACING_RECEIPTS' || echo 'WARNING: tracing receipt summary failed' >&2
+import json
+from pathlib import Path
+import sys
+
+receipts = []
+for path in sorted(Path("/tmp/gate-logs/test-reports").glob("*/*/reports/trace-receipt-*.json")):
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+        receipts.append(receipt if isinstance(receipt, dict) else {})
+    except (OSError, ValueError):
+        receipts.append({})
+
+def metric(key, reduce):
+    values = [receipt.get(key) for receipt in receipts]
+    return reduce(values) if values and all(value is not None for value in values) else None
+
+fields = {
+    "suites": len(receipts),
+    "sink": metric("sink", lambda values: ",".join(sorted(set(values)))),
+    "decode_mode": metric("decode_mode", lambda values: ",".join(sorted(set(values)))),
+    "sum_capture_wall_s": metric("capture_wall_s", sum),
+    "sum_decode_wall_s": metric("decode_wall_s", sum),
+    "sum_events_decoded": metric("events_decoded", sum),
+    "mean_events_per_s": metric("events_per_s", lambda values: sum(values) / len(values)),
+    "max_spool_bytes": metric("spool_bytes", max),
+    "faults": sum(any(isinstance(error, str) and error.startswith("spool_fault:")
+                      for error in (receipt.get("capture_errors") or [])) for receipt in receipts),
+}
+print("LEAF_EVENT tracing_receipts " + " ".join(
+    key + "=" + ("null" if value is None else str(value)) for key, value in fields.items()),
+    file=sys.stderr)
+LEAF_TRACING_RECEIPTS
+  fi
   if ! publish_readsets; then
     readsets_status=upload_failed
     echo "WARNING: readsets upload failed ($readsets_error)" >&2

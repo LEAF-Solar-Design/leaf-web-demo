@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CI = ROOT / "scripts" / "ci"
 RUNNER_PATH = ROOT / "scripts/run-all-gates.py"
 COPIES = ("trace_process_tree.py", "trace_supervisor.py", "external_inventory.py", "select_tests.py")
-TOOLS_SHA = "6961c34ae9a99d959099edc924cb1696a7033015"
+TOOLS_SHA = "75b70741f4ebead8877a6c0bb275342fa598476f"
 RUN_ID = "codebuild:fixture"
 SHA = "a" * 40
 
@@ -110,11 +110,12 @@ class SpawnWrapTests(CaptureFixture):
         result, (argv, kwargs) = self.spawn(suite)
         report_dir = self.logs.resolve() / "test-reports" / suite.id / "1"
         self.assertEqual(argv[:6], [sys.executable, "-I", "-B", "-c", RUNNER.CAPTURE_WRAPPER, str(self.trusted)])
-        self.assertEqual(argv[6:14], ["run", "--context", str(report_dir / "capture-context.json"),
+        self.assertEqual(argv[6:18], ["run", "--context", str(report_dir / "capture-context.json"),
                                       "--out", str(report_dir), "--suites-file",
-                                      str(report_dir / "capture-suites.json"), "--"])
-        self.assertEqual(argv[14:], [str(word) for word in suite.argv])
-        self.assertEqual(argv[14:], plain)
+                                      str(report_dir / "capture-suites.json"), "--sink", "file",
+                                      "--spool-quota-bytes", "8589934592", "--"])
+        self.assertEqual(argv[18:], [str(word) for word in suite.argv])
+        self.assertEqual(argv[18:], plain)
         self.assertIs(kwargs["shell"], False)
         self.assertIsNone(kwargs["executable"])
         for key in ("cwd", "timeout", "capture_output", "text", "encoding", "errors"):
@@ -417,6 +418,7 @@ class CatalogAndCopyTests(unittest.TestCase):
                          plain["suites"])
 
     def test_helper_copies_equal_the_frozen_tools_files(self):
+        self.assertEqual(TREE.PARSER_VERSION, "s15a-14")
         ref = os.environ.get("LEAF_TOOLS_REF")
         if not ref:
             self.skipTest("LEAF_TOOLS_REF is unset; the planner's verify compares the copies")

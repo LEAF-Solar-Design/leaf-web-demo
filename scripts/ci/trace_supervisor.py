@@ -33,6 +33,8 @@ TRACE_FLAGS = ["-f", "-ttt", "-x", "-s", "4096", "--seccomp-bpf", "-e", "trace="
 TERM, KILL = signal.SIGTERM, getattr(signal, "SIGKILL", 9)
 KILL_GRACE = 10  # seconds between SIGTERM and SIGKILL of the tracer's group [guessed]
 STDERR_TAIL = 4096  # bytes of strace's own diagnostics copied into the receipt
+SPOOL_QUOTA = 8 * 1024 ** 3
+SPOOL_RESERVE = 1024 ** 3
 ADMISSION_POLICY = {
     "python-installation": True, "os-image": True, "terraform-provider-cache": True,
     "generated": False, "generated-input": False, "device": False, "network": False,
@@ -275,10 +277,16 @@ def _restore_forwarding(previous):
         signal.signal(sig, handler if handler is not None else signal.SIG_DFL)
 
 
-def _stream_file(path, process, grace, errors):
+def _stream_file(path, process, grace, errors, sample=None, exited=None):
     # Poll, never block in wait(): a forwarded signal's handler must be able to reap.
     while process.poll() is None:
+        if sample is not None:
+            sample()
         time.sleep(0.02)
+    if exited is not None:
+        exited()
+    if sample is not None:
+        sample()
     try:
         with open(path, "rb") as stream:
             # A regular file has no writer-close notification. Observe one
@@ -300,10 +308,12 @@ def _stream_file(path, process, grace, errors):
         errors.append("trace_sink_unreadable")
 
 
-def _stream_fifo(fd, process, grace, errors):
+def _stream_fifo(fd, process, grace, errors, metrics=None, exited=None):
     deadline = None
     while True:
         if process.poll() is not None and deadline is None:
+            if exited is not None:
+                exited()
             deadline = time.monotonic() + grace
         ready, _, _ = select.select([fd], [], [], 0.05)
         if ready:
@@ -312,8 +322,13 @@ def _stream_fifo(fd, process, grace, errors):
             except BlockingIOError:
                 chunk = None
             if chunk:
+                if metrics is not None:
+                    metrics["fifo_reads"] += 1
+                    metrics["fifo_full_reads"] += int(len(chunk) == 65536)
                 yield chunk
             elif chunk == b"" and process.poll() is not None:
+                if exited is not None:
+                    exited()
                 return
             elif chunk == b"":
                 time.sleep(0.01)
@@ -368,7 +383,7 @@ def _transcript_chunks(chunks, path):
 
 
 def run(context, out_dir, command, tracer=None, sink=None, limits=None, descendant_grace=30, suites_file=None,
-        kill_grace=KILL_GRACE, keep_transcript=None):
+        kill_grace=KILL_GRACE, keep_transcript=None, spool_quota_bytes=SPOOL_QUOTA):
     """Capture COMMAND under the tracer. SIGTERM/SIGINT during the capture are forwarded to
     the tracer's process group (terminate_tree); outputs and receipt are still written, and
     the exit is 124 when the command's status never arrived."""
@@ -387,6 +402,8 @@ def run(context, out_dir, command, tracer=None, sink=None, limits=None, descenda
         raise ValueError("invalid_command_or_grace")
     if type(kill_grace) not in (int, float) or not math.isfinite(kill_grace) or kill_grace < 0:
         raise ValueError("invalid_kill_grace")
+    if type(spool_quota_bytes) is not int or spool_quota_bytes < 1:
+        raise ValueError("invalid_spool_quota")
     sink = sink or ("fifo" if os.name == "posix" else "file")
     if sink not in {"fifo", "file"}:
         raise ValueError("invalid_sink")
@@ -428,6 +445,11 @@ def run(context, out_dir, command, tracer=None, sink=None, limits=None, descenda
                    decoder_complete=False, capture_complete=False, capture_errors=[],
                    sanitized_trace_bytes=0, decoded_evidence_bytes=0, decoder_peak_bytes=0,
                    terminated_by=None, kill_grace_seconds=kill_grace,
+                   sink=sink, decode_mode="deferred" if sink == "file" else "live",
+                   capture_wall_s=None, decode_wall_s=None, decode_cpu_s=None,
+                   events_decoded=None, events_per_s=None, spool_bytes=None,
+                   spool_quota_bytes=spool_quota_bytes if sink == "file" else None,
+                   spool_free_bytes_at_start=None, fifo_reads=None, fifo_full_reads=None,
                    tracer_stderr_tail=None, tracer_stderr_withheld=False, seed_fds=context["seed_fds"])
     receipt_path = out / "reports" / ("trace-receipt-" + context["capture_group"] + ".json")
     state = {"process": None, "signal": None, "escalate": False, "terminated": False}
@@ -453,7 +475,23 @@ def run(context, out_dir, command, tracer=None, sink=None, limits=None, descenda
                 state["terminated"] = True
                 terminate_tree(state["process"], kill_grace, escalate=lambda: state["escalate"])
 
-        with tempfile.TemporaryDirectory(prefix=".trace-", dir=out) as private:
+        with tempfile.TemporaryDirectory(prefix=".trace-") as private:
+            if sink == "file":
+                try:
+                    if hasattr(os, "statvfs"):
+                        space = os.statvfs(private)
+                        free = space.f_bavail * space.f_frsize
+                    else:
+                        free = shutil.disk_usage(private).free
+                    receipt["spool_free_bytes_at_start"] = free
+                    fault = "spool_fault:insufficient_space" if free < spool_quota_bytes + SPOOL_RESERVE else None
+                except OSError:
+                    fault = "spool_fault:write"
+                if fault:
+                    errors.append(fault)
+                    receipt["elapsed_seconds"] = time.monotonic() - started
+                    tree._atomic(receipt_path, receipt)
+                    return 1
             path = os.path.join(private, "sink")
             status_path = os.path.join(private, "command-exit.json")
             stderr_path = os.path.join(private, "tracer-stderr")
@@ -478,6 +516,7 @@ def run(context, out_dir, command, tracer=None, sink=None, limits=None, descenda
                         with open(stderr_path, "wb") as tracer_stderr:
                             inherit = ({"pass_fds": (stderr_fd,)} if os.name == "posix" and stderr_fd is not None
                                        else {"close_fds": False} if stderr_fd is not None else {})
+                            capture_started = time.monotonic()
                             process = subprocess.Popen(actual_argv, stdin=subprocess.DEVNULL, stderr=tracer_stderr,
                                                        start_new_session=os.name == "posix", **inherit)
                     except OSError:
@@ -492,13 +531,36 @@ def run(context, out_dir, command, tracer=None, sink=None, limits=None, descenda
                     # The signal landed while the tracer was being launched.
                     terminate_tree(process, kill_grace, escalate=lambda: state["escalate"])
                 if process is not None:
+                    if sink == "fifo":
+                        receipt.update(fifo_reads=0, fifo_full_reads=0)
                     hasher, count = hashlib.sha256(), 0
+                    decode_started = decode_cpu_started = None
+
+                    def exited():
+                        if receipt["capture_wall_s"] is None:
+                            receipt["capture_wall_s"] = time.monotonic() - capture_started
+
+                    def sample_spool():
+                        try:
+                            receipt["spool_bytes"] = os.stat(path).st_size
+                        except FileNotFoundError:
+                            return
+                        except OSError:
+                            if "spool_fault:write" not in errors:
+                                errors.append("spool_fault:write")
+                            forward(TERM, None)
+                            return
+                        if receipt["spool_bytes"] > spool_quota_bytes and "spool_fault:quota" not in errors:
+                            errors.append("spool_fault:quota")
+                            forward(TERM, None)
 
                     def chunks():
-                        nonlocal count
-                        stream = (_stream_fifo(fd, process, descendant_grace, errors) if sink == "fifo"
-                                  else _stream_file(path, process, descendant_grace, errors))
+                        nonlocal count, decode_started, decode_cpu_started
+                        stream = (_stream_fifo(fd, process, descendant_grace, errors, receipt, exited) if sink == "fifo"
+                                  else _stream_file(path, process, descendant_grace, errors, sample_spool, exited))
                         for chunk in stream:
+                            if decode_started is None:
+                                decode_started, decode_cpu_started = time.monotonic(), time.process_time()
                             hasher.update(chunk)
                             count += len(chunk)
                             yield chunk
@@ -517,11 +579,17 @@ def run(context, out_dir, command, tracer=None, sink=None, limits=None, descenda
                     if keep_transcript is not None:
                         stream = _transcript_chunks(stream, transcript_path)
                     result = tree.decode_stream(stream, context, limits)
+                    if decode_started is not None:
+                        receipt.update(decode_wall_s=time.monotonic() - decode_started,
+                                       decode_cpu_s=time.process_time() - decode_cpu_started)
+                    if sink == "file":
+                        sample_spool()
                     if keep_transcript is not None:
                         destination = Path(keep_transcript)
                         destination.mkdir(parents=True, exist_ok=True)
                         shutil.copyfile(transcript_path, destination / "transcript.strace")
                     receipt["tracer_exit_code"] = process.wait()
+                    exited()
                     code, restored = None, False
                     try:
                         status = json.loads(Path(status_path).read_text())
@@ -539,6 +607,11 @@ def run(context, out_dir, command, tracer=None, sink=None, limits=None, descenda
                     # from the command's recorded status is the tracer's own failure.
                     if receipt["tracer_exit_code"] != 0 and receipt["tracer_exit_code"] != code:
                         errors.append("tracer_nonzero_exit")
+                    diagnostic = _stderr_tail(stderr_path)
+                    if sink == "file" and ((receipt["tracer_exit_code"] != 0 and code == 0)
+                                           or (diagnostic and ("ENOSPC" in diagnostic
+                                                               or "no space left on device" in diagnostic.lower()))):
+                        errors.append("spool_fault:write")
                     # Only strace's diagnostics ("seccomp-bpf not enabled"), never tracee output:
                     # withheld unless the wrapper confirms the command wrote to our stderr.
                     if restored:
@@ -550,6 +623,9 @@ def run(context, out_dir, command, tracer=None, sink=None, limits=None, descenda
                     _incomplete(result, errors)
                     tree.write_outputs(result, out)
                     certificate = result["certificate"]
+                    receipt["events_decoded"] = certificate["event_count"]
+                    if receipt["decode_wall_s"] is not None and receipt["decode_wall_s"] > 0:
+                        receipt["events_per_s"] = certificate["event_count"] / receipt["decode_wall_s"]
                     receipt.update(byte_count=count, sha256=hasher.hexdigest(), sanitized_trace_bytes=count,
                                    root_pid=certificate["root"]["pid"],
                                    decoder_complete=certificate["decoder_complete"], capture_complete=certificate["complete"],
@@ -584,6 +660,7 @@ def main(argv=None):
     launch.add_argument("--out", required=True)
     launch.add_argument("--tracer", nargs="+", default=["strace"])
     launch.add_argument("--sink", choices=("fifo", "file"))
+    launch.add_argument("--spool-quota-bytes", type=int, default=SPOOL_QUOTA)
     launch.add_argument("--limit", action="append", default=[])
     launch.add_argument("--descendant-grace", type=float, default=30)
     launch.add_argument("--suites-file", help="JSON suite list the plugin writes at session finish")
@@ -605,7 +682,7 @@ def main(argv=None):
             name, value = item.split("=", 1)
             limits[name] = int(value)
         return run(context, args.out, command, args.tracer, args.sink, limits, args.descendant_grace,
-                   args.suites_file, args.kill_grace, args.keep_transcript)
+                   args.suites_file, args.kill_grace, args.keep_transcript, args.spool_quota_bytes)
     except (OSError, ValueError, TypeError, KeyError, UnicodeError):
         if args.sink == "fifo" and os.name == "nt":
             print("trace_supervisor: fifo sink is unavailable on Windows; use --sink file", file=sys.stderr)

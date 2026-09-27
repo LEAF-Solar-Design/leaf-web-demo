@@ -29,6 +29,7 @@ import tempfile
 from pathlib import Path
 from urllib.parse import quote
 from dataclasses import dataclass, field
+from collections import OrderedDict
 
 try:
     import resource
@@ -37,7 +38,7 @@ except ImportError:  # Windows: the live-state counter stands in for measured RS
 
 
 BINDINGS = ("run_id", "source_sha", "source_tree", "capture_sha", "catalog_sha256")
-PARSER_VERSION = "s15a-12"
+PARSER_VERSION = "s15a-14"
 # max_state_bytes: 2 GiB, compared against measured peak RSS (Amendment 5); the counter it
 # replaced only ever added, so a 40 M-line stream tripped it on cumulative allocation.
 LIMITS = dict(max_live_tasks=65536, max_total_tasks=4194304, max_fds_per_task=65536, max_record_bytes=1048576,
@@ -67,7 +68,7 @@ POLICY = {
     "process": "fork vfork clone wait4 waitid exit exit_group setsid setpgid getpid getppid gettid".split(),
     "network": "socket connect bind listen accept accept4 sendto recvfrom sendmsg recvmsg sendmmsg recvmmsg getsockopt setsockopt getpeername getsockname shutdown".split(),
     "namespace": "unshare setns chroot pivot_root mount umount2".split(),
-    "reject": "ptrace process_vm_readv process_vm_writev io_setup io_submit io_getevents io_cancel io_destroy io_uring_setup io_uring_enter io_uring_register open_by_handle_at name_to_handle_at splice tee vmsplice bpf userfaultfd shmget shmat shmdt shmctl semget semop semctl msgget msgsnd msgrcv msgctl".split(),
+    "reject": "ptrace process_vm_readv process_vm_writev io_setup io_submit io_getevents io_cancel io_destroy io_uring_setup io_uring_enter io_uring_register fanotify_init fanotify_mark open_by_handle_at name_to_handle_at splice tee vmsplice bpf userfaultfd shmget shmat shmdt shmctl semget semop semctl msgget msgsnd msgrcv msgctl".split(),
     # Modern calls decode normally; ENOSYS probes on older kernels are no-ops.
     "abi": "openat2 clone3 close_range pidfd_open pidfd_getfd faccessat2".split(),
     "runtime": "brk madvise arch_prctl set_tid_address set_robust_list get_robust_list futex rseq rt_sigaction rt_sigprocmask rt_sigreturn sigaltstack rt_sigsuspend rt_sigtimedwait rt_sigpending restart_syscall kill tkill tgkill sched_yield nanosleep clock_nanosleep poll ppoll select pselect6 epoll_create epoll_create1 epoll_ctl epoll_wait epoll_pwait eventfd eventfd2 alarm setitimer getitimer getuid geteuid getgid getegid getgroups uname getrlimit prlimit64 getrusage times umask clock_gettime clock_getres gettimeofday time getrandom sched_getaffinity sched_getparam sched_getscheduler prctl ioctl sysinfo getpgrp getpgid setrlimit capget sched_setaffinity timer_create timer_settime timer_gettime timer_delete timerfd_settime timerfd_gettime mincore msync mlock munlock".split(),
@@ -89,13 +90,13 @@ TRACED = list(dict.fromkeys(
 POLICY["traced"] = TRACED
 PATH_ARGS = {
     **{n: (0,) for n in "open creat execve readlink access stat lstat statfs chdir truncate mkdir rmdir unlink chroot getxattr lgetxattr listxattr llistxattr chmod chown lchown".split()},
-    **{n: (1,) for n in "openat openat2 execveat readlinkat faccessat faccessat2 newfstatat statx mkdirat unlinkat fchmodat fchownat utimensat futimesat".split()},
+    **{n: (1,) for n in "openat openat2 execveat readlinkat faccessat faccessat2 newfstatat fstatat statx mkdirat unlinkat fchmodat fchownat utimensat futimesat".split()},
     "rename": (0, 1), "link": (0, 1), "symlink": (0, 1),
     "renameat": (1, 3), "renameat2": (1, 3), "linkat": (1, 3), "symlinkat": (0, 2),
 }
 FD_ARGS = {
     **{n: (0,) for n in "read pread64 readv preadv preadv2 write pwrite64 writev pwritev pwritev2 fstat fstatfs fchdir lseek dup fcntl close getdents getdents64 ioctl ftruncate fsync fdatasync connect bind listen accept accept4 sendto recvfrom sendmsg recvmsg sendmmsg recvmmsg getsockopt setsockopt getpeername getsockname shutdown".split()},
-    **{n: (0,) for n in "openat openat2 execveat readlinkat faccessat faccessat2 newfstatat statx mkdirat unlinkat pidfd_getfd".split()},
+    **{n: (0,) for n in "openat openat2 execveat readlinkat faccessat faccessat2 newfstatat fstatat statx mkdirat unlinkat pidfd_getfd".split()},
     **{n: (0,) for n in "fadvise64 posix_fadvise readahead sync_file_range flock fgetxattr flistxattr fchmod fchown fchmodat fchownat utimensat futimesat".split()},
     "dup2": (0, 1), "dup3": (0, 1), "mmap": (4,), "renameat": (0, 2),
     "renameat2": (0, 2), "linkat": (0, 2), "symlinkat": (1,), "epoll_ctl": (0, 2),
@@ -107,11 +108,12 @@ FD_ARGS = {
 COPIES = {"sendfile": (1, 0), "copy_file_range": (0, 2)}
 READS = set("read pread64 readv preadv preadv2".split())
 WRITES = set("write pwrite64 writev pwritev pwritev2 ftruncate fsync fdatasync".split())
-LOOKUPS = set("stat lstat newfstatat statx access faccessat faccessat2 readlink readlinkat statfs getxattr lgetxattr listxattr llistxattr".split())
+LOOKUPS = set("stat lstat newfstatat fstatat statx access faccessat faccessat2 readlink readlinkat statfs getxattr lgetxattr listxattr llistxattr".split())
 MUTATIONS = set(POLICY["directory"]) - {"getdents", "getdents64"}
 METADATA_MUTATIONS = set(POLICY["metadata_mutation"])
 FD_LOOKUPS = {"fstat", "fstatfs", "fgetxattr", "flistxattr"}
-KNOWN = frozenset().union(*(POLICY[k] for k in ("path", "descriptor", "directory", "process", "network", "namespace", "runtime",
+# fstatat is a transcript alias; Linux strace's capture name is newfstatat.
+KNOWN = frozenset({"fstatat"}).union(*(POLICY[k] for k in ("path", "descriptor", "directory", "process", "network", "namespace", "runtime",
                                                 "metadata_mutation", "internal_object", "filesystem_events", "noise", "legacy_stat", "abi")))
 FD_CREATORS = set(POLICY["fd_table"]) - {"close", "close_range", "inotify_add_watch", "inotify_rm_watch"}
 PAIR_REQUIRED = set(PATH_ARGS) | set(POLICY["path"]) | {"connect", "bind", "fork", "vfork", "clone", "clone3"} | FD_CREATORS
@@ -123,7 +125,40 @@ LEADING = re.compile(r"(?:\[pid +\d+\] |\d+ +)?(?:\d+\.\d+ )?(?:<\.\.\. ([A-Za-z
 RETURNED = re.compile(r"(.*)\)\s+=\s+(\?|0x[0-9a-fA-F]+|-?\d+)(?:<(.*?)>(?= |$))?(.*)")
 # Amendment 5 drops -T: the duration is optional, still accepted when present.
 TRAILER = re.compile(r"(?: ([A-Z][A-Z0-9_]+)(?: \([^\n]*\))?)?(?: <(\d+\.\d+|unavailable)>)?")
+RX_HEX_BYTE = re.compile(r"[0-9a-fA-F]{2}")
+RX_ABBREVIATED_STRING = re.compile(r'"\s*\.\.\.$')
+RX_FD_TOKEN = re.compile(r"(-?\d+)(?:<(.*)>)?")
+RX_DIRENT = re.compile(r'\{d_ino=(\d+), d_off=(-?\d+), d_reclen=(\d+), d_type=(DT_[A-Z]+), d_name=("(?:\\.|[^"\\])*")\}')
+RX_STAT_SIZE = re.compile(r"\b(?:st_size|stx_size)=(\d+)(?:,|\})")
+RX_AT_FLAGS = re.compile(r"AT_[A-Z_]+(?:\|AT_[A-Z_]+)*")
+RX_FD_PAIR = re.compile(r"\[\s*\d+(?:<[^>]*>)?\s*,\s*\d+(?:<[^>]*>)?\s*\]")
+RX_FLAGS = re.compile(r"[A-Z][A-Z0-9_]*(?:\|[A-Z][A-Z0-9_]*)*")
+RX_INTEGER = re.compile(r"-?\d+")
+RX_SUBTYPE = re.compile(r"[A-Za-z0-9_]{1,64}")
+RX_STRUCT_FLAGS = re.compile(r"(?:^|[,{]\s*)flags=([^,}]+)(?:[,}]|$)")
+RX_NUMERIC_FLAGS = re.compile(r"(?:[A-Z][A-Z0-9_]*|[0-9]+)(?:\|[A-Z][A-Z0-9_]*)*")
+RX_HEX_INTEGER = re.compile(r"0x[0-9a-fA-F]+")
+RX_UNIX_PEER = re.compile(r'\bsa_family=AF_UNIX,\s*sun_path=("(?:\\.|[^"\\])*")')
+RX_ATTACH_LINE = re.compile(r"strace: Process (\d+) (attached|detached)")
+RX_TIMED_LINE = re.compile(r"(?:\[pid +(\d+)\] |(\d+) +)?(\d+\.\d+) (.*)")
+RX_EXIT_LINE = re.compile(r"\+\+\+ exited with (\d+) \+\+\+")
+RX_KILLED_LINE = re.compile(r"\+\+\+ killed by (SIG[A-Z0-9]+)(?: \(core dumped\))? \+\+\+")
+RX_SIGNAL_LINE = re.compile(r"--- (?:stopped by )?(SIG[A-Z0-9]+)(?: \{.*\})? ---")
+RX_CALL_START = re.compile(r"([a-zA-Z_][a-zA-Z_0-9]*)\(")
+RX_CALL_RESUME = re.compile(r"<\.\.\. ([a-zA-Z_][a-zA-Z_0-9]*) resumed>")
+RX_OUTPUT_ID = re.compile(r"[A-Za-z0-9_-]+")
+RX_PID_PREFIX = re.compile(r"(?:\[pid +(\d+)\] |(\d+) +)")
+RX_DRAIN_LINE = re.compile(r"(?:\[pid +(\d+)\] |(\d+) +)?(?:\d+\.\d+ )?(.*)")
+RX_DRAIN_EXIT = re.compile(r"(?:exit_group|exit)\(|\+\+\+ (?:exited|killed)")
+RX_DRAIN_RESUME = re.compile(r"<\.\.\. ([A-Za-z_]\w*) resumed>")
+RX_ENDPOINT_ANNOTATION = re.compile(r"(?:pipe:|socket:|UNIX:|TCP:|anon_inode:)")
+RX_BYTECODE_PATH = re.compile(r"(?:(.*)/)?__pycache__/([^/]+?)\.[^.\/]+(?:\.opt-\d+)?(?:-pytest-[\d.]+)?\.pyc")
 CLOSERS = {")": "(", "]": "[", "}": "{"}
+SPLIT_BYTES = re.compile(rb'"(?:\\.|[^"\\])*"|["<>\[\](){},]')
+C_STRING_BYTES = re.compile(rb'"(?:[\x20-\x21\x23-\x5b\x5d-\x7e]|\\(?:[ntrfvab\\"]|x[0-9a-fA-F]{2}|[0-3][0-7]{2}|[0-7]{1,2}(?![0-7])))*"')
+REASON_UNSET = object()
+DESCRIPTOR_MUTATIONS = WRITES | {"close", "close_range", "dup", "dup2", "dup3", "fcntl", "ioctl"}
+STAT_FLAG_INDEX = {"newfstatat": 3, "fstatat": 3, "statx": 2}
 
 
 def _balanced(text, start):
@@ -186,6 +221,14 @@ def decode_c_string(token):
     """Decode exactly one quoted strace string, without accepting truncation."""
     if len(token) < 2 or token[0] != '"' or token[-1] != '"':
         raise ValueError("malformed_string")
+    if "\\" not in token:
+        try:
+            data = token.encode("ascii")
+        except UnicodeError:
+            raise ValueError("malformed_string") from None
+        if not C_STRING_BYTES.fullmatch(data):
+            raise ValueError("malformed_string")
+        return data[1:-1]
     out = bytearray()
     i = 1
     escapes = {"n": 10, "t": 9, "r": 13, "f": 12, "v": 11, "a": 7, "b": 8, "\\": 92, '"': 34}
@@ -199,7 +242,7 @@ def decode_c_string(token):
             i += 1
             if c == "x":
                 h = token[i:i + 2]
-                if len(h) != 2 or not re.fullmatch(r"[0-9a-fA-F]{2}", h):
+                if len(h) != 2 or not RX_HEX_BYTE.fullmatch(h):
                     raise ValueError("malformed_string")
                 out.append(int(h, 16))
                 i += 2
@@ -223,7 +266,7 @@ def decode_c_string(token):
 
 
 def _string(token):
-    if re.search(r'"\s*\.\.\.$', token):
+    if RX_ABBREVIATED_STRING.search(token):
         raise ValueError("abbreviated_required_string")
     try:
         value = decode_c_string(token).decode("utf-8", "strict")
@@ -237,41 +280,36 @@ def _string(token):
 def _split(raw):
     """Split arguments without retaining any quoted buffers in the result event."""
     items, start, depth, angle = [], 0, 0, False
-    quoted = escaped = False
-    quote_start = inner = 0
-    for i, c in enumerate(raw):
-        if quoted:
-            if escaped:
-                escaped = False
-            elif c == "\\":
-                escaped = True
-            elif c == '"':
-                decode_c_string(raw[quote_start:i + 1])
-                quoted = False
-        elif c == '"':
-            quoted = True
-            quote_start = i
+    inner = 0
+    try:
+        data = raw.encode("ascii")
+    except UnicodeError:
+        raise ValueError("malformed_string") from None
+    for match in SPLIT_BYTES.finditer(data):
+        i, token = match.start(), match[0]
+        c = token[0]
+        if c == 34:
+            if not C_STRING_BYTES.fullmatch(token):
+                raise ValueError("malformed_string")
         elif angle:
             # Socket annotations carry '->' inside brackets (<TCP:[a->b]>): only a
             # '>' outside the annotation's own brackets closes it.
-            if c == "[":
+            if c == 91:
                 inner += 1
-            elif c == "]":
+            elif c == 93:
                 inner -= 1
-            elif c == ">" and inner <= 0:
+            elif c == 62 and inner <= 0:
                 angle = False
-        elif c == "<":
+        elif c == 60:
             angle, inner = True, 0
         elif not angle:
-            if c in "([{":
+            if c in (40, 91, 123):
                 depth += 1
-            elif c in ")]}":
+            elif c in (41, 93, 125):
                 depth -= 1
-            elif c == "," and depth == 0:
+            elif c == 44 and depth == 0:
                 items.append(raw[start:i].strip())
                 start = i + 1
-    if quoted:
-        raise ValueError("malformed_string")
     items.append(raw[start:].strip())
     return items
 
@@ -279,7 +317,7 @@ def _split(raw):
 def _fd(raw):
     if raw == "AT_FDCWD":
         return {"fd": "AT_FDCWD", "annotation": None, "deleted": False}
-    match = re.fullmatch(r"(-?\d+)(?:<(.*)>)?", raw)
+    match = RX_FD_TOKEN.fullmatch(raw)
     if not match:
         raise ValueError("unresolved_file_descriptor")
     annotation = match[2]
@@ -299,7 +337,7 @@ def _entries(raw):
     if raw == "[]":
         return rows
     for record in _split(raw[1:-1]):
-        m = re.fullmatch(r'\{d_ino=(\d+), d_off=(-?\d+), d_reclen=(\d+), d_type=(DT_[A-Z]+), d_name=("(?:\\.|[^"\\])*")\}', record)
+        m = RX_DIRENT.fullmatch(record)
         if not m or m[4] not in {"DT_UNKNOWN", "DT_FIFO", "DT_CHR", "DT_DIR", "DT_BLK", "DT_REG", "DT_LNK", "DT_SOCK", "DT_WHT"}:
             raise ValueError("directory_enumeration_incomplete")
         name = _string(m[5])
@@ -318,27 +356,31 @@ def _args(event, raw, resumed=False):
     event.update(paths={}, fds={}, scalars={}, flags=[], entries=None, endpoints=[])
     if name in POLICY["abi"] and event["errno"] == "ENOSYS":
         return
-    if name in {"fstat", "newfstatat", "statx"}:
-        size = re.search(r"\b(?:st_size|stx_size)=(\d+)(?:,|\})", raw)
+    if name in {"fstat", "newfstatat", "fstatat", "statx"}:
+        size = RX_STAT_SIZE.search(raw)
         if size:
             event["observed_size"] = int(size[1])
     # Retain only an argument index, never an unfinished output buffer.
-    if not resumed and event["kind"] == "unfinished" and name in {"newfstatat", "statx", "fstat"}:
+    if not resumed and event["kind"] == "unfinished" and name in {"newfstatat", "fstatat", "statx", "fstat"}:
         event["stat_resume_index"] = len(args) - (1 if args[-1] == "" else 0)
     # A resumed tail needs its matched entry to establish argument positions.
     if resumed:
         # Evidence only: these tokens must not change the semantic flags below.
         event["witness_flags"] = [malformed_shape(token) for token in args
-                                  if re.fullmatch(r"AT_[A-Z_]+(?:\|AT_[A-Z_]+)*", token)][:8]
-        if name in {"newfstatat", "statx"}:
+                                  if RX_AT_FLAGS.fullmatch(token)][:8]
+        if name in {"newfstatat", "fstatat", "statx"}:
             event["stat_tail_flags"] = {
                 i: token.split("|") for i, token in enumerate(args)
-                if re.fullmatch(r"AT_[A-Z_]+(?:\|AT_[A-Z_]+)*", token)}
+                if RX_AT_FLAGS.fullmatch(token)}
+            event["stat_tail_values"] = {
+                i: int(token, 16 if token.startswith("0x") else 10)
+                for i, token in enumerate(args)
+                if RX_INTEGER.fullmatch(token) or RX_HEX_INTEGER.fullmatch(token)}
         if name in {"pipe", "pipe2", "socketpair"}:
             for token in args:
-                if re.fullmatch(r"\[\s*\d+(?:<[^>]*>)?\s*,\s*\d+(?:<[^>]*>)?\s*\]", token):
+                if RX_FD_PAIR.fullmatch(token):
                     event["endpoints"] = [_fd(x) for x in _split(token[1:-1])]
-                elif re.fullmatch(r"[A-Z][A-Z0-9_]*(?:\|[A-Z][A-Z0-9_]*)*", token):
+                elif RX_FLAGS.fullmatch(token):
                     event["flags"].extend(token.split("|"))
         return
     for i in PATH_ARGS.get(name, ()):
@@ -351,19 +393,26 @@ def _args(event, raw, resumed=False):
     # Only scalar literals/flag expressions survive. Never retain unknown text,
     # argv/envp, structures, addresses, read/write buffers or socket payloads.
     for i, token in enumerate(args):
-        if re.fullmatch(r"-?\d+", token):
+        if RX_INTEGER.fullmatch(token):
             event["scalars"][i] = int(token)
-        elif re.fullmatch(r"[A-Z][A-Z0-9_]*(?:\|[A-Z][A-Z0-9_]*)*", token):
+        elif RX_FLAGS.fullmatch(token):
             event["scalars"][i] = token
             event["flags"].extend(token.split("|"))
+    flag_index = STAT_FLAG_INDEX.get(name)
+    if flag_index is not None and flag_index < len(args):
+        token = args[flag_index]
+        if RX_INTEGER.fullmatch(token) or RX_HEX_INTEGER.fullmatch(token):
+            event["stat_flags_value"] = int(token, 16 if token.startswith("0x") else 10)
+        elif RX_AT_FLAGS.fullmatch(token):
+            event["stat_flags_value"] = token.split("|")
     if name in {"ioctl", "fcntl", "prctl"}:
         # Leading identifier or number of the subtype argument, for the subtype counters only.
         index = 0 if name == "prctl" else 1
-        label = re.match(r"[A-Za-z0-9_]{1,64}", args[index]) if index < len(args) else None
+        label = RX_SUBTYPE.match(args[index]) if index < len(args) else None
         event["subtype_label"] = label[0] if label else "unknown"
     if name in {"clone", "clone3", "openat2"}:
         token = args[0] if name == "clone3" else args[2] if name == "openat2" and len(args) > 2 else raw
-        m = re.search(r"(?:^|[,{]\s*)flags=([^,}]+)(?:[,}]|$)", token)
+        m = RX_STRUCT_FLAGS.search(token)
         if not m:
             if name == "clone":
                 raise ValueError("unsupported_kernel_abi")
@@ -372,7 +421,7 @@ def _args(event, raw, resumed=False):
         else:
             value = m[1].strip()
             # Keep flag literals only, never arbitrary struct text or pointers.
-            if not re.fullmatch(r"(?:[A-Z][A-Z0-9_]*|[0-9]+)(?:\|[A-Z][A-Z0-9_]*)*", value):
+            if not RX_NUMERIC_FLAGS.fullmatch(value):
                 value = "unknown"
             event["flags"] = [] if value == "0" else value.split("|")
             if name == "openat2":
@@ -381,7 +430,7 @@ def _args(event, raw, resumed=False):
         for i, token in enumerate(args[:2]):
             if token == "~0U":
                 event["scalars"][i] = 4294967295
-            elif re.fullmatch(r"0x[0-9a-fA-F]+", token):
+            elif RX_HEX_INTEGER.fullmatch(token):
                 event["scalars"][i] = int(token, 16)
     # Amendment 6: getdents buffers, including abbreviated and resumed ones, are not evidence.
     if name in {"pipe", "pipe2", "socketpair"}:
@@ -395,7 +444,7 @@ def _args(event, raw, resumed=False):
     if name in {"sendmsg", "recvmsg", "sendmmsg", "recvmmsg"}:
         event["rights"] = "SCM_RIGHTS" in raw
     if name in {"bind", "connect"} and len(args) > 1:
-        match = re.search(r'\bsa_family=AF_UNIX,\s*sun_path=("(?:\\.|[^"\\])*")', args[1])
+        match = RX_UNIX_PEER.search(args[1])
         if match:
             event["unix_peer"] = _string(match[1])
 
@@ -403,13 +452,13 @@ def _args(event, raw, resumed=False):
 def _parse_line(line, sequence):
     event = dict(sequence=sequence, pid=None, time=None, kind=None, name=None,
                  errno=None, return_value=None, duration=None)
-    m = re.fullmatch(r"strace: Process (\d+) (attached|detached)", line)
+    m = RX_ATTACH_LINE.fullmatch(line)
     if m:
         event.update(pid=int(m[1]), kind=m[2])
         return event
     # strace -f -o prints no pid until a second process exists (pid None: the root);
     # pids are left-justified in five columns; stderr output uses "[pid N] ".
-    m = re.fullmatch(r"(?:\[pid +(\d+)\] |(\d+) +)?(\d+\.\d+) (.*)", line)
+    m = RX_TIMED_LINE.fullmatch(line)
     if not m:
         raise ValueError("malformed_line")
     pid = m[1] or m[2]
@@ -418,20 +467,20 @@ def _parse_line(line, sequence):
     if body.startswith("????("):
         event.update(kind="interrupted", name="????")
         return event
-    terminal = re.fullmatch(r"\+\+\+ exited with (\d+) \+\+\+", body)
+    terminal = RX_EXIT_LINE.fullmatch(body)
     if terminal:
         event.update(kind="exit", status=int(terminal[1]))
         return event
-    terminal = re.fullmatch(r"\+\+\+ killed by (SIG[A-Z0-9]+)(?: \(core dumped\))? \+\+\+", body)
+    terminal = RX_KILLED_LINE.fullmatch(body)
     if terminal:
         event.update(kind="killed", signal=terminal[1])
         return event
-    signal = re.fullmatch(r"--- (?:stopped by )?(SIG[A-Z0-9]+)(?: \{.*\})? ---", body)
+    signal = RX_SIGNAL_LINE.fullmatch(body)
     if signal:
         event.update(kind="signal", signal=signal[1])
         return event
-    start = re.match(r"([a-zA-Z_][a-zA-Z_0-9]*)\(", body)
-    resumed = re.match(r"<\.\.\. ([a-zA-Z_][a-zA-Z_0-9]*) resumed>", body)
+    start = RX_CALL_START.match(body)
+    resumed = RX_CALL_RESUME.match(body)
     if not start and not resumed:
         raise ValueError("malformed_line")
     match = start or resumed
@@ -625,7 +674,7 @@ def _validate(context):
     for key in BINDINGS + ("capture_group", "source_root", "initial_cwd"):
         if not isinstance(context.get(key), str) or not context[key]:
             raise ValueError("invalid_context")
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", context["capture_group"]):
+    if not RX_OUTPUT_ID.fullmatch(context["capture_group"]):
         raise ValueError("invalid_context")
     # Absent or null root_pid: the decoder adopts the first parsed event's pid.
     if context.get("root_pid") is not None and (type(context["root_pid"]) is not int or context["root_pid"] <= 0):
@@ -656,7 +705,7 @@ def validate_suites(suites, allow_empty=False):
     for suite in suites:
         if (not isinstance(suite, dict) or not isinstance(suite.get("suite_id"), str) or not suite["suite_id"]
                 or type(suite.get("attempt")) is not int or suite["attempt"] < 1
-                or not isinstance(suite.get("worker"), str) or not re.fullmatch(r"[A-Za-z0-9_-]+", suite["worker"])
+                or not isinstance(suite.get("worker"), str) or not RX_OUTPUT_ID.fullmatch(suite["worker"])
                 or not isinstance(suite.get("test_ids"), list)
                 or any(not isinstance(t, str) for t in suite["test_ids"])
                 or not isinstance(suite.get("outcomes_ref"), str)):
@@ -708,6 +757,8 @@ class _Decoder:
         self.generated_inputs, self.listings, self.consumed_directories = {}, {}, set()
         self.followed_links = {}
         self.links = {}
+        self.alias_generation = 0
+        self.path_cache = OrderedDict()
         self.supervisor_reads = 0
         self.unix_peers, self.unix_sockets = {}, []
         self.event_count = self.syscall_count = 0
@@ -799,18 +850,28 @@ class _Decoder:
 
     def reason_context(self, event, task=None):
         self.reason_event = event
-        self.reason_task = task or self.active.get(event.get("pid"))
-        argument = next(iter(event.get("fds", {}).values()), None)
-        self.reason_fd = argument["fd"] if argument else None
+        self.reason_task = task
+        self.reason_fd = REASON_UNSET
 
     def reason_line(self, sequence, raw):
         self.line = (sequence, raw)
-        prefix = raw[:SAMPLE_PREFIX].decode("ascii", "replace")
-        pid = re.match(r"(?:\[pid +(\d+)\] |(\d+) +)", prefix)
-        self.reason_context({"sequence": sequence, "pid": int(pid[1] or pid[2]) if pid else None,
-                             "name": line_kind(prefix)})
+        self.reason_event, self.reason_task, self.reason_fd = None, None, REASON_UNSET
+
+    def materialize_reason_context(self):
+        if self.reason_event is None:
+            sequence, raw = self.line
+            prefix = raw[:SAMPLE_PREFIX].decode("ascii", "replace")
+            pid = RX_PID_PREFIX.match(prefix)
+            self.reason_event = {"sequence": sequence, "pid": int(pid[1] or pid[2]) if pid else None,
+                                 "name": line_kind(prefix)}
+        if self.reason_task is None:
+            self.reason_task = self.active.get(self.reason_event.get("pid"))
+        if self.reason_fd is REASON_UNSET:
+            argument = next(iter(self.reason_event.get("fds", {}).values()), None)
+            self.reason_fd = argument["fd"] if argument else None
 
     def reason(self, value):
+        self.materialize_reason_context()
         if value == "unknown_path_base" and value not in self.witnesses:
             event, task, fd = self.reason_event, self.reason_task, self.reason_fd
             entry = task["fds"].get(fd) if task else None
@@ -868,6 +929,7 @@ class _Decoder:
             self.directories.clear()
 
     def record_stop(self, name, accounting=None):
+        self.materialize_reason_context()
         event, task, fd = self.reason_event, self.reason_task, self.reason_fd
         entry = task["fds"].get(fd) if task else None
         desc = entry["description"] if entry else {}
@@ -902,16 +964,16 @@ class _Decoder:
     def drain_diagnostic(self, raw):
         # Match only the bounded prefix. No dependency decoding or state mutation.
         text = raw[:SAMPLE_PREFIX].decode("ascii", "replace")
-        match = re.match(r"(?:\[pid +(\d+)\] |(\d+) +)?(?:\d+\.\d+ )?(.*)", text)
+        match = RX_DRAIN_LINE.match(text)
         if not match:
             return
         pid = int(match[1] or match[2]) if match[1] or match[2] else (self.root["record"]["pid"] if self.root else None)
         if pid not in self.stop_pids:
             return
         tail = match[3]
-        if re.match(r"(?:exit_group|exit)\(|\+\+\+ (?:exited|killed)", tail):
+        if RX_DRAIN_EXIT.match(tail):
             self.stop_terminals.add(pid)
-        resumed = re.match(r"<\.\.\. ([A-Za-z_]\w*) resumed>", tail)
+        resumed = RX_DRAIN_RESUME.match(tail)
         if resumed and (pid, resumed[1]) in self.stop_pending:
             self.stop_pending.remove((pid, resumed[1]))
             self.post_stop_resumes += 1
@@ -1055,7 +1117,7 @@ class _Decoder:
                 self.cap("max_fds_per_task")
                 return
             self.retain(128)
-        task["fds"][fd] = {"description": desc, "cloexec": cloexec}
+        task["fds"][fd] = {"description": desc, "cloexec": cloexec, "created_sequence": self.line[0]}
 
     def closefd(self, task, fd):
         if task["fds"].pop(fd, None) is not None:
@@ -1080,13 +1142,13 @@ class _Decoder:
         annotation = argument.get("annotation")
         if annotation:
             if desc["kind"] == "file":
-                resolution = resolve_path(task["cwd"]["path"], None, annotation, self.context, {"symlinks": self.links})
+                resolution = self.resolve_cached(task["cwd"]["path"], None, annotation)
                 if resolution.absolute != desc.get("path"):
                     self.reason("descriptor_annotation_mismatch")
                 if argument.get("deleted"):
                     desc["deleted"] = True
             elif desc["kind"] == "endpoint":
-                if not re.match(r"(?:pipe:|socket:|UNIX:|TCP:|anon_inode:)", annotation):
+                if not RX_ENDPOINT_ANNOTATION.match(annotation):
                     self.reason("descriptor_annotation_mismatch")
         return desc
 
@@ -1094,6 +1156,25 @@ class _Decoder:
         if len(self.loss["unknown_fd_samples"]) < SAMPLE_LIMIT:
             self.loss["unknown_fd_samples"].append(self.fd_sample or {
                 "fd": None, "syscall": self.syscall_name, "root": None, "sequence": self.line[0]})
+
+    def invalidate_paths(self):
+        self.alias_generation += 1
+        self.path_cache.clear()
+
+    def resolve_cached(self, cwd, dirfd_path, raw, nofollow=False):
+        key = (cwd, dirfd_path, raw, self.alias_generation, nofollow)
+        result = self.path_cache.get(key)
+        if result is None:
+            result = resolve_path(cwd, dirfd_path, raw, self.context,
+                                  {"symlinks": self.links, "nofollow": nofollow})
+            self.path_cache[key] = result
+            if len(self.path_cache) > 4096:
+                self.path_cache.popitem(last=False)
+        else:
+            self.path_cache.move_to_end(key)
+        # Callers add descriptor provenance; no mutable result is shared with the cache.
+        return Resolution(result.absolute, result.path, dict(result.external) if result.external else None,
+                          [dict(alias) for alias in result.aliases], list(result.followed_links), list(result.reasons))
 
     def resolve(self, task, event, index, nofollow=False):
         argument = event["fds"].get(index - 1)
@@ -1116,8 +1197,7 @@ class _Decoder:
         if raw == "" and "AT_EMPTY_PATH" not in event["flags"]:
             self.reason("unknown_path_base")
             return Resolution()
-        resolution = resolve_path(event.get("entry_cwd", task["cwd"]["path"]), base, raw, self.context,
-                                  {"symlinks": self.links, "nofollow": nofollow})
+        resolution = self.resolve_cached(event.get("entry_cwd", task["cwd"]["path"]), base, raw, nofollow)
         resolution.followed_links = list(dict.fromkeys(list(inherited_links) + resolution.followed_links))
         for reason in resolution.reasons:
             self.reason(reason)
@@ -1140,7 +1220,7 @@ class _Decoder:
             self.retain(160 + sum(64 + len(member.encode("utf-8")) for member in members))
 
     def bytecode_source(self, path):
-        match = re.fullmatch(r"(?:(.*)/)?__pycache__/([^/]+?)\.[^.\/]+(?:\.opt-\d+)?(?:-pytest-[\d.]+)?\.pyc", path)
+        match = RX_BYTECODE_PATH.fullmatch(path)
         if match:
             source = (match[1] + "/" if match[1] else "") + match[2] + ".py"
             if source in self.files:
@@ -1257,6 +1337,7 @@ class _Decoder:
     def policy(self, event, task):
         name, flags = event["name"], event["flags"]
         if name in POLICY["namespace"] or any(f.startswith("CLONE_NEW") for f in flags):
+            self.invalidate_paths()
             self.reason("namespace_change")
         if name in POLICY["abi"] and event["errno"] == "ENOSYS":
             return False
@@ -1399,6 +1480,8 @@ class _Decoder:
                 return
         if not self.policy(event, task):
             return
+        if self.empty_fdcwd_enoent(event):
+            return
         if name in {"fork", "vfork", "clone", "clone3"} and success and ret > 0:
             birth_return = {"pid": event["pid"], "child_pid": ret, "syscall": name,
                             "entry_sequence": event["sequence"], "completion_sequence": self.line[0]}
@@ -1434,6 +1517,8 @@ class _Decoder:
                     self.retain(128 * len(table))
                 for fd in list(task["fds"]):
                     if first <= fd <= last:
+                        if fd in event.get("protected_fds", ()):
+                            continue
                         if "CLOSE_RANGE_CLOEXEC" in flags:
                             task["fds"][fd]["cloexec"] = True
                         else:
@@ -1508,7 +1593,7 @@ class _Decoder:
                 self.retain(128 * len(table))
             return
         if name in LOOKUPS:
-            index = 1 if name in {"newfstatat", "statx", "faccessat", "faccessat2", "readlinkat"} else 0
+            index = 1 if name in {"newfstatat", "fstatat", "statx", "faccessat", "faccessat2", "readlinkat"} else 0
             if event["paths"].get(index) == "" and "AT_EMPTY_PATH" in flags:
                 desc = self.fd(task, event["fds"].get(index - 1), required=True)
                 if desc and desc["kind"] == "file":
@@ -1586,6 +1671,8 @@ class _Decoder:
                         for entry in owner["fds"].values():
                             if entry["description"].get("path") == resolutions[0].absolute:
                                 entry["description"]["deleted"] = True
+            if success:
+                self.invalidate_paths()
             return
         if name in {"pipe", "pipe2", "socketpair"} and success:
             if len(event["endpoints"]) != 2:
@@ -1605,7 +1692,16 @@ class _Decoder:
         argument = event["fds"].get(4 if name == "mmap" else 0)
         if argument is None or argument["fd"] == "AT_FDCWD":
             return
-        desc = self.fd(task, argument, required=name == "fchdir")
+        protected = event.get("protected_fds", ())
+        if name == "close" and argument["fd"] in protected:
+            return
+        if name in {"dup2", "dup3"} and success and ret in protected:
+            return
+        entry_descriptions = event.get("entry_descriptions", {})
+        if argument["fd"] in protected and entry_descriptions.get(argument["fd"]) is not None:
+            desc = entry_descriptions[argument["fd"]]
+        else:
+            desc = self.fd(task, argument, required=name == "fchdir")
         if desc is None:
             if success and (name in {"dup", "dup2", "dup3"} or name == "fcntl" and event["scalars"].get(1) in {"F_DUPFD", "F_DUPFD_CLOEXEC"}):
                 self.closefd(task, ret)
@@ -1643,9 +1739,9 @@ class _Decoder:
                 self.putfd(task, ret, desc, command == "F_DUPFD_CLOEXEC")
                 if "return_fd" in event:
                     self.fd(task, event["return_fd"])
-            elif command == "F_SETFD":
+            elif command == "F_SETFD" and fd not in protected:
                 task["fds"][fd]["cloexec"] = "FD_CLOEXEC" in flags or event["scalars"].get(2) == 1
-        elif name == "ioctl" and success and event["scalars"].get(1) in {"FIOCLEX", "FIONCLEX"}:
+        elif name == "ioctl" and success and fd not in protected and event["scalars"].get(1) in {"FIOCLEX", "FIONCLEX"}:
             task["fds"][fd]["cloexec"] = event["scalars"][1] == "FIOCLEX"
         elif name in {"getdents", "getdents64"}:
             self.enumerate(desc, event)
@@ -1732,13 +1828,17 @@ class _Decoder:
                 self.unpaired(previous[1], old[4], old[0])
             # Capture the entry cwd and the descriptions of the descriptors this call uses only.
             snapshot = {fd: (task["fds"].get(fd) or {}).get("description") for fd in self.used_fds(event)}
+            if event["name"] == "close_range":
+                first, last = event["scalars"].get(0), event["scalars"].get(1)
+                if isinstance(first, int) and isinstance(last, int):
+                    snapshot.update((fd, entry["description"]) for fd, entry in task["fds"].items()
+                                    if first <= fd <= last)
             event.setdefault("_reason_shape", malformed_shape(raw.decode("ascii", "replace")))
             provenance = set()
             for index, path in event["paths"].items():
                 desc = snapshot.get(event["fds"].get(index - 1, {}).get("fd")) or {}
-                resolved = resolve_path(task["cwd"]["path"], desc.get("path"), path,
-                                        self.context, {"symlinks": self.links,
-                                                       "nofollow": event["name"] in MUTATIONS})
+                resolved = self.resolve_cached(task["cwd"]["path"], desc.get("path"), path,
+                                               event["name"] in MUTATIONS)
                 provenance.update(resolved.followed_links)
                 if not path.startswith("/"):
                     provenance.update(desc.get("followed_links", ()))
@@ -1770,19 +1870,38 @@ class _Decoder:
             if event["endpoints"]:
                 joined["endpoints"] = event["endpoints"]
             joined["flags"] = list(dict.fromkeys(original["flags"] + event["flags"]))
-            flag_index = {"newfstatat": 3, "statx": 2}.get(event["name"])
+            flag_index = STAT_FLAG_INDEX.get(event["name"])
             offset = original.get("stat_resume_index")
             if flag_index is not None and offset is not None:
                 joined["flags"].extend(event.get("stat_tail_flags", {}).get(flag_index - offset, []))
+                tail_index = flag_index - offset
+                if tail_index in event.get("stat_tail_values", {}):
+                    joined["stat_flags_value"] = event["stat_tail_values"][tail_index]
+                elif tail_index in event.get("stat_tail_flags", {}):
+                    joined["stat_flags_value"] = event["stat_tail_flags"][tail_index]
             joined["kind"] = "syscall"
             joined["entry_cwd"] = cwd
             self.reason_context(joined, owner)
             # Sibling threads may change unrelated table rows; only this call's own inputs matter.
             relative = any(not p.startswith("/") for p in original["paths"].values())
-            if ((relative and cwd != owner["cwd"]["path"])
-                    or any((owner["fds"].get(fd) or {}).get("description") is not desc for fd, desc in snapshot.items())):
+            if self.empty_fdcwd_enoent(joined):
+                relative = False
+            changed = {fd for fd, desc in snapshot.items()
+                       if (owner["fds"].get(fd) or {}).get("description") is not desc}
+            if event["name"] == "close_range":
+                first, last = original["scalars"].get(0), original["scalars"].get(1)
+                if isinstance(first, int) and isinstance(last, int):
+                    changed.update(fd for fd in owner["fds"] if first <= fd <= last and fd not in snapshot)
+            unexplained = changed
+            if event["name"] in DESCRIPTOR_MUTATIONS:
+                # A completion acts on the entry-time object, never a reused table slot.
+                joined["entry_descriptions"] = snapshot
+                joined["protected_fds"] = changed
+                unexplained = {fd for fd in changed
+                               if (owner["fds"].get(fd) or {}).get("created_sequence", -1) <= original["sequence"]}
+            if (relative and cwd != owner["cwd"]["path"]) or unexplained:
                 self.reason("ambiguous_shared_state")
-                if event["name"] in {"newfstatat", "statx", "fstat"}:
+                if event["name"] in {"newfstatat", "fstatat", "statx", "fstat"}:
                     return
             self.syscall(owner, joined)
             return
@@ -1792,6 +1911,17 @@ class _Decoder:
         """Bounded raw prefix of the event's own line; empty for a replayed pending event."""
         sequence, raw = self.line
         return raw[:SAMPLE_PREFIX] if sequence == event["sequence"] else b""
+
+    @staticmethod
+    def empty_fdcwd_enoent(event):
+        if event["name"] not in STAT_FLAG_INDEX or event.get("errno") != "ENOENT":
+            return False
+        value = event.get("stat_flags_value")
+        no_empty_path = ((isinstance(value, int) and not value & 0x1000)
+                         or (isinstance(value, list) and "AT_EMPTY_PATH" not in value))
+        return (event.get("kind") == "syscall"
+                and event.get("return_value") == -1 and event.get("paths", {}).get(1) == ""
+                and event.get("fds", {}).get(0, {}).get("fd") == "AT_FDCWD" and no_empty_path)
 
     @staticmethod
     def used_fds(event):
@@ -2052,12 +2182,12 @@ def _atomic(path, value):
 def write_outputs(result, out_dir):
     root = Path(out_dir)
     group = result["certificate"]["capture_group"]
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", group):
+    if not RX_OUTPUT_ID.fullmatch(group):
         raise ValueError("invalid_capture_group")
     _atomic(root / "reports" / ("process-tree-" + group + ".json"), result["certificate"])
     for shard in result["shards"]:
         suite = quote(str(shard["suite_id"]), safe="").replace(".", "%2E") or "%00"
-        if not re.fullmatch(r"[A-Za-z0-9_-]+", shard["worker"]) or type(shard["attempt"]) is not int or shard["attempt"] < 1:
+        if not RX_OUTPUT_ID.fullmatch(shard["worker"]) or type(shard["attempt"]) is not int or shard["attempt"] < 1:
             raise ValueError("invalid_output_identity")
         _atomic(root / "readsets" / suite / str(shard["attempt"]) / (shard["worker"] + "-process.json"), shard)
 

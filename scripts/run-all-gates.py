@@ -3071,7 +3071,8 @@ def capture_spawn(suite: Suite, attempt: int, trace_env: dict, spawn_command, us
                    else [str(word) for word in spawn_command])
         return ([sys.executable, "-I", "-B", "-c", CAPTURE_WRAPPER, trusted, "run",
                  "--context", str(context_path), "--out", str(output),
-                 "--suites-file", str(suites_path), "--"] + command, False, None)
+                 "--suites-file", str(suites_path), "--sink", "file",
+                 "--spool-quota-bytes", "8589934592", "--"] + command, False, None)
     except Exception as exc:
         print(f"WARNING: process capture unavailable for {suite.id}: {type(exc).__name__}", file=sys.stderr)
         return None
