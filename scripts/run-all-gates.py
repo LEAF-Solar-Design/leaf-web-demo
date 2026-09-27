@@ -634,6 +634,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_w1_solve_split.py"), 35),
         Suite("server-w1-equipment", "server tests/test_w1_equipment.py", "pytest", SERVER,
               _py_pytest("tests/test_w1_equipment.py"), 24),
+        Suite("server-solar-tool-solar-assign-equipment", "server tests/test_solar_tool_solar_assign_equipment.py", "pytest", SERVER,
+              _py_pytest("tests/test_solar_tool_solar_assign_equipment.py"), 33),
         Suite("server-w1-catalog-gates", "server tests/test_w1_catalog_gates.py", "pytest", SERVER,
               _py_pytest("tests/test_w1_catalog_gates.py"), 61),
         Suite("server-w1-solar-apply-plan", "server tests/test_w1_solar_apply_plan.py", "pytest", SERVER,

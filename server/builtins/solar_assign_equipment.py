@@ -1,10 +1,8 @@
-"""Equipment placement adapter for the existing licensed mutation broker.
+"""Caller-configured equipment for local graph commits and licensed DWG placement.
 
-The broker provides licensed_equipment(plan, graph, timeout) on its isolated
-preview lane and commits the returned candidate with its DWG via
-write_loop.apply_graph_version. This module neither writes nor calls placement
-services. The reply carries plan_sha256 and placements, each with id, handle
-and configuration (the persisted equipment fields), read back from that DWG.
+The local entry point validates configurations without creating DWG entities.
+The separate licensed adapter checks placement replies against the mutation
+plan before the broker publishes the candidate and its DWG.
 """
 import copy
 import re
@@ -81,5 +79,17 @@ def assign_equipment(graph, params, *, drawing_intake, licensed_equipment=None):
             "ready": equipment_ready(candidate)}
 
 
-def run(intake, params):
-    raise RuntimeError("solar-assign-equipment requires the licensed mutation broker")
+def run(graph, params):
+    candidate = equipment_candidate(graph, params)
+    if params.get("preview", False):
+        raise GraphValidationError("EQUIPMENT_PREVIEW_UNSUPPORTED")
+    if params.get("cancel", False):
+        return candidate
+    old = {item["id"]: item for item in graph["inverters"]}
+    for item in candidate["inverters"]:
+        previous = old.get(item["id"])
+        if previous is not None and "source_handle" in previous["provenance"]:
+            if any(previous[key] != item[key] for key in
+                   ("block_name", "layer", "position", "rotation", "scale")):
+                raise GraphValidationError("EQUIPMENT_TRANSFORM_EDIT_UNSUPPORTED")
+    return candidate

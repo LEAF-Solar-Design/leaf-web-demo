@@ -341,14 +341,21 @@ def w1_graph_readiness(graph):
     mark(["solar-solve-proposal", "solar-commit-solve"], grouped,
          "sized_panel_groups_required")
     basis = upstream_basis(graph)
-    strings_valid = grouped and bool(graph["strings"]) and all(
-        item["validity"]["state"] == "valid" and item["module_count"] > 0
-        for item in graph["strings"]
-    ) and not any(coverage(graph).values()) and all(
+    strings_current = grouped and bool(graph["strings"]) and not any(coverage(graph).values()) and all(
         isinstance(frame["extra"].get("solve", {}), dict) and
         frame["extra"].get("solve", {}).get("upstream_sha256", basis) == basis
         for frame in graph["frames"])
-    mark(["solar-assign-equipment"], strings_valid, "valid_strings_required")
+    strings_valid = strings_current and all(
+        item["validity"]["state"] == "valid" and item["module_count"] > 0
+        for item in graph["strings"])
+    equipment_recoverable = strings_current and all(
+        item["module_count"] > 0 and (
+            item["validity"]["state"] == "valid" or (
+                item["validity"]["state"] == "invalid" and
+                bool(item["validity"]["reasons"]) and
+                all(reason.startswith("EQUIPMENT_") for reason in item["validity"]["reasons"])))
+        for item in graph["strings"])
+    mark(["solar-assign-equipment"], equipment_recoverable, "valid_strings_required")
     assigned = strings_valid and equipment_ready(graph)
     mark(["solar-homeruns"], assigned, "equipment_assignment_required")
     expected = None
