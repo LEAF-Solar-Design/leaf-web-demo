@@ -5,6 +5,8 @@
 // an unavailable group its note, and no cluster is ever fabricated.
 import { describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
+import { canOpenSolarSettingsForm } from '../solar/solarSettingsWire.js'
+import { SOLAR_REFUSAL_REASONS } from './ribbonClusters.js'
 
 import { DEFERRED_REASONS } from './actionRegistry.js'
 import { RIBBON_TABS } from '../site/CockpitTopBand.jsx'
@@ -34,6 +36,7 @@ import {
 } from './ribbonClusters.js'
 
 describe('solar-ui-rail', () => {
+  const A = { entitled: true, implemented: true, engine_ready: true, input_ready: false, refusal_reasons: ['graph_seed_required'] }
   const ready = { entitled: true, implemented: true, input_ready: true, engine_ready: true, refusal_reasons: [] }
   const solarRow = (name, overrides = {}) => ({
     name, capabilities: ['drawing.write'],
@@ -49,6 +52,42 @@ describe('solar-ui-rail', () => {
     return profileRibbonTabs('solar', { families, onRun, catalogOptions: gate,
       solarRail: { families, openName, onOpenForm } })[1].clusters[1].tools
   }
+
+  it('SF2 row12 the typed form opens on a seed-eligible settings row', () => {
+    const row = solarRow('solar-settings', { availability: A })
+    const families = [familyOf([row])]
+    const onOpenForm = vi.fn()
+    const tools = profileRibbonTabs('solar', { solarTypedForm: canOpenSolarSettingsForm,
+      solarRail: { families, onOpenForm }, catalogOptions: { running: false } })[1].clusters[1].tools
+    const settings = tools.find((tool) => tool.id === 'solar-settings')
+    expect(settings.reason).toBe('')
+    expect(settings.disabled).toBe(false)
+    settings.onClick()
+    expect(onOpenForm).toHaveBeenCalledTimes(1)
+    expect(onOpenForm).toHaveBeenCalledWith(row)
+    expect(row.availability).toBe(A)
+    expect(row.availability.input_ready).toBe(false)
+  })
+
+  it('SF2 row13 a running job still disables the settings row', () => {
+    const row = solarRow('solar-settings', { availability: A })
+    const families = [familyOf([row])]
+    const tools = profileRibbonTabs('solar', { solarTypedForm: canOpenSolarSettingsForm,
+      solarRail: { families, onOpenForm: vi.fn() }, catalogOptions: { running: true } })[1].clusters[1].tools
+    const settings = tools.find((tool) => tool.id === 'solar-settings')
+    expect(settings.reason).toBe(REASONS.running)
+    expect(settings.disabled).toBe(true)
+  })
+
+  it('SF2 row36 without the predicate the settings row keeps its refusal', () => {
+    const row = solarRow('solar-settings', { availability: A })
+    const families = [familyOf([row])]
+    const tools = profileRibbonTabs('solar', {
+      solarRail: { families, onOpenForm: vi.fn() }, catalogOptions: { running: false } })[1].clusters[1].tools
+    const settings = tools.find((tool) => tool.id === 'solar-settings')
+    expect(settings.reason).toBe(SOLAR_REFUSAL_REASONS.graph_seed_required)
+    expect(settings.disabled).toBe(true)
+  })
 
   it('a null solarRail leaves the Solar tab byte-identical', () => {
     const rows = [solarRow('solar-settings'), solarRow('solar-size-strings', {

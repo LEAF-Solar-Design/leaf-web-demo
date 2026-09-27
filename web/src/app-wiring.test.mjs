@@ -20,6 +20,37 @@ import esbuild from 'esbuild'
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
 const viewerSource = readFileSync(new URL('./components/Viewer.jsx', import.meta.url), 'utf8')
 
+describe('Solar settings form wiring', () => {
+  it('SF2 wiring the typed form mounts at the Solar form host behind its fence', () => {
+    const host = appSource.indexOf("{ENV_CAD_EDIT && drafting && surfaceSlots.toolbar.profile === 'solar' && solarFormTool && (")
+    const fence = appSource.indexOf('ENV_SOLAR_SETTINGS_FORM && solarSettingsFormChoice(', host)
+    const typed = appSource.indexOf('<SolarSettingsForm', fence)
+    const generic = appSource.indexOf('<SolarToolForm', host)
+    assert.ok(host >= 0 && fence > host && typed > fence && generic > typed)
+  })
+
+  it('SF2 wiring prepareRunParams takes its overlays from catalogRunOverlays', () => {
+    const start = appSource.indexOf('const prepareRunParams = useCallback')
+    const end = appSource.indexOf('}, [selectedHandle])', start)
+    assert.ok(start >= 0 && end > start)
+    assert.ok(appSource.slice(start, end).includes('catalogRunOverlays({'))
+    assert.ok(!appSource.includes('? { target_handle: selectedHandle, ...(isWrite ? { handle: selectedHandle } : {}) }'))
+  })
+
+  it('SF2 wiring the catalog controller context follows solarSettingsScope', () => {
+    assert.ok(appSource.includes('catalogController.setContext(solarSettingsScope('))
+  })
+
+  it('SF2 wiring a confirmed settings run records its result for the form', () => {
+    const start = appSource.indexOf('const onConfirmCatalogRun = useCallback')
+    const end = appSource.indexOf('}, [dismissRoute, mock, onRun])', start)
+    assert.ok(start >= 0 && end > start)
+    const body = appSource.slice(start, end)
+    assert.ok(body.includes('settingsRunRef.current?.intentId === confirmed.execution.intentId'))
+    assert.ok(body.includes('setSettingsRunResult('))
+  })
+})
+
 describe('solar-ui-rail wiring', () => {
   it('passes the solar rail only under the engine flag on a drafting surface', () => {
     assert.match(appSource, /solarRail: ENV_CAD_EDIT && drafting \? \{\s*families: catalog\.families, openName: solarFormTool\?\.name \?\? null, onOpenForm: setSolarFormTool,?\s*\} : null/)

@@ -23,6 +23,9 @@ import { byId, ladderListener, slashCommandHandlers } from './lib/actionRegistry
 import { REASONS, RIBBON_RATIONALE, profileRibbonTabs, profileEntryTab, solarRouteStatus, solarRouteDisplay, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels } from './lib/ribbonClusters.js'
 import { isWriteTool } from './lib/toolRecord.js'
 import SolarToolForm from './solar/SolarToolForm.jsx'
+import SolarSettingsForm from './solar/SolarSettingsForm.jsx'
+import { ENV_SOLAR_SETTINGS_FORM } from './solar/flag.js'
+import { canOpenSolarSettingsForm, catalogRunOverlays, solarSettingsFormChoice, solarSettingsLoaders, solarSettingsRunFeedback, solarSettingsScope } from './solar/solarSettingsWire.js'
 import { resolvePublishedCatalogTool } from './site/publishedCatalogTool.js'
 import { entityGeometry } from './lib/entityMetrics.js'
 import { setCredentialMountAvailable } from './lib/secretGuardTransport.js'
@@ -272,6 +275,8 @@ function SignedOutGate({ onDemo, onSignIn }) {
 }
 
 
+const SOLAR_SETTINGS_LOADERS = ENV_SOLAR_SETTINGS_FORM ? solarSettingsLoaders({ getDrawingIntake, getDrawingVersions }) : null
+
 // Mount the upload controller only on the live material pane. Its policy
 // request must not run when the drawing profiles or offline demo boot.
 function LiveProjectMaterialIntake({ project, artifacts, onAttached }) {
@@ -364,6 +369,8 @@ export default function App() {
   const [intakeRetryKey, setIntakeRetryKey] = useState(0) // X3 Retry — bumping re-runs the intake load effect
   const [selectedTool, setSelectedTool] = useState(null)
   const [solarFormTool, setSolarFormTool] = useState(null)
+  const settingsRunRef = useRef(null)
+  const [settingsRunResult, setSettingsRunResult] = useState(null)
   const [selectedHandle, setSelectedHandle] = useState(null)
   const canvasPickRef = useRef(null)
   const registerCanvasPick = useCallback((fn) => { canvasPickRef.current = fn }, [])
@@ -849,7 +856,7 @@ export default function App() {
   // with no props to thread), and it fails honest: false until answered.
   useEffect(() => { setCredentialMountAvailable(!mock) }, [mock])
 
-  const { state: catalogState, actions: catalogActions } = useCatalogController({
+  const { state: catalogState, actions: catalogActions, controller: catalogController } = useCatalogController({
     services: catalogServices,
     adapters: catalogAdapters,
     context: { mock, entitlements, running: false, agentDisabled },
@@ -1569,9 +1576,7 @@ export default function App() {
 
   const prepareRunParams = useCallback((tool, params) => {
     const isWrite = (tool.capabilities || []).includes('drawing.write')
-    const overlays = selectedHandle
-      ? { target_handle: selectedHandle, ...(isWrite ? { handle: selectedHandle } : {}) }
-      : {}
+    const overlays = catalogRunOverlays({ enabled: ENV_SOLAR_SETTINGS_FORM, toolName: tool?.name, selectedHandle, isWrite })
     return prepareCatalogRunParams(tool, params, catalogRunContextRef.current, overlays)
   }, [selectedHandle])
 
@@ -1888,11 +1893,19 @@ export default function App() {
         ...(matches ? { ms_since_shown: Date.now() - shownRec.ts } : {}),
       })
     }
-    onRun(currentTool, confirmed.execution.params, {
+    const runPromise = onRun(currentTool, confirmed.execution.params, {
       intentConfirmed: true,
       runContext: { ...confirmed.execution.context, toolSnapshot: confirmed.execution.toolSnapshot },
       idempotencyKey: confirmed.execution.intentId,
     })
+    if (ENV_SOLAR_SETTINGS_FORM && settingsRunRef.current?.intentId === confirmed.execution.intentId) {
+      const intentId = confirmed.execution.intentId
+      runPromise.then((envelope) => {
+        if (envelope && settingsRunRef.current?.intentId === intentId) {
+          setSettingsRunResult({ ...settingsRunRef.current, envelope })
+        }
+      }, () => {})
+    }
   }, [dismissRoute, mock, onRun])
 
   // Retry the last run (plain affordance for retryable failures / transport hiccups).
@@ -2716,6 +2729,10 @@ export default function App() {
   // instead of the bare contract; byte-identical to `surfaceContract(id)`
   // for a tenant with no overlay (useSurfaceContract's own contract).
   const surfaceSlots = useSurfaceContract(activeSurface, mock)
+  useEffect(() => {
+    if (!ENV_SOLAR_SETTINGS_FORM) return
+    catalogController.setContext(solarSettingsScope({ enabled: ENV_SOLAR_SETTINGS_FORM, mock, profile: surfaceSlots.toolbar.profile, context: catalogRunContext }))
+  }, [catalogController, mock, surfaceSlots.toolbar.profile, catalogRunContext?.drawingId, catalogRunContext?.drawingVersion, catalogRunContext?.projectId])
   const boardVisible = !!studioGround && (startOpen || surfaceSlots.ground === 'board')
   // The Browser board's panel slot hosts the project panels; CAD and Solar Start keep them inline because they pass no panel.
   const boardHostsProject = boardVisible && surfaceSlots.ground === 'board'
@@ -2916,6 +2933,7 @@ export default function App() {
       solarRail: ENV_CAD_EDIT && drafting ? {
         families: catalog.families, openName: solarFormTool?.name ?? null, onOpenForm: setSolarFormTool,
       } : null,
+      solarTypedForm: ENV_SOLAR_SETTINGS_FORM && !mock && catalogRunContext?.projectId === null ? canOpenSolarSettingsForm : undefined,
       selectedHandle, onClearSelection: () => setSelectedHandle(null),
       onRun: (tool) => onRequestCatalogRun(tool, null, RIBBON_RATIONALE, 'ribbon'),
       catalogOptions: {
@@ -2941,7 +2959,7 @@ export default function App() {
     running, previewing, writeLocked, canRunWrite, engineDirty, mock, signedIn, projectsErr,
     orgId, openProjectId, projectBusy, onCreateProject, agentDisabled, routing, clearAgentSession,
     openAgentMode, jobs.length, ship, setNavExpanded, setJobRailExpanded,
-    solarRoutesStatus, showSolarStrings, selectedHandle, drafting, catalog.families, solarFormTool])
+    solarRoutesStatus, showSolarStrings, selectedHandle, drafting, catalog.families, solarFormTool, catalogRunContext?.projectId])
   const previousRibbonProfile = useRef(null)
   const entryRibbonTab = profileEntryTab(previousRibbonProfile.current, surfaceSlots.toolbar.profile, ribbonTab, surfaceSlots.toolbar.home)
   const activeRibbonTab = profileTabs.some((tab) => tab.id === entryRibbonTab)
@@ -3781,12 +3799,46 @@ export default function App() {
             </div>
           )}
           {ENV_CAD_EDIT && drafting && surfaceSlots.toolbar.profile === 'solar' && solarFormTool && (
+            ENV_SOLAR_SETTINGS_FORM && solarSettingsFormChoice({ enabled: ENV_SOLAR_SETTINGS_FORM, mock, toolName: solarFormTool.name, context: catalogRunContext }) === 'typed' ? (
+              <div id="solar-tool-form" key={solarFormTool.name} onKeyDown={(event) => {
+                if (event.key === 'Escape') {
+                  event.stopPropagation()
+                  settingsRunRef.current = null
+                  setSettingsRunResult(null)
+                  setSolarFormTool(null)
+                }
+              }}>
+                <SolarSettingsForm
+                  context={catalogRunContext}
+                  readIntake={SOLAR_SETTINGS_LOADERS.readIntake}
+                  readVersions={SOLAR_SETTINGS_LOADERS.readVersions}
+                  checkoutHeld={heldByUs}
+                  busy={!!running}
+                  onSubmit={(params) => {
+                    const armed = onRequestCatalogRun(solarFormTool, params, RIBBON_RATIONALE, 'ribbon')
+                    settingsRunRef.current = armed?.runIntent?.intentId ? {
+                      intentId: armed.runIntent.intentId,
+                      drawingId: catalogRunContext.drawingId,
+                      drawingVersion: catalogRunContext.drawingVersion,
+                    } : null
+                    setSettingsRunResult(null)
+                  }}
+                  onClose={() => {
+                    settingsRunRef.current = null
+                    setSettingsRunResult(null)
+                    setSolarFormTool(null)
+                  }}
+                  runMessage={solarSettingsRunFeedback({ association: settingsRunResult, context: catalogRunContext })}
+                />
+              </div>
+            ) : (
             <SolarToolForm
               key={solarFormTool.name}
               tool={solarFormTool}
               onSubmit={(tool, params) => onRequestCatalogRun(tool, params, RIBBON_RATIONALE, 'ribbon')}
               onClose={() => setSolarFormTool(null)}
             />
+            )
           )}
           {/* W4c-V1: the drafting ribbon — the drawing window's command
               strip, in the cockpit grammar. Studio-only (nothing renders
