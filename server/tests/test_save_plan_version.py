@@ -298,6 +298,27 @@ def test_live_leg_submits_a_plan_job_and_writes_nothing(live):
     assert not backend.exists(write_loop.edited_source_key(TENANT, DWG_DRAWING, 2))
 
 
+def test_live_leg_tenant_inflight_cap_returns_retryable_429(live, monkeypatch):
+    import jobs  # noqa: PLC0415
+
+    client, _backend, _submissions = live
+    capability = _checkout(client)
+
+    def refuse(*args, **kwargs):
+        raise jobs.TenantInflightCapExceeded("t", 8, 8)
+
+    monkeypatch.setattr(jobs, "submit_plan_job", refuse)
+    resp = _post(client, DWG_DRAWING, _live_mutations(), capability=capability)
+
+    assert resp.status_code == 429, resp.text
+    body = resp.json()
+    assert body["error"]["error_code"] == "quota_exceeded"
+    assert body["error"]["retryable"] is True
+    assert body["quota_kind"] == "tenant_inflight"
+    assert body["limit"] == 8
+    assert body["used"] == 8
+
+
 def _live_full_precision_base_intake():
     intake = _live_base_intake()
     intake["polylines"][0]["pts"] = [
