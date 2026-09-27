@@ -1,5 +1,6 @@
 """Bounded change records, atomic persistence, receipts, and dispositions."""
 
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -8,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+import time
 
 import yaml
 
@@ -25,6 +27,9 @@ CHANGE_ID = r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}"
 SUBJECT = r"[A-Za-z0-9._/@+:-]{1,200}"
 ROW_ID = rf"(?:{'|'.join(CONCERNS)}):{SUBJECT}@[0-9a-f]{{12}}"
 TASK_ID = r"[A-Za-z0-9._#/-]{1,128}"
+# The C loader is about ten times faster; validate_record still judges the shape.
+LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+LOCK_TIMEOUT = 120.0
 
 
 @dataclass
@@ -162,15 +167,28 @@ def validate_record(data):
     return deepcopy(data)
 
 
-def load_record(path):
+def _read_raw(path):
+    # Size the read from fstat: read(MAX_BYTES + 1) preallocates 8 MiB per call,
+    # which alone cost 1.6 s across 700 records. The 8 MiB bound still holds.
     with Path(path).open("rb") as stream:
-        raw = stream.read(MAX_BYTES + 1)
+        size = os.fstat(stream.fileno()).st_size
+        if size > MAX_BYTES:
+            raise ManifestError("record exceeds 8 MiB limit")
+        raw = stream.read(size + 1)
     if len(raw) > MAX_BYTES:
         raise ManifestError("record exceeds 8 MiB limit")
+    return raw
+
+
+def _parse_record(raw):
     try:
-        return validate_record(yaml.safe_load(raw.decode("utf-8")))
+        return validate_record(yaml.load(raw.decode("utf-8"), Loader=LOADER))
     except (UnicodeError, yaml.YAMLError, RecursionError) as exc:
         raise ManifestError(f"invalid record: {exc}") from exc
+
+
+def load_record(path):
+    return _parse_record(_read_raw(path))
 
 
 def atomic_write(path, text):
@@ -204,31 +222,90 @@ def write_receipt(path, receipt):
     atomic_write(str(path) + ".meta.json", json.dumps(meta, sort_keys=True, indent=1) + "\n")
 
 
-def prior_records():
-    # The bounded scan skips unreadable records and sorts the resulting paths.
+def prior_records(needle=None, select=None):
+    # Bounded to 5,000 sorted records; unreadable ones are skipped. With a needle,
+    # a record is parsed only when its raw bytes contain it, and select(raw) may
+    # veto the parse, so a row lookup costs one read per record plus one parse
+    # per record that carries the row in a state the caller acts on.
     from itertools import islice
     root = home_path() / "pair-runs"
     paths = sorted(islice(root.glob("*/impact/record.yaml"), 5000))
     for path in paths:
         try:
-            yield path, load_record(path)
+            raw = _read_raw(path)
+            if needle is not None and needle not in raw:
+                continue
+            if select is not None and not select(raw):
+                continue
+            yield path, _parse_record(raw)
         except (OSError, ValueError, yaml.YAMLError, RecursionError):
             continue
 
 
-def carried_rows(repository, change_id):
-    from heapq import nsmallest
-    def entries():
-        for _, previous in prior_records():
-            if previous["repository"] != repository or previous["change_id"] == change_id:
-                continue
-            for row in previous["rows"]:
-                if row["outcome"] == "unresolved" and row["superseded_by"] is None:
-                    yield {"row": row["id"], "from_change_id": previous["change_id"], "outcome": "unresolved"}
-    return nsmallest(200, entries(), key=lambda item: (item["from_change_id"], item["row"]))
+def _may_hold_unresolved(row_id):
+    # save_record writes a row as "- id: <id>" followed by two-space-indented
+    # fields. The veto fires only when that block is found and names a settled
+    # outcome; any other layout is parsed, so a hand-written record is never missed.
+    marker = b"- id: " + row_id.encode("ascii") + b"\n"
+
+    def select(raw):
+        start = raw.find(marker)
+        if start < 0:
+            return True
+        for line in raw[start + len(marker):].split(b"\n", 16)[:15]:
+            if not line.startswith(b"  "):
+                break
+            if line.startswith(b"  outcome: "):
+                return line == b"  outcome: unresolved"
+        return True
+    return select
+
+
+@contextmanager
+def _disposition_lock(timeout=LOCK_TIMEOUT):
+    # One disposition at a time per host. The OS byte-range lock dies with its
+    # holder, so a crashed disposer never strands it and nothing reclaims by age.
+    path = home_path() / "state" / "impact-dispose.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stream = open(path, "a+b")
+    try:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    stream.seek(0)
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise ManifestError(f"disposition lock busy after {timeout:g} s: {path}")
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                import msvcrt
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+    finally:
+        stream.close()
 
 
 def dispose(args):
+    # The lock spans the target and every sibling write, so two disposals that
+    # supersede rows in the same sibling record cannot overwrite each other.
+    with _disposition_lock():
+        return _dispose_locked(args)
+
+
+def _dispose_locked(args):
     data = load_record(args.record)
     row = next((row for row in data["rows"] if row["id"] == args.row), None)
     if row is None:
@@ -251,7 +328,8 @@ def dispose(args):
                                  "by": os.environ.get("CLAUDE_CODE_SESSION_ID", "unknown"),
                                  "at": datetime.now(timezone.utc).isoformat(), "detail": detail})
     save_record(args.record, data)
-    for path, previous in prior_records():
+    # Only records whose bytes carry the row, still unresolved, are parsed or rewritten.
+    for path, previous in prior_records(needle=args.row.encode("ascii"), select=_may_hold_unresolved(args.row)):
         if (path.resolve() == Path(args.record).resolve() or previous["repository"] != data["repository"]
                 or previous["change_id"] == data["change_id"]):
             continue
