@@ -37,7 +37,7 @@ except ImportError:  # Windows: the live-state counter stands in for measured RS
 
 
 BINDINGS = ("run_id", "source_sha", "source_tree", "capture_sha", "catalog_sha256")
-PARSER_VERSION = "s15a-9"
+PARSER_VERSION = "s15a-10"
 # max_state_bytes: 2 GiB, compared against measured peak RSS (Amendment 5); the counter it
 # replaced only ever added, so a 40 M-line stream tripped it on cumulative allocation.
 LIMITS = dict(max_live_tasks=65536, max_total_tasks=4194304, max_fds_per_task=65536, max_record_bytes=1048576,
@@ -659,6 +659,8 @@ class _Decoder:
     def __init__(self, context, limits):
         self.context, self.limits = context, limits
         self.reasons, self.reason_count = set(), 0
+        self.reason_samples, self.reason_sample_counts = [], {}
+        self.reason_event, self.reason_fd, self.reason_task = {}, None, None
         self.stopped = False
         # Live-state estimate: rises on retain, falls on release; the cap reads measured RSS
         # where resource exists and this counter's peak only where it does not.
@@ -745,7 +747,10 @@ class _Decoder:
         self.sample(self.malformed_samples, raw)
         self.reason(reason)
 
-    def unpaired(self, name, raw):
+    def unpaired(self, name, raw, event=None):
+        previous = self.reason_event, self.reason_fd, self.reason_task
+        if event is not None:
+            self.reason_context(event)
         self.count(self.unpaired_by_name, name)
         self.sample(self.unpaired_samples, raw)
         if name in POLICY["reject"]:
@@ -754,6 +759,7 @@ class _Decoder:
             self.reason("unpaired_syscall")
         else:
             self.loss["unpaired"] += 1
+        self.reason_event, self.reason_fd, self.reason_task = previous
 
     def claims_root(self, event, pid):
         """Is an unknown prefixed pid the unprefixed root rather than an unborn child?
@@ -775,7 +781,35 @@ class _Decoder:
         for key in [key for key in self.unfinished if key[0] is None]:
             self.unfinished[(pid, key[1])] = self.unfinished.pop(key)
 
+    def reason_context(self, event, task=None):
+        self.reason_event = event
+        self.reason_task = task or self.active.get(event.get("pid"))
+        argument = next(iter(event.get("fds", {}).values()), None)
+        self.reason_fd = argument["fd"] if argument else None
+
+    def reason_line(self, sequence, raw):
+        self.line = (sequence, raw)
+        prefix = raw[:SAMPLE_PREFIX].decode("ascii", "replace")
+        pid = re.match(r"(?:\[pid +(\d+)\] |(\d+) +)", prefix)
+        self.reason_context({"sequence": sequence, "pid": int(pid[1] or pid[2]) if pid else None,
+                             "name": line_kind(prefix)})
+
     def reason(self, value):
+        count = self.reason_sample_counts.get(value, 0)
+        if count < 8 and (count or len(self.reason_sample_counts) < 32):
+            event, fd, task = self.reason_event, self.reason_fd, self.reason_task
+            sequence = event.get("sequence", self.line[0])
+            entry = task["fds"].get(fd) if task is not None else None
+            raw = self.line[1] if sequence == self.line[0] else b""
+            shape = event.get("_reason_shape")
+            if shape is None:
+                shape = malformed_shape(raw[:SAMPLE_PREFIX].decode("ascii", "replace"))
+            self.reason_samples.append({"reason": value, "sequence": sequence,
+                                        "pid": event.get("pid"), "syscall": event.get("name"),
+                                        "fd": fd, "fd_kind": (entry["description"]["kind"] if entry
+                                                                 else "unknown" if fd is not None else None),
+                                        "shape": shape})
+            self.reason_sample_counts[value] = count + 1
         if value == "trace_loss":
             self.trace_lost = True
         if value == "unpaired_syscall":
@@ -899,6 +933,8 @@ class _Decoder:
             self.release(128)
 
     def fd(self, task, argument, required=False):
+        self.reason_task = task
+        self.reason_fd = argument["fd"] if argument else None
         entry = task["fds"].get(argument["fd"]) if argument is not None else None
         desc = entry["description"] if entry else None
         if desc is None or desc["kind"] in {"deleted", "unknown"}:
@@ -931,6 +967,8 @@ class _Decoder:
                 "fd": None, "syscall": self.syscall_name, "root": None, "sequence": self.line[0]})
 
     def resolve(self, task, event, index, nofollow=False):
+        argument = event["fds"].get(index - 1)
+        self.reason_fd = argument["fd"] if argument else None
         raw = event["paths"].get(index)
         if raw is None:
             self.reason("malformed_string")
@@ -1195,6 +1233,7 @@ class _Decoder:
             self.written(out["path"])
 
     def syscall(self, task, event):
+        self.reason_context(event, task)
         name, ret, flags = event["name"], event["return_value"], event["flags"]
         success = ret is not None and ret >= 0
         self.syscall_name = name
@@ -1447,6 +1486,7 @@ class _Decoder:
     def process(self, event):
         if self.stopped:
             return
+        self.reason_context(event)
         kind, pid = event["kind"], event["pid"]
         if pid is None:
             # No pid prefix: strace has traced one process so far, so the line is the
@@ -1471,7 +1511,9 @@ class _Decoder:
             self.reason("trace_loss")
             return
         task = self.active.get(pid)
+        self.reason_task = task
         if task is None or task["record"]["exit"] is not None:
+            event["_reason_shape"] = malformed_shape(self.raw_of(event).decode("ascii", "replace"))
             amount = len(canonical(event))
             self.pending.setdefault(pid, []).append((event, amount))
             self.retain(amount)
@@ -1506,9 +1548,10 @@ class _Decoder:
             for previous in [key for key in self.unfinished if key[0] == pid]:
                 old = self.unfinished.pop(previous)
                 self.release(old[5])
-                self.unpaired(previous[1], old[4])
+                self.unpaired(previous[1], old[4], old[0])
             # Capture the entry cwd and the descriptions of the descriptors this call uses only.
             snapshot = {fd: (task["fds"].get(fd) or {}).get("description") for fd in self.used_fds(event)}
+            event.setdefault("_reason_shape", malformed_shape(raw.decode("ascii", "replace")))
             amount = 256 + len(raw) + 64 * len(snapshot)
             self.unfinished[key] = (event, task["cwd"]["path"], snapshot, task, raw, amount)
             self.retain(amount)
@@ -1519,7 +1562,7 @@ class _Decoder:
                 for previous in [key for key in self.unfinished if key[0] == pid]:
                     old = self.unfinished.pop(previous)
                     self.release(old[5])
-                    self.unpaired(previous[1], old[4])
+                    self.unpaired(previous[1], old[4], old[0])
                 self.unpaired(event["name"], raw)
                 return
             original, cwd, snapshot, owner, _, amount = pending
@@ -1533,6 +1576,7 @@ class _Decoder:
             joined["flags"] = list(dict.fromkeys(original["flags"] + event["flags"]))
             joined["kind"] = "syscall"
             joined["entry_cwd"] = cwd
+            self.reason_context(joined, owner)
             # Sibling threads may change unrelated table rows; only this call's own inputs matter.
             relative = any(not p.startswith("/") for p in original["paths"].values())
             if ((relative and cwd != owner["cwd"]["path"])
@@ -1573,12 +1617,15 @@ def _chunk_lines(chunks, decoder, counters):
             if length <= decoder.limits["max_record_bytes"]:
                 partial.extend(chunk[start:stop])
             else:
-                partial.clear()
+                del partial[SAMPLE_PREFIX:]
+                partial.extend(chunk[start:stop][:max(0, SAMPLE_PREFIX - len(partial))])
             if end < 0:
                 break
             if length > decoder.limits["max_record_bytes"]:
+                decoder.reason_line(sequence, bytes(partial))
                 decoder.loss["oversize"] += 1
                 decoder.cap("max_record_bytes")
+                partial.clear()
             yield sequence, bytes(partial), True
             sequence += 1
             partial.clear()
@@ -1586,8 +1633,10 @@ def _chunk_lines(chunks, decoder, counters):
             start = end + 1
     if length:
         if length > decoder.limits["max_record_bytes"]:
+            decoder.reason_line(sequence, bytes(partial))
             decoder.loss["oversize"] += 1
             decoder.cap("max_record_bytes")
+            partial.clear()
         yield sequence, bytes(partial), False
 
 
@@ -1605,6 +1654,7 @@ def decode_stream(chunks, context, limits=None):
     decoder = _Decoder(context, caps)
     counters = {"hash": hashlib.sha256(), "byte_count": 0, "terminated": False}
     for sequence, raw, terminated in _chunk_lines(chunks, decoder, counters):
+        decoder.reason_line(sequence, raw)
         decoder.event_count = sequence + 1
         if sequence % RSS_INTERVAL == 0:
             decoder.measure()
@@ -1616,7 +1666,6 @@ def decode_stream(chunks, context, limits=None):
             decoder.cap("max_record_bytes")
         if decoder.stopped:
             continue
-        decoder.line = (sequence, raw)
         try:
             event = _parse_line(raw.decode("ascii", "strict"), sequence)
             if event["kind"] in {"syscall", "unfinished"}:
@@ -1631,14 +1680,20 @@ def decode_stream(chunks, context, limits=None):
                 decoder.reason(reason)
     decoder.measure()
     for (_, name), pending in list(decoder.unfinished.items()):
-        decoder.unpaired(name, pending[4])
+        decoder.unpaired(name, pending[4], pending[0])
     if decoder.pending:
+        decoder.reason_context(next(iter(decoder.pending.values()))[0][0])
         decoder.reason("unexplained_pid")
     if decoder.root is None and not decoder.stopped:
         decoder.reason("missing_terminal")
     missing_exits = []
     for task in decoder.active.values():
         if task["record"]["exit"] is None:
+            last = task["last"]
+            decoder.reason_context({"pid": task["record"]["pid"],
+                                    "sequence": last[0] if last else task["record"]["birth_sequence"],
+                                    "name": line_kind(last[1].decode("ascii", "replace")) if last else None,
+                                    "_reason_shape": malformed_shape(last[1].decode("ascii", "replace")) if last else ""}, task)
             decoder.reason("missing_terminal" if task is decoder.root else "descendant_outlived_tree")
             if len(missing_exits) < SAMPLE_LIMIT:
                 record, last = task["record"], task["last"]
@@ -1654,6 +1709,7 @@ def decode_stream(chunks, context, limits=None):
     receipt = context.get("terminal_receipt", {})
     matched = isinstance(receipt, dict) and receipt.get("byte_count") == counters["byte_count"] and receipt.get("sha256") == sha
     if not matched or not counters["terminated"]:
+        decoder.reason_line(*decoder.line)
         decoder.reason("trace_loss")
     if decoder.stopped:
         decoder.reads.clear()
@@ -1687,6 +1743,7 @@ def decode_stream(chunks, context, limits=None):
                        transcript_bytes=counters["byte_count"], transcript_sha256=sha, receipt_matched=matched,
                        capture_epoch=context.get("capture_epoch"), capture_epoch_manifest=context.get("capture_epoch_manifest"),
                        syscall_policy_digest=digest(POLICY), loss_counters=decoder.loss,
+                       reason_samples=decoder.reason_samples,
                        malformed_samples=[{"shape": shape, "count": n} for shape, n in _ranked(decoder.malformed_samples)],
                        malformed_by_name=dict(_ranked(decoder.malformed_by_name)[:NAME_REPORT]),
                        unsupported_by_name=dict(_ranked(decoder.unsupported_by_name)),

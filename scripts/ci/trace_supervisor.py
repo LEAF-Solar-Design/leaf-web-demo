@@ -348,8 +348,27 @@ def load_suites(path):
         return None
 
 
+def _transcript_chunks(chunks, path):
+    """Tee one sanitized shape per source line without retaining buffers or argv."""
+    prefix = bytearray()
+    unfinished = False
+    with open(path, "w", encoding="utf-8", newline="\n") as transcript:
+        for chunk in chunks:
+            parts = chunk.split(b"\n")
+            for index, part in enumerate(parts):
+                prefix.extend(part[:max(0, tree.SAMPLE_PREFIX - len(prefix))])
+                unfinished |= bool(part)
+                if index < len(parts) - 1:
+                    transcript.write(tree.malformed_shape(prefix.decode("ascii", "replace")) + "\n")
+                    prefix.clear()
+                    unfinished = False
+            yield chunk
+        if unfinished:
+            transcript.write(tree.malformed_shape(prefix.decode("ascii", "replace")))
+
+
 def run(context, out_dir, command, tracer=None, sink=None, limits=None, descendant_grace=30, suites_file=None,
-        kill_grace=KILL_GRACE):
+        kill_grace=KILL_GRACE, keep_transcript=None):
     """Capture COMMAND under the tracer. SIGTERM/SIGINT during the capture are forwarded to
     the tracer's process group (terminate_tree); outputs and receipt are still written, and
     the exit is 124 when the command's status never arrived."""
@@ -493,7 +512,15 @@ def run(context, out_dir, command, tracer=None, sink=None, limits=None, descenda
                             else:
                                 context["suites"] = suites
 
-                    result = tree.decode_stream(chunks(), context, limits)
+                    stream = chunks()
+                    transcript_path = Path(private) / "transcript.strace"
+                    if keep_transcript is not None:
+                        stream = _transcript_chunks(stream, transcript_path)
+                    result = tree.decode_stream(stream, context, limits)
+                    if keep_transcript is not None:
+                        destination = Path(keep_transcript)
+                        destination.mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(transcript_path, destination / "transcript.strace")
                     receipt["tracer_exit_code"] = process.wait()
                     code, restored = None, False
                     try:
@@ -560,6 +587,8 @@ def main(argv=None):
     launch.add_argument("--limit", action="append", default=[])
     launch.add_argument("--descendant-grace", type=float, default=30)
     launch.add_argument("--suites-file", help="JSON suite list the plugin writes at session finish")
+    launch.add_argument("--keep-transcript", metavar="DIR",
+                        help="keep sanitized transcript line shapes in DIR/transcript.strace")
     launch.add_argument("--kill-grace", type=float, default=KILL_GRACE, metavar="SECONDS",
                         help="seconds between forwarding SIGTERM to the tracer's group and SIGKILL")
     # Split explicitly so a multi-token tracer cannot swallow COMMAND.
@@ -576,7 +605,7 @@ def main(argv=None):
             name, value = item.split("=", 1)
             limits[name] = int(value)
         return run(context, args.out, command, args.tracer, args.sink, limits, args.descendant_grace,
-                   args.suites_file, args.kill_grace)
+                   args.suites_file, args.kill_grace, args.keep_transcript)
     except (OSError, ValueError, TypeError, KeyError, UnicodeError):
         if args.sink == "fifo" and os.name == "nt":
             print("trace_supervisor: fifo sink is unavailable on Windows; use --sink file", file=sys.stderr)
