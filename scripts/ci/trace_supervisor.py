@@ -346,6 +346,8 @@ def _incomplete(result, errors):
     for shard in result["shards"]:
         shard.update(capture_complete=False, incomplete_reasons=reasons,
                      process_tree_sha256=tree.digest(certificate))
+        if shard.get("attribution_scope") == "session+suite":
+            shard["session_ref"]["process_tree_sha256"] = tree.digest(certificate)
 
 
 def load_suites(path):
@@ -517,8 +519,12 @@ def run(context, out_dir, command, tracer=None, sink=None, limits=None, descenda
                             inherit = ({"pass_fds": (stderr_fd,)} if os.name == "posix" and stderr_fd is not None
                                        else {"close_fds": False} if stderr_fd is not None else {})
                             capture_started = time.monotonic()
+                            context["marker_token"] = os.urandom(16).hex()
+                            receipt["marker_token"] = context["marker_token"]
+                            capture_env = dict(os.environ, LEAF_CAPTURE_MARKER_TOKEN=context["marker_token"],
+                                               LEAF_CAPTURE_MARKER_ROOT="/leaf-ci-marker")
                             process = subprocess.Popen(actual_argv, stdin=subprocess.DEVNULL, stderr=tracer_stderr,
-                                                       start_new_session=os.name == "posix", **inherit)
+                                                       start_new_session=os.name == "posix", env=capture_env, **inherit)
                     except OSError:
                         receipt.update(facility_available=False, facility_reason="tracer_launch_failed")
                         errors.append("tracer_launch_failed")

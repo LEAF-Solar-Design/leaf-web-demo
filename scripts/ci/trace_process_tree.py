@@ -38,11 +38,13 @@ except ImportError:  # Windows: the live-state counter stands in for measured RS
 
 
 BINDINGS = ("run_id", "source_sha", "source_tree", "capture_sha", "catalog_sha256")
-PARSER_VERSION = "s15a-15"
+PARSER_VERSION = "s15b-1"
 # max_state_bytes: 2 GiB, compared against measured peak RSS (Amendment 5); the counter it
 # replaced only ever added, so a 40 M-line stream tripped it on cumulative allocation.
 LIMITS = dict(max_live_tasks=65536, max_total_tasks=4194304, max_fds_per_task=65536, max_record_bytes=1048576,
-              max_dependencies=3000000, max_state_bytes=2 * 1024 ** 3, max_reasons=256)
+              max_dependencies=3000000, max_state_bytes=2 * 1024 ** 3, max_reasons=256,
+              max_attribution_windows=1000000, max_attribution_subjects=1000000,
+              max_attribution_dependencies=3000000)
 # ru_maxrss is KiB on Linux, bytes on macOS; sampled once per RSS_INTERVAL lines.
 RSS_SCALE, RSS_INTERVAL = (1 if sys.platform == "darwin" else 1024), 65536
 # Calibration instrument bounds: distinct sanitized shapes kept, names counted, names reported.
@@ -715,6 +717,33 @@ def validate_suites(suites, allow_empty=False):
     return suites
 
 
+DEPENDENCY_FIELDS = ("reads", "negative_lookups", "directory_reads", "path_aliases",
+                     "external_inputs", "generated_inputs")
+MARKER = re.compile(r"/leaf-ci-marker/v1/([0-9a-f]{32})/(main|gw[0-9]+)/([1-9][0-9]*)/"
+                    r"(test|fixture)/([^/]+)/(setup|call|teardown)/(begin|end)")
+
+
+class _DependencyTable(dict):
+    """Observe occurrences before the tree's global deduplication."""
+    def __init__(self, decoder, field):
+        super().__init__()
+        self.decoder, self.field = decoder, field
+
+    def __setitem__(self, key, value):
+        self.decoder.attribute(self.field, value)
+        super().__setitem__(key, value)
+
+
+def _dependency_set():
+    return {field: {} for field in DEPENDENCY_FIELDS}
+
+
+def _sealed_dependencies(rows):
+    result = {field: [row for _, row in sorted(rows[field].items())] for field in DEPENDENCY_FIELDS}
+    result["sha256"] = digest(result)
+    return result
+
+
 class _Decoder:
     def __init__(self, context, limits):
         self.context, self.limits = context, limits
@@ -736,7 +765,32 @@ class _Decoder:
         self.trace_lost = False
         self.tasks, self.active, self.pending, self.unfinished = [], {}, {}, {}
         self.tasks_total = self.observed_exits = 0
-        self.reads, self.external, self.negative, self.aliases = {}, {}, {}, {}
+        self.marker_token = context.get("marker_token")
+        self.attribution_attempted = False
+        self.attribution_disabled = False
+        self.attribution_task = None
+        self.session_dependencies, self.suite_deltas = _dependency_set(), {}
+        self.marker_workers, self.marker_counters, self.marker_subjects = {}, {}, set()
+        self.window_count = 0
+        self.attribution_dependencies = 0
+        self.suites_seen, self.tests_seen = set(), set()
+        self.attribution_counts = {"attribution_outside_window": 0, "attribution_lingering_child": 0}
+        self.suite_hashes, self.test_hashes = {}, {}
+        self.catalog_suites = {suite["suite_id"] for suite in context["suites"]}
+        for suite in context["suites"]:
+            sid = suite["suite_id"]
+            self.suite_hashes[hashlib.sha256(sid.encode()).hexdigest()[:16]] = sid
+            for tid in suite["test_ids"]:
+                # Some older catalogs prefix an already full nodeid with the suite.
+                candidates = [tid]
+                if tid.startswith(sid + "::" + sid + "::"):
+                    candidates.append(tid[len(sid) + 2:])
+                for nodeid in candidates:
+                    self.test_hashes[(sid, hashlib.sha256(nodeid.encode()).hexdigest()[:16])] = tid
+        self.reads = _DependencyTable(self, "reads")
+        self.external = _DependencyTable(self, "external_inputs")
+        self.negative = {}
+        self.aliases = _DependencyTable(self, "path_aliases")
         self.negative_events = 0
         self.external_paths, self.written_paths, self.observed_sizes = {}, set(), {}
         self.directories, self.enumerations, self.created, self.internal = {}, [], set(), set()
@@ -778,6 +832,146 @@ class _Decoder:
         self.adopt_root = context.get("root_pid") is None
         if not self.adopt_root:
             self.birth_root(context["root_pid"])
+
+    def attribute(self, field, row):
+        if not self.marker_token or self.attribution_disabled:
+            return
+        task = self.attribution_task
+        stack = task.get("windows", []) if task else []
+        shared = not stack or (task and task.get("promoted")) or any(
+            window["closed"] or window["shared"] for window in stack)
+        suite = next((w["suite"] for w in reversed(stack) if w["suite"]), None)
+        if shared or suite not in self.catalog_suites:
+            target = self.session_dependencies
+        else:
+            target = self.suite_deltas.get(suite)
+            if target is None:
+                target = self.suite_deltas[suite] = _dependency_set()
+        key = canonical({k: v for k, v in row.items() if k != "sequence"}) if field == "negative_lookups" else canonical(row)
+        if key not in target[field]:
+            self.attribution_dependencies += 1
+            if self.attribution_dependencies > self.limits["max_attribution_dependencies"]:
+                if self.attribution_attempted:
+                    self.reason("attribution_limit_exceeded")
+                self.attribution_disabled = True
+                return
+        target[field].setdefault(key, row)
+        if not stack:
+            self.attribution_counts["attribution_outside_window"] += 1
+        if task and task["inherited"] and not task["promoted"]:
+            task["history"][field].setdefault(key, row)
+
+    def close_window(self, window):
+        window["closed"] = True
+        for child in list(window["children"].values()):
+            if not child["promoted"]:
+                child["promoted"] = True
+                self.attribution_counts["attribution_lingering_child"] += 1
+                for field in DEPENDENCY_FIELDS:
+                    self.session_dependencies[field].update(child["history"][field])
+                child["history"] = _dependency_set()
+        window["children"].clear()
+
+    def attribution_exit(self, task):
+        for window in task["windows"]:
+            if window["owner"] is task:
+                self.reason("attribution_boundary_unpaired")
+                self.close_window(window)
+            else:
+                window["children"].pop(id(task), None)
+        task["windows"] = []
+        task["history"] = _dependency_set()
+
+    def marker(self, task, event):
+        if not self.marker_token:
+            return False
+        paths = [path for path in event["paths"].values() if path.startswith("/leaf-ci-marker/")]
+        if not paths:
+            return False
+        path = paths[0]
+        match = MARKER.fullmatch(path)
+        valid_call = (event["name"] == "access" and event["paths"].get(0) == path and
+                      event["scalars"].get(1) in ("F_OK", 0)) or (
+            event["name"] == "newfstatat" and event["paths"].get(1) == path and
+            event["fds"].get(0, {}).get("fd") == "AT_FDCWD" and event.get("stat_flags_value") == 0)
+        valid = bool(match and match[1] == self.marker_token and valid_call)
+        if valid:
+            token, worker, counter, kind, subject, phase, edge = match.groups()
+            valid = bool(re.fullmatch(r"[0-9a-f]{16}-[0-9a-f]{16}-[1-9][0-9]*", subject) if kind == "test"
+                         else re.fullmatch(r"(session|package|module|class)-[0-9a-f]{16}", subject))
+            valid = valid and (kind == "test" or phase != "call")
+        if not valid or event.get("errno") != "ENOENT" or event.get("return_value") != -1:
+            self.reason("attribution_marker_collision")
+            # Marker namespace entries never become dependencies, even on collision.
+            return len(paths) == len(event["paths"])
+        self.attribution_attempted = True
+        if self.attribution_disabled:
+            self.reason("attribution_limit_exceeded")
+            return True
+        identity = (task["record"]["pid"], task["record"]["birth_sequence"])
+        if (worker in self.marker_workers and self.marker_workers[worker] != identity or
+                int(counter) <= self.marker_counters.get(worker, 0) or
+                worker not in self.marker_counters and counter != "1"):
+            self.reason("attribution_worker_conflict")
+            return True
+        self.marker_workers[worker], self.marker_counters[worker] = identity, int(counter)
+        self.marker_subjects.add((kind, subject))
+        if len(self.marker_subjects) > self.limits["max_attribution_subjects"]:
+            self.reason("attribution_limit_exceeded")
+            self.attribution_disabled = True
+            return True
+        key = (worker, kind, subject, phase)
+        if edge == "end":
+            if not task["windows"] or task["windows"][-1]["key"] != key or task["windows"][-1]["owner"] is not task:
+                self.reason("attribution_boundary_unpaired")
+            else:
+                self.close_window(task["windows"].pop())
+            return True
+        self.window_count += 1
+        if self.window_count > self.limits["max_attribution_windows"]:
+            self.reason("attribution_limit_exceeded")
+            self.attribution_disabled = True
+            return True
+        suite = None
+        if kind == "test":
+            if task["windows"]:
+                self.reason("attribution_worker_conflict")
+                return True
+            suite_hash, test_hash, attempt = subject.split("-")
+            suite = self.suite_hashes.get(suite_hash)
+            if suite is None:
+                suite = "sha256:" + suite_hash
+            self.suites_seen.add(suite)
+            self.tests_seen.add((suite, self.test_hashes.get((suite, test_hash), "sha256:" + test_hash)))
+        window = {"key": key, "suite": suite, "owner": task, "closed": False,
+                  "shared": kind == "fixture" and subject.split("-")[0] in {"session", "package"},
+                  "children": {}}
+        task["windows"].append(window)
+        return True
+
+    def attribution_result(self):
+        if self.attribution_attempted:
+            expected = {suite["suite_id"] for suite in self.context["suites"]}
+            if expected - self.suites_seen:
+                self.reason("attribution_coverage_incomplete")
+            for task in self.active.values():
+                if any(w["owner"] is task for w in task["windows"]):
+                    self.reason("attribution_boundary_unpaired")
+        for rows in [self.session_dependencies] + list(self.suite_deltas.values()):
+            for row in rows["directory_reads"].values():
+                row["complete"] = self.listings.get(row["path"], True)
+            rows["generated_inputs"] = {key: row for key, row in rows["generated_inputs"].items()
+                                        if row["path"] in self.generated_inputs and
+                                        self.context["source_root"].rstrip("/") + "/" + row["path"] not in self.written_paths}
+        return {"version": "s15b-1", "marker_token": bool(self.marker_token),
+                "mode": "session+suite" if self.attribution_attempted else "none",
+                "session_dependencies": _sealed_dependencies(self.session_dependencies),
+                "suite_deltas": {sid: _sealed_dependencies(self.suite_deltas.get(sid, _dependency_set()))
+                                 for sid in sorted(self.suites_seen)},
+                "boundary_coverage": {"suites_with_windows": sorted(self.suites_seen),
+                                      "tests_with_windows": [{"suite_id": sid, "test_id": tid} for sid, tid in sorted(self.tests_seen)],
+                                      "tests_total": sum(len(s["test_ids"]) for s in self.context["suites"])},
+                "counts": dict(self.attribution_counts, windows=self.window_count, subjects=len(self.marker_subjects))}
 
     def birth_root(self, pid):
         self.adopt_root = False
@@ -845,7 +1039,11 @@ class _Decoder:
 
     def name_root(self, pid):
         record = self.root["record"]
+        old_identity = (record["pid"], record["birth_sequence"])
         record["pid"] = pid
+        for worker, identity in self.marker_workers.items():
+            if identity == old_identity:
+                self.marker_workers[worker] = (pid, record["birth_sequence"])
         self.active[pid] = self.active.pop(None)
         for key in [key for key in self.unfinished if key[0] is None]:
             self.unfinished[(pid, key[1])] = self.unfinished.pop(key)
@@ -1102,6 +1300,11 @@ class _Decoder:
             cwd = parent["cwd"] if "CLONE_FS" in flags else dict(parent["cwd"])
             fds = parent["fds"] if "CLONE_FILES" in flags else {k: dict(v) for k, v in parent["fds"].items()}
         task = dict(record=record, cwd=cwd, fds=fds, last=None, retained=self.tasks_total < 65536)
+        task.update(windows=list(parent["windows"]) if parent else [],
+                    inherited=bool(parent and parent["windows"]), promoted=bool(parent and parent["promoted"]),
+                    history=_dependency_set())
+        for window in task["windows"]:
+            window["children"][id(task)] = task
         self.tasks_total += 1
         if len(self.tasks) < 65536:
             self.tasks.append(task)
@@ -1215,6 +1418,7 @@ class _Decoder:
         return resolution
 
     def directory(self, path):
+        self.attribute("directory_reads", {"path": path, "members": self.children.get(path, []), "complete": True})
         if path not in self.directories:
             members = self.children.get(path, [])
             self.directories[path] = members
@@ -1237,6 +1441,8 @@ class _Decoder:
     def edge(self, resolution, kind, event, allow_missing=False):
         if not resolution.absolute or self.stopped:
             return
+        if self.marker_token and resolution.absolute.startswith("/leaf-ci-marker/"):
+            return
         if _is_supervisor(resolution):
             # Harness control files: counted, never a dependency or lookup.
             self.supervisor_reads += 1
@@ -1246,12 +1452,14 @@ class _Decoder:
         if error in {"ENOENT", "ENOTDIR"}:
             self.negative_events += 1
             added = resolution.absolute not in self.negative
-            if added:
+            if added or self.marker_token:
                 row = {"path_or_class": resolution.path if resolution.path is not None else resolution.external["class"],
                        "scope": "repo" if resolution.path is not None else "external",
                        "errno": error, "syscall": event["name"], "sequence": event["sequence"]}
                 if resolution.path is None:
                     row["path_token"] = resolution.external["path_token"]
+                self.attribute("negative_lookups", row)
+            if added:
                 self.negative[resolution.absolute] = row
                 self.retain(len(resolution.absolute.encode("utf-8")))
         elif resolution.absolute in self.created and resolution.path is None:
@@ -1274,6 +1482,7 @@ class _Decoder:
                 if source:
                     path, kind = source, "bytecode"
                 elif path not in self.files and path not in self.inventory_links and not allow_missing:
+                    self.attribute("generated_inputs", {"path": path, "resolved": False})
                     if path not in self.generated_inputs:
                         self.generated_inputs[path] = {"path": path, "resolved": False}
                         self.retain(160)
@@ -1464,6 +1673,9 @@ class _Decoder:
 
     def syscall(self, task, event):
         self.reason_context(event, task)
+        self.attribution_task = task
+        if self.marker(task, event):
+            return
         name, ret, flags = event["name"], event["return_value"], event["flags"]
         success = ret is not None and ret >= 0
         self.syscall_name = name
@@ -1796,6 +2008,7 @@ class _Decoder:
                 users = self.alias_users(alias)
                 pending["alias_overlap"][alias] = tuple(max(a, b) for a, b in zip(previous, users))
         if kind in {"exit", "killed"}:
+            self.attribution_exit(task)
             # A syscall still unfinished when its task exits never resumes: not unpaired.
             for key in [key for key in self.unfinished if key[0] == pid]:
                 self.release(self.unfinished.pop(key)[5])
@@ -2055,6 +2268,7 @@ def decode_stream(chunks, context, limits=None):
         decoder.negative.clear()
         decoder.aliases.clear()
         decoder.directories.clear()
+    attribution = decoder.attribution_result()
     reasons = sorted(decoder.reasons)
     records = [task["record"] for task in decoder.tasks]
     exits = decoder.observed_exits
@@ -2123,6 +2337,7 @@ def decode_stream(chunks, context, limits=None):
                        negative_events=decoder.negative_events,
                        negative_lookups=sorted(decoder.negative.values(), key=lambda r: (r["path_or_class"], r["sequence"])),
                        path_aliases=[r for _, r in sorted(decoder.aliases.items())])
+    certificate["attribution"] = attribution
     reference = "reports/process-tree-" + context["capture_group"] + ".json"
     shards = []
     for suite in context["suites"]:
@@ -2142,6 +2357,15 @@ def decode_stream(chunks, context, limits=None):
                      completion_marker=bool(decoder.root and decoder.root["record"]["exit"] and matched),
                      trace_loss=certificate["trace_loss"], decoder_complete=certificate["decoder_complete"],
                      capture_complete=complete, incomplete_reasons=reasons)
+        if attribution["mode"] == "session+suite" and not any(r.startswith("attribution_") for r in reasons):
+            delta = attribution["suite_deltas"][suite["suite_id"]]
+            shard.update({field: delta[field] for field in DEPENDENCY_FIELDS})
+            shard.update(attribution_scope="session+suite",
+                         session_ref={"sha256": attribution["session_dependencies"]["sha256"],
+                                      "process_tree_sha256": digest(certificate)},
+                         generated_inputs_resolved=not (delta["generated_inputs"] or attribution["session_dependencies"]["generated_inputs"]),
+                         external_inputs_resolved=all(row["resolved"] for row in
+                             delta["external_inputs"] + attribution["session_dependencies"]["external_inputs"]))
         shards.append(shard)
     paths = {} if decoder.stopped else decoder.external_paths
     for row in paths.values():
@@ -2160,9 +2384,22 @@ def bind_external_identities(result, table):
         identity = table.get(row["path_token"], {})
         row.update({k: identity[k] for k in ("identity_sha256", "inventory_ref", "resolved", "reason", "size") if k in identity})
     certificate["external_inputs_resolved"] = all(row["resolved"] for row in certificate["external_inputs"])
+    attribution = certificate.get("attribution", {})
+    for rows in [attribution.get("session_dependencies", {})] + list(attribution.get("suite_deltas", {}).values()):
+        if not rows:
+            continue
+        for row in rows["external_inputs"]:
+            identity = table.get(row["path_token"], {})
+            row.update({k: identity[k] for k in ("identity_sha256", "inventory_ref", "resolved", "reason", "size") if k in identity})
+        rows["sha256"] = digest({field: rows[field] for field in DEPENDENCY_FIELDS})
     for shard in result["shards"]:
         shard.update(external_inputs_resolved=certificate["external_inputs_resolved"],
                      process_tree_sha256=digest(certificate))
+        if shard.get("attribution_scope") == "session+suite":
+            shard["session_ref"] = {"sha256": attribution["session_dependencies"]["sha256"],
+                                    "process_tree_sha256": digest(certificate)}
+            shard["external_inputs_resolved"] = all(row["resolved"] for row in
+                shard["external_inputs"] + attribution["session_dependencies"]["external_inputs"])
     return result
 
 

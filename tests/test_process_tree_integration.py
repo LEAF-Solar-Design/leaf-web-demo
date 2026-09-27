@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CI = ROOT / "scripts" / "ci"
 RUNNER_PATH = ROOT / "scripts/run-all-gates.py"
 COPIES = ("trace_process_tree.py", "trace_supervisor.py", "external_inventory.py", "select_tests.py")
-TOOLS_SHA = "cceb79f10d653d9bfd420bcaa11216ed8a1fc66e"
+TOOLS_SHA = "b1c5d0984cd0cbda1c839e537ec6fe121a41c3bf"
 RUN_ID = "codebuild:fixture"
 SHA = "a" * 40
 
@@ -418,7 +418,7 @@ class CatalogAndCopyTests(unittest.TestCase):
                          plain["suites"])
 
     def test_helper_copies_equal_the_frozen_tools_files(self):
-        self.assertEqual(TREE.PARSER_VERSION, "s15a-15")
+        self.assertEqual(TREE.PARSER_VERSION, "s15b-1")
         ref = os.environ.get("LEAF_TOOLS_REF")
         if not ref:
             self.skipTest("LEAF_TOOLS_REF is unset; the planner's verify compares the copies")
