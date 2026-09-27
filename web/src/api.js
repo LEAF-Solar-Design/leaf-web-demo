@@ -127,6 +127,41 @@ async function apiFetch(input, init, source = 'api') {
   return noteUnauthorized(await fetch(input, init), source, init?.headers?.Authorization)
 }
 
+export class BindingGrantError extends Error {
+  constructor(status, retryAfter = null) {
+    const messages = {
+      401: 'Sign in again to connect this drawing.',
+      403: 'You need project owner or editor access to connect this drawing.',
+      404: 'This drawing version is no longer available. Choose another version.',
+      422: 'The drawing connection details are invalid. Check the names in Studio, then reconnect AutoCAD.',
+      429: 'Too many connection requests. Please try again later.',
+      503: 'Leaf Automation Studio cannot authorize this connection right now. Please try again.',
+    }
+    const seconds = retryAfter && /^\d+$/.test(retryAfter) ? Number(retryAfter)
+      : retryAfter ? Math.ceil((Date.parse(retryAfter) - Date.now()) / 1000) : NaN
+    super(status === 429 && Number.isFinite(seconds)
+      ? `Too many connection requests. Try again in ${Math.max(1, seconds)} seconds.`
+      : messages[status] || 'The drawing could not be connected. Please try again.')
+    this.name = 'BindingGrantError'
+    this.status = status
+    this.code = `binding_grant_${status}`
+    this.userMessage = this.message
+  }
+}
+
+export async function requestBindingGrant(projectId, versionId, { pluginSessionId, documentFingerprint }, { signal } = {}) {
+  const path = `/api/projects/${encodeURIComponent(projectId)}/drawing-versions/${encodeURIComponent(versionId)}/binding-grants`
+  const response = await apiFetch(`${API_BASE}${path}`, {
+    method: 'POST', cache: 'no-store', redirect: 'error', signal,
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ pluginSessionId, documentFingerprint }),
+  }, path)
+  if (!response.ok) throw new BindingGrantError(response.status, response.headers.get('Retry-After'))
+  const { grant, expiresAt } = await response.json()
+  if (typeof grant !== 'string' || !grant || typeof expiresAt !== 'string') throw new BindingGrantError(503)
+  return { grant, expiresAt }
+}
+
 // A tiny artificial delay so mock runs show loading states like the real thing.
 const nap = (ms) => new Promise((r) => setTimeout(r, ms))
 

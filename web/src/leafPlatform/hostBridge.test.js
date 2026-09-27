@@ -120,6 +120,45 @@ describe('Studio bridge diagnostics and telemetry', () => {
   const detailsFor = (diagnostics, phase) => diagnostics.entries().filter((entry) => entry.phase === phase).map((entry) => entry.detail)
   const eventsFor = (phase) => track.mock.calls.filter(([name, props]) => name === 'leaf_platform_bridge' && props.phase === phase).map(([, props]) => props)
 
+  it('signs an opaque grant with only the grant payload and keeps it out of diagnostics', async () => {
+    bridge.start()
+    await bridge.receive({ ...unbound(), bindingGrantVersion: 1 })
+    const grant = 'opaque.grant.bytes-UNCHANGED'
+    await bridge.bindDrawingWithGrant(grant)
+    const sent = channel.postMessage.mock.calls.at(-1)[0]
+    expect(sent.verb).toBe('drawing.bind_grant')
+    expect(sent.payload).toEqual({ grant })
+    expect(Object.keys(sent.payload)).toEqual(['grant'])
+    const { signature, ...body } = sent
+    expect(signature).toBe(sign(body).signature)
+    expect(JSON.stringify(diagnostics.entries())).not.toContain(grant)
+    expect(JSON.stringify(track.mock.calls)).not.toContain(grant)
+  })
+
+  it.each(['ready', 'channel'])('guards grant signing against a changed %s', async (change) => {
+    bridge.start()
+    await bridge.receive({ ...unbound(), bindingGrantVersion: 1 })
+    let finish
+    vi.spyOn(webcrypto.subtle, 'sign').mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+    const pending = bridge.bindDrawingWithGrant('opaque-grant')
+    const rejected = expect(pending).rejects.toThrow('AutoCAD connection changed')
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'))
+    if (change === 'ready') await bridge.receive({ ...unbound(), bindingGrantVersion: 1 })
+    else bridge.channel = fakeChannel()
+    finish(new Uint8Array(32).buffer)
+    await rejected
+    expect(channel.postMessage.mock.calls.some(([message]) => message.verb === 'drawing.bind_grant')).toBe(false)
+  })
+
+  it('records an accepted bind with a null reason without invalid_result', async () => {
+    bridge.start()
+    await bridge.receive(unbound())
+    await bridge.receive(envelope(unbound(), { payload: { accepted: true, reason: null } }))
+    expect(detailsFor(diagnostics, 'bind-result')[0].status).toBe('accepted')
+    expect(detailsFor(diagnostics, 'bind-result')[0].reason ?? null).toBeNull()
+    expect(JSON.stringify(diagnostics.entries())).not.toContain('invalid_result')
+  })
+
   it('records startup, hello, handshake and both handshake rejection categories', async () => {
     const absent = createLeafHostBridge({ channel: null, diagnostics })
     absent.start()
