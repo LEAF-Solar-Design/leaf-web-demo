@@ -41,6 +41,83 @@ describe('Solar settings form wiring', () => {
     assert.ok(appSource.includes('catalogController.setContext(solarSettingsScope('))
   })
 
+  it('SF2 wiring a settings submit ties the run to its own intent and drawing', () => {
+    const formStart = appSource.indexOf('<SolarSettingsForm')
+    assert.notEqual(formStart, -1)
+    const marker = 'onSubmit={(params) => {'
+    const submitStart = appSource.indexOf(marker, formStart)
+    assert.ok(submitStart > formStart)
+    const bodyStart = submitStart + marker.length - 1
+    let depth = 1
+    let bodyEnd = bodyStart + 1
+    for (; bodyEnd < appSource.length && depth > 0; bodyEnd++) {
+      if (appSource[bodyEnd] === '{') depth++
+      if (appSource[bodyEnd] === '}') depth--
+    }
+    assert.equal(depth, 0, 'submit body must close')
+    const submit = new Function('onRequestCatalogRun', 'solarFormTool', 'RIBBON_RATIONALE',
+      'catalogRunContext', 'settingsRunRef', 'setSettingsRunResult', 'params',
+      appSource.slice(bodyStart + 1, bodyEnd - 1))
+    const solarFormTool = { tool: 'settings sentinel' }
+    const params = { params: 'sentinel' }
+    const rationale = { rationale: 'sentinel' }
+    for (const [armed, context, expected] of [
+      [{ runIntent: { intentId: 'i-1' } }, { drawingId: 'd1', drawingVersion: 3 },
+        { intentId: 'i-1', drawingId: 'd1', drawingVersion: 3 }],
+      [undefined, { drawingId: 'd1', drawingVersion: 3 }, null],
+      [{ runIntent: {} }, { drawingId: 'd1', drawingVersion: 3 }, null],
+      [{ runIntent: { intentId: 'i-2' } }, { drawingId: 'd2', drawingVersion: 7 },
+        { intentId: 'i-2', drawingId: 'd2', drawingVersion: 7 }],
+    ]) {
+      const settingsRunRef = { current: { stale: true } }
+      const resultCalls = []
+      const requestCalls = []
+      submit((...args) => { requestCalls.push(args); return armed }, solarFormTool, rationale,
+        context, settingsRunRef, (value) => resultCalls.push(value), params)
+      assert.deepEqual(settingsRunRef.current, expected)
+      assert.deepEqual(resultCalls, [null])
+      assert.equal(requestCalls.length, 1)
+      assert.equal(requestCalls[0].length, 4)
+      assert.equal(requestCalls[0][0], solarFormTool)
+      assert.equal(requestCalls[0][1], params)
+      assert.equal(requestCalls[0][2], rationale)
+      assert.equal(requestCalls[0][3], 'ribbon')
+    }
+  })
+
+  it('SF2 wiring any change of the open Solar form clears the settings run association', () => {
+    const commentStart = appSource.indexOf('// The settings run result belongs to one open form')
+    assert.notEqual(commentStart, -1)
+    const marker = 'useLayoutEffect(() => {'
+    const effectStart = appSource.indexOf(marker, commentStart)
+    assert.ok(effectStart > commentStart)
+    const bodyStart = effectStart + marker.length - 1
+    let depth = 1
+    let bodyEnd = bodyStart + 1
+    for (; bodyEnd < appSource.length && depth > 0; bodyEnd++) {
+      if (appSource[bodyEnd] === '{') depth++
+      if (appSource[bodyEnd] === '}') depth--
+    }
+    assert.equal(depth, 0, 'effect body must close')
+    assert.equal(appSource.slice(bodyEnd, bodyEnd + 2), ', ')
+    const dependencyEnd = appSource.indexOf(')', bodyEnd)
+    assert.ok(dependencyEnd > bodyEnd)
+    assert.equal(appSource.slice(bodyEnd + 2, dependencyEnd), '[solarFormTool]')
+    const clear = new Function('ENV_SOLAR_SETTINGS_FORM', 'settingsRunRef', 'setSettingsRunResult',
+      appSource.slice(bodyStart + 1, bodyEnd - 1))
+    for (const enabled of [true, false]) {
+      const association = { intentId: 'i-1' }
+      const settingsRunRef = { current: association }
+      const resultCalls = []
+      clear(enabled, settingsRunRef, (value) => resultCalls.push(value))
+      assert.equal(settingsRunRef.current, enabled ? null : association)
+      assert.deepEqual(settingsRunRef.current, enabled ? null : { intentId: 'i-1' })
+      assert.deepEqual(resultCalls, enabled ? [null] : [])
+    }
+    const compiled = esbuild.transformSync(appSource, { loader: 'jsx' }).code
+    assert.match(compiled, new RegExp('useLayoutEffect\\([\\s\\S]{0,300}settingsRunRef\\.current = null'))
+  })
+
   it('SF2 wiring a confirmed settings run records its result for the form', () => {
     const start = appSource.indexOf('const onConfirmCatalogRun = useCallback')
     const end = appSource.indexOf('}, [dismissRoute, mock, onRun])', start)

@@ -371,6 +371,13 @@ export default function App() {
   const [solarFormTool, setSolarFormTool] = useState(null)
   const settingsRunRef = useRef(null)
   const [settingsRunResult, setSettingsRunResult] = useState(null)
+  // The settings run result belongs to one open form: any change of the open Solar form (a close from the ribbon,
+  // Escape, the form's own Close, or opening another tool) drops it before paint.
+  useLayoutEffect(() => {
+    if (!ENV_SOLAR_SETTINGS_FORM) return
+    settingsRunRef.current = null
+    setSettingsRunResult(null)
+  }, [solarFormTool])
   const [selectedHandle, setSelectedHandle] = useState(null)
   const canvasPickRef = useRef(null)
   const registerCanvasPick = useCallback((fn) => { canvasPickRef.current = fn }, [])
