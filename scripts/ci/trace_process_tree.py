@@ -37,11 +37,11 @@ except ImportError:  # Windows: the live-state counter stands in for measured RS
 
 
 BINDINGS = ("run_id", "source_sha", "source_tree", "capture_sha", "catalog_sha256")
-PARSER_VERSION = "s15a-11"
+PARSER_VERSION = "s15a-12"
 # max_state_bytes: 2 GiB, compared against measured peak RSS (Amendment 5); the counter it
 # replaced only ever added, so a 40 M-line stream tripped it on cumulative allocation.
 LIMITS = dict(max_live_tasks=65536, max_total_tasks=4194304, max_fds_per_task=65536, max_record_bytes=1048576,
-              max_dependencies=1000000, max_state_bytes=2 * 1024 ** 3, max_reasons=256)
+              max_dependencies=3000000, max_state_bytes=2 * 1024 ** 3, max_reasons=256)
 # ru_maxrss is KiB on Linux, bytes on macOS; sampled once per RSS_INTERVAL lines.
 RSS_SCALE, RSS_INTERVAL = (1 if sys.platform == "darwin" else 1024), 65536
 # Calibration instrument bounds: distinct sanitized shapes kept, names counted, names reported.
@@ -322,12 +322,18 @@ def _args(event, raw, resumed=False):
         size = re.search(r"\b(?:st_size|stx_size)=(\d+)(?:,|\})", raw)
         if size:
             event["observed_size"] = int(size[1])
-    # A resumed tail carries no trustworthy argument indices. Entry arguments
-    # are already sanitized in its unfinished partner.
+    # Retain only an argument index, never an unfinished output buffer.
+    if not resumed and event["kind"] == "unfinished" and name in {"newfstatat", "statx", "fstat"}:
+        event["stat_resume_index"] = len(args) - (1 if args[-1] == "" else 0)
+    # A resumed tail needs its matched entry to establish argument positions.
     if resumed:
         # Evidence only: these tokens must not change the semantic flags below.
         event["witness_flags"] = [malformed_shape(token) for token in args
                                   if re.fullmatch(r"AT_[A-Z_]+(?:\|AT_[A-Z_]+)*", token)][:8]
+        if name in {"newfstatat", "statx"}:
+            event["stat_tail_flags"] = {
+                i: token.split("|") for i, token in enumerate(args)
+                if re.fullmatch(r"AT_[A-Z_]+(?:\|AT_[A-Z_]+)*", token)}
         if name in {"pipe", "pipe2", "socketpair"}:
             for token in args:
                 if re.fullmatch(r"\[\s*\d+(?:<[^>]*>)?\s*,\s*\d+(?:<[^>]*>)?\s*\]", token):
@@ -679,9 +685,11 @@ class _Decoder:
         self.trace_lost = False
         self.tasks, self.active, self.pending, self.unfinished = [], {}, {}, {}
         self.tasks_total = self.observed_exits = 0
-        self.reads, self.external, self.negative, self.aliases = {}, {}, [], {}
+        self.reads, self.external, self.negative, self.aliases = {}, {}, {}, {}
+        self.negative_events = 0
         self.external_paths, self.written_paths, self.observed_sizes = {}, set(), {}
         self.directories, self.enumerations, self.created, self.internal = {}, [], set(), set()
+        self.inventory_membership_entries = 0
         source = context["source_root"].rstrip("/")
         def relative(path):
             return path[len(source) + 1:] if path.startswith(source + "/") else path
@@ -870,7 +878,8 @@ class _Decoder:
                 "limit": name, "threshold": self.limits[name], "accounting": accounting,
                 "components": {"inventory_membership_entries": sum(map(len, self.directories.values())),
                                "reads": len(self.reads), "external_inputs": len(self.external),
-                               "negative_lookups": len(self.negative), "directories": len(self.directories),
+                               "negative_lookups": len(self.negative), "negative_events": self.negative_events,
+                               "directories": len(self.directories),
                                "generated_inputs": len(self.generated_inputs), "live_tasks": len(self.active),
                                "total_tasks": self.tasks_total, "fds_per_task": len(task["fds"]) if task else 0,
                                "record_bytes": getattr(self, "record_bytes", len(self.line[1])),
@@ -918,24 +927,23 @@ class _Decoder:
         self.aliases.clear()
         self.directories.clear()
 
-    def alias_witness(self, resolution, event):
-        if "unsupported_alias_race" in self.witnesses:
-            return
-        alias = resolution.absolute
+    def alias_users(self, alias):
+        """Current users, including dirfd provenance frozen at syscall entry."""
         live = set()
         for owner in self.active.values():
             for fd, entry in owner["fds"].items():
                 if alias in entry["description"].get("followed_links", ()):
                     live.add((id(owner["fds"]), fd))
         inflight = 0
-        for pending, cwd, snapshot, owner, _, _ in self.unfinished.values():
-            through = False
-            for index, path in pending.get("paths", {}).items():
-                argument = pending["fds"].get(index - 1, {})
-                desc = snapshot.get(argument.get("fd")) or {}
-                resolved = resolve_path(cwd, desc.get("path"), path, self.context, {"symlinks": self.links})
-                through |= alias in resolved.followed_links
-            inflight += through
+        for pending, _, _, _, _, _ in self.unfinished.values():
+            inflight += alias in pending.get("resolution_links", ())
+        return len(live), inflight
+
+    def alias_witness(self, resolution, event, users=None):
+        if "unsupported_alias_race" in self.witnesses:
+            return
+        alias = resolution.absolute
+        live, inflight = users if users is not None else self.alias_users(alias)
         target = self.links.get(alias)
         if target is None:
             links = self.context["inventory"]["symlinks"]
@@ -946,7 +954,7 @@ class _Decoder:
             "target_token": malformed_shape(json.dumps(target)) if target is not None else None,
             "prior_follow_sequence": self.followed_links.get(alias),
             "mutation_entry_sequence": event["sequence"], "mutation_completion_sequence": self.line[0],
-            "live_descriptors": len(live), "inflight_resolutions": inflight}]
+            "live_descriptors": live, "inflight_resolutions": inflight}]
 
     def unknown_pid_witness(self, pid, event):
         if pid in self.pid_witnesses:
@@ -1095,11 +1103,13 @@ class _Decoder:
             self.reason("malformed_string")
             return Resolution()
         base = None
+        inherited_links = ()
         if not raw.startswith("/") and index > 0 and index - 1 in event["fds"]:
             arg = event["fds"][index - 1]
             if arg["fd"] != "AT_FDCWD":
                 desc = self.fd(task, arg, required=True)
                 base = desc.get("path") if desc else None
+                inherited_links = desc.get("followed_links", ()) if desc else ()
                 if base is None:
                     self.reason("unknown_path_base")
                     return Resolution()
@@ -1108,11 +1118,16 @@ class _Decoder:
             return Resolution()
         resolution = resolve_path(event.get("entry_cwd", task["cwd"]["path"]), base, raw, self.context,
                                   {"symlinks": self.links, "nofollow": nofollow})
+        resolution.followed_links = list(dict.fromkeys(list(inherited_links) + resolution.followed_links))
         for reason in resolution.reasons:
             self.reason(reason)
         for alias in resolution.aliases:
             self.aliases[canonical(alias)] = alias
         for link in resolution.followed_links:
+            for pending, _, _, _, _, _ in self.unfinished.values():
+                if link in pending.get("alias_overlap", {}):
+                    live, inflight = pending["alias_overlap"][link]
+                    pending["alias_overlap"][link] = (live, max(1, inflight))
             if _under(link, self.context["source_root"]):
                 self.followed_links.setdefault(link, event["sequence"])
         return resolution
@@ -1121,6 +1136,7 @@ class _Decoder:
         if path not in self.directories:
             members = self.children.get(path, [])
             self.directories[path] = members
+            self.inventory_membership_entries += len(members)
             self.retain(160 + sum(64 + len(member.encode("utf-8")) for member in members))
 
     def bytecode_source(self, path):
@@ -1146,10 +1162,16 @@ class _Decoder:
         error = event.get("errno")
         added = False
         if error in {"ENOENT", "ENOTDIR"}:
-            self.negative.append({"path_or_class": resolution.path if resolution.path is not None else resolution.external["class"],
-                                  "scope": "repo" if resolution.path is not None else "external",
-                                  "errno": error, "syscall": event["name"], "sequence": event["sequence"]})
-            added = True
+            self.negative_events += 1
+            added = resolution.absolute not in self.negative
+            if added:
+                row = {"path_or_class": resolution.path if resolution.path is not None else resolution.external["class"],
+                       "scope": "repo" if resolution.path is not None else "external",
+                       "errno": error, "syscall": event["name"], "sequence": event["sequence"]}
+                if resolution.path is None:
+                    row["path_token"] = resolution.external["path_token"]
+                self.negative[resolution.absolute] = row
+                self.retain(len(resolution.absolute.encode("utf-8")))
         elif resolution.absolute in self.created and resolution.path is None:
             token = digest(resolution.absolute)[:16]
             added = token not in self.internal
@@ -1173,9 +1195,7 @@ class _Decoder:
                     if path not in self.generated_inputs:
                         self.generated_inputs[path] = {"path": path, "resolved": False}
                         self.retain(160)
-                    if (len(self.generated_inputs) + len(self.reads) + len(self.external) + len(self.negative)
-                            + len(self.directories) > self.limits["max_dependencies"]):
-                        self.cap("max_dependencies", "directories+generated_inputs+reads+external_inputs+negative_lookups")
+                    self.check_dependencies()
                     return
             row = {"path": path, "kind": kind}
             if error:
@@ -1190,10 +1210,16 @@ class _Decoder:
             if row["path_token"] not in self.external_paths:
                 self.external_paths[row["path_token"]] = {"path": resolution.absolute, "class": row["class"]}
                 self.retain(len(resolution.absolute.encode("utf-8")) + 128)
-        if len(self.reads) + len(self.external) + len(self.negative) + len(self.directories) + len(self.generated_inputs) > self.limits["max_dependencies"]:
-            self.cap("max_dependencies", "directories+generated_inputs+reads+external_inputs+negative_lookups")
+        self.check_dependencies()
         if added:
             self.retain(160)
+
+    def check_dependencies(self):
+        if (self.inventory_membership_entries + len(self.directories)
+                + len(self.generated_inputs) + len(self.reads) + len(self.external)
+                + len(self.negative) > self.limits["max_dependencies"]):
+            self.cap("max_dependencies",
+                     "inventory_membership_entries+directories+generated_inputs+reads+external_inputs+negative_lookups")
 
     def written(self, path):
         if path not in self.written_paths:
@@ -1224,8 +1250,7 @@ class _Decoder:
             self.directory(path)
             self.generated_inputs.pop(path, None)
             self.listings[path] = self.listings.get(path, False) or enumeration["eof"]
-            if sum(len(m) for m in self.directories.values()) + len(self.reads) + len(self.external) + len(self.negative) > self.limits["max_dependencies"]:
-                self.cap("max_dependencies", "inventory_membership_entries+reads+external_inputs+negative_lookups")
+            self.check_dependencies()
         else:
             self.edge(desc["resolution"], "stat", event)
 
@@ -1485,7 +1510,7 @@ class _Decoder:
         if name in LOOKUPS:
             index = 1 if name in {"newfstatat", "statx", "faccessat", "faccessat2", "readlinkat"} else 0
             if event["paths"].get(index) == "" and "AT_EMPTY_PATH" in flags:
-                desc = self.fd(task, event["fds"].get(index - 1))
+                desc = self.fd(task, event["fds"].get(index - 1), required=True)
                 if desc and desc["kind"] == "file":
                     self.edge(desc["resolution"], "stat", event)
                     if success:
@@ -1516,10 +1541,21 @@ class _Decoder:
             for resolution in resolutions:
                 if success and (not name.startswith(("link", "symlink")) or resolution is resolutions[-1]):
                     self.written(resolution.absolute)
-                if success and (resolution.path in self.inventory_links or
-                                resolution.path is not None and resolution.absolute in self.followed_links):
-                    self.alias_witness(resolution, event)
-                    self.reason("unsupported_alias_race")
+                alias = resolution.absolute
+                live, inflight = self.alias_users(alias)
+                prior = event.get("alias_overlap", {}).get(alias, (0, 0))
+                users = max(live, prior[0]), max(inflight, prior[1])
+                if success and (resolution.path in self.inventory_links
+                                or alias in self.followed_links or any(users)):
+                    closed = (name in {"unlink", "unlinkat"} and alias in self.links
+                              and resolution.path not in self.inventory_links
+                              and alias in self.followed_links
+                              and self.followed_links[alias] < event["sequence"] and not any(users))
+                    if closed:
+                        self.followed_links.pop(alias, None)
+                    else:
+                        self.alias_witness(resolution, event, users)
+                        self.reason("unsupported_alias_race")
             if success and resolutions:
                 if name.startswith(("mkdir", "rename", "link", "symlink")):
                     target = resolutions[-1]
@@ -1656,6 +1692,10 @@ class _Decoder:
             return
         raw = self.raw_of(event)
         task["last"] = (event["sequence"], raw)
+        for pending, _, _, _, _, _ in self.unfinished.values():
+            for alias, previous in pending.get("alias_overlap", {}).items():
+                users = self.alias_users(alias)
+                pending["alias_overlap"][alias] = tuple(max(a, b) for a, b in zip(previous, users))
         if kind in {"exit", "killed"}:
             # A syscall still unfinished when its task exits never resumes: not unpaired.
             for key in [key for key in self.unfinished if key[0] == pid]:
@@ -1693,6 +1733,18 @@ class _Decoder:
             # Capture the entry cwd and the descriptions of the descriptors this call uses only.
             snapshot = {fd: (task["fds"].get(fd) or {}).get("description") for fd in self.used_fds(event)}
             event.setdefault("_reason_shape", malformed_shape(raw.decode("ascii", "replace")))
+            provenance = set()
+            for index, path in event["paths"].items():
+                desc = snapshot.get(event["fds"].get(index - 1, {}).get("fd")) or {}
+                resolved = resolve_path(task["cwd"]["path"], desc.get("path"), path,
+                                        self.context, {"symlinks": self.links,
+                                                       "nofollow": event["name"] in MUTATIONS})
+                provenance.update(resolved.followed_links)
+                if not path.startswith("/"):
+                    provenance.update(desc.get("followed_links", ()))
+                if event["name"] in {"unlink", "unlinkat"}:
+                    event.setdefault("alias_overlap", {})[resolved.absolute] = self.alias_users(resolved.absolute)
+            event["resolution_links"] = tuple(provenance)
             amount = 256 + len(raw) + 64 * len(snapshot)
             self.unfinished[key] = (event, task["cwd"]["path"], snapshot, task, raw, amount)
             self.retain(amount)
@@ -1718,6 +1770,10 @@ class _Decoder:
             if event["endpoints"]:
                 joined["endpoints"] = event["endpoints"]
             joined["flags"] = list(dict.fromkeys(original["flags"] + event["flags"]))
+            flag_index = {"newfstatat": 3, "statx": 2}.get(event["name"])
+            offset = original.get("stat_resume_index")
+            if flag_index is not None and offset is not None:
+                joined["flags"].extend(event.get("stat_tail_flags", {}).get(flag_index - offset, []))
             joined["kind"] = "syscall"
             joined["entry_cwd"] = cwd
             self.reason_context(joined, owner)
@@ -1726,6 +1782,8 @@ class _Decoder:
             if ((relative and cwd != owner["cwd"]["path"])
                     or any((owner["fds"].get(fd) or {}).get("description") is not desc for fd, desc in snapshot.items())):
                 self.reason("ambiguous_shared_state")
+                if event["name"] in {"newfstatat", "statx", "fstat"}:
+                    return
             self.syscall(owner, joined)
             return
         self.syscall(task, event)
@@ -1929,7 +1987,8 @@ def decode_stream(chunks, context, limits=None):
                                         for p, m in sorted(decoder.directories.items())],
                        external_inputs=[r for _, r in sorted(decoder.external.items())],
                        external_inputs_resolved=all(r["resolved"] for r in decoder.external.values()),
-                       negative_lookups=sorted(decoder.negative, key=lambda r: (r["path_or_class"], r["sequence"])),
+                       negative_events=decoder.negative_events,
+                       negative_lookups=sorted(decoder.negative.values(), key=lambda r: (r["path_or_class"], r["sequence"])),
                        path_aliases=[r for _, r in sorted(decoder.aliases.items())])
     reference = "reports/process-tree-" + context["capture_group"] + ".json"
     shards = []
