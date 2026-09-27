@@ -38,7 +38,7 @@ except ImportError:  # Windows: the live-state counter stands in for measured RS
 
 
 BINDINGS = ("run_id", "source_sha", "source_tree", "capture_sha", "catalog_sha256")
-PARSER_VERSION = "s15b-1"
+PARSER_VERSION = "s15b-2"
 # max_state_bytes: 2 GiB, compared against measured peak RSS (Amendment 5); the counter it
 # replaced only ever added, so a 40 M-line stream tripped it on cumulative allocation.
 LIMITS = dict(max_live_tasks=65536, max_total_tasks=4194304, max_fds_per_task=65536, max_record_bytes=1048576,
@@ -698,7 +698,7 @@ def _validate(context):
     for root, value in context["external_roots"].items():
         if not isinstance(root, str) or not isinstance(value, (str, dict)):
             raise ValueError("invalid_context")
-    # suites_deferred: the supervisor reads the suite list when the stream ends.
+    # suites_deferred permits an empty catalog until the supervisor can load it.
     validate_suites(context.get("suites"), allow_empty=context.get("suites_deferred") is True)
     canonical(context)
 
@@ -841,7 +841,7 @@ class _Decoder:
         shared = not stack or (task and task.get("promoted")) or any(
             window["closed"] or window["shared"] for window in stack)
         suite = next((w["suite"] for w in reversed(stack) if w["suite"]), None)
-        if shared or suite not in self.catalog_suites:
+        if shared or suite is None:
             target = self.session_dependencies
         else:
             target = self.suite_deltas.get(suite)
@@ -950,6 +950,30 @@ class _Decoder:
         return True
 
     def attribution_result(self):
+        # The live stream can publish its catalog only after its last chunk.
+        suite_hashes, test_hashes = {}, {}
+        for suite in self.context["suites"]:
+            sid = suite["suite_id"]
+            suite_hashes["sha256:" + hashlib.sha256(sid.encode()).hexdigest()[:16]] = sid
+            for tid in suite["test_ids"]:
+                candidates = [tid]
+                if tid.startswith(sid + "::" + sid + "::"):
+                    candidates.append(tid[len(sid) + 2:])
+                for nodeid in candidates:
+                    test_hashes[(sid, "sha256:" + hashlib.sha256(nodeid.encode()).hexdigest()[:16])] = tid
+        catalog = {suite["suite_id"] for suite in self.context["suites"]}
+        resolve = lambda sid: sid if sid in catalog else suite_hashes.get(sid, sid)
+        self.suites_seen = {resolve(sid) for sid in self.suites_seen}
+        self.tests_seen = {(resolve(sid), test_hashes.get((resolve(sid), tid), tid))
+                           for sid, tid in self.tests_seen}
+        unresolved = sorted(self.suites_seen - catalog)
+        deltas = {}
+        for sid, rows in self.suite_deltas.items():
+            sid = resolve(sid)
+            target = deltas.setdefault(sid, _dependency_set()) if sid in catalog else self.session_dependencies
+            for field in DEPENDENCY_FIELDS:
+                target[field].update(rows[field])
+        self.suite_deltas = deltas
         if self.attribution_attempted:
             expected = {suite["suite_id"] for suite in self.context["suites"]}
             if expected - self.suites_seen:
@@ -963,15 +987,17 @@ class _Decoder:
             rows["generated_inputs"] = {key: row for key, row in rows["generated_inputs"].items()
                                         if row["path"] in self.generated_inputs and
                                         self.context["source_root"].rstrip("/") + "/" + row["path"] not in self.written_paths}
-        return {"version": "s15b-1", "marker_token": bool(self.marker_token),
+        return {"version": "s15b-2", "marker_token": bool(self.marker_token),
                 "mode": "session+suite" if self.attribution_attempted else "none",
                 "session_dependencies": _sealed_dependencies(self.session_dependencies),
                 "suite_deltas": {sid: _sealed_dependencies(self.suite_deltas.get(sid, _dependency_set()))
-                                 for sid in sorted(self.suites_seen)},
+                                 for sid in sorted(self.suites_seen & catalog)},
+                "unresolved_suites": unresolved[:100],
                 "boundary_coverage": {"suites_with_windows": sorted(self.suites_seen),
                                       "tests_with_windows": [{"suite_id": sid, "test_id": tid} for sid, tid in sorted(self.tests_seen)],
                                       "tests_total": sum(len(s["test_ids"]) for s in self.context["suites"])},
-                "counts": dict(self.attribution_counts, windows=self.window_count, subjects=len(self.marker_subjects))}
+                "counts": dict(self.attribution_counts, windows=self.window_count, subjects=len(self.marker_subjects),
+                               unresolved_suites=len(unresolved))}
 
     def birth_root(self, pid):
         self.adopt_root = False

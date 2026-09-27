@@ -560,6 +560,22 @@ def run(context, out_dir, command, tracer=None, sink=None, limits=None, descenda
                             errors.append("spool_fault:quota")
                             forward(TERM, None)
 
+                    def read_suites(stage):
+                        receipt["suites_loaded_at"] = stage
+                        suites = load_suites(suites_file) if suites_file is not None else None
+                        if suites is None:
+                            errors.append("suites_unavailable")
+                            context["suites"] = []
+                        else:
+                            context["suites"] = suites
+
+                    if sink == "file" and context.get("suites_deferred") is True:
+                        while process.poll() is None:
+                            sample_spool()
+                            time.sleep(0.02)
+                        exited()
+                        read_suites("before-decode")
+
                     def chunks():
                         nonlocal count, decode_started, decode_cpu_started
                         stream = (_stream_fifo(fd, process, descendant_grace, errors, receipt, exited) if sink == "fifo"
@@ -571,14 +587,9 @@ def run(context, out_dir, command, tracer=None, sink=None, limits=None, descenda
                             count += len(chunk)
                             yield chunk
                         context["terminal_receipt"] = {"byte_count": count, "sha256": hasher.hexdigest()}
-                        # Deferred suites are read at stream end, before outputs are built.
-                        if context.get("suites_deferred") is True:
-                            suites = load_suites(suites_file) if suites_file is not None else None
-                            if suites is None:
-                                errors.append("suites_unavailable")
-                                context["suites"] = []
-                            else:
-                                context["suites"] = suites
+                        # Live capture cannot read the catalog until the plugin finishes.
+                        if sink == "fifo" and context.get("suites_deferred") is True:
+                            read_suites("stream-end")
 
                     stream = chunks()
                     transcript_path = Path(private) / "transcript.strace"
