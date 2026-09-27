@@ -23,6 +23,7 @@ import json
 import logging
 import math
 import os
+import re
 import sqlite3
 import sys
 import threading
@@ -108,6 +109,44 @@ def _emit_job_terminal_event(job_id: str, status: str,
         pass
 
 logger = logging.getLogger(__name__)
+
+_TENANT_MAX_INFLIGHT_DEFAULT = 8
+_tenant_cap_warned = False
+_tenant_cap_log_lock = threading.Lock()
+
+
+def tenant_max_inflight() -> int:
+    """Return a mandatory cap; invalid configuration falls back and warns once."""
+    global _tenant_cap_warned
+    raw = os.environ.get("LEAF_TENANT_MAX_INFLIGHT", "").strip()
+    if not raw:
+        return _TENANT_MAX_INFLIGHT_DEFAULT
+    if re.fullmatch(r"[+-]?[0-9]+", raw):
+        try:
+            value = int(raw, 10)
+            if 1 <= value <= 1000:
+                return value
+        except ValueError:
+            pass
+    with _tenant_cap_log_lock:
+        warn = not _tenant_cap_warned
+        _tenant_cap_warned = True
+    if warn:
+        logger.warning(
+            "Invalid LEAF_TENANT_MAX_INFLIGHT; expected an integer in 1..1000; "
+            "using default %s", _TENANT_MAX_INFLIGHT_DEFAULT)
+    return _TENANT_MAX_INFLIGHT_DEFAULT
+
+
+class TenantInflightCapExceeded(Exception):
+    def __init__(self, tenant_id: str, limit: int, in_flight: int):
+        self.tenant_id = tenant_id
+        self.limit = int(limit)
+        self.in_flight = int(in_flight)
+        super().__init__(
+            f"The tenant already has {self.in_flight} runs queued or running; "
+            "retry when one finishes.")
+
 
 SERVER_DIR = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get("JOBS_DB", str(SERVER_DIR / "jobs.db")))
@@ -351,6 +390,9 @@ def _apply_first_connect_migrations(conn: sqlite3.Connection) -> None:
             "CREATE UNIQUE INDEX IF NOT EXISTS jobs_project_idempotency_uq "
             "ON jobs(tenant_id, project_id, idempotency_key) "
             "WHERE project_id IS NOT NULL AND idempotency_key IS NOT NULL")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS jobs_tenant_inflight_idx "
+            "ON jobs(tenant_id) WHERE status IN ('submitted','running')")
         conn.commit()
     except sqlite3.OperationalError:
         # Write-lock contention (e.g. "database is locked" / "database table is
@@ -756,6 +798,7 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
         execution["capability_provenance"] = capability_provenance
     if completion_provenance is not None:
         execution["completion_provenance"] = completion_provenance
+    max_inflight = tenant_max_inflight()
     created = True
     if job_store_mode() == "postgres":
         job_id, created = _pg_store.submit({
@@ -772,7 +815,7 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
             "idempotency_key": idempotency_key,
             "submission_fingerprint": submission_fingerprint,
             "dwg_version": dwg_version,
-        })
+        }, max_inflight=max_inflight)
     else:
         with _lock:
             conn = _db()
@@ -786,6 +829,13 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
                     if existing["submission_fingerprint"] != submission_fingerprint:
                         raise ValueError("idempotency key already exists with different run input")
                     return str(existing["job_id"])
+            in_flight = conn.execute(
+                "SELECT count(*) FROM jobs WHERE tenant_id = ? "
+                "AND status IN ('submitted','running')",
+                (str(tenant_id),),
+            ).fetchone()[0]
+            if in_flight >= max_inflight:
+                raise TenantInflightCapExceeded(str(tenant_id), max_inflight, in_flight)
             try:
                 conn.execute(
                     "INSERT INTO jobs (job_id, tenant_id, tool, params_json, dwg, status, progress, "
