@@ -32,6 +32,20 @@
       "signature": "ff1e8f851386e4e68f593df48c1e46a2f73900d47a0a4619eff61df42d282d8b"
     },
     {
+      "name": "unbound",
+      "kind": "ready-object",
+      "verb": "ready",
+      "wire": "{\"kind\":\"host_bridge_unbound\",\"protocolVersion\":\"leaf.web-bridge.v1\",\"contractVersion\":\"leaf.platform.v1alpha1\",\"sessionId\":\"11111111-1111-4111-8111-111111111111\",\"nonce\":\"22222222-2222-4222-8222-222222222222\",\"origin\":\"https://platform-staging.leafdesign.ai\",\"sessionKey\":\"BUl5QKvy+9UlQFeIWZR/2H/CvG2uXxNbiVkBuGElzsU=\",\"connectedAt\":\"2026-09-25T12:00:00+00:00\",\"documentFingerprint\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"drawingRevision\":\"00000000-0000-0000-0000-000000000000\"}",
+      "signature": null
+    },
+    {
+      "name": "unbound-with-capability",
+      "kind": "ready-object",
+      "verb": "ready",
+      "wire": "{\"kind\":\"host_bridge_unbound\",\"protocolVersion\":\"leaf.web-bridge.v1\",\"contractVersion\":\"leaf.platform.v1alpha1\",\"sessionId\":\"11111111-1111-4111-8111-111111111111\",\"nonce\":\"22222222-2222-4222-8222-222222222222\",\"origin\":\"https://platform-staging.leafdesign.ai\",\"sessionKey\":\"BUl5QKvy+9UlQFeIWZR/2H/CvG2uXxNbiVkBuGElzsU=\",\"connectedAt\":\"2026-09-25T12:00:00+00:00\",\"documentFingerprint\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"drawingRevision\":\"00000000-0000-0000-0000-000000000000\",\"bindingGrantVersion\":1}",
+      "signature": null
+    },
+    {
       "name": "bind-accepted",
       "kind": "envelope",
       "verb": "drawing.bind_result",
