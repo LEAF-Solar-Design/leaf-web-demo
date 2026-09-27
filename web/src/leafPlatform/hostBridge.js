@@ -7,7 +7,7 @@ export const DISPATCH_MODE = 'autocad_idle_document_lock'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const IDENTITY_KEYS = ['platformTenantId', 'projectId', 'drawingId', 'drawingVersionId']
-const unavailable = () => ({ status: 'unavailable', ready: null, selectedObjectId: null, selectedHandles: null, lastCommand: null, helloSentAt: null })
+const unavailable = () => ({ status: 'unavailable', ready: null, bindingGrantVersion: null, selectedObjectId: null, selectedHandles: null, lastCommand: null, helloSentAt: null })
 const isRecord = (value) => !!value && typeof value === 'object' && !Array.isArray(value)
 const isObjectId = (value) => typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,200}$/.test(value) && value === value.trim()
 
@@ -110,7 +110,10 @@ function isReady(value) {
 }
 
 function isUnbound(value) {
-  return isHandshake(value, 'host_bridge_unbound', ['drawingRevision']) &&
+  if (!isRecord(value)) return false
+  const hasGrantVersion = Object.hasOwn(value, 'bindingGrantVersion')
+  return isHandshake(value, 'host_bridge_unbound', hasGrantVersion ? ['drawingRevision', 'bindingGrantVersion'] : ['drawingRevision']) &&
+    (!hasGrantVersion || (Number.isInteger(value.bindingGrantVersion) && value.bindingGrantVersion === 1)) &&
     value.drawingRevision === '00000000-0000-0000-0000-000000000000'
 }
 
@@ -304,7 +307,8 @@ export class LeafHostBridge {
       this.seenHostMessages.clear()
       this.state = isReady(value)
         ? { ...unavailable(), status: 'connected', ready: value }
-        : { ...unavailable(), status: 'unbound', ready: value, bindingResult: null }
+        : { ...unavailable(), status: 'unbound', ready: value, bindingResult: null,
+          bindingGrantVersion: Object.hasOwn(value, 'bindingGrantVersion') ? value.bindingGrantVersion : null }
       this.diagnose('handshake', { kind: isReady(value) ? 'ready' : 'unbound' })
       this.publish()
       return
