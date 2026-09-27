@@ -91,6 +91,11 @@ describe('Solar settings form wiring', () => {
     const marker = 'useLayoutEffect(() => {'
     const effectStart = appSource.indexOf(marker, commentStart)
     assert.ok(effectStart > commentStart)
+    const hookStart = appSource.indexOf('useLayoutEffect(', commentStart)
+    const effectLineStart = appSource.lastIndexOf('\n', hookStart) + 1
+    const effectLineEnd = appSource.indexOf('\n', hookStart)
+    assert.match(appSource.slice(effectLineStart, effectLineEnd === -1 ? appSource.length : effectLineEnd),
+      new RegExp('^[ \\t]*useLayoutEffect\\(\\(\\) => \\{\\r?$'))
     const bodyStart = effectStart + marker.length - 1
     let depth = 1
     let bodyEnd = bodyStart + 1
@@ -116,6 +121,9 @@ describe('Solar settings form wiring', () => {
     }
     const compiled = esbuild.transformSync(appSource, { loader: 'jsx' }).code
     assert.match(compiled, new RegExp('useLayoutEffect\\([\\s\\S]{0,300}settingsRunRef\\.current = null'))
+    const compiledEffectStart = compiled.match(new RegExp('useLayoutEffect\\([\\s\\S]{0,300}settingsRunRef\\.current = null')).index
+    const compiledLineStart = compiled.lastIndexOf('\n', compiledEffectStart) + 1
+    assert.match(compiled.slice(compiledLineStart, compiledEffectStart), new RegExp('^\\s*$'))
   })
 
   it('SF2 wiring a confirmed settings run records its result for the form', () => {
