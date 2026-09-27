@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CI = ROOT / "scripts" / "ci"
 RUNNER_PATH = ROOT / "scripts/run-all-gates.py"
 COPIES = ("trace_process_tree.py", "trace_supervisor.py", "external_inventory.py", "select_tests.py")
-TOOLS_SHA = "0714b65261c80313c68a5bed413873f0ac926368"
+TOOLS_SHA = "985ffa8b4723496864a01074f2756a65cb38de30"
 RUN_ID = "codebuild:fixture"
 SHA = "a" * 40
 

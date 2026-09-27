@@ -37,7 +37,7 @@ except ImportError:  # Windows: the live-state counter stands in for measured RS
 
 
 BINDINGS = ("run_id", "source_sha", "source_tree", "capture_sha", "catalog_sha256")
-PARSER_VERSION = "s15a-10"
+PARSER_VERSION = "s15a-11"
 # max_state_bytes: 2 GiB, compared against measured peak RSS (Amendment 5); the counter it
 # replaced only ever added, so a 40 M-line stream tripped it on cumulative allocation.
 LIMITS = dict(max_live_tasks=65536, max_total_tasks=4194304, max_fds_per_task=65536, max_record_bytes=1048576,
@@ -325,6 +325,9 @@ def _args(event, raw, resumed=False):
     # A resumed tail carries no trustworthy argument indices. Entry arguments
     # are already sanitized in its unfinished partner.
     if resumed:
+        # Evidence only: these tokens must not change the semantic flags below.
+        event["witness_flags"] = [malformed_shape(token) for token in args
+                                  if re.fullmatch(r"AT_[A-Z_]+(?:\|AT_[A-Z_]+)*", token)][:8]
         if name in {"pipe", "pipe2", "socketpair"}:
             for token in args:
                 if re.fullmatch(r"\[\s*\d+(?:<[^>]*>)?\s*,\s*\d+(?:<[^>]*>)?\s*\]", token):
@@ -662,6 +665,11 @@ class _Decoder:
         self.reason_samples, self.reason_sample_counts = [], {}
         self.reason_event, self.reason_fd, self.reason_task = {}, None, None
         self.stopped = False
+        self.limit_trip, self.decoder_stop, self.witnesses = {}, None, {}
+        self.stop_pids, self.stop_pending, self.stop_terminals = set(), set(), set()
+        self.post_stop_resumes = 0
+        self.active_at_stop = []
+        self.pid_witnesses, self.birth_returns, self.interrupted_names = {}, [], []
         # Live-state estimate: rises on retain, falls on release; the cap reads measured RSS
         # where resource exists and this counter's peak only where it does not.
         self.state_bytes = self.state_peak = self.measured_peak = 0
@@ -690,7 +698,7 @@ class _Decoder:
         self.cache_dirs = frozenset((path.rsplit("/", 1)[0] + "/" if "/" in path else "") + "__pycache__"
                                     for path in self.files if path.endswith(".py"))
         self.generated_inputs, self.listings, self.consumed_directories = {}, {}, set()
-        self.followed_links = set()
+        self.followed_links = {}
         self.links = {}
         self.supervisor_reads = 0
         self.unix_peers, self.unix_sockets = {}, []
@@ -795,6 +803,18 @@ class _Decoder:
                              "name": line_kind(prefix)})
 
     def reason(self, value):
+        if value == "unknown_path_base" and value not in self.witnesses:
+            event, task, fd = self.reason_event, self.reason_task, self.reason_fd
+            entry = task["fds"].get(fd) if task else None
+            desc = entry["description"] if entry else {}
+            paths = list(event.get("paths", {}).values())
+            self.witnesses[value] = [{"resumed_shape": event.get("resumed_shape"),
+                                     "resume_matched": event.get("resume_matched", False),
+                                     "flags_token": event.get("witness_flags", event.get("flags", []))[:8],
+                                     "descriptor_kind": desc.get("kind", "unknown"),
+                                     "open_shape": desc.get("open_shape"),
+                                     "pathname_emptiness": ("empty" if "" in paths else
+                                                            "non-empty" if paths else "unknown")}]
         count = self.reason_sample_counts.get(value, 0)
         if count < 8 and (count or len(self.reason_sample_counts) < 32):
             event, fd, task = self.reason_event, self.reason_fd, self.reason_task
@@ -831,6 +851,7 @@ class _Decoder:
         elif not self.stopped:
             self.reasons.remove(max(self.reasons))
             self.reasons.add("capture_limit_exceeded:max_reasons")
+            self.record_stop("max_reasons")
             self.stopped = True
             self.reads.clear()
             self.external.clear()
@@ -838,7 +859,56 @@ class _Decoder:
             self.aliases.clear()
             self.directories.clear()
 
-    def cap(self, name):
+    def record_stop(self, name, accounting=None):
+        event, task, fd = self.reason_event, self.reason_task, self.reason_fd
+        entry = task["fds"].get(fd) if task else None
+        desc = entry["description"] if entry else {}
+        path = desc.get("resolution")
+        directory = path.path if path is not None else None
+        if name not in self.limit_trip:
+            self.limit_trip[name] = {
+                "limit": name, "threshold": self.limits[name], "accounting": accounting,
+                "components": {"inventory_membership_entries": sum(map(len, self.directories.values())),
+                               "reads": len(self.reads), "external_inputs": len(self.external),
+                               "negative_lookups": len(self.negative), "directories": len(self.directories),
+                               "generated_inputs": len(self.generated_inputs), "live_tasks": len(self.active),
+                               "total_tasks": self.tasks_total, "fds_per_task": len(task["fds"]) if task else 0,
+                               "record_bytes": getattr(self, "record_bytes", len(self.line[1])),
+                               "state_bytes": self.peak_bytes, "reasons": self.reason_count},
+                "syscall": event.get("name"), "pid": event.get("pid"), "descriptor": fd,
+                "directory_shape": malformed_shape(json.dumps(directory)) if directory is not None else None,
+                "directory_member_count": len(self.children.get(directory, [])),
+                "entry_sequence": event.get("sequence", self.line[0]), "processing_sequence": self.line[0]}
+        if self.decoder_stop is None:
+            self.stop_pids = set(self.active)
+            self.stop_pending = set(self.unfinished)
+            self.decoder_stop = {"sequence": self.line[0], "reason": name,
+                                 "pending_calls": [{"pid": pid, "syscall": call,
+                                                    "entry_sequence": pending[0]["sequence"]}
+                                                   for (pid, call), pending in list(self.unfinished.items())[:16]]}
+            self.active_at_stop = [{"pid": pid, "birth_sequence": task["record"]["birth_sequence"],
+                                    "parent_pid": task["record"]["parent"]["pid"] if task["record"]["parent"] else None}
+                                   for pid, task in list(self.active.items())[:64]]
+
+    def drain_diagnostic(self, raw):
+        # Match only the bounded prefix. No dependency decoding or state mutation.
+        text = raw[:SAMPLE_PREFIX].decode("ascii", "replace")
+        match = re.match(r"(?:\[pid +(\d+)\] |(\d+) +)?(?:\d+\.\d+ )?(.*)", text)
+        if not match:
+            return
+        pid = int(match[1] or match[2]) if match[1] or match[2] else (self.root["record"]["pid"] if self.root else None)
+        if pid not in self.stop_pids:
+            return
+        tail = match[3]
+        if re.match(r"(?:exit_group|exit)\(|\+\+\+ (?:exited|killed)", tail):
+            self.stop_terminals.add(pid)
+        resumed = re.match(r"<\.\.\. ([A-Za-z_]\w*) resumed>", tail)
+        if resumed and (pid, resumed[1]) in self.stop_pending:
+            self.stop_pending.remove((pid, resumed[1]))
+            self.post_stop_resumes += 1
+
+    def cap(self, name, accounting=None):
+        self.record_stop(name, accounting)
         self.reason("capture_limit_exceeded:" + name)
         self.stopped = True
         # Discard the entire dependency payload, never a seemingly complete prefix.
@@ -847,6 +917,56 @@ class _Decoder:
         self.negative.clear()
         self.aliases.clear()
         self.directories.clear()
+
+    def alias_witness(self, resolution, event):
+        if "unsupported_alias_race" in self.witnesses:
+            return
+        alias = resolution.absolute
+        live = set()
+        for owner in self.active.values():
+            for fd, entry in owner["fds"].items():
+                if alias in entry["description"].get("followed_links", ()):
+                    live.add((id(owner["fds"]), fd))
+        inflight = 0
+        for pending, cwd, snapshot, owner, _, _ in self.unfinished.values():
+            through = False
+            for index, path in pending.get("paths", {}).items():
+                argument = pending["fds"].get(index - 1, {})
+                desc = snapshot.get(argument.get("fd")) or {}
+                resolved = resolve_path(cwd, desc.get("path"), path, self.context, {"symlinks": self.links})
+                through |= alias in resolved.followed_links
+            inflight += through
+        target = self.links.get(alias)
+        if target is None:
+            links = self.context["inventory"]["symlinks"]
+            target = links.get(alias, links.get(resolution.path))
+        self.witnesses["unsupported_alias_race"] = [{
+            "alias_token": malformed_shape(json.dumps(alias)),
+            "origin": "inventory" if resolution.path in self.inventory_links else "runtime",
+            "target_token": malformed_shape(json.dumps(target)) if target is not None else None,
+            "prior_follow_sequence": self.followed_links.get(alias),
+            "mutation_entry_sequence": event["sequence"], "mutation_completion_sequence": self.line[0],
+            "live_descriptors": len(live), "inflight_resolutions": inflight}]
+
+    def unknown_pid_witness(self, pid, event):
+        if pid in self.pid_witnesses:
+            return
+        if len(self.pid_witnesses) >= 3:
+            # A stream of resolved early children must not hide the first orphan.
+            replace = next((key for key, row in reversed(list(self.pid_witnesses.items()))
+                            if row["queue_resolved"]), None)
+            if replace is None:
+                return
+            self.witnesses["unexplained_pid"].remove(self.pid_witnesses.pop(replace))
+        row = {"pid": pid, "first_sequence": event["sequence"],
+               "pending_birth_calls": [{"pid": owner, "syscall": name, "entry_sequence": pending[0]["sequence"]}
+                                       for (owner, name), pending in self.unfinished.items()
+                                       if name in {"fork", "vfork", "clone", "clone3"}][:16],
+               "interrupted_calls": list(self.interrupted_names), "birth_returns": list(self.birth_returns),
+               "prior_generations": [task["record"]["birth_sequence"] for task in self.tasks
+                                     if task["record"]["pid"] == pid][:16], "queue_resolved": False}
+        self.pid_witnesses[pid] = row
+        self.witnesses.setdefault("unexplained_pid", []).append(row)
 
     def retain(self, amount):
         self.state_bytes += amount
@@ -923,6 +1043,7 @@ class _Decoder:
             return
         if fd not in task["fds"]:
             if len(task["fds"]) >= self.limits["max_fds_per_task"]:
+                self.reason_task, self.reason_fd = task, fd
                 self.cap("max_fds_per_task")
                 return
             self.retain(128)
@@ -991,8 +1112,9 @@ class _Decoder:
             self.reason(reason)
         for alias in resolution.aliases:
             self.aliases[canonical(alias)] = alias
-        self.followed_links.update(link for link in resolution.followed_links
-                                   if _under(link, self.context["source_root"]))
+        for link in resolution.followed_links:
+            if _under(link, self.context["source_root"]):
+                self.followed_links.setdefault(link, event["sequence"])
         return resolution
 
     def directory(self, path):
@@ -1053,7 +1175,7 @@ class _Decoder:
                         self.retain(160)
                     if (len(self.generated_inputs) + len(self.reads) + len(self.external) + len(self.negative)
                             + len(self.directories) > self.limits["max_dependencies"]):
-                        self.cap("max_dependencies")
+                        self.cap("max_dependencies", "directories+generated_inputs+reads+external_inputs+negative_lookups")
                     return
             row = {"path": path, "kind": kind}
             if error:
@@ -1069,7 +1191,7 @@ class _Decoder:
                 self.external_paths[row["path_token"]] = {"path": resolution.absolute, "class": row["class"]}
                 self.retain(len(resolution.absolute.encode("utf-8")) + 128)
         if len(self.reads) + len(self.external) + len(self.negative) + len(self.directories) + len(self.generated_inputs) > self.limits["max_dependencies"]:
-            self.cap("max_dependencies")
+            self.cap("max_dependencies", "directories+generated_inputs+reads+external_inputs+negative_lookups")
         if added:
             self.retain(160)
 
@@ -1103,7 +1225,7 @@ class _Decoder:
             self.generated_inputs.pop(path, None)
             self.listings[path] = self.listings.get(path, False) or enumeration["eof"]
             if sum(len(m) for m in self.directories.values()) + len(self.reads) + len(self.external) + len(self.negative) > self.limits["max_dependencies"]:
-                self.cap("max_dependencies")
+                self.cap("max_dependencies", "inventory_membership_entries+reads+external_inputs+negative_lookups")
         else:
             self.edge(desc["resolution"], "stat", event)
 
@@ -1253,8 +1375,18 @@ class _Decoder:
         if not self.policy(event, task):
             return
         if name in {"fork", "vfork", "clone", "clone3"} and success and ret > 0:
+            birth_return = {"pid": event["pid"], "child_pid": ret, "syscall": name,
+                            "entry_sequence": event["sequence"], "completion_sequence": self.line[0]}
+            self.birth_returns.append(birth_return)
+            del self.birth_returns[:-16]
+            for witness in self.pid_witnesses.values():
+                if not witness["queue_resolved"]:
+                    witness["birth_returns"].append(birth_return)
+                    del witness["birth_returns"][:-16]
             child = self.birth(ret, event["sequence"], task, flags)
             if child:
+                if ret in self.pid_witnesses:
+                    self.pid_witnesses[ret]["queue_resolved"] = True
                 for queued, amount in self.pending.pop(ret, []):
                     self.release(amount)
                     self.process(queued)
@@ -1327,6 +1459,8 @@ class _Decoder:
                 self.edge(resolution, "open", event)
             else:
                 desc = dict(kind="file", path=resolution.absolute, resolution=resolution, flags=flags,
+                            open_shape=event.get("_reason_shape", malformed_shape(self.raw_of(event).decode("ascii", "replace"))),
+                            followed_links=tuple(resolution.followed_links),
                             deleted=False, written=False,
                             directory="O_DIRECTORY" in flags or resolution.path in self.dirs or resolution.path in self.cache_dirs)
                 if desc["directory"] and resolution.path is not None:
@@ -1384,6 +1518,7 @@ class _Decoder:
                     self.written(resolution.absolute)
                 if success and (resolution.path in self.inventory_links or
                                 resolution.path is not None and resolution.absolute in self.followed_links):
+                    self.alias_witness(resolution, event)
                     self.reason("unsupported_alias_race")
             if success and resolutions:
                 if name.startswith(("mkdir", "rename", "link", "symlink")):
@@ -1513,6 +1648,7 @@ class _Decoder:
         task = self.active.get(pid)
         self.reason_task = task
         if task is None or task["record"]["exit"] is not None:
+            self.unknown_pid_witness(pid, event)
             event["_reason_shape"] = malformed_shape(self.raw_of(event).decode("ascii", "replace"))
             amount = len(canonical(event))
             self.pending.setdefault(pid, []).append((event, amount))
@@ -1540,6 +1676,11 @@ class _Decoder:
             return
         key = (pid, event["name"])
         if kind == "interrupted":
+            self.interrupted_names.append(event["name"])
+            del self.interrupted_names[:-16]
+            for witness in self.pid_witnesses.values():
+                if not witness["queue_resolved"] and len(witness["interrupted_calls"]) < 16:
+                    witness["interrupted_calls"].append(event["name"])
             self.loss["interrupted"] += 1
             for previous in [key for key in self.unfinished if key[0] == pid]:
                 self.release(self.unfinished.pop(previous)[5])
@@ -1568,6 +1709,9 @@ class _Decoder:
             original, cwd, snapshot, owner, _, amount = pending
             self.release(amount)
             joined = dict(original)
+            joined["resume_matched"] = True
+            joined["resumed_shape"] = malformed_shape(raw.decode("ascii", "replace"))
+            joined["witness_flags"] = list(dict.fromkeys(original.get("flags", []) + event.get("witness_flags", [])))[:8]
             for field_name in ("return_value", "return_fd", "errno", "duration", "observed_size"):
                 if field_name in event:
                     joined[field_name] = event[field_name]
@@ -1623,6 +1767,7 @@ def _chunk_lines(chunks, decoder, counters):
                 break
             if length > decoder.limits["max_record_bytes"]:
                 decoder.reason_line(sequence, bytes(partial))
+                decoder.record_bytes = length
                 decoder.loss["oversize"] += 1
                 decoder.cap("max_record_bytes")
                 partial.clear()
@@ -1634,6 +1779,7 @@ def _chunk_lines(chunks, decoder, counters):
     if length:
         if length > decoder.limits["max_record_bytes"]:
             decoder.reason_line(sequence, bytes(partial))
+            decoder.record_bytes = length
             decoder.loss["oversize"] += 1
             decoder.cap("max_record_bytes")
             partial.clear()
@@ -1665,6 +1811,7 @@ def decode_stream(chunks, context, limits=None):
             decoder.loss["oversize"] += 1
             decoder.cap("max_record_bytes")
         if decoder.stopped:
+            decoder.drain_diagnostic(raw)
             continue
         try:
             event = _parse_line(raw.decode("ascii", "strict"), sequence)
@@ -1744,6 +1891,12 @@ def decode_stream(chunks, context, limits=None):
                        capture_epoch=context.get("capture_epoch"), capture_epoch_manifest=context.get("capture_epoch_manifest"),
                        syscall_policy_digest=digest(POLICY), loss_counters=decoder.loss,
                        reason_samples=decoder.reason_samples,
+                       limit_trip=decoder.limit_trip, decoder_stop=decoder.decoder_stop,
+                       post_stop={"terminals_seen": len(decoder.stop_terminals),
+                                  "terminals_missing": len(decoder.stop_pids - decoder.stop_terminals),
+                                  "resumes_matched": decoder.post_stop_resumes,
+                                  "pids_active_at_stop": len(decoder.stop_pids)},
+                       active_at_stop=decoder.active_at_stop, witnesses=decoder.witnesses,
                        malformed_samples=[{"shape": shape, "count": n} for shape, n in _ranked(decoder.malformed_samples)],
                        malformed_by_name=dict(_ranked(decoder.malformed_by_name)[:NAME_REPORT]),
                        unsupported_by_name=dict(_ranked(decoder.unsupported_by_name)),
