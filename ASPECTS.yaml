@@ -3,7 +3,7 @@
 schema_version: 1
 project_id: leaf-web-demo
 repository: LEAF-Solar-Design/leaf-web-demo
-authored_at_revision: b31bafebea4e3d51181eb0deaf4ae08029340ade
+authored_at_revision: 03e16cc24908c49b25f3670a6ba6d8062046c968
 
 components:
   - id: server
@@ -350,3 +350,16 @@ concerns:
   docs_runbooks:
     evidence: []
     outcome_default: unresolved
+ci_contract_tests:
+  - name: gate-server-file-registration
+    command: python -P -m pytest scripts/test_gate_runner.py::test_every_server_test_file_is_registered_or_named scripts/test_gate_runner.py::test_the_real_catalog_registers_every_suite_id_exactly_once -q -p no:cacheprovider
+  - name: gate-catalog-ratchets
+    command: python -P -m pytest scripts/test_gate_runner.py::test_duplicate_suite_id_is_named_once_in_registration_order scripts/test_gate_runner.py::test_measured_weights_name_only_registered_suites -q -p no:cacheprovider
+  - name: gate-static-registration
+    command: python -P -m pytest scripts/test_gate_runner.py::test_every_platform_static_file_is_registered_in_platform_static -q -p no:cacheprovider
+  - name: ci-script-workflow-shape
+    command: python -P -m pytest tests/test_codebuild_ci_script.py --deselect tests/test_codebuild_ci_script.py::TestCodebuildCiScript::test_proof_trusted_sha_receipt_contract -q -p no:cacheprovider
+  - name: gate-selection-self-test
+    command: python -P -m pytest tests/test_run_all_gates_selection.py -q -p no:cacheprovider
+  - name: contract-workflow-shape
+    command: python -P -m pytest tests/test_contract_workflow_shape.py -q -p no:cacheprovider
