@@ -38,7 +38,7 @@ except ImportError:  # Windows: the live-state counter stands in for measured RS
 
 
 BINDINGS = ("run_id", "source_sha", "source_tree", "capture_sha", "catalog_sha256")
-PARSER_VERSION = "s15a-14"
+PARSER_VERSION = "s15a-15"
 # max_state_bytes: 2 GiB, compared against measured peak RSS (Amendment 5); the counter it
 # replaced only ever added, so a 40 M-line stream tripped it on cumulative allocation.
 LIMITS = dict(max_live_tasks=65536, max_total_tasks=4194304, max_fds_per_task=65536, max_record_bytes=1048576,
@@ -57,7 +57,7 @@ POLICY = {
               "getrlimit prlimit64 getrusage times clock_gettime gettimeofday time getrandom sched_getaffinity "
               "sched_getparam sched_getscheduler futex").split(),
     "path": "open openat openat2 creat execve execveat readlink readlinkat access faccessat faccessat2 stat lstat newfstatat statx statfs getcwd chdir fchdir getxattr lgetxattr listxattr llistxattr truncate".split(),
-    "descriptor": "read pread64 readv preadv preadv2 mmap mremap munmap mprotect lseek dup dup2 dup3 fcntl close pipe pipe2 socketpair write pwrite64 writev pwritev pwritev2 truncate ftruncate fsync fdatasync fadvise64 posix_fadvise readahead sync_file_range flock fgetxattr flistxattr sendfile copy_file_range".split(),
+    "descriptor": "read pread64 readv preadv preadv2 mmap mremap munmap mprotect lseek dup dup2 dup3 fcntl close pipe pipe2 socketpair write pwrite64 writev pwritev pwritev2 truncate ftruncate fsync fdatasync fadvise64 posix_fadvise readahead sync_file_range flock fgetxattr flistxattr sendfile copy_file_range splice".split(),
     "metadata_mutation": "chmod fchmod fchmodat chown fchown fchownat lchown utimensat futimesat".split(),
     "internal_object": "memfd_create timerfd_create signalfd signalfd4".split(),
     "fd_table": "dup dup2 dup3 fcntl close close_range pipe pipe2 socketpair socket accept accept4 memfd_create timerfd_create eventfd eventfd2 epoll_create epoll_create1 signalfd signalfd4 inotify_init inotify_init1 inotify_add_watch inotify_rm_watch pidfd_open pidfd_getfd".split(),
@@ -68,7 +68,7 @@ POLICY = {
     "process": "fork vfork clone wait4 waitid exit exit_group setsid setpgid getpid getppid gettid".split(),
     "network": "socket connect bind listen accept accept4 sendto recvfrom sendmsg recvmsg sendmmsg recvmmsg getsockopt setsockopt getpeername getsockname shutdown".split(),
     "namespace": "unshare setns chroot pivot_root mount umount2".split(),
-    "reject": "ptrace process_vm_readv process_vm_writev io_setup io_submit io_getevents io_cancel io_destroy io_uring_setup io_uring_enter io_uring_register fanotify_init fanotify_mark open_by_handle_at name_to_handle_at splice tee vmsplice bpf userfaultfd shmget shmat shmdt shmctl semget semop semctl msgget msgsnd msgrcv msgctl".split(),
+    "reject": "ptrace process_vm_readv process_vm_writev io_setup io_submit io_getevents io_cancel io_destroy io_uring_setup io_uring_enter io_uring_register fanotify_init fanotify_mark open_by_handle_at name_to_handle_at tee vmsplice bpf userfaultfd shmget shmat shmdt shmctl semget semop semctl msgget msgsnd msgrcv msgctl".split(),
     # Modern calls decode normally; ENOSYS probes on older kernels are no-ops.
     "abi": "openat2 clone3 close_range pidfd_open pidfd_getfd faccessat2".split(),
     "runtime": "brk madvise arch_prctl set_tid_address set_robust_list get_robust_list futex rseq rt_sigaction rt_sigprocmask rt_sigreturn sigaltstack rt_sigsuspend rt_sigtimedwait rt_sigpending restart_syscall kill tkill tgkill sched_yield nanosleep clock_nanosleep poll ppoll select pselect6 epoll_create epoll_create1 epoll_ctl epoll_wait epoll_pwait eventfd eventfd2 alarm setitimer getitimer getuid geteuid getgid getegid getgroups uname getrlimit prlimit64 getrusage times umask clock_gettime clock_getres gettimeofday time getrandom sched_getaffinity sched_getparam sched_getscheduler prctl ioctl sysinfo getpgrp getpgid setrlimit capget sched_setaffinity timer_create timer_settime timer_gettime timer_delete timerfd_settime timerfd_gettime mincore msync mlock munlock".split(),
@@ -82,10 +82,12 @@ POLICY = {
     "clone_flags": "CLONE_VM CLONE_FS CLONE_FILES CLONE_SIGHAND CLONE_PTRACE CLONE_VFORK CLONE_PARENT CLONE_THREAD CLONE_SYSVSEM CLONE_SETTLS CLONE_PARENT_SETTID CLONE_CHILD_CLEARTID CLONE_DETACHED CLONE_UNTRACED CLONE_CHILD_SETTID CLONE_IO SIGCHLD".split(),
     "nondeterminism_boundary": ["clock", "randomness", "scheduling"],
 }
+# Keep splice in its original capture position although it is now a supported copy.
 TRACED = list(dict.fromkeys(
     POLICY["path"] + POLICY["directory"] + POLICY["metadata_mutation"] + POLICY["lifecycle"]
     + POLICY["fd_table"] + [name for name in POLICY["network"] if name in {"connect", "bind"}]
-    + POLICY["namespace"] + POLICY["reject"]))
+    + POLICY["namespace"] + [call for name in POLICY["reject"]
+                             for call in (("splice", "tee") if name == "tee" else (name,))]))
 # Both the policy and its ordered capture projection participate in the epoch digest.
 POLICY["traced"] = TRACED
 PATH_ARGS = {
@@ -102,10 +104,10 @@ FD_ARGS = {
     "renameat2": (0, 2), "linkat": (0, 2), "symlinkat": (1,), "epoll_ctl": (0, 2),
     "epoll_wait": (0,), "epoll_pwait": (0,),
     # sendfile(out, in, ...), copy_file_range(in, off, out, ...).
-    "sendfile": (0, 1), "copy_file_range": (0, 2),
+    "sendfile": (0, 1), "copy_file_range": (0, 2), "splice": (0, 2),
 }
 # (in, out) descriptor argument indices of the in-kernel copy calls.
-COPIES = {"sendfile": (1, 0), "copy_file_range": (0, 2)}
+COPIES = {"sendfile": (1, 0), "copy_file_range": (0, 2), "splice": (0, 2)}
 READS = set("read pread64 readv preadv preadv2".split())
 WRITES = set("write pwrite64 writev pwritev pwritev2 ftruncate fsync fdatasync".split())
 LOOKUPS = set("stat lstat newfstatat fstatat statx access faccessat faccessat2 readlink readlinkat statfs getxattr lgetxattr listxattr llistxattr".split())
@@ -1445,7 +1447,7 @@ class _Decoder:
             self.putfd(task, ret, {"kind": "network"}, "SOCK_CLOEXEC" in event["flags"])
 
     def copy(self, task, event):
-        """sendfile/copy_file_range: a read edge for the in-descriptor's path, a write for the out's."""
+        """In-kernel copies: a read edge for the in-descriptor's path, a write for the out's."""
         ret = event["return_value"]
         source, sink = (event["fds"].get(i) for i in COPIES[event["name"]])
         if source is None or sink is None:
@@ -1722,9 +1724,10 @@ class _Decoder:
             if desc.get("path"):
                 self.written(desc["path"])
         elif name == "fchdir" and success:
-            if desc["kind"] != "file" or not desc.get("directory"):
+            if desc["kind"] != "file" or not desc.get("path"):
                 self.reason("unknown_path_base")
             else:
+                desc["directory"] = True
                 task["cwd"]["path"] = desc["path"]
         elif name in {"dup", "dup2", "dup3"} and success:
             destination = event["fds"].get(1)
