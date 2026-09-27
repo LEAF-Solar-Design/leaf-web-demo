@@ -288,6 +288,15 @@ _REQUIRED_COLUMNS = {
         "binding_id", "platform_tenant_id", "role", "status",
         "display_name",  # 0068 (B5)
     },
+    "binding_grant_audit": {
+        "request_id", "actor_binding_id", "org_id", "project_id", "drawing_id",
+        "version_id", "plugin_session_id", "fingerprint_sha256", "nonce_sha256",
+        "key_id", "iat", "exp", "policy_version", "decision", "refusal_reason",
+        "recorded_at",
+    },
+    "binding_grant_counters": {
+        "namespace", "counter_key", "value", "updated_at",
+    },
     "history_operations": {"operation_id", "org_id", "project_id", "hash_value"},
     "history_edges": {"edge_id", "org_id", "project_id"},
     "branch_refs": {"ref_id", "org_id", "project_id", "operation_id"},
