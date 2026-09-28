@@ -24,9 +24,8 @@ from corpus_harness import EngineAdapter
 HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parent
 _RUNNER = PROJECT_ROOT / "vendor" / "acadrust-worker" / "roundtrip-cli.mjs"
-_COMPILED_BUILD = (
-    PROJECT_ROOT / "vendor" / "acadrust-worker" / "pkg-node" / "acadrust_worker_bg.wasm"
-)
+PKG_NODE_DIR = PROJECT_ROOT / "vendor" / "acadrust-worker" / "pkg-node"
+COMPILED_WASM_NAMES = ("engine_bg.wasm", "acadrust_worker_bg.wasm")
 
 # Wall-clock bound for one subprocess round trip. The harness's own
 # per-fixture bound (FIXTURE_TIMEOUT_MS) stays the receipt-level authority;
@@ -34,10 +33,10 @@ _COMPILED_BUILD = (
 ROUND_TRIP_TIMEOUT_S = 30.0
 
 
-def compiled_build_present() -> bool:
-    """True when the documented wasm-pack build output exists — the same
-    opt-in gate the realwasm vitest uses, exposed for test skip logic."""
-    return _COMPILED_BUILD.is_file()
+def compiled_build_present(pkg_dir: Path | None = None) -> bool:
+    """Accept the documented default acadrust_worker build or --out-name engine."""
+    base = pkg_dir or PKG_NODE_DIR
+    return any((base / name).is_file() for name in COMPILED_WASM_NAMES)
 
 
 class AcadrustAdapter(EngineAdapter):

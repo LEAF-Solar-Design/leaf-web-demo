@@ -160,3 +160,69 @@ exercises the failure path directly: `rollback.source_untouched` stays
   picks an adapter at request time. `IdentityAdapter` is instantiated
   directly by `main()`/tests; a future enabled engine adapter is wired in
   wherever the ENG2+ slice that adds a real engine lands, not here.
+
+## Tracked-drawing export fidelity (no-change round trip)
+
+Studio's CAD export proof also covers every tracked drawing through
+`engine/export_fidelity.py`. This harness is separate from the capped,
+hand-authored corpus and does not change its receipt or production wiring.
+The existing intake parser is the oracle, independent of the engine writer.
+Block definitions are also proven by handle and exact geometry from the raw
+BLOCKS section, not only through the intake reader.
+
+Every entity kind count must match. Each real hexadecimal DXF handle must
+return on the same kind, layer and geometry. Synthetic intake handles do not
+define identity: entities without source handles match in document order
+within their kind, including when the engine assigns them handles. Numeric
+values compare with absolute tolerance `1e-6`. Blocks must match and every
+source layer must survive; adding the default layer is allowed. Style
+properties, including block-child properties, are excluded. The rule is:
+byte identity is recorded, never required. Each receipt also requires the
+source file's hash to remain unchanged and elapsed time to stay within 10 s.
+Input is capped at 16 MiB and output at 64 MiB.
+
+The table below is the tracked set in run order. The ratchet rejects any new
+`*.dxf` directly inside `engine/corpus`, `vendor/acadrust-worker/fixtures`,
+`web/e2e/fixtures` or `web/public` that is absent from `TRACKED_DRAWINGS`.
+Adding a drawing requires adding its export proof.
+
+Build from `vendor/acadrust-worker` with the same RUSTFLAGS as the spike:
+
+```powershell
+$env:RUSTFLAGS = '--cfg getrandom_backend="wasm_js"'
+wasm-pack build --release --target nodejs . --out-dir pkg-node --out-name engine
+```
+
+Both this engine-named build and the documented default worker-named build
+are accepted. From the repository root, run the real engine or the identity
+baseline:
+
+```text
+python engine/export_fidelity.py --adapter=acadrust
+python engine/export_fidelity.py
+```
+
+Prepared 2026-09-26. Real-engine verification is pending; bytes after and
+timing cells will be filled from the verifier's own build and run. The source
+handle column states the required result, not a completed measurement.
+
+| drawing | bytes before | bytes after | source handles preserved | timing ms |
+| --- | --- | --- | --- | --- |
+| web/public/sample.dxf | 424391 | measured at verify | 2345 of 2345 | measured at verify |
+| web/e2e/fixtures/block-fixture.dxf | 280 | measured at verify | 1 of 1 | measured at verify |
+| web/e2e/fixtures/distinctive-panel.dxf | 146 | measured at verify | 1 of 1 | measured at verify |
+| vendor/acadrust-worker/fixtures/one_line.dxf | 140 | measured at verify | 0 of 0 | measured at verify |
+| engine/corpus/01_closed_lwpolyline_single_layer.dxf | 132 | measured at verify | 1 of 1 | measured at verify |
+| engine/corpus/02_open_lwpolyline_two_layers.dxf | 215 | measured at verify | 2 of 2 | measured at verify |
+| engine/corpus/03_classic_polyline_vertex_seqend.dxf | 170 | measured at verify | 1 of 1 | measured at verify |
+| engine/corpus/04_empty_entities_section.dxf | 36 | measured at verify | 0 of 0 | measured at verify |
+
+Required sample result: web/public/sample.dxf: 2345 of 2345 source handles preserved.
+The required total is 2351 preserved source handles across eight drawings.
+
+Not proven here:
+
+- Native CI execution: runners have no Rust toolchain. This is the
+  `cad-export-fidelity-ci` follow-on.
+- Style property fidelity.
+- The DWG path.

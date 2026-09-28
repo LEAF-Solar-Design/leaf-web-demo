@@ -30,6 +30,7 @@ if str(ENGINE_DIR) not in sys.path:
 
 import acadrust_adapter  # noqa: E402
 import corpus_harness as harness  # noqa: E402
+import export_fidelity  # noqa: E402
 
 FIXTURE_01 = ENGINE_DIR / "corpus" / "01_closed_lwpolyline_single_layer.dxf"
 
@@ -125,3 +126,44 @@ def test_real_engine_selection_via_the_harness_cli_switch():
     adapter = harness._select_adapter(["--adapter=acadrust"])
     assert adapter.name == "acadrust"
     assert isinstance(adapter, acadrust_adapter.AcadrustAdapter)
+
+
+def test_compiled_build_present_accepts_either_documented_glue_name(tmp_path):
+    assert acadrust_adapter.compiled_build_present(tmp_path) is False
+    (tmp_path / "engine.js").write_text("", encoding="utf-8")
+    assert acadrust_adapter.compiled_build_present(tmp_path) is False
+    (tmp_path / "engine.js").unlink()
+    (tmp_path / "engine_bg.wasm").write_bytes(b"")
+    assert acadrust_adapter.compiled_build_present(tmp_path) is True
+    (tmp_path / "engine_bg.wasm").unlink()
+    (tmp_path / "acadrust_worker_bg.wasm").write_bytes(b"")
+    assert acadrust_adapter.compiled_build_present(tmp_path) is True
+
+
+@needs_real_engine
+def test_real_engine_no_change_round_trip_preserves_every_tracked_drawing():
+    cases = (
+        ("web/public/sample.dxf", 2345, 0, 2345),
+        ("web/e2e/fixtures/block-fixture.dxf", 0, 1, 1),
+        ("web/e2e/fixtures/distinctive-panel.dxf", 1, 0, 1),
+        ("vendor/acadrust-worker/fixtures/one_line.dxf", 1, 0, 0),
+        ("engine/corpus/01_closed_lwpolyline_single_layer.dxf", 1, 0, 1),
+        ("engine/corpus/02_open_lwpolyline_two_layers.dxf", 2, 0, 2),
+        ("engine/corpus/03_classic_polyline_vertex_seqend.dxf", 1, 0, 1),
+        ("engine/corpus/04_empty_entities_section.dxf", 0, 0, 0),
+    )
+    receipts = export_fidelity.run_tracked(acadrust_adapter.AcadrustAdapter())
+    assert len(receipts) == 8
+    for receipt, (drawing, polylines, inserts, handles) in zip(receipts, cases):
+        assert receipt["drawing"] == drawing
+        assert receipt["ok"] is True, receipt
+        assert receipt["adapter"] == "acadrust"
+        assert receipt["byte_identical"] is False
+        assert receipt["source_untouched"] is True
+        assert receipt["entities_after"] == {
+            "polylines": polylines, "circles": 0, "arcs": 0, "texts": 0,
+            "dimensions": 0, "inserts": inserts, "mleaders": 0,
+        }
+        assert receipt["source_handles"] == handles
+        assert receipt["handles_preserved"] == handles
+    assert sum(r["handles_preserved"] for r in receipts) == 2351

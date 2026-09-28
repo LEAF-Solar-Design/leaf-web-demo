@@ -11,10 +11,14 @@
 // compiled pkg-node/ build it imports is produced by the documented wasm-pack
 // command in worker-entry.mjs (day-3 spike). A tree that never ran that build
 // exits 3 here instead of half-working.
+// Accepts both the default acadrust_worker build and --out-name engine.
 //
 // Input bound: 32 MiB. The corpus fixtures are bytes-scale; the bound exists
 // so a misuse of this CLI cannot buffer unbounded stdin.
 
+import { existsSync } from 'node:fs'
+
+const GLUE_NAMES = ['engine.js', 'acadrust_worker.js']
 const MAX_INPUT_BYTES = 32 * 1024 * 1024
 
 async function readStdin(limit) {
@@ -31,9 +35,14 @@ async function readStdin(limit) {
 }
 
 async function main() {
+  const glue = GLUE_NAMES.find((name) => existsSync(new URL(`./pkg-node/${name}`, import.meta.url)))
+  if (!glue) {
+    process.stderr.write(`no compiled engine build (run the documented wasm-pack build first): ${GLUE_NAMES.join(', ')}\n`)
+    return 3
+  }
   let engine
   try {
-    engine = await import('./pkg-node/acadrust_worker.js')
+    engine = await import(`./pkg-node/${glue}`)
   } catch (error) {
     process.stderr.write(`no compiled engine build (run the documented wasm-pack build first): ${error.message}\n`)
     return 3
