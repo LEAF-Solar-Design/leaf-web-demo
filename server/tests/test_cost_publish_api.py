@@ -205,6 +205,61 @@ def _rows(body):
     return {row["resource_id"]: row for row in body["resources"]}
 
 
+@pytest.mark.parametrize("truncated", [False, True])
+def test_postgres_broker_rows_reach_publisher_and_tenant_api(published, monkeypatch, truncated):
+    from datetime import datetime, timezone
+
+    import broker_pg_store
+    from cost_meter import publish_main
+
+    calls = []
+
+    class Store:
+        def usage_rows_for_period(self, period):
+            calls.append(period)
+            assert period == PERIOD
+            return [
+                {"tenant_id": tenant, "tool": "extract", "engine_seconds": seconds,
+                 "usd_est": 1.0, "status": "ok", "job_id": "job-1", "aps_live": True,
+                 "inserted_at": datetime(2026, 9, 1, tzinfo=timezone.utc)}
+                for tenant, seconds in ((A, 10.0), (B, 90.0))
+            ], truncated
+
+    monkeypatch.setenv("LEAF_BROKER_STORE", "postgres")
+    monkeypatch.setattr(broker_pg_store, "get_store", lambda: Store())
+    observation, = publish_main._collect_broker(PERIOD, datetime.now(timezone.utc))
+    assert observation["total_usage"] == "100.0"
+    assert observation["usages"] == {f"{A}|": "10.0", f"{B}|": "90.0"}
+    assert observation["coverage"] == ("partial" if truncated else "complete")
+    assert observation["status"] == (ESTIMATED if truncated else MEASURED)
+    response = _get(A, tenant_id=B)
+    assert response.status_code == 200
+    assert B not in response.text
+    cad = response.json()["own_use"]["cad"]
+    assert cad["runs"] == 1 and cad["engine_seconds"] == "10.0"
+    assert cad["coverage"] == observation["coverage"]
+    assert calls == [PERIOD, PERIOD]
+
+
+def test_postgres_broker_outage_is_missing_for_publish_and_unknown_for_api(ledger_dir, monkeypatch):
+    from datetime import datetime, timezone
+
+    import broker_pg_store
+    from cost_meter import publish_main
+
+    def unavailable():
+        raise ConnectionError("database unavailable")
+
+    monkeypatch.setenv("LEAF_BROKER_STORE", "postgres")
+    monkeypatch.setattr(broker_pg_store, "get_store", unavailable)
+    with pytest.raises(publish_main.SourceMissing, match="unreadable"):
+        publish_main._collect_broker(PERIOD, datetime.now(timezone.utc))
+    response = _get(A)
+    assert response.status_code == 200
+    cad = response.json()["own_use"]["cad"]
+    assert cad["coverage"] == "unknown" and cad["engine_seconds"] is None
+
+
 def test_a_tenant_sees_its_own_share_and_never_another_tenants_id(published):
     r = _get(A)
     assert r.status_code == 200

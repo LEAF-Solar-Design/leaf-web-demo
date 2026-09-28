@@ -193,7 +193,7 @@ def test_aps_observation_absent_source_is_unknown():
     assert obs["status"] == ESTIMATED and obs["coverage"] == "unknown"
 
 
-def test_loaders_read_jsonl_missing_is_zero_postgres_is_unknown(tmp_path, monkeypatch):
+def test_loaders_read_jsonl_missing_is_zero(tmp_path, monkeypatch):
     agent_path = tmp_path / "agent.jsonl"
     agent_path.write_text(json.dumps(_turn(A)) + "\nnot json\n\n", encoding="utf-8")
     broker_path = tmp_path / "broker.jsonl"
@@ -212,7 +212,74 @@ def test_loaders_read_jsonl_missing_is_zero_postgres_is_unknown(tmp_path, monkey
     monkeypatch.setenv("LEAF_AGENT_STORE", "postgres")
     monkeypatch.setenv("LEAF_BROKER_STORE", "postgres")
     assert direct_usage.load_agent_rows() is None
-    assert direct_usage.load_broker_rows() is None
+    with pytest.raises(ValueError, match="period"):
+        direct_usage.load_broker_rows()
+
+
+@pytest.mark.parametrize("truncated", [False, True])
+def test_postgres_loader_shape_tenant_isolation_and_coverage(monkeypatch, caplog, truncated):
+    import broker_pg_store
+
+    expected = [_run(A), _run(B, seconds=99), _run(A, seconds=None, usd=None, aps_live=False)]
+    stored = []
+    for row in expected:
+        entry = dict(row)
+        entry["inserted_at"] = datetime.fromtimestamp(entry.pop("ts"), timezone.utc)
+        stored.append(entry)
+
+    class Store:
+        def usage_rows_for_period(self, period):
+            assert period == PERIOD
+            return stored, truncated
+
+    monkeypatch.setenv("LEAF_BROKER_STORE", "postgres")
+    monkeypatch.setattr(broker_pg_store, "get_store", lambda: Store())
+    rows = direct_usage.load_broker_rows(period=PERIOD)
+    assert rows == expected
+    assert rows.truncated is truncated
+    assert "inserted_at" in stored[0]  # the store's result was not mutated
+    cad = tenant_direct_use(PERIOD, A, agent_rows=[], broker_rows=rows)["cad"]
+    assert cad["runs"] == 2 and cad["engine_seconds"] == "10.0"
+    assert cad["coverage"] == ("partial" if truncated else "complete")
+    obs = aps_usage_observation(PERIOD, rows)
+    assert obs["total_usage"] == "109.0"
+    assert obs["status"] == (ESTIMATED if truncated else MEASURED)
+    assert obs["coverage"] == ("partial" if truncated else "complete")
+    assert ("truncated" in caplog.text) is truncated
+
+
+def test_postgres_loader_unreachable_is_reported_unknown_no_jsonl_fallback(tmp_path, monkeypatch, caplog):
+    import broker_pg_store
+
+    path = tmp_path / "broker.jsonl"
+    path.write_text(json.dumps(_run(A)), encoding="utf-8")
+    monkeypatch.setenv("BROKER_LEDGER", str(path))
+    monkeypatch.setenv("LEAF_BROKER_STORE", "postgres")
+
+    class Store:
+        def usage_rows_for_period(self, period):
+            raise ConnectionError("database unavailable")
+
+    monkeypatch.setattr(broker_pg_store, "get_store", lambda: Store())
+    assert direct_usage.load_broker_rows(period=PERIOD) is None
+    assert "broker usage rows unavailable for 2026-09" in caplog.text
+    monkeypatch.setenv("LEAF_BROKER_STORE", "legacy")
+    assert direct_usage.load_broker_rows(period=PERIOD) == [_run(A)]
+
+
+def test_postgres_empty_month_is_complete_zero(monkeypatch):
+    import broker_pg_store
+
+    class Store:
+        def usage_rows_for_period(self, period):
+            return [], False
+
+    monkeypatch.setenv("LEAF_BROKER_STORE", "postgres")
+    monkeypatch.setattr(broker_pg_store, "get_store", lambda: Store())
+    rows = direct_usage.load_broker_rows(period=PERIOD)
+    assert rows == []
+    assert aps_usage_observation(PERIOD, rows)["coverage"] == "complete"
+    assert aps_usage_observation(PERIOD, rows)["total_usage"] == "0"
 
 
 def test_output_is_json_with_decimal_strings_never_floats(tmp_path):

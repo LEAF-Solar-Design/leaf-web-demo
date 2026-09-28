@@ -17,6 +17,7 @@ Contract:
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -194,7 +195,7 @@ def _cad_section(period: str, tenant_id: str, broker_rows: Optional[Iterable[Any
     seconds = Decimal(0)
     usd = Decimal(0)
     without_job = 0
-    gaps = 0
+    gaps = int(bool(getattr(broker_rows, "truncated", False)))
     for row in _dicts(broker_rows):
         if row is None:
             gaps += 1
@@ -329,7 +330,7 @@ def aps_usage_observation(period: str, broker_rows: Optional[Iterable[Any]]) -> 
                 "coverage": "unknown"}
     total = Decimal(0)
     per_tenant: Dict[str, Decimal] = {}
-    gaps = 0
+    gaps = int(bool(getattr(broker_rows, "truncated", False)))
     for row in _dicts(broker_rows):
         if row is None:
             gaps += 1
@@ -361,7 +362,7 @@ def aps_usage_observation(period: str, broker_rows: Optional[Iterable[Any]]) -> 
 
 
 # --------------------------------------------------------------------------- #
-# thin loaders: reuse the existing ledgers' own readers, no new Postgres path
+# thin loaders: reuse the existing ledgers' own readers
 # --------------------------------------------------------------------------- #
 def _parse_jsonl(lines: Iterable[str]) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
@@ -394,12 +395,38 @@ def load_agent_rows(path: Optional[Path] = None) -> Optional[List[Dict[str, Any]
     return _parse_jsonl(lines)
 
 
-def load_broker_rows(path: Optional[Path] = None) -> Optional[List[Dict[str, Any]]]:
-    """Broker ledger rows from the JSONL attribution ledger broker.py appends to
-    (BROKER_LEDGER, default server/broker_ledger.jsonl), the same file da/usage.py
-    reads. Postgres mode exposes only per-tenant aggregates, so it is None."""
+class BrokerRows(list):
+    """Ledger rows with scan coverage preserved for both cost consumers."""
+
+    def __init__(self, rows: Iterable[Dict[str, Any]], *, truncated: bool):
+        super().__init__(rows)
+        self.truncated = truncated
+
+
+def load_broker_rows(path: Optional[Path] = None, *, period: Optional[str] = None) -> Optional[List[Dict[str, Any]]]:
+    """Read a bounded UTC month in Postgres mode, or the legacy JSONL ledger.
+
+    Postgres insertion time supplies the JSONL-compatible ts. An unreadable
+    database is reported as unknown; a capped read retains partial coverage.
+    """
     if path is None and os.environ.get("LEAF_BROKER_STORE", "legacy").strip().lower() == "postgres":
-        return None
+        import broker_pg_store
+
+        period = _check_period(period)
+        try:
+            rows, truncated = broker_pg_store.get_store().usage_rows_for_period(period)
+        except Exception:  # noqa: BLE001 - database failures are unknown, never zero
+            logging.getLogger(__name__).exception("broker usage rows unavailable for %s", period)
+            return None
+        result = []
+        for row in rows:
+            entry = dict(row)
+            inserted_at = entry.pop("inserted_at")
+            entry["ts"] = inserted_at.timestamp()
+            result.append(entry)
+        if truncated:
+            logging.getLogger(__name__).warning("broker usage rows truncated for %s", period)
+        return BrokerRows(result, truncated=truncated)
     target = Path(path) if path is not None else Path(
         os.environ.get("BROKER_LEDGER", str(SERVER_DIR / "broker_ledger.jsonl")))
     if not target.exists():

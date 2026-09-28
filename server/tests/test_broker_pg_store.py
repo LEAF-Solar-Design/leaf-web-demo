@@ -391,6 +391,55 @@ def _admit(store, key, tenant="tenant-a", **overrides):
     return store.admit_run(key, tenant, **options)
 
 
+@pytest.mark.parametrize("period, start_parts, end_parts", [
+    ("2026-09", (2026, 9, 1), (2026, 10, 1)),
+    ("2026-12", (2026, 12, 1), (2027, 1, 1)),
+    ("2024-02", (2024, 2, 1), (2024, 3, 1)),
+])
+@pytest.mark.parametrize("count", [0, 1, 2, 3])
+def test_usage_rows_month_bounds_shape_and_cap(monkeypatch, period, start_parts, end_parts, count):
+    from datetime import datetime, timedelta, timezone
+
+    start = datetime(*start_parts, tzinfo=timezone.utc)
+    end = datetime(*end_parts, tzinfo=timezone.utc)
+    db = _Db()
+    store = broker_pg_store.PostgresBrokerStore(db)
+    monkeypatch.setattr(broker_pg_store, "MAX_USAGE_ROWS", 2)
+    rows = [dict(_entry(), job_id="job-1", inserted_at=start + timedelta(seconds=i))
+            for i in range(count)]
+    outside = [dict(_entry(), inserted_at=start - timedelta(microseconds=1)),
+               dict(_entry(), inserted_at=end)]
+
+    def execute(sql, params):
+        assert sql.startswith("SELECT tenant_id, tool, engine_seconds")
+        assert "WHERE inserted_at >= %(start)s AND inserted_at < %(end)s" in sql
+        assert "ORDER BY inserted_at, event_key LIMIT %(limit)s" in sql
+        assert params == {"start": start, "end": end, "limit": 2}
+        return _Result(many=sorted(
+            [r for r in outside + rows if params["start"] <= r["inserted_at"] < params["end"]],
+            key=lambda r: r["inserted_at"],
+        )[:params["limit"]])
+
+    monkeypatch.setattr(db.pool.conn, "execute", execute)
+    got, truncated = store.usage_rows_for_period(period)
+    assert got == rows[:2]
+    assert truncated is (count >= 2)
+    if got:
+        assert got[0] is not rows[0]
+
+
+@pytest.mark.parametrize("period", [None, "2026-9", "2026-13", "0000-01", "2026-09' OR TRUE--"])
+def test_usage_rows_invalid_month_never_queries(monkeypatch, period):
+    db = _Db()
+
+    def unexpected():
+        pytest.fail("invalid period reached the database")
+
+    monkeypatch.setattr(db, "get_pool", unexpected)
+    with pytest.raises(ValueError):
+        broker_pg_store.PostgresBrokerStore(db).usage_rows_for_period(period)
+
+
 def test_postgres_kill_state_is_visible_to_each_store_instance():
     db = _Db()
     writer = broker_pg_store.PostgresBrokerStore(db)

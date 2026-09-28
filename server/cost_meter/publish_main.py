@@ -88,9 +88,9 @@ def _collect_storage(period: str, now: datetime) -> List[dict]:
 
 
 def _collect_broker(period: str, now: datetime) -> List[dict]:
-    rows = direct_usage.load_broker_rows()
+    rows = direct_usage.load_broker_rows(period=period)
     if rows is None:
-        raise SourceMissing("broker ledger rows are unreadable (or held only in PostgreSQL)")
+        raise SourceMissing("broker ledger rows are unreadable")
     return [direct_usage.aps_usage_observation(period, rows)]
 
 
