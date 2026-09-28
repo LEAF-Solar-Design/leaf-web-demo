@@ -2816,6 +2816,9 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_roles.py"), 22),
         Suite("server-sample-dxf-asset", "server tests/test_sample_dxf_asset.py", "pytest", SERVER,
               _py_pytest("tests/test_sample_dxf_asset.py"), 2),
+        # TCM-07 vendor and subscription cost schedule: hermetic, exact count.
+        Suite("server-cost-vendors", "server tests/test_cost_vendors.py", "pytest", SERVER,
+              _py_pytest("tests/test_cost_vendors.py"), 15),
         Suite("server-save-plan-version", "server tests/test_save_plan_version.py", "pytest", SERVER,
               _py_pytest("tests/test_save_plan_version.py"), 39),
         Suite("server-search", "server tests/test_search.py", "pytest", SERVER,
