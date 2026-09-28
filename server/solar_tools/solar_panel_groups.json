@@ -3,15 +3,15 @@
   "name": "solar-panel-groups",
   "builtin": "builtins/solar_panel_groups.py",
   "family": "stringing",
-  "adapter": null,
+  "adapter": "local-graph-commit",
   "entitlement": "run_write",
   "requires_persisted_graph": true,
   "seedable": false,
-  "invalid_request_code": null,
+  "invalid_request_code": "INVALID_GROUP_REQUEST",
   "readiness": {
     "kind": "w1-chain"
   },
-  "engine": "autocad-lane",
+  "engine": "server-builtin",
   "interaction": {
     "mode": "form"
   },

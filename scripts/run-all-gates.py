@@ -324,7 +324,10 @@ def build_suites() -> List[Suite]:
         # the port of BuildAndSaveGroupsForZone) added four hermetic, unparametrized
         # tests. Nothing in this file skips, so the count is the same on every runner.
         Suite("server-w1-panel-group-kernel", "server tests/test_w1_panel_group_kernel.py", "pytest", SERVER,
-              _py_pytest("tests/test_w1_panel_group_kernel.py"), 35),
+              _py_pytest("tests/test_w1_panel_group_kernel.py"), 38),
+        # Intake panel groups: kernel matrices, deterministic commits, and Studio receipt replay.
+        Suite("server-solar-tool-panel-groups", "server tests/test_solar_tool_solar_panel_groups.py", "pytest", SERVER,
+              _py_pytest("tests/test_solar_tool_solar_panel_groups.py"), 79),
         # S16 electrical zones (2026-09-22): the create/assign builtin and the
         # partition the plugin keeps. Hermetic (a graph seeded in the test, no
         # network, no fixture), so the floor is the exact count on every runner:

@@ -92,6 +92,10 @@ class PanelGroupKernelError(ValueError):
     """Malformed kernel input; raised instead of guessing (fails closed)."""
 
 
+class PanelGroupMatrixLimitError(PanelGroupKernelError):
+    """Signals a matrix larger than the caller's cell budget."""
+
+
 # ----------------------------------------------------------------- primitives
 
 
@@ -509,9 +513,15 @@ def island_partition(panels: Sequence[Mapping[str, Any]], branch_max_offset: flo
 
 
 def group_matrix(
-    panels: Sequence[Mapping[str, Any]], row_angle: float, alignment_tolerance: float
+    panels: Sequence[Mapping[str, Any]], row_angle: float, alignment_tolerance: float,
+    *, max_cells: int | None = None,
 ) -> list[list[str | None]]:
-    """PrecomputeGroup matrix (BranchCmdCore.cs:192-266); cells hold the handle or None."""
+    """PrecomputeGroup matrix (BranchCmdCore.cs:192-266); cells hold the handle or None.
+
+    max_cells bounds the allocation; the check runs before the matrix exists.
+    """
+    if max_cells is not None and (type(max_cells) is not int or max_cells < 0):
+        raise PanelGroupKernelError("max_cells must be a nonnegative int or None")
     xs = [p["centre"][0] for p in panels]
     ys = [p["centre"][1] for p in panels]
     ext_min, ext_max = (min(xs), min(ys)), (max(xs), max(ys))
@@ -531,6 +541,9 @@ def group_matrix(
     idx = list(range(len(panels)))
     x_buckets, sorted_x = bucket_by_distance(idx, dist_x, alignment_tolerance)
     y_buckets, sorted_y = bucket_by_distance(idx, dist_y, alignment_tolerance)
+    rows, cols = len(sorted_x), len(sorted_y)
+    if max_cells is not None and rows * cols > max_cells:
+        raise PanelGroupMatrixLimitError(f"group matrix of {rows} x {cols} cells exceeds {max_cells}")
     sorted_y.reverse()
     row_of = {i: r for r, key in enumerate(sorted_x) for i in x_buckets[key]}
     col_of = {i: c for c, key in enumerate(sorted_y) for i in y_buckets[key]}
