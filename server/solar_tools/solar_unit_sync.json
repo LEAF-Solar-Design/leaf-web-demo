@@ -1,0 +1,43 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-unit-sync",
+  "builtin": "builtins/solar_unit_sync.py",
+  "family": "settings",
+  "adapter": "local-graph-commit",
+  "entitlement": "run_write",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_UNIT_SYNC_REQUEST",
+  "readiness": {"kind": "facets", "facets": []},
+  "engine": "server-builtin",
+  "interaction": {"mode": "form"},
+  "record_store": "registry",
+  "record": {
+    "name": "solar-unit-sync",
+    "version": "1.0.0",
+    "description": "Declare the drawing's distance unit as Meters or Feet; no geometry moves.",
+    "kind": "script",
+    "family_id": "settings",
+    "engine_op": "solar_unit_sync",
+    "entry": "builtins/solar_unit_sync.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {"type": "string", "maxLength": 128},
+        "expected_rev": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+        "distance_unit": {"type": "string", "enum": ["Meters", "Feet"]}
+      },
+      "required": ["expected_rev", "distance_unit"],
+      "additionalProperties": false
+    },
+    "returns": {"type": "object"},
+    "capabilities": ["drawing.write"],
+    "allow_local_fallback": false
+  },
+  "ledger": ["unit-sync"],
+  "trusted_inputs": [],
+  "maturity": "preview",
+  "wave": 2,
+  "order": 10,
+  "scenario": "w2-rooftop"
+}

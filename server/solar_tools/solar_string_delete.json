@@ -1,0 +1,50 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-string-delete",
+  "builtin": "builtins/solar_string_delete.py",
+  "family": "stringing",
+  "adapter": "local-graph-commit",
+  "entitlement": "run_write",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_STRING_DELETE_REQUEST",
+  "readiness": {"kind": "facets", "facets": ["strings"]},
+  "engine": "server-builtin",
+  "interaction": {"mode": "form"},
+  "record_store": "registry",
+  "record": {
+    "name": "solar-string-delete",
+    "version": "1.0.0",
+    "description": "Delete named strings from a solved drawing.",
+    "kind": "script",
+    "family_id": "stringing",
+    "engine_op": "solar_string_delete",
+    "entry": "builtins/solar_string_delete.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {"type": "string", "maxLength": 128},
+        "operation": {"type": "string", "enum": ["delete-strings"], "default": "delete-strings"},
+        "expected_rev": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+        "string_refs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 128}
+        }
+      },
+      "required": ["operation", "expected_rev", "string_refs"],
+      "additionalProperties": false
+    },
+    "returns": {"type": "object"},
+    "capabilities": ["drawing.write"],
+    "allow_local_fallback": false
+  },
+  "ledger": ["string-delete"],
+  "trusted_inputs": [],
+  "maturity": "preview",
+  "wave": 2,
+  "order": 80,
+  "scenario": "w2-rooftop"
+}

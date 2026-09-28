@@ -1,0 +1,51 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-panel-remove",
+  "builtin": "builtins/solar_panel_remove.py",
+  "family": "placement",
+  "adapter": "local-graph-commit",
+  "entitlement": "run_write",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_PANEL_REMOVE_REQUEST",
+  "readiness": {"kind": "facets", "facets": ["frames"]},
+  "engine": "server-builtin",
+  "interaction": {"mode": "form"},
+  "record_store": "registry",
+  "record": {
+    "name": "solar-panel-remove",
+    "version": "1.0.0",
+    "description": "Remove named panels from one panel group.",
+    "kind": "script",
+    "family_id": "placement",
+    "engine_op": "solar_panel_remove",
+    "entry": "builtins/solar_panel_remove.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {"type": "string", "maxLength": 128},
+        "operation": {"type": "string", "enum": ["remove-panels"], "default": "remove-panels"},
+        "expected_rev": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+        "frame_ref": {"type": "string", "minLength": 1, "maxLength": 128},
+        "panel_refs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 128}
+        }
+      },
+      "required": ["operation", "expected_rev", "frame_ref", "panel_refs"],
+      "additionalProperties": false
+    },
+    "returns": {"type": "object"},
+    "capabilities": ["drawing.write"],
+    "allow_local_fallback": false
+  },
+  "ledger": ["panel-remove"],
+  "trusted_inputs": [],
+  "maturity": "preview",
+  "wave": 2,
+  "order": 40,
+  "scenario": "w2-rooftop"
+}

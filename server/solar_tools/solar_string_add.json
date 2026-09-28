@@ -1,0 +1,49 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-string-add",
+  "builtin": "builtins/solar_string_add.py",
+  "family": "stringing",
+  "adapter": "local-graph-commit",
+  "entitlement": "run_write",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_STRING_ADD_REQUEST",
+  "readiness": {"kind": "facets", "facets": ["panels"]},
+  "engine": "server-builtin",
+  "interaction": {"mode": "form"},
+  "record_store": "registry",
+  "record": {
+    "name": "solar-string-add",
+    "version": "1.0.0",
+    "description": "Add one string over named panels, in the named order.",
+    "kind": "script",
+    "family_id": "stringing",
+    "engine_op": "solar_string_add",
+    "entry": "builtins/solar_string_add.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {"type": "string", "maxLength": 128},
+        "operation": {"type": "string", "enum": ["add-string"], "default": "add-string"},
+        "expected_rev": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+        "ordered_panel_refs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "items": {"type": "string", "minLength": 1, "maxLength": 128}
+        }
+      },
+      "required": ["operation", "expected_rev", "ordered_panel_refs"],
+      "additionalProperties": false
+    },
+    "returns": {"type": "object"},
+    "capabilities": ["drawing.write"],
+    "allow_local_fallback": false
+  },
+  "ledger": ["string-single-add"],
+  "trusted_inputs": [],
+  "maturity": "preview",
+  "wave": 2,
+  "order": 70,
+  "scenario": "w2-rooftop"
+}

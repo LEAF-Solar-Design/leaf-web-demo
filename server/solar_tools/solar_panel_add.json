@@ -1,0 +1,51 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-panel-add",
+  "builtin": "builtins/solar_panel_add.py",
+  "family": "placement",
+  "adapter": "local-graph-commit",
+  "entitlement": "run_write",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_PANEL_ADD_REQUEST",
+  "readiness": {"kind": "facets", "facets": ["frames"]},
+  "engine": "server-builtin",
+  "interaction": {"mode": "form"},
+  "record_store": "registry",
+  "record": {
+    "name": "solar-panel-add",
+    "version": "1.0.0",
+    "description": "Add named panels to one panel group.",
+    "kind": "script",
+    "family_id": "placement",
+    "engine_op": "solar_panel_add",
+    "entry": "builtins/solar_panel_add.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {"type": "string", "maxLength": 128},
+        "operation": {"type": "string", "enum": ["add-panels"], "default": "add-panels"},
+        "expected_rev": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+        "frame_ref": {"type": "string", "minLength": 1, "maxLength": 128},
+        "panel_refs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 128}
+        }
+      },
+      "required": ["operation", "expected_rev", "frame_ref", "panel_refs"],
+      "additionalProperties": false
+    },
+    "returns": {"type": "object"},
+    "capabilities": ["drawing.write"],
+    "allow_local_fallback": false
+  },
+  "ledger": ["panel-add"],
+  "trusted_inputs": [],
+  "maturity": "preview",
+  "wave": 2,
+  "order": 30,
+  "scenario": "w2-rooftop"
+}
