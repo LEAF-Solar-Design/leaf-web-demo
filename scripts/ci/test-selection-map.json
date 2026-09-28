@@ -366,6 +366,7 @@
     "server-request-journal",
     "server-roles",
     "server-sample-dxf-asset",
+    "server-cost-vendors",
     "server-save-edited-version",
     "server-save-plan-version",
     "server-search",
