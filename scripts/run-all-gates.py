@@ -790,6 +790,10 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_agent_policy.py"), 33),
         Suite("server-agent-gate", "server tests/test_agent_gate.py", "pytest", SERVER,
               _py_pytest("tests/test_agent_gate.py"), 57),
+        # TCM-04 cost transparency: tenant direct use and the aps:engine usage
+        # observation. Hermetic (fixture rows, tmp_path marathon runs), exact count.
+        Suite("server-cost-direct-use", "server tests/test_cost_direct_use.py", "pytest", SERVER,
+              _py_pytest("tests/test_cost_direct_use.py"), 19),
         # SSD1 element 17, entity-scope containment: the turn's frozen binding
         # (17-A), its admission at the gate and /api/run (17-B1), and the backedge
         # identity rows whose fixtures 17-B1 extended. None of the three files was

@@ -151,7 +151,7 @@ class _State:
 _TASK_LOCAL_STATE: dict[str, _State] = {
     "BROKER_LEDGER": _State(
         container_default="/app/server/broker_ledger.jsonl",
-        modules=("server/broker.py", "server/site_demo.py"),
+        modules=("server/broker.py", "server/cost_meter/direct_usage.py", "server/site_demo.py"),
         manifests=("app", "broker"),
         compose={
             "app": "/data/state/broker_ledger.jsonl",
