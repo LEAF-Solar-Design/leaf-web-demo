@@ -35,6 +35,25 @@ and unresolved outcome. An optional `repos` mapping (repository id to absolute c
 rewrite the file. The draft-07 schema documents the contract; validation is
 hand-written and does not depend on jsonschema.
 
+The optional `ci_contract_tests` list declares the pair verification floor:
+
+```yaml
+ci_contract_tests:
+  - name: alarm-publisher-contract
+    command: python -m pytest tests/test_alarm_publisher_contract.py -q -p no:cacheprovider
+```
+
+At most 12 entries are allowed, each with exactly `name` and `command`.
+Names are unique and match `[a-z0-9-]{1,48}`. Commands are non-empty strings
+of at most 400 characters, with no newline, `&&`, `||`, `;`, `|`, or backtick.
+Pair `open` validates and freezes this list into the record and spec. Verification
+and attribution run it in order before the slice command, sharing one timeout
+budget and recording each result. Missing manifests or keys give an empty floor.
+An invalid or unreadable manifest opens with an empty floor, a visible warning on
+stderr, and a `verify-floor-unavailable` ledger row naming the error.
+`--no-verify-floor REASON` skips the floor and ledgers the reason. Empty floors
+otherwise add no spec section. Existing records retain their frozen floor.
+
 Globs use `/`, `*`, `?`, and whole-segment `**`. They are anchored: `a/**` matches
 descendants, and `**/x` also matches root `x`. Absolute paths, `..` segments,
 backslashes, braces, and characters outside the documented grammar are refused.
@@ -154,7 +173,15 @@ Disposition commands require an existing row and append the action, session,
 UTC time, and detail. Missing row IDs return 1; missing CLI arguments return 2.
 After a disposition, unresolved rows with the same ID in other records for
 this repository receive the resolving change_id in superseded_by. The record
-grammar accepts this change-ID form and legacy row-ID links. A changed digest
+grammar accepts this change-ID form and legacy row-ID links. A disposition
+parses only records whose bytes carry the row id, and skips a record whose
+`save_record` block for that row already names a settled outcome; any other
+layout is parsed. It holds a host-wide OS lock (`state/impact-dispose.lock`,
+120-second wait, released when its holder dies) across the read, modify and
+write of the target and every sibling, so concurrent dispositions cannot drop
+each other's `superseded_by` writes. Measured on 708 records (2026-09-23): about
+47 s per call before, 0.3 to 0.6 s after, and about 2.5 s for a row that 192
+records still carry unresolved. A changed digest
 does not supersede an older digest's rows. Plan scans up to 5,000 records in
 `$IMPACT_HOME/pair-runs/*/impact/record.yaml` and displays at most 200 unresolved,
 unsuperseded rows from other changes. Unreadable prior records are skipped.
