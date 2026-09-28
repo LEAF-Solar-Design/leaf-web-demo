@@ -292,6 +292,7 @@
     "server-jobs-callbacks-postgres",
     "server-jobs-connection-ownership",
     "server-jobs-reaper-start-race",
+    "server-jobs-tenant-inflight-cap",
     "server-jobs-terminal-mirror-atomic",
     "server-jobs-terminal-mirror-durable",
     "server-kit-stream-superset",

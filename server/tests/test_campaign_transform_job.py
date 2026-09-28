@@ -647,7 +647,7 @@ def test_submit_persists_idempotent_context_before_enqueue(published, monkeypatc
     rows, queued = [], []
 
     class Store:
-        def submit(self, row):
+        def submit(self, row, *, max_inflight=None):
             if rows:
                 if rows[0]['submission_fingerprint'] != row['submission_fingerprint']:
                     raise ValueError('idempotency collision')

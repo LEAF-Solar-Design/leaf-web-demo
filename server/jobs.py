@@ -110,7 +110,8 @@ def _emit_job_terminal_event(job_id: str, status: str,
 
 logger = logging.getLogger(__name__)
 
-_TENANT_MAX_INFLIGHT_DEFAULT = 8
+# Exceed test_backbone 1b's 25-job single-tenant submit burst while still bounding one tenant's share of the shared lanes.
+_TENANT_MAX_INFLIGHT_DEFAULT = 32
 _tenant_cap_warned = False
 _tenant_cap_log_lock = threading.Lock()
 

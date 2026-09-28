@@ -88,24 +88,24 @@ def assert_capped(owner, limit):
 
 def test_default_cap_is_per_tenant(sqlite_store):
     owner = tenant()
-    ids = [submit(owner) for _ in range(8)]
-    assert len(set(ids)) == 8
-    assert_capped(owner, 8)
+    ids = [submit(owner) for _ in range(32)]
+    assert len(set(ids)) == 32
+    assert_capped(owner, 32)
     assert jobs.get_job(submit(tenant()))["status"] == "submitted"
 
 
 @pytest.mark.parametrize("status", ["complete", "failed"])
 def test_terminal_job_frees_a_slot(sqlite_store, status):
     owner = tenant()
-    ids = [submit(owner) for _ in range(8)]
+    ids = [submit(owner) for _ in range(32)]
     jobs._exec("UPDATE jobs SET status = ? WHERE job_id = ?", (status, ids[0]))
     assert submit(owner) not in ids
-    assert_capped(owner, 8)
+    assert_capped(owner, 32)
 
 
 @pytest.mark.parametrize("raw,limit", [
-    ("2", 2), ("", 8), ("   ", 8), ("0", 8), ("-1", 8),
-    ("abc", 8), ("1e3", 8), ("1001", 8), ("1_0", 8),
+    ("2", 2), ("", 32), ("   ", 32), ("0", 32), ("-1", 32),
+    ("abc", 32), ("1e3", 32), ("1001", 32), ("1_0", 32),
 ])
 def test_config_never_disables_cap(sqlite_store, monkeypatch, raw, limit):
     monkeypatch.setenv("LEAF_TENANT_MAX_INFLIGHT", raw)
@@ -119,7 +119,7 @@ def test_invalid_config_logs_once(monkeypatch, caplog):
     monkeypatch.setattr(jobs, "_tenant_cap_warned", False)
     monkeypatch.setenv("LEAF_TENANT_MAX_INFLIGHT", "abc")
     for _ in range(3):
-        assert jobs.tenant_max_inflight() == 8
+        assert jobs.tenant_max_inflight() == 32
     assert sum("Invalid LEAF_TENANT_MAX_INFLIGHT" in r.message
                for r in caplog.records) == 1
 

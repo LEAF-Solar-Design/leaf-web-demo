@@ -947,6 +947,8 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_job_migration_thread_race.py"), 1),
         Suite("server-jobs-reaper-start-race", "server tests/test_jobs_reaper_start_race.py",
               "pytest", SERVER, _py_pytest("tests/test_jobs_reaper_start_race.py"), 2),
+        Suite("server-jobs-tenant-inflight-cap", "server tests/test_jobs_tenant_inflight_cap.py",
+              "pytest", SERVER, _py_pytest("tests/test_jobs_tenant_inflight_cap.py"), 18),
         Suite("server-canonical-worker", "server tests/test_canonical_worker.py", "pytest",
               SERVER, _py_pytest("tests/test_canonical_worker.py"), 25),
         Suite("server-marathon-orchestration", "server tests/test_marathon_orchestration.py",
