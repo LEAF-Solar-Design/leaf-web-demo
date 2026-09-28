@@ -2701,6 +2701,9 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_build_queue.py"), 86),
         Suite("server-builds-route", "server tests/test_builds_route.py", "pytest", SERVER,
               _py_pytest("tests/test_builds_route.py"), 10),
+        # TCM-08 pooled AWS lines split by the Environment tag: hermetic (fake ce client), exact count.
+        Suite("server-cost-pooled", "server tests/test_cost_pooled.py", "pytest", SERVER,
+              _py_pytest("tests/test_cost_pooled.py"), 13),
         Suite("server-cad-fence", "server tests/test_cad_fence.py", "pytest", SERVER,
               _py_pytest("tests/test_cad_fence.py"), 9),
         Suite("server-cad-timing-client-delivery", "server tests/test_cad_timing_client_delivery.py", "pytest", SERVER,
