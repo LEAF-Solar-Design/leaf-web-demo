@@ -117,9 +117,13 @@ class PostgresJobStore:
                 "0011_jobs_callbacks.sql (missing: " + detail + ")"
             )
 
-    def submit(self, row: Dict[str, Any]) -> Tuple[str, bool]:
+    def submit(self, row: Dict[str, Any], *, max_inflight: int) -> Tuple[str, bool]:
         db = _db()
         with db.transaction() as conn:
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtext('leaf-job-inflight:' || %s))",
+                (row["tenant_id"],),
+            )
             if row["project_id"] is not None and row["idempotency_key"] is not None:
                 existing = conn.execute(
                     "SELECT job_id, submission_fingerprint FROM async_jobs "
@@ -132,6 +136,14 @@ class PostgresJobStore:
                         raise ValueError(
                             "idempotency key already exists with different run input")
                     return str(existing["job_id"]), False
+            in_flight = int(conn.execute(
+                "SELECT count(*) AS count FROM async_jobs WHERE tenant_id = %s "
+                "AND status IN ('submitted','running')",
+                (row["tenant_id"],),
+            ).fetchone()["count"])
+            if in_flight >= max_inflight:
+                from jobs import TenantInflightCapExceeded
+                raise TenantInflightCapExceeded(row["tenant_id"], max_inflight, in_flight)
             inserted = conn.execute(
                 """
                 INSERT INTO async_jobs

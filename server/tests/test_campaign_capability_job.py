@@ -216,7 +216,7 @@ def test_submit_persists_context_before_enqueue_and_fingerprints_only_trusted_ar
     enqueued = []
 
     class Store:
-        def submit(self, row):
+        def submit(self, row, *, max_inflight=None):
             for old in rows:
                 if old["idempotency_key"] == row["idempotency_key"]:
                     if old["submission_fingerprint"] != row["submission_fingerprint"]:

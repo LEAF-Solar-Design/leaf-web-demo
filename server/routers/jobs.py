@@ -788,6 +788,13 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
                 checkout_fence=checkout_fence,
                 entity_scope=binding,
             )
+    except jobs.TenantInflightCapExceeded as exc:
+        response = error_response(
+            ErrorCode.QUOTA_EXCEEDED, str(exc), retryable=True, status_code=429)
+        return JSONResponse(status_code=429, content={
+            **json.loads(response.body),
+            "quota_kind": "tenant_inflight", "limit": exc.limit, "used": exc.in_flight,
+        })
     except jobs.platform_link.CanonicalEntitlementDenied as exc:
         # STORED-org entitlement denial from the canonical choke point (P1
         # floor): hand the documented 403/503 envelope back verbatim — never

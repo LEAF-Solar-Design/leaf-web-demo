@@ -1348,6 +1348,13 @@ def save_plan_version(drawing_id: str,
                     checkout_holder=holder, checkout_fence=fence)
             except HTTPException:
                 raise
+            except jobs.TenantInflightCapExceeded as exc:
+                response = error_response(
+                    ErrorCode.QUOTA_EXCEEDED, str(exc), retryable=True, status_code=429)
+                return JSONResponse(status_code=429, content={
+                    **json.loads(response.body),
+                    "quota_kind": "tenant_inflight", "limit": exc.limit, "used": exc.in_flight,
+                })
             except Exception as exc:  # noqa: BLE001
                 return error_response(ErrorCode.INTERNAL,
                                       f"plan submit failed: {type(exc).__name__}",
