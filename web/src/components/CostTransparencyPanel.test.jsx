@@ -108,11 +108,12 @@ describe('cost transparency', () => {
   })
 
   it('forwards the period and the same tenant and auth headers as usage', async () => {
-    localStorage.setItem('leaf.jwt', 'test-token')
+    const fakeJwt = 'test-token'
+    localStorage.setItem('leaf.jwt', fakeJwt)
     const fetchMock = respond()
     await expect(getCost('2026-08')).resolves.toEqual(fixture)
     expect(fetchMock).toHaveBeenCalledWith(`${config.apiBase}/api/cost?period=2026-08`, {
-      headers: { 'X-Tenant-Id': config.tenant, Authorization: 'Bearer test-token' },
+      headers: { 'X-Tenant-Id': config.tenant, Authorization: ['Bearer', fakeJwt].join(' ') },
     })
   })
 
