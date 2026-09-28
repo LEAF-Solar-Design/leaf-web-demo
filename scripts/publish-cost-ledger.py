@@ -10,6 +10,7 @@ would-be ledger as JSON and writes nothing.
 Collectors:
   aws-cost-explorer   ce:GetCostAndUsage through the default AWS credential chain
   cost-vendors        config/cost-vendors.yaml
+  internal-resources  config/cost-internal-resources.yaml
   storage-snapshots   LEAF_COST_STORAGE_SNAPSHOTS (skipped and recorded missing when unset)
   broker-ledger       the broker attribution ledger through direct_usage.load_broker_rows
 A collector that fails is reported on stderr and skipped; the publication records
@@ -34,7 +35,7 @@ SERVER_DIR = Path(__file__).resolve().parent.parent / "server"
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from cost_meter import aws_import, direct_usage, publisher, storage, vendors  # noqa: E402
+from cost_meter import aws_import, direct_usage, internal, publisher, storage, vendors  # noqa: E402
 from cost_meter.ledger import PERIOD_RE  # noqa: E402
 from cost_meter.store import ENV_DIR, CostLedgerStore  # noqa: E402
 
@@ -59,6 +60,10 @@ def _collect_aws(period: str, now: datetime) -> List[dict]:
 
 def _collect_vendors(period: str, now: datetime) -> List[dict]:
     return vendors.vendor_observations(period, vendors.load_vendor_config())
+
+
+def _collect_internal(period: str, now: datetime) -> List[dict]:
+    return internal.internal_usage_observations(period, internal.load_internal_config())
 
 
 def _read_bounded_lines(path: str) -> List[str]:
@@ -98,6 +103,7 @@ DEFAULT_COLLECTORS: Dict[str, Collector] = {
     "cost-vendors": _collect_vendors,
     "storage-snapshots": _collect_storage,
     "broker-ledger": _collect_broker,
+    "internal-resources": _collect_internal,
 }
 
 
@@ -162,6 +168,9 @@ def _gather(period: str, now: datetime, collectors: Mapping[str, Collector],
         if other:
             log(f"publish-cost-ledger: {name}: ignored {other} observations for other periods")
         take(name, observations)
+    # MEASURED ties select the first observation. Keep declared internal usage
+    # behind real collectors, including usage supplied by --observations files.
+    merged.sort(key=lambda obs: obs.get("source") == internal.SOURCE)
     return merged, used, missing
 
 
