@@ -4100,7 +4100,15 @@ def check_docs_noop_filter(text: str) -> None:
         # One OIDC role reference and read-only S3 GetObject were added. The
         # dispatch site, infra PAT uses, service selectors, and mutation path
         # are unchanged.
-        "ecfaff8b99464112ed210fc6435446f1889c3e46a11021139ecd46b8156899e7"
+        # Hash updated 2026-09-28: both Terraform consumer-contract producer
+        # reads (the contract step and require_contract_still_latest) now ask
+        # for status=success and keep only completed/success runs, so one
+        # failed or running producer run no longer blocks every staging
+        # deploy (terraform run 36371660260 died in "Set up job" on a GitHub
+        # action-download timeout). REVIEWED FOR DISPATCH CAPABILITY: only the
+        # query string and the jq filter of two existing read-only GETs change.
+        # No new endpoint, token, secret reference or `gh workflow run` site.
+        "9332d2aeea4d47857fc593f4fe35a5f15c6d9f8378c4cf03c66711d0348ee3e9"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -7212,6 +7220,41 @@ def test_digest_aware_relay_requires_consumer_marker_and_exact_surface_receipts(
     assert "candidate_supply_set: $supply[0]" in code
     assert 'full_fleet_identity_stamped: false' in code
     assert 'harness: "not_automatically_reconciled"' in code
+
+
+def test_relay_selects_only_successful_consumer_contract_producer_runs() -> None:
+    # One failed or still-running Terraform producer run must not block staging:
+    # both selections read the newest completed/success run, like the Python
+    # convergence path's `status: success` query.
+    job = _strict_yaml(
+        (WORKFLOW.parent / "dispatch-staging-deploys.yml").read_text(encoding="utf-8")
+    )["jobs"]["dispatch"]
+    contract_code = _executable_bash(next(
+        step for step in job["steps"]
+        if step.get("name") == "Read the provider-associated Terraform consumer contract"
+    )["run"])
+    deploy_code = _executable_bash(_relay_deploy_step(job)["run"])
+    latest = re.search(
+        r"require_contract_still_latest\(\) \{\n(.*?)\n\s*latest=\$\(", deploy_code, re.S
+    )
+    assert latest, "require_contract_still_latest's producer run query is missing"
+    runs_url = (
+        "actions/workflows/$CONSUMER_CONTRACT_WORKFLOW/runs"
+        "?branch=main&event=push&status=success&per_page=100"
+    )
+    for label, code in (("contract step", contract_code), ("deploy step", latest.group(1))):
+        assert code.count(runs_url) == 1, label
+        assert "runs?branch=main&event=push&per_page=100" not in code, label
+        normalized = code.replace('\\"', '"')
+        assert '.status == "completed"' in normalized, label
+        assert '.conclusion == "success"' in normalized, label
+        filtered = normalized.index('.conclusion == "success"')
+        assert filtered < normalized.index("sort_by(-.id)"), label
+    assert "missing successful contract producer run" in contract_code
+    # A newer successful run still walks the successor path, and the fetched run
+    # is still required to be terminal success.
+    assert '[ "$state" = "completed success" ]' in deploy_code
+    assert 'if [ "$latest" != "$TF_CONTRACT_RUN_ID" ]; then' in deploy_code
 
 
 def test_relay_accepts_only_byte_equivalent_newer_consumer_contract() -> None:
