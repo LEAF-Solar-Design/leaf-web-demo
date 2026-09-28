@@ -2714,6 +2714,9 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_change_classifier.py"), 164),
         Suite("server-checkpoints", "server tests/test_checkpoints.py", "pytest", SERVER,
               _py_pytest("tests/test_checkpoints.py"), 6),
+        # TCM-05 cost transparency storage snapshots: hermetic (tmp_path roots), exact count.
+        Suite("server-cost-storage", "server tests/test_cost_storage.py", "pytest", SERVER,
+              _py_pytest("tests/test_cost_storage.py"), 15),
         Suite("server-codeql-barrier-literals", "server tests/test_codeql_barrier_literals.py", "pytest", SERVER,
               _py_pytest("tests/test_codeql_barrier_literals.py"), 9),
         Suite("server-completion-broker-file-route", "server tests/test_completion_broker_file_route.py", "pytest", SERVER,
