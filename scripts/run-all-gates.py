@@ -948,7 +948,9 @@ def build_suites() -> List[Suite]:
         Suite("server-jobs-reaper-start-race", "server tests/test_jobs_reaper_start_race.py",
               "pytest", SERVER, _py_pytest("tests/test_jobs_reaper_start_race.py"), 2),
         Suite("server-jobs-tenant-inflight-cap", "server tests/test_jobs_tenant_inflight_cap.py",
-              "pytest", SERVER, _py_pytest("tests/test_jobs_tenant_inflight_cap.py"), 18),
+              "pytest", SERVER, _py_pytest("tests/test_jobs_tenant_inflight_cap.py"), 18,
+              allowed_skip_reasons=(
+                  r"DATABASE_URL is required for PostgreSQL job tests",)),
         Suite("server-canonical-worker", "server tests/test_canonical_worker.py", "pytest",
               SERVER, _py_pytest("tests/test_canonical_worker.py"), 25),
         Suite("server-marathon-orchestration", "server tests/test_marathon_orchestration.py",
