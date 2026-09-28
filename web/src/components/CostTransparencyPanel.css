@@ -1,0 +1,14 @@
+.cost-transparency { min-width: 0; }
+.cost-panel { position: fixed; inset: 5vh max(1rem, calc((100vw - 1100px) / 2)); z-index: 100; box-sizing: border-box; overflow-y: auto; padding: 1.25rem; background: var(--card, #fff); color: var(--foreground, #222); border: 1px solid var(--border, #aaa); border-radius: .5rem; box-shadow: 0 1rem 3rem #0003; text-align: left; }
+.cost-panel p { line-height: 1.5; }
+.cost-panel h2 { margin-top: 0; }
+.cost-close { float: right; margin: 0 0 1rem 1rem; }
+.cost-use { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: .5rem 1rem; }
+.cost-use dd { margin: 0; overflow-wrap: anywhere; }
+.cost-table-scroll { max-width: 100%; overflow-x: auto; }
+.cost-panel table { border-collapse: collapse; min-width: 1000px; width: 100%; font-variant-numeric: tabular-nums; }
+.cost-panel th, .cost-panel td { padding: .65rem; border-bottom: 1px solid var(--border, #aaa); text-align: left; vertical-align: top; }
+.cost-panel small { display: block; margin-top: .3rem; font-weight: normal; }
+.cost-panel caption { text-align: left; margin-bottom: .5rem; }
+.cost-footnote { overflow-wrap: anywhere; font-size: .875rem; }
+@media (max-width: 600px) { .cost-panel { inset: 1rem; padding: 1rem; } .cost-close { float: none; margin: 0 0 1rem; } .cost-use { grid-template-columns: 1fr; } .cost-use dd { margin-bottom: .5rem; } }

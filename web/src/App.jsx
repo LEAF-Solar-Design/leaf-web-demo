@@ -82,6 +82,7 @@ import OpsDrawer from './components/OpsDrawer.jsx'
 import CustomizePanel from './components/CustomizePanel.jsx'
 import CheckoutControls from './components/CheckoutControls.jsx'
 import ClaudeAccountPanel from './components/ClaudeAccountPanel.jsx'
+import CostTransparencyPanel from './components/CostTransparencyPanel.jsx'
 import useTenantMcpRegistry from './useTenantMcpRegistry.js'
 import DemoBanner from './components/DemoBanner.jsx'
 import { AccountSignOut } from './components/ProductSurfaceTabs.jsx'
@@ -3622,6 +3623,7 @@ export default function App() {
           )}
           {/* Live-only chrome (Claude-account terminal panel) is hidden in the
               demo — it can't work signed-out. Guarded on !mock. */}
+          <CostTransparencyPanel mock={mock} />
           {!mock && (
             <ClaudeAccountPanel
               mock={mock}
