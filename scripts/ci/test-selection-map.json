@@ -414,6 +414,7 @@
     "server-solar-solaredge-pdf",
     "server-solar-terrain",
     "server-solar-tool-homeruns",
+    "server-solar-tool-nec-ac-voltage-drop",
     "server-solar-tool-nec-ampacity-correction",
     "server-solar-tool-panel-groups",
     "server-solar-tool-panels-from-drawing",

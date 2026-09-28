@@ -1,0 +1,48 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-nec-ac-voltage-drop",
+  "builtin": "builtins/solar_nec_ac_voltage_drop.py",
+  "family": "equipment",
+  "adapter": "local-graph-read",
+  "entitlement": "run_read",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_VOLTAGE_DROP_REQUEST",
+  "readiness": {"kind": "facets", "facets": []},
+  "engine": "server-builtin",
+  "interaction": {"mode": "form"},
+  "record_store": "registry",
+  "record": {
+    "name": "solar-nec-ac-voltage-drop",
+    "version": "1.0.0",
+    "description": "NEC 210.19(A)(4) AC voltage drop with reactance, power factor and phase factor, as a cited calculation.",
+    "kind": "script",
+    "family_id": "equipment",
+    "engine_op": "solar_nec_ac_voltage_drop",
+    "entry": "builtins/solar_nec_ac_voltage_drop.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {"type": "string", "maxLength": 128},
+        "current_a": {"type": "number", "minimum": 0, "maximum": 10000},
+        "one_way_length_ft": {"type": "number", "minimum": 0, "maximum": 100000},
+        "r_ohm_per_1000ft": {"type": "number", "minimum": 0, "maximum": 100},
+        "x_ohm_per_1000ft": {"type": "number", "minimum": 0, "maximum": 100},
+        "power_factor": {"type": "number", "minimum": -10, "maximum": 10},
+        "phase": {"type": "integer", "enum": [1, 3]},
+        "source_voltage": {"type": "number", "minimum": 0, "maximum": 100000}
+      },
+      "required": ["current_a", "one_way_length_ft", "r_ohm_per_1000ft", "x_ohm_per_1000ft", "power_factor", "phase", "source_voltage"],
+      "additionalProperties": false
+    },
+    "returns": {"type": "object"},
+    "capabilities": ["drawing.read"],
+    "allow_local_fallback": false
+  },
+  "ledger": ["nec-ac-voltage-drop"],
+  "trusted_inputs": [],
+  "maturity": "production",
+  "wave": 3,
+  "order": 20,
+  "scenario": "w3-ground-electrical"
+}
