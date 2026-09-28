@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { alternativeDecision } from './catalogRouting.js'
+import { alternativeDecision, solveRunDecision } from './catalogRouting.js'
 
 describe('alternativeDecision', () => {
   it('keeps demo provenance and removes the picked tool from alternatives', () => {
@@ -44,5 +44,45 @@ describe('alternativeDecision', () => {
     expect(picked.stub).toBeUndefined()
     expect(picked.stubKind).toBeUndefined()
     expect(picked.stubReason).toBeUndefined()
+  })
+})
+
+describe('solveRunDecision', () => {
+  it('turns a bound solve decision into a run of that tool', () => {
+    const bound = {
+      lane: 'solve',
+      tool: 'string-autofill-opt',
+      params: { panelsPerString: 12 },
+      confidence: 0.43,
+      rationale: "Matched the 'string-autofill-opt' solver capability; confirm before it runs.",
+      alternatives: [{ tool: 'solar-solve-proposal', confidence: 0.39 }],
+    }
+
+    const decision = solveRunDecision(bound)
+
+    expect(decision).toEqual({ ...bound, lane: 'run', routedLane: 'solve' })
+    expect(decision).not.toBe(bound)
+    expect(bound.lane).toBe('solve')
+    expect('routedLane' in bound).toBe(false)
+  })
+
+  it('trims the bound tool name', () => {
+    expect(solveRunDecision({ lane: 'solve', tool: '  arlo-design  ', confidence: 0.5 }))
+      .toEqual({ lane: 'run', tool: 'arlo-design', confidence: 0.5, routedLane: 'solve' })
+  })
+
+  it.each([null, undefined, '', '   ', 42])('leaves an unbound solve decision unchanged for tool %s', (tool) => {
+    const decision = { lane: 'solve', tool, confidence: 0.8, alternatives: [] }
+    expect(solveRunDecision(decision)).toBe(decision)
+  })
+
+  it.each(['run', 'build'])('leaves a %s decision unchanged', (lane) => {
+    const decision = { lane, tool: 'count-by-layer', confidence: 0.9 }
+    expect(solveRunDecision(decision)).toBe(decision)
+  })
+
+  it('passes a missing decision through', () => {
+    expect(solveRunDecision(null)).toBeNull()
+    expect(solveRunDecision(undefined)).toBeUndefined()
   })
 })

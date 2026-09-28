@@ -21,6 +21,7 @@ def _tool(name: str, marker: str = "engine"):
 
 @pytest.fixture
 def stores(monkeypatch, tmp_path):
+    monkeypatch.setattr(deps.solar_tools, "registry_records", lambda: [])
     engine_store = tmp_path / "engine.json"
     catalog_store = tmp_path / "catalog.json"
     write_store = tmp_path / "write.json"

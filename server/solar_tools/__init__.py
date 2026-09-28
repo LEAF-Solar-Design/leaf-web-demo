@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 
 SCHEMA = "leaf.solar-tool.v1"
-ADAPTER_KINDS = ("local-graph-commit", "cloud-proposal")
+ADAPTER_KINDS = ("local-graph-commit", "cloud-proposal", "local-graph-read")
 TRUSTED_INPUTS = ()
 MAX_DECLARATIONS = 256
 _DIRECTORY = Path(__file__).resolve().parent
@@ -145,6 +145,12 @@ def _validate(row, stem, server_dir, families):
         _require(_strings(readiness["facets"]), "invalid facets")
     else:
         _shape(readiness, ("kind",), "readiness")
+    if row["adapter"] == "local-graph-read":
+        _require(_text(row["invalid_request_code"]), "read adapter requires invalid_request_code")
+        _require(row["entitlement"] == "run_read", "read adapter requires run_read")
+        _require(row["requires_persisted_graph"] is True, "read adapter requires a persisted graph")
+        _require(readiness["kind"] in ("facets", "hook"), "read adapter requires facets or hook readiness")
+        _require(row["trusted_inputs"] == [], "read adapter takes no trusted inputs")
     record = row["record"]
     if row["record_store"] == "registry":
         _require(isinstance(record, dict), "registry store requires record")
@@ -175,6 +181,9 @@ class _Registry:
 
     def local_graph_tools(self):
         return tuple(row["name"] for row in self._rows if row["adapter"] == "local-graph-commit")
+
+    def local_graph_read_tools(self):
+        return tuple(row["name"] for row in self._rows if row["adapter"] == "local-graph-read")
 
     def seed_tool(self):
         return next(row["name"] for row in self._rows if row["seedable"])
@@ -271,6 +280,10 @@ def capability_table():
 
 def local_graph_tools():
     return _REGISTRY.local_graph_tools()
+
+
+def local_graph_read_tools():
+    return _REGISTRY.local_graph_read_tools()
 
 
 def seed_tool():

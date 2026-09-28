@@ -108,6 +108,7 @@ W1_CAPABILITIES = {name: row for name, row in SOLAR_CAPABILITIES.items()
 
 CLOUD_PROPOSAL_ADAPTER = "cloud-proposal"
 LOCAL_GRAPH_COMMIT_ADAPTER = "local-graph-commit"
+LOCAL_GRAPH_READ_ADAPTER = "local-graph-read"
 
 
 def capability_adapter(name):
@@ -139,6 +140,13 @@ def is_local_graph_commit(tool):
     if not isinstance(tool, Mapping):
         raise TypeError("tool record must be a mapping")
     return capability_adapter(tool.get("name")) == LOCAL_GRAPH_COMMIT_ADAPTER
+
+
+def is_local_graph_read(tool):
+    """True only for a mapping tool record with the local graph read kind."""
+    if not isinstance(tool, Mapping):
+        raise TypeError("tool record must be a mapping")
+    return capability_adapter(tool.get("name")) == LOCAL_GRAPH_READ_ADAPTER
 
 
 def annotate_w1_availability(families, tenant, drawing_id=None, *,
@@ -253,6 +261,8 @@ def w1_input_readiness(tenant, drawing_id=None, *, project_id=None, version="hea
                 if not context["local_commit_ready"]:
                     readiness[name] = {"input_ready": False,
                                        "input_reason": context["refusal_reason"]}
+            elif capability_adapter(name) == LOCAL_GRAPH_READ_ADAPTER:
+                pass
             elif context["representation"] == "intake":
                 readiness[name] = {"input_ready": False,
                                    "input_reason": "persisted_graph_unavailable"}
@@ -298,7 +308,7 @@ def w1_local_commit_inputs(graph):
 
 def w1_graph_readiness(graph):
     """Project persisted producer contracts without making a mutation or a call."""
-    from solar_design_graph import validate_graph
+    from solar_design_graph import GraphValidationError, validate_graph
     from solar_sizing_client import require_sizing
     from solar_equipment import equipment_ready
     from solar_solve_results import coverage, upstream_basis
@@ -341,10 +351,17 @@ def w1_graph_readiness(graph):
     mark(["solar-assign-equipment"], strings_valid, "valid_strings_required")
     assigned = strings_valid and equipment_ready(graph)
     mark(["solar-homeruns"], assigned, "equipment_assignment_required")
-    routed = False
+    expected = None
     if assigned:
         try:
             expected = local_routes(graph)
+        except GraphValidationError as error:
+            mark(["solar-homeruns"], False, error.code.lower())
+        except (KeyError, TypeError, ValueError):
+            mark(["solar-homeruns"], False, "routing_topology_required")
+    routed = False
+    if expected is not None:
+        try:
             actual = {(r["from_ref"], r["route_kind"]): r for r in graph["routes"]}
             routed = len(actual) == len(expected) == len(graph["routes"])
             for route in expected:

@@ -1,5 +1,6 @@
 """Assess actual changes, preserve deleted obligations, and emit stable receipts."""
 
+from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
 import platform
@@ -160,6 +161,37 @@ def apply_evidence(rows, manifests, workdir, head):
             row["reason"] = detail[:900]
 
 
+DISPOSED_FIELDS = ("outcome", "evidence", "reason", "task")
+
+
+def _key(item):
+    return json.dumps(item, sort_keys=True)
+
+
+def merge_concurrent(data, loaded, path):
+    # Runs under the disposition lock, after every git and evidence step. A
+    # disposition that landed while check computed wins on each row check left
+    # as it found it; superseded_by and the disposition log are never check's to
+    # write, so the on-disk copy always carries them. Fails closed on identity.
+    if not Path(path).exists():
+        return
+    disk = record.load_record(path)
+    if any(disk[key] != data[key] for key in ("change_id", "repository", "project_id")):
+        raise ManifestError("record identity changed during check")
+    before = {row["id"]: row for row in loaded["rows"]} if loaded is not None else {}
+    current = {row["id"]: row for row in disk["rows"]}
+    for row in data["rows"]:
+        theirs = current.get(row["id"])
+        if theirs is None:
+            continue
+        row["superseded_by"] = theirs["superseded_by"]
+        mine = before.get(row["id"])
+        if mine is not None and all(row[key] == mine[key] for key in DISPOSED_FIELDS):
+            row.update({key: theirs[key] for key in DISPOSED_FIELDS})
+    seen = {_key(item) for item in disk["dispositions"]}
+    data["dispositions"] = disk["dispositions"] + [item for item in data["dispositions"] if _key(item) not in seen]
+
+
 def run(args, version):
     current = plan.enabled_manifest(args.workdir)
     if current is None:
@@ -204,12 +236,21 @@ def run(args, version):
             raise ManifestError("record identity does not match change/repository/project")
     else:
         data = record.new_record(args.change_id, manifest, digest, version)
+    loaded = deepcopy(data) if Path(args.record).exists() else None
     reconcile(data, expected)
     data["carried"] = plan.carried_rows(data["repository"], args.change_id)
     receipt_head = f"worktree:{head}" if worktree else head
     apply_evidence(data["rows"], [manifest, previous], args.workdir, receipt_head)
     data.update(base=base, head="worktree" if worktree else head, touched=touched,
                 manifest_digest=digest, checker_version=version)
+    if Path(args.record).resolve() in (Path(args.receipt).resolve(), Path(str(args.receipt) + ".meta.json").resolve()):
+        raise ManifestError("record and receipt paths must differ")
+    record.validate_record(data)
+    # The window holds one read, one merge and one write; the receipt is built
+    # from the merged rows so it agrees with the record it sits beside.
+    with record._disposition_lock():
+        merge_concurrent(data, loaded, args.record)
+        record.save_record(args.record, data)
     required = [row for row in data["rows"] if row["required"]]
     unresolved = sum(row["outcome"] == "unresolved" for row in required)
     summary = {"required": len(required), "complete": len(required) - unresolved,
@@ -224,10 +265,6 @@ def run(args, version):
               for row in data["rows"]], summary=summary, verdict=verdict,
         transaction={"kind": args.transaction, "target": args.target} if args.transaction else None,
     )
-    record.validate_record(data)
-    if Path(args.record).resolve() in (Path(args.receipt).resolve(), Path(str(args.receipt) + ".meta.json").resolve()):
-        raise ManifestError("record and receipt paths must differ")
-    record.save_record(args.record, data)
     record.write_receipt(args.receipt, receipt)
     if args.json:
         print(json.dumps(asdict(receipt), sort_keys=True, ensure_ascii=True))

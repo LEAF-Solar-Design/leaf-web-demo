@@ -2,13 +2,13 @@
  "schema_version": 1,
  "source_repo": "Evan-Haug/claude-config",
  "source_path": "scripts/impact",
- "source_revision": "efd740117dc7c4a181ab204ffaacfeafb93c1879",
- "vendored_on": "2026-09-22",
+ "source_revision": "6c47300586224a266ab63e41d39eca4a4ad00dde",
+ "vendored_on": "2026-09-27",
  "entries": [
   {
    "path": "README.md",
-   "sha256": "6ddba68d4320a0bfdc2e7fbca658add23e9571ecb9048dd817485f979183666b",
-   "bytes": 10969
+   "sha256": "b00d35090f86e02a18759bea62a7698e481c5ed08572ef908c65b5e77a38443a",
+   "bytes": 12569
   },
   {
    "path": "__init__.py",
@@ -17,8 +17,8 @@
   },
   {
    "path": "check.py",
-   "sha256": "22e177be3a7bb9560119e03396150ae29feb2b8229e3bd351df6e0edda77f840",
-   "bytes": 11170
+   "sha256": "dfda283ae2272643ed1639d84f0cff7191b252e91102a4469633941b90c186b8",
+   "bytes": 12912
   },
   {
    "path": "extractors.py",
@@ -42,8 +42,8 @@
   },
   {
    "path": "manifest.py",
-   "sha256": "d269ac79403a5884d854bf90ae015348ee206d1175fc1d8f7f1b1c53d1cfeca2",
-   "bytes": 12919
+   "sha256": "26e241a2d8b86754198b8a89e5820822dd46e810a4f55d513463332a94403ffa",
+   "bytes": 13706
   },
   {
    "path": "plan.py",
@@ -52,8 +52,8 @@
   },
   {
    "path": "record.py",
-   "sha256": "cc344ba33715704f07e98728f8323c01583137da977f60ec6335bc0eb660c766",
-   "bytes": 10946
+   "sha256": "9d5526379bfd5dec178cf88ba890c0284f2c87a58a81ac3c4d3aa764c65d52d4",
+   "bytes": 13902
   },
   {
    "path": "rules.py",
