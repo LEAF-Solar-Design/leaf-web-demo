@@ -9,6 +9,7 @@ import {
 import { track } from '../../telemetry.js'
 import { isSecretRefused } from '../../lib/secretGuardTransport.js'
 import { solarView } from '../../solar/solarView.js'
+import { canInitializeSolarSettings } from '../../solar/solarSettingsWire.js'
 
 const DEFAULT_THRESHOLDS = { CHIP_ONLY: 0.8, RACE_MIN: 0.55 }
 const AVAILABILITY_KEYS = ['entitled', 'engine_ready', 'input_ready', 'implemented']
@@ -106,7 +107,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     return snapshot
   }
 
-  const solarRefusal = (name) => {
+  const solarRefusal = (name, params) => {
     const entry = (state.catalog.families || [])
       .flatMap((family) => family.capabilities || []).find((tool) => tool.name === name)
     let required
@@ -123,6 +124,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     if (!availability) return 'capability_availability_unavailable'
     if (!entitlementAllows(current.entitlements, required)) return 'entitlement_required'
     if (AVAILABILITY_KEYS.every((key) => availability[key] === true)) return null
+    if (current.solarSettingsFormEnabled === true && canInitializeSolarSettings(name, availability, params)) return null
     const reasons = availability.refusal_reasons
     return Array.isArray(reasons) && reasons.length
       ? reasons.join('; ') : 'capability_not_ready'
@@ -141,7 +143,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
   }
 
   const commitDecision = (decision, { routeOutcome = 'invalidated', requestText = null } = {}) => {
-    const reason = decision?.lane === 'run' && solarRefusal(decision.tool)
+    const reason = decision?.lane === 'run' && solarRefusal(decision.tool, decision.params)
     if (reason) {
       adapters.dismissDecision?.()
       publish({ route: null, routeError: reason })
@@ -306,7 +308,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
       // A solve bound to a solver is a confirmable run of that tool (routedLane 'solve').
       const routed = await services.routePrompt(current.mock, text, state.tools, { allowSecretOnce })
       const decision = solveRunDecision(routed)
-      if (decision.lane === 'run' && solarRefusal(decision.tool)) {
+      if (decision.lane === 'run' && solarRefusal(decision.tool, decision.params)) {
         return commitDecision(decision, { requestText: text })
       }
       const confidence = Number(decision.confidence) || 0

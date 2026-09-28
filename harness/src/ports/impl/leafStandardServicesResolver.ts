@@ -16,6 +16,8 @@ import type {
   StandardServicesSessionAttachment,
   TenantBrokerApprovalStore,
   TenantBrokerAuthorization,
+  TenantBrokerCompletionReceipt,
+  TenantBrokerPendingApprovalBinding,
   TrustedStandardServicesContext,
 } from "../../vendor/mushy-author/index.js";
 import { TenantBrokerStandardServiceProvider } from "../../vendor/mushy-author/index.js";
@@ -416,6 +418,7 @@ export interface HumanApprovalReceipt {
 }
 
 interface HumanApprovalProvider {
+  replayConfirm(identity: StandardServiceIdentity, binding: TenantBrokerPendingApprovalBinding): Promise<TenantBrokerCompletionReceipt>;
   recordHumanAuthenticatedApproval(
     identity: StandardServiceIdentity,
     approvalId: string,
@@ -529,15 +532,17 @@ export class LeafStandardServicesHumanApprovalHost {
     if (reviewed.state === "completed") {
       return safeHumanApprovalReceipt(approvalId, input.argument_digest, reviewed.receipt);
     }
-    if (reviewed.state === "executing" || reviewed.state === "uncertain") {
+    if (reviewed.state === "executing") {
       return { status: "uncertain" };
     }
     const credentialExpiry = canonicalExpiryMillis(input.attachment.expires_at);
-    if (typeof input.human_bearer !== "string" || !TOKEN.test(input.human_bearer)
-      || typeof input.attachment.bearer_token !== "string" || !TOKEN.test(input.attachment.bearer_token)
-      || typeof input.attachment.channel_secret !== "string" || !TOKEN.test(input.attachment.channel_secret)
-      || credentialExpiry === null
-      || credentialExpiry <= this.now()) {
+    const credentialsValid = typeof input.human_bearer === "string" && TOKEN.test(input.human_bearer)
+      && typeof input.attachment.bearer_token === "string" && TOKEN.test(input.attachment.bearer_token)
+      && typeof input.attachment.channel_secret === "string" && TOKEN.test(input.attachment.channel_secret)
+      && credentialExpiry !== null
+      && credentialExpiry > this.now();
+    if (!credentialsValid) {
+      if (reviewed.state === "uncertain") return { status: "uncertain" };
       throw new Error("standard_services_human_approval_credential_invalid");
     }
     const providerOptions: ConstructorParameters<typeof TenantBrokerStandardServiceProvider>[0] = {
@@ -559,6 +564,32 @@ export class LeafStandardServicesHumanApprovalHost {
     const provider = this.options.providerFactory
       ? this.options.providerFactory(providerOptions)
       : new TenantBrokerStandardServiceProvider(providerOptions);
+    if (reviewed.state === "uncertain") {
+      try {
+        const replayed = await provider.replayConfirm(identity, structuredClone(reviewed.binding));
+        const receipt = safeHumanApprovalReceipt(approvalId, input.argument_digest, replayed);
+        const reconciled = await this.options.approvalStore.reconcile({
+          approval_id: approvalId,
+          identity,
+          argument_digest: input.argument_digest,
+          receipt: replayed,
+        });
+        if (reconciled) return receipt;
+        const latest = await this.options.approvalStore.review({
+          approval_id: approvalId,
+          argument_digest: input.argument_digest,
+          tenant_id: identity.tenant_id,
+          subject_id: identity.subject_id,
+          now_ms: this.now(),
+        });
+        if (latest?.state === "completed") {
+          return safeHumanApprovalReceipt(approvalId, input.argument_digest, latest.receipt);
+        }
+      } catch {
+        return { status: "uncertain" };
+      }
+      return { status: "uncertain" };
+    }
     if (reviewed.state === "pending") {
       const approvalUrl = new URL(
         `/mcp/approvals/${encodeURIComponent(approvalId)}`,

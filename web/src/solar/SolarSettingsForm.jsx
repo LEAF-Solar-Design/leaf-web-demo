@@ -4,7 +4,7 @@ import {
   parseField, deriveFormState, buildSettingsParams,
 } from './solarSettingsModel.js';
 
-export default function SolarSettingsForm({ context, readIntake, readVersions, checkoutHeld, busy, onSubmit, onClose }) {
+export default function SolarSettingsForm({ context, readIntake, readVersions, checkoutHeld, busy, onSubmit, onClose, runMessage }) {
   return (
     <SettingsForContext
       key={JSON.stringify([context?.drawingId, context?.drawingVersion])}
@@ -15,11 +15,12 @@ export default function SolarSettingsForm({ context, readIntake, readVersions, c
       busy={busy}
       onSubmit={onSubmit}
       onClose={onClose}
+      runMessage={runMessage}
     />
   );
 }
 
-function SettingsForContext({ context, readIntake, readVersions, checkoutHeld, busy, onSubmit, onClose }) {
+function SettingsForContext({ context, readIntake, readVersions, checkoutHeld, busy, onSubmit, onClose, runMessage }) {
   const [views, setViews] = useState(null);
   const [drafts, setDrafts] = useState({});
   const [units, setUnits] = useState({ drawing_units: '', elevation_datum: 'unknown', crs: '' });
@@ -58,6 +59,9 @@ function SettingsForContext({ context, readIntake, readVersions, checkoutHeld, b
       {state === null && <p role="status" data-testid="solar-settings-status">Reading the drawing.</p>}
       {state?.mode === 'edit' && <p>Graph revision {state.rev}</p>}
       {reason && <p role="status" data-testid="solar-settings-reason">{SOLAR_SETTINGS_REASONS[reason]}</p>}
+      {runMessage && typeof runMessage === 'object' && typeof runMessage.text === 'string' && runMessage.text.length > 0 && (
+        <p className="solar-settings-run" role="status" data-testid="solar-settings-run">{runMessage.text}{runMessage.code ? ` (${runMessage.code})` : ''}</p>
+      )}
       {editable && (
         <form className="params" onSubmit={submit} noValidate>
           {SETTINGS_FIELDS.map(({ key, label, kind }) => {

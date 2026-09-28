@@ -11,6 +11,7 @@
 // see the same shape the old synchronous /api/run used to return.
 
 import { createRunSubmissionRequest } from './runIntent.js'
+import { isSolarReasonCode } from './solar/solarSettingsWire.js'
 import { runMock } from './mock/mockEngine.js'
 import { authorMock } from './mock/mockAuthor.js'
 import { matchPrompt, MIN_RUN_MATCH_CONF } from './mock/mockNlPrompt.js'
@@ -359,14 +360,17 @@ const normalizeFamilies = (families) =>
     capabilities: (f.capabilities || []).map(normalizeCap),
   }))
 
-export async function getCapabilities(mock) {
+export async function getCapabilities(mock, context) {
   if (mock) {
     await nap(150)
     const tools = listMockCatalogTools()
     return { families: normalizeFamilies(groupToolsByFamily(tools)), source: 'mock' }
   }
   try {
-    const data = await http('/api/capabilities', undefined, STARTUP_FETCH_TIMEOUT_MS)
+    const path = typeof context?.drawing_id === 'string' && context.drawing_id.length > 0
+      ? `/api/capabilities?drawing_id=${encodeURIComponent(context.drawing_id)}&drawing_version=${encodeURIComponent(context.drawing_version ?? 'head')}`
+      : '/api/capabilities'
+    const data = await http(path, undefined, STARTUP_FETCH_TIMEOUT_MS)
     return { families: normalizeFamilies(data.families || []), source: 'endpoint' }
   } catch (error) {
     if (error?.status !== 404) throw error
@@ -1036,7 +1040,8 @@ export async function runToolAsync(tool, params, dwg = 'rooftop_demo', opts = {}
     }
     if (body && body.error) {
       return { ok: false, tool: toolName, version: null, result: null, overlay: null,
-        timing_ms: 0, cost: null, error: body.error, degraded_mode: false }
+        timing_ms: 0, cost: null, error: body.error, degraded_mode: false,
+        ...(toolName === 'solar-settings' && isSolarReasonCode(body.reason_code) ? { reason_code: body.reason_code } : {}) }
     }
     throw new Error(`POST /api/run -> ${res.status}`)
   }

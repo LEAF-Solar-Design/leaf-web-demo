@@ -65,7 +65,8 @@ export const SOLAR_REFUSAL_REASONS = Object.freeze({
   unlisted: 'The server refused this solar tool',
 })
 
-export function solarRailReason(availability) {
+export function solarRailReason(availability, options) {
+  if (options?.openTypedForm === true) return ''
   if (!availability || typeof availability !== 'object' || Array.isArray(availability)) {
     return SOLAR_REFUSAL_REASONS.capability_availability_unavailable
   }
@@ -258,7 +259,7 @@ export function profileEntryTab(previousProfile, profile, selected, home) {
   return profile === 'solar' && previousProfile !== profile ? home : selected
 }
 
-function solarRailTools(rows, gate, { openName, onOpenForm }, onRun) {
+function solarRailTools(rows, gate, { openName, onOpenForm }, onRun, solarTypedForm) {
   const { running, previewing, writeLocked, writeEntitled, writeLockNote, engineDirty } = gate
   return rows.map((row) => ({ row, result: solarView(row) }))
     .filter(({ result }) => result.state !== 'absent')
@@ -271,6 +272,8 @@ function solarRailTools(rows, gate, { openName, onOpenForm }, onRun) {
       const entBlocked = isWrite && !writeEntitled
       const dirtyBlocked = isWrite && !!engineDirty
       const mcpSource = toolMcpSource(row)
+      const formMode = result.view?.interaction.mode === 'form'
+      const openTyped = formMode && typeof solarTypedForm === 'function' && solarTypedForm(row.name, row.availability) === true
       const reason = mcpSource
         ? REASONS.mcpToolNotWired
         : running
@@ -285,8 +288,7 @@ function solarRailTools(rows, gate, { openName, onOpenForm }, onRun) {
                   ? REASONS.unsavedEngineEdits
                   : result.state === 'invalid'
                     ? SOLAR_REFUSAL_REASONS.capability_availability_unavailable
-                    : solarRailReason(row.availability)
-      const formMode = result.view?.interaction.mode === 'form'
+                    : solarRailReason(row.availability, { openTypedForm: openTyped })
       return {
         id: row.name,
         label: row.name,
@@ -354,7 +356,7 @@ export function profileRibbonTabs(profile, ctx = {}) {
         const source = railFamilies.find((item) => item.family_id === id) || family
         if (!source?.capabilities.length) return null
         return [
-          ...solarRailTools(source.capabilities, gate, solarRail, onRun),
+          ...solarRailTools(source.capabilities, gate, solarRail, onRun, context.solarTypedForm),
           ...familyCluster(source, source.capabilities.filter((row) => solarView(row).state === 'absent'), gate, null).tools,
         ]
       }
@@ -395,7 +397,7 @@ export function profileRibbonTabs(profile, ctx = {}) {
       ...(solarRail ? railFamilies
         .filter((family) => !['stringing', 'placement', 'measurement', 'selection'].includes(family.family_id))
         .map((family) => profileGroup(`solar-rail:${family.family_id}`, family.label,
-          solarRailTools(family.capabilities, gate, solarRail, onRun)))
+          solarRailTools(family.capabilities, gate, solarRail, onRun, context.solarTypedForm)))
         .filter((cluster) => cluster.tools.length > 0) : []),
     ] })
     return tabs

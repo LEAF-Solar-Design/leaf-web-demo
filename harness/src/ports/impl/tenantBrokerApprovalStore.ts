@@ -136,6 +136,12 @@ export type LeafTenantBrokerApprovalReview =
   | { state: "completed"; binding: TenantBrokerPendingApprovalBinding; receipt: TenantBrokerCompletionReceipt };
 
 export interface LeafTenantBrokerApprovalStore extends TenantBrokerApprovalStore {
+  reconcile(input: {
+    approval_id: string;
+    identity: StandardServiceIdentity;
+    argument_digest: string;
+    receipt: TenantBrokerCompletionReceipt;
+  }): Promise<boolean>;
   review(input: {
     approval_id: string;
     argument_digest: string;
@@ -424,6 +430,20 @@ export class PgTenantBrokerApprovalStore implements LeafTenantBrokerApprovalStor
     return result.rowCount === 1;
   }
 
+  async reconcile(input: Parameters<LeafTenantBrokerApprovalStore["reconcile"]>[0]): Promise<boolean> {
+    if (!APPROVAL_ID.test(input.approval_id) || !validIdentity(input.identity)
+      || !DIGEST.test(input.argument_digest) || !validReceipt(input.receipt)) return false;
+    const result = await this.pool.query(
+      `UPDATE harness_tenant_mcp_approvals
+       SET execution_state='completed', result=$9::jsonb, completed_at=clock_timestamp(), uncertain_at=NULL
+       WHERE approval_id=$1 AND tenant_id=$2 AND subject_id=$3 AND session_id=$4
+         AND authority_turn_id=$5 AND subscription_mount_id=$6 AND runner_profile_id=$7
+         AND argument_digest=$8 AND execution_state='uncertain'`,
+      [input.approval_id, ...identityValues(input.identity), input.argument_digest, JSON.stringify(input.receipt)],
+    );
+    return result.rowCount === 1;
+  }
+
   async markUncertain(input: Parameters<TenantBrokerApprovalStore["markUncertain"]>[0]): Promise<boolean> {
     if (!APPROVAL_ID.test(input.approval_id) || !validIdentity(input.identity)
       || !EXECUTION_CLAIM_ID.test(input.execution_claim_id) || !Number.isFinite(input.failed_at_ms)) return false;
@@ -628,6 +648,22 @@ export class FileTenantBrokerApprovalStore implements LeafTenantBrokerApprovalSt
       record.state = "completed";
       record.receipt = structuredClone(input.receipt);
       record.completed_at = new Date(completedAtMs).toISOString();
+      await this.write(input.approval_id, record);
+      return true;
+    });
+  }
+
+  reconcile(input: Parameters<LeafTenantBrokerApprovalStore["reconcile"]>[0]): Promise<boolean> {
+    if (!APPROVAL_ID.test(input.approval_id) || !validIdentity(input.identity)
+      || !DIGEST.test(input.argument_digest) || !validReceipt(input.receipt)) return Promise.resolve(false);
+    return this.locked(input.approval_id, async () => {
+      const record = await this.read(input.approval_id);
+      if (!record || record.state !== "uncertain" || !sameIdentity(record.binding.identity, input.identity)
+        || record.binding.argument_digest !== input.argument_digest) return false;
+      record.state = "completed";
+      record.receipt = structuredClone(input.receipt);
+      record.completed_at = new Date(this.now()).toISOString();
+      delete record.uncertain_at;
       await this.write(input.approval_id, record);
       return true;
     });

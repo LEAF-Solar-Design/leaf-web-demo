@@ -534,6 +534,19 @@ function snapshotCompletedResult(value: unknown): TenantBrokerCompletionReceipt 
   });
 }
 
+function brokerCompletionReceipt(value: Record<string, unknown>, ids: string[] | undefined): TenantBrokerCompletionReceipt {
+  return snapshotCompletedResult({
+    content: JSON.stringify(value.result ?? null),
+    ...(ids ? { artifact_ids: ids } : {}),
+    ...(value.result
+      && typeof value.result === "object"
+      && !Array.isArray(value.result)
+      && typeof (value.result as Record<string, unknown>).receipt_id === "string"
+      ? { receipt_id: (value.result as Record<string, unknown>).receipt_id }
+      : {}),
+  });
+}
+
 /** Production adapter for the public tenant broker's six facade tools. */
 export class TenantBrokerStandardServiceProvider implements StandardServiceProvider {
   private readonly endpoint: string;
@@ -587,9 +600,10 @@ export class TenantBrokerStandardServiceProvider implements StandardServiceProvi
       client.callTool("services_catalog", {}));
     const value = requireCompleted(parseToolResult(response));
     if (!Array.isArray(value.tools)) throw new Error("standard_service_broker_catalog_invalid");
-    // This adapter has no broker receipt lookup yet. A crash after a remote
-    // effect can only become uncertain, so do not advertise mutation or
-    // operator effects until reconciliation can resolve that state.
+    // replayConfirm reads the journaled broker receipt for a repeated services_confirm, but
+    // the app gateway does not yet send an uncertain human retry to the host,
+    // so an uncertain mutation still cannot be resolved end to end.
+    // Do not advertise mutation or operator effects until it can.
     const tools = value.tools
       .map(catalogTool)
       .filter((tool) => tool.effect !== "mutate-tenant" && tool.effect !== "operator-privileged");
@@ -803,6 +817,33 @@ export class TenantBrokerStandardServiceProvider implements StandardServiceProvi
       }
       throw brokerApprovalError("uncertain");
     }
+  }
+
+  /**
+   * Replay the broker's journaled confirm for a bound uncertain human approval.
+   * Accept only a completed receipt; never read or mutate the local approval store.
+   * If the first confirm never arrived, the broker may execute it once while valid.
+   */
+  async replayConfirm(
+    identity: StandardServiceIdentity,
+    binding: TenantBrokerPendingApprovalBinding,
+  ): Promise<TenantBrokerCompletionReceipt> {
+    requireTurnIdentity(identity);
+    if (
+      !APPROVAL_ID.test(binding.approval_id)
+      || !sameIdentity(identity, binding.identity)
+      || !ARGUMENT_DIGEST.test(binding.argument_digest)
+      || tenantBrokerApprovalDigest(binding.identity, binding.call) !== binding.argument_digest
+    ) {
+      throw brokerApprovalError("binding_invalid");
+    }
+    if (binding.call.service_id === "visual" && binding.call.tool_id === "inspect-issued-target") {
+      throw brokerApprovalError("uncertain");
+    }
+    const value = parseToolResult(await this.withClient(identity, (client) =>
+      client.callTool("services_confirm", { approval_id: binding.approval_id })));
+    if (value.status !== "completed") throw brokerApprovalError("uncertain");
+    return brokerCompletionReceipt(value, artifactIds(value.result));
   }
 
   async visualInspect(
