@@ -30,6 +30,8 @@ from .mutation_fence import drawing_mutation_refusal_guard, fence_refusal_messag
 from .offboard import OrgNotFound, PurgeHook, offboard_org
 
 router = APIRouter(prefix="/api", tags=["platform"])
+from .binding_grant_issuance import router as binding_grant_router
+router.include_router(binding_grant_router)
 LOGGER = logging.getLogger(__name__)
 
 

@@ -105,7 +105,9 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
     # the previous note left open). Mirrors the floor in run-all-gates.py; BOTH
     # must move together when a *_static.py file gains a test (#432's 96->102
     # history), and only alongside a re-measured run-all-gates.py floor.
-    assert static.expected == 182
+    # Added test_binding_grant_static.py (6 tests) and
+    # test_binding_grant_issuance_static.py (20 tests) on 2026-09-28: 182 -> 208.
+    assert static.expected == 208
     assert any(
         str(arg).endswith("platform/tests/test_soft_delete_guard_static.py")
         for arg in static.argv

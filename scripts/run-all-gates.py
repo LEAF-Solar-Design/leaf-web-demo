@@ -1755,7 +1755,9 @@ def build_suites() -> List[Suite]:
                  # *_static.py runs nowhere, which is the exact vacuous-green
                  # this list exists to stop.
                  f"{repo_name}/platform/tests/test_soft_delete_guard_static.py",
-                 f"{repo_name}/platform/tests/test_identity_display_name_static.py"], 182,
+                 f"{repo_name}/platform/tests/test_identity_display_name_static.py",
+                 f"{repo_name}/platform/tests/test_binding_grant_static.py",
+                 f"{repo_name}/platform/tests/test_binding_grant_issuance_static.py"], 208,
               allowed_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
         # The committed replay fixture is dependency-free and catches hash or
