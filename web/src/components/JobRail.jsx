@@ -97,11 +97,36 @@ function BuildFeedNotes({ buildFeed }) {
   )
 }
 
+// solar-parity-017: a result that finished after a newer run started is listed
+// here and never loaded into the view (the server already committed it), and a
+// run kept across a sign-in expiry waits behind 'Review and run'. Absent or
+// empty props render nothing.
+function StaleResultNotes({ staleResults, onDismissStale }) {
+  if (!Array.isArray(staleResults) || staleResults.length === 0) return null
+  return staleResults.map((row) => (
+    <div key={row.job_id} className="rail-note rail-stale" role="status" data-stale-job={row.job_id}>
+      <span>{`${row.tool} finished after a newer run started. Its result was not loaded into this view.`}</span>{' '}
+      <button type="button" className="chip-act" onClick={() => onDismissStale?.(row.job_id)}>Dismiss</button>
+    </div>
+  ))
+}
+
+function PendingRunNote({ pendingRun, onResumePendingRun, onDiscardPendingRun }) {
+  if (!pendingRun || typeof pendingRun.tool !== 'string') return null
+  return (
+    <div className="rail-note rail-pending-run" role="status" data-pending-run={pendingRun.tool}>
+      <span>{`Your sign-in expired before ${pendingRun.tool} was submitted. Your inputs were kept.`}</span>{' '}
+      <button type="button" className="chip-act" onClick={() => onResumePendingRun?.()}>Review and run</button>{' '}
+      <button type="button" className="chip-act" onClick={() => onDiscardPendingRun?.()}>Discard</button>
+    </div>
+  )
+}
+
 // W4d Slice D seating: `spine` renders the rail as a 44px strip (the live
 // count and one expand button); `onCollapse` adds the collapse control to the
 // expanded rail's header. Both undefined = the rail exactly as before (rail
 // OFF is byte-identical by construction).
-export default function JobRail({ mock, jobs, currentJob, inflight, reattaching, onSelectJob, builds, buildFeed, spine = false, onExpand, onCollapse }) {
+export default function JobRail({ mock, jobs, currentJob, inflight, reattaching, onSelectJob, builds, buildFeed, spine = false, onExpand, onCollapse, staleResults, onDismissStale, pendingRun, onResumePendingRun, onDiscardPendingRun }) {
   const list = jobs || []
   const knownIds = new Set(list.map((j) => j.job_id))
   const showCurrent = currentJob && (!currentJob.job_id || !knownIds.has(currentJob.job_id))
@@ -217,6 +242,14 @@ export default function JobRail({ mock, jobs, currentJob, inflight, reattaching,
       )}
 
       <BuildFeedNotes buildFeed={buildFeed} />
+
+      <PendingRunNote
+        pendingRun={pendingRun}
+        onResumePendingRun={onResumePendingRun}
+        onDiscardPendingRun={onDiscardPendingRun}
+      />
+
+      <StaleResultNotes staleResults={staleResults} onDismissStale={onDismissStale} />
 
       <div className="rail-ledger">
         {showCurrent && (

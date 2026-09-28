@@ -134,7 +134,9 @@ function useSlot() {
  *   commandBar        render prop (or node): App's PromptBox, ToolCast's
  *                     .tc-bar block, until slice 5 unifies them
  *   jobRail           { mock, jobs, currentJob, inflight, reattaching,
- *                      onSelectJob, builds?, buildFeed? } or null. The stage gates its own
+ *                      onSelectJob, builds?, buildFeed?, staleResults?,
+ *                      onDismissStale?, pendingRun?, onResumePendingRun?,
+ *                      onDiscardPendingRun? } or null. The stage gates its own
  *                      `rightView === 'jobs'` OUTSIDE the frame by passing
  *                      null, so the frame never assumes rightView exists.
  *                      Slice 11a: `builds` is the validated GET /api/builds
@@ -144,6 +146,11 @@ function useSlot() {
  *                      W6-E01: `buildFeed` is { status, dropped, onRetry }
  *                      from useBuildQueue; the rail says when that list is
  *                      stale or paused by sign-in. The badge never reads it.
+ *                      solar-parity-017: `staleResults`, `onDismissStale`,
+ *                      `pendingRun`, `onResumePendingRun` and
+ *                      `onDiscardPendingRun` (optional, from useJobController)
+ *                      list results that finished after a newer run started
+ *                      and the run kept across a sign-in expiry.
  *   toast            { toast, onDone }
  *   conversations     slice 6b. { activeSessionId, onResume, label } or null.
  *                     The CONTRACT decides WHETHER the list mounts
@@ -395,6 +402,11 @@ function JobRail() {
       onSelectJob={rail.onSelectJob}
       builds={rail.builds}
       buildFeed={rail.buildFeed}
+      staleResults={rail.staleResults}
+      onDismissStale={rail.onDismissStale}
+      pendingRun={rail.pendingRun}
+      onResumePendingRun={rail.onResumePendingRun}
+      onDiscardPendingRun={rail.onDiscardPendingRun}
       spine={spined && !!posture.wideViewport && !posture.jobRailExpanded}
       onExpand={spined ? posture.onJobRailExpand : undefined}
       onCollapse={spined && posture.jobRailExpanded ? posture.onJobRailCollapse : undefined}
