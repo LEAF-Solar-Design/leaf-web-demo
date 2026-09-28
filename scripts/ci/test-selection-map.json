@@ -414,6 +414,7 @@
     "server-solar-terrain",
     "server-solar-tool-homeruns",
     "server-solar-tool-select-by-zone",
+    "server-solar-tool-solar-assign-equipment",
     "server-solar-tool-solar-schedule",
     "server-solar-workflow-flow",
     "server-solar-xlsx",
