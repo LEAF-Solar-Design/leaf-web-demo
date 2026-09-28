@@ -299,6 +299,11 @@ def _invoke(runtime, tenant, org, project, campaign, release, params, context, t
                         tenant_id=context['tenant_id'], tool=tool, params=params, dwg='', aps_live=False,
                         org_id=str(org), project_id=str(project), idempotency_key=key,
                         authority_mode='legacy_sqlite', completion_provenance=context)
+                except jobs.TenantInflightCapExceeded as exc:
+                    # Definite refusal before any row (the key's row is checked first, under
+                    # this admission lock). It is the distinct quota state, never 'working':
+                    # it propagates past advance() and the release stage record to the router's 429.
+                    raise admission.QuotaExceeded(exc.limit, exc.in_flight) from None
                 except Exception:
                     prior = admission._lookup(context['tenant_id'], str(project), key)
                     if prior is None:

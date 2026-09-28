@@ -129,6 +129,15 @@ def _failure(status, code, message):
         'error_code': code, 'message': message, 'retryable': status >= 500}})
 
 
+def _quota_failure(exc):
+    # The POST /api/run tenant in-flight refusal, in this router's envelope: retryable,
+    # with quota_kind/limit/used top-level so clients can name the state.
+    return JSONResponse(status_code=429, content={'ok': False, 'error': {
+        'error_code': 'quota_exceeded', 'retryable': True,
+        'message': f'The workspace already has {exc.used} runs queued or running; retry when one finishes.'},
+        'quota_kind': 'tenant_inflight', 'limit': exc.limit, 'used': exc.used})
+
+
 def _text(value, name, maximum):
     if not isinstance(value, str) or not 1 <= len(value) <= maximum or '\x00' in value:
         raise ValueError(f'{name} must contain 1 to {maximum} characters')
@@ -254,6 +263,8 @@ async def enroll(campaign_id: str, request: Request, tenant: Any = Depends(deps.
 def _capability_call(key, function, *args):
     try:
         return {'ok': True, key: function(*args)}
+    except campaign_capability_api.QuotaExceeded as exc:
+        return _quota_failure(exc)
     except campaign_capability_api.CapabilityError as exc:
         return _failure(exc.status, exc.code, 'Campaign capability request failed')
     except Exception:
@@ -506,6 +517,9 @@ def _release_call(key, function, *args, **kwargs):
     import campaign_delivery_service as delivery
     try:
         return {'ok': True, key: function(*args, **kwargs)}
+    except campaign_capability_api.QuotaExceeded as exc:
+        # Raised by the transform acquisition submit; no stage was recorded for it.
+        return _quota_failure(exc)
     except (platform_link.ProjectSessionForbidden, PermissionError):
         return _failure(403, 'forbidden', 'Project access denied')
     except LookupError:

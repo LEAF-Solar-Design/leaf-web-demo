@@ -10,13 +10,17 @@ const executionWords = value => ({ reconcile_required: 'Outcome unknown, reconci
   || String(value || '').replaceAll('_', ' ')
 const nativeRelease = row => row.capability === 'campaign.native-release' || row.capability_link?.capability === 'campaign.native-release'
 
-function Alert({ error, onReload, retry = 'Reload' }) {
+// A run-limit refusal (429 quota_exceeded) is a named state: nothing was sent, the
+// user's input stays in place, and only this explicit Try again sends it again.
+function Alert({ error, onReload, onRetry, retry = 'Reload' }) {
   const ref = useRef(null)
   const refresh = useAction()
   useEffect(() => { if (error) ref.current?.focus() }, [error])
   if (!error) return null
-  return <div className="campaign-error" role="alert" tabIndex={-1} ref={ref}>
+  const quota = !!error.quota
+  return <div className="campaign-error" role="alert" tabIndex={-1} ref={ref} data-state={quota ? 'quota' : undefined}>
     <p>{messageOf(error)}</p>
+    {quota && onRetry && <button type="button" className="chip-act" onClick={() => onRetry()}>Try again</button>}
     {onReload && <button type="button" className="chip-act" disabled={refresh.busy} aria-busy={refresh.busy} onClick={() => refresh.run(onReload, 'Campaigns reloaded.')}>{retry}</button>}
     {refresh.outcome && <span role="status">{refresh.outcome}</span>}
   </div>
@@ -28,10 +32,12 @@ function useAction() {
   const [busy, setBusy] = useState(false)
   const active = useRef(false)
   const lock = useRef(false)
+  const last = useRef(null)
   useEffect(() => { active.current = true; return () => { active.current = false } }, [])
   async function run(operation, success) {
     if (lock.current) return
     lock.current = true
+    last.current = { operation, success }
     setBusy(true)
     setError(null)
     setOutcome('')
@@ -45,7 +51,9 @@ function useAction() {
       if (active.current) setBusy(false)
     }
   }
-  return { error, outcome, busy, run }
+  // Explicit retry of the last operation with the input it was given; never automatic.
+  const retry = () => last.current ? run(last.current.operation, last.current.success) : undefined
+  return { error, outcome, busy, run, retry }
 }
 
 function check(value, field, max) {
@@ -129,7 +137,7 @@ function SubmitForm({ campaign, projectId, navigationRef, onBusyChange }) {
     <span className="dim" aria-live="polite">{(mode === 'finish' ? 2000 : 32768) - prompt.length} characters remaining</span>
     {field === 'prompt' && <Alert error={action.error} />}
     <button type="submit" className="btn primary" disabled={busy || (mode === 'finish' && !!input.file && !input.ready)} aria-busy={busy}>{mode === 'finish' ? 'Request release' : 'Submit campaign'}</button>
-    {field !== 'title' && field !== 'prompt' && <Alert error={action.error} onReload={campaign.refetch} />}
+    {field !== 'title' && field !== 'prompt' && <Alert error={action.error} onReload={campaign.refetch} onRetry={action.retry} />}
     <span role="status">{action.outcome}</span>
   </form>
 }
@@ -307,7 +315,7 @@ function CompletionPanel({ campaign, artifactUrlApi }) {
         workflow: campaign.selected.prompt, artifact_refs: [] }), 'Release requested.')}>
       Finish this project
     </button>
-    <Alert error={action.error} onReload={campaign.refetch} />
+    <Alert error={action.error} onReload={campaign.refetch} onRetry={action.retry} />
     <span role="status">{action.outcome}</span>
   </section>
   const contract = release.contract || {}
@@ -391,7 +399,7 @@ function CompletionPanel({ campaign, artifactUrlApi }) {
       {retryable && failed && <button type="button" className="chip-act" disabled={busy}
         onClick={() => action.run(() => campaign.retryReleaseStage(failed.stage), 'Stage retry requested.')}>Retry {stageLabel(failed.stage).toLowerCase()}</button>}
     </div>
-    <Alert error={action.error} onReload={campaign.refetch} />
+    <Alert error={action.error} onReload={campaign.refetch} onRetry={action.retry} />
     <span role="status">{action.outcome}</span>
   </section>
 }
@@ -482,7 +490,7 @@ function CapabilityControls({ campaign, row }) {
     </button>}
     <button type="button" className="chip-act" disabled={busy || campaign.refreshing}
       onClick={() => action.run(campaign.refetch, 'Capability status reloaded.')}>Reload status</button>
-    <Alert error={action.error} />
+    <Alert error={action.error} onRetry={action.retry} />
     <span role="status">{action.outcome}</span>
   </div>
 }

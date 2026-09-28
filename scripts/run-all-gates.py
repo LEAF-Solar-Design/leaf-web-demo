@@ -700,6 +700,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_campaign_capability_job_access.py"), 6),
         Suite("server-campaign-capability-api", "server tests/test_campaign_capability_api.py", "pytest", SERVER,
               _py_pytest("tests/test_campaign_capability_api.py"), 42),
+        Suite("server-campaign-quota-state", "server tests/test_campaign_quota_state.py", "pytest", SERVER,
+              _py_pytest("tests/test_campaign_quota_state.py"), 9),
         Suite("server-build-receipts", "server tests/test_build_receipts.py", "pytest", SERVER,
               _py_pytest("tests/test_build_receipts.py"), 9),
         Suite("server-project-repository-source", "server tests/test_project_repository_source.py", "pytest", SERVER,

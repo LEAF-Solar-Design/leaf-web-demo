@@ -18,6 +18,18 @@ class CapabilityError(Exception):
         super().__init__('Campaign capability request failed')
 
 
+class QuotaExceeded(CapabilityError):
+    """The tenant in-flight cap refused admission before any job row was written.
+
+    Retryable 429 ``quota_exceeded`` (quota_kind ``tenant_inflight``), the same
+    refusal POST /api/run returns. It is a CapabilityError so the admission lock
+    and ``_safe`` pass it through instead of collapsing it to invocation_unknown.
+    """
+    def __init__(self, limit, used):
+        super().__init__(429, 'quota_exceeded')
+        self.limit, self.used = int(limit), int(used)
+
+
 def _safe(fn):
     @wraps(fn)
     def call(*args, **kwargs):
@@ -258,6 +270,10 @@ def invoke(tenant, project_id, campaign_id, enrollment_id, expected_digest, idem
             if durable is None or durable['job_id'] != job_id:
                 raise CapabilityError(503, 'invocation_unknown')
             return _recover(durable, context, expected_digest)
+        except jobs.TenantInflightCapExceeded as exc:
+            # submit_job checks this key's existing row before the cap, and the admission
+            # lock is held, so the refusal is definite: no row exists and none was written.
+            raise QuotaExceeded(exc.limit, exc.in_flight) from None
         except Exception:
             # Once submit was entered, no error can instruct the client to clear its key.
             try:
