@@ -297,7 +297,7 @@ describe("broker receipt reconciliation", () => {
     });
   });
 
-  it("keeps mutate-tenant broker tools out of the tenant catalog until the app routes an uncertain retry", async () => {
+  it("advertises mutate-tenant broker tools and never operator-privileged tools", async () => {
     const { provider, approvalStore } = replayProvider({
       status: "completed",
       tools: [
@@ -309,10 +309,12 @@ describe("broker receipt reconciliation", () => {
     });
     const catalog = await provider.catalog(identity);
     expect(catalog.tools.map((tool) => [tool.service_id, tool.tool_id])).toEqual([
-      ["time", "convert"], ["research", "search-arxiv"],
+      ["time", "convert"], ["research", "search-arxiv"], ["workspace", "change"], ["preview", "create"],
     ]);
-    expect(catalog.tools.map((tool) => tool.effect)).toEqual(["observe-contained", "observe-external"]);
-    expect(catalog.tools.some((tool) => tool.effect === "mutate-tenant")).toBe(false);
+    expect(catalog.tools.map((tool) => tool.effect)).toEqual([
+      "observe-contained", "observe-external", "mutate-tenant", "mutate-tenant",
+    ]);
+    expect(catalog.tools.some((tool) => tool.effect === "operator-privileged")).toBe(false);
     for (const spy of Object.values(approvalStore)) expect(spy).not.toHaveBeenCalled();
   });
 
