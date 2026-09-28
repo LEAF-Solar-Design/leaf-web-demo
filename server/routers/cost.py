@@ -91,7 +91,7 @@ def _period_or_400(period: Optional[str]) -> str:
 def _own_use(period: str, tenant_id: str) -> tuple[Optional[Dict[str, Any]], bool]:
     try:
         return tenant_direct_use(period, tenant_id, agent_rows=load_agent_rows(),
-                                 broker_rows=load_broker_rows()), False
+                                 broker_rows=load_broker_rows(period=period)), False
     except Exception:  # noqa: BLE001 - own use is additive; its failure degrades, never 500s
         return None, True
 

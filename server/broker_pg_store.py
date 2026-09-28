@@ -11,11 +11,13 @@ import math
 import re
 import sys
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 _store: Optional["PostgresBrokerStore"] = None
 JOB_ID_RE = re.compile(r"[A-Za-z0-9._:-]{1,128}")
+MAX_USAGE_ROWS = 200_000
 
 
 def normalize_ledger_job_id(value: Any) -> Optional[str]:
@@ -46,6 +48,28 @@ class PostgresBrokerStore:
 
     def __init__(self, db: Any = None) -> None:
         self._db = db or _load_db()
+
+    def usage_rows_for_period(self, period: str) -> tuple[list[Dict[str, Any]], bool]:
+        """Read one UTC insertion month, capped; True means coverage may be partial.
+
+        The cap is conservative: reaching it reports truncation even if the
+        last returned row happens to be the month's last row.
+        """
+        if not isinstance(period, str) or not re.fullmatch(r"[0-9]{4}-(0[1-9]|1[0-2])", period):
+            raise ValueError("period must be YYYY-MM")
+        year, month = map(int, period.split("-"))
+        start = datetime(year, month, 1, tzinfo=timezone.utc)
+        end = datetime(year + (month == 12), month % 12 + 1, 1, tzinfo=timezone.utc)
+        with self._db.get_pool().connection() as conn:
+            rows = conn.execute(
+                "SELECT tenant_id, tool, engine_seconds, usd_est, status, job_id, "
+                "inserted_at, aps_live, engine_op, aps_endpoint "
+                "FROM broker_usage_ledger "
+                "WHERE inserted_at >= %(start)s AND inserted_at < %(end)s "
+                "ORDER BY inserted_at, event_key LIMIT %(limit)s",
+                {"start": start, "end": end, "limit": MAX_USAGE_ROWS},
+            ).fetchall()
+        return [dict(row) for row in rows], len(rows) >= MAX_USAGE_ROWS
 
     def validate_schema(self) -> None:
         self._db.assert_schema_current()
