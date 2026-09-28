@@ -11,6 +11,7 @@ vi.mock('../api.js', () => ({ getStoredOrgId: vi.fn(), listProjects: vi.fn(), op
 vi.mock('../auth.js', () => ({ isSignedIn: vi.fn(), login: vi.fn() }))
 vi.mock('./hostBridge.js', () => ({ getLeafHostBridge: vi.fn() }))
 
+const FAKE_ACCESS_TOKEN = 'test-bearer'
 const orgId = '11111111-1111-4111-8111-111111111111'
 const projectId = '22222222-2222-4222-8222-222222222222'
 const drawingId = '33333333-3333-4333-8333-333333333333'
@@ -181,14 +182,14 @@ describe('AutoCAD palette scene in Studio', () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
       ok: true, status: 200, json: async () => ({ grant: 'opaque', expiresAt: 'later' }),
     }).mockResolvedValueOnce({ ok: false, status: 429, headers: new Headers({ 'Retry-After': '17' }) })
-    localStorage.setItem('leaf.jwt', 'test-bearer')
+    localStorage.setItem('leaf.jwt', FAKE_ACCESS_TOKEN)
     const controller = new AbortController()
     try {
       const context = { pluginSessionId: 'native-session', documentFingerprint: 'fingerprint' }
       expect(await api.requestBindingGrant(projectId, versionId, context, { signal: controller.signal })).toEqual({ grant: 'opaque', expiresAt: 'later' })
       const [url, options] = fetchMock.mock.calls[0]
       expect(url).toContain(`/api/projects/${projectId}/drawing-versions/${versionId}/binding-grants`)
-      expect(options.headers.Authorization).toBe('Bearer test-bearer')
+      expect(options.headers.Authorization).toBe(`Bearer ${FAKE_ACCESS_TOKEN}`)
       expect(options.signal).toBe(controller.signal)
       expect(JSON.parse(options.body)).toEqual(context)
       expect(options.redirect).toBe('error')
