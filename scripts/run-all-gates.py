@@ -2728,7 +2728,7 @@ def build_suites() -> List[Suite]:
         Suite("server-egress-guard-telemetry", "server tests/test_egress_guard_telemetry.py", "pytest", SERVER,
               _py_pytest("tests/test_egress_guard_telemetry.py"), 9),
         Suite("server-engine-corpus-harness", "server tests/test_engine_corpus_harness.py", "pytest", SERVER,
-              _py_pytest("tests/test_engine_corpus_harness.py"), 10),
+              _py_pytest("tests/test_engine_corpus_harness.py"), 24),
         Suite("server-engine-selector", "server tests/test_engine_selector.py", "pytest", SERVER,
               _py_pytest("tests/test_engine_selector.py"), 4),
         Suite("server-error-guidance-contract", "server tests/test_error_guidance_contract.py", "pytest", SERVER,
