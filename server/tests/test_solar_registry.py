@@ -118,8 +118,8 @@ def _assert_shipped_declarations(registry):
     expected = [
         ("solar-settings", 10, "local-graph-commit", "run_write", True, True,
          "INVALID_SETTINGS_REQUEST", {"kind": "facets", "facets": []}, "server-builtin", "write_seed", []),
-        ("solar-size-strings", 20, None, "run_write", True, False, None,
-         {"kind": "w1-chain"}, "cloud-service", "write_seed", ["string-sizer"]),
+        ("solar-size-strings", 20, "local-graph-commit", "run_write", True, False,
+         "INVALID_SIZING_REQUEST", {"kind": "w1-chain"}, "cloud-service", "write_seed", ["string-sizer"]),
         ("solar-panel-groups", 30, "local-graph-commit", "run_write", True, False,
          "INVALID_GROUP_REQUEST", {"kind": "w1-chain"}, "server-builtin", "write_seed", ["panel-group-create"]),
         ("solar-solve-proposal", 40, "cloud-proposal", "solve", False, False, None,

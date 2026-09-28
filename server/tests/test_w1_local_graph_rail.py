@@ -31,7 +31,7 @@ from test_w1_local_graph_seed import request as seed_params
 
 TENANT = "fixture-tenant"
 UNWIRED = (
-    "solar-size-strings", "solar-commit-solve",
+    "solar-commit-solve",
     "solar-assign-equipment", "solar-homeruns", "solar-schedule",
 )
 
@@ -231,6 +231,37 @@ def test_panel_groups_refuses_until_sizing_is_confirmed(api):
     assert store.load_manifest(api[1], TENANT, "solar")["head"] == 1
 
 
+def test_size_strings_commits_through_the_rail(api, graph, monkeypatch):
+    import solar_sizing_client as sizing_client
+    from leaf_cloud_client import canonical_bytes
+    from leaf_cloud_grants import CloudGrant
+
+    recorded = json.loads((SERVER / "tests" / "fixtures" / "w1_string_length_recorded_response.json")
+                          .read_text(encoding="utf-8"))
+    calls = []
+
+    def post(request, grant):
+        calls.append(request.wire())
+        return canonical_bytes(recorded["response"])
+
+    monkeypatch.setattr(sizing_client, "resolve_grant",
+                        lambda reference, tenant: CloudGrant(tenant, "fixture-token-must-not-persist"))
+    monkeypatch.setattr(sizing_client, "post_string_length", post)
+    params = {"expected_rev": graph["rev"], "mode": "global",
+              "requests": {graph["settings"]["id"]: recorded["request"]},
+              "grant_ref": "fixture-grant", "confirm": True}
+    response = api[0].post("/api/run?wait=1", json=body(api, "solar-size-strings", params))
+    assert response.status_code == 200, response.text
+    env = response.json()
+    assert env["ok"] is True
+    assert jobs.get_job(env["result"]["job_id"])["status"] == "complete"
+    assert env["execution_provenance"]["execution_mode"] == "local_graph_commit"
+    assert store.load_manifest(api[1], TENANT, "solar")["head"] == 2
+    stored = resolve_graph_context(api[1], TENANT, "solar", 2)["graph"]
+    assert stored["settings"]["panels_in_sequence"] == 27
+    assert len(calls) == 1
+
+
 def test_catalog_engine_readiness(api, graph):
     families = catalog.build_catalog(deps.all_tools(TENANT))
     availability.annotate_w1_availability(
@@ -253,9 +284,11 @@ def test_intake_catalog_uses_adapter_format(api, graph):
     assert settings["input_ready"] is True
     assert settings["runnable"] is True
     sizing = states["solar-size-strings"]
-    assert sizing["input_ready"] is False
-    assert sizing["input_reason"] == "persisted_graph_unavailable"
-    assert sizing["refusal_reasons"][0] == "broker_adapter_unavailable"
+    assert sizing["engine_ready"] is True
+    assert sizing["input_ready"] is True
+    assert sizing["input_reason"] is None
+    assert sizing["refusal_reasons"] == []
+    assert sizing["runnable"] is True
 
 
 @pytest.mark.parametrize("name", ["solar-settings", "solar-correct-string"])
@@ -387,8 +420,7 @@ def test_digit_string_version_reads_like_its_integer(api, graph):
     by_text = availability.w1_input_readiness(api[5], "solar", project_id=project, version="1")
     assert by_text == by_int
     assert by_text["solar-settings"]["input_ready"] is True
-    assert by_text["solar-size-strings"] == {
-        "input_ready": False, "input_reason": "persisted_graph_unavailable"}
+    assert by_text["solar-size-strings"] == {"input_ready": True, "input_reason": None}
 
 
 def seed_body(api):

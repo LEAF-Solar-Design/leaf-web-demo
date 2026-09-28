@@ -3,11 +3,11 @@
   "name": "solar-size-strings",
   "builtin": "builtins/solar_size_strings.py",
   "family": "stringing",
-  "adapter": null,
+  "adapter": "local-graph-commit",
   "entitlement": "run_write",
   "requires_persisted_graph": true,
   "seedable": false,
-  "invalid_request_code": null,
+  "invalid_request_code": "INVALID_SIZING_REQUEST",
   "readiness": {
     "kind": "w1-chain"
   },

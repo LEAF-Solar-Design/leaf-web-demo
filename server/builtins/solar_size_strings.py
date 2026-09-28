@@ -5,6 +5,11 @@ recommendation (standard.string_length) and commits only when its cold-Voc guard
 as StringSizerInputForm does; confirm=True is the palette's explicit Confirm step.
 Returns a complete graph candidate for the existing drawing transaction. Neither
 preview, cancellation nor a partial zone response writes durable state here.
+
+The broker's local graph commit rail calls run_bound with the job's tenant and job id.
+It refuses anything but a confirmed or cancelled request before any outbound call, and
+names every CloudError as a GraphValidationError so a refusal never publishes a version.
+run() stays unbound: sizing without a tenant grant is refused.
 """
 import copy
 
@@ -53,6 +58,17 @@ def size_strings(graph, params, *, tenant_id, job_id):
     result = cloud.advance(result, changed, "solar-size-strings")
     cloud.require_sizing(result)
     return {"graph": result, "confirmed": True, "records": copy.deepcopy(records)}
+
+
+def run_bound(graph, params, *, tenant_id, job_id):
+    """Commit a confirmed sizing under the job's tenant; fails closed before any call."""
+    if (type(params) is not dict
+            or (params.get("confirm") is not True and params.get("cancel") is not True)):
+        raise GraphValidationError("INVALID_SIZING_REQUEST")
+    try:
+        return size_strings(graph, params, tenant_id=tenant_id, job_id=job_id)["graph"]
+    except cloud.CloudError as exc:
+        raise GraphValidationError(exc.classification.upper()) from None
 
 
 def run(intake, params):

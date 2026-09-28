@@ -425,6 +425,7 @@
     "server-solar-tool-select-by-zone",
     "server-solar-tool-solar-assign-equipment",
     "server-solar-tool-solar-schedule",
+    "server-solar-tool-solar-size-strings",
     "server-solar-workflow-flow",
     "server-solar-xlsx",
     "server-start-leaf-harness-config",

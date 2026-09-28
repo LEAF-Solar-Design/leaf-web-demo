@@ -273,7 +273,14 @@ def run_local_graph_commit(backend, tenant_id, tool, params, *, drawing_id, sour
         resolved = {name: _TRUSTED_RESOLVERS[name](
             backend, tenant_id, drawing_id, source_version, context["graph_sha256"])
             for name in solar_tools.get(tool)["trusted_inputs"]}
-        after = _load_builtin(tool).run(copy.deepcopy(context["graph"]), builtin_params, **resolved)
+        module = _load_builtin(tool)
+        run_bound = getattr(module, "run_bound", None)
+        if callable(run_bound):
+            # A tenant-bound builtin (an outbound service call) sees the job's identity only.
+            after = run_bound(copy.deepcopy(context["graph"]), copy.deepcopy(builtin_params),
+                              tenant_id=tenant_id, job_id=job_id)
+        else:
+            after = module.run(copy.deepcopy(context["graph"]), builtin_params, **resolved)
         if builtin_params.get("cancel") is True:
             raise GraphValidationError("GRAPH_COMMIT_CANCELLED")
         request_sha256 = request_digest(tool, drawing_id, source_version, builtin_params)
