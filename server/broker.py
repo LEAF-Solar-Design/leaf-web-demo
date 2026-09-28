@@ -1749,8 +1749,12 @@ def _graph_commit_refused(
 ) -> tuple[Dict[str, Any], int]:
     if not isinstance(reason_code, str) or not re.fullmatch(r"[A-Z][A-Z0-9_]{2,63}", reason_code):
         reason_code = "GRAPH_COMMIT_REFUSED"
-    code = (ErrorCode.FORBIDDEN if reason_code in {"CHECKOUT_REQUIRED", "CHECKOUT_DENIED"}
+    code = (ErrorCode.FORBIDDEN if reason_code in {"CHECKOUT_REQUIRED", "CHECKOUT_DENIED",
+                                                   "CLOUD_AUTH_MISSING",
+                                                   "CLOUD_TENANT_UNAUTHORIZED"}
             else ErrorCode.INTERNAL if reason_code == "GRAPH_COMMIT_READBACK_FAILED"
+            else ErrorCode.WORKITEM_FAILED if reason_code in {"CLOUD_UPSTREAM_FAILURE",
+                                                              "CLOUD_RESPONSE_INVALID"}
             else ErrorCode.BAD_PARAMS)
     env = err_envelope(code, reason_code, retryable=False, tool=tool)
     env["error"]["reason_code"] = reason_code

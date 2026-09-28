@@ -323,7 +323,7 @@ def test_empty_correction(graph, tmp_path, monkeypatch):
     assert latest(backend) == 1
 
 
-@pytest.mark.parametrize("tool", ["solar-size-strings", "../solar_settings"])
+@pytest.mark.parametrize("tool", ["solar-solve-proposal", "../solar_settings"])
 def test_unknown_tool(tool):
     with refused("UNKNOWN_LOCAL_GRAPH_TOOL"):
         run(None, tool=tool)
