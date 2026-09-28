@@ -1,0 +1,278 @@
+"""Publish one month of the resource share ledger (TCM-09a).
+
+Transparency of Leaf's real cost only, never billing: nothing here feeds Stripe,
+quotas or caps. build_period joins the collectors' JSON-able usage and cost
+observations (aws_import, vendors, storage, direct_usage.aps_usage_observation)
+by resource_id into (ResourcePeriod, shares) pairs; publish_period appends each
+as a revision (identical content is a no-op, per CostLedgerStore) and freezes the
+month with store.publish.
+
+Beside the store's immutable manifests, publish_period writes two small files:
+  publication-meta/<publication_id>.json  which sources were used and missing (first writer wins)
+  latest/<YYYY-MM>.json                   the newest publication of the month (atomic replace)
+so a reader finds the current publication in O(1) instead of scanning every manifest.
+
+Fails closed: an observation of the wrong kind or period, a float amount or a
+malformed participant key raises ValueError or TypeError, and nothing is written.
+"""
+from __future__ import annotations
+
+import json
+import os
+from decimal import Decimal
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+from .ledger import (
+    ESTIMATED, LEAF, MEASURED, PERIOD_RE, SHARE_ONE, STATUSES, ResourcePeriod, ShareEntry,
+    compute_shares, to_decimal,
+)
+from .store import PUBLICATION_ID_RE, CostLedgerStore, _canon_json, _write_atomic
+
+META_SCHEMA = "leaf.cost-share-publication-meta.v1"
+LATEST_SCHEMA = "leaf.cost-share-latest.v1"
+META_DIR = "publication-meta"
+LATEST_DIR = "latest"
+PUBLICATIONS_DIR = "publications"
+UNMETERED_UNIT = "unmetered"  # a resource with cost but no usage observation
+MAX_OBSERVATIONS = 100_000  # bounds one publish; exceeding it raises, never truncates
+MAX_SCAN_PUBLICATIONS = 5_000  # bounds the fallback manifest scan when no latest pointer exists
+_MAX_META_BYTES = 256 * 1024
+_MAX_SOURCES = 64
+
+# Weakest first: a resource's coverage is the weakest of its cost observations.
+_COVERAGE_RANK = {"unknown": 0, "partial": 1, "complete": 2}
+
+
+def _check_period(period: Any) -> str:
+    if not isinstance(period, str) or not PERIOD_RE.fullmatch(period):
+        raise ValueError(f"period must be YYYY-MM, got {period!r}")
+    return period
+
+
+def _usage_map(usages: Any, resource_id: str) -> Dict[Tuple[str, str], Decimal]:
+    """{"participant|dimension": amount} to {(participant, dimension): Decimal}. Fails closed."""
+    if not isinstance(usages, Mapping):
+        raise TypeError(f"{resource_id} usages must be an object")
+    out: Dict[Tuple[str, str], Decimal] = {}
+    for key, value in usages.items():
+        if not isinstance(key, str) or key.count("|") != 1:
+            raise ValueError(f"{resource_id} usage key must be 'participant|dimension', got {key!r}")
+        participant, dimension = key.split("|")
+        out[(participant, dimension)] = to_decimal(value, f"{resource_id} usage {key}")
+    return out
+
+
+def _pick_usage(candidates: Sequence[Mapping[str, Any]]) -> Optional[Mapping[str, Any]]:
+    """At most one usage observation per resource: MEASURED over ESTIMATED, then the first."""
+    for obs in candidates:
+        if obs.get("status") == MEASURED:
+            return obs
+    return candidates[0] if candidates else None
+
+
+def _validated(observations: Iterable[Any], period: str) -> List[Mapping[str, Any]]:
+    out: List[Mapping[str, Any]] = []
+    for index, obs in enumerate(observations):
+        if index >= MAX_OBSERVATIONS:
+            raise ValueError(f"more than {MAX_OBSERVATIONS} observations in one publish")
+        if not isinstance(obs, Mapping):
+            raise TypeError(f"observation {index} must be an object")
+        kind = obs.get("kind")
+        if kind not in ("usage", "cost"):
+            raise ValueError(f"observation {index} kind must be usage or cost, got {kind!r}")
+        if obs.get("period") != period:
+            raise ValueError(f"observation {index} is for {obs.get('period')!r}, not {period}")
+        if not isinstance(obs.get("resource_id"), str):
+            raise TypeError(f"observation {index} has no resource_id")
+        if kind == "usage" and obs.get("status") not in STATUSES:
+            raise ValueError(f"observation {index} status must be one of {sorted(STATUSES)}")
+        out.append(obs)
+    return out
+
+
+def build_period(period: str, observations: Iterable[Any]) -> List[Tuple[ResourcePeriod, List[ShareEntry]]]:
+    """Join usage to cost by resource_id; one (ResourcePeriod, shares) per resource, sorted by id.
+
+    cost: gross and credits summed over the resource's cost observations, coverage the
+    weakest of them, every source batch listed. usage: one observation (MEASURED first).
+    Cost without usage puts the whole resource on (leaf, unattributed) ESTIMATED; usage
+    without cost is gross 0 with coverage unknown, and still appears.
+    """
+    period = _check_period(period)
+    costs: Dict[str, List[Mapping[str, Any]]] = {}
+    usages: Dict[str, List[Mapping[str, Any]]] = {}
+    for obs in _validated(observations, period):
+        (costs if obs["kind"] == "cost" else usages).setdefault(obs["resource_id"], []).append(obs)
+
+    out: List[Tuple[ResourcePeriod, List[ShareEntry]]] = []
+    for resource_id in sorted(set(costs) | set(usages)):
+        cost_obs = costs.get(resource_id, [])
+        usage = _pick_usage(usages.get(resource_id, []))
+        gross = Decimal(0)
+        credits = Decimal(0)
+        batches: List[str] = []
+        coverage = "unknown"
+        if cost_obs:
+            coverage = "complete"
+            for obs in cost_obs:
+                gross += to_decimal(obs.get("gross_cost_usd"), f"{resource_id} gross_cost_usd")
+                credits += to_decimal(obs.get("credits_usd", "0"), f"{resource_id} credits_usd")
+                obs_coverage = obs.get("coverage")
+                if obs_coverage not in _COVERAGE_RANK:
+                    raise ValueError(f"{resource_id} coverage must be one of {sorted(_COVERAGE_RANK)}")
+                if _COVERAGE_RANK[obs_coverage] < _COVERAGE_RANK[coverage]:
+                    coverage = obs_coverage
+                batch = obs.get("source_batch_id")
+                if isinstance(batch, str) and batch.strip() and batch not in batches:
+                    batches.append(batch)
+        unit = usage.get("unit") if usage is not None else UNMETERED_UNIT
+        resource_period = ResourcePeriod(
+            resource_id=resource_id,
+            period=period,
+            unit=unit if isinstance(unit, str) and unit.strip() else UNMETERED_UNIT,
+            total_usage=usage.get("total_usage") if usage is not None else None,
+            gross_cost_usd=gross,
+            credits_usd=credits,
+            source_batch_ids=tuple(batches),
+            coverage=coverage,
+        )
+        if usage is None:
+            shares = [ShareEntry(LEAF, "unattributed", None, SHARE_ONE, ESTIMATED)]
+        else:
+            shares = compute_shares(resource_period, _usage_map(usage.get("usages") or {}, resource_id),
+                                    usage["status"])
+        out.append((resource_period, shares))
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# publication metadata: which sources went missing, and the month's newest id
+# --------------------------------------------------------------------------- #
+def _root(store: CostLedgerStore) -> Path:
+    return store._require_enabled()
+
+
+def _source_list(values: Iterable[Any], what: str) -> List[str]:
+    out: List[str] = []
+    for value in values:
+        if not isinstance(value, str) or not value.strip() or len(value) > 256:
+            raise ValueError(f"{what} entries must be 1..256 character strings")
+        if value not in out:
+            out.append(value)
+        if len(out) > _MAX_SOURCES:
+            raise ValueError(f"more than {_MAX_SOURCES} {what}")
+    return sorted(out)
+
+
+def publish_period(store: CostLedgerStore, period: str, observations: Iterable[Any], reason: str, *,
+                   sources: Iterable[str] = (), missing_sources: Iterable[str] = ()) -> str:
+    """Append every resource's revision, then publish the month. Returns the publication id.
+
+    Re-publishing identical input appends nothing and returns the same id. The
+    publication's used and missing sources are recorded once (first writer wins),
+    and latest/<period>.json is atomically pointed at the returned id.
+    """
+    period = _check_period(period)
+    used = _source_list(sources, "sources")
+    missing = _source_list(missing_sources, "missing sources")
+    pairs = build_period(period, observations)
+    if not pairs:
+        raise ValueError(f"no observations to publish for {period}")
+    root = _root(store)
+    for resource_period, shares in pairs:
+        store.append_revision(resource_period, shares, reason)
+    publication_id = store.publish(period)
+
+    meta_path = root / META_DIR / f"{publication_id}.json"
+    if not meta_path.exists():
+        _write_atomic(meta_path, _canon_json({
+            "schema": META_SCHEMA,
+            "publication_id": publication_id,
+            "period": period,
+            "sources": used,
+            "missing_sources": missing,
+        }) + b"\n")
+    _write_atomic(root / LATEST_DIR / f"{period}.json", _canon_json({
+        "schema": LATEST_SCHEMA,
+        "period": period,
+        "publication_id": publication_id,
+    }) + b"\n")
+    return publication_id
+
+
+def _read_json(path: Path) -> Optional[dict]:
+    """A small JSON object, or None when absent, oversized or malformed."""
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read(_MAX_META_BYTES + 1)
+    except OSError:
+        return None
+    if len(raw) > _MAX_META_BYTES:
+        return None
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _publication_id_ok(publication_id: Any, period: str) -> bool:
+    if not isinstance(publication_id, str):
+        return False
+    match = PUBLICATION_ID_RE.fullmatch(publication_id)
+    return bool(match) and match.group(1) == period
+
+
+def latest_publication_id(store: CostLedgerStore, period: str) -> Optional[str]:
+    """The newest publication of the month, or None. Disabled store reads as None.
+
+    The latest pointer answers in O(1); a month published without publish_period
+    falls back to one bounded scan of its manifests, newest published_at wins.
+    """
+    period = _check_period(period)
+    if not store.enabled:
+        return None
+    root = _root(store)
+    pointer = _read_json(root / LATEST_DIR / f"{period}.json")
+    if pointer is not None and _publication_id_ok(pointer.get("publication_id"), period):
+        if (root / PUBLICATIONS_DIR / f"{pointer['publication_id']}.json").is_file():
+            return pointer["publication_id"]
+    best: Optional[Tuple[str, int, str]] = None
+    prefix = f"pub-{period}-"
+    try:
+        with os.scandir(root / PUBLICATIONS_DIR) as it:
+            for count, entry in enumerate(it):
+                if count >= MAX_SCAN_PUBLICATIONS:
+                    break
+                stem = entry.name[:-5] if entry.name.endswith(".json") else ""
+                if not stem.startswith(prefix) or not _publication_id_ok(stem, period):
+                    continue
+                manifest = _read_json(Path(entry.path))
+                published_at = manifest.get("published_at") if manifest else None
+                if not isinstance(published_at, str):
+                    continue
+                key = (published_at, entry.stat().st_mtime_ns, stem)
+                if best is None or key > best:
+                    best = key
+    except OSError:
+        return None
+    return best[2] if best else None
+
+
+def publication_info(store: CostLedgerStore, publication_id: str) -> Dict[str, Any]:
+    """published_at from the manifest, and the sources recorded beside it (empty when unrecorded)."""
+    root = _root(store)
+    match = PUBLICATION_ID_RE.fullmatch(publication_id or "")
+    if not match:
+        raise ValueError(f"invalid publication id: {publication_id!r}")
+    manifest = _read_json(root / PUBLICATIONS_DIR / f"{publication_id}.json") or {}
+    meta = _read_json(root / META_DIR / f"{publication_id}.json") or {}
+    published_at = manifest.get("published_at")
+    missing = meta.get("missing_sources") if meta.get("publication_id") == publication_id else None
+    sources = meta.get("sources") if meta.get("publication_id") == publication_id else None
+    return {
+        "published_at": published_at if isinstance(published_at, str) else None,
+        "missing_sources": [s for s in missing if isinstance(s, str)] if isinstance(missing, list) else [],
+        "sources": [s for s in sources if isinstance(s, str)] if isinstance(sources, list) else [],
+    }
