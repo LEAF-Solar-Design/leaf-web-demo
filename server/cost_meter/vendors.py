@@ -1,6 +1,6 @@
 """Vendor, subscription and fleet costs from a declared schedule (TCM-07).
 
-Transparency of Leaf's real cost only, never billing. config/cost-vendors.yaml
+Transparency of Leaf's real cost only, never billing. cost_meter/data/cost-vendors.yaml
 declares Leaf's non-AWS recurring costs, one entry each; vendor_observations turns
 one month of that schedule into plain JSON-able cost and usage observations for
 the publisher. Collectors never write the ledger.
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -22,7 +23,7 @@ from .ledger import (
     ESTIMATED, PERIOD_RE, RESOURCE_ID_RE, SHARE_ONE, SHARE_QUANTUM, to_decimal, validate_participant,
 )
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "cost-vendors.yaml"
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "data" / "cost-vendors.yaml"
 CONFIG_VERSION = 1
 BASES = frozenset({"invoice", "card-charge", "estimate"})
 RESOURCE_PREFIXES = ("vendor:", "subscription:")
@@ -232,7 +233,7 @@ def parse_vendor_config(text: str) -> VendorConfig:
 
 
 def load_vendor_config(path: Optional[Path] = None) -> VendorConfig:
-    path = Path(path) if path is not None else DEFAULT_CONFIG_PATH
+    path = Path(path) if path is not None else Path(os.environ.get("LEAF_COST_VENDORS_CONFIG", DEFAULT_CONFIG_PATH))
     return parse_vendor_config(path.read_text(encoding="utf-8"))
 
 

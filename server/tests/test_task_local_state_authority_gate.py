@@ -346,6 +346,18 @@ class _Unreadable:
 
 
 _UNREADABLE_DEFAULTS: dict[str, _Unreadable] = {
+    "server/cost_meter/vendors.py:LEAF_COST_VENDORS_CONFIG": _Unreadable(
+        source="DEFAULT_CONFIG_PATH",
+        container_default="/app/server/cost_meter/data/cost-vendors.yaml",
+        read_only=True,
+        why="The vendor schedule ships in the image and the collector only reads it.",
+    ),
+    "server/cost_meter/internal.py:LEAF_COST_INTERNAL_CONFIG": _Unreadable(
+        source="DEFAULT_CONFIG_PATH",
+        container_default="/app/server/cost_meter/data/cost-internal-resources.yaml",
+        read_only=True,
+        why="Internal usage declarations ship in the image and the collector only reads them.",
+    ),
     "server/jobs.py:JOB_WORKERS_SLOW": _Unreadable(
         source="str(MAX_WORKERS)",
         container_default="",

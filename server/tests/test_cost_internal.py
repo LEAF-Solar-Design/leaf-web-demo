@@ -1,7 +1,6 @@
 """TCM-10: Leaf-only declarations and their publisher attribution."""
 from __future__ import annotations
 
-import importlib.util
 import json
 import sys
 from datetime import datetime, timezone
@@ -27,14 +26,12 @@ def _config(**changes):
 
 
 def _script():
-    spec = importlib.util.spec_from_file_location(
-        "publish_cost_ledger_internal_test", SERVER_DIR.parent / "scripts" / "publish-cost-ledger.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    from cost_meter import publish_main
+    return publish_main
 
 
 def test_seed_loads_and_emits_the_usage_contract():
+    assert internal.DEFAULT_CONFIG_PATH == SERVER_DIR / "cost_meter" / "data" / "cost-internal-resources.yaml"
     config = internal.load_internal_config()
     assert config.entries[0].basis == (
         "every CodeBuild project in the account is Leaf CI (leaf-ci-*) or a Leaf GitHub Actions runner (leaf-gha-runner-*)")
@@ -45,6 +42,14 @@ def test_seed_loads_and_emits_the_usage_contract():
         "status": "MEASURED", "coverage": "complete", "source": internal.SOURCE,
     }]
     assert json.loads(json.dumps(observations)) == observations
+
+
+def test_internal_config_env_override_and_explicit_path_precedence(tmp_path, monkeypatch):
+    override = tmp_path / "internal.yaml"
+    override.write_text(json.dumps(_config(resource_id="vendor:override")), encoding="utf-8")
+    monkeypatch.setenv("LEAF_COST_INTERNAL_CONFIG", str(override))
+    assert internal.load_internal_config().entries[0].resource_id == "vendor:override"
+    assert internal.load_internal_config(internal.DEFAULT_CONFIG_PATH).entries[0].resource_id == "aws:codebuild"
 
 
 @pytest.mark.parametrize("share", [
