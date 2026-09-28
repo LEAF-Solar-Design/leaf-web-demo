@@ -511,6 +511,7 @@ def build_suites() -> List[Suite]:
         Suite("server-solar-tool-select-by-zone", "server tests/test_solar_tool_select_by_zone.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_select_by_zone.py"), 26),
         Suite("server-solar-tool-nec-ampacity-correction", "server tests/test_solar_tool_nec_ampacity_correction.py", "pytest", SERVER, _py_pytest("tests/test_solar_tool_nec_ampacity_correction.py"), 39),
+        Suite("server-solar-tool-nec-ac-voltage-drop", "server tests/test_solar_tool_nec_ac_voltage_drop.py", "pytest", SERVER, _py_pytest("tests/test_solar_tool_nec_ac_voltage_drop.py"), 34),
         # W5 PVcase solve (2026-09-23, contract G33): server/solar_pvcase_solve.py, the literal port of
         # LEAFPVCASESOLVE (the input builder, PvcaseSolver.Solve with DefaultPanelsPerString and the
         # zero L2 case, the handle map and the matrix write-back). Inputs are authored in the file
