@@ -100,8 +100,12 @@ Introduce `drawing.bind_grant` and advertise `bindingGrantVersion: 1` in unbound
 | Pair | Behavior |
 | --- | --- |
 | Old plugin, new page | Detect absent capability. Disable new binding with an update instruction. Existing bound read/selection behavior stays as supported today. |
-| New plugin, old page | With enforcement on, reject legacy `drawing.bind` with `binding_grant_required`. Show a native instruction to reload/update the page. |
+| New plugin, old page | The old page rejects the whole unbound handshake when it contains `bindingGrantVersion`, because `web/src/leafPlatform/hostBridge.js` `isHandshake` and `isUnbound` require an exact key count. With enforcement on, reject legacy `drawing.bind` with `binding_grant_required`. Show a native instruction to reload/update the page. |
 | New plugin, new page | Issue, verify, confirm, then write using the grant. |
+
+A plugin must not advertise `bindingGrantVersion` until a page that accepts the optional key (absent or integer 1, anything else rejected) is live in production and proven to reload into open palettes; this is a hard release ordering.
+
+Native staging verification runs through the loopback page origin because the plugin host allowlist in Branch2025 `WebBridge/LeafPlatformWebViewHost.cs` admits only the production hosts and loopback, not the staging host name.
 
 Use a native deployment flag `RequireServerBindingGrant`, initially off only for a bounded compatibility pilot. With it off, legacy binding retains its old risk and native prompt; label that mode in release notes. A grant-path failure never triggers automatic legacy retry. The page cannot set this flag. Separately gate server issuance for staged deployment.
 
@@ -114,14 +118,18 @@ Deploy issuer and key first, then capability-aware page and plugin. Turn native 
 - **Per-install device keys:** attest an enrolled installation, not user membership or the selected identity tuple. Enrollment, recovery, and key revocation add work without replacing server authorization.
 - **Use the existing HMAC for grants:** every page key holder could mint them, defeating the intended boundary.
 
-## Open questions
+## Decisions (operator, 2026-09-26)
 
-- Who may bind? Recommend active project owners and editors, including invited editors, using lifecycle membership policy. Read-only access should not authorize a persistent local binding.
-- Is offline first binding required? Recommend no. Existing connections remain usable within their existing controls; new connections require fresh server authorization.
-- Is a two-minute revocation delay acceptable? Recommend yes for this narrow local action with native confirmation. If not, choose native online redemption instead of claiming immediate revocation from a signed token.
-- How should customers recover a mistaken binding? Recommend a separate explicit native repair workflow. Do not weaken first-binding-only behavior in this feature.
-- Who owns signer rotation and minimum plugin version? Recommend the Leaf Automation release owner, with an overlapping-key release procedure before enforcement.
-- Should existing records be marked verified? Recommend no. A future migration must reauthorize them; mere presence of a record proves no grant was checked.
+Operator answers to F1, F2 and F3: "reviews are ack, Yes on F1, yes on F2, yes F3".
+
+- Who may bind? Decided: active project owners and editors, including invited editors, using lifecycle membership policy. Read-only access should not authorize a persistent local binding.
+- Is offline first binding required? Decided: no. Existing connections remain usable within their existing controls; new connections require fresh server authorization.
+- Is a two-minute revocation delay acceptable? Decided: yes for this narrow local action with native confirmation. F1 accepts offline-verifiable grants without native online redemption.
+- How should customers recover a mistaken binding? Decided: a separate explicit native repair workflow, out of scope here. Do not weaken first-binding-only behavior in this feature.
+- Who owns signer rotation and minimum plugin version? Decided: the Leaf Automation release owner, with an overlapping-key release procedure before enforcement.
+- Should existing records be marked verified? Decided: no. A future migration must reauthorize them; mere presence of a record proves no grant was checked.
+
+F2 accepts all six recommendations above as written. F3 accepts legacy binding on old plugins for a bounded, disclosed compatibility pilot, with `RequireServerBindingGrant` off only during the pilot, that mode labelled in release notes, and no automatic legacy fallback after a grant failure; enforcement remains a later decision.
 
 ## Effort
 
