@@ -208,6 +208,7 @@
     "server-checkout-capability",
     "server-checkout-crossproc",
     "server-checkpoints",
+    "server-cost-storage",
     "server-client-exception-vocab-freeze",
     "server-codeql-barrier-literals",
     "server-completion-broker-file-route",
