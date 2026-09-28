@@ -1,0 +1,43 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-panels-from-drawing",
+  "builtin": "builtins/solar_panels_from_drawing.py",
+  "family": "placement",
+  "adapter": "local-graph-commit",
+  "entitlement": "run_write",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_PANEL_IMPORT_REQUEST",
+  "readiness": {"kind": "hook"},
+  "engine": "server-builtin",
+  "interaction": {"mode": "form"},
+  "record_store": "registry",
+  "ledger": [],
+  "trusted_inputs": ["source_intake"],
+  "maturity": "preview",
+  "wave": 1,
+  "order": 15,
+  "scenario": "graph-origin",
+  "record": {
+    "name": "solar-panels-from-drawing",
+    "version": "1.0.0",
+    "description": "Create the drawing's panels from closed rectangular polylines on the panel layer.",
+    "kind": "script",
+    "family_id": "placement",
+    "engine_op": "solar_panels_from_drawing",
+    "entry": "builtins/solar_panels_from_drawing.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {"type": "string", "maxLength": 128},
+        "expected_rev": {"type": "integer", "minimum": 0},
+        "cancel": {"type": "boolean"}
+      },
+      "required": ["expected_rev"],
+      "additionalProperties": false
+    },
+    "returns": {"type": "object"},
+    "capabilities": ["drawing.write"],
+    "allow_local_fallback": false
+  }
+}

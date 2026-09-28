@@ -299,7 +299,8 @@ def test_local_graph_tools_derive_from_declarations():
 def test_read_declaration_rules_are_enforced(package, monkeypatch, field, value, message):
     declaration = solar_tools.get("solar-select-by-zone")
     declaration[field] = value
-    monkeypatch.setattr(solar_tools, "TRUSTED_INPUTS", ("untrusted",))
+    trusted_inputs = solar_tools.TRUSTED_INPUTS + ("untrusted",)
+    monkeypatch.setattr(solar_tools, "TRUSTED_INPUTS", trusted_inputs)
     write_declaration(package, declaration)
     with pytest.raises(solar_tools.SolarRegistryError, match=message):
         load_package(package)
