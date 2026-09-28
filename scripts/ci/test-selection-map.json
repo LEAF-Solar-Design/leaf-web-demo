@@ -170,6 +170,7 @@
     "server-build-queue",
     "server-build-receipts",
     "server-builds-route",
+    "server-cost-pooled",
     "server-cad-fence",
     "server-cad-timing-client-delivery",
     "server-cad-upload-disposition",
