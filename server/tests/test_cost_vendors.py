@@ -1,7 +1,7 @@
 """TCM-07 vendor, subscription and fleet costs from the declared schedule.
 
 Transparency of Leaf's real cost, never billing. Hermetic: reads only the repo's
-config/cost-vendors.yaml and in-memory documents; nothing touches the ledger.
+cost_meter/data/cost-vendors.yaml and in-memory documents; nothing touches the ledger.
 """
 from __future__ import annotations
 
@@ -61,7 +61,7 @@ def _walk(value):
 
 
 def test_seed_file_loads_and_emits_one_cost_and_one_usage_per_entry():
-    assert DEFAULT_CONFIG_PATH == REPO_ROOT / "config" / "cost-vendors.yaml"
+    assert DEFAULT_CONFIG_PATH == SERVER_DIR / "cost_meter" / "data" / "cost-vendors.yaml"
     config = load_vendor_config()
     assert isinstance(config, VendorConfig)
     assert {e.resource_id for e in config.entries} == SEED_IDS
@@ -77,6 +77,14 @@ def test_seed_file_loads_and_emits_one_cost_and_one_usage_per_entry():
     assert costs["vendor:other-bills-unitemized"]["gross_cost_usd"] == "720.00"
     assert usages["subscription:ai-models"]["usages"] == {"leaf|fleet": "1"}
     assert usages["vendor:github"]["usages"] == {"leaf|development": "1"}
+
+
+def test_vendor_config_env_override_and_explicit_path_precedence(tmp_path, monkeypatch):
+    override = tmp_path / "vendors.yaml"
+    override.write_text(json.dumps(_doc(_entry(resource_id="vendor:override"))), encoding="utf-8")
+    monkeypatch.setenv("LEAF_COST_VENDORS_CONFIG", str(override))
+    assert load_vendor_config().entries[0].resource_id == "vendor:override"
+    assert {e.resource_id for e in load_vendor_config(DEFAULT_CONFIG_PATH).entries} == SEED_IDS
 
 
 def test_observation_shapes_follow_the_wave_contract():

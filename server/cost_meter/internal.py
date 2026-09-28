@@ -1,6 +1,7 @@
 """Declared Leaf-only usage, for cost transparency only, never billing."""
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from decimal import Decimal
@@ -9,8 +10,8 @@ from typing import Any, Mapping, Optional, Tuple
 
 from .ledger import ESTIMATED, LEAF, MEASURED, PERIOD_RE, RESOURCE_ID_RE, SHARE_QUANTUM, to_decimal
 
-SOURCE = "config/cost-internal-resources.yaml"
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / SOURCE
+SOURCE = "cost_meter/data/cost-internal-resources.yaml"
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "data" / "cost-internal-resources.yaml"
 _PARTICIPANTS = frozenset(f"{LEAF}|{dimension}" for dimension in ("development", "ci", "fleet"))
 _RESOURCE_RE = re.compile(r"(?:aws|llm|vendor|subscription):[a-z0-9]+(?:-[a-z0-9]+)*|aps:engine")
 _ENTRY_KEYS = frozenset({"resource_id", "share", "basis", "status"})
@@ -112,7 +113,8 @@ def parse_internal_config(text: str) -> InternalConfig:
 
 
 def load_internal_config(path: Optional[Path] = None) -> InternalConfig:
-    return parse_internal_config((Path(path) if path is not None else DEFAULT_CONFIG_PATH).read_text(encoding="utf-8"))
+    path = Path(path) if path is not None else Path(os.environ.get("LEAF_COST_INTERNAL_CONFIG", DEFAULT_CONFIG_PATH))
+    return parse_internal_config(path.read_text(encoding="utf-8"))
 
 
 def internal_usage_observations(period: str, config: Any) -> list:

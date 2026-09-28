@@ -305,6 +305,60 @@ def _broken(period, now):
     raise RuntimeError("no credentials")
 
 
+def test_package_publish_dry_run_defaults_to_utc_month_with_fixture_file(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    from cost_meter import publish_main
+
+    observations = tmp_path / "observations.jsonl"
+    observations.write_text("\n".join(json.dumps(o) for o in _fixture_observations()) + "\n",
+                            encoding="utf-8")
+    out = io.StringIO()
+    calls = []
+    code = publish_main.main(
+        ["--dry-run", "--observations", str(observations)],
+        collectors={"aws-cost-explorer": lambda p, n: calls.append(p)},
+        environ={"LEAF_COST_DISABLE_AWS": "1"}, stdout=out,
+        now=datetime(2026, 10, 1, 1, tzinfo=timezone(timedelta(hours=2))))
+    assert code == 0 and calls == []
+    assert len(out.getvalue().splitlines()) == 1
+    summary = json.loads(out.getvalue())
+    assert summary["period"] == PERIOD
+    assert summary["publication_id"] is None
+    assert summary["missing_sources"] == ["aws-cost-explorer"]
+    assert {r["resource_period"]["resource_id"] for r in summary["resources"]} == {
+        EFS, "aps:engine", "vendor:figma"}
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["observations.jsonl"]
+
+
+def test_python_module_dispatches_publish_without_network(monkeypatch, capsys):
+    import runpy
+    from cost_meter import publish_main
+
+    monkeypatch.setattr(publish_main, "DEFAULT_COLLECTORS",
+                        {"fixture": lambda p, n: _fixture_observations()})
+    monkeypatch.setattr(sys, "argv", ["cost_meter", "publish", "--period", PERIOD, "--dry-run"])
+    with pytest.raises(SystemExit) as result:
+        runpy.run_module("cost_meter", run_name="__main__")
+    assert result.value.code == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["period"] == PERIOD and len(summary["resources"]) == 3
+
+
+def test_package_publish_failure_returns_nonzero(tmp_path, monkeypatch):
+    from cost_meter import publish_main
+
+    def fail(*args, **kwargs):
+        raise OSError("publication unavailable")
+
+    monkeypatch.setattr(publisher, "publish_period", fail)
+    out = io.StringIO()
+    assert publish_main.main(
+        ["--period", PERIOD],
+        collectors={"fixture": lambda p, n: _fixture_observations()},
+        environ={"LEAF_COST_LEDGER_DIR": str(tmp_path / "ledger")}, stdout=out) == 1
+    assert out.getvalue() == ""
+
+
 def test_script_dry_run_merges_observation_files_and_reports_failed_collectors(tmp_path):
     extra = tmp_path / "pooled.jsonl"
     extra.write_text("\n".join(json.dumps(o) for o in [
@@ -334,7 +388,10 @@ def test_script_publishes_and_the_publication_records_missing_sources(tmp_path):
         collectors={"aws-cost-explorer": _broken, "fixture": lambda p, n: _fixture_observations()},
         environ={"LEAF_COST_LEDGER_DIR": str(root)}, stdout=out)
     assert code == 0
-    publication_id = out.getvalue().strip()
+    summary = json.loads(out.getvalue())
+    publication_id = summary["publication_id"]
+    assert summary["period"] == PERIOD and summary["resources"] == 3
+    assert len(out.getvalue().splitlines()) == 1
     store = CostLedgerStore(root)
     assert publisher.latest_publication_id(store, PERIOD) == publication_id
     assert publisher.publication_info(store, publication_id)["missing_sources"] == ["aws-cost-explorer"]
