@@ -657,6 +657,15 @@ export async function getUsage() {
   }
 }
 
+// Monthly transparency, with the same tenant/auth and unavailable semantics as usage.
+export async function getCost(period) {
+  try {
+    return await http(`/api/cost?period=${encodeURIComponent(period)}`, { headers: { 'X-Tenant-Id': TENANT } })
+  } catch {
+    return null
+  }
+}
+
 // --- Entitlements (REAL plan gates) --------------------------------------
 // GET /api/entitlements -> {tier, entitlements:{run_read, run_write, build},
 // source:"policy"} (§10-enveloped: those fields sit at top level alongside
