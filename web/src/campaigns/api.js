@@ -8,7 +8,23 @@ const messages = {
   409: 'That change collided with another update. Reload and try again.',
   400: 'Some of that input was not accepted.',
   422: 'Some of that input was not accepted.',
+  429: 'Too many requests right now. Nothing was sent; try again in a moment.',
   503: 'Campaigns are unavailable right now; retry in a moment.',
+}
+const quotaCount = value => Number.isSafeInteger(value) && value >= 0 ? value : null
+
+// The tenant in-flight cap refused the run before anything was submitted (HTTP 429
+// quota_exceeded). Returns { kind, limit, used } with null for any malformed count.
+export function quotaOf(status, body) {
+  if (status !== 429 || body?.error?.error_code !== 'quota_exceeded') return null
+  return { kind: typeof body.quota_kind === 'string' ? body.quota_kind : null, limit: quotaCount(body.limit), used: quotaCount(body.used) }
+}
+
+export function quotaMessage(quota) {
+  const busy = quota?.used ?? quota?.limit
+  const held = busy == null ? 'the workspace already has its maximum runs queued or running'
+    : `${busy} ${busy === 1 ? 'run is' : 'runs are'} already queued or running`
+  return `Run limit reached: ${held}. This one will not be sent; try again when one finishes.`
 }
 const conflicts = {
   answer_conflict: 'This question already has a different recorded answer. Reload to see it.',
@@ -54,10 +70,11 @@ async function request(path, options = {}, binary = false) {
     const detail = body?.error?.message
     const plain = typeof detail === 'string' && detail.trim() && detail.length <= 240
       && !/\/api\/|->\s*\d{3}\b|[{}<>]/.test(detail)
-    const message = (response.status === 409 && conflicts[code])
+    const quota = quotaOf(response.status, body)
+    const message = (quota && quotaMessage(quota)) || (response.status === 409 && conflicts[code])
       || (plain && detail.trim()) || messages[response.status] || 'That campaign action did not go through.'
     throw Object.assign(new Error(message), {
-      status: response.status, body, code, retryable: body?.error?.retryable === true,
+      status: response.status, body, code, retryable: body?.error?.retryable === true, ...(quota ? { quota } : {}),
     })
   }
   return binary ? response : response.json()

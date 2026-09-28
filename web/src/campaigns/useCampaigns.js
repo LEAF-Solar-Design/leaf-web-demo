@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import * as api from './api.js'
 
-const empty = () => ({ status: 'idle', refreshing: false, error: null, errorAction: null,
+// quota is the named run-limit state: { action, kind, limit, used } after a 429 quota_exceeded refusal.
+const empty = () => ({ status: 'idle', refreshing: false, error: null, errorAction: null, quota: null,
   campaigns: [], selectedId: null, selected: null, questions: [], answers: {}, pending: {},
   execution: null, executionLoading: false, executionError: null, completion: null,
   enrollments: [], allowedMachines: [], enrollmentError: null,
@@ -186,7 +187,7 @@ export default function useCampaigns(projectId, { enabled = true, authorityProvi
     context.enrollments = []
     context.completion = null
     questionKeyRef.current = null
-    update({ selectedId: id, selected: null, questions: [], answers: {}, pending: {}, error: null, errorAction: null,
+    update({ selectedId: id, selected: null, questions: [], answers: {}, pending: {}, error: null, errorAction: null, quota: null,
       enrollments: [], allowedMachines: [], enrollmentError: null,
       capabilities: [], capabilityError: null, submissions: {}, invocationResults: {}, recoveryUnavailable: false,
       execution: null, executionLoading: false, executionError: null, completion: null })
@@ -199,7 +200,7 @@ export default function useCampaigns(projectId, { enabled = true, authorityProvi
     const selectedId = context.selectedId
     const locks = context.locks
     locks[action] = true
-    update({ pending: { ...locks }, error: null, errorAction: null })
+    update({ pending: { ...locks }, error: null, errorAction: null, quota: null })
     try {
       const result = await operation()
       if (!current(view) || context.selectedId !== selectedId) return null
@@ -217,8 +218,10 @@ export default function useCampaigns(projectId, { enabled = true, authorityProvi
       await load({ preferredId: preferredId?.(result) ?? context.selectedId, afterCurrent: true })
       return current(view) ? result : null
     } catch (error) {
+      // A run-limit refusal is never retried here: the caller keeps its input and retries explicitly.
       if (current(view) && context.selectedId === selectedId) setSnapshot(previous => error?.status === 409 && error?.code === 'catalog_drift'
-        && previous.errorAction === 'load' ? previous : { ...previous, error, errorAction: action })
+        && previous.errorAction === 'load' ? previous
+        : { ...previous, error, errorAction: action, quota: error?.quota ? { action, ...error.quota } : null })
       throw error
     } finally {
       delete locks[action]
@@ -392,9 +395,11 @@ export default function useCampaigns(projectId, { enabled = true, authorityProvi
       try {
         result = await api.invokeCapability(projectId, id, enrollmentId, submission)
       } catch (error) {
-        if (error?.status !== 409 || error?.code !== 'catalog_drift') throw error
+        const refusedByQuota = !!error?.quota
+        if (!refusedByQuota && (error?.status !== 409 || error?.code !== 'catalog_drift')) throw error
         const matches = value => value?.idempotencyKey === submission.idempotencyKey
           && value?.effectiveCatalogDigest === submission.effectiveCatalogDigest
+        // Both refusals are definite: the server admitted no job under this key, so it is not pending.
         if (matches(submissionsRef.current.get(key))) {
           submissionsRef.current.set(key, null)
           try {
@@ -407,6 +412,8 @@ export default function useCampaigns(projectId, { enabled = true, authorityProvi
             return { ...previous, submissions, recoveryUnavailable: storageUnavailableRef.current }
           })
         }
+        // No reload and no resubmission: the run-limit state waits for an explicit retry.
+        if (refusedByQuota) throw error
         let refreshError = null
         if (current(view)) await load({ preferredId: id, onChoicesError: failure => { refreshError = failure } })
         const message = 'The published tool changed. No job was submitted. Review its publication binding before using it again.'

@@ -267,6 +267,30 @@ describe('published campaign capability transport', () => {
     expect(JSON.parse(fetcher.mock.calls[0][1].body).effective_catalog_digest).toBe(digest)
   })
 
+  it('names the run-limit state from a 429 quota_exceeded refusal', async () => {
+    const body = { ok: false, error: { error_code: 'quota_exceeded', retryable: true, message: 'The workspace already has 32 runs queued or running; retry when one finishes.' },
+      quota_kind: 'tenant_inflight', limit: 32, used: 32 }
+    fetcher.mockResolvedValue({ ok: false, status: 429, json: async () => body })
+    await expect(invokeCapability(P, C, E, { effectiveCatalogDigest: digest, idempotencyKey: 'same-key' })).rejects.toMatchObject({
+      status: 429, code: 'quota_exceeded', retryable: true, body, quota: { kind: 'tenant_inflight', limit: 32, used: 32 },
+      message: 'Run limit reached: 32 runs are already queued or running. This one will not be sent; try again when one finishes.',
+    })
+    await expect(transitionRelease(P, C, E, 'advance')).rejects.toMatchObject({ status: 429, quota: { limit: 32, used: 32 } })
+    expect(fetcher).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps a malformed or foreign 429 out of the run-limit state', async () => {
+    fetcher.mockResolvedValueOnce({ ok: false, status: 429, json: async () => ({ error: { error_code: 'quota_exceeded' }, limit: '32', used: -1 }) })
+    await expect(invokeCapability(P, C, E, { effectiveCatalogDigest: digest, idempotencyKey: 'key' })).rejects.toMatchObject({
+      quota: { kind: null, limit: null, used: null },
+      message: 'Run limit reached: the workspace already has its maximum runs queued or running. This one will not be sent; try again when one finishes.',
+    })
+    fetcher.mockResolvedValueOnce({ ok: false, status: 429, json: async () => ({ error: { error_code: 'rate_limited' } }) })
+    const failure = await invokeCapability(P, C, E, { effectiveCatalogDigest: digest, idempotencyKey: 'key' }).catch(error => error)
+    expect(failure.quota).toBeUndefined()
+    expect(failure.message).toBe('Too many requests right now. Nothing was sent; try again in a moment.')
+  })
+
   it('requires bearer identity for all capability actions', async () => {
     localStorage.clear()
     await expect(listCapabilities(P, C)).rejects.toThrow('Sign in')

@@ -93,6 +93,22 @@ describe('release workflow recovery', () => {
     expect(hook.result.current.completion).toBeNull()
     expect(api.transitionRelease).not.toHaveBeenCalled()
   })
+  it('keeps the release and names the run-limit state when continuation is refused by the in-flight cap', async () => {
+    const hook = await ready()
+    await waitFor(() => expect(hook.result.current.completion).toEqual(stalled))
+    const failure = Object.assign(new Error('Run limit reached'), { status: 429, code: 'quota_exceeded', retryable: true,
+      quota: { kind: 'tenant_inflight', limit: 8, used: 8 } })
+    api.transitionRelease.mockRejectedValueOnce(failure).mockResolvedValueOnce({ completion: stalled })
+    await act(async () => { await expect(hook.result.current.transitionRelease('advance')).rejects.toBe(failure) })
+    expect(hook.result.current.quota).toEqual({ action: 'release', kind: 'tenant_inflight', limit: 8, used: 8 })
+    expect(hook.result.current.errorAction).toBe('release')
+    expect(hook.result.current.completion).toEqual(stalled)
+    expect(api.transitionRelease).toHaveBeenCalledTimes(1)
+    await act(async () => { await hook.result.current.transitionRelease('advance') })
+    expect(api.transitionRelease).toHaveBeenCalledTimes(2)
+    expect(hook.result.current.quota).toBeNull()
+    expect(hook.result.current.error).toBeNull()
+  })
 })
 
 describe('release continuation authority', () => {
@@ -515,6 +531,30 @@ describe('project campaign hook', () => {
       idempotencyKey: expect.any(String), effectiveCatalogDigest: nextDigest,
     })
     expect(api.invokeCapability.mock.calls[2][3].idempotencyKey).not.toBe(rejected.idempotencyKey)
+  })
+
+  const runLimit = () => Object.assign(new Error('Run limit reached: 32 runs are already queued or running. This one will not be sent; try again when one finishes.'),
+    { status: 429, code: 'quota_exceeded', retryable: true, quota: { kind: 'tenant_inflight', limit: 32, used: 32 } })
+
+  it('names the run-limit state, forgets the never-sent key, and waits for an explicit retry', async () => {
+    capabilityFixture()
+    const hook = await ready()
+    const loads = api.listEnrollments.mock.calls.length
+    const failure = runLimit()
+    api.invokeCapability.mockRejectedValueOnce(failure)
+    await act(async () => { await expect(hook.result.current.invokeCapability(Q)).rejects.toBe(failure) })
+    const refused = api.invokeCapability.mock.calls[0][3]
+    expect(hook.result.current.quota).toEqual({ action: `enrollment:${Q}`, kind: 'tenant_inflight', limit: 32, used: 32 })
+    expect(hook.result.current.error).toBe(failure)
+    expect(hook.result.current.submissions).toEqual({})
+    expect(sessionStorage.getItem(submissionKey())).toBeNull()
+    expect(api.invokeCapability).toHaveBeenCalledTimes(1)
+    expect(api.listEnrollments).toHaveBeenCalledTimes(loads)
+    await act(async () => { await hook.result.current.invokeCapability(Q) })
+    expect(api.invokeCapability).toHaveBeenCalledTimes(2)
+    expect(api.invokeCapability.mock.calls[1][3].idempotencyKey).not.toBe(refused.idempotencyKey)
+    expect(hook.result.current.quota).toBeNull()
+    expect(hook.result.current.invocationResults[Q]).toEqual(job)
   })
 
   it.each([

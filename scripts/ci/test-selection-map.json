@@ -184,6 +184,7 @@
     "server-campaign-dxf-inventory",
     "server-campaign-native-developer-bridge",
     "server-campaign-product-execution",
+    "server-campaign-quota-state",
     "server-campaign-release",
     "server-campaign-release-service",
     "server-campaign-release-wiring",

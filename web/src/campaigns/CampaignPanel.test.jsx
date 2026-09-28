@@ -913,6 +913,27 @@ describe('campaign panel in the project workspace', () => {
     expect(screen.queryByRole('button', { name: 'Use again' })).toBeNull()
   })
 
+  it('shows the run-limit state with an explicit retry and never resubmits on its own', async () => {
+    capabilityFixture()
+    campaign.enrollments[0].capability_link = { state: 'published', effective_catalog_digest: digest }
+    const message = 'Run limit reached: 32 runs are already queued or running. This one will not be sent; try again when one finishes.'
+    campaign.invokeCapability = vi.fn()
+      .mockRejectedValueOnce(Object.assign(new Error(message), { status: 429, code: 'quota_exceeded', quota: { kind: 'tenant_inflight', limit: 32, used: 32 } }))
+      .mockResolvedValueOnce({ invocation: {} })
+    render(panel())
+    fireEvent.click(screen.getByRole('button', { name: 'Use capability' }))
+    const alert = (await screen.findByText(message)).closest('[role="alert"]')
+    expect(alert.dataset.state).toBe('quota')
+    expect(screen.queryByText(/Submission outcome unknown/)).toBeNull()
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)) })
+    expect(campaign.invokeCapability).toHaveBeenCalledExactlyOnceWith(Q)
+    fireEvent.click(within(alert).getByRole('button', { name: 'Try again' }))
+    await screen.findByText('Submission recorded. Awaiting verified receipt.')
+    expect(campaign.invokeCapability).toHaveBeenCalledTimes(2)
+    expect(campaign.invokeCapability).toHaveBeenLastCalledWith(Q)
+    expect(screen.queryByText(message)).toBeNull()
+  })
+
   it('shows actual running, held, failed and missing receipt states without counting them', () => {
     capabilityFixture()
     campaign.enrollments[0].capability_link = { state: 'published', effective_catalog_digest: digest }
@@ -1089,6 +1110,38 @@ describe('campaign panel in the project workspace', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Submit campaign' }))
     await screen.findByText('Campaign recorded.')
     expect(campaign.submit).toHaveBeenCalledWith({ title: 'New campaign', prompt: 'Build' })
+  })
+
+  it('keeps a run-limited draft in place and resends it only through Try again', async () => {
+    const message = 'Run limit reached: 8 runs are already queued or running. This one will not be sent; try again when one finishes.'
+    campaign.submit.mockRejectedValueOnce(Object.assign(new Error(message), { status: 429, code: 'quota_exceeded',
+      quota: { kind: 'tenant_inflight', limit: 8, used: 8 } }))
+    render(panel())
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Limited campaign' } })
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Build later' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Submit campaign' }))
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toContain(message)
+    expect(alert.dataset.state).toBe('quota')
+    expect(screen.getByLabelText('Title').value).toBe('Limited campaign')
+    expect(screen.getByLabelText('Prompt').value).toBe('Build later')
+    expect(campaign.submit).toHaveBeenCalledTimes(1)
+    fireEvent.click(within(alert).getByRole('button', { name: 'Try again' }))
+    await screen.findByText('Campaign recorded.')
+    expect(campaign.submit).toHaveBeenCalledTimes(2)
+    expect(campaign.submit.mock.calls[1]).toEqual(campaign.submit.mock.calls[0])
+    expect(campaign.submit).toHaveBeenLastCalledWith({ title: 'Limited campaign', prompt: 'Build later' })
+  })
+
+  it('offers Try again only for the run-limit state', async () => {
+    campaign.submit.mockRejectedValueOnce(Object.assign(new Error('Campaigns are unavailable right now; retry in a moment.'), { status: 503 }))
+    render(panel())
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'New campaign' } })
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Build' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Submit campaign' }))
+    const alert = await screen.findByRole('alert')
+    expect(alert.dataset.state).toBeUndefined()
+    expect(within(alert).queryByRole('button', { name: 'Try again' })).toBeNull()
   })
 
   it('keeps the answer draft on conflict and offers exactly one reload', async () => {
