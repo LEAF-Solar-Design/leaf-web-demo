@@ -50,7 +50,7 @@ describe('cost transparency', () => {
     expect(screen.getByText(/Input: 100 · Output: 50/)).toBeInTheDocument()
     expect(screen.getByText('24.50 seconds · 3 runs')).toBeInTheDocument()
     expect(screen.getByText('not added to totals')).toBeInTheDocument()
-    expect(screen.getByText('Unavailable — direct storage use is not published.')).toBeInTheDocument()
+    expect(screen.getByText('Unavailable. Direct storage use is not published.')).toBeInTheDocument()
     const table = screen.getByRole('table')
     expect(within(table).getByText('0.123457 (12.3457%)')).toBeInTheDocument()
     expect(within(table).getByText('Development: 0.100000 (10.0000%)')).toBeInTheDocument()
@@ -108,11 +108,11 @@ describe('cost transparency', () => {
   })
 
   it('forwards the period and the same tenant and auth headers as usage', async () => {
-    localStorage.setItem('leaf.jwt', 'cost-test-token')
+    localStorage.setItem('leaf.jwt', 'test-token')
     const fetchMock = respond()
     await expect(getCost('2026-08')).resolves.toEqual(fixture)
     expect(fetchMock).toHaveBeenCalledWith(`${config.apiBase}/api/cost?period=2026-08`, {
-      headers: { 'X-Tenant-Id': config.tenant, Authorization: 'Bearer cost-test-token' },
+      headers: { 'X-Tenant-Id': config.tenant, Authorization: 'Bearer test-token' },
     })
   })
 

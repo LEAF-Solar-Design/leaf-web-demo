@@ -84,7 +84,7 @@ export default function CostTransparencyPanel({ mock = false }) {
               <dt>LLM API-equivalent value</dt><dd>{money(own?.llm?.usd_est)} {own?.llm?.payer === 'tenant_plan' && <span>Covered by your Claude plan</span>}</dd>
               <dt>CAD engine time and runs</dt><dd>{quantity(own?.cad?.engine_seconds)} seconds · {quantity(own?.cad?.runs)} runs</dd>
               <dt>Marathon runs</dt><dd>{quantity(own?.marathon?.runs)} <small>not added to totals</small></dd>
-              <dt>Storage</dt><dd>Unavailable — direct storage use is not published.</dd>
+              <dt>Storage</dt><dd>Unavailable. Direct storage use is not published.</dd>
             </dl>
             <h3>Leaf's costs and your share</h3>
             {!data.publication_id ? <p>The first monthly publication has not been made yet.</p> : <>
