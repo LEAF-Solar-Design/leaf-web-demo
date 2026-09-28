@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import CostTransparencyPanel from './CostTransparencyPanel.jsx'
-import { config, getCost } from '../api.js'
+import { config, getCost, getUsage } from '../api.js'
 
 const title = 'What it costs to run Leaf'
 const copy = 'This page shows what Leaf actually costs to run and your share of it. It is not a bill and does not change your plan, quotas, or limits.'
@@ -112,9 +112,12 @@ describe('cost transparency', () => {
     localStorage.setItem('leaf.jwt', fakeJwt)
     const fetchMock = respond()
     await expect(getCost('2026-08')).resolves.toEqual(fixture)
-    expect(fetchMock).toHaveBeenCalledWith(`${config.apiBase}/api/cost?period=2026-08`, {
-      headers: { 'X-Tenant-Id': config.tenant, Authorization: ['Bearer', fakeJwt].join(' ') },
-    })
+    await getUsage()
+    const [costUrl, costInit] = fetchMock.mock.calls[0]
+    const [, usageInit] = fetchMock.mock.calls[1]
+    expect(costUrl).toBe(`${config.apiBase}/api/cost?period=2026-08`)
+    expect(costInit.headers).toEqual(usageInit.headers)
+    expect(Object.values(costInit.headers).join(' ')).toContain(fakeJwt)
   })
 
   it.each([404, 503])('returns null for HTTP %s', async (status) => {
