@@ -950,6 +950,9 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_live_lsp_resolution.py"), 2),
         Suite("server-job-dwg-version", "server tests/test_job_dwg_version_persist.py",
               "pytest", SERVER, _py_pytest("tests/test_job_dwg_version_persist.py"), 6),
+        # TCM-06 Cost Explorer import: hermetic (fake ce client, tmp_path output), exact count.
+        Suite("server-cost-aws-import", "server tests/test_cost_aws_import.py",
+              "pytest", SERVER, _py_pytest("tests/test_cost_aws_import.py"), 11),
         Suite("server-job-migration-concurrent", "server tests/test_job_migration_concurrent.py",
               "pytest", SERVER, _py_pytest("tests/test_job_migration_concurrent.py"), 1),
         Suite("server-job-migration-thread-race", "server tests/test_job_migration_thread_race.py",
