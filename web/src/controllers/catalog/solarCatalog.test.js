@@ -4,6 +4,91 @@ vi.mock('../../telemetry.js', () => ({ track: vi.fn() }))
 
 import { createCatalogController } from './createCatalogController.js'
 
+const A = { entitled: true, implemented: true, engine_ready: true, input_ready: false, refusal_reasons: ['graph_seed_required'] }
+const I = { schema_version: 1, source_intake_sha256: 'a'.repeat(64), units: { drawing_units: 'ft', wcs_to_ucs: [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1], elevation_datum: 'unknown', crs: null } }
+const P = { expected_rev: 0, changes: { panels_in_sequence: 3 }, initialize: I }
+
+describe('Solar settings seed admission', () => {
+  async function seedCase({ name = 'solar-settings', availability = A, params = P, context = {}, reason = null } = {}) {
+    const run = setup(availability)
+    run.controller.setContext({ solarSettingsFormEnabled: true, entitlements: { entitlements: { run_write: true } }, ...context })
+    await run.load()
+    run.controller.actions.commitDecision({ lane: 'run', tool: name, params, confidence: 1, source: 'ribbon' })
+    expect(run.controller.getState().routeError).toBe(reason)
+    expect(run.adapters.commitDecision).toHaveBeenCalledTimes(reason === null ? 1 : 0)
+    // Opening or seeding a form must not turn readiness into a runnable claim.
+    expect(run.controller.getState().runnableTools).toEqual([])
+    expect(run.controller.getState().runnableCapabilityCount).toBe(0)
+    return run
+  }
+
+  it('SF2 row1 a settings seed request passes the graph_seed_required refusal', async () => {
+    await seedCase()
+  })
+
+  it('SF2 row2 a settings request without initialize keeps graph_seed_required', async () => {
+    await seedCase({ params: { expected_rev: 0, changes: { panels_in_sequence: 3 } }, reason: 'graph_seed_required' })
+  })
+
+  it('SF2 row3 an inherited initialize key is not a seed request', async () => {
+    await seedCase({ params: Object.create({ initialize: I }), reason: 'graph_seed_required' })
+  })
+
+  it('SF2 row4 initialize null still reaches the server', async () => {
+    await seedCase({ params: { initialize: null } })
+  })
+
+  it('SF2 row5 engine_ready false keeps the refusal', async () => {
+    await seedCase({ availability: { ...A, engine_ready: false }, reason: 'graph_seed_required' })
+  })
+
+  it('SF2 row6 the local entitlement refuses first', async () => {
+    await seedCase({ context: { entitlements: { entitlements: { run_write: false } } }, reason: 'entitlement_required' })
+  })
+
+  it('SF2 row7 two refusal reasons keep the joined refusal', async () => {
+    await seedCase({ availability: { ...A, refusal_reasons: ['graph_seed_required', 'broker_adapter_unavailable'] }, reason: 'graph_seed_required; broker_adapter_unavailable' })
+  })
+
+  it('SF2 row8 another solar tool keeps its refusal', async () => {
+    await seedCase({ name: 'solar-size-strings', reason: 'graph_seed_required' })
+  })
+
+  it('SF2 row9 the carve-out is off outside the settings form scope', async () => {
+    await seedCase({ context: { solarSettingsFormEnabled: false }, reason: 'graph_seed_required' })
+  })
+
+  it('SF2 row10 persisted_graph_unavailable seed request reaches the server', async () => {
+    await seedCase({ availability: { ...A, refusal_reasons: ['persisted_graph_unavailable'] } })
+  })
+
+  it('SF2 row11 not_current_head keeps its refusal', async () => {
+    await seedCase({ availability: { ...A, refusal_reasons: ['not_current_head'] }, reason: 'not_current_head' })
+  })
+
+  it('SF2 row32 the drawing context reaches getCapabilities', async () => {
+    const { controller, services } = setup(A)
+    controller.start()
+    controller.setContext({ drawingId: 'd1', drawingVersion: 3, solarSettingsFormEnabled: true })
+    expect(services.getCapabilities).toHaveBeenLastCalledWith(false, {
+      drawing_id: 'd1', project_id: undefined, drawing_version: 3,
+    })
+    controller.destroy()
+  })
+
+  it('SF2 row35 a converted solver decision keeps its refusal', async () => {
+    const { controller, services, adapters, load } = setup(A)
+    controller.setContext({ solarSettingsFormEnabled: true, entitlements: { entitlements: { run_write: true, solve: true } } })
+    services.routePrompt.mockResolvedValue({ lane: 'solve', tool: 'solar-solve-proposal', params: P, confidence: 1 })
+    await load()
+    await controller.actions.dispatch('solve the Solar layout')
+    expect(services.routePrompt).toHaveBeenCalledTimes(1)
+    expect(controller.getState().routeError).toBe('graph_seed_required')
+    expect(adapters.commitDecision).not.toHaveBeenCalled()
+    expect(adapters.startAgentTurn).not.toHaveBeenCalled()
+  })
+})
+
 // Copied from the 76648b1e declarations and frozen on purpose. Sibling
 // capability work must not change this mock's baseline or its expected counts.
 const fixture = Object.freeze([

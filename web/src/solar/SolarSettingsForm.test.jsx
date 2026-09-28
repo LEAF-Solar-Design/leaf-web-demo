@@ -51,6 +51,30 @@ async function waitForMode(mode) {
 afterEach(cleanup);
 
 describe('Solar settings form', () => {
+  it('SF2 row29 the form shows its run message and keeps the drafts', async () => {
+    const M = 'This saved drawing version cannot be used to start a Solar design.';
+    const supplied = props();
+    const view = render(<SolarSettingsForm {...supplied} />);
+    await waitForMode('edit');
+    fireEvent.change(screen.getByLabelText('MPPT count'), { target: { value: '4' } });
+    view.rerender(<SolarSettingsForm {...supplied} runMessage={{ text: M, code: 'INVALID_SEED_PARENT' }} />);
+    expect(screen.getByTestId('solar-settings-run').textContent).toBe(`${M} (INVALID_SEED_PARENT)`);
+    expect(screen.getByTestId('solar-settings-run').getAttribute('role')).toBe('status');
+    expect(screen.getByLabelText('MPPT count').value).toBe('4');
+    expect(supplied.readIntake).toHaveBeenCalledTimes(1);
+    expect(supplied.readVersions).toHaveBeenCalledTimes(1);
+  });
+
+  it('SF2 row39 no run message renders nothing new', async () => {
+    const supplied = props();
+    const view = render(<SolarSettingsForm {...supplied} />);
+    await waitForMode('edit');
+    expect(screen.queryByTestId('solar-settings-run')).toBeNull();
+    view.rerender(<SolarSettingsForm {...supplied} runMessage={null} />);
+    expect(screen.queryByTestId('solar-settings-run')).toBeNull();
+    expect(screen.getByTestId('solar-settings-reason').textContent).toBe(SOLAR_SETTINGS_REASONS.no_changes);
+  });
+
   it('reads the intake and versions for the context version and shows the graph revision', async () => {
     const supplied = props();
     render(<SolarSettingsForm {...supplied} />);
