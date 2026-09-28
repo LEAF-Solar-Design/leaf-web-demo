@@ -1,0 +1,21 @@
+/* Guided Solar step rail and step editor. Imported only by SolarFlowRail.jsx;
+   the rules match nothing unless the rail is mounted. */
+.solar-flow-rail { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+.solar-flow-steps { list-style: decimal; margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 4px; }
+.solar-flow-step { font-size: 12px; }
+.solar-flow-button {
+  display: inline-flex; align-items: baseline; gap: 8px; width: 100%;
+  border: 0; background: none; padding: 3px 4px; font: inherit; text-align: left; cursor: pointer; color: inherit;
+}
+.solar-flow-button:disabled { cursor: default; opacity: .6; }
+.solar-flow-button[aria-current="step"] { font-weight: 600; }
+.solar-flow-button[aria-expanded="true"] { background: var(--accent-tint); }
+.solar-flow-status { margin-left: auto; color: var(--muted); white-space: nowrap; }
+.solar-flow-resume { color: var(--primary); white-space: nowrap; }
+.solar-flow-step[data-status="failed"] .solar-flow-status,
+.solar-flow-step[data-invalidated="true"] .solar-flow-reason { color: var(--status-warning); }
+.solar-flow-note,
+.solar-flow-reason { margin: 0 0 2px 4px; font-size: 11px; color: var(--muted); }
+.solar-flow-announce { margin: 0; min-height: 1em; font-size: 11px; color: var(--muted); }
+.solar-step-editor .solar-step-note { font-size: 12px; color: var(--muted); margin: 6px 0; }
+.solar-step-editor [role="alert"].solar-step-note { color: var(--status-warning); }
