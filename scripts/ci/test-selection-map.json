@@ -158,6 +158,7 @@
     "server-broker-blank-dwg",
     "server-broker-boundary",
     "server-broker-ledger-runtime",
+    "server-cost-share-ledger",
     "server-broker-ledger-schema",
     "server-broker-migration-static",
     "server-broker-pg-store",
