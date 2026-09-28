@@ -3432,6 +3432,31 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
     if qa_sleep is not None and not _qa_hooks_enabled():
         qa_sleep = None
 
+    # 1e) A NON-trusted authored tool that declares graph_input receives the
+    #     tenant's own pinned W1 graph as its intake, through the SAME
+    #     run_dynamic sandbox seam as every authored tool (the deployed-posture
+    #     gate above has already required an engaged sandbox). It never reaches
+    #     solar_local_read, whose in-process loader is for trusted builtins only.
+    import solar_authored_graph
+    authored_graph = (not cloud_proposal and not local_graph and not local_read
+                      and solar_authored_graph.reads_graph(tool))
+    if authored_graph:
+        if req.aps_live or req.test_source is not None or req.file_only:
+            return _classified_bad_params(
+                "authored_graph_input_invalid",
+                "graph intake requires ordinary pinned execution without APS",
+                tool=tool.get("name"))
+        if not isinstance(req.job_id, str) or not req.job_id:
+            return _graph_commit_refused("JOB_IDENTITY_MISSING", tool=tool.get("name"))
+        if type(req.dwg_version) is not int or req.dwg_version < 1:
+            return _graph_commit_refused("INVALID_SOURCE_VERSION", tool=tool.get("name"))
+        if (not isinstance(req.dwg, str) or not req.dwg
+                or ("drawing_id" in params and params["drawing_id"] != req.dwg)):
+            return _graph_commit_refused("DRAWING_ID_CONFLICT", tool=tool.get("name"))
+        # The drawing identity travels in the intake; the tool's own schema never
+        # has to admit the routing key the jobs router adds.
+        params.pop("drawing_id", None)
+
     # 1b) PRE-VALIDATE params against the tool's own JSON Schema (§8.4 step 1).
     # A schema violation returns a BAD_PARAMS envelope and the tool body NEVER
     # runs — for BOTH the live and the mock paths.
@@ -3442,6 +3467,34 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
             "params schema: " + "; ".join(perrs),
             tool=tool.get("name"),
         )
+
+    if authored_graph:
+        from solar_design_graph import GraphValidationError
+
+        try:
+            backend = write_loop.backend_for_tenant(req.tenant_id, aps_live=False, da=None)
+        except (RuntimeError, OSError):
+            env = err_envelope(ErrorCode.INTERNAL, "graph store unavailable",
+                               retryable=True, tool=tool.get("name"))
+            env["error"]["reason_code"] = "GRAPH_STORE_UNAVAILABLE"
+            env["degraded_mode"] = False
+            return env, DEFAULT_HTTP_STATUS[ErrorCode.INTERNAL]
+        try:
+            graph_intake = solar_authored_graph.build_graph_intake(
+                backend, req.tenant_id, req.dwg, req.dwg_version)
+        except GraphValidationError as exc:
+            env, status = _graph_commit_refused(exc.code, tool=tool.get("name"))
+            if env["error"]["reason_code"] in solar_authored_graph.CONTEXT_REFUSALS:
+                status = 409
+            return env, status
+        _start_admitted_execution(req, admission, aps_submission=False)
+        env = run_dynamic(tool, graph_intake, params, aps_live=False, da=None, t0=t0,
+                          tenant_id=req.tenant_id)
+        if not env.get("ok"):
+            code = (env.get("error") or {}).get("error_code", ErrorCode.INTERNAL)
+            return env, DEFAULT_HTTP_STATUS.get(code, 500)
+        env["degraded_mode"] = False
+        return env, 200
 
     if req.file_only:
         _start_admitted_execution(req, admission, aps_submission=False)

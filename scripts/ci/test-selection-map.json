@@ -456,6 +456,7 @@
     "server-vendor",
     "server-version-restore",
     "server-version-source-ref",
+    "server-w1-authored-reports",
     "server-w1-catalog-gates",
     "server-w1-cloud-solve-probe",
     "server-w1-design-graph",

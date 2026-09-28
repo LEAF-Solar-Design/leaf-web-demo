@@ -32,6 +32,7 @@ import jobs
 import write_loop
 import product_capability_availability as capability_catalog
 import customization_service
+import solar_authored_graph
 from envelopes import DEFAULT_HTTP_STATUS, ErrorCode, error_obj, error_response, with_envelope_fields
 
 try:  # APS domain metrics (CloudWatch EMF); best-effort, optional — mirrors jobs.py
@@ -542,7 +543,10 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
     params = dict(tool.get("default_params", {}))
     params.update(req.params or {})
 
-    if (capability_catalog.is_local_graph_read(tool) and "drawing_id" in params
+    # An authored tool that declares the W1 graph intake is pinned and anonymous
+    # exactly like the trusted read kind; only the broker's execution differs.
+    graph_intake = solar_authored_graph.reads_graph(tool)
+    if ((capability_catalog.is_local_graph_read(tool) or graph_intake) and "drawing_id" in params
             and (not isinstance(params["drawing_id"], str) or params["drawing_id"] != req.dwg)):
         return JSONResponse(status_code=409, content=with_envelope_fields({
             "error": error_obj(ErrorCode.BAD_PARAMS, "DRAWING_ID_CONFLICT", retryable=False),
@@ -550,7 +554,7 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
         }))
 
     availability_version = req.dwg_version if req.dwg_version is not None else "head"
-    if capability_catalog.is_local_graph_read(tool) and req.dwg_version is None:
+    if (capability_catalog.is_local_graph_read(tool) or graph_intake) and req.dwg_version is None:
         try:
             backend = write_loop.backend_for_tenant(str(tenant_id), aps_live=False, da=None)
             availability_version = _store().load_manifest(
@@ -591,7 +595,7 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
             return error_response(ErrorCode.BAD_PARAMS, exc.classification,
                                   retryable=False, status_code=400)
 
-    if is_local_graph_commit(tool) or is_local_graph_read(tool):
+    if is_local_graph_commit(tool) or is_local_graph_read(tool) or graph_intake:
         if "drawing_id" not in params:
             params["drawing_id"] = req.dwg
         elif not isinstance(params["drawing_id"], str) or params["drawing_id"] != req.dwg:
@@ -607,7 +611,7 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
     # (which names the intake source). Asking it means the capability is verified
     # against the drawing that will actually be published to.
     target_drawing_id = write_loop.target_drawing_id(params)
-    if is_local_graph_read(tool):
+    if is_local_graph_read(tool) or graph_intake:
         checkout_holder, checkout_fence = _store().ANONYMOUS_HOLDER, None
     else:
         checkout_holder, checkout_fence = _checkout_identity(
@@ -633,7 +637,7 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
                     "reason_code": "GRAPH_CONTEXT_UNAVAILABLE",
                 }))
 
-    if is_local_graph_read(tool):
+    if is_local_graph_read(tool) or graph_intake:
         dwg_version = availability_version
 
     aps_live_authorized = False
@@ -722,7 +726,7 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
                 ):
                     raise ValueError(
                         "effective catalog changed after approval; refresh tools and confirm again")
-                if is_local_graph_commit(tool) or is_local_graph_read(tool):
+                if is_local_graph_commit(tool) or is_local_graph_read(tool) or graph_intake:
                     try:
                         backend = write_loop.backend_for_tenant(str(tenant_id), aps_live=False, da=None)
                         current_head = _store().load_manifest(backend, str(tenant_id), target_drawing_id)["head"]
@@ -769,7 +773,7 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
                     deps.TOOL_SOURCE_OPERATOR_OWNED_ENGINE
                 ),
             )
-            if is_local_graph_commit(tool) or is_local_graph_read(tool):
+            if is_local_graph_commit(tool) or is_local_graph_read(tool) or graph_intake:
                 aps_live_authorized = False
             job_id = jobs.submit_job(
                 tenant_id, tool, params, req.dwg,
