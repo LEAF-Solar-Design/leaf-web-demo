@@ -600,13 +600,10 @@ export class TenantBrokerStandardServiceProvider implements StandardServiceProvi
       client.callTool("services_catalog", {}));
     const value = requireCompleted(parseToolResult(response));
     if (!Array.isArray(value.tools)) throw new Error("standard_service_broker_catalog_invalid");
-    // replayConfirm reads the journaled broker receipt for a repeated services_confirm, but
-    // the app gateway does not yet send an uncertain human retry to the host,
-    // so an uncertain mutation still cannot be resolved end to end.
-    // Do not advertise mutation or operator effects until it can.
+    // mutate-tenant tools are advertised: an uncertain human retry reaches the host, which reconciles through the broker's journaled confirm. operator-privileged is never tenant-callable.
     const tools = value.tools
       .map(catalogTool)
-      .filter((tool) => tool.effect !== "mutate-tenant" && tool.effect !== "operator-privileged");
+      .filter((tool) => tool.effect !== "operator-privileged");
     const digest = createHash("sha256").update(JSON.stringify(tools)).digest("hex").slice(0, 16);
     const catalog = validateStandardServiceCatalog({
       catalog_version: `broker-${digest}`,

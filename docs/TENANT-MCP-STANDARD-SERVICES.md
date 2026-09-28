@@ -22,10 +22,14 @@ The harness human host can reconcile an uncertain row through that replay: on
 an execute with a valid attachment it replays the confirm, journals a completed
 receipt with one conditional update from `uncertain`, and returns it. Any other
 replay answer leaves the row uncertain, and a live `executing` row is never
-replayed. The app gateway does not yet send an execute for an uncertain row,
-so end to end a lost response still becomes `uncertain` and Leaf reports that
-safe status without retrying the operation. Until that app path lands, the
-tenant catalog omits `mutate-tenant` and `operator-privileged` tools. This protects
+replayed. When a human retries an approval whose review reports `uncertain`,
+the app gateway re-verifies the subscription mount, mints fresh human and
+attachment credentials for the stored identity, and sends one execute to the
+host, which replays or reports the row as above. A row that is still uncertain
+after that replay stays `uncertain`, and Leaf reports that safe status.
+The tenant catalog therefore lists `mutate-tenant` tools. It never lists
+`operator-privileged` tools: the broker adapter maps no broker effect to that
+class and the facade refuses it. This protects
 against duplicate effects, but it does not claim that an uncertain operation
 completed or failed.
 

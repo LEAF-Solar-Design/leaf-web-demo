@@ -875,7 +875,7 @@ def test_completed_human_approval_retry_returns_journaled_receipt_without_mint_o
     assert len(receipt_events) == 1
 
 
-def test_uncertain_human_approval_is_observable_and_never_reexecutes(
+def test_uncertain_human_approval_retry_reaches_the_host_once_and_stays_uncertain(
     authority, monkeypatch
 ):
     client, authority_session_id, kms = authority
@@ -884,13 +884,17 @@ def test_uncertain_human_approval_is_observable_and_never_reexecutes(
     )
     state = "pending"
     calls: list[str] = []
+    execute_payloads: list[dict] = []
 
-    def approval_call(path, _payload):
+    def approval_call(path, payload):
         nonlocal state
         calls.append(path)
         if path == "execute":
-            state = "uncertain"
-            return {"status": "uncertain", "result": "must-not-be-reflected"}
+            execute_payloads.append(payload)
+            if state == "pending":
+                state = "uncertain"
+                return {"status": "uncertain", "result": "must-not-be-reflected"}
+            return {"status": "uncertain"}
         return {
             "status": state,
             "identity": {
@@ -909,7 +913,7 @@ def test_uncertain_human_approval_is_observable_and_never_reexecutes(
         "headers": {"Authorization": "Bearer test-human"},
     }
     first = client.post("/api/mcp/gateway/approvals/execute", **request)
-    sign_count = len(kms.sign_calls)
+    first_mints = len(kms.sign_calls)
     second = client.post("/api/mcp/gateway/approvals/execute", **request)
 
     assert first.status_code == 200, first.text
@@ -917,8 +921,23 @@ def test_uncertain_human_approval_is_observable_and_never_reexecutes(
     assert first.json() == {"status": "uncertain"}
     assert second.json() == {"status": "uncertain"}
     assert "must-not-be-reflected" not in first.text
-    assert calls == ["review", "execute", "review"]
-    assert len(kms.sign_calls) == sign_count
+    assert "must-not-be-reflected" not in second.text
+    assert calls == ["review", "execute", "review", "execute"]
+    # The retry mints fresh credentials, exactly as many as the first request.
+    assert first_mints >= 1
+    assert len(kms.sign_calls) == 2 * first_mints
+    assert len(execute_payloads) == 2
+    retry = execute_payloads[1]
+    assert retry["approval_id"] == "approval_12345678"
+    assert retry["argument_digest"] == "a" * 64
+    assert retry["identity"] == execute_payloads[0]["identity"] == {
+        "tenant_id": TENANT,
+        "subject_id": SAFE_SUBJECT,
+        "session_id": authority_session_id,
+        "authority_turn_id": TURN,
+        "subscription_mount_id": MOUNT,
+        "runner_profile_id": "spine",
+    }
     status_events = [
         event for event in session_store.recent_events(authority_session_id, 20)
         if event["type"] == "standard_service_approval_status"
@@ -927,6 +946,115 @@ def test_uncertain_human_approval_is_observable_and_never_reexecutes(
         "status": "uncertain",
         "approval_id": "approval_12345678",
     }
+
+
+def test_uncertain_human_approval_retry_returns_the_reconciled_receipt_once(
+    authority, monkeypatch
+):
+    client, authority_session_id, _kms = authority
+    client.app.dependency_overrides[deps.require_tenant] = lambda: deps.TenantContext(
+        TENANT, tier="hosted_pro", subject=SUBJECT, authority_resolved=True
+    )
+    state = "pending"
+    calls: list[str] = []
+    identity = {
+        "tenant_id": TENANT,
+        "subject_id": SAFE_SUBJECT,
+        "session_id": authority_session_id,
+        "authority_turn_id": TURN,
+        "subscription_mount_id": MOUNT,
+        "runner_profile_id": "spine",
+    }
+    reconciled = {
+        "receipt_id": "e" * 64,
+        "artifact_ids": ["-aaaaaaaaaaaaaaa"],
+    }
+
+    def approval_call(path, _payload):
+        nonlocal state
+        calls.append(path)
+        if path == "execute":
+            if state == "pending":
+                state = "uncertain"
+                return {"status": "uncertain"}
+            state = "completed"
+            return {"status": "completed", **reconciled}
+        if state == "completed":
+            return {"status": "completed", "identity": identity, **reconciled}
+        return {"status": state, "identity": identity}
+
+    monkeypatch.setattr(mcp_gateway, "_harness_approval_call", approval_call)
+    request = {
+        "json": {"approval_id": "approval_12345678", "argument_digest": "a" * 64},
+        "headers": {"Authorization": "Bearer test-human"},
+    }
+    first = client.post("/api/mcp/gateway/approvals/execute", **request)
+    second = client.post("/api/mcp/gateway/approvals/execute", **request)
+    third = client.post("/api/mcp/gateway/approvals/execute", **request)
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert third.status_code == 200, third.text
+    assert first.json() == {"status": "uncertain"}
+    assert second.json() == third.json() == {"status": "completed", **reconciled}
+    assert calls == ["review", "execute", "review", "execute", "review"]
+    receipt_events = [
+        event for event in session_store.recent_events(authority_session_id, 20)
+        if event["type"] == "standard_service_approval_receipt"
+    ]
+    assert len(receipt_events) == 1
+
+
+def test_uncertain_human_approval_retry_rechecks_the_mount(authority, monkeypatch):
+    client, authority_session_id, kms = authority
+    client.app.dependency_overrides[deps.require_tenant] = lambda: deps.TenantContext(
+        TENANT, tier="hosted_pro", subject=SUBJECT, authority_resolved=True
+    )
+    state = "pending"
+    calls: list[str] = []
+    denied_reasons: list[str] = []
+
+    def approval_call(path, _payload):
+        nonlocal state
+        calls.append(path)
+        if path == "execute":
+            state = "uncertain"
+            return {"status": "uncertain"}
+        return {
+            "status": state,
+            "identity": {
+                "tenant_id": TENANT,
+                "subject_id": SAFE_SUBJECT,
+                "session_id": authority_session_id,
+                "authority_turn_id": TURN,
+                "subscription_mount_id": MOUNT,
+                "runner_profile_id": "spine",
+            },
+        }
+
+    monkeypatch.setattr(mcp_gateway, "_harness_approval_call", approval_call)
+    request = {
+        "json": {"approval_id": "approval_12345678", "argument_digest": "a" * 64},
+        "headers": {"Authorization": "Bearer test-human"},
+    }
+    first = client.post("/api/mcp/gateway/approvals/execute", **request)
+    assert first.status_code == 200, first.text
+    assert first.json() == {"status": "uncertain"}
+    first_mints = len(kms.sign_calls)
+
+    monkeypatch.setattr(
+        mcp_authority,
+        "verify_subscription_mount",
+        lambda *_args: (_ for _ in ()).throw(mcp_authority.McpMountDenied("not owned")),
+    )
+    monkeypatch.setattr(mcp_gateway, "_emit_authority_denied", denied_reasons.append)
+    second = client.post("/api/mcp/gateway/approvals/execute", **request)
+
+    assert second.status_code == 403, second.text
+    assert denied_reasons == ["mount_denied"]
+    assert "not owned" not in second.text
+    assert calls == ["review", "execute", "review"]
+    assert len(kms.sign_calls) == first_mints
 
 
 @pytest.mark.parametrize(
