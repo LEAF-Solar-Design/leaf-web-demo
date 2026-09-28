@@ -288,6 +288,7 @@
     "server-ios-surface-contract",
     "server-ios-surface-e2e-harness",
     "server-job-dwg-version",
+    "server-cost-aws-import",
     "server-job-lanes",
     "server-job-migration-concurrent",
     "server-job-migration-thread-race",
