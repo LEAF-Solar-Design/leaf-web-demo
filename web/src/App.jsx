@@ -1247,6 +1247,11 @@ export default function App() {
     clearError: clearRunErr,
     adoptEnvelope,
     refreshJobs,
+    staleResults,
+    dismissStaleResult,
+    pendingRun,
+    preparePendingRun,
+    discardPendingRun,
   } = useJobController({
     mock,
     resetKey: `${isEditFixture}:${intakeRetryKey}`,
@@ -1856,6 +1861,7 @@ export default function App() {
 
     const envelope = await runJob({
       toolName: tool.name,
+      submission: { params: merged },
       execute: ({ onSubmit, onStatus }) => (mock
         ? runTool(mock, tool, merged, shown)
         : runToolAsync(tool, merged, executionContext.drawingId, {
@@ -2014,6 +2020,24 @@ export default function App() {
     const staged = solarFlowRunRef.current
     if (staged && !staged.confirmed && route?.runIntent?.intentId !== staged.intentId) clearSolarFlowStaged(staged.intentId)
   }, [route, solarFlowPending, clearSolarFlowStaged])
+
+  // solar-parity-017: the run kept across a sign-in expiry goes back through
+  // the same confirm ladder as a catalog pick, so nothing runs on its own. The
+  // catalog loads before the run is taken, so a failed load keeps the inputs.
+  const onResumePendingRun = useCallback(async () => {
+    if (mock) return
+    let prepared
+    try {
+      prepared = await preparePendingRun(() => getTools(false))
+    } catch {
+      setRunErr('The saved run could not be prepared, so your inputs were kept.')
+      return
+    }
+    if (!prepared) return
+    const { pending, tool } = prepared
+    if (tool) onRequestCatalogRun(tool, pending.params)
+    else setRunErr(`${pending.tool} is no longer in your catalog. Your saved inputs were discarded.`)
+  }, [mock, onRequestCatalogRun, preparePendingRun, setRunErr])
 
   // An agent-dispatched job (job_linked event) -> the SAME §7 attach
   // affordance the tab-close re-attach uses: subscribe to the job, stream
@@ -3521,6 +3545,11 @@ export default function App() {
         onSelectJob,
         builds: buildQueue.builds,
         buildFeed: { status: buildQueue.status, dropped: buildQueue.dropped, onRetry: buildQueue.resume },
+        staleResults,
+        onDismissStale: dismissStaleResult,
+        pendingRun,
+        onResumePendingRun,
+        onDiscardPendingRun: discardPendingRun,
       }}
       toast={{ toast, onDone: onToastDone }}
       integrations={{
