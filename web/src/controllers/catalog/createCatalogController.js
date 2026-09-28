@@ -4,6 +4,7 @@ import {
   previewLane,
   runnableCatalogTools,
   slashDecision,
+  solveRunDecision,
 } from './catalogRouting.js'
 import { track } from '../../telemetry.js'
 import { isSecretRefused } from '../../lib/secretGuardTransport.js'
@@ -302,7 +303,9 @@ export function createCatalogController({ services, adapters = {}, context = {} 
 
     publish({ routing: true, route: null, routeError: null })
     try {
-      const decision = await services.routePrompt(current.mock, text, state.tools, { allowSecretOnce })
+      // A solve bound to a solver is a confirmable run of that tool (routedLane 'solve').
+      const routed = await services.routePrompt(current.mock, text, state.tools, { allowSecretOnce })
+      const decision = solveRunDecision(routed)
       if (decision.lane === 'run' && solarRefusal(decision.tool)) {
         return commitDecision(decision, { requestText: text })
       }
@@ -321,7 +324,8 @@ export function createCatalogController({ services, adapters = {}, context = {} 
           rationale: decision.rationale || null,
         }
         publish({ agentBanner: null })
-        if (decision.lane === 'run' && !!decision.tool && confidence >= thresholds.RACE_MIN) {
+        if (decision.lane === 'run' && !!decision.tool &&
+            (confidence >= thresholds.RACE_MIN || decision.routedLane === 'solve')) {
           commitDecision(decision, { requestText: text })
           try {
             await adapters.startAgentTurn(text, hint, { allowSecretOnce })

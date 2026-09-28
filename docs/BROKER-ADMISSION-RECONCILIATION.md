@@ -101,8 +101,9 @@ can execute a tool or clear an unknown run.
 ## Automatic reconciler
 
 The broker admission reconciler is part of hosted APS execution recovery. It
-settles only outcomes the evidence proves. Production scheduling is a separate
-follow-up; importing the module starts no thread or loop. It requires the
+settles only outcomes the evidence proves. Importing the module still starts
+nothing; the broker process arms the loop itself when
+`LEAF_BROKER_RECONCILER=1`. It requires the
 `wd-broker-ledger-job-id` ledger schema and resolver support for `job_id`.
 
 With `LEAF_BROKER_STORE=postgres`, each tick reads at most 100 executing
@@ -126,10 +127,10 @@ requests share APS's 150-per-minute application limit with the live broker, so
 choose the loop interval with the live polling load in mind.
 Eligible live admissions use FIFO queue positions: new arrivals join behind
 waiting admissions, and each status check moves its admission to the back.
-Residual: this no-starvation order holds only across ticks in one process, so
-the production arming follow-up (`priorities-s4-s6-012`) must use the loop form
-(`run_forever`) in one process, because each `--once` invocation starts a fresh
-queue and checks the oldest eligible admissions first.
+Residual: this no-starvation order holds only across ticks in one process.
+Broker arming uses the loop form in one process and retains that queue. Each
+`--once` invocation starts a fresh queue and checks the oldest eligible
+admissions first.
 Residual: `list_executing(100)` reads at most the 100 oldest executing
 admissions, so an admission beyond the first 100 waits until older ones settle.
 
@@ -191,3 +192,51 @@ caller; they are not successful ticks.
 In-process callers can inject an APS status client, a `correlation(job_id)`
 reader, and an `alarm(record)` sink into `reconcile_once`. `run_forever` accepts
 an interval and a stop event and waits interruptibly between completed ticks.
+
+### Arming in the broker
+
+The broker lifespan arms reconciliation after all existing startup validations.
+It is off by default. Importing the module starts no thread or loop.
+
+| Environment variable | Values and default |
+| --- | --- |
+| `LEAF_BROKER_RECONCILER` | Unset, blank, or `0` disables it; `1` arms it. |
+| `LEAF_BROKER_RECONCILER_INTERVAL_S` | ASCII decimal integer from 60 to 3600 seconds; default 300. |
+| `LEAF_BROKER_RECONCILER_MAX_APS_CHECKS` | ASCII decimal integer from 1 to 20; default 20. |
+
+Surrounding whitespace is stripped. Blank knob values use their defaults.
+Disabled reconciliation ignores the knobs. When armed, a malformed knob, an
+arm value other than `0` or `1`, or a store other than
+`LEAF_BROKER_STORE=postgres` refuses broker startup. Run `uvicorn broker:app`:
+an armed `python broker.py` run is refused to prevent a second broker copy.
+The row limit stays 100 and the minimum admission age stays 3600 seconds.
+
+One daemon thread named `leaf-broker-reconciler` runs per process. The first
+tick runs at startup. Later ticks wait the configured interval after the prior
+tick finishes, so ticks never overlap. A second start while the thread is alive
+does not create another loop. A failed tick or malformed summary is logged and
+the loop continues.
+
+Every action emits one stderr line with the prefix `[leaf-broker-reconciler] `:
+`ARMED` records the parsed configuration, `RESOLVED` records a resolution,
+`TICK` records counts, and `ALARM` retains the existing admission alarm format.
+`TICK_FAILED` records only the exception class name, never its message.
+Store numeric values, including PostgreSQL decimal ages, are logged as JSON
+numbers. An action logging failure emits `TICK_FAILED` without dropping the
+other action lines from that tick.
+`NOT_ARMED` reports `already_running`. `STOP_TIMEOUT` reports a join timeout,
+and `STOPPED` records thread exit.
+
+Shutdown sets the stop event and joins for at most 15 seconds. A timed-out
+thread stays a daemon and prevents another start while it is alive. The daemon
+cannot hold the process open; PostgreSQL rolls back a transaction interrupted
+by process exit. The join blocks the event loop only during shutdown.
+
+There is no cross-replica loop lock. A second replica's write is refused by the
+store's advisory lock and state check and surfaces as a `resolve_rejected`
+alarm.
+
+Roll out to staging with `LEAF_BROKER_RECONCILER_ALARM_ONLY=1` first and inspect
+the tick and alarm lines. Then run staging without alarm-only mode. Promote to
+production only after that staging observation and production authorization.
+Setting the deployed broker environment remains a separate rollout step.

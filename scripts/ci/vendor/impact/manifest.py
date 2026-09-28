@@ -157,8 +157,20 @@ def endpoint(value, path, consumer=False):
 
 def validate_manifest(data):
     # Fails closed on unknown keys; only schema version 1 is accepted.
-    mapping(data, "manifest", REQUIRED, ("unmapped", "targets", "contracts", "companions", "concerns", "repos", "integration_branch"))
+    mapping(data, "manifest", REQUIRED, ("unmapped", "targets", "contracts", "companions", "concerns", "repos", "integration_branch", "ci_contract_tests"))
     data = deepcopy(data)
+    if "ci_contract_tests" in data:
+        seen = set()
+        for i, item in enumerate(sequence(data["ci_contract_tests"], "ci_contract_tests", 0, 12)):
+            path = f"ci_contract_tests[{i}]"
+            mapping(item, path, ("name", "command"))
+            name = string(item["name"], f"{path}.name", 48, r"[a-z0-9-]{1,48}")
+            if name in seen:
+                raise ManifestError(f"{path}.name: duplicate name {name}")
+            seen.add(name)
+            command = string(item["command"], f"{path}.command", 400)
+            if not command.strip() or any(token in command for token in ("\n", "\r", "&&", "||", ";", "|", "`")):
+                raise ManifestError(f"{path}.command: expected a non-empty single command without shell separators")
     if type(data["schema_version"]) is not int or data["schema_version"] != 1:
         raise ManifestError("schema_version: expected integer 1")
     string(data["project_id"], "project_id", 64, ID_PATTERN)

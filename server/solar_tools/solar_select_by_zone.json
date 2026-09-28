@@ -1,0 +1,42 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-select-by-zone",
+  "builtin": "builtins/solar_select_by_zone.py",
+  "family": "placement",
+  "adapter": "local-graph-read",
+  "entitlement": "run_read",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_ZONE_SELECTION",
+  "readiness": {"kind": "facets", "facets": ["electrical_zones"]},
+  "engine": "server-builtin",
+  "interaction": {"mode": "form"},
+  "record_store": "registry",
+  "record": {
+    "name": "solar-select-by-zone",
+    "version": "1.0.0",
+    "description": "List the panels of a named electrical zone, in the zone's stored order.",
+    "kind": "script",
+    "family_id": "placement",
+    "engine_op": "solar_select_by_zone",
+    "entry": "builtins/solar_select_by_zone.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {"type": "string", "maxLength": 128},
+        "zone_name": {"type": "string", "maxLength": 1024}
+      },
+      "required": ["zone_name"],
+      "additionalProperties": false
+    },
+    "returns": {"type": "object"},
+    "capabilities": ["drawing.read"],
+    "allow_local_fallback": false
+  },
+  "ledger": ["select-by-zone"],
+  "trusted_inputs": [],
+  "maturity": "production",
+  "wave": 2,
+  "order": 10,
+  "scenario": "w2-rooftop"
+}
