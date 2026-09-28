@@ -1185,6 +1185,9 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_broker_ledger_schema_static.py"), 9),
         Suite("server-broker-ledger-runtime", "server tests/test_broker_ledger_schema_runtime.py",
               "pytest", SERVER, _py_pytest("tests/test_broker_ledger_schema_runtime.py"), 6),
+        # TCM-01 cost transparency share ledger: hermetic (tmp_path stores), exact count.
+        Suite("server-cost-share-ledger", "server tests/test_cost_share_ledger.py",
+              "pytest", SERVER, _py_pytest("tests/test_cost_share_ledger.py"), 19),
         # Callback-primary is isolated: it changes completion selection and holds
         # a durable replay ledger, so it must not share another broker suite.
         Suite("server-da-callback", "server tests/test_da_callback.py", "pytest",
