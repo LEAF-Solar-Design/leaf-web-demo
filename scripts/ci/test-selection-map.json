@@ -129,6 +129,7 @@
     "server-agent-approvals",
     "server-agent-e2e",
     "server-agent-gate",
+    "server-cost-direct-use",
     "server-agent-gate-postgres",
     "server-agent-ledger-unreadable",
     "server-agent-metering-hook",
