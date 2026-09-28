@@ -1,0 +1,7 @@
+version: 1
+entries:
+  - resource_id: aws:codebuild
+    share:
+      leaf|ci: "1"
+    basis: "every CodeBuild project in the account is Leaf CI (leaf-ci-*) or a Leaf GitHub Actions runner (leaf-gha-runner-*)"
+    status: MEASURED

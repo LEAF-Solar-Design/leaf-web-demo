@@ -252,6 +252,7 @@
     "server-emf-metrics-stream",
     "server-engine-corpus-harness",
     "server-engine-registry-scripts",
+    "server-cost-internal",
     "server-engine-selector",
     "server-entitlements",
     "server-entitlements-converse",
