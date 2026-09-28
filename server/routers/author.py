@@ -75,6 +75,9 @@ class AuthorRequest(BaseModel):
     # there, so an over-long body is rejected before any validator runs.
     icon: str | None = Field(default=None, max_length=tool_record_fields.MAX_ICON_LEN)
     placement: Dict[str, Any] | None = None
+    # The one pinned intake an authored tool may request instead of the drawing
+    # intake: the tenant's own stored W1 design graph (server/solar_authored_graph.py).
+    graph_input: Literal["solar-w1-graph"] | None = None
 
 
 class StageRequest(AuthorRequest):
@@ -184,7 +187,33 @@ def _record_fields_error(exc: ToolRecordFieldError) -> JSONResponse:
 def _validated_record_fields(req: AuthorRequest) -> Dict[str, Any]:
     """The request's valid optional record fields, or raise ToolRecordFieldError."""
     return tool_record_fields.validate_optional_fields(
-        {"icon": req.icon, "placement": req.placement})
+        {"icon": req.icon, "placement": req.placement, "graph_input": req.graph_input})
+
+
+GRAPH_INPUT_UNSUPPORTED = "GRAPH_INPUT_UNSUPPORTED"
+
+
+def _graph_input_unsupported_response() -> JSONResponse:
+    """422 for graph_input on a path that cannot persist it on the record.
+
+    Only the templated lane writes the record itself; the harness and the staged
+    lane register a record that does not carry the field, so echoing it would
+    promise a graph intake the catalog record never declares. Refused before any
+    harness call or stage, so nothing is created.
+    """
+    message = ("Graph-input authoring is available on the templated path only; "
+               "the tool was not created.")
+    return JSONResponse(status_code=422, content=with_envelope_fields({
+        "tool": None,
+        "code": None,
+        "preview": message,
+        "source": "graph_input_unsupported",
+        "static_scan": [],
+        "invalid_field": "graph_input",
+        "error_code": GRAPH_INPUT_UNSUPPORTED,
+        "reason_code": GRAPH_INPUT_UNSUPPORTED,
+        "error": error_obj(ErrorCode.BAD_PARAMS, message, retryable=False),
+    }))
 
 
 def _grant_required_response(tenant_id: str, harness_message: str | None) -> JSONResponse:
@@ -734,6 +763,11 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
         _validated_record_fields(req)
     except ToolRecordFieldError as exc:
         return _record_fields_error(exc)
+    if req.graph_input is not None and (
+            deps.auth_live() or customization_enabled(5, str(tenant).strip())
+            or os.environ.get("LEAF_AUTHOR_HARNESS_URL", "").rstrip("/")):
+        # Only the templated legacy lane persists the record the router writes.
+        return _graph_input_unsupported_response()
     _emit_author_event("author.requested", tenant, {
         "mode": req.mode, "desc_len": len(req.description or "")})
     if not deps.auth_live() and not customization_enabled(5, str(tenant).strip()):
@@ -828,6 +862,9 @@ def stage(
         _validated_record_fields(req)
     except ToolRecordFieldError as exc:
         return _record_fields_error(exc)
+    if req.graph_input is not None:
+        # The staged record does not carry the field: refuse rather than drop it.
+        return _graph_input_unsupported_response()
     denied = _customization_gate(5, tenant)
     if denied is not None:
         return denied
