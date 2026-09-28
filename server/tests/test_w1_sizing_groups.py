@@ -446,7 +446,7 @@ def test_groups_cancel_and_no_local_matrix_fallback(group_case):
         groups.create_groups(graph, params, drawing_intake=intake)
     with pytest.raises(RuntimeError, match="broker"):
         sizing.run(graph, {})
-    with pytest.raises(RuntimeError, match="broker"):
+    with pytest.raises(GraphValidationError, match="INVALID_GROUP_REQUEST"):
         groups.run(graph, {})
 
 

@@ -31,7 +31,7 @@ from test_w1_local_graph_seed import request as seed_params
 
 TENANT = "fixture-tenant"
 UNWIRED = (
-    "solar-size-strings", "solar-panel-groups", "solar-commit-solve",
+    "solar-size-strings", "solar-commit-solve",
     "solar-assign-equipment", "solar-homeruns", "solar-schedule",
 )
 
@@ -217,6 +217,16 @@ def test_other_persisted_capabilities_refuse_before_submission(api, name):
     if not unwired:
         assert state["engine_ready"] is True
         assert state["input_ready"] is False
+    assert not jobs._query("SELECT job_id FROM jobs")
+    assert store.load_manifest(api[1], TENANT, "solar")["head"] == 1
+
+
+def test_panel_groups_refuses_until_sizing_is_confirmed(api):
+    response = api[0].post("/api/run?wait=1", json=body(api, "solar-panel-groups"))
+    assert response.status_code == 409, response.text
+    reasons = response.json()["availability"]["refusal_reasons"]
+    assert "sizing_confirmation_required" in reasons
+    assert "broker_adapter_unavailable" not in reasons
     assert not jobs._query("SELECT job_id FROM jobs")
     assert store.load_manifest(api[1], TENANT, "solar")["head"] == 1
 

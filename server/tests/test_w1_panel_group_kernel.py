@@ -5,6 +5,7 @@ import copy
 import json
 import math
 import sys
+import tracemalloc
 from pathlib import Path
 
 import pytest
@@ -157,6 +158,37 @@ def test_matrix_rows_ascend_and_columns_are_reversed():
 def test_matrix_leaves_blank_cells_for_missing_panels():
     panels = [_panel("A", 0, 0), _panel("B", 100, 0), _panel("D", 100, 50)]
     assert kernel.group_matrix(panels, 0.0, 12.0) == [["B", "A"], ["D", None]]
+
+
+def test_group_matrix_budget_is_checked_before_allocation():
+    panels = [_panel(f"{i + 1:X}", 10 * i, 10 * i) for i in range(64)]
+    unbounded = kernel.group_matrix(panels, 0.0, 0.5)
+    assert len(unbounded) == 64
+    assert all(len(row) == 64 for row in unbounded)
+    assert kernel.group_matrix(panels, 0.0, 0.5, max_cells=4096) == unbounded
+    assert kernel.group_matrix(panels, 0.0, 0.5, max_cells=None) == unbounded
+    with pytest.raises(kernel.PanelGroupMatrixLimitError):
+        kernel.group_matrix(panels, 0.0, 0.5, max_cells=4095)
+
+
+def test_group_matrix_refusal_allocates_no_matrix():
+    panels = [_panel(f"{i + 1:X}", 10 * i, 10 * i) for i in range(2048)]
+    tracemalloc.start()
+    try:
+        with pytest.raises(kernel.PanelGroupMatrixLimitError):
+            kernel.group_matrix(panels, 0.0, 0.5, max_cells=29411)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 8 * 1024 * 1024
+
+
+def test_group_matrix_rejects_a_bad_budget():
+    panels = [_panel("A", 0, 0), _panel("B", 10, 10)]
+    for max_cells in (-1, True, 1.5):
+        with pytest.raises(kernel.PanelGroupKernelError) as error:
+            kernel.group_matrix(panels, 0.0, 0.5, max_cells=max_cells)
+        assert not isinstance(error.value, kernel.PanelGroupMatrixLimitError)
 
 
 def test_rectangle_test_tolerates_intake_quantization_only():
