@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { getStoredOrgId, listProjects, openProject } from '../api.js'
 import { isSignedIn, login } from '../auth.js'
 import { getLeafHostBridge } from './hostBridge.js'
+import DiagnosticsDetails from './DiagnosticsDetails.jsx'
 import './leafPlatform.css'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -264,6 +265,9 @@ export default function LeafPlatformScene() {
 
   const selectedTarget = state.selectedObjectId || (state.selectedHandles?.length ? { objectHandles: state.selectedHandles } : null)
   const selectedLabel = state.selectedObjectId || (state.selectedHandles?.length === 1 ? state.selectedHandles[0] : null)
+  const selectionMessage = selectedLabel ? `Selected object: ${selectedLabel}` : state.selectedHandles?.length
+    ? `${state.selectedHandles.length} objects selected (${state.selectedHandles.slice(0, 3).join(', ')}${state.selectedHandles.length > 3 ? `, and ${state.selectedHandles.length - 3} more` : ''})`
+    : ''
 
   return (
     <main className="leaf-platform" aria-labelledby="leaf-platform-title">
@@ -272,6 +276,7 @@ export default function LeafPlatformScene() {
         <h1 id="leaf-platform-title" ref={headingRef} tabIndex={-1}>Drawing connection</h1>
       </header>
       <p role="status" aria-live="polite" className="leaf-platform-status">{actionMessage}</p>
+      <div role="status" aria-live="polite" aria-atomic="true" aria-label="Selection" style={{ position: 'absolute', width: 1, height: 1, padding: 0, margin: -1, overflow: 'hidden', clip: 'rect(0, 0, 0, 0)', whiteSpace: 'nowrap', border: 0 }}>{selectionMessage}</div>
       {state.status === 'unavailable' && <section>
         <p>This page connects an AutoCAD drawing to a drawing version in your Leaf Automation Studio workspace.</p>
         <p>Open this page from AutoCAD with the LEAFPLATFORM command.</p>
@@ -321,7 +326,7 @@ export default function LeafPlatformScene() {
           <p>Connected to {boundProject?.name || state.ready.drawingId.slice(0, 8)}.</p>
           {boundDetail?.identity === boundIdentity && boundDetail.label && <p>{boundDetail.label}</p>}
           <p>{selectedLabel ? <>Selected object: <span>{selectedLabel}</span></> : state.selectedHandles?.length
-            ? `${state.selectedHandles.length} objects selected (${state.selectedHandles.slice(0, 3).join(', ')}${state.selectedHandles.length > 3 ? `, and ${state.selectedHandles.length - 3} more` : ''})`
+            ? selectionMessage
             : 'Select objects in your AutoCAD drawing to use these buttons.'}</p>
           <div className="leaf-platform-actions">
             <button type="button" disabled={!selectedTarget || !!working} onClick={() => runAction(() => bridge.focusObject(selectedTarget, 'select'), 'select')}>{working === 'select' ? 'Selecting...' : 'Select'}</button>
@@ -329,6 +334,7 @@ export default function LeafPlatformScene() {
           </div>
         </>}
       </section>}
+      <DiagnosticsDetails />
     </main>
   )
 }

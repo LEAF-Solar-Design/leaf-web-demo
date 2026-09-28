@@ -47,12 +47,60 @@ function mountUnbound() {
   return render(<LeafPlatformScene />)
 }
 
+function getActionStatus() {
+  return screen.getAllByRole('status').find((region) => region.className === 'leaf-platform-status')
+}
+
 function expectStudioRecovery() {
   expect(screen.getByRole('link', { name: 'Open Leaf Automation Studio' }).getAttribute('href')).toBe('/app')
   expect(screen.getByText(/Then run LEAFPLATFORM again in AutoCAD to come back\./)).toBeTruthy()
 }
 
 describe('AutoCAD palette scene in Studio', () => {
+  it.each([true, false])('keeps collapsed connection details in every connection state when signed in is %s', async (signedIn) => {
+    isSignedIn.mockReturnValue(signedIn)
+    render(<LeafPlatformScene />)
+    const summary = screen.getByText('Connection details', { selector: 'summary' })
+    const details = summary.closest('details')
+    expect(details.open).toBe(false)
+    for (const next of [
+      { status: 'connecting', ready: null, helloSentAt: Date.now() },
+      { status: 'unbound', ready: { sessionKey } },
+      { status: 'connected', ready },
+      { status: 'unavailable', ready: null },
+    ]) {
+      setBridgeState(next)
+      await act(async () => {})
+      expect(screen.getAllByText('Connection details', { selector: 'summary' })).toEqual([summary])
+      expect(details.open).toBe(false)
+    }
+  })
+
+  it('announces signed bridge selection updates separately from command outcomes', async () => {
+    state = { status: 'connected', ready, selectedObjectId: null, selectedHandles: null }
+    render(<LeafPlatformScene />)
+    await screen.findByText('Connected to Roof project.', { selector: 'section p' })
+    const selection = screen.getByRole('status', { name: 'Selection' })
+    const action = getActionStatus()
+    expect(selection.getAttribute('aria-live')).toBe('polite')
+    expect(selection.getAttribute('aria-atomic')).toBe('true')
+    expect(selection.textContent).toBe('')
+    expect(action.textContent).toBe('DWG connected.')
+    setBridgeState({ ...state, selectedObjectId: '4A5' })
+    expect(selection.textContent).toBe('Selected object: 4A5')
+    expect(action.textContent).toBe('DWG connected.')
+    setBridgeState({ ...state, lastCommand: { action: 'focus', status: 'applied' } })
+    expect(action.textContent).toBe('Zoomed to the selection in AutoCAD.')
+    expect(selection.textContent).toBe('Selected object: 4A5')
+    setBridgeState({ ...state, selectedObjectId: null, selectedHandles: ['4A6', '4A7'] })
+    expect(screen.getByRole('status', { name: 'Selection' })).toBe(selection)
+    expect(selection.textContent).toBe('2 objects selected (4A6, 4A7)')
+    expect(action.textContent).toBe('Zoomed to the selection in AutoCAD.')
+    setBridgeState({ ...state, selectedHandles: null })
+    expect(selection.textContent).toBe('')
+    expect(action.textContent).toBe('Zoomed to the selection in AutoCAD.')
+  })
+
   it('explains how to open the palette when WebView is unavailable', () => {
     render(<LeafPlatformScene />)
     expect(screen.getByText('This page connects an AutoCAD drawing to a drawing version in your Leaf Automation Studio workspace.')).toBeTruthy()
@@ -64,7 +112,7 @@ describe('AutoCAD palette scene in Studio', () => {
   it('shows a connecting status', () => {
     state = { status: 'connecting', ready: null, selectedObjectId: null }
     render(<LeafPlatformScene />)
-    expect(screen.getByRole('status').textContent).toBe('Waiting for AutoCAD.')
+    expect(getActionStatus().textContent).toBe('Waiting for AutoCAD.')
   })
 
   it('offers sign in for an unbound DWG when signed out', async () => {
@@ -181,13 +229,13 @@ describe('AutoCAD palette scene in Studio', () => {
     render(<LeafPlatformScene />)
     await act(async () => {})
     expect(screen.queryByText(/, Version/)).toBeNull()
-    expect(screen.getByRole('status').textContent).toBe('DWG connected.')
+    expect(getActionStatus().textContent).toBe('DWG connected.')
     expect(document.body.textContent).not.toContain('private catalog error')
   })
 
   it('focuses the heading only after a user-initiated bind becomes connected', async () => {
     mountUnbound()
-    const region = screen.getByRole('status')
+    const region = getActionStatus()
     fireEvent.change(await screen.findByLabelText('Project'), { target: { value: projectId } })
     fireEvent.change(await screen.findByLabelText('Drawing version'), { target: { value: versionId } })
     const heading = screen.getByRole('heading', { level: 1 })
@@ -201,7 +249,7 @@ describe('AutoCAD palette scene in Studio', () => {
     await act(async () => {})
     expect(document.activeElement).toBe(heading)
     expect(screen.getAllByText('Connected to Roof project.')).toHaveLength(1)
-    expect(screen.getByRole('status')).toBe(region)
+    expect(getActionStatus()).toBe(region)
     expect(region.textContent).toBe('DWG connected.')
   })
 
@@ -247,7 +295,12 @@ describe('AutoCAD palette scene in Studio', () => {
     expect(screen.getByText(/belongs to another workspace/)).toBeTruthy()
     expectStudioRecovery()
     expect(openProject).not.toHaveBeenCalled()
-    expect(screen.queryByRole('button')).toBeNull()
+    for (const name of ['Select', 'Zoom to', 'Connect drawing', 'Try again']) {
+      expect(screen.queryByRole('button', { name })).toBeNull()
+    }
+    const copy = screen.getByRole('button', { name: 'Copy connection details' })
+    expect(screen.getAllByRole('button')).toEqual([copy])
+    expect(copy.closest('details')).toBe(screen.getByText('Connection details', { selector: 'summary' }).closest('details'))
     expect(document.body.innerHTML).not.toContain(sessionKey)
   })
 
@@ -276,7 +329,12 @@ describe('AutoCAD palette scene in Studio', () => {
     expectStudioRecovery()
     expect(openProject).not.toHaveBeenCalled()
     expect(screen.queryByText(/belongs to another workspace/)).toBeNull()
-    expect(screen.queryByRole('button')).toBeNull()
+    for (const name of ['Select', 'Zoom to', 'Connect drawing', 'Try again']) {
+      expect(screen.queryByRole('button', { name })).toBeNull()
+    }
+    const copy = screen.getByRole('button', { name: 'Copy connection details' })
+    expect(screen.getAllByRole('button')).toEqual([copy])
+    expect(copy.closest('details')).toBe(screen.getByText('Connection details', { selector: 'summary' }).closest('details'))
     expect(listProjects).not.toHaveBeenCalled()
     expect(document.body.innerHTML).not.toContain(sessionKey)
   })
@@ -361,9 +419,9 @@ describe('AutoCAD palette scene in Studio', () => {
     expect(bridge.stop).toHaveBeenCalledTimes(1)
   })
 
-  it('keeps one polite status region mounted through every connection state', async () => {
+  it('keeps the command status region mounted through every connection state', async () => {
     render(<LeafPlatformScene />)
-    const region = screen.getByRole('status')
+    const region = getActionStatus()
     expect(region.tagName).toBe('P')
     expect(region.className).toBe('leaf-platform-status')
     expect(region.getAttribute('aria-live')).toBe('polite')
@@ -376,8 +434,8 @@ describe('AutoCAD palette scene in Studio', () => {
     ]) {
       setBridgeState(next)
       await act(async () => {})
-      expect(screen.getAllByRole('status')).toHaveLength(1)
-      expect(screen.getByRole('status')).toBe(region)
+      expect(screen.getAllByRole('status').filter((region) => region.getAttribute('aria-live') === 'polite')).toHaveLength(2)
+      expect(getActionStatus()).toBe(region)
     }
     expect(region.textContent).toBe('')
   })
@@ -389,10 +447,11 @@ describe('AutoCAD palette scene in Studio', () => {
     await act(async () => { vi.advanceTimersByTime(9999) })
     expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull()
     await act(async () => { vi.advanceTimersByTime(1) })
-    expect(screen.getByRole('status').textContent).toBe('AutoCAD has not answered yet. Check that AutoCAD is open, then try again.')
+    expect(getActionStatus().textContent).toBe('AutoCAD has not answered yet. Check that AutoCAD is open, then try again.')
+    expect(screen.getByText('Connection details', { selector: 'summary' }).closest('details').open).toBe(false)
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
     expect(bridge.retryHello).toHaveBeenCalledTimes(1)
-    expect(screen.getByRole('status').textContent).toBe('Waiting for AutoCAD.')
+    expect(getActionStatus().textContent).toBe('Waiting for AutoCAD.')
     await act(async () => { vi.advanceTimersByTime(9999) })
     expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull()
     await act(async () => { vi.advanceTimersByTime(1) })
@@ -400,7 +459,7 @@ describe('AutoCAD palette scene in Studio', () => {
     setBridgeState({ status: 'connected', ready, selectedObjectId: null })
     await act(async () => { vi.advanceTimersByTime(10_000) })
     expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull()
-    expect(screen.getByRole('status').textContent).toBe('DWG connected.')
+    expect(getActionStatus().textContent).toBe('DWG connected.')
   })
 
   it('retries projects after a catalog error', async () => {
@@ -411,7 +470,7 @@ describe('AutoCAD palette scene in Studio', () => {
     expect(listProjects).toHaveBeenCalledTimes(2)
     expect(listProjects).toHaveBeenLastCalledWith(orgId)
     expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull()
-    expect(screen.getAllByRole('status')).toHaveLength(1)
+    expect(screen.getAllByRole('status').filter((region) => region.getAttribute('aria-live') === 'polite')).toHaveLength(2)
   })
 
   it('retries versions for the selected project without toggling the select', async () => {
@@ -439,14 +498,14 @@ describe('AutoCAD palette scene in Studio', () => {
     expect(bridge.retryHello).not.toHaveBeenCalled()
     screen.getByRole('heading', { level: 1 }).focus()
     await act(async () => { vi.advanceTimersByTime(1) })
-    expect(screen.getByRole('status').textContent).toBe('AutoCAD did not answer. Look for a confirmation window in AutoCAD, then try again.')
+    expect(getActionStatus().textContent).toBe('AutoCAD did not answer. Look for a confirmation window in AutoCAD, then try again.')
     expect(screen.getByRole('button', { name: 'Connect drawing' }).disabled).toBe(false)
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Connect drawing' }))
     expect(screen.getByLabelText('Project').disabled).toBe(false)
     expect(screen.getByLabelText('Drawing version').value).toBe(versionId)
     expect(bridge.retryHello).toHaveBeenCalledTimes(1)
     setBridgeState({ ...state, ready: { ...state.ready }, bindingResult: null })
-    expect(screen.getByRole('status').textContent).toBe('AutoCAD did not answer. Look for a confirmation window in AutoCAD, then try again.')
+    expect(getActionStatus().textContent).toBe('AutoCAD did not answer. Look for a confirmation window in AutoCAD, then try again.')
     await act(async () => { vi.advanceTimersByTime(120_000) })
     expect(bridge.retryHello).toHaveBeenCalledTimes(1)
     expect(bridge.bindDrawing).toHaveBeenCalledTimes(1)
@@ -464,7 +523,7 @@ describe('AutoCAD palette scene in Studio', () => {
     setBridgeState({ ...state, bindingResult: 'DWG connection was not changed (cancelled).' })
     await act(async () => { vi.advanceTimersByTime(60_000) })
     expect(bridge.retryHello).not.toHaveBeenCalled()
-    expect(screen.getByRole('status').textContent).toBe('DWG connection was not changed (cancelled).')
+    expect(getActionStatus().textContent).toBe('DWG connection was not changed (cancelled).')
   })
 
   it.each([
@@ -486,10 +545,10 @@ describe('AutoCAD palette scene in Studio', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Zooming...' }))
     expect(bridge.focusObject).toHaveBeenCalledTimes(1)
     await act(async () => { finish({ action: 'focus', status, reason }) })
-    expect(screen.getByRole('status').textContent).toBe(message)
+    expect(getActionStatus().textContent).toBe(message)
     expect(screen.getByRole('button', { name: 'Zoom to' }).disabled).toBe(false)
     expect(screen.getByRole('button', { name: 'Select' }).disabled).toBe(false)
-    expect(screen.getAllByRole('status')).toHaveLength(1)
+    expect(screen.getAllByRole('status').filter((region) => region.getAttribute('aria-live') === 'polite')).toHaveLength(2)
   })
 
   it.each([
@@ -502,7 +561,7 @@ describe('AutoCAD palette scene in Studio', () => {
     render(<LeafPlatformScene />)
     await act(async () => {})
     const connection = screen.getByText(connectionText, { selector: 'section p' })
-    const region = screen.getByRole('status')
+    const region = getActionStatus()
     fireEvent.click(screen.getByRole('button', { name: 'Zoom to' }))
     await waitFor(() => expect(region.textContent).toBe('AutoCAD could not find those objects. Select them again in AutoCAD.'))
     expect(screen.getByText(connectionText)).toBe(connection)
@@ -514,7 +573,7 @@ describe('AutoCAD palette scene in Studio', () => {
       expect(getComputedStyle(element).display).not.toBe('none')
       expect(getComputedStyle(element).visibility).toBe('visible')
     }
-    expect(screen.getAllByRole('status')).toHaveLength(1)
+    expect(screen.getAllByRole('status').filter((region) => region.getAttribute('aria-live') === 'polite')).toHaveLength(2)
   })
 
   it('shows Selecting until the host applies selection', async () => {
@@ -527,7 +586,7 @@ describe('AutoCAD palette scene in Studio', () => {
     expect(screen.getByRole('button', { name: 'Selecting...' }).disabled).toBe(true)
     expect(screen.getByRole('button', { name: 'Zoom to' }).disabled).toBe(true)
     await act(async () => { finish({ action: 'select', status: 'applied', reason: null }) })
-    expect(screen.getByRole('status').textContent).toBe('Selected in AutoCAD.')
+    expect(getActionStatus().textContent).toBe('Selected in AutoCAD.')
   })
 
   it('reports action errors in the persistent region and releases the controls', async () => {
@@ -536,7 +595,7 @@ describe('AutoCAD palette scene in Studio', () => {
     render(<LeafPlatformScene />)
     await screen.findByText('Connected to Roof project.', { selector: 'section p' })
     fireEvent.click(screen.getByRole('button', { name: 'Zoom to' }))
-    await waitFor(() => expect(screen.getByRole('status').textContent).toBe('The request could not be completed. Please try again.'))
+    await waitFor(() => expect(getActionStatus().textContent).toBe('The request could not be completed. Please try again.'))
     expect(screen.getByRole('button', { name: 'Zoom to' }).disabled).toBe(false)
     expect(document.body.textContent).not.toContain('private signing error')
   })
