@@ -450,6 +450,7 @@
     "server-tool-publication-policy",
     "server-tool-record-fields",
     "server-turn-queue",
+    "server-cost-publish-api",
     "server-turn-runner",
     "server-ui-wave",
     "server-unit-economics-ops",

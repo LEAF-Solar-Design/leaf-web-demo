@@ -2868,6 +2868,10 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_tool_record_fields.py"), 42),
         Suite("server-turn-queue", "server tests/test_turn_queue.py", "pytest", SERVER,
               _py_pytest("tests/test_turn_queue.py"), 16),
+        # TCM-09a cost transparency: publish the monthly share ledger and GET /api/cost.
+        # Hermetic (tmp_path stores, in-process minimal app), exact count.
+        Suite("server-cost-publish-api", "server tests/test_cost_publish_api.py", "pytest", SERVER,
+              _py_pytest("tests/test_cost_publish_api.py"), 16),
         Suite("server-version-source-ref", "server tests/test_version_source_ref.py", "pytest", SERVER,
               _py_pytest("tests/test_version_source_ref.py"), 22),
         Suite("server-write-path-telemetry", "server tests/test_write_path_telemetry.py", "pytest", SERVER,
