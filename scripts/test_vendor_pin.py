@@ -88,6 +88,7 @@ def test_downstream_overlay_inventory_matches_current_vendor():
         "ports/impl/harnessSchema.ts",
         "ports/impl/pgSessionStore.ts",
         "ports/impl/sessionStore.ts",
+        "ports/impl/tenantBrokerStandardServiceProvider.ts",
         "ports/impl/tenantChangeRepo.ts",
         "ports/impl/tenantRepoProvider.ts",
         "ports/index.ts",

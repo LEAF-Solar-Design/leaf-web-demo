@@ -16,6 +16,7 @@ import {
   validStandardServiceArtifactIds,
 } from "../src/ports/impl/standardServiceArtifactContract.js";
 import { tenantBrokerApprovalDigest } from "../src/vendor/mushy-author/index.js";
+import { TenantBrokerStandardServiceProvider } from "../src/vendor/mushy-author/index.js";
 
 const directories: string[] = [];
 const identity = {
@@ -56,8 +57,302 @@ function reviewInput(pending = binding(), now_ms = 1_000) {
   };
 }
 
+const replayReceipt = { content: "{\"safe\":true}", artifact_ids: ["-aaaaaaaaaaaaaaa"] };
+const replayHostReceipt = {
+  status: "completed",
+  receipt_id: "00f0e316bdc9c0f66082a1b038fabcf04fd38102fddb035199ab71e723991a75",
+  artifact_ids: ["-aaaaaaaaaaaaaaa"],
+};
+
+async function replayStore(state: "approved" | "executing" | "uncertain" = "uncertain") {
+  const approvals = await store(() => 2_000);
+  const pending = binding();
+  expect(pending.argument_digest).toBe("29bd6f69a496ca3985e4288715ec074cb2ba3059da73ffd4b67afb51506b1b7f");
+  expect(await approvals.create(pending)).toBe(true);
+  expect(await approvals.approve({
+    approval_id: pending.approval_id, identity, argument_digest: pending.argument_digest, approved_at_ms: 1_000,
+  })).toBe(true);
+  if (state !== "approved") {
+    expect(await approvals.claim({
+      approval_id: pending.approval_id, identity, now_ms: 1_100,
+      execution_deadline_ms: state === "uncertain" ? 1_500 : 121_100,
+    })).toMatchObject({ state: "claimed" });
+  }
+  expect(await approvals.review(reviewInput(pending, 2_000))).toEqual({ state, binding: pending });
+  return { approvals, pending };
+}
+
+function replayRequest(pending = binding()) {
+  return {
+    approval_id: pending.approval_id,
+    argument_digest: pending.argument_digest,
+    identity,
+    human_bearer: "human.approval.token.value.1234567890",
+    attachment: {
+      bearer_token: "attachment.token.value.1234567890",
+      channel_secret: "channel-secret-value-1234567890-abcd",
+      expires_at: "2099-01-01T00:00:00.000Z",
+    },
+  };
+}
+
+function replayHost(
+  approvals: FileTenantBrokerApprovalStore,
+  replay: () => Promise<typeof replayReceipt> = async () => structuredClone(replayReceipt),
+) {
+  const replayConfirm = vi.fn(replay);
+  const confirm = vi.fn(async () => { throw new Error("unexpected confirm"); });
+  const recordHumanAuthenticatedApproval = vi.fn(async () => { throw new Error("unexpected approval"); });
+  const fetchImpl = vi.fn(async () => { throw new Error("unexpected approval POST"); });
+  const providerFactory = vi.fn(() => ({ replayConfirm, confirm, recordHumanAuthenticatedApproval }));
+  const host = new LeafStandardServicesHumanApprovalHost({
+    brokerEndpoint: "http://127.0.0.1:18901",
+    environment: "local",
+    approvalStore: approvals,
+    fetchImpl,
+    providerFactory,
+    now: () => 2_000,
+  });
+  return { host, replayConfirm, confirm, recordHumanAuthenticatedApproval, fetchImpl, providerFactory };
+}
+
+function replayProvider(answer: Record<string, unknown>) {
+  const approvalStore = {
+    create: vi.fn(async () => false),
+    approve: vi.fn(async () => false),
+    claim: vi.fn(async () => null),
+    complete: vi.fn(async () => false),
+    markUncertain: vi.fn(async () => false),
+  };
+  const provider = new TenantBrokerStandardServiceProvider({
+    endpoint: "https://broker.example.test/mcp",
+    authorization: async () => { throw new Error("unused"); },
+    approvalStore,
+    now: () => 1_000,
+  });
+  const toolCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
+  const fakeClient = {
+    async callTool(name: string, args: Record<string, unknown>) {
+      toolCalls.push({ name, args });
+      return { structuredContent: answer };
+    },
+  };
+  (provider as unknown as {
+    withClient: (identity: unknown, action: (client: unknown) => Promise<unknown>) => Promise<unknown>;
+  }).withClient = (_identity, action) => action(fakeClient);
+  return { provider, approvalStore, toolCalls };
+}
+
 afterEach(async () => {
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
+});
+
+describe("broker receipt reconciliation", () => {
+  it("reconciles only an uncertain row to the broker's completed receipt", async () => {
+    const { approvals, pending } = await replayStore();
+    const input = {
+      approval_id: pending.approval_id, identity, argument_digest: pending.argument_digest,
+      receipt: structuredClone(replayReceipt),
+    };
+    expect(await approvals.reconcile(input)).toBe(true);
+    input.receipt.artifact_ids.push("_bbbbbbbbbbbbbbb");
+    expect(await approvals.review(reviewInput(pending, 2_000))).toEqual({
+      state: "completed", binding: pending, receipt: replayReceipt,
+    });
+    expect(await approvals.claim({
+      approval_id: pending.approval_id, identity, now_ms: 5_000, execution_deadline_ms: 6_000,
+    })).toEqual({ state: "completed", binding: pending, receipt: replayReceipt });
+    expect(await approvals.reconcile({ ...input, receipt: replayReceipt })).toBe(false);
+    for (const state of ["approved", "executing"] as const) {
+      const other = await replayStore(state);
+      expect(await other.approvals.reconcile({
+        approval_id: other.pending.approval_id, identity,
+        argument_digest: other.pending.argument_digest, receipt: replayReceipt,
+      })).toBe(false);
+      expect(await other.approvals.review(reviewInput(other.pending, 2_000)))
+        .toEqual({ state, binding: other.pending });
+    }
+  });
+
+  it("refuses reconciliation for a swapped identity, digest or invalid receipt", async () => {
+    const { approvals, pending } = await replayStore();
+    const input = {
+      approval_id: pending.approval_id, identity, argument_digest: pending.argument_digest, receipt: replayReceipt,
+    };
+    for (const wrong of [
+      { ...identity, tenant_id: "tenant-b" },
+      { ...identity, subject_id: "auth0:bob" },
+      { ...identity, session_id: "session-b" },
+      { ...identity, authority_turn_id: "turn-b" },
+      { ...identity, subscription_mount_id: "mount-b" },
+      { ...identity, runner_profile_id: "author" as const },
+    ]) {
+      expect(await approvals.reconcile({ ...input, identity: wrong })).toBe(false);
+      expect(await approvals.review(reviewInput(pending, 2_000))).toEqual({ state: "uncertain", binding: pending });
+    }
+    expect(await approvals.reconcile({ ...input, argument_digest: "0".repeat(64) })).toBe(false);
+    const invalidReceipt = { content: "x", extra: 1 };
+    expect(await approvals.reconcile({ ...input, receipt: invalidReceipt })).toBe(false);
+    expect(await approvals.review(reviewInput(pending, 2_000))).toEqual({ state: "uncertain", binding: pending });
+  });
+
+  it("reconciles in PostgreSQL with one conditional update from uncertain", async () => {
+    const query = vi.fn(async (_sql: string, _params: unknown[]) => ({ rowCount: 1, rows: [] }));
+    const approvals = new PgTenantBrokerApprovalStore({ query } as unknown as Pool);
+    const pending = binding();
+    const input = {
+      approval_id: pending.approval_id, identity, argument_digest: pending.argument_digest, receipt: replayReceipt,
+    };
+    expect(await approvals.reconcile(input)).toBe(true);
+    expect(query).toHaveBeenCalledTimes(1);
+    const [sql, params] = query.mock.calls[0]!;
+    for (const fragment of [
+      "uncertain_at=NULL", "AND execution_state='uncertain'", "argument_digest=$8",
+      "result=$9::jsonb", "clock_timestamp()",
+    ]) expect(sql).toContain(fragment);
+    const where = sql.slice(sql.indexOf("WHERE") + "WHERE".length);
+    for (const predicate of [
+      "approval_id=$1", "tenant_id=$2", "subject_id=$3", "session_id=$4",
+      "authority_turn_id=$5", "subscription_mount_id=$6", "runner_profile_id=$7",
+      "argument_digest=$8", "execution_state='uncertain'",
+    ]) expect(where).toContain(predicate);
+    expect(params).toEqual([
+      pending.approval_id, identity.tenant_id, identity.subject_id, identity.session_id,
+      identity.authority_turn_id, identity.subscription_mount_id, identity.runner_profile_id,
+      pending.argument_digest, JSON.stringify(replayReceipt),
+    ]);
+    query.mockResolvedValueOnce({ rowCount: 0, rows: [] });
+    expect(await approvals.reconcile(input)).toBe(false);
+    expect(query).toHaveBeenCalledTimes(2);
+    query.mockClear();
+    const invalidReceipt = { content: "x", extra: 1 };
+    expect(await approvals.reconcile({ ...input, receipt: invalidReceipt })).toBe(false);
+    expect(await approvals.reconcile({ ...input, approval_id: "bad" })).toBe(false);
+    expect(await approvals.reconcile({ ...input, identity: { ...identity, tenant_id: "" } })).toBe(false);
+    expect(await approvals.reconcile({ ...input, argument_digest: "invalid" })).toBe(false);
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it("reconciles an uncertain approval through the broker replay and returns the stored receipt on retry", async () => {
+    const { approvals, pending } = await replayStore();
+    const fixture = replayHost(approvals);
+    const request = replayRequest(pending);
+    expect(await fixture.host.execute(request)).toEqual(replayHostReceipt);
+    expect(await fixture.host.execute({
+      ...request,
+      human_bearer: "expired",
+      attachment: { bearer_token: "expired", channel_secret: "expired", expires_at: "1970-01-01T00:00:00.000Z" },
+    })).toEqual(replayHostReceipt);
+    expect(fixture.replayConfirm).toHaveBeenCalledTimes(1);
+    expect(fixture.replayConfirm).toHaveBeenCalledWith(identity, pending);
+    expect(fixture.fetchImpl).not.toHaveBeenCalled();
+    expect(fixture.confirm).not.toHaveBeenCalled();
+    expect(fixture.recordHumanAuthenticatedApproval).not.toHaveBeenCalled();
+    expect(await approvals.review(reviewInput(pending, 2_000))).toEqual({
+      state: "completed", binding: pending, receipt: replayReceipt,
+    });
+  });
+
+  it("keeps an uncertain approval uncertain when the broker replay is not completed", async () => {
+    const { approvals, pending } = await replayStore();
+    const fixture = replayHost(approvals, async () => {
+      throw new Error("standard_service_broker_approval_uncertain");
+    });
+    expect(await fixture.host.execute(replayRequest(pending))).toEqual({ status: "uncertain" });
+    expect(fixture.replayConfirm).toHaveBeenCalledTimes(1);
+    expect(fixture.fetchImpl).not.toHaveBeenCalled();
+    expect(fixture.confirm).not.toHaveBeenCalled();
+    expect(await approvals.review(reviewInput(pending, 2_000))).toEqual({ state: "uncertain", binding: pending });
+  });
+
+  it("never replays a live executing approval", async () => {
+    const { approvals, pending } = await replayStore("executing");
+    const fixture = replayHost(approvals);
+    expect(await fixture.host.execute(replayRequest(pending))).toEqual({ status: "uncertain" });
+    expect(fixture.providerFactory).not.toHaveBeenCalled();
+    expect(fixture.fetchImpl).not.toHaveBeenCalled();
+    expect(await approvals.review(reviewInput(pending, 2_000))).toEqual({ state: "executing", binding: pending });
+  });
+
+  it("returns the stored receipt when a concurrent reconcile already completed the row", async () => {
+    const { approvals, pending } = await replayStore();
+    const reconcile = vi.spyOn(approvals, "reconcile");
+    const losingReplayReceipt = { content: JSON.stringify({ safe: false }), artifact_ids: ["-bbbbbbbbbbbbbbb"] };
+    const fixture = replayHost(approvals, async () => {
+      expect(await approvals.reconcile({
+        approval_id: pending.approval_id, identity, argument_digest: pending.argument_digest, receipt: replayReceipt,
+      })).toBe(true);
+      return structuredClone(losingReplayReceipt);
+    });
+    const receipt = await fixture.host.execute(replayRequest(pending));
+    expect(receipt).toEqual(replayHostReceipt);
+    expect(receipt).not.toEqual({
+      status: "completed", receipt_id: expect.any(String), artifact_ids: losingReplayReceipt.artifact_ids,
+    });
+    expect(fixture.replayConfirm).toHaveBeenCalledTimes(1);
+    expect(reconcile).toHaveBeenCalledTimes(2);
+    expect(await reconcile.mock.results[1]!.value).toBe(false);
+    expect(await approvals.review(reviewInput(pending, 2_000))).toEqual({
+      state: "completed", binding: pending, receipt: replayReceipt,
+    });
+  });
+
+  it("keeps mutate-tenant broker tools out of the tenant catalog until the app routes an uncertain retry", async () => {
+    const { provider, approvalStore } = replayProvider({
+      status: "completed",
+      tools: [
+        { service_id: "time", tool_id: "convert", description: "Convert time", effect: "read", requires_approval: false },
+        { service_id: "research", tool_id: "search-arxiv", description: "Search papers", effect: "external_read", requires_approval: true },
+        { service_id: "workspace", tool_id: "change", description: "Change workspace", effect: "write", requires_approval: true },
+        { service_id: "preview", tool_id: "create", description: "Create preview", effect: "external_write", requires_approval: true },
+      ],
+    });
+    const catalog = await provider.catalog(identity);
+    expect(catalog.tools.map((tool) => [tool.service_id, tool.tool_id])).toEqual([
+      ["time", "convert"], ["research", "search-arxiv"],
+    ]);
+    expect(catalog.tools.map((tool) => tool.effect)).toEqual(["observe-contained", "observe-external"]);
+    expect(catalog.tools.some((tool) => tool.effect === "mutate-tenant")).toBe(false);
+    for (const spy of Object.values(approvalStore)) expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("replays the journaled confirm receipt without touching the approval store", async () => {
+    const { provider, approvalStore, toolCalls } = replayProvider({
+      status: "completed",
+      result: { ok: true, receipt_id: "receipt_12345678", artifact: { artifact_id: "_bbbbbbbbbbbbbbb" } },
+    });
+    expect(await provider.replayConfirm(identity, binding())).toEqual({
+      content: "{\"ok\":true,\"receipt_id\":\"receipt_12345678\",\"artifact\":{\"artifact_id\":\"_bbbbbbbbbbbbbbb\"}}",
+      receipt_id: "receipt_12345678",
+      artifact_ids: ["_bbbbbbbbbbbbbbb"],
+    });
+    expect(toolCalls).toEqual([{ name: "services_confirm", args: { approval_id: "approval_12345678" } }]);
+    for (const spy of Object.values(approvalStore)) expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("refuses a replay that is not a completed broker receipt", async () => {
+    for (const status of ["executing", "uncertain", "ready"]) {
+      const { provider, approvalStore, toolCalls } = replayProvider({ status });
+      await expect(provider.replayConfirm(identity, binding()))
+        .rejects.toThrow("standard_service_broker_approval_uncertain");
+      expect(toolCalls).toEqual([{ name: "services_confirm", args: { approval_id: "approval_12345678" } }]);
+      for (const spy of Object.values(approvalStore)) expect(spy).not.toHaveBeenCalled();
+    }
+  });
+
+  it("refuses a replay for a mismatched binding or a visual target", async () => {
+    const { provider, approvalStore, toolCalls } = replayProvider({ status: "completed", result: {} });
+    await expect(provider.replayConfirm({ ...identity, authority_turn_id: "turn-other" }, binding()))
+      .rejects.toThrow("standard_service_broker_approval_binding_invalid");
+    await expect(provider.replayConfirm(identity, binding({ argument_digest: "0".repeat(64) })))
+      .rejects.toThrow("standard_service_broker_approval_binding_invalid");
+    const visualCall = { service_id: "visual", tool_id: "inspect-issued-target", arguments: { target: "roof-a" } };
+    await expect(provider.replayConfirm(identity, binding({
+      call: visualCall, argument_digest: tenantBrokerApprovalDigest(identity, visualCall),
+    }))).rejects.toThrow("standard_service_broker_approval_uncertain");
+    expect(toolCalls).toHaveLength(0);
+    for (const spy of Object.values(approvalStore)) expect(spy).not.toHaveBeenCalled();
+  });
 });
 
 describe("durable tenant broker approval store", () => {
@@ -317,6 +612,7 @@ describe("human approval host", () => {
       environment: "staging",
       approvalStore: approvals,
       providerFactory: () => ({
+        async replayConfirm() { throw new Error("unused"); },
         async recordHumanAuthenticatedApproval() {},
         async confirm() { return { content: "{}" }; },
       }),
@@ -340,6 +636,7 @@ describe("human approval host", () => {
         });
       }) as typeof fetch,
       providerFactory: (options) => ({
+        async replayConfirm() { throw new Error("unused"); },
         async recordHumanAuthenticatedApproval(approvedIdentity, approvalId, argumentDigest) {
           const approved = await options.approvalStore.approve({
             approval_id: approvalId,
