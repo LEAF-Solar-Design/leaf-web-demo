@@ -1,0 +1,44 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-nec-ampacity-correction",
+  "builtin": "builtins/solar_nec_ampacity_correction.py",
+  "family": "equipment",
+  "adapter": "local-graph-read",
+  "entitlement": "run_read",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_AMPACITY_REQUEST",
+  "readiness": {"kind": "facets", "facets": []},
+  "engine": "server-builtin",
+  "interaction": {"mode": "form"},
+  "record_store": "registry",
+  "record": {
+    "name": "solar-nec-ampacity-correction",
+    "version": "1.0.0",
+    "description": "NEC 310.16 conductor ampacity with temperature and conduit-fill correction, as a cited calculation.",
+    "kind": "script",
+    "family_id": "equipment",
+    "engine_op": "solar_nec_ampacity_correction",
+    "entry": "builtins/solar_nec_ampacity_correction.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {"type": "string", "maxLength": 128},
+        "base_ampacity": {"type": "number", "minimum": 0, "maximum": 10000},
+        "temp_factor": {"type": "number", "minimum": 0, "maximum": 10},
+        "conduit_factor": {"type": "number", "minimum": 0, "maximum": 10}
+      },
+      "required": ["base_ampacity", "temp_factor", "conduit_factor"],
+      "additionalProperties": false
+    },
+    "returns": {"type": "object"},
+    "capabilities": ["drawing.read"],
+    "allow_local_fallback": false
+  },
+  "ledger": ["nec-ampacity-correction"],
+  "trusted_inputs": [],
+  "maturity": "production",
+  "wave": 3,
+  "order": 10,
+  "scenario": "w3-ground-electrical"
+}

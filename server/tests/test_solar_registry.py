@@ -309,7 +309,8 @@ def test_read_declaration_rules_are_enforced(package, monkeypatch, field, value,
 def test_local_graph_read_tools_derive_from_declarations():
     expected = tuple(row["name"] for row in solar_tools.entries()
                      if row["adapter"] == "local-graph-read")
-    assert solar_tools.local_graph_read_tools() == expected == ("solar-select-by-zone",)
+    assert solar_tools.local_graph_read_tools() == expected
+    assert "solar-select-by-zone" in expected
     assert solar_local_read.LOCAL_GRAPH_READ_TOOLS == expected
     assert solar_local_read.local_graph_read_tools() == expected
     assert "solar-select-by-zone" not in solar_tools.local_graph_tools()
