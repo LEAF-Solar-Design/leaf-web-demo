@@ -1,0 +1,51 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-electrical-zones",
+  "builtin": "builtins/solar_electrical_zones.py",
+  "family": "placement",
+  "adapter": "local-graph-commit",
+  "entitlement": "run_write",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_ZONE_REQUEST",
+  "readiness": {"kind": "facets", "facets": []},
+  "engine": "server-builtin",
+  "interaction": {"mode": "form"},
+  "record_store": "registry",
+  "record": {
+    "name": "solar-electrical-zones",
+    "version": "1.0.0",
+    "description": "Add a named electrical zone, or assign panels to one, moving each panel out of any other zone.",
+    "kind": "script",
+    "family_id": "placement",
+    "engine_op": "solar_electrical_zones",
+    "entry": "builtins/solar_electrical_zones.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {"type": "string", "maxLength": 128},
+        "operation": {"type": "string", "enum": ["add", "assign-panels"]},
+        "expected_rev": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+        "name": {"type": "string", "minLength": 1, "maxLength": 255},
+        "color_index": {"type": "integer", "minimum": 0, "maximum": 256},
+        "panel_refs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100000,
+          "items": {"type": "string", "minLength": 1, "maxLength": 128}
+        }
+      },
+      "required": ["operation", "expected_rev", "name"],
+      "additionalProperties": false
+    },
+    "returns": {"type": "object"},
+    "capabilities": ["drawing.write"],
+    "allow_local_fallback": false
+  },
+  "ledger": ["electrical-zone-add", "electrical-zone-assign-panels"],
+  "trusted_inputs": [],
+  "maturity": "preview",
+  "wave": 2,
+  "order": 20,
+  "scenario": "w2-rooftop"
+}

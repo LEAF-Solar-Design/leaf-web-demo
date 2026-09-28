@@ -123,7 +123,10 @@ OPERATIONS = {"add": add_zone, "assign-panels": assign_panels}
 
 def run(intake, params):
     _bounded_json(params)
-    if type(params) is not dict or params.get("operation") not in OPERATIONS:
+    # The operation is named as a string or the request is refused: an unhashable
+    # value would otherwise escape the membership test as a raw TypeError.
+    if (type(params) is not dict or type(params.get("operation")) is not str
+            or params["operation"] not in OPERATIONS):
         raise GraphValidationError("INVALID_ZONE_REQUEST")
     request = {key: value for key, value in params.items() if key != "operation"}
     return OPERATIONS[params["operation"]](intake, request)["graph"]

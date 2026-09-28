@@ -1,0 +1,43 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-panel-group-delete",
+  "builtin": "builtins/solar_panel_group_delete.py",
+  "family": "placement",
+  "adapter": "local-graph-commit",
+  "entitlement": "run_write",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_GROUP_DELETE_REQUEST",
+  "readiness": {"kind": "facets", "facets": ["frames"]},
+  "engine": "server-builtin",
+  "interaction": {"mode": "form"},
+  "record_store": "registry",
+  "record": {
+    "name": "solar-panel-group-delete",
+    "version": "1.0.0",
+    "description": "Delete every panel group; the panels stay and leave their groups.",
+    "kind": "script",
+    "family_id": "placement",
+    "engine_op": "solar_panel_group_delete",
+    "entry": "builtins/solar_panel_group_delete.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {"type": "string", "maxLength": 128},
+        "operation": {"type": "string", "enum": ["delete-all"], "default": "delete-all"},
+        "expected_rev": {"type": "integer", "minimum": 0, "maximum": 2147483647}
+      },
+      "required": ["operation", "expected_rev"],
+      "additionalProperties": false
+    },
+    "returns": {"type": "object"},
+    "capabilities": ["drawing.write"],
+    "allow_local_fallback": false
+  },
+  "ledger": ["panel-group-delete-all"],
+  "trusted_inputs": [],
+  "maturity": "preview",
+  "wave": 2,
+  "order": 50,
+  "scenario": "w2-rooftop"
+}
