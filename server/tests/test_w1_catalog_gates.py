@@ -417,7 +417,8 @@ def test_ordinary_embedded_graph_readiness_unchanged(graph, tmp_path, monkeypatc
                 for name in availability.W1_CAPABILITIES}
     expected.update({name: {"input_ready": True, "input_reason": None}
                      for name in ("solar-settings", "solar-correct-string")})
-    expected.update({name: availability.w1_graph_readiness(graph)[name] for name in availability.W1_CAPABILITIES
+    expected.update({name: availability.w1_graph_readiness(graph)[name]
+                     for name in dict.fromkeys((*availability.W1_CAPABILITIES, *availability.SOLAR_CAPABILITIES))
                      if availability.capability_adapter(name) == availability.LOCAL_GRAPH_COMMIT_ADAPTER
                      and name not in ("solar-settings", "solar-correct-string")})
     expected.update({name: availability.w1_graph_readiness(graph)[name] for name in availability.SOLAR_CAPABILITIES

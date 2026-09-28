@@ -47,6 +47,28 @@ def request_digest(tool, drawing_id, source_version, builtin_params):
                    "source_version": source_version, "params": builtin_params})
 
 
+def _source_intake(backend, tenant_id, drawing_id, version, graph_sha256):
+    """Resolve immutable intake bytes bound to the graph used by the builtin."""
+    try:
+        _, key, entry = store.resolve_version_entry(backend, tenant_id, drawing_id, version)
+        data = backend.get(key)
+        if hashlib.sha256(data).hexdigest() != entry["sha256"]:
+            raise ValueError()
+        intake = json.loads(data)
+        if (not isinstance(intake, dict) or "solar_design_graph" not in intake
+                or "solar_design_graph_sha256" not in intake
+                or intake["solar_design_graph_sha256"] != graph_sha256):
+            raise ValueError()
+        del intake["solar_design_graph"]
+        del intake["solar_design_graph_sha256"]
+        return intake
+    except Exception:
+        raise GraphValidationError("SOURCE_INTAKE_UNAVAILABLE") from None
+
+
+_TRUSTED_RESOLVERS = {"source_intake": _source_intake}
+
+
 def stable_numbers(value):
     """True when every float in a JSON value survives a JSONB round trip with the same spelling.
 
@@ -117,6 +139,21 @@ def graph_commit_provenance(result, params, tenant_id, job_id, tool, source_vers
                 or parent["graph"]["rev"] != result["before_rev"]
                 or parent["graph_sha256"] != result["before_graph_sha256"]):
             raise ValueError()
+        trusted_inputs = solar_tools.get(tool)["trusted_inputs"]
+        if "source_intake" in trusted_inputs:
+            resolved = {name: _TRUSTED_RESOLVERS[name](
+                backend, tenant_id, drawing_id, source_version, parent["graph_sha256"])
+                for name in trusted_inputs}
+            after = _load_builtin(tool).run(copy.deepcopy(parent["graph"]), builtin_params,
+                                            **copy.deepcopy(resolved))
+            if digest(after) != result["graph_sha256"]:
+                raise ValueError()
+            intake = _source_intake(backend, tenant_id, drawing_id, version, result["graph_sha256"])
+            def canonical(value):
+                return json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                  ensure_ascii=False, allow_nan=False)
+            if canonical(intake) != canonical(resolved["source_intake"]):
+                raise ValueError()
         return {"execution_mode": "local_graph_commit", "adapter": ADAPTER_KIND,
                 "request_sha256": request_sha256, "graph_sha256": result["graph_sha256"],
                 "intake_sha256": result["intake_sha256"], "source_version": source_version,
@@ -233,7 +270,10 @@ def run_local_graph_commit(backend, tenant_id, tool, params, *, drawing_id, sour
                                         project_id=project_id)
         if context["representation"] == "dwg-bundle":
             raise GraphValidationError("LICENSED_GRAPH_COMMIT_REQUIRED")
-        after = _load_builtin(tool).run(copy.deepcopy(context["graph"]), builtin_params)
+        resolved = {name: _TRUSTED_RESOLVERS[name](
+            backend, tenant_id, drawing_id, source_version, context["graph_sha256"])
+            for name in solar_tools.get(tool)["trusted_inputs"]}
+        after = _load_builtin(tool).run(copy.deepcopy(context["graph"]), builtin_params, **resolved)
         if builtin_params.get("cancel") is True:
             raise GraphValidationError("GRAPH_COMMIT_CANCELLED")
         request_sha256 = request_digest(tool, drawing_id, source_version, builtin_params)
