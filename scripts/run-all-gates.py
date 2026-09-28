@@ -1695,8 +1695,6 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_ios_ship_source_routes.py"), 5),
         Suite("platform-ios-ship-source-catalog-static", "platform iOS source catalog static", "pytest",
               REPO_PARENT, _py_pytest(f"{repo_name}/platform/tests/test_ios_ship_source_catalog_static.py"), 1),
-        Suite("platform-binding-grant-static", "platform binding grant static", "pytest",
-              REPO_PARENT, _py_pytest(f"{repo_name}/platform/tests/test_binding_grant_static.py"), 6),
         # Dependency-free *_static proofs must run even with NO Postgres: the
         # conftest's pytest_ignore_collect exempts them, so this un-gated suite
         # keeps them in the gate on a clean checkout.
@@ -1757,7 +1755,9 @@ def build_suites() -> List[Suite]:
                  # *_static.py runs nowhere, which is the exact vacuous-green
                  # this list exists to stop.
                  f"{repo_name}/platform/tests/test_soft_delete_guard_static.py",
-                 f"{repo_name}/platform/tests/test_identity_display_name_static.py"], 182,
+                 f"{repo_name}/platform/tests/test_identity_display_name_static.py",
+                 f"{repo_name}/platform/tests/test_binding_grant_static.py",
+                 f"{repo_name}/platform/tests/test_binding_grant_issuance_static.py"], 208,
               allowed_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
         # The committed replay fixture is dependency-free and catches hash or
