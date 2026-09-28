@@ -26,6 +26,11 @@ import SolarToolForm from './solar/SolarToolForm.jsx'
 import SolarSettingsForm from './solar/SolarSettingsForm.jsx'
 import { ENV_SOLAR_SETTINGS_FORM } from './solar/flag.js'
 import { canOpenSolarSettingsForm, catalogRunOverlays, solarSettingsFormChoice, solarSettingsLoaders, solarSettingsRunFeedback, solarSettingsScope } from './solar/solarSettingsWire.js'
+import { ENV_SOLAR_FLOW_RAIL } from './solar/flag.js'
+import { SOLAR_SETTINGS_TOOL_NAME } from './solar/solarSettingsWire.js'
+import SolarFlowRail from './solar/SolarFlowRail.jsx'
+import SolarStepEditor from './solar/SolarStepEditor.jsx'
+import { MAX_FLOW_STEPS, solarFlowRecordRun, solarFlowRunOutcome, solarFlowRunStatus, solarFlowRunsFor } from './solar/solarFlowModel.js'
 import { resolvePublishedCatalogTool } from './site/publishedCatalogTool.js'
 import { entityGeometry } from './lib/entityMetrics.js'
 import { setCredentialMountAvailable } from './lib/secretGuardTransport.js'
@@ -378,6 +383,23 @@ export default function App() {
     settingsRunRef.current = null
     setSettingsRunResult(null)
   }, [solarFormTool])
+  // Guided Solar step rail (ENV_SOLAR_FLOW_RAIL): the open step editor, the one step run waiting on its
+  // confirm or settle, the settled outcomes for the open drawing, and each step's last submitted inputs
+  // (at most MAX_FLOW_STEPS entries) so a failed run keeps them.
+  const [solarFlowEditor, setSolarFlowEditor] = useState(null)
+  const solarFlowRunRef = useRef(null)
+  const [solarFlowPending, setSolarFlowPending] = useState(null)
+  const [solarFlowRuns, setSolarFlowRuns] = useState(null)
+  const solarFlowRetainedRef = useRef(new Map())
+  // The drawing the capability families were loaded for (what the catalog controller was last handed).
+  const [solarFlowFamiliesDrawingId, setSolarFlowFamiliesDrawingId] = useState(null)
+  // A step run that ends without running (dismissed confirm, refused confirm) is no longer pending.
+  const clearSolarFlowStaged = useCallback((intentId = null) => {
+    const staged = solarFlowRunRef.current
+    if (!staged || staged.confirmed || (intentId !== null && staged.intentId !== intentId)) return
+    solarFlowRunRef.current = null
+    setSolarFlowPending(null)
+  }, [])
   const [selectedHandle, setSelectedHandle] = useState(null)
   const canvasPickRef = useRef(null)
   const registerCanvasPick = useCallback((fn) => { canvasPickRef.current = fn }, [])
@@ -1870,6 +1892,7 @@ export default function App() {
       runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current, intent?.intentId)
       dismissRoute({ outcome: 'invalidated' })
       setRunErr('That catalog tool changed or is no longer available. Choose Run again to create a new intent.')
+      if (ENV_SOLAR_FLOW_RAIL) clearSolarFlowStaged(intent?.intentId ?? null)
       return
     }
     const confirmed = confirmRunIntent(runIntentStateRef.current, {
@@ -1884,6 +1907,7 @@ export default function App() {
     if (!confirmed.ok) {
       dismissRoute({ outcome: 'invalidated' })
       setRunErr('That run confirmation is no longer valid. Choose Run again to create a new intent.')
+      if (ENV_SOLAR_FLOW_RAIL) clearSolarFlowStaged(intent?.intentId ?? null)
       return
     }
     // P2 wave C-2: trust-gate friction. This is THE confirm click (the only
@@ -1913,6 +1937,30 @@ export default function App() {
         }
       }, () => {})
     }
+    if (ENV_SOLAR_FLOW_RAIL) {
+      // The step rail learns a run's outcome only from this confirmed run's own settle, matched by intent.
+      const intentId = confirmed.execution.intentId
+      const staged = solarFlowRunRef.current
+      const flowRun = staged?.intentId === intentId ? { ...staged, confirmed: true }
+        : settingsRunRef.current?.intentId === intentId
+          ? { intentId, tool: SOLAR_SETTINGS_TOOL_NAME, drawingId: settingsRunRef.current.drawingId ?? null, confirmed: true }
+          : null
+      // Another intent confirmed: a step intent still waiting on its confirm was replaced, so it is no longer pending.
+      if (flowRun || !staged?.confirmed) {
+        solarFlowRunRef.current = flowRun
+        setSolarFlowPending(flowRun ? flowRun.tool : null)
+      }
+      if (flowRun) {
+        const settle = (envelope) => {
+          if (solarFlowRunRef.current !== flowRun) return
+          solarFlowRunRef.current = null
+          setSolarFlowPending(null)
+          if (solarFlowRunOutcome(envelope).ok) solarFlowRetainedRef.current.delete(flowRun.tool)
+          setSolarFlowRuns((previous) => solarFlowRecordRun(previous, flowRun, envelope))
+        }
+        runPromise.then(settle, () => settle(null))
+      }
+    }
   }, [dismissRoute, mock, onRun])
 
   // Retry the last run (plain affordance for retryable failures / transport hiccups).
@@ -1920,6 +1968,51 @@ export default function App() {
     const last = lastRunRef.current
     if (last) onRequestCatalogRun(last.tool, last.params)
   }, [onRequestCatalogRun])
+
+  // Guided Solar step rail: Solar settings opens its typed form; every other step opens the step editor.
+  const onOpenSolarFlowStep = useCallback((row) => {
+    if (!row || typeof row.name !== 'string') return
+    if (row.name === SOLAR_SETTINGS_TOOL_NAME) {
+      setSolarFlowEditor(null)
+      setSolarFormTool(row)
+      return
+    }
+    setSolarFormTool(null)
+    setSolarFlowEditor(row)
+  }, [])
+
+  // A step submit arms the same confirm path as the ribbon; the rail never runs a tool itself.
+  const onSubmitSolarFlowStep = useCallback((row, params) => {
+    const drawingId = catalogRunContextRef.current?.drawingId ?? null
+    const retained = solarFlowRetainedRef.current
+    if (!retained.has(row.name) && retained.size >= MAX_FLOW_STEPS) retained.delete(retained.keys().next().value)
+    retained.set(row.name, { drawingId, values: params })
+    const armed = onRequestCatalogRun(row, params, RIBBON_RATIONALE, 'ribbon')
+    const intentId = armed?.runIntent?.intentId
+    if (!intentId) return
+    solarFlowRunRef.current = { intentId, tool: row.name, drawingId }
+    setSolarFlowPending(row.name)
+  }, [onRequestCatalogRun])
+
+  // Closing the editor before the confirm clears the pending mark; a later confirm of that intent restores it.
+  const onCloseSolarFlowStep = useCallback(() => {
+    if (solarFlowRunRef.current && !solarFlowRunRef.current.confirmed) setSolarFlowPending(null)
+    setSolarFlowEditor(null)
+  }, [])
+
+  // Dismissing the confirm strip ends a step run that never ran, so the rail stops showing it pending.
+  const onDismissSolarFlowRoute = useCallback(() => {
+    clearSolarFlowStaged()
+    dismissRoute()
+  }, [clearSolarFlowStaged, dismissRoute])
+
+  // Any other way the armed step intent leaves the confirm strip unconfirmed (typed over, replaced,
+  // a drawing change) also ends it: pending holds only while the strip still carries that intent.
+  useEffect(() => {
+    if (!ENV_SOLAR_FLOW_RAIL) return
+    const staged = solarFlowRunRef.current
+    if (staged && !staged.confirmed && route?.runIntent?.intentId !== staged.intentId) clearSolarFlowStaged(staged.intentId)
+  }, [route, solarFlowPending, clearSolarFlowStaged])
 
   // An agent-dispatched job (job_linked event) -> the SAME §7 attach
   // affordance the tab-close re-attach uses: subscribe to the job, stream
@@ -2485,7 +2578,7 @@ export default function App() {
       onCloseDrawer: () => setDrawer(null),
       onCloseHistory: () => closeHistory(),
       onCloseStart: onReturnToDrawing,
-      onDismissRoute: () => dismissRoute(),
+      onDismissRoute: () => (ENV_SOLAR_FLOW_RAIL ? onDismissSolarFlowRoute() : dismissRoute()),
       onClearErrors: () => { clearRouteError(); clearRunErr() },
       onInterruptRun: () => {
         // P2 wave C-2: latency tolerance in the wild. Esc-on-running is the
@@ -2524,7 +2617,8 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [startOpen, onReturnToDrawing, drawer, historyOpen, route, routeErr, runErr, running, selectedHandle,
       interruptRun, currentJob?.tool, currentJob?.job_id, result, mock, showToast, onDispatch, openProjectId, onCloseProject, rTarget,
-      closeHistory, loadHistory, retryTools, loadCatalog, onRetryViewerRefresh, dismissRoute, clearRouteError])
+      closeHistory, loadHistory, retryTools, loadCatalog, onRetryViewerRefresh, dismissRoute, clearRouteError,
+      onDismissSolarFlowRoute])
 
   // Click-to-fall-through (operator rule): a click anywhere on the surface that
   // doesn't otherwise take an action activates the prompt bar. Real
@@ -2740,6 +2834,13 @@ export default function App() {
     if (!ENV_SOLAR_SETTINGS_FORM) return
     catalogController.setContext(solarSettingsScope({ enabled: ENV_SOLAR_SETTINGS_FORM, mock, profile: surfaceSlots.toolbar.profile, context: catalogRunContext }))
   }, [catalogController, mock, surfaceSlots.toolbar.profile, catalogRunContext?.drawingId, catalogRunContext?.drawingVersion, catalogRunContext?.projectId])
+  // Guided Solar step rail: record the drawing the effect above just handed the catalog controller, so the
+  // rail knows which drawing its families belong to and never files one drawing's readiness under another.
+  useEffect(() => {
+    if (!ENV_SOLAR_FLOW_RAIL) return
+    const scope = solarSettingsScope({ enabled: ENV_SOLAR_SETTINGS_FORM, mock, profile: surfaceSlots.toolbar.profile, context: catalogRunContext })
+    setSolarFlowFamiliesDrawingId(scope.drawingId ?? null)
+  }, [mock, surfaceSlots.toolbar.profile, catalogRunContext?.drawingId, catalogRunContext?.drawingVersion, catalogRunContext?.projectId])
   const boardVisible = !!studioGround && (startOpen || surfaceSlots.ground === 'board')
   // The Browser board's panel slot hosts the project panels; CAD and Solar Start keep them inline because they pass no panel.
   const boardHostsProject = boardVisible && surfaceSlots.ground === 'board'
@@ -3847,6 +3948,35 @@ export default function App() {
             />
             )
           )}
+          {ENV_SOLAR_FLOW_RAIL && ENV_CAD_EDIT && ENV_SOLAR_SETTINGS_FORM && drafting && surfaceSlots.toolbar.profile === 'solar' && (
+            <div className="solar-flow-host">
+              <SolarFlowRail
+                families={catalog.families}
+                familiesDrawingId={solarFlowFamiliesDrawingId}
+                drawingId={catalogRunContext?.drawingId ?? null}
+                openSettingsForm={ENV_SOLAR_SETTINGS_FORM && !mock && catalogRunContext?.projectId === null ? canOpenSolarSettingsForm : undefined}
+                pendingTool={solarFlowPending}
+                runs={solarFlowRunsFor(solarFlowRuns, catalogRunContext?.drawingId)}
+                openName={solarFlowEditor?.name ?? solarFormTool?.name ?? null}
+                onOpenStep={onOpenSolarFlowStep}
+              />
+              {solarFlowEditor && (
+                <SolarStepEditor
+                  key={`${catalogRunContext?.drawingId ?? ''}:${solarFlowEditor.name}`}
+                  row={solarFlowEditor}
+                  drawingId={catalogRunContext?.drawingId ?? null}
+                  drawingVersion={catalogRunContext?.drawingVersion ?? null}
+                  readIntake={SOLAR_SETTINGS_LOADERS?.readIntake}
+                  retained={solarFlowRetainedRef.current.get(solarFlowEditor.name)?.drawingId === (catalogRunContext?.drawingId ?? null)
+                    ? solarFlowRetainedRef.current.get(solarFlowEditor.name).values : null}
+                  status={solarFlowRunStatus(solarFlowEditor.name, solarFlowPending, solarFlowRunsFor(solarFlowRuns, catalogRunContext?.drawingId))}
+                  failureCode={solarFlowRunsFor(solarFlowRuns, catalogRunContext?.drawingId)[solarFlowEditor.name]?.code ?? null}
+                  onSubmit={onSubmitSolarFlowStep}
+                  onClose={onCloseSolarFlowStep}
+                />
+              )}
+            </div>
+          )}
           {/* W4c-V1: the drafting ribbon — the drawing window's command
               strip, in the cockpit grammar. Studio-only (nothing renders
               before the ground attaches); tools are the ACTIVE SURFACE's fold, wired through
@@ -4450,7 +4580,7 @@ export default function App() {
             onConfirmIntent={onConfirmCatalogRun}
             onPickAlternative={onPickAlternative}
             onOpenAuthor={onOpenAuthor}
-            onDismiss={dismissRoute}
+            onDismiss={ENV_SOLAR_FLOW_RAIL ? onDismissSolarFlowRoute : dismissRoute}
           />
           {/* Slice 4a: the command well is the frame's `commandBar` render
               prop (declared at the SurfaceFrame call above), so slice 5 has one

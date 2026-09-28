@@ -24,7 +24,7 @@ function buildWithFlag(root, flag) {
     [join(WEB_ROOT, 'node_modules', 'vite', 'bin', 'vite.js'), 'build', '--outDir', outDir, '--emptyOutDir'],
     {
       cwd: WEB_ROOT,
-      env: { ...process.env, NODE_ENV: 'production', VITE_CAD_EDIT: '1', VITE_SOLAR_SETTINGS_FORM: flag },
+      env: { ...process.env, NODE_ENV: 'production', VITE_CAD_EDIT: '1', VITE_SOLAR_SETTINGS_FORM: flag, VITE_SOLAR_FLOW_RAIL: flag },
       stdio: 'pipe',
       timeout: 240_000,
     })
@@ -54,6 +54,11 @@ describe('Solar settings build fence', () => {
 
   it('SF2 fence the flag-off build ships no settings form', () => {
     for (const marker of MARKERS) expect(offText).not.toContain(marker)
+  })
+
+  it('FR fence the flag-off build ships no Solar step rail', () => {
+    expect(onText).toContain('solar-flow-rail')
+    expect(offText).not.toContain('solar-flow-rail')
   })
 
   it('SF2 fence the positive control ships in both builds', () => {

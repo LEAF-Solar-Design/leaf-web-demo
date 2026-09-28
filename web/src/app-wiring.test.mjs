@@ -164,6 +164,100 @@ describe('solar-ui-rail wiring', () => {
   })
 })
 
+describe('Solar step rail wiring', () => {
+  const condition = "{ENV_SOLAR_FLOW_RAIL && ENV_CAD_EDIT && ENV_SOLAR_SETTINGS_FORM && drafting && surfaceSlots.toolbar.profile === 'solar' && ("
+
+  it('FR wiring the rail mounts once, behind its fence, after the Solar form host and before the ribbon', () => {
+    const host = appSource.indexOf("{ENV_CAD_EDIT && drafting && surfaceSlots.toolbar.profile === 'solar' && solarFormTool && (")
+    const generic = appSource.indexOf('<SolarToolForm', host)
+    const mount = appSource.indexOf(condition)
+    const rail = appSource.indexOf('<SolarFlowRail', mount)
+    const ribbon = appSource.indexOf('{/* W4c-V1: the drafting ribbon')
+    assert.ok(host >= 0 && generic > host && mount > generic && rail > mount && ribbon > rail)
+    assert.equal(appSource.split('<SolarFlowRail').length, 2)
+    assert.equal(appSource.split(condition).length, 2)
+    assert.ok(appSource.slice(rail, ribbon).includes('families={catalog.families}'))
+  })
+
+  it('FR wiring the rail flag is the first operand so a flag-off build folds the mount away', () => {
+    const mount = appSource.indexOf(condition)
+    assert.ok(mount >= 0)
+    const operands = appSource.slice(mount + 1, appSource.indexOf(' && (', mount)).split(' && ')
+    assert.equal(operands[0], 'ENV_SOLAR_FLOW_RAIL')
+    for (const operand of ['ENV_CAD_EDIT', 'ENV_SOLAR_SETTINGS_FORM', 'drafting', "surfaceSlots.toolbar.profile === 'solar'"]) {
+      assert.ok(operands.includes(operand), `${operand} must gate the rail`)
+    }
+  })
+
+  it('FR wiring a step submit arms through the catalog run path and never runs a tool', () => {
+    const start = appSource.indexOf('const onSubmitSolarFlowStep = useCallback')
+    const end = appSource.indexOf('}, [onRequestCatalogRun])', start)
+    assert.ok(start >= 0 && end > start)
+    const body = appSource.slice(start, end)
+    assert.ok(body.includes("onRequestCatalogRun(row, params, RIBBON_RATIONALE, 'ribbon')"))
+    assert.ok(!/\brunTool(Async)?\(/.test(body))
+  })
+
+  it('FR wiring a confirmed step run records its outcome from its own settle, under the rail flag', () => {
+    const start = appSource.indexOf('const onConfirmCatalogRun = useCallback')
+    const end = appSource.indexOf('}, [dismissRoute, mock, onRun])', start)
+    assert.ok(start >= 0 && end > start)
+    const body = appSource.slice(start, end)
+    const fence = body.indexOf('if (ENV_SOLAR_FLOW_RAIL) {')
+    assert.ok(fence > body.indexOf('const runPromise = onRun('))
+    assert.ok(body.indexOf('staged?.intentId === intentId', fence) > fence)
+    assert.ok(body.indexOf('solarFlowRecordRun(previous, flowRun, envelope)', fence) > fence)
+  })
+
+  it('CORR1 wiring App passes the ribbon opener predicate and the families drawing id to the rail', () => {
+    const opener = 'ENV_SOLAR_SETTINGS_FORM && !mock && catalogRunContext?.projectId === null ? canOpenSolarSettingsForm : undefined'
+    assert.ok(appSource.includes(`solarTypedForm: ${opener},`))
+    const rail = appSource.indexOf('<SolarFlowRail')
+    assert.ok(rail >= 0)
+    const props = appSource.slice(rail, appSource.indexOf('/>', rail))
+    assert.ok(props.includes(`openSettingsForm={${opener}}`))
+    assert.ok(props.includes('familiesDrawingId={solarFlowFamiliesDrawingId}'))
+    const record = appSource.indexOf('setSolarFlowFamiliesDrawingId(scope.drawingId ?? null)')
+    const scope = appSource.lastIndexOf('const scope = solarSettingsScope({ enabled: ENV_SOLAR_SETTINGS_FORM, mock, profile: surfaceSlots.toolbar.profile, context: catalogRunContext })', record)
+    const handed = appSource.indexOf('catalogController.setContext(solarSettingsScope(')
+    assert.ok(handed >= 0 && scope > handed && record > scope)
+  })
+
+  it('CORR1 wiring the dismiss path and the refused confirms clear solarFlowPending', () => {
+    const start = appSource.indexOf('const clearSolarFlowStaged = useCallback(')
+    const end = appSource.indexOf('}, [])', start)
+    assert.ok(start >= 0 && end > start)
+    const clear = new Function('solarFlowRunRef', 'setSolarFlowPending',
+      `return ${appSource.slice(start + 'const clearSolarFlowStaged = useCallback('.length, end + 1)}`)
+    for (const [staged, intentId, cleared] of [
+      [{ intentId: 'i-1', tool: 'solar-homeruns' }, null, true],
+      [{ intentId: 'i-1', tool: 'solar-homeruns' }, 'i-1', true],
+      [{ intentId: 'i-1', tool: 'solar-homeruns' }, 'i-2', false],
+      [{ intentId: 'i-1', tool: 'solar-homeruns', confirmed: true }, null, false],
+      [null, null, false],
+    ]) {
+      const ref = { current: staged }
+      const pending = []
+      clear(ref, (value) => pending.push(value))(intentId)
+      assert.deepEqual(pending, cleared ? [null] : [])
+      assert.equal(ref.current, cleared ? null : staged)
+    }
+    const dismiss = appSource.slice(appSource.indexOf('const onDismissSolarFlowRoute = useCallback'),
+      appSource.indexOf('}, [clearSolarFlowStaged, dismissRoute])'))
+    assert.ok(dismiss.indexOf('clearSolarFlowStaged()') >= 0 && dismiss.indexOf('dismissRoute()') > dismiss.indexOf('clearSolarFlowStaged()'))
+    assert.ok(appSource.includes('onDismiss={ENV_SOLAR_FLOW_RAIL ? onDismissSolarFlowRoute : dismissRoute}'))
+    assert.ok(appSource.includes('onDismissRoute: () => (ENV_SOLAR_FLOW_RAIL ? onDismissSolarFlowRoute() : dismissRoute()),'))
+    const confirmStart = appSource.indexOf('const onConfirmCatalogRun = useCallback')
+    const body = appSource.slice(confirmStart, appSource.indexOf('}, [dismissRoute, mock, onRun])', confirmStart))
+    const fence = body.indexOf('if (ENV_SOLAR_FLOW_RAIL) {')
+    const clears = [...body.matchAll(/if \(ENV_SOLAR_FLOW_RAIL\) clearSolarFlowStaged\(intent\?\.intentId \?\? null\)\r?\n\s*return\r?\n/g)]
+    assert.equal(clears.length, 2)
+    assert.ok(clears.every((match) => match.index < fence))
+    const effect = appSource.slice(appSource.indexOf('const onDismissSolarFlowRoute = useCallback'))
+    assert.ok(effect.includes("route?.runIntent?.intentId !== staged.intentId) clearSolarFlowStaged(staged.intentId)"))
+  })
+})
+
 describe('J1 Browser composition', () => {
   const compiled = esbuild.transformSync(appSource, { loader: 'jsx' }).code
   const mount = (name) => {
