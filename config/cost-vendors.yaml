@@ -1,0 +1,42 @@
+# Leaf Automation's non-AWS recurring costs, one entry per resource (TCM-07).
+# Transparency of real cost, never billing. Read by server/cost_meter/vendors.py
+# and scripts/collect-cost-vendors.py; validation is strict and fails closed.
+#
+# Each entry: resource_id (vendor:<name> or subscription:<name>), display_name,
+# EITHER monthly_usd OR annual_usd plus start (YYYY-MM, the first of the 12 months
+# the annual amount is spread over), basis (invoice | card-charge | estimate),
+# source (a document or statement reference, never a secret), and optional
+# default_share ("participant|dimension" to a share, summing to exactly 1;
+# omitted means leaf|development 1). Every amount and share is a QUOTED decimal
+# string: an unquoted number is refused so no value ever passes through a float.
+# Payroll is not a resource here.
+version: 1
+entries:
+  - resource_id: subscription:ai-models
+    display_name: Build fleet AI model plans (Claude and ChatGPT)
+    monthly_usd: "3000"
+    basis: card-charge
+    source: Company card statement, Anthropic and OpenAI plan charges
+    default_share:
+      leaf|fleet: "1"
+  - resource_id: vendor:github
+    display_name: GitHub
+    monthly_usd: "590"
+    basis: estimate
+    source: GitHub billing page, monthly estimate
+  - resource_id: subscription:autodesk-adn
+    display_name: Autodesk Developer Network membership
+    annual_usd: "1620"
+    start: "2026-01"
+    basis: invoice
+    source: Autodesk ADN annual membership invoice
+  - resource_id: vendor:software-and-fees-unitemized
+    display_name: Other software subscriptions and fees (not itemized)
+    monthly_usd: "970"
+    basis: card-charge
+    source: Company card statement, software and fee charges not itemized above
+  - resource_id: vendor:other-bills-unitemized
+    display_name: Other recurring bills (not itemized)
+    monthly_usd: "720"
+    basis: card-charge
+    source: Company card statement, other recurring bills not itemized above

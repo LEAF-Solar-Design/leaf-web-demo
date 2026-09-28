@@ -720,7 +720,10 @@ def execute_human_approval(
             _require_project_execution(
                 identity["session_id"], tenant_id, tenant.subject, current_tier,
             )
-            if approval_status in {"pending", "approved"}:
+            # An uncertain review re-verifies the mount, mints fresh credentials for the
+            # stored identity and sends one execute; the host replays only a harness-uncertain
+            # row and never an executing one, and the broker journal never runs the adapter twice.
+            if approval_status in {"pending", "approved", "uncertain"}:
                 mcp_authority.verify_subscription_mount(
                     tenant_id, identity["subscription_mount_id"]
                 )

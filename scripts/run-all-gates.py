@@ -954,6 +954,9 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_live_lsp_resolution.py"), 2),
         Suite("server-job-dwg-version", "server tests/test_job_dwg_version_persist.py",
               "pytest", SERVER, _py_pytest("tests/test_job_dwg_version_persist.py"), 6),
+        # TCM-06 Cost Explorer import: hermetic (fake ce client, tmp_path output), exact count.
+        Suite("server-cost-aws-import", "server tests/test_cost_aws_import.py",
+              "pytest", SERVER, _py_pytest("tests/test_cost_aws_import.py"), 11),
         Suite("server-job-migration-concurrent", "server tests/test_job_migration_concurrent.py",
               "pytest", SERVER, _py_pytest("tests/test_job_migration_concurrent.py"), 1),
         Suite("server-job-migration-thread-race", "server tests/test_job_migration_thread_race.py",
@@ -2718,6 +2721,9 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_change_classifier.py"), 164),
         Suite("server-checkpoints", "server tests/test_checkpoints.py", "pytest", SERVER,
               _py_pytest("tests/test_checkpoints.py"), 6),
+        # TCM-05 cost transparency storage snapshots: hermetic (tmp_path roots), exact count.
+        Suite("server-cost-storage", "server tests/test_cost_storage.py", "pytest", SERVER,
+              _py_pytest("tests/test_cost_storage.py"), 15),
         Suite("server-codeql-barrier-literals", "server tests/test_codeql_barrier_literals.py", "pytest", SERVER,
               _py_pytest("tests/test_codeql_barrier_literals.py"), 9),
         Suite("server-completion-broker-file-route", "server tests/test_completion_broker_file_route.py", "pytest", SERVER,
@@ -2814,6 +2820,9 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_roles.py"), 22),
         Suite("server-sample-dxf-asset", "server tests/test_sample_dxf_asset.py", "pytest", SERVER,
               _py_pytest("tests/test_sample_dxf_asset.py"), 2),
+        # TCM-07 vendor and subscription cost schedule: hermetic, exact count.
+        Suite("server-cost-vendors", "server tests/test_cost_vendors.py", "pytest", SERVER,
+              _py_pytest("tests/test_cost_vendors.py"), 15),
         Suite("server-save-plan-version", "server tests/test_save_plan_version.py", "pytest", SERVER,
               _py_pytest("tests/test_save_plan_version.py"), 39),
         Suite("server-search", "server tests/test_search.py", "pytest", SERVER,
