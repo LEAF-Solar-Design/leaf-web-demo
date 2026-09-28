@@ -7,7 +7,7 @@ export const DISPATCH_MODE = 'autocad_idle_document_lock'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const IDENTITY_KEYS = ['platformTenantId', 'projectId', 'drawingId', 'drawingVersionId']
-const unavailable = () => ({ status: 'unavailable', ready: null, selectedObjectId: null, selectedHandles: null, lastCommand: null, helloSentAt: null })
+const unavailable = () => ({ status: 'unavailable', ready: null, bindingGrantVersion: null, selectedObjectId: null, selectedHandles: null, lastCommand: null, helloSentAt: null })
 const isRecord = (value) => !!value && typeof value === 'object' && !Array.isArray(value)
 const isObjectId = (value) => typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,200}$/.test(value) && value === value.trim()
 
@@ -110,7 +110,10 @@ function isReady(value) {
 }
 
 function isUnbound(value) {
-  return isHandshake(value, 'host_bridge_unbound', ['drawingRevision']) &&
+  if (!isRecord(value)) return false
+  const hasGrantVersion = Object.hasOwn(value, 'bindingGrantVersion')
+  return isHandshake(value, 'host_bridge_unbound', hasGrantVersion ? ['drawingRevision', 'bindingGrantVersion'] : ['drawingRevision']) &&
+    (!hasGrantVersion || (Number.isInteger(value.bindingGrantVersion) && value.bindingGrantVersion === 1)) &&
     value.drawingRevision === '00000000-0000-0000-0000-000000000000'
 }
 
@@ -288,6 +291,32 @@ export class LeafHostBridge {
     }, 60_000)
   }
 
+  async bindDrawingWithGrant(grant) {
+    if (this.state.status !== 'unbound' || !this.channel || this.state.bindingGrantVersion !== 1) throw new Error('Active DWG is not available for connection')
+    if (typeof grant !== 'string' || !grant) throw new Error('Invalid binding grant')
+    const ready = this.state.ready
+    const channel = this.channel
+    const now = new Date()
+    const body = {
+      protocolVersion: PROTOCOL_VERSION, sessionId: ready.sessionId,
+      messageId: crypto.randomUUID(), issuedAt: dotNetTimestamp(now),
+      expiresAt: dotNetTimestamp(new Date(now.getTime() + 60_000)), origin: ready.origin,
+      verb: 'drawing.bind_grant', drawingFingerprint: ready.documentFingerprint,
+      drawingRevision: ready.drawingRevision, payload: { grant },
+    }
+    this.state = { ...this.state, bindingResult: 'Waiting for confirmation in AutoCAD.' }
+    this.publish()
+    const signed = await signature(body, ready.sessionKey)
+    if (this.channel !== channel || this.state.ready !== ready) throw new Error('AutoCAD connection changed')
+    channel.postMessage({ ...body, signature: signed })
+    this.diagnose('bind-sent')
+    clearTimeout(this.bindTimer)
+    this.bindTimer = setTimeout(() => {
+      this.bindTimer = null
+      this.diagnose('timeout', { kind: 'bind' })
+    }, 60_000)
+  }
+
   onMessage = (event) => { void this.receive(event.data).catch(() => {}) }
 
   async receive(value) {
@@ -304,7 +333,8 @@ export class LeafHostBridge {
       this.seenHostMessages.clear()
       this.state = isReady(value)
         ? { ...unavailable(), status: 'connected', ready: value }
-        : { ...unavailable(), status: 'unbound', ready: value, bindingResult: null }
+        : { ...unavailable(), status: 'unbound', ready: value, bindingResult: null,
+          bindingGrantVersion: Object.hasOwn(value, 'bindingGrantVersion') ? value.bindingGrantVersion : null }
       this.diagnose('handshake', { kind: isReady(value) ? 'ready' : 'unbound' })
       this.publish()
       return
@@ -354,9 +384,9 @@ export class LeafHostBridge {
     if (unbound) {
       const accepted = isRecord(envelope.payload) && envelope.payload.accepted === true
       const reason = isRecord(envelope.payload) && typeof envelope.payload.reason === 'string'
-        ? envelope.payload.reason : 'invalid_result'
+        ? envelope.payload.reason : accepted ? null : 'invalid_result'
       clearTimeout(this.bindTimer)
-      this.diagnose('bind-result', { status: accepted ? 'accepted' : 'rejected', reason })
+      this.diagnose('bind-result', { status: accepted ? 'accepted' : 'rejected', ...(reason === null ? {} : { reason }) })
       this.state = { ...this.state, bindingResult: accepted
         ? 'DWG connected. Starting the signed cross-probe session.'
         : `DWG connection was not changed (${reason.replaceAll('_', ' ')}).` }

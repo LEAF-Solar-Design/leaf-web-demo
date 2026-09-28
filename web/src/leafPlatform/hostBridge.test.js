@@ -120,6 +120,45 @@ describe('Studio bridge diagnostics and telemetry', () => {
   const detailsFor = (diagnostics, phase) => diagnostics.entries().filter((entry) => entry.phase === phase).map((entry) => entry.detail)
   const eventsFor = (phase) => track.mock.calls.filter(([name, props]) => name === 'leaf_platform_bridge' && props.phase === phase).map(([, props]) => props)
 
+  it('signs an opaque grant with only the grant payload and keeps it out of diagnostics', async () => {
+    bridge.start()
+    await bridge.receive({ ...unbound(), bindingGrantVersion: 1 })
+    const grant = 'opaque.grant.bytes-UNCHANGED'
+    await bridge.bindDrawingWithGrant(grant)
+    const sent = channel.postMessage.mock.calls.at(-1)[0]
+    expect(sent.verb).toBe('drawing.bind_grant')
+    expect(sent.payload).toEqual({ grant })
+    expect(Object.keys(sent.payload)).toEqual(['grant'])
+    const { signature, ...body } = sent
+    expect(signature).toBe(sign(body).signature)
+    expect(JSON.stringify(diagnostics.entries())).not.toContain(grant)
+    expect(JSON.stringify(track.mock.calls)).not.toContain(grant)
+  })
+
+  it.each(['ready', 'channel'])('guards grant signing against a changed %s', async (change) => {
+    bridge.start()
+    await bridge.receive({ ...unbound(), bindingGrantVersion: 1 })
+    let finish
+    vi.spyOn(webcrypto.subtle, 'sign').mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+    const pending = bridge.bindDrawingWithGrant('opaque-grant')
+    const rejected = expect(pending).rejects.toThrow('AutoCAD connection changed')
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'))
+    if (change === 'ready') await bridge.receive({ ...unbound(), bindingGrantVersion: 1 })
+    else bridge.channel = fakeChannel()
+    finish(new Uint8Array(32).buffer)
+    await rejected
+    expect(channel.postMessage.mock.calls.some(([message]) => message.verb === 'drawing.bind_grant')).toBe(false)
+  })
+
+  it('records an accepted bind with a null reason without invalid_result', async () => {
+    bridge.start()
+    await bridge.receive(unbound())
+    await bridge.receive(envelope(unbound(), { payload: { accepted: true, reason: null } }))
+    expect(detailsFor(diagnostics, 'bind-result')[0].status).toBe('accepted')
+    expect(detailsFor(diagnostics, 'bind-result')[0].reason ?? null).toBeNull()
+    expect(JSON.stringify(diagnostics.entries())).not.toContain('invalid_result')
+  })
+
   it('records startup, hello, handshake and both handshake rejection categories', async () => {
     const absent = createLeafHostBridge({ channel: null, diagnostics })
     absent.start()
@@ -133,6 +172,54 @@ describe('Studio bridge diagnostics and telemetry', () => {
     expect(detailsFor(diagnostics, 'handshake-rejected')).toEqual([{ reason: 'origin' }, { reason: 'shape' }])
     expect(detailsFor(diagnostics, 'handshake')).toEqual([{ kind: 'unbound' }, { kind: 'ready' }])
     expect(track.mock.calls.map(([, props]) => props.phase)).toEqual(['handshake'])
+  })
+
+  it.each([
+    ['absent', {}, null],
+    ['version 1', { bindingGrantVersion: 1 }, 1],
+  ])('accepts an unbound handshake with %s binding grant capability', async (_, extra, expected) => {
+    bridge.start()
+    await bridge.receive({ ...unbound(), ...extra })
+    expect(bridge.state.status).toBe('unbound')
+    expect(bridge.state.bindingGrantVersion).toBe(expected)
+    expect(detailsFor(diagnostics, 'handshake')).toEqual([{ kind: 'unbound' }])
+    expect(detailsFor(diagnostics, 'handshake-rejected')).toEqual([])
+  })
+
+  it.each([0, 2, '1', 1.5, null, true, {}, undefined])(
+    'rejects an unbound handshake with invalid bindingGrantVersion %j', async (bindingGrantVersion) => {
+      bridge.start()
+      await bridge.receive({ ...unbound(), bindingGrantVersion })
+      expect(bridge.state.status).toBe('connecting')
+      expect(bridge.state.ready).toBeNull()
+      expect(bridge.state.bindingGrantVersion).toBeNull()
+      expect(detailsFor(diagnostics, 'handshake-rejected')).toEqual([{ reason: 'shape' }])
+    },
+  )
+
+  it.each([
+    { ...unbound(), extra: true },
+    { ...unbound(), bindingGrantVersion: 1, extra: true },
+    { ...ready(), bindingGrantVersion: 1 },
+  ])('rejects unexpected handshake keys: %j', async (handshake) => {
+    bridge.start()
+    await bridge.receive(handshake)
+    expect(bridge.state.status).toBe('connecting')
+    expect(bridge.state.ready).toBeNull()
+    expect(detailsFor(diagnostics, 'handshake-rejected')).toEqual([{ reason: 'shape' }])
+  })
+
+  it('clears the binding grant capability on replacement handshakes and stop', async () => {
+    expect(bridge.state.bindingGrantVersion).toBeNull()
+    bridge.start()
+    for (const handshake of [unbound(), ready()]) {
+      await bridge.receive({ ...unbound(), bindingGrantVersion: 1 })
+      await bridge.receive(handshake)
+      expect(bridge.state.bindingGrantVersion).toBeNull()
+    }
+    await bridge.receive({ ...unbound(), bindingGrantVersion: 1 })
+    bridge.stop()
+    expect(bridge.state.bindingGrantVersion).toBeNull()
   })
 
   it.each([

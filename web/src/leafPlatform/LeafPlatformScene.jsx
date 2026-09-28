@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { getStoredOrgId, listProjects, openProject } from '../api.js'
+import { getStoredOrgId, listProjects, openProject, requestBindingGrant } from '../api.js'
 import { isSignedIn, login } from '../auth.js'
 import { getLeafHostBridge } from './hostBridge.js'
 import DiagnosticsDetails from './DiagnosticsDetails.jsx'
@@ -57,6 +57,11 @@ export default function LeafPlatformScene() {
   const [helloTimedOut, setHelloTimedOut] = useState(false)
   const [actionMessage, setActionMessage] = useState('')
   const [binding, setBinding] = useState(false)
+  const [grantFailed, setGrantFailed] = useState(false)
+  const [awaitingReady, setAwaitingReady] = useState(false)
+  const [, refreshAuth] = useState(0)
+  const grantRequest = useRef(null)
+  const grantAttempt = useRef(false)
   const [working, setWorking] = useState(false)
   const [focusConnect, setFocusConnect] = useState(false)
   const headingRef = useRef(null)
@@ -77,8 +82,31 @@ export default function LeafPlatformScene() {
   useEffect(() => {
     const unsubscribe = bridge.subscribe(setState)
     bridge.start()
-    return () => { actionInFlight.current = false; unsubscribe(); bridge.stop() }
+    return () => { grantRequest.current?.abort(); actionInFlight.current = false; unsubscribe(); bridge.stop() }
   }, [bridge])
+
+  useEffect(() => {
+    const changed = (event) => {
+      if (event.key === null || ['leaf.jwt', 'leaf.org_id'].includes(event.key)) refreshAuth((value) => value + 1)
+    }
+    window.addEventListener('storage', changed)
+    return () => window.removeEventListener('storage', changed)
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      grantRequest.current?.abort()
+      grantRequest.current = null
+      actionInFlight.current = false
+    }
+  }, [signedIn, orgId, state.ready, state.status, state.helloSentAt])
+
+  useEffect(() => {
+    if (!grantAttempt.current) return
+    bindingPending.current = false
+    setBinding(false)
+    setGrantFailed(false)
+  }, [signedIn, orgId, state.helloSentAt])
 
   useEffect(() => {
     if (!signedIn || !['unbound', 'connected'].includes(state.status)) return undefined
@@ -154,6 +182,8 @@ export default function LeafPlatformScene() {
   }, [boundIdentity])
 
   useEffect(() => {
+    if (state.ready) setAwaitingReady(false)
+    setGrantFailed(false)
     if (bindingPending.current && state.status === 'connected') headingRef.current?.focus()
     bindingPending.current = false
     actionInFlight.current = false
@@ -189,10 +219,13 @@ export default function LeafPlatformScene() {
   }, [state.lastCommand])
 
   useEffect(() => {
-    if (state.bindingResult) setActionMessage(state.bindingResult)
+    if (state.bindingResult) setActionMessage(grantAttempt.current && state.bindingResult === 'Waiting for confirmation in AutoCAD.'
+      ? 'Confirm in AutoCAD' : state.bindingResult)
+    if (grantAttempt.current && state.bindingResult === 'DWG connected. Starting the signed cross-probe session.') setAwaitingReady(true)
     if (state.status !== 'unbound' || (state.bindingResult && state.bindingResult !== 'Waiting for confirmation in AutoCAD.')) {
       if (state.bindingResult !== 'DWG connected. Starting the signed cross-probe session.') {
         if (bindingPending.current && state.status === 'unbound') setFocusConnect(true)
+        if (grantAttempt.current && state.status === 'unbound' && state.bindingResult) setGrantFailed(true)
         bindingPending.current = false
       }
       setBinding(false)
@@ -202,12 +235,16 @@ export default function LeafPlatformScene() {
   useEffect(() => {
     if (!binding) return undefined
     const timer = setTimeout(() => {
+      grantRequest.current?.abort()
+      if (grantAttempt.current) setAwaitingReady(true)
       actionInFlight.current = false
       bindingPending.current = false
       setFocusConnect(true)
       setBinding(false)
       bridge.retryHello()
-      setActionMessage('AutoCAD did not answer. Look for a confirmation window in AutoCAD, then try again.')
+      setActionMessage(grantAttempt.current
+        ? 'The connection outcome is unknown. Check AutoCAD. Waiting for a new AutoCAD connection before retrying.'
+        : 'AutoCAD did not answer. Look for a confirmation window in AutoCAD, then try again.')
     }, 60_000)
     return () => clearTimeout(timer)
   }, [binding, bridge])
@@ -220,25 +257,43 @@ export default function LeafPlatformScene() {
 
   async function connect(chosenVersionId) {
     const version = versions.find((item) => item.version_id === chosenVersionId)
-    if (!version || binding || actionInFlight.current) return
+    if (!version || binding || actionInFlight.current || awaitingReady || !signedIn || !isUuid(orgId)) return
     const operation = {}
     actionInFlight.current = operation
     bindingPending.current = true
+    grantAttempt.current = state.bindingGrantVersion === 1
+    setGrantFailed(false)
     setBinding(true)
-    setActionMessage('Waiting for confirmation in AutoCAD.')
+    setActionMessage(grantAttempt.current ? 'Checking your access in Leaf Automation Studio' : 'Waiting for confirmation in AutoCAD.')
     try {
-      await bridge.bindDrawing({
+      if (grantAttempt.current) {
+        const controller = new AbortController()
+        const channel = bridge.channel
+        const ready = bridge.state?.ready
+        grantRequest.current = controller
+        const { grant } = await requestBindingGrant(version.project_id, version.version_id, {
+          pluginSessionId: state.ready.sessionId, documentFingerprint: state.ready.documentFingerprint,
+        }, { signal: controller.signal })
+        if (controller.signal.aborted || actionInFlight.current !== operation) return
+        if (bridge.channel !== channel || bridge.state?.ready !== ready || !isSignedIn() || getStoredOrgId() !== orgId) throw new Error('AutoCAD connection changed')
+        setActionMessage('Confirm in AutoCAD')
+        await bridge.bindDrawingWithGrant(grant)
+      } else await bridge.bindDrawing({
         platformTenantId: version.org_id, projectId: version.project_id,
         drawingId: version.drawing_id, drawingVersionId: version.version_id,
       })
-    } catch {
+    } catch (error) {
       if (actionInFlight.current !== operation) return
       bindingPending.current = false
       setFocusConnect(true)
       setBinding(false)
-      setActionMessage('The drawing could not be connected. Please try again.')
+      setGrantFailed(grantAttempt.current)
+      setActionMessage(error?.name === 'BindingGrantError' ? error.userMessage : 'The drawing could not be connected. Please try again.')
     } finally {
-      if (actionInFlight.current === operation) actionInFlight.current = false
+      if (actionInFlight.current === operation) {
+        grantRequest.current = null
+        actionInFlight.current = false
+      }
     }
   }
 
@@ -313,7 +368,8 @@ export default function LeafPlatformScene() {
               </select>
             </label>
             {chosenVersion && <p className="leaf-platform-summary">Connect this DWG to {typeof chosenProject?.name === 'string' && chosenProject.name.trim() ? chosenProject.name : 'Untitled project'} / {drawingName(chosenVersion, drawings)} / Version {chosenVersion.seq ?? '?'}. You cannot change this from the palette later.</p>}
-            <button ref={connectRef} type="button" disabled={!versionId || binding} onClick={() => connect(versionId)}>Connect drawing</button>
+            <button ref={connectRef} type="button" disabled={!versionId || binding || awaitingReady} onClick={() => connect(versionId)}>Connect drawing</button>
+            {grantFailed && <button type="button" disabled={binding || awaitingReady} onClick={() => connect(versionId)}>Try again</button>}
           </>}
         </>}
       </section>}

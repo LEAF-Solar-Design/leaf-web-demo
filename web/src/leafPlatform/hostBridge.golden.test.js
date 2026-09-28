@@ -8,9 +8,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import golden from './__fixtures__/leaf.web-bridge.v1.golden.json'
 import { createLeafHostBridge, PROTOCOL_VERSION } from './hostBridge.js'
 
-const CASE_NAMES = ['ready', 'selection-handles', 'selection-empty', 'bind-accepted', 'bind-rejected',
+const CASE_NAMES = ['ready', 'selection-handles', 'selection-empty', 'unbound', 'unbound-with-capability', 'bind-accepted', 'bind-rejected',
   'callback-applied', 'callback-stale', 'callback-rejected']
-const ENVELOPE_NAMES = CASE_NAMES.filter((name) => name !== 'ready')
+const HANDSHAKE_NAMES = ['ready', 'unbound', 'unbound-with-capability']
+const ENVELOPE_NAMES = CASE_NAMES.filter((name) => !HANDSHAKE_NAMES.includes(name))
 const UNBOUND_REVISION = '00000000-0000-0000-0000-000000000000'
 const location = { origin: golden.session.origin }
 
@@ -22,13 +23,6 @@ function goldenCase(name) {
 
 // A fresh parse per delivery: WebView2 hands the page a new object for every posted message.
 const wire = (name) => JSON.parse(goldenCase(name).wire)
-
-// The fixture carries no unbound handshake; the plugin sends one for the same session before a bind.
-function unboundFrom(ready) {
-  const unbound = { ...ready, kind: 'host_bridge_unbound', drawingRevision: UNBOUND_REVISION }
-  for (const key of ['platformTenantId', 'projectId', 'drawingId', 'drawingVersionId', 'bridgeEndpoint']) delete unbound[key]
-  return unbound
-}
 
 const midpoint = (envelope) => new Date((Date.parse(envelope.issuedAt) + Date.parse(envelope.expiresAt)) / 2)
 
@@ -67,7 +61,7 @@ describe('Studio host bridge against the plugin golden wire fixture', () => {
     const envelope = wire(name)
     vi.setSystemTime(midpoint(envelope))
     await bridge.receive(wire('ready'))
-    if (envelope.verb === 'drawing.bind_result') await bridge.receive(unboundFrom(wire('ready')))
+    if (envelope.verb === 'drawing.bind_result') await bridge.receive(wire('unbound'))
     if (envelope.verb !== 'host.callback') return { envelope, outcome: null }
     let posted
     const sent = new Promise((resolve) => { posted = resolve })
@@ -88,7 +82,7 @@ describe('Studio host bridge against the plugin golden wire fixture', () => {
     for (const name of CASE_NAMES) {
       const entry = goldenCase(name)
       const parsed = wire(name)
-      if (name === 'ready') {
+      if (HANDSHAKE_NAMES.includes(name)) {
         expect(entry.kind).toBe('ready-object')
         expect(entry.signature).toBeNull()
         expect(parsed.protocolVersion).toBe(PROTOCOL_VERSION)
@@ -108,6 +102,15 @@ describe('Studio host bridge against the plugin golden wire fixture', () => {
     expect(state.ready.nonce).toBe(golden.session.nonce)
     expect(state.ready.origin).toBe(golden.session.origin)
     expect(Buffer.from(state.ready.sessionKey, 'base64').toString('hex')).toBe(golden.session.sessionKeyHex)
+  })
+
+  it.each([
+    ['unbound', null],
+    ['unbound-with-capability', 1],
+  ])('accepts the %s handshake', async (name, bindingGrantVersion) => {
+    await bridge.receive(wire(name))
+    expect(state.status).toBe('unbound')
+    expect(state.bindingGrantVersion).toBe(bindingGrantVersion)
   })
 
   it('ignores the ready case on a page at a different origin', async () => {

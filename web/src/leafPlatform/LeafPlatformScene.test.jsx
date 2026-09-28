@@ -2,15 +2,16 @@
 import React from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { getStoredOrgId, listProjects, openProject } from '../api.js'
+import { getStoredOrgId, listProjects, openProject, requestBindingGrant } from '../api.js'
 import { isSignedIn, login } from '../auth.js'
 import { getLeafHostBridge } from './hostBridge.js'
 import LeafPlatformScene from './LeafPlatformScene.jsx'
 
-vi.mock('../api.js', () => ({ getStoredOrgId: vi.fn(), listProjects: vi.fn(), openProject: vi.fn() }))
+vi.mock('../api.js', () => ({ getStoredOrgId: vi.fn(), listProjects: vi.fn(), openProject: vi.fn(), requestBindingGrant: vi.fn() }))
 vi.mock('../auth.js', () => ({ isSignedIn: vi.fn(), login: vi.fn() }))
 vi.mock('./hostBridge.js', () => ({ getLeafHostBridge: vi.fn() }))
 
+const FAKE_ACCESS_TOKEN = 'test-bearer'
 const orgId = '11111111-1111-4111-8111-111111111111'
 const projectId = '22222222-2222-4222-8222-222222222222'
 const drawingId = '33333333-3333-4333-8333-333333333333'
@@ -30,6 +31,7 @@ beforeEach(() => {
   bridge = {
     subscribe: vi.fn((fn) => { listener = fn; fn(state); return vi.fn() }),
     start: vi.fn(), stop: vi.fn(), bindDrawing: vi.fn().mockResolvedValue(undefined),
+    bindDrawingWithGrant: vi.fn().mockResolvedValue(undefined),
     focusObject: vi.fn().mockResolvedValue(undefined),
     retryHello: vi.fn(() => { state = { ...state, helloSentAt: Date.now() }; listener(state) }),
   }
@@ -39,6 +41,7 @@ beforeEach(() => {
   login.mockResolvedValue(undefined)
   listProjects.mockResolvedValue([{ project_id: projectId, name: 'Roof project' }])
   openProject.mockResolvedValue({ drawing_versions: [version] })
+  requestBindingGrant.mockResolvedValue({ grant: 'opaque-grant', expiresAt: '2026-09-26T12:00:00Z' })
 })
 afterEach(() => { cleanup(); vi.useRealTimers() })
 
@@ -57,6 +60,146 @@ function expectStudioRecovery() {
 }
 
 describe('AutoCAD palette scene in Studio', () => {
+  async function chooseGrantVersion() {
+    state = { status: 'unbound', bindingGrantVersion: 1,
+      ready: { sessionKey, sessionId: 'native-session', documentFingerprint: `sha256:${'a'.repeat(64)}` }, bindingResult: null }
+    const view = render(<LeafPlatformScene />)
+    fireEvent.change(await screen.findByLabelText('Project'), { target: { value: projectId } })
+    fireEvent.change(await screen.findByLabelText('Drawing version'), { target: { value: versionId } })
+    return view
+  }
+
+  it('requests a grant only on Connect, shows both pending states and ignores duplicate clicks', async () => {
+    let finish
+    requestBindingGrant.mockImplementation(() => new Promise((resolve) => { finish = resolve }))
+    await chooseGrantVersion()
+    expect(requestBindingGrant).not.toHaveBeenCalled()
+    const button = screen.getByRole('button', { name: 'Connect drawing' })
+    fireEvent.click(button)
+    fireEvent.click(button)
+    expect(requestBindingGrant).toHaveBeenCalledTimes(1)
+    expect(requestBindingGrant).toHaveBeenCalledWith(projectId, versionId, {
+      pluginSessionId: state.ready.sessionId, documentFingerprint: state.ready.documentFingerprint,
+    }, { signal: expect.any(AbortSignal) })
+    expect(getActionStatus().textContent).toBe('Checking your access in Leaf Automation Studio')
+    const grant = 'private-opaque-grant-never-render'
+    await act(async () => { finish({ grant, expiresAt: '2026-09-26T12:00:00Z' }) })
+    expect(getActionStatus().textContent).toBe('Confirm in AutoCAD')
+    fireEvent.click(button)
+    expect(requestBindingGrant).toHaveBeenCalledTimes(1)
+    expect(bridge.bindDrawingWithGrant).toHaveBeenCalledWith(grant)
+    expect(bridge.bindDrawing).not.toHaveBeenCalled()
+    expect(document.body.innerHTML).not.toContain(grant)
+    expect(JSON.stringify(localStorage)).not.toContain(grant)
+    expect(JSON.stringify(sessionStorage)).not.toContain(grant)
+  })
+
+  it.each(['sign-out', 'workspace', 'reconnect', 'hello', 'unmount'])('aborts issuance on %s and discards a late grant', async (change) => {
+    let finish
+    requestBindingGrant.mockImplementation(() => new Promise((resolve) => { finish = resolve }))
+    const view = await chooseGrantVersion()
+    fireEvent.click(screen.getByRole('button', { name: 'Connect drawing' }))
+    const { signal } = requestBindingGrant.mock.calls[0][3]
+    if (change === 'unmount') view.unmount()
+    else if (change === 'reconnect') setBridgeState({ ...state, ready: { ...state.ready, sessionId: 'new-session' } })
+    else if (change === 'hello') act(() => bridge.retryHello())
+    else {
+      if (change === 'sign-out') isSignedIn.mockReturnValue(false)
+      else getStoredOrgId.mockReturnValue(projectId)
+      view.rerender(<LeafPlatformScene />)
+    }
+    expect(signal.aborted).toBe(true)
+    await act(async () => { finish({ grant: 'late-grant', expiresAt: 'later' }) })
+    expect(bridge.bindDrawingWithGrant).not.toHaveBeenCalled()
+    expect(bridge.bindDrawing).not.toHaveBeenCalled()
+  })
+
+  it.each([401, 403, 404, 422, 429, 503])('announces a typed %s failure, retains selections and retries with a fresh grant', async (status) => {
+    const { BindingGrantError } = await vi.importActual('../api.js')
+    const error = new BindingGrantError(status, status === 429 ? '42' : null)
+    requestBindingGrant.mockRejectedValueOnce(error)
+    await chooseGrantVersion()
+    fireEvent.click(screen.getByRole('button', { name: 'Connect drawing' }))
+    await waitFor(() => expect(getActionStatus().textContent).toBe(error.userMessage))
+    if (status === 429) expect(error.userMessage).toContain('42 seconds')
+    expect(screen.getByLabelText('Project').value).toBe(projectId)
+    expect(screen.getByLabelText('Drawing version').value).toBe(versionId)
+    expect(bridge.bindDrawing).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(bridge.bindDrawingWithGrant).toHaveBeenCalledWith('opaque-grant'))
+    expect(requestBindingGrant).toHaveBeenCalledTimes(2)
+    expect(bridge.bindDrawing).not.toHaveBeenCalled()
+  })
+
+  it('blocks retry after grant timeout until a new native ready arrives', async () => {
+    await chooseGrantVersion()
+    vi.useFakeTimers()
+    fireEvent.click(screen.getByRole('button', { name: 'Connect drawing' }))
+    await act(async () => {})
+    await act(async () => { vi.advanceTimersByTime(60_000) })
+    expect(getActionStatus().textContent).toContain('outcome is unknown')
+    expect(screen.getByRole('button', { name: 'Connect drawing' }).disabled).toBe(true)
+    expect(bridge.retryHello).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Connect drawing' }))
+    expect(requestBindingGrant).toHaveBeenCalledTimes(1)
+    setBridgeState({ ...state, ready: { ...state.ready }, bindingResult: null })
+    expect(screen.getByRole('button', { name: 'Connect drawing' }).disabled).toBe(false)
+    expect(screen.getByLabelText('Drawing version').value).toBe(versionId)
+    fireEvent.click(screen.getByRole('button', { name: 'Connect drawing' }))
+    await act(async () => {})
+    expect(requestBindingGrant).toHaveBeenCalledTimes(2)
+  })
+
+  it('waits for ready after native acceptance and requests a fresh grant after native rejection', async () => {
+    await chooseGrantVersion()
+    fireEvent.click(screen.getByRole('button', { name: 'Connect drawing' }))
+    await act(async () => {})
+    setBridgeState({ ...state, bindingResult: 'DWG connection was not changed (cancelled).' })
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+    await act(async () => {})
+    expect(requestBindingGrant).toHaveBeenCalledTimes(2)
+    setBridgeState({ ...state, bindingResult: 'DWG connected. Starting the signed cross-probe session.' })
+    expect(screen.getByRole('button', { name: 'Connect drawing' }).disabled).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Connect drawing' }))
+    expect(requestBindingGrant).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([401, 403, 404, 422, 429, 503])('maps HTTP %s to a safe typed grant error', async (status) => {
+    const api = await vi.importActual('../api.js')
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: false, status, headers: new Headers(), json: async () => ({ grant: 'private-grant-error' }),
+    })
+    try {
+      await expect(api.requestBindingGrant(projectId, versionId, {
+        pluginSessionId: 'native-session', documentFingerprint: 'fingerprint',
+      })).rejects.toMatchObject({ name: 'BindingGrantError', status, userMessage: expect.any(String) })
+      expect(api.recentRequestFailures()).not.toEqual(expect.arrayContaining([expect.objectContaining({ grant: 'private-grant-error' })]))
+    } finally { fetchMock.mockRestore() }
+  })
+
+  it('uses the authenticated grant endpoint with only host context and maps Retry-After', async () => {
+    const api = await vi.importActual('../api.js')
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+      ok: true, status: 200, json: async () => ({ grant: 'opaque', expiresAt: 'later' }),
+    }).mockResolvedValueOnce({ ok: false, status: 429, headers: new Headers({ 'Retry-After': '17' }) })
+    localStorage.setItem('leaf.jwt', FAKE_ACCESS_TOKEN)
+    const controller = new AbortController()
+    try {
+      const context = { pluginSessionId: 'native-session', documentFingerprint: 'fingerprint' }
+      expect(await api.requestBindingGrant(projectId, versionId, context, { signal: controller.signal })).toEqual({ grant: 'opaque', expiresAt: 'later' })
+      const [url, options] = fetchMock.mock.calls[0]
+      expect(url).toContain(`/api/projects/${projectId}/drawing-versions/${versionId}/binding-grants`)
+      expect(options.headers.Authorization).toBe(`Bearer ${FAKE_ACCESS_TOKEN}`)
+      expect(options.signal).toBe(controller.signal)
+      expect(JSON.parse(options.body)).toEqual(context)
+      expect(options.redirect).toBe('error')
+      await expect(api.requestBindingGrant(projectId, versionId, context)).rejects.toMatchObject({ name: 'BindingGrantError', status: 429, message: 'Too many connection requests. Try again in 17 seconds.' })
+    } finally {
+      fetchMock.mockRestore()
+      localStorage.removeItem('leaf.jwt')
+    }
+  })
+
   it.each([true, false])('keeps collapsed connection details in every connection state when signed in is %s', async (signedIn) => {
     isSignedIn.mockReturnValue(signedIn)
     render(<LeafPlatformScene />)
@@ -140,6 +283,7 @@ describe('AutoCAD palette scene in Studio', () => {
     fireEvent.click(connect)
     await waitFor(() => expect(bridge.bindDrawing).toHaveBeenCalledTimes(1))
     expect(bridge.bindDrawing).toHaveBeenCalledWith({ platformTenantId: orgId, projectId, drawingId, drawingVersionId: versionId })
+    expect(requestBindingGrant).not.toHaveBeenCalled()
     setBridgeState({ ...state, bindingResult: 'Waiting for confirmation in AutoCAD.' })
     expect(screen.getByText('Waiting for confirmation in AutoCAD.')).toBeTruthy()
     expect(connect.disabled).toBe(true)
