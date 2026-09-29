@@ -1,0 +1,84 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-string-swap",
+  "builtin": "builtins/solar_string_swap.py",
+  "family": "stringing",
+  "adapter": "local-graph-commit",
+  "entitlement": "run_write",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_STRING_SWAP_REQUEST",
+  "readiness": {
+    "kind": "facets",
+    "facets": [
+      "strings"
+    ]
+  },
+  "engine": "server-builtin",
+  "interaction": {
+    "mode": "form"
+  },
+  "record_store": "registry",
+  "record": {
+    "name": "solar-string-swap",
+    "version": "1.0.0",
+    "description": "Exchange two strings' circuit identities (circuit tag and inverter input); panels stay where they are.",
+    "kind": "script",
+    "family_id": "stringing",
+    "engine_op": "solar_string_swap",
+    "entry": "builtins/solar_string_swap.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "operation": {
+          "type": "string",
+          "enum": [
+            "swap-strings"
+          ],
+          "default": "swap-strings"
+        },
+        "expected_rev": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "string_refs": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      },
+      "required": [
+        "operation",
+        "expected_rev",
+        "string_refs"
+      ],
+      "additionalProperties": false
+    },
+    "returns": {
+      "type": "object"
+    },
+    "capabilities": [
+      "drawing.write"
+    ],
+    "allow_local_fallback": false
+  },
+  "ledger": [
+    "string-swap"
+  ],
+  "trusted_inputs": [],
+  "maturity": "preview",
+  "wave": 2,
+  "order": 74,
+  "scenario": "w2-rooftop"
+}

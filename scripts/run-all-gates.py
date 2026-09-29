@@ -548,6 +548,11 @@ def build_suites() -> List[Suite]:
         # Explicit per-string conductor choices (2026-09-29): the producer homerun routing needs.
         Suite("server-solar-tool-solar-string-conductors", "server tests/test_solar_tool_solar_string_conductors.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_string_conductors.py"), 30),
+        # String flip and swap over the W1 graph (2026-09-29, sf-w2-string-edit): the rooftop-chain kernels
+        # behind position-surrogate mapping. Inputs are authored in the file, so the floor is the exact
+        # count on every runner. COUNTED: 22 tests + 44 more parametrizations = 66.
+        Suite("server-solar-tool-solar-string-edits", "server tests/test_solar_tool_solar_string_edits.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_string_edits.py"), 66),
         # W5 inverter family (2026-09-24, contract G35): the shared state and delta module and the
         # device, string and output engines (literal ports of the plugin's inverter commands). Inputs
         # are authored in each file, so each floor is the exact count on every runner. MEASURED.
