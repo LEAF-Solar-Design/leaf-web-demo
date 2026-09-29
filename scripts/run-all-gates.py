@@ -563,6 +563,11 @@ def build_suites() -> List[Suite]:
         # every runner. COUNTED: 15 tests + 43 more parametrizations = 58.
         Suite("server-solar-tool-solar-string-reports", "server tests/test_solar_tool_solar_string_reports.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_string_reports.py"), 58),
+        # String multi-add over the W1 graph (2026-09-29, sf-w2-string-multi-add): the MULTISTRING
+        # combination cuts the caller's ordered panels into strings. Inputs are authored in the file,
+        # so the floor is the exact count on every runner. COUNTED: 21 tests + 38 more parametrizations = 59.
+        Suite("server-solar-tool-solar-string-multi-add", "server tests/test_solar_tool_solar_string_multi_add.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_string_multi_add.py"), 59),
         # Auto-fill registry and persisted plan round trips: 17 tests + 50 more parametrizations = 67.
         Suite("server-solar-tool-solar-autofill", "server tests/test_solar_tool_solar_autofill.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_autofill.py"), 67),
