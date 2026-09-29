@@ -402,6 +402,7 @@
     "server-solar-ground-scene",
     "server-solar-ground-shade",
     "server-solar-ground-terrain",
+    "server-solar-ground-topology",
     "server-solar-guardrails",
     "server-solar-harness-bom",
     "server-solar-inverter-cabling",

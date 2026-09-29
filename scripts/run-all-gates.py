@@ -323,6 +323,9 @@ def build_suites() -> List[Suite]:
         # sf-solar-ground-graph: Ground frames with tracker metadata on the shared W1 graph contract.
         Suite("server-solar-ground-graph", "server tests/test_solar_ground_graph.py", "pytest", SERVER,
               _py_pytest("tests/test_solar_ground_graph.py"), 48),
+        # sf-solar-ground-graph-topology: typed L1/L2 equipment topology on the shared design graph.
+        Suite("server-solar-ground-topology", "server tests/test_solar_ground_topology.py", "pytest", SERVER,
+              _py_pytest("tests/test_solar_ground_topology.py"), 50),
         # 31 -> 35 on 2026-09-22: the zone-aware entry point (group_panels_by_zone,
         # the port of BuildAndSaveGroupsForZone) added four hermetic, unparametrized
         # tests. Nothing in this file skips, so the count is the same on every runner.

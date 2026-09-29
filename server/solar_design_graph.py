@@ -307,6 +307,41 @@ def validate_graph(graph: dict) -> dict:
     for string in graph["strings"]:
         if string["inverter_ref"] is not None and string["id"] not in assigned_strings:
             raise GraphValidationError("INVERTER_ASSIGNMENT_MISMATCH")
+    l2_mode = graph["settings"]["use_l2_collectors"]
+    equipment_numbers = set()
+    for inverter in graph["inverters"]:
+        if "equipment_type" not in inverter:
+            if l2_mode:
+                raise GraphValidationError("EQUIPMENT_TYPE_REQUIRED")
+            continue
+        if not l2_mode:
+            raise GraphValidationError("L2_MODE_REQUIRED")
+        level_number = (inverter["is_l2"], inverter["number"])
+        if level_number in equipment_numbers:
+            raise GraphValidationError("DUPLICATE_EQUIPMENT_NUMBER")
+        equipment_numbers.add(level_number)
+    fed_l1 = set()
+    for inverter in graph["inverters"]:
+        if not inverter["is_l2"]:
+            continue
+        feeds = inverter["l1_assignments"]
+        if feeds and inverter["input_assignments"]:
+            raise GraphValidationError("L2_MIXED_INPUTS")
+        if len(feeds) > inverter["collector_capacity"]:
+            raise GraphValidationError("L2_CAPACITY_EXCEEDED")
+        for feed in feeds:
+            l1 = index.get(feed["inverter_ref"])
+            if (l1 is None or l1["kind"] != "inverter" or l1["is_l2"]
+                    or "equipment_type" not in l1 or l1["l2_ref"] != inverter["id"]):
+                raise GraphValidationError("L2_ASSIGNMENT_MISMATCH")
+            if feed["inverter_ref"] in fed_l1:
+                raise GraphValidationError("DUPLICATE_L2_INPUT")
+            if feed["mppt_index"] >= inverter["mppt_count"]:
+                raise GraphValidationError("L2_CAPACITY_EXCEEDED")
+            fed_l1.add(feed["inverter_ref"])
+    for inverter in graph["inverters"]:
+        if inverter.get("l2_ref") is not None and inverter["id"] not in fed_l1:
+            raise GraphValidationError("L2_ASSIGNMENT_MISMATCH")
     for frame in graph["frames"]:
         records = frame["panel_assignments"] + [cell for row in frame["matrix"] for cell in row if cell["panel_ref"] is not None]
         for record in records:
