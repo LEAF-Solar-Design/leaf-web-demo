@@ -44,8 +44,9 @@ import checkout_capability
 import deps
 import guest_uploads
 import jobs
+import solar_artifacts
 import write_loop
-from envelopes import ErrorCode, error_obj, error_response, with_envelope_fields
+from envelopes import ErrorCode, err_envelope, error_obj, error_response, with_envelope_fields
 
 router = APIRouter()
 LOGGER = logging.getLogger(__name__)
@@ -239,6 +240,48 @@ def get_dxf(drawing_id: str, request: Request, version: str = "head",
         return Response(status_code=304, headers=headers)
     headers["Content-Disposition"] = f'inline; filename="{drawing_id}-v{v}.dxf"'
     return Response(content=data, media_type="application/dxf", headers=headers)
+
+
+@router.get("/api/drawings/{drawing_id}/artifacts/{artifact_id}")
+def get_artifact(drawing_id: str, artifact_id: str, request: Request, current: bool = False,
+                 tenant_id: str = Depends(deps.require_active_tenant)) -> Any:
+    """Download an immutable tenant-scoped Solar artifact."""
+    def refused(reason):
+        status, code, retryable = {
+            "ARTIFACT_ID_INVALID": (400, ErrorCode.BAD_PARAMS, False),
+            "ARTIFACT_NOT_FOUND": (404, ErrorCode.BAD_PARAMS, False),
+            "ARTIFACT_STALE": (409, ErrorCode.BAD_PARAMS, False),
+            "ARTIFACT_CORRUPT": (500, ErrorCode.INTERNAL, False),
+            "ARTIFACT_STORE_UNAVAILABLE": (503, ErrorCode.INTERNAL, True),
+        }[reason]
+        env = err_envelope(code, reason, retryable=retryable)
+        env["error"]["reason_code"] = reason
+        return JSONResponse(status_code=status, content=env)
+
+    if (not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", drawing_id or "")
+            or not re.fullmatch(r"[0-9a-f]{64}", artifact_id or "")):
+        return refused("ARTIFACT_ID_INVALID")
+    try:
+        backend = _backend(str(tenant_id))
+    except (RuntimeError, OSError):
+        return refused("ARTIFACT_STORE_UNAVAILABLE")
+    try:
+        meta, content = solar_artifacts.read_artifact(
+            backend, str(tenant_id), drawing_id, artifact_id, require_head=current)
+    except solar_artifacts.GraphValidationError as exc:
+        return refused(exc.code)
+    etag = '"' + meta["content_sha256"] + '"'
+    headers = {
+        "ETag": etag,
+        "X-Leaf-Artifact-Id": artifact_id,
+        "X-Leaf-Source-Version": str(meta["source_version"]),
+        "Cache-Control": "private, no-cache",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Disposition": f'attachment; filename="{meta["filename"]}"',
+    }
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return Response(content=content, media_type=meta["media_type"], headers=headers)
 
 
 @router.get("/api/drawings/{drawing_id}/summary")

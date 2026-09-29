@@ -5,6 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import solar_tools
+import solar_artifacts
 import write_loop
 from leaf_cloud_client import canonical_bytes
 from solar_design_graph import GraphValidationError, _bounded_json
@@ -43,13 +44,21 @@ def _load_builtin(tool):
     return module
 
 
-def _read_output(tool, graph, builtin_params):
+def _read_output(tool, graph, builtin_params, sink=None):
     try:
         output = _load_builtin(tool).run(copy.deepcopy(graph), copy.deepcopy(builtin_params))
     except GraphValidationError:
         raise
     except (LookupError, ArithmeticError, TypeError, ValueError, RecursionError):
         raise GraphValidationError("LOCAL_GRAPH_READ_FAILED") from None
+    prepared = None
+    if type(output) is solar_artifacts.ArtifactOutput:
+        if sink is None:
+            raise GraphValidationError("READ_OUTPUT_INVALID")
+        prepared = sink.prepare(output)
+        output = {"summary": output.summary, "artifact": prepared.ref}
+    elif solar_artifacts.artifact_references(output):
+        raise GraphValidationError("ARTIFACT_REFERENCE_RESERVED")
     if type(output) is not dict:
         raise GraphValidationError("READ_OUTPUT_INVALID")
     try:
@@ -59,6 +68,8 @@ def _read_output(tool, graph, builtin_params):
         raise GraphValidationError("READ_OUTPUT_INVALID") from None
     if len(data) > MAX_OUTPUT_BYTES:
         raise GraphValidationError("READ_OUTPUT_LIMIT_EXCEEDED")
+    if prepared is not None:
+        sink.finish(prepared)
     return output, data
 
 
@@ -82,12 +93,15 @@ def run_local_graph_read(backend, tenant_id, tool, params, *, drawing_id, source
         raise GraphValidationError("READ_SEED_UNSUPPORTED")
     context = resolve_graph_context(backend, tenant_id, drawing_id, source_version,
                                     project_id=project_id)
-    output, data = _read_output(tool, context["graph"], builtin_params)
+    request_sha256 = request_digest(tool, drawing_id, source_version, builtin_params)
+    sink = solar_artifacts.ArtifactSink(backend, tenant_id, drawing_id, context, tool,
+                                        request_sha256, False)
+    output, data = _read_output(tool, context["graph"], builtin_params, sink)
     return {
         "schema_version": RESULT_SCHEMA, "adapter": ADAPTER_KIND,
         "tenant_id": tenant_id, "job_id": job_id, "tool": tool,
         "project_id": context["project_id"], "drawing_id": drawing_id,
-        "request_sha256": request_digest(tool, drawing_id, source_version, builtin_params),
+        "request_sha256": request_sha256,
         "source_version": context["resolved_version"], "representation": context["representation"],
         "graph_sha256": context["graph_sha256"], "output": output,
         "output_sha256": digest(output), "output_bytes": len(data), "drawing_changed": False,
@@ -124,7 +138,11 @@ def graph_read_provenance(result, params, tenant_id, job_id, tool, source_versio
                 or context["graph_sha256"] != result["graph_sha256"]
                 or context["project_id"] != result["project_id"]):
             raise ValueError()
-        output, data = _read_output(tool, context["graph"], builtin_params)
+        sink = solar_artifacts.ArtifactSink(backend, tenant_id, drawing_id,
+                                            context, tool, request_sha256, True)
+        for reference in solar_artifacts.artifact_references(result["output"]):
+            sink.verify_reference(reference)
+        output, data = _read_output(tool, context["graph"], builtin_params, sink)
         output_sha256 = digest(output)
         if (type(result["output"]) is not dict or output != result["output"]
                 or output_sha256 != result["output_sha256"]

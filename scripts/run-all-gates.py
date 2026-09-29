@@ -511,6 +511,8 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_solar_rooftop_chain.py"), 89),
         Suite("server-solar-local-read", "server tests/test_solar_local_read.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_local_read.py"), 88),
+        Suite("server-solar-artifacts", "server tests/test_solar_artifacts.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_artifacts.py"), 99),
         Suite("server-solar-tool-select-by-zone", "server tests/test_solar_tool_select_by_zone.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_select_by_zone.py"), 26),
         Suite("server-solar-tool-nec-ampacity-correction", "server tests/test_solar_tool_nec_ampacity_correction.py", "pytest", SERVER, _py_pytest("tests/test_solar_tool_nec_ampacity_correction.py"), 39),
