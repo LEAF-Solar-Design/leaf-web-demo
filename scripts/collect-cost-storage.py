@@ -11,7 +11,8 @@ unset means stdout only.
   python scripts/collect-cost-storage.py                    # snapshot now
   python scripts/collect-cost-storage.py --observe 2026-09  # the period's gb-month observation
 
-It never writes the cost ledger. Exit 0 ok, 2 usage or input error.
+It never writes the cost ledger. Incomplete snapshots are not appended.
+Exit 0 ok, 2 usage, input error, or incomplete snapshot.
 """
 from __future__ import annotations
 
@@ -95,6 +96,10 @@ def main(argv: Optional[List[str]] = None, *, now: Optional[datetime] = None) ->
         print(f"snapshot failed: {exc}", file=sys.stderr)
         return 2
     line = json.dumps(snap, sort_keys=True, separators=(",", ":"))
+    if not snap["complete"]:
+        print(line)
+        print("snapshot incomplete; not appended", file=sys.stderr)
+        return 2
     if snapshots_path:
         _append_line(snapshots_path, line)
     print(line)

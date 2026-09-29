@@ -189,6 +189,42 @@ def test_snapshot_and_observation_refuse_bad_input(tmp_path):
         storage.storage_usage_observation(PERIOD, [], now=datetime(2026, 10, 1))
 
 
+def test_snapshot_all_roots_unset_is_incomplete(monkeypatch):
+    _clear_env(monkeypatch)
+
+    snap = storage.snapshot(storage.roots_from_env(), _t(9, 1))
+
+    assert snap["complete"] is False
+    assert snap["bytes"] == {}
+    assert snap["total_bytes"] == "0"
+    assert all(root == {"status": "unset"} for root in snap["roots"].values())
+
+
+def test_snapshot_empty_configured_root_is_complete_zero(tmp_path):
+    snap = storage.snapshot({"uploads": str(tmp_path)}, _t(9, 1))
+
+    assert snap["complete"] is True
+    assert snap["bytes"] == {}
+    assert snap["total_bytes"] == "0"
+    assert snap["roots"]["uploads"]["status"] == "measured"
+
+
+@pytest.mark.parametrize("alias", [False, True])
+def test_snapshot_duplicate_real_roots_count_bytes_once(tmp_path, alias):
+    root = tmp_path / "uploads"
+    _write(root / "t1--a.dwg", 40)
+    second = tmp_path / "alias" if alias else root
+    if alias:
+        _link_dir(second, root)
+
+    snap = storage.snapshot({"drawings": str(second), "uploads": str(root)}, _t(9, 1))
+
+    assert snap["complete"] is True
+    assert snap["bytes"] == {"t1|": "40"}
+    assert snap["total_bytes"] == "40"
+    assert snap["roots"]["drawings"] == {"status": "duplicate", "duplicate_of": "uploads"}
+
+
 # --------------------------------------------------------------------------- #
 # observation
 # --------------------------------------------------------------------------- #
@@ -252,6 +288,24 @@ def test_observation_gap_over_48_hours_is_partial():
 
     late = [_line(_t(9, 3, 1), counts)] + _daily(4, 30, counts)
     assert storage.storage_usage_observation(PERIOD, late, now=_t(10, 2))["coverage"] == "partial"
+
+
+@pytest.mark.parametrize("moment", [_t(8, 31, 12), _t(9, 1)])
+def test_observation_incomplete_carry_in_is_partial(moment):
+    counts = {"t1|": 500_000_000}
+    lines = [_line(moment, counts, complete=False)] + _daily(2, 30, counts)
+
+    obs = storage.storage_usage_observation(PERIOD, lines, now=_t(10, 2))
+
+    assert obs["coverage"] == "partial"
+    assert obs["usages"] == {"t1|": "0.500000000000000"}
+
+
+def test_observation_superseded_incomplete_carry_does_not_reduce_coverage():
+    counts = {"t1|": 500_000_000}
+    lines = _daily(1, 30, counts) + [_line(_t(8, 31), counts, complete=False)]
+
+    assert storage.storage_usage_observation(PERIOD, lines, now=_t(10, 2))["coverage"] == "complete"
 
 
 def test_observation_open_period_holds_last_sample_to_now():
@@ -358,3 +412,46 @@ def test_script_is_stdout_only_when_the_snapshots_env_is_unset(tmp_path, monkeyp
     assert sorted(p.name for p in tmp_path.iterdir()) == ["uploads"]  # nothing written
 
     assert script.main(["--observe", PERIOD], now=_t(10, 2)) == 2  # nothing to observe from
+
+
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("root_state", ["unset", "missing", "truncated"])
+def test_script_incomplete_snapshot_is_not_appended(tmp_path, monkeypatch, capsys, existing, root_state):
+    _clear_env(monkeypatch)
+    snapshots = tmp_path / "storage.jsonl"
+    original = (_line(_t(8, 31), {"t1|": 10}) + "\n").encode("utf-8")
+    if existing:
+        snapshots.write_bytes(original)
+    monkeypatch.setenv(storage.SNAPSHOTS_ENV, str(snapshots))
+    uploads = tmp_path / "uploads"
+    if root_state != "unset":
+        monkeypatch.setenv("LEAF_UPLOADS_DIR", str(uploads))
+    if root_state == "truncated":
+        _write(uploads / "t1--a.dwg", 10)
+        _write(uploads / "t1--b.dwg", 20)
+
+    assert _load_script().main(["--max-entries", "1"], now=_t(9, 1)) == 2
+
+    output = capsys.readouterr()
+    assert json.loads(output.out)["complete"] is False
+    assert "incomplete" in output.err
+    if existing:
+        assert snapshots.read_bytes() == original
+    else:
+        assert not snapshots.exists()
+
+
+def test_script_appends_empty_configured_root(tmp_path, monkeypatch, capsys):
+    _clear_env(monkeypatch)
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    snapshots = tmp_path / "storage.jsonl"
+    monkeypatch.setenv("LEAF_UPLOADS_DIR", str(uploads))
+    monkeypatch.setenv(storage.SNAPSHOTS_ENV, str(snapshots))
+
+    assert _load_script().main([], now=_t(9, 1)) == 0
+
+    snap = json.loads(snapshots.read_text(encoding="utf-8"))
+    assert snap == json.loads(capsys.readouterr().out)
+    assert snap["complete"] is True
+    assert snap["total_bytes"] == "0"
