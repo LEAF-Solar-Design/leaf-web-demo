@@ -20,6 +20,32 @@ import esbuild from 'esbuild'
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
 const viewerSource = readFileSync(new URL('./components/Viewer.jsx', import.meta.url), 'utf8')
 
+describe('Conductor form wiring', () => {
+  it('CF15 the ribbon conductor choice mounts the step editor with live context and loaders', () => {
+    const live = esbuild.transformSync(appSource, { loader: 'jsx' }).code
+    const start = live.indexOf('=== "conductors"')
+    assert.ok(start >= 0)
+    const host = live.slice(start, start + 1600)
+    assert.match(host, /React.createElement\(\s*SolarStepEditor/)
+    assert.match(host, /row: solarFormTool/)
+    assert.match(host, /drawingId: catalogRunContext\?\.drawingId/)
+    assert.match(host, /drawingVersion: catalogRunContext\?\.drawingVersion/)
+    assert.match(host, /projectId: catalogRunContext\?\.projectId/)
+    assert.match(host, /readIntake: SOLAR_SETTINGS_LOADERS.readIntake/)
+    assert.match(host, /onSubmit: \(tool, params\) => onRequestCatalogRun\(tool, params, RIBBON_RATIONALE, "ribbon"\)/)
+    assert.match(host, /onClose: \(\) => setSolarFormTool\(null\)/)
+  })
+
+  it('CF8 the rail editor receives project scope and CF14 overlays receive the tool name', () => {
+    const live = esbuild.transformSync(appSource, { loader: 'jsx' }).code
+    const rail = live.slice(live.indexOf('row: solarFlowEditor'), live.indexOf('row: solarFlowEditor') + 700)
+    assert.match(rail, /projectId: catalogRunContext\?\.projectId/)
+    const start = live.indexOf('const overlays = catalogRunOverlays(')
+    assert.ok(start >= 0)
+    assert.match(live.slice(start, start + 220), /toolName: tool\?\.name/)
+  })
+})
+
 describe('Solar settings form wiring', () => {
   it('SF2 wiring the typed form mounts at the Solar form host behind its fence', () => {
     const host = appSource.indexOf("{ENV_CAD_EDIT && drafting && surfaceSlots.toolbar.profile === 'solar' && solarFormTool && (")

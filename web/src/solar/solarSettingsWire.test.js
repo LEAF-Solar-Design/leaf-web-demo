@@ -16,6 +16,29 @@ const refused = { ok: false, error: { error_code: 'bad_params', message: 'invali
 const association = (envelope) => ({ intentId: 'i1', drawingId: 'd1', drawingVersion: 3, envelope })
 
 describe('Solar settings wiring rules', () => {
+  it('CF14 enabled conductors omit CAD handles from the whole-graph request', () => {
+    const input = { toolName: 'solar-string-conductors', selectedHandle: 'AB', isWrite: true }
+    expect(catalogRunOverlays({ ...input, enabled: true })).toEqual({})
+    expect(catalogRunOverlays({ ...input, enabled: false })).toEqual({ target_handle: 'AB', handle: 'AB' })
+    expect(prepareCatalogRunParams(
+      { name: input.toolName, capabilities: ['drawing.write'], params: { properties: {} } },
+      { operation: 'set-conductors', expected_rev: 7, assignments: [{ string_ref: 'T1', wire_gauge: '10 AWG' }] }, C,
+      catalogRunOverlays({ ...input, enabled: true }),
+    )).toEqual({ operation: 'set-conductors', expected_rev: 7,
+      assignments: [{ string_ref: 'T1', wire_gauge: '10 AWG' }], drawing_id: 'd1' })
+  })
+
+  it('CF15 chooses conductors only for a live standalone drawing', () => {
+    const input = { enabled: true, mock: false, toolName: 'solar-string-conductors', context: C }
+    expect(solarSettingsFormChoice(input)).toBe('conductors')
+    for (const override of [{ enabled: false }, { mock: true }, { context: { ...C, projectId: 'p1' } },
+      { context: { ...C, drawingId: '' } }, { context: null }, { context: Object.assign(new Date(), C) }]) {
+      expect(solarSettingsFormChoice({ ...input, ...override })).toBe('generic')
+    }
+    expect(solarSettingsFormChoice({ ...input, toolName: 'solar-settings' })).toBe('typed')
+    expect(solarSettingsFormChoice({ ...input, toolName: 'solar-homeruns' })).toBe('generic')
+  })
+
   it('SF2 row14 the typed form is chosen for a standalone live settings context', () => {
     expect(solarSettingsFormChoice({ enabled: true, mock: false, toolName: 'solar-settings', context: C })).toBe('typed')
   })

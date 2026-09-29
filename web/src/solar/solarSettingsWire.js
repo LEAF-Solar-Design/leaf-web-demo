@@ -22,9 +22,13 @@ export function canInitializeSolarSettings(name, availability, params) {
 }
 
 export function solarSettingsFormChoice({ enabled, mock, toolName, context }) {
-  return enabled === true && mock === false && toolName === SOLAR_SETTINGS_TOOL_NAME &&
+  const standalone = enabled === true && mock === false &&
     context !== null && typeof context === 'object' && context.projectId === null &&
-    typeof context.drawingId === 'string' && context.drawingId.length > 0 ? 'typed' : 'generic'
+    [Object.prototype, null].includes(Object.getPrototypeOf(context)) &&
+    typeof context.drawingId === 'string' && context.drawingId.length > 0
+  if (!standalone) return 'generic'
+  if (toolName === SOLAR_SETTINGS_TOOL_NAME) return 'typed'
+  return toolName === 'solar-string-conductors' ? 'conductors' : 'generic'
 }
 
 export function solarSettingsScope({ enabled, mock, profile, context }) {
@@ -36,7 +40,7 @@ export function solarSettingsScope({ enabled, mock, profile, context }) {
 }
 
 export function catalogRunOverlays({ enabled, toolName, selectedHandle, isWrite }) {
-  if (!selectedHandle || (enabled === true && toolName === SOLAR_SETTINGS_TOOL_NAME)) return {}
+  if (!selectedHandle || (enabled === true && [SOLAR_SETTINGS_TOOL_NAME, 'solar-string-conductors'].includes(toolName))) return {}
   return { target_handle: selectedHandle, ...(isWrite ? { handle: selectedHandle } : {}) }
 }
 
