@@ -264,13 +264,19 @@ def snapshot(roots: Mapping[str, Optional[str]], now: datetime, *,
 
     totals: Dict[str, int] = {}
     report: Dict[str, dict] = {}
-    complete = True
+    complete = bool(real)
+    scanned_roots: Dict[str, str] = {}
     skipped_total = 0
     for kind in ROOT_ENVS:
         if kind not in real:
             report[kind] = {"status": "unset"}
             continue
         root = real[kind]
+        canonical_root = os.path.normcase(root)
+        if canonical_root in scanned_roots:
+            report[kind] = {"status": "duplicate", "duplicate_of": scanned_roots[canonical_root]}
+            continue
+        scanned_roots[canonical_root] = kind
         try:
             st = os.stat(root)
         except FileNotFoundError:
@@ -371,6 +377,7 @@ def storage_usage_observation(period: str, snapshot_lines: Iterable[Any], *,
     partial = effective_end < end
     samples: List[Tuple[datetime, int, Dict[str, int]]] = []
     carry: Optional[Tuple[datetime, int, Dict[str, int]]] = None
+    carry_complete = True
     read = 0
     for order, line in enumerate(snapshot_lines):
         if read >= MAX_SNAPSHOT_LINES:
@@ -387,11 +394,14 @@ def storage_usage_observation(period: str, snapshot_lines: Iterable[Any], *,
         if taken_at <= start:
             if carry is None or (taken_at, order) >= (carry[0], carry[1]):
                 carry = (taken_at, order, counts)
+                carry_complete = complete
             continue
         if not complete:
             partial = True
         samples.append((taken_at, order, counts))
 
+    if not carry_complete:
+        partial = True
     samples.sort(key=lambda s: (s[0], s[1]))
     timeline = ([carry] if carry is not None else []) + samples
     source = f"{SOURCE}:snapshots={len(timeline)}"
