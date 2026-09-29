@@ -1,0 +1,65 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-autofill",
+  "builtin": "builtins/solar_autofill.py",
+  "family": "placement",
+  "adapter": "local-graph-commit",
+  "entitlement": "run_write",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_AUTOFILL_REQUEST",
+  "readiness": {"kind": "facets", "facets": ["frames"]},
+  "engine": "server-builtin",
+  "interaction": {"mode": "form"},
+  "record_store": "registry",
+  "record": {
+    "name": "solar-autofill",
+    "version": "1.0.0",
+    "description": "Apply an auto-fill correction plan that rebalances panel group membership, or revert exactly that plan.",
+    "kind": "script",
+    "family_id": "placement",
+    "engine_op": "solar_autofill",
+    "entry": "builtins/solar_autofill.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {"type": "string", "maxLength": 128},
+        "operation": {"type": "string", "enum": ["apply-corrections", "revert-corrections"]},
+        "expected_rev": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+        "corrections": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "items": {
+            "type": "object",
+            "properties": {
+              "from_ref": {"type": "string", "minLength": 1, "maxLength": 128},
+              "to_ref": {"type": "string", "minLength": 1, "maxLength": 128},
+              "panel_refs": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 4096,
+                "uniqueItems": true,
+                "items": {"type": "string", "minLength": 1, "maxLength": 128}
+              }
+            },
+            "required": ["from_ref", "to_ref", "panel_refs"],
+            "additionalProperties": false
+          }
+        },
+        "alignment_tolerance": {"type": "number", "minimum": 0.000001, "maximum": 1000000}
+      },
+      "required": ["operation", "expected_rev", "corrections"],
+      "additionalProperties": false
+    },
+    "returns": {"type": "object"},
+    "capabilities": ["drawing.write"],
+    "allow_local_fallback": false
+  },
+  "ledger": ["auto-fill", "auto-fill-revert"],
+  "trusted_inputs": [],
+  "maturity": "preview",
+  "wave": 2,
+  "order": 60,
+  "scenario": "w2-rooftop"
+}

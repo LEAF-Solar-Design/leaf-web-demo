@@ -74,6 +74,9 @@ MAX_MEMBERS = 4096
 # The smallest membership the groups builtin will commit; a donation never takes a
 # group below it (builtins/solar_panel_remove.py, "GROUP_WOULD_BE_EMPTY").
 MIN_MEMBERS = 2
+MIN_ALIGNMENT_TOLERANCE = 1e-6
+# The panel-groups builtin's bound, so schema-valid tolerances are accepted.
+MAX_ALIGNMENT_TOLERANCE = 1e6
 # An emptied matrix cell, the shape the groups builtin commits for a slot with no
 # panel in it, identical to builtins/solar_panel_remove.py:37 and
 # builtins/solar_panel_add.py:51. The geometry fields are the placeholder the
@@ -83,14 +86,15 @@ EMPTY_CELL = {"code": "empty", "panel_ref": None, "seq": None, "inverter_id": No
 
 
 def _valid_request(params):
-    """True for exactly {expected_rev, corrections} plus an optional positive finite alignment_tolerance,
-    no coercion anywhere."""
+    """True for exactly {expected_rev, corrections} plus an optional int or float tolerance in
+    [1e-6, 1e6], no other coercion."""
     if type(params) is not dict or not ({"expected_rev", "corrections"} <= set(params)
                                         <= {"expected_rev", "corrections", "alignment_tolerance"}):
         return False
     if "alignment_tolerance" in params:
         tolerance = params["alignment_tolerance"]
-        if type(tolerance) is not float or not math.isfinite(tolerance) or tolerance <= 0:
+        if (type(tolerance) not in (int, float) or not math.isfinite(tolerance)
+                or not MIN_ALIGNMENT_TOLERANCE <= tolerance <= MAX_ALIGNMENT_TOLERANCE):
             return False
     corrections = params["corrections"]
     if type(params["expected_rev"]) is not int or type(corrections) is not list:
@@ -290,7 +294,10 @@ def apply_corrections(graph, params):
         _receive(target, arriving, inputs, strings)
         if "alignment_tolerance" in params:
             for frame in (source, target):
-                _regrid(frame, panels, params["alignment_tolerance"])
+                try:
+                    _regrid(frame, panels, float(params["alignment_tolerance"]))
+                except (KeyError, IndexError, ZeroDivisionError) as exc:
+                    raise GraphValidationError("REGRID_TOLERANCE_UNSTABLE") from exc
                 changed.update({ref: panels[ref] for ref in frame["panel_refs"]})
         for entity in (source, target, *arriving):
             changed[entity["id"]] = entity
