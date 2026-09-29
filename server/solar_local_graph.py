@@ -42,9 +42,13 @@ def _load_builtin(tool):
     return module
 
 
-def request_digest(tool, drawing_id, source_version, builtin_params):
-    return digest({"tool": tool, "drawing_id": drawing_id,
-                   "source_version": source_version, "params": builtin_params})
+def request_digest(tool, drawing_id, source_version, builtin_params, *, proposal_candidate=None):
+    payload = {"tool": tool, "drawing_id": drawing_id,
+               "source_version": source_version, "params": builtin_params}
+    if proposal_candidate is not None:
+        from solar_proposal_candidate import proposal_identity
+        payload["trusted_inputs"] = {"proposal_candidate": proposal_identity(proposal_candidate)}
+    return digest(payload)
 
 
 def _source_intake(backend, tenant_id, drawing_id, version, graph_sha256):
@@ -66,7 +70,27 @@ def _source_intake(backend, tenant_id, drawing_id, version, graph_sha256):
         raise GraphValidationError("SOURCE_INTAKE_UNAVAILABLE") from None
 
 
-_TRUSTED_RESOLVERS = {"source_intake": _source_intake}
+def _proposal_candidate(backend, tenant_id, drawing_id, version, snapshot):
+    from solar_proposal_candidate import verify_snapshot
+    return verify_snapshot(backend, tenant_id, drawing_id, version, snapshot)["candidate"]
+
+
+_TRUSTED_RESOLVERS = {"source_intake": _source_intake, "proposal_candidate": _proposal_candidate}
+
+
+def _resolve_trusted(tool, backend, tenant_id, drawing_id, version, graph_sha256, snapshot):
+    names = solar_tools.get(tool)["trusted_inputs"]
+    if snapshot is not None and "proposal_candidate" not in names:
+        raise GraphValidationError("INVALID_COMMIT_REQUEST")
+    resolved = {}
+    for name in names:
+        if name == "proposal_candidate":
+            resolved["candidate"] = _TRUSTED_RESOLVERS[name](
+                backend, tenant_id, drawing_id, version, snapshot)
+        else:
+            resolved[name] = _TRUSTED_RESOLVERS[name](
+                backend, tenant_id, drawing_id, version, graph_sha256)
+    return resolved
 
 
 def stable_numbers(value):
@@ -89,9 +113,13 @@ def stable_numbers(value):
     return True
 
 
-def graph_commit_provenance(result, params, tenant_id, job_id, tool, source_version, *, backend=None):
+def graph_commit_provenance(result, params, tenant_id, job_id, tool, source_version, *, backend=None,
+                            proposal_candidate=None):
     """Bind a terminal receipt to its durable request and immutable stored version."""
     try:
+        if (proposal_candidate is not None
+                and "proposal_candidate" not in (solar_tools.get(tool) or {}).get("trusted_inputs", [])):
+            raise ValueError()
         if isinstance(result, dict) and result["schema_version"] == SEED_RESULT_SCHEMA:
             return _seed_provenance(result, params, tenant_id, job_id, tool, source_version,
                                     backend=backend)
@@ -108,7 +136,8 @@ def graph_commit_provenance(result, params, tenant_id, job_id, tool, source_vers
             raise ValueError()
         builtin_params = copy.deepcopy(params)
         drawing_id = builtin_params.pop("drawing_id")
-        request_sha256 = request_digest(tool, drawing_id, source_version, builtin_params)
+        request_sha256 = request_digest(tool, drawing_id, source_version, builtin_params,
+                                       proposal_candidate=proposal_candidate)
         version = result["new_version"]["version"]
         if (result["request_sha256"] != request_sha256
                 or type(version) is not int or version <= source_version
@@ -140,6 +169,14 @@ def graph_commit_provenance(result, params, tenant_id, job_id, tool, source_vers
                 or parent["graph_sha256"] != result["before_graph_sha256"]):
             raise ValueError()
         trusted_inputs = solar_tools.get(tool)["trusted_inputs"]
+        if "proposal_candidate" in trusted_inputs or proposal_candidate is not None:
+            resolved_candidate = _resolve_trusted(
+                tool, backend, tenant_id, drawing_id, source_version,
+                parent["graph_sha256"], proposal_candidate)
+            after = _load_builtin(tool).run(copy.deepcopy(parent["graph"]), builtin_params,
+                                            **resolved_candidate)
+            if digest(after) != result["graph_sha256"]:
+                raise ValueError()
         if "source_intake" in trusted_inputs:
             resolved = {name: _TRUSTED_RESOLVERS[name](
                 backend, tenant_id, drawing_id, source_version, parent["graph_sha256"])
@@ -230,13 +267,19 @@ def _seed_provenance(result, params, tenant_id, job_id, tool, source_version, *,
 
 
 def run_local_graph_commit(backend, tenant_id, tool, params, *, drawing_id, source_version,
-                           holder, fence, job_id, project_id=None):
+                           holder, fence, job_id, project_id=None, proposal_candidate=None):
     if tool not in local_graph_tools():
         raise GraphValidationError("UNKNOWN_LOCAL_GRAPH_TOOL")
+    if proposal_candidate is not None and "proposal_candidate" not in solar_tools.get(tool)["trusted_inputs"]:
+        raise GraphValidationError("INVALID_COMMIT_REQUEST")
     _bounded_json(params)
     if type(params) is not dict:
         raise GraphValidationError(solar_tools.get(tool)["invalid_request_code"])
-    if not stable_numbers(params):
+    # A malformed revision is the acceptance kernel's STALE_GRAPH_REVISION,
+    # including floats whose spelling would otherwise fail the numeric guard.
+    numeric_params = ({key: value for key, value in params.items() if key != "expected_rev"}
+                      if proposal_candidate is not None else params)
+    if not stable_numbers(numeric_params):
         raise GraphValidationError("INVALID_NUMERIC_PARAM")
     if type(source_version) is not int or source_version < 1:
         raise GraphValidationError("INVALID_PARENT_VERSION")
@@ -270,9 +313,8 @@ def run_local_graph_commit(backend, tenant_id, tool, params, *, drawing_id, sour
                                         project_id=project_id)
         if context["representation"] == "dwg-bundle":
             raise GraphValidationError("LICENSED_GRAPH_COMMIT_REQUIRED")
-        resolved = {name: _TRUSTED_RESOLVERS[name](
-            backend, tenant_id, drawing_id, source_version, context["graph_sha256"])
-            for name in solar_tools.get(tool)["trusted_inputs"]}
+        resolved = _resolve_trusted(tool, backend, tenant_id, drawing_id, source_version,
+                                    context["graph_sha256"], proposal_candidate)
         module = _load_builtin(tool)
         run_bound = getattr(module, "run_bound", None)
         if callable(run_bound):
@@ -283,7 +325,8 @@ def run_local_graph_commit(backend, tenant_id, tool, params, *, drawing_id, sour
             after = module.run(copy.deepcopy(context["graph"]), builtin_params, **resolved)
         if builtin_params.get("cancel") is True:
             raise GraphValidationError("GRAPH_COMMIT_CANCELLED")
-        request_sha256 = request_digest(tool, drawing_id, source_version, builtin_params)
+        request_sha256 = request_digest(tool, drawing_id, source_version, builtin_params,
+                                       proposal_candidate=proposal_candidate)
         receipt = publish_version(
             backend, tenant_id, drawing_id, parent_version=source_version,
             before=context["graph"], after=after, holder=holder, fence=fence,

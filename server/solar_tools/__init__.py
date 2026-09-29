@@ -8,7 +8,7 @@ from pathlib import Path
 
 SCHEMA = "leaf.solar-tool.v1"
 ADAPTER_KINDS = ("local-graph-commit", "cloud-proposal", "local-graph-read")
-TRUSTED_INPUTS = ("source_intake",)
+TRUSTED_INPUTS = ("source_intake", "proposal_candidate")
 MAX_DECLARATIONS = 256
 _DIRECTORY = Path(__file__).resolve().parent
 _KEYS = frozenset((
@@ -138,6 +138,9 @@ def _validate(row, stem, server_dir, families):
     if "source_intake" in row["trusted_inputs"]:
         _require(row["adapter"] == "local-graph-commit" and row["seedable"] is False,
                  "source_intake requires a non-seed local graph commit")
+    if "proposal_candidate" in row["trusted_inputs"]:
+        _require(row["adapter"] == "local-graph-commit" and row["seedable"] is False,
+                 "proposal_candidate requires a non-seed local graph commit")
     if row["seedable"]:
         _require(row["adapter"] == "local-graph-commit", "seed must use local adapter")
     readiness = row["readiness"]

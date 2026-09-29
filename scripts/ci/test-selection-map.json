@@ -466,6 +466,7 @@
     "server-w1-catalog-gates",
     "server-w1-cloud-solve-probe",
     "server-w1-bound-proposal",
+    "server-w1-commit-solve-adapter",
     "server-w1-design-graph",
     "server-w1-electrical-zones",
     "server-w1-equipment",

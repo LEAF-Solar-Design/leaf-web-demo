@@ -1329,6 +1329,7 @@ class BrokerRunRequest(BaseModel):
     job_id: Optional[str] = None
     entity_scope: Optional[Dict[str, Any]] = None
     solve_scope: Optional[Dict[str, Any]] = None
+    proposal_candidate: Any = None
 
     @field_validator("entity_scope", mode="before")
     @classmethod
@@ -1614,6 +1615,9 @@ def _broker_request_fingerprint(req: Union[BrokerRunRequest, BrokerPlanRunReques
         fingerprint_input["entity_scope"] = req.entity_scope
     if getattr(req, "solve_scope", None) is not None:
         fingerprint_input["solve_scope"] = req.solve_scope
+    if getattr(req, "proposal_candidate", None) is not None:
+        from solar_proposal_candidate import proposal_identity
+        fingerprint_input["proposal_candidate"] = proposal_identity(req.proposal_candidate)
     canonical = json.dumps(
         fingerprint_input, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -2810,6 +2814,22 @@ def _broker_run_request(req: Union[BrokerRunRequest, BrokerPlanRunRequest]) -> J
     is_plan = isinstance(req, BrokerPlanRunRequest)
     tool = PLAN_TOOL if is_plan else (req.tool or {})
     aps_live = True if is_plan else bool(req.aps_live)
+    if not is_plan:
+        from solar_proposal_candidate import requires_candidate, verify_snapshot
+        from solar_design_graph import GraphValidationError
+        if requires_candidate(tool) or req.proposal_candidate is not None:
+            try:
+                if not requires_candidate(tool):
+                    raise GraphValidationError("INVALID_COMMIT_REQUEST")
+                backend = write_loop.backend_for_tenant(req.tenant_id, aps_live=False, da=None)
+                req.proposal_candidate = verify_snapshot(
+                    backend, req.tenant_id, req.dwg, req.dwg_version, req.proposal_candidate)
+            except GraphValidationError as exc:
+                env, status = _graph_commit_refused(exc.code, tool=tool.get("name"))
+                return JSONResponse(status_code=status, content=env)
+            except (KeyError, TypeError, ValueError):
+                env, status = _graph_commit_refused("INVALID_SOLVE_CANDIDATE", tool=tool.get("name"))
+                return JSONResponse(status_code=status, content=env)
     engine_op = tool.get("engine_op", "")
     entry: Dict[str, Any] = {
         "ts": time.time(),
@@ -3486,7 +3506,11 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
     # 1b) PRE-VALIDATE params against the tool's own JSON Schema (§8.4 step 1).
     # A schema violation returns a BAD_PARAMS envelope and the tool body NEVER
     # runs — for BOTH the live and the mock paths.
-    perrs = validate_params(tool, params)
+    # Candidate acceptance owns revision typing and staleness. Its strict kernel
+    # also checks the closed parameter shape; the catalog schema must not replace
+    # STALE_GRAPH_REVISION with a generic schema error on this trusted adapter.
+    perrs = ([] if local_graph and "proposal_candidate" in solar_tools.get(tool["name"])["trusted_inputs"]
+             else validate_params(tool, params))
     if perrs:
         return _classified_bad_params(
             "tool_params_invalid",
@@ -3595,7 +3619,9 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
             result = run_local_graph_commit(
                 backend, req.tenant_id, tool["name"], params,
                 drawing_id=req.dwg, source_version=req.dwg_version,
-                holder=req.checkout_holder, fence=req.checkout_fence, job_id=req.job_id)
+                holder=req.checkout_holder, fence=req.checkout_fence, job_id=req.job_id,
+                **({"proposal_candidate": req.proposal_candidate}
+                   if req.proposal_candidate is not None else {}))
             env = ok_envelope(tool["name"], tool["version"], result, None,
                               int((time.perf_counter() - t0) * 1000))
             env["degraded_mode"] = False

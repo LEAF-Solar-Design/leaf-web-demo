@@ -124,7 +124,7 @@ def _assert_shipped_declarations(registry):
          "INVALID_GROUP_REQUEST", {"kind": "w1-chain"}, "server-builtin", "write_seed", ["panel-group-create"]),
         ("solar-solve-proposal", 40, "cloud-proposal", "solve", False, False, None,
          {"kind": "w1-chain"}, "cloud-service", "catalog_seed", ["solve"]),
-        ("solar-commit-solve", 50, None, "run_write", True, False, None,
+        ("solar-commit-solve", 50, "local-graph-commit", "run_write", True, False, "INVALID_COMMIT_REQUEST",
          {"kind": "w1-chain"}, "server-builtin", "write_seed", ["solve"]),
         ("solar-correct-string", 60, "local-graph-commit", "run_write", True, False,
          "INVALID_CORRECTION", {"kind": "facets", "facets": ["strings"]}, "server-builtin", "write_seed", []),
@@ -145,7 +145,7 @@ def _assert_shipped_declarations(registry):
         assert row["schema"] == solar_tools.SCHEMA == "leaf.solar-tool.v1"
         assert row["builtin"] == "builtins/" + row["name"].replace("-", "_") + ".py"
         assert row["family"] == "stringing"
-        assert row["trusted_inputs"] == []
+        assert row["trusted_inputs"] == (["proposal_candidate"] if name == "solar-commit-solve" else [])
         assert row["record"] is None
         assert row["wave"] == 1
         assert row["maturity"] == "production"
