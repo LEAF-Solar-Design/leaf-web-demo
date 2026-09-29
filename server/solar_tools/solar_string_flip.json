@@ -1,0 +1,78 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-string-flip",
+  "builtin": "builtins/solar_string_flip.py",
+  "family": "stringing",
+  "adapter": "local-graph-commit",
+  "entitlement": "run_write",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_STRING_FLIP_REQUEST",
+  "readiness": {
+    "kind": "facets",
+    "facets": [
+      "strings"
+    ]
+  },
+  "engine": "server-builtin",
+  "interaction": {
+    "mode": "form"
+  },
+  "record_store": "registry",
+  "record": {
+    "name": "solar-string-flip",
+    "version": "1.0.0",
+    "description": "Reverse one string's panel order and trade its two ends; circuit and inverter stay.",
+    "kind": "script",
+    "family_id": "stringing",
+    "engine_op": "solar_string_flip",
+    "entry": "builtins/solar_string_flip.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "operation": {
+          "type": "string",
+          "enum": [
+            "flip-string"
+          ],
+          "default": "flip-string"
+        },
+        "expected_rev": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "string_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "operation",
+        "expected_rev",
+        "string_ref"
+      ],
+      "additionalProperties": false
+    },
+    "returns": {
+      "type": "object"
+    },
+    "capabilities": [
+      "drawing.write"
+    ],
+    "allow_local_fallback": false
+  },
+  "ledger": [
+    "string-flip"
+  ],
+  "trusted_inputs": [],
+  "maturity": "preview",
+  "wave": 2,
+  "order": 72,
+  "scenario": "w2-rooftop"
+}
