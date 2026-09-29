@@ -238,6 +238,11 @@ def test_size_strings_commits_through_the_rail(api, graph, monkeypatch):
 
     recorded = json.loads((SERVER / "tests" / "fixtures" / "w1_string_length_recorded_response.json")
                           .read_text(encoding="utf-8"))
+    setup = api[0].post("/api/run?wait=1", json=body(api, "solar-settings", {
+        "expected_rev": graph["rev"],
+        "project_changes": {"zip_code": recorded["request"]["zip_code"]}}))
+    assert setup.status_code == 200, setup.text
+    assert setup.json()["ok"] is True
     calls = []
 
     def post(request, grant):
@@ -247,7 +252,7 @@ def test_size_strings_commits_through_the_rail(api, graph, monkeypatch):
     monkeypatch.setattr(sizing_client, "resolve_grant",
                         lambda reference, tenant: CloudGrant(tenant, "fixture-token-must-not-persist"))
     monkeypatch.setattr(sizing_client, "post_string_length", post)
-    params = {"expected_rev": graph["rev"], "mode": "global",
+    params = {"expected_rev": graph["rev"] + 1, "mode": "global",
               "requests": {graph["settings"]["id"]: recorded["request"]},
               "grant_ref": "fixture-grant", "confirm": True}
     response = api[0].post("/api/run?wait=1", json=body(api, "solar-size-strings", params))
@@ -256,8 +261,8 @@ def test_size_strings_commits_through_the_rail(api, graph, monkeypatch):
     assert env["ok"] is True
     assert jobs.get_job(env["result"]["job_id"])["status"] == "complete"
     assert env["execution_provenance"]["execution_mode"] == "local_graph_commit"
-    assert store.load_manifest(api[1], TENANT, "solar")["head"] == 2
-    stored = resolve_graph_context(api[1], TENANT, "solar", 2)["graph"]
+    assert store.load_manifest(api[1], TENANT, "solar")["head"] == 3
+    stored = resolve_graph_context(api[1], TENANT, "solar", 3)["graph"]
     assert stored["settings"]["panels_in_sequence"] == 27
     assert len(calls) == 1
 

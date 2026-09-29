@@ -50,6 +50,11 @@ def builtin():
     return local._load_builtin(TOOL)
 
 
+def _sized(value, recorded, mode="global"):
+    value["project"]["zip_code"] = recorded["request"]["zip_code"]
+    return confirm(value, sizing_params(value, recorded, mode))["graph"]
+
+
 def params(refs=None):
     return {"expected_rev": 1, "groups": [{
         "name": "Roof group", "panel_refs": [P3, P2, P1] if refs is None else list(refs),
@@ -95,7 +100,7 @@ def u(graph, passing, service):
             other = copy.deepcopy(value["electrical_zones"][0])
             other.update(id=app_id("zone-el", 2), name="Roof 2", panel_refs=[P3])
             value["electrical_zones"].append(other)
-        return confirm(value, sizing_params(value, passing, mode))["graph"]
+        return _sized(value, passing, mode)
     return build
 
 
@@ -262,7 +267,7 @@ def test_matrix_budget_is_cumulative_across_groups(graph, passing, service, monk
     for zone in value["electrical_zones"]:
         if P3 in zone["panel_refs"]:
             zone["panel_refs"].append(p4)
-    source = confirm(value, sizing_params(value, passing, "global"))["graph"]
+    source = _sized(value, passing, "global")
     before = copy.deepcopy(source)
     request = {"expected_rev": 1, "groups": [
         {"name": name, "panel_refs": refs, "alignment_tolerance": 0.5,
@@ -580,7 +585,7 @@ def test_parity_receipt_replays_through_studio_path(passing, service, tmp_path, 
                "elevation_datum": "unrecorded", "crs": ""}, created_at=created_at)
     by_handle, dimensions = prod.import_panels(source, intake, panels, created_at)
     source = validate_graph(source)
-    source = confirm(source, sizing_params(source, passing))["graph"]
+    source = _sized(source, passing)
     assert source["rev"] == 1
     require_sizing(source)
     requests = []
