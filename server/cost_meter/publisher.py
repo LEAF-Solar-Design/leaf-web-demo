@@ -120,11 +120,18 @@ def build_period(period: str, observations: Iterable[Any]) -> List[Tuple[Resourc
             for obs in cost_obs:
                 obs_gross = to_decimal(obs.get("gross_cost_usd"), f"{resource_id} gross_cost_usd")
                 obs_credits = to_decimal(obs.get("credits_usd", "0"), f"{resource_id} credits_usd")
+                obs_coverage = obs.get("coverage")
+                if obs_coverage not in _COVERAGE_RANK:
+                    raise ValueError(f"{resource_id} coverage must be one of {sorted(_COVERAGE_RANK)}")
+                if _COVERAGE_RANK[obs_coverage] < _COVERAGE_RANK[coverage]:
+                    coverage = obs_coverage
                 batch = obs.get("source_batch_id")
                 if isinstance(batch, str) and batch.strip():
                     amounts = (obs_gross, obs_credits)
-                    if batch in batch_amounts and batch_amounts[batch] != amounts:
-                        raise ValueError(f"{resource_id} conflicting amounts for batch {batch}")
+                    if batch in batch_amounts:
+                        if batch_amounts[batch] != amounts:
+                            raise ValueError(f"{resource_id} conflicting amounts for batch {batch}")
+                        continue
                     batch_amounts[batch] = amounts
                 fingerprint = _canon_json(obs)
                 if fingerprint in seen:
@@ -132,11 +139,6 @@ def build_period(period: str, observations: Iterable[Any]) -> List[Tuple[Resourc
                 seen.add(fingerprint)
                 gross += obs_gross
                 credits += obs_credits
-                obs_coverage = obs.get("coverage")
-                if obs_coverage not in _COVERAGE_RANK:
-                    raise ValueError(f"{resource_id} coverage must be one of {sorted(_COVERAGE_RANK)}")
-                if _COVERAGE_RANK[obs_coverage] < _COVERAGE_RANK[coverage]:
-                    coverage = obs_coverage
                 batch = obs.get("source_batch_id")
                 if isinstance(batch, str) and batch.strip() and batch not in batches:
                     batches.append(batch)

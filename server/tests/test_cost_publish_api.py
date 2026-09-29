@@ -155,6 +155,40 @@ def test_conflicting_batch_amounts_write_nothing(tmp_path, changed):
     assert publisher.latest_publication_id(store, PERIOD) == first
 
 
+def test_same_batch_decimal_equal_amounts_count_once(tmp_path):
+    store = CostLedgerStore(tmp_path / "ledger")
+    pub = publisher.publish_period(store, PERIOD, [
+        _cost(EFS, "10", credits="1"),
+        _cost(EFS, "10.00", credits="1.00"),
+    ], "snapshot")
+    row, = store.read_publication(pub)
+    assert row.resource_period.gross_cost_usd == Decimal("10")
+    assert row.resource_period.credits_usd == Decimal("1")
+    assert row.resource_period.source_batch_ids == ("batch-1",)
+
+
+@pytest.mark.parametrize("coverages", [("complete", "partial"), ("partial", "complete")])
+def test_same_batch_duplicate_keeps_weakest_coverage(tmp_path, coverages):
+    store = CostLedgerStore(tmp_path / "ledger")
+    pub = publisher.publish_period(store, PERIOD, [
+        _cost(EFS, "10", coverage=coverage) for coverage in coverages
+    ], "snapshot")
+    row, = store.read_publication(pub)
+    assert row.resource_period.gross_cost_usd == Decimal("10")
+    assert row.resource_period.coverage == "partial"
+
+
+@pytest.mark.parametrize("changed", [{"gross_cost_usd": "11"}, {"credits_usd": "2"}])
+def test_same_batch_conflict_leaves_new_ledger_empty(tmp_path, changed):
+    root = tmp_path / "ledger"
+    store = CostLedgerStore(root)
+    cost = _cost(EFS, "10")
+    with pytest.raises(ValueError, match="conflicting amounts"):
+        publisher.publish_period(store, PERIOD,
+                                 [_cost("aps:engine", "5"), cost, {**cost, **changed}], "bad")
+    assert not any(p.is_file() for p in root.rglob("*"))
+
+
 def test_snapshot_removes_absent_resources_and_partial_snapshot_carries_previous(tmp_path):
     store = CostLedgerStore(tmp_path / "ledger")
     first = publisher.publish_period(store, PERIOD, _fixture_observations(), "initial")

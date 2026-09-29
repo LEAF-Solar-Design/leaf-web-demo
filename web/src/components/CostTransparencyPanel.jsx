@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { getCost } from '../api.js'
 import './CostTransparencyPanel.css'
 
-const TITLE = 'What it costs to run Leaf'
+const TITLE = 'What Leaf costs to operate'
 const COPY = 'This page shows what Leaf actually costs to run and your share of it. It is not a bill and does not change your plan, quotas, or limits.'
 const dimensions = [['development', 'Development'], ['ci', 'CI'], ['fleet', 'Fleet'], ['unattributed', 'Unattributed']]
 

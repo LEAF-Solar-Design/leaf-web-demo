@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import CostTransparencyPanel from './CostTransparencyPanel.jsx'
 import { config, getCost, getUsage } from '../api.js'
 
-const title = 'What it costs to run Leaf'
+const title = 'What Leaf costs to operate'
 const copy = 'This page shows what Leaf actually costs to run and your share of it. It is not a bill and does not change your plan, quotas, or limits.'
 const fixture = {
   period: '2026-09', publication_id: 'pub-1', published_at: '2026-09-28T12:00:00Z',
@@ -42,6 +42,17 @@ async function openPanel() {
 }
 
 describe('cost transparency', () => {
+  it.each(['success', 'failure-with-retry', 'unpublished', 'unreadable'])('has no button name matching run in the %s state', async (state) => {
+    const fetchMock = respond(state === 'unpublished' || state === 'unreadable'
+      ? { ...fixture, publication_id: null, resources: [], degraded_mode: state === 'unreadable' }
+      : fixture)
+    if (state === 'failure-with-retry') fetchMock.mockRejectedValueOnce(new TypeError('offline'))
+    await openPanel()
+    expect(screen.getByRole('button', { name: title })).toBeInTheDocument()
+    if (state === 'failure-with-retry') expect(screen.getByRole('button', { name: 'Retry costs' })).toBeInTheDocument()
+    expect(screen.queryAllByRole('button', { name: /run/i })).toHaveLength(0)
+  })
+
   it('shows only the caller’s use and aggregate shares with non-billing copy', async () => {
     respond()
     const panel = await openPanel()
