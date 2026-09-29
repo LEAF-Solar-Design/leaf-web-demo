@@ -29,7 +29,8 @@ import test_w1_local_graph_broker as broker_tests
 # Captured from the unmodified stores and canonical digest definition at
 # 767e5a42739f92308e73a215b557bc661809d61f, before this correction.
 PINNED_BASE_DIGESTS = {
-    "solar-settings": "sha256:0a487cc04ce8d8f46c95645bc6ab05f75471e970364c3ce56cc5a08cb2cbe6f1",
+    # moved 2026-09-29: solar-settings params gained project_changes (sf-solar-project-readiness)
+    "solar-settings": "sha256:a560ec3662e09efb3fefb2d7fa683cdbc55f2630abe633910b0bdd6645528559",
     "solar-size-strings": "sha256:48d2c171a8c9da862ae6da44987fcb8fec528e2abe1a268bcf875dc6e236233f",
     "solar-panel-groups": "sha256:098e6563d15837eccc55d63f81b45011fa6efc679130b27c8241fef77e47425a",
     "solar-solve-proposal": "sha256:33ca2f21d777762c0e3dd1ad6925599c1d3533aa6341dffa39167fdd5728132d",

@@ -40,6 +40,10 @@ def size_strings(graph, params, *, tenant_id, job_id):
                                 or parsed.request.full_inverter_name != target["inverter_model_a"]):
             raise GraphValidationError("SIZING_MODEL_MISMATCH")
         validated[target_id] = {"grant_ref": parsed.grant_ref, "request": parsed.request.wire()}
+    project_zip = result["project"]["zip_code"].strip()[:5]
+    if not project_zip or any(request["request"]["zip_code"] != project_zip
+                              for request in validated.values()):
+        raise GraphValidationError("SIZING_PROJECT_MISMATCH")
     records = {target_id: cloud.size(request, tenant_id, job_id)
                for target_id, request in validated.items()}
     if not params.get("confirm", False):

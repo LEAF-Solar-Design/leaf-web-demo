@@ -28,6 +28,18 @@
             "minProperties": 1,
             "maxProperties": 14
           },
+          "project_changes": {
+            "type": "object",
+            "minProperties": 1,
+            "maxProperties": 4,
+            "properties": {
+              "name": {"type": "string", "maxLength": 4096},
+              "zip_code": {"type": "string", "maxLength": 10},
+              "latitude": {"type": ["number", "null"], "minimum": -90, "maximum": 90},
+              "longitude": {"type": ["number", "null"], "minimum": -180, "maximum": 180}
+            },
+            "additionalProperties": false
+          },
           "initialize": {
             "type": "object",
             "properties": {

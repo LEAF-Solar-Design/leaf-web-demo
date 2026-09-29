@@ -484,6 +484,7 @@
     "server-w1-routes-schedule",
     "server-w1-seed-product-path",
     "server-w1-sizing-groups",
+    "server-w1-project-settings",
     "server-w1-solar-apply-plan",
     "server-w1-solar-interchange",
     "server-w1-solve-commit",

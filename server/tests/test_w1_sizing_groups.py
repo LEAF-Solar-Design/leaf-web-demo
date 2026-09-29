@@ -37,6 +37,11 @@ settings = builtin("solar_settings")
 sizing = builtin("solar_size_strings")
 groups = builtin("solar_panel_groups")
 
+
+@pytest.fixture(autouse=True)
+def project_zip(graph):
+    graph["project"]["zip_code"] = "44224"
+
 # NecVocGate.ComputeVocCold on the real response: Voc 52.58 V, bvoc -0.13145 read as
 # %/degC, min_temp -2.700000047683716 degC, same operation order as the C#.
 PER_MODULE = 52.58 * (1.0 + -0.13145 / 100.0 * (-2.700000047683716 - 25.0))

@@ -225,7 +225,13 @@ def matching_response(request, responses, used=None):
 
 def apply_recorded_sizing(graph, sizing_record, tenant):
     """The string-sizing precondition from a recorded response: the builtin's own request, response,
-    confirmation and graph validation, with only the transport substituted (scoped to this call)."""
+    confirmation and graph validation, with only the transport substituted (scoped to this call).
+    Sizing binds every request to the project ZIP (SIZING_PROJECT_MISMATCH), so the recording's ZIP
+    is set first through the product path, a solar-settings project change."""
+    graph = builtin("solar_settings").run(graph, {
+        "expected_rev": graph["rev"],
+        "project_changes": {"zip_code": sizing_record["request"]["zip_code"]}})
+
     def recorded_sizing(request, grant):
         if request.wire() != sizing_record["request"]:
             raise ProducerError("sizing request does not match its recording")
