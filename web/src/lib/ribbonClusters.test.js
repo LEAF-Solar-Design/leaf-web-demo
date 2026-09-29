@@ -959,6 +959,24 @@ describe('viewCluster', () => {
     expect(() => toolsOf(off).fit.onClick()).not.toThrow()
   })
 
+  it('S3: Fit calls onBeforeJump once, before setView(home); zoom never calls it', () => {
+    const order = []
+    const viewer = { setView: vi.fn((pose) => { order.push(['setView', pose]); return true }), getPose: () => ({ zoom: 2 }) }
+    const onBeforeJump = vi.fn(() => { order.push(['before']) })
+    const tools = toolsOf(viewCluster({ viewerRef: { current: viewer }, hasDrawing: true, onBeforeJump }))
+    tools.fit.onClick()
+    expect(onBeforeJump).toHaveBeenCalledTimes(1)
+    expect(order).toEqual([['before'], ['setView', 'home']])
+    tools['zoom-in'].onClick()
+    tools['zoom-out'].onClick()
+    expect(onBeforeJump).toHaveBeenCalledTimes(1)
+    // Without onBeforeJump, Fit behaves exactly as before.
+    const plain = { setView: vi.fn(() => true), getPose: () => ({ zoom: 2 }) }
+    toolsOf(viewCluster({ viewerRef: { current: plain }, hasDrawing: true })).fit.onClick()
+    expect(plain.setView).toHaveBeenCalledTimes(1)
+    expect(plain.setView).toHaveBeenCalledWith('home')
+  })
+
   it('carries the Properties pane toggle only when the caller owns the pane, as a pressed-state tool', () => {
     expect(toolsOf(viewCluster({ viewerRef: { current: null }, hasDrawing: true }))['properties-pane']).toBeUndefined()
     const onTogglePane = vi.fn()
