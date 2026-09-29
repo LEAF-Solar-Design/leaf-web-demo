@@ -395,6 +395,7 @@
     "server-solar-ground-dialogs",
     "server-solar-ground-dsteps",
     "server-solar-ground-frames",
+    "server-solar-ground-graph",
     "server-solar-ground-layout",
     "server-solar-ground-reports",
     "server-solar-ground-scene",

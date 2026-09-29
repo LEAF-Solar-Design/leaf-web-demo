@@ -9,6 +9,7 @@ import copy
 import hashlib
 import json
 import math
+import re
 import threading
 from collections import OrderedDict
 from pathlib import Path
@@ -21,6 +22,7 @@ MAX_BYTES = 16 * 1024 * 1024
 MAX_NODES = 500000
 MAX_DEPTH = 32
 COLLECTIONS = ("electrical_zones", "frames", "panels", "strings", "inverters", "routes", "schedules")
+TRACKER_AXIS_EPSILON = 1e-9  # LeafTrackersToPanelGroupsCommand.cs:42 (solar_ground_dsteps.TRACKER_EPSILON); a shorter axis is degenerate
 KINDS = {"project", "settings", "zone-el", "frame", "panel", "string", "inverter", "route", "schedule"}
 
 # Schema validators are built once per process from the packaged schema; reused, never mutated.
@@ -188,6 +190,26 @@ def validate_graph(graph: dict) -> dict:
             len(row) != len(schedule["headers"]) for row in schedule["rows"]
         ):
             raise GraphValidationError("INVALID_SCHEDULE_COLUMNS")
+    design = graph["project"]["installation_design"]
+    tracker_handles = set()
+    for frame in graph["frames"]:
+        if frame["installation_design"] != design:
+            raise GraphValidationError("INSTALLATION_DESIGN_MISMATCH")
+        tracker = frame.get("tracker")
+        if tracker is None:
+            continue
+        if tracker["module_slots"] != frame["module_slots"]:
+            raise GraphValidationError("TRACKER_SLOT_MISMATCH")
+        (ax, ay), (bx, by) = tracker["axis_start"], tracker["axis_end"]
+        if math.sqrt((bx - ax) ** 2 + (by - ay) ** 2) <= TRACKER_AXIS_EPSILON:
+            raise GraphValidationError("DEGENERATE_TRACKER_AXIS")
+        handle = tracker["source"]["handle"]
+        if handle is not None:
+            if re.fullmatch(r"[0-9A-F]{1,16}", handle) is None:
+                raise GraphValidationError("INVALID_GRAPH_SCHEMA")
+            if handle in tracker_handles:
+                raise GraphValidationError("DUPLICATE_TRACKER_SOURCE")
+            tracker_handles.add(handle)
     members = {}
     for string in graph["strings"]:
         if string["module_count"] != len(string["ordered_panel_refs"]):
