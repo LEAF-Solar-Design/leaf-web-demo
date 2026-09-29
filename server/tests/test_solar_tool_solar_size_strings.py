@@ -78,6 +78,11 @@ def service(monkeypatch):
     return calls, reply
 
 
+@pytest.fixture(autouse=True)
+def project_zip(graph):
+    graph["project"]["zip_code"] = "44224"
+
+
 def grant(monkeypatch):
     monkeypatch.setattr(solar_sizing_client, "resolve_grant",
                         lambda reference, tenant: CloudGrant(tenant, TOKEN))
