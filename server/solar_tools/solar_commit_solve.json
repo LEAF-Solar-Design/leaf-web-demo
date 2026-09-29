@@ -3,11 +3,11 @@
   "name": "solar-commit-solve",
   "builtin": "builtins/solar_commit_solve.py",
   "family": "stringing",
-  "adapter": null,
+  "adapter": "local-graph-commit",
   "entitlement": "run_write",
   "requires_persisted_graph": true,
   "seedable": false,
-  "invalid_request_code": null,
+  "invalid_request_code": "INVALID_COMMIT_REQUEST",
   "readiness": {
     "kind": "w1-chain"
   },
@@ -20,7 +20,7 @@
   "ledger": [
     "solve"
   ],
-  "trusted_inputs": [],
+  "trusted_inputs": ["proposal_candidate"],
   "maturity": "production",
   "wave": 1,
   "order": 50,

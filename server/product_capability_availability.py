@@ -385,6 +385,18 @@ def w1_graph_readiness(graph):
     return result
 
 
+def w1_contextual_availability(name, *, entitled, inputs, proposal_state=None):
+    """Overlay resolved proposal readiness only after policy and graph prerequisites."""
+    state = w1_availability(name, entitled=entitled, inputs=inputs)
+    declaration = solar_tools.get(name) or {}
+    if state["runnable"] and "proposal_candidate" in declaration.get("trusted_inputs", ()):
+        reason = "proposal_job_required" if proposal_state is None else proposal_state.get("input_reason")
+        if reason:
+            state.update(input_ready=False, input_reason=reason, runnable=False,
+                         refusal_reasons=[reason])
+    return state
+
+
 def w1_availability(name, *, entitled, inputs):
     """Implementation presence does not imply a reachable broker engine."""
     if not SOLAR_CAPABILITIES[name]["requires_persisted_graph"]:

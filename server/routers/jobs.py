@@ -206,6 +206,7 @@ class RunRequest(BaseModel):
     dwg: str = "rooftop_demo"
     dwg_version: Optional[int] = None  # None -> head (unchanged default); pin to a
     solve_context: Optional[SolveContext] = None
+    proposal_job_id: Any = None
     catalog_digest: Optional[str] = None
     expected_drawing_head: Optional[int] = None
     catalog_commit: Optional[str] = None
@@ -502,6 +503,10 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
             capability_catalog.capability_adapter(req.tool) != capability_catalog.CLOUD_PROPOSAL_ADAPTER):
         return error_response(ErrorCode.BAD_PARAMS, "solve_context requires a cloud proposal",
                               retryable=False, status_code=400)
+    from solar_proposal_candidate import requires_candidate, resolve_proposal
+    if "proposal_job_id" in req.model_fields_set and not requires_candidate(tool or {}):
+        return error_response(ErrorCode.BAD_PARAMS, "proposal_job_id requires a proposal candidate input",
+                              retryable=False, status_code=400)
     if tool is None:
         return error_response(ErrorCode.UNKNOWN_TOOL, f"unknown tool: {req.tool}",
                               retryable=False, tool=req.tool)
@@ -584,7 +589,25 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
     availability = entitlements.w1_tool_availability(
         tool, tenant_id, params.get("drawing_id") or req.dwg,
         project_id=x_project_id, version=availability_version,
-        seed_request=params["initialize"] if "initialize" in params else NO_SEED_REQUEST)
+        seed_request=(params["initialize"] if "initialize" in params and not requires_candidate(tool)
+                      else NO_SEED_REQUEST))
+    proposal_candidate = None
+    if (requires_candidate(tool) and availability is not None
+            and availability["refusal_reasons"] == ["proposal_job_required"]):
+        try:
+            backend = write_loop.backend_for_tenant(str(tenant_id), aps_live=False, da=None)
+            proposal_version = (req.dwg_version if req.dwg_version is not None else
+                                _store().load_manifest(backend, str(tenant_id), req.dwg)["head"])
+            proposal_candidate = resolve_proposal(
+                str(tenant_id), req.dwg, proposal_version, req.proposal_job_id, params)
+            proposal_state = {"input_reason": None}
+        except GraphValidationError as exc:
+            proposal_state = {"input_reason": exc.code.lower()}
+        availability = entitlements.w1_tool_availability(
+            tool, tenant_id, params.get("drawing_id") or req.dwg,
+            project_id=x_project_id, version=availability_version,
+            seed_request=NO_SEED_REQUEST,
+            proposal_state=proposal_state)
     if availability is not None and not availability["runnable"]:
         return JSONResponse(status_code=409, content=with_envelope_fields({
             "error": error_obj(ErrorCode.BAD_PARAMS,
@@ -824,6 +847,8 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
                 entity_scope=binding,
                 **({"solve_context": req.solve_context.model_dump()}
                    if req.solve_context is not None else {}),
+                **({"proposal_candidate": proposal_candidate}
+                   if proposal_candidate is not None else {}),
             )
     except GraphValidationError as exc:
         return JSONResponse(status_code=409, content=with_envelope_fields({

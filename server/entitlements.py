@@ -312,10 +312,11 @@ from product_capability_availability import NO_SEED_REQUEST
 
 
 def w1_tool_availability(tool, tenant, drawing_id=None, *, project_id=None,
-                         version="head", inputs=None, seed_request=NO_SEED_REQUEST):
+                         version="head", inputs=None, seed_request=NO_SEED_REQUEST,
+                         proposal_state=None):
     """Shared catalog/run projection, using the existing tier and role policy."""
     from product_capability_availability import (
-        SOLAR_CAPABILITIES, w1_availability, w1_input_readiness,
+        SOLAR_CAPABILITIES, w1_contextual_availability, w1_input_readiness,
     )
     name = tool.get("name")
     if name not in SOLAR_CAPABILITIES:
@@ -334,7 +335,8 @@ def w1_tool_availability(tool, tenant, drawing_id=None, *, project_id=None,
     elif inputs is None:
         inputs = w1_input_readiness(tenant, drawing_id, project_id=project_id, version=version,
                                    seed_request=seed_request)
-    state = w1_availability(name, entitled=entitled, inputs=inputs[name])
+    state = w1_contextual_availability(name, entitled=entitled, inputs=inputs[name],
+                                       proposal_state=proposal_state)
     if policy_unavailable:
         state["entitlement_reason"] = "entitlement_policy_unavailable"
         state["refusal_reasons"][0] = "entitlement_policy_unavailable"

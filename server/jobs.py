@@ -617,7 +617,8 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
                capability_provenance: Optional[Dict[str, Any]] = None,
                completion_provenance: Optional[Dict[str, Any]] = None,
                entity_scope: Optional[Dict[str, Any]] = None,
-               solve_context: Optional[Dict[str, Any]] = None) -> str:
+               solve_context: Optional[Dict[str, Any]] = None,
+               proposal_candidate: Optional[Dict[str, Any]] = None) -> str:
     """Insert the durable job row and hand it to the executor. Returns job_id.
 
     ``org_id`` / ``project_id`` carry the OPTIONAL project context from the
@@ -673,7 +674,9 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
             raise ValueError("local graph commit requires a drawing id")
         if params["drawing_id"] != dwg:
             raise ValueError("local graph commit drawing id must equal the drawing")
-        if not stable_numbers(params):
+        numeric_params = ({key: value for key, value in params.items() if key != "expected_rev"}
+                          if proposal_candidate is not None else params)
+        if not stable_numbers(numeric_params):
             raise ValueError("local graph commit requires stable numeric parameters")
     if is_local_graph_read(tool):
         from solar_local_graph import stable_numbers
@@ -696,6 +699,7 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
         completion_provenance=completion_provenance,
         entity_scope=entity_scope,
         solve_context=solve_context,
+        proposal_candidate=proposal_candidate,
     )
 
 
@@ -724,7 +728,8 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
                 capability_provenance: Optional[Dict[str, Any]] = None,
                 completion_provenance: Optional[Dict[str, Any]] = None,
                 entity_scope: Optional[Dict[str, Any]] = None,
-                solve_context: Optional[Dict[str, Any]] = None) -> str:
+                solve_context: Optional[Dict[str, Any]] = None,
+                proposal_candidate: Optional[Dict[str, Any]] = None) -> str:
     """Shared durable insert and executor hand-off for tool and data-plan jobs."""
     if entity_scope is not None:
         from entity_scope import ScopeError, validate_binding
@@ -764,6 +769,15 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
                     "project_id": project_id, "tool_name": tool.get("name"),
                 }.items())):
             raise ValueError("capability submission scope or execution mode mismatch")
+    from solar_proposal_candidate import requires_candidate, verify_snapshot, proposal_identity
+    if requires_candidate(tool) or proposal_candidate is not None:
+        import write_loop
+        from solar_design_graph import GraphValidationError
+        if not requires_candidate(tool):
+            raise GraphValidationError("INVALID_COMMIT_REQUEST")
+        backend = write_loop.backend_for_tenant(str(tenant_id), aps_live=False, da=None)
+        proposal_candidate = verify_snapshot(backend, str(tenant_id), dwg, dwg_version,
+                                             proposal_candidate)
     solve_scope = None
     solve_error = None
     bound_job_id = None
@@ -811,6 +825,8 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
             **solve_scope,
             "binding": {k: v for k, v in solve_scope["binding"].items() if k != "job_id"},
         }
+    if proposal_candidate is not None:
+        fingerprint_payload["proposal_candidate"] = proposal_identity(proposal_candidate)
     submission_fingerprint = hashlib.sha256(json.dumps(
         fingerprint_payload, sort_keys=True, separators=(",", ":"), default=str,
     ).encode("utf-8")).hexdigest()
@@ -819,7 +835,7 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
     now = time.time()
     execution = {"tool": tool, "aps_live": bool(aps_live), "dwg_version": dwg_version,
                  "checkout_holder": checkout_holder, "checkout_fence": checkout_fence}
-    if solve_context is not None:
+    if solve_context is not None or proposal_candidate is not None:
         # Resolve key reuse before validating a changed (possibly stale) frame.
         # The insert's existing atomic key check still arbitrates concurrent submissions.
         if idempotency_key:
@@ -843,7 +859,10 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
                 return str(existing["job_id"])
         if solve_error is not None:
             raise solve_error
-        execution["solve_scope"] = solve_scope
+        if solve_scope is not None:
+            execution["solve_scope"] = solve_scope
+        if proposal_candidate is not None:
+            execution["proposal_candidate"] = proposal_candidate
     if entity_scope is not None:
         execution["entity_scope"] = validate_binding(entity_scope)
     from product_capability_availability import is_cloud_proposal, is_local_graph_commit, is_local_graph_read
@@ -862,7 +881,8 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
     max_inflight = tenant_max_inflight()
     created = True
     if job_store_mode() == "postgres":
-        submit = _submit_bound_postgres if solve_scope is not None else _pg_store.submit
+        submit = (_submit_bound_postgres if solve_scope is not None or proposal_candidate is not None
+                  else _pg_store.submit)
         job_id, created = submit({
             "job_id": job_id,
             "tenant_id": str(tenant_id),
@@ -881,11 +901,11 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
     else:
         with _lock:
             conn = _db()
-            bound_transaction = solve_scope is not None and bool(idempotency_key)
+            bound_transaction = (solve_scope is not None or proposal_candidate is not None) and bool(idempotency_key)
             if bound_transaction:
                 # Null-project keys have no unique index; serialize across processes too.
                 conn.execute("BEGIN IMMEDIATE")
-            if idempotency_key and (project_id or solve_scope is not None):
+            if idempotency_key and (project_id or solve_scope is not None or proposal_candidate is not None):
                 existing = conn.execute(
                     "SELECT job_id, submission_fingerprint FROM jobs "
                     "WHERE tenant_id = ? AND project_id IS ? AND idempotency_key = ?",
@@ -1165,6 +1185,19 @@ def solve_scope_context(job_id: str) -> Optional[Dict[str, Any]]:
     return validate_scope(execution["solve_scope"]) if "solve_scope" in execution else None
 
 
+def proposal_candidate_context(job_id: str) -> Optional[Dict[str, Any]]:
+    """Recover the commit's frozen input without consulting its proposal job."""
+    from solar_proposal_candidate import validate_snapshot
+    if job_store_mode() == "postgres":
+        execution = _pg_store.execution(job_id)
+    else:
+        rows = _query("SELECT execution_json FROM jobs WHERE job_id = ?", (job_id,))
+        execution = json.loads(rows[0]["execution_json"]) if rows else None
+    if not isinstance(execution, dict):
+        raise ValueError("invalid durable execution")
+    return validate_snapshot(execution["proposal_candidate"]) if "proposal_candidate" in execution else None
+
+
 def completion_context(job_id: str) -> Optional[Dict[str, Any]]:
     """Completion execution is admitted only into the PostgreSQL job authority."""
     from campaign_transform_job import record_context
@@ -1260,7 +1293,9 @@ def _validate_terminal_context(
             raise ValueError("local graph commit requires non-APS local execution")
         receipt = graph_commit_provenance(
             (result_env or {}).get("result"), durable_params, graph_commit["tenant_id"],
-            job_id, execution["tool"]["name"], execution["dwg_version"])
+            job_id, execution["tool"]["name"], execution["dwg_version"],
+            **({"proposal_candidate": execution["proposal_candidate"]}
+               if "proposal_candidate" in execution else {}))
         if any(provenance.get(key) != value for key, value in receipt.items()):
             raise ValueError("graph commit provenance does not match broker receipt")
     elif is_local_graph_read(execution.get("tool") or {}):
@@ -1671,6 +1706,7 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
     try:
         entity_scope = entity_scope_context(job_id)
         solve_scope = solve_scope_context(job_id)
+        proposal_candidate = proposal_candidate_context(job_id)
     except (ValueError, TypeError):
         _finish(job_id, "failed", started, worker_id=worker_id,
                 error=error_obj(ErrorCode.INTERNAL, "invalid durable entity scope", False),
@@ -1707,6 +1743,7 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
                 job_id=job_id,
                 **({"entity_scope": entity_scope} if entity_scope is not None else {}),
                 **({"solve_scope": solve_scope} if solve_scope is not None else {}),
+                **({"proposal_candidate": proposal_candidate} if proposal_candidate is not None else {}),
             )
         except Exception as exc:  # noqa: BLE001
             holder["exc"] = exc
@@ -1783,7 +1820,8 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
 
             try:
                 provenance.update(graph_commit_provenance(
-                    env.get("result"), params, str(tenant_id), job_id, tool["name"], dwg_version))
+                    env.get("result"), params, str(tenant_id), job_id, tool["name"], dwg_version,
+                    **({"proposal_candidate": proposal_candidate} if proposal_candidate is not None else {})))
             except ValueError:
                 _finish(job_id, "failed", started, worker_id=worker_id,
                         error=error_obj(ErrorCode.INTERNAL, "graph commit terminal proof rejected", False),
@@ -1942,6 +1980,9 @@ def failed_envelope_from(record: Dict[str, Any]) -> Dict[str, Any]:
     reason_code = err.get("reason_code")
     if isinstance(reason_code, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{2,63}", reason_code):
         envelope["reason_code"] = reason_code
+        from solar_proposal_candidate import requires_candidate
+        if requires_candidate({"name": record.get("tool")}):
+            envelope["error"]["reason_code"] = reason_code
     return envelope
 
 

@@ -106,7 +106,8 @@ def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
                    file_only: bool = False,
                    test_source: Optional[str] = None,
                    entity_scope: Optional[Dict[str, Any]] = None, *,
-                   solve_scope: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                   solve_scope: Optional[Dict[str, Any]] = None,
+                   proposal_candidate: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """POST /broker/run -> extended section-3 envelope (ok true OR false).
 
     ``dwg_version`` (None -> head, unchanged behaviour) pins the run to a specific
@@ -167,6 +168,8 @@ def run_via_broker(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any],
         payload["entity_scope"] = entity_scope
     if solve_scope is not None:
         payload["solve_scope"] = solve_scope
+    if proposal_candidate is not None:
+        payload["proposal_candidate"] = proposal_candidate
     try:
         resp = requests.post(
             f"{broker_url()}/broker/run",
