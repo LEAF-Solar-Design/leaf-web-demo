@@ -125,6 +125,8 @@ export const PROPERTY_REASONS = Object.freeze({
   busy: 'Match copies properties to another object; ByLayer inherits layer properties: wait for the current edit',
   noSelection: 'Match copies the selected object\'s layer, colour, linetype and lineweight to another object; ByLayer inherits layer properties: select a source object first',
   readOnlyKind: 'Match copies properties to another object; ByLayer inherits layer properties: select an object whose properties can be edited',
+  // S1 (Apply boundary): a staged Color, Linetype or Lineweight change holds the other two combos.
+  pendingChange: 'A property change is waiting for Apply or Cancel: finish it before changing another property',
 })
 
 export const PLACED_KINDS = new Set(['INSERT', 'DIMENSION', 'MLEADER'])

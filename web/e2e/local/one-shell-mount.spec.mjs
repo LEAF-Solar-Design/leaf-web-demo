@@ -2051,6 +2051,7 @@ test.describe('route matrix, rail ON', () => {
     await page.locator(`input[type="radio"][value="${sourceId}"]`).check()
     const colorSelect = page.locator('#cockpit-properties-slot [data-widget="prop-color"] select')
     await colorSelect.selectOption('red')
+    await page.getByTestId('property-apply-strip').getByRole('button', { name: /^Apply Color/ }).click()
     await expect(workbenchStatus).toContainText('setColor applied', { timeout: 60_000 })
     const dockColor = page.getByTestId('dock-properties').locator('dd').first()
     await expect(dockColor).toHaveText('red (1)')

@@ -284,6 +284,19 @@
    the three rows. Before this the slots rendered after the row and fell
    under the label, off the band. */
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-slot { display: contents; }
+/* S1 (Apply boundary): a staged Color, Linetype or Lineweight change's strip.
+   A fixed layer portaled to the body under the Properties cluster (the ribbon
+   when that cluster is off the band), so it never changes the band's height,
+   the slot's grid items or the cluster's width, and the ribbon's clipping
+   never hides it. --strip-x and --strip-y come from the cluster's box; the
+   clamp keeps the whole strip on screen, and touch gets 44px targets. */
+.property-apply-strip {
+  position: fixed; z-index: 60; top: var(--strip-y, 124px);
+  left: clamp(8px, var(--strip-x, 8px), calc(100vw - 8px - min(460px, calc(100vw - 16px))));
+  width: min(460px, calc(100vw - 16px)); box-sizing: border-box; flex-wrap: wrap; row-gap: 6px;
+}
+.property-apply-strip .strip-sentence { flex: 1 1 220px; min-width: 0; overflow-wrap: anywhere; }
+@media (pointer: coarse) { .property-apply-strip .chip-act { min-height: 44px; min-width: 44px; } }
 /* Keep the group picker compact beside the two large tools. */
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) #cockpit-groups-slot > label {
   display: flex; flex-direction: column; width: 120px; min-width: 0;
