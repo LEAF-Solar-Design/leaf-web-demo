@@ -609,6 +609,24 @@
       ],
       "additionalProperties": true
     },
+    "collector_assignment": {
+      "type": "object",
+      "properties": {
+        "inverter_ref": {
+          "$ref": "#/$defs/id"
+        },
+        "mppt_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        }
+      },
+      "required": [
+        "inverter_ref",
+        "mppt_index"
+      ],
+      "additionalProperties": true
+    },
     "project": {
       "type": "object",
       "properties": {
@@ -759,7 +777,7 @@
           "exclusiveMinimum": 0
         },
         "use_l2_collectors": {
-          "const": false
+          "type": "boolean"
         },
         "panel_group_number": {
           "type": "integer",
@@ -1383,7 +1401,7 @@
           "maxLength": 16
         },
         "is_l2": {
-          "const": false
+          "type": "boolean"
         },
         "position": {
           "$ref": "#/$defs/point"
@@ -1419,6 +1437,28 @@
             "$ref": "#/$defs/input_assignment"
           },
           "maxItems": 100000
+        },
+        "equipment_type": {
+          "enum": [
+            "string_inverter",
+            "combiner_box",
+            "central_inverter"
+          ]
+        },
+        "l2_ref": {
+          "$ref": "#/$defs/ref"
+        },
+        "collector_capacity": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "l1_assignments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/collector_assignment"
+          },
+          "maxItems": 10000
         }
       },
       "required": [
@@ -1440,7 +1480,113 @@
         "is_solaredge",
         "input_assignments"
       ],
-      "additionalProperties": true
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "equipment_type": {
+                "const": "central_inverter"
+              }
+            },
+            "required": [
+              "equipment_type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "is_l2": {
+                "const": true
+              }
+            },
+            "required": [
+              "collector_capacity",
+              "l1_assignments"
+            ],
+            "not": {
+              "required": [
+                "l2_ref"
+              ]
+            }
+          },
+          "else": {
+            "properties": {
+              "is_l2": {
+                "const": false
+              }
+            },
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "collector_capacity"
+                  ]
+                },
+                {
+                  "required": [
+                    "l1_assignments"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "equipment_type": {
+                "enum": [
+                  "string_inverter",
+                  "combiner_box"
+                ]
+              }
+            },
+            "required": [
+              "equipment_type"
+            ]
+          },
+          "then": {
+            "required": [
+              "l2_ref"
+            ]
+          }
+        },
+        {
+          "if": {
+            "not": {
+              "required": [
+                "equipment_type"
+              ]
+            }
+          },
+          "then": {
+            "not": {
+              "required": [
+                "l2_ref"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "equipment_type": {
+                "const": "combiner_box"
+              }
+            },
+            "required": [
+              "equipment_type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "mppt_count": {
+                "const": 1
+              }
+            }
+          }
+        }
+      ]
     },
     "route": {
       "type": "object",
