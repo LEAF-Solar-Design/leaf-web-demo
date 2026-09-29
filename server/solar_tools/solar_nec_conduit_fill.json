@@ -1,0 +1,135 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-nec-conduit-fill",
+  "builtin": "builtins/solar_nec_conduit_fill.py",
+  "family": "equipment",
+  "adapter": "local-graph-read",
+  "entitlement": "run_read",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_CONDUIT_FILL_REQUEST",
+  "readiness": {
+    "kind": "facets",
+    "facets": []
+  },
+  "engine": "server-builtin",
+  "interaction": {
+    "mode": "form"
+  },
+  "record_store": "registry",
+  "record": {
+    "name": "solar-nec-conduit-fill",
+    "version": "1.0.0",
+    "description": "NEC Chapter 9 conduit fill: the smallest trade size for N conductors of one gauge plus an optional bare EGC, with Table 1, 4 and 5 values.",
+    "kind": "script",
+    "family_id": "equipment",
+    "engine_op": "solar_nec_conduit_fill",
+    "entry": "builtins/solar_nec_conduit_fill.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "conductor_gauge": {
+          "type": "string",
+          "enum": [
+            "14 AWG",
+            "12 AWG",
+            "10 AWG",
+            "8 AWG",
+            "6 AWG",
+            "4 AWG",
+            "3 AWG",
+            "2 AWG",
+            "1 AWG",
+            "1/0 AWG",
+            "2/0 AWG",
+            "3/0 AWG",
+            "4/0 AWG",
+            "250 kcmil",
+            "300 kcmil",
+            "350 kcmil",
+            "400 kcmil",
+            "500 kcmil",
+            "600 kcmil",
+            "750 kcmil",
+            "1000 kcmil"
+          ]
+        },
+        "current_carrying_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000
+        },
+        "egc_gauge": {
+          "type": "string",
+          "enum": [
+            "14 AWG",
+            "12 AWG",
+            "10 AWG",
+            "8 AWG",
+            "6 AWG",
+            "4 AWG",
+            "3 AWG",
+            "2 AWG",
+            "1 AWG",
+            "1/0 AWG",
+            "2/0 AWG",
+            "3/0 AWG",
+            "4/0 AWG",
+            "250 kcmil",
+            "300 kcmil",
+            "350 kcmil",
+            "400 kcmil",
+            "500 kcmil",
+            "600 kcmil",
+            "750 kcmil",
+            "1000 kcmil"
+          ]
+        },
+        "conduit_type": {
+          "type": "string",
+          "enum": [
+            "EMT",
+            "PvcSch40",
+            "PvcSch80",
+            "RMC",
+            "LFNC_B"
+          ]
+        },
+        "conductor_insulation": {
+          "type": "string",
+          "enum": [
+            "THWN2",
+            "XHHW2",
+            "USE2"
+          ]
+        }
+      },
+      "required": [
+        "conductor_gauge",
+        "current_carrying_count",
+        "conduit_type",
+        "conductor_insulation"
+      ],
+      "additionalProperties": false
+    },
+    "returns": {
+      "type": "object"
+    },
+    "capabilities": [
+      "drawing.read"
+    ],
+    "allow_local_fallback": false
+  },
+  "ledger": [
+    "nec-conduit-fill"
+  ],
+  "trusted_inputs": [],
+  "maturity": "production",
+  "wave": 3,
+  "order": 30,
+  "scenario": "w3-ground-electrical"
+}
