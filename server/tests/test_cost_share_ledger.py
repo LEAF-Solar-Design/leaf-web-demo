@@ -137,6 +137,28 @@ def test_late_correction_keeps_history_and_an_earlier_publication_reads_the_old_
                           "stale correction", supersedes=r1)
 
 
+def test_explicit_snapshot_selects_exact_revisions_and_preserves_legacy_publication(tmp_path):
+    s = CostLedgerStore(tmp_path)
+    rp = _rp()
+    first = s.append_revision(rp, compute_shares(rp, {}, ESTIMATED), "first")
+    legacy = s.publish(PERIOD)
+    updated = _rp(gross="60")
+    s.append_revision(updated, compute_shares(updated, {}, ESTIMATED), "correction")
+    metadata = {"missing_sources": ["aws"], "carried_forward": [rp.resource_id]}
+    snapshot = s.publish(PERIOD, revision_ids=[first], metadata=metadata)
+    assert snapshot == s.publish(PERIOD, revision_ids=[first], metadata=metadata)
+    assert [r.revision_id for r in s.read_publication(snapshot)] == [first]
+    assert [r.revision_id for r in s.read_publication(legacy)] == [first]
+    empty = s.publish(PERIOD, revision_ids=[], metadata={})
+    assert s.read_publication(empty) == []
+    path = tmp_path / "publications" / f"{snapshot}.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["metadata"]["missing_sources"] = []
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(store.LedgerCorrupt):
+        s.read_publication(snapshot)
+
+
 def test_reappending_identical_content_adds_nothing(tmp_path):
     s = CostLedgerStore(tmp_path)
     rp = _rp(total="10")

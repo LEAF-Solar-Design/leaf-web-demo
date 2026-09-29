@@ -130,6 +130,76 @@ def test_an_observation_for_another_period_is_refused():
         publisher.build_period(PERIOD, [{"kind": "invoice", "resource_id": "vendor:x", "period": PERIOD}])
 
 
+def test_duplicate_costs_count_once_and_shared_batches_keep_each_resource(tmp_path):
+    store = CostLedgerStore(tmp_path / "ledger")
+    cost = _cost(EFS, "12.50", credits="1.25")
+    pub = publisher.publish_period(store, PERIOD,
+                                   [cost, dict(cost), _cost("vendor:figma", "7")], "snapshot")
+    rows = {r.resource_id: r.resource_period for r in store.read_publication(pub)}
+    assert rows[EFS].gross_cost_usd == Decimal("12.50")
+    assert rows[EFS].credits_usd == Decimal("1.25")
+    assert rows["vendor:figma"].gross_cost_usd == Decimal("7")
+
+
+@pytest.mark.parametrize("changed", [{"gross_cost_usd": "11"}, {"credits_usd": "2"}])
+def test_conflicting_batch_amounts_write_nothing(tmp_path, changed):
+    root = tmp_path / "ledger"
+    store = CostLedgerStore(root)
+    first = publisher.publish_period(store, PERIOD, [_cost(EFS, "10")], "initial")
+    before = {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+    cost = _cost(EFS, "10")
+    with pytest.raises(ValueError, match="conflicting amounts"):
+        publisher.publish_period(store, PERIOD,
+                                 [_cost("aps:engine", "5"), cost, {**cost, **changed}], "bad")
+    assert {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()} == before
+    assert publisher.latest_publication_id(store, PERIOD) == first
+
+
+def test_snapshot_removes_absent_resources_and_partial_snapshot_carries_previous(tmp_path):
+    store = CostLedgerStore(tmp_path / "ledger")
+    first = publisher.publish_period(store, PERIOD, _fixture_observations(), "initial")
+    frozen = store.read_publication(first)
+    partial = publisher.publish_period(store, PERIOD, [_cost(EFS, "31")], "outage",
+                                       missing_sources=["vendors"])
+    assert {r.resource_id for r in store.read_publication(partial)} == {
+        EFS, "aps:engine", "vendor:figma"}
+    assert publisher.publication_info(store, partial)["carried_forward"] == ["aps:engine", "vendor:figma"]
+    complete = publisher.publish_period(store, PERIOD, [_cost(EFS, "31")], "recovered")
+    assert [r.resource_id for r in store.read_publication(complete)] == [EFS]
+    assert publisher.publication_info(store, complete)["carried_forward"] == []
+    again = publisher.publish_period(store, PERIOD, [], "another outage", missing_sources=["vendors"])
+    assert [r.resource_id for r in store.read_publication(again)] == [EFS]
+    assert publisher.publication_info(store, again)["carried_forward"] == [EFS]
+    empty = publisher.publish_period(store, PERIOD, [], "empty snapshot")
+    assert store.read_publication(empty) == []
+    assert store.read_publication(first) == frozen
+
+
+def test_source_health_changes_identity_without_changing_revisions(tmp_path):
+    store = CostLedgerStore(tmp_path / "ledger")
+    observations = [_cost(EFS, "10")]
+    first = publisher.publish_period(store, PERIOD, observations, "outage",
+                                     sources=["test"], missing_sources=["vendors"])
+    old_info = publisher.publication_info(store, first)
+    second = publisher.publish_period(store, PERIOD, observations, "recovered", sources=["test"])
+    assert second != first
+    assert publisher.publication_info(store, second)["missing_sources"] == []
+    assert publisher.publication_info(store, first) == old_info
+    assert store.read_publication(first) == store.read_publication(second)
+    assert len(store.history(EFS, PERIOD)) == 1
+
+
+@pytest.mark.parametrize("coverage", ["partial", "unknown"])
+def test_usage_coverage_caps_resource_and_keeps_previous_publication(tmp_path, coverage):
+    store = CostLedgerStore(tmp_path / "ledger")
+    cost = _cost(EFS, "10")
+    usage = _usage(EFS, "10", {f"{A}|": "10"})
+    first = publisher.publish_period(store, PERIOD, [cost, usage], "complete")
+    second = publisher.publish_period(store, PERIOD, [cost, {**usage, "coverage": coverage}], "limited")
+    assert store.read_publication(second)[0].resource_period.coverage == coverage
+    assert store.read_publication(first)[0].resource_period.coverage == "complete"
+
+
 def test_republishing_identical_input_adds_no_revision(tmp_path):
     store = CostLedgerStore(tmp_path / "ledger")
     first = publisher.publish_period(store, PERIOD, _fixture_observations(), "first")

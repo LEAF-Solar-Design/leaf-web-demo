@@ -283,9 +283,12 @@ class CostLedgerStore:
             _append_line(self._revisions_path(period), _canon_json(record) + b"\n")
             return revision_id
 
-    def publish(self, period: str) -> str:
+    def publish(self, period: str, *, revision_ids: Optional[Sequence[str]] = None,
+                metadata: Optional[dict] = None) -> str:
         """Freeze the current revision of every resource in `period`; returns the publication id.
 
+        Explicit revision_ids freeze only that snapshot, including an empty snapshot.
+        Metadata, when supplied, also participates in the immutable identity.
         The id is derived from the named revisions, so publishing the same state twice
         returns the same id and never rewrites the manifest.
         """
@@ -293,18 +296,26 @@ class CostLedgerStore:
         self._check_period(period)
         with self._lock:
             newest: dict = {}
-            for rev in self._read_period(period):
+            revisions = self._read_period(period)
+            for rev in revisions:
                 held = newest.get(rev.resource_id)
                 if held is None or rev.revision > held.revision:
                     newest[rev.resource_id] = rev
-            if not newest:
+            if revision_ids is not None:
+                by_id = {r.revision_id: r for r in revisions}
+                selected = [by_id[rid] for rid in revision_ids]
+                newest = {r.resource_id: r for r in selected}
+                if len(newest) != len(selected):
+                    raise ValueError("snapshot names a resource more than once")
+            if not newest and revision_ids is None:
                 raise ValueError(f"no revisions to publish for {period}")
             entries = [
                 {"resource_id": r.resource_id, "revision_id": r.revision_id,
                  "revision": r.revision, "digest": r.digest}
                 for r in (newest[k] for k in sorted(newest))
             ]
-            publication_id = f"pub-{period}-{hashlib.sha256(_canon_json(entries)).hexdigest()[:20]}"
+            identity = entries if metadata is None else {"revisions": entries, "metadata": metadata}
+            publication_id = f"pub-{period}-{hashlib.sha256(_canon_json(identity)).hexdigest()[:20]}"
             path = root / "publications" / f"{publication_id}.json"
             if not path.exists():
                 manifest = {
@@ -314,6 +325,8 @@ class CostLedgerStore:
                     "published_at": _utc_now(),
                     "revisions": entries,
                 }
+                if metadata is not None:
+                    manifest["metadata"] = metadata
                 _write_atomic(path, _canon_json(manifest) + b"\n")
             return publication_id
 
@@ -338,11 +351,13 @@ class CostLedgerStore:
         try:
             manifest = json.loads(raw.decode("utf-8"))
             entries = manifest["revisions"]
+            identity = ({"revisions": entries, "metadata": manifest["metadata"]}
+                        if "metadata" in manifest else entries)
             ok = (manifest["schema"] == PUBLICATION_SCHEMA
                   and manifest["publication_id"] == publication_id
                   and manifest["period"] == match.group(1)
                   and isinstance(entries, list)
-                  and hashlib.sha256(_canon_json(entries)).hexdigest()[:20] == match.group(2))
+                  and hashlib.sha256(_canon_json(identity)).hexdigest()[:20] == match.group(2))
         except (ValueError, TypeError, KeyError):
             ok = False
         if not ok:
