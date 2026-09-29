@@ -493,6 +493,37 @@ describe('S1: Properties picks stage and wait for Apply on the pinned target', (
     expect(document.activeElement).toBe(screen.getByLabelText(/^Linetype/))
   })
 
+  it.each(['move', 'createLine'])('Apply restores the Linetype combo while %s stays armed', (op) => {
+    const { worker, getContext, edits } = mountStaging()
+    act(() => { getContext().setArmed({ group: op === 'move' ? 'modify' : 'draw', op }) })
+    const armed = getContext().armed
+    const select = screen.getByLabelText(/^Linetype/)
+    fireEvent.change(select, { target: { value: 'ZZZ' } })
+    act(() => { applyButton().focus() })
+    fireEvent.click(applyButton())
+    expect(getContext().session.busy).toBe(true)
+    expect(edits()).toHaveLength(1)
+    worker.emit({ type: 'editApplied', op: 'setLinetype', ok: true, entities: [stagedLine('7', { linetype: 'ZZZ' }), ...STAGED_ENTITIES.slice(1)],
+      entityCount: 3, bytes: new Uint8Array([1, 2]), byteLength: 2 })
+    expect(document.activeElement).toBe(select)
+    expect(getContext().armed).toBe(armed)
+  })
+
+  it('Apply with an armed command preserves focus moved to another control during the edit', () => {
+    const { worker, getContext } = mountStaging()
+    render(<input aria-label="another control" />)
+    act(() => { getContext().setArmed({ group: 'modify', op: 'move' }) })
+    const armed = getContext().armed
+    fireEvent.change(screen.getByLabelText(/^Linetype/), { target: { value: 'ZZZ' } })
+    fireEvent.click(applyButton())
+    const other = screen.getByLabelText('another control')
+    act(() => { other.focus() })
+    worker.emit({ type: 'editApplied', op: 'setLinetype', ok: true, entities: [stagedLine('7', { linetype: 'ZZZ' }), ...STAGED_ENTITIES.slice(1)],
+      entityCount: 3, bytes: new Uint8Array([1, 2]), byteLength: 2 })
+    expect(document.activeElement).toBe(other)
+    expect(getContext().armed).toBe(armed)
+  })
+
   it.each([
     ['nothing selected', (ctx) => ctx.session.actions.selectClear()],
     ['7 and 9 selected', (ctx) => ctx.session.actions.selectReplace(['7', '9'])],
@@ -543,6 +574,29 @@ describe('S1: Properties picks stage and wait for Apply on the pinned target', (
     expect(edits()).toHaveLength(0)
     expect(getContext().session.selectedId).toBe('7')
     expect(screen.getByLabelText(/^Color/).value).toBe('ByLayer')
+  })
+
+  it.each(['index...', 'green'])('Esc discards a buffered Color walk to %s without committing it', (value) => {
+    const { worker, getContext } = mountStaging()
+    const select = screen.getByLabelText(/^Color/)
+    fireEvent.change(select, { target: { value: 'red' } })
+    act(() => { select.focus() })
+    const postedBefore = worker.posted.length
+    const options = [...select.options].map((option) => option.value)
+    // jsdom does not perform the native select's arrow-key change itself.
+    for (let index = options.indexOf('red') + 1; index <= options.indexOf(value); index += 1) {
+      fireEvent.keyDown(select, { key: 'ArrowDown' })
+      fireEvent.change(select, { target: { value: options[index] } })
+    }
+    expect(select.value).toBe(value)
+    expect(getContext().pending).toMatchObject({ op: 'setColor', value: 'red', targetId: '7' })
+    fireEvent.keyDown(select, { key: 'Escape' })
+    expect(getContext().armed).toBeNull()
+    expect(getContext().pending).toBeNull()
+    expect(strip()).toBeNull()
+    expect(worker.posted).toHaveLength(postedBefore)
+    expect(document.activeElement).toBe(select)
+    expect(select.value).toBe('ByLayer')
   })
 
   it('while staged the other two combos wait with the pendingChange sentence', () => {

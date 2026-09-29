@@ -191,6 +191,8 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   const save = saveReason(session, canSave)
   const { applyEdit, create, copyToClipboard, pasteFromClipboard } = session.actions
   const pendingRef = useRef(pending)
+  const refocusOpRef = useRef(null)
+  const cancellingPropertyRef = useRef(false)
   pendingRef.current = pending
   const quickSlot = useSlot(QUICK_FILE_SLOT_ID)
   const promptSlot = useSlot(PROMPT_SLOT_ID)
@@ -370,7 +372,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     // caret comes back to the prompt so the next command (or Esc) is one
     // keystroke away. Only when nothing else took the focus in between (the
     // Command bar, a ribbon tool): those keep it.
-    if (!armedOp || session.busy || typeof document === 'undefined') return undefined
+    if (refocusOpRef.current || !armedOp || session.busy || typeof document === 'undefined') return undefined
     // W4f-3: LINE chains, as the reference's LINE keeps asking "Specify next
     // point:" until Esc. After a segment is drawn its end becomes the next
     // segment's first point (the fields and the picker's rubber band alike,
@@ -535,6 +537,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // picking the target's own current value drops the staged change.
   const stageFocusRef = useRef(null)
   const stageProperty = (op, value) => {
+    if (cancellingPropertyRef.current) return
     if (pending && pending.op !== op) return
     const entity = pending ? pendingTarget : (property ? null : selectedEntity)
     if (!entity) return
@@ -559,7 +562,11 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
       id: 'prop-color', label: 'Color', value: colorValue,
       options: withCurrentOption(withCurrentOption(['ByLayer', 'ByBlock', ...Object.values(ACI_NAMES), 'index...'], actual.setColor), colorValue),
       disabled: widgetOff('setColor'), reason: widgetReason('setColor'),
-      onChange: (value) => (value === 'index...' ? toggleArmed('modify', 'setColor') : stageProperty('setColor', value)),
+      onChange: (value) => {
+        if (cancellingPropertyRef.current) return
+        if (value === 'index...') toggleArmed('modify', 'setColor')
+        else stageProperty('setColor', value)
+      },
     },
     {
       id: 'prop-linetype', label: 'Linetype', value: linetypeValue, title: LINETYPE_TITLE,
@@ -578,7 +585,6 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // S1: Apply posts the staged change to its pinned target, whatever the live
   // selection is now, and clears it first (so the edit it causes is never read
   // as "another edit got there first"). Cancel drops it: nothing is posted.
-  const refocusOpRef = useRef(null)
   const applyButtonRef = useRef(null)
   const stripRef = useRef(null)
   const applyPending = () => {
@@ -592,13 +598,17 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     if (!pending) return
     const staged = pending
     const select = pendingWidgetSelect(staged.op)
-    // A keyboard walk in the staged combo commits on blur; blur it first so
-    // that commit lands BEFORE the discard below and the discard wins, then
-    // the refocus resets the walk.
-    if (select && typeof document !== 'undefined' && document.activeElement === select) select.blur()
-    setPending?.(null)
-    refuse(`${PENDING_WORD[staged.op]} change cancelled; ${staged.label} was not changed.`)
-    select?.focus()
+    // Blur clears the buffered walk; suppress its commit, including index...
+    // arming a prompt. Refocusing resets the select's keyboard walk state.
+    cancellingPropertyRef.current = true
+    try {
+      if (select && typeof document !== 'undefined' && document.activeElement === select) select.blur()
+      setPending?.(null)
+      refuse(`${PENDING_WORD[staged.op]} change cancelled; ${staged.label} was not changed.`)
+      select?.focus()
+    } finally {
+      cancellingPropertyRef.current = false
+    }
   }
   const cancelPendingRef = useRef(cancelPending)
   cancelPendingRef.current = cancelPending
