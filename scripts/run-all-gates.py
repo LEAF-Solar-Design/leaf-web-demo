@@ -3280,7 +3280,8 @@ def parse_pytest(text: str) -> dict:
             break
     if not summary:
         if "no tests ran" in t:
-            return {"passed": 0, "failed": 0, "errors": 0, "skipped": 0, "got": 0}
+            return {"passed": 0, "failed": 0, "errors": 0, "skipped": 0,
+                    "xfailed": 0, "xpassed": 0, "got": 0}
         summary = t
     passed = _n("passed", summary)
     failed = _n("failed", summary)
@@ -3295,7 +3296,8 @@ def parse_pytest(text: str) -> dict:
         if match:
             skip_reasons.append((int(match.group(1)), match.group(2).strip()))
     return {"passed": passed, "failed": failed, "errors": errors,
-            "skipped": skipped, "got": got, "skip_reasons": skip_reasons}
+            "skipped": skipped, "xfailed": xfailed, "xpassed": xpassed,
+            "got": got, "skip_reasons": skip_reasons}
 
 
 def coverage_verdict(c: dict, expected: Optional[int], passed: bool,
@@ -3312,11 +3314,15 @@ def coverage_verdict(c: dict, expected: Optional[int], passed: bool,
     which is the one thing a merge gate must never say.
 
     Rule 2 -- `expected` is an EXECUTED-test floor, never a collected-test
-    floor. A skipped test proves no assertion, so counting it toward the floor
-    lets a suite trade real coverage for skips and stay green.
+    floor. A skipped or xfailed test proves no assertion, so counting it toward
+    the floor lets a suite trade real coverage for skips or xfails and stay green.
+    An xpassed test counts because its assertions ran and held.
     """
-    executed = c["got"] - c.get("skipped", 0)
+    executed = c["got"] - c.get("skipped", 0) - c.get("xfailed", 0)
     if passed and c["got"] and executed == 0:
+        if c.get("xfailed", 0) > 0:
+            return False, (note + " " if note else "") + \
+                f"no executed test: {c.get('skipped', 0)} skipped, {c['xfailed']} xfailed"
         return False, (note + " " if note else "") + "ALL skipped: no coverage"
     if expected is not None and passed and executed < expected:
         return False, (note + " " if note else "") + \
@@ -4755,7 +4761,7 @@ def verify_gate_proof(proof_path: Path, expect_tree: str) -> int:
 
 
 def executed_count(res: Result) -> Optional[int]:
-    """Executed tests behind a result row: got minus skipped, the same
+    """Executed tests behind a result row: got minus skipped minus xfailed, the same
     quantity coverage_verdict compares floors against. None for rows that
     carry no test counts at all (tsc / script suites); 0 for suite-level
     SKIPs."""
@@ -4765,7 +4771,7 @@ def executed_count(res: Result) -> Optional[int]:
     if not c or "got" not in c:
         return None
     try:
-        return int(c["got"]) - int(c.get("skipped", 0))
+        return int(c["got"]) - int(c.get("skipped", 0)) - int(c.get("xfailed", 0))
     except (TypeError, ValueError):
         return None
 
