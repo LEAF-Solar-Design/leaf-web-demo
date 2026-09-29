@@ -7,11 +7,327 @@ import hashlib
 import threading
 import os
 import subprocess
+import base64
+import io
+import zipfile
 
 import pytest
 
 from ci.native_release_producer import image_build_command, SERVICES, FRESHNESS, TRIXIE
 from ci import native_release_producer as producer
+
+
+def forge_case(tmp_path, monkeypatch):
+    """Fake providers and commands; retain real gate, build and packaging code."""
+    roots = {role: tmp_path / role for role in producer.FORGE_CHECKOUTS}
+    for root in roots.values():
+        root.mkdir()
+        (root / ".git").mkdir()
+    source = roots["source_snapshot"]
+    (source / "deploy").mkdir()
+    (source / "deploy/autofill-solver-sources.json").write_text(
+        json.dumps({producer.FORGE_SOLVER_REVISION: "d" * 64}))
+    adapter = source / "server/solver_adapters/autofill.py"
+    adapter.parent.mkdir(parents=True)
+    adapter.write_text('def _source_sha256(root):\n    return "d" * 64\n')
+    output = tmp_path / "output"
+    output.mkdir()
+    revisions = ["a" * 40, producer.FORGE_CONTRACT_REVISION, producer.FORGE_SOLVER_REVISION]
+    repositories = ["leaf-web-demo", "leaf-automation-aws-terraform", "autofill-solver"]
+    snapshots = {role: dict(repository={"id": index + 1, "full_name": "LEAF-Solar-Design/" + repo},
+        commit=revision, tree=str(index + 1) * 40,
+        bucket="leaf-developer-platform-artifacts-807034087062-us-east-1",
+        key="forge-ci-relay/LEAF-Solar-Design/" + repo + "/snapshot.zip", version_id="snapshot-v1",
+        zip_sha256="b" * 64, bundle_sha256="c" * 64)
+        for index, (role, revision, repo) in enumerate(zip(roots, revisions, repositories))}
+    request = dict(schema=producer.FORGE_REQUEST_SCHEMA, mode="gate", transaction_id="test",
+        reservation_id="test-gate", source_revision="a" * 40, source_tree="1" * 40,
+        authority_sha256="e" * 64, executor_package=dict(bucket="package", key="package.zip",
+            version_id="package-v1", sha256="f" * 64), **snapshots)
+    env = {variable: str(roots[role]) for role, variable in producer.FORGE_CHECKOUTS.items()}
+    env.update(LEAF_FORGE_OUTPUT_DIR=str(output), LEAF_FORGE_REQUEST_FILE=str(tmp_path / "request.json"))
+    records, objects, calls, events = {}, {}, [], []
+    actual_checkouts = {path.resolve(): (snapshots[role]["commit"], snapshots[role]["tree"])
+                        for role, path in roots.items()}
+    loader = "reviewed fixture loader\n"
+    monkeypatch.setattr(producer, "FORGE_BUILDSPEC_SHA256", hashlib.sha256(loader.encode()).hexdigest())
+
+    def bind():
+        mode = "gate" if request["mode"] == "gate" else "release"
+        identity = native_identity("leaf-studio-native-" + mode)
+        encoded = json.dumps(request, sort_keys=True, separators=(",", ":")).encode()
+        Path(env["LEAF_FORGE_REQUEST_FILE"]).write_bytes(encoded)
+        env.update(LEAF_NATIVE_REQUEST_B64=base64.b64encode(encoded).decode(), LEAF_NATIVE_MODE=mode,
+            CODEBUILD_BUILD_ARN=identity["build_arn"], CODEBUILD_BUILD_NUMBER="7",
+            CODEBUILD_BUILD_ID=identity["build_arn"].split("build/")[1])
+        row = dict(arn=identity["build_arn"], id=env["CODEBUILD_BUILD_ID"], buildNumber=7,
+            projectName="leaf-studio-native-" + mode, buildStatus="IN_PROGRESS", buildComplete=False,
+            serviceRole="arn:aws:iam::807034087062:role/leaf-studio-native-" + mode + "-role",
+            source={"type": "NO_SOURCE", "buildspec": loader}, resolvedSourceVersion="not-a-git-sha",
+            environment={"environmentVariables": [{"name": name, "value": env[name], "type": "PLAINTEXT"}
+                for name in ("LEAF_NATIVE_MODE", "LEAF_NATIVE_REQUEST_B64")]})
+        records[identity["build_arn"]] = row
+        return row
+
+    def get_builds(*, ids):
+        events.append("codebuild")
+        return {"builds": [copy.deepcopy(records[key]) for key in ids if key in records],
+                "buildsNotFound": [key for key in ids if key not in records]}
+
+    def get_object(**kwargs):
+        events.append("s3")
+        assert kwargs["ExpectedBucketOwner"] == "807034087062"
+        payload = objects[(kwargs["Bucket"], kwargs["Key"], kwargs["VersionId"])]
+        return dict(Body=io.BytesIO(payload), VersionId=kwargs["VersionId"], ContentLength=len(payload))
+
+    cb, s3 = SimpleNamespace(batch_get_builds=get_builds), SimpleNamespace(get_object=get_object)
+    base_fields = set(request)
+
+    def decode(encoded):
+        value = json.loads(base64.b64decode(encoded))
+        extra = {"gate", "gate_proof_sha256"} if value["mode"] == "publisher" else set()
+        if set(value) != base_fields | extra or value["schema"] != producer.FORGE_REQUEST_SCHEMA:
+            raise ValueError("contract refuses mixed fields")
+        if (value["source_revision"] != value["source_snapshot"]["commit"]
+                or value["source_tree"] != value["source_snapshot"]["tree"]):
+            raise ValueError("contract refuses source snapshot")
+        return value
+
+    bootstrap = dict(native_release_bootstrap_sha256="8" * 64, forge_source_bootstrap_sha256="9" * 64)
+
+    def read_gate(descriptor, gate_request, actual_cb, actual_s3, *, trusted_bootstrap, max_archive_bytes):
+        # Contract double corroborates the descriptor against independent fake
+        # provider records. It emits no made-up provider-success receipt.
+        events.append("gate-contract")
+        assert actual_cb is cb and actual_s3 is s3
+        assert trusted_bootstrap == bootstrap and max_archive_bytes == 4 * 1024 * 1024
+        row = cb.batch_get_builds(ids=[descriptor.build_arn])["builds"][0]
+        expected_request = base64.b64encode(json.dumps(gate_request, sort_keys=True, separators=(",", ":")).encode()).decode()
+        if (row["buildStatus"] != "SUCCEEDED" or row["buildComplete"] is not True
+                or descriptor.request_sha256 != hashlib.sha256(base64.b64decode(expected_request)).hexdigest()
+                or row["environment"]["environmentVariables"][1]["value"] != expected_request):
+            raise ValueError("independent gate request or completion differs")
+        response = s3.get_object(Bucket=descriptor.bucket, Key=descriptor.key, VersionId=descriptor.version_id,
+                                 ExpectedBucketOwner="807034087062")
+        payload = response["Body"].read()
+        response["Body"].close()
+        if (hashlib.sha256(payload).hexdigest() != descriptor.sha256
+                or row["artifacts"]["sha256sum"] != descriptor.sha256):
+            raise ValueError("independent gate artifact differs")
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            return None, {name: archive.read(name) for name in archive.namelist()}
+
+    contract = SimpleNamespace(decode_forge_request=decode,
+        forge_request_bytes=lambda value: json.dumps(value, sort_keys=True, separators=(",", ":")).encode(),
+        parse_forge_descriptor=lambda value, mode: SimpleNamespace(**value), read_forge_release=read_gate)
+    monkeypatch.setattr(producer, "load_forge_contract", lambda *args: (contract, bootstrap))
+    monkeypatch.setattr(producer, "host_gate_jobs", lambda root: 1)
+    monkeypatch.setattr(producer, "resolve_freshness", lambda root:
+        {service: {name: "b" * 64 for name in FRESHNESS.get(service, TRIXIE)} for service in SERVICES})
+
+    def run(command, **kwargs):
+        calls.append(command)
+        assert kwargs.get("timeout", 0) > 0
+        assert not any("github.com" in str(arg) for arg in command)
+        assert not any(arg in ("clone", "fetch", "start-build", "update-service") for arg in command)
+        stdout = ""
+        if command[0] == "git":
+            path = Path(command[2] if command[1] == "-C" else kwargs["cwd"]).resolve()
+            commit, tree = actual_checkouts[path]
+            stdout = "" if "status" in command else tree if command[-1] == "HEAD^{tree}" else commit
+        elif "--emit-proof" in command:
+            Path(command[-1]).write_bytes(b"canonical proof fixture")
+        elif command[:3] == ["docker", "buildx", "build"]:
+            events.append("build")
+            Path(command[command.index("--metadata-file") + 1]).write_text(
+                json.dumps({"containerimage.digest": "sha256:" + "c" * 64}))
+        elif command[:2] == ["docker", "create"]:
+            stdout = "d" * 64
+        elif command[:2] == ["docker", "cp"]:
+            (Path(command[-1]) / "health.json").write_text(json.dumps({"ok": True, "source_sha": "a" * 40}))
+        elif "pack-web-dist" in command:
+            archive = Path(command[command.index("--output") + 1])
+            with zipfile.ZipFile(archive, "w") as bundle:
+                bundle.writestr("health.json", json.dumps({"ok": True, "source_sha": "a" * 40}))
+            stdout = json.dumps(dict(artifact_sha256="b" * 64,
+                archive_sha256=hashlib.sha256(archive.read_bytes()).hexdigest()))
+        return SimpleNamespace(stdout=stdout, returncode=0)
+
+    monkeypatch.setattr(producer.subprocess, "run", run)
+    row = bind()
+    return SimpleNamespace(env=env, request=request, roots=roots, output=output, row=row, bind=bind,
+        cb=cb, s3=s3, records=records, objects=objects, calls=calls, events=events,
+        actual_checkouts=actual_checkouts, contract=contract)
+
+
+def forge_publisher(case):
+    producer.produce_forge(case.env, case.cb, case.s3)
+    assert {path.name for path in case.output.iterdir()} == {"gate-proof.json"}
+    proof = (case.output / "gate-proof.json").read_bytes()
+    (case.output / "gate-proof.json").unlink()
+    row = case.row
+    row.update(buildStatus="SUCCEEDED", buildComplete=True, currentPhase="COMPLETED")
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("gate-proof.json", proof)
+        bundle.writestr("forge-provenance.json", "bootstrap-owned fixture")
+    payload = archive.getvalue()
+    digest = hashlib.sha256(payload).hexdigest()
+    row["artifacts"] = {"sha256sum": digest}
+    case.objects[("gate-bucket", "gate/evidence.zip", "version-1")] = payload
+    descriptor = dict(native_identity("leaf-studio-native-gate"), mode="gate",
+        source_revision=case.request["source_revision"], source_tree=case.request["source_tree"],
+        request_sha256=hashlib.sha256(base64.b64decode(case.env["LEAF_NATIVE_REQUEST_B64"])).hexdigest(),
+        buildspec_sha256=producer.FORGE_BUILDSPEC_SHA256,
+        bucket="gate-bucket", key="gate/evidence.zip", version_id="version-1", sha256=digest)
+    case.request.update(mode="publisher", reservation_id="test-publisher", gate=descriptor,
+                        gate_proof_sha256=hashlib.sha256(proof).hexdigest())
+    case.row = case.bind()
+
+
+def test_forge_full_gate_then_five_images_with_exact_members(tmp_path, monkeypatch):
+    case = forge_case(tmp_path, monkeypatch)
+    forge_publisher(case)
+    producer.produce_forge(case.env, case.cb, case.s3)
+    shards = [cmd for cmd in case.calls if "--shard-index" in cmd]
+    assert len(shards) == 8 and all("--only" not in cmd for cmd in shards)
+    assert case.events.index("gate-contract") < case.events.index("build")
+    assert len([cmd for cmd in case.calls if cmd[:3] == ["docker", "buildx", "build"]]) == 5
+    assert set(path.name for path in case.output.iterdir()) == {"staging-supply-set.json", "web-dist.zip"}
+    manifest = json.loads((case.output / "staging-supply-set.json").read_bytes())
+    assert set(manifest["services"]) == set(SERVICES)
+    assert all(item["source_revision"] == "a" * 40 and item["native_build_number"] == 7
+               for item in manifest["services"].values())
+    assert manifest["gate"]["proof_sha256"] == case.request["gate_proof_sha256"]
+    assert not (case.output / "forge-provenance.json").exists()
+
+
+@pytest.mark.parametrize("field,value", [
+    ("arn", "wrong"), ("id", "wrong"), ("projectName", "wrong"), ("buildNumber", 8),
+    ("buildNumber", True), ("serviceRole", "wrong"), ("buildStatus", "SUCCEEDED"),
+    ("buildComplete", True), ("secondarySources", [{"type": "GITHUB"}]),
+    ("secondarySourceVersions", [{"sourceVersion": "a" * 40}]),
+    ("source", {"type": "GITHUB", "buildspec": ".codebuild/release.yml"}),
+    ("source", {"type": "NO_SOURCE", "buildspec": "untrusted"}),
+    ("environment", {"environmentVariables": []}),
+])
+def test_forge_refuses_provider_mismatch_before_work(tmp_path, monkeypatch, field, value):
+    case = forge_case(tmp_path, monkeypatch)
+    case.row[field] = value
+    with pytest.raises(ValueError):
+        producer.produce_forge(case.env, case.cb, case.s3)
+    assert case.calls == [] and list(case.output.iterdir()) == []
+
+
+@pytest.mark.parametrize("role", list(producer.FORGE_CHECKOUTS))
+@pytest.mark.parametrize("fault", ["source", "tree", "missing"])
+def test_forge_requires_every_exact_materialized_checkout(tmp_path, monkeypatch, role, fault):
+    case = forge_case(tmp_path, monkeypatch)
+    path = case.roots[role]
+    if fault == "missing":
+        (path / ".git").rmdir()
+    else:
+        commit, tree = case.actual_checkouts[path.resolve()]
+        case.actual_checkouts[path.resolve()] = ("0" * 40, tree) if fault == "source" else (commit, "0" * 40)
+    with pytest.raises(ValueError, match="checkout"):
+        producer.produce_forge(case.env, case.cb, case.s3)
+    assert not any("--shard-index" in cmd for cmd in case.calls)
+    assert list(case.output.iterdir()) == []
+
+
+@pytest.mark.parametrize("fault", ["file", "request", "schema", "legacy-fields", "contract-pin",
+    "solver-pin", "source", "tree", "secondary", "missing-input", "output", "mode", "execution"])
+def test_forge_refuses_request_and_transport_substitution(tmp_path, monkeypatch, fault):
+    case = forge_case(tmp_path, monkeypatch)
+    if fault == "file":
+        Path(case.env["LEAF_FORGE_REQUEST_FILE"]).write_text("{}")
+    elif fault == "request":
+        case.env["LEAF_NATIVE_REQUEST_B64"] = base64.b64encode(b"{}").decode()
+    elif fault == "secondary":
+        case.env["CODEBUILD_SRC_DIR_provider_contract"] = "legacy"
+    elif fault == "missing-input":
+        del case.env["LEAF_FORGE_SOLVER_DIR"]
+    elif fault == "output":
+        (case.output / "forge-provenance.json").write_text("forbidden")
+    elif fault == "mode":
+        case.env["LEAF_NATIVE_MODE"] = "release"
+    elif fault == "execution":
+        case.env["CODEBUILD_BUILD_ID"] = "wrong"
+    else:
+        if fault == "schema": case.request["schema"] = "unknown"
+        if fault == "legacy-fields": case.request["contract_revision"] = "f" * 40
+        if fault == "contract-pin": case.request["contract_snapshot"]["commit"] = "f" * 40
+        if fault == "solver-pin": case.request["solver_snapshot"]["commit"] = "f" * 40
+        if fault == "source": case.request["source_revision"] = "f" * 40
+        if fault == "tree": case.request["source_tree"] = "f" * 40
+        case.bind()
+    with pytest.raises(ValueError):
+        producer.produce_forge(case.env, case.cb, case.s3)
+    assert not any("--shard-index" in cmd for cmd in case.calls)
+
+
+@pytest.mark.parametrize("fault", ["absent", "failed", "request", "loader", "artifact", "proof", "solver-content"])
+def test_forge_publisher_refuses_before_any_image_build(tmp_path, monkeypatch, fault):
+    case = forge_case(tmp_path, monkeypatch)
+    forge_publisher(case)
+    gate = case.request["gate"]
+    row = case.records[gate["build_arn"]]
+    if fault == "absent": del case.request["gate"]
+    if fault == "failed": row["buildStatus"] = "FAILED"
+    if fault == "request": row["environment"]["environmentVariables"][1]["value"] = "substituted"
+    if fault == "loader": gate["buildspec_sha256"] = "0" * 64
+    if fault == "artifact": row["artifacts"]["sha256sum"] = "0" * 64
+    if fault == "proof": case.request["gate_proof_sha256"] = "0" * 64
+    if fault == "solver-content":
+        (case.roots["source_snapshot"] / "deploy/autofill-solver-sources.json").write_text(
+            json.dumps({producer.FORGE_SOLVER_REVISION: "0" * 64}))
+    case.bind()
+    with pytest.raises(ValueError):
+        producer.produce_forge(case.env, case.cb, case.s3)
+    assert "build" not in case.events and list(case.output.iterdir()) == []
+
+
+def test_forge_cannot_enter_legacy_identity(tmp_path, monkeypatch):
+    case = forge_case(tmp_path, monkeypatch)
+    with pytest.raises(ValueError, match="legacy"):
+        producer.runtime_identity("gate", "a" * 40, case.env, case.cb)
+
+
+@pytest.mark.parametrize("fault", [None, "digest", "version", "member", "duplicate", "missing-bootstrap"])
+def test_forge_contract_comes_only_from_exact_versioned_package(tmp_path, fault):
+    code = b'FORGE_REQUEST_SCHEMA = "leaf.native-release.forge-request.v1"\n'
+    files = {"scripts/verify_release_provider_evidence.py": code,
+             ".codebuild/forge/native_release_bootstrap.py": b"# bootstrap\n",
+             ".codebuild/deploy/forge_source_bootstrap.py": b"# source bootstrap\n"}
+    if fault == "missing-bootstrap": del files[".codebuild/forge/native_release_bootstrap.py"]
+    manifest = dict(schema="leaf.staging-rail.package.v1", infrastructure_source_commit="a" * 40,
+                    members={name: hashlib.sha256(data).hexdigest() for name, data in files.items()})
+    if fault == "member": manifest["members"]["scripts/verify_release_provider_evidence.py"] = "0" * 64
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("manifest.json", json.dumps(manifest))
+        for name, data in files.items(): bundle.writestr(name, data)
+        if fault == "duplicate":
+            with pytest.warns(UserWarning): bundle.writestr("manifest.json", json.dumps(manifest))
+    payload = archive.getvalue()
+    package = dict(bucket="leaf-developer-platform-artifacts-807034087062-us-east-1",
+                   key="forge-native-release/packages/test.zip", version_id="immutable-version",
+                   sha256=hashlib.sha256(payload).hexdigest())
+    if fault == "digest": package["sha256"] = "0" * 64
+    body = io.BytesIO(payload)
+    def get(**kwargs):
+        assert kwargs == dict(Bucket=package["bucket"], Key=package["key"],
+            VersionId="immutable-version", ExpectedBucketOwner="807034087062")
+        return dict(Body=body, ContentLength=len(payload),
+                    VersionId="wrong" if fault == "version" else "immutable-version")
+    if fault:
+        with pytest.raises((ValueError, KeyError)):
+            producer.load_forge_contract({"executor_package": package}, SimpleNamespace(get_object=get))
+    else:
+        contract, bootstrap = producer.load_forge_contract({"executor_package": package}, SimpleNamespace(get_object=get))
+        assert contract.FORGE_REQUEST_SCHEMA == producer.FORGE_REQUEST_SCHEMA
+        assert bootstrap["native_release_bootstrap_sha256"] == hashlib.sha256(b"# bootstrap\n").hexdigest()
+    assert body.closed
 
 
 def native_identity(project):
