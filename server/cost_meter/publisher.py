@@ -40,7 +40,7 @@ MAX_SCAN_PUBLICATIONS = 5_000  # bounds the fallback manifest scan when no lates
 _MAX_META_BYTES = 256 * 1024
 _MAX_SOURCES = 64
 
-# Weakest first: a resource's coverage is the weakest of its cost observations.
+# Weakest first: cost coverage is capped by the selected usage observation.
 _COVERAGE_RANK = {"unknown": 0, "partial": 1, "complete": 2}
 
 
@@ -115,9 +115,23 @@ def build_period(period: str, observations: Iterable[Any]) -> List[Tuple[Resourc
         coverage = "unknown"
         if cost_obs:
             coverage = "complete"
+            seen = set()
+            batch_amounts = {}
             for obs in cost_obs:
-                gross += to_decimal(obs.get("gross_cost_usd"), f"{resource_id} gross_cost_usd")
-                credits += to_decimal(obs.get("credits_usd", "0"), f"{resource_id} credits_usd")
+                obs_gross = to_decimal(obs.get("gross_cost_usd"), f"{resource_id} gross_cost_usd")
+                obs_credits = to_decimal(obs.get("credits_usd", "0"), f"{resource_id} credits_usd")
+                batch = obs.get("source_batch_id")
+                if isinstance(batch, str) and batch.strip():
+                    amounts = (obs_gross, obs_credits)
+                    if batch in batch_amounts and batch_amounts[batch] != amounts:
+                        raise ValueError(f"{resource_id} conflicting amounts for batch {batch}")
+                    batch_amounts[batch] = amounts
+                fingerprint = _canon_json(obs)
+                if fingerprint in seen:
+                    continue
+                seen.add(fingerprint)
+                gross += obs_gross
+                credits += obs_credits
                 obs_coverage = obs.get("coverage")
                 if obs_coverage not in _COVERAGE_RANK:
                     raise ValueError(f"{resource_id} coverage must be one of {sorted(_COVERAGE_RANK)}")
@@ -126,6 +140,12 @@ def build_period(period: str, observations: Iterable[Any]) -> List[Tuple[Resourc
                 batch = obs.get("source_batch_id")
                 if isinstance(batch, str) and batch.strip() and batch not in batches:
                     batches.append(batch)
+        if usage is not None:
+            usage_coverage = usage.get("coverage", "unknown")
+            if usage_coverage not in _COVERAGE_RANK:
+                raise ValueError(f"{resource_id} usage coverage must be one of {sorted(_COVERAGE_RANK)}")
+            if _COVERAGE_RANK[usage_coverage] < _COVERAGE_RANK[coverage]:
+                coverage = usage_coverage
         unit = usage.get("unit") if usage is not None else UNMETERED_UNIT
         resource_period = ResourcePeriod(
             resource_id=resource_id,
@@ -170,19 +190,24 @@ def publish_period(store: CostLedgerStore, period: str, observations: Iterable[A
     """Append every resource's revision, then publish the month. Returns the publication id.
 
     Re-publishing identical input appends nothing and returns the same id. The
-    publication's used and missing sources are recorded once (first writer wins),
+    publication's membership and source health are part of its immutable identity,
     and latest/<period>.json is atomically pointed at the returned id.
     """
     period = _check_period(period)
     used = _source_list(sources, "sources")
     missing = _source_list(missing_sources, "missing sources")
     pairs = build_period(period, observations)
-    if not pairs:
-        raise ValueError(f"no observations to publish for {period}")
     root = _root(store)
+    current_ids = {rp.resource_id for rp, _ in pairs}
+    previous_id = latest_publication_id(store, period) if missing else None
+    carried = [r for r in store.read_publication(previous_id)
+               if r.resource_id not in current_ids] if previous_id else []
+    revision_ids = [r.revision_id for r in carried]
     for resource_period, shares in pairs:
-        store.append_revision(resource_period, shares, reason)
-    publication_id = store.publish(period)
+        revision_ids.append(store.append_revision(resource_period, shares, reason))
+    metadata = {"sources": used, "missing_sources": missing,
+                "carried_forward": sorted(r.resource_id for r in carried)}
+    publication_id = store.publish(period, revision_ids=revision_ids, metadata=metadata)
 
     meta_path = root / META_DIR / f"{publication_id}.json"
     if not meta_path.exists():
@@ -190,8 +215,7 @@ def publish_period(store: CostLedgerStore, period: str, observations: Iterable[A
             "schema": META_SCHEMA,
             "publication_id": publication_id,
             "period": period,
-            "sources": used,
-            "missing_sources": missing,
+            **metadata,
         }) + b"\n")
     _write_atomic(root / LATEST_DIR / f"{period}.json", _canon_json({
         "schema": LATEST_SCHEMA,
@@ -271,8 +295,10 @@ def publication_info(store: CostLedgerStore, publication_id: str) -> Dict[str, A
     published_at = manifest.get("published_at")
     missing = meta.get("missing_sources") if meta.get("publication_id") == publication_id else None
     sources = meta.get("sources") if meta.get("publication_id") == publication_id else None
+    carried = meta.get("carried_forward") if meta.get("publication_id") == publication_id else None
     return {
         "published_at": published_at if isinstance(published_at, str) else None,
         "missing_sources": [s for s in missing if isinstance(s, str)] if isinstance(missing, list) else [],
         "sources": [s for s in sources if isinstance(s, str)] if isinstance(sources, list) else [],
+        "carried_forward": [s for s in carried if isinstance(s, str)] if isinstance(carried, list) else [],
     }
