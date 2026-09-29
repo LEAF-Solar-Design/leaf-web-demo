@@ -47,7 +47,7 @@ def upstream_basis(graph):
         "frames": [{key: frame[key] for key in (
             "id", "panel_refs", "module_rows", "module_columns", "electrical_zone_ref",
             "module_power_watts", "module_width_along_row", "module_height_across_row",
-        )} for frame in graph["frames"]],
+        ) + (("tracker",) if "tracker" in frame else ())} for frame in graph["frames"]],
         "panels": [{key: panel[key] for key in (
             "id", "frame_ref", "matrix_cell", "centre", "angle",
         )} for panel in graph["panels"]],
