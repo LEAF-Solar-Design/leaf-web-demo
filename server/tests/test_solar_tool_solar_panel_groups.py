@@ -173,7 +173,7 @@ def test_local_run_commits_kernel_matrix(u, angles, centres, angle_key, row_angl
         "validity": {"state": "valid", "reasons": []}, "name": "Roof group",
         "panel_refs": [P3, P2, P1], "insertion_point": list(centres[0]),
         "installation_design": "Roof", "module_rows": 1, "module_columns": 3,
-        "module_slots": 3, "module_power_watts": 0, "module_width_along_row": 1,
+        "module_slots": 3, "module_power_watts": 595.0, "module_width_along_row": 1,
         "module_height_across_row": 2, "electrical_zone_ref": Z1, "matrix": [cells],
         "sequences": [{"string_ref": S1, "ordered_panel_refs": [P1, P2]},
                       {"string_ref": S2, "ordered_panel_refs": [P3]}],

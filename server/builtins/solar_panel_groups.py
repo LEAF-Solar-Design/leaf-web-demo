@@ -13,6 +13,7 @@ from mutation_plan import emit_plan, plan_sha256, validate_mutations
 from solar_design_graph import MAX_NODES, GraphValidationError, _bounded_json
 import solar_panel_group_kernel as kernel
 from solar_sizing_client import advance, checked_graph, require_sizing
+from solar_sizing_power import frame_module_power
 
 
 _CELL_KEYS = ("code", "panel_ref", "seq", "inverter_id", "string_input_number", "x", "y", "angle")
@@ -252,7 +253,8 @@ def run(graph, params):
                 "name": group["name"], "panel_refs": refs[:],
                 "insertion_point": members[0]["centre"][:], "installation_design": "Roof",
                 "module_rows": len(matrix), "module_columns": len(matrix[0]),
-                "module_slots": len(matrix) * len(matrix[0]), "module_power_watts": 0,
+                "module_slots": len(matrix) * len(matrix[0]),
+                "module_power_watts": frame_module_power(result, refs, zone_ref),
                 "module_width_along_row": group["module_width_along_row"],
                 "module_height_across_row": group["module_height_across_row"],
                 "electrical_zone_ref": zone_ref, "matrix": matrix,

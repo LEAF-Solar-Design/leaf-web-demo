@@ -124,7 +124,8 @@ def test_completed_flags_and_confirmation_boolean_are_not_evidence(graph):
 def test_producer_state_survives_reopen_and_stale_inputs_disable(case):
     graph, params, intake = case
     result = availability.w1_graph_readiness(graph)
-    assert result["solar-panel-groups"]["input_ready"]
+    assert result["solar-panel-groups"] == {
+        "input_ready": False, "input_reason": "module_power_required"}
     assert result["solar-solve-proposal"]["input_ready"]
     assert result["solar-assign-equipment"]["input_ready"]
     assert not result["solar-homeruns"]["input_ready"]
