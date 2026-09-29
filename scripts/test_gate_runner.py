@@ -881,6 +881,84 @@ def test_all_skipped_pytest_suite_fails_even_when_reason_is_allowlisted(tmp_path
     assert "ALL skipped: no coverage" in result.note
 
 
+def test_parse_pytest_reports_xfailed_and_xpassed():
+    g = _load_runner()
+    counts = g.parse_pytest("5 passed, 1 xfailed, 2 xpassed in 0.01s")
+
+    assert counts["passed"] == 5
+    assert counts["xfailed"] == 1
+    assert counts["xpassed"] == 2
+    assert counts["got"] == 8
+    for output in ("5 passed in 0.01s", "no tests ran in 0.01s"):
+        counts = g.parse_pytest(output)
+        assert counts["xfailed"] == 0
+        assert counts["xpassed"] == 0
+
+
+def test_xfailed_does_not_fill_the_executed_floor(tmp_path):
+    g = _load_runner()
+    output = "5 passed, 1 xfailed in 0.01s"
+    for expected, status in ((6, "FAIL"), (5, "PASS")):
+        suite = g.Suite(
+            "xfail-floor", "xfail floor", "pytest", SCRIPTS,
+            [sys.executable, "-c", f"print({output!r})"], expected,
+        )
+
+        result = g.run_suite(suite, tmp_path)
+
+        assert result.status == status
+        if expected == 6:
+            assert "executed-count regression: expected >= 6, got 5" in result.note
+
+
+def test_xpassed_counts_as_executed(tmp_path):
+    g = _load_runner()
+    output = "5 passed, 1 xpassed in 0.01s"
+    suite = g.Suite(
+        "xpass-floor", "xpass floor", "pytest", SCRIPTS,
+        [sys.executable, "-c", f"print({output!r})"], 6,
+    )
+
+    result = g.run_suite(suite, tmp_path)
+
+    assert result.status == "PASS"
+
+
+def test_all_xfailed_suite_fails_with_no_coverage(tmp_path):
+    g = _load_runner()
+    output = "3 xfailed in 0.01s"
+    suite = g.Suite(
+        "all-xfail", "all xfail", "pytest", SCRIPTS,
+        [sys.executable, "-c", f"print({output!r})"], None,
+    )
+
+    result = g.run_suite(suite, tmp_path)
+
+    assert result.status == "FAIL"
+    assert "no executed test: 0 skipped, 3 xfailed" in result.note
+
+
+def test_executed_count_excludes_xfailed():
+    g = _load_runner()
+    suite = g.Suite("xfail-count", "xfail count", "pytest", SCRIPTS, [], None)
+    result = g.Result(
+        suite, "PASS", "8", 0.0,
+        counts={"got": 8, "skipped": 1, "xfailed": 2},
+    )
+    assert g.executed_count(result) == 5
+    result = g.Result(
+        suite, "PASS", "4", 0.0, counts={"got": 4, "skipped": 1},
+    )
+    assert g.executed_count(result) == 3
+
+
+def test_vitest_verdict_unchanged_without_xfailed():
+    g = _load_runner()
+    assert g.coverage_verdict(
+        {"got": 4, "skipped": 1, "passed": 3, "failed": 0}, 3, True, "",
+    ) == (True, "")
+
+
 def test_selected_script_environment_skip_is_a_failure(tmp_path):
     g = _load_runner()
     suite = g.Suite(
