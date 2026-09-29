@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   SETTINGS_FIELDS, SEED_SETTINGS, DRAWING_UNITS, IDENTITY_WCS_TO_UCS,
-  SOLAR_SETTINGS_REASONS, deriveFormState, buildSettingsParams,
+  SOLAR_SETTINGS_REASONS, deriveFormState, buildSettingsParams, pyStrip,
 } from './solarSettingsModel.js';
 
 const SHA = 'a'.repeat(64);
@@ -15,7 +15,8 @@ const settings = {
   panel_group_number: 1, string_number: 1, inverter_number: 1, mppt_letter: 'A',
 };
 const S = { ...settings, global_string_sizing_confirmed: false, extra: {} };
-const G = { rev: 2, settings: S };
+const project = { name: 'Roof A', zip_code: '44224', latitude: 41, longitude: -81 };
+const G = { rev: 2, settings: S, project };
 const IE = {
   version: 3, head: 3, latest: 3,
   intake: { polylines: [], solar_design_graph: G, solar_design_graph_sha256: 'b'.repeat(64) },
@@ -28,10 +29,11 @@ const V = {
     { v: 3, parent: 2, sha256: SHA, note: null },
   ],
 };
-const E = { mode: 'edit', drawingId: 'd1', version: 3, rev: 2, settings };
+const E = { mode: 'edit', drawingId: 'd1', version: 3, rev: 2, settings, project };
 const I = {
   mode: 'initialize', drawingId: 'd1', version: 3, sourceIntakeSha256: SHA,
   settings: { ...settings, panels_in_sequence: 0, num_mppt: 0 },
+  project: { name: '', zip_code: '', latitude: null, longitude: null },
 };
 const R = { ...E, settings: { ...settings, optimizer_ratio: 5e-7 } };
 const U = { drawing_units: 'ft', elevation_datum: 'unknown', crs: '' };
@@ -61,6 +63,21 @@ function seedRequest(crs = null) {
 }
 
 describe('Solar settings model', () => {
+  it('PJ15 strips project text with Python whitespace parity', () => {
+    expect(buildSettingsParams(E, {}, {}, { name: '\u0085' }))
+      .toEqual({ ok: false, reason: 'project_name_required' });
+    expect(buildSettingsParams(E, {}, {}, { zip_code: '\u008537601' }))
+      .toEqual({ ok: true, params: { expected_rev: 2, project_changes: { zip_code: '37601' } } });
+    expect(buildSettingsParams(E, {}, {}, { name: 'Roof A\u0085' }))
+      .toEqual({ ok: false, reason: 'no_changes' });
+    expect(buildSettingsParams(E, {}, {}, { name: 'Roof B\uFEFF' }))
+      .toEqual({ ok: true, params: { expected_rev: 2, project_changes: { name: 'Roof B\uFEFF' } } });
+    const whitespace = '\u0009\u000A\u000B\u000C\u000D\u001C\u001D\u001E\u001F\u0020\u0085\u00A0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200A\u2028\u2029\u202F\u205F\u3000';
+    for (const character of whitespace) expect(pyStrip(`${character}Roof${character}`)).toBe('Roof');
+    expect(pyStrip('\uFEFFRoof\uFEFF')).toBe('\uFEFFRoof\uFEFF');
+    expect(pyStrip('Roof\u0085B')).toBe('Roof\u0085B');
+  });
+
   it('D1 edit state at the head version', () => {
     expect(derive()).toEqual(E);
   });
@@ -191,6 +208,45 @@ describe('Solar settings model', () => {
 });
 
 const readRoot = (...parts) => readFileSync(resolve(process.cwd(), '..', ...parts), 'utf8');
+
+describe('Solar project validation', () => {
+  it.each([
+    null, [], undefined, { ...project, name: 3 }, { ...project, zip_code: '1'.repeat(11) },
+    { ...project, latitude: true }, { ...project, longitude: Infinity },
+    { ...project, latitude: 91 }, { ...project, name: '\uD800' },
+  ])('refuses malformed saved project %j', (value) => {
+    expect(derive(withGraph({ project: value }))).toEqual(refused('graph_unreadable'));
+  });
+  it('accepts incomplete saved setup without defaulting coordinates', () => {
+    const empty = { name: '', zip_code: '', latitude: null, longitude: null };
+    expect(derive(withGraph({ project: empty }))).toEqual({ ...E, project: empty });
+  });
+  it.each([
+    { name: ' '.repeat(4096) + 'A' }, { zip_code: ' 44224     ' },
+    { name: '\uD800' }, { zip_code: '\uDC00' }, { extra: 'x' },
+  ])('checks raw project strings and keys before normalization %j', (drafts) => {
+    expect(buildSettingsParams(E, {}, U, drafts)).toEqual({ ok: false, reason: 'invalid_project_request' });
+  });
+  it.each(['+1', '.5', '1.', '1e1', 'NaN', 'Infinity', '1x'])('refuses nondecimal coordinate %s', (latitude) => {
+    expect(buildSettingsParams(E, {}, U, { latitude })).toEqual({ ok: false, reason: 'invalid_project_coordinates' });
+  });
+  it('sends a complete pair when only one coordinate changes', () => {
+    expect(buildSettingsParams(E, {}, U, { latitude: ' 40.5 ' })).toEqual({
+      ok: true, params: { expected_rev: 2, project_changes: { latitude: 40.5, longitude: -81 } },
+    });
+  });
+  it('accepts coordinate limits and ZIP+4', () => {
+    expect(buildSettingsParams(E, {}, U, { zip_code: '12345-6789', latitude: '-90', longitude: '180' })).toEqual({
+      ok: true, params: { expected_rev: 2, project_changes: { zip_code: '12345-6789', latitude: -90, longitude: 180 } },
+    });
+  });
+  it('omits normalized coordinate no-ops from a ZIP change', () => {
+    expect(buildSettingsParams(E, {}, U, { zip_code: '37601', latitude: '41.0', longitude: '-81.0' })).toEqual({
+      ok: true, params: { expected_rev: 2, project_changes: { zip_code: '37601' } },
+    });
+  });
+});
+
 const schema = () => JSON.parse(readRoot('contract', 'solar-design-graph.v1.schema.json'));
 
 describe('Solar settings server parity', () => {
@@ -238,7 +294,7 @@ describe('Solar settings server parity', () => {
     for (const value of [SETTINGS_FIELDS, ...SETTINGS_FIELDS, SEED_SETTINGS, DRAWING_UNITS, IDENTITY_WCS_TO_UCS, SOLAR_SETTINGS_REASONS]) {
       expect(Object.isFrozen(value)).toBe(true);
     }
-    expect(Object.keys(SOLAR_SETTINGS_REASONS)).toHaveLength(15);
+    expect(Object.keys(SOLAR_SETTINGS_REASONS)).toHaveLength(19);
     for (const sentence of Object.values(SOLAR_SETTINGS_REASONS)) {
       expect(typeof sentence).toBe('string');
       expect(sentence.length).toBeGreaterThanOrEqual(12);
