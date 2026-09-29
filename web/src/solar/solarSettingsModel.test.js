@@ -266,7 +266,8 @@ describe('Solar settings server parity', () => {
       string: { type: 'string', maxLength: 4096 },
       integer: { type: 'integer', minimum: 0, maximum: 1000000 },
       ratio: { type: 'number', exclusiveMinimum: 0 },
-      fixed: { const: false },
+      // The graph schema admits L2 mode since the typed topology slice; the form still offers only false.
+      fixed: { type: 'boolean' },
     };
     for (const { key, kind } of SETTINGS_FIELDS) expect(properties[key]).toMatchObject(bounds[kind]);
   });
