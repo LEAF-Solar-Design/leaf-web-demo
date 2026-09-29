@@ -1,0 +1,61 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-string-conductors",
+  "builtin": "builtins/solar_string_conductors.py",
+  "family": "stringing",
+  "adapter": "local-graph-commit",
+  "entitlement": "run_write",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_CONDUCTOR_REQUEST",
+  "readiness": {"kind": "facets", "facets": ["strings"]},
+  "engine": "server-builtin",
+  "interaction": {"mode": "form"},
+  "record_store": "registry",
+  "record": {
+    "name": "solar-string-conductors",
+    "version": "1.0.0",
+    "description": "Set explicit conductor choices for named strings without certifying ampacity or voltage drop.",
+    "kind": "script",
+    "family_id": "stringing",
+    "engine_op": "solar_string_conductors",
+    "entry": "builtins/solar_string_conductors.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {"type": "string", "maxLength": 128},
+        "operation": {"type": "string", "enum": ["set-conductors"], "default": "set-conductors"},
+        "expected_rev": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+        "assignments": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "items": {
+            "type": "object",
+            "properties": {
+              "string_ref": {"type": "string", "minLength": 1, "maxLength": 128},
+              "wire_gauge": {"type": "string", "enum": [
+                "14 AWG", "12 AWG", "10 AWG", "8 AWG", "6 AWG", "4 AWG", "3 AWG", "2 AWG", "1 AWG",
+                "1/0 AWG", "2/0 AWG", "3/0 AWG", "4/0 AWG", "250 kcmil", "300 kcmil", "350 kcmil",
+                "400 kcmil", "500 kcmil", "600 kcmil", "750 kcmil", "1000 kcmil"
+              ]}
+            },
+            "required": ["string_ref", "wire_gauge"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": ["operation", "expected_rev", "assignments"],
+      "additionalProperties": false
+    },
+    "returns": {"type": "object"},
+    "capabilities": ["drawing.write"],
+    "allow_local_fallback": false
+  },
+  "ledger": ["homeruns"],
+  "trusted_inputs": [],
+  "maturity": "preview",
+  "wave": 2,
+  "order": 85,
+  "scenario": "w2-rooftop"
+}
