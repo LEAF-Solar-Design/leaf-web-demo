@@ -6,8 +6,11 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { useCallback, useRef, useState } from 'react'
 
-import { CockpitStatus, FootRegion, StatusToggles, ViewCluster, formatCoordinate, formatScale, zoomViewer } from './DrawingCockpit.jsx'
+import { BACK_UNAVAILABLE, CockpitStatus, FootRegion, StatusToggles, ViewCluster, formatCoordinate, formatScale, useViewNavigation, zoomViewer } from './DrawingCockpit.jsx'
+import { createViewHistory } from '../lib/viewHistory.js'
+import useDrawingVersionController from '../controllers/useDrawingVersionController.js'
 
 afterEach(cleanup)
 
@@ -160,6 +163,235 @@ describe('ViewCluster', () => {
     expect(() => fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }))).not.toThrow()
     expect(zoomViewer(null, 2)).toBe(false)
     expect(zoomViewer({ getPose: () => null, setView: vi.fn() }, 2)).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// S3 Back and Up. The fake viewer exposes ONLY setView, getPose and frame:
+// pose A until setView('home') runs, pose B after it, with a different
+// target, zoom and scale, so Back must restore the SCALE, not the raw zoom.
+// ---------------------------------------------------------------------------
+const POSE_A = Object.freeze({ position: [5, 6, 100], target: [5, 6, 0], zoom: 4, near: 0.1, far: 1000, worldPerPixel: 0.25 })
+const POSE_B = Object.freeze({ position: [50, 60, 100], target: [50, 60, 0], zoom: 1, near: 0.1, far: 1000, worldPerPixel: 2 })
+
+function fakeViewer({ frameResult = true } = {}) {
+  let homed = false
+  return {
+    setView: vi.fn((pose) => { if (pose === 'home') homed = true; return true }),
+    getPose: vi.fn(() => ({ ...(homed ? POSE_B : POSE_A), target: [...(homed ? POSE_B : POSE_A).target] })),
+    frame: vi.fn(() => frameResult),
+  }
+}
+
+const NAV_INTAKE = {
+  polylines: [
+    { handle: 'P1', layer: 'Walls', pts: [[0, 0], [10, 4]] },
+    { handle: 'P2', layer: 'Roof', pts: [[20, 20], [30, 25]] },
+  ],
+  inserts: [],
+  faces3d: [],
+  layers: ['Walls', 'Roof'],
+}
+const layerOf = (handle) => NAV_INTAKE.polylines.find((e) => e.handle === handle)?.layer ?? null
+
+// App's wiring in miniature: ONE history, a size counter, selection and layers.
+function NavHarness({ viewer, probe, initialSelected = null }) {
+  const viewerRef = useRef(viewer)
+  const history = useRef(null)
+  if (!history.current) history.current = createViewHistory()
+  const [size, setSize] = useState(0)
+  const [selectedHandle, setSelectedHandle] = useState(initialSelected)
+  const [visibleLayers, setVisibleLayers] = useState({ Walls: true, Roof: false })
+  const nav = useViewNavigation({
+    viewerRef, history: history.current, setHistorySize: setSize,
+    selectedHandle, selectedLayer: layerOf(selectedHandle), setSelectedHandle,
+    visibleLayers, setVisibleLayers, intake: NAV_INTAKE,
+  })
+  probe.current = { selectedHandle, visibleLayers, setSelectedHandle, setVisibleLayers, size, pushView: nav.pushView }
+  return <ViewCluster viewerRef={viewerRef} onFit={nav.fit} canBack={size > 0} onBack={nav.back} onUp={nav.up} announcement={nav.announcement} />
+}
+
+const flushFrame = () => act(async () => { await nextFrame() })
+const backButton = () => screen.getByRole('button', { name: 'Back to the previous view' })
+const upButton = () => screen.getByRole('button', { name: 'Up one level' })
+const liveText = () => screen.getByTestId('cockpit-view-live').textContent
+
+describe('ViewCluster Back and Up (S3)', () => {
+  it('shows visible Back and Up labels, and an empty Back is aria-disabled but focusable', () => {
+    const probe = { current: null }
+    render(<NavHarness viewer={fakeViewer()} probe={probe} />)
+    const back = backButton()
+    expect(back.textContent).toBe('Back')
+    expect(upButton().textContent).toBe('Up')
+    expect(back.getAttribute('aria-disabled')).toBe('true')
+    expect(back.hasAttribute('disabled')).toBe(false)
+    expect(back.title).toBe(BACK_UNAVAILABLE)
+    const describedBy = back.getAttribute('aria-describedby')
+    expect(document.getElementById(describedBy).textContent).toBe(BACK_UNAVAILABLE)
+    expect(screen.getByRole('toolbar', { name: 'View' }).contains(back)).toBe(true)
+  })
+
+  it('Fit then Back restores the centre, the scale, the selection and the layers; focus stays on Back', async () => {
+    const viewer = fakeViewer()
+    const probe = { current: null }
+    render(<NavHarness viewer={viewer} probe={probe} initialSelected="P1" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Fit drawing to view' }))
+    expect(viewer.setView).toHaveBeenLastCalledWith('home')
+    expect(probe.current.size).toBe(1)
+    expect(backButton().hasAttribute('aria-disabled')).toBe(false)
+    // The user moves on: a different selection and different layers.
+    act(() => {
+      probe.current.setSelectedHandle(null)
+      probe.current.setVisibleLayers({ Walls: false, Roof: true })
+    })
+    const back = backButton()
+    back.focus()
+    fireEvent.click(back)
+    // Pose B is on screen now, so the zoom that reproduces A's scale is
+    // B.zoom * B.worldPerPixel / A.worldPerPixel = 1 * 2 / 0.25.
+    expect(viewer.setView).toHaveBeenLastCalledWith({ center: { x: 5, y: 6 }, zoom: 8 })
+    expect(POSE_B.worldPerPixel * POSE_B.zoom / 8).toBe(POSE_A.worldPerPixel)
+    expect(probe.current.selectedHandle).toBe('P1')
+    expect(probe.current.visibleLayers).toEqual({ Walls: true, Roof: false })
+    expect(document.activeElement).toBe(back)
+    expect(back.getAttribute('aria-disabled')).toBe('true')
+    await flushFrame()
+    expect(liveText()).toBe('Back to your previous view, P1 selected')
+  })
+
+  it('activating an empty Back does nothing', () => {
+    const viewer = fakeViewer()
+    const probe = { current: null }
+    render(<NavHarness viewer={viewer} probe={probe} initialSelected="P1" />)
+    fireEvent.click(backButton())
+    expect(viewer.setView).not.toHaveBeenCalled()
+    expect(probe.current.selectedHandle).toBe('P1')
+    expect(liveText()).toBe('')
+  })
+
+  it('Back with no selection in the snapshot announces the plain sentence', async () => {
+    const probe = { current: null }
+    render(<NavHarness viewer={fakeViewer()} probe={probe} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Fit drawing to view' }))
+    fireEvent.click(backButton())
+    await flushFrame()
+    expect(liveText()).toBe('Back to your previous view')
+  })
+
+  it('Up with a selected entity clears the selection and frames its layer; Back returns to the entity', async () => {
+    const viewer = fakeViewer()
+    const probe = { current: null }
+    render(<NavHarness viewer={viewer} probe={probe} initialSelected="P1" />)
+    fireEvent.click(upButton())
+    expect(probe.current.selectedHandle).toBeNull()
+    expect(viewer.frame).toHaveBeenCalledTimes(1)
+    expect(viewer.frame.mock.calls[0][0]).toEqual({ minX: 0, minY: 0, maxX: 10, maxY: 4 })
+    expect(viewer.setView).not.toHaveBeenCalled()
+    await flushFrame()
+    expect(liveText()).toBe('Showing layer Walls')
+    act(() => { probe.current.setVisibleLayers({ Walls: false, Roof: false }) })
+    fireEvent.click(backButton())
+    expect(viewer.setView).toHaveBeenLastCalledWith({ center: { x: 5, y: 6 }, zoom: 4 })
+    expect(probe.current.selectedHandle).toBe('P1')
+    expect(probe.current.visibleLayers).toEqual({ Walls: true, Roof: false })
+    await flushFrame()
+    expect(liveText()).toBe('Back to your previous view, P1 selected')
+  })
+
+  it('Up falls back to the whole drawing when frame returns false', async () => {
+    const viewer = fakeViewer({ frameResult: false })
+    const probe = { current: null }
+    render(<NavHarness viewer={viewer} probe={probe} initialSelected="P1" />)
+    fireEvent.click(upButton())
+    expect(viewer.frame).toHaveBeenCalledTimes(1)
+    expect(viewer.setView).toHaveBeenLastCalledWith('home')
+    expect(probe.current.selectedHandle).toBeNull()
+    await flushFrame()
+    expect(liveText()).toBe('Showing the whole drawing')
+  })
+
+  it('Up with nothing selected shows the whole drawing every time and re-announces a repeated message', async () => {
+    const viewer = fakeViewer()
+    const probe = { current: null }
+    render(<NavHarness viewer={viewer} probe={probe} />)
+    const up = upButton()
+    up.focus()
+    fireEvent.click(up)
+    await flushFrame()
+    expect(liveText()).toBe('Showing the whole drawing')
+    fireEvent.click(up)
+    // Cleared first, then set again on the next frame: a real mutation.
+    expect(liveText()).toBe('')
+    await flushFrame()
+    expect(liveText()).toBe('Showing the whole drawing')
+    fireEvent.click(up)
+    expect(viewer.setView.mock.calls.filter(([pose]) => pose === 'home')).toHaveLength(3)
+    expect(viewer.frame).not.toHaveBeenCalled()
+    expect(document.activeElement).toBe(up)
+  })
+
+  it('a jump pushed from outside the strip (the ribbon Fit) enables Back through the size counter alone', () => {
+    const probe = { current: null }
+    render(<NavHarness viewer={fakeViewer()} probe={probe} />)
+    expect(backButton().getAttribute('aria-disabled')).toBe('true')
+    act(() => { probe.current.pushView() })
+    expect(backButton().hasAttribute('aria-disabled')).toBe(false)
+  })
+
+  it('never pushes a snapshot before layout (a null pose)', () => {
+    const viewer = { setView: vi.fn(() => true), getPose: vi.fn(() => null), frame: vi.fn(() => false) }
+    const probe = { current: null }
+    render(<NavHarness viewer={viewer} probe={probe} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Fit drawing to view' }))
+    expect(viewer.setView).toHaveBeenCalledWith('home')
+    expect(probe.current.size).toBe(0)
+    expect(backButton().getAttribute('aria-disabled')).toBe('true')
+  })
+})
+
+// Scope reset: every controller source funnels through onResetSelection,
+// which App wires to resetDrawingSelection, which clears the history.
+function ScopeHarness({ probe }) {
+  const history = useRef(null)
+  if (!history.current) history.current = createViewHistory()
+  const [size, setSize] = useState(0)
+  const resetDrawingSelection = useCallback(() => {
+    history.current.clear()
+    setSize(0)
+  }, [])
+  const view = (version) => ({ intake: { ...NAV_INTAKE }, drawing_id: 'd1', version, head: 2, latest: 2 })
+  const drawing = useDrawingVersionController({
+    loadHead: async () => view(2),
+    loadVersion: async (_id, version) => view(version),
+    onResetSelection: resetDrawingSelection,
+  })
+  probe.current = {
+    size,
+    drawing,
+    push: () => { if (history.current.push({ pose: POSE_A, selectedHandle: 'P1', visibleLayers: {} })) setSize(history.current.size()) },
+    view,
+  }
+  return null
+}
+
+describe('Back history scope reset (S3)', () => {
+  it('is empty after each controller source: reset, intake, version, preview and head', async () => {
+    const probe = { current: null }
+    render(<ScopeHarness probe={probe} />)
+    const actions = () => probe.current.drawing.actions
+    const cases = [
+      ['reset', () => actions().reset()],
+      ['intake', () => actions().seatIntake({ ...NAV_INTAKE }, { drawingId: 'd1', drawingState: { version: 2, head: 2, latest: 2 } })],
+      ['version', () => actions().seatVersion(probe.current.view(2), { drawingId: 'd1' })],
+      ['preview', () => actions().previewVersion(1)],
+      ['head', () => actions().previewVersion(2)],
+    ]
+    for (const [source, run] of cases) {
+      act(() => { probe.current.push() })
+      expect(probe.current.size, `${source}: seeded`).toBe(1)
+      await act(async () => { await run() })
+      expect(probe.current.size, `${source}: cleared`).toBe(0)
+    }
   })
 })
 

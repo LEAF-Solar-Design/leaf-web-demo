@@ -1811,6 +1811,11 @@
 }
 .cockpit-view button:hover { background: rgba(240, 242, 240, .16); }
 .cockpit-view button:focus-visible { outline: 2px solid #7fd6a6; outline-offset: 1px; }
+/* S3 Back and Up: a word label in the icon's 16px box height; an empty Back
+   is aria-disabled (still focusable), so it dims without the disabled state. */
+.cockpit-view .ci-word { display: inline-flex; align-items: center; height: 16px; font: 600 11px/1 var(--font-sans); letter-spacing: .01em; }
+.cockpit-view button[aria-disabled="true"] { opacity: .45; cursor: default; }
+.cockpit-view button[aria-disabled="true"]:hover { background: rgba(240, 242, 240, .06); }
 .cockpit-status { display: inline-flex; gap: 14px; align-items: center; font-variant-numeric: tabular-nums; }
 .cockpit-status b { font-weight: 500; color: rgba(240, 242, 240, .96); min-width: 5.5ch; display: inline-block; text-align: right; }
 .cockpit-scale b { min-width: 0; text-align: left; }

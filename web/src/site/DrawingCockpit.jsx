@@ -11,9 +11,11 @@
 // legend's material, never paper. The cursor readout is a rAF-throttled DOM
 // write, never React state: pointer-rate re-renders were risk R11 in the
 // convergence plan.
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
 
 import CockpitIcon from './CockpitIcon.jsx'
+import LiveRegion, { HIDE_WITH_STYLE } from '../components/LiveRegion.jsx'
+import { layerBounds } from '../lib/viewHistory.js'
 
 const ZOOM_IN = 1.25
 const ZOOM_OUT = 0.8
@@ -41,16 +43,142 @@ export function zoomViewer(viewer, factor) {
   return viewer.setView({ zoom: pose.zoom * factor })
 }
 
-export function ViewCluster({ viewerRef }) {
+export const BACK_UNAVAILABLE = 'There is no earlier view to go back to'
+
+export function backAnnouncement(selectedHandle) {
+  return selectedHandle ? `Back to your previous view, ${selectedHandle} selected` : 'Back to your previous view'
+}
+
+// The share of the safe rectangle a layer fills when Up frames it.
+const UP_LAYER_SHARE = 0.8
+
+/**
+ * Back and Up for the drawing viewer (S3, navigation rules R4 and R13).
+ *
+ * Back returns to exactly where the user was: the camera, the selection and
+ * the visible layers from one snapshot. Up goes one level toward the whole
+ * drawing: from a selected entity to its layer's bounds, else to the whole
+ * drawing. The caller owns the ONE bounded history (lib/viewHistory.js) and a
+ * size counter, so every consumer re-renders when the size changes.
+ *
+ * Callbacks are stable: they read the latest selection, layers and intake
+ * from a ref written on each render, so a jump never pushes a stale snapshot.
+ */
+export function useViewNavigation({
+  viewerRef, history, setHistorySize,
+  selectedHandle = null, selectedLayer = null, setSelectedHandle,
+  visibleLayers = null, setVisibleLayers, intake = null,
+}) {
+  const latest = useRef(null)
+  latest.current = { history, setHistorySize, selectedHandle, selectedLayer, setSelectedHandle, visibleLayers, setVisibleLayers, intake }
+  const [announcement, setAnnouncement] = useState('')
+  const frameRef = useRef(0)
+  useEffect(() => () => {
+    if (frameRef.current && typeof window !== 'undefined') window.cancelAnimationFrame(frameRef.current)
+  }, [])
+
+  // Clear, then set again on the next frame: a repeated message is a real
+  // mutation, so a screen reader announces it again.
+  const announce = useCallback((text) => {
+    setAnnouncement('')
+    if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') {
+      setAnnouncement(text)
+      return
+    }
+    if (frameRef.current) window.cancelAnimationFrame(frameRef.current)
+    frameRef.current = window.requestAnimationFrame(() => {
+      frameRef.current = 0
+      setAnnouncement(text)
+    })
+  }, [])
+
+  const pushView = useCallback(() => {
+    const now = latest.current
+    if (!now.history) return false
+    const viewer = viewerRef.current
+    const pose = typeof viewer?.getPose === 'function' ? viewer.getPose() : null
+    const pushed = now.history.push({ pose, selectedHandle: now.selectedHandle, visibleLayers: now.visibleLayers })
+    if (pushed) now.setHistorySize?.(now.history.size())
+    return pushed
+  }, [viewerRef])
+
+  const fit = useCallback(() => {
+    pushView()
+    viewerRef.current?.setView?.('home')
+  }, [pushView, viewerRef])
+
+  const back = useCallback(() => {
+    const now = latest.current
+    const snap = now.history?.pop() ?? null
+    if (!snap) return false
+    now.setHistorySize?.(now.history.size())
+    const viewer = viewerRef.current
+    const { pose } = snap
+    // Restore the SCALE, not the raw zoom: Fit and resize recompute the
+    // frustum, so the same zoom number can mean a different scale now.
+    const current = typeof viewer?.getPose === 'function' ? viewer.getPose() : null
+    const scaled = current && pose.worldPerPixel > 0 ? current.zoom * current.worldPerPixel / pose.worldPerPixel : NaN
+    const zoom = Number.isFinite(scaled) && scaled > 0 ? scaled : pose.zoom
+    viewer?.setView?.({ center: { x: pose.target[0], y: pose.target[1] }, zoom })
+    now.setSelectedHandle?.(snap.selectedHandle)
+    now.setVisibleLayers?.({ ...snap.visibleLayers })
+    announce(backAnnouncement(snap.selectedHandle))
+    return true
+  }, [announce, viewerRef])
+
+  const up = useCallback(() => {
+    pushView()
+    const now = latest.current
+    const viewer = viewerRef.current
+    if (now.selectedHandle) {
+      now.setSelectedHandle?.(null)
+      const bounds = layerBounds(now.intake, now.selectedLayer)
+      if (bounds && typeof viewer?.frame === 'function' && viewer.frame(bounds, UP_LAYER_SHARE) === true) {
+        announce(`Showing layer ${now.selectedLayer}`)
+        return
+      }
+    }
+    viewer?.setView?.('home')
+    announce('Showing the whole drawing')
+  }, [announce, pushView, viewerRef])
+
+  return { pushView, fit, back, up, announcement }
+}
+
+export function ViewCluster({ viewerRef, onFit = null, canBack = false, onBack = null, onUp = null, announcement = '' }) {
+  const backReasonId = useId()
+  const fit = typeof onFit === 'function' ? onFit : () => viewerRef.current?.setView?.('home')
   return (
     <>
-      {/* The viewport strip: fit / zoom as icons, then the view mode the
+      {/* The viewport strip: fit / back / up / zoom, then the view mode the
           Viewer actually renders (2D wireframe; there is no other mode, so
           it is a readout, never a fake dropdown). */}
       <div className="cockpit-view" role="toolbar" aria-label="View" data-testid="cockpit-view">
-        <button type="button" onClick={() => viewerRef.current?.setView?.('home')} aria-label="Fit drawing to view" title="Fit to view">
+        <button type="button" onClick={fit} aria-label="Fit drawing to view" title="Fit to view">
           <CockpitIcon id="fit" fallback="Fit" size="strip" />
         </button>
+        {typeof onBack === 'function' ? (
+          // aria-disabled, never `disabled`: an empty Back stays in the Tab
+          // order and keeps focus, and says why it does nothing.
+          <button
+            type="button"
+            className="cockpit-view-word"
+            data-view="back"
+            aria-label="Back to the previous view"
+            aria-disabled={canBack ? undefined : 'true'}
+            aria-describedby={canBack ? undefined : backReasonId}
+            title={canBack ? 'Back to the previous view' : BACK_UNAVAILABLE}
+            onClick={() => { if (canBack) onBack() }}
+          >
+            <span className="ci-word" aria-hidden="true">Back</span>
+          </button>
+        ) : null}
+        {typeof onUp === 'function' ? (
+          <button type="button" className="cockpit-view-word" data-view="up" aria-label="Up one level" title="Up one level" onClick={() => onUp()}>
+            <span className="ci-word" aria-hidden="true">Up</span>
+          </button>
+        ) : null}
+        {typeof onBack === 'function' ? <span id={backReasonId} hidden>{BACK_UNAVAILABLE}</span> : null}
         <button type="button" onClick={() => zoomViewer(viewerRef.current, ZOOM_IN)} aria-label="Zoom in" title="Zoom in">
           <CockpitIcon id="zoom-in" fallback="+" size="strip" />
         </button>
@@ -62,6 +190,9 @@ export function ViewCluster({ viewerRef }) {
           Wireframe 2D
         </span>
       </div>
+      {typeof onBack === 'function' || typeof onUp === 'function' ? (
+        <LiveRegion role="status" visuallyHidden={HIDE_WITH_STYLE} data-testid="cockpit-view-live">{announcement}</LiveRegion>
+      ) : null}
       {/* The view cube: TOP is the only view this 2D viewer has, so the cube
           is a readout of that fact with the compass around it. */}
       <div className="cockpit-cube-wrap" aria-hidden="true">

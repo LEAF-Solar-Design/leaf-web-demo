@@ -416,6 +416,10 @@
     background: transparent; color: var(--ck-ink); font: 400 12px var(--ck-font);
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-view button:hover { background: #4a4a4a; }
+  /* S3 Back and Up carry a word, so they size to it; the strip height is unchanged. */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-view button.cockpit-view-word { width: auto; padding: 0 5px; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-view .ci-word { font: 400 11.5px/1 var(--ck-font); }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-view button[aria-disabled="true"]:hover { background: transparent; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-view .cockpit-view-mode {
     display: inline-flex; align-items: center; gap: 4px; padding: 0 8px; font: 400 11.5px var(--ck-font); color: #d8d8d8;
   }
