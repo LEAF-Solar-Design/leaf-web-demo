@@ -642,6 +642,9 @@ def build_suites() -> List[Suite]:
         # sf-solar-project-readiness: project setup, sizing invalidation, and ZIP binding.
         Suite("server-w1-project-settings", "server tests/test_w1_project_settings.py", "pytest", SERVER,
               _py_pytest("tests/test_w1_project_settings.py"), 46),
+        # sf-solar-module-power: confirmed module power, zone coverage, and frame refresh.
+        Suite("server-w1-module-power", "server tests/test_w1_module_power.py", "pytest", SERVER,
+              _py_pytest("tests/test_w1_module_power.py"), 10),
         Suite("server-w1-solar-interchange", "server tests/test_w1_solar_interchange.py", "pytest", SERVER,
               _py_pytest("tests/test_w1_solar_interchange.py"), 19),
         Suite("server-w1-solve-commit", "server tests/test_w1_solve_commit.py", "pytest", SERVER,

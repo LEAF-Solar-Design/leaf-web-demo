@@ -15,6 +15,7 @@ import copy
 
 import solar_sizing_client as cloud
 from solar_design_graph import GraphValidationError, _bounded_json
+from solar_sizing_power import frame_module_power, record_module_power
 
 
 def size_strings(graph, params, *, tenant_id, job_id):
@@ -50,6 +51,11 @@ def size_strings(graph, params, *, tenant_id, job_id):
         return {"graph": result, "confirmed": False, "records": records}
     if any(not record["sizing"]["voc_cold"]["passes"] for record in records.values()):
         raise GraphValidationError("COLD_VOLTAGE_FAILED")
+    try:
+        for record in records.values():
+            record_module_power(record)
+    except GraphValidationError:
+        raise GraphValidationError("CLOUD_RESPONSE_INVALID") from None
     for target_id, target in targets.items():
         target.update(copy.deepcopy(records[target_id]["sizing"]))
     settings = result["settings"]
@@ -59,6 +65,19 @@ def size_strings(graph, params, *, tenant_id, job_id):
     changed = list(targets.values())
     if mode != "global":
         changed.append(settings)
+    for frame in result["frames"]:
+        zone_ref = frame["electrical_zone_ref"]
+        if mode == "zones":
+            covering = [zone["id"] for zone in result["electrical_zones"]
+                        if set(frame["panel_refs"]) <= set(zone["panel_refs"])]
+            # Existing frames may span zones after switching from global sizing.
+            power = (frame_module_power(result, frame["panel_refs"], covering[0])
+                     if len(covering) == 1 else 0.0)
+        else:
+            power = frame_module_power(result, frame["panel_refs"], zone_ref)
+        if frame["module_power_watts"] != power:
+            frame["module_power_watts"] = power
+            changed.append(frame)
     result = cloud.advance(result, changed, "solar-size-strings")
     cloud.require_sizing(result)
     return {"graph": result, "confirmed": True, "records": copy.deepcopy(records)}

@@ -310,6 +310,7 @@ def w1_graph_readiness(graph):
     """Project persisted producer contracts without making a mutation or a call."""
     from solar_design_graph import GraphValidationError, validate_graph
     from solar_sizing_client import require_sizing
+    from solar_sizing_power import sizing_power_ready
     from solar_equipment import equipment_ready
     from solar_solve_results import coverage, upstream_basis
     from solar_wiring_client import local_routes
@@ -334,6 +335,8 @@ def w1_graph_readiness(graph):
         except (KeyError, ValueError, TypeError):
             pass
     mark(["solar-panel-groups"], sized, "sizing_confirmation_required")
+    if sized and not sizing_power_ready(graph):
+        mark(["solar-panel-groups"], False, "module_power_required")
     grouped = sized and bool(graph["frames"]) and bool(graph["panels"]) and all(
         item["validity"]["state"] == "valid"
         for item in graph["frames"] + graph["panels"] + graph["electrical_zones"]
