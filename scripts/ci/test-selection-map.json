@@ -429,6 +429,7 @@
     "server-solar-tool-solar-assign-equipment",
     "server-solar-tool-solar-schedule",
     "server-solar-tool-solar-size-strings",
+    "server-solar-tool-solar-string-conductors",
     "server-solar-w2-registration",
     "server-solar-workflow-flow",
     "server-solar-xlsx",
