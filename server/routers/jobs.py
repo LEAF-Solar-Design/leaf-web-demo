@@ -17,11 +17,11 @@ import os
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Literal, Optional, Tuple
 
 from fastapi import APIRouter, Depends, Header
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 import checkout_capability
 import catalog
@@ -33,6 +33,7 @@ import write_loop
 import product_capability_availability as capability_catalog
 import customization_service
 import solar_authored_graph
+from solar_design_graph import GraphValidationError
 from envelopes import DEFAULT_HTTP_STATUS, ErrorCode, error_obj, error_response, with_envelope_fields
 
 try:  # APS domain metrics (CloudWatch EMF); best-effort, optional — mirrors jobs.py
@@ -192,11 +193,19 @@ def _measured_solve_availability(health: Optional[Dict[str, Any]],
     }
 
 
+class SolveContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    frame_ref: str = Field(min_length=1, max_length=256, strict=True)
+    expected_rev: int = Field(ge=0, strict=True)
+    phase: Literal["initial", "background"] = "initial"
+
+
 class RunRequest(BaseModel):
     tool: str
     params: Dict[str, Any] = {}
     dwg: str = "rooftop_demo"
     dwg_version: Optional[int] = None  # None -> head (unchanged default); pin to a
+    solve_context: Optional[SolveContext] = None
     catalog_digest: Optional[str] = None
     expected_drawing_head: Optional[int] = None
     catalog_commit: Optional[str] = None
@@ -489,6 +498,10 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
         )
         if match is not None and tool == match[0]:
             tool_source = match[1]
+    if (req.solve_context is not None and
+            capability_catalog.capability_adapter(req.tool) != capability_catalog.CLOUD_PROPOSAL_ADAPTER):
+        return error_response(ErrorCode.BAD_PARAMS, "solve_context requires a cloud proposal",
+                              retryable=False, status_code=400)
     if tool is None:
         return error_response(ErrorCode.UNKNOWN_TOOL, f"unknown tool: {req.tool}",
                               retryable=False, tool=req.tool)
@@ -618,6 +631,24 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
             tenant_id, target_drawing_id, x_checkout_capability)
 
     dwg_version = req.dwg_version
+    if req.solve_context is not None:
+        from solar_graph_context import resolve_graph_context
+
+        try:
+            if not req.dwg:
+                raise GraphValidationError("DRAWING_CONTEXT_REQUIRED")
+            backend = write_loop.backend_for_tenant(str(tenant_id), aps_live=False, da=None)
+            context = resolve_graph_context(
+                backend, str(tenant_id), req.dwg,
+                dwg_version if dwg_version is not None else "head")
+            dwg_version = context["resolved_version"]
+        except GraphValidationError as exc:
+            reason = ("persisted_graph_unavailable" if exc.code == "GRAPH_NOT_EMBEDDED"
+                      else exc.code.lower())
+            return JSONResponse(status_code=409, content=with_envelope_fields({
+                "error": error_obj(ErrorCode.BAD_PARAMS, reason, retryable=False),
+                "reason_code": reason,
+            }))
     if is_local_graph_commit(tool):
         store = _store()
         if checkout_holder == store.ANONYMOUS_HOLDER or checkout_fence is None:
@@ -791,7 +822,14 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
                 checkout_holder=checkout_holder,
                 checkout_fence=checkout_fence,
                 entity_scope=binding,
+                **({"solve_context": req.solve_context.model_dump()}
+                   if req.solve_context is not None else {}),
             )
+    except GraphValidationError as exc:
+        return JSONResponse(status_code=409, content=with_envelope_fields({
+            "error": error_obj(ErrorCode.BAD_PARAMS, exc.code, retryable=False),
+            "reason_code": exc.code.lower(),
+        }))
     except jobs.TenantInflightCapExceeded as exc:
         response = error_response(
             ErrorCode.QUOTA_EXCEEDED, str(exc), retryable=True, status_code=429)

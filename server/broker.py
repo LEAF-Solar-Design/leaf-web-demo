@@ -1328,6 +1328,7 @@ class BrokerRunRequest(BaseModel):
     # ledger row's fingerprint unrecognisable on replay.
     job_id: Optional[str] = None
     entity_scope: Optional[Dict[str, Any]] = None
+    solve_scope: Optional[Dict[str, Any]] = None
 
     @field_validator("entity_scope", mode="before")
     @classmethod
@@ -1611,6 +1612,8 @@ def _broker_request_fingerprint(req: Union[BrokerRunRequest, BrokerPlanRunReques
             fingerprint_input["fixture_profile"] = _CAMPAIGN_HOST_FIXTURE_PROFILE
     if req.entity_scope is not None:
         fingerprint_input["entity_scope"] = req.entity_scope
+    if getattr(req, "solve_scope", None) is not None:
+        fingerprint_input["solve_scope"] = req.solve_scope
     canonical = json.dumps(
         fingerprint_input, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -3249,6 +3252,9 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
 
     from product_capability_availability import is_cloud_proposal, is_local_graph_commit, is_local_graph_read
     cloud_proposal = is_cloud_proposal(tool)
+    if req.solve_scope is not None and not cloud_proposal:
+        return _classified_bad_params(
+            "invalid_solve_binding", "solve_scope requires a cloud proposal", tool=tool.get("name"))
     if cloud_proposal:
         with (SERVER_DIR / "catalog_tools.json").open(encoding="utf-8") as stream:
             canonical = next(row for row in json.load(stream)["tools"]
@@ -3317,15 +3323,31 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
     if is_cloud_proposal(tool):
         from leaf_cloud_client import proposal, validate_params as validate_cloud_params
         from leaf_cloud_grants import CloudError
+        from solar_design_graph import GraphValidationError
+        from solar_proposal_candidate import RESULT_SCHEMA, resolve_binding
+        from solar_solve_results import complete_search
 
         try:
             validate_cloud_params(req.params)
             if not req.job_id:
                 raise CloudError("cloud_job_identity_missing", 400)
+            if req.solve_scope is not None:
+                backend = write_loop.backend_for_tenant(req.tenant_id, aps_live=False, da=None)
+                graph = resolve_binding(backend, req.tenant_id, req.job_id,
+                                        req.solve_scope, req.params)
             _start_admitted_execution(req, admission, aps_submission=False)
             result = proposal(req.params, req.tenant_id, req.job_id)
+            if req.solve_scope is not None:
+                result = {"schema": RESULT_SCHEMA, "proposal": result,
+                          "candidate": complete_search(graph, req.solve_scope["binding"], result),
+                          "scope": {k: req.solve_scope[k] for k in ("drawing_id", "source_version")}}
             return ok_envelope(tool["name"], tool["version"], result, None,
                                int((time.perf_counter() - t0) * 1000)), 200
+        except GraphValidationError as exc:
+            env = err_envelope(ErrorCode.BAD_PARAMS, exc.code, retryable=False, tool=tool.get("name"))
+            env["reason_code"] = exc.code.lower()
+            env["error"]["classification"] = exc.code
+            return env, 409
         except CloudError as exc:
             code = (ErrorCode.BAD_PARAMS if exc.status == 400 else
                     ErrorCode.UNAUTHENTICATED if exc.status == 401 else

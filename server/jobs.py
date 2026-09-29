@@ -616,7 +616,8 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
                checkout_fence: Optional[int] = None,
                capability_provenance: Optional[Dict[str, Any]] = None,
                completion_provenance: Optional[Dict[str, Any]] = None,
-               entity_scope: Optional[Dict[str, Any]] = None) -> str:
+               entity_scope: Optional[Dict[str, Any]] = None,
+               solve_context: Optional[Dict[str, Any]] = None) -> str:
     """Insert the durable job row and hand it to the executor. Returns job_id.
 
     ``org_id`` / ``project_id`` carry the OPTIONAL project context from the
@@ -653,6 +654,8 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
         validate_cloud_params(params)
         if aps_live:
             raise ValueError("cloud proposal does not use APS execution")
+    elif solve_context is not None:
+        raise ValueError("solve_context requires a cloud proposal")
     if is_local_graph_commit(tool):
         import write_loop
         import store
@@ -692,6 +695,7 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
         checkout_fence=checkout_fence, capability_provenance=capability_provenance,
         completion_provenance=completion_provenance,
         entity_scope=entity_scope,
+        solve_context=solve_context,
     )
 
 
@@ -719,7 +723,8 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
                 plan: Optional[Dict[str, Any]] = None,
                 capability_provenance: Optional[Dict[str, Any]] = None,
                 completion_provenance: Optional[Dict[str, Any]] = None,
-                entity_scope: Optional[Dict[str, Any]] = None) -> str:
+                entity_scope: Optional[Dict[str, Any]] = None,
+                solve_context: Optional[Dict[str, Any]] = None) -> str:
     """Shared durable insert and executor hand-off for tool and data-plan jobs."""
     if entity_scope is not None:
         from entity_scope import ScopeError, validate_binding
@@ -759,6 +764,29 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
                     "project_id": project_id, "tool_name": tool.get("name"),
                 }.items())):
             raise ValueError("capability submission scope or execution mode mismatch")
+    solve_scope = None
+    solve_error = None
+    bound_job_id = None
+    if solve_context is not None:
+        import write_loop
+        from solar_graph_context import resolve_graph_context
+        from solar_solve_results import bind_request
+        from solar_design_graph import GraphValidationError
+        if not dwg or type(dwg_version) is not int or dwg_version < 1:
+            raise GraphValidationError("GRAPH_CONTEXT_UNAVAILABLE")
+        bound_job_id = str(uuid.uuid4())
+        backend = write_loop.backend_for_tenant(str(tenant_id), aps_live=False, da=None)
+        graph = resolve_graph_context(backend, str(tenant_id), dwg, dwg_version)["graph"]
+        try:
+            solve_binding = bind_request(graph, params["request"], tenant_id=str(tenant_id),
+                                         job_id=bound_job_id, **solve_context)
+        except GraphValidationError as exc:
+            # Key reuse takes precedence over a changed, invalid solve request.
+            # This placeholder is fingerprint-only and can never be persisted.
+            solve_error = exc
+            solve_binding = {"invalid_context": solve_context}
+        solve_scope = {"drawing_id": dwg, "source_version": dwg_version,
+                       "binding": solve_binding}
     fingerprint_payload = {
         "tenantId": str(tenant_id), "orgId": org_id, "projectId": project_id,
         "tool": tool, "params": params, "dwg": dwg, "apsLive": bool(aps_live),
@@ -776,14 +804,46 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
         fingerprint_payload["completion_provenance"] = completion_provenance
     if entity_scope is not None:
         fingerprint_payload["entity_scope"] = entity_scope
+    if solve_scope is not None:
+        # The server-minted job id is an output, not idempotent run input.
+        # All other binding fields, including the graph digest, identify the work.
+        fingerprint_payload["solve_scope"] = {
+            **solve_scope,
+            "binding": {k: v for k, v in solve_scope["binding"].items() if k != "job_id"},
+        }
     submission_fingerprint = hashlib.sha256(json.dumps(
         fingerprint_payload, sort_keys=True, separators=(",", ":"), default=str,
     ).encode("utf-8")).hexdigest()
     ensure_started()
-    job_id = str(uuid.uuid4())
+    job_id = bound_job_id or str(uuid.uuid4())
     now = time.time()
     execution = {"tool": tool, "aps_live": bool(aps_live), "dwg_version": dwg_version,
                  "checkout_holder": checkout_holder, "checkout_fence": checkout_fence}
+    if solve_context is not None:
+        # Resolve key reuse before validating a changed (possibly stale) frame.
+        # The insert's existing atomic key check still arbitrates concurrent submissions.
+        if idempotency_key:
+            if job_store_mode() == "postgres":
+                import job_pg_store
+                with job_pg_store._db().cursor() as cur:
+                    cur.execute(
+                        "SELECT job_id, submission_fingerprint FROM async_jobs "
+                        "WHERE tenant_id = %s AND project_id IS NOT DISTINCT FROM %s AND idempotency_key = %s",
+                        (str(tenant_id), str(project_id) if project_id is not None else None, idempotency_key))
+                    existing = cur.fetchone()
+            else:
+                rows = _query(
+                    "SELECT job_id, submission_fingerprint FROM jobs "
+                    "WHERE tenant_id = ? AND project_id IS ? AND idempotency_key = ?",
+                    (str(tenant_id), str(project_id) if project_id is not None else None, idempotency_key))
+                existing = rows[0] if rows else None
+            if existing is not None:
+                if existing["submission_fingerprint"] != submission_fingerprint:
+                    raise ValueError("idempotency key already exists with different run input")
+                return str(existing["job_id"])
+        if solve_error is not None:
+            raise solve_error
+        execution["solve_scope"] = solve_scope
     if entity_scope is not None:
         execution["entity_scope"] = validate_binding(entity_scope)
     from product_capability_availability import is_cloud_proposal, is_local_graph_commit, is_local_graph_read
@@ -802,7 +862,8 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
     max_inflight = tenant_max_inflight()
     created = True
     if job_store_mode() == "postgres":
-        job_id, created = _pg_store.submit({
+        submit = _submit_bound_postgres if solve_scope is not None else _pg_store.submit
+        job_id, created = submit({
             "job_id": job_id,
             "tenant_id": str(tenant_id),
             "tool": tool["name"],
@@ -820,13 +881,19 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
     else:
         with _lock:
             conn = _db()
-            if project_id and idempotency_key:
+            bound_transaction = solve_scope is not None and bool(idempotency_key)
+            if bound_transaction:
+                # Null-project keys have no unique index; serialize across processes too.
+                conn.execute("BEGIN IMMEDIATE")
+            if idempotency_key and (project_id or solve_scope is not None):
                 existing = conn.execute(
                     "SELECT job_id, submission_fingerprint FROM jobs "
-                    "WHERE tenant_id = ? AND project_id = ? AND idempotency_key = ?",
-                    (str(tenant_id), str(project_id), idempotency_key),
+                    "WHERE tenant_id = ? AND project_id IS ? AND idempotency_key = ?",
+                    (str(tenant_id), str(project_id) if project_id is not None else None, idempotency_key),
                 ).fetchone()
                 if existing is not None:
+                    if bound_transaction:
+                        conn.rollback()
                     if existing["submission_fingerprint"] != submission_fingerprint:
                         raise ValueError("idempotency key already exists with different run input")
                     return str(existing["job_id"])
@@ -836,6 +903,8 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
                 (str(tenant_id),),
             ).fetchone()[0]
             if in_flight >= max_inflight:
+                if bound_transaction:
+                    conn.rollback()
                 raise TenantInflightCapExceeded(str(tenant_id), max_inflight, in_flight)
             try:
                 conn.execute(
@@ -859,6 +928,10 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
                 if existing is None or existing["submission_fingerprint"] != submission_fingerprint:
                     raise ValueError("idempotency key already exists with different run input")
                 return str(existing["job_id"])
+            except Exception:
+                if bound_transaction:
+                    conn.rollback()
+                raise
     if not created:
         return job_id
     # In legacy_sqlite this is a diagnostic mirror. postgres_canonical requests
@@ -1000,6 +1073,45 @@ def heartbeat_lease(job_id: str, worker_id: str, progress: Optional[str] = None)
         return cur.rowcount == 1
 
 
+def _submit_bound_postgres(row, *, max_inflight):
+    """Serialize bound key reuse even without a project-scoped unique index.
+
+    Use the store's tenant admission lock and existing execution JSON column.
+    Ordinary submissions retain their original store path.
+    """
+    if not row["idempotency_key"]:
+        return _pg_store.submit(row, max_inflight=max_inflight)
+    import job_pg_store
+    with job_pg_store._db().transaction() as conn:
+        conn.execute("SELECT pg_advisory_xact_lock(hashtext('leaf-job-inflight:' || %s))",
+                     (row["tenant_id"],))
+        existing = conn.execute(
+            "SELECT job_id, submission_fingerprint FROM async_jobs "
+            "WHERE tenant_id = %s AND project_id IS NOT DISTINCT FROM %s AND idempotency_key = %s",
+            (row["tenant_id"], row["project_id"], row["idempotency_key"]),
+        ).fetchone()
+        if existing is not None:
+            if existing["submission_fingerprint"] != row["submission_fingerprint"]:
+                raise ValueError("idempotency key already exists with different run input")
+            return str(existing["job_id"]), False
+        in_flight = int(conn.execute(
+            "SELECT count(*) AS count FROM async_jobs WHERE tenant_id = %s "
+            "AND status IN ('submitted','running')", (row["tenant_id"],),
+        ).fetchone()["count"])
+        if in_flight >= max_inflight:
+            raise TenantInflightCapExceeded(row["tenant_id"], max_inflight, in_flight)
+        conn.execute(
+            "INSERT INTO async_jobs "
+            "(job_id, tenant_id, tool, params_json, dwg, status, progress, "
+            "created_at, updated_at, execution_json, org_id, project_id, "
+            "authority_mode, idempotency_key, submission_fingerprint, dwg_version) "
+            "VALUES (%(job_id)s, %(tenant_id)s, %(tool)s, %(params)s::jsonb, %(dwg)s, "
+            "'submitted', 'queued', %(created_at)s, %(created_at)s, %(execution)s::jsonb, "
+            "%(org_id)s, %(project_id)s, %(authority_mode)s, %(idempotency_key)s, "
+            "%(submission_fingerprint)s, %(dwg_version)s)", row)
+        return row["job_id"], True
+
+
 def _terminal_fingerprint(status: str, result_env: Optional[Dict[str, Any]],
                           error: Optional[Dict[str, Any]],
                           provenance: Optional[Dict[str, Any]]) -> str:
@@ -1038,6 +1150,19 @@ def entity_scope_context(job_id: str) -> Optional[Dict[str, Any]]:
     if "entity_scope" not in execution:
         return None
     return validate_binding(execution["entity_scope"])
+
+
+def solve_scope_context(job_id: str) -> Optional[Dict[str, Any]]:
+    """Read the submission binding on every delivery, including restart recovery."""
+    from solar_proposal_candidate import validate_scope
+    if job_store_mode() == "postgres":
+        execution = _pg_store.execution(job_id)
+    else:
+        rows = _query("SELECT execution_json FROM jobs WHERE job_id = ?", (job_id,))
+        execution = json.loads(rows[0]["execution_json"]) if rows else None
+    if not isinstance(execution, dict):
+        raise ValueError("invalid durable execution")
+    return validate_scope(execution["solve_scope"]) if "solve_scope" in execution else None
 
 
 def completion_context(job_id: str) -> Optional[Dict[str, Any]]:
@@ -1114,9 +1239,15 @@ def _validate_terminal_context(
                 or not isinstance(cloud_service, dict)
                 or not cloud_service.get("tenant_id") or not job_id):
             raise ValueError("cloud proposal requires non-APS cloud service execution")
-        receipt = proposal_provenance(
-            (result_env or {}).get("result"), durable_params,
-            cloud_service["tenant_id"], job_id)
+        if "solve_scope" in execution:
+            from solar_proposal_candidate import bound_provenance
+            receipt = bound_provenance(
+                (result_env or {}).get("result"), durable_params,
+                cloud_service["tenant_id"], job_id, execution["solve_scope"])
+        else:
+            receipt = proposal_provenance(
+                (result_env or {}).get("result"), durable_params,
+                cloud_service["tenant_id"], job_id)
         if any(provenance.get(key) != value for key, value in receipt.items()):
             raise ValueError("cloud proposal provenance does not match broker receipt")
     elif is_local_graph_commit(execution.get("tool") or {}):
@@ -1539,6 +1670,7 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
 
     try:
         entity_scope = entity_scope_context(job_id)
+        solve_scope = solve_scope_context(job_id)
     except (ValueError, TypeError):
         _finish(job_id, "failed", started, worker_id=worker_id,
                 error=error_obj(ErrorCode.INTERNAL, "invalid durable entity scope", False),
@@ -1574,6 +1706,7 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
                 # broker, so a tab closed mid-run has an id to cancel.
                 job_id=job_id,
                 **({"entity_scope": entity_scope} if entity_scope is not None else {}),
+                **({"solve_scope": solve_scope} if solve_scope is not None else {}),
             )
         except Exception as exc:  # noqa: BLE001
             holder["exc"] = exc
@@ -1627,13 +1760,19 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
                 provenance={"attempt": attempt, "execution_path": "local"})
         return
     if env.get("ok"):
+        cloud_proposal = is_cloud_proposal(tool)
         provenance = {"attempt": attempt, "execution_path": "cloud" if (
             aps_live or is_cloud_proposal(tool)) else "local"}
-        if is_cloud_proposal(tool):
+        if cloud_proposal:
             from leaf_cloud_client import proposal_provenance
 
             try:
-                provenance.update(proposal_provenance(env.get("result"), params, str(tenant_id), job_id))
+                if solve_scope is not None:
+                    from solar_proposal_candidate import bound_provenance
+                    provenance.update(bound_provenance(
+                        env.get("result"), params, str(tenant_id), job_id, solve_scope))
+                else:
+                    provenance.update(proposal_provenance(env.get("result"), params, str(tenant_id), job_id))
             except ValueError:
                 _finish(job_id, "failed", started, worker_id=worker_id,
                         error=error_obj(ErrorCode.INTERNAL, "cloud proposal terminal proof rejected", False),
@@ -1685,6 +1824,15 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
             except ValueError:
                 _finish(job_id, "failed", started, worker_id=worker_id,
                         error=error_obj(ErrorCode.INTERNAL, "graph commit terminal proof rejected", False),
+                        provenance=provenance)
+            return
+        if cloud_proposal:
+            try:
+                _finish(job_id, "complete", started, result_env=env, worker_id=worker_id,
+                        provenance=provenance)
+            except ValueError:
+                _finish(job_id, "failed", started, worker_id=worker_id,
+                        error=error_obj(ErrorCode.INTERNAL, "cloud proposal terminal proof rejected", False),
                         provenance=provenance)
             return
         _finish(job_id, "complete", started, result_env=env, worker_id=worker_id,
