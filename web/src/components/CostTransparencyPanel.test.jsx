@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import CostTransparencyPanel from './CostTransparencyPanel.jsx'
 import { config, getCost, getUsage } from '../api.js'
 
-const title = 'What it costs to run Leaf'
+const title = 'What Leaf costs to operate'
 const copy = 'This page shows what Leaf actually costs to run and your share of it. It is not a bill and does not change your plan, quotas, or limits.'
 const fixture = {
   period: '2026-09', publication_id: 'pub-1', published_at: '2026-09-28T12:00:00Z',
@@ -37,10 +37,22 @@ function respond(body = fixture) {
 async function openPanel() {
   render(<CostTransparencyPanel />)
   fireEvent.click(await screen.findByRole('button', { name: title }))
+  await waitFor(() => expect(screen.queryByText('Loading costs…')).not.toBeInTheDocument())
   return screen.getByRole('region', { name: title })
 }
 
 describe('cost transparency', () => {
+  it.each(['success', 'failure-with-retry', 'unpublished', 'unreadable'])('has no button name matching run in the %s state', async (state) => {
+    const fetchMock = respond(state === 'unpublished' || state === 'unreadable'
+      ? { ...fixture, publication_id: null, resources: [], degraded_mode: state === 'unreadable' }
+      : fixture)
+    if (state === 'failure-with-retry') fetchMock.mockRejectedValueOnce(new TypeError('offline'))
+    await openPanel()
+    expect(screen.getByRole('button', { name: title })).toBeInTheDocument()
+    if (state === 'failure-with-retry') expect(screen.getByRole('button', { name: 'Retry costs' })).toBeInTheDocument()
+    expect(screen.queryAllByRole('button', { name: /run/i })).toHaveLength(0)
+  })
+
   it('shows only the caller’s use and aggregate shares with non-billing copy', async () => {
     respond()
     const panel = await openPanel()
@@ -69,6 +81,7 @@ describe('cost transparency', () => {
     expect(screen.getByText(/Missing sources: aws-storage\. Published: 2026-09-28T12:00:00Z/)).toBeInTheDocument()
     expect(panel.textContent).not.toContain('other-private-tenant')
     expect(panel.textContent).not.toContain('my-tenant')
+    expect(panel.textContent).not.toMatch(/[\u2013\u2014]/)
     expect(screen.getByRole('region', { name: 'Resource costs' })).toHaveAttribute('tabindex', '0')
   })
 
@@ -81,23 +94,66 @@ describe('cost transparency', () => {
   it('shows the empty publication and requests a previous month', async () => {
     const fetchMock = respond({ ...fixture, publication_id: null, resources: [] })
     await openPanel()
-    expect(screen.getByText('The first monthly publication has not been made yet.')).toBeInTheDocument()
+    expect(screen.getByText('The publication for this month has not been made yet.')).toBeInTheDocument()
+    expect(screen.queryByText(/first|unreadable/i)).not.toBeInTheDocument()
     expect(screen.queryByRole('table')).not.toBeInTheDocument()
     expect(screen.getByLabelText('Month')).toHaveValue(new Date().toISOString().slice(0, 7))
     fireEvent.change(screen.getByLabelText('Month'), { target: { value: '2025-01' } })
     await waitFor(() => expect(fetchMock).toHaveBeenLastCalledWith(
       `${config.apiBase}/api/cost?period=2025-01`, expect.any(Object),
     ))
-    await screen.findByText('The first monthly publication has not been made yet.')
+    await screen.findByText('The publication for this month has not been made yet.')
     fireEvent.keyDown(screen.getByLabelText('Month'), { key: 'Escape' })
     expect(screen.queryByRole('region', { name: title })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: title })).toHaveFocus()
   })
 
-  it('hides the entry when getCost returns null', async () => {
-    respond(null)
-    await act(async () => { render(<CostTransparencyPanel />) })
-    expect(screen.queryByRole('button', { name: title })).not.toBeInTheDocument()
+  it.each(['null', 'offline', '503'])('keeps the entry and retries after %s', async (failure) => {
+    const fetchMock = respond()
+    if (failure === 'offline') fetchMock.mockRejectedValueOnce(new TypeError('offline'))
+    else fetchMock.mockResolvedValueOnce(new Response(failure === 'null' ? 'null' : '{}', { status: failure === '503' ? 503 : 200 }))
+    await openPanel()
+    expect(screen.getByRole('button', { name: title })).toBeInTheDocument()
+    expect(screen.getByText('Costs are unavailable for this month.')).toBeInTheDocument()
+    expect(screen.queryByText(/has not been made yet/)).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Retry costs' }))
+    await screen.findByRole('table')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(fetchMock.mock.calls[1][0]).toBe(fetchMock.mock.calls[0][0])
+    expect(screen.queryByRole('button', { name: 'Retry costs' })).not.toBeInTheDocument()
+  })
+
+  it('distinguishes an unreadable publication from an unpublished month', async () => {
+    respond({ ...fixture, publication_id: null, degraded_mode: true, resources: [] })
+    const panel = await openPanel()
+    expect(screen.getByText('Cost data for this month is unreadable. Publication details are unavailable.')).toBeInTheDocument()
+    expect(screen.queryByText(/has not been made yet/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('table')).not.toBeInTheDocument()
+    expect(panel.textContent).not.toMatch(/[\u2013\u2014]/)
+  })
+
+  it.each(['tenant_api_key', 'unknown', 'mixed', null])('labels payer %s without claiming plan coverage', async (payer) => {
+    respond({ ...fixture, own_use: { ...fixture.own_use, llm: { ...fixture.own_use.llm, payer } } })
+    await openPanel()
+    expect(screen.queryByText('Covered by your Claude plan')).not.toBeInTheDocument()
+    expect(screen.getByText(payer === 'tenant_api_key' ? 'Paid through your own API key' : 'Payer may vary or is unknown')).toBeInTheDocument()
+  })
+
+  it.each(['partial', 'unknown', 'complete'])('shows incomplete own-use coverage: %s', async (coverage) => {
+    const own_use = Object.fromEntries(['llm', 'cad', 'marathon'].map((key) => [key, { ...fixture.own_use[key], coverage }]))
+    respond({ ...fixture, own_use })
+    await openPanel()
+    for (const label of ['LLM', 'CAD', 'Marathon']) {
+      if (coverage === 'complete') expect(screen.queryByText(new RegExp(`${label} use coverage:`))).not.toBeInTheDocument()
+      else expect(screen.getByText(new RegExp(`${label} use coverage: ${coverage}`))).toBeInTheDocument()
+    }
+  })
+
+  it('shows unknown coverage when own use is unavailable', async () => {
+    respond({ ...fixture, own_use: null, degraded_mode: true })
+    await openPanel()
+    expect(screen.getAllByText(/use coverage: unknown/)).toHaveLength(3)
+    expect(screen.getByRole('table')).toBeInTheDocument()
   })
 
   it('hides mock mode without making a request', async () => {

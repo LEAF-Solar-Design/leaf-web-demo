@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib.util
 import hashlib
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -760,6 +761,47 @@ def _usage_bucket(rows: List[Any]) -> Dict[str, Any]:
         "cost_tokens": cost_tokens,
         "usd_est": round(usd_est, 6),
     }
+
+
+MAX_USAGE_ROWS = 10000
+
+
+def usage_rows_for_period(
+    tenant_id: str, period: str,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Read one tenant's UTC month, with a hard cap and overflow evidence."""
+    tenant_id_validator.validate_tenant_id(tenant_id)
+    if not isinstance(period, str) or not re.fullmatch(r"[0-9]{4}-(0[1-9]|1[0-2])", period):
+        raise ValueError("period must be YYYY-MM")
+    year, month = map(int, period.split("-"))
+    start = datetime(year, month, 1, tzinfo=timezone.utc)
+    end = datetime(year + (month == 12), month % 12 + 1, 1, tzinfo=timezone.utc)
+    db, _counter_type = _load_platform()
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            SELECT tenant_id, ts, record FROM agent_usage_turns
+            WHERE tenant_id = %(tenant_id)s
+              AND record->>'kind' = 'turn'
+              AND ts >= %(start)s AND ts < %(end)s
+            ORDER BY ts, usage_key
+            LIMIT %(limit)s
+            """,
+            {"tenant_id": tenant_id, "start": start, "end": end,
+             "limit": MAX_USAGE_ROWS + 1},
+        )
+        rows = cur.fetchall()
+    result = []
+    for row in rows[:MAX_USAGE_ROWS]:
+        record = row["record"]
+        result.append({
+            "kind": "turn", "tenant_id": row["tenant_id"], "ts": row["ts"],
+            **{key: record.get(key) for key in (
+                "tokens_in", "tokens_out", "cache_read_tokens",
+                "cache_creation_tokens", "usd_est", "grant_kind",
+            )},
+        })
+    return result, len(rows) > MAX_USAGE_ROWS
 
 
 def aggregate_usage(tenant_id: str) -> Dict[str, Any]:

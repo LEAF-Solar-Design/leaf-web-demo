@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { getCost } from '../api.js'
 import './CostTransparencyPanel.css'
 
-const TITLE = 'What it costs to run Leaf'
+const TITLE = 'What Leaf costs to operate'
 const COPY = 'This page shows what Leaf actually costs to run and your share of it. It is not a bill and does not change your plan, quotas, or limits.'
 const dimensions = [['development', 'Development'], ['ci', 'CI'], ['fleet', 'Fleet'], ['unattributed', 'Unattributed']]
 
@@ -39,6 +39,7 @@ export default function CostTransparencyPanel({ mock = false }) {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(false)
   const [open, setOpen] = useState(false)
+  const [retry, setRetry] = useState(0)
   const trigger = useRef(null)
   const closeButton = useRef(null)
 
@@ -51,14 +52,14 @@ export default function CostTransparencyPanel({ mock = false }) {
       if (active) setData(null)
     }).finally(() => { if (active) setLoading(false) })
     return () => { active = false }
-  }, [mock, period])
+  }, [mock, period, retry])
 
   useEffect(() => {
     if (open) closeButton.current?.focus()
   }, [open])
 
   const close = () => { setOpen(false); trigger.current?.focus() }
-  if (mock || (!data && !open)) return null
+  if (mock) return null
   const resources = data?.resources || []
   const own = data?.own_use
   return (
@@ -76,18 +77,24 @@ export default function CostTransparencyPanel({ mock = false }) {
             const value = event.target.value
             if (/^\d{4}-(0[1-9]|1[0-2])$/.test(value) && value <= currentMonth) setPeriod(value)
           }} /></label>
-          {loading ? <p role="status">Loading costs…</p> : !data ? <p role="status">Costs are unavailable for this month.</p> : <>
+          {loading ? <p role="status">Loading costs…</p> : !data ? <>
+            <p role="status">Costs are unavailable for this month.</p>
+            <button type="button" className="chip-neutral" onClick={() => setRetry((value) => value + 1)}>Retry costs</button>
+          </> : <>
             <h3>Your use</h3>
+            {[['llm', 'LLM'], ['cad', 'CAD'], ['marathon', 'Marathon']].map(([key, label]) => own?.[key]?.coverage !== 'complete' && (
+              <p key={key}>{label} use coverage: {own?.[key]?.coverage === 'partial' ? 'partial. Some use may be missing.' : 'unknown. Complete use could not be determined.'}</p>
+            ))}
             <dl className="cost-use">
               <dt>LLM turns</dt><dd>{quantity(own?.llm?.turns)}</dd>
               <dt>Tokens</dt><dd>Input: {quantity(own?.llm?.tokens?.input)} · Output: {quantity(own?.llm?.tokens?.output)} · Cache read: {quantity(own?.llm?.tokens?.cache_read)} · Cache write: {quantity(own?.llm?.tokens?.cache_write)}</dd>
-              <dt>LLM API-equivalent value</dt><dd>{money(own?.llm?.usd_est)} {own?.llm?.payer === 'tenant_plan' && <span>Covered by your Claude plan</span>}</dd>
+              <dt>LLM API-equivalent value</dt><dd>{money(own?.llm?.usd_est)} <span>{own?.llm?.payer === 'tenant_plan' ? 'Covered by your Claude plan' : own?.llm?.payer === 'tenant_api_key' ? 'Paid through your own API key' : 'Payer may vary or is unknown'}</span></dd>
               <dt>CAD engine time and runs</dt><dd>{quantity(own?.cad?.engine_seconds)} seconds · {quantity(own?.cad?.runs)} runs</dd>
               <dt>Marathon runs</dt><dd>{quantity(own?.marathon?.runs)} <small>not added to totals</small></dd>
               <dt>Storage</dt><dd>Unavailable. Direct storage use is not published.</dd>
             </dl>
             <h3>Leaf's costs and your share</h3>
-            {!data.publication_id ? <p>The first monthly publication has not been made yet.</p> : <>
+            {!data.publication_id ? <p>{data.degraded_mode ? 'Cost data for this month is unreadable. Publication details are unavailable.' : 'The publication for this month has not been made yet.'}</p> : <>
               <div className="cost-table-scroll" role="region" aria-label="Resource costs" tabIndex={0}>
                 <table>
                   <caption>Monthly resource use and costs (USD)</caption>
@@ -102,7 +109,7 @@ export default function CostTransparencyPanel({ mock = false }) {
                     <td>{dimensions.map(([key, label]) => <div key={key}>{label}: {share(row.leaf_share?.[key])}</div>)}</td>
                     <td>{share(row.other_customers_share)}</td>
                   </tr>)}</tbody>
-                  <tfoot><tr><th scope="row">Totals</th><td>—</td><td>{money(data.totals?.gross_cost_usd)}</td><td>{money(data.totals?.credits_usd)}</td><td>—</td><td>{money(sum(resources.map((row) => row.your_implied_cost_usd)))}</td><td>—</td><td>—</td></tr></tfoot>
+                  <tfoot><tr><th scope="row">Totals</th><td>Not applicable</td><td>{money(data.totals?.gross_cost_usd)}</td><td>{money(data.totals?.credits_usd)}</td><td>Not applicable</td><td>{money(sum(resources.map((row) => row.your_implied_cost_usd)))}</td><td>Not applicable</td><td>Not applicable</td></tr></tfoot>
                 </table>
               </div>
               <p className="cost-footnote">Missing sources: {data.missing_sources?.length ? data.missing_sources.join(', ') : 'None reported'}. Published: {data.published_at || 'Unavailable'}.</p>
