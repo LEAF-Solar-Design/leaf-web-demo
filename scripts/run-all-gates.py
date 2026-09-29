@@ -574,6 +574,11 @@ def build_suites() -> List[Suite]:
         # Auto-fill plan preview (2026-09-29, sf-w2-autofill-plan): the solver's plan from the persisted graph, proven against solar-autofill. COUNTED: 38 tests + 73 more parametrizations = 111.
         Suite("server-solar-tool-solar-autofill-plan", "server tests/test_solar_tool_solar_autofill_plan.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_autofill_plan.py"), 111),
+        # Guardrails as a W2 registry graph read (2026-09-29, sf-w2-presets-guardrails): the plugin's 14
+        # rules on the stored graph plus the recorded g1/g2 rule set replayed through the tool's row path.
+        # Inputs are authored in the file, so the floor is the exact count on every runner. PLANNED: 59.
+        Suite("server-solar-tool-guardrails-read", "server tests/test_solar_tool_guardrails_read.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_guardrails_read.py"), 59),
         # W5 inverter family (2026-09-24, contract G35): the shared state and delta module and the
         # device, string and output engines (literal ports of the plugin's inverter commands). Inputs
         # are authored in each file, so each floor is the exact count on every runner. MEASURED.
