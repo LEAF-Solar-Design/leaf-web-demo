@@ -405,6 +405,7 @@
     "server-solar-ground-topology",
     "server-solar-guardrails",
     "server-solar-harness-bom",
+    "server-solar-import-sources",
     "server-solar-inverter-cabling",
     "server-solar-inverter-combiner",
     "server-solar-inverter-devices",

@@ -39,12 +39,15 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 import checkout_capability
 import deps
+import entitlements
 import guest_uploads
 import jobs
 import solar_artifacts
+import solar_import_sources
 import write_loop
 from envelopes import ErrorCode, err_envelope, error_obj, error_response, with_envelope_fields
 
@@ -282,6 +285,80 @@ def get_artifact(drawing_id: str, artifact_id: str, request: Request, current: b
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=headers)
     return Response(content=content, media_type=meta["media_type"], headers=headers)
+
+
+def _import_solaredge(tenant_id, drawing_id, data, project_id):
+    try:
+        backend = _backend(tenant_id)
+    except (RuntimeError, OSError):
+        raise solar_import_sources.ImportSourceError("IMPORT_STORE_UNAVAILABLE") from None
+    return solar_import_sources.import_solaredge_source(
+        backend, tenant_id, drawing_id, data, project_id=project_id)
+
+
+@router.post("/api/drawings/{drawing_id}/imports/solaredge-pdf")
+async def import_solaredge_pdf(drawing_id: str, request: Request, project_id: Optional[str] = None,
+                               tenant=Depends(deps.require_active_tenant)):
+    """Attach a bounded immutable SolarEdge source to the current Solar revision."""
+    def refused(reason):
+        reasons = {
+            "IMPORT_DRAWING_ID_INVALID": (400, ErrorCode.BAD_PARAMS, False),
+            "IMPORT_PROJECT_ID_INVALID": (400, ErrorCode.BAD_PARAMS, False),
+            "IMPORT_MEDIA_TYPE_REFUSED": (415, ErrorCode.BAD_PARAMS, False),
+            "IMPORT_PDF_EMPTY": (400, ErrorCode.BAD_PARAMS, False),
+            "IMPORT_NOT_A_PDF": (400, ErrorCode.BAD_PARAMS, False),
+            "IMPORT_PDF_MALFORMED": (400, ErrorCode.BAD_PARAMS, False),
+            "IMPORT_PDF_ENCRYPTED": (400, ErrorCode.BAD_PARAMS, False),
+            "IMPORT_PDF_NO_PAGES": (400, ErrorCode.BAD_PARAMS, False),
+            "IMPORT_PDF_TOO_MANY_PAGES": (400, ErrorCode.BAD_PARAMS, False),
+            "IMPORT_PDF_TOO_LARGE": (413, ErrorCode.BAD_PARAMS, False),
+            "IMPORT_DRAWING_NOT_FOUND": (404, ErrorCode.BAD_PARAMS, False),
+            "IMPORT_GRAPH_REQUIRED": (409, ErrorCode.BAD_PARAMS, False),
+            "IMPORT_PROJECT_MISMATCH": (409, ErrorCode.BAD_PARAMS, False),
+            "IMPORT_QUOTA_EXCEEDED": (429, ErrorCode.QUOTA_EXCEEDED, False),
+            "IMPORT_WRITES_DRAINED": (503, ErrorCode.INTERNAL, True),
+            "IMPORT_STORE_UNAVAILABLE": (503, ErrorCode.INTERNAL, True),
+            "IMPORT_SOURCE_CONFLICT": (500, ErrorCode.INTERNAL, False),
+            "IMPORT_SOURCE_INVALID": (500, ErrorCode.INTERNAL, False),
+        }
+        if reason not in reasons:
+            reason = "IMPORT_SOURCE_INVALID"
+        status, code, retryable = reasons[reason]
+        env = err_envelope(code, reason, retryable=retryable)
+        env["error"]["reason_code"] = reason
+        return JSONResponse(status_code=status, content=env)
+
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", drawing_id):
+        return refused("IMPORT_DRAWING_ID_INVALID")
+    if project_id is not None and not 1 <= len(project_id) <= 100:
+        return refused("IMPORT_PROJECT_ID_INVALID")
+    tier = entitlements.resolve_tier(tenant)
+    try:
+        roles, elevated = entitlements.resolve_roles(tenant)
+        if not entitlements.entitlements_for(tier, roles, elevated).get("upload", False):
+            return entitlements.entitlement_denied_response("upload", tier)
+    except entitlements.EntitlementsError:
+        return entitlements.policy_unavailable_response("upload", tier)
+    if write_loop.drawing_mutations_refusal() is not None:
+        return refused("IMPORT_WRITES_DRAINED")
+    if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/pdf":
+        return refused("IMPORT_MEDIA_TYPE_REFUSED")
+    length = request.headers.get("content-length", "")
+    if re.fullmatch(r"[0-9]+", length):
+        stripped = length.lstrip("0")
+        if len(stripped) > 12 or int(stripped or "0") > solar_import_sources.MAX_IMPORT_PDF_BYTES:
+            return refused("IMPORT_PDF_TOO_LARGE")
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > solar_import_sources.MAX_IMPORT_PDF_BYTES:
+            return refused("IMPORT_PDF_TOO_LARGE")
+        body.extend(chunk)
+    data = bytes(body)
+    try:
+        result = await run_in_threadpool(_import_solaredge, str(tenant), drawing_id, data, project_id)
+    except solar_import_sources.ImportSourceError as exc:
+        return refused(exc.code)
+    return JSONResponse(content=with_envelope_fields(result))
 
 
 @router.get("/api/drawings/{drawing_id}/summary")

@@ -602,6 +602,8 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_solar_solaredge_parse.py"), 19),
         Suite("server-solar-solaredge-import", "server tests/test_solar_solaredge_import.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_solaredge_import.py"), 11),
+        Suite("server-solar-import-sources", "server tests/test_solar_import_sources.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_import_sources.py"), 73),
         Suite("server-solar-guardrails", "server tests/test_solar_guardrails.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_guardrails.py"), 17),  # R31b: two intake/branch cases
         Suite("server-solar-pile-block-mapping", "server tests/test_solar_pile_block_mapping.py",

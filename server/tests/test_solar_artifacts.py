@@ -179,7 +179,7 @@ def test_artifacts_size_limit(backend, monkeypatch, size, limit, accepted):
 
 @pytest.mark.parametrize("changes,code", [
     ({"media_type": "text/html"}, "ARTIFACT_MEDIA_TYPE_REFUSED"),
-    ({"media_type": "application/pdf"}, "ARTIFACT_MEDIA_TYPE_REFUSED"),
+    ({"media_type": "application/zip"}, "ARTIFACT_MEDIA_TYPE_REFUSED"),
     *[({"filename": name}, "ARTIFACT_FILENAME_INVALID") for name in
       ["strings.xlsx", "../x.csv", ".csv", "a b.csv", "strings.CSV", "a" * 121 + ".csv", "a..b.csv", 7]],
     ({"content": b""}, "ARTIFACT_INVALID"),
