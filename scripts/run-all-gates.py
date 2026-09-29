@@ -645,6 +645,8 @@ def build_suites() -> List[Suite]:
         # sf-solar-module-power: confirmed module power, zone coverage, and frame refresh.
         Suite("server-w1-module-power", "server tests/test_w1_module_power.py", "pytest", SERVER,
               _py_pytest("tests/test_w1_module_power.py"), 10),
+        Suite("server-w1-rooftop-acceptance", "server tests/test_w1_rooftop_acceptance.py", "pytest", SERVER,
+              _py_pytest("tests/test_w1_rooftop_acceptance.py"), 6),
         Suite("server-w1-solar-interchange", "server tests/test_w1_solar_interchange.py", "pytest", SERVER,
               _py_pytest("tests/test_w1_solar_interchange.py"), 19),
         Suite("server-w1-solve-commit", "server tests/test_w1_solve_commit.py", "pytest", SERVER,

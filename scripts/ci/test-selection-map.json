@@ -486,6 +486,7 @@
     "server-w1-sizing-groups",
     "server-w1-project-settings",
     "server-w1-module-power",
+    "server-w1-rooftop-acceptance",
     "server-w1-solar-apply-plan",
     "server-w1-solar-interchange",
     "server-w1-solve-commit",
