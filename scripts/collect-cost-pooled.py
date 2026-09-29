@@ -52,7 +52,7 @@ def main(argv=None, *, client=None, stdout=None, now=None, agent_rows=None, brok
         if agent_rows is None:
             agent_rows = direct_usage.load_agent_rows()
         if broker_rows is None:
-            broker_rows = direct_usage.load_broker_rows()
+            broker_rows = direct_usage.load_broker_rows(period=period)
         activity = pooled.tenant_activity_from_rows(period, agent_rows, broker_rows)
         responses = pooled.fetch_environment_split(client if client is not None else _ce_client(), period,
                                                    today=now.astimezone(timezone.utc).date())

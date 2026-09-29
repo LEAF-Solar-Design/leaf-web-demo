@@ -14,6 +14,7 @@ import sys
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -250,3 +251,146 @@ def test_script_prints_json_lines():
     assert [o["resource_id"] for o in lines] == [EC2_ID]  # EFS has its own collector
     assert lines[0]["usages"] == {"tenant_a|": "2", "tenant_b|": "4"}
     assert script.main(["--period", "2026-13"], client=client, stdout=io.StringIO()) == 2
+
+
+def _publish_setup(monkeypatch, agent_rows):
+    from cost_meter import direct_usage, internal, publish_main, vendors
+
+    class PublishCostExplorer:
+        def __init__(self):
+            self.calls = []
+
+        def get_cost_and_usage(self, **kwargs):
+            self.calls.append(kwargs)
+            if kwargs["GroupBy"][1]["Type"] == "TAG":
+                return _page([_group(EC2, "staging", "2"),
+                              _group(EC2, "production", "6"),
+                              _group(EC2, "", "2"),
+                              _group("CodeBuild", "production", "4")])
+            groups = []
+            for service, amount in ((EC2, "10"), ("CodeBuild", "4")):
+                group = _group(service, "", amount)
+                group["Keys"][1] = "Usage"
+                groups.append(group)
+            return _page(groups)
+
+    client = PublishCostExplorer()
+    monkeypatch.setitem(sys.modules, "boto3", SimpleNamespace(client=lambda *a, **k: client))
+    monkeypatch.setattr(direct_usage, "load_agent_rows", lambda: agent_rows)
+    broker_periods = []
+
+    def broker_rows(*, period):
+        broker_periods.append(period)
+        return []
+
+    monkeypatch.setattr(direct_usage, "load_broker_rows", broker_rows)
+    monkeypatch.setattr(vendors, "load_vendor_config", lambda: None)
+    monkeypatch.setattr(vendors, "vendor_observations", lambda *a: [])
+    config = internal.validate_internal_config({"version": 1, "entries": [{
+        "resource_id": "aws:codebuild", "share": {"leaf|ci": "1"},
+        "basis": "Builds are Leaf CI.", "status": "MEASURED",
+    }]})
+    monkeypatch.setattr(internal, "load_internal_config", lambda: config)
+    monkeypatch.delenv("LEAF_COST_STORAGE_SNAPSHOTS", raising=False)
+    return publish_main, client, broker_periods
+
+
+def _dry_publish(publish_main, **kwargs):
+    out = io.StringIO()
+    assert publish_main.main(
+        ["--period", PERIOD, "--dry-run"], stdout=out,
+        now=datetime(2026, 9, 3, tzinfo=timezone.utc), environ={}, **kwargs) == 0
+    return json.loads(out.getvalue())
+
+
+def test_default_publish_collects_pooled_and_internal_wins(monkeypatch):
+    publish_main, client, periods = _publish_setup(monkeypatch, [
+        {"kind": "turn", "tenant_id": "tenant_a", "ts": "2026-08-01T10:00:00Z"},
+        {"kind": "turn", "tenant_id": "tenant_b", "ts": "2026-08-01T10:00:00Z"},
+        {"kind": "turn", "tenant_id": "tenant_b", "ts": "2026-08-02T10:00:00Z"},
+        {"kind": "turn", "tenant_id": "tenant_other_month", "ts": "2026-07-01T10:00:00Z"},
+    ])
+    assert publish_main.DEFAULT_COLLECTORS["pooled-aws"] is publish_main._collect_pooled
+    result = _dry_publish(publish_main)
+    assert "pooled-aws" in result["sources"]
+    assert "agent-activity" not in result["missing_sources"]
+    assert periods == [PERIOD, PERIOD]
+    assert any(call["GroupBy"][1] == {"Type": "TAG", "Key": "Environment"}
+               for call in client.calls)
+    resources = {r["resource_period"]["resource_id"]: r for r in result["resources"]}
+    ec2 = resources[EC2_ID]
+    assert ec2["resource_period"]["unit"] == "usd-by-environment"
+    assert Decimal(ec2["resource_period"]["gross_cost_usd"]) == Decimal("10")
+    assert {(s["participant_id"], s["dimension"]): Decimal(s["participant_usage"])
+            for s in ec2["shares"]} == {
+                ("leaf", "development"): Decimal("2"),
+                ("leaf", "unattributed"): Decimal("2"),
+                ("tenant_a", ""): Decimal("2"), ("tenant_b", ""): Decimal("4"),
+            }
+    assert all(s["status"] == ESTIMATED for s in ec2["shares"])
+    codebuild = resources["aws:codebuild"]["shares"]
+    assert len(codebuild) == 1
+    assert (codebuild[0]["participant_id"], codebuild[0]["dimension"],
+            codebuild[0]["status"]) == ("leaf", "ci", "MEASURED")
+    for resource in resources.values():
+        assert sum(Decimal(s["usage_share"]) for s in resource["shares"]) == Decimal(1)
+
+
+def test_publish_records_missing_agent_activity(monkeypatch):
+    publish_main, _, _ = _publish_setup(monkeypatch, None)
+    result = _dry_publish(publish_main)
+    assert "agent-activity" in result["missing_sources"]
+    assert "pooled-aws" in result["sources"]
+    ec2 = next(r for r in result["resources"] if r["resource_period"]["resource_id"] == EC2_ID)
+    assert {(s["participant_id"], s["dimension"]): Decimal(s["participant_usage"])
+            for s in ec2["shares"]} == {
+                ("leaf", "development"): Decimal("2"),
+                ("leaf", "unattributed"): Decimal("8"),
+            }
+
+
+def test_pooled_failure_does_not_block_publish(monkeypatch):
+    publish_main, _, _ = _publish_setup(monkeypatch, [])
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("Cost Explorer tag query unavailable")
+
+    monkeypatch.setattr(pooled, "fetch_environment_split", fail)
+    result = _dry_publish(publish_main)
+    assert "pooled-aws" in result["missing_sources"]
+    assert "pooled-aws" not in result["sources"]
+    assert "aws-cost-explorer" in result["sources"]
+    assert "internal-resources" in result["sources"]
+    assert any(r["resource_period"]["resource_id"] == EC2_ID for r in result["resources"])
+
+
+def test_disable_aws_also_disables_pooled(monkeypatch):
+    publish_main, client, _ = _publish_setup(monkeypatch, [])
+    out = io.StringIO()
+    assert publish_main.main(
+        ["--period", PERIOD, "--dry-run"], stdout=out,
+        now=datetime(2026, 9, 3, tzinfo=timezone.utc),
+        environ={"LEAF_COST_DISABLE_AWS": "1"}) == 0
+    result = json.loads(out.getvalue())
+    assert {"aws-cost-explorer", "pooled-aws"} <= set(result["missing_sources"])
+    assert client.calls == []
+
+
+def test_script_passes_period_to_postgres_broker_store(monkeypatch):
+    script = _load_script()
+    periods = []
+
+    def usage_rows_for_period(period):
+        periods.append(period)
+        return [{"tenant_id": "tenant_pg", "status": "ok",
+                 "inserted_at": datetime(2026, 8, 5, tzinfo=timezone.utc)}], False
+
+    store = SimpleNamespace(usage_rows_for_period=usage_rows_for_period)
+    monkeypatch.setitem(sys.modules, "broker_pg_store", SimpleNamespace(get_store=lambda: store))
+    monkeypatch.setenv("LEAF_BROKER_STORE", "postgres")
+    out = io.StringIO()
+    assert script.main(
+        ["--period", PERIOD], client=FakeCostExplorer([_page([_group(EC2, "production", "6")])]),
+        stdout=out, now=datetime(2026, 9, 3, tzinfo=timezone.utc), agent_rows=[]) == 0
+    assert periods == [PERIOD]
+    assert json.loads(out.getvalue())["usages"] == {"tenant_pg|": "6"}

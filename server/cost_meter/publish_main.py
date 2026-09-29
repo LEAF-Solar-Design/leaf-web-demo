@@ -13,6 +13,7 @@ Collectors:
   internal-resources  cost_meter/data/cost-internal-resources.yaml
   storage-snapshots   LEAF_COST_STORAGE_SNAPSHOTS (skipped and recorded missing when unset)
   broker-ledger       the broker attribution ledger through direct_usage.load_broker_rows
+  pooled-aws         Environment-tag split weighted by tenant active days
 A collector that fails is reported on stderr and skipped; the publication records
 which sources were missing. A source whose observations do not validate is
 dropped whole, never half-used.
@@ -31,7 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
-from cost_meter import aws_import, direct_usage, internal, publisher, storage, vendors  # noqa: E402
+from cost_meter import aws_import, direct_usage, internal, pooled, publisher, storage, vendors  # noqa: E402
 from cost_meter.ledger import PERIOD_RE  # noqa: E402
 from cost_meter.store import ENV_DIR, CostLedgerStore  # noqa: E402
 
@@ -94,11 +95,42 @@ def _collect_broker(period: str, now: datetime) -> List[dict]:
     return [direct_usage.aps_usage_observation(period, rows)]
 
 
+class _CollectedObservations(list):
+    """Usable observations with explicit gaps in their supporting sources."""
+
+    def __init__(self, observations: List[dict], missing_sources: List[str]):
+        super().__init__(observations)
+        self.missing_sources = missing_sources
+
+
+def _collect_pooled(period: str, now: datetime) -> List[dict]:
+    import boto3
+
+    agent_rows = direct_usage.load_agent_rows()
+    broker_rows = direct_usage.load_broker_rows(period=period)
+    missing = []
+    if agent_rows is None:
+        missing.append("agent-activity")
+    if broker_rows is None:
+        missing.append("broker-ledger")
+    activity = pooled.tenant_activity_from_rows(period, agent_rows, broker_rows)
+    responses = pooled.fetch_environment_split(
+        boto3.client("ce", region_name=CE_REGION), period,
+        today=now.astimezone(timezone.utc).date())
+    observations = pooled.pooled_usage_observations(
+        period, responses, activity, exclude_resource_ids=pooled.DIRECT_COLLECTOR_RESOURCE_IDS)
+    if missing:
+        for observation in observations:
+            observation["coverage"] = "partial"
+    return _CollectedObservations(observations, missing)
+
+
 DEFAULT_COLLECTORS: Dict[str, Collector] = {
     "aws-cost-explorer": _collect_aws,
     "cost-vendors": _collect_vendors,
     "storage-snapshots": _collect_storage,
     "broker-ledger": _collect_broker,
+    "pooled-aws": _collect_pooled,
     "internal-resources": _collect_internal,
 }
 
@@ -151,6 +183,10 @@ def _gather(period: str, now: datetime, collectors: Mapping[str, Collector],
             log(f"publish-cost-ledger: {name} failed: {type(exc).__name__}: {exc}")
             missing.append(name)
             continue
+        for source in getattr(observations, "missing_sources", ()):
+            if source not in missing:
+                missing.append(source)
+            log(f"publish-cost-ledger: {source} missing: {name} activity rows are unreadable")
         take(name, list(observations))
 
     for path in observation_files:
@@ -198,10 +234,12 @@ def main(argv: Optional[List[str]] = None, *, collectors: Optional[Mapping[str, 
             return 2
 
     selected = dict(DEFAULT_COLLECTORS if collectors is None else collectors)
-    if environ.get("LEAF_COST_DISABLE_AWS", "") == "1" and "aws-cost-explorer" in selected:
+    if environ.get("LEAF_COST_DISABLE_AWS", "") == "1":
         def disabled_aws(period: str, now: datetime) -> List[dict]:
             raise SourceMissing("disabled by LEAF_COST_DISABLE_AWS=1")
-        selected["aws-cost-explorer"] = disabled_aws
+        for name in ("aws-cost-explorer", "pooled-aws"):
+            if name in selected:
+                selected[name] = disabled_aws
     observations, used, missing = _gather(
         args.period, now, selected, args.observations, log)
     if not observations:
