@@ -20,6 +20,8 @@ import sys
 import tempfile
 import time
 import urllib.request
+import io
+import zipfile
 
 
 SERVICES = ("app", "broker", "canonical-worker", "harness", "web")
@@ -33,6 +35,15 @@ FRESHNESS = {
     "web": ("WEB_ALPINE_MAIN_APKINDEX_SHA256",),
 }
 TRIXIE = ("TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256", "TRIXIE_DEBIAN_UPDATES_INRELEASE_SHA256")
+
+# Reviewed infrastructure NO_SOURCE loader, normalized to LF (native_release_start.py).
+FORGE_BUILDSPEC_SHA256 = "732f3b630b0ed19cba28ff6f3acefd1ee69afce3a2142a376231af6cd6756e89"
+FORGE_REQUEST_SCHEMA = "leaf.native-release.forge-request.v1"
+FORGE_CONTRACT_REVISION = "b35a1647663c106ec6efdc15b741c0270366de65"
+FORGE_SOLVER_REVISION = "760d3888018f762e0ab8dbe289dae8a2871216ea"
+FORGE_CHECKOUTS = {"source_snapshot": "LEAF_FORGE_SOURCE_DIR",
+                   "contract_snapshot": "LEAF_FORGE_CONTRACT_DIR",
+                   "solver_snapshot": "LEAF_FORGE_SOLVER_DIR"}
 
 
 def _hex(value, length, label):
@@ -437,6 +448,8 @@ def admit_checkout(root: Path, source: str, tree: str) -> None:
 
 def runtime_identity(mode: str, source: str, env: dict, codebuild) -> dict:
     """Bind the running job to its fixed project and least-privilege role."""
+    if any(key.startswith("LEAF_FORGE_") for key in env):
+        raise ValueError("Forge invocation cannot use legacy runtime identity")
     if mode not in ("gate", "release"):
         raise ValueError("unknown native mode")
     project = f"leaf-studio-native-{mode}"
@@ -698,17 +711,263 @@ def produce_release(root: Path, output: Path, request: dict, env: dict, codebuil
                          web=web, solver={"revision": revision, "source_sha256": source_hash}, gate=gate)
 
 
+def forge_runtime_identity(request: dict, env: dict, codebuild) -> dict:
+    """Authenticate the live loader and request before loading any package code."""
+    mode = {"gate": "gate", "publisher": "release"}.get(request.get("mode"))
+    if request.get("schema") != FORGE_REQUEST_SCHEMA or mode is None or env.get("LEAF_NATIVE_MODE") != mode:
+        raise ValueError("Forge schema or mode differs")
+    if any(key.startswith("CODEBUILD_SRC_DIR_") for key in env):
+        raise ValueError("Forge invocation has legacy secondary sources")
+    encoded = base64.b64encode(json.dumps(request, sort_keys=True, separators=(",", ":"),
+                                         allow_nan=False).encode()).decode()
+    if env.get("LEAF_NATIVE_REQUEST_B64") != encoded:
+        raise ValueError("Forge request encoding differs")
+    project = "leaf-studio-native-" + mode
+    prefix = "arn:aws:codebuild:us-east-1:807034087062:"
+    number = env.get("CODEBUILD_BUILD_NUMBER", "")
+    if not number.isdigit() or int(number) <= 0:
+        raise ValueError("Forge build number invalid")
+    identity = _build_identity(dict(project_arn=prefix + "project/" + project,
+                                   build_arn=env.get("CODEBUILD_BUILD_ARN"), build_number=int(number)))
+    build_id = identity["build_arn"].removeprefix(prefix + "build/")
+    if env.get("CODEBUILD_BUILD_ID") != build_id:
+        raise ValueError("Forge execution differs")
+    response = codebuild.batch_get_builds(ids=[identity["build_arn"]])
+    rows = response.get("builds", [])
+    if response.get("buildsNotFound") or len(rows) != 1:
+        raise ValueError("Forge execution is not unique")
+    row = rows[0]
+    expected = dict(arn=identity["build_arn"], id=build_id, projectName=project,
+                    buildNumber=identity["build_number"], buildStatus="IN_PROGRESS",
+                    serviceRole=f"arn:aws:iam::807034087062:role/{project}-role")
+    if (any(row.get(key) != value for key, value in expected.items())
+            or type(row.get("buildNumber")) is not int or row.get("buildComplete") is not False):
+        raise ValueError("Forge running build identity differs")
+    src = row.get("source", {})
+    buildspec = src.get("buildspec")
+    if (src.get("type") != "NO_SOURCE" or src.get("location")
+            or row.get("secondarySources") or row.get("secondarySourceVersions")
+            or not isinstance(buildspec, str)
+            or hashlib.sha256(buildspec.replace("\r\n", "\n").encode()).hexdigest() != FORGE_BUILDSPEC_SHA256):
+        raise ValueError("Forge trusted loader differs")
+    variables = row.get("environment", {}).get("environmentVariables")
+    expected_variables = [{"name": "LEAF_NATIVE_MODE", "value": mode, "type": "PLAINTEXT"},
+                          {"name": "LEAF_NATIVE_REQUEST_B64", "value": encoded, "type": "PLAINTEXT"}]
+    if (not isinstance(variables, list) or len(variables) != 2
+            or any(item not in expected_variables for item in variables)
+            or any(item not in variables for item in expected_variables)):
+        raise ValueError("Forge provider request binding differs")
+    # NO_SOURCE sourceVersion/resolvedSourceVersion are deliberately not Git facts.
+    return identity
+
+
+def load_forge_contract(request: dict, s3):
+    """Read the exact executor package; the snapshot contract pin is legacy-only.
+
+    The authenticated live request binds these bytes. Never import the Forge
+    verifier from a candidate checkout or reinterpret a legacy verifier as Forge.
+    """
+    package = request.get("executor_package")
+    if (not isinstance(package, dict) or set(package) != {"bucket", "key", "version_id", "sha256"}
+            or package["bucket"] != "leaf-developer-platform-artifacts-807034087062-us-east-1"
+            or not isinstance(package["key"], str)
+            or not package["key"].startswith("forge-native-release/packages/")
+            or not package["key"].endswith(".zip")
+            or any(part in ("", ".", "..") for part in package["key"].split("/"))
+            or not isinstance(package["version_id"], str) or package["version_id"] in ("", "null")):
+        raise ValueError("Forge executor package identity invalid")
+    _hex(package["sha256"], 64, "Forge executor package digest")
+    response = s3.get_object(Bucket=package["bucket"], Key=package["key"],
+                             VersionId=package["version_id"], ExpectedBucketOwner="807034087062")
+    limit = 64 * 1024 * 1024
+    body = response["Body"]
+    try:
+        length = response.get("ContentLength")
+        if (type(length) is not int or not 0 < length <= limit
+                or response.get("VersionId") != package["version_id"] or response.get("DeleteMarker")):
+            raise ValueError("Forge executor package object differs")
+        payload = body.read(limit + 1)
+    finally:
+        body.close()
+    if len(payload) != length or hashlib.sha256(payload).hexdigest() != package["sha256"]:
+        raise ValueError("Forge executor package bytes differ")
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        infos = archive.infolist()
+        if (len(infos) > 1024 or len({info.filename for info in infos}) != len(infos)
+                or sum(info.file_size for info in infos) > limit):
+            raise ValueError("Forge package members exceed bounds or repeat")
+        for info in infos:
+            name = info.filename
+            if (not name or "\\" in name or ":" in name
+                    or any(part in ("", ".", "..") for part in name.split("/"))
+                    or (info.external_attr >> 16) & 0o170000 == 0o120000
+                    or info.file_size > 8 * 1024 * 1024):
+                raise ValueError("Forge package member invalid")
+        manifest = json.loads(archive.read("manifest.json"))
+        if manifest.get("schema") != "leaf.staging-rail.package.v1":
+            raise ValueError("Forge package manifest schema differs")
+        _hex(manifest.get("infrastructure_source_commit"), 40, "package infrastructure commit")
+        members = manifest.get("members")
+        if not isinstance(members, dict) or set(members) | {"manifest.json"} != {i.filename for i in infos}:
+            raise ValueError("Forge package manifest members differ")
+        data = {}
+        for name, digest in members.items():
+            data[name] = archive.read(name)
+            if hashlib.sha256(data[name]).hexdigest() != digest:
+                raise ValueError("Forge package member digest differs")
+    bootstrap = {"native_release_bootstrap_sha256": members[".codebuild/forge/native_release_bootstrap.py"],
+                 "forge_source_bootstrap_sha256": members[".codebuild/deploy/forge_source_bootstrap.py"]}
+    member = "scripts/verify_release_provider_evidence.py"
+    name = "leaf_forge_producer_contract_" + members[member]
+    spec = importlib.util.spec_from_loader(name, loader=None, origin=member)
+    contract = importlib.util.module_from_spec(spec)
+    contract.__file__ = member
+    sys.modules[name] = contract
+    try:
+        exec(compile(data[member], member, "exec"), contract.__dict__)
+    finally:
+        sys.modules.pop(name, None)
+    if getattr(contract, "FORGE_REQUEST_SCHEMA", None) != FORGE_REQUEST_SCHEMA:
+        raise ValueError("executor package lacks Forge provider contract")
+    return contract, bootstrap
+
+
+def admit_forge(env: dict, codebuild, s3):
+    """Require the bootstrap seam in full, without GitHub or legacy fallbacks."""
+    required = {*FORGE_CHECKOUTS.values(), "LEAF_FORGE_REQUEST_FILE", "LEAF_FORGE_OUTPUT_DIR"}
+    if any(not env.get(key) for key in required):
+        raise ValueError("Forge bootstrap inputs missing")
+    request_file = Path(env["LEAF_FORGE_REQUEST_FILE"])
+    if request_file.is_symlink() or not request_file.is_file() or request_file.stat().st_size > 16384:
+        raise ValueError("Forge request file invalid")
+    raw = request_file.read_bytes()
+    request = json.loads(raw)
+    if not isinstance(request, dict):
+        raise ValueError("Forge request must be an object")
+    identity = forge_runtime_identity(request, env, codebuild)
+    contract, bootstrap = load_forge_contract(request, s3)
+    request = contract.decode_forge_request(env["LEAF_NATIVE_REQUEST_B64"])
+    if contract.forge_request_bytes(request) != raw:
+        raise ValueError("Forge request file binding differs")
+    if (request["contract_snapshot"]["commit"] != FORGE_CONTRACT_REVISION
+            or request["solver_snapshot"]["commit"] != FORGE_SOLVER_REVISION):
+        raise ValueError("Forge reviewed snapshot pins differ")
+    roots = {}
+    for role, variable in FORGE_CHECKOUTS.items():
+        path = Path(env[variable])
+        if path.is_symlink() or not path.is_dir() or not (path / ".git").exists():
+            raise ValueError("Forge materialized checkout missing: " + role)
+        roots[role] = path.resolve(strict=True)
+        snapshot = request[role]
+        admit_checkout(roots[role], snapshot["commit"], snapshot["tree"])
+    if len(set(roots.values())) != 3 or any(
+            a.is_relative_to(b) for a in roots.values() for b in roots.values() if a != b):
+        raise ValueError("Forge checkouts overlap")
+    output = Path(env["LEAF_FORGE_OUTPUT_DIR"])
+    if output.is_symlink() or not output.is_dir() or any(output.iterdir()):
+        raise ValueError("Forge output must be an empty directory")
+    output = output.resolve(strict=True)
+    if any(output.is_relative_to(path) or path.is_relative_to(output) for path in roots.values()):
+        raise ValueError("Forge output overlaps a checkout")
+    return request, identity, contract, bootstrap, roots, output
+
+
+def produce_forge(env: dict, codebuild, s3, *, admit_only=False):
+    request, identity, contract, bootstrap, roots, output = admit_forge(env, codebuild, s3)
+    if admit_only:
+        return identity
+    root = roots["source_snapshot"]
+    source, tree = request["source_revision"], request["source_tree"]
+    with tempfile.TemporaryDirectory(prefix="leaf-forge-producer-") as scratch:
+        work = Path(scratch)
+        if request["mode"] == "gate":
+            gate_env = dict(env)
+            gate_env.pop("DATABASE_URL", None)
+            gate_env.pop("LEAF_CONTAINER_SMOKE", None)
+            gate_env["LEAF_AUTOFILL_SOLVER_ABSENT_OK"] = "1"
+            workers, jobs = gate_parallelism(host_gate_jobs(root))
+            proof = run_gate(root, work / "results", env=gate_env,
+                             worker_count=workers, jobs_per_shard=jobs)
+            payloads = {"gate-proof.json": proof.read_bytes()}
+        else:
+            gate_request = {key: value for key, value in request.items()
+                            if key not in ("gate", "gate_proof_sha256")}
+            gate_request.update(mode="gate", reservation_id=request["transaction_id"] + "-gate")
+            gate_descriptor = contract.parse_forge_descriptor(request["gate"], "gate")
+            if gate_descriptor.buildspec_sha256 != FORGE_BUILDSPEC_SHA256:
+                raise ValueError("Forge gate loader differs")
+            _, members = contract.read_forge_release(gate_descriptor, gate_request, codebuild, s3,
+                trusted_bootstrap=bootstrap, max_archive_bytes=4 * 1024 * 1024)
+            proof = members["gate-proof.json"]
+            if hashlib.sha256(proof).hexdigest() != request["gate_proof_sha256"]:
+                raise ValueError("Forge gate proof binding differs")
+            proof_path = work / "gate-proof.json"
+            proof_path.write_bytes(proof)
+            subprocess.run([sys.executable, "scripts/run-all-gates.py", "--verify-gate-proof",
+                            str(proof_path), "--expect-tree", tree], cwd=root, check=True, timeout=120)
+            revision = request["solver_snapshot"]["commit"]
+            pins = json.loads((root / "deploy/autofill-solver-sources.json").read_text())
+            if not isinstance(pins, dict) or set(pins) != {revision}:
+                raise ValueError("Forge solver differs from reviewed content pin")
+            source_hash = _hex(pins[revision], 64, "solver content hash")
+            solver_root = roots["solver_snapshot"]
+            # Reuse the adapter's byte hashing without writing an attestation into
+            # the clean materialized checkout. The Docker recipe also attests it.
+            path = root / "server/solver_adapters/autofill.py"
+            spec = importlib.util.spec_from_file_location("leaf_forge_solver_hash", path)
+            adapter = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(adapter)
+            if adapter._source_sha256(solver_root) != source_hash:
+                raise ValueError("Forge solver content differs")
+            images = _build_images(root, SERVICES, source, identity["build_number"],
+                resolve_freshness(root), work,
+                {"canonical-worker": {"solver_revision": revision, "solver_root": solver_root}})
+            web = package_web_image(root, images["web"]["image_digest"], source, work / "web")
+            gate = {"producer": {key: getattr(gate_descriptor, key)
+                                 for key in ("project_arn", "build_arn", "build_number")},
+                    "source_revision": source, "source_tree": tree,
+                    "proof_sha256": request["gate_proof_sha256"],
+                    "archive": {key: getattr(gate_descriptor, key)
+                                for key in ("bucket", "key", "version_id", "sha256")}}
+            staged = work / "release"
+            stage_release(staged, source=source, tree=tree, producer=identity, images=images,
+                          web=web, solver={"revision": revision, "source_sha256": source_hash}, gate=gate)
+            payloads = {name: (staged / name).read_bytes()
+                        for name in ("staging-supply-set.json", "web-dist.zip")}
+        for role, path in roots.items():
+            admit_checkout(path, request[role]["commit"], request[role]["tree"])
+        if any(output.iterdir()):
+            raise ValueError("Forge output changed during production")
+        for name, payload in payloads.items():
+            with (output / name).open("xb") as stream:
+                stream.write(payload)
+    return identity
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("gate", "release"))
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("mode", choices=("gate", "release", "forge"))
+    parser.add_argument("--output", type=Path)
     parser.add_argument("--admit-only", action="store_true")
     args = parser.parse_args()
     env = dict(os.environ)
+    if args.mode == "forge":
+        if args.output is not None:
+            raise ValueError("Forge output is supplied only by the bootstrap")
+        import boto3
+        from botocore.config import Config
+        config = Config(connect_timeout=10, read_timeout=60, retries={"max_attempts": 1})
+        produce_forge(env, boto3.client("codebuild", region_name="us-east-1", config=config),
+                      boto3.client("s3", region_name="us-east-1", config=config), admit_only=args.admit_only)
+        return 0
+    if args.output is None or any(key.startswith("LEAF_FORGE_") for key in env):
+        raise ValueError("legacy transport requires its explicit output and no Forge inputs")
     encoded = env["LEAF_NATIVE_REQUEST_B64"]
     if len(encoded) > 32768:
         raise ValueError("native request exceeds bound")
     request = json.loads(base64.b64decode(encoded, validate=True))
+    if not isinstance(request, dict) or "schema" in request:
+        raise ValueError("unknown or mixed legacy request schema")
     root = Path(env["CODEBUILD_SRC_DIR"])
     import boto3
     codebuild = boto3.client("codebuild", region_name="us-east-1")
