@@ -1414,8 +1414,27 @@ export default function useEngineSession({
     }
   }, [patch])
 
-  const applyEdit = useCallback((op, inputs) => {
-    if (op !== 'ungroup' && sessionRef.current.selectedIds.length > 1) {
+  // S1 (Apply boundary): an optional third argument `{ targetId }` pins the
+  // edit to that entity instead of the LIVE selection (the ribbon's staged
+  // property change applies to the target it was staged on). Honoured only by
+  // the ops that reach buildEditPayload below; the verbs that read the
+  // selection themselves (group, ungroup, offset, matchprop, the intersect
+  // verbs) refuse it with a status and post nothing. Without it, every rung
+  // below is exactly the selection-driven ladder it always was.
+  const applyEdit = useCallback((op, inputs, options) => {
+    const explicit = options !== null && typeof options === 'object' && options.targetId !== undefined
+    if (explicit) {
+      if (op === 'group' || op === 'ungroup' || op === 'offset' || op === 'matchprop' || INTERSECT_VERBS[op]) {
+        patch({ errorKind: SESSION_ERROR.REFUSED, status: `Edit refused (${op}): this command works on the selection, not a pinned target.` })
+        return
+      }
+      const pinned = typeof options.targetId === 'string' ? options.targetId : ''
+      if (!pinned || !sessionRef.current.entities.some((entity) => entity.id === pinned)) {
+        patch({ errorKind: SESSION_ERROR.REFUSED, status: `Edit refused (${op}): the target entity is no longer in the document.` })
+        return
+      }
+    }
+    if (!explicit && op !== 'ungroup' && sessionRef.current.selectedIds.length > 1) {
       patch({ errorKind: SESSION_ERROR.REFUSED, status: multiSelectionRefusal(op, sessionRef.current.selectedIds.length) })
       return
     }
@@ -1425,7 +1444,8 @@ export default function useEngineSession({
     }
     // Nothing selected is not an error, it is a no-op: the affordances that
     // dispatch an edit are disabled until something is.
-    if (!sessionRef.current.selectedId && op !== 'group' && op !== 'ungroup') return
+    if (!explicit && !sessionRef.current.selectedId && op !== 'group' && op !== 'ungroup') return
+    const targetId = explicit ? options.targetId : sessionRef.current.selectedId
     if (op === 'group' || op === 'ungroup') {
       const { payload, refusal } = buildEditPayload(op, sessionRef.current.selectedId, inputs, [], sessionRef.current.entities)
       if (refusal) { patch({ errorKind: SESSION_ERROR.REFUSED, status: refusal }); return }
@@ -1445,7 +1465,7 @@ export default function useEngineSession({
     // reference as the SOURCE reaches planMatchprop's own ladder instead of
     // this blanket one. W4g-7b-05c-2: ERASE stays allowed on both kinds (the
     // contract carries `removed` for any kind), so it is exempt here too.
-    const targetType = sessionRef.current.entities.find((entity) => entity.id === sessionRef.current.selectedId)?.type
+    const targetType = sessionRef.current.entities.find((entity) => entity.id === targetId)?.type
     if (op !== 'delete' && !EDIT_KIND_EXEMPT_OPS.has(op) && targetType === 'INSERT') {
       patch({ errorKind: SESSION_ERROR.REFUSED, status: 'an INSERT is placed, not edited, in this round' })
       return
@@ -1523,7 +1543,7 @@ export default function useEngineSession({
       }
       return
     }
-    const { payload, refusal } = buildEditPayload(op, sessionRef.current.selectedId, inputs, sessionRef.current.entities.linetypes, sessionRef.current.entities)
+    const { payload, refusal } = buildEditPayload(op, targetId, inputs, sessionRef.current.entities.linetypes, sessionRef.current.entities)
     if (refusal) {
       patch({ errorKind: SESSION_ERROR.REFUSED, status: refusal })
       return

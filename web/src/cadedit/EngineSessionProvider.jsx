@@ -115,6 +115,18 @@ const ARMED_GROUPS = new Set(['draw', 'modify', 'clipboard', 'groups'])
 const ARMED_OP = /^[a-zA-Z]{1,32}$/
 const sameFrom = (a, b) => (!a && !b) || (!!a && !!b && a[0] === b[0] && a[1] === b[1])
 
+// S1: the three ops a ribbon pick stages, the input key each one's value
+// rides on, and the word the strip and the discard sentence use for it.
+export const PENDING_INPUT_KEY = Object.freeze({ setColor: 'aci', setLinetype: 'linetype', setLineweight: 'lineweight' })
+export const PENDING_WORD = Object.freeze({ setColor: 'Color', setLinetype: 'Linetype', setLineweight: 'Lineweight' })
+// The raw fields one property reads from an entity, as one comparable
+// string: a change here after staging means another edit got there first.
+function propertySnapshot(op, entity) {
+  if (op === 'setColor') return JSON.stringify([entity.aci ?? null, Array.isArray(entity.trueColor) ? entity.trueColor : null])
+  if (op === 'setLinetype') return JSON.stringify(entity.linetype ?? null)
+  return JSON.stringify(entity.lineweight ?? null)
+}
+
 /**
  * W4g-1b: engine reach, the state of opening the console's own drawing in
  * the engine (EngineHeadOpener writes it, the ribbon's reason ladder reads
@@ -257,6 +269,45 @@ export default function EngineSessionProvider({
     setRefusalState(typeof sentence === 'string' ? sentence.slice(0, MAX_REACH_SENTENCE) : '')
   }, [])
   useEffect(() => { setRefusalState('') }, [session.status])
+
+  // S1 (Apply boundary): the ribbon's staged property change. A Color,
+  // Linetype or Lineweight pick no longer dispatches; it stages ONE change
+  // pinned to the entity selected at staging, and only Apply posts it. It
+  // lives here, beside `armed`, so a ribbon tab remount neither applies nor
+  // drops it. Bounded like every other record here: a known op, short
+  // strings, an entity id the document holds; anything else is dropped.
+  const [pending, setPendingState] = useState(null)
+  const sessionRef = useRef(session)
+  sessionRef.current = session
+  const setPending = useCallback((next) => {
+    if (next === null) { setPendingState(null); return }
+    if (!next || typeof next !== 'object' || !Object.prototype.hasOwnProperty.call(PENDING_INPUT_KEY, next.op)) return
+    const { op, value, targetId, label } = next
+    if (typeof value !== 'string' || !value || value.length > MAX_INPUT_CHARS) return
+    if (typeof targetId !== 'string' || !targetId || typeof label !== 'string') return
+    const current = sessionRef.current
+    const entity = (current.entities || []).find((candidate) => candidate.id === targetId)
+    if (!entity) return
+    setPendingState(Object.freeze({
+      op, value, targetId, label: label.slice(0, MAX_INPUT_CHARS),
+      document: current.documentLoadIdentity, baseline: propertySnapshot(op, entity),
+    }))
+  }, [])
+  // Declared after the refusal reset above, so in a commit where both run
+  // (a reload changes the status too) the discard sentence is the one kept.
+  useEffect(() => {
+    if (!pending) return
+    const entity = session.engineParsed && session.errorKind !== SESSION_ERROR.CRASHED
+      ? (session.entities || []).find((candidate) => candidate.id === pending.targetId)
+      : null
+    const why = session.documentLoadIdentity !== pending.document
+      ? (entity ? 'the drawing was reloaded' : `${pending.label} is no longer in the drawing`)
+      : !entity ? `${pending.label} is no longer in the drawing`
+        : propertySnapshot(pending.op, entity) !== pending.baseline ? `another edit changed ${pending.label} first` : ''
+    if (!why) return
+    setPendingState(null)
+    setRefusalState(`${PENDING_WORD[pending.op]} ${pending.value} was not applied: ${why}.`)
+  }, [pending, session.documentLoadIdentity, session.entities, session.engineParsed, session.errorKind])
   const onBeforeEditRef = useRef(onBeforeEdit)
   onBeforeEditRef.current = onBeforeEdit
   const actions = useMemo(() => Object.fromEntries(Object.entries(session.actions).map(([name, action]) => [
@@ -312,9 +363,9 @@ export default function EngineSessionProvider({
   const value = useMemo(
     () => ({
       session: sessionForConsumers, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap,
-      reach, setReach, refuse, highlightedIds, selectGroup,
+      reach, setReach, refuse, highlightedIds, selectGroup, pending, setPending,
     }),
-    [sessionForConsumers, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap, reach, setReach, refuse, highlightedIds, selectGroup],
+    [sessionForConsumers, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap, reach, setReach, refuse, highlightedIds, selectGroup, pending, setPending],
   )
   return <EngineSessionContext.Provider value={value}>{children}</EngineSessionContext.Provider>
 }

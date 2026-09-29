@@ -29,16 +29,16 @@
  * reference's tools this engine has no operation for (rectangle, copy,
  * mirror, ...) are present, disabled, with "not in the browser engine yet".
  */
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 
 import { RibbonCluster, RibbonTool, RibbonWidget } from '../site/DraftingRibbon.jsx'
 import { QuickButton, QUICK_FILE_SLOT_ID } from '../site/CockpitTopBand.jsx'
 
-import { DEFERRED_REASONS, DRAW_REASONS, MODIFY_REASONS, clipboardReason, drawReason, forGroup, modifyReason, propertyReason, propertyControlReason, ribbonTool } from '../lib/actionRegistry.js'
+import { DEFERRED_REASONS, DRAW_REASONS, MODIFY_REASONS, PROPERTY_REASONS, clipboardReason, drawReason, forGroup, modifyReason, propertyReason, propertyControlReason, ribbonTool } from '../lib/actionRegistry.js'
 
-import { ACI_NAMES, LINEWEIGHT_VALUES, admissibleBlockName, admissibleServerName, buildCreatePayload, buildEditPayload, formatLineweight, readNumber } from './engineSession.js'
-import { useEngineSessionContext } from './EngineSessionProvider.jsx'
+import { ACI_NAMES, LINEWEIGHT_VALUES, SESSION_ERROR, admissibleBlockName, admissibleServerName, buildCreatePayload, buildEditPayload, formatLineweight, readNumber } from './engineSession.js'
+import { PENDING_INPUT_KEY, PENDING_WORD, useEngineSessionContext } from './EngineSessionProvider.jsx'
 import { PROMPTS, humanizeRefusal } from './promptKeys.js'
 import { isPointExpression } from './pointExpression.js'
 import { resolvePromptInputs } from './promptInputs.js'
@@ -55,6 +55,22 @@ export const PROMPT_SLOT_ID = 'cockpit-prompt-slot'
 export const PROMPT_ID = 'cockpit-prompt'
 
 const ESC_OWNER_SELECTOR = '[data-escape-owner]'
+
+// S1 (Apply boundary): where an Escape cancels a staged property change (the
+// Properties cluster, its slot, the strip), the strip's own marker, and the
+// widget id each staged op's combo carries.
+const PENDING_STRIP_SELECTOR = '[data-property-apply-strip]'
+const PENDING_ESC_SCOPE = `#cockpit-properties-slot, [data-group="properties"], ${PENDING_STRIP_SELECTOR}`
+const PENDING_WIDGET_ID = Object.freeze({ setColor: 'prop-color', setLinetype: 'prop-linetype', setLineweight: 'prop-lineweight' })
+
+function pendingWidgetSelect(op) {
+  if (typeof document === 'undefined' || !PENDING_WIDGET_ID[op]) return null
+  return document.querySelector(`#cockpit-properties-slot [data-widget="${PENDING_WIDGET_ID[op]}"] select`)
+}
+
+// Studio's words for an entity: its kind and its handle, as the selection
+// readout names it.
+const entityLabel = (entity) => `${entity.type || 'entity'} handle ${entity.handle || entity.id}`
 
 export function armedToolElement(group, op) {
   if (typeof document === 'undefined') return null
@@ -165,7 +181,7 @@ const offTool = ({ id, label, icon, reason = NOT_IN_ENGINE }, size = 'small') =>
 })
 
 export default function EngineRibbonClusters({ importOpen = false, onToggleImport, panels = ['draw', 'modify'] }) {
-  const { session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap, reach, selectGroup, refuse } = useEngineSessionContext()
+  const { session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap, reach, selectGroup, refuse, pending = null, setPending } = useEngineSessionContext()
   const modify = modifyReason(session, reach)
   // W4g-7b-03c-f: the Properties panel's own ladder, which waives the
   // INSERT-reference rung `modify` still refuses (a property is not
@@ -174,6 +190,10 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   const draw = drawReason(session, reach)
   const save = saveReason(session, canSave)
   const { applyEdit, create, copyToClipboard, pasteFromClipboard } = session.actions
+  const pendingRef = useRef(pending)
+  const refocusOpRef = useRef(null)
+  const cancellingPropertyRef = useRef(false)
+  pendingRef.current = pending
   const quickSlot = useSlot(QUICK_FILE_SLOT_ID)
   const promptSlot = useSlot(PROMPT_SLOT_ID)
   // W4g-5c: the reference puts Clipboard LAST, and the ribbon renders these
@@ -352,7 +372,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     // caret comes back to the prompt so the next command (or Esc) is one
     // keystroke away. Only when nothing else took the focus in between (the
     // Command bar, a ribbon tool): those keep it.
-    if (!armedOp || session.busy || typeof document === 'undefined') return undefined
+    if (refocusOpRef.current || !armedOp || session.busy || typeof document === 'undefined') return undefined
     // W4f-3: LINE chains, as the reference's LINE keeps asking "Specify next
     // point:" until Esc. After a segment is drawn its end becomes the next
     // segment's first point (the fields and the picker's rubber band alike,
@@ -396,6 +416,9 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
       if (event.key !== 'Escape' || event.defaultPrevented) return
       const target = event.target
       if (promptRef.current?.contains(target)) return
+      // S1: while a property change is staged, an Esc in the Properties
+      // cluster or its strip cancels that change, not the armed command.
+      if (pendingRef.current && target instanceof Element && target.closest(PENDING_ESC_SCOPE)) return
       if (target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return
       // An open dialog or drawer owns its Esc. Check the whole visible layer
       // stack too because a layer may leave focus on its outside opener.
@@ -435,8 +458,9 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     ? { expanded: prompt !== null && armedOp === op, controls: prompt !== null && armedOp === op ? PROMPT_ID : undefined }
     : {})
 
-  // W4g-7b-03c: the Properties panel's three combos. Each RUNS AT ONCE on
-  // change (a select is its own prompt, no arm/Run round trip); "index..."
+  // W4g-7b-03c: the Properties panel's three combos. S1 (Apply boundary): a
+  // pick no longer runs at once; it STAGES one change on the selected entity
+  // and the strip under the cluster applies or cancels it. "index..."
   // is the one value that still needs typed input (1..255), so it arms the
   // COLOR word's own prompt instead of guessing a number. buildEditPayload's
   // parseAci/parseLinetype/parseLineweight are the same validators the typed
@@ -468,18 +492,64 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // option carries it, so withCurrentOption below adds it as the SELECTED
   // option and every standard option, the nearest index's own name
   // included, becomes a real change that posts setColor and clears the 420.
-  const trueColor = selectedEntity && Array.isArray(selectedEntity.trueColor) && selectedEntity.trueColor.length === 3
-    ? selectedEntity.trueColor
-    : null
-  const colorValue = !selectedEntity ? 'ByLayer'
-    : trueColor ? `rgb(${trueColor[0]},${trueColor[1]},${trueColor[2]})`
-      : selectedEntity.aci === 256 ? 'ByLayer'
-        : selectedEntity.aci === 0 ? 'ByBlock'
-          : ACI_NAMES[selectedEntity.aci] || `index ${selectedEntity.aci}`
-  const linetypeValue = !selectedEntity ? 'ByLayer'
-    : linetypeCatalogue.find((name) => name.toLowerCase() === String(selectedEntity.linetype ?? 'ByLayer').toLowerCase())
-      || selectedEntity.linetype || 'ByLayer'
-  const lineweightValue = !selectedEntity ? 'ByLayer' : formatLineweight(Number.isFinite(selectedEntity.lineweight) ? selectedEntity.lineweight : -1)
+  // S1: one entity's three readings, keyed by the op that sets each. The
+  // combos read the SELECTED entity, or, while a change is staged, the staged
+  // TARGET (the strip names it; the live selection may have moved on).
+  const actualValues = (entity) => {
+    const trueColor = entity && Array.isArray(entity.trueColor) && entity.trueColor.length === 3
+      ? entity.trueColor
+      : null
+    return {
+      setColor: !entity ? 'ByLayer'
+        : trueColor ? `rgb(${trueColor[0]},${trueColor[1]},${trueColor[2]})`
+          : entity.aci === 256 ? 'ByLayer'
+            : entity.aci === 0 ? 'ByBlock'
+              : ACI_NAMES[entity.aci] || `index ${entity.aci}`,
+      setLinetype: !entity ? 'ByLayer'
+        : linetypeCatalogue.find((name) => name.toLowerCase() === String(entity.linetype ?? 'ByLayer').toLowerCase())
+          || entity.linetype || 'ByLayer',
+      setLineweight: !entity ? 'ByLayer' : formatLineweight(Number.isFinite(entity.lineweight) ? entity.lineweight : -1),
+    }
+  }
+  const pendingTarget = pending ? (session.entities || []).find((entity) => entity.id === pending.targetId) || null : null
+  const actual = actualValues(pending ? pendingTarget : selectedEntity)
+  const colorValue = pending?.op === 'setColor' ? pending.value : actual.setColor
+  const linetypeValue = pending?.op === 'setLinetype' ? pending.value : actual.setLinetype
+  const lineweightValue = pending?.op === 'setLineweight' ? pending.value : actual.setLineweight
+  // Apply is judged against the staged TARGET plus the engine's own state
+  // (crashed, no document, busy, which a save in flight also sets), never the
+  // live selection's ladder: the target was chosen when the change was staged.
+  const applyRung = !pending ? ''
+    : session.errorKind === SESSION_ERROR.CRASHED ? 'crashed'
+      : !session.engineParsed ? 'noDocument'
+        : session.busy ? 'busy'
+          : !pendingTarget ? 'noSelection' : ''
+  const applyHold = applyRung ? MODIFY_REASONS[applyRung] : ''
+  // The staged combo stays live (another value replaces the staged one); the
+  // other two wait with the pendingChange sentence. No staged change: the
+  // property ladder, exactly as before.
+  const widgetOff = (op) => (pending ? (pending.op === op ? !!applyRung : true) : !!property)
+  const widgetReason = (op) => (pending
+    ? (pending.op === op ? (applyRung ? PROPERTY_REASONS[applyRung] || applyHold : '') : PROPERTY_REASONS.pendingChange)
+    : propertyControl)
+  // A pick STAGES the change on the entity selected now; only Apply posts it.
+  // Picking again in the same combo replaces the value and keeps the target;
+  // picking the target's own current value drops the staged change.
+  // Blur commits follow those same rules: the select shows the walked value,
+  // so Apply applies what the user sees, and Cancel then discards it.
+  const stageFocusRef = useRef(null)
+  const stageProperty = (op, value) => {
+    if (cancellingPropertyRef.current) return
+    if (pending && pending.op !== op) return
+    const entity = pending ? pendingTarget : (property ? null : selectedEntity)
+    if (!entity) return
+    if (value === actualValues(entity)[op]) {
+      if (pending) setPending?.(null)
+      return
+    }
+    stageFocusRef.current = op
+    setPending?.({ op, value, targetId: entity.id, label: entityLabel(entity) })
+  }
   // W4g-7b-03c-g F5: `disabled` already follows the whole ladder (noDocument
   // / crashed / busy / readOnlyKind / noSelection); the displayed sentence
   // must be the SAME rung, not a hardcoded noSelection that lies on every
@@ -492,23 +562,170 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   const propertyWidgets = [
     {
       id: 'prop-color', label: 'Color', value: colorValue,
-      options: withCurrentOption(['ByLayer', 'ByBlock', ...Object.values(ACI_NAMES), 'index...'], colorValue),
-      disabled: !!property, reason: propertyControl,
-      onChange: (value) => (value === 'index...' ? toggleArmed('modify', 'setColor') : applyEdit('setColor', { aci: value })),
+      options: withCurrentOption(withCurrentOption(['ByLayer', 'ByBlock', ...Object.values(ACI_NAMES), 'index...'], actual.setColor), colorValue),
+      disabled: widgetOff('setColor'), reason: widgetReason('setColor'),
+      onChange: (value) => {
+        if (cancellingPropertyRef.current) return
+        if (value === 'index...') {
+          // A staged change must survive every commit path, including blur
+          // before an Apply/Cancel click, without arming or toggling a prompt.
+          if (!pending) toggleArmed('modify', 'setColor')
+        }
+        else stageProperty('setColor', value)
+      },
     },
     {
       id: 'prop-linetype', label: 'Linetype', value: linetypeValue, title: LINETYPE_TITLE,
-      options: withCurrentOption(linetypeCatalogue, linetypeValue),
-      disabled: !!property, reason: propertyControl,
-      onChange: (value) => applyEdit('setLinetype', { linetype: value }),
+      options: withCurrentOption(withCurrentOption(linetypeCatalogue, actual.setLinetype), linetypeValue),
+      disabled: widgetOff('setLinetype'), reason: widgetReason('setLinetype'),
+      onChange: (value) => stageProperty('setLinetype', value),
     },
     {
       id: 'prop-lineweight', label: 'Lineweight', value: lineweightValue,
-      options: withCurrentOption(['ByLayer', 'ByBlock', 'Default', ...LINEWEIGHT_VALUES.map(formatLineweight)], lineweightValue),
-      disabled: !!property, reason: propertyControl,
-      onChange: (value) => applyEdit('setLineweight', { lineweight: value }),
+      options: withCurrentOption(withCurrentOption(['ByLayer', 'ByBlock', 'Default', ...LINEWEIGHT_VALUES.map(formatLineweight)], actual.setLineweight), lineweightValue),
+      disabled: widgetOff('setLineweight'), reason: widgetReason('setLineweight'),
+      onChange: (value) => stageProperty('setLineweight', value),
     },
   ]
+
+  // S1: Apply posts the staged change to its pinned target, whatever the live
+  // selection is now, and clears it first (so the edit it causes is never read
+  // as "another edit got there first"). Cancel drops it: nothing is posted.
+  const applyButtonRef = useRef(null)
+  const stripRef = useRef(null)
+  const applyPending = () => {
+    if (!pending || applyRung) return
+    const staged = pending
+    refocusOpRef.current = staged.op
+    setPending?.(null)
+    applyEdit(staged.op, { [PENDING_INPUT_KEY[staged.op]]: staged.value }, { targetId: staged.targetId })
+  }
+  const cancelPending = () => {
+    if (!pending) return
+    const staged = pending
+    const select = pendingWidgetSelect(staged.op)
+    // Blur clears the buffered walk; suppress its commit, including index...
+    // arming a prompt. Refocusing resets the select's keyboard walk state.
+    cancellingPropertyRef.current = true
+    try {
+      if (select && typeof document !== 'undefined' && document.activeElement === select) select.blur()
+      setPending?.(null)
+      refuse(`${PENDING_WORD[staged.op]} change cancelled; ${staged.label} was not changed.`)
+      select?.focus()
+    } finally {
+      cancellingPropertyRef.current = false
+    }
+  }
+  const cancelPendingRef = useRef(cancelPending)
+  cancelPendingRef.current = cancelPending
+  const hasPending = !!pending
+  useEffect(() => {
+    // Esc in the Properties cluster or the strip cancels the staged change and
+    // is swallowed there, like the prompt row's Esc: capture phase, so App's
+    // window key ladder (selection, then project) never also reads it.
+    if (!hasPending || typeof window === 'undefined') return undefined
+    const onWindowKeyDown = (event) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return
+      const target = event.target
+      if (!(target instanceof Element) || !target.closest(PENDING_ESC_SCOPE)) return
+      event.preventDefault()
+      event.stopPropagation()
+      cancelPendingRef.current()
+    }
+    window.addEventListener('keydown', onWindowKeyDown, true)
+    return () => window.removeEventListener('keydown', onWindowKeyDown, true)
+  }, [hasPending])
+  useEffect(() => {
+    // A pick that staged while its combo kept focus leaves focus there. A
+    // keyboard walk committed on blur (Tab) would leave it on a sibling combo
+    // that staging just disabled, so it goes to Apply instead.
+    const op = stageFocusRef.current
+    stageFocusRef.current = null
+    if (!op || !pending || typeof document === 'undefined') return
+    if (document.activeElement !== pendingWidgetSelect(op)) applyButtonRef.current?.focus()
+  }, [pending])
+  useEffect(() => {
+    // After Apply, focus returns to the combo once the edit settles, unless
+    // the operator has since moved it to another control (the W4f-2 rule).
+    const op = refocusOpRef.current
+    if (!op || pending || session.busy || typeof document === 'undefined') return
+    refocusOpRef.current = null
+    const active = document.activeElement
+    // The Apply button itself is gone with the strip; that is not a move.
+    if (active && active !== document.body && active.isConnected && !stripRef.current?.contains(active)) return
+    pendingWidgetSelect(op)?.focus()
+  }, [pending, session.busy])
+  const pendingWord = pending ? PENDING_WORD[pending.op] : ''
+  const pendingElsewhere = !!pending && !(session.selectedIds?.length === 1 && session.selectedId === pending.targetId)
+  const onStripKeyDown = (event) => {
+    if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent?.isComposing) return
+    // Enter on Apply or Cancel keeps the button's own activation.
+    if (event.target instanceof HTMLButtonElement) return
+    event.preventDefault()
+    applyPending()
+  }
+  // Placement: a fixed layer under the Properties cluster (or the ribbon when
+  // the cluster is on another tab or in the overflow), so the band's height,
+  // grid and width never move and the ribbon's clipping never hides it.
+  const [stripAt, setStripAt] = useState(null)
+  useLayoutEffect(() => {
+    if (!pending || typeof window === 'undefined') return undefined
+    const place = () => {
+      const cluster = document.getElementById('cockpit-properties-slot')?.closest('.ribbon-cluster') || null
+      const clusterShown = cluster && !cluster.closest('[hidden]') && cluster.getBoundingClientRect().width > 0
+      const anchor = clusterShown ? cluster : document.querySelector('.drafting-ribbon')
+      const rect = anchor ? anchor.getBoundingClientRect() : null
+      const next = rect ? { x: Math.round(rect.left), y: Math.round(rect.bottom + 4) } : null
+      setStripAt((prev) => (prev && next && prev.x === next.x && prev.y === next.y ? prev : next))
+    }
+    place()
+    window.addEventListener('resize', place)
+    window.addEventListener('scroll', place, true)
+    return () => {
+      window.removeEventListener('resize', place)
+      window.removeEventListener('scroll', place, true)
+    }
+  }, [pending, panels])
+  const pendingStrip = pending ? (
+    <div
+      ref={stripRef}
+      className="strip-decision property-apply-strip"
+      data-property-apply-strip=""
+      data-testid="property-apply-strip"
+      data-op={pending.op}
+      role="status"
+      onKeyDown={onStripKeyDown}
+      style={stripAt ? { '--strip-x': `${stripAt.x}px`, '--strip-y': `${stripAt.y}px` } : undefined}
+    >
+      <span className="dot square" aria-hidden="true" />
+      <span className="strip-sentence" data-testid="property-apply-sentence">
+        {`${pendingWord} ${pending.value} is waiting for Apply on ${pending.label}.`}
+        {pendingElsewhere ? ` ${pending.label} is not the current selection.` : ''}
+      </span>
+      <button
+        type="button"
+        ref={applyButtonRef}
+        className="chip-act"
+        data-testid="property-apply"
+        onClick={applyPending}
+        disabled={!!applyRung}
+        title={applyRung ? applyHold : `Apply ${pendingWord} ${pending.value} to ${pending.label} (Enter)`}
+        aria-label={applyRung ? `Apply ${pendingWord} change (unavailable: ${applyHold})` : `Apply ${pendingWord} change`}
+      >
+        Apply <kbd className="key">Enter</kbd>
+      </button>
+      <button
+        type="button"
+        className="chip-act"
+        data-testid="property-cancel"
+        onClick={cancelPending}
+        title={`Cancel the ${pendingWord} change (Esc)`}
+        aria-label={`Cancel ${pendingWord} change`}
+      >
+        Cancel <kbd className="key">Esc</kbd>
+      </button>
+    </div>
+  ) : null
 
   const fileTools = [
     {
@@ -884,6 +1101,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
       )}
       {show.has('script') && scriptSlot && createPortal(<ScriptPanel />, scriptSlot)}
       {promptRow && (promptSlot ? createPortal(promptRow, promptSlot) : promptRow)}
+      {pendingStrip && typeof document !== 'undefined' && createPortal(pendingStrip, document.body)}
     </>
   )
 }

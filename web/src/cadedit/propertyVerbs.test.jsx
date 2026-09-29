@@ -3,6 +3,7 @@
 // lowering and the Properties panel's census. Mostly pure rows; a few
 // (W4g-7b-03c-g) render the real combos against a fake worker.
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { MODIFY_REASONS, PROPERTY_REASONS, forGroup, propertyReason } from '../lib/actionRegistry.js'
@@ -377,7 +378,9 @@ describe('W4g-7b-03c-h D2: a true-coloured entity\'s Color combo carries the rgb
     const colorSelect = screen.getByLabelText(/^Color/)
     expect(colorSelect.value).toBe('rgb(10,20,30)')
     expect([...colorSelect.options].map((o) => o.value)).toContain('green')
+    // S1: the pick stages; Apply posts it.
     fireEvent.change(colorSelect, { target: { value: 'green' } })
+    fireEvent.click(screen.getByRole('button', { name: /^Apply Color/ }))
     expect(workers[0].posted.at(-1)).toEqual({ type: 'applyEdit', op: 'setColor', payload: { entityId: '7', aci: 3 } })
   })
 })
@@ -409,8 +412,332 @@ describe('W4g-7b-03c-g F8/F9: the current value is always its own option', () =>
     expect(lwSelect.value).toBe('26')
     expect([...lwSelect.options].map((o) => o.value)).toContain('26')
     expect([...lwSelect.options].map((o) => o.value)).toContain('ByLayer')
-    // ByLayer is now a REAL change from either combo's current state.
+    // ByLayer is now a REAL change from either combo's current state (S1:
+    // staged by the pick, posted by Apply).
     fireEvent.change(colorSelect, { target: { value: 'ByLayer' } })
+    fireEvent.click(screen.getByRole('button', { name: /^Apply Color/ }))
     expect(workers[0].posted.at(-1)).toEqual({ type: 'applyEdit', op: 'setColor', payload: { entityId: '7', aci: 256 } })
+  })
+})
+
+// S1 (Apply boundary): a Properties pick stages ONE change pinned to the entity
+// selected at staging; only the strip's Apply posts it, whatever the live
+// selection is by then; Cancel and Esc post nothing.
+const stagedLine = (id, extra = {}) => ({
+  id, handle: id, type: 'LINE', layer: 'A', closed: false, editable: true,
+  vertices: [[0, 0, 0], [1, 1, 0]], radius: null, startDeg: null, endDeg: null,
+  aci: 256, linetype: 'ByLayer', lineweight: -1, ...extra,
+})
+const STAGED_ENTITIES = [
+  stagedLine('7'),
+  stagedLine('9'),
+  { id: 'd1', handle: 'D1', type: 'DIMENSION', layer: 'A', editable: false, aci: 256, linetype: 'ByLayer', lineweight: -1 },
+]
+
+function mountStaging() {
+  let context = null
+  let showTab = null
+  function Probe() { context = useEngineSessionContext(); return null }
+  const workers = []
+  const createWorker = vi.fn(() => { const w = new LiveWorker(); workers.push(w); return w })
+  const seat = {
+    id: 'properties', label: 'Properties', kind: 'group', tools: [],
+    extra: <div id="cockpit-properties-slot" className="ribbon-slot" />,
+  }
+  function Tabs() {
+    const [tab, setTab] = useState('properties')
+    showTab = setTab
+    const onProperties = tab === 'properties'
+    return (
+      <DraftingRibbon clusters={onProperties ? [seat] : []} tab={tab}>
+        <EngineRibbonClusters importOpen={false} onToggleImport={() => {}} panels={onProperties ? ['properties'] : ['draw']} />
+      </DraftingRibbon>
+    )
+  }
+  render(
+    <EngineSessionProvider createWorker={createWorker}>
+      <Probe />
+      <Tabs />
+    </EngineSessionProvider>,
+  )
+  act(() => { context.session.actions.openBytes(new Uint8Array([0]), 'x.dxf') })
+  workers[0].emit({ type: 'documentLoaded', documentId: 'x.dxf', entities: STAGED_ENTITIES, entityCount: 3, unsupported: [],
+    linetypes: ['ByLayer', 'ByBlock', 'Continuous', 'ZZZ'] })
+  act(() => { context.session.actions.select('7') })
+  const edits = () => workers[0].posted.filter((message) => message.type === 'applyEdit')
+  return { worker: workers[0], getContext: () => context, edits, setTab: (tab) => act(() => { showTab(tab) }) }
+}
+
+const strip = () => screen.queryByTestId('property-apply-strip')
+const applyButton = () => screen.getByRole('button', { name: /^Apply (Color|Linetype|Lineweight) change/ })
+const cancelButton = () => screen.getByRole('button', { name: /^Cancel (Color|Linetype|Lineweight) change/ })
+
+describe('S1: Properties picks stage and wait for Apply on the pinned target', () => {
+  it('a Linetype pick posts nothing, the strip names it, Apply posts exactly one edit and one undo step', () => {
+    const { worker, getContext, edits } = mountStaging()
+    fireEvent.change(screen.getByLabelText(/^Linetype/), { target: { value: 'ZZZ' } })
+    expect(edits()).toHaveLength(0)
+    expect(strip().getAttribute('role')).toBe('status')
+    const sentence = screen.getByTestId('property-apply-sentence').textContent
+    expect(sentence).toContain('Linetype')
+    expect(sentence).toContain('ZZZ')
+    expect(sentence).toContain('LINE handle 7')
+    expect(screen.getByLabelText(/^Linetype/).value).toBe('ZZZ')
+    const undoBefore = getContext().session.undoDepth
+    fireEvent.click(applyButton())
+    expect(edits()).toEqual([{ type: 'applyEdit', op: 'setLinetype', payload: { entityId: '7', linetype: 'ZZZ' } }])
+    expect(strip()).toBeNull()
+    worker.emit({ type: 'editApplied', op: 'setLinetype', ok: true, entities: [stagedLine('7', { linetype: 'ZZZ' }), ...STAGED_ENTITIES.slice(1)],
+      entityCount: 3, bytes: new Uint8Array([1, 2]), byteLength: 2 })
+    expect(getContext().session.undoDepth).toBe(undoBefore + 1)
+    expect(document.activeElement).toBe(screen.getByLabelText(/^Linetype/))
+  })
+
+  it.each(['move', 'createLine'])('Apply restores the Linetype combo while %s stays armed', (op) => {
+    const { worker, getContext, edits } = mountStaging()
+    act(() => { getContext().setArmed({ group: op === 'move' ? 'modify' : 'draw', op }) })
+    const armed = getContext().armed
+    const select = screen.getByLabelText(/^Linetype/)
+    fireEvent.change(select, { target: { value: 'ZZZ' } })
+    act(() => { applyButton().focus() })
+    fireEvent.click(applyButton())
+    expect(getContext().session.busy).toBe(true)
+    expect(edits()).toHaveLength(1)
+    worker.emit({ type: 'editApplied', op: 'setLinetype', ok: true, entities: [stagedLine('7', { linetype: 'ZZZ' }), ...STAGED_ENTITIES.slice(1)],
+      entityCount: 3, bytes: new Uint8Array([1, 2]), byteLength: 2 })
+    expect(document.activeElement).toBe(select)
+    expect(getContext().armed).toBe(armed)
+  })
+
+  it('Apply with an armed command preserves focus moved to another control during the edit', () => {
+    const { worker, getContext } = mountStaging()
+    render(<input aria-label="another control" />)
+    act(() => { getContext().setArmed({ group: 'modify', op: 'move' }) })
+    const armed = getContext().armed
+    fireEvent.change(screen.getByLabelText(/^Linetype/), { target: { value: 'ZZZ' } })
+    fireEvent.click(applyButton())
+    const other = screen.getByLabelText('another control')
+    act(() => { other.focus() })
+    worker.emit({ type: 'editApplied', op: 'setLinetype', ok: true, entities: [stagedLine('7', { linetype: 'ZZZ' }), ...STAGED_ENTITIES.slice(1)],
+      entityCount: 3, bytes: new Uint8Array([1, 2]), byteLength: 2 })
+    expect(document.activeElement).toBe(other)
+    expect(getContext().armed).toBe(armed)
+  })
+
+  it.each([
+    ['nothing selected', (ctx) => ctx.session.actions.selectClear()],
+    ['7 and 9 selected', (ctx) => ctx.session.actions.selectReplace(['7', '9'])],
+    ['a DIMENSION selected', (ctx) => ctx.session.actions.select('d1')],
+    ['another entity selected', (ctx) => ctx.session.actions.select('9')],
+  ])('Apply posts to the staged target with %s', (_name, reselect) => {
+    const { getContext, edits } = mountStaging()
+    fireEvent.change(screen.getByLabelText(/^Color/), { target: { value: 'red' } })
+    act(() => { reselect(getContext()) })
+    expect(strip().textContent).toContain('LINE handle 7 is not the current selection.')
+    expect(applyButton().disabled).toBe(false)
+    fireEvent.click(applyButton())
+    expect(edits()).toEqual([{ type: 'applyEdit', op: 'setColor', payload: { entityId: '7', aci: 1 } }])
+  })
+
+  it('Cancel posts nothing, restores the value and puts focus back on the combo', () => {
+    const { edits } = mountStaging()
+    const select = screen.getByLabelText(/^Linetype/)
+    fireEvent.change(select, { target: { value: 'ZZZ' } })
+    fireEvent.click(cancelButton())
+    expect(edits()).toHaveLength(0)
+    expect(strip()).toBeNull()
+    expect(screen.getByLabelText(/^Linetype/).value).toBe('ByLayer')
+    expect(document.activeElement).toBe(screen.getByLabelText(/^Linetype/))
+  })
+
+  it('Enter on Cancel cancels; Enter elsewhere in the strip applies', () => {
+    const { edits } = mountStaging()
+    fireEvent.change(screen.getByLabelText(/^Linetype/), { target: { value: 'ZZZ' } })
+    const cancel = cancelButton()
+    fireEvent.keyDown(cancel, { key: 'Enter' })
+    fireEvent.click(cancel)
+    expect(edits()).toHaveLength(0)
+    expect(strip()).toBeNull()
+    fireEvent.change(screen.getByLabelText(/^Linetype/), { target: { value: 'ZZZ' } })
+    fireEvent.keyDown(screen.getByTestId('property-apply-sentence'), { key: 'Enter' })
+    expect(edits()).toEqual([{ type: 'applyEdit', op: 'setLinetype', payload: { entityId: '7', linetype: 'ZZZ' } }])
+  })
+
+  it('Esc in the Color combo cancels the staged change and keeps the selection', () => {
+    const { getContext, edits } = mountStaging()
+    const select = screen.getByLabelText(/^Color/)
+    fireEvent.change(select, { target: { value: 'red' } })
+    const escape = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+    act(() => { select.dispatchEvent(escape) })
+    expect(escape.defaultPrevented).toBe(true)
+    expect(strip()).toBeNull()
+    expect(edits()).toHaveLength(0)
+    expect(getContext().session.selectedId).toBe('7')
+    expect(screen.getByLabelText(/^Color/).value).toBe('ByLayer')
+  })
+
+  it.each(['index...', 'green'])('Esc discards a buffered Color walk to %s without committing it', (value) => {
+    const { worker, getContext } = mountStaging()
+    const select = screen.getByLabelText(/^Color/)
+    fireEvent.change(select, { target: { value: 'red' } })
+    act(() => { select.focus() })
+    const postedBefore = worker.posted.length
+    const options = [...select.options].map((option) => option.value)
+    // jsdom does not perform the native select's arrow-key change itself.
+    for (let index = options.indexOf('red') + 1; index <= options.indexOf(value); index += 1) {
+      fireEvent.keyDown(select, { key: 'ArrowDown' })
+      fireEvent.change(select, { target: { value: options[index] } })
+    }
+    expect(select.value).toBe(value)
+    expect(getContext().pending).toMatchObject({ op: 'setColor', value: 'red', targetId: '7' })
+    fireEvent.keyDown(select, { key: 'Escape' })
+    expect(getContext().armed).toBeNull()
+    expect(getContext().pending).toBeNull()
+    expect(strip()).toBeNull()
+    expect(worker.posted).toHaveLength(postedBefore)
+    expect(document.activeElement).toBe(select)
+    expect(select.value).toBe('ByLayer')
+  })
+
+  it.each(['Cancel', 'Apply'].flatMap((action) =>
+    [null, 'move', 'setColor'].map((op) => [action, op]),
+  ))('blur to index... before %s preserves the armed command %s', (action, op) => {
+    const { worker, getContext, edits } = mountStaging()
+    if (op) act(() => { getContext().setArmed({ group: 'modify', op }) })
+    const armed = getContext().armed
+    const select = screen.getByLabelText(/^Color/)
+    fireEvent.change(select, { target: { value: 'red' } })
+    const staged = getContext().pending
+    act(() => { select.focus() })
+    const postedBefore = worker.posted.length
+    const options = [...select.options].map((option) => option.value)
+    for (let index = options.indexOf('red') + 1; index <= options.indexOf('index...'); index += 1) {
+      fireEvent.keyDown(select, { key: 'ArrowDown' })
+      fireEvent.change(select, { target: { value: options[index] } })
+    }
+    expect(select.value).toBe('index...')
+    fireEvent.blur(select)
+    expect(getContext().armed).toBe(armed)
+    expect(getContext().pending).toBe(staged)
+    expect(select.value).toBe('red')
+    expect(worker.posted).toHaveLength(postedBefore)
+    fireEvent.click(action === 'Cancel' ? cancelButton() : applyButton())
+    expect(getContext().armed).toBe(armed)
+    expect(getContext().pending).toBeNull()
+    expect(strip()).toBeNull()
+    if (action === 'Cancel') expect(worker.posted).toHaveLength(postedBefore)
+    else expect(edits()).toEqual([{ type: 'applyEdit', op: 'setColor', payload: { entityId: '7', aci: 1 } }])
+  })
+
+  it.each(['Enter', 'pointer'])('%s committing index... leaves the staged value and armed command unchanged', (path) => {
+    const { worker, getContext } = mountStaging()
+    act(() => { getContext().setArmed({ group: 'modify', op: 'move' }) })
+    const armed = getContext().armed
+    const select = screen.getByLabelText(/^Color/)
+    fireEvent.change(select, { target: { value: 'red' } })
+    const staged = getContext().pending
+    act(() => { select.focus() })
+    const postedBefore = worker.posted.length
+    if (path === 'Enter') fireEvent.keyDown(select, { key: 'ArrowDown' })
+    fireEvent.change(select, { target: { value: 'index...' } })
+    if (path === 'Enter') fireEvent.keyDown(select, { key: 'Enter' })
+    expect(getContext().pending).toBe(staged)
+    expect(getContext().armed).toBe(armed)
+    expect(worker.posted).toHaveLength(postedBefore)
+  })
+
+  it.each(['blue', 'ByLayer'])('a buffered walk to %s commits the normal staging rules on blur', (value) => {
+    const { worker, getContext, edits } = mountStaging()
+    const select = screen.getByLabelText(/^Color/)
+    fireEvent.change(select, { target: { value: 'red' } })
+    act(() => { select.focus() })
+    const postedBefore = worker.posted.length
+    const options = [...select.options].map((option) => option.value)
+    const step = options.indexOf(value) > options.indexOf('red') ? 1 : -1
+    for (let index = options.indexOf('red') + step; index !== options.indexOf(value) + step; index += step) {
+      fireEvent.keyDown(select, { key: step === 1 ? 'ArrowDown' : 'ArrowUp' })
+      fireEvent.change(select, { target: { value: options[index] } })
+    }
+    expect(select.value).toBe(value)
+    expect(getContext().pending).toMatchObject({ value: 'red', targetId: '7' })
+    fireEvent.blur(select)
+    expect(worker.posted).toHaveLength(postedBefore)
+    expect(getContext().armed).toBeNull()
+    if (value === 'ByLayer') {
+      expect(getContext().pending).toBeNull()
+      expect(strip()).toBeNull()
+      expect(screen.queryByRole('button', { name: /^Apply Color change/ })).toBeNull()
+    } else {
+      expect(getContext().pending).toMatchObject({ value: 'blue', targetId: '7' })
+      fireEvent.click(applyButton())
+      expect(edits()).toEqual([{ type: 'applyEdit', op: 'setColor', payload: { entityId: '7', aci: 5 } }])
+    }
+  })
+
+  it('while staged the other two combos wait with the pendingChange sentence', () => {
+    mountStaging()
+    fireEvent.change(screen.getByLabelText(/^Color/), { target: { value: 'red' } })
+    for (const label of ['Linetype', 'Lineweight']) {
+      const select = screen.getByLabelText(new RegExp(`^${label}`))
+      expect(select.disabled).toBe(true)
+      expect(select.getAttribute('aria-label')).toBe(`${label} (unavailable: ${PROPERTY_REASONS.pendingChange})`)
+    }
+    expect(screen.getByLabelText(/^Color/).disabled).toBe(false)
+  })
+
+  it('a new document without the target discards the staged change with a sentence', () => {
+    const { worker, getContext, edits } = mountStaging()
+    fireEvent.change(screen.getByLabelText(/^Linetype/), { target: { value: 'ZZZ' } })
+    act(() => { getContext().session.actions.openBytes(new Uint8Array([3]), 'y.dxf') })
+    worker.emit({ type: 'documentLoaded', documentId: 'y.dxf', entities: [stagedLine('11')], entityCount: 1, unsupported: [] })
+    expect(strip()).toBeNull()
+    expect(getContext().pending).toBeNull()
+    expect(getContext().session.status).toBe('Linetype ZZZ was not applied: LINE handle 7 is no longer in the drawing.')
+    expect(edits()).toHaveLength(0)
+  })
+
+  it('re-picking the target\'s current value drops the staged change; another value replaces it on the same target', () => {
+    const { getContext, edits } = mountStaging()
+    const select = () => screen.getByLabelText(/^Color/)
+    fireEvent.change(select(), { target: { value: 'red' } })
+    act(() => { getContext().session.actions.select('9') })
+    fireEvent.change(select(), { target: { value: 'green' } })
+    expect(getContext().pending).toMatchObject({ op: 'setColor', value: 'green', targetId: '7' })
+    fireEvent.change(select(), { target: { value: 'ByLayer' } })
+    expect(getContext().pending).toBeNull()
+    expect(strip()).toBeNull()
+    expect(edits()).toHaveLength(0)
+  })
+
+  it('with 7 and 9 selected the three combos keep the multiSelection sentence and no strip exists', () => {
+    const { getContext } = mountStaging()
+    act(() => { getContext().session.actions.selectReplace(['7', '9']) })
+    for (const label of ['Color', 'Linetype', 'Lineweight']) {
+      const select = screen.getByLabelText(new RegExp(`^${label}`))
+      expect(select.disabled).toBe(true)
+      expect(select.getAttribute('aria-label')).toBe(`${label} (unavailable: ${PROPERTY_REASONS.multiSelection})`)
+    }
+    expect(strip()).toBeNull()
+  })
+
+  it('"index..." still arms the setColor prompt and stages nothing', () => {
+    const { getContext, edits } = mountStaging()
+    fireEvent.change(screen.getByLabelText(/^Color/), { target: { value: 'index...' } })
+    expect(getContext().armed).toMatchObject({ group: 'modify', op: 'setColor' })
+    expect(getContext().pending).toBeNull()
+    expect(edits()).toHaveLength(0)
+  })
+
+  it('switching the ribbon tab away and back keeps the staged change', () => {
+    const { getContext, edits, setTab } = mountStaging()
+    fireEvent.change(screen.getByLabelText(/^Lineweight/), { target: { value: '0.25 mm' } })
+    const staged = getContext().pending
+    expect(staged).toMatchObject({ op: 'setLineweight', value: '0.25 mm', targetId: '7' })
+    setTab('draw')
+    expect(getContext().pending).toBe(staged)
+    setTab('properties')
+    expect(getContext().pending).toBe(staged)
+    expect(screen.getByLabelText(/^Lineweight/).value).toBe('0.25 mm')
+    expect(edits()).toHaveLength(0)
   })
 })
