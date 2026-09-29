@@ -1,0 +1,56 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-string-rebuild",
+  "builtin": "builtins/solar_string_rebuild.py",
+  "family": "stringing",
+  "adapter": "local-graph-read",
+  "entitlement": "run_read",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_STRING_REBUILD_REQUEST",
+  "readiness": {
+    "kind": "facets",
+    "facets": [
+      "strings"
+    ]
+  },
+  "engine": "server-builtin",
+  "interaction": {
+    "mode": "form"
+  },
+  "record_store": "registry",
+  "record": {
+    "name": "solar-string-rebuild",
+    "version": "1.0.0",
+    "description": "Rebuild every string's panel association (STRINGREBUILD, all) and report how many strings were rebuilt; the drawing is unchanged.",
+    "kind": "script",
+    "family_id": "stringing",
+    "engine_op": "solar_string_rebuild",
+    "entry": "builtins/solar_string_rebuild.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {
+          "type": "string",
+          "maxLength": 128
+        }
+      },
+      "additionalProperties": false
+    },
+    "returns": {
+      "type": "object"
+    },
+    "capabilities": [
+      "drawing.read"
+    ],
+    "allow_local_fallback": false
+  },
+  "ledger": [
+    "string-rebuild"
+  ],
+  "trusted_inputs": [],
+  "maturity": "preview",
+  "wave": 2,
+  "order": 76,
+  "scenario": "w2-rooftop"
+}

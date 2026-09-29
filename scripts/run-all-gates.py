@@ -557,6 +557,12 @@ def build_suites() -> List[Suite]:
         # count on every runner. COUNTED: 22 tests + 44 more parametrizations = 66.
         Suite("server-solar-tool-solar-string-edits", "server tests/test_solar_tool_solar_string_edits.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_string_edits.py"), 66),
+        # String rebuild and string data over the W1 graph (2026-09-29, sf-w2-string-rebuild-data): two
+        # local-graph-read tools over the rooftop-chain kernels; string data writes StringData.json as a
+        # revision-bound artifact. Inputs are authored in the file, so the floor is the exact count on
+        # every runner. COUNTED: 15 tests + 43 more parametrizations = 58.
+        Suite("server-solar-tool-solar-string-reports", "server tests/test_solar_tool_solar_string_reports.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_string_reports.py"), 58),
         # Auto-fill registry and persisted plan round trips: 17 tests + 50 more parametrizations = 67.
         Suite("server-solar-tool-solar-autofill", "server tests/test_solar_tool_solar_autofill.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_autofill.py"), 67),
