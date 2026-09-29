@@ -536,9 +536,12 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_size_strings.py"), 40),
         # W2 registration (2026-09-28, studio-finish solar-parity-010): seven W2 parity builtins
         # as registry local-graph-commit declarations. COUNTED from the collected cases:
-        # 13 tests + 7 more parametrizations = 20.
+        # 13 tests + 8 more parametrizations = 21 (the solar-string-conductors row joined TOOLS).
         Suite("server-solar-w2-registration", "server tests/test_solar_w2_registration.py", "pytest", SERVER,
-              _py_pytest("tests/test_solar_w2_registration.py"), 20),
+              _py_pytest("tests/test_solar_w2_registration.py"), 21),
+        # Explicit per-string conductor choices (2026-09-29): the producer homerun routing needs.
+        Suite("server-solar-tool-solar-string-conductors", "server tests/test_solar_tool_solar_string_conductors.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_string_conductors.py"), 30),
         # W5 inverter family (2026-09-24, contract G35): the shared state and delta module and the
         # device, string and output engines (literal ports of the plugin's inverter commands). Inputs
         # are authored in each file, so each floor is the exact count on every runner. MEASURED.

@@ -61,6 +61,19 @@ TOOLS = (
      {"string_refs": {"type": "array", "minItems": 1, "maxItems": 4096,
                       "uniqueItems": True, "items": REF}},
      ["string_refs"]),
+    ("solar-string-conductors", "stringing", 85, "INVALID_CONDUCTOR_REQUEST", ["strings"],
+     ["homeruns"], "set-conductors",
+     {"assignments": {"type": "array", "minItems": 1, "maxItems": 4096,
+                      "items": {"type": "object", "properties": {
+                          "string_ref": REF,
+                          "wire_gauge": {"type": "string", "enum": [
+                              "14 AWG", "12 AWG", "10 AWG", "8 AWG", "6 AWG", "4 AWG",
+                              "3 AWG", "2 AWG", "1 AWG", "1/0 AWG", "2/0 AWG", "3/0 AWG",
+                              "4/0 AWG", "250 kcmil", "300 kcmil", "350 kcmil", "400 kcmil",
+                              "500 kcmil", "600 kcmil", "750 kcmil", "1000 kcmil"]}},
+                                "required": ["string_ref", "wire_gauge"],
+                                "additionalProperties": False}}},
+     ["assignments"]),
 )
 NAMES = tuple(row[0] for row in TOOLS)
 
