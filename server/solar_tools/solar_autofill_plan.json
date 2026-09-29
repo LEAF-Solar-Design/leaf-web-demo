@@ -1,0 +1,43 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-autofill-plan",
+  "builtin": "builtins/solar_autofill_plan.py",
+  "family": "placement",
+  "adapter": "local-graph-read",
+  "entitlement": "run_read",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_AUTOFILL_PLAN_REQUEST",
+  "readiness": {"kind": "facets", "facets": ["frames"]},
+  "engine": "server-builtin",
+  "interaction": {"mode": "form"},
+  "record_store": "registry",
+  "record": {
+    "name": "solar-autofill-plan",
+    "version": "1.0.0",
+    "description": "Preview the auto-fill correction plan for the current panel groups, ready to apply with solar-autofill.",
+    "kind": "script",
+    "family_id": "placement",
+    "engine_op": "solar_autofill_plan",
+    "entry": "builtins/solar_autofill_plan.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {"type": "string", "maxLength": 128},
+        "panels_per_string": {"type": "integer", "minimum": 1, "maximum": 4096},
+        "alignment_tolerance": {"type": "number", "minimum": 0.000001, "maximum": 1000000}
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "returns": {"type": "object"},
+    "capabilities": ["drawing.read"],
+    "allow_local_fallback": false
+  },
+  "ledger": ["auto-fill"],
+  "trusted_inputs": [],
+  "maturity": "preview",
+  "wave": 2,
+  "order": 58,
+  "scenario": "w2-rooftop"
+}
