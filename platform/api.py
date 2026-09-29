@@ -28,6 +28,7 @@ from .deps import (get_org_id, get_review_binding_id, get_write_binding_id, get_
 from .models import JOB_KINDS, TIERS
 from .mutation_fence import drawing_mutation_refusal_guard, fence_refusal_message
 from .offboard import OrgNotFound, PurgeHook, offboard_org
+from . import org_export
 
 router = APIRouter(prefix="/api", tags=["platform"])
 from .binding_grant_issuance import router as binding_grant_router
@@ -556,6 +557,22 @@ def export_project(
     return _lifecycle_response(lambda: project_lifecycle.export_project(
         actor.org_id, project_id, actor.binding_id, idempotency_key=idempotency_key,
     ))
+
+
+@router.post("/orgs/{org_id}/export")
+def export_org(
+    org_id: uuid.UUID,
+    idempotency_key: str = Header(alias="Idempotency-Key"),
+    actor: _LifecycleActor = Depends(_get_lifecycle_actor),
+):
+    # Composes the per-project export for every org project; bounded, fails
+    # closed with 403 on a cross-org actor before any read.
+    try:
+        return _lifecycle_response(lambda: org_export.export_org(
+            org_id, actor, idempotency_key=idempotency_key,
+        ))
+    except org_export.OrgExportForbidden:
+        raise HTTPException(status_code=403, detail="org access denied") from None
 
 
 @router.post("/projects/{project_id}/reset")
