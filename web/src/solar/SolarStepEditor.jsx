@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import SchemaForm, { defaultsOf } from '../components/SchemaForm.jsx'
 import SolarConductorForm from './SolarConductorForm.jsx'
+import SolarSizingForm from './SolarSizingForm.jsx'
 import { solarFormKeys, solarView } from './solarView.js'
 import { solarFlowPrefill, solarFlowStepId } from './solarFlowModel.js'
 
@@ -30,7 +31,7 @@ export default function SolarStepEditor({
   const pending = status === 'pending'
 
   useEffect(() => {
-    if (row.name === 'solar-string-conductors' || typeof readIntake !== 'function' || Object.keys(solarFlowPrefill(row, 0)).length === 0) return undefined
+    if (['solar-string-conductors', 'solar-size-strings'].includes(row.name) || typeof readIntake !== 'function' || Object.keys(solarFlowPrefill(row, 0)).length === 0) return undefined
     let current = true
     Promise.resolve()
       .then(() => readIntake(drawingId, drawingVersion))
@@ -73,6 +74,9 @@ export default function SolarStepEditor({
       <h3>{text}</h3>
       {row.name === 'solar-string-conductors' ? (
         <SolarConductorForm row={row} drawingId={drawingId} drawingVersion={drawingVersion} projectId={projectId}
+          readIntake={readIntake} status={status} failureCode={failureCode} onSubmit={onSubmit} />
+      ) : row.name === 'solar-size-strings' ? (
+        <SolarSizingForm row={row} drawingId={drawingId} drawingVersion={drawingVersion} projectId={projectId}
           readIntake={readIntake} status={status} failureCode={failureCode} onSubmit={onSubmit} />
       ) : <>
       <SchemaForm schema={schema} values={values} onChange={change} />
