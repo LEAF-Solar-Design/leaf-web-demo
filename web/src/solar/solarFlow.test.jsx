@@ -185,6 +185,20 @@ describe('SolarFlowRail', () => {
 })
 
 describe('SolarStepEditor', () => {
+  it('SZ22 sizing mounts its Scope control and owns the only intake read', async () => {
+    const step = row('solar-size-strings', 20, 'Size strings', READY)
+    const readIntake = vi.fn(async () => ({ version: 3, intake: { solar_design_graph: {
+      rev: 7, settings: { id: 'S' }, project: { zip_code: '44224' }, panels: [{ id: 'P1' }], electrical_zones: [],
+    } } }))
+    render(<SolarStepEditor row={step} drawingId="d1" drawingVersion={3} readIntake={readIntake}
+      onSubmit={vi.fn()} onClose={vi.fn()} />)
+    expect(screen.getByLabelText('Scope')).toBeTruthy()
+    expect(screen.queryByLabelText('Expected rev')).toBeNull()
+    expect(screen.queryByLabelText('Note')).toBeNull()
+    await screen.findByText('Saved project ZIP: 44224')
+    expect(readIntake).toHaveBeenCalledExactlyOnceWith('d1', 3)
+  })
+
   const homeruns = () => families(W1.map(([name]) => name))[0].capabilities[7]
 
   it('CF13 prefills only a matching plain envelope with a safe nonnegative revision', async () => {

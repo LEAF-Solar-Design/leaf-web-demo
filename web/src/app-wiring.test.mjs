@@ -21,9 +21,20 @@ const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
 const viewerSource = readFileSync(new URL('./components/Viewer.jsx', import.meta.url), 'utf8')
 
 describe('Conductor form wiring', () => {
+  it('SZ23 the live ribbon branch routes conductors and sizing to the step editor', () => {
+    const live = esbuild.transformSync(appSource, { loader: 'jsx' }).code
+    const start = live.indexOf('["conductors", "sizing"].includes(solarSettingsFormChoice(')
+    assert.ok(start >= 0)
+    const branch = live.slice(start, start + 1600)
+    assert.match(branch, /React.createElement\(\s*SolarStepEditor/)
+    assert.match(branch, /readIntake: SOLAR_SETTINGS_LOADERS.readIntake/)
+    assert.match(branch, /drawingVersion: catalogRunContext\?\.drawingVersion/)
+    assert.match(branch, /onSubmit: \(tool, params\) => onRequestCatalogRun\(tool, params, RIBBON_RATIONALE, "ribbon"\)/)
+  })
+
   it('CF15 the ribbon conductor choice mounts the step editor with live context and loaders', () => {
     const live = esbuild.transformSync(appSource, { loader: 'jsx' }).code
-    const start = live.indexOf('=== "conductors"')
+    const start = live.indexOf('["conductors", "sizing"].includes(solarSettingsFormChoice(')
     assert.ok(start >= 0)
     const host = live.slice(start, start + 1600)
     assert.match(host, /React.createElement\(\s*SolarStepEditor/)

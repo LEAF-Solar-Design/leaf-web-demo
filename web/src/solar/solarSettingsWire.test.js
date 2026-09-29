@@ -16,6 +16,36 @@ const refused = { ok: false, error: { error_code: 'bad_params', message: 'invali
 const association = (envelope) => ({ intentId: 'i1', drawingId: 'd1', drawingVersion: 3, envelope })
 
 describe('Solar settings wiring rules', () => {
+  it('SZ19 sizing is chosen only for a live standalone drawing', () => {
+    const input = { enabled: true, mock: false, toolName: 'solar-size-strings', context: C }
+    expect(solarSettingsFormChoice(input)).toBe('sizing')
+    for (const override of [{ mock: true }, { enabled: false }, { context: { ...C, projectId: 'p1' } }]) {
+      expect(solarSettingsFormChoice({ ...input, ...override })).toBe('generic')
+    }
+  })
+
+  it('SZ20 sizing omits selection overlays only when enabled', () => {
+    const input = { toolName: 'solar-size-strings', selectedHandle: 'AB', isWrite: true }
+    expect(catalogRunOverlays({ ...input, enabled: true })).toEqual({})
+    expect(catalogRunOverlays({ ...input, enabled: false })).toEqual({ target_handle: 'AB', handle: 'AB' })
+  })
+
+  it('SZ21 settings success belongs only to its own new version', () => {
+    const envelope = { ok: true, result: { new_version: { drawing_id: 'd1', version: 4 } } }
+    const context = { ...C, drawingVersion: 4 }
+    expect(solarSettingsRunFeedback({ association: association(envelope), context }))
+      .toEqual({ text: 'Solar settings applied.', code: null })
+    for (const other of [{ ...context, drawingVersion: 5 }, { ...context, drawingId: 'd2' },
+      { ...context, projectId: 'p1' }, null]) {
+      expect(solarSettingsRunFeedback({ association: association(envelope), context: other })).toBeNull()
+    }
+    for (const version of [undefined, [], { drawing_id: 'd2', version: 4 }, { drawing_id: 'd1', version: '4' },
+      { drawing_id: 'd1', version: 4.5 }, Object.assign(new Date(), { drawing_id: 'd1', version: 4 })]) {
+      expect(solarSettingsRunFeedback({ association: association({ ok: true, result: { new_version: version } }), context })).toBeNull()
+    }
+    expect(solarSettingsRunFeedback({ association: association({ ok: true }), context })).toBeNull()
+  })
+
   it('CF14 enabled conductors omit CAD handles from the whole-graph request', () => {
     const input = { toolName: 'solar-string-conductors', selectedHandle: 'AB', isWrite: true }
     expect(catalogRunOverlays({ ...input, enabled: true })).toEqual({})

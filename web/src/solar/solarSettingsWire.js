@@ -28,6 +28,7 @@ export function solarSettingsFormChoice({ enabled, mock, toolName, context }) {
     typeof context.drawingId === 'string' && context.drawingId.length > 0
   if (!standalone) return 'generic'
   if (toolName === SOLAR_SETTINGS_TOOL_NAME) return 'typed'
+  if (toolName === 'solar-size-strings') return 'sizing'
   return toolName === 'solar-string-conductors' ? 'conductors' : 'generic'
 }
 
@@ -40,7 +41,7 @@ export function solarSettingsScope({ enabled, mock, profile, context }) {
 }
 
 export function catalogRunOverlays({ enabled, toolName, selectedHandle, isWrite }) {
-  if (!selectedHandle || (enabled === true && [SOLAR_SETTINGS_TOOL_NAME, 'solar-string-conductors'].includes(toolName))) return {}
+  if (!selectedHandle || (enabled === true && [SOLAR_SETTINGS_TOOL_NAME, 'solar-string-conductors', 'solar-size-strings'].includes(toolName))) return {}
   return { target_handle: selectedHandle, ...(isWrite ? { handle: selectedHandle } : {}) }
 }
 
@@ -52,11 +53,22 @@ export function solarSettingsLoaders({ getDrawingIntake, getDrawingVersions }) {
 }
 
 export const SOLAR_SETTINGS_RUN_MESSAGES = Object.freeze({
+  applied: 'Solar settings applied.',
   invalid_seed_parent: 'This saved drawing version cannot be used to start a Solar design.',
   not_applied: 'Solar settings were not applied.',
 })
 
 export function solarSettingsRunFeedback({ association, context }) {
+  if (context && association?.drawingId === context.drawingId && context.projectId == null && association?.envelope?.ok === true) {
+    const version = association.envelope.result?.new_version
+    if (version !== null && typeof version === 'object' &&
+        [Object.prototype, null].includes(Object.getPrototypeOf(version)) &&
+        version.drawing_id === context.drawingId && Number.isSafeInteger(version.version) &&
+        version.version === context.drawingVersion) {
+      return { text: SOLAR_SETTINGS_RUN_MESSAGES.applied, code: null }
+    }
+    return null
+  }
   if (!association || typeof association !== 'object' ||
       association.drawingId !== context?.drawingId ||
       association.drawingVersion !== context?.drawingVersion || context?.projectId != null ||
