@@ -8,6 +8,7 @@ import { SOLAR_SETTINGS_REASONS } from './solarSettingsModel.js';
 
 const SHA = 'a'.repeat(64);
 const C = { drawingId: 'd1', drawingVersion: 3, projectId: null };
+const P = { name: 'Roof A', zip_code: '44224', latitude: 41, longitude: -81 };
 const S = {
   panel_layer_contains: 'Panel', panel_group_layer: 'Panel Group',
   string_layer: 'String', home_run_layer: 'HomeRun', panels_in_sequence: 3,
@@ -18,7 +19,7 @@ const S = {
 const IE = {
   version: 3, head: 3, latest: 3,
   intake: {
-    polylines: [], solar_design_graph: { rev: 2, settings: S },
+    polylines: [], solar_design_graph: { rev: 2, settings: S, project: P },
     solar_design_graph_sha256: 'b'.repeat(64),
   },
 };
@@ -49,6 +50,226 @@ async function waitForMode(mode) {
 }
 
 afterEach(cleanup);
+
+const consequence = 'Re-size strings after this change';
+const blankZip = 'ZIP code is blank. You can save setup, but string sizing is unavailable until you save a ZIP code.';
+const clearingZip = 'Changing the ZIP code clears saved coordinates unless you enter both coordinates again.';
+const changeInput = (label, value) => fireEvent.change(screen.getByLabelText(label), { target: { value } });
+const applyButton = () => screen.getByRole('button', { name: 'Apply settings' });
+
+describe('Solar project settings', () => {
+  it('PJ16 keeps the ZIP clearing warning for normalized coordinate no-ops', async () => {
+    const supplied = props();
+    render(<SolarSettingsForm {...supplied} />);
+    await waitForMode('edit');
+    changeInput('ZIP code', '37601');
+    expect(screen.getByText(clearingZip)).toBeTruthy();
+    changeInput('Latitude', '41.0');
+    changeInput('Longitude', '-81.0');
+    expect(screen.getByText(clearingZip)).toBeTruthy();
+    expect(applyButton().disabled).toBe(false);
+    fireEvent.click(applyButton());
+    expect(supplied.onSubmit).toHaveBeenCalledExactlyOnceWith({ expected_rev: 2, project_changes: { zip_code: '37601' } });
+  });
+
+  it('PJ1 initializes from project fields alone', async () => {
+    const supplied = props({ readIntake: vi.fn().mockResolvedValue(IG) });
+    render(<SolarSettingsForm {...supplied} />);
+    await waitForMode('initialize');
+    expect(screen.getByLabelText('Project name').value).toBe('');
+    expect(screen.getByLabelText('Latitude').value).toBe('');
+    expect(screen.getByText(blankZip)).toBeTruthy();
+    changeInput('Project name', ' Roof A ');
+    changeInput('ZIP code', '44224');
+    changeInput('Drawing units', 'ft');
+    expect(screen.getByText(consequence)).toBeTruthy();
+    const button = screen.getByRole('button', { name: 'Start Solar design' });
+    expect(button.disabled).toBe(false);
+    fireEvent.click(button);
+    expect(supplied.onSubmit).toHaveBeenCalledExactlyOnceWith({
+      expected_rev: 0,
+      initialize: {
+        schema_version: 1, source_intake_sha256: SHA,
+        units: {
+          drawing_units: 'ft', wcs_to_ucs: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+          elevation_datum: 'unknown', crs: null,
+        },
+      },
+      project_changes: { name: 'Roof A', zip_code: '44224' },
+    });
+  });
+
+  it.each([
+    ['PJ2 name-only change', [['Project name', ' Roof B ']], { name: 'Roof B' }, null],
+    ['PJ3 blank ZIP remains saveable', [['ZIP code', '']], { zip_code: '' }, blankZip],
+    ['PJ4 ZIP-only change omits coordinates', [['ZIP code', '37601']], { zip_code: '37601' }, clearingZip],
+    ['PJ6 combined coordinates and settings', [['Latitude', '40.5'], ['Longitude', '-80.25'], ['MPPT count', '4']], { latitude: 40.5, longitude: -80.25 }, null],
+  ])('%s', async (_name, inputs, project_changes, message) => {
+    const supplied = props();
+    render(<SolarSettingsForm {...supplied} />);
+    await waitForMode('edit');
+    expect(screen.getByLabelText('Project name').value).toBe('Roof A');
+    expect(screen.getByLabelText('ZIP code').value).toBe('44224');
+    expect(screen.getByLabelText('Latitude').value).toBe('41');
+    expect(screen.getByLabelText('Longitude').value).toBe('-81');
+    for (const [label, value] of inputs) changeInput(label, value);
+    if (message) expect(screen.getByText(message)).toBeTruthy();
+    expect(screen.getByText(consequence)).toBeTruthy();
+    expect(applyButton().disabled).toBe(false);
+    fireEvent.click(applyButton());
+    expect(supplied.onSubmit).toHaveBeenCalledExactlyOnceWith({
+      expected_rev: 2, ...(inputs.some(([label]) => label === 'MPPT count') ? { changes: { num_mppt: 4 } } : {}), project_changes,
+    });
+  });
+
+  it('PJ5 clears both coordinates explicitly', async () => {
+    const supplied = props();
+    render(<SolarSettingsForm {...supplied} />);
+    await waitForMode('edit');
+    fireEvent.click(screen.getByRole('button', { name: 'Clear coordinates' }));
+    expect(screen.getByLabelText('Latitude').value).toBe('');
+    expect(screen.getByLabelText('Longitude').value).toBe('');
+    fireEvent.click(applyButton());
+    expect(supplied.onSubmit).toHaveBeenCalledExactlyOnceWith({ expected_rev: 2, project_changes: { latitude: null, longitude: null } });
+  });
+
+  it('PJ7 refuses a blank supplied name and keeps the draft', async () => {
+    const supplied = props();
+    render(<SolarSettingsForm {...supplied} />);
+    await waitForMode('edit');
+    changeInput('Project name', '   ');
+    expect(screen.getByTestId('solar-settings-reason').textContent).toBe('Enter a project name before saving this change.');
+    expect(applyButton().disabled).toBe(true);
+    fireEvent.click(applyButton());
+    expect(supplied.onSubmit).not.toHaveBeenCalled();
+    expect(screen.getByLabelText('Project name').value).toBe('   ');
+  });
+
+  it('PJ8 refuses malformed and overlength ZIP codes', async () => {
+    const supplied = props();
+    render(<SolarSettingsForm {...supplied} />);
+    await waitForMode('edit');
+    for (const [value, sentence] of [
+      ['1234', 'Enter a five-digit ZIP code or ZIP+4, or leave it blank.'],
+      ['12345-67890', 'Check the project fields and their length limits.'],
+    ]) {
+      changeInput('ZIP code', value);
+      expect(screen.getByTestId('solar-settings-reason').textContent).toBe(sentence);
+      expect(applyButton().disabled).toBe(true);
+      fireEvent.click(applyButton());
+    }
+    expect(supplied.onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('PJ9 counts name length in Unicode code points', async () => {
+    const supplied = props();
+    render(<SolarSettingsForm {...supplied} />);
+    await waitForMode('edit');
+    const name = '\u{1F600}'.repeat(4096);
+    changeInput('Project name', name);
+    expect(applyButton().disabled).toBe(false);
+    fireEvent.click(applyButton());
+    expect(supplied.onSubmit).toHaveBeenCalledExactlyOnceWith({ expected_rev: 2, project_changes: { name } });
+    changeInput('Project name', name + '\u{1F600}');
+    expect(screen.getByTestId('solar-settings-reason').textContent).toBe('Check the project fields and their length limits.');
+    expect(applyButton().disabled).toBe(true);
+    fireEvent.click(applyButton());
+    expect(supplied.onSubmit).toHaveBeenCalledTimes(1);
+  });
+
+  it('PJ10 refuses out of range, half-empty and exponent coordinates', async () => {
+    const supplied = props();
+    render(<SolarSettingsForm {...supplied} />);
+    await waitForMode('edit');
+    for (const [latitude, longitude] of [['91', '0'], ['0', ''], ['1e2', '0']]) {
+      changeInput('Latitude', latitude);
+      changeInput('Longitude', longitude);
+      expect(screen.getByTestId('solar-settings-reason').textContent).toBe('Enter both coordinates within their allowed ranges, or clear both.');
+      expect(applyButton().disabled).toBe(true);
+      fireEvent.click(applyButton());
+    }
+    expect(supplied.onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('PJ11 normalized no-op has no sizing consequence', async () => {
+    const supplied = props();
+    render(<SolarSettingsForm {...supplied} />);
+    await waitForMode('edit');
+    changeInput('Project name', ' Roof A ');
+    expect(screen.queryByText(consequence)).toBeNull();
+    expect(applyButton().disabled).toBe(true);
+    expect(screen.getByTestId('solar-settings-reason').textContent).toBe('Change at least one project field or setting before you submit.');
+    fireEvent.click(applyButton());
+    expect(supplied.onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('PJ12 locks duplicate submissions before the parent renders', async () => {
+    const supplied = props();
+    render(<SolarSettingsForm {...supplied} />);
+    await waitForMode('edit');
+    changeInput('Project name', 'Roof B');
+    act(() => {
+      fireEvent.click(applyButton());
+      fireEvent.click(applyButton());
+    });
+    expect(supplied.onSubmit).toHaveBeenCalledExactlyOnceWith({ expected_rev: 2, project_changes: { name: 'Roof B' } });
+  });
+
+  it('PJ13 refuses an incomplete saved coordinate pair', async () => {
+    const intake = { ...IE, intake: { ...IE.intake, solar_design_graph: { rev: 2, settings: S, project: { ...P, name: 'A', longitude: null } } } };
+    const supplied = props({ readIntake: vi.fn().mockResolvedValue(intake) });
+    render(<SolarSettingsForm {...supplied} />);
+    await waitForMode('refused');
+    expect(screen.getByTestId('solar-settings-reason').textContent).toBe(SOLAR_SETTINGS_REASONS.graph_unreadable);
+    expect(screen.queryAllByRole('textbox')).toHaveLength(0);
+    expect(supplied.onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('PJ14 allows applying again after confirmation dismissal and a parent render', async () => {
+    const supplied = props();
+    const view = render(<SolarSettingsForm {...supplied} />);
+    await waitForMode('edit');
+    changeInput('Project name', 'Roof B');
+    fireEvent.click(applyButton());
+    expect(supplied.onSubmit).toHaveBeenCalledExactlyOnceWith({ expected_rev: 2, project_changes: { name: 'Roof B' } });
+    view.rerender(<SolarSettingsForm {...supplied} />);
+    fireEvent.click(applyButton());
+    expect(supplied.onSubmit).toHaveBeenCalledTimes(2);
+    expect(supplied.onSubmit.mock.calls[1][0]).toEqual(supplied.onSubmit.mock.calls[0][0]);
+  });
+
+  it('releases the lock on settled busy state and failure without losing drafts', async () => {
+    const supplied = props();
+    const view = render(<SolarSettingsForm {...supplied} />);
+    await waitForMode('edit');
+    changeInput('Project name', 'Roof B');
+    fireEvent.click(applyButton());
+    view.rerender(<SolarSettingsForm {...supplied} busy />);
+    view.rerender(<SolarSettingsForm {...supplied} busy={false} />);
+    fireEvent.click(applyButton());
+    expect(supplied.onSubmit).toHaveBeenCalledTimes(2);
+    view.rerender(<SolarSettingsForm {...supplied} runMessage={{ text: 'Solar settings were not applied.', code: null }} />);
+    expect(screen.getByLabelText('Project name').value).toBe('Roof B');
+    fireEvent.click(applyButton());
+    fireEvent.click(applyButton());
+    expect(supplied.onSubmit).toHaveBeenCalledTimes(3);
+  });
+
+  it('releases the lock and resets project drafts when the drawing changes', async () => {
+    const supplied = props();
+    const view = render(<SolarSettingsForm {...supplied} />);
+    await waitForMode('edit');
+    changeInput('Project name', 'Roof B');
+    fireEvent.click(applyButton());
+    view.rerender(<SolarSettingsForm {...supplied} context={{ ...C, drawingId: 'd2' }} />);
+    await waitForMode('edit');
+    expect(screen.getByLabelText('Project name').value).toBe('Roof A');
+    changeInput('Project name', 'Roof C');
+    fireEvent.click(applyButton());
+    expect(supplied.onSubmit).toHaveBeenCalledTimes(2);
+    expect(supplied.onSubmit).toHaveBeenLastCalledWith({ expected_rev: 2, project_changes: { name: 'Roof C' } });
+  });
+});
 
 describe('Solar settings form', () => {
   it('SF2 row29 the form shows its run message and keeps the drafts', async () => {
@@ -84,7 +305,7 @@ describe('Solar settings form', () => {
     expect(supplied.readVersions).toHaveBeenCalledWith('d1');
     expect(screen.getByText('Graph revision 2')).toBeTruthy();
     expect(screen.getByRole('region', { name: 'Solar settings' })).toBeTruthy();
-    expect(screen.getAllByRole('textbox')).toHaveLength(12);
+    expect(screen.getAllByRole('textbox')).toHaveLength(16);
     expect(screen.getByLabelText('MPPT count').value).toBe('2');
     expect(screen.queryByLabelText('Drawing units')).toBeNull();
     expect(screen.getByRole('button', { name: 'Apply settings' }).disabled).toBe(true);
@@ -96,7 +317,7 @@ describe('Solar settings form', () => {
   it('submits expected_rev and only the changed fields', async () => {
     const intake = {
       ...IE,
-      intake: { ...IE.intake, solar_design_graph: { rev: 2, settings: { ...S, optimizer_ratio: 5e-7 } } },
+      intake: { ...IE.intake, solar_design_graph: { rev: 2, settings: { ...S, optimizer_ratio: 5e-7 }, project: P } },
     };
     const supplied = props({ readIntake: vi.fn().mockResolvedValue(intake) });
     render(<SolarSettingsForm {...supplied} />);
@@ -165,7 +386,7 @@ describe('Solar settings form', () => {
     const oldVersions = deferred();
     const nextIntake = {
       ...IE, version: 4, head: 4, latest: 4,
-      intake: { ...IE.intake, solar_design_graph: { rev: 7, settings: { ...S, num_mppt: 8 } } },
+      intake: { ...IE.intake, solar_design_graph: { rev: 7, settings: { ...S, num_mppt: 8 }, project: P } },
     };
     const nextVersions = { ...V, head: 4, latest: 4, versions: [...V.versions, { v: 4, parent: 3, sha256: SHA, note: null }] };
     const supplied = props({
