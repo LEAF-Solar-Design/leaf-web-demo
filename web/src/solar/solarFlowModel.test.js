@@ -35,6 +35,23 @@ function steps(readyNames, blockedAvailability = blocked('valid_settings_require
 }
 
 describe('solarFlowSteps', () => {
+  it('CF11 admits conductors before homeruns while excluding other wave-two rows', () => {
+    const conductor = row('solar-string-conductors', 85, { wave: 2 })
+    const result = solarFlowSteps([{ capabilities: [
+      ...W1.map(([name, order]) => row(name, order)), conductor,
+      row('solar-string-add', 86, { wave: 2 }),
+      row('solar-string-conductors', 1, { wave: 1 }),
+    ] }])
+    expect(result.map((item) => item.name)).toEqual([
+      ...W1.slice(0, 7).map(([name]) => name), 'solar-string-conductors',
+      ...W1.slice(7).map(([name]) => name),
+    ])
+    expect(result).toHaveLength(10)
+    expect(result[7]).toBe(conductor)
+    expect(conductor.solar.order).toBe(85)
+    expect(conductor.solar.wave).toBe(2)
+  })
+
   it('M1 keeps the nine W1 rows in (order, name) order, first wins, bounded', () => {
     const shuffled = [...W1].reverse().map(([name, order]) => row(name, order))
     const families = [

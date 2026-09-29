@@ -3971,7 +3971,18 @@ export default function App() {
                 />
               </div>
             ) : (
-            <SolarToolForm
+            ENV_SOLAR_SETTINGS_FORM && solarSettingsFormChoice({ enabled: ENV_SOLAR_SETTINGS_FORM, mock, toolName: solarFormTool.name, context: catalogRunContext }) === 'conductors' ? (
+              <SolarStepEditor
+                key={`${catalogRunContext?.drawingId ?? ''}:${solarFormTool.name}`}
+                row={solarFormTool}
+                drawingId={catalogRunContext?.drawingId ?? null}
+                drawingVersion={catalogRunContext?.drawingVersion ?? null}
+                projectId={catalogRunContext?.projectId ?? null}
+                readIntake={SOLAR_SETTINGS_LOADERS.readIntake}
+                onSubmit={(tool, params) => onRequestCatalogRun(tool, params, RIBBON_RATIONALE, 'ribbon')}
+                onClose={() => setSolarFormTool(null)}
+              />
+            ) : <SolarToolForm
               key={solarFormTool.name}
               tool={solarFormTool}
               onSubmit={(tool, params) => onRequestCatalogRun(tool, params, RIBBON_RATIONALE, 'ribbon')}
@@ -3997,6 +4008,7 @@ export default function App() {
                   row={solarFlowEditor}
                   drawingId={catalogRunContext?.drawingId ?? null}
                   drawingVersion={catalogRunContext?.drawingVersion ?? null}
+                  projectId={catalogRunContext?.projectId ?? null}
                   readIntake={SOLAR_SETTINGS_LOADERS?.readIntake}
                   retained={solarFlowRetainedRef.current.get(solarFlowEditor.name)?.drawingId === (catalogRunContext?.drawingId ?? null)
                     ? solarFlowRetainedRef.current.get(solarFlowEditor.name).values : null}

@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { solarRailReason } from '../lib/ribbonClusters.js'
 import SolarFlowRail from './SolarFlowRail.jsx'
 import SolarStepEditor from './SolarStepEditor.jsx'
+import conductorDeclaration from '../../../server/solar_tools/solar_string_conductors.json'
 
 afterEach(cleanup)
 
@@ -52,6 +53,38 @@ function button(name) {
 }
 
 describe('SolarFlowRail', () => {
+  it('CF12 conductors stay enabled when homeruns are blocked and open the table', async () => {
+    const conductor = {
+      ...row('solar-string-conductors', 85, 'String conductors', READY),
+      params: conductorDeclaration.record.params,
+    }
+    conductor.solar.wave = 2
+    const shown = families(W1.map(([name]) => name).filter((name) => name !== 'solar-homeruns'), blocked('routing_topology_required'))
+    shown[0].capabilities.push(conductor)
+    const readIntake = vi.fn(async () => ({ version: 3, intake: { solar_design_graph: { rev: 7, strings: [
+      { id: 'T1', circuit_tag: 'A1', wire_gauge: '' },
+    ] } } }))
+    function Host() {
+      const [step, setStep] = React.useState(null)
+      return <>
+        <SolarFlowRail families={shown} drawingId="d1" familiesDrawingId="d1" onOpenStep={setStep} />
+        {step && <SolarStepEditor row={step} drawingId="d1" drawingVersion={3} readIntake={readIntake}
+          onSubmit={vi.fn()} onClose={() => setStep(null)} />}
+      </>
+    }
+    render(<Host />)
+    expect(items()).toHaveLength(10)
+    expect(button('String conductors').disabled).toBe(false)
+    expect(button('Homeruns').disabled).toBe(true)
+    fireEvent.click(button('String conductors'))
+    expect(screen.getByRole('table', { name: 'String conductors' })).toBeTruthy()
+    await screen.findByLabelText('Select A1')
+    expect(readIntake).toHaveBeenCalledTimes(1)
+    fireEvent.keyDown(screen.getByLabelText('Select A1'), { key: 'Escape' })
+    expect(screen.queryByRole('table')).toBeNull()
+    expect(document.activeElement).toBe(button('String conductors'))
+  })
+
   it('R1 renders the nine steps in order with the resume step marked', () => {
     render(<SolarFlowRail families={families(['solar-settings', 'solar-size-strings'])} drawingId="d1" onOpenStep={vi.fn()} />)
     const nav = screen.getByRole('navigation', { name: 'Solar design steps' })
@@ -154,9 +187,28 @@ describe('SolarFlowRail', () => {
 describe('SolarStepEditor', () => {
   const homeruns = () => families(W1.map(([name]) => name))[0].capabilities[7]
 
+  it('CF13 prefills only a matching plain envelope with a safe nonnegative revision', async () => {
+    const samples = [
+      [{ version: 3, intake: { solar_design_graph: { rev: 7 } } }, '7'],
+      [{ solar_design_graph: { rev: 7 } }, '0'],
+      [{ version: 4, intake: { solar_design_graph: { rev: 7 } } }, '0'],
+      [{ version: 3, intake: { solar_design_graph: { rev: -1 } } }, '0'],
+      [{ version: 3, intake: { solar_design_graph: { rev: 1.5 } } }, '0'],
+      [Object.assign(new Date(), { version: 3, intake: { solar_design_graph: { rev: 7 } } }), '0'],
+    ]
+    for (const [value, expected] of samples) {
+      const readIntake = vi.fn(async () => value)
+      render(<SolarStepEditor row={homeruns()} drawingId="d1" drawingVersion={3} readIntake={readIntake}
+        onSubmit={vi.fn()} onClose={vi.fn()} />)
+      await act(async () => {})
+      expect(screen.getByLabelText('Expected rev').value).toBe(expected)
+      cleanup()
+    }
+  })
+
   it('E1 prefills the graph revision, submits without closing, and retries the same values', async () => {
     const step = homeruns()
-    const readIntake = vi.fn(async () => ({ solar_design_graph: { rev: 7 } }))
+    const readIntake = vi.fn(async () => ({ version: 3, intake: { solar_design_graph: { rev: 7 } } }))
     const onSubmit = vi.fn()
     const onClose = vi.fn()
     const props = { row: step, drawingId: 'd1', drawingVersion: 3, readIntake, onSubmit, onClose }
@@ -186,7 +238,7 @@ describe('SolarStepEditor', () => {
   })
 
   it('E1 retained inputs win over the prefill and a touched revision is never overwritten', async () => {
-    const readIntake = vi.fn(async () => ({ solar_design_graph: { rev: 7 } }))
+    const readIntake = vi.fn(async () => ({ version: 3, intake: { solar_design_graph: { rev: 7 } } }))
     render(<SolarStepEditor row={homeruns()} drawingId="d1" drawingVersion={3} readIntake={readIntake}
       retained={{ expected_rev: 4, note: 'kept' }} onSubmit={vi.fn()} onClose={vi.fn()} />)
     await waitFor(() => expect(readIntake).toHaveBeenCalledTimes(1))
@@ -200,7 +252,7 @@ describe('SolarStepEditor', () => {
     render(<SolarStepEditor row={homeruns()} drawingId="d1" drawingVersion={3} readIntake={slow} onSubmit={vi.fn()} onClose={vi.fn()} />)
     await waitFor(() => expect(slow).toHaveBeenCalledTimes(1))
     fireEvent.change(screen.getByLabelText('Expected rev'), { target: { value: '5' } })
-    await act(async () => { resolve({ solar_design_graph: { rev: 9 } }) })
+    await act(async () => { resolve({ version: 3, intake: { solar_design_graph: { rev: 9 } } }) })
     expect(screen.getByLabelText('Expected rev').value).toBe('5')
   })
 

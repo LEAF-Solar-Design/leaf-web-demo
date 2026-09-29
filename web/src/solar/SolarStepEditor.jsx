@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import SchemaForm, { defaultsOf } from '../components/SchemaForm.jsx'
+import SolarConductorForm from './SolarConductorForm.jsx'
 import { solarFormKeys, solarView } from './solarView.js'
 import { solarFlowPrefill, solarFlowStepId } from './solarFlowModel.js'
 
@@ -13,7 +14,7 @@ function ownsKey(record, key) {
 // Review & run arms the confirm path and leaves the editor open; a failed run
 // offers Retry with the same values. Cancel returns focus to the step's rail button.
 export default function SolarStepEditor({
-  row, drawingId = null, drawingVersion = null, readIntake, retained = null,
+  row, drawingId = null, drawingVersion = null, projectId = null, readIntake, retained = null,
   status = null, failureCode = null, onSubmit, onClose,
 }) {
   const { view } = solarView(row)
@@ -29,12 +30,14 @@ export default function SolarStepEditor({
   const pending = status === 'pending'
 
   useEffect(() => {
-    if (typeof readIntake !== 'function' || Object.keys(solarFlowPrefill(row, 0)).length === 0) return undefined
+    if (row.name === 'solar-string-conductors' || typeof readIntake !== 'function' || Object.keys(solarFlowPrefill(row, 0)).length === 0) return undefined
     let current = true
     Promise.resolve()
       .then(() => readIntake(drawingId, drawingVersion))
       .then((intake) => {
-        const rev = intake?.solar_design_graph?.rev
+        if (intake === null || typeof intake !== 'object'
+          || ![Object.prototype, null].includes(Object.getPrototypeOf(intake)) || intake.version !== drawingVersion) return
+        const rev = intake.intake?.solar_design_graph?.rev
         const prefill = solarFlowPrefill(row, rev)
         if (!current || revTouched.current || !ownsKey(prefill, 'expected_rev')) return
         setValues((previous) => ({ ...previous, expected_rev: prefill.expected_rev }))
@@ -68,6 +71,10 @@ export default function SolarStepEditor({
       }}
     >
       <h3>{text}</h3>
+      {row.name === 'solar-string-conductors' ? (
+        <SolarConductorForm row={row} drawingId={drawingId} drawingVersion={drawingVersion} projectId={projectId}
+          readIntake={readIntake} status={status} failureCode={failureCode} onSubmit={onSubmit} />
+      ) : <>
       <SchemaForm schema={schema} values={values} onChange={change} />
       {pending && <p role="status" className="solar-step-note">This step is running. Confirm or wait for it to finish.</p>}
       {status === 'failed' && (
@@ -81,6 +88,7 @@ export default function SolarStepEditor({
       {status === 'failed' && (
         <button type="button" className="chip-act" onClick={() => onSubmit(row, values)}>Retry</button>
       )}
+      </>}
       <button type="button" className="chip-act" onClick={close}>Cancel</button>
     </section>
   )

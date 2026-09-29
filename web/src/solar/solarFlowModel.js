@@ -80,9 +80,9 @@ export function solarFlowSteps(families) {
       if (!row || typeof row !== 'object' || typeof row.name !== 'string' || row.name.length === 0) continue
       if (seen.has(row.name)) continue
       const result = solarView(row)
-      if (result.state !== 'valid' || result.view.wave !== 1) continue
+      if (result.state !== 'valid' || (result.view.wave !== 1 && row.name !== 'solar-string-conductors')) continue
       seen.add(row.name)
-      picked.push({ row, order: result.view.order })
+      picked.push({ row, order: row.name === 'solar-string-conductors' ? 75 : result.view.order })
     }
   }
   return picked.sort(compareSteps).slice(0, MAX_FLOW_STEPS).map(({ row }) => row)
