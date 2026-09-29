@@ -28,6 +28,7 @@
     "pg": "^8.22.0"
   },
   "overrides": {
-    "fast-uri": "4.1.4"
+    "fast-uri": "4.1.4",
+    "undici": "7.30.0"
   }
 }
