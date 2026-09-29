@@ -58,6 +58,18 @@ const changeInput = (label, value) => fireEvent.change(screen.getByLabelText(lab
 const applyButton = () => screen.getByRole('button', { name: 'Apply settings' });
 
 describe('Solar project settings', () => {
+  it('PJ17 omits the ZIP clearing warning for an untouched normalized blank ZIP', async () => {
+    const intake = { ...IE, intake: { ...IE.intake, solar_design_graph: { rev: 2, settings: S, project: { ...P, zip_code: '\u0085' } } } };
+    const supplied = props({ readIntake: vi.fn().mockResolvedValue(intake) });
+    render(<SolarSettingsForm {...supplied} />);
+    await waitForMode('edit');
+    changeInput('MPPT count', '4');
+    expect(screen.queryByText(clearingZip)).toBeNull();
+    expect(applyButton().disabled).toBe(false);
+    fireEvent.click(applyButton());
+    expect(supplied.onSubmit).toHaveBeenCalledExactlyOnceWith({ expected_rev: 2, changes: { num_mppt: 4 } });
+  });
+
   it('PJ16 keeps the ZIP clearing warning for normalized coordinate no-ops', async () => {
     const supplied = props();
     render(<SolarSettingsForm {...supplied} />);

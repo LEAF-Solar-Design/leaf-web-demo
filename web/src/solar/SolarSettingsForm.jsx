@@ -55,7 +55,7 @@ function SettingsForContext({ context, readIntake, readVersions, checkoutHeld, b
         : result && !result.ok ? result.reason : null;
   const editable = state?.mode === 'edit' || state?.mode === 'initialize';
   const effectiveZip = editable ? pyStrip(projectDrafts.zip_code ?? state.project.zip_code) : '';
-  const zipChanged = editable && effectiveZip !== state.project.zip_code;
+  const zipChanged = editable && effectiveZip !== pyStrip(state.project.zip_code);
   const coordinateChange = editable ? buildSettingsParams(state, {}, units,
     Object.fromEntries(Object.entries(projectDrafts).filter(([key]) => key === 'latitude' || key === 'longitude'))) : null;
   const coordinatesUnchanged = coordinateChange?.reason === 'no_changes';
