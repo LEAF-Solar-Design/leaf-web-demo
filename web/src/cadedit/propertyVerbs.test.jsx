@@ -599,6 +599,81 @@ describe('S1: Properties picks stage and wait for Apply on the pinned target', (
     expect(select.value).toBe('ByLayer')
   })
 
+  it.each(['Cancel', 'Apply'].flatMap((action) =>
+    [null, 'move', 'setColor'].map((op) => [action, op]),
+  ))('blur to index... before %s preserves the armed command %s', (action, op) => {
+    const { worker, getContext, edits } = mountStaging()
+    if (op) act(() => { getContext().setArmed({ group: 'modify', op }) })
+    const armed = getContext().armed
+    const select = screen.getByLabelText(/^Color/)
+    fireEvent.change(select, { target: { value: 'red' } })
+    const staged = getContext().pending
+    act(() => { select.focus() })
+    const postedBefore = worker.posted.length
+    const options = [...select.options].map((option) => option.value)
+    for (let index = options.indexOf('red') + 1; index <= options.indexOf('index...'); index += 1) {
+      fireEvent.keyDown(select, { key: 'ArrowDown' })
+      fireEvent.change(select, { target: { value: options[index] } })
+    }
+    expect(select.value).toBe('index...')
+    fireEvent.blur(select)
+    expect(getContext().armed).toBe(armed)
+    expect(getContext().pending).toBe(staged)
+    expect(select.value).toBe('red')
+    expect(worker.posted).toHaveLength(postedBefore)
+    fireEvent.click(action === 'Cancel' ? cancelButton() : applyButton())
+    expect(getContext().armed).toBe(armed)
+    expect(getContext().pending).toBeNull()
+    expect(strip()).toBeNull()
+    if (action === 'Cancel') expect(worker.posted).toHaveLength(postedBefore)
+    else expect(edits()).toEqual([{ type: 'applyEdit', op: 'setColor', payload: { entityId: '7', aci: 1 } }])
+  })
+
+  it.each(['Enter', 'pointer'])('%s committing index... leaves the staged value and armed command unchanged', (path) => {
+    const { worker, getContext } = mountStaging()
+    act(() => { getContext().setArmed({ group: 'modify', op: 'move' }) })
+    const armed = getContext().armed
+    const select = screen.getByLabelText(/^Color/)
+    fireEvent.change(select, { target: { value: 'red' } })
+    const staged = getContext().pending
+    act(() => { select.focus() })
+    const postedBefore = worker.posted.length
+    if (path === 'Enter') fireEvent.keyDown(select, { key: 'ArrowDown' })
+    fireEvent.change(select, { target: { value: 'index...' } })
+    if (path === 'Enter') fireEvent.keyDown(select, { key: 'Enter' })
+    expect(getContext().pending).toBe(staged)
+    expect(getContext().armed).toBe(armed)
+    expect(worker.posted).toHaveLength(postedBefore)
+  })
+
+  it.each(['blue', 'ByLayer'])('a buffered walk to %s commits the normal staging rules on blur', (value) => {
+    const { worker, getContext, edits } = mountStaging()
+    const select = screen.getByLabelText(/^Color/)
+    fireEvent.change(select, { target: { value: 'red' } })
+    act(() => { select.focus() })
+    const postedBefore = worker.posted.length
+    const options = [...select.options].map((option) => option.value)
+    const step = options.indexOf(value) > options.indexOf('red') ? 1 : -1
+    for (let index = options.indexOf('red') + step; index !== options.indexOf(value) + step; index += step) {
+      fireEvent.keyDown(select, { key: step === 1 ? 'ArrowDown' : 'ArrowUp' })
+      fireEvent.change(select, { target: { value: options[index] } })
+    }
+    expect(select.value).toBe(value)
+    expect(getContext().pending).toMatchObject({ value: 'red', targetId: '7' })
+    fireEvent.blur(select)
+    expect(worker.posted).toHaveLength(postedBefore)
+    expect(getContext().armed).toBeNull()
+    if (value === 'ByLayer') {
+      expect(getContext().pending).toBeNull()
+      expect(strip()).toBeNull()
+      expect(screen.queryByRole('button', { name: /^Apply Color change/ })).toBeNull()
+    } else {
+      expect(getContext().pending).toMatchObject({ value: 'blue', targetId: '7' })
+      fireEvent.click(applyButton())
+      expect(edits()).toEqual([{ type: 'applyEdit', op: 'setColor', payload: { entityId: '7', aci: 5 } }])
+    }
+  })
+
   it('while staged the other two combos wait with the pendingChange sentence', () => {
     mountStaging()
     fireEvent.change(screen.getByLabelText(/^Color/), { target: { value: 'red' } })

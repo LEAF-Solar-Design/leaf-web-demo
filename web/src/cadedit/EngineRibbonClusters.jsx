@@ -535,6 +535,8 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // A pick STAGES the change on the entity selected now; only Apply posts it.
   // Picking again in the same combo replaces the value and keeps the target;
   // picking the target's own current value drops the staged change.
+  // Blur commits follow those same rules: the select shows the walked value,
+  // so Apply applies what the user sees, and Cancel then discards it.
   const stageFocusRef = useRef(null)
   const stageProperty = (op, value) => {
     if (cancellingPropertyRef.current) return
@@ -564,7 +566,11 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
       disabled: widgetOff('setColor'), reason: widgetReason('setColor'),
       onChange: (value) => {
         if (cancellingPropertyRef.current) return
-        if (value === 'index...') toggleArmed('modify', 'setColor')
+        if (value === 'index...') {
+          // A staged change must survive every commit path, including blur
+          // before an Apply/Cancel click, without arming or toggling a prompt.
+          if (!pending) toggleArmed('modify', 'setColor')
+        }
         else stageProperty('setColor', value)
       },
     },
