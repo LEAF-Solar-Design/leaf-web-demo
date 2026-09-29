@@ -71,7 +71,8 @@ def test_llm_two_tenants_mixed_payers():
     assert llm["usd_est"] == "0.35"
     assert llm["payer"] == "mixed"
     assert llm["by_payer"] == {"leaf": {"turns": 1, "usd_est": "0.05"},
-                               "tenant_plan": {"turns": 2, "usd_est": "0.3"}}
+                               "tenant_api_key": {"turns": 1, "usd_est": "0.2"},
+                               "tenant_plan": {"turns": 1, "usd_est": "0.1"}}
 
 
 def test_llm_single_payer_and_missing_grant_kind_is_unknown_and_partial():
@@ -312,3 +313,120 @@ def test_bad_period_is_refused(bad):
 def test_blank_tenant_is_refused():
     with pytest.raises(ValueError):
         tenant_direct_use(PERIOD, "  ", agent_rows=[], broker_rows=[])
+
+
+@pytest.mark.parametrize("period,start,end", [
+    ("2026-09", datetime(2026, 9, 1, tzinfo=timezone.utc),
+     datetime(2026, 10, 1, tzinfo=timezone.utc)),
+    ("2026-12", datetime(2026, 12, 1, tzinfo=timezone.utc),
+     datetime(2027, 1, 1, tzinfo=timezone.utc)),
+])
+@pytest.mark.parametrize("cap", [1, 2, 3])
+def test_agent_postgres_month_reader_is_bounded_and_tenant_scoped(monkeypatch, period, start, end, cap):
+    from contextlib import contextmanager
+    from datetime import timedelta
+    from types import SimpleNamespace
+
+    import agent_pg_store
+
+    stored = [
+        {"tenant_id": tenant, "ts": ts,
+         "record": _turn(tenant, ts="1999-01-01T00:00:00Z", usd="0.123456789",
+                         grant_kind="api_key")}
+        for tenant, ts in ((A, start - timedelta(microseconds=1)), (B, start),
+                           (A, start), (A, end - timedelta(microseconds=1)), (A, end))
+    ]
+
+    class Cursor:
+        def execute(self, sql, params):
+            assert "SELECT tenant_id, ts, record FROM agent_usage_turns" in sql
+            assert "tenant_id = %(tenant_id)s" in sql
+            assert "record->>'kind' = 'turn'" in sql
+            assert "ts >= %(start)s AND ts < %(end)s" in sql
+            assert "ORDER BY ts, usage_key" in sql
+            assert "LIMIT %(limit)s" in sql
+            assert params == {"tenant_id": A, "start": start, "end": end, "limit": cap + 1}
+            self.rows = [r for r in stored if r["tenant_id"] == params["tenant_id"]
+                         and params["start"] <= r["ts"] < params["end"]][:params["limit"]]
+
+        def fetchall(self):
+            return self.rows
+
+    @contextmanager
+    def cursor():
+        yield Cursor()
+
+    monkeypatch.setattr(agent_pg_store, "_load_platform", lambda: (SimpleNamespace(cursor=cursor), None))
+    monkeypatch.setattr(agent_pg_store, "MAX_USAGE_ROWS", cap)
+    rows, truncated = agent_pg_store.usage_rows_for_period(A, period)
+    assert len(rows) == min(cap, 2)
+    assert truncated is (cap < 2)
+    assert all(r["tenant_id"] == A and start <= r["ts"] < end for r in rows)
+    assert rows[0]["ts"] == start  # indexed DB timestamp, not the JSON timestamp
+    assert rows[0]["usd_est"] == "0.123456789"
+    assert {k: rows[0][k] for k in ("tokens_in", "tokens_out", "cache_read_tokens", "cache_creation_tokens")} == {
+        "tokens_in": 100, "tokens_out": 20, "cache_read_tokens": 5, "cache_creation_tokens": 7}
+    assert rows[0]["grant_kind"] == "api_key"
+    assert "session_id" not in rows[0]
+
+
+@pytest.mark.parametrize("mode", ["complete", "partial", "unknown", "empty"])
+def test_agent_postgres_cost_api_coverage_and_payer(monkeypatch, tmp_path, mode):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    import agent_pg_store
+    import deps
+    from routers import cost as cost_router
+
+    calls = []
+
+    def read(tenant_id, period):
+        calls.append((tenant_id, period))
+        if mode == "unknown":
+            raise ConnectionError("database unavailable")
+        if mode == "empty":
+            return [], False
+        # The collector also rejects a foreign tenant should a source return one.
+        return [_turn(A, grant_kind="api_key", usd="0.123456789"),
+                _turn(B, usd="99")], mode == "partial"
+
+    monkeypatch.setattr(agent_pg_store, "usage_rows_for_period", read)
+    monkeypatch.setenv("LEAF_AGENT_STORE", "postgres")
+    monkeypatch.setenv("LEAF_COST_LEDGER_DIR", str(tmp_path / "cost"))
+    monkeypatch.setenv("BROKER_LEDGER", str(tmp_path / "broker.jsonl"))
+    # A readable JSONL must never mask a Postgres outage.
+    legacy = tmp_path / "agent.jsonl"
+    legacy.write_text(json.dumps(_turn(A, usd="50")), encoding="utf-8")
+    monkeypatch.setenv("LEAF_AGENT_LEDGER", str(legacy))
+    app = FastAPI()
+    app.dependency_overrides[deps.require_tenant] = lambda: A
+    app.include_router(cost_router.router)
+    with TestClient(app) as client:
+        response = client.get("/api/cost", params={"period": PERIOD, "tenant_id": B})
+    assert response.status_code == 200
+    assert calls == [(A, PERIOD)]
+    assert B not in response.text
+    llm = response.json()["own_use"]["llm"]
+    assert llm["coverage"] == ("complete" if mode == "empty" else mode)
+    if mode == "unknown":
+        assert all(llm[key] is None for key in ("turns", "tokens", "usd_est", "payer", "by_payer"))
+    elif mode == "empty":
+        assert llm["turns"] == 0 and llm["usd_est"] == "0"
+    else:
+        assert llm["turns"] == 1 and llm["usd_est"] == "0.123456789"
+        assert llm["tokens"] == {"input": 100, "output": 20, "cache_read": 5, "cache_write": 7}
+        assert llm["payer"] == "tenant_api_key"
+        assert llm["by_payer"] == {"tenant_api_key": {"turns": 1, "usd_est": "0.123456789"}}
+
+
+@pytest.mark.parametrize("bad", ["2026-9", "2026-13", "", None, "0000-01"])
+def test_agent_postgres_reader_rejects_invalid_month_before_io(monkeypatch, bad):
+    import agent_pg_store
+
+    def unexpected_io():
+        pytest.fail("invalid month reached database")
+
+    monkeypatch.setattr(agent_pg_store, "_load_platform", unexpected_io)
+    with pytest.raises(ValueError):
+        agent_pg_store.usage_rows_for_period(A, bad)

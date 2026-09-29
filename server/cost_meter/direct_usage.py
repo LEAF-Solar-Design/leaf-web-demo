@@ -32,12 +32,13 @@ APS_RESOURCE_ID = "aps:engine"
 APS_UNIT = "engine-second"
 
 PAYER_TENANT = "tenant_plan"
+PAYER_TENANT_API_KEY = "tenant_api_key"
 PAYER_LEAF = "leaf"
 PAYER_UNKNOWN = "unknown"
 # agent_ledger grant_kind vocabulary (docs/AGENT-SPINE-DESIGN.md 6.2): oauth and
 # api_key are the tenant's own linked Claude grant. No writer records a Leaf-key
 # turn today; "leaf" is reserved for when one does. Anything else is unknown.
-_PAYER_BY_GRANT_KIND = {"oauth": PAYER_TENANT, "api_key": PAYER_TENANT, "leaf": PAYER_LEAF}
+_PAYER_BY_GRANT_KIND = {"oauth": PAYER_TENANT, "api_key": PAYER_TENANT_API_KEY, "leaf": PAYER_LEAF}
 
 # Same pre-flight denial filter as da/usage.py aggregate_usage: a denied run
 # never touched APS and never spent, so it is neither a run nor engine use.
@@ -123,7 +124,7 @@ def _llm_section(period: str, tenant_id: str, agent_rows: Optional[Iterable[Any]
     tokens: Dict[str, Optional[int]] = {name: 0 for name, _ in _TOKEN_FIELDS}
     usd = Decimal(0)
     by_payer: Dict[str, Dict[str, Any]] = {}
-    gaps = 0
+    gaps = int(bool(getattr(agent_rows, "truncated", False)))
     for row in _dicts(agent_rows):
         if row is None:
             gaps += 1
@@ -379,20 +380,44 @@ def _parse_jsonl(lines: Iterable[str]) -> List[Dict[str, Any]]:
     return out
 
 
-def load_agent_rows(path: Optional[Path] = None) -> Optional[List[Dict[str, Any]]]:
+def load_agent_rows(
+    path: Optional[Path] = None, *, period: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+) -> Optional[List[Dict[str, Any]]]:
     """Agent turn rows through agent_ledger's own reader. A missing JSONL ledger
-    is a real zero ([]); an unreadable one, or Postgres mode (whose store exposes
-    only aggregates, not rows), is None: unknown."""
+    is a real zero ([]); an unreadable source is None: unknown. Postgres reads
+    require both a month and a tenant; the no-argument call remains unknown."""
     import agent_ledger
 
     if path is None and agent_ledger._using_postgres():
-        return None
+        if period is None or tenant_id is None:
+            return None
+        period = _check_period(period)
+        tenant_id = _check_tenant(tenant_id)
+        try:
+            import agent_pg_store
+
+            rows, truncated = agent_pg_store.usage_rows_for_period(tenant_id, period)
+        except Exception:  # noqa: BLE001 - database failure is unknown, never zero
+            logging.getLogger(__name__).exception("agent usage rows unavailable for %s", period)
+            return None
+        if truncated:
+            logging.getLogger(__name__).warning("agent usage rows truncated for %s", period)
+        return AgentRows(rows, truncated=truncated)
     target = Path(path) if path is not None else agent_ledger.ledger_path()
     try:
         lines = agent_ledger._read_lines(target, raise_on_read_error=True)
     except OSError:
         return None
     return _parse_jsonl(lines)
+
+
+class AgentRows(list):
+    """Agent rows retaining evidence that the monthly read hit its cap."""
+
+    def __init__(self, rows: Iterable[Dict[str, Any]], *, truncated: bool):
+        super().__init__(rows)
+        self.truncated = truncated
 
 
 class BrokerRows(list):
