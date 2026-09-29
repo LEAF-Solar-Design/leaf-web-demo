@@ -1,0 +1,44 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-nec-feeder-ocpd",
+  "builtin": "builtins/solar_nec_feeder_ocpd.py",
+  "family": "equipment",
+  "adapter": "local-graph-read",
+  "entitlement": "run_read",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_FEEDER_OCPD_REQUEST",
+  "readiness": {"kind": "facets", "facets": []},
+  "engine": "server-builtin",
+  "interaction": {"mode": "form"},
+  "record_store": "registry",
+  "record": {
+    "name": "solar-nec-feeder-ocpd",
+    "version": "1.0.0",
+    "description": "NEC 215.3 and 210.20(A) feeder overcurrent device rating with its NEC 250.122 equipment grounding conductor, as a cited calculation.",
+    "kind": "script",
+    "family_id": "equipment",
+    "engine_op": "solar_nec_feeder_ocpd",
+    "entry": "builtins/solar_nec_feeder_ocpd.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {"type": "string", "maxLength": 128},
+        "continuous_current_a": {"type": "number", "minimum": 0, "maximum": 10000},
+        "is_continuous": {"type": "boolean"},
+        "egc_material": {"type": "string", "enum": ["Copper", "Aluminum"], "maxLength": 8}
+      },
+      "required": ["continuous_current_a", "is_continuous", "egc_material"],
+      "additionalProperties": false
+    },
+    "returns": {"type": "object"},
+    "capabilities": ["drawing.read"],
+    "allow_local_fallback": false
+  },
+  "ledger": ["nec-feeder-ocpd-sizing"],
+  "trusted_inputs": [],
+  "maturity": "production",
+  "wave": 3,
+  "order": 40,
+  "scenario": "w3-ground-electrical"
+}

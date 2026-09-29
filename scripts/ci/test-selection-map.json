@@ -426,6 +426,7 @@
     "server-solar-tool-nec-ac-voltage-drop",
     "server-solar-tool-nec-ampacity-correction",
     "server-solar-tool-nec-conduit-fill",
+    "server-solar-tool-nec-feeder-ocpd",
     "server-solar-tool-panel-groups",
     "server-solar-tool-panels-from-drawing",
     "server-solar-tool-select-by-zone",
