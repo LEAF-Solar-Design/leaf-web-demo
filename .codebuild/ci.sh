@@ -591,6 +591,60 @@ fi
 echo "LEAF_T end gate $(date +%s%3N) rc=$gate_status"
 if [[ -f /tmp/gate-results/gate-result.json ]]; then
   tail -n 200 /tmp/gate-results/gate-result.json || true
+  # BEGIN GATE FAIL NAMES
+  {
+    python3 - <<'PY'
+import json
+import re
+from pathlib import Path
+
+try:
+    result = json.loads(Path("/tmp/gate-results/gate-result.json").read_text())
+except Exception as exc:
+    print(f"gate fail names: result JSON unreadable ({type(exc).__name__})")
+    raise SystemExit(0)
+
+output_lines = 0
+
+def emit(text):
+    global output_lines
+    for line in str(text).splitlines() or [""]:
+        print(line)
+        output_lines += 1
+        if output_lines == 400:
+            print("gate fail names: output capped at 400 lines")
+            raise SystemExit(0)
+
+log_dir = Path("/tmp/gate-logs")
+markers = re.compile(r"\bFAIL\b|FAILED|\u00d7|\u2717|AssertionError|Error:|Timeout")
+for suite in result.get("results", []):
+    if suite.get("status") != "FAIL":
+        continue
+    suite_id = suite.get("id", "")
+    emit(f"GATE FAIL {suite_id}: {suite.get('note', '')}")
+    failed_ids = suite.get("test_report", {}).get("failed_test_ids", [])
+    for test_id in failed_ids[:20]:
+        emit(f"  failed test: {test_id}")
+    if len(failed_ids) > 20:
+        emit(f"  ... and {len(failed_ids) - 20} more failed tests")
+    log_path = log_dir / f"{suite_id}.log"
+    retry_pattern = re.compile(re.escape(suite_id) + r"\.retry(\d+)\.log")
+    try:
+        retries = [(int(match.group(1)), path)
+                   for path in log_dir.iterdir()
+                   if (match := retry_pattern.fullmatch(path.name))]
+        if retries:
+            log_path = max(retries, key=lambda retry: retry[0])[1]
+        lines = log_path.read_text(errors="replace").splitlines()
+    except OSError:
+        emit(f"  (no suite log at {log_path})")
+        continue
+    matching = [line for line in lines if markers.search(line)]
+    for line in matching[:40] if matching else lines[-20:]:
+        emit("  log: " + line[:300])
+PY
+  } || true
+  # END GATE FAIL NAMES
 else
   echo "No gate result JSON was written (runner exit $gate_status)"
 fi

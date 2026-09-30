@@ -1,9 +1,13 @@
-"""Drawing-owned settings candidate for the existing mutation transaction."""
+"""Drawing-owned settings candidate for the existing mutation transaction.
+
+A material settings change stales the design outputs built under the old settings
+(solar_settings_invalidation.py); a project change keeps its own rule (solar_project.py)."""
 import copy
 
 from leaf_cloud_client import canonical_bytes
 from solar_design_graph import GraphValidationError, _bounded_json, entities
 from solar_project import apply_project_changes, normalize_project_changes
+from solar_settings_invalidation import invalidate_settings_dependents
 from solar_sizing_client import advance, checked_graph
 
 EDITABLE = {"panel_layer_contains", "panel_group_layer", "string_layer", "home_run_layer",
@@ -40,6 +44,7 @@ def run(intake, params):
         settings["extra"].pop("string_sizing", None)
     if "project_changes" in params:
         apply_project_changes(graph, params["project_changes"])
+    invalidate_settings_dependents(graph, before["settings"])
     old = {entity["id"]: entity for entity in entities(before)}
     changed = [entity for entity in entities(graph)
                if canonical_bytes(old.get(entity["id"])) != canonical_bytes(entity)]

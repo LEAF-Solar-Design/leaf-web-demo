@@ -1,5 +1,4 @@
 """Typed W1 circuit schedule for local and licensed persistence."""
-import math
 import uuid
 
 from solar_design_graph import GraphValidationError, _bounded_json
@@ -17,19 +16,14 @@ def _schedule(intake, params):
     if params.get("cancel", False):
         return graph, None
     insertion = point(params.get("insertion_point"))
-    expected = local_routes(graph)
-    actual = {(r["from_ref"], r["route_kind"]): r for r in graph["routes"]}
-    if len(actual) != len(expected) or len(actual) != len(graph["routes"]):
+    import product_capability_availability as availability
+    from solar_solve_results import HOMERUN_KINDS
+
+    # Readiness and this refusal share one check over the homerun subset only.
+    if not availability.w1_homeruns_current(graph, local_routes(graph)):
         raise GraphValidationError("COMPLETE_ROUTING_REQUIRED")
-    for route in expected:
-        found = actual.get((route["from_ref"], route["route_kind"]))
-        if (found is None or found["validity"]["state"] != "valid"
-                or any(found[key] != route[key] for key in
-                       ("to_ref", "points", "wire_gauge", "point_units", "length_units"))
-                or not math.isclose(found["length_ft"], route["length_ft"], rel_tol=1e-9)
-                or any(found["extra"].get(key) != route["extra"][key] for key in
-                       ("terminal_panel_ref", "mppt_letter", "input_number"))):
-            raise GraphValidationError("COMPLETE_ROUTING_REQUIRED")
+    actual = {(r["from_ref"], r["route_kind"]): r for r in graph["routes"]
+              if r["route_kind"] in HOMERUN_KINDS}
     rows, sources = [], []
     for string in graph["strings"]:
         leads = [actual[(string["id"], kind)] for kind in ("start homerun", "end homerun")]

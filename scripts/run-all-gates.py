@@ -332,6 +332,9 @@ def build_suites() -> List[Suite]:
         # sf-solar-ground-graph-route-kinds: feeder and trench route kinds, conductor pathways, feeder currency.
         Suite("server-solar-ground-route-kinds", "server tests/test_solar_ground_route_kinds.py", "pytest", SERVER,
               _py_pytest("tests/test_solar_ground_route_kinds.py"), 61),
+        # sf-solar-ground-graph-scale piece 1: exact expansion; 96 cases + 4 template/row guards = 100.
+        Suite("server-solar-ground-graph-codec", "server tests/test_solar_ground_graph_codec.py", "pytest", SERVER,
+              _py_pytest("tests/test_solar_ground_graph_codec.py"), 100),
         # sf-solar-electrical-bridge: the kernel state to design graph topology mapping, both ways.
         Suite("server-solar-electrical-bridge", "server tests/test_solar_electrical_state_bridge.py", "pytest", SERVER,
               _py_pytest("tests/test_solar_electrical_state_bridge.py"), 83),
@@ -552,6 +555,10 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_panels_from_drawing.py"), 64),
         Suite("server-solar-tool-solar-schedule", "server tests/test_solar_tool_solar_schedule.py", "pytest", SERVER,
               _py_pytest("tests/test_solar_tool_solar_schedule.py"), 30),
+        # sf-solar-w1-route-consumers: W1 homeruns, schedule and readiness keep feeders, trenches and
+        # pathways and judge only the homerun subset. COUNTED: 18 test functions + 23 additional parametrizations = 41.
+        Suite("server-solar-w1-route-consumers", "server tests/test_solar_w1_route_consumers.py", "pytest",
+              SERVER, _py_pytest("tests/test_solar_w1_route_consumers.py"), 41),
         # solar-size-strings through the local graph commit rail with a recorded String Sizer and a
         # fake grant, so the floor is the exact count on every runner. MEASURED from the collected
         # cases: 13 tests + 27 more parametrizations = 40 passed.
@@ -611,6 +618,13 @@ def build_suites() -> List[Suite]:
         # committed evidence, so the floor is the exact count on every runner. COUNTED: 22.
         Suite("server-solar-tool-design-presets-apply", "server tests/test_solar_tool_design_presets_apply.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_design_presets_apply.py"), 22),
+        # A drawing-settings change stales the outputs built under the old settings (2026-09-30,
+        # sf-solar-settings-invalidation): solar-settings and preset apply stale every homerun route and
+        # schedule, so the export guard refuses them on a graph with no solve digest. Inputs are authored
+        # in the file or are committed evidence, so the floor is the exact count on every runner.
+        # COUNTED: 18 unparametrized tests + 11 material-field cases + 2 L2-flag refusal cases = 31.
+        Suite("server-solar-settings-invalidation", "server tests/test_solar_settings_invalidation.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_settings_invalidation.py"), 31),
         # Guardrails as a W2 registry graph read (2026-09-29, sf-w2-presets-guardrails): the plugin's 14
         # rules on the stored graph plus the recorded g1/g2 rule set replayed through the tool's row path.
         # Inputs are authored in the file, so the floor is the exact count on every runner. PLANNED: 59.
