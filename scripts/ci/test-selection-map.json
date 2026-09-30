@@ -400,6 +400,7 @@
     "server-solar-ground-dsteps",
     "server-solar-ground-frames",
     "server-solar-ground-graph",
+    "server-solar-ground-graph-codec",
     "server-solar-ground-invalidation",
     "server-solar-ground-layout",
     "server-solar-ground-reports",
