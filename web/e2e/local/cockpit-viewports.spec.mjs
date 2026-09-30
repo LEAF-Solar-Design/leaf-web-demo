@@ -30,9 +30,77 @@ async function expectSeparateTabs(page) {
     ribbon.x + ribbon.width + 1 <= profiles.x || profiles.x + profiles.width + 1 <= ribbon.x).toBe(true)
 }
 
+const overviewControl = (page) => page.getByRole('button', { name: 'Drawing overview', exact: true })
+const drawingMount = (page) => page.locator('.studio-ground .viewer-canvas')
+const drawingPose = (page) => drawingMount(page).evaluate((element) => element.__cadviewer.getPose())
+
+async function activateOverview(page, hasTouch) {
+  const svg = overviewControl(page).locator('svg')
+  await expect(svg).toBeInViewport({ ratio: 1 })
+  const box = await svg.boundingBox()
+  const point = { x: box.x + box.width * 0.7, y: box.y + box.height * 0.3 }
+  expect(await page.evaluate(({ x, y }) => !!document.elementFromPoint(x, y)?.closest('.cad-overview-map'), point)).toBe(true)
+  if (hasTouch) await page.touchscreen.tap(point.x, point.y)
+  else await page.mouse.click(point.x, point.y)
+  await expect(overviewControl(page)).toBeFocused()
+}
+
+async function boardRoundTrip(page) {
+  await page.getByRole('button', { name: 'Start', exact: true }).click()
+  await expect(page.getByRole('region', { name: 'Project workspace', exact: true })).toBeVisible()
+  await expect(page.locator('[data-cad-overview]')).toHaveCount(0)
+  await page.getByRole('button', { name: 'Return to drawing', exact: true }).click()
+  await expect(page.locator('[data-cad-overview]')).toBeVisible()
+}
+
 for (const condition of conditions) {
   test.describe(condition.name, () => {
     test.use({ viewport: condition.viewport, deviceScaleFactor: condition.deviceScaleFactor, hasTouch: condition.hasTouch })
+    test(`drawing overview ${condition.name}: camera only, keyboard and session collapse`, async ({ page, request }) => {
+      test.setTimeout(120_000)
+      await boot(page, request)
+      const root = page.locator('[data-cad-overview]')
+      await expect(root).toBeVisible({ timeout: 30_000 })
+      await expect(root).toHaveAttribute('data-collapsed', String(condition.viewport.width <= 980))
+      if (condition.viewport.width <= 980) await page.getByRole('button', { name: 'Expand drawing overview' }).click()
+      const back = page.getByRole('button', { name: 'Back to the previous view', exact: true })
+      await expect(back).toHaveAttribute('aria-disabled', 'true')
+      await page.getByRole('button', { name: 'Zoom in', exact: true }).click()
+      await page.getByRole('button', { name: 'Zoom in', exact: true }).click()
+      await expect(root.locator('[data-overview-viewport]')).toHaveCount(1)
+      const before = await drawingPose(page)
+      // Observe actual SVG mutations instead of sampling one timed frame.
+      await root.evaluate((element) => {
+        element.dataset.cameraMutations = '0'
+        const target = element.querySelector('[data-overview-viewport]')
+        if (!target) throw new Error('Overview viewport is missing')
+        const observer = new MutationObserver((records) => {
+          element.dataset.cameraMutations = String(Number(element.dataset.cameraMutations) + records.length)
+        })
+        observer.observe(target, { attributes: true })
+        element.__overviewObserver = observer
+      })
+      await activateOverview(page, condition.hasTouch)
+      await expect.poll(async () => (await drawingPose(page)).target).not.toEqual(before.target)
+      expect((await drawingPose(page)).worldPerPixel).toBeCloseTo(before.worldPerPixel, 6)
+      await expect.poll(() => root.getAttribute('data-camera-mutations')).not.toBe('0')
+      const clicked = await drawingPose(page)
+      await overviewControl(page).press('ArrowRight')
+      await expect.poll(async () => (await drawingPose(page)).target[0]).toBeGreaterThan(clicked.target[0])
+      const moved = await drawingPose(page)
+      await overviewControl(page).press('Enter') // No object focus: no movement or implicit Fit.
+      expect((await drawingPose(page)).target).toEqual(moved.target)
+      expect((await drawingPose(page)).worldPerPixel).toBeCloseTo(before.worldPerPixel, 6)
+      await expect(back).toHaveAttribute('aria-disabled', 'true')
+      await root.evaluate((element) => element.__overviewObserver.disconnect())
+      await page.getByRole('button', { name: 'Collapse drawing overview' }).click()
+      await boardRoundTrip(page)
+      await expect(root).toHaveAttribute('data-collapsed', 'true')
+      await page.getByRole('button', { name: 'Expand drawing overview' }).click()
+      await boardRoundTrip(page)
+      await expect(overviewControl(page)).toBeVisible()
+    })
+
     test(`cockpit viewports ${condition.name}: panels, keyboard, canvas and touch`, async ({ page, request }) => {
       test.setTimeout(180_000)
       await boot(page, request)
@@ -142,6 +210,59 @@ for (const condition of conditions) {
     })
   })
 }
+
+test.describe('drawing overview preserves a staged property edit', () => {
+  test.use({ viewport: { width: 1366, height: 768 } })
+  test('camera moves keep the pending target and value and add no Back entry', async ({ page, request }) => {
+    test.setTimeout(180_000)
+    await requireLocalReady(request, test, API_BASE)
+    const emptyDxf = '0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n'
+    await page.route('**/sample.dxf', (route) => route.fulfill({ status: 200, contentType: 'application/dxf', body: emptyDxf }))
+    await page.route('**/api/drawings/*/dxf*', (route) => route.fulfill({ status: 200, contentType: 'application/dxf', body: emptyDxf }))
+    await page.goto('/app?dev=1')
+    await page.getByLabel('Use mock data (off = live backend)').check()
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('0', { timeout: 60_000 })
+    const command = page.getByLabel('Command bar', { exact: true })
+    for (const [i, y] of [0, 20].entries()) {
+      await command.fill('LINE'); await command.press('Enter')
+      await page.getByLabel('ribbon x', { exact: true }).fill(`0,${y}`)
+      const end = page.getByLabel('ribbon x2', { exact: true })
+      await end.fill(`10,${y}`); await end.press('Enter')
+      await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(i + 1), { timeout: 60_000 })
+      await page.keyboard.press('Escape')
+    }
+    await expect(overviewControl(page)).toBeVisible()
+    const point = await drawingMount(page).evaluate((element) => element.__cadviewer.project(5, 0))
+    expect(await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.tagName, point)).toBe('CANVAS')
+    await page.mouse.click(point.x, point.y)
+    await expect(page.getByTestId('dock-properties')).toBeVisible()
+    await page.getByRole('tab', { name: 'Draw', exact: true }).click()
+    await openPanels(page)
+    const color = page.locator('#cockpit-properties-slot [data-widget="prop-color"] select')
+    await color.scrollIntoViewIfNeeded()
+    await color.selectOption('red')
+    const sentence = page.getByTestId('property-apply-sentence')
+    await expect(sentence).toContainText('Color red is waiting for Apply on')
+    const pending = await sentence.textContent()
+    const target = await page.getByTestId('dock-geometry').textContent()
+    const back = page.getByRole('button', { name: 'Back to the previous view', exact: true })
+    await expect(back).toHaveAttribute('aria-disabled', 'true')
+    const before = await drawingPose(page)
+    await activateOverview(page, false)
+    await overviewControl(page).press('ArrowLeft')
+    await expect.poll(async () => (await drawingPose(page)).target).not.toEqual(before.target)
+    expect((await drawingPose(page)).worldPerPixel).toBeCloseTo(before.worldPerPixel, 6)
+    await expect(sentence).toHaveText(pending)
+    await expect(color).toHaveValue('red')
+    await expect(page.getByTestId('dock-geometry')).toHaveText(target)
+    await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('2')
+    await expect(back).toHaveAttribute('aria-disabled', 'true')
+    await page.getByRole('button', { name: 'Apply Color change', exact: true }).click()
+    await expect(page.getByTestId('property-apply-strip')).toHaveCount(0)
+    await expect(page.getByTestId('dock-properties')).toContainText('red (1)')
+    await expect(page.getByTestId('dock-geometry')).toHaveText(target)
+  })
+})
 
 test.describe('shared phone workspace', () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true })

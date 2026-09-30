@@ -922,12 +922,13 @@ describe('Studio navigation shared wiring', () => {
     assert.ok(editor?.includes('viewerRef={viewerRef}'))
   })
 
-  it('mounts the null overview directly after the tools only on the drawing ground', () => {
+  it('mounts the overview directly after the tools only on the drawing ground', () => {
     assert.ok(appNoComments.includes("import CadOverview from './site/CadOverview.jsx'"))
     assert.match(appNoComments, new RegExp('<DrawingNavigationTools\\s[^>]*/>\\s*\\{studioGround && groundShowsDrawing\\(activeSurface\\) && <CadOverview viewerRef=\\{viewerRef\\} />\\}'))
     assert.equal((appNoComments.match(/<CadOverview\b/g) || []).length, 1)
     const overview = decomment(readFileSync(new URL('./site/CadOverview.jsx', import.meta.url), 'utf8'))
-    assert.match(overview, new RegExp('export default function CadOverview\\(\\{ viewerRef \\}\\)\\s*\\{\\s*return null\\s*\\}'))
+    assert.ok(overview.includes('export default function CadOverview('))
+    assert.ok(overview.includes('data-cad-overview'))
   })
 })
 describe('S3 viewer Back and Up history wiring', () => {
