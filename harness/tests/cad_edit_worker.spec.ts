@@ -1,17 +1,9 @@
 // CAD-edit worker negative control (Lane C1, card C1-7).
 //
-// The upload -> version receipt -> read round-trip E2E and the cad_upload
-// OFF negative control now live where the real surface actually is:
-// server/tests/test_cad_upload_e2e.py and server/tests/test_cad_fence.py,
-// driving the REAL server/routers/cad_upload.py through a TestClient. That
-// route has nothing to do with the isolated-worker primitive this file used
-// to exercise -- it is a plain synchronous multipart handler.
-//
-// What genuinely belongs here: "cad_edit OFF never mounts the worker" is a
-// JS-side claim (cad_edit has no server route at all -- C1-5/C1-6 landed it
-// entirely client-side as web/src/cad/engineWorker.js's EngineBoundary). This
-// spec proves that claim against the REAL EngineBoundary with a real
-// `Worker` constructor spy, not a toy re-implementation of the boundary.
+// Proves cad_edit OFF never constructs the Worker against the real
+// EngineBoundary in web/src/cad/engineWorker.js, using a Worker constructor
+// spy. The same boundary constructs a worker once enabled, and defaults
+// dormant when no flag is supplied.
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { EngineBoundary } from "../../web/src/cad/engineWorker.js";

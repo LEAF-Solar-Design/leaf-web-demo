@@ -51,7 +51,6 @@ from routers import (
     agent,
     author,
     builds as builds_router,
-    cad_upload,
     campaign_mcp,
     campaigns,
     campaign_conversation,
@@ -310,13 +309,6 @@ app.include_router(tenant.router)  # wave 4: per-tenant Claude grant linking (pr
 app.include_router(tenant_mcp.router)  # slice 8b: tenant MCP server registry (server-side OAuth connect)
 app.include_router(site.router)  # public site-facing namespace for the leaf_website Next app (/api/site/*)
 app.include_router(uploads.router)  # §19 guest/account drawing uploads (+ /api/site/guest-upload-policy in site.router)
-# Dedicated CAD admissibility endpoint (POST /api/cad/upload), fail-closed behind
-# LEAF_CAD_UPLOAD_ENABLED: mounted-but-disabled answers 503, so a 404 here now
-# means UNMOUNTED, never "flag off". Distinct from the live DrawingUploadControl
-# path above (POST /api/drawings/upload -> uploads.router + drawings.router),
-# which owns extraction and tenancy; this one only proves a file is admissible
-# and durably receipted.
-app.include_router(cad_upload.router)
 app.include_router(telemetry.router)  # P2 product-event ingest (always 202; identity server-stamped; docs/PLATFORM_TELEMETRY.md)
 app.include_router(templates_router.router)  # Wave C solar template beta, fail-closed behind LEAF_SOLAR_TEMPLATE_BETA_ENABLED
 app.include_router(overlay.router)  # T1 runtime overlay: propose a preview, decide it, read the resolved tokens

@@ -1,5 +1,5 @@
 """Acceptance tests for card TEL-4: write-path product events (templates,
-project edit, CAD upload).
+project edit).
 
 Every test drives the REAL router handler (never a stand-in), monkeypatching
 only ``telemetry_sink.emit`` to capture calls -- so a "mutation" that deletes,
@@ -9,8 +9,7 @@ breaks the assertion here (mutation-red), not just the label wiring.
 Acceptance oracle (frozen, TEL-4):
   - Events: template.pinned/template.applied {template_id, version};
     project.edit_applied {files_changed, bytes_class} - project edit is the
-    ONE write path and must be observable; cad.upload_received /
-    cad.upload_rejected {reason, size_class, format}.
+    ONE write path and must be observable.
   - Acceptance: exactly one event per accepted/rejected request, tested;
     mutation-red proven; no payload contents in labels.
 
@@ -18,7 +17,6 @@ Run:  cd server/tests && python -m pytest test_write_path_telemetry.py -q
 """
 from __future__ import annotations
 
-import hashlib
 import importlib.util
 import os
 import sys
@@ -48,7 +46,6 @@ from fastapi.testclient import TestClient  # noqa: E402
 import deps  # noqa: E402
 import telemetry_sink  # noqa: E402
 import templates  # noqa: E402
-from routers import cad_upload as cad_upload_router  # noqa: E402
 from routers import project_repository_edit as edit_router  # noqa: E402
 from routers import templates as templates_router  # noqa: E402
 
@@ -155,99 +152,6 @@ def test_clone_into_project_denied_emits_nothing(captured):
     assert captured == []
 
 
-# --------------------------------------------------------------------------- #
-# cad_upload: cad.upload_received / cad.upload_rejected
-# --------------------------------------------------------------------------- #
-
-VALID_DXF = (
-    b"0\nSECTION\n2\nHEADER\n0\nENDSEC\n"
-    b"0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n"
-)
-
-
-@pytest.fixture()
-def cad_client(tmp_path, monkeypatch):
-    monkeypatch.setenv(cad_upload_router.FLAG_CAD_UPLOAD, "1")
-    monkeypatch.setenv("LEAF_CAD_UPLOAD_DIR", str(tmp_path))
-    app = FastAPI()
-    app.include_router(cad_upload_router.router)
-    return TestClient(app)
-
-
-def test_accepted_upload_emits_exactly_one_received_event(cad_client, captured):
-    resp = cad_client.post(
-        "/api/cad/upload",
-        files={"file": ("layout.dxf", VALID_DXF, "application/octet-stream")})
-    assert resp.status_code == 201
-    digest = hashlib.sha256(VALID_DXF).hexdigest()
-
-    events = [c for c in captured if c["name"] == "cad.upload_received"]
-    assert len(events) == 1
-    rejected = [c for c in captured if c["name"] == "cad.upload_rejected"]
-    assert rejected == []
-    ev = events[0]
-    assert set(ev["labels"].keys()) == {"size_class", "format"}
-    assert ev["labels"]["format"] == "dxf"
-    assert ev["labels"]["size_class"] != "unknown"
-    _no_payload_contents(ev["labels"], ["layout.dxf", digest])
-
-
-def test_rejected_upload_bad_extension_emits_exactly_one_rejected_event(cad_client, captured):
-    resp = cad_client.post(
-        "/api/cad/upload",
-        files={"file": ("notes.txt", b"hello world", "text/plain")})
-    assert resp.status_code == 400
-
-    events = [c for c in captured if c["name"] == "cad.upload_rejected"]
-    assert len(events) == 1
-    accepted = [c for c in captured if c["name"] == "cad.upload_received"]
-    assert accepted == []
-    ev = events[0]
-    assert set(ev["labels"].keys()) == {"reason", "size_class", "format"}
-    assert ev["labels"]["reason"] == "bad_extension"
-    assert ev["labels"]["format"] == "unknown"
-    _no_payload_contents(ev["labels"], ["notes.txt", "hello world"])
-
-
-def test_rejected_upload_sniff_failure_emits_exactly_one_rejected_event(cad_client, captured):
-    resp = cad_client.post(
-        "/api/cad/upload",
-        files={"file": ("fake.dxf", b"not really a dxf file", "application/octet-stream")})
-    assert resp.status_code == 400
-
-    events = [c for c in captured if c["name"] == "cad.upload_rejected"]
-    assert len(events) == 1
-    assert events[0]["labels"]["reason"] == "sniff_failed"
-    assert events[0]["labels"]["format"] == "dxf"
-
-
-def test_disabled_flag_emits_exactly_one_rejected_event(monkeypatch, tmp_path, captured):
-    monkeypatch.delenv(cad_upload_router.FLAG_CAD_UPLOAD, raising=False)
-    monkeypatch.setenv("LEAF_CAD_UPLOAD_DIR", str(tmp_path))
-    app = FastAPI()
-    app.include_router(cad_upload_router.router)
-    client = TestClient(app)
-
-    resp = client.post(
-        "/api/cad/upload",
-        files={"file": ("layout.dxf", VALID_DXF, "application/octet-stream")})
-    assert resp.status_code == 503
-
-    events = [c for c in captured if c["name"] == "cad.upload_rejected"]
-    assert len(events) == 1
-    assert events[0]["labels"] == {"reason": "disabled", "size_class": "unknown", "format": "unknown"}
-
-
-def test_oversize_upload_emits_exactly_one_rejected_event(cad_client, monkeypatch, captured):
-    monkeypatch.setenv("LEAF_CAD_UPLOAD_MAX_BYTES", "16")
-    resp = cad_client.post(
-        "/api/cad/upload",
-        files={"file": ("layout.dxf", VALID_DXF, "application/octet-stream")})
-    assert resp.status_code == 413
-
-    events = [c for c in captured if c["name"] == "cad.upload_rejected"]
-    assert len(events) == 1
-    assert events[0]["labels"]["reason"] == "oversize"
 
 
 # --------------------------------------------------------------------------- #

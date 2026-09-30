@@ -153,7 +153,7 @@ CAD_ENGINE_NOTICE = (
 
 
 def cad_edit_enabled() -> bool:
-    """Server-side cad_edit config rail, same truthy set as cad_upload's."""
+    """Server-side cad_edit config rail; truthy values are 1, true, yes, on."""
     return os.environ.get(FLAG_CAD_EDIT, "").strip().lower() in {
         "1", "true", "yes", "on",
     }

@@ -46,7 +46,7 @@ router = APIRouter()
 # secrets or prompt text (only ids and the allowlisted `role` metadata value,
 # never `content`). No natural interactive-session id exists for a
 # conversation resource event, so `session_id="server"` -- the same
-# placeholder drawing.uploaded/org.created/cad_upload use for the same
+# placeholder drawing.uploaded/org.created use for the same
 # reason.
 #
 # conversation.message_appended and conversation.recovered are wired below
