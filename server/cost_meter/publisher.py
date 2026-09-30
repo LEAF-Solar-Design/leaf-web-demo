@@ -18,7 +18,13 @@ malformed participant key raises ValueError or TypeError, and nothing is written
 from __future__ import annotations
 
 import json
+import logging
+import math
 import os
+import socket
+import time
+import uuid
+from contextlib import contextmanager, nullcontext
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -39,6 +45,145 @@ MAX_OBSERVATIONS = 100_000  # bounds one publish; exceeding it raises, never tru
 MAX_SCAN_PUBLICATIONS = 5_000  # bounds the fallback manifest scan when no latest pointer exists
 _MAX_META_BYTES = 256 * 1024
 _MAX_SOURCES = 64
+PUBLISH_LOCK = ".publisher.lock"
+_LOG = logging.getLogger(__name__)
+
+
+class LedgerBusy(RuntimeError):
+    """Another publisher holds the ledger past the configured wait timeout."""
+
+
+def _pid_alive(pid: int) -> bool:
+    if os.name == "nt":
+        # os.kill(pid, 0) can terminate a Windows process; query its handle instead.
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+        handle = kernel.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return ctypes.get_last_error() != 87  # only invalid PID proves absence
+        try:
+            code = wintypes.DWORD()
+            kernel.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+            return not kernel.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value == 259
+        finally:
+            kernel.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # permission failures are not proof of death
+    return True
+
+
+@contextmanager
+def _lock_guard(root: Path):
+    """Serialize lock-file changes, including competing stale takeovers.
+
+    This empty guard inode is permanent: deleting it would split OS lock holders.
+    The OS releases its byte lock automatically if a process crashes.
+    """
+    with open(root / ".publisher.guard", "a+b") as fh:
+        if os.name == "nt":
+            import msvcrt
+            try:
+                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                yield False
+                return
+            try:
+                yield True
+            finally:
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                yield False
+                return
+            try:
+                yield True
+            finally:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+def _remove_owned_lock(path: Path, content: bytes) -> None:
+    try:
+        if path.read_bytes() == content:
+            path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _stale_lock(owner: Optional[dict], stale_after: float) -> bool:
+    if owner is None:
+        return False
+    pid, started = owner.get("pid"), owner.get("start_time")
+    return (owner.get("host") == socket.gethostname()
+            and type(pid) is int and 0 < pid <= 0xFFFFFFFF
+            and type(started) in (int, float) and math.isfinite(started)
+            and time.time() - started > stale_after and not _pid_alive(pid))
+
+
+@contextmanager
+def _publisher_lock(root: Path, timeout: float, stale_after: float):
+    if any(not math.isfinite(v) or v < 0 for v in (timeout, stale_after)):
+        raise ValueError("lock timeout and stale threshold must be finite and nonnegative")
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / PUBLISH_LOCK
+    deadline = time.monotonic() + timeout
+    delay = 0.01
+    content = _canon_json({"pid": os.getpid(), "host": socket.gethostname(),
+                           "start_time": time.time(), "token": uuid.uuid4().hex})
+    while True:
+        acquired = False
+        # A pre-existing fresh owner without a guard must also time out without
+        # creating any files. Normal publishers already have the permanent guard.
+        held_without_guard = (not (root / ".publisher.guard").exists() and path.exists()
+                              and not _stale_lock(_read_json(path), stale_after))
+        with (nullcontext(False) if held_without_guard else _lock_guard(root)) as guarded:
+            if guarded:
+                old = _read_json(path)
+                if _stale_lock(old, stale_after):
+                    path.unlink()
+                    _LOG.warning("Taking over stale publisher lock: pid=%s host=%s start_time=%s",
+                                 old["pid"], old["host"], old["start_time"])
+                try:
+                    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                except FileExistsError:
+                    pass
+                else:
+                    try:
+                        with os.fdopen(fd, "wb") as fh:
+                            fh.write(content)
+                            fh.flush()
+                            os.fsync(fh.fileno())
+                    except BaseException:
+                        path.unlink()  # still guarded; no other owner can have acquired it
+                        raise
+                    acquired = True
+        if acquired:
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise LedgerBusy(f"Cost ledger publisher busy at {root}; timed out after {timeout}s")
+        time.sleep(min(delay, remaining))
+        delay = min(delay * 2, 0.5)
+    try:
+        yield
+    finally:
+        while True:
+            with _lock_guard(root) as guarded:
+                if guarded:
+                    _remove_owned_lock(path, content)
+                    break
+            time.sleep(0.01)
 
 # Weakest first: cost coverage is capped by the selected usage observation.
 _COVERAGE_RANK = {"unknown": 0, "partial": 1, "complete": 2}
@@ -188,17 +333,27 @@ def _source_list(values: Iterable[Any], what: str) -> List[str]:
 
 
 def publish_period(store: CostLedgerStore, period: str, observations: Iterable[Any], reason: str, *,
-                   sources: Iterable[str] = (), missing_sources: Iterable[str] = ()) -> str:
+                   sources: Iterable[str] = (), missing_sources: Iterable[str] = (),
+                   lock_timeout: float = 300, stale_after: float = 1800) -> str:
     """Append every resource's revision, then publish the month. Returns the publication id.
 
     Re-publishing identical input appends nothing and returns the same id. The
     publication's membership and source health are part of its immutable identity,
     and latest/<period>.json is atomically pointed at the returned id.
+    lock_timeout and stale_after are seconds; foreign-host locks are never reclaimed.
     """
     period = _check_period(period)
     used = _source_list(sources, "sources")
     missing = _source_list(missing_sources, "missing sources")
     pairs = build_period(period, observations)
+    root = _root(store)
+    with _publisher_lock(root, lock_timeout, stale_after):
+        return _publish_period_locked(store, period, pairs, reason, used, missing)
+
+
+def _publish_period_locked(store: CostLedgerStore, period: str,
+                           pairs: List[Tuple[ResourcePeriod, List[ShareEntry]]],
+                           reason: str, used: List[str], missing: List[str]) -> str:
     root = _root(store)
     current_ids = {rp.resource_id for rp, _ in pairs}
     previous_id = latest_publication_id(store, period) if missing else None
