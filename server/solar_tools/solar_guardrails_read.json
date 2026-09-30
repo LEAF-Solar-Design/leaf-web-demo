@@ -1,0 +1,50 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-guardrails-read",
+  "builtin": "builtins/solar_guardrails_read.py",
+  "family": "placement",
+  "adapter": "local-graph-read",
+  "entitlement": "run_read",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_GUARDRAILS_REQUEST",
+  "readiness": {"kind": "hook"},
+  "engine": "server-builtin",
+  "interaction": {"mode": "form"},
+  "record_store": "registry",
+  "record": {
+    "name": "solar-guardrails-read",
+    "version": "1.0.0",
+    "description": "Run the plugin's 14 design guardrails on the stored design: verdicts in palette order and the health banner counts.",
+    "kind": "script",
+    "family_id": "placement",
+    "engine_op": "solar_guardrails_read",
+    "entry": "builtins/solar_guardrails_read.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {"type": "string", "maxLength": 128},
+        "mppt_voltage_window": {
+          "type": "object",
+          "properties": {
+            "min_v": {"type": "number", "minimum": 0, "maximum": 100000},
+            "max_v": {"type": "number", "minimum": 0, "maximum": 100000}
+          },
+          "required": ["min_v", "max_v"],
+          "additionalProperties": false
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "returns": {"type": "object"},
+    "capabilities": ["drawing.read"],
+    "allow_local_fallback": false
+  },
+  "ledger": ["guardrails-monitoring"],
+  "trusted_inputs": [],
+  "maturity": "preview",
+  "wave": 2,
+  "order": 95,
+  "scenario": "w2-rooftop"
+}
