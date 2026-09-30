@@ -2,19 +2,27 @@
 
 Each subcommand runs the kernel's own command path (solar_design_profiles.leafprofile) with the
 answers the plugin's prompts would take, against the store in graph["extra"]["design_profiles"]
-(server/solar_preset_store.py), then publishes the new store as the next graph revision. No entity
-changes, so no design output goes stale. The graph has no layer table and no DrawingStateSnapshot
-yet, so adoption and layer freeze or thaw touch nothing and every profile keeps the plugin's
-default drawing state; Swap changes the drawing's preset settings, not the graph's own settings.
-The 12 cable fields restore only when the target preset's CableMaterial is non-empty.
+(server/solar_preset_store.py), then publishes the new store as the next graph revision. The
+drawing's current preset settings take the three always-synced layer names from graph["settings"]
+(server/solar_preset_sync.py) unless the request supplies them, and after the kernel runs the
+plugin's SyncFromGlobalSettings rule is applied to graph["settings"]: a Swap, the delete of the
+active preset, or supplied settings that differ from the graph change the graph's three layer
+names (and seed its string length and MPPT topology where they are still 0) through the
+solar-settings rule, which clears sizing confirmation. Otherwise no entity changes and no design
+output goes stale. The graph has no layer table and no DrawingStateSnapshot yet, so adoption and
+layer freeze or thaw touch nothing and every profile keeps the plugin's default drawing state.
+The 12 cable fields restore only when the target preset's CableMaterial is non-empty; the graph
+has no cable field, so they stay in the store.
 
 Refusals are named and checked in a fixed order: request shape, settings range, revision, stored
-store, then the subcommand's own rules. Pure: linear in the preset count, no I/O, no clock.
+store, graph settings the store cannot hold, then the subcommand's own rules. Pure: linear in the
+preset count, no I/O, no clock.
 """
 import re
 from datetime import datetime, timezone
 
 import solar_preset_store as preset_store
+import solar_preset_sync as preset_sync
 from solar_design_graph import GraphValidationError, _bounded_json, require_revision
 from solar_sizing_client import advance
 
@@ -84,8 +92,7 @@ def run(graph, params):
     subcommand, target, supplied = _request(params)
     result = require_revision(graph, params["expected_rev"])
     current, manager = preset_store.load(result)
-    if supplied is not None:
-        current = supplied
+    current = supplied if supplied is not None else preset_sync.effective_current(result, current)
     if current is None:
         raise GraphValidationError("DESIGN_PRESET_SETTINGS_REQUIRED")
     answers = _answers(subcommand, target, manager)
@@ -96,5 +103,6 @@ def run(graph, params):
         raise GraphValidationError("DESIGN_PRESET_KERNEL_REFUSED") from None
     if out["saved"] is not True or out["consumed"] != len(answers):
         raise GraphValidationError("DESIGN_PRESET_KERNEL_REFUSED")
+    changed = preset_sync.sync(result, current)
     preset_store.save(result, current, manager)
-    return advance(result, [], TOOL)
+    return advance(result, changed, TOOL)

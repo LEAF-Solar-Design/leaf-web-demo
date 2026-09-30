@@ -52,28 +52,32 @@ STEP_PARAMS = {"f1": {"subcommand": "Create", "name": "Alpha"}, "f2": {"subcomma
                "f3": {"subcommand": "Swap", "prefix": "A"}, "f4": None,
                "f5": {"subcommand": "Delete", "prefix": "B"}}
 # (graph rev, graph sha256, store sha256, list output bytes, list output sha256) after each step,
-# measured with python -B on 9ca48750 from the untouched fixture graph (f4 is the read; no commit).
+# measured with python -B from the untouched fixture graph (f4 is the read; no commit). The graph
+# digests moved with sf-w2-design-presets-apply: f1 now writes the snapshot's three layer names into
+# graph["settings"] (test_solar_tool_design_presets_apply.py); the store and List digests did not.
 STEP_DIGESTS = {
-    "f1": (1, "768501192dfdefd5f7faa50b2d93760aee1f62e0d6e805b7bb2affa5878961ad",
+    "f1": (1, "1ca13567d2c45e99fb05cf3c0aec4ff22fe62e6f94b1bc28e52d07bf3fbc926d",
            "91f98d47e719f4db929471228ee6bf1a03abfcb34e70534c44abcd8fdb958be8",
            3694, "cc28171c8f6b097be6e5def3b1a7beec21ff787862a01031cd3ffc89f86daca6"),
-    "f2": (2, "4d62a177e825c53729650c982bffef3ed10497cad063bb0dd390589d28da48f8",
+    "f2": (2, "c552831ce946de2fae75464f9127dcfdd1e92436bbca23d25f31d5f4ad086c93",
            "fd5dffb7e157fb1a1da860d63ca9e0efee6ba262962bd794dabd90d7c6ced791",
            5545, "7881da1cdb0087e205727f0dc45bc954f86214e12765328e3b1ab7b83885ddf6"),
-    "f3": (3, "44c204f2290556b05c9d9b35f1add927ccac596801cfd4e042ead48ce62fc1a2",
+    "f3": (3, "70fa485315ff47b89139a5357acb70fa5431dbbde535adaa90fc114dcc333c3d",
            "b51ab618f294153e1b5bf703e4bd53606694400f788834721a02445ea8695b88",
            5545, "279101e78d1b50e351bbdd5ace9ec1f6bcd4f8303f6fcbced7cf823c057568e1"),
-    "f4": (3, "44c204f2290556b05c9d9b35f1add927ccac596801cfd4e042ead48ce62fc1a2",
+    "f4": (3, "70fa485315ff47b89139a5357acb70fa5431dbbde535adaa90fc114dcc333c3d",
            "b51ab618f294153e1b5bf703e4bd53606694400f788834721a02445ea8695b88",
            5545, "279101e78d1b50e351bbdd5ace9ec1f6bcd4f8303f6fcbced7cf823c057568e1"),
-    "f5": (4, "2d0fa9f0e75262372aa41bcf5553ca5881feda490b0888c43640e9409fa1977d",
+    "f5": (4, "3c4d2702dd69d861e83fb6bea8a30bd64e6dd3cdd87ab96303bd9410961f945e",
            "91f98d47e719f4db929471228ee6bf1a03abfcb34e70534c44abcd8fdb958be8",
            3694, "cc28171c8f6b097be6e5def3b1a7beec21ff787862a01031cd3ffc89f86daca6"),
 }
 EMPTY_LIST = (464, "8986f711ae6ba864fae9fdced7fa3da0d9a4a0c431aeb879a456c1f20a44ba96")
 KIND_COUNTS = {"s": 31, "b": 7, "i": 9, "f": 13}
 STOCKED_64_STORE_BYTES = 112978
-STOCKED_64_LIST = (120404, "ab0d3df7f75cefefe5275805bad0821b5e52ecdb4799b621263d0684c7b490a6")
+# List reads the three layer names from the fixture graph ("Strings", "Homeruns", "Groups"), not
+# from the stocked store's snapshot values (sf-w2-design-presets-apply).
+STOCKED_64_LIST = (120401, "de5b3471fc45e837afe1ec41031cfb5c93e58b26a8422a943b66483a10a02169")
 WORST_CREATES = 14
 WORST_STORE_BYTES = 261785
 WORST_LIST_BYTES = 485841
@@ -328,10 +332,34 @@ def test_design_presets_empty_drawing_lists_nothing(graph):
     assert (len(canonical_bytes(output)), digest(output)) == EMPTY_LIST
 
 
+def test_design_presets_list_returns_graph_layer_outside_store_bounds(graph):
+    value = create(graph, "Alpha", current_settings=current())
+    value["settings"]["string_layer"] = "x" * 257
+    before = copy.deepcopy(value)
+    output = list_builtin().run(value, {})
+    assert set(output) == {"schema", "active_prefix", "current_settings", "rows", "list_rows"}
+    assert output["current_settings"]["StringLayer"] == "x" * 257
+    assert availability.w1_local_commit_inputs(value)[LIST] == {"input_ready": True, "input_reason": None}
+    assert value == before
+
+
+def test_design_presets_store_write_refuses_graph_layer_outside_store_bounds(graph):
+    value = create(graph, "Alpha", current_settings=current())
+    value["settings"]["string_layer"] = "x" * 257
+    before = copy.deepcopy(value)
+    with pytest.raises(GraphValidationError) as caught:
+        commit_builtin().run(value, {"expected_rev": value["rev"], "subcommand": "Create", "name": "Beta"})
+    assert caught.value.code == "DESIGN_PRESET_GRAPH_SETTINGS_OUT_OF_RANGE"
+    assert value == before
+
+
 def test_design_presets_commit_changes_only_the_store(graph, passing, service):
     sized = confirm(located(graph), sizing_params(graph, passing))["graph"]
     evidence = require_sizing(sized)
-    after = commit(sized, {"subcommand": "Create", "name": "Alpha", "current_settings": current()})
+    # Settings that agree with the graph's three layer names: the preset sync writes nothing
+    # (test_solar_tool_design_presets_apply.py pins the case where they differ).
+    agreeing = dict(current(), StringLayer="Strings", HomeRunLayer="Homeruns", PanelGroupLayer="Groups")
+    after = commit(sized, {"subcommand": "Create", "name": "Alpha", "current_settings": agreeing})
     assert (after["rev"], after["parent_rev"]) == (sized["rev"] + 1, sized["rev"])
     assert entities(after) == entities(sized)
     assert {k: v for k, v in after.items() if k not in ("rev", "parent_rev", "extra")} == \
