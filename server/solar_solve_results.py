@@ -562,6 +562,15 @@ def homeruns_follow_topology(graph):
                if route["route_kind"] in HOMERUN_KINDS and route["from_ref"] in strings)
 
 
+def feeders_follow_topology(graph):
+    """True when every feeder ends at the central inverter its L1 currently names in l2_ref.
+    Catches an L1 reassignment whose writer did not mark validity. One pass over inverters and
+    routes; validate_graph has already proved every feeder starts at an L1 device."""
+    inverters = {inverter["id"]: inverter for inverter in graph["inverters"]}
+    return all(inverters[route["from_ref"]]["l2_ref"] == route["to_ref"]
+               for route in graph["routes"] if route["route_kind"] == "feeder")
+
+
 def require_current_export(graph):
     """Export adapters must call this before labelling output current."""
     graph = validate_graph(graph)
@@ -570,7 +579,8 @@ def require_current_export(graph):
             or any(f["extra"].get("solve", {}).get("upstream_sha256", basis) != basis
                    for f in graph["frames"])
             or any(coverage(graph).values())
-            or not homeruns_follow_topology(graph)):
+            or not homeruns_follow_topology(graph)
+            or not feeders_follow_topology(graph)):
         raise GraphValidationError("SOLAR_OUTPUT_NOT_CURRENT")
     return graph
 

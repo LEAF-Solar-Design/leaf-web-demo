@@ -329,6 +329,9 @@ def build_suites() -> List[Suite]:
         # sf-solar-ground-graph-routes: output invalidation for L1/L2 topology edits.
         Suite("server-solar-ground-invalidation", "server tests/test_solar_ground_invalidation.py", "pytest", SERVER,
               _py_pytest("tests/test_solar_ground_invalidation.py"), 20),
+        # sf-solar-ground-graph-route-kinds: feeder and trench route kinds, conductor pathways, feeder currency.
+        Suite("server-solar-ground-route-kinds", "server tests/test_solar_ground_route_kinds.py", "pytest", SERVER,
+              _py_pytest("tests/test_solar_ground_route_kinds.py"), 61),
         # sf-solar-electrical-bridge: the kernel state to design graph topology mapping, both ways.
         Suite("server-solar-electrical-bridge", "server tests/test_solar_electrical_state_bridge.py", "pytest", SERVER,
               _py_pytest("tests/test_solar_electrical_state_bridge.py"), 83),

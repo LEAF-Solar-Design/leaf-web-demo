@@ -402,6 +402,7 @@
     "server-solar-ground-invalidation",
     "server-solar-ground-layout",
     "server-solar-ground-reports",
+    "server-solar-ground-route-kinds",
     "server-solar-ground-scene",
     "server-solar-ground-shade",
     "server-solar-ground-terrain",

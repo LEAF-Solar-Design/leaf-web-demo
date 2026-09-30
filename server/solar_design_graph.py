@@ -24,6 +24,10 @@ MAX_DEPTH = 32
 COLLECTIONS = ("electrical_zones", "frames", "panels", "strings", "inverters", "routes", "schedules")
 TRACKER_AXIS_EPSILON = 1e-9  # LeafTrackersToPanelGroupsCommand.cs:42 (solar_ground_dsteps.TRACKER_EPSILON); a shorter axis is degenerate
 KINDS = {"project", "settings", "zone-el", "frame", "panel", "string", "inverter", "route", "schedule"}
+# A feeder runs from an L1 device to the central inverter it feeds (RouteL2Feeders, LEAFLITEFEEDERS).
+L1_EQUIPMENT_TYPES = ("combiner_box", "string_inverter")
+# A trench end is open (a picked point or the LEAFTRENCHAUTO hub), a panel group (frame) or a device.
+TRENCH_ENDPOINT_KINDS = ("frame", "inverter")
 
 # Schema validators are built once per process from the packaged schema; reused, never mutated.
 _SCHEMA_VALIDATORS = None
@@ -349,6 +353,30 @@ def validate_graph(graph: dict) -> dict:
             expected = string_inputs.get(panel["assignment"]["string_ref"], (None, None))
             if (record["inverter_id"], record["string_input_number"]) != expected:
                 raise GraphValidationError("MATRIX_INPUT_MISMATCH")
+    feeder_sources = set()
+    for route in graph["routes"]:
+        if route["route_kind"] == "feeder":
+            # Kind only; whether the L1 still feeds this L2 is currency (require_current_export).
+            source, target = index.get(route["from_ref"]), index.get(route["to_ref"])
+            if (source is None or source["kind"] != "inverter"
+                    or source.get("equipment_type") not in L1_EQUIPMENT_TYPES
+                    or target is None or target["kind"] != "inverter"
+                    or target.get("equipment_type") != "central_inverter"):
+                raise GraphValidationError("ROUTE_ENDPOINT_MISMATCH")
+            if route["from_ref"] in feeder_sources:
+                raise GraphValidationError("DUPLICATE_FEEDER")
+            feeder_sources.add(route["from_ref"])
+        elif route["route_kind"] == "trench":
+            for ref in (route["from_ref"], route["to_ref"]):
+                if ref is not None and (ref not in index or index[ref]["kind"] not in TRENCH_ENDPOINT_KINDS):
+                    raise GraphValidationError("ROUTE_ENDPOINT_MISMATCH")
+    for conductors in (graph["routes"], graph["strings"]):
+        for conductor in conductors:
+            pathway = conductor.get("pathway_ref")
+            if pathway is not None:
+                trench = index.get(pathway)
+                if trench is None or trench["kind"] != "route" or trench["route_kind"] != "trench":
+                    raise GraphValidationError("ROUTE_PATHWAY_MISMATCH")
     result = copy.deepcopy(graph)
     # Success-only insert; bounded LRU evicts the oldest digest past the bound.
     with _VALIDATED_GRAPH_MEMO_LOCK:
