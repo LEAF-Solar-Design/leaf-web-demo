@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import io
 import json
+import random
 import uuid
+import zlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -386,6 +388,76 @@ def test_upload_fake_dwg_magic_400(client):
     r = _upload(client, data=b"this is not a dwg at all", name="mine.dwg")
     assert r.status_code == 400
     assert "AC1" in r.json()["error"]["message"]
+
+
+def _entity_bomb_dxf():
+    rng = random.Random(7)
+    vertices = "".join(
+        f"0\nVERTEX\n10\n{rng.uniform(-1e6, 1e6):.12f}\n"
+        f"20\n{rng.uniform(-1e6, 1e6):.12f}\n"
+        for _ in range(150_001))
+    return ("0\nSECTION\n2\nENTITIES\n" + vertices
+            + "0\nENDSEC\n0\nEOF\n").encode("ascii")
+
+
+def test_upload_dxf_compression_bomb_rejected_before_staging(client):
+    data = b"0\nSECTION\n2\nENTITIES\n" + b"x" * 200_000
+    r = _upload(client, data=data)
+    assert r.status_code == 400
+    assert "compression ratio" in r.json()["error"]["message"]
+    assert not any(guest_uploads.uploads_dir().glob("*")), \
+        "a compression bomb must never reach staging"
+
+
+def test_upload_dxf_entity_bomb_rejected_before_staging(client):
+    data = _entity_bomb_dxf()
+    assert len(data) < 25 * 1024 * 1024
+    assert len(data) / len(zlib.compress(data, 6)) < 40
+    r = _upload(client, data=data)
+    assert r.status_code == 400
+    assert "entity count" in r.json()["error"]["message"]
+    assert not any(guest_uploads.uploads_dir().glob("*")), \
+        "an entity bomb must never reach staging"
+
+
+def test_upload_dxf_embedded_zip_rejected_before_staging(client):
+    r = _upload(client, data=DXF_BYTES + b"PK\x03\x04")
+    assert r.status_code == 400
+    assert "zip signature" in r.json()["error"]["message"]
+    assert not any(guest_uploads.uploads_dir().glob("*")), \
+        "an embedded zip must never reach staging"
+
+
+def test_upload_dxf_zip_signature_after_first_8kb_accepted(client):
+    comment = b"999\n" + b" ".join(str(i).encode("ascii") for i in range(2500))
+    data = DXF_BYTES.replace(b"0\nENDSEC", comment + b" PK\x03\x04\n0\nENDSEC")
+    assert data.index(b"PK\x03\x04") > 8192
+    r = _upload(client, data=data)
+    assert r.status_code == 202, r.text
+
+
+def test_upload_dwg_repeated_bytes_accepted(client):
+    r = _upload(client, data=b"AC1032" + b"x" * 200_000, name="mine.dwg")
+    assert r.status_code == 202, r.text
+
+
+def test_dxf_bomb_reason_accepts_sample_dxf():
+    assert guest_uploads._dxf_bomb_reason(DXF_BYTES) is None
+
+
+def test_dxf_bomb_reason_rejects_zip_signature():
+    assert guest_uploads._dxf_bomb_reason(b"PK\x03\x04") == (
+        "embedded zip signature in a DXF payload is rejected")
+
+
+def test_dxf_bomb_reason_rejects_compression_ratio():
+    assert guest_uploads._dxf_bomb_reason(b"x" * 4096) == (
+        "pathological compression ratio in a DXF payload (possible decompression bomb)")
+
+
+def test_dxf_bomb_reason_rejects_entity_count():
+    assert guest_uploads._dxf_bomb_reason(_entity_bomb_dxf()) == (
+        "implausible DXF entity count (possible entity-expansion bomb)")
 
 
 def test_guest_rate_limit_per_ip(client, monkeypatch):

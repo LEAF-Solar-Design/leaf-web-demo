@@ -1074,7 +1074,7 @@ def build_suites() -> List[Suite]:
         # these toggle LEAF_AUTH_LIVE / LEAF_GUEST_* env and share the guest
         # store + uploads staging dirs (isolated per-test via tmp_path).
         Suite("server-guest-uploads", "server tests/test_guest_uploads.py", "pytest", SERVER,
-              _py_pytest("tests/test_guest_uploads.py"), 61),
+              _py_pytest("tests/test_guest_uploads.py"), 70),
         # The APS-free DWG read lane (dwg2dxf -> dxf_intake) + engine toggle.
         # FIVE real-binary tests run wherever their tools are installed (the app
         # container ships them; see deploy/Dockerfile.app) and skip with these
