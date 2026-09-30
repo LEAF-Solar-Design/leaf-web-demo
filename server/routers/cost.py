@@ -10,7 +10,8 @@ ledger (LEAF_COST_LEDGER_DIR, read by CostLedgerStore) and answers:
       resources: [ { resource_id, display_name, unit, total_usage, gross_cost_usd,
                      credits_usd, status, coverage, your_share, your_implied_cost_usd,
                      leaf_share: { development, ci, fleet, unattributed },
-                     other_customers_share } ],
+                     other_customers_share,
+                     physical_usage: { quantity, unit, coverage } | null } ],
       error, degraded_mode }
 
 TENANT BOUNDARY. The tenant is resolved only by deps.require_tenant, exactly as
@@ -112,7 +113,15 @@ def _implied_amount(value: Decimal) -> str:
         return _dec(value.quantize(_IMPLIED_QUANTUM, rounding=ROUND_HALF_UP))
 
 
-def _resource_row(revision: Any, tenant_id: str) -> Dict[str, Any]:
+def _physical_row(entry: Any) -> Optional[Dict[str, str]]:
+    """Leaf's whole physical quantity for the resource (never per tenant), or None."""
+    if not isinstance(entry, dict):
+        return None
+    return {"quantity": entry["quantity"], "unit": entry["unit"], "coverage": entry["coverage"]}
+
+
+def _resource_row(revision: Any, tenant_id: str,
+                  physical_usage: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """One resource as the caller may see it. Another tenant appears only inside
     other_customers_share, as part of a sum."""
     rp = revision.resource_period
@@ -142,6 +151,7 @@ def _resource_row(revision: Any, tenant_id: str) -> Dict[str, Any]:
         "your_implied_cost_usd": _implied_amount(_your_implied_cost(revision, tenant_id)),
         "leaf_share": {dim: _share(leaf[dim]) for dim in sorted(LEAF_DIMENSIONS)},
         "other_customers_share": _share(others),
+        "physical_usage": _physical_row((physical_usage or {}).get(rp.resource_id)),
     }
 
 
@@ -178,7 +188,7 @@ def cost(period: Optional[str] = Query(default=None),
             revisions = store.read_publication(publication_id)
             info = publisher.publication_info(store, publication_id)
             for revision in sorted(revisions, key=lambda r: r.resource_id):
-                rows.append(_resource_row(revision, tenant_id))
+                rows.append(_resource_row(revision, tenant_id, info.get("physical_usage")))
                 gross += revision.resource_period.gross_cost_usd
                 credits += revision.resource_period.credits_usd
                 with localcontext() as ctx:

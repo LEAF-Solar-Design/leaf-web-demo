@@ -30,8 +30,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .ledger import (
-    ESTIMATED, LEAF, MEASURED, PERIOD_RE, SHARE_ONE, STATUSES, ResourcePeriod, ShareEntry,
-    compute_shares, to_decimal,
+    COVERAGES, ESTIMATED, LEAF, MEASURED, PERIOD_RE, RESOURCE_ID_RE, SHARE_ONE, STATUSES,
+    ResourcePeriod, ShareEntry, compute_shares, to_decimal,
 )
 from .store import PUBLICATION_ID_RE, CostLedgerStore, _canon_json, _write_atomic
 
@@ -45,6 +45,8 @@ MAX_OBSERVATIONS = 100_000  # bounds one publish; exceeding it raises, never tru
 MAX_SCAN_PUBLICATIONS = 5_000  # bounds the fallback manifest scan when no latest pointer exists
 _MAX_META_BYTES = 256 * 1024
 _MAX_SOURCES = 64
+_MAX_PHYSICAL_USAGE = 256  # resources with a physical quantity in one publication
+_MAX_UNIT = 64
 PUBLISH_LOCK = ".publisher.lock"
 _LOG = logging.getLogger(__name__)
 
@@ -332,28 +334,71 @@ def _source_list(values: Iterable[Any], what: str) -> List[str]:
     return sorted(out)
 
 
+def _physical_usage_entry(entry: Any) -> Optional[Dict[str, str]]:
+    """{quantity, unit, coverage} with a nonnegative decimal-string quantity, else None."""
+    if not isinstance(entry, Mapping) or set(entry) != {"quantity", "unit", "coverage"}:
+        return None
+    quantity, unit, coverage = entry["quantity"], entry["unit"], entry["coverage"]
+    if not isinstance(quantity, str) or not isinstance(unit, str):
+        return None
+    if not unit.strip() or len(unit) > _MAX_UNIT or coverage not in COVERAGES:
+        return None
+    try:
+        if to_decimal(quantity, "quantity") < 0:
+            return None
+    except (TypeError, ValueError, ArithmeticError):
+        return None
+    return {"quantity": quantity, "unit": unit, "coverage": coverage}
+
+
+def _physical_usage_map(value: Any) -> Dict[str, Dict[str, str]]:
+    """{resource_id: {quantity, unit, coverage}} sorted by resource_id. Fails closed."""
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise TypeError("physical_usage must be an object")
+    if len(value) > _MAX_PHYSICAL_USAGE:
+        raise ValueError(f"physical_usage names more than {_MAX_PHYSICAL_USAGE} resources")
+    out: Dict[str, Dict[str, str]] = {}
+    for resource_id, entry in value.items():
+        if not isinstance(resource_id, str) or not RESOURCE_ID_RE.fullmatch(resource_id):
+            raise ValueError(f"physical_usage resource id is invalid: {resource_id!r}")
+        checked = _physical_usage_entry(entry)
+        if checked is None:
+            raise ValueError(f"{resource_id} physical_usage must be {{quantity, unit, coverage}} "
+                             "with a nonnegative decimal-string quantity")
+        out[resource_id] = checked
+    return dict(sorted(out.items()))
+
+
 def publish_period(store: CostLedgerStore, period: str, observations: Iterable[Any], reason: str, *,
                    sources: Iterable[str] = (), missing_sources: Iterable[str] = (),
+                   physical_usage: Optional[Mapping[str, Any]] = None,
                    lock_timeout: float = 300, stale_after: float = 1800) -> str:
     """Append every resource's revision, then publish the month. Returns the publication id.
 
     Re-publishing identical input appends nothing and returns the same id. The
     publication's membership and source health are part of its immutable identity,
     and latest/<period>.json is atomically pointed at the returned id.
+    physical_usage ({resource_id: {quantity, unit, coverage}}) is display metadata
+    only: it lands in the publication metadata and never touches shares, amounts,
+    coverage or revision digests. An empty map leaves the metadata as before.
     lock_timeout and stale_after are seconds; foreign-host locks are never reclaimed.
     """
     period = _check_period(period)
     used = _source_list(sources, "sources")
     missing = _source_list(missing_sources, "missing sources")
+    physical = _physical_usage_map(physical_usage)
     pairs = build_period(period, observations)
     root = _root(store)
     with _publisher_lock(root, lock_timeout, stale_after):
-        return _publish_period_locked(store, period, pairs, reason, used, missing)
+        return _publish_period_locked(store, period, pairs, reason, used, missing, physical)
 
 
 def _publish_period_locked(store: CostLedgerStore, period: str,
                            pairs: List[Tuple[ResourcePeriod, List[ShareEntry]]],
-                           reason: str, used: List[str], missing: List[str]) -> str:
+                           reason: str, used: List[str], missing: List[str],
+                           physical: Optional[Dict[str, Dict[str, str]]] = None) -> str:
     root = _root(store)
     current_ids = {rp.resource_id for rp, _ in pairs}
     previous_id = latest_publication_id(store, period) if missing else None
@@ -364,6 +409,8 @@ def _publish_period_locked(store: CostLedgerStore, period: str,
         revision_ids.append(store.append_revision(resource_period, shares, reason))
     metadata = {"sources": used, "missing_sources": missing,
                 "carried_forward": sorted(r.resource_id for r in carried)}
+    if physical:
+        metadata["physical_usage"] = physical
     publication_id = store.publish(period, revision_ids=revision_ids, metadata=metadata)
 
     meta_path = root / META_DIR / f"{publication_id}.json"
@@ -442,7 +489,8 @@ def latest_publication_id(store: CostLedgerStore, period: str) -> Optional[str]:
 
 
 def publication_info(store: CostLedgerStore, publication_id: str) -> Dict[str, Any]:
-    """published_at from the manifest, and the sources recorded beside it (empty when unrecorded)."""
+    """published_at from the manifest, and the sources and physical usage recorded beside it
+    (empty when unrecorded)."""
     root = _root(store)
     match = PUBLICATION_ID_RE.fullmatch(publication_id or "")
     if not match:
@@ -453,9 +501,17 @@ def publication_info(store: CostLedgerStore, publication_id: str) -> Dict[str, A
     missing = meta.get("missing_sources") if meta.get("publication_id") == publication_id else None
     sources = meta.get("sources") if meta.get("publication_id") == publication_id else None
     carried = meta.get("carried_forward") if meta.get("publication_id") == publication_id else None
+    physical = meta.get("physical_usage") if meta.get("publication_id") == publication_id else None
+    physical_usage: Dict[str, Dict[str, str]] = {}
+    if isinstance(physical, dict):
+        for resource_id, entry in physical.items():
+            checked = _physical_usage_entry(entry)
+            if isinstance(resource_id, str) and checked is not None:
+                physical_usage[resource_id] = checked
     return {
         "published_at": published_at if isinstance(published_at, str) else None,
         "missing_sources": [s for s in missing if isinstance(s, str)] if isinstance(missing, list) else [],
         "sources": [s for s in sources if isinstance(s, str)] if isinstance(sources, list) else [],
         "carried_forward": [s for s in carried if isinstance(s, str)] if isinstance(carried, list) else [],
+        "physical_usage": physical_usage,
     }

@@ -28,6 +28,20 @@ GROUP_BY = (
 # (Usage, Tax, Fee, RIFee, Support, savings-plan lines...) is part of gross.
 CREDIT_RECORD_TYPES = frozenset({"Credit", "Refund"})
 MAX_PAGES = 100  # bounds a looping NextPageToken; exceeding it raises, never truncates
+
+# Physical usage (TCM-21): one quantity per resource, in one unit. Only usage types
+# whose name carries the marker are summed, so unlike units are never added.
+QUANTITY_SOURCE = "aws-usage-quantities"
+QUANTITY_METRIC = "UsageQuantity"
+QUANTITY_GROUP_BY = (
+    {"Type": "DIMENSION", "Key": "SERVICE"},
+    {"Type": "DIMENSION", "Key": "USAGE_TYPE"},
+)
+# SERVICE -> (usage type marker, unit)
+PHYSICAL_USAGE_RULES = {
+    "AWS CodeBuild": ("Build-Min", "build-minutes"),
+    "Amazon Elastic Compute Cloud - Compute": ("BoxUsage", "instance-hours"),
+}
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
 
@@ -80,6 +94,22 @@ def fetch(client: Any, period: str, *, today: Optional[date] = None,
     Follows NextPageToken; raises RuntimeError past max_pages instead of
     returning a silently truncated month.
     """
+    return _fetch_pages(client, period, today, max_pages, METRIC, GROUP_BY, None)
+
+
+def fetch_quantities(client: Any, period: str, *, today: Optional[date] = None,
+                     max_pages: int = MAX_PAGES) -> List[dict]:
+    """Every UsageQuantity page for the period, grouped by SERVICE and USAGE_TYPE.
+
+    Filtered to the services in PHYSICAL_USAGE_RULES; paged and bounded like fetch().
+    """
+    service_filter = {"Dimensions": {"Key": "SERVICE", "Values": sorted(PHYSICAL_USAGE_RULES)}}
+    return _fetch_pages(client, period, today, max_pages, QUANTITY_METRIC, QUANTITY_GROUP_BY,
+                        service_filter)
+
+
+def _fetch_pages(client: Any, period: str, today: Optional[date], max_pages: int, metric: str,
+                 group_by: Tuple[dict, ...], service_filter: Optional[dict]) -> List[dict]:
     if today is None:
         today = datetime.now(timezone.utc).date()
     start, end = period_time_range(period, today)
@@ -89,9 +119,11 @@ def fetch(client: Any, period: str, *, today: Optional[date] = None,
         request = {
             "TimePeriod": {"Start": start, "End": end},
             "Granularity": "MONTHLY",
-            "Metrics": [METRIC],
-            "GroupBy": [dict(g) for g in GROUP_BY],
+            "Metrics": [metric],
+            "GroupBy": [dict(g) for g in group_by],
         }
+        if service_filter is not None:
+            request["Filter"] = json.loads(json.dumps(service_filter))
         if token:
             request["NextPageToken"] = token
         response = client.get_cost_and_usage(**request)
@@ -225,3 +257,77 @@ def to_cost_observations(period: str, responses: Iterable[Any],
             "source": SOURCE,
         })
     return observations
+
+
+def to_physical_usage(responses: Iterable[Any], *, period: Optional[str] = None,
+                      fetched_at: Union[datetime, str, None] = None) -> dict:
+    """{resource_id: {quantity, unit, coverage}} from fetch_quantities pages. Fails closed.
+
+    CodeBuild sums the usage types containing "Build-Min" (build-minutes), EC2 compute
+    sums those containing "BoxUsage" (instance-hours); every other usage type is ignored,
+    so unlike units are never added. A resource appears only when a matching usage type
+    was seen. coverage is partial when Cost Explorer marks a result Estimated, or when
+    period is the month of fetched_at; otherwise complete.
+    """
+    partial = False
+    if period is not None:
+        year, month = _check_period(period)
+        if fetched_at is not None:
+            fetched = _fetched_month(fetched_at)
+            if (year, month) > fetched:
+                raise ValueError(f"period {period} is after fetched_at")
+            partial = (year, month) == fetched
+    totals: dict = {}
+    ce_units: dict = {}
+    with localcontext() as ctx:
+        ctx.prec = 60
+        ctx.traps[Inexact] = True  # sums are exact or refused, never silently rounded
+        for response in responses:
+            if not isinstance(response, Mapping):
+                raise TypeError("each response must be an object")
+            results = response.get("ResultsByTime") or []
+            if not isinstance(results, list):
+                raise TypeError("ResultsByTime must be a list")
+            for result in results:
+                if not isinstance(result, Mapping):
+                    raise TypeError("each ResultsByTime entry must be an object")
+                if period is not None:
+                    start = (result.get("TimePeriod") or {}).get("Start")
+                    if not isinstance(start, str) or start[:7] != period:
+                        raise ValueError(f"result period {start!r} is outside {period}")
+                if result.get("Estimated", False):
+                    partial = True
+                groups = result.get("Groups") or []
+                if not isinstance(groups, list):
+                    raise TypeError("Groups must be a list")
+                for group in groups:
+                    if not isinstance(group, Mapping):
+                        raise TypeError("each group must be an object")
+                    keys = group.get("Keys")
+                    if not isinstance(keys, list) or len(keys) != 2:
+                        raise ValueError(f"group keys must be [SERVICE, USAGE_TYPE], got {keys!r}")
+                    service, usage_type = keys
+                    if not isinstance(usage_type, str):
+                        raise ValueError(f"invalid usage type: {usage_type!r}")
+                    rule = PHYSICAL_USAGE_RULES.get(service) if isinstance(service, str) else None
+                    if rule is None or rule[0] not in usage_type:
+                        continue
+                    resource_id = resource_id_for_service(service)
+                    metric = (group.get("Metrics") or {}).get(QUANTITY_METRIC)
+                    if not isinstance(metric, Mapping):
+                        raise ValueError(f"{service} {usage_type} has no {QUANTITY_METRIC}")
+                    amount = to_decimal(metric.get("Amount"), f"{service} {usage_type} quantity")
+                    if amount < 0:
+                        raise ValueError(f"{service} {usage_type} quantity is negative: {amount}")
+                    ce_unit = metric.get("Unit")
+                    seen = ce_units.setdefault(resource_id, ce_unit)
+                    if seen != ce_unit:
+                        raise ValueError(f"{service} usage units differ: {seen!r} and {ce_unit!r}")
+                    totals[resource_id] = totals.get(resource_id, Decimal(0)) + amount
+    units = {resource_id_for_service(service): unit for service, (_, unit) in PHYSICAL_USAGE_RULES.items()}
+    coverage = "partial" if partial else "complete"
+    return {
+        resource_id: {"quantity": _fmt(totals[resource_id]), "unit": units[resource_id],
+                      "coverage": coverage}
+        for resource_id in sorted(totals)
+    }

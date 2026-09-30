@@ -51,9 +51,26 @@ class SourceMissing(RuntimeError):
 def _collect_aws(period: str, now: datetime) -> List[dict]:
     import boto3  # deferred: the default credential chain is resolved only when collecting
 
-    client = boto3.client("ce", region_name=CE_REGION)
-    responses = aws_import.fetch(client, period, today=now.astimezone(timezone.utc).date())
-    return aws_import.to_cost_observations(period, responses, now)
+    return _aws_observations(boto3.client("ce", region_name=CE_REGION), period, now)
+
+
+def _aws_observations(client: Any, period: str, now: datetime) -> List[dict]:
+    """Cost observations, carrying physical usage for CodeBuild and EC2 beside them.
+
+    A quantities failure is recorded as the missing source aws-usage-quantities and
+    never blocks the cost observations.
+    """
+    today = now.astimezone(timezone.utc).date()
+    observations = aws_import.to_cost_observations(
+        period, aws_import.fetch(client, period, today=today), now)
+    try:
+        physical = aws_import.to_physical_usage(
+            aws_import.fetch_quantities(client, period, today=today), period=period, fetched_at=now)
+    except Exception as exc:  # noqa: BLE001 - quantities are additive; costs still publish
+        print(f"publish-cost-ledger: {aws_import.QUANTITY_SOURCE} failed: {type(exc).__name__}: {exc}",
+              file=sys.stderr)
+        return _CollectedObservations(observations, [aws_import.QUANTITY_SOURCE])
+    return _CollectedObservations(observations, [], physical_usage=physical)
 
 
 def _collect_vendors(period: str, now: datetime) -> List[dict]:
@@ -99,9 +116,11 @@ def _collect_broker(period: str, now: datetime) -> List[dict]:
 class _CollectedObservations(list):
     """Usable observations with explicit gaps in their supporting sources."""
 
-    def __init__(self, observations: List[dict], missing_sources: List[str]):
+    def __init__(self, observations: List[dict], missing_sources: List[str], *,
+                 physical_usage: Optional[Dict[str, dict]] = None):
         super().__init__(observations)
         self.missing_sources = missing_sources
+        self.physical_usage = physical_usage or {}
 
 
 def _collect_pooled(period: str, now: datetime) -> List[dict]:
@@ -156,13 +175,17 @@ def _refuse_float(text: str) -> Any:
 
 
 def _gather(period: str, now: datetime, collectors: Mapping[str, Collector],
-            observation_files: List[str], log) -> Tuple[List[dict], List[str], List[str]]:
-    """Every usable source's observations, the sources used, and the sources missing."""
+            observation_files: List[str], log,
+            physical_usage: Optional[Dict[str, dict]] = None) -> Tuple[List[dict], List[str], List[str]]:
+    """Every usable source's observations, the sources used, and the sources missing.
+
+    physical_usage, when given, is filled with the physical quantities of the sources used.
+    """
     merged: List[dict] = []
     used: List[str] = []
     missing: List[str] = []
 
-    def take(name: str, observations: List[dict]) -> None:
+    def take(name: str, observations: List[dict], physical: Optional[Mapping[str, dict]] = None) -> None:
         try:
             publisher.build_period(period, observations)  # a source that does not validate is dropped whole
         except Exception as exc:  # noqa: BLE001 - reported, skipped, recorded missing
@@ -171,6 +194,8 @@ def _gather(period: str, now: datetime, collectors: Mapping[str, Collector],
             return
         merged.extend(observations)
         used.append(name)
+        if physical and physical_usage is not None:
+            physical_usage.update(physical)
         log(f"publish-cost-ledger: {name}: {len(observations)} observations")
 
     for name, collect in collectors.items():
@@ -187,8 +212,8 @@ def _gather(period: str, now: datetime, collectors: Mapping[str, Collector],
         for source in getattr(observations, "missing_sources", ()):
             if source not in missing:
                 missing.append(source)
-            log(f"publish-cost-ledger: {source} missing: {name} activity rows are unreadable")
-        take(name, list(observations))
+            log(f"publish-cost-ledger: {source} missing: reported by {name}")
+        take(name, list(observations), getattr(observations, "physical_usage", None))
 
     for path in observation_files:
         name = f"observations:{Path(path).name}"
@@ -261,8 +286,9 @@ def main(argv: Optional[List[str]] = None, *, collectors: Optional[Mapping[str, 
 
 
 def _publish_month(period, now, selected, observation_files, required, store, dry_run, stdout, log):
+    physical_usage: Dict[str, dict] = {}
     observations, used, missing = _gather(
-        period, now, selected, observation_files, log)
+        period, now, selected, observation_files, log, physical_usage)
     required_missing = sorted(required.intersection(missing) | (required - set(selected) - set(used)))
     missing = sorted(set(missing) | set(required_missing))
     if required_missing:
@@ -283,6 +309,7 @@ def _publish_month(period, now, selected, observation_files, required, store, dr
             "publication_id": None,
             "sources": sorted(used),
             "missing_sources": sorted(missing),
+            "physical_usage": physical_usage,
             "resources": [{"resource_period": rp.to_dict(), "shares": [s.to_dict() for s in shares]}
                           for rp, shares in pairs],
         }, sort_keys=True) + "\n")
@@ -293,7 +320,8 @@ def _publish_month(period, now, selected, observation_files, required, store, dr
               f"sources {', '.join(sorted(used)) or 'none'}; missing {', '.join(sorted(missing)) or 'none'}")
     try:
         publication_id = publisher.publish_period(store, period, observations, reason,
-                                                  sources=used, missing_sources=missing)
+                                                  sources=used, missing_sources=missing,
+                                                  physical_usage=physical_usage)
     except Exception as exc:  # noqa: BLE001 - one named failure line
         log(f"publish-cost-ledger: publish failed: {type(exc).__name__}: {exc}")
         return 1
