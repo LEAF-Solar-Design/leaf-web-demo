@@ -419,6 +419,7 @@
     "server-solar-lite-cabling",
     "server-solar-local-read",
     "server-solar-nec",
+    "server-solar-physical-state",
     "server-solar-pile-block-mapping",
     "server-solar-probe-calcs",
     "server-solar-pvcase-solve",
