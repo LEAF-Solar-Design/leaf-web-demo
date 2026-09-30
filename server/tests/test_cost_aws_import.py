@@ -247,7 +247,7 @@ def test_publish_reconciles_previous_month_first(tmp_path, now, argv, expected):
 ])
 def test_required_source_exit_keeps_publication(tmp_path, capsys, missing_source,
                                                required, expected_code):
-    from cost_meter import publish_main
+    from cost_meter import publish_main, publisher
     from cost_meter.store import CostLedgerStore, ENV_DIR
 
     def fail(period, now):
@@ -264,7 +264,9 @@ def test_required_source_exit_keeps_publication(tmp_path, capsys, missing_source
     assert CostLedgerStore(tmp_path).read_publication(summary["publication_id"])
     manifest = json.loads((tmp_path / "publications" /
                            (summary["publication_id"] + ".json")).read_text(encoding="utf-8"))
-    assert missing_source in manifest["metadata"]["missing_sources"]
+    assert "metadata" not in manifest
+    assert missing_source in publisher.publication_info(
+        CostLedgerStore(tmp_path), summary["publication_id"])["missing_sources"]
     if expected_code == 3:
         assert "required sources missing: aws-cost-explorer" in capsys.readouterr().err
 

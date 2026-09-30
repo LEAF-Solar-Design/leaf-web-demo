@@ -5,6 +5,7 @@ tmp_path, and LEAF_COST_LEDGER_DIR is set or cleared per test.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import multiprocessing
 import os
@@ -310,10 +311,33 @@ def test_explicit_snapshot_selects_exact_revisions_and_preserves_legacy_publicat
     assert s.read_publication(empty) == []
     path = tmp_path / "publications" / f"{snapshot}.json"
     manifest = json.loads(path.read_text(encoding="utf-8"))
+    assert snapshot == legacy
+    assert "metadata" not in manifest
+    # Reconstruct the metadata-identity form already written by the legacy publisher.
+    manifest["metadata"] = metadata
+    digest = hashlib.sha256(store._canon_json({
+        "revisions": manifest["revisions"], "metadata": metadata,
+    })).hexdigest()[:20]
+    legacy_metadata_id = f"pub-{PERIOD}-{digest}"
+    manifest["publication_id"] = legacy_metadata_id
+    path = tmp_path / "publications" / f"{legacy_metadata_id}.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert [r.revision_id for r in s.read_publication(legacy_metadata_id)] == [first]
+    assert publisher.publication_info(s, legacy_metadata_id)["missing_sources"] == ["aws"]
+    assert publisher.publication_info(s, legacy_metadata_id)["carried_forward"] == [rp.resource_id]
+    meta_path = tmp_path / "publication-meta" / f"{legacy_metadata_id}.json"
+    store._write_atomic(meta_path, store._canon_json({
+        "schema": publisher.META_SCHEMA, "publication_id": legacy_metadata_id,
+        "period": PERIOD, "sources": ["recovered"], "missing_sources": [],
+        "carried_forward": [],
+    }))
+    assert publisher.publication_info(s, legacy_metadata_id)["missing_sources"] == []
+    assert publisher.publication_info(s, legacy_metadata_id)["sources"] == ["recovered"]
+    assert publisher.publication_info(s, legacy_metadata_id)["carried_forward"] == []
     manifest["metadata"]["missing_sources"] = []
     path.write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(store.LedgerCorrupt):
-        s.read_publication(snapshot)
+        s.read_publication(legacy_metadata_id)
 
 
 def test_reappending_identical_content_adds_nothing(tmp_path):
