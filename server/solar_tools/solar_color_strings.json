@@ -1,0 +1,41 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-color-strings",
+  "builtin": "builtins/solar_color_strings.py",
+  "family": "stringing",
+  "adapter": "local-graph-read",
+  "entitlement": "run_read",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_COLOR_STRINGS_REQUEST",
+  "readiness": {"kind": "facets", "facets": ["strings"]},
+  "engine": "server-builtin",
+  "interaction": {"mode": "form"},
+  "record_store": "registry",
+  "record": {
+    "name": "solar-color-strings",
+    "version": "1.0.0",
+    "description": "Colour every string by its inverter, as LEAFCOLORSTRINGS does: the untyped colour of its inverter number, colour 7 when unassigned.",
+    "kind": "script",
+    "family_id": "stringing",
+    "engine_op": "solar_color_strings",
+    "entry": "builtins/solar_color_strings.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {"type": "string", "maxLength": 128}
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "returns": {"type": "object"},
+    "capabilities": ["drawing.read"],
+    "allow_local_fallback": false
+  },
+  "ledger": ["color-strings"],
+  "trusted_inputs": [],
+  "maturity": "preview",
+  "wave": 2,
+  "order": 83,
+  "scenario": "w2-rooftop"
+}

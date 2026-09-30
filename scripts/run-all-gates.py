@@ -618,6 +618,12 @@ def build_suites() -> List[Suite]:
         # on every runner. COUNTED: 28 tests + 32 more parametrizations = 60.
         Suite("server-solar-tool-solar-assign-strings", "server tests/test_solar_tool_solar_assign_strings.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_assign_strings.py"), 60),
+        # String colours through the electrical bridge (2026-09-30, sf-w2-color-strings): LEAFCOLORSTRINGS as a
+        # local-graph-read tool, the i3 receipt replayed on the published i2 graph. Inputs are authored in the
+        # file or are committed evidence, so the floor is the exact count on every runner.
+        # COUNTED: 14 tests + 25 more parametrizations = 39 (38 + 1 duplicate-row refusal).
+        Suite("server-solar-tool-color-strings", "server tests/test_solar_tool_color_strings.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_color_strings.py"), 39),
         # Electrical schedules as a W2 registry graph read (2026-09-30, sf-w2-electrical-output): the plugin's
         # InsertSchedules tables over the bridged graph, written as ElectricalSchedules.json; the recorded i7
         # design rebuilt as a graph reproduces the i8 receipt. Inputs are authored in the file or read from
