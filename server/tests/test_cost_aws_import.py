@@ -171,6 +171,125 @@ def test_resource_id_naming_rule():
         aws_import.resource_id_for_service(" - ")
 
 
+@pytest.mark.parametrize("estimated,coverage", [(True, "partial"), (False, "complete")])
+def test_closed_month_respects_cost_explorer_estimated(estimated, coverage):
+    page = _page([_group("AWS Lambda", "Usage", "1.25")])
+    page["ResultsByTime"][0]["Estimated"] = estimated
+    observations = aws_import.to_cost_observations("2026-08", [page], CLOSED)
+    assert observations[0]["coverage"] == coverage
+    assert observations[0]["gross_cost_usd"] == "1.25"
+
+
+def test_estimated_page_cannot_be_overridden_by_a_final_page():
+    first = _page([_group("AWS Lambda", "Usage", "1.25")], token="next")
+    first["ResultsByTime"][0]["Estimated"] = True
+    last = _page([_group("AWS Lambda", "Tax", "0.05")])
+    observations = aws_import.to_cost_observations("2026-08", [first, last], CLOSED)
+    assert observations[0]["coverage"] == "partial"
+    assert observations[0]["gross_cost_usd"] == "1.30"
+
+
+@pytest.mark.parametrize("period,today,end", [
+    ("2026-12", date(2027, 1, 3), "2027-01-01"),
+    ("2026-12", date(2026, 12, 31), "2027-01-01"),
+    ("2028-02", date(2028, 3, 3), "2028-03-01"),
+    ("2028-02", date(2028, 2, 29), "2028-03-01"),
+])
+def test_fetch_preserves_exclusive_calendar_month_ends(period, today, end):
+    client = FakeCostExplorer([_page([], start=period + "-01", end=end)])
+    aws_import.fetch(client, period, today=today)
+    assert client.calls[0]["TimePeriod"] == {"Start": period + "-01", "End": end}
+
+
+def _publication_cost(period, now):
+    return aws_import.to_cost_observations(
+        period, [_page([_group("AWS Lambda", "Usage", "2.00")], start=period + "-01")], now)
+
+
+@pytest.mark.parametrize("now,argv,expected", [
+    (datetime(2026, 10, 3, tzinfo=timezone.utc), [], ["2026-09", "2026-10"]),
+    (datetime(2026, 10, 5, tzinfo=timezone.utc), [], ["2026-09", "2026-10"]),
+    (datetime(2026, 10, 6, tzinfo=timezone.utc), [], ["2026-10"]),
+    (datetime(2026, 10, 3, tzinfo=timezone.utc), ["--period", "2026-08"], ["2026-08"]),
+    (datetime(2026, 10, 3, tzinfo=timezone.utc), ["--reconcile-days", "0"], ["2026-10"]),
+    (datetime(2026, 10, 6, tzinfo=timezone.utc), ["--reconcile-days", "6"],
+     ["2026-09", "2026-10"]),
+    (datetime(2027, 1, 3, tzinfo=timezone.utc), [], ["2026-12", "2027-01"]),
+    (datetime(2028, 3, 3, tzinfo=timezone.utc), [], ["2028-02", "2028-03"]),
+    (datetime.fromisoformat("2026-10-05T23:30:00-02:00"), [], ["2026-10"]),
+])
+def test_publish_reconciles_previous_month_first(tmp_path, now, argv, expected):
+    from cost_meter import publish_main
+    from cost_meter.store import CostLedgerStore, ENV_DIR
+
+    called = []
+
+    def collect(period, fetched_at):
+        called.append(period)
+        return _publication_cost(period, fetched_at)
+
+    out = io.StringIO()
+    assert publish_main.main(argv, collectors={"aws-cost-explorer": collect},
+                             environ={ENV_DIR: str(tmp_path)}, stdout=out, now=now) == 0
+    summaries = [json.loads(line) for line in out.getvalue().splitlines()]
+    assert called == expected
+    assert [summary["period"] for summary in summaries] == expected
+    store = CostLedgerStore(tmp_path)
+    for summary in summaries:
+        revisions = store.read_publication(summary["publication_id"])
+        assert [revision.period for revision in revisions] == [summary["period"]]
+
+
+@pytest.mark.parametrize("missing_source,required,expected_code", [
+    ("aws-cost-explorer", ["--required-sources", "aws-cost-explorer"], 3),
+    ("aws-cost-explorer", [], 0),
+    ("cost-vendors", ["--required-sources", "aws-cost-explorer"], 0),
+])
+def test_required_source_exit_keeps_publication(tmp_path, capsys, missing_source,
+                                               required, expected_code):
+    from cost_meter import publish_main
+    from cost_meter.store import CostLedgerStore, ENV_DIR
+
+    def fail(period, now):
+        raise RuntimeError("collector unavailable")
+
+    collectors = {"aws-cost-explorer": _publication_cost, "cost-vendors": _publication_cost}
+    collectors[missing_source] = fail
+    out = io.StringIO()
+    code = publish_main.main(["--period", "2026-08", *required], collectors=collectors,
+                             environ={ENV_DIR: str(tmp_path)}, stdout=out, now=CLOSED)
+    assert code == expected_code
+    summary = json.loads(out.getvalue())
+    assert summary["missing_sources"] == [missing_source]
+    assert CostLedgerStore(tmp_path).read_publication(summary["publication_id"])
+    manifest = json.loads((tmp_path / "publications" /
+                           (summary["publication_id"] + ".json")).read_text(encoding="utf-8"))
+    assert missing_source in manifest["metadata"]["missing_sources"]
+    if expected_code == 3:
+        assert "required sources missing: aws-cost-explorer" in capsys.readouterr().err
+
+
+def test_reconciliation_continues_after_required_source_failure(tmp_path):
+    from cost_meter import publish_main
+    from cost_meter.store import ENV_DIR
+
+    def aws(period, now):
+        if period == "2026-09":
+            raise RuntimeError("September unavailable")
+        return _publication_cost(period, now)
+
+    out = io.StringIO()
+    code = publish_main.main(
+        ["--required-sources", "aws-cost-explorer"],
+        collectors={"aws-cost-explorer": aws, "cost-vendors": _publication_cost},
+        environ={ENV_DIR: str(tmp_path)}, stdout=out,
+        now=datetime(2026, 10, 3, tzinfo=timezone.utc))
+    assert code == 3
+    summaries = [json.loads(line) for line in out.getvalue().splitlines()]
+    assert [summary["period"] for summary in summaries] == ["2026-09", "2026-10"]
+    assert [summary["missing_sources"] for summary in summaries] == [["aws-cost-explorer"], []]
+
+
 def test_the_same_responses_give_the_same_batch_id():
     groups = [_group("AWS CodeBuild", "Usage", "1.00"), _group("AWS Lambda", "Usage", "2.00")]
     first = aws_import.to_cost_observations("2026-08", [_page(groups, request_id="a")], CLOSED)

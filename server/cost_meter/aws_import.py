@@ -154,7 +154,8 @@ def to_cost_observations(period: str, responses: Iterable[Any],
     gross_cost_usd sums every non-credit record type; credits_usd is the absolute
     value of the Credit and Refund record types. Every service is kept, however
     small. coverage is partial for the month of fetched_at, complete for a
-    closed month; a period after fetched_at is refused.
+    closed month unless Cost Explorer marks it Estimated; a period after
+    fetched_at is refused.
     """
     year, month = _check_period(period)
     responses = list(responses)
@@ -181,6 +182,8 @@ def to_cost_observations(period: str, responses: Iterable[Any],
                 start = (result.get("TimePeriod") or {}).get("Start")
                 if not isinstance(start, str) or start[:7] != period:
                     raise ValueError(f"result period {start!r} is outside {period}")
+                if result.get("Estimated", False):
+                    coverage = "partial"
                 groups = result.get("Groups") or []
                 if not isinstance(groups, list):
                     raise TypeError("Groups must be a list")
