@@ -425,6 +425,7 @@
     "server-solar-solaredge-import",
     "server-solar-solaredge-parse",
     "server-solar-solaredge-pdf",
+    "server-solar-solaredge-report",
     "server-solar-terrain",
     "server-solar-tool-guardrails-read",
     "server-solar-tool-homeruns",

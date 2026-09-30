@@ -48,6 +48,7 @@ import guest_uploads
 import jobs
 import solar_artifacts
 import solar_import_sources
+import solar_solaredge_report
 import write_loop
 from envelopes import ErrorCode, err_envelope, error_obj, error_response, with_envelope_fields
 
@@ -357,6 +358,94 @@ async def import_solaredge_pdf(drawing_id: str, request: Request, project_id: Op
     try:
         result = await run_in_threadpool(_import_solaredge, str(tenant), drawing_id, data, project_id)
     except solar_import_sources.ImportSourceError as exc:
+        return refused(exc.code)
+    return JSONResponse(content=with_envelope_fields(result))
+
+
+def _solaredge_report(tenant_id, drawing_id, body):
+    try:
+        backend = _backend(tenant_id)
+    except (RuntimeError, OSError):
+        raise solar_solaredge_report.SolarEdgeReportError("REPORT_STORE_UNAVAILABLE") from None
+    return solar_solaredge_report.build_solaredge_report(backend, tenant_id, drawing_id, body)
+
+
+@router.post("/api/drawings/{drawing_id}/imports/solaredge-pdf/report")
+async def solaredge_pdf_report(drawing_id: str, request: Request,
+                               tenant=Depends(deps.require_active_tenant)):
+    """Publish the revision-bound SolarEdge counts and tracking report for a stored source."""
+    def refused(reason):
+        reasons = {
+            "REPORT_DRAWING_ID_INVALID": (400, ErrorCode.BAD_PARAMS, False),
+            "REPORT_REQUEST_INVALID": (400, ErrorCode.BAD_PARAMS, False),
+            "IMPORT_SOURCE_ID_INVALID": (400, ErrorCode.BAD_PARAMS, False),
+            "REPORT_MEDIA_TYPE_REFUSED": (415, ErrorCode.BAD_PARAMS, False),
+            "REPORT_REQUEST_TOO_LARGE": (413, ErrorCode.BAD_PARAMS, False),
+            "REPORT_DRAWING_NOT_FOUND": (404, ErrorCode.BAD_PARAMS, False),
+            "IMPORT_SOURCE_NOT_FOUND": (404, ErrorCode.BAD_PARAMS, False),
+            "REPORT_GRAPH_REQUIRED": (409, ErrorCode.BAD_PARAMS, False),
+            "REPORT_PROJECT_MISMATCH": (409, ErrorCode.BAD_PARAMS, False),
+            "REPORT_UNITS_UNRESOLVED": (409, ErrorCode.BAD_PARAMS, False),
+            "REPORT_FRAMES_REQUIRED": (409, ErrorCode.BAD_PARAMS, False),
+            "REPORT_FRAME_EMPTY": (409, ErrorCode.BAD_PARAMS, False),
+            "REPORT_PANEL_HANDLE_INVALID": (409, ErrorCode.BAD_PARAMS, False),
+            "REPORT_PANEL_HANDLE_DUPLICATE": (409, ErrorCode.BAD_PARAMS, False),
+            "REPORT_AMBIGUOUS_MATCH": (409, ErrorCode.BAD_PARAMS, False),
+            "REPORT_HANDLE_ALIAS": (409, ErrorCode.BAD_PARAMS, False),
+            "IMPORT_SOURCE_KIND_MISMATCH": (409, ErrorCode.BAD_PARAMS, False),
+            "IMPORT_PROJECT_MISMATCH": (409, ErrorCode.BAD_PARAMS, False),
+            "REPORT_NO_MATCH": (422, ErrorCode.BAD_PARAMS, False),
+            "REPORT_BRIDGE_UNRESOLVED": (422, ErrorCode.BAD_PARAMS, False),
+            "REPORT_ROW_ANGLE_UNRESOLVED": (422, ErrorCode.BAD_PARAMS, False),
+            "REPORT_PDF_UNSUPPORTED": (422, ErrorCode.BAD_PARAMS, False),
+            "REPORT_LIMIT_EXCEEDED": (422, ErrorCode.BAD_PARAMS, False),
+            "REPORT_BUSY": (503, ErrorCode.INTERNAL, True),
+            "REPORT_WRITES_DRAINED": (503, ErrorCode.INTERNAL, True),
+            "REPORT_STORE_UNAVAILABLE": (503, ErrorCode.INTERNAL, True),
+            "IMPORT_STORE_UNAVAILABLE": (503, ErrorCode.INTERNAL, True),
+            "REPORT_ARTIFACT_CONFLICT": (500, ErrorCode.INTERNAL, False),
+            "REPORT_ARTIFACT_CORRUPT": (500, ErrorCode.INTERNAL, False),
+            "REPORT_ARTIFACT_INVALID": (500, ErrorCode.INTERNAL, False),
+            "IMPORT_SOURCE_CORRUPT": (500, ErrorCode.INTERNAL, False),
+            "IMPORT_SOURCE_INVALID": (500, ErrorCode.INTERNAL, False),
+        }
+        if reason not in reasons:
+            reason = "REPORT_ARTIFACT_INVALID"
+        status, code, retryable = reasons[reason]
+        env = err_envelope(code, reason, retryable=retryable)
+        env["error"]["reason_code"] = reason
+        return JSONResponse(status_code=status, content=env)
+
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", drawing_id):
+        return refused("REPORT_DRAWING_ID_INVALID")
+    tier = entitlements.resolve_tier(tenant)
+    try:
+        roles, elevated = entitlements.resolve_roles(tenant)
+        if not entitlements.entitlements_for(tier, roles, elevated).get("run_read", False):
+            return entitlements.entitlement_denied_response("run_read", tier)
+    except entitlements.EntitlementsError:
+        return entitlements.policy_unavailable_response("run_read", tier)
+    if write_loop.drawing_mutations_refusal() is not None:
+        return refused("REPORT_WRITES_DRAINED")
+    if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+        return refused("REPORT_MEDIA_TYPE_REFUSED")
+    length = request.headers.get("content-length", "")
+    if re.fullmatch(r"[0-9]+", length):
+        stripped = length.lstrip("0")
+        if len(stripped) > 12 or int(stripped or "0") > solar_solaredge_report.MAX_REPORT_REQUEST_BYTES:
+            return refused("REPORT_REQUEST_TOO_LARGE")
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > solar_solaredge_report.MAX_REPORT_REQUEST_BYTES:
+            return refused("REPORT_REQUEST_TOO_LARGE")
+        raw.extend(chunk)
+    try:
+        body = json.loads(bytes(raw).decode("utf-8"))
+    except (ValueError, RecursionError):
+        return refused("REPORT_REQUEST_INVALID")
+    try:
+        result = await run_in_threadpool(_solaredge_report, str(tenant), drawing_id, body)
+    except solar_solaredge_report.SolarEdgeReportError as exc:
         return refused(exc.code)
     return JSONResponse(content=with_envelope_fields(result))
 
