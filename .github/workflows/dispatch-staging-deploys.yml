@@ -1158,14 +1158,40 @@ jobs:
           GH_TOKEN: ${{ secrets.TERRAFORM_REPO_TOKEN }}
         run: |
           set -euo pipefail
-          gh api \
-            "repos/$INFRA_REPO/actions/workflows/$CONSUMER_CONTRACT_WORKFLOW/runs?branch=main&event=push&status=success&per_page=100" \
-            > consumer-contract-runs.json
-          RUN_ID=$(jq -er --arg path "$CONSUMER_CONTRACT_WORKFLOW_PATH" '
-            [.workflow_runs[] | select(.path == $path and .status == "completed" and .conclusion == "success")]
-            | sort_by(-.id)
-            | if length == 0 then error("missing successful contract producer run") else .[0].id end
-          ' consumer-contract-runs.json)
+          # The listing intermittently serves a stale snapshot, as relay 36687438292
+          # attempts 1 and 2 showed. Two of six reads measured 2026-09-30 were stale.
+          # Read three times and keep the maximum id to use the freshest view.
+          RUN_ID=0
+          READ_IDS=""
+          FIRST_READ_ID=""
+          READS_DISAGREE=false
+          for read in 1 2 3; do
+            gh api \
+              "repos/$INFRA_REPO/actions/workflows/$CONSUMER_CONTRACT_WORKFLOW/runs?branch=main&event=push&status=success&per_page=100" \
+              > consumer-contract-read.json
+            READ_ID=$(jq -r --arg path "$CONSUMER_CONTRACT_WORKFLOW_PATH" '
+              [.workflow_runs[] | select(.path == $path and .status == "completed" and .conclusion == "success")]
+              | sort_by(-.id)
+              | if length == 0 then empty else .[0].id end
+            ' consumer-contract-read.json)
+            READ_IDS="${READ_IDS}${READ_IDS:+ }${READ_ID:-empty}"
+            if [ "$read" = 1 ]; then
+              FIRST_READ_ID="$READ_ID"
+            elif [ "$READ_ID" != "$FIRST_READ_ID" ]; then
+              READS_DISAGREE=true
+            fi
+            if [ -n "$READ_ID" ] && [ "$READ_ID" -gt "$RUN_ID" ]; then
+              RUN_ID="$READ_ID"
+              cp consumer-contract-read.json consumer-contract-runs.json
+            fi
+          done
+          [ "$RUN_ID" -gt 0 ] || {
+            echo "::error::missing successful contract producer run"
+            exit 1
+          }
+          if [ "$READS_DISAGREE" = true ]; then
+            echo "::notice::stale run listing: ids seen $READ_IDS; chosen $RUN_ID."
+          fi
           gh api "repos/$INFRA_REPO/actions/runs/$RUN_ID" > consumer-contract-run.json
           ATTEMPT=$(jq -er '.run_attempt' consumer-contract-run.json)
           NAME="leaf-platform-staging-consumer-contract-run-$RUN_ID-attempt-$ATTEMPT"
@@ -1456,11 +1482,39 @@ jobs:
           require_contract_still_latest() {
             local latest latest_head latest_json run_json state attempt name
             local artifacts artifact_json artifact_id provider_digest archive_sha
-            latest_json=$(GH_TOKEN="$GH_TOKEN" gh api \
-              "repos/$INFRA_REPO/actions/workflows/$CONSUMER_CONTRACT_WORKFLOW/runs?branch=main&event=push&status=success&per_page=100" \
-              --jq ".workflow_runs | map(select(.path == \"$CONSUMER_CONTRACT_WORKFLOW_PATH\" and .status == \"completed\" and .conclusion == \"success\")) | sort_by(-.id) | first | {id, head_sha} // empty")
-            latest=$(jq -er '.id | tostring' <<<"$latest_json") || {
+            local read read_json read_id newest=0 read_ids="" first_read_id="" reads_disagree=false
+            # The listing intermittently serves a stale snapshot, as relay 36687438292
+            # attempts 1 and 2 showed. Two of six reads measured 2026-09-30 were stale.
+            # Read three times and keep the maximum id to use the freshest view.
+            latest_json=""
+            for read in 1 2 3; do
+              read_json=$(GH_TOKEN="$GH_TOKEN" gh api \
+                "repos/$INFRA_REPO/actions/workflows/$CONSUMER_CONTRACT_WORKFLOW/runs?branch=main&event=push&status=success&per_page=100" \
+                --jq ".workflow_runs | map(select(.path == \"$CONSUMER_CONTRACT_WORKFLOW_PATH\" and .status == \"completed\" and .conclusion == \"success\")) | sort_by(-.id) | first | select(. != null) | {id, head_sha}")
+              read_id=""
+              if [ -n "$read_json" ]; then
+                read_id=$(jq -er '.id | tostring | select(test("^[1-9][0-9]*$"))' <<<"$read_json")
+              fi
+              read_ids="${read_ids}${read_ids:+ }${read_id:-empty}"
+              if [ "$read" = 1 ]; then
+                first_read_id="$read_id"
+              elif [ "$read_id" != "$first_read_id" ]; then
+                reads_disagree=true
+              fi
+              if [ -n "$read_id" ] && [ "$read_id" -gt "$newest" ]; then
+                newest="$read_id"
+                latest_json="$read_json"
+              fi
+            done
+            if [ "$reads_disagree" = true ]; then
+              echo "::notice::stale run listing: ids seen $read_ids; chosen $newest."
+            fi
+            latest=$(jq -er '.id | select(. != null) | tostring' <<<"${latest_json:-null}") || {
               echo "::error::The latest provider-associated Terraform consumer contract is unavailable."
+              exit 1
+            }
+            [[ "$latest" =~ ^[1-9][0-9]*$ ]] && [[ "$TF_CONTRACT_RUN_ID" =~ ^[1-9][0-9]*$ ]] || {
+              echo "::error::The Terraform consumer-contract run id is malformed."
               exit 1
             }
             latest_head=$(jq -er '.head_sha | select(type == "string" and test("^[0-9a-f]{40}$"))' <<<"$latest_json") || {
@@ -1474,7 +1528,10 @@ jobs:
               echo "::error::The latest Terraform consumer-contract run is not terminal success."
               exit 1
             }
-            if [ "$latest" != "$TF_CONTRACT_RUN_ID" ]; then
+            if [ "$latest" -lt "$TF_CONTRACT_RUN_ID" ]; then
+              echo "::notice::The run listing returned a stale page; the bound contract stands. Terraform re-validates it at dispatch."
+            fi
+            if [ "$latest" -gt "$TF_CONTRACT_RUN_ID" ]; then
               attempt=$(jq -er --argjson run "$latest" --arg head "$latest_head" \
                 --arg path "$CONSUMER_CONTRACT_WORKFLOW_PATH" '
                   select(

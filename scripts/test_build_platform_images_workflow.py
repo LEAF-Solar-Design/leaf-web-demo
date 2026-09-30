@@ -4110,7 +4110,11 @@ def check_docs_noop_filter(text: str) -> None:
         # accept exact ancestors of main. Each adds a read-only compare on
         # the workflow token, with malformed or unreadable results failing RED.
         # Dispatch sites, infra PAT use, inputs, and receipt logic are unchanged.
-        "d0ad6390f0ed4f0bc9a609082d3bada68170cd332060da2e196007e9c587ab50"
+        # Hash updated 2026-09-30: two read-only listing reads now read three
+        # times and keep the newest; the successor gate refuses only a strictly
+        # newer contract. No new endpoint, token, secret reference or
+        # `gh workflow run` site.
+        "1a90b6cc28189b73462ffb017c7e92ac92df5f06f2d4bc4432752f921359c627"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -5373,11 +5377,22 @@ case "${args[0]}" in
         ;;
       *"/actions/workflows/"*"/runs?branch=main"*)
         [ "${FAKE_V3:-0}" = "1" ] || { echo "fake gh: unexpected contract read" >&2; exit 9; }
-        printf '{"id":99,"head_sha":"%s"}\n' "$FAKE_TF_HEAD"
+        n=$(cat "$FAKE_CONTRACT_READ_FILE")
+        ids=(${FAKE_CONTRACT_IDS:-99 99 99})
+        id="${ids[$((n % ${#ids[@]}))]}"
+        printf '%s' "$((n + 1))" > "$FAKE_CONTRACT_READ_FILE"
+        if [ "$id" != empty ]; then
+          printf '{"id":%s,"head_sha":"%s"}\n' "$id" "$FAKE_TF_HEAD"
+        fi
         ;;
-      *"/actions/runs/99")
+      *"/actions/runs/97"|*"/actions/runs/98"|*"/actions/runs/99"|*"/actions/runs/100")
         [ "${FAKE_V3:-0}" = "1" ] || { echo "fake gh: unexpected contract run" >&2; exit 9; }
-        printf '%s\n' '{"status":"completed","conclusion":"success"}'
+        printf '{"id":%s,"head_sha":"%s","path":"%s","event":"push","head_branch":"main","run_attempt":1,"status":"completed","conclusion":"success"}\n' "${url##*/}" "$FAKE_TF_HEAD" "$CONSUMER_CONTRACT_WORKFLOW_PATH"
+        ;;
+      *"/actions/runs/100/artifacts?per_page=100")
+        printf '{"total_count":1,"artifacts":[{"id":3100,"name":"leaf-platform-staging-consumer-contract-run-100-attempt-1","expired":false,"digest":"sha256:%s","workflow_run":{"id":100,"head_sha":"%s","head_branch":"main"}}]}\n' "$FAKE_NEW_CONTRACT_DIGEST" "$FAKE_TF_HEAD"
+        ;;
+      *"/actions/artifacts/3100/zip") cat "$FAKE_NEW_CONTRACT_ZIP"
         ;;
       *"/actions/runs/2000/artifacts?per_page=100")
         printf '{"total_count":1,"artifacts":[{"id":3000,"name":"staging-surface-result-%s-1-web","expired":false}]}\n' "$FAKE_RELEASE_SOURCE"
@@ -5433,7 +5448,8 @@ esac
 def _rehearse_relay_dispatch(*, image_tag="prod-9999999", web_title, app_title,
                              relation="ahead", main_sha="deadbee",
                              history_fails=False, tip_ok_reads=99, v3=False,
-                             ancestry=None, evict=False):
+                             ancestry=None, evict=False,
+                             contract_ids="99 99 99", changed_consumer=False):
     """Execute the relay's ACTUAL dispatch script (extracted from the parsed
     YAML, never re-typed here) against a fake `gh`. Legacy rehearsals return
     (returncode, stdout, [(service, image_tag)] in dispatch order). A v3
@@ -5484,10 +5500,38 @@ def _rehearse_relay_dispatch(*, image_tag="prod-9999999", web_title, app_title,
         tip_file.write_text(str(tip_ok_reads), encoding="utf-8")
         evict_file = tmp / "evict"
         evict_file.write_text("1" if evict else "0", encoding="utf-8")
+        contract_read_file = tmp / "contract-reads"
+        contract_read_file.write_text("0", encoding="utf-8")
         receipt = None
         web_result_zip = tmp / "web-result.zip"
         app_result_zip = tmp / "app-result.zip"
         if v3:
+            bound_contract = {
+                "consumer": {"deploy_workflow_blob": "b" * 40},
+                "producer": {"workflow_blob": "c" * 40},
+            }
+            newer_contract = {
+                "consumer": dict(bound_contract["consumer"]),
+                "producer": {
+                    "repository": "LEAF-Solar-Design/leaf-automation-aws-terraform",
+                    "workflow_path": ".github/workflows/publish-leaf-platform-staging-consumer-contract.yml",
+                    "workflow_blob": "c" * 40,
+                    "run_id": 100,
+                    "run_attempt": 1,
+                    "event": "push",
+                    "branch": "main",
+                    "head_sha": "a" * 40,
+                    "head_tree": "e" * 40,
+                },
+            }
+            if changed_consumer:
+                newer_contract["consumer"]["deploy_workflow_blob"] = "f" * 40
+            newer_contract["payload_sha256"] = hashlib.sha256(
+                _canonical_json(newer_contract)
+            ).hexdigest()
+            newer_contract_zip = tmp / "newer-contract.zip"
+            with zipfile.ZipFile(newer_contract_zip, "w") as archive:
+                archive.writestr("consumer-contract.json", _canonical_json(newer_contract))
             digests = {
                 "web": "sha256:" + "1" * 64,
                 "app": "sha256:" + "2" * 64,
@@ -5564,6 +5608,11 @@ def _rehearse_relay_dispatch(*, image_tag="prod-9999999", web_title, app_title,
             env.update(
                 FAKE_V3="1",
                 FAKE_TF_HEAD="a" * 40,
+                FAKE_CONTRACT_IDS=contract_ids,
+                FAKE_CONTRACT_READ_FILE=str(contract_read_file),
+                FAKE_NEW_CONTRACT_ZIP=str(newer_contract_zip),
+                FAKE_NEW_CONTRACT_DIGEST=hashlib.sha256(
+                    newer_contract_zip.read_bytes()).hexdigest(),
                 FAKE_RELEASE_SOURCE=build_sha,
                 FAKE_WEB_RESULT_ZIP=str(web_result_zip),
                 FAKE_APP_RESULT_ZIP=str(app_result_zip),
@@ -5576,7 +5625,9 @@ def _rehearse_relay_dispatch(*, image_tag="prod-9999999", web_title, app_title,
                 RELEASE_SOURCE=build_sha,
                 RELEASE_ATTEMPT="1",
                 DIGEST_AWARE_CONVERGENCE_ENABLED="true",
-                CONSUMER_CONTRACT_B64="Y29udHJhY3Q",
+                CONSUMER_CONTRACT_B64=base64.urlsafe_b64encode(
+                    _canonical_json({"contract": bound_contract})
+                ).rstrip(b"=").decode("ascii"),
                 TF_CONTRACT_HEAD="a" * 40,
                 TF_CONSUMER_BLOB="b" * 40,
                 TF_CONTRACT_RUN_ID="99",
@@ -5812,6 +5863,45 @@ def test_v3_relay_publishes_frozen_receipt_after_main_advances() -> None:
         for result in receipt["surface_results"].values()
     )
     assert out.count("Dispatched ") == 2, out
+
+
+def test_v3_relay_contract_listing_survives_stale_pages() -> None:
+    for ids in ("98 99 97", "98 97 98"):
+        rc, out, deployed, receipt = _rehearse_relay_dispatch(
+            web_title="", app_title="", v3=True, contract_ids=ids,
+        )
+        assert rc == 0, out
+        assert len(deployed) == 2 and receipt is not None, out
+        assert "stale" in out, out
+        assert "newer byte-equivalent" not in out, out
+        if ids == "98 97 98":
+            assert "the bound contract stands" in out, out
+
+
+def test_v3_relay_contract_listing_checks_genuinely_newer_run() -> None:
+    for changed in (False, True):
+        rc, out, deployed, receipt = _rehearse_relay_dispatch(
+            web_title="", app_title="", v3=True,
+            contract_ids="98 100 99", changed_consumer=changed,
+        )
+        if changed:
+            assert rc != 0, out
+            assert "consumer semantics changed" in out, out
+            assert deployed == [] and receipt is None, out
+        else:
+            assert rc == 0, out
+            assert "Accepted one newer byte-equivalent protected consumer contract." in out
+            assert len(deployed) == 2 and receipt is not None, out
+
+
+def test_v3_relay_contract_listing_fails_closed_when_empty() -> None:
+    rc, out, deployed, receipt = _rehearse_relay_dispatch(
+        web_title="", app_title="", v3=True,
+        contract_ids="empty empty empty",
+    )
+    assert rc != 0, out
+    assert "The latest provider-associated Terraform consumer contract is unavailable." in out
+    assert deployed == [] and receipt is None, out
 
 
 def test_settled_relay_receipt_survives_a_new_consumer_contract() -> None:
@@ -7305,6 +7395,7 @@ def test_relay_selects_only_successful_consumer_contract_producer_runs() -> None
     )
     for label, code in (("contract step", contract_code), ("deploy step", latest.group(1))):
         assert code.count(runs_url) == 1, label
+        assert "for read in 1 2 3; do" in code, label
         assert "runs?branch=main&event=push&per_page=100" not in code, label
         normalized = code.replace('\\"', '"')
         assert '.status == "completed"' in normalized, label
@@ -7312,10 +7403,17 @@ def test_relay_selects_only_successful_consumer_contract_producer_runs() -> None
         filtered = normalized.index('.conclusion == "success"')
         assert filtered < normalized.index("sort_by(-.id)"), label
     assert "missing successful contract producer run" in contract_code
+    assert '[ "$READ_ID" -gt "$RUN_ID" ]' in contract_code
+    assert 'RUN_ID="$READ_ID"' in contract_code
+    assert 'cp consumer-contract-read.json consumer-contract-runs.json' in contract_code
+    assert '[ "$read_id" -gt "$newest" ]' in latest.group(1)
+    assert 'latest_json="$read_json"' in latest.group(1)
     # A newer successful run still walks the successor path, and the fetched run
     # is still required to be terminal success.
     assert '[ "$state" = "completed success" ]' in deploy_code
-    assert 'if [ "$latest" != "$TF_CONTRACT_RUN_ID" ]; then' in deploy_code
+    assert 'if [ "$latest" -gt "$TF_CONTRACT_RUN_ID" ]; then' in deploy_code
+    assert '[[ "$latest" =~ ^[1-9][0-9]*$ ]]' in deploy_code
+    assert '[[ "$TF_CONTRACT_RUN_ID" =~ ^[1-9][0-9]*$ ]]' in deploy_code
 
 
 def test_relay_accepts_only_byte_equivalent_newer_consumer_contract() -> None:
