@@ -331,7 +331,7 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_solar_ground_invalidation.py"), 20),
         # sf-solar-electrical-bridge: the kernel state to design graph topology mapping, both ways.
         Suite("server-solar-electrical-bridge", "server tests/test_solar_electrical_state_bridge.py", "pytest", SERVER,
-              _py_pytest("tests/test_solar_electrical_state_bridge.py"), 62),
+              _py_pytest("tests/test_solar_electrical_state_bridge.py"), 83),
         # 31 -> 35 on 2026-09-22: the zone-aware entry point (group_panels_by_zone,
         # the port of BuildAndSaveGroupsForZone) added four hermetic, unparametrized
         # tests. Nothing in this file skips, so the count is the same on every runner.
