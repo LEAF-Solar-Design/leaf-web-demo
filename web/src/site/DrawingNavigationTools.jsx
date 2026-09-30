@@ -119,7 +119,8 @@ export default function DrawingNavigationTools({ navigationSourceRef, navigation
   }
   if (!ground || frame?.contract?.ground !== 'drawing' || !index) return null
   const focused = index.byId.get(objects.focusId)
-  return <div className="drawing-navigation" data-nav-find>
+  return <div className="drawing-navigation">
+    <div className="drawing-find-band" data-nav-find>
     <div className="drawing-find-field">
     <label htmlFor={inputId}>Find in drawing</label>
     <input id={inputId} role="combobox" value={query} autoComplete="off"
@@ -127,18 +128,21 @@ export default function DrawingNavigationTools({ navigationSourceRef, navigation
       aria-activedescendant={results ? `${listId}-${active}` : undefined}
       onChange={(event) => { setQuery(event.target.value); setResults(null); setMessage('') }} onKeyDown={keyDown} />
     </div>
-    {results && <div className="drawing-find-results" data-nav-find>
-      <ul ref={listRef} id={listId} role="listbox" aria-label="Drawing matches">
-        {results.matches.map((record, i) => <li id={`${listId}-${i}`} key={record.id} role="option"
-          aria-selected={i === active} onMouseDown={(event) => event.preventDefault()} onClick={() => choose(record)}>{record.path}</li>)}
-      </ul>
-      {results.truncated && <p>More matches; refine your search</p>}
-    </div>}
+    <div className="drawing-find-status">
     {message && <span role="status">{message}</span>}
     {focused && <span className="drawing-focus">
       <span aria-describedby={pathId}>Focus: {focused.name}</span>
       <span id={pathId} hidden>{focused.path}</span>
       <button type="button" onClick={objects.clearFocus} aria-label="Clear focus">Clear</button>
     </span>}
+    </div>
+    </div>
+    {results && <div className="drawing-find-results">
+      <ul ref={listRef} id={listId} role="listbox" aria-label="Drawing matches">
+        {results.matches.map((record, i) => <li id={`${listId}-${i}`} key={record.id} role="option"
+          aria-selected={i === active} onMouseDown={(event) => event.preventDefault()} onClick={() => choose(record)}>{record.path}</li>)}
+      </ul>
+      {results.truncated && <p>More matches; refine your search</p>}
+    </div>}
   </div>
 }

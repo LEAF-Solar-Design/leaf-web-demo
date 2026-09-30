@@ -51,6 +51,35 @@ describe('computeSafeRect', () => {
 })
 
 describe('useDrawingViewport', () => {
+  it('re-resolves Objects from the top to the left edge and back when details resize on toggle', () => {
+    document.body.innerHTML = '<div id="ground"><div class="viewer-canvas"><canvas></canvas></div></div><details data-nav-objects><summary>Objects</summary></details>'
+    const root = document.querySelector('#ground')
+    const panel = document.querySelector('details')
+    vi.spyOn(root.querySelector('canvas'), 'getBoundingClientRect').mockReturnValue(canvas)
+    const measure = vi.spyOn(panel, 'getBoundingClientRect').mockReturnValue(rect(456, 200, 96, 26))
+    let notify
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(callback) { notify = callback }
+      observe = vi.fn()
+      unobserve = vi.fn()
+      disconnect = vi.fn()
+    })
+    const frames = new Map()
+    let id = 0
+    vi.stubGlobal('requestAnimationFrame', (callback) => { frames.set(++id, callback); return id })
+    vi.stubGlobal('cancelAnimationFrame', (key) => frames.delete(key))
+    const flush = () => act(() => { const pending = [...frames.values()]; frames.clear(); pending.forEach((callback) => callback()) })
+    const { result } = renderHook(() => useDrawingViewport(root, STUDIO_DRAWING_OCCLUDERS))
+    flush()
+    expect(result.current).toEqual(rect(16, 242, 1888, 682))
+    act(() => { panel.open = true; measure.mockReturnValue(rect(8, 250, 360, 400)); notify() })
+    flush()
+    expect(result.current).toEqual(rect(384, 16, 1520, 908))
+    act(() => { panel.open = false; measure.mockReturnValue(rect(456, 200, 96, 26)); notify() })
+    flush()
+    expect(result.current).toEqual(rect(16, 242, 1888, 682))
+  })
+
   it('discovers the overview and updates safe space when it resizes, collapses or is removed', async () => {
     document.body.innerHTML = '<div id="ground"><div class="viewer-canvas"><canvas></canvas></div></div>'
     const root = document.querySelector('#ground')
@@ -73,15 +102,15 @@ describe('useDrawingViewport', () => {
     expect(result.current).toEqual(rect(16, 16, 1888, 908))
     const overview = document.createElement('div')
     overview.setAttribute('data-cad-overview', '')
-    const measure = vi.spyOn(overview, 'getBoundingClientRect').mockReturnValue(rect(500, 720, 182, 180))
+    const measure = vi.spyOn(overview, 'getBoundingClientRect').mockReturnValue(rect(1720, 300, 182, 180))
     await act(async () => { document.body.appendChild(overview) })
     flush()
     expect(observe).toHaveBeenCalledWith(overview)
-    expect(result.current).toEqual(rect(16, 16, 1888, 688))
-    measure.mockReturnValue(rect(500, 856, 100, 44))
+    expect(result.current).toEqual(rect(16, 16, 1688, 908))
+    measure.mockReturnValue(rect(1802, 300, 100, 44))
     act(() => notify())
     flush()
-    expect(result.current).toEqual(rect(16, 16, 1888, 824))
+    expect(result.current).toEqual(rect(16, 16, 1770, 908))
     await act(async () => overview.remove())
     flush()
     expect(unobserve).toHaveBeenCalledWith(overview)

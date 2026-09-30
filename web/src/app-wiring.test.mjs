@@ -891,14 +891,18 @@ describe('studio unobstructed drawing viewport', () => {
     assert.match(appNoComments, /import \{ STUDIO_DRAWING_OCCLUDERS \} from '.\/site\/drawingOccluders.js'/)
     const start = occluderSource.indexOf('const STUDIO_DRAWING_OCCLUDERS = Object.freeze(')
     assert.ok(start >= 0)
-    const list = occluderSource.slice(start, occluderSource.indexOf('])', start))
+    const end = occluderSource.indexOf('\n])', start)
+    assert.ok(end >= 0)
+    const list = occluderSource.slice(start, end)
     for (const selector of ['header.top', '#drafting-ribbon', '.viewer-toolbar', '[data-testid="cockpit-view"]',
       '.properties-dock', '.bar.bar-command-line', 'footer.foot-bar', '.rail-stack']) assert.ok(list.includes(selector), selector)
     assert.ok(list.includes('reserve: 50'))
-    for (const entry of ["['[data-nav-find]', 'top']", "['[data-cad-overview]', 'nearest']", "['[data-nav-objects]', 'nearest']"]) {
+    for (const entry of ["['[data-nav-find]', 'top']", "['[data-cad-overview]', 'right']", "['[data-nav-objects]:not([open])', 'top']", "['[data-nav-objects][open]', 'left']"]) {
       assert.ok(list.includes(entry), entry)
     }
     assert.ok(!list.includes("'.bar-dock'"))
+    assert.ok(!list.includes("['[data-cad-overview]', 'nearest']"))
+    assert.ok(!list.includes("['[data-nav-objects]', 'nearest']"))
     assert.ok(!list.includes('cockpit-prompt'))
     assert.ok(!list.includes('cockpit-cube'))
   })

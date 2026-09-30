@@ -1,48 +1,58 @@
 .drawing-navigation {
-  position: absolute;
-  top: 48px;
-  left: 12px;
-  z-index: 5;
+  position: fixed;
+  top: calc(var(--ck-canvas-top, 140px) + 26px);
+  left: 8px;
+  z-index: 30;
   display: flex;
   flex-direction: column;
   gap: 4px;
-  width: min(440px, calc(100% - 24px));
+  width: min(440px, calc(100vw - 120px));
   /* A stable occluder: expanding results must not trigger Viewer's safe-rect camera shift. */
-  height: 144px;
+  height: 52px;
   color: #f1f5f9;
   font-size: 12px;
   pointer-events: none;
 }
-.drawing-navigation > * {
+.drawing-find-field, .drawing-find-status > *, .drawing-find-results {
   min-height: 0;
-  padding: 4px 6px;
+  padding: 0 4px;
   border: 1px solid #626c79;
   border-radius: 4px;
   background: #202832;
   pointer-events: auto;
 }
-.drawing-find-field { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
-.drawing-navigation input {
+.drawing-find-band { height: 52px; }
+.drawing-find-field { display: flex; align-items: center; gap: 6px; height: 26px; box-sizing: border-box; }
+.drawing-find-status { display: flex; height: 26px; gap: 4px; }
+.drawing-find-status > * { min-width: 0; box-sizing: border-box; line-height: 18px; }
+.drawing-find-status > [role="status"] { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.drawing-navigation .drawing-find-field input {
   flex: 1;
   width: 100px;
-  min-width: 0;
+  min-width: 24px;
+  min-height: 24px;
+  height: 24px;
+  box-sizing: border-box;
   background: #111820;
   color: inherit;
   border: 1px solid #84909f;
-  padding: 4px;
+  padding: 2px;
+  font: inherit;
+  line-height: 16px;
 }
 .drawing-navigation :focus-visible { outline: 2px solid #91c9ff; outline-offset: 2px; }
-.drawing-find-results { overflow: auto; }
+.drawing-find-results { position: absolute; top: 26px; left: 0; right: 0; max-height: 180px; overflow: auto; }
 .drawing-find-results ul { position: relative; list-style: none; margin: 0; padding: 0; }
 .drawing-find-results p { margin: 4px 0; }
 .drawing-find-results li { padding: 6px; cursor: pointer; overflow-wrap: anywhere; }
 .drawing-find-results [aria-selected="true"] { background: #364e68; }
-.drawing-focus { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.drawing-focus { display: flex; align-items: center; gap: 6px; flex: 1; }
+.drawing-navigation .drawing-focus button { flex-shrink: 0; min-width: 24px; min-height: 24px; height: 24px; box-sizing: border-box; font: inherit; line-height: 16px; padding: 0 4px; }
 .drawing-focus > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (min-width: 981px) {
   .drawing-navigation {
     position: fixed;
-    top: calc(var(--ck-canvas-top, 0px) + 32px);
+    top: calc(var(--ck-canvas-top, 0px) + 26px);
     left: calc(var(--ck-pane, 0px) + 8px);
   }
 }

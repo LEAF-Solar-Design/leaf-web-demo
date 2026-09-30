@@ -22,20 +22,30 @@
 .drawing-objects-panel [aria-disabled="true"] { cursor: not-allowed; }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drawing-objects-panel {
   position: fixed;
-  left: calc(var(--ck-pane, 0px) + 12px);
-  top: calc(var(--ck-canvas-top, 140px) + 76px);
+  left: calc(var(--ck-pane, 0px) + 456px);
+  top: calc(var(--ck-canvas-top, 140px) + 26px);
   z-index: 7;
-  width: min(360px, calc(100vw - 24px));
+  width: 96px;
   max-height: calc(100dvh - var(--ck-canvas-top, 140px) - 160px);
   overflow: auto;
   pointer-events: auto;
 }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drawing-objects-panel > summary { min-width: 24px; min-height: 24px; box-sizing: border-box; padding: 3px 8px; line-height: 18px; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drawing-objects-panel[open] {
+  left: calc(var(--ck-pane, 0px) + 8px);
+  top: calc(var(--ck-canvas-top, 140px) + 82px);
+  width: min(360px, calc(100vw - var(--ck-pane, 0px) - 224px));
+}
 @media (max-width: 980px) {
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drawing-objects-panel {
-    left: 8px;
-    top: calc(var(--ck-canvas-top, 140px) + 54px);
-    width: min(340px, calc(100vw - 16px));
+    left: min(456px, calc(100vw - 104px));
+    top: calc(var(--ck-canvas-top, 140px) + 26px);
+    width: 96px;
     max-height: calc(100dvh - var(--ck-canvas-top, 140px) - var(--ck-dock, 35px) - var(--ck-drawer, 36px) - 64px);
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drawing-objects-panel[open] {
+    left: 8px;
+    width: min(340px, calc(100vw - 218px));
   }
   .drawing-object-list { max-height: 32dvh; }
 }

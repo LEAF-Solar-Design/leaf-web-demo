@@ -243,7 +243,7 @@ it('discards drawing-scoped snapshots when a new drawing reuses a handle', () =>
   expect(h.probe.engine.session.selectedIds).toEqual([])
 })
 
-it('reports truncated results honestly and marks both Find and the results as occluders', () => {
+it('reports truncated results honestly and registers only the stable Find band as an occluder', () => {
   const h = setup()
   const intake = { polylines: Array.from({ length: 60 }, (_, i) => ({ handle: `X${i}`, layer: 'Batch', pts: [[i, 0], [i + 1, 1]] })) }
   const index = buildDrawingObjectIndex({ drawingKey: 'engine:guest.dxf', intake })
@@ -252,7 +252,7 @@ it('reports truncated results honestly and marks both Find and the results as oc
   expect(screen.getAllByRole('option')).toHaveLength(50)
   expect(screen.getByText('More matches; refine your search')).toBeTruthy()
   expect(input().closest('[data-nav-find]')).toBeTruthy()
-  expect(screen.getByRole('listbox').closest('[data-nav-find]')).toBeTruthy()
+  expect(screen.getByRole('listbox').closest('[data-nav-find]')).toBeNull()
   expect(h.viewer.frame).not.toHaveBeenCalled()
 })
 

@@ -4,6 +4,7 @@ import { requireLocalReady } from './requireReady.mjs'
 const API_BASE = process.env.LEAF_E2E_API_BASE || 'http://127.0.0.1:8230'
 const conditions = [
   { name: '1366x768', viewport: { width: 1366, height: 768 }, deviceScaleFactor: 1, hasTouch: false },
+  { name: '1280x720', viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1, hasTouch: false },
   { name: '200 percent zoom (800x500 at scale 2)', viewport: { width: 800, height: 500 }, deviceScaleFactor: 2, hasTouch: false },
   { name: '390x844', viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, hasTouch: true },
   { name: '1024x1366', viewport: { width: 1024, height: 1366 }, deviceScaleFactor: 1, hasTouch: true },
@@ -51,6 +52,114 @@ async function boardRoundTrip(page) {
   await expect(page.locator('[data-cad-overview]')).toHaveCount(0)
   await page.getByRole('button', { name: 'Return to drawing', exact: true }).click()
   await expect(page.locator('[data-cad-overview]')).toBeVisible()
+}
+
+async function navigationGeometry(page) {
+  await expect.poll(() => page.evaluate(() => {
+    const selectors = ['.drawing-find-field', '.drawing-find-status > [role="status"]', '.drawing-focus',
+      '[data-nav-objects]', '[data-cad-overview]']
+    const boxes = selectors.flatMap((selector) => {
+      const element = document.querySelector(selector)
+      if (!element || !element.checkVisibility()) return []
+      const box = element.getBoundingClientRect()
+      return [{ element, selector, box }]
+    })
+    const failures = []
+    for (const control of document.querySelectorAll('.drawing-find-field input, .drawing-focus button, [data-nav-objects] > summary')) {
+      if (!control.checkVisibility()) continue
+      const box = control.getBoundingClientRect()
+      if (box.width < 24 || box.height < 24) failures.push(`${control.tagName} target is smaller than 24px`)
+    }
+    for (const [i, a] of boxes.entries()) {
+      const hit = document.elementFromPoint(a.box.x + a.box.width / 2, a.box.y + a.box.height / 2)
+      if (!a.element.contains(hit)) failures.push(`${a.selector} centre is covered`)
+      for (const b of boxes.slice(i + 1)) {
+        if (a.box.left < b.box.right && b.box.left < a.box.right && a.box.top < b.box.bottom && b.box.top < a.box.bottom) {
+          failures.push(`${a.selector} overlaps ${b.selector}`)
+        }
+      }
+    }
+    return failures
+  })).toEqual([])
+}
+
+async function navigationSafeRect(page) {
+  // Let ResizeObserver and the hook's queued measurement finish before comparing states.
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+  const value = await drawingMount(page).getAttribute('data-safe-rect')
+  if (!value) return null
+  expect(value).toMatch(/^\d+,\d+,\d+,\d+$/)
+  return value.split(',').map(Number)
+}
+
+for (const condition of [...conditions, { name: '844x390', viewport: { width: 844, height: 390 }, deviceScaleFactor: 1, hasTouch: true }]) {
+  test.describe(`navigation layout ${condition.name}`, () => {
+    test.use({ viewport: condition.viewport, deviceScaleFactor: condition.deviceScaleFactor, hasTouch: condition.hasTouch })
+    test('Find, status, Objects and overview share space without moving the safe rectangle for status or results', async ({ page, request }) => {
+      test.setTimeout(180_000)
+      await requireLocalReady(request, test, API_BASE)
+      const emptyDxf = '0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n'
+      await page.route('**/sample.dxf', (route) => route.fulfill({ status: 200, contentType: 'application/dxf', body: emptyDxf }))
+      await page.route('**/api/drawings/*/dxf*', (route) => route.fulfill({ status: 200, contentType: 'application/dxf', body: emptyDxf }))
+      await page.goto('/app?dev=1')
+      await page.getByLabel('Use mock data (off = live backend)').check()
+      await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('0', { timeout: 60_000 })
+      const command = page.getByLabel('Command bar', { exact: true })
+      for (const [i, y] of [0, 20].entries()) {
+        await command.fill('LINE'); await command.press('Enter')
+        await page.getByLabel('ribbon x', { exact: true }).fill(`0,${y}`)
+        const end = page.getByLabel('ribbon x2', { exact: true })
+        await end.fill(`10,${y}`); await end.press('Enter')
+        await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(i + 1), { timeout: 60_000 })
+        await page.keyboard.press('Escape')
+      }
+      const overview = page.locator('[data-cad-overview]')
+      await expect(overview).toHaveAttribute('data-collapsed', String(condition.viewport.width <= 980))
+      const panel = page.locator('[data-nav-objects]')
+      const find = page.getByRole('combobox', { name: 'Find in drawing' })
+      let defaultRect
+      for (const open of [false, true]) {
+        if (await panel.evaluate((element) => element.open) !== open) await panel.locator('summary').click()
+        for (const expanded of [false, true]) {
+          if ((await overview.getAttribute('data-collapsed') === 'false') !== expanded) await overview.locator('.cad-overview-toggle').click()
+          await find.fill('')
+          const baseline = await navigationSafeRect(page)
+          if (!open && !expanded) defaultRect = baseline
+          if (condition.viewport.width === 1280) {
+            expect(baseline).not.toBeNull()
+            expect(baseline[3]).toBeGreaterThanOrEqual(open ? 280 : 320)
+            expect(baseline[2]).toBeGreaterThanOrEqual(open ? 400 : expanded ? 760 : 900)
+            if (!open && expanded) expect(baseline[3]).toBe(defaultRect[3])
+          }
+          expect((await page.locator('[data-nav-find]').boundingBox()).height).toBeLessThanOrEqual(76)
+          for (const focused of [false, true]) {
+            if (focused) {
+              await find.fill('LINE'); await find.press('Enter')
+              await expect(page.getByRole('listbox', { name: 'Drawing matches' })).toBeVisible()
+              await find.press('Enter')
+              await expect(page.getByRole('button', { name: 'Clear focus' })).toBeVisible()
+            }
+            await navigationGeometry(page)
+            expect(await navigationSafeRect(page)).toEqual(baseline)
+            await find.fill('no-such-layout-object'); await find.press('Enter')
+            await expect(page.locator('.drawing-find-status > [role="status"]')).toHaveText('No matching object in this drawing.')
+            await navigationGeometry(page)
+            expect(await navigationSafeRect(page)).toEqual(baseline)
+            await find.fill('LINE'); await find.press('Enter')
+            const results = page.locator('.drawing-find-results')
+            await expect(results).toBeVisible()
+            expect(await results.evaluate((element) => {
+              const box = element.getBoundingClientRect()
+              return element.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2)) && !element.closest('[data-nav-find]')
+            })).toBe(true)
+            expect(await navigationSafeRect(page)).toEqual(baseline)
+            await find.press('Escape')
+            if (focused) await page.getByRole('button', { name: 'Clear focus' }).click()
+          }
+        }
+      }
+    })
+  })
 }
 
 for (const condition of conditions) {
