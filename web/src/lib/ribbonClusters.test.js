@@ -1284,6 +1284,62 @@ describe('referencePanels (the flag-off placeholders)', () => {
 })
 
 describe('solar refusal copy', () => {
+  // Hook builtins that emit codes through error.code.lower(), which no literal
+  // scan can see. Measured per builtin; a new dynamic hook must land here.
+  const DYNAMIC_HOOK_CODES = Object.freeze({
+    'builtins/solar_electrical_schedules.py': Object.freeze([
+      'schedules_kernel_refused', 'schedules_mapping_failed', 'schedules_optimizers_unsupported',
+      'schedules_zone_sizing_unsupported', 'sizing_confirmation_required', 'solar_output_not_current', 'unresolved_units',
+    ]),
+    'builtins/solar_guardrails_read.py': Object.freeze([
+      'guardrails_mixed_inverters', 'guardrails_project_coordinates_required', 'guardrails_sizing_ambiguous',
+      'guardrails_sizing_required',
+    ]),
+  })
+  function facetCodes(declarations) {
+    const codes = new Set()
+    for (const declaration of declarations) {
+      if (declaration.readiness?.kind !== 'facets') continue
+      for (const facet of declaration.readiness.facets) codes.add(`${facet}_required`)
+    }
+    return [...codes].sort()
+  }
+  function hookCodes(declarations, readSource) {
+    const codes = new Set()
+    const missingDynamic = []
+    const empty = []
+    const badPath = []
+    for (const declaration of declarations) {
+      if (declaration.readiness?.kind !== 'hook') continue
+      const builtin = declaration.builtin
+      if (typeof builtin !== 'string' || !/^builtins\/[a-z0-9_]{1,64}\.py$/.test(builtin)) {
+        badPath.push(builtin)
+        continue
+      }
+      const source = readSource(builtin)
+      const found = new Set()
+      for (const match of source.matchAll(/"input_reason":\s*"([a-z][a-z0-9_]{0,63})"/g)) found.add(match[1])
+      if (source.includes('.lower()')) {
+        if (Object.hasOwn(DYNAMIC_HOOK_CODES, builtin)) {
+          for (const code of DYNAMIC_HOOK_CODES[builtin]) found.add(code)
+        } else {
+          missingDynamic.push(builtin)
+        }
+      }
+      if (found.size === 0) empty.push(builtin)
+      for (const code of found) codes.add(code)
+    }
+    return { codes: [...codes].sort(), missingDynamic, empty, badPath }
+  }
+  function uncovered(codes) {
+    return codes.filter((code) => !Object.hasOwn(SOLAR_REFUSAL_REASONS, code))
+  }
+  // Every literal code a source raises through GraphValidationError, including a raise whose
+  // code sits on a later line (\s matches newlines) or is single-quoted.
+  function raisedCodes(source) {
+    return [...source.matchAll(/GraphValidationError\(\s*[\x22\x27]([A-Z][A-Z0-9_]{0,63})[\x22\x27]/g)].map((match) => match[1])
+  }
+  const readSource = (builtin) => readFileSync(new URL(`../../../server/${builtin}`, import.meta.url), 'utf8')
   const NEW_COPY = [
     ['licensed_graph_commit_required', 'This drawing keeps its solar design in AutoCAD, so this tool runs there'],
     ['module_power_required', 'Run Size strings again to record the module power'],
@@ -1377,7 +1433,7 @@ describe('solar refusal copy', () => {
       'electrical_zones_required', 'panels_already_present', 'panel_layer_filter_required',
       'rooftop_required', 'drawing_units_unsupported', 'guardrails_sizing_required',
       'guardrails_sizing_ambiguous', 'guardrails_project_coordinates_required',
-      'guardrails_mixed_inverters', 'guardrails_input_unsupported',
+      'guardrails_mixed_inverters', 'guardrails_input_unsupported', 'solar_output_not_current',
     ]
     for (const code of SERVER_CODES) {
       expect(Object.hasOwn(SOLAR_REFUSAL_REASONS, code)).toBe(true)
@@ -1386,42 +1442,53 @@ describe('solar refusal copy', () => {
   })
 
   it('RC5 facet declarations keep their copy', () => {
-    const codes = new Set()
-    for (const declaration of declarations()) {
-      if (declaration.readiness?.kind !== 'facets') continue
-      for (const facet of declaration.readiness.facets) {
-        const code = `${facet}_required`
-        codes.add(code)
-        expect(Object.hasOwn(SOLAR_REFUSAL_REASONS, code)).toBe(true)
-      }
-    }
-    expect([...codes].sort()).toEqual([
+    const codes = facetCodes(declarations())
+    expect(uncovered(codes)).toEqual([])
+    expect(codes).toEqual(expect.arrayContaining([
       'electrical_zones_required', 'frames_required', 'panels_required', 'strings_required',
-    ])
+    ]))
   })
 
   it('RC6 hook declarations keep their copy', () => {
-    const codes = new Set()
-    const hooks = declarations().filter((declaration) => declaration.readiness?.kind === 'hook')
-    expect(hooks).toHaveLength(5)
-    for (const declaration of hooks) {
-      expect(declaration.builtin).toMatch(/^builtins\/[a-z0-9_]{1,64}\.py$/)
-      const source = readFileSync(new URL(`../../../server/${declaration.builtin}`, import.meta.url), 'utf8')
-      for (const match of source.matchAll(/"input_reason":\s*"([a-z][a-z0-9_]{0,63})"/g)) {
-        codes.add(match[1])
-        expect(Object.hasOwn(SOLAR_REFUSAL_REASONS, match[1])).toBe(true)
-      }
-    }
-    expect([...codes].sort()).toEqual([
+    const hooks = declarations().filter((d) => d.readiness?.kind === 'hook')
+    expect(hooks.map((d) => d.builtin)).toEqual(expect.arrayContaining([
+      'builtins/solar_assign_strings.py', 'builtins/solar_electrical_schedules.py',
+      'builtins/solar_elevation_zones.py', 'builtins/solar_guardrails_read.py',
+      'builtins/solar_panels_from_drawing.py',
+    ]))
+    const result = hookCodes(hooks, readSource)
+    expect(result.badPath).toEqual([])
+    expect(result.missingDynamic).toEqual([])
+    expect(result.empty).toEqual([])
+    expect(uncovered(result.codes)).toEqual([])
+    expect(result.codes).toEqual(expect.arrayContaining([
       'drawing_units_unsupported', 'electrical_zones_unsupported', 'guardrails_input_unsupported',
       'panel_layer_filter_required', 'panels_already_present', 'rooftop_required',
       'schedules_input_unsupported', 'string_collectors_required', 'unassigned_strings_required',
-    ])
+    ]))
+    expect(result.codes).toEqual(expect.arrayContaining(Object.values(DYNAMIC_HOOK_CODES).flat()))
   })
 
   it('RC7 every sentence follows the map voice', () => {
+    const MAP_KEYS = [
+      'broker_adapter_unavailable', 'capability_availability_unavailable', 'capability_not_ready',
+      'complete_routing_required', 'degenerate_route', 'drawing_context_required', 'drawing_units_unsupported',
+      'electrical_zones_required', 'electrical_zones_unsupported', 'entitlement_policy_unavailable',
+      'entitlement_required', 'equipment_assignment_required', 'frames_required', 'graph_already_embedded',
+      'graph_seed_required', 'guardrails_input_unsupported', 'guardrails_mixed_inverters',
+      'guardrails_project_coordinates_required', 'guardrails_sizing_ambiguous', 'guardrails_sizing_required',
+      'invalid_drawing_context', 'invalid_route_point', 'invalid_seed_request', 'inverter_assignment_mismatch',
+      'licensed_graph_commit_required', 'module_power_required', 'not_current_head', 'panel_layer_filter_required',
+      'panels_already_present', 'panels_required', 'persisted_graph_unavailable', 'proposal_job_required',
+      'roof_installation_required', 'rooftop_required', 'routing_topology_required', 'schedules_input_unsupported',
+      'schedules_kernel_refused', 'schedules_mapping_failed', 'schedules_optimizers_unsupported',
+      'schedules_zone_sizing_unsupported', 'seed_project_scope_unsupported', 'sized_panel_groups_required',
+      'sizing_confirmation_required', 'solar_output_not_current', 'string_collectors_required', 'strings_required',
+      'unassigned_strings_required', 'unlisted', 'unresolved_units', 'valid_settings_required',
+      'valid_strings_required',
+    ]
     expect(Object.isFrozen(SOLAR_REFUSAL_REASONS)).toBe(true)
-    expect(Object.keys(SOLAR_REFUSAL_REASONS)).toHaveLength(50)
+    expect(Object.keys(SOLAR_REFUSAL_REASONS).sort()).toEqual(MAP_KEYS)
     for (const sentence of Object.values(SOLAR_REFUSAL_REASONS)) {
       expect(typeof sentence).toBe('string')
       expect(sentence.length).toBeGreaterThanOrEqual(12)
@@ -1458,5 +1525,105 @@ describe('solar refusal copy', () => {
     for (const [code, sentence] of Object.entries(BASE_COPY)) {
       expect(SOLAR_REFUSAL_REASONS[code]).toBe(sentence)
     }
+  })
+
+  it('RC9 a stale solar output asks for the earlier steps again', () => {
+    const sentence = 'Rerun the earlier Solar steps so the whole design is current first'
+    expect(SOLAR_REFUSAL_REASONS.solar_output_not_current).toBe(sentence)
+    expect(solarRailReason({
+      entitled: true, implemented: true, engine_ready: true, input_ready: false,
+      refusal_reasons: ['solar_output_not_current'],
+    })).toBe(sentence)
+  })
+
+  it('RC10 the dynamic hook table names real dynamic hooks', () => {
+    expect(Object.isFrozen(DYNAMIC_HOOK_CODES)).toBe(true)
+    expect(Object.keys(DYNAMIC_HOOK_CODES).sort()).toEqual([
+      'builtins/solar_electrical_schedules.py', 'builtins/solar_guardrails_read.py',
+    ])
+    const hookBuiltins = declarations().filter((d) => d.readiness?.kind === 'hook').map((d) => d.builtin)
+    for (const [builtin, codes] of Object.entries(DYNAMIC_HOOK_CODES)) {
+      expect(hookBuiltins).toContain(builtin)
+      expect(readSource(builtin).includes('.lower()')).toBe(true)
+      expect(uncovered(codes)).toEqual([])
+    }
+  })
+
+  it('RC11 the coverage helpers pass mapped codes and fail unmapped ones', () => {
+    const inFlight = facetCodes([
+      { readiness: { kind: 'facets', facets: ['strings'] } },
+      { readiness: { kind: 'facets', facets: [] } },
+    ])
+    expect(inFlight).toEqual(['strings_required'])
+    expect(uncovered(inFlight)).toEqual([])
+    expect(uncovered(facetCodes([{ readiness: { kind: 'facets', facets: ['panels'] } }]))).toEqual([])
+    expect(uncovered(facetCodes([{ readiness: { kind: 'facets', facets: ['inverters'] } }])))
+      .toEqual(['inverters_required'])
+
+    const probe = { readiness: { kind: 'hook' }, builtin: 'builtins/solar_probe.py' }
+    const withSource = (source) => hookCodes([probe], () => source)
+    const mapped = withSource('return {"input_reason": "rooftop_required"}')
+    expect(mapped.codes).toEqual(['rooftop_required'])
+    expect(uncovered(mapped.codes)).toEqual([])
+    const unmapped = withSource('"input_reason": "solar_future_code"')
+    expect(unmapped.codes).toEqual(['solar_future_code'])
+    expect(uncovered(unmapped.codes)).toEqual(['solar_future_code'])
+    expect(withSource('error.code.lower()').missingDynamic).toEqual(['builtins/solar_probe.py'])
+    expect(hookCodes([{ readiness: { kind: 'hook' }, builtin: 'server/x.py' }], () => '').badPath)
+      .toEqual(['server/x.py'])
+    const silent = withSource('return {"input_ready": True}')
+    expect(silent.empty).toEqual(['builtins/solar_probe.py'])
+    expect(silent.codes).toEqual([])
+  })
+
+  it('RC12 the dynamic hook table is pinned to the server source', () => {
+    // Raised only while validating a caller request, which readiness never
+    // sends because it calls run(graph, {}), so no hook can publish them.
+    const REQUEST_ONLY_CODES = Object.freeze([
+      'INVALID_SCHEDULES_REQUEST', 'INVALID_GUARDRAILS_REQUEST', 'GUARDRAILS_WINDOW_OUT_OF_RANGE',
+    ])
+    const serverModule = (name) => {
+      try {
+        return readFileSync(new URL(`../../../server/${name}.py`, import.meta.url), 'utf8')
+      } catch (error) {
+        if (error?.code === 'ENOENT') return null
+        throw error
+      }
+    }
+    for (const [builtin, codes] of Object.entries(DYNAMIC_HOOK_CODES)) {
+      const source = readSource(builtin)
+      const modules = new Set()
+      for (const match of source.matchAll(/^from\s+([A-Za-z_][A-Za-z0-9_]*)\s+import\b/gm)) modules.add(match[1])
+      for (const match of source.matchAll(/^import\s+([A-Za-z_][A-Za-z0-9_]*)\b/gm)) modules.add(match[1])
+      const sources = [source]
+      for (const name of modules) {
+        const text = serverModule(name)
+        if (text !== null) sources.push(text)
+      }
+      // Forward: every table code is a literal the builtin or a module it imports can raise.
+      const notRaised = codes.filter((code) => !sources.some((text) => text.includes(`"${code.toUpperCase()}"`)))
+      expect(notRaised).toEqual([])
+      // Reverse: every code the builtin itself raises is in its table entry, a static reason or request-only.
+      const statics = [...source.matchAll(/"input_reason":\s*"([a-z][a-z0-9_]{0,63})"/g)].map((match) => match[1])
+      const raised = raisedCodes(source)
+      expect(raised.length).toBeGreaterThan(0)
+      const unlisted = [...new Set(raised)].filter((code) => !codes.includes(code.toLowerCase())
+        && !statics.includes(code.toLowerCase()) && !REQUEST_ONLY_CODES.includes(code))
+      expect(unlisted).toEqual([])
+      // The basis of the request-only allowlist: readiness runs the tool with an empty request.
+      const start = source.indexOf('def input_readiness(')
+      expect(start).toBeGreaterThanOrEqual(0)
+      const next = source.indexOf('\ndef ', start + 1)
+      expect(source.slice(start, next === -1 ? source.length : next)).toContain('run(graph, {})')
+    }
+  })
+
+  it('RC13 raisedCodes sees a raise however it is split across lines', () => {
+    expect(raisedCodes('raise GraphValidationError("SCHEDULES_KERNEL_REFUSED")')).toEqual(['SCHEDULES_KERNEL_REFUSED'])
+    expect(raisedCodes('raise GraphValidationError(\n    "SCHEDULES_MAPPING_FAILED")')).toEqual(['SCHEDULES_MAPPING_FAILED'])
+    expect(raisedCodes('raise GraphValidationError(\n    "UNRESOLVED_UNITS",\n)\n')).toEqual(['UNRESOLVED_UNITS'])
+    expect(raisedCodes('raise GraphValidationError(\'GUARDRAILS_SIZING_REQUIRED\')')).toEqual(['GUARDRAILS_SIZING_REQUIRED'])
+    expect(raisedCodes('raise GraphValidationError(code)')).toEqual([])
+    expect(raisedCodes('raise GraphValidationError("lowercase")')).toEqual([])
   })
 })
