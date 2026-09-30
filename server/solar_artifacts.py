@@ -2,7 +2,7 @@
 
 Artifacts bind tenant, drawing, project, source version, graph, tool and request.
 Immutable content and metadata make duplicate requests idempotent. Files are
-limited to 16 MiB and a closed CSV, JSON, XLSX, KML and XML media list. Everything
+limited to 16 MiB and a closed CSV, JSON, XLSX, KML, XML and PDF media list. Everything
 lives under the drawing prefix and shares drawing retention. Validation and
 readback fail closed; metadata is written only after its content is durable.
 """
@@ -26,6 +26,7 @@ MEDIA_TYPES = {
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
     "application/vnd.google-earth.kml+xml": "kml",
     "application/xml": "xml",
+    "application/pdf": "pdf",
 }
 BINDING_SCHEMA = "leaf.solar-artifact-binding.v1"
 ARTIFACT_SCHEMA = "leaf.solar-artifact.v1"
@@ -81,7 +82,7 @@ def _media_filename(media_type, filename):
     if not isinstance(media_type, str) or media_type not in MEDIA_TYPES:
         raise GraphValidationError("ARTIFACT_MEDIA_TYPE_REFUSED")
     if (not isinstance(filename, str)
-            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}\.(csv|json|xlsx|kml|xml)", filename)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}\.(csv|json|xlsx|kml|xml|pdf)", filename)
             or ".." in filename or filename.rsplit(".", 1)[1] != MEDIA_TYPES[media_type]):
         raise GraphValidationError("ARTIFACT_FILENAME_INVALID")
 
@@ -96,6 +97,9 @@ def _validate(value):
     try:
         if extension == "xlsx":
             if value.content[:4] != b"PK\x03\x04":
+                raise ValueError()
+        elif extension == "pdf":
+            if not value.content[:1024].lstrip().startswith(b"%PDF-"):
                 raise ValueError()
         else:
             text = value.content.decode("utf-8", errors="strict")

@@ -615,14 +615,19 @@ export function railCluster({ onExpand } = {}) {
  * View: fit / zoom in / zoom out on the Viewer's ref surface (setView/getPose),
  * and (W4e round 3) the Properties pane toggle when the caller owns one: a
  * pressed-state tool, the way back after the pane's own close control.
+ * `onBeforeJump` (S3), when given, runs once before Fit so the caller can
+ * record a Back snapshot; zoom steps are not jumps and never call it.
  */
-export function viewCluster({ viewerRef, hasDrawing = false, paneOpen = null, onTogglePane = null } = {}) {
+export function viewCluster({ viewerRef, hasDrawing = false, paneOpen = null, onTogglePane = null, onBeforeJump = null } = {}) {
   // The four records live in the registry; this builder supplies the CONTEXT
   // they close over (the viewer ref surface is React's, never the registry's).
   const ctx = {
     hasDrawing,
     paneOpen,
-    onFit: () => { viewerRef?.current?.setView?.('home') },
+    onFit: () => {
+      if (typeof onBeforeJump === 'function') onBeforeJump()
+      viewerRef?.current?.setView?.('home')
+    },
     onZoomIn: () => { zoomViewer(viewerRef?.current, ZOOM_IN) },
     onZoomOut: () => { zoomViewer(viewerRef?.current, ZOOM_OUT) },
     onTogglePane: () => onTogglePane?.(),

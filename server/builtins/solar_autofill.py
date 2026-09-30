@@ -67,6 +67,8 @@ import solar_panel_group_kernel as kernel
 from solar_sizing_client import advance, checked_graph
 
 TOOL = "solar-autofill"
+# The schema's expected_rev maximum; Draft7 admits an integral float such as 0.0 as an integer.
+MAX_EXPECTED_REV = 2147483647
 MAX_CORRECTIONS = 4096
 MAX_MOVED = 4096
 # The largest membership the groups builtin will commit (builtins/solar_panel_add.py:48).
@@ -85,9 +87,20 @@ EMPTY_CELL = {"code": "empty", "panel_ref": None, "seq": None, "inverter_id": No
               "string_input_number": None, "x": 0.0, "y": 0.0, "angle": 0.0}
 
 
+def _revision(value):
+    """The expected revision as an int: an int as given, an integral float in [0, MAX_EXPECTED_REV]
+    converted exactly, anything else (bool, str, None, non-integral, out of range) None."""
+    if type(value) is int:
+        return value
+    if (type(value) is float and math.isfinite(value) and value.is_integer()
+            and 0 <= value <= MAX_EXPECTED_REV):
+        return int(value)
+    return None
+
+
 def _valid_request(params):
     """True for exactly {expected_rev, corrections} plus an optional int or float tolerance in
-    [1e-6, 1e6], no other coercion."""
+    [1e-6, 1e6], an int or integral float expected_rev, no other coercion."""
     if type(params) is not dict or not ({"expected_rev", "corrections"} <= set(params)
                                         <= {"expected_rev", "corrections", "alignment_tolerance"}):
         return False
@@ -97,7 +110,7 @@ def _valid_request(params):
                 or not MIN_ALIGNMENT_TOLERANCE <= tolerance <= MAX_ALIGNMENT_TOLERANCE):
             return False
     corrections = params["corrections"]
-    if type(params["expected_rev"]) is not int or type(corrections) is not list:
+    if _revision(params["expected_rev"]) is None or type(corrections) is not list:
         return False
     if not 1 <= len(corrections) <= MAX_CORRECTIONS:
         return False
@@ -266,7 +279,7 @@ def apply_corrections(graph, params):
     _bounded_json(params)
     if not _valid_request(params):
         raise GraphValidationError("INVALID_AUTOFILL_REQUEST")
-    result = checked_graph(graph, params["expected_rev"])
+    result = checked_graph(graph, _revision(params["expected_rev"]))
     frames = {frame["id"]: frame for frame in result["frames"]}
     panels = {panel["id"]: panel for panel in result["panels"]}
     corrections = params["corrections"]

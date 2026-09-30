@@ -557,9 +557,18 @@ def build_suites() -> List[Suite]:
         # count on every runner. COUNTED: 22 tests + 44 more parametrizations = 66.
         Suite("server-solar-tool-solar-string-edits", "server tests/test_solar_tool_solar_string_edits.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_string_edits.py"), 66),
+        # String rebuild and string data over the W1 graph (2026-09-29, sf-w2-string-rebuild-data): two
+        # local-graph-read tools over the rooftop-chain kernels; string data writes StringData.json as a
+        # revision-bound artifact. Inputs are authored in the file, so the floor is the exact count on
+        # every runner. COUNTED: 15 tests + 43 more parametrizations = 58.
+        Suite("server-solar-tool-solar-string-reports", "server tests/test_solar_tool_solar_string_reports.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_string_reports.py"), 58),
         # Auto-fill registry and persisted plan round trips: 17 tests + 50 more parametrizations = 67.
         Suite("server-solar-tool-solar-autofill", "server tests/test_solar_tool_solar_autofill.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_autofill.py"), 67),
+        # Auto-fill plan preview (2026-09-29, sf-w2-autofill-plan): the solver's plan from the persisted graph, proven against solar-autofill. COUNTED: 38 tests + 73 more parametrizations = 111.
+        Suite("server-solar-tool-solar-autofill-plan", "server tests/test_solar_tool_solar_autofill_plan.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_autofill_plan.py"), 111),
         # W5 inverter family (2026-09-24, contract G35): the shared state and delta module and the
         # device, string and output engines (literal ports of the plugin's inverter commands). Inputs
         # are authored in each file, so each floor is the exact count on every runner. MEASURED.
@@ -593,6 +602,8 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_solar_solaredge_parse.py"), 19),
         Suite("server-solar-solaredge-import", "server tests/test_solar_solaredge_import.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_solaredge_import.py"), 11),
+        Suite("server-solar-import-sources", "server tests/test_solar_import_sources.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_import_sources.py"), 73),
         Suite("server-solar-guardrails", "server tests/test_solar_guardrails.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_guardrails.py"), 17),  # R31b: two intake/branch cases
         Suite("server-solar-pile-block-mapping", "server tests/test_solar_pile_block_mapping.py",

@@ -883,6 +883,38 @@ describe('studio unobstructed drawing viewport', () => {
     assert.ok(!list.includes('cockpit-cube'))
   })
 })
+describe('S3 viewer Back and Up history wiring', () => {
+  it('owns one bounded history plus a size counter, and the live hook survives comment stripping', () => {
+    assert.equal((appNoComments.match(/createViewHistory\(\)/g) || []).length, 1)
+    assert.ok(appNoComments.includes('const [viewHistorySize, setViewHistorySize] = useState(0)'))
+    assert.ok(appNoComments.includes('history: viewHistoryRef.current, setHistorySize: setViewHistorySize'))
+    assert.ok(stripped.includes('useViewNavigation({'))
+  })
+  it('pushes before Show result frames, inside the showCreatedResult slice', () => {
+    const show = appNoComments.indexOf('const showCreatedResult =')
+    const end = appNoComments.indexOf('const seatVersion =', show)
+    assert.ok(show >= 0 && end > show)
+    const framing = appNoComments.slice(show, end)
+    const guard = framing.indexOf('if (!resultBounds) return')
+    const push = framing.indexOf('pushViewSnapshot()')
+    assert.ok(guard >= 0 && push > guard, 'the push follows the no-result guard')
+    assert.ok(push < framing.indexOf('viewer.frame('), 'the push precedes the frame')
+    assert.ok(push < framing.indexOf('viewer.setView('), 'the push precedes the setView fallback')
+  })
+  it('pushes before every other navigation jump: the ribbon Fit to bounds, the View cluster Fit and the cockpit Fit', () => {
+    assert.match(appNoComments, /onClick=\{\(\) => \{ pushViewSnapshot\(\); viewerRef\.current\?\.fit\(\) \}\}>Fit to bounds</)
+    assert.match(appNoComments, /const view = viewCluster\(\{[\s\S]*?onBeforeJump: pushViewSnapshot,[\s\S]*?\}\)/)
+    assert.match(appNoComments, /<ViewCluster\s+viewerRef=\{viewerRef\}\s+onFit=\{fitWithHistory\}\s+canBack=\{viewHistorySize > 0\}\s+onBack=\{viewBack\}\s+onUp=\{viewUp\}/)
+  })
+  it('clears the history in resetDrawingSelection and in one effect keyed on the engine document id', () => {
+    const start = appNoComments.indexOf('const resetDrawingSelection = useCallback(')
+    const end = appNoComments.indexOf('const reportDrawingError', start)
+    assert.ok(start >= 0 && end > start)
+    assert.ok(appNoComments.slice(start, end).includes('clearViewHistory()'))
+    const effects = appNoComments.match(/useEffect\(\(\) => \{ clearViewHistory\(\) \}, \[activeIntake\?\.documentId, clearViewHistory\]\)/g) || []
+    assert.equal(effects.length, 1)
+  })
+})
 describe('Start is a view inside the current workspace profile', () => {
   it('wires all three Start controls to one memory-only handler', () => {
     assert.match(appSource, new RegExp('className="doc-tab-start"\\s+onClick=\\{onOpenStart\\}'))

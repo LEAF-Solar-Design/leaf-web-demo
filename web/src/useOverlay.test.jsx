@@ -39,7 +39,9 @@ describe('the read on load', () => {
     }))
     render(<Probe sessionId="s1" />)
     await waitFor(() => expect(screen.getByTestId('v').textContent).toBe('v3'))
-    expect(document.documentElement.style.getPropertyValue('--primary')).toBe('#123456')
+    // The overlay's passive effect runs after the version-text commit, so wait for the style itself.
+    await waitFor(() =>
+      expect(document.documentElement.style.getPropertyValue('--primary')).toBe('#123456'))
   })
 
   it('leaves the committed defaults alone when the read FAILS', async () => {

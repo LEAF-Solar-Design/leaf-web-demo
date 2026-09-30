@@ -8,7 +8,8 @@ import useDrawingViewport from './site/useDrawingViewport.js'
 import { useLeavingGround, useStudioTransition } from './site/useStudioTransition.js'
 import SurfaceGrounds, { groundShowsDrawing } from './site/SurfaceGrounds.jsx'
 import { START_BOARD_COPY } from './site/startBoardCopy.js'
-import { CockpitStatus, FootRegion, StatusTabs, ViewCluster } from './site/DrawingCockpit.jsx'
+import { CockpitStatus, FootRegion, StatusTabs, ViewCluster, useViewNavigation } from './site/DrawingCockpit.jsx'
+import { createViewHistory } from './lib/viewHistory.js'
 // Slice 4a: the ONE shell wrapper both scenes mount, and the console nav
 // rail it used to spell inline. Every shared chrome gate lives there now.
 import SurfaceFrame from './site/SurfaceFrame.jsx'
@@ -587,6 +588,16 @@ export default function App() {
   }, [agentSessionId, mock])
 
   const viewerRef = useRef(null)
+  // S3 Back and Up: ONE bounded navigation history for this viewer (never the
+  // operator stage's), plus a size counter so every consumer re-renders when
+  // it changes. Cleared on every drawing scope change.
+  const viewHistoryRef = useRef(null)
+  if (!viewHistoryRef.current) viewHistoryRef.current = createViewHistory()
+  const [viewHistorySize, setViewHistorySize] = useState(0)
+  const clearViewHistory = useCallback(() => {
+    viewHistoryRef.current.clear()
+    setViewHistorySize(0)
+  }, [])
   const [, setSolarStarterViewerMounted] = useState(false)
   const solarStarterViewerRef = useCallback((viewer) => {
     viewerRef.current = viewer
@@ -636,7 +647,8 @@ export default function App() {
   const resetDrawingSelection = useCallback(() => {
     setSelectedHandle(null)
     setPendingEdit(null)
-  }, [])
+    clearViewHistory()
+  }, [clearViewHistory])
   const reportDrawingError = useCallback((error, { operation } = {}) => {
     if (operation === 'undo' || operation === 'redo') drawingErrorRef.current?.(error)
   }, [])
@@ -1413,6 +1425,19 @@ export default function App() {
   const selection = useMemo(() => selectEntity(drawingIntake, selectedHandle, {
     onUnresolved: (handle) => ({ handle, kind: 'entity', layer: null }),
   }), [selectedHandle, drawingIntake])
+  // S3 Back and Up over App's viewer. Every navigation jump (cockpit Fit, the
+  // ribbon Fit to bounds, the View cluster Fit, Show result, Up) pushes a
+  // snapshot first; wheel, pan, zoom steps, selection and layer toggles do not.
+  const {
+    pushView: pushViewSnapshot, fit: fitWithHistory, back: viewBack, up: viewUp, announcement: viewAnnouncement,
+  } = useViewNavigation({
+    viewerRef, history: viewHistoryRef.current, setHistorySize: setViewHistorySize,
+    selectedHandle, selectedLayer: selection?.layer ?? null, setSelectedHandle,
+    visibleLayers, setVisibleLayers, intake: drawingIntake,
+  })
+  // An engine document opened, closed or swapped is a new drawing scope: the
+  // CAD engine path sets activeIntake without resetDrawingSelection.
+  useEffect(() => { clearViewHistory() }, [activeIntake?.documentId, clearViewHistory])
   // W4c-V2: the raw intake entity behind the selection, resolved in place -
   // selectEntity deliberately drops geometry and its descriptor shape is
   // pinned by exact-shape tests, so the dock derives from the intake here.
@@ -1478,6 +1503,7 @@ export default function App() {
   }, [resultBounds, resultCandidate, studioGround])
   const showCreatedResult = useCallback(() => {
     if (!resultBounds) return
+    pushViewSnapshot()
     const viewer = viewerRef.current
     if (drawingViewportRef.current && typeof viewer?.frame === 'function') {
       viewer.frame({ minX: resultBounds.minX, minY: resultBounds.minY, maxX: resultBounds.maxX, maxY: resultBounds.maxY }, 0.4)
@@ -1497,7 +1523,7 @@ export default function App() {
     const span = Math.max((Math.max(...points.map((p) => p.x)) - Math.min(...points.map((p) => p.x))) / rect.width, (Math.max(...points.map((p) => p.y)) - Math.min(...points.map((p) => p.y))) / rect.height)
     const zoom = span > 0 ? pose.zoom * 0.4 / span : pose.zoom
     viewer.setView({ center: { x: (resultBounds.minX + resultBounds.maxX) / 2, y: (resultBounds.minY + resultBounds.maxY) / 2 }, zoom })
-  }, [resultBounds, studioGround])
+  }, [resultBounds, studioGround, pushViewSnapshot])
 
   // Swap the viewer + panels to a drawing version (§11). The completed event
   // ("Version 2 created" / "Reverted to version 1") fires the NT2 toast.
@@ -3118,6 +3144,7 @@ export default function App() {
     const view = viewCluster({
       viewerRef, hasDrawing: !!shown, paneOpen: phoneViewport ? studioDrawer === 'plan' : paneOpen,
       onTogglePane: () => phoneViewport ? toggleStudioDrawer('plan') : setPaneOpen((open) => !open),
+      onBeforeJump: pushViewSnapshot,
     })
     const version = versionCluster({
       hasVersions: !!drawingState,
@@ -3278,7 +3305,7 @@ export default function App() {
     shown, drawingState, canUndo, canRedo, versionBusy, running, previewing,
     drawingMutationsBlocked, historyOpen, onUndo, onRedo, onToggleHistoryTracked, layerCounts, visibleLayers,
     toggleLayer, railFamilies, onRequestCatalogRun, writeLocked, canRunWrite, canBuild, entOf, ribbonTab, colorForLayer, paneOpen,
-    lastAuthoredTool, onUseAuthored, setFamilyOpen, engineDirty])
+    pushViewSnapshot, lastAuthoredTool, onUseAuthored, setFamilyOpen, engineDirty])
   const ribbonClusters = ribbon.clusters
 
   // Slice 10b: the palette's action rows, read straight off `ribbon`'s own
@@ -4273,7 +4300,7 @@ export default function App() {
                   </button>
                 </>
               )}
-              <button className="btn ghost" data-cockpit="ribbon" onClick={() => viewerRef.current?.fit()}>Fit to bounds</button>
+              <button className="btn ghost" data-cockpit="ribbon" onClick={() => { pushViewSnapshot(); viewerRef.current?.fit() }}>Fit to bounds</button>
             </div>
           </div>
           {/* X1: a failed post-write viewer refresh — red row + Retry + honest
@@ -4451,7 +4478,14 @@ export default function App() {
             })()}
             {/* W4b cockpit: view snaps on the drawing (studio only). */}
             {studioGround && intake && groundShowsDrawing(activeSurface) && (
-              <ViewCluster viewerRef={viewerRef} />
+              <ViewCluster
+                viewerRef={viewerRef}
+                onFit={fitWithHistory}
+                canBack={viewHistorySize > 0}
+                onBack={viewBack}
+                onUp={viewUp}
+                announcement={viewAnnouncement}
+              />
             )}
           </div>
         </div>,
