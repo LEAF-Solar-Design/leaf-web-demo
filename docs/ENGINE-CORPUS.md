@@ -202,23 +202,41 @@ python engine/export_fidelity.py --adapter=acadrust
 python engine/export_fidelity.py
 ```
 
-Prepared 2026-09-26. Real-engine verification is pending; bytes after and
-timing cells will be filled from the verifier's own build and run. The source
-handle column states the required result, not a completed measurement.
+Require the compiled build for the eight-drawing test gate from `server/`:
+
+```powershell
+$env:LEAF_REQUIRE_REAL_ENGINE = '1'
+python -P -m pytest tests/test_acadrust_adapter.py -q -p no:cacheprovider -rs
+```
+
+With this opt-in, the tracked-drawing test fails if the compiled WASM is
+absent. Without it, the existing optional-engine skip remains. Byte identity
+is checked as a boolean measurement, with either value accepted.
+
+Measured 2026-09-30 with acadrust at source commit
+`4f663aa86f57936d29c22daf846a3b0ef6db77b4`; the [export evidence](evidence/tracked-export-acadrust.json)
+records all eight receipts, tool versions, WASM SHA-256, build and run commands,
+and host conditions. All eight receipts report unchanged sources and preserved
+source handles within the 10 s export budget.
+
+The separate corpus oracle (`engine/corpus_harness.py`) passed entity parity
+on all four corpus fixtures. Its 1000 ms per-fixture timing budget sat at the
+edge on a host at 100 percent CPU (979 to 1733 ms across three runs, one of
+which passed), pending an idle-host re-measure.
 
 | drawing | bytes before | bytes after | source handles preserved | timing ms |
 | --- | --- | --- | --- | --- |
-| web/public/sample.dxf | 424391 | measured at verify | 2345 of 2345 | measured at verify |
-| web/e2e/fixtures/block-fixture.dxf | 280 | measured at verify | 1 of 1 | measured at verify |
-| web/e2e/fixtures/distinctive-panel.dxf | 146 | measured at verify | 1 of 1 | measured at verify |
-| vendor/acadrust-worker/fixtures/one_line.dxf | 140 | measured at verify | 0 of 0 | measured at verify |
-| engine/corpus/01_closed_lwpolyline_single_layer.dxf | 132 | measured at verify | 1 of 1 | measured at verify |
-| engine/corpus/02_open_lwpolyline_two_layers.dxf | 215 | measured at verify | 2 of 2 | measured at verify |
-| engine/corpus/03_classic_polyline_vertex_seqend.dxf | 170 | measured at verify | 1 of 1 | measured at verify |
-| engine/corpus/04_empty_entities_section.dxf | 36 | measured at verify | 0 of 0 | measured at verify |
+| web/public/sample.dxf | 424391 | 912196 | 2345 of 2345 | 3703.619 |
+| web/e2e/fixtures/block-fixture.dxf | 280 | 47490 | 1 of 1 | 2567.324 |
+| web/e2e/fixtures/distinctive-panel.dxf | 146 | 47207 | 1 of 1 | 1481.1 |
+| vendor/acadrust-worker/fixtures/one_line.dxf | 140 | 46750 | 0 of 0 | 2623.062 |
+| engine/corpus/01_closed_lwpolyline_single_layer.dxf | 132 | 47193 | 1 of 1 | 2262.962 |
+| engine/corpus/02_open_lwpolyline_two_layers.dxf | 215 | 47472 | 2 of 2 | 2998.472 |
+| engine/corpus/03_classic_polyline_vertex_seqend.dxf | 170 | 47507 | 1 of 1 | 3519.542 |
+| engine/corpus/04_empty_entities_section.dxf | 36 | 46863 | 0 of 0 | 3051.496 |
 
-Required sample result: web/public/sample.dxf: 2345 of 2345 source handles preserved.
-The required total is 2351 preserved source handles across eight drawings.
+Measured sample result: web/public/sample.dxf: 2345 of 2345 source handles preserved.
+The measured total is 2351 preserved source handles across eight drawings.
 
 Not proven here:
 
