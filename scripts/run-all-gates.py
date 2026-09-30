@@ -580,7 +580,7 @@ def build_suites() -> List[Suite]:
         # Elevation zones over the W1 graph (2026-09-29, sf-w2-zone-metadata): one local-graph-commit tool
         # for ZONEHEIGHT and the two zone assigns over server/solar_batch2_simple.py, the z1, z2 and z3
         # receipts replayed. Inputs are authored in the file, so the floor is the exact count on every
-        # runner. COUNTED: 17 tests + 50 more parametrizations = 67.
+        # runner. COUNTED: 17 tests + 51 more parametrizations = 68.
         Suite("server-solar-tool-solar-elevation-zones", "server tests/test_solar_tool_solar_elevation_zones.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_elevation_zones.py"), 68),
         # Guardrails as a W2 registry graph read (2026-09-29, sf-w2-presets-guardrails): the plugin's 14
