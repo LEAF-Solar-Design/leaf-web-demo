@@ -597,6 +597,12 @@ def build_suites() -> List[Suite]:
         # Inputs are authored in the file, so the floor is the exact count on every runner. PLANNED: 59.
         Suite("server-solar-tool-guardrails-read", "server tests/test_solar_tool_guardrails_read.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_guardrails_read.py"), 59),
+        # String assignment through the electrical bridge (2026-09-30, sf-w2-string-assignment): AssignStrings'
+        # pattern matcher as a local-graph-commit tool, the i2 receipt replayed and the result shown to be the
+        # i3 intake. Inputs are authored in the file or are committed evidence, so the floor is the exact count
+        # on every runner. COUNTED: 28 tests + 32 more parametrizations = 60.
+        Suite("server-solar-tool-solar-assign-strings", "server tests/test_solar_tool_solar_assign_strings.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_assign_strings.py"), 60),
         # W5 inverter family (2026-09-24, contract G35): the shared state and delta module and the
         # device, string and output engines (literal ports of the plugin's inverter commands). Inputs
         # are authored in each file, so each floor is the exact count on every runner. MEASURED.
