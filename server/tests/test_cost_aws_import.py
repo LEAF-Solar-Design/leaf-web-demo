@@ -394,12 +394,44 @@ def test_fetch_quantities_asks_for_usage_quantity_of_codebuild_and_ec2_only():
     assert first["Metrics"] == ["UsageQuantity"]
     assert first["GroupBy"] == [{"Type": "DIMENSION", "Key": "SERVICE"},
                                 {"Type": "DIMENSION", "Key": "USAGE_TYPE"}]
-    assert first["Filter"] == {"Dimensions": {"Key": "SERVICE", "Values": ["AWS CodeBuild", EC2]}}
+    assert first["Filter"] == {"Dimensions": {"Key": "SERVICE",
+                                               "Values": ["AWS CodeBuild", EC2, "CodeBuild"]}}
     cost_client = FakeCostExplorer([_page([])])
     aws_import.fetch(cost_client, "2026-08", today=date(2026, 9, 3))
     assert "Filter" not in cost_client.calls[0]
     with pytest.raises(RuntimeError, match="pagination exceeded 3 pages"):
         aws_import.fetch_quantities(EndlessCostExplorer(), "2026-08", today=date(2026, 9, 3), max_pages=3)
+
+
+def test_real_codebuild_usage_reports_minutes_without_lambda_seconds():
+    usage_types = [
+        ("USE1-Build-Min:Linux:g1.large", "243514", "Minutes"),
+        ("USE1-Build-Min:Linux:g1.medium", "25776", "Minutes"),
+        ("USE1-Build-Min:Windows:g1.medium", "21121", "Minutes"),
+        ("USE1-Build-Min:Linux:g1.xlarge", "19710", "Minutes"),
+        ("USE1-Build-Min:Linux:g1.small", "9583", "Minutes"),
+        ("USE1-Build-Sec:Linux:Lambda:arm.4GB", "21399", "Second"),
+        ("USE1-Build-Sec:Linux:Lambda:arm.2GB", "21209", "Second"),
+        ("USE1-Build-Sec:Linux:Lambda:x86-64.2GB", "405", "Second"),
+    ]
+    page = {
+        "GroupDefinitions": [{"Type": "DIMENSION", "Key": "SERVICE"},
+                             {"Type": "DIMENSION", "Key": "USAGE_TYPE"}],
+        "ResultsByTime": [{
+            "TimePeriod": {"Start": "2026-09-01", "End": "2026-10-01"},
+            "Total": {},
+            "Groups": [_quantity("CodeBuild", usage_type, amount, unit)
+                       for usage_type, amount, unit in usage_types],
+            "Estimated": False,
+        }],
+    }
+    assert aws_import.resource_id_for_service("CodeBuild") == "aws:codebuild"
+    client = FakeCostExplorer([page])
+    responses = aws_import.fetch_quantities(client, "2026-09", today=date(2026, 10, 3))
+    assert aws_import.to_physical_usage(
+        responses, period="2026-09", fetched_at=datetime(2026, 10, 3, tzinfo=timezone.utc)) == {
+        "aws:codebuild": {"quantity": "319704", "unit": "build-minutes", "coverage": "complete"},
+    }
 
 
 def test_physical_usage_sums_like_units_and_ignores_every_other_usage_type():
