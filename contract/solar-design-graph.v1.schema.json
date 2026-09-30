@@ -1344,6 +1344,9 @@
         },
         "inverter_ref": {
           "$ref": "#/$defs/ref"
+        },
+        "pathway_ref": {
+          "$ref": "#/$defs/ref"
         }
       },
       "required": [
@@ -1614,7 +1617,9 @@
         "route_kind": {
           "enum": [
             "start homerun",
-            "end homerun"
+            "end homerun",
+            "feeder",
+            "trench"
           ]
         },
         "points": {
@@ -1639,6 +1644,12 @@
         },
         "length_units": {
           "const": "ft"
+        },
+        "pathway_ref": {
+          "$ref": "#/$defs/ref"
+        },
+        "trench": {
+          "$ref": "#/$defs/trench"
         }
       },
       "required": [
@@ -1656,6 +1667,93 @@
         "length_ft",
         "point_units",
         "length_units"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "route_kind": {
+                "const": "trench"
+              }
+            },
+            "required": [
+              "route_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "wire_gauge": {
+                "const": ""
+              }
+            },
+            "required": [
+              "trench"
+            ],
+            "not": {
+              "required": [
+                "pathway_ref"
+              ]
+            }
+          },
+          "else": {
+            "not": {
+              "required": [
+                "trench"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "route_kind": {
+                "const": "feeder"
+              }
+            },
+            "required": [
+              "route_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "from_ref": {
+                "$ref": "#/$defs/id"
+              },
+              "to_ref": {
+                "$ref": "#/$defs/id"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "trench": {
+      "type": "object",
+      "properties": {
+        "depth_m": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 10
+        },
+        "width_m": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 10
+        },
+        "voltage_class": {
+          "enum": [
+            "DC-PV",
+            "AC-LV",
+            "AC-MV",
+            "MIXED"
+          ]
+        }
+      },
+      "required": [
+        "depth_m",
+        "width_m",
+        "voltage_class"
       ],
       "additionalProperties": true
     },

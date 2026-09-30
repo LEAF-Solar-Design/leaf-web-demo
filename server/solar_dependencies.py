@@ -58,6 +58,8 @@ def dependency_index(graph: dict) -> dict[str, set[str]]:
             edge(panel_id, string["id"])
         if string["inverter_ref"] is not None:
             edge(string["id"], string["inverter_ref"])
+        # A conductor snapped onto a trench (LEAFCABLETOTRAY) depends on that trench.
+        edge(string.get("pathway_ref"), string["id"])
     for inverter in graph["inverters"]:
         # An L1 feeds its L2 the way a string feeds its inverter: the L2, and every route and
         # schedule naming it, depend on the L1. Strings already reach their L1 through
@@ -67,6 +69,7 @@ def dependency_index(graph: dict) -> dict[str, set[str]]:
     for route in graph["routes"]:
         edge(route["from_ref"], route["id"])
         edge(route["to_ref"], route["id"])
+        edge(route.get("pathway_ref"), route["id"])
     for schedule in graph["schedules"]:
         for source in schedule["source_refs"]:
             edge(source, schedule["id"])
