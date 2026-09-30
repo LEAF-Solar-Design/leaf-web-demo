@@ -1,0 +1,43 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-solaredge-accept",
+  "builtin": "builtins/solar_solaredge_accept.py",
+  "family": "imports",
+  "adapter": "local-graph-commit",
+  "entitlement": "run_write",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_SOLAREDGE_ACCEPT_REQUEST",
+  "readiness": {"kind": "facets", "facets": ["frames", "panels"]},
+  "engine": "server-builtin",
+  "interaction": {"mode": "form"},
+  "record_store": "registry",
+  "record": {
+    "name": "solar-solaredge-accept",
+    "version": "1.0.0",
+    "description": "Accept a SolarEdge report's tracking: record which PDF inverter and string input each panel belongs to, with the source PDF and report it came from. Creates no string, inverter or device and does not run Solve.",
+    "kind": "script",
+    "family_id": "imports",
+    "engine_op": "solar_solaredge_accept",
+    "entry": "builtins/solar_solaredge_accept.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {"type": "string", "maxLength": 128},
+        "expected_rev": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+        "report_artifact_id": {"type": "string", "minLength": 64, "maxLength": 64}
+      },
+      "required": ["expected_rev", "report_artifact_id"],
+      "additionalProperties": false
+    },
+    "returns": {"type": "object"},
+    "capabilities": ["drawing.write"],
+    "allow_local_fallback": false
+  },
+  "ledger": ["import-solaredge-pdf"],
+  "trusted_inputs": ["solaredge_report"],
+  "maturity": "preview",
+  "wave": 4,
+  "order": 30,
+  "scenario": "w4-solaredge"
+}

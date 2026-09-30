@@ -640,6 +640,11 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_solar_import_sources.py"), 73),
         Suite("server-solar-solaredge-report", "server tests/test_solar_solaredge_report.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_solaredge_report.py"), 100),
+        # SolarEdge accept (2026-09-30, sf-w4-solaredge-accept): a stored report's import provenance and
+        # tracking associations committed to graph extra through the solaredge_report trusted input; no
+        # string, inverter or Solve state. Hermetic, so the floor is the exact count. COUNTED: 111.
+        Suite("server-solar-tool-solaredge-accept", "server tests/test_solar_tool_solaredge_accept.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_solaredge_accept.py"), 111),
         Suite("server-solar-guardrails", "server tests/test_solar_guardrails.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_guardrails.py"), 17),  # R31b: two intake/branch cases
         Suite("server-solar-pile-block-mapping", "server tests/test_solar_pile_block_mapping.py",

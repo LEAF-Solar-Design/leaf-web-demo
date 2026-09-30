@@ -75,10 +75,19 @@ def _proposal_candidate(backend, tenant_id, drawing_id, version, snapshot):
     return verify_snapshot(backend, tenant_id, drawing_id, version, snapshot)["candidate"]
 
 
-_TRUSTED_RESOLVERS = {"source_intake": _source_intake, "proposal_candidate": _proposal_candidate}
+def _solaredge_report(backend, tenant_id, drawing_id, version, graph_sha256, params):
+    """The stored SolarEdge report the request names, bound to this exact version and graph."""
+    import solar_solaredge_tracking
+    return solar_solaredge_tracking.resolve_report(
+        backend, tenant_id, drawing_id, version, graph_sha256, params)
 
 
-def _resolve_trusted(tool, backend, tenant_id, drawing_id, version, graph_sha256, snapshot):
+_TRUSTED_RESOLVERS = {"source_intake": _source_intake, "proposal_candidate": _proposal_candidate,
+                      "solaredge_report": _solaredge_report}
+
+
+def _resolve_trusted(tool, backend, tenant_id, drawing_id, version, graph_sha256, snapshot,
+                     params=None):
     names = solar_tools.get(tool)["trusted_inputs"]
     if snapshot is not None and "proposal_candidate" not in names:
         raise GraphValidationError("INVALID_COMMIT_REQUEST")
@@ -87,6 +96,9 @@ def _resolve_trusted(tool, backend, tenant_id, drawing_id, version, graph_sha256
         if name == "proposal_candidate":
             resolved["candidate"] = _TRUSTED_RESOLVERS[name](
                 backend, tenant_id, drawing_id, version, snapshot)
+        elif name == "solaredge_report":
+            resolved[name] = _TRUSTED_RESOLVERS[name](
+                backend, tenant_id, drawing_id, version, graph_sha256, params)
         else:
             resolved[name] = _TRUSTED_RESOLVERS[name](
                 backend, tenant_id, drawing_id, version, graph_sha256)
@@ -190,6 +202,13 @@ def graph_commit_provenance(result, params, tenant_id, job_id, tool, source_vers
                 return json.dumps(value, sort_keys=True, separators=(",", ":"),
                                   ensure_ascii=False, allow_nan=False)
             if canonical(intake) != canonical(resolved["source_intake"]):
+                raise ValueError()
+        if "solaredge_report" in trusted_inputs:
+            resolved = _resolve_trusted(tool, backend, tenant_id, drawing_id, source_version,
+                                        parent["graph_sha256"], None, builtin_params)
+            after = _load_builtin(tool).run(copy.deepcopy(parent["graph"]), builtin_params,
+                                            **resolved)
+            if digest(after) != result["graph_sha256"]:
                 raise ValueError()
         return {"execution_mode": "local_graph_commit", "adapter": ADAPTER_KIND,
                 "request_sha256": request_sha256, "graph_sha256": result["graph_sha256"],
@@ -314,7 +333,7 @@ def run_local_graph_commit(backend, tenant_id, tool, params, *, drawing_id, sour
         if context["representation"] == "dwg-bundle":
             raise GraphValidationError("LICENSED_GRAPH_COMMIT_REQUIRED")
         resolved = _resolve_trusted(tool, backend, tenant_id, drawing_id, source_version,
-                                    context["graph_sha256"], proposal_candidate)
+                                    context["graph_sha256"], proposal_candidate, builtin_params)
         module = _load_builtin(tool)
         run_bound = getattr(module, "run_bound", None)
         if callable(run_bound):
