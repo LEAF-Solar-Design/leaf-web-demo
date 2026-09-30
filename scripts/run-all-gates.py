@@ -592,9 +592,15 @@ def build_suites() -> List[Suite]:
         # Design presets (2026-09-29, sf-w2-design-presets): LEAFPROFILE Create, Swap and Delete as a
         # local-graph-commit and List as a local-graph-read over the drawing-owned store in graph extra;
         # the recorded f1 to f5 parity chain replayed row for row. Inputs are authored in the file or are
-        # committed evidence, so the floor is the exact count on every runner. PLANNED: 143.
+        # committed evidence, so the floor is the exact count on every runner. COUNTED: 145.
         Suite("server-solar-tool-design-presets", "server tests/test_solar_tool_design_presets.py",
-              "pytest", SERVER, _py_pytest("tests/test_solar_tool_design_presets.py"), 143),
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_design_presets.py"), 145),
+        # Design presets applied to the drawing (2026-09-30, sf-w2-design-presets-apply): the plugin's
+        # SyncFromGlobalSettings rule from the preset settings onto graph["settings"] after every preset
+        # commit, and the three layer names read back before one. Inputs are authored in the file or are
+        # committed evidence, so the floor is the exact count on every runner. COUNTED: 22.
+        Suite("server-solar-tool-design-presets-apply", "server tests/test_solar_tool_design_presets_apply.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_design_presets_apply.py"), 22),
         # Guardrails as a W2 registry graph read (2026-09-29, sf-w2-presets-guardrails): the plugin's 14
         # rules on the stored graph plus the recorded g1/g2 rule set replayed through the tool's row path.
         # Inputs are authored in the file, so the floor is the exact count on every runner. PLANNED: 59.
