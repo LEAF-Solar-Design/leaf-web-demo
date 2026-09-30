@@ -1,0 +1,41 @@
+.drawing-objects-panel {
+  background: var(--ck-glass-dock, #24282e);
+  color: var(--ck-ink, #f3f4f6);
+  border: 1px solid var(--ck-edge, #68717b);
+  border-radius: 4px;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+.drawing-objects-panel > summary { cursor: pointer; padding: 10px 12px; }
+.drawing-objects-content { padding: 0 10px 10px; }
+.drawing-object-list { list-style: none; padding: 0; margin: 8px 0 0; max-height: 42vh; overflow: auto; }
+.drawing-object-list > li { padding: 10px 6px; border-top: 1px solid var(--ck-edge, #68717b); overflow-wrap: anywhere; }
+.drawing-object-list > li[data-selected] { border-left: 3px solid currentColor; padding-left: 3px; }
+.drawing-object-list > li[data-focused] { outline: 1px dashed currentColor; outline-offset: -3px; }
+.drawing-object-path, .drawing-object-radio, .drawing-object-reason { display: block; margin-top: 4px; }
+.drawing-object-path, .drawing-object-reason { font-size: 12px; }
+.drawing-object-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; }
+.drawing-object-actions label { display: flex; align-items: center; min-height: 44px; gap: 6px; }
+.drawing-object-actions button { min-height: 44px; padding: 4px 12px; }
+.drawing-object-state { display: flex; gap: 8px; font-weight: 600; }
+.drawing-objects-panel :focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.drawing-objects-panel [aria-disabled="true"] { cursor: not-allowed; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drawing-objects-panel {
+  position: fixed;
+  left: calc(var(--ck-pane, 0px) + 12px);
+  top: calc(var(--ck-canvas-top, 140px) + 76px);
+  z-index: 7;
+  width: min(360px, calc(100vw - 24px));
+  max-height: calc(100dvh - var(--ck-canvas-top, 140px) - 160px);
+  overflow: auto;
+  pointer-events: auto;
+}
+@media (max-width: 980px) {
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drawing-objects-panel {
+    left: 8px;
+    top: calc(var(--ck-canvas-top, 140px) + 54px);
+    width: min(340px, calc(100vw - 16px));
+    max-height: calc(100dvh - var(--ck-canvas-top, 140px) - var(--ck-dock, 35px) - var(--ck-drawer, 36px) - 64px);
+  }
+  .drawing-object-list { max-height: 32dvh; }
+}
