@@ -462,6 +462,7 @@
     "server-solar-tool-solar-string-reports",
     "server-solar-tool-solaredge-accept",
     "server-solar-w1-route-consumers",
+    "server-solar-tool-solaredge-tracking-read",
     "server-solar-w2-registration",
     "server-solar-workflow-flow",
     "server-solar-xlsx",

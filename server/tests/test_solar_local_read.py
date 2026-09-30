@@ -211,6 +211,52 @@ def test_read_builtin_failure_is_named(backend, monkeypatch, error, code):
     assert exc.value.code == code
 
 
+def test_read_builtin_without_history_gets_two_positional_arguments(backend, monkeypatch):
+    # (e) Every builtin that does not declare READS_VERSION_HISTORY is called exactly as before.
+    calls = []
+
+    def spy(*args, **kwargs):
+        calls.append((len(args), kwargs))
+        return {"status": "spied"}
+
+    monkeypatch.setattr(local, "_load_builtin", lambda tool: SimpleNamespace(run=spy))
+    result = run(backend)
+    assert proof(result, backend)["output_sha256"] == digest({"status": "spied"})
+    assert calls == [(2, {}), (2, {})]
+
+
+def _history_builtin(monkeypatch, asks):
+    """A builtin that declares the history need and asks the lookup for each version in asks."""
+    def spy(graph, params, version_graph_sha256=None):
+        return {"answers": [version_graph_sha256(version) for version in asks]}
+
+    monkeypatch.setattr(local, "_load_builtin", lambda tool: SimpleNamespace(
+        READS_VERSION_HISTORY=True, run=spy))
+
+
+def test_read_history_lookup_answers_this_drawing_only(backend, graph, monkeypatch):
+    # (f) The real graph_sha256 for an existing version; None for a missing, bool or zero version.
+    _history_builtin(monkeypatch, [1, 99])
+    result = run(backend)
+    assert result["output"] == {"answers": [digest(graph), None]}
+    assert result["output"]["answers"][0] == result["graph_sha256"]
+    assert proof(result, backend)["output_sha256"] == digest(result["output"])
+    _history_builtin(monkeypatch, [True, 0])
+    assert run(backend)["output"] == {"answers": [None, None]}
+
+
+def test_read_history_lookup_is_bounded(backend, monkeypatch):
+    # (g) A third lookup in one read fails closed, in the read and in its terminal proof.
+    _history_builtin(monkeypatch, [1, 1])
+    result = run(backend)
+    _history_builtin(monkeypatch, [1, 1, 1])
+    with pytest.raises(GraphValidationError) as exc:
+        run(backend)
+    assert exc.value.code == "READ_HISTORY_LIMIT_EXCEEDED"
+    with pytest.raises(ValueError, match="^graph read terminal proof rejected$"):
+        proof(result, backend)
+
+
 @pytest.mark.parametrize("tool", ["solar-settings", "solar-unregistered"])
 def test_read_refuses_unknown_and_commit_tools(backend, tool):
     # K12 checks admission and the loader independently.

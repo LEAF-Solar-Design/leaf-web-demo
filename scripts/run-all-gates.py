@@ -528,8 +528,9 @@ def build_suites() -> List[Suite]:
         # runner. COUNTED from the collected cases: 48 tests + 41 more parametrizations = 89.
         Suite("server-solar-rooftop-chain", "server tests/test_solar_rooftop_chain.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_rooftop_chain.py"), 89),
+        # 88 + 3 opt-in history lookup rows (sf-w4-solaredge-tracking-read-b: e, f, g) = 91.
         Suite("server-solar-local-read", "server tests/test_solar_local_read.py",
-              "pytest", SERVER, _py_pytest("tests/test_solar_local_read.py"), 88),
+              "pytest", SERVER, _py_pytest("tests/test_solar_local_read.py"), 91),
         Suite("server-solar-artifacts", "server tests/test_solar_artifacts.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_artifacts.py"), 99),
         Suite("server-solar-tool-select-by-zone", "server tests/test_solar_tool_select_by_zone.py",
@@ -696,6 +697,12 @@ def build_suites() -> List[Suite]:
         # refusals; C14 output unchanged. Hermetic (no PostgreSQL, no skips): 37 + 9 decoder + 4 coverage cases. COUNTED: 50.
         Suite("server-solar-solaredge-parse-deadline", "server tests/test_solar_solaredge_parse_deadline.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_solaredge_parse_deadline.py"), 50),
+        # SolarEdge tracking read (2026-09-30, sf-w4-solaredge-tracking-read): the accepted import record read
+        # back with provenance, counts, a reference check and one bounded page; labels only, never electrical
+        # state. Hermetic, so the floor is the exact count. COUNTED: 91, plus 4 for the binding to this
+        # drawing's history (sf-w4-solaredge-tracking-read-b: 3 refusal cases + 1 own-history row) = 95.
+        Suite("server-solar-tool-solaredge-tracking-read", "server tests/test_solar_tool_solaredge_tracking_read.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_solaredge_tracking_read.py"), 95),
         Suite("server-solar-guardrails", "server tests/test_solar_guardrails.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_guardrails.py"), 17),  # R31b: two intake/branch cases
         Suite("server-solar-pile-block-mapping", "server tests/test_solar_pile_block_mapping.py",

@@ -16,6 +16,7 @@ from solar_sizing_client import digest
 ADAPTER_KIND = "local-graph-read"
 RESULT_SCHEMA = "leaf.solar-graph-read.v1"
 MAX_OUTPUT_BYTES = 1_048_576
+MAX_HISTORY_LOOKUPS = 2
 _RESULT_KEYS = frozenset((
     "schema_version", "adapter", "tenant_id", "job_id", "tool", "project_id", "drawing_id",
     "request_sha256", "source_version", "representation", "graph_sha256", "output",
@@ -44,9 +45,49 @@ def _load_builtin(tool):
     return module
 
 
-def _read_output(tool, graph, builtin_params, sink=None):
+def _reads_version_history(module):
+    """Only a builtin that declares READS_VERSION_HISTORY = True (exactly) receives the lookup."""
+    return getattr(module, "READS_VERSION_HISTORY", False) is True
+
+
+def _version_history_lookup(backend, tenant_id, drawing_id):
+    """A read-only lookup into the version history of the drawing this read resolves.
+
+    lookup(version) returns that version's graph_sha256, or None when the version is not a
+    positive int, does not exist or carries no graph. Bounded: at most MAX_HISTORY_LOOKUPS calls
+    per read; the next call fails closed with READ_HISTORY_LIMIT_EXCEEDED. It never writes.
+    """
+    calls = [0]
+
+    def version_graph_sha256(version):
+        if calls[0] >= MAX_HISTORY_LOOKUPS:
+            raise GraphValidationError("READ_HISTORY_LIMIT_EXCEEDED")
+        calls[0] += 1
+        if type(version) is not int or version < 1:
+            return None
+        try:
+            return resolve_graph_context(backend, tenant_id, drawing_id, version)["graph_sha256"]
+        except GraphValidationError:
+            return None
+
+    return version_graph_sha256
+
+
+def _history_argument(tool, backend, tenant_id, drawing_id):
+    """{} for every builtin that does not declare the history need, so its call is unchanged."""
+    if not _reads_version_history(_load_builtin(tool)):
+        return {}
+    return {"version_graph_sha256": _version_history_lookup(backend, tenant_id, drawing_id)}
+
+
+def _read_output(tool, graph, builtin_params, sink=None, *, version_graph_sha256=None):
     try:
-        output = _load_builtin(tool).run(copy.deepcopy(graph), copy.deepcopy(builtin_params))
+        module = _load_builtin(tool)
+        if _reads_version_history(module):
+            output = module.run(copy.deepcopy(graph), copy.deepcopy(builtin_params),
+                                version_graph_sha256=version_graph_sha256)
+        else:
+            output = module.run(copy.deepcopy(graph), copy.deepcopy(builtin_params))
     except GraphValidationError:
         raise
     except (LookupError, ArithmeticError, TypeError, ValueError, RecursionError):
@@ -96,7 +137,8 @@ def run_local_graph_read(backend, tenant_id, tool, params, *, drawing_id, source
     request_sha256 = request_digest(tool, drawing_id, source_version, builtin_params)
     sink = solar_artifacts.ArtifactSink(backend, tenant_id, drawing_id, context, tool,
                                         request_sha256, False)
-    output, data = _read_output(tool, context["graph"], builtin_params, sink)
+    output, data = _read_output(tool, context["graph"], builtin_params, sink,
+                                **_history_argument(tool, backend, tenant_id, drawing_id))
     return {
         "schema_version": RESULT_SCHEMA, "adapter": ADAPTER_KIND,
         "tenant_id": tenant_id, "job_id": job_id, "tool": tool,
@@ -142,7 +184,8 @@ def graph_read_provenance(result, params, tenant_id, job_id, tool, source_versio
                                             context, tool, request_sha256, True)
         for reference in solar_artifacts.artifact_references(result["output"]):
             sink.verify_reference(reference)
-        output, data = _read_output(tool, context["graph"], builtin_params, sink)
+        output, data = _read_output(tool, context["graph"], builtin_params, sink,
+                                    **_history_argument(tool, backend, tenant_id, drawing_id))
         output_sha256 = digest(output)
         if (type(result["output"]) is not dict or output != result["output"]
                 or output_sha256 != result["output_sha256"]
