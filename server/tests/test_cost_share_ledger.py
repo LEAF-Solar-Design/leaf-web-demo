@@ -74,6 +74,22 @@ def _exit_worker():
     pass
 
 
+def _held_owner_worker(root, host, entered, release):
+    with publisher._publisher_lock(Path(root), 0, 1800):
+        path = Path(root) / publisher.PUBLISH_LOCK
+        owner = json.loads(path.read_bytes())
+        owner.update(host=host, start_time=time.time() - 1900)
+        path.write_text(json.dumps(owner), encoding="utf-8")
+        entered.set()
+        if not release.wait(30):
+            raise RuntimeError("test lock owner was not released")
+
+
+def _foreign_publish_worker(root, entered, release, attempting, done):
+    publisher.socket.gethostname = lambda: "terminated-host"
+    _publish_worker(root, "20", entered, release, attempting, done)
+
+
 def test_publishers_in_two_processes_preserve_complete_snapshots(tmp_path):
     ctx = multiprocessing.get_context("spawn")
     entered, release = ctx.Event(), ctx.Event()
@@ -158,14 +174,91 @@ def test_stale_dead_publisher_lock_is_taken_over(tmp_path, caplog):
 
 @pytest.mark.parametrize("host", [socket.gethostname(), "another-host"])
 def test_old_live_or_foreign_publisher_lock_is_not_reclaimed(tmp_path, host):
+    ctx = multiprocessing.get_context("spawn")
+    entered, release = ctx.Event(), ctx.Event()
+    process = ctx.Process(target=_held_owner_worker,
+                          args=(str(tmp_path), host, entered, release))
     path = tmp_path / publisher.PUBLISH_LOCK
-    content = json.dumps({"pid": os.getpid(), "host": host, "start_time": time.time() - 1900})
-    path.write_text(content, encoding="utf-8")
-    with pytest.raises(publisher.LedgerBusy):
-        publisher.publish_period(CostLedgerStore(tmp_path), PERIOD, _snapshot("10"),
-                                 "blocked", lock_timeout=0)
-    assert path.read_text(encoding="utf-8") == content
-    assert list(tmp_path.iterdir()) == [path]
+    process.start()
+    try:
+        assert entered.wait(30)
+        assert process.is_alive()
+        before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
+        with pytest.raises(publisher.LedgerBusy):
+            publisher.publish_period(CostLedgerStore(tmp_path), PERIOD, _snapshot("10"),
+                                     "blocked", lock_timeout=0.05)
+        assert path.read_bytes() == before[path.name]
+        assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before
+    finally:
+        release.set()
+        process.join(10)
+        if process.is_alive():
+            process.terminate()
+            process.join(10)
+
+
+def test_terminated_foreign_publisher_recovers_only_after_stale_threshold(tmp_path, monkeypatch):
+    s = CostLedgerStore(tmp_path)
+    first = publisher.publish_period(s, PERIOD, _snapshot("10"), "first snapshot")
+    frozen = s.read_publication(first)
+    ctx = multiprocessing.get_context("spawn")
+    entered, release, attempting, done = (ctx.Event() for _ in range(4))
+    process = ctx.Process(target=_foreign_publish_worker,
+                          args=(str(tmp_path), entered, release, attempting, done))
+    process.start()
+    try:
+        assert entered.wait(30)
+        process.terminate()
+        process.join(10)
+        assert not process.is_alive()
+        assert not done.is_set()
+        path = tmp_path / publisher.PUBLISH_LOCK
+        content = path.read_bytes()
+        owner = json.loads(content)
+        assert owner["host"] == "terminated-host"
+        monkeypatch.setattr(publisher.socket, "gethostname", lambda: "successor-host")
+        monkeypatch.setattr(publisher.time, "time", lambda: owner["start_time"] + 10)
+        with pytest.raises(publisher.LedgerBusy):
+            publisher.publish_period(s, PERIOD, _snapshot("20"), "too soon",
+                                     lock_timeout=0, stale_after=10)
+        assert path.read_bytes() == content
+        monkeypatch.setattr(publisher.time, "time", lambda: owner["start_time"] + 11)
+        recovered = publisher.publish_period(s, PERIOD, _snapshot("20"), "recovery",
+                                             lock_timeout=0, stale_after=10)
+        assert recovered != first
+        assert s.read_publication(first) == frozen
+        assert {r.resource_period.gross_cost_usd for r in s.read_publication(recovered)} == {
+            Decimal("20")}
+        for resource in ("aws:codebuild", "vendor:figma"):
+            assert [r.revision for r in s.history(resource, PERIOD)] == [1, 2]
+        assert not path.exists()
+    finally:
+        # A terminated Windows Event waiter cannot acknowledge notify(); leave
+        # its release event untouched, including when an assertion fails.
+        if process.is_alive():
+            process.terminate()
+        process.join(10)
+
+
+def test_publisher_unlinks_only_while_holding_the_owner_os_lock(tmp_path, monkeypatch):
+    path = tmp_path / publisher.PUBLISH_LOCK
+    path.write_text(json.dumps({"pid": os.getpid(), "host": "another-host",
+                                "start_time": time.time() - 1900}), encoding="utf-8")
+    original = Path.unlink
+    removals = []
+
+    def checked_unlink(target, *args, **kwargs):
+        if target == path:
+            with publisher._open_lock_file(path) as probe:
+                assert not publisher._try_owner_lock(probe), "unlinked without an OS lock"
+            removals.append(json.loads(path.read_bytes()))
+        return original(target, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", checked_unlink)
+    publisher.publish_period(CostLedgerStore(tmp_path), PERIOD, _snapshot("10"),
+                             "recovery", lock_timeout=0)
+    assert len(removals) == 2  # stale takeover, then the successor's normal cleanup
+    assert time.time() - removals[0]["start_time"] > 1800
 
 
 def test_failed_publish_releases_lock_and_next_publish_can_finish(tmp_path, monkeypatch):
