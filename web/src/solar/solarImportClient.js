@@ -76,6 +76,8 @@ export const SOLAREDGE_IMPORT_REASONS = Object.freeze({
   REPORT_PDF_UNSUPPORTED: 'This PDF layout is not one the SolarEdge import can read',
   REPORT_LIMIT_EXCEEDED: 'This design is larger than a SolarEdge report can cover',
   REPORT_BUSY: 'Other PDFs are being read right now, so try again shortly',
+  REPORT_PARSE_TIMEOUT: 'Reading this PDF took too long, so nothing was saved and you can try again',
+  REPORT_PARSE_UNAVAILABLE: 'The PDF reader could not start, so nothing was saved and you can try again shortly',
   REPORT_WRITES_DRAINED: 'Drawing changes are paused right now, so try the report again shortly',
   REPORT_STORE_UNAVAILABLE: 'The drawing store is unavailable right now, so try again shortly',
   REPORT_ARTIFACT_CONFLICT: 'A stored report does not match this request, so the report stopped',
