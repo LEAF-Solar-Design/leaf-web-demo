@@ -4,9 +4,9 @@
 // command with honest gating — a disabled tool always carries its reason,
 // an unavailable group its note, and no cluster is ever fabricated.
 import { describe, expect, it, vi } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { canOpenSolarSettingsForm } from '../solar/solarSettingsWire.js'
-import { SOLAR_REFUSAL_REASONS } from './ribbonClusters.js'
+import { SOLAR_REFUSAL_REASONS, solarRailReason } from './ribbonClusters.js'
 
 import { DEFERRED_REASONS } from './actionRegistry.js'
 import { RIBBON_TABS } from '../site/CockpitTopBand.jsx'
@@ -1280,5 +1280,183 @@ describe('referencePanels (the flag-off placeholders)', () => {
     const ungroup = toolsOf(groups)['groups:ungroup']
     expect([group.disabled, group.reason]).toEqual([true, REASONS.notInEngine])
     expect([ungroup.disabled, ungroup.reason]).toEqual([true, REASONS.notInEngine])
+  })
+})
+
+describe('solar refusal copy', () => {
+  const NEW_COPY = [
+    ['licensed_graph_commit_required', 'This drawing keeps its solar design in AutoCAD, so this tool runs there'],
+    ['module_power_required', 'Run Size strings again to record the module power'],
+    ['roof_installation_required', 'Panel groups are made on rooftop designs only'],
+    ['routing_topology_required', 'Give every string its panels, an inverter and a valid wire size first'],
+    ['inverter_assignment_mismatch', 'Assign every string to an input on its inverter first'],
+    ['degenerate_route', 'Move each inverter off the panels at either end of its string'],
+    ['invalid_route_point', 'A panel or inverter sits outside the range homeruns can route'],
+    ['proposal_job_required', 'Run Solve proposal first, then commit its result'],
+    ['frames_required', 'Create panel groups first'],
+    ['panels_required', 'Add panels to the design first'],
+    ['electrical_zones_required', 'Create electrical zones first'],
+    ['panels_already_present', 'This design already has its panels'],
+    ['panel_layer_filter_required', 'Set Panel layer contains in Solar settings first'],
+    ['rooftop_required', 'This solar tool works on rooftop designs only'],
+    ['drawing_units_unsupported', 'This solar tool needs drawing units of in, ft, mm, cm or m'],
+    ['guardrails_sizing_required', 'Size strings before reading guardrails'],
+    ['guardrails_sizing_ambiguous', 'String sizing differs across the design, so guardrails cannot pick one module'],
+    ['guardrails_project_coordinates_required', 'Set the project latitude and longitude in Solar settings first'],
+    ['guardrails_mixed_inverters', 'Guardrails need every inverter configured the same, and this design\'s inverters differ'],
+    ['guardrails_input_unsupported', 'Guardrails cannot read this design yet'],
+    ['electrical_zones_unsupported', 'Assign strings works on designs without electrical zones'],
+    ['unassigned_strings_required', 'Every string already has an inverter or collector'],
+    ['string_collectors_required', 'Add an inverter or collector for the strings to feed first'],
+    ['schedules_input_unsupported', 'Electrical schedules cannot read this design yet'],
+    ['schedules_kernel_refused', 'Electrical schedules cannot build tables from this design'],
+    ['schedules_mapping_failed', 'Electrical schedules cannot match this design to its circuits'],
+    ['schedules_optimizers_unsupported', 'Electrical schedules do not cover optimizer designs yet'],
+    ['schedules_zone_sizing_unsupported', 'Electrical schedules need one global string sizing, not zone sizing'],
+  ]
+  const availabilityFor = (code) => ({
+    entitled: true, implemented: true, engine_ready: true, input_ready: false, refusal_reasons: [code],
+  })
+  const ready = { entitled: true, implemented: true, input_ready: true, engine_ready: true, refusal_reasons: [] }
+  const solarRow = (name, overrides = {}) => ({
+    name, capabilities: ['drawing.write'],
+    params: { properties: { expected_rev: { type: 'integer' }, changes: { type: 'object' } } },
+    solar: { schema: 'leaf.solar-tool-view.v1', name, family: 'stringing', wave: 1, order: 10,
+      entitlement: 'run_write', interaction: { mode: 'form' } },
+    availability: ready,
+    ...overrides,
+  })
+  const familyOf = (rows) => ({ family_id: 'stringing', label: 'Stringing', capabilities: rows })
+  const project = (rows, { gate = {}, openName = null, onRun = vi.fn(), onOpenForm = vi.fn() } = {}) => {
+    const families = [familyOf(rows)]
+    return profileRibbonTabs('solar', { families, onRun, catalogOptions: gate,
+      solarRail: { families, openName, onOpenForm } })[1].clusters[1].tools
+  }
+  const declarations = () => {
+    const directory = new URL('../../../server/solar_tools/', import.meta.url)
+    const files = readdirSync(directory).filter((name) => name.endsWith('.json'))
+    expect(files.length).toBeLessThanOrEqual(256)
+    expect(files.length).toBeGreaterThanOrEqual(30)
+    return files.map((name) => JSON.parse(readFileSync(new URL(name, directory), 'utf8')))
+  }
+
+  it.each(NEW_COPY)('RC1 %s renders its sentence', (code, sentence) => {
+    expect(SOLAR_REFUSAL_REASONS[code]).toBe(sentence)
+    expect(solarRailReason(availabilityFor(code))).toBe(sentence)
+  })
+
+  it('RC2 unknown codes keep the fallback', () => {
+    expect(solarRailReason(availabilityFor('solar_future_code')))
+      .toBe('The server refused this solar tool (solar_future_code)')
+    expect(solarRailReason(availabilityFor('toString')))
+      .toBe('The server refused this solar tool (toString)')
+    expect(solarRailReason({ ...availabilityFor('frames_required'), refusal_reasons: ['frames_required', 'solar_future_code'] }))
+      .toBe('Create panel groups first; The server refused this solar tool (solar_future_code)')
+  })
+
+  it('RC3 the rail seat renders the new copy', () => {
+    const row = solarRow('solar-panel-groups', { availability: availabilityFor('roof_installation_required') })
+    expect(project([row])[1]).toMatchObject({ disabled: true, reason: 'Panel groups are made on rooftop designs only' })
+    const combined = solarRow('solar-elevation-zones', {
+      availability: { ...availabilityFor('rooftop_required'), refusal_reasons: ['valid_settings_required', 'rooftop_required'] },
+    })
+    expect(project([combined])[1].reason)
+      .toBe('Complete valid Solar settings first; This solar tool works on rooftop designs only')
+  })
+
+  it('RC4 every current catalog code has a sentence', () => {
+    const SERVER_CODES = [
+      'entitlement_required', 'entitlement_policy_unavailable', 'broker_adapter_unavailable',
+      'drawing_context_required', 'invalid_drawing_context', 'persisted_graph_unavailable',
+      'graph_seed_required', 'not_current_head', 'unresolved_units', 'strings_required',
+      'valid_settings_required', 'sizing_confirmation_required', 'sized_panel_groups_required',
+      'valid_strings_required', 'equipment_assignment_required', 'complete_routing_required',
+      'licensed_graph_commit_required', 'module_power_required', 'roof_installation_required',
+      'routing_topology_required', 'inverter_assignment_mismatch', 'degenerate_route',
+      'invalid_route_point', 'proposal_job_required', 'frames_required', 'panels_required',
+      'electrical_zones_required', 'panels_already_present', 'panel_layer_filter_required',
+      'rooftop_required', 'drawing_units_unsupported', 'guardrails_sizing_required',
+      'guardrails_sizing_ambiguous', 'guardrails_project_coordinates_required',
+      'guardrails_mixed_inverters', 'guardrails_input_unsupported',
+    ]
+    for (const code of SERVER_CODES) {
+      expect(Object.hasOwn(SOLAR_REFUSAL_REASONS, code)).toBe(true)
+      expect(solarRailReason(availabilityFor(code)).startsWith('The server refused this solar tool')).toBe(false)
+    }
+  })
+
+  it('RC5 facet declarations keep their copy', () => {
+    const codes = new Set()
+    for (const declaration of declarations()) {
+      if (declaration.readiness?.kind !== 'facets') continue
+      for (const facet of declaration.readiness.facets) {
+        const code = `${facet}_required`
+        codes.add(code)
+        expect(Object.hasOwn(SOLAR_REFUSAL_REASONS, code)).toBe(true)
+      }
+    }
+    expect([...codes].sort()).toEqual([
+      'electrical_zones_required', 'frames_required', 'panels_required', 'strings_required',
+    ])
+  })
+
+  it('RC6 hook declarations keep their copy', () => {
+    const codes = new Set()
+    const hooks = declarations().filter((declaration) => declaration.readiness?.kind === 'hook')
+    expect(hooks).toHaveLength(5)
+    for (const declaration of hooks) {
+      expect(declaration.builtin).toMatch(/^builtins\/[a-z0-9_]{1,64}\.py$/)
+      const source = readFileSync(new URL(`../../../server/${declaration.builtin}`, import.meta.url), 'utf8')
+      for (const match of source.matchAll(/"input_reason":\s*"([a-z][a-z0-9_]{0,63})"/g)) {
+        codes.add(match[1])
+        expect(Object.hasOwn(SOLAR_REFUSAL_REASONS, match[1])).toBe(true)
+      }
+    }
+    expect([...codes].sort()).toEqual([
+      'drawing_units_unsupported', 'electrical_zones_unsupported', 'guardrails_input_unsupported',
+      'panel_layer_filter_required', 'panels_already_present', 'rooftop_required',
+      'schedules_input_unsupported', 'string_collectors_required', 'unassigned_strings_required',
+    ])
+  })
+
+  it('RC7 every sentence follows the map voice', () => {
+    expect(Object.isFrozen(SOLAR_REFUSAL_REASONS)).toBe(true)
+    expect(Object.keys(SOLAR_REFUSAL_REASONS)).toHaveLength(50)
+    for (const sentence of Object.values(SOLAR_REFUSAL_REASONS)) {
+      expect(typeof sentence).toBe('string')
+      expect(sentence.length).toBeGreaterThanOrEqual(12)
+      expect(sentence).not.toMatch(/[;\u2013\u2014]/)
+      expect(sentence.endsWith('.')).toBe(false)
+    }
+  })
+
+  it('RC8 the existing entries stay unchanged', () => {
+    const BASE_COPY = {
+      entitlement_required: 'Your plan does not include this solar tool',
+      entitlement_policy_unavailable: 'The plan policy could not be read, so this tool stays off',
+      broker_adapter_unavailable: 'No engine runs this solar tool yet',
+      drawing_context_required: 'Open a drawing to use this solar tool',
+      invalid_drawing_context: 'The open drawing context is not valid for solar tools',
+      persisted_graph_unavailable: 'This drawing has no saved solar design yet',
+      graph_seed_required: 'Start the solar design with Solar settings first',
+      not_current_head: 'Open the latest drawing version to start a solar design',
+      seed_project_scope_unsupported: 'A project drawing cannot start a solar design yet',
+      invalid_seed_request: 'The solar design start request is not valid',
+      graph_already_embedded: 'This drawing already carries a solar design',
+      unresolved_units: 'Set the drawing units in Solar settings first',
+      strings_required: 'Create strings before correcting one',
+      valid_settings_required: 'Complete valid Solar settings first',
+      sizing_confirmation_required: 'Confirm the string sizing first',
+      sized_panel_groups_required: 'Create sized panel groups first',
+      valid_strings_required: 'Solve valid strings first',
+      equipment_assignment_required: 'Assign inverter equipment first',
+      complete_routing_required: 'Route every homerun first',
+      capability_availability_unavailable: 'Tool readiness has not loaded for this drawing',
+      capability_not_ready: 'This solar tool is not ready for this drawing',
+      unlisted: 'The server refused this solar tool',
+    }
+    for (const [code, sentence] of Object.entries(BASE_COPY)) {
+      expect(SOLAR_REFUSAL_REASONS[code]).toBe(sentence)
+    }
   })
 })
