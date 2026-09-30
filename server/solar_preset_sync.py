@@ -27,10 +27,12 @@ schema requires it > 0, so the <= 0 seed can never fire); panel_layer_contains
 project.installation_design (a project field solar-settings cannot edit; the declared follow-up
 sf-w2-design-presets-installation); the counters panel_group_number, string_number,
 inverter_number and mppt_letter (DrawingStateSnapshot fields the store keeps at the plugin's
-defaults). Pure, constant work, no I/O.
+defaults). Pure, no I/O: constant work, plus one pass over the routes and schedules when a
+setting changes (solar_settings_invalidation.py).
 """
 import solar_preset_store as preset_store
 from solar_design_graph import GraphValidationError
+from solar_settings_invalidation import invalidate_settings_dependents
 
 GRAPH_SETTINGS_OUT_OF_RANGE = "DESIGN_PRESET_GRAPH_SETTINGS_OUT_OF_RANGE"
 # (graph settings key, preset settings field), always overwritten by SyncFromGlobalSettings.
@@ -62,8 +64,9 @@ def effective_current(graph, stored, *, check_bounds=True):
 def sync(graph, current):
     """SyncFromGlobalSettings from `current` onto graph["settings"], in place, through the
     solar-settings rule (builtins/solar_settings.py): when any value changes, sizing confirmation
-    is cleared and settings.extra.string_sizing dropped. Returns the changed entities for advance
-    ([] or [settings])."""
+    is cleared, settings.extra.string_sizing dropped and the design outputs stale
+    (solar_settings_invalidation.py). Returns the changed entities for advance: [], or [settings]
+    followed by every entity the settings-change rule staled."""
     settings = graph["settings"]
     changes = {}
     for key, field in ALWAYS:
@@ -75,8 +78,9 @@ def sync(graph, current):
             changes[key] = value
     if not changes:
         return []
+    previous = dict(settings)
     settings.update(changes)
     # Editing a drawing setting requires explicit sizing confirmation again (solar_settings.py).
     settings["global_string_sizing_confirmed"] = False
     settings["extra"].pop("string_sizing", None)
-    return [settings]
+    return [settings] + invalidate_settings_dependents(graph, previous)

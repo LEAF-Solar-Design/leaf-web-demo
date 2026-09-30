@@ -618,6 +618,13 @@ def build_suites() -> List[Suite]:
         # committed evidence, so the floor is the exact count on every runner. COUNTED: 22.
         Suite("server-solar-tool-design-presets-apply", "server tests/test_solar_tool_design_presets_apply.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_design_presets_apply.py"), 22),
+        # A drawing-settings change stales the outputs built under the old settings (2026-09-30,
+        # sf-solar-settings-invalidation): solar-settings and preset apply stale every homerun route and
+        # schedule, so the export guard refuses them on a graph with no solve digest. Inputs are authored
+        # in the file or are committed evidence, so the floor is the exact count on every runner.
+        # COUNTED: 18 unparametrized tests + 11 material-field cases + 2 L2-flag refusal cases = 31.
+        Suite("server-solar-settings-invalidation", "server tests/test_solar_settings_invalidation.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_settings_invalidation.py"), 31),
         # Guardrails as a W2 registry graph read (2026-09-29, sf-w2-presets-guardrails): the plugin's 14
         # rules on the stored graph plus the recorded g1/g2 rule set replayed through the tool's row path.
         # Inputs are authored in the file, so the floor is the exact count on every runner. PLANNED: 59.
