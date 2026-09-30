@@ -1174,6 +1174,12 @@ jobs:
               | sort_by(-.id)
               | if length == 0 then empty else .[0].id end
             ' consumer-contract-read.json)
+            if [ -n "$READ_ID" ]; then
+              [[ "$READ_ID" =~ ^[1-9][0-9]*$ ]] || {
+                echo "::error::The Terraform consumer-contract listing returned a malformed run id."
+                exit 1
+              }
+            fi
             READ_IDS="${READ_IDS}${READ_IDS:+ }${READ_ID:-empty}"
             if [ "$read" = 1 ]; then
               FIRST_READ_ID="$READ_ID"
