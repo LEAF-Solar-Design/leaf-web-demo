@@ -5,6 +5,7 @@ import { solarRailReason } from '../lib/ribbonClusters.js'
 import SolarFlowRail from './SolarFlowRail.jsx'
 import SolarStepEditor from './SolarStepEditor.jsx'
 import conductorDeclaration from '../../../server/solar_tools/solar_string_conductors.json'
+import { SOLAR_FLOW_MATURITY_NOTES, SOLAR_FLOW_UNAVAILABLE_REASONS, solarFlowStepId } from './solarFlowModel.js'
 
 afterEach(cleanup)
 
@@ -51,6 +52,138 @@ function items() {
 function button(name) {
   return screen.getByRole('button', { name: new RegExp(`^${name}`) })
 }
+
+
+const LIVE_TABLE = [
+  ['stringing', [
+    ['solar-settings', 1, 10, 'run_write'], ['solar-size-strings', 1, 20, 'run_write'],
+    ['solar-panel-groups', 1, 30, 'run_write'], ['solar-commit-solve', 1, 50, 'run_write'],
+    ['solar-correct-string', 1, 60, 'run_write'], ['solar-assign-equipment', 1, 70, 'run_write'],
+    ['solar-homeruns', 1, 80, 'run_write'], ['solar-schedule', 1, 90, 'run_write'],
+    ['solar-string-add', 2, 70, 'run_write'], ['solar-string-flip', 2, 72, 'run_write'],
+    ['solar-string-swap', 2, 74, 'run_write'], ['solar-string-rebuild', 2, 76, 'run_read'],
+    ['solar-string-data', 2, 78, 'run_read'], ['solar-string-delete', 2, 80, 'run_write'],
+    ['solar-string-conductors', 2, 85, 'run_write'], ['solar-solve-proposal', 1, 40, 'solve'],
+  ]],
+  ['placement', [
+    ['solar-panels-from-drawing', 1, 15, 'run_write'], ['solar-select-by-zone', 2, 10, 'run_read'],
+    ['solar-electrical-zones', 2, 20, 'run_write'], ['solar-panel-add', 2, 30, 'run_write'],
+    ['solar-panel-remove', 2, 40, 'run_write'], ['solar-panel-group-delete', 2, 50, 'run_write'],
+    ['solar-autofill-plan', 2, 58, 'run_read'], ['solar-autofill', 2, 60, 'run_write'],
+  ]],
+  ['settings', [['solar-unit-sync', 2, 10, 'run_write']]],
+  ['equipment', [
+    ['solar-nec-ampacity-correction', 3, 10, 'run_read'], ['solar-nec-ac-voltage-drop', 3, 20, 'run_read'],
+    ['solar-nec-conduit-fill', 3, 30, 'run_read'], ['solar-nec-feeder-ocpd', 3, 40, 'run_read'],
+  ]],
+]
+function liveRow(name, family, wave, order, entitlement) {
+  return {
+    name, availability: READY, params: { type: 'object', properties: {} },
+    solar: { schema: 'leaf.solar-tool-view.v1', name, family, wave, order, entitlement, interaction: { mode: 'form' } },
+  }
+}
+const LIVE = LIVE_TABLE.map(([family_id, rows]) => ({
+  family_id, capabilities: rows.map(([name, wave, order, entitlement]) => liveRow(name, family_id, wave, order, entitlement)),
+}))
+const ROOFTOP_LIVE = [
+  'solar-settings', 'solar-panels-from-drawing', 'solar-size-strings', 'solar-panel-groups',
+  'solar-solve-proposal', 'solar-commit-solve', 'solar-correct-string', 'solar-assign-equipment',
+  'solar-string-conductors', 'solar-homeruns', 'solar-schedule',
+]
+
+const FLOW_OPTION_LABELS = [
+  'Rooftop', 'Ground Mount Electrical (unavailable)', 'Ground Mount Physical (preview, unavailable)',
+  'SolarEdge PDF Import (unavailable)', 'PVcase Parity (tutorial, unavailable)',
+]
+function changeFlow(id) {
+  fireEvent.change(screen.getByRole('combobox', { name: 'Solar flow' }), { target: { value: id } })
+}
+
+describe('Solar flow picker', () => {
+  it('FL11 the selector retains default Rooftop labels and statuses', () => {
+    render(<SolarFlowRail families={families(['solar-settings', 'solar-size-strings'])} drawingId="d1" onOpenStep={vi.fn()} />)
+    const select = screen.getByRole('combobox', { name: 'Solar flow' })
+    expect(select.value).toBe('rooftop')
+    expect([...select.options].map((option) => option.textContent)).toEqual(FLOW_OPTION_LABELS)
+    expect(screen.getByTestId('solar-flow-rail').getAttribute('data-flow')).toBe('rooftop')
+    expect(items()).toHaveLength(9)
+    expect(items().map((item) => item.querySelector('.solar-flow-label').textContent)).toEqual(W1.map(([, , label]) => label))
+    expect(items().map((item) => item.getAttribute('data-status')))
+      .toEqual(['ready', 'ready', 'blocked', 'blocked', 'blocked', 'blocked', 'blocked', 'blocked', 'blocked'])
+    expect(screen.queryByTestId('solar-flow-unavailable')).toBeNull()
+    expect(screen.queryByTestId('solar-flow-maturity')).toBeNull()
+    expect(screen.getAllByRole('status')).toHaveLength(1)
+  })
+
+  it('FL12 unavailable flows explain missing stages without step controls', () => {
+    const onFlowChange = vi.fn()
+    render(<SolarFlowRail families={LIVE} drawingId="d1" onFlowChange={onFlowChange} />)
+    changeFlow('ground-electrical')
+    const rail = screen.getByTestId('solar-flow-rail')
+    expect(items()).toEqual([])
+    expect(rail.querySelector('ol')).toBeNull()
+    expect(rail.querySelector('[id^="solar-step-"]')).toBeNull()
+    expect(rail.querySelector('button')).toBeNull()
+    expect(screen.getByTestId('solar-flow-unavailable')).toBeTruthy()
+    expect(document.getElementById('solar-flow-unavailable-reason').textContent).toBe(SOLAR_FLOW_UNAVAILABLE_REASONS.stages_missing)
+    expect(screen.getByRole('combobox', { name: 'Solar flow' }).getAttribute('aria-describedby')).toBe('solar-flow-unavailable-reason')
+    const list = screen.getByRole('list', { name: 'Stages not in this catalog' })
+    expect([...list.children].map((item) => item.textContent))
+      .toEqual(['Tracker conversion', 'Sizing and stringing', 'Equipment', 'Feeders and routes', 'Schedules and exports'])
+    expect(rail.getAttribute('data-flow')).toBe('ground-electrical')
+    expect(onFlowChange).toHaveBeenCalledTimes(1)
+    expect(onFlowChange).toHaveBeenCalledWith('ground-electrical')
+    expect(screen.getAllByRole('status')).toHaveLength(1)
+    expect(screen.getByRole('status').textContent).toBe('')
+    changeFlow('ground-electrical')
+    expect(onFlowChange).toHaveBeenCalledTimes(1)
+  })
+
+  it('FL12 a run settling in another flow cannot restore an old success announcement', () => {
+    const shown = families(['solar-settings'])
+    const { rerender } = render(<SolarFlowRail families={shown} drawingId="d1" runs={{}} />)
+    const success = { 'solar-settings': { ok: true, code: null } }
+    rerender(<SolarFlowRail families={shown} drawingId="d1" runs={success} />)
+    expect(screen.getByRole('status').textContent).toBe('Solar settings finished')
+    rerender(<SolarFlowRail families={shown} drawingId="d1" pendingTool="solar-settings" runs={success} />)
+    expect(items()[0].getAttribute('data-status')).toBe('pending')
+    changeFlow('ground-electrical')
+    expect(screen.getByRole('status').textContent).toBe('')
+    const failure = { 'solar-settings': { ok: false, code: 'STALE_GRAPH_REVISION' } }
+    rerender(<SolarFlowRail families={shown} drawingId="d1" runs={failure} />)
+    changeFlow('rooftop')
+    expect(items()[0].getAttribute('data-status')).toBe('failed')
+    expect(screen.getByRole('status').textContent).not.toContain('Solar settings finished')
+  })
+
+  it('FL13 the live catalog renders all eleven Rooftop steps in order', () => {
+    render(<SolarFlowRail families={LIVE} drawingId="d1" />)
+    expect(items().map((item) => item.querySelector('button').id)).toEqual(ROOFTOP_LIVE.map(solarFlowStepId))
+    expect(items()[8].querySelector('button').id).toBe('solar-step-solar-string-conductors')
+  })
+
+  it('FL14 preview and tutorial notes and readiness memory survive a flow round trip', () => {
+    const all = W1.map(([name]) => name)
+    const { rerender } = render(<SolarFlowRail families={families(all)} familiesDrawingId="d1" drawingId="d1" />)
+    changeFlow('ground-physical')
+    expect(screen.getByTestId('solar-flow-maturity').textContent).toBe(SOLAR_FLOW_MATURITY_NOTES.preview)
+    changeFlow('pvcase-tutorial')
+    expect(screen.getByTestId('solar-flow-maturity').textContent).toBe(SOLAR_FLOW_MATURITY_NOTES.tutorial)
+    changeFlow('solaredge-import')
+    expect(screen.queryByTestId('solar-flow-maturity')).toBeNull()
+    changeFlow('rooftop')
+    expect(screen.queryByTestId('solar-flow-maturity')).toBeNull()
+    expect(items()).toHaveLength(9)
+    changeFlow('ground-electrical')
+    rerender(<SolarFlowRail families={families(['solar-settings'], blocked('valid_strings_required'))} familiesDrawingId="d1" drawingId="d1" />)
+    changeFlow('rooftop')
+    expect(items()).toHaveLength(9)
+    expect(items()[6].getAttribute('data-invalidated')).toBe('true')
+    expect(items()[6].textContent).toContain('Needs rerun: Solve valid strings first')
+  })
+})
+
 
 describe('SolarFlowRail', () => {
   it('CF12 conductors stay enabled when homeruns are blocked and open the table', async () => {

@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { solarRailReason } from '../lib/ribbonClusters.js'
-import { solarFlowReadyMap, solarFlowState, solarFlowStepId, solarFlowSteps } from './solarFlowModel.js'
+import {
+  DEFAULT_SOLAR_FLOW, SOLAR_FLOW_MATURITY_NOTES, solarFlowId, solarFlowOptionLabel,
+  solarFlowOptions, solarFlowReadyMap, solarFlowSelect, solarFlowState, solarFlowStepId,
+} from './solarFlowModel.js'
 import './solarFlow.css'
 
 const STATUS_TEXT = Object.freeze({
@@ -23,9 +26,12 @@ function runAnnouncement(item, run) {
 // differs from drawingId (a switch in flight) the families are another
 // drawing's, so nothing is recorded and nothing is compared.
 export default function SolarFlowRail({
-  families, familiesDrawingId, drawingId = null, pendingTool = null, runs, openName = null, openSettingsForm, onOpenStep,
+  families, familiesDrawingId, drawingId = null, pendingTool = null, runs, openName = null, openSettingsForm, onOpenStep, onFlowChange,
 }) {
-  const steps = useMemo(() => solarFlowSteps(families), [families])
+  const [flowId, setFlowId] = useState(DEFAULT_SOLAR_FLOW)
+  const options = useMemo(() => solarFlowOptions(families), [families])
+  const selection = useMemo(() => solarFlowSelect(families, flowId), [families, flowId])
+  const steps = selection.steps
   const memory = useRef({ drawingId, everReady: Object.create(null) })
   if (memory.current.drawingId !== drawingId) memory.current = { drawingId, everReady: Object.create(null) }
   const current = drawingId !== null && familiesDrawingId === drawingId
@@ -57,8 +63,24 @@ export default function SolarFlowRail({
   }, [runs, items])
 
   return (
-    <nav aria-label="Solar design steps" data-testid="solar-flow-rail" className="solar-flow-rail">
-      <ol className="solar-flow-steps">
+    <nav aria-label="Solar design steps" data-testid="solar-flow-rail" className="solar-flow-rail" data-flow={selection.flow}>
+      <label className="solar-flow-picker" htmlFor="solar-flow-select">Solar flow</label>
+      <select id="solar-flow-select" data-testid="solar-flow-select" value={selection.flow}
+        aria-describedby={selection.available ? undefined : 'solar-flow-unavailable-reason'}
+        onChange={(event) => {
+          const next = solarFlowId(event.target.value)
+          if (next !== flowId) {
+            setFlowId(next)
+            setAnnouncement('')
+            if (typeof onFlowChange === 'function') onFlowChange(next)
+          }
+        }}>
+        {options.map((option) => <option key={option.id} value={option.id}>{solarFlowOptionLabel(option)}</option>)}
+      </select>
+      {selection.maturity !== 'production' && (
+        <p className="solar-flow-maturity" data-testid="solar-flow-maturity">{SOLAR_FLOW_MATURITY_NOTES[selection.maturity]}</p>
+      )}
+      {selection.available ? <ol className="solar-flow-steps">
         {items.map((item, index) => {
           const id = solarFlowStepId(item.name)
           const reason = item.enabled ? '' : solarRailReason(item.row.availability)
@@ -98,7 +120,16 @@ export default function SolarFlowRail({
             </li>
           )
         })}
-      </ol>
+      </ol> : (
+        <div className="solar-flow-unavailable" data-testid="solar-flow-unavailable">
+          <p id="solar-flow-unavailable-reason" className="solar-flow-reason">{selection.reason}</p>
+          {selection.missing.length > 0 && (
+            <ul className="solar-flow-missing" aria-label="Stages not in this catalog">
+              {selection.missing.map((label) => <li key={label}>{label}</li>)}
+            </ul>
+          )}
+        </div>
+      )}
       <p role="status" className="solar-flow-announce" data-testid="solar-flow-announce">{announcement}</p>
     </nav>
   )

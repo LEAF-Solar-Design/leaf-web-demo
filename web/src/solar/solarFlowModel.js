@@ -7,6 +7,110 @@
 import { solarView } from './solarView.js'
 
 export const MAX_FLOW_STEPS = 64
+export const MAX_CATALOG_ROWS = 4096
+export const DEFAULT_SOLAR_FLOW = 'rooftop'
+// Shipped table bounds: at most 8 flows and 8 stages per flow; unique flow ids.
+// Flow/stage ids match /^[a-z][a-z0-9-]{0,31}$/; labels have 1..64 characters
+// and stage labels are unique within each flow. Maturity is production, preview
+// or tutorial. Capability names match /^[a-z][a-z0-9-]{0,63}$/; at most 32 per
+// stage and no duplicate capability name within a flow.
+function flowStage(id, label, capabilities = []) {
+  return Object.freeze({ id, label, capabilities: Object.freeze(capabilities) })
+}
+
+function flowEntry(id, label, maturity, stages) {
+  return Object.freeze({ id, label, maturity, stages: stages === null ? null : Object.freeze(stages) })
+}
+
+export const SOLAR_FLOWS = Object.freeze([
+  flowEntry('rooftop', 'Rooftop', 'production', null),
+  flowEntry('ground-electrical', 'Ground Mount Electrical', 'production', [
+    flowStage('conversion', 'Tracker conversion'),
+    flowStage('stringing', 'Sizing and stringing'),
+    flowStage('equipment', 'Equipment'),
+    flowStage('feeders', 'Feeders and routes'),
+    flowStage('calculations', 'NEC calculations', [
+      'solar-nec-ampacity-correction', 'solar-nec-ac-voltage-drop',
+      'solar-nec-conduit-fill', 'solar-nec-feeder-ocpd',
+    ]),
+    flowStage('outputs', 'Schedules and exports'),
+  ]),
+  flowEntry('ground-physical', 'Ground Mount Physical', 'preview', [
+    flowStage('terrain', 'Terrain'), flowStage('layout', 'Tracker layout'),
+    flowStage('civil', 'Civil and piles'), flowStage('analysis', 'Shade and terrain analysis'),
+    flowStage('outputs', 'Exports'),
+  ]),
+  flowEntry('solaredge-import', 'SolarEdge PDF Import', 'production', [
+    flowStage('upload', 'Upload the SolarEdge PDF'), flowStage('inspect', 'Inspect counts and matching'),
+    flowStage('tracking', 'Accept tracking'), flowStage('outputs', 'Schedules and exports'),
+  ]),
+  flowEntry('pvcase-tutorial', 'PVcase Parity', 'tutorial', [
+    flowStage('conversion', 'Geometry conversion'), flowStage('solve', 'Solve on the shared model'),
+    flowStage('outputs', 'Exports'),
+  ]),
+])
+
+export const SOLAR_FLOW_UNAVAILABLE_REASONS = Object.freeze({
+  stages_missing: 'This flow needs Solar tools this catalog does not offer yet, so it has no steps to run.',
+  rooftop_steps_missing: 'This catalog offers no Rooftop steps for this drawing yet.',
+})
+export const SOLAR_FLOW_MATURITY_NOTES = Object.freeze({
+  preview: 'Preview flow: its results are not production Solar design yet.',
+  tutorial: 'Tutorial flow: it shows the supported conversion boundaries and never runs PVcase itself.',
+})
+
+export function solarFlowId(value, flows = SOLAR_FLOWS) {
+  return typeof value === 'string' && value.length <= 32 && flows.some((flow) => flow.id === value)
+    ? value : DEFAULT_SOLAR_FLOW
+}
+
+export function solarFlowSelect(families, flowId, flows = SOLAR_FLOWS) {
+  const id = solarFlowId(flowId, flows)
+  const flow = flows.find((entry) => entry.id === id)
+  let steps
+  let missing = []
+  let reasonKey = null
+  if (flow.stages === null) {
+    steps = solarFlowSteps(families)
+    if (steps.length === 0) reasonKey = 'rooftop_steps_missing'
+  } else {
+    const index = new Map()
+    let visited = 0
+    scan: for (const family of Array.isArray(families) ? families : []) {
+      const rows = Array.isArray(family?.capabilities) ? family.capabilities : []
+      for (const row of rows) {
+        if (visited >= MAX_CATALOG_ROWS) break scan
+        visited += 1
+        if (!row || typeof row !== 'object' || typeof row.name !== 'string' || row.name.length === 0) continue
+        if (!index.has(row.name) && solarView(row).state === 'valid') index.set(row.name, row)
+      }
+    }
+    const stageRows = flow.stages.map((stage) => stage.capabilities.filter((name) => index.has(name)).map((name) => index.get(name)))
+    missing = flow.stages.filter((stage, position) => stageRows[position].length === 0).map((stage) => stage.label)
+    if (missing.length > 0) {
+      reasonKey = 'stages_missing'
+      steps = []
+    } else steps = stageRows.flat().slice(0, MAX_FLOW_STEPS)
+  }
+  return {
+    flow: id, label: flow.label, maturity: flow.maturity, available: reasonKey === null,
+    steps, reasonKey, reason: reasonKey === null ? null : SOLAR_FLOW_UNAVAILABLE_REASONS[reasonKey], missing,
+  }
+}
+
+export function solarFlowOptions(families, flows = SOLAR_FLOWS) {
+  return flows.map(({ id, label, maturity }) => ({
+    id, label, maturity, available: solarFlowSelect(families, id, flows).available,
+  }))
+}
+
+export function solarFlowOptionLabel(option) {
+  const parts = []
+  if (option.maturity !== 'production') parts.push(option.maturity)
+  if (!option.available) parts.push('unavailable')
+  return parts.length === 0 ? option.label : `${option.label} (${parts.join(', ')})`
+}
+
 const MAX_REASON_CODES = 8
 const MAX_REASON_CODE_LENGTH = 64
 // Charset only; the length bound is the explicit check beside each use.

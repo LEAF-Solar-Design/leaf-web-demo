@@ -1,6 +1,11 @@
 /* Guided Solar step rail and step editor. Imported only by SolarFlowRail.jsx;
    the rules match nothing unless the rail is mounted. */
 .solar-flow-rail { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+.solar-flow-picker { font-size: 12px; font-weight: 600; color: var(--primary); }
+#solar-flow-select { font: inherit; padding: 4px; color: var(--primary); background: var(--accent-tint); border: 1px solid var(--muted); border-radius: 4px; }
+.solar-flow-maturity { margin: 0; font-size: 11px; color: var(--status-warning); }
+.solar-flow-unavailable { padding: 6px; background: var(--accent-tint); }
+.solar-flow-missing { margin: 4px 0 0; padding-left: 20px; font-size: 11px; color: var(--muted); }
 .solar-flow-steps { list-style: decimal; margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 4px; }
 .solar-flow-step { font-size: 12px; }
 .solar-flow-button {
