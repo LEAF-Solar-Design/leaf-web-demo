@@ -30,6 +30,7 @@ SETTINGS_FIELDS = {
     "use_l2_collectors", "panel_group_number", "string_number", "inverter_number",
     "mppt_letter",
 }
+HOMERUN_KINDS = ("start homerun", "end homerun")
 
 
 def digest(value):
@@ -551,6 +552,16 @@ def correct_graph(graph, params):
     return finish_mutation(before, result, "solar-correct-string")
 
 
+def homeruns_follow_topology(graph):
+    """True when every homerun from a string ends at that string's current inverter (its L1 in
+    L1/L2 mode). Catches a topology edit whose writer did not mark validity, the way
+    upstream_basis catches an unmarked solve input. One pass over strings and routes."""
+    strings = {string["id"]: string for string in graph["strings"]}
+    return all(route["to_ref"] == strings[route["from_ref"]]["inverter_ref"]
+               for route in graph["routes"]
+               if route["route_kind"] in HOMERUN_KINDS and route["from_ref"] in strings)
+
+
 def require_current_export(graph):
     """Export adapters must call this before labelling output current."""
     graph = validate_graph(graph)
@@ -558,7 +569,8 @@ def require_current_export(graph):
     if (any(e["validity"]["state"] != "valid" for e in entities(graph))
             or any(f["extra"].get("solve", {}).get("upstream_sha256", basis) != basis
                    for f in graph["frames"])
-            or any(coverage(graph).values())):
+            or any(coverage(graph).values())
+            or not homeruns_follow_topology(graph)):
         raise GraphValidationError("SOLAR_OUTPUT_NOT_CURRENT")
     return graph
 

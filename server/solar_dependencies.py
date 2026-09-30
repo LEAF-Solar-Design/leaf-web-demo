@@ -58,6 +58,12 @@ def dependency_index(graph: dict) -> dict[str, set[str]]:
             edge(panel_id, string["id"])
         if string["inverter_ref"] is not None:
             edge(string["id"], string["inverter_ref"])
+    for inverter in graph["inverters"]:
+        # An L1 feeds its L2 the way a string feeds its inverter: the L2, and every route and
+        # schedule naming it, depend on the L1. Strings already reach their L1 through
+        # inverter_ref above. A W1 inverter has no l2_ref and adds no edge.
+        if inverter.get("l2_ref") is not None:
+            edge(inverter["id"], inverter["l2_ref"])
     for route in graph["routes"]:
         edge(route["from_ref"], route["id"])
         edge(route["to_ref"], route["id"])
