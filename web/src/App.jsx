@@ -8,6 +8,7 @@ import useDrawingViewport from './site/useDrawingViewport.js'
 import { STUDIO_DRAWING_OCCLUDERS } from './site/drawingOccluders.js'
 import { DrawingObjectsProvider, useDrawingObjects } from './site/DrawingObjectsContext.jsx'
 import DrawingNavigationTools from './site/DrawingNavigationTools.jsx'
+import CadOverview from './site/CadOverview.jsx'
 import { buildDrawingObjectIndex } from './lib/drawingObjectIndex.js'
 import EngineObjectBridge from './cadedit/EngineObjectBridge.jsx'
 import { useLeavingGround, useStudioTransition } from './site/useStudioTransition.js'
@@ -1440,13 +1441,16 @@ export default function App() {
   // S3 Back and Up over App's viewer. Every navigation jump (cockpit Fit, the
   // ribbon Fit to bounds, the View cluster Fit, Show result, Up) pushes a
   // snapshot first; wheel, pan, zoom steps, selection and layer toggles do not.
-  const {
-    pushView: pushViewSnapshot, fit: fitWithHistory, back: viewBack, up: viewUp, announcement: viewAnnouncement,
-  } = useViewNavigation({
+  const navigationSourceRef = useRef(null)
+  const viewNavigation = useViewNavigation({
     viewerRef, history: viewHistoryRef.current, setHistorySize: setViewHistorySize,
     selectedHandle, selectedLayer: selection?.layer ?? null, setSelectedHandle,
     visibleLayers, setVisibleLayers, intake: drawingIntake,
+    navigationSource: navigationSourceRef,
   })
+  const {
+    pushView: pushViewSnapshot, fit: fitWithHistory, back: viewBack, up: viewUp, announcement: viewAnnouncement,
+  } = viewNavigation
   // An engine document opened, closed or swapped is a new drawing scope: the
   // CAD engine path sets activeIntake without resetDrawingSelection.
   useEffect(() => { clearViewHistory() }, [activeIntake?.documentId, clearViewHistory])
@@ -4346,6 +4350,7 @@ export default function App() {
               // target) come from the EngineSessionProvider wrapping this
               // workspace (W4d Slice A).
               notice={catalog?.cad_engine?.notice || ''}
+              viewerRef={viewerRef}
             />
           )}
           {/* W4g-7b-03c-d: mounted unconditionally on studioGround (the dock
@@ -4500,7 +4505,8 @@ export default function App() {
               return <>{legendEl}{readoutEl}</>
             })()}
             {/* W4b cockpit: view snaps on the drawing (studio only). */}
-            <DrawingNavigationTools />
+            <DrawingNavigationTools viewerRef={viewerRef} navigationSourceRef={navigationSourceRef} navigation={viewNavigation} />
+            {studioGround && groundShowsDrawing(activeSurface) && <CadOverview viewerRef={viewerRef} />}
             {studioGround && intake && groundShowsDrawing(activeSurface) && (
               <ViewCluster
                 viewerRef={viewerRef}
