@@ -887,7 +887,7 @@ describe('studio unobstructed drawing viewport', () => {
     assert.ok(framing.includes('viewer.frame('))
     assert.ok(framing.includes('viewer.setView('))
   })
-  it('names all eight occluders and excludes growing command chrome and the view cube', () => {
+  it('names the existing and navigation occluders and excludes growing command chrome and the view cube', () => {
     assert.match(appNoComments, /import \{ STUDIO_DRAWING_OCCLUDERS \} from '.\/site\/drawingOccluders.js'/)
     const start = occluderSource.indexOf('const STUDIO_DRAWING_OCCLUDERS = Object.freeze(')
     assert.ok(start >= 0)
@@ -895,9 +895,39 @@ describe('studio unobstructed drawing viewport', () => {
     for (const selector of ['header.top', '#drafting-ribbon', '.viewer-toolbar', '[data-testid="cockpit-view"]',
       '.properties-dock', '.bar.bar-command-line', 'footer.foot-bar', '.rail-stack']) assert.ok(list.includes(selector), selector)
     assert.ok(list.includes('reserve: 50'))
+    for (const entry of ["['[data-nav-find]', 'top']", "['[data-cad-overview]', 'nearest']", "['[data-nav-objects]', 'nearest']"]) {
+      assert.ok(list.includes(entry), entry)
+    }
     assert.ok(!list.includes("'.bar-dock'"))
     assert.ok(!list.includes('cockpit-prompt'))
     assert.ok(!list.includes('cockpit-cube'))
+  })
+})
+describe('Studio navigation shared wiring', () => {
+  it('shares a live navigation source ref and the full hook return object', () => {
+    assert.match(stripped, /const navigationSourceRef = useRef\(null\)/)
+    const hook = stripped.slice(stripped.indexOf('useViewNavigation({'))
+    assert.ok(hook.slice(0, hook.indexOf('});')).includes('navigationSource: navigationSourceRef'))
+    assert.ok(stripped.includes('const viewNavigation = useViewNavigation({'))
+    assert.match(stripped, /const\s*\{\s*pushView: pushViewSnapshot,\s*fit: fitWithHistory,\s*back: viewBack,\s*up: viewUp,\s*announcement: viewAnnouncement,?\s*\}\s*= viewNavigation/)
+  })
+
+  it('passes the shared viewer and navigation bindings to the navigation tools and editor', () => {
+    const tools = appNoComments.match(/<DrawingNavigationTools\s[^>]*\/>/)?.[0]
+    assert.ok(tools)
+    for (const prop of ['viewerRef={viewerRef}', 'navigationSourceRef={navigationSourceRef}', 'navigation={viewNavigation}']) {
+      assert.ok(tools.includes(prop), prop)
+    }
+    const editor = appNoComments.match(/<CadEditSurface\s[\s\S]*?\/>/)?.[0]
+    assert.ok(editor?.includes('viewerRef={viewerRef}'))
+  })
+
+  it('mounts the null overview directly after the tools only on the drawing ground', () => {
+    assert.ok(appNoComments.includes("import CadOverview from './site/CadOverview.jsx'"))
+    assert.match(appNoComments, new RegExp('<DrawingNavigationTools\\s[^>]*/>\\s*\\{studioGround && groundShowsDrawing\\(activeSurface\\) && <CadOverview viewerRef=\\{viewerRef\\} />\\}'))
+    assert.equal((appNoComments.match(/<CadOverview\b/g) || []).length, 1)
+    const overview = decomment(readFileSync(new URL('./site/CadOverview.jsx', import.meta.url), 'utf8'))
+    assert.match(overview, new RegExp('export default function CadOverview\\(\\{ viewerRef \\}\\)\\s*\\{\\s*return null\\s*\\}'))
   })
 })
 describe('S3 viewer Back and Up history wiring', () => {
