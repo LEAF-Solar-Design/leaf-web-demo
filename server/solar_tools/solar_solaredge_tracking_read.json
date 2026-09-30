@@ -1,0 +1,70 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-solaredge-tracking-read",
+  "builtin": "builtins/solar_solaredge_tracking_read.py",
+  "family": "imports",
+  "adapter": "local-graph-read",
+  "entitlement": "run_read",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_SOLAREDGE_TRACKING_READ_REQUEST",
+  "readiness": {
+    "kind": "facets",
+    "facets": []
+  },
+  "engine": "server-builtin",
+  "interaction": {
+    "mode": "form"
+  },
+  "record_store": "registry",
+  "record": {
+    "name": "solar-solaredge-tracking-read",
+    "version": "1.0.0",
+    "description": "Show the accepted SolarEdge tracking: which PDF inverter and string input each panel was labelled with, the PDF and report it came from, and whether those panels still match the drawing. Labels only; no electrical design.",
+    "kind": "script",
+    "family_id": "imports",
+    "engine_op": "solar_solaredge_tracking_read",
+    "entry": "builtins/solar_solaredge_tracking_read.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "section": {
+          "type": "string",
+          "enum": [
+            "strings",
+            "frames",
+            "unassigned"
+          ],
+          "default": "strings"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 200000,
+          "default": 0
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "returns": {
+      "type": "object"
+    },
+    "capabilities": [
+      "drawing.read"
+    ],
+    "allow_local_fallback": false
+  },
+  "ledger": [
+    "import-solaredge-pdf"
+  ],
+  "trusted_inputs": [],
+  "maturity": "preview",
+  "wave": 4,
+  "order": 31,
+  "scenario": "w4-solaredge"
+}
