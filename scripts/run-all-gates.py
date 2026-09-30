@@ -622,7 +622,7 @@ def build_suites() -> List[Suite]:
         # sf-solar-settings-invalidation): solar-settings and preset apply stale every homerun route and
         # schedule, so the export guard refuses them on a graph with no solve digest. Inputs are authored
         # in the file or are committed evidence, so the floor is the exact count on every runner.
-        # COUNTED: 20 tests + 10 material-field parametrizations + 1 refusal-entry parametrization = 31.
+        # COUNTED: 18 unparametrized tests + 11 material-field cases + 2 L2-flag refusal cases = 31.
         Suite("server-solar-settings-invalidation", "server tests/test_solar_settings_invalidation.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_settings_invalidation.py"), 31),
         # Guardrails as a W2 registry graph read (2026-09-29, sf-w2-presets-guardrails): the plugin's 14
