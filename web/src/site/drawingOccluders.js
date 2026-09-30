@@ -5,6 +5,7 @@ export const STUDIO_DRAWING_OCCLUDERS = Object.freeze([
   ['.bar.bar-command-line', 'bottom', Object.freeze({ reserve: 50 })],
   ['footer.foot-bar', 'bottom'], ['.studio-drawer-tabs', 'bottom'], ['.rail-stack', 'nearest'],
   ['[data-nav-find]', 'top'],
-  ['[data-cad-overview]', 'nearest'],
-  ['[data-nav-objects]', 'nearest'],
+  ['[data-cad-overview]', 'right'],
+  ['[data-nav-objects]:not([open])', 'top'],
+  ['[data-nav-objects][open]', 'left'],
 ])
