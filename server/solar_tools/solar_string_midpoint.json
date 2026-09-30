@@ -1,0 +1,45 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-string-midpoint",
+  "builtin": "builtins/solar_string_midpoint.py",
+  "family": "stringing",
+  "adapter": "local-graph-commit",
+  "entitlement": "run_write",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_STRING_MIDPOINT_REQUEST",
+  "readiness": {"kind": "facets", "facets": ["frames"]},
+  "engine": "server-builtin",
+  "interaction": {"mode": "form"},
+  "record_store": "registry",
+  "record": {
+    "name": "solar-string-midpoint",
+    "version": "1.0.0",
+    "description": "Add one string along the shortest panel path between two picked panels of one group, tagged MID at its middle panel.",
+    "kind": "script",
+    "family_id": "stringing",
+    "engine_op": "solar_string_midpoint",
+    "entry": "builtins/solar_string_midpoint.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {"type": "string", "maxLength": 128},
+        "operation": {"type": "string", "enum": ["add-midpoint-string"], "default": "add-midpoint-string"},
+        "expected_rev": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+        "start_panel_ref": {"type": "string", "minLength": 1, "maxLength": 128},
+        "end_panel_ref": {"type": "string", "minLength": 1, "maxLength": 128}
+      },
+      "required": ["operation", "expected_rev", "start_panel_ref", "end_panel_ref"],
+      "additionalProperties": false
+    },
+    "returns": {"type": "object"},
+    "capabilities": ["drawing.write"],
+    "allow_local_fallback": false
+  },
+  "ledger": ["string-midpoint-connection"],
+  "trusted_inputs": [],
+  "maturity": "preview",
+  "wave": 2,
+  "order": 73,
+  "scenario": "w2-rooftop"
+}
