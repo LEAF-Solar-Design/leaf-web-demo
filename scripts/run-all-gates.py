@@ -684,6 +684,11 @@ def build_suites() -> List[Suite]:
         # committed or authored in the file and nothing skips: the floor is the exact count, 22.
         Suite("server-solar-ground-conversion-evidence", "server tests/test_solar_ground_conversion_evidence.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_ground_conversion_evidence.py"), 44),
+        # sf-w5-physical-state: the Ground physical state serialized and reopened unchanged through the artifact
+        # store (C17 to C23 on the committed generate and terrain intakes and parity receipts). Hermetic and
+        # nothing skips: COUNTED floor is the exact count, 110.
+        Suite("server-solar-physical-state", "server tests/test_solar_physical_state.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_physical_state.py"), 110),
         # W5 dialog batch (2026-09-23, contract G30): server/solar_ground_dialogs.py (the shading
         # object form and PlaceTree, the project-area manager's Add Area and OK, the pile-template
         # manager's "+" and OK with the store file byte for byte). Every input is authored in the
