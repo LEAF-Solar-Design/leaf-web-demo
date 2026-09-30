@@ -48,11 +48,13 @@ from scripts.platform_staging_convergence import (
     ARTIFACT_FILE,
     DEPLOY_WORKFLOW,
     SERVICE_ORDER,
+    STALE_LISTING_READS,
     TF_REPOSITORY,
     ContractError,
     GitHubProvider,
     Provider,
     _artifact_rows,
+    _listing_top_id,
     _one_artifact,
     _positive,
     _sha40,
@@ -145,10 +147,9 @@ def _run_page(
     the live provider on 2026-09-03, that is exactly what happened:
     ERROR:PROVIDER_RUN_LIST_DRIFT, every time.
 
-    A single snapshot is the honest primitive for a REPORT. It is also what the
-    provider's own prewarm self-yield uses for the same decision. Staleness is
-    bounded by the read itself and costs at worst one skipped cycle, and the
-    schedule brings the lane straight back.
+    Callers selecting the newest successful run use _freshest_run_page:
+    GitHub can serve stale pages containing only older runs, so those callers
+    keep the greatest run id across three snapshots. Busy-run checks read once.
     """
     raw = provider.json(repository, f"/actions/workflows/{workflow}/runs?{query}")
     if not isinstance(raw, dict) or not isinstance(raw.get("workflow_runs"), list):
@@ -260,13 +261,34 @@ def yield_check(provider: Provider) -> dict[str, Any]:
     return {"status": "clear", "reason": None, "detail": None}
 
 
+def _freshest_run_page(
+    provider: Provider, repository: str, workflow: str, query: str
+) -> list[dict[str, Any]]:
+    chosen: list[dict[str, Any]] | None = None
+    chosen_id = 0
+    top_ids: list[int] = []
+    for _read in range(STALE_LISTING_READS):
+        rows = _run_page(provider, repository, workflow, query)
+        top_id = _listing_top_id(rows)
+        top_ids.append(top_id)
+        if chosen is None or top_id > chosen_id:
+            chosen, chosen_id = rows, top_id
+    if len(set(top_ids)) > 1:
+        print(
+            f"Stale run listing: {workflow} read top ids {top_ids}; chose {chosen_id}",
+            file=sys.stderr,
+        )
+    assert chosen is not None
+    return chosen
+
+
 def _newest_relay_release(provider: Provider) -> dict[str, Any]:
     """The newest successful relay run that actually published a receipt.
 
     A relay that stood down or went red published nothing, so it names no
     converged release and is skipped rather than treated as a failure.
     """
-    rows = _run_page(
+    rows = _freshest_run_page(
         provider,
         APP_REPOSITORY,
         "dispatch-staging-deploys.yml",
@@ -400,7 +422,7 @@ def _settled_service_state(provider: Provider) -> dict[str, dict[str, Any]]:
         query = f"event=workflow_dispatch&status=success&per_page={MAX_DEPLOY_RUN_SCAN}"
         if page > 1:
             query += f"&page={page}"
-        rows = _run_page(provider, TF_REPOSITORY, "deploy-leaf-platform-staging.yml", query)
+        rows = _freshest_run_page(provider, TF_REPOSITORY, "deploy-leaf-platform-staging.yml", query)
         for row in rows:
             if not isinstance(row, dict):
                 raise ContractError("PROVIDER_RUN_LIST_INVALID")

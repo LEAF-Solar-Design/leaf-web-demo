@@ -78,15 +78,24 @@ def canonical(value: object) -> bytes:
 class FakeProvider:
     def __init__(self) -> None:
         self.json_values: dict[tuple[str, str], object] = {}
+        self.json_sequences: dict[tuple[str, str], list[object]] = {}
         self.byte_values: dict[tuple[str, str], bytes] = {}
+        self.calls: list[tuple[str, str, str]] = []
 
     def json(self, repository: str, endpoint: str) -> object:
+        self.calls.append(("GET_JSON", repository, endpoint))
         key = (repository, endpoint)
+        if key in self.json_sequences:
+            values = self.json_sequences[key]
+            if not values:
+                raise subject.ContractError("PROVIDER_FIXTURE_MISSING")
+            return copy.deepcopy(values.pop(0))
         if key not in self.json_values:
             raise subject.ContractError("PROVIDER_FIXTURE_MISSING")
         return copy.deepcopy(self.json_values[key])
 
     def bytes(self, repository: str, endpoint: str) -> bytes:
+        self.calls.append(("GET_BYTES", repository, endpoint))
         key = (repository, endpoint)
         if key not in self.byte_values:
             raise subject.ContractError("PROVIDER_FIXTURE_MISSING")
@@ -346,6 +355,66 @@ class YieldTests(unittest.TestCase):
 
 
 class PlanTests(unittest.TestCase):
+    def test_relay_listing_stale_then_fresh_binds_newest_release(self) -> None:
+        provider = fixture()
+        endpoint = runs_endpoint(RELAY_WF, f"status=success&per_page={subject.MAX_RELAY_RUN_SCAN}")
+        old_run = RELAY_RUN - 100
+        old_source = "b" * 40
+        old_receipt = relay_receipt({s: digest(f"old-{s}") for s in subject.SERVICE_ORDER})
+        old_receipt.update(relay_run_id=old_run, release_source_revision=old_source)
+        old_receipt["candidate_supply_set"]["build_run_id"] = BUILD_RUN - 100
+        old_artifact = artifact_row(1900, f"staging-converged-{old_source}-attempt-1", old_run)
+        old_artifact["workflow_run"]["head_sha"] = old_source
+        provider.json_values[(APP, f"/actions/runs/{old_run}/artifacts?per_page=100")] = {
+            "total_count": 1, "artifacts": [old_artifact],
+        }
+        provider.byte_values[(APP, "/actions/artifacts/1900/zip")] = archive(
+            subject.RELAY_ARTIFACT_FILE, canonical(old_receipt)
+        )
+        stale = {"workflow_runs": [run_row(old_run, head_sha=old_source)]}
+        fresh = provider.json_values[(APP, endpoint)]
+        provider.json_sequences[(APP, endpoint)] = [stale, fresh, stale]
+
+        plan = subject.build_plan(provider)
+
+        self.assertEqual(plan["release"]["relay_run_id"], RELAY_RUN)
+        self.assertEqual(provider.calls.count(("GET_JSON", APP, endpoint)), 3)
+
+    def test_settled_listing_stale_then_fresh_keeps_fresh_service(self) -> None:
+        provider = fixture()
+        endpoint = runs_endpoint(
+            DEPLOY_WF,
+            f"event=workflow_dispatch&status=success&per_page={subject.MAX_DEPLOY_RUN_SCAN}",
+        )
+        old_run = SETTLED["broker"] - 100
+        stale = {"workflow_runs": [run_row(old_run, service="broker")]}
+        name = f"leaf-platform-staging-service-run-{old_run}-attempt-1"
+        provider.json_values[(TF, f"/actions/runs/{old_run}/artifacts?per_page=100")] = {
+            "total_count": 1, "artifacts": [artifact_row(1603, name, old_run)],
+        }
+        provider.byte_values[(TF, "/actions/artifacts/1603/zip")] = archive(
+            subject.ARTIFACT_FILE,
+            canonical(service_receipt("broker", old_run, digest("old-broker"), f"{ACCOUNT}/leaf-platform-broker:761")),
+        )
+        fresh = provider.json_values[(TF, endpoint)]
+        provider.json_sequences[(TF, endpoint)] = [stale, fresh, stale]
+
+        plan = subject.build_plan(provider)
+
+        self.assertEqual(plan["services"]["broker"]["observed_from_run_id"], SETTLED["broker"])
+        self.assertEqual(plan["services"]["broker"]["status"], "converged")
+        self.assertEqual(provider.calls.count(("GET_JSON", TF, endpoint)), 3)
+
+    def test_three_empty_relay_reads_fail_closed(self) -> None:
+        provider = fixture()
+        endpoint = runs_endpoint(RELAY_WF, f"status=success&per_page={subject.MAX_RELAY_RUN_SCAN}")
+        provider.json_sequences[(APP, endpoint)] = [{"workflow_runs": []}] * 3
+
+        with self.assertRaisesRegex(subject.ContractError, "^NO_CONVERGED_RELEASE$"):
+            subject.build_plan(provider)
+
+        self.assertEqual(provider.calls.count(("GET_JSON", APP, endpoint)), 3)
+
     def test_a_converged_fleet_plans_no_deploys(self) -> None:
         plan = subject.build_plan(fixture())
         self.assertEqual(plan["lagging"], [])
