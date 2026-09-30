@@ -115,22 +115,80 @@ def _lock_guard(root: Path):
                 fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
-def _remove_owned_lock(path: Path, content: bytes) -> None:
+def _remove_owned_lock(path: Path, content: bytes, fh) -> None:
+    """Remove matching content only on the inode whose OS lock we hold."""
     try:
-        if path.read_bytes() == content:
+        fh.seek(0)
+        if os.path.samestat(path.stat(), os.fstat(fh.fileno())) and fh.read() == content:
             path.unlink()
     except FileNotFoundError:
         pass
 
 
+def _open_lock_file(path: Path, create: bool = False):
+    if os.name == "nt":
+        # Deletion must remain possible while our byte lock is held.
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateFileW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                      wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD,
+                                      wintypes.HANDLE)
+        kernel.CreateFileW.restype = wintypes.HANDLE
+        handle = kernel.CreateFileW(str(path), 0xC0000000, 7, None,
+                                    1 if create else 3, 0x80, None)
+        if handle == wintypes.HANDLE(-1).value:
+            error = ctypes.get_last_error()
+            if error in (80, 183):
+                raise FileExistsError(str(path))
+            if error in (2, 3):
+                raise FileNotFoundError(str(path))
+            raise ctypes.WinError(error)
+        fd = msvcrt.open_osfhandle(handle, os.O_RDWR | os.O_BINARY)
+    else:
+        flags = os.O_RDWR | (os.O_CREAT | os.O_EXCL if create else 0)
+        fd = os.open(path, flags, 0o600)
+    return os.fdopen(fd, "r+b")
+
+
+def _try_owner_lock(fh) -> bool:
+    fh.seek(0)
+    if os.name == "nt":
+        import msvcrt
+        # Windows byte locks also prohibit I/O through other descriptors. Lock
+        # beyond the bounded metadata so readers can still inspect the owner.
+        fh.seek(_MAX_META_BYTES)
+        try:
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError:
+            return False
+        finally:
+            fh.seek(0)
+    else:
+        import fcntl
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+    return True
+
+
+def _lock_expired(owner: Optional[dict], stale_after: float) -> bool:
+    if owner is None:
+        return False
+    started = owner.get("start_time")
+    return (type(started) in (int, float) and math.isfinite(started)
+            and time.time() - started > stale_after)
+
+
 def _stale_lock(owner: Optional[dict], stale_after: float) -> bool:
     if owner is None:
         return False
-    pid, started = owner.get("pid"), owner.get("start_time")
+    pid = owner.get("pid")
     return (owner.get("host") == socket.gethostname()
             and type(pid) is int and 0 < pid <= 0xFFFFFFFF
-            and type(started) in (int, float) and math.isfinite(started)
-            and time.time() - started > stale_after and not _pid_alive(pid))
+            and _lock_expired(owner, stale_after) and not _pid_alive(pid))
 
 
 @contextmanager
@@ -148,26 +206,40 @@ def _publisher_lock(root: Path, timeout: float, stale_after: float):
         # A pre-existing fresh owner without a guard must also time out without
         # creating any files. Normal publishers already have the permanent guard.
         held_without_guard = (not (root / ".publisher.guard").exists() and path.exists()
-                              and not _stale_lock(_read_json(path), stale_after))
+                              and not _lock_expired(_read_json(path), stale_after))
         with (nullcontext(False) if held_without_guard else _lock_guard(root)) as guarded:
             if guarded:
                 old = _read_json(path)
-                if _stale_lock(old, stale_after):
-                    path.unlink()
-                    _LOG.warning("Taking over stale publisher lock: pid=%s host=%s start_time=%s",
-                                 old["pid"], old["host"], old["start_time"])
+                if _stale_lock(old, stale_after) or _lock_expired(old, stale_after):
+                    try:
+                        previous = _open_lock_file(path)
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        with previous:
+                            if _try_owner_lock(previous) and _lock_expired(
+                                    _read_json(path), stale_after):
+                                _remove_owned_lock(path, previous.read(), previous)
+                                _LOG.warning("Taking over stale publisher lock: pid=%s host=%s start_time=%s",
+                                             old.get("pid"), old.get("host"), old.get("start_time"))
                 try:
-                    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    fh = _open_lock_file(path, create=True)
                 except FileExistsError:
                     pass
                 else:
+                    owner_locked = False
                     try:
-                        with os.fdopen(fd, "wb") as fh:
-                            fh.write(content)
-                            fh.flush()
-                            os.fsync(fh.fileno())
+                        owner_locked = _try_owner_lock(fh)
+                        if not owner_locked:
+                            raise LedgerBusy("Could not lock newly created publisher file")
+                        fh.write(content)
+                        fh.flush()
+                        os.fsync(fh.fileno())
                     except BaseException:
-                        path.unlink()  # still guarded; no other owner can have acquired it
+                        # Only unlink if this descriptor owns the OS lock.
+                        if owner_locked:
+                            path.unlink()
+                        fh.close()
                         raise
                     acquired = True
         if acquired:
@@ -180,12 +252,15 @@ def _publisher_lock(root: Path, timeout: float, stale_after: float):
     try:
         yield
     finally:
-        while True:
-            with _lock_guard(root) as guarded:
-                if guarded:
-                    _remove_owned_lock(path, content)
-                    break
-            time.sleep(0.01)
+        try:
+            while True:
+                with _lock_guard(root) as guarded:
+                    if guarded:
+                        _remove_owned_lock(path, content, fh)
+                        break
+                time.sleep(0.01)
+        finally:
+            fh.close()  # releases the OS lock, including on process death
 
 # Weakest first: cost coverage is capped by the selected usage observation.
 _COVERAGE_RANK = {"unknown": 0, "partial": 1, "complete": 2}
@@ -383,7 +458,8 @@ def publish_period(store: CostLedgerStore, period: str, observations: Iterable[A
     physical_usage ({resource_id: {quantity, unit, coverage}}) is display metadata
     only: it lands in the publication metadata and never touches shares, amounts,
     coverage or revision digests. An empty map clears earlier physical usage metadata.
-    lock_timeout and stale_after are seconds; foreign-host locks are never reclaimed.
+    lock_timeout and stale_after are seconds. Expired locks from any host are
+    reclaimed only while holding their OS lock; live owners cannot be displaced.
     """
     period = _check_period(period)
     used = _source_list(sources, "sources")

@@ -5,6 +5,7 @@ import './CostTransparencyPanel.css'
 const TITLE = 'What Leaf costs to operate'
 const COPY = 'This page shows what Leaf actually costs to run and your share of it. It is not a bill and does not change your plan, quotas, or limits.'
 const dimensions = [['development', 'Development'], ['ci', 'CI'], ['fleet', 'Fleet'], ['unattributed', 'Unattributed']]
+const payerLabels = { tenant_plan: 'Your Claude plan', tenant_api_key: 'Your own API key', leaf: 'Leaf', mixed: 'Mixed payers', unknown: 'Payer unknown' }
 
 // Decimal strings never pass through binary floating point, including totals.
 function decimal(value) {
@@ -80,7 +81,11 @@ export default function CostTransparencyPanel({ mock = false }) {
             <dl className="cost-use">
               <dt>LLM turns</dt><dd>{quantity(own?.llm?.turns)}</dd>
               <dt>Tokens</dt><dd>Input: {quantity(own?.llm?.tokens?.input)} · Output: {quantity(own?.llm?.tokens?.output)} · Cache read: {quantity(own?.llm?.tokens?.cache_read)} · Cache write: {quantity(own?.llm?.tokens?.cache_write)}</dd>
-              <dt>LLM API-equivalent value</dt><dd>{money(own?.llm?.usd_est)} <span>{own?.llm?.payer === 'tenant_plan' ? 'Covered by your Claude plan' : own?.llm?.payer === 'tenant_api_key' ? 'Paid through your own API key' : 'Payer may vary or is unknown'}</span></dd>
+              <dt>LLM API-equivalent value</dt><dd>{money(own?.llm?.usd_est)} <span>{own?.llm?.payer === 'tenant_plan' ? 'Covered by your Claude plan' : own?.llm?.payer === 'tenant_api_key' ? 'Paid through your own API key' : 'Payer may vary or is unknown'}</span>
+                {Object.entries(own?.llm?.by_payer || {}).map(([payer, bucket]) => <div key={payer}>
+                  {payerLabels[payer] || payerLabels.unknown}: {quantity(bucket?.turns)} {bucket?.turns === 1 ? 'turn' : 'turns'} · {money(bucket?.usd_est)} API-equivalent value
+                </div>)}
+              </dd>
               <dt>CAD engine time and runs</dt><dd>{quantity(own?.cad?.engine_seconds)} seconds · {quantity(own?.cad?.runs)} runs</dd>
               <dt>Marathon runs</dt><dd>{quantity(own?.marathon?.runs)} <small>not added to totals</small></dd>
               <dt>Storage</dt><dd>Unavailable. Direct storage use is not published.</dd>
@@ -96,7 +101,11 @@ export default function CostTransparencyPanel({ mock = false }) {
                     <th scope="row">{row.display_name}<small>{row.status} · {row.coverage}</small>
                       {row.status === 'ESTIMATED' && <small>{row.unit === 'usd-by-environment' ? 'Split by environment tag and activity' : 'Estimated share, not metered'}</small>}
                     </th>
-                    <td>{quantity(row.total_usage)} {row.unit}</td>
+                    <td>{row.physical_usage ? <>
+                      <div>{quantity(row.physical_usage.quantity)} {row.physical_usage.unit}</div>
+                      <small>Physical use coverage: {row.physical_usage.coverage}</small>
+                      <small>Allocation basis: {quantity(row.total_usage)} {row.unit}</small>
+                    </> : <>{quantity(row.total_usage)} {row.unit}</>}</td>
                     <td>{money(row.gross_cost_usd)}</td>
                     <td>{money(row.credits_usd)}<small>covered by credits</small></td>
                     <td>{share(row.your_share)}</td>

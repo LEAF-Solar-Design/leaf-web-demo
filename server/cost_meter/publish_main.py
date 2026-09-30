@@ -298,6 +298,20 @@ def _publish_month(period, now, selected, observation_files, required, store, dr
         return 1
 
     try:
+        if not dry_run and store is not None and store.enabled and missing:
+            previous_id = publisher.latest_publication_id(store, period)
+            if previous_id:
+                cost_ids = {obs["resource_id"] for obs in observations if obs["kind"] == "cost"}
+                usage_ids = {obs["resource_id"] for obs in observations if obs["kind"] == "usage"}
+                carried_ids = {
+                    revision.resource_id for revision in store.read_publication(previous_id)
+                    if revision.resource_id in usage_ids - cost_ids
+                    and revision.resource_period.source_batch_ids
+                }
+                observations = [obs for obs in observations if obs["resource_id"] not in carried_ids]
+                for resource_id in sorted(carried_ids):
+                    log(f"publish-cost-ledger: {period} carry-forward {resource_id}: "
+                        "cost source missing; keeping previous cost revision")
         pairs = publisher.build_period(period, observations)
     except Exception as exc:  # noqa: BLE001 - merged sources can conflict
         log(f"publish-cost-ledger: publish failed: {type(exc).__name__}: {exc}")

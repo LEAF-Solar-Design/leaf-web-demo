@@ -292,6 +292,110 @@ def test_reconciliation_continues_after_required_source_failure(tmp_path):
     assert [summary["missing_sources"] for summary in summaries] == [["aws-cost-explorer"], []]
 
 
+@pytest.mark.parametrize("service,resource_id,usage_source", [
+    ("EC2", "aws:ec2", "pooled-aws"),
+    ("CodeBuild", "aws:codebuild", "internal-resources"),
+])
+@pytest.mark.parametrize("failure", ["raises", "invalid", "missing"])
+@pytest.mark.parametrize("initial_gross", ["12.34", "0"])
+def test_missing_cost_preserves_known_revision_despite_usage(
+        tmp_path, capsys, service, resource_id, usage_source, failure, initial_gross):
+    from cost_meter import internal, pooled, publish_main, publisher
+    from cost_meter.store import CostLedgerStore, ENV_DIR
+
+    period = "2026-08"
+    store = CostLedgerStore(tmp_path)
+    state = {"failed": False, "gross": initial_gross}
+
+    def cost(period, now):
+        if state["failed"]:
+            if failure == "invalid":
+                return [{"kind": "cost", "period": period, "resource_id": resource_id,
+                         "gross_cost_usd": "invalid"}]
+            if failure == "missing":
+                raise publish_main.SourceMissing("cost source unconfigured")
+            raise RuntimeError("Cost Explorer unavailable")
+        return aws_import.to_cost_observations(
+            period, [_page([_group(service, "Usage", state["gross"])])], now)
+
+    def usage(period, now):
+        if usage_source == "pooled-aws":
+            page = _page([{"Keys": [service, "Environment$staging"],
+                           "Metrics": {"UnblendedCost": {"Amount": "8", "Unit": "USD"}}}])
+            observations = pooled.pooled_usage_observations(period, [page], {})
+        else:
+            observations = internal.internal_usage_observations(period, {
+                "version": 1, "entries": [{
+                    "resource_id": resource_id, "share": {"leaf|ci": "1"},
+                    "basis": "Leaf CI builds.", "status": "ESTIMATED",
+                }],
+            })
+        # This resource has usage but has never had a cost batch.
+        observations.append({
+            "kind": "usage", "period": period, "resource_id": "aws:never-costed",
+            "unit": "share", "total_usage": "1", "usages": {"leaf|development": "1"},
+            "status": "ESTIMATED", "coverage": "complete",
+        })
+        return observations
+
+    collectors = {"aws-cost-explorer": cost, usage_source: usage}
+
+    def run(*extra):
+        out = io.StringIO()
+        code = publish_main.main(["--period", period, *extra], collectors=collectors,
+                                 environ={ENV_DIR: str(tmp_path)}, stdout=out, now=CLOSED)
+        assert code == 0
+        return json.loads(out.getvalue())
+
+    first = run()
+    previous = store.read_publication(first["publication_id"])
+    known = next(r for r in previous if r.resource_id == resource_id)
+    assert known.resource_period.source_batch_ids
+    assert known.resource_period.gross_cost_usd == Decimal(initial_gross)
+    first_manifest = tmp_path / "publications" / (first["publication_id"] + ".json")
+    first_bytes = first_manifest.read_bytes()
+
+    state["failed"] = True
+    dry = run("--dry-run")
+    assert set(dry) == {"period", "publication_id", "sources", "missing_sources",
+                        "physical_usage", "resources"}
+    assert dry["publication_id"] is None
+    assert dry["missing_sources"] == ["aws-cost-explorer"]
+    assert len(dry["resources"]) == 2
+    for row in dry["resources"]:
+        assert set(row) == {"resource_period", "shares"}
+        assert Decimal(row["resource_period"]["gross_cost_usd"]) == 0
+        assert row["resource_period"]["coverage"] == "unknown"
+    assert first_manifest.read_bytes() == first_bytes
+    assert store.read_publication(first["publication_id"]) == previous
+
+    failed = run()
+    rows = {r.resource_id: r for r in store.read_publication(failed["publication_id"])}
+    assert rows[resource_id] == known
+    assert rows["aws:never-costed"].resource_period.gross_cost_usd == 0
+    assert rows["aws:never-costed"].resource_period.coverage == "unknown"
+    assert not rows["aws:never-costed"].resource_period.source_batch_ids
+    info = publisher.publication_info(store, failed["publication_id"])
+    assert info["carried_forward"] == [resource_id]
+    assert info["missing_sources"] == ["aws-cost-explorer"]
+    assert f"carry-forward {resource_id}" in capsys.readouterr().err
+    failed_manifest = tmp_path / "publications" / (failed["publication_id"] + ".json")
+    failed_bytes = failed_manifest.read_bytes()
+
+    state.update(failed=False, gross="15.67")
+    recovered = run()
+    rows = {r.resource_id: r for r in store.read_publication(recovered["publication_id"])}
+    assert rows[resource_id].revision_id != known.revision_id
+    assert rows[resource_id].supersedes == known.revision_id
+    assert rows[resource_id].resource_period.gross_cost_usd == Decimal("15.67")
+    info = publisher.publication_info(store, recovered["publication_id"])
+    assert info["carried_forward"] == []
+    assert info["missing_sources"] == []
+    assert first_manifest.read_bytes() == first_bytes
+    assert failed_manifest.read_bytes() == failed_bytes
+    assert store.read_publication(first["publication_id"]) == previous
+
+
 def test_the_same_responses_give_the_same_batch_id():
     groups = [_group("AWS CodeBuild", "Usage", "1.00"), _group("AWS Lambda", "Usage", "2.00")]
     first = aws_import.to_cost_observations("2026-08", [_page(groups, request_id="a")], CLOSED)
