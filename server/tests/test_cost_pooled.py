@@ -96,7 +96,7 @@ def test_production_without_activity_goes_to_unattributed():
     obs = _one(pooled.pooled_usage_observations(PERIOD, [_page([_group(EC2, "production", "9.99")])], {}))
     assert obs["usages"] == {"leaf|unattributed": "9.99"}
     assert obs["total_usage"] == "9.99"
-    assert obs["coverage"] == "complete"
+    assert obs["coverage"] == "unknown"
 
 
 def test_untagged_goes_to_unattributed_with_partial_coverage():
@@ -402,3 +402,148 @@ def test_script_passes_period_to_postgres_broker_store(monkeypatch):
         stdout=out, now=datetime(2026, 9, 3, tzinfo=timezone.utc), agent_rows=[]) == 0
     assert periods == [PERIOD]
     assert json.loads(out.getvalue())["usages"] == {"tenant_pg|": "6"}
+
+
+def _activity_row(source, tenant="tenant_a", ts="2026-08-01T10:00:00Z"):
+    row = {"tenant_id": tenant, "ts": ts}
+    row.update({"kind": "turn"} if source == "agent" else {"status": "ok"})
+    return row
+
+
+@pytest.mark.parametrize("source", ["agent", "broker"])
+@pytest.mark.parametrize("gap", ["truncated", "malformed"])
+def test_partial_activity_preserves_weights_and_exact_shares(source, gap):
+    from cost_meter import direct_usage
+
+    rows = [_activity_row(source), _activity_row(source, "tenant_b")]
+    if gap == "truncated":
+        row_type = direct_usage.AgentRows if source == "agent" else direct_usage.BrokerRows
+        rows = row_type(rows, truncated=True)
+    else:
+        rows += [None, {"kind": "turn", "ts": "bad"},
+                 _activity_row(source, "leaf"), _activity_row(source, ts="2026-08-01bad")]
+    activity = pooled.tenant_activity_from_rows(
+        PERIOD, rows if source == "agent" else [], rows if source == "broker" else [])
+    evidence = activity.evidence[source + "-activity"]
+    assert evidence == {"status": "partial", "truncated": gap == "truncated",
+                        "dropped_rows": 4 if gap == "malformed" else 0}
+    assert activity == {"tenant_a": Decimal(1), "tenant_b": Decimal(1)}
+    assert activity.missing_sources == [source + "-activity:partial"]
+    obs = _one(pooled.pooled_usage_observations(
+        PERIOD, [_page([_group(EC2, "production", "1")])], activity))
+    assert obs["coverage"] == "partial"
+    _assert_exact(obs)
+    rp = ResourcePeriod(EC2_ID, PERIOD, obs["unit"], obs["total_usage"], "0", "0")
+    shares = compute_shares(rp, {tuple(k.split("|")): v for k, v in obs["usages"].items()}, ESTIMATED)
+    assert sum(s.usage_share for s in shares) == Decimal(1)
+
+
+def test_empty_activity_is_complete_and_absence_is_unavailable():
+    empty = pooled.tenant_activity_from_rows(PERIOD, [], [])
+    absent = pooled.tenant_activity_from_rows(PERIOD, None, None)
+    assert empty == absent == {}
+    assert empty.missing_sources == []
+    assert absent.missing_sources == ["agent-activity", "broker-ledger"]
+    assert all(e == {"status": "complete", "truncated": False, "dropped_rows": 0}
+               for e in empty.evidence.values())
+    assert all(e["status"] == "unavailable" for e in absent.evidence.values())
+    for activity in (empty, absent):
+        obs = _one(pooled.pooled_usage_observations(
+            PERIOD, [_page([_group(EC2, "production", "2")])], activity))
+        assert obs["coverage"] == "unknown"
+        _assert_exact(obs)
+    staging = [_page([_group(EC2, "staging", "2")])]
+    assert _one(pooled.pooled_usage_observations(PERIOD, staging, empty))["coverage"] == "complete"
+    assert _one(pooled.pooled_usage_observations(PERIOD, staging, absent))["coverage"] == "partial"
+
+
+def test_irrelevant_activity_rows_do_not_degrade_evidence():
+    activity = pooled.tenant_activity_from_rows(PERIOD, [
+        _activity_row("agent", ts="2026-07-01T10:00:00Z"),
+        {"kind": "session"},
+    ], [
+        _activity_row("broker", ts="2026-07-01T10:00:00Z"),
+        {"status": "quota_exceeded"}, {"status": "TENANT_DISABLED"},
+    ])
+    assert activity == {}
+    assert activity.missing_sources == []
+
+
+def test_broker_unusable_status_is_counted_without_losing_valid_rows():
+    activity = pooled.tenant_activity_from_rows(PERIOD, [], [
+        {**_activity_row("broker"), "status": []}, _activity_row("broker"),
+    ])
+    assert activity == {"tenant_a": Decimal(1)}
+    assert activity.evidence["broker-activity"] == {
+        "status": "partial", "truncated": False, "dropped_rows": 1,
+    }
+
+
+@pytest.mark.parametrize("source", ["agent", "broker"])
+@pytest.mark.parametrize("gap", ["truncated", "malformed", "unavailable"])
+def test_publish_records_activity_evidence(monkeypatch, source, gap):
+    from cost_meter import direct_usage
+
+    publish_main, _, _ = _publish_setup(monkeypatch, [_activity_row("agent")])
+    rows = [_activity_row(source)]
+    if gap == "truncated":
+        row_type = direct_usage.AgentRows if source == "agent" else direct_usage.BrokerRows
+        rows = row_type(rows, truncated=True)
+    elif gap == "malformed":
+        rows += [None]
+    else:
+        rows = None
+    monkeypatch.setattr(direct_usage, "load_" + source + "_rows", lambda **kwargs: rows)
+    expected = (("broker-ledger" if source == "broker" else "agent-activity")
+                if gap == "unavailable" else source + "-activity:partial")
+    collected = publish_main._collect_pooled(PERIOD, datetime(2026, 9, 3, tzinfo=timezone.utc))
+    assert collected.missing_sources == [expected]
+    # Fully tagged lines still degrade when the participant evidence is incomplete.
+    codebuild = _one(collected, "aws:codebuild")
+    assert codebuild["coverage"] == ("unknown" if source == "agent" and gap == "unavailable" else "partial")
+    result = _dry_publish(publish_main)
+    assert expected in result["missing_sources"]
+    for resource in result["resources"]:
+        assert sum(Decimal(s["usage_share"]) for s in resource["shares"]) == Decimal(1)
+
+
+@pytest.mark.parametrize("source", ["agent", "broker"])
+@pytest.mark.parametrize("gap", ["truncated", "malformed", "unavailable", "complete"])
+def test_script_reports_activity_evidence_and_exit_code(monkeypatch, capsys, source, gap):
+    from cost_meter import direct_usage
+
+    rows = [_activity_row(source)]
+    if gap == "truncated":
+        row_type = direct_usage.AgentRows if source == "agent" else direct_usage.BrokerRows
+        rows = row_type(rows, truncated=True)
+    elif gap == "malformed":
+        rows += [None, _activity_row(source, ts="bad")]
+    elif gap == "unavailable":
+        rows = None
+    else:
+        rows = []  # valid empty activity sources remain complete
+    calls = []
+
+    def load_rows(*, period):
+        calls.append(period)
+        return rows
+
+    monkeypatch.setattr(direct_usage, "load_" + source + "_rows", load_rows)
+    out = io.StringIO()
+    code = _load_script().main(
+        ["--period", PERIOD], client=FakeCostExplorer([_page([_group(EC2, "production", "3")])]),
+        stdout=out, now=datetime(2026, 9, 3, tzinfo=timezone.utc),
+        agent_rows=None if source == "agent" else [_activity_row("agent")],
+        broker_rows=None if source == "broker" else [_activity_row("broker")])
+    assert calls == [PERIOD]
+    assert code == (0 if gap == "complete" else 3)
+    obs = json.loads(out.getvalue())
+    assert obs["coverage"] == ("complete" if gap == "complete" else "partial")
+    _assert_exact(obs)
+    stderr = capsys.readouterr().err
+    if gap != "complete":
+        name = "broker-ledger" if source == "broker" and gap == "unavailable" else source + "-activity"
+        status = "unavailable" if gap == "unavailable" else "partial"
+        assert f"{name}:{status}" in stderr
+        assert f"truncated={gap == 'truncated'}" in stderr
+        assert f"dropped_rows={2 if gap == 'malformed' else 0}" in stderr

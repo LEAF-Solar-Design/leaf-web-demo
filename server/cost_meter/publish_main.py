@@ -128,21 +128,13 @@ def _collect_pooled(period: str, now: datetime) -> List[dict]:
 
     agent_rows = direct_usage.load_agent_rows(period=period)
     broker_rows = direct_usage.load_broker_rows(period=period)
-    missing = []
-    if agent_rows is None:
-        missing.append("agent-activity")
-    if broker_rows is None:
-        missing.append("broker-ledger")
     activity = pooled.tenant_activity_from_rows(period, agent_rows, broker_rows)
     responses = pooled.fetch_environment_split(
         boto3.client("ce", region_name=CE_REGION), period,
         today=now.astimezone(timezone.utc).date())
     observations = pooled.pooled_usage_observations(
         period, responses, activity, exclude_resource_ids=pooled.DIRECT_COLLECTOR_RESOURCE_IDS)
-    if missing:
-        for observation in observations:
-            observation["coverage"] = "partial"
-    return _CollectedObservations(observations, missing)
+    return _CollectedObservations(observations, activity.missing_sources)
 
 
 DEFAULT_COLLECTORS: Dict[str, Collector] = {
