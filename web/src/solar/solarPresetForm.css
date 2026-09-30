@@ -1,0 +1,37 @@
+.solar-preset-form .solar-preset-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 6px;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.solar-preset-form .solar-preset-field-message,
+.solar-preset-form [data-testid="solar-preset-unfit"] {
+  color: var(--status-warning);
+}
+
+.solar-preset-form code {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.solar-preset-form .solar-preset-note {
+  font-size: 0.85em;
+  color: var(--muted);
+}
+
+.solar-preset-form input[aria-invalid="true"] {
+  border-color: var(--status-warning);
+}
+
+.solar-preset-form input:focus-visible,
+.solar-preset-form select:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.solar-preset-form fieldset {
+  background: var(--accent-tint);
+  min-width: 0;
+}
