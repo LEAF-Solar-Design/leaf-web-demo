@@ -389,6 +389,13 @@ def _get(as_tenant=None, **params):
     return _client().get("/api/cost", params={"period": PERIOD, **params}, headers=headers)
 
 
+def _get_history(from_period, to_period, as_tenant=None, **params):
+    headers = {"X-Tenant-Id": as_tenant} if as_tenant else {}
+    return _client().get("/api/cost/history",
+                         params={"from": from_period, "to": to_period, **params},
+                         headers=headers)
+
+
 def _rows(body):
     return {row["resource_id"]: row for row in body["resources"]}
 
@@ -721,6 +728,92 @@ def test_a_malformed_period_is_refused(published):
                          headers={"X-Tenant-Id": A}).status_code == 400
     other_month = _client().get("/api/cost", params={"period": "2026-08"}, headers={"X-Tenant-Id": A})
     assert other_month.status_code == 200 and other_month.json()["resources"] == []
+
+
+def test_history_uses_each_months_latest_publication_once_and_keeps_shares_separate(ledger_dir):
+    store = CostLedgerStore(ledger_dir)
+    july = "2026-07"
+    august = "2026-08"
+    first = publisher.publish_period(store, july, [
+        _cost("aps:engine", "10.00", credits="1.00", period=july),
+        _usage("aps:engine", "2", {f"{A}|": "1", f"{B}|": "1"}, period=july),
+    ], "initial")
+    corrected = publisher.publish_period(store, july, [
+        _cost("aps:engine", "20.00", credits="2.00", period=july),
+        _usage("aps:engine", "2", {f"{A}|": "1", f"{B}|": "1"}, period=july),
+    ], "correction")
+    august_pub = publisher.publish_period(store, august, [
+        _cost("aps:engine", "30.00", credits="3.00", period=august),
+        _usage("aps:engine", "3", {f"{A}|": "1", f"{B}|": "2"}, period=august),
+    ], "august")
+    assert first != corrected
+
+    response = _get_history(july, august, A, tenant=B)
+    assert response.status_code == 200
+    assert B not in response.text
+    body = response.json()
+    assert [month["publication_id"] for month in body["months"]] == [corrected, august_pub]
+    assert [month["your_implied_cost_usd"] for month in body["months"]] == ["10.000000", "10.000000"]
+    assert body["totals"] == {"gross_cost_usd": "50.00", "credits_usd": "5.00",
+                              "your_implied_cost_usd": "20.000000"}
+    resource, = body["resources"]
+    assert resource == {
+        "resource_id": "aps:engine", "display_name": "APS engine",
+        "gross_cost_usd": "50.00", "credits_usd": "5.00",
+        "your_implied_cost_usd": "20.000000",
+        "monthly_shares": [
+            {"period": july, "your_share": "0.500000000000"},
+            {"period": august, "your_share": "0.333333333333"},
+        ],
+    }
+    assert first not in response.text
+
+
+def test_history_lists_unpublished_and_unreadable_months_without_contribution(ledger_dir):
+    store = CostLedgerStore(ledger_dir)
+    unreadable_period = "2026-09"
+    publication_id = publisher.publish_period(store, unreadable_period, [
+        _cost(EFS, "99.00", period=unreadable_period),
+    ], "will be unreadable")
+    (ledger_dir / publisher.PUBLICATIONS_DIR / f"{publication_id}.json").write_text("{", encoding="utf-8")
+
+    response = _get_history("2026-08", unreadable_period, A)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["months"] == [
+        {"period": "2026-08", "publication_id": None, "status": "unpublished",
+         "provisional": False, "your_implied_cost_usd": "0.000000"},
+        {"period": unreadable_period, "publication_id": publication_id, "status": "unreadable",
+         "provisional": False, "your_implied_cost_usd": "0.000000"},
+    ]
+    assert body["resources"] == []
+    assert body["totals"] == {"gross_cost_usd": "0", "credits_usd": "0",
+                              "your_implied_cost_usd": "0.000000"}
+    assert body["degraded_mode"] is True
+
+
+@pytest.mark.parametrize("params", [
+    {}, {"from": "2026-1", "to": "2026-02"},
+    {"from": "2026-03", "to": "2026-02"},
+    {"from": "2024-01", "to": "2026-01"},
+])
+def test_history_rejects_missing_bad_reversed_or_overlong_ranges(ledger_dir, params):
+    response = _client().get("/api/cost/history", params=params, headers={"X-Tenant-Id": A})
+    assert response.status_code == 400
+
+
+def test_history_response_has_no_floats_and_ignores_tenant_query(published):
+    def refuse(text):
+        raise AssertionError(f"float in /api/cost/history JSON: {text}")
+
+    response = _get_history(PERIOD, PERIOD, A, tenant=B, tenant_id=B)
+    assert response.status_code == 200
+    assert B not in response.text
+    body = json.loads(response.text, parse_float=refuse)
+    assert body["months"][0]["your_implied_cost_usd"] == "40.000000"
+    assert all(isinstance(value, str) for value in body["totals"].values())
+    assert all(isinstance(entry["your_share"], str)
+               for row in body["resources"] for entry in row["monthly_shares"])
 
 
 # --------------------------------------------------------------------------- #

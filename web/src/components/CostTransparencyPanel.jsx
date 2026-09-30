@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { getCost } from '../api.js'
+import { authHeaders, config, getCost } from '../api.js'
 import './CostTransparencyPanel.css'
 
 const TITLE = 'What Leaf costs to operate'
@@ -26,9 +26,70 @@ const money = (value) => decimal(value) ? `$${fixed(value, 6).replace(/(\.\d{2}\
 const share = (value) => decimal(value) ? `${fixed(value, 6)} (${fixed(value, 4, 2)}%)` : 'Unavailable'
 const quantity = (value) => typeof value === 'number' || decimal(value) ? String(value) : 'Unavailable'
 
+function shiftMonth(period, delta) {
+  const [year, month] = period.split('-').map(Number)
+  const date = new Date(Date.UTC(year, month - 1 + delta, 1))
+  return date.toISOString().slice(0, 7)
+}
+
+async function getCostHistory(from, to) {
+  try {
+    const response = await fetch(`${config.apiBase}/api/cost/history?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`, {
+      headers: { 'X-Tenant-Id': config.tenant, ...authHeaders() },
+    })
+    if (!response.ok) return null
+    return await response.json()
+  } catch {
+    return null
+  }
+}
+
+function HistoryView({ data, loading, from, to, currentMonth, onFrom, onTo, onRetry }) {
+  if (loading) return <p role="status">Loading cost history...</p>
+  if (!data) return <>
+    <p role="status">Cost history is unavailable.</p>
+    <button type="button" className="chip-neutral" onClick={onRetry}>Retry history</button>
+  </>
+  const earliestFrom = shiftMonth(to, -23)
+  const latestAllowedTo = shiftMonth(from, 23)
+  const latestTo = latestAllowedTo < currentMonth ? latestAllowedTo : currentMonth
+  return <>
+    <div>
+      <label>From month <input type="month" value={from} min={earliestFrom} max={to} onChange={(event) => onFrom(event.target.value)} /></label>
+      <label>To month <input type="month" value={to} min={from} max={latestTo} onChange={(event) => onTo(event.target.value)} /></label>
+    </div>
+    <h3>Months</h3>
+    <ul aria-label="Cost history months">{(data.months || []).map((month) => <li key={month.period}>
+      {month.period}: {month.status}. Your implied amount: {money(month.your_implied_cost_usd)}
+      {month.provisional && ' (provisional)'}
+    </li>)}</ul>
+    <h3>Cumulative resource costs</h3>
+    <div className="cost-table-scroll" role="region" aria-label="Cumulative resource costs" tabIndex={0}>
+      <table>
+        <caption>Cumulative resource costs and your implied amounts (USD)</caption>
+        <thead><tr><th scope="col">Resource</th><th scope="col">Gross cost</th><th scope="col">Credits</th><th scope="col">Your implied amount</th><th scope="col">Monthly shares</th></tr></thead>
+        <tbody>{(data.resources || []).map((row) => <tr key={row.resource_id}>
+          <th scope="row">{row.display_name}</th>
+          <td>{money(row.gross_cost_usd)}</td>
+          <td>{money(row.credits_usd)}</td>
+          <td>{money(row.your_implied_cost_usd)}</td>
+          <td>{(row.monthly_shares || []).map((entry) => <div key={entry.period}>{entry.period}: {share(entry.your_share)}</div>)}</td>
+        </tr>)}</tbody>
+        <tfoot><tr><th scope="row">Cumulative totals</th><td>{money(data.totals?.gross_cost_usd)}</td><td>{money(data.totals?.credits_usd)}</td><td>{money(data.totals?.your_implied_cost_usd)}</td><td>Not applicable</td></tr></tfoot>
+      </table>
+    </div>
+  </>
+}
+
 export default function CostTransparencyPanel({ mock = false }) {
   const currentMonth = new Date().toISOString().slice(0, 7)
   const [period, setPeriod] = useState(currentMonth)
+  const [view, setView] = useState('monthly')
+  const [historyFrom, setHistoryFrom] = useState(shiftMonth(currentMonth, -2))
+  const [historyTo, setHistoryTo] = useState(currentMonth)
+  const [history, setHistory] = useState(null)
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const [historyRetry, setHistoryRetry] = useState(0)
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(false)
   const [open, setOpen] = useState(false)
@@ -46,6 +107,17 @@ export default function CostTransparencyPanel({ mock = false }) {
     }).finally(() => { if (active) setLoading(false) })
     return () => { active = false }
   }, [mock, period, retry])
+
+  useEffect(() => {
+    let active = true
+    if (mock || view !== 'history') return undefined
+    setHistoryLoading(true)
+    setHistory(null)
+    getCostHistory(historyFrom, historyTo).then((result) => { if (active) setHistory(result) }).finally(() => {
+      if (active) setHistoryLoading(false)
+    })
+    return () => { active = false }
+  }, [mock, view, historyFrom, historyTo, historyRetry])
 
   useEffect(() => {
     if (open) closeButton.current?.focus()
@@ -66,6 +138,15 @@ export default function CostTransparencyPanel({ mock = false }) {
           <button type="button" ref={closeButton} className="chip-neutral cost-close" onClick={close}>Close cost panel</button>
           <h2>{TITLE}</h2>
           <p>{COPY}</p>
+          <div role="group" aria-label="Cost view">
+            <button type="button" className="chip-neutral" aria-pressed={view === 'monthly'} onClick={() => setView('monthly')}>Monthly</button>
+            <button type="button" className="chip-neutral" aria-pressed={view === 'history'} onClick={() => setView('history')}>History</button>
+          </div>
+          {view === 'history' ? <HistoryView data={history} loading={historyLoading}
+            from={historyFrom} to={historyTo} currentMonth={currentMonth}
+            onFrom={(value) => { if (/^\d{4}-(0[1-9]|1[0-2])$/.test(value) && value >= shiftMonth(historyTo, -23) && value <= historyTo) setHistoryFrom(value) }}
+            onTo={(value) => { if (/^\d{4}-(0[1-9]|1[0-2])$/.test(value) && value >= historyFrom && value <= shiftMonth(historyFrom, 23) && value <= currentMonth) setHistoryTo(value) }}
+            onRetry={() => setHistoryRetry((value) => value + 1)} /> : <>
           <label>Month <input type="month" value={period} max={currentMonth} onChange={(event) => {
             const value = event.target.value
             if (/^\d{4}-(0[1-9]|1[0-2])$/.test(value) && value <= currentMonth) setPeriod(value)
@@ -118,6 +199,7 @@ export default function CostTransparencyPanel({ mock = false }) {
               </div>
               <p className="cost-footnote">Missing sources: {data.missing_sources?.length ? data.missing_sources.join(', ') : 'None reported'}. Published: {data.published_at || 'Unavailable'}.</p>
             </>}
+          </>}
           </>}
         </section>
       )}
