@@ -210,7 +210,7 @@ prose comments, and produced 4 violations; the comments were rewritten. Both
 | The surface is not even *in* a flag-off build | `cadedit/bundleFence.test.js` — two real vite builds, markers present at `VITE_CAD_EDIT=1`, absent at `=0`, with the same positive control the lifecycle fence uses |
 | No engine worker is spawned unless a document is opened | `cadEditSurface.test.jsx`, "never spawns the engine worker at mount" |
 | No worker is instantiated with `cad_edit` off | `engineBoundary.test.js` (pre-existing) |
-| No server route to refuse | `server/tests/test_cad_fence.py` — `cad_edit` has no server-side route on this revision, by design |
+| No server route to refuse | `harness/tests/cad_edit_worker.spec.ts` — `cad_edit` has no server-side route on this revision, by design |
 
 **Measured limitation of the build fence.** Vite's worker plugin emits the
 worker chunk during *transform*, before tree-shaking, so a flag-off build

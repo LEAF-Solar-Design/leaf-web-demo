@@ -188,22 +188,7 @@ _TASK_LOCAL_STATE: dict[str, _State] = {
             "existed. The app manifest names it."
         ),
     ),
-    # LEAF_CAD_UPLOAD_DIR: REMOVED from this ledger by card F-2 (2026-08-31),
-    # which is this entry's own flip-time requirement being met, not an
-    # evasion. The old prose ("no deployed environment enables
-    # LEAF_CAD_UPLOAD_ENABLED yet") had gone stale — PR #774 mounted the
-    # route and the flag is live on the deployed task definitions — and the
-    # image-local default was 500ing every accepted upload on staging
-    # (error_id 1d0930ab8e96381c). cad_upload_dir() now resolves
-    # WRITABLE-FIRST: explicit LEAF_CAD_UPLOAD_DIR, else a sibling of
-    # LEAF_UPLOADS_DIR (the durable volume this ledger already tracks via its
-    # own entry below), else the local-dev tree path. That branching is
-    # invisible to this file's AST scanner (no single environ.get default),
-    # so the entry is removed per the stale-assertion instruction; the
-    # deployed-shape invariant is TESTED instead in
-    # tests/test_cad_upload_disposition.py::test_dir_resolution_is_writable_first
-    # (deployed envs always set LEAF_UPLOADS_DIR, so the store lands on the
-    # durable volume there, never in the image).
+    # The CAD upload store and its dir variable were retired with the endpoint on 2026-09-30.
     "LEAF_GUEST_STORE_DIR": _State(
         container_default="/app/server/guest_drawings",
         modules=("server/write_loop.py",),
