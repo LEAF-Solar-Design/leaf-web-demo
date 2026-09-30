@@ -3028,7 +3028,7 @@ def build_suites() -> List[Suite]:
         Suite("server-version-source-ref", "server tests/test_version_source_ref.py", "pytest", SERVER,
               _py_pytest("tests/test_version_source_ref.py"), 22),
         Suite("server-write-path-telemetry", "server tests/test_write_path_telemetry.py", "pytest", SERVER,
-              _py_pytest("tests/test_write_path_telemetry.py"), 14),
+              _py_pytest("tests/test_write_path_telemetry.py"), 9),
         Suite("web-link-service-flow", "web managed link service OAuth flow", "script", WEB,
               [_npx(), "--no-install", "playwright", "test", "--config", "playwright.local.config.mjs",
                "e2e/local/link-service-flow.spec.mjs", "e2e/local/trust-state.spec.mjs", "--workers=1"], None),
