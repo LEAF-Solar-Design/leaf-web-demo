@@ -34,8 +34,13 @@ def test_shard_block_present_and_fail_closed():
 
 
 def test_all_mode_lines_unchanged():
+    merge_base = subprocess.run(
+        ["git", "merge-base", "HEAD", "origin/main"], cwd=ROOT,
+        capture_output=True, text=True,
+    )
+    base = merge_base.stdout.strip() if merge_base.returncode == 0 else "HEAD"
     original = subprocess.run(
-        ["git", "show", "HEAD:.codebuild/ci.sh"], cwd=ROOT,
+        ["git", "show", f"{base}:.codebuild/ci.sh"], cwd=ROOT,
         check=True, capture_output=True, text=True,
     ).stdout.splitlines()
     remaining = iter(ci_script().splitlines())
@@ -48,7 +53,7 @@ def test_all_mode_lines_unchanged():
 def test_gate_call_gets_shard_flags_only_when_unfiltered():
     script = ci_script()
     guard = 'if [[ "${CI_SHARD_MODE:-all}" == shard && ${#only_args[@]} == 0 ]]; then\n'
-    flags = '  only_args+=("--shard-"count "$CI_SHARD_TOTAL_N" "--shard-"index "$CI_SHARD_INDEX_N")\n'
+    flags = '  only_args+=(--shard-count "$CI_SHARD_TOTAL_N" --shard-index "$CI_SHARD_INDEX_N")\n'
     assert guard + flags + "fi\n" in script
     call = next(line for line in script.splitlines()
                 if line.startswith("python scripts/run-all-gates.py "))

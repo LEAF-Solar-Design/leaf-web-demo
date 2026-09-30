@@ -579,7 +579,7 @@ if [[ "$tracing_helpers_ready" != 1 || "$reporters_ready" != 1 ]]; then
 fi
 if [[ "${CI_SHARD_MODE:-all}" == all || ${#only_args[@]} == 0 || "$CI_SHARD_INDEX_N" == 0 ]]; then
 if [[ "${CI_SHARD_MODE:-all}" == shard && ${#only_args[@]} == 0 ]]; then
-  only_args+=("--shard-"count "$CI_SHARD_TOTAL_N" "--shard-"index "$CI_SHARD_INDEX_N")
+  only_args+=(--shard-count "$CI_SHARD_TOTAL_N" --shard-index "$CI_SHARD_INDEX_N")
 fi
 gate_status=0
 unset PYTHONSAFEPATH
