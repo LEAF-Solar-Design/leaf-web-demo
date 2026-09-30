@@ -70,9 +70,14 @@ COPY server/glug_adoption_manifest.json /app/glug/glug_adoption_manifest.json
 
 # Compile TS -> /app/dist (dist/scripts/serve.js + dist/src/**), then drop the
 # dev toolchain (typescript/vitest/@types) — the runtime keeps only the SDK dep.
+# The runtime runs node only. npm and npx are build tools. Removing them keeps
+# npm's bundled dependencies out of the shipped image. brace-expansion
+# CVE-2026-102276/102278 failed cve-harvest on 2026-09-30. Nothing is allowlisted.
 RUN npx tsc -p tsconfig.build.json \
   && npm prune --omit=dev \
-  && chmod 0555 /app/scripts/start-harness.sh
+  && chmod 0555 /app/scripts/start-harness.sh \
+  && rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
+  && test ! -e /usr/local/lib/node_modules/npm && test ! -e /usr/local/bin/npm && test ! -e /usr/local/bin/npx
 
 # F11: authored tenant repositories and grant metadata are writable only through
 # the dedicated non-root harness identity.
