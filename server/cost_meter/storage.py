@@ -245,13 +245,19 @@ def roots_from_env(env: Optional[Mapping[str, str]] = None) -> Dict[str, Optiona
 
 
 def snapshot(roots: Mapping[str, Optional[str]], now: datetime, *,
-             max_entries: int = MAX_ENTRIES_PER_ROOT) -> dict:
+             max_entries: int = MAX_ENTRIES_PER_ROOT,
+             not_configured: Iterable[str] = ()) -> dict:
     """Bytes per tenant across the configured roots at `now`. JSON-able, no floats."""
     if not isinstance(roots, Mapping):
         raise TypeError("roots must map a root kind to a path or None")
     unknown = set(roots) - set(ROOT_ENVS)
     if unknown:
         raise ValueError(f"unknown root kind(s): {sorted(unknown)}")
+    not_configured = frozenset(not_configured)
+    if not_configured - set(ROOT_ENVS):
+        raise ValueError("unknown not_configured root kind")
+    if any(roots.get(kind) for kind in not_configured):
+        raise ValueError("not_configured roots must be unset")
     if isinstance(max_entries, bool) or not isinstance(max_entries, int) or max_entries < 1:
         raise ValueError("max_entries must be a positive int")
     taken_at = format_timestamp(now)
@@ -269,7 +275,11 @@ def snapshot(roots: Mapping[str, Optional[str]], now: datetime, *,
     skipped_total = 0
     for kind in ROOT_ENVS:
         if kind not in real:
-            report[kind] = {"status": "unset"}
+            if kind in not_configured:
+                report[kind] = {"status": "not_configured", "reason": "unset in this deployment"}
+            else:
+                report[kind] = {"status": "unset"}
+                complete = False
             continue
         root = real[kind]
         canonical_root = os.path.normcase(root)
@@ -314,7 +324,8 @@ def snapshot(roots: Mapping[str, Optional[str]], now: datetime, *,
         "schema": SNAPSHOT_SCHEMA,
         "taken_at": taken_at,
         "bytes": {key: str(totals[key]) for key in sorted(totals)},
-        "total_bytes": str(sum(totals.values())),
+        "total_bytes": str(sum(totals.values())) if complete else None,
+        "measured_total_bytes": str(sum(totals.values())),
         "complete": complete,
         "skipped_entries": skipped_total,
         "roots": report,
@@ -353,6 +364,18 @@ def _parse_line(line: Any) -> Tuple[datetime, Dict[str, int], bool]:
         if count < 0:
             raise ValueError("byte counts must be >= 0")
         out[key] = count
+    roots = body.get("roots")
+    if roots is not None:
+        if not isinstance(roots, Mapping):
+            raise ValueError("roots must be an object")
+        measured = any(isinstance(root, Mapping) and root.get("status") in ("measured", "truncated")
+                       for root in roots.values())
+    else:
+        # Older observation inputs omit root reports; byte counts are evidence
+        # of a measurement, but an empty object alone cannot prove a zero.
+        measured = bool(out)
+    if not measured:
+        raise ValueError("snapshot has no measured roots")
     return taken_at, out, body.get("complete") is not False
 
 

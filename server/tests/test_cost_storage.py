@@ -20,7 +20,7 @@ REPO_DIR = SERVER_DIR.parent
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from cost_meter import storage  # noqa: E402
+from cost_meter import collect_storage_main, storage  # noqa: E402
 from cost_meter.ledger import ESTIMATED, ResourcePeriod, compute_shares  # noqa: E402
 
 UTC = timezone.utc
@@ -126,7 +126,8 @@ def test_snapshot_skips_links_and_never_follows_them_out_of_the_root(tmp_path):
     _link_dir(store / "tenants" / "t1", outside)          # a whole tenant dir that points out
     _link_dir(store / "tenants" / "t2" / "drawings" / "escape", outside)
 
-    snap = storage.snapshot({"uploads": str(uploads), "drawings": str(store)}, _t(9, 1))
+    snap = storage.snapshot({"uploads": str(uploads), "drawings": str(store)}, _t(9, 1),
+                            not_configured=("tenant_git", "marathon_runs"))
 
     assert snap["bytes"] == {"t1|": "50", "t2|": "70"}
     assert snap["roots"]["uploads"]["skipped_links"] == (2 if file_linked else 1)
@@ -148,7 +149,8 @@ def test_snapshot_caps_entries_per_root_and_reports_truncation(tmp_path):
     assert snap["bytes"] == {"t1|": "3"}
     assert snap["complete"] is False
 
-    full = storage.snapshot({"uploads": str(uploads)}, _t(9, 1), max_entries=5)
+    full = storage.snapshot({"uploads": str(uploads)}, _t(9, 1), max_entries=5,
+                            not_configured=("drawings", "tenant_git", "marathon_runs"))
     assert full["roots"]["uploads"]["status"] == "measured"
     assert full["complete"] is True
 
@@ -172,7 +174,8 @@ def test_snapshot_reports_unset_and_missing_roots(tmp_path):
     assert snap["roots"]["drawings"] == {"status": "missing"}
     assert snap["roots"]["tenant_git"] == {"status": "unset"}
     assert snap["bytes"] == {}
-    assert snap["total_bytes"] == "0"
+    assert snap["total_bytes"] is None
+    assert snap["measured_total_bytes"] == "0"
     assert snap["complete"] is False
 
 
@@ -196,12 +199,14 @@ def test_snapshot_all_roots_unset_is_incomplete(monkeypatch):
 
     assert snap["complete"] is False
     assert snap["bytes"] == {}
-    assert snap["total_bytes"] == "0"
+    assert snap["total_bytes"] is None
+    assert snap["measured_total_bytes"] == "0"
     assert all(root == {"status": "unset"} for root in snap["roots"].values())
 
 
 def test_snapshot_empty_configured_root_is_complete_zero(tmp_path):
-    snap = storage.snapshot({"uploads": str(tmp_path)}, _t(9, 1))
+    snap = storage.snapshot({"uploads": str(tmp_path)}, _t(9, 1),
+                            not_configured=("drawings", "tenant_git", "marathon_runs"))
 
     assert snap["complete"] is True
     assert snap["bytes"] == {}
@@ -217,7 +222,8 @@ def test_snapshot_duplicate_real_roots_count_bytes_once(tmp_path, alias):
     if alias:
         _link_dir(second, root)
 
-    snap = storage.snapshot({"drawings": str(second), "uploads": str(root)}, _t(9, 1))
+    snap = storage.snapshot({"drawings": str(second), "uploads": str(root)}, _t(9, 1),
+                            not_configured=("tenant_git", "marathon_runs"))
 
     assert snap["complete"] is True
     assert snap["bytes"] == {"t1|": "40"}
@@ -373,6 +379,11 @@ def _clear_env(monkeypatch):
         monkeypatch.delenv(var, raising=False)
 
 
+def _uploads_only_args():
+    return [arg for kind in ("drawings", "tenant_git", "marathon_runs")
+            for arg in ("--not-configured", kind)]
+
+
 def test_script_appends_one_line_per_run_and_observes(tmp_path, monkeypatch, capsys):
     _clear_env(monkeypatch)
     uploads = tmp_path / "uploads"
@@ -382,14 +393,15 @@ def test_script_appends_one_line_per_run_and_observes(tmp_path, monkeypatch, cap
     monkeypatch.setenv(storage.SNAPSHOTS_ENV, str(snapshots))
     script = _load_script()
 
-    assert script.main([], now=_t(9, 1)) == 0
-    assert script.main([], now=_t(9, 2)) == 0
+    assert script.main(_uploads_only_args(), now=_t(9, 1)) == 0
+    assert script.main(_uploads_only_args(), now=_t(9, 2)) == 0
     printed = [json.loads(x) for x in capsys.readouterr().out.splitlines() if x.strip()]
     stored = [json.loads(x) for x in snapshots.read_text(encoding="utf-8").splitlines()]
     assert stored == printed
     assert [s["taken_at"] for s in stored] == ["2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z"]
     assert stored[0]["bytes"] == {"t1|": "1000"}
-    assert stored[0]["roots"]["drawings"] == {"status": "unset"}
+    assert stored[0]["roots"]["drawings"] == {
+        "status": "not_configured", "reason": "unset in this deployment"}
 
     assert script.main(["--observe", PERIOD], now=_t(10, 2)) == 0
     obs = json.loads(capsys.readouterr().out)
@@ -406,7 +418,7 @@ def test_script_is_stdout_only_when_the_snapshots_env_is_unset(tmp_path, monkeyp
     monkeypatch.setenv("LEAF_UPLOADS_DIR", str(uploads))
     script = _load_script()
 
-    assert script.main([], now=_t(9, 1)) == 0
+    assert script.main(_uploads_only_args(), now=_t(9, 1)) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["bytes"] == {"t2|": "5"}
     assert sorted(p.name for p in tmp_path.iterdir()) == ["uploads"]  # nothing written
@@ -430,10 +442,12 @@ def test_script_incomplete_snapshot_is_not_appended(tmp_path, monkeypatch, capsy
         _write(uploads / "t1--a.dwg", 10)
         _write(uploads / "t1--b.dwg", 20)
 
-    assert _load_script().main(["--max-entries", "1"], now=_t(9, 1)) == 2
+    assert _load_script().main(["--max-entries", "1"] + _uploads_only_args(), now=_t(9, 1)) == 3
 
     output = capsys.readouterr()
-    assert json.loads(output.out)["complete"] is False
+    snap = json.loads(output.out)
+    assert snap["complete"] is False
+    assert snap["total_bytes"] is None
     assert "incomplete" in output.err
     if existing:
         assert snapshots.read_bytes() == original
@@ -449,9 +463,177 @@ def test_script_appends_empty_configured_root(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("LEAF_UPLOADS_DIR", str(uploads))
     monkeypatch.setenv(storage.SNAPSHOTS_ENV, str(snapshots))
 
-    assert _load_script().main([], now=_t(9, 1)) == 0
+    assert _load_script().main(_uploads_only_args(), now=_t(9, 1)) == 0
 
     snap = json.loads(snapshots.read_text(encoding="utf-8"))
     assert snap == json.loads(capsys.readouterr().out)
     assert snap["complete"] is True
     assert snap["total_bytes"] == "0"
+
+
+def test_snapshot_unset_root_keeps_only_the_measured_subtotal(tmp_path):
+    _write(tmp_path / "t1--a.dwg", 10)
+
+    snap = storage.snapshot({"uploads": str(tmp_path)}, _t(9, 1))
+
+    assert snap["complete"] is False
+    assert snap["total_bytes"] is None
+    assert snap["measured_total_bytes"] == "10"
+    assert snap["bytes"] == {"t1|": "10"}
+
+
+def test_snapshot_without_any_configured_roots_cannot_claim_measured_zero():
+    snap = storage.snapshot({}, _t(9, 1), not_configured=storage.ROOT_ENVS)
+
+    assert snap["complete"] is False
+    assert snap["total_bytes"] is None
+    assert snap["measured_total_bytes"] == "0"
+    assert all(root["status"] == "not_configured" for root in snap["roots"].values())
+
+
+def test_collect_storage_not_configured_deployment_appends_nested_roots_once(tmp_path, monkeypatch, capsys):
+    _clear_env(monkeypatch)
+    store = tmp_path / "store"
+    uploads = store / "uploads"
+    git = tmp_path / "git"
+    git.mkdir()
+    _write(uploads / "t1--a.dwg", 40)
+    _write(store / "tenants" / "t1" / "drawings" / "a.dwg", 60)
+    snapshots = tmp_path / "storage.jsonl"
+    for kind, path in (("uploads", uploads), ("drawings", store), ("tenant_git", git)):
+        monkeypatch.setenv(storage.ROOT_ENVS[kind], str(path))
+    monkeypatch.setenv(storage.SNAPSHOTS_ENV, str(snapshots))
+
+    assert collect_storage_main.main(["--not-configured", "marathon_runs"], now=_t(9, 1)) == 0
+
+    lines = snapshots.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    snap = json.loads(lines[0])
+    assert snap == json.loads(capsys.readouterr().out)
+    assert snap["complete"] is True
+    assert snap["total_bytes"] == snap["measured_total_bytes"] == "100"
+    assert snap["bytes"] == {"t1|": "100"}
+    assert snap["roots"]["drawings"]["skipped_nested_roots"] == 1
+    assert snap["roots"]["marathon_runs"] == {
+        "status": "not_configured", "reason": "unset in this deployment"}
+
+
+@pytest.mark.parametrize("value", ["", "some/path"])
+def test_collect_storage_rejects_not_configured_when_env_is_set(tmp_path, monkeypatch, capsys, value):
+    _clear_env(monkeypatch)
+    snapshots = tmp_path / "storage.jsonl"
+    monkeypatch.setenv(storage.SNAPSHOTS_ENV, str(snapshots))
+    monkeypatch.setenv("LEAF_MARATHON_RUNS_DIR", value)
+
+    assert collect_storage_main.main(["--not-configured", "marathon_runs"], now=_t(9, 1)) == 2
+
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "requires LEAF_MARATHON_RUNS_DIR to be unset" in output.err
+    assert not snapshots.exists()
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_module_collect_storage_dry_run_never_appends(tmp_path, monkeypatch, capsys, existing):
+    from cost_meter import __main__ as cost_main
+
+    _clear_env(monkeypatch)
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    snapshots = tmp_path / "storage.jsonl"
+    original = b"existing snapshot\n"
+    if existing:
+        snapshots.write_bytes(original)
+    monkeypatch.setenv("LEAF_UPLOADS_DIR", str(uploads))
+    monkeypatch.setenv(storage.SNAPSHOTS_ENV, str(snapshots))
+
+    assert cost_main.main(["collect-storage", "--dry-run"] + _uploads_only_args()) == 0
+
+    snap = json.loads(capsys.readouterr().out)
+    assert snap["complete"] is True
+    assert snap["total_bytes"] == "0"
+    if existing:
+        assert snapshots.read_bytes() == original
+    else:
+        assert not snapshots.exists()
+
+
+def test_collect_storage_one_unset_root_is_not_appended(tmp_path, monkeypatch, capsys):
+    _clear_env(monkeypatch)
+    for kind in ("uploads", "drawings", "tenant_git"):
+        root = tmp_path / kind
+        root.mkdir()
+        monkeypatch.setenv(storage.ROOT_ENVS[kind], str(root))
+    snapshots = tmp_path / "storage.jsonl"
+    monkeypatch.setenv(storage.SNAPSHOTS_ENV, str(snapshots))
+
+    assert collect_storage_main.main([], now=_t(9, 1)) == 3
+
+    snap = json.loads(capsys.readouterr().out)
+    assert snap["complete"] is False
+    assert snap["total_bytes"] is None
+    assert snap["roots"]["marathon_runs"] == {"status": "unset"}
+    assert not snapshots.exists()
+
+
+def test_collect_storage_append_failure_exits_one(tmp_path, monkeypatch, capsys):
+    _clear_env(monkeypatch)
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    # An existing directory cannot be opened as a JSONL append destination.
+    monkeypatch.setenv("LEAF_UPLOADS_DIR", str(uploads))
+    monkeypatch.setenv(storage.SNAPSHOTS_ENV, str(tmp_path))
+
+    assert collect_storage_main.main(_uploads_only_args(), now=_t(9, 1)) == 1
+
+    output = capsys.readouterr()
+    assert json.loads(output.out)["complete"] is True
+    assert "append failed" in output.err
+    assert list(tmp_path.iterdir()) == [uploads]
+
+
+def test_old_script_delegates_to_the_image_collector():
+    assert _load_script().main is collect_storage_main.main
+
+
+@pytest.mark.parametrize("root_status", ["unset", "not_configured", "missing", "unreadable"])
+def test_observation_without_measured_roots_is_unknown(root_status):
+    lines = [{"kind": storage.SNAPSHOT_KIND, "taken_at": storage.format_timestamp(_t(9, day)),
+              "bytes": {}, "complete": root_status == "not_configured",
+              "roots": {kind: {"status": root_status} for kind in storage.ROOT_ENVS}}
+             for day in range(1, 31)]
+
+    obs = storage.storage_usage_observation(PERIOD, lines, now=_t(10, 2))
+
+    assert obs["coverage"] == "unknown"
+    assert obs["total_usage"] is None
+    assert obs["usages"] == {}
+
+
+def test_observation_legacy_empty_bytes_without_roots_is_unknown():
+    obs = storage.storage_usage_observation(PERIOD, _daily(1, 30, {}), now=_t(10, 2))
+
+    assert obs["coverage"] == "unknown"
+    assert obs["total_usage"] is None
+
+
+def test_observation_measured_empty_roots_are_genuine_zero(tmp_path):
+    lines = [storage.snapshot({"uploads": str(tmp_path)}, _t(9, day),
+                              not_configured=("drawings", "tenant_git", "marathon_runs"))
+             for day in range(1, 31)]
+
+    obs = storage.storage_usage_observation(PERIOD, lines, now=_t(10, 2))
+
+    assert obs["coverage"] == "complete"
+    assert Decimal(obs["total_usage"]) == 0
+    assert obs["usages"] == {}
+
+
+def test_observation_ignores_unmeasured_sample_and_marks_partial():
+    lines = _daily(1, 30, {"t1|": 1_000_000_000})
+    lines.append(storage.snapshot({}, _t(9, 15, 12)))
+
+    obs = storage.storage_usage_observation(PERIOD, lines, now=_t(10, 2))
+
+    assert obs["coverage"] == "partial"
+    assert obs["total_usage"] == "1.000000000000000"
