@@ -21,15 +21,7 @@ function fixed(value, places, shift = 0) {
   const digits = n.toString().padStart(places + 1, '0')
   return places ? `${digits.slice(0, -places)}.${digits.slice(-places)}` : digits
 }
-function sum(values) {
-  const parts = values.map(decimal)
-  if (parts.some((part) => !part)) return null
-  const scale = Math.max(0, ...parts.map((part) => part.scale))
-  const n = parts.reduce((total, part) => total + part.n * 10n ** BigInt(scale - part.scale), 0n)
-  const digits = n.toString().padStart(scale + 1, '0')
-  return scale ? `${digits.slice(0, -scale)}.${digits.slice(-scale)}` : digits
-}
-const money = (value) => decimal(value) ? `$${fixed(value, 6)}` : 'Unavailable'
+const money = (value) => decimal(value) ? `$${fixed(value, 6).replace(/(\.\d{2}\d*?)0+$/, '$1')}` : 'Unavailable'
 const share = (value) => decimal(value) ? `${fixed(value, 6)} (${fixed(value, 4, 2)}%)` : 'Unavailable'
 const quantity = (value) => typeof value === 'number' || decimal(value) ? String(value) : 'Unavailable'
 
@@ -94,13 +86,16 @@ export default function CostTransparencyPanel({ mock = false }) {
               <dt>Storage</dt><dd>Unavailable. Direct storage use is not published.</dd>
             </dl>
             <h3>Leaf's costs and your share</h3>
+            {data.stale && <p role="status">Cost publication is stale. {data.stale_reason || 'Recent use may be missing.'}</p>}
             {!data.publication_id ? <p>{data.degraded_mode ? 'Cost data for this month is unreadable. Publication details are unavailable.' : 'The publication for this month has not been made yet.'}</p> : <>
               <div className="cost-table-scroll" role="region" aria-label="Resource costs" tabIndex={0}>
                 <table>
                   <caption>Monthly resource use and costs (USD)</caption>
                   <thead><tr>{['Resource', 'Total used', 'Gross cost', 'Credits', 'Your share', 'Your implied amount', "Leaf’s own share", 'Other customers combined'].map((heading) => <th key={heading} scope="col">{heading}</th>)}</tr></thead>
                   <tbody>{resources.map((row) => <tr key={row.resource_id}>
-                    <th scope="row">{row.display_name}<small>{row.status} · {row.coverage}</small></th>
+                    <th scope="row">{row.display_name}<small>{row.status} · {row.coverage}</small>
+                      {row.status === 'ESTIMATED' && <small>{row.unit === 'usd-by-environment' ? 'Split by environment tag and activity' : 'Estimated share, not metered'}</small>}
+                    </th>
                     <td>{quantity(row.total_usage)} {row.unit}</td>
                     <td>{money(row.gross_cost_usd)}</td>
                     <td>{money(row.credits_usd)}<small>covered by credits</small></td>
@@ -109,7 +104,7 @@ export default function CostTransparencyPanel({ mock = false }) {
                     <td>{dimensions.map(([key, label]) => <div key={key}>{label}: {share(row.leaf_share?.[key])}</div>)}</td>
                     <td>{share(row.other_customers_share)}</td>
                   </tr>)}</tbody>
-                  <tfoot><tr><th scope="row">Totals</th><td>Not applicable</td><td>{money(data.totals?.gross_cost_usd)}</td><td>{money(data.totals?.credits_usd)}</td><td>Not applicable</td><td>{money(sum(resources.map((row) => row.your_implied_cost_usd)))}</td><td>Not applicable</td><td>Not applicable</td></tr></tfoot>
+                  <tfoot><tr><th scope="row">Totals</th><td>Not applicable</td><td>{money(data.totals?.gross_cost_usd)}</td><td>{money(data.totals?.credits_usd)}</td><td>Not applicable</td><td>{money(data.your_total_implied_cost_usd)}</td><td>Not applicable</td><td>Not applicable</td></tr></tfoot>
                 </table>
               </div>
               <p className="cost-footnote">Missing sources: {data.missing_sources?.length ? data.missing_sources.join(', ') : 'None reported'}. Published: {data.published_at || 'Unavailable'}.</p>

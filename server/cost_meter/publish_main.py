@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish one month of Leaf's resource share ledger (TCM-09a).
+"""Publish Leaf's resource share ledger, reconciling recent month close (TCM-09a).
 
 Transparency of Leaf's real cost only, never billing. Runs the collectors for the
 period, merges any --observations files (JSON Lines of usage or cost observations,
@@ -20,7 +20,8 @@ dropped whole, never half-used.
 
     python -m cost_meter publish --period 2026-09 [--dry-run] [--observations FILE ...]
 
-Exit codes: 0 published (or printed), 1 nothing to publish or the publish failed, 2 usage.
+Exit codes: 0 published (or printed), 1 nothing to publish or the publish failed,
+2 usage, 3 published with a required source missing.
 """
 from __future__ import annotations
 
@@ -28,7 +29,7 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
@@ -209,7 +210,11 @@ def _gather(period: str, now: datetime, collectors: Mapping[str, Collector],
 def main(argv: Optional[List[str]] = None, *, collectors: Optional[Mapping[str, Collector]] = None,
          environ: Optional[Mapping[str, str]] = None, stdout=None, now: Optional[datetime] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--period", help="calendar month YYYY-MM (default: current UTC month)")
+    parser.add_argument("--period", help="calendar month YYYY-MM (overrides reconciliation)")
+    parser.add_argument("--reconcile-days", type=int, default=5, metavar="N",
+                        help="also publish the previous month on UTC days 1..N (default: 5; 0 disables)")
+    parser.add_argument("--required-sources", default="", metavar="SOURCE,...",
+                        help="comma-separated sources whose absence exits 3 (default: none)")
     parser.add_argument("--dry-run", action="store_true", help="print the would-be ledger, write nothing")
     parser.add_argument("--observations", action="append", default=[], metavar="FILE",
                         help="JSON Lines of usage or cost observations to merge (repeatable)")
@@ -217,13 +222,20 @@ def main(argv: Optional[List[str]] = None, *, collectors: Optional[Mapping[str, 
     environ = os.environ if environ is None else environ
     stdout = sys.stdout if stdout is None else stdout
     now = datetime.now(timezone.utc) if now is None else now
-    if args.period is None:
-        args.period = now.astimezone(timezone.utc).strftime("%Y-%m")
+    utc_now = now.astimezone(timezone.utc)
+    periods = [args.period] if args.period is not None else [utc_now.strftime("%Y-%m")]
+    if args.period is None and utc_now.day <= args.reconcile_days:
+        previous = utc_now.date().replace(day=1) - timedelta(days=1)
+        periods.insert(0, previous.strftime("%Y-%m"))
+    required = {name.strip() for name in args.required_sources.split(",") if name.strip()}
 
     def log(line: str) -> None:
         print(line, file=sys.stderr)
 
-    if not PERIOD_RE.fullmatch(args.period):
+    if args.reconcile_days < 0:
+        log("publish-cost-ledger: --reconcile-days must be nonnegative")
+        return 2
+    if any(not PERIOD_RE.fullmatch(period) for period in periods):
         log(f"publish-cost-ledger: --period must be YYYY-MM, got {args.period!r}")
         return 2
     store = None
@@ -240,21 +252,34 @@ def main(argv: Optional[List[str]] = None, *, collectors: Optional[Mapping[str, 
         for name in ("aws-cost-explorer", "pooled-aws"):
             if name in selected:
                 selected[name] = disabled_aws
+    codes = []
+    for period in periods:
+        codes.append(_publish_month(period, now, selected, args.observations,
+                                    required, store, args.dry_run, stdout, log))
+    # Attempt both months; a publication failure takes precedence over source gaps.
+    return 1 if 1 in codes else 3 if 3 in codes else 0
+
+
+def _publish_month(period, now, selected, observation_files, required, store, dry_run, stdout, log):
     observations, used, missing = _gather(
-        args.period, now, selected, args.observations, log)
+        period, now, selected, observation_files, log)
+    required_missing = sorted(required.intersection(missing) | (required - set(selected) - set(used)))
+    missing = sorted(set(missing) | set(required_missing))
+    if required_missing:
+        log(f"publish-cost-ledger: {period} required sources missing: {', '.join(required_missing)}")
     if not observations:
-        log(f"publish-cost-ledger: nothing to publish for {args.period}; missing: {missing}")
+        log(f"publish-cost-ledger: nothing to publish for {period}; missing: {missing}")
         return 1
 
     try:
-        pairs = publisher.build_period(args.period, observations)
+        pairs = publisher.build_period(period, observations)
     except Exception as exc:  # noqa: BLE001 - merged sources can conflict
         log(f"publish-cost-ledger: publish failed: {type(exc).__name__}: {exc}")
         return 1
 
-    if args.dry_run:
+    if dry_run:
         stdout.write(json.dumps({
-            "period": args.period,
+            "period": period,
             "publication_id": None,
             "sources": sorted(used),
             "missing_sources": sorted(missing),
@@ -262,25 +287,25 @@ def main(argv: Optional[List[str]] = None, *, collectors: Optional[Mapping[str, 
                           for rp, shares in pairs],
         }, sort_keys=True) + "\n")
         stdout.flush()
-        return 0
+        return 3 if required_missing else 0
 
-    reason = (f"publish-cost-ledger {args.period} at {now.astimezone(timezone.utc).isoformat(timespec='seconds')}; "
+    reason = (f"publish-cost-ledger {period} at {now.astimezone(timezone.utc).isoformat(timespec='seconds')}; "
               f"sources {', '.join(sorted(used)) or 'none'}; missing {', '.join(sorted(missing)) or 'none'}")
     try:
-        publication_id = publisher.publish_period(store, args.period, observations, reason,
+        publication_id = publisher.publish_period(store, period, observations, reason,
                                                   sources=used, missing_sources=missing)
     except Exception as exc:  # noqa: BLE001 - one named failure line
         log(f"publish-cost-ledger: publish failed: {type(exc).__name__}: {exc}")
         return 1
     stdout.write(json.dumps({
-        "period": args.period,
+        "period": period,
         "publication_id": publication_id,
         "resources": len(pairs),
         "missing_sources": sorted(missing),
     }, sort_keys=True) + "\n")
     stdout.flush()
     log(f"publish-cost-ledger: published {publication_id}; missing sources: {sorted(missing) or 'none'}")
-    return 0
+    return 3 if required_missing else 0
 
 
 if __name__ == "__main__":
