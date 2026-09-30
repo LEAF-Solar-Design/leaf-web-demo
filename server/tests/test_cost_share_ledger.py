@@ -6,7 +6,11 @@ tmp_path, and LEAF_COST_LEDGER_DIR is set or cleared per test.
 from __future__ import annotations
 
 import json
+import multiprocessing
+import os
+import socket
 import sys
+import time
 from decimal import Decimal
 from pathlib import Path
 
@@ -16,7 +20,7 @@ SERVER_DIR = Path(__file__).resolve().parent.parent
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from cost_meter import ledger, store  # noqa: E402
+from cost_meter import ledger, publisher, store  # noqa: E402
 from cost_meter.ledger import (  # noqa: E402
     ESTIMATED, MEASURED, ResourcePeriod, ShareEntry, compute_shares, implied_cost,
 )
@@ -38,6 +42,159 @@ def _by_key(shares):
 
 def _sum(shares):
     return sum((s.usage_share for s in shares), Decimal(0))
+
+
+def _snapshot(gross):
+    return [{"kind": "cost", "resource_id": resource, "period": PERIOD,
+             "gross_cost_usd": gross, "coverage": "complete"}
+            for resource in ("aws:codebuild", "vendor:figma")]
+
+
+def _publish_worker(root, gross, entered, release, attempting, done):
+    class PausedStore(CostLedgerStore):
+        def current(self, resource_id, period):
+            result = super().current(resource_id, period)
+            if entered is not None and resource_id == "aws:codebuild":
+                entered.set()
+                if not release.wait(30):
+                    raise RuntimeError("test publisher was not released")
+            return result
+
+    def observations():
+        yield from _snapshot(gross)
+        attempting.set()
+
+    publisher.publish_period(PausedStore(root), PERIOD, observations(), "process snapshot",
+                             lock_timeout=30)
+    done.set()
+
+
+def _exit_worker():
+    pass
+
+
+def test_publishers_in_two_processes_preserve_complete_snapshots(tmp_path):
+    ctx = multiprocessing.get_context("spawn")
+    entered, release = ctx.Event(), ctx.Event()
+    first_attempt, second_attempt = ctx.Event(), ctx.Event()
+    first_done, second_done = ctx.Event(), ctx.Event()
+    processes = [
+        ctx.Process(target=_publish_worker, args=(str(tmp_path), "10", entered, release,
+                                                 first_attempt, first_done)),
+        ctx.Process(target=_publish_worker, args=(str(tmp_path), "20", None, None,
+                                                 second_attempt, second_done)),
+    ]
+    try:
+        processes[0].start()
+        assert entered.wait(30)
+        processes[1].start()
+        assert second_attempt.wait(30)
+        assert not second_done.wait(0.3), "second publisher entered the held critical section"
+        release.set()
+        for process in processes:
+            process.join(30)
+            assert process.exitcode == 0
+    finally:
+        release.set()
+        for process in processes:
+            if process.pid is not None:
+                if process.is_alive():
+                    process.terminate()
+                process.join(10)
+    s = CostLedgerStore(tmp_path)
+    manifests = list((tmp_path / "publications").glob("*.json"))
+    assert len(manifests) == 2
+    amounts = set()
+    for manifest in manifests:
+        revisions = s.read_publication(manifest.stem)
+        assert {r.resource_id for r in revisions} == {"aws:codebuild", "vendor:figma"}
+        assert len({r.revision for r in revisions}) == 1
+        costs = {r.resource_period.gross_cost_usd for r in revisions}
+        assert len(costs) == 1
+        amounts.update(costs)
+    assert amounts == {Decimal("10"), Decimal("20")}
+    for resource in ("aws:codebuild", "vendor:figma"):
+        assert [r.revision for r in s.history(resource, PERIOD)] == [1, 2]
+        assert s.malformed_lines == 0
+    latest = publisher.latest_publication_id(s, PERIOD)
+    assert {r.resource_period.gross_cost_usd for r in s.read_publication(latest)} == {Decimal("20")}
+    assert not (tmp_path / publisher.PUBLISH_LOCK).exists()
+
+
+def test_fresh_publisher_lock_times_out_without_writing(tmp_path):
+    with publisher._publisher_lock(tmp_path, 0, 1800):
+        before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
+        started = time.monotonic()
+        with pytest.raises(publisher.LedgerBusy, match="timed out"):
+            publisher.publish_period(CostLedgerStore(tmp_path), PERIOD, _snapshot("10"),
+                                     "blocked", lock_timeout=0.05)
+        assert time.monotonic() - started >= 0.05
+        assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before
+    assert not (tmp_path / publisher.PUBLISH_LOCK).exists()
+
+
+def test_stale_dead_publisher_lock_is_taken_over(tmp_path, caplog):
+    ctx = multiprocessing.get_context("spawn")
+    process = ctx.Process(target=_exit_worker)
+    process.start()
+    process.join(30)
+    try:
+        assert process.exitcode == 0
+        assert not publisher._pid_alive(process.pid)
+        (tmp_path / publisher.PUBLISH_LOCK).write_text(json.dumps({
+            "pid": process.pid, "host": socket.gethostname(), "start_time": time.time() - 1900,
+        }), encoding="utf-8")
+        s = CostLedgerStore(tmp_path)
+        pub = publisher.publish_period(s, PERIOD, _snapshot("10"), "recovery", lock_timeout=0)
+        assert len(s.read_publication(pub)) == 2
+        assert "Taking over stale publisher lock" in caplog.text
+        assert not (tmp_path / publisher.PUBLISH_LOCK).exists()
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(10)
+
+
+@pytest.mark.parametrize("host", [socket.gethostname(), "another-host"])
+def test_old_live_or_foreign_publisher_lock_is_not_reclaimed(tmp_path, host):
+    path = tmp_path / publisher.PUBLISH_LOCK
+    content = json.dumps({"pid": os.getpid(), "host": host, "start_time": time.time() - 1900})
+    path.write_text(content, encoding="utf-8")
+    with pytest.raises(publisher.LedgerBusy):
+        publisher.publish_period(CostLedgerStore(tmp_path), PERIOD, _snapshot("10"),
+                                 "blocked", lock_timeout=0)
+    assert path.read_text(encoding="utf-8") == content
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_failed_publish_releases_lock_and_next_publish_can_finish(tmp_path, monkeypatch):
+    s = CostLedgerStore(tmp_path)
+    original = s.append_revision
+    count = 0
+
+    def fail_second(*args, **kwargs):
+        nonlocal count
+        count += 1
+        if count == 2:
+            raise RuntimeError("injected append failure")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(s, "append_revision", fail_second)
+    with pytest.raises(RuntimeError, match="injected append failure"):
+        publisher.publish_period(s, PERIOD, _snapshot("10"), "fails")
+    assert not (tmp_path / publisher.PUBLISH_LOCK).exists()
+    assert not (tmp_path / "latest").exists()
+    monkeypatch.setattr(s, "append_revision", original)
+    pub = publisher.publish_period(s, PERIOD, _snapshot("10"), "retry", lock_timeout=0)
+    assert len(s.read_publication(pub)) == 2
+
+
+def test_lock_cleanup_does_not_remove_another_owner(tmp_path):
+    path = tmp_path / publisher.PUBLISH_LOCK
+    with publisher._publisher_lock(tmp_path, 0, 1800):
+        replacement = path.read_bytes() + b" "
+        path.write_bytes(replacement)
+    assert path.read_bytes() == replacement
 
 
 def test_two_tenants_and_leaf_on_a_measured_resource_match_usage_and_sum_to_one():
