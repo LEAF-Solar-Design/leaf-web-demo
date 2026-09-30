@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, renderHook } from '@testing-library/react'
 import useDrawingViewport, { computeSafeRect } from './useDrawingViewport.js'
+import { STUDIO_DRAWING_OCCLUDERS } from './drawingOccluders.js'
 
 const rect = (left, top, width, height) => ({ left, top, width, height })
 const canvas = rect(0, 0, 1920, 940)
@@ -50,6 +51,43 @@ describe('computeSafeRect', () => {
 })
 
 describe('useDrawingViewport', () => {
+  it('discovers the overview and updates safe space when it resizes, collapses or is removed', async () => {
+    document.body.innerHTML = '<div id="ground"><div class="viewer-canvas"><canvas></canvas></div></div>'
+    const root = document.querySelector('#ground')
+    vi.spyOn(root.querySelector('canvas'), 'getBoundingClientRect').mockReturnValue(canvas)
+    let notify
+    const observe = vi.fn(), unobserve = vi.fn()
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(callback) { notify = callback }
+      observe = observe
+      unobserve = unobserve
+      disconnect = vi.fn()
+    })
+    const frames = new Map()
+    let id = 0
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback) => { frames.set(++id, callback); return id }))
+    vi.stubGlobal('cancelAnimationFrame', vi.fn((key) => frames.delete(key)))
+    const flush = () => act(() => { const pending = [...frames.values()]; frames.clear(); pending.forEach((callback) => callback()) })
+    const { result } = renderHook(() => useDrawingViewport(root, STUDIO_DRAWING_OCCLUDERS))
+    flush()
+    expect(result.current).toEqual(rect(16, 16, 1888, 908))
+    const overview = document.createElement('div')
+    overview.setAttribute('data-cad-overview', '')
+    const measure = vi.spyOn(overview, 'getBoundingClientRect').mockReturnValue(rect(500, 720, 182, 180))
+    await act(async () => { document.body.appendChild(overview) })
+    flush()
+    expect(observe).toHaveBeenCalledWith(overview)
+    expect(result.current).toEqual(rect(16, 16, 1888, 688))
+    measure.mockReturnValue(rect(500, 856, 100, 44))
+    act(() => notify())
+    flush()
+    expect(result.current).toEqual(rect(16, 16, 1888, 824))
+    await act(async () => overview.remove())
+    flush()
+    expect(unobserve).toHaveBeenCalledWith(overview)
+    expect(result.current).toEqual(rect(16, 16, 1888, 908))
+  })
+
   it('coalesces resize notifications, ignores pointers and removes observers and listeners', () => {
     document.body.innerHTML = '<main class="center-scroll"><div class="studio-shell"><div id="ground"><div class="viewer-canvas"><canvas></canvas></div></div><div class="bar-dock"></div></div></main>'
     const root = document.querySelector('#ground')

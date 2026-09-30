@@ -1,0 +1,36 @@
+.cad-overview {
+  position: fixed; left: calc(var(--ck-pane, 250px) + 16px); bottom: 120px; z-index: 24;
+  width: 182px; box-sizing: border-box; pointer-events: auto;
+  color: var(--ck-ink, #e2e2e2); background: var(--ck-glass-panel, #1e2227);
+  border: 1px solid var(--ck-edge, #424242); border-radius: 4px;
+  font: 12px/1.4 var(--ck-font, system-ui);
+}
+.cad-overview[data-collapsed="true"] { width: auto; }
+.cad-overview .cad-overview-toggle, .cad-overview .cad-overview-map {
+  display: block; width: 100%; margin: 0; padding: 0; border: 0; border-radius: 3px;
+  color: inherit; background: transparent; font: inherit; cursor: pointer; touch-action: manipulation;
+}
+.cad-overview .cad-overview-toggle { min-height: 44px; padding: 4px 10px; }
+.cad-overview .cad-overview-map { line-height: 0; }
+.cad-overview button:focus-visible { outline: 2px solid var(--ck-sel, #00b4ff); outline-offset: 2px; }
+.cad-overview-map svg { display: block; width: 100%; height: auto; }
+.cad-overview-outline { fill: #212830; stroke: #b8b8b8; }
+.cad-overview-context { fill: #b8b8b8; fill-opacity: .18; stroke: #b8b8b8; stroke-opacity: .35; stroke-width: .5; }
+.cad-overview-viewport { fill: #fff; fill-opacity: .12; stroke: #fff; stroke-width: 1.5; }
+.cad-overview-selected { fill: none; stroke: #00b4ff; stroke-width: 3; }
+.cad-overview-focus { fill: none; stroke: #f0c97b; stroke-width: 1.5; }
+.cad-overview-focus rect { stroke-dasharray: 3 2; }
+.cad-overview-focus path { fill: #212830; }
+.cad-overview-key { display: flex; justify-content: space-between; padding: 4px 6px; gap: 4px; }
+@media (max-width: 980px) {
+  .cad-overview { left: auto; right: 8px; bottom: 112px; }
+}
+@media (min-width: 601px) and (max-width: 980px) and (max-height: 600px) {
+  .cad-overview[data-collapsed="false"] { display: grid; grid-template-columns: 150px 80px; width: 232px; }
+  .cad-overview .cad-overview-toggle { grid-column: 1; grid-row: 1; }
+  .cad-overview .cad-overview-map { grid-column: 2; grid-row: 1 / 3; display: flex; align-items: center; }
+  .cad-overview-key { grid-column: 1; grid-row: 2; }
+}
+@media (max-width: 600px) {
+  .cad-overview { bottom: calc(var(--ck-dock, 112px) + var(--ck-drawer, 44px) + 8px); }
+}
