@@ -9,7 +9,8 @@ ledger; a later publisher slice joins these to cost.
 
     python scripts/collect-cost-pooled.py [--period YYYY-MM] [--exclude RESOURCE_ID ...]
 
-Exit codes: 0 written, 1 fetch or parse failure, 2 usage.
+Exit codes: 0 written with complete activity evidence, 1 fetch or parse failure,
+2 usage, 3 written with partial or unavailable activity evidence.
 """
 from __future__ import annotations
 
@@ -50,7 +51,7 @@ def main(argv=None, *, client=None, stdout=None, now=None, agent_rows=None, brok
     excludes = tuple(args.exclude) if args.exclude is not None else pooled.DIRECT_COLLECTOR_RESOURCE_IDS
     try:
         if agent_rows is None:
-            agent_rows = direct_usage.load_agent_rows()
+            agent_rows = direct_usage.load_agent_rows(period=period)
         if broker_rows is None:
             broker_rows = direct_usage.load_broker_rows(period=period)
         activity = pooled.tenant_activity_from_rows(period, agent_rows, broker_rows)
@@ -66,7 +67,14 @@ def main(argv=None, *, client=None, stdout=None, now=None, agent_rows=None, brok
     stdout.flush()
     print(f"collect-cost-pooled: {len(observations)} usage observations for {period}, "
           f"{len(activity)} active tenants", file=sys.stderr)
-    return 0
+    for name, evidence in activity.evidence.items():
+        if evidence["status"] != "complete":
+            source = ("broker-ledger" if name == "broker-activity" and
+                      evidence["status"] == "unavailable" else name)
+            print(f"collect-cost-pooled: {source}:{evidence['status']}, "
+                  f"truncated={evidence['truncated']}, dropped_rows={evidence['dropped_rows']}",
+                  file=sys.stderr)
+    return 3 if activity.missing_sources else 0
 
 
 if __name__ == "__main__":

@@ -532,12 +532,124 @@ def test_stale_publication_only_in_current_utc_month(published, monkeypatch, hou
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["published_at"] = (now - timedelta(hours=hours)).isoformat()
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    # Older sidecars lack checked_at and must fall back to the manifest time.
+    meta_path = published / publisher.META_DIR / f"{publication_id}.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta.pop("checked_at", None)
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
     response = _get(A)
     assert response.status_code == 200
     body = response.json()
     assert body["publication_id"] == publication_id
     assert body["stale"] is expected
     assert bool(body["stale_reason"]) is expected
+
+
+def test_identical_refresh_advances_checked_at_and_clears_stale(ledger_dir, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from cost_meter import store as store_module
+    from routers import cost as cost_router
+
+    now = datetime(2026, 9, 20, tzinfo=timezone.utc)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    for module in (publisher, store_module, cost_router):
+        monkeypatch.setattr(module, "datetime", Clock)
+    store = CostLedgerStore(ledger_dir)
+    first = publisher.publish_period(store, PERIOD, _fixture_observations(), "initial")
+    before = publisher.publication_info(store, first)
+    manifest_path = ledger_dir / publisher.PUBLICATIONS_DIR / f"{first}.json"
+    manifest = manifest_path.read_bytes()
+    now += timedelta(hours=48)
+    assert _get(A).json()["stale"] is True
+    second = publisher.publish_period(store, PERIOD, _fixture_observations(), "refresh")
+    after = publisher.publication_info(store, second)
+    assert first == second
+    assert manifest_path.read_bytes() == manifest
+    assert after["published_at"] == before["published_at"]
+    assert after["checked_at"] > before["checked_at"]
+    body = _get(A).json()
+    assert body["checked_at"] == now.isoformat()
+    assert body["stale"] is False
+    assert body["source_health"] == "ok"
+
+
+@pytest.mark.parametrize("damage, status", [
+    ("absent", "absent"), ("json", "unreadable"),
+    ("shape", "unreadable"), ("timestamp", "unreadable"),
+])
+def test_unavailable_metadata_reports_unknown_health(published, monkeypatch, damage, status):
+    from datetime import datetime, timezone
+    from routers import cost as cost_router
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 9, 20, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(cost_router, "datetime", Clock)
+    store = CostLedgerStore(published)
+    publication_id = publisher.latest_publication_id(store, PERIOD)
+    path = published / publisher.META_DIR / f"{publication_id}.json"
+    if damage == "absent":
+        path.unlink()
+    elif damage == "json":
+        path.write_text("{", encoding="utf-8")
+    else:
+        meta = json.loads(path.read_text(encoding="utf-8"))
+        meta["missing_sources" if damage == "shape" else "checked_at"] = "invalid"
+        path.write_text(json.dumps(meta), encoding="utf-8")
+    info = publisher.publication_info(store, publication_id)
+    assert info["metadata_status"] == status
+    assert info["checked_at"] is None
+    response = _get(A)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["publication_id"] == publication_id
+    assert body["source_health"] == "unknown"
+    assert len(body["resources"]) == 3
+
+
+@pytest.mark.parametrize("condition, provisional", [
+    ("missing", True), ("partial", True), ("unknown", True),
+    ("absent", True), ("complete", False),
+])
+def test_month_rollover_preserves_previous_month_health(ledger_dir, monkeypatch, condition, provisional):
+    from datetime import datetime, timezone
+    from routers import cost as cost_router
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 10, 1, 0, 30, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(cost_router, "datetime", Clock)
+    store = CostLedgerStore(ledger_dir)
+    publication_id = publisher.publish_period(
+        store, PERIOD, [_cost(EFS, "10", coverage=condition if condition in
+                       ("partial", "unknown") else "complete")], "September",
+        missing_sources=["vendors"] if condition == "missing" else [])
+    if condition == "absent":
+        (ledger_dir / publisher.META_DIR / f"{publication_id}.json").unlink()
+    default = _client().get("/api/cost", headers={"X-Tenant-Id": A}).json()
+    assert default["period"] == "2026-10"
+    assert default["publication_id"] is None
+    prior = _get(A).json()
+    assert prior["publication_id"] == publication_id
+    assert prior["provisional"] is provisional
+    assert prior["stale"] is False
+
+
+def test_api_exposes_carried_forward_resources(published):
+    publisher.publish_period(CostLedgerStore(published), PERIOD, [_cost(EFS, "31")],
+                             "outage", missing_sources=["vendors"])
+    body = _get(A).json()
+    assert body["carried_forward"] == ["aps:engine", "vendor:figma"]
+    assert body["missing_sources"] == ["vendors"]
 
 
 def test_the_tenant_id_cannot_come_from_the_query(published):

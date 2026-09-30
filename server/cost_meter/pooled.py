@@ -197,10 +197,13 @@ def pooled_usage_observations(period: str, responses: Iterable[Any], tenant_acti
     """One usd-by-environment usage observation per AWS service line, sorted by
     resource_id, skipping exclude_resource_ids. Status is always ESTIMATED: a tag
     split and an activity proxy are estimates, not metered use. Coverage is
-    partial whenever untagged (or unknown-environment) cost exists."""
+    partial whenever untagged cost or incomplete activity evidence exists;
+    production without any activity has unknown coverage."""
     period = _check_period(period)
     excluded = _check_excludes(exclude_resource_ids)
     activity = _check_activity(tenant_activity)
+    evidence = getattr(tenant_activity, "evidence", {})
+    incomplete = any(source["status"] != "complete" for source in evidence.values())
     observations: List[dict] = []
     with localcontext() as ctx:
         ctx.prec = 60
@@ -233,7 +236,8 @@ def pooled_usage_observations(period: str, responses: Iterable[Any], tenant_acti
                 "total_usage": _fmt(total),
                 "usages": {k: _fmt(v) for k, v in sorted(usages.items())},
                 "status": ESTIMATED,
-                "coverage": "partial" if untagged > 0 else "complete",
+                "coverage": ("unknown" if production > 0 and not activity else
+                             "partial" if untagged > 0 or incomplete else "complete"),
                 "source": SOURCE,
             })
     return observations
@@ -253,10 +257,7 @@ def _row_date(ts: Any) -> Optional[date]:
         try:
             parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
         except ValueError:
-            try:
-                return date.fromisoformat(text[:10])
-            except ValueError:
-                return None
+            return None
         return (parsed if parsed.tzinfo is None else parsed.astimezone(timezone.utc)).date()
     if isinstance(ts, (int, float)) and not isinstance(ts, bool):
         try:
@@ -266,26 +267,74 @@ def _row_date(ts: Any) -> Optional[date]:
     return None
 
 
+class TenantActivity(dict):
+    """Tenant weights retaining each source's scan and dropped-row evidence."""
+
+    def __init__(self, weights: Dict[str, Decimal], evidence: Dict[str, dict]):
+        super().__init__(weights)
+        self.evidence = evidence
+
+    @property
+    def missing_sources(self) -> List[str]:
+        missing = []
+        for name, source in self.evidence.items():
+            if source["status"] == "partial":
+                missing.append(name + ":partial")
+            elif source["status"] == "unavailable":
+                missing.append("broker-ledger" if name == "broker-activity" else name)
+        return missing
+
+
 def tenant_activity_from_rows(period: str, agent_rows: Optional[Iterable[Any]],
-                              broker_rows: Optional[Iterable[Any]]) -> Dict[str, Decimal]:
+                              broker_rows: Optional[Iterable[Any]]) -> TenantActivity:
     """tenant_id -> active days in period: distinct UTC dates with any agent turn
     or any broker run (denials excluded, the same filter the direct-use collector
-    uses). One linear pass per source; None or malformed rows contribute nothing."""
+    uses). One linear pass per source; absent, truncated and unusable rows are
+    recorded in evidence. Valid out-of-period rows and denials are excluded."""
     period = _check_period(period)
     days: Dict[str, set] = {}
+    evidence: Dict[str, dict] = {}
 
-    def _mark(tenant: Any, ts: Any) -> None:
-        if not isinstance(tenant, str) or not PARTICIPANT_RE.fullmatch(tenant) or tenant == LEAF:
-            return
+    def _mark(tenant: Any, ts: Any) -> bool:
         day = _row_date(ts)
-        if day is None or day.strftime("%Y-%m") != period:
-            return
+        if day is None:
+            return False
+        if day.strftime("%Y-%m") != period:
+            return True
+        if not isinstance(tenant, str) or not PARTICIPANT_RE.fullmatch(tenant) or tenant == LEAF:
+            return False
         days.setdefault(tenant, set()).add(day)
+        return True
 
-    for row in _dicts(agent_rows or ()):
-        if row is not None and row.get("kind") == "turn":
-            _mark(row.get("tenant_id"), row.get("ts"))
-    for row in _dicts(broker_rows or ()):
-        if row is not None and _counted_cad_row(row, period):
-            _mark(row.get("tenant_id"), row.get("ts"))
-    return {tenant: Decimal(len(d)) for tenant, d in sorted(days.items())}
+    for name, rows in (("agent-activity", agent_rows), ("broker-activity", broker_rows)):
+        truncated = bool(getattr(rows, "truncated", False))
+        dropped = 0
+        if rows is not None:
+            for row in _dicts(rows):
+                if row is None:
+                    dropped += 1
+                    continue
+                if name == "agent-activity":
+                    kind = row.get("kind")
+                    if not isinstance(kind, str) or not kind:
+                        dropped += 1
+                        continue
+                    if kind != "turn":
+                        continue
+                else:
+                    try:
+                        counted = _counted_cad_row(row, period)
+                    except TypeError:  # an unusable status must degrade evidence, not abort the scan
+                        dropped += 1
+                        continue
+                    if counted is False:
+                        continue
+                if not _mark(row.get("tenant_id"), row.get("ts")):
+                    dropped += 1
+        evidence[name] = {
+            "status": ("unavailable" if rows is None else
+                       "partial" if truncated or dropped else "complete"),
+            "truncated": truncated,
+            "dropped_rows": dropped,
+        }
+    return TenantActivity({tenant: Decimal(len(d)) for tenant, d in sorted(days.items())}, evidence)

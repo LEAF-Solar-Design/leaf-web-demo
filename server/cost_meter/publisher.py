@@ -25,6 +25,7 @@ import socket
 import time
 import uuid
 from contextlib import contextmanager, nullcontext
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -488,6 +489,7 @@ def _publish_period_locked(store: CostLedgerStore, period: str,
     if physical:
         metadata["physical_usage"] = physical
     publication_id = store.publish(period, revision_ids=revision_ids)
+    metadata["checked_at"] = datetime.now(timezone.utc).isoformat()
 
     meta_path = root / META_DIR / f"{publication_id}.json"
     _write_atomic(meta_path, _canon_json({
@@ -565,13 +567,28 @@ def latest_publication_id(store: CostLedgerStore, period: str) -> Optional[str]:
 
 def publication_info(store: CostLedgerStore, publication_id: str) -> Dict[str, Any]:
     """published_at from the manifest, and the sources and physical usage recorded beside it
-    (empty when unrecorded)."""
+    with an explicit status when source health metadata is unavailable."""
     root = _root(store)
     match = PUBLICATION_ID_RE.fullmatch(publication_id or "")
     if not match:
         raise ValueError(f"invalid publication id: {publication_id!r}")
     manifest = _read_json(root / PUBLICATIONS_DIR / f"{publication_id}.json") or {}
-    meta = _read_json(root / META_DIR / f"{publication_id}.json") or {}
+    meta_path = root / META_DIR / f"{publication_id}.json"
+    try:
+        meta_path.stat()
+    except FileNotFoundError:
+        metadata_status = "absent"
+    except OSError:
+        metadata_status = "unreadable"
+    else:
+        metadata_status = "ok"
+    meta = _read_json(meta_path) or {}
+    if metadata_status == "ok" and (
+            meta.get("publication_id") != publication_id
+            or any(not isinstance(meta.get(key), list)
+                   or any(not isinstance(s, str) for s in meta[key])
+                   for key in ("sources", "missing_sources", "carried_forward"))):
+        metadata_status = "unreadable"
     if meta.get("publication_id") != publication_id:
         legacy = manifest.get("metadata")
         meta = {**legacy, "publication_id": publication_id} if isinstance(legacy, dict) else {}
@@ -580,6 +597,16 @@ def publication_info(store: CostLedgerStore, publication_id: str) -> Dict[str, A
     sources = meta.get("sources") if meta.get("publication_id") == publication_id else None
     carried = meta.get("carried_forward") if meta.get("publication_id") == publication_id else None
     physical = meta.get("physical_usage") if meta.get("publication_id") == publication_id else None
+    checked_at = meta.get("checked_at")
+    if checked_at is not None:
+        try:
+            if not isinstance(checked_at, str):
+                raise ValueError("checked_at must be an ISO timestamp")
+            datetime.fromisoformat(checked_at.replace("Z", "+00:00"))
+        except ValueError:
+            metadata_status = "unreadable"
+    if metadata_status != "ok":
+        checked_at = None
     physical_usage: Dict[str, Dict[str, str]] = {}
     if isinstance(physical, dict):
         for resource_id, entry in physical.items():
@@ -588,6 +615,8 @@ def publication_info(store: CostLedgerStore, publication_id: str) -> Dict[str, A
                 physical_usage[resource_id] = checked
     return {
         "published_at": published_at if isinstance(published_at, str) else None,
+        "checked_at": checked_at,
+        "metadata_status": metadata_status,
         "missing_sources": [s for s in missing if isinstance(s, str)] if isinstance(missing, list) else [],
         "sources": [s for s in sources if isinstance(s, str)] if isinstance(sources, list) else [],
         "carried_forward": [s for s in carried if isinstance(s, str)] if isinstance(carried, list) else [],

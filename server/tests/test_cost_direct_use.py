@@ -204,6 +204,8 @@ def test_loaders_read_jsonl_missing_is_zero(tmp_path, monkeypatch):
     assert len(agent_rows) == 1 and len(broker_rows) == 1
     use = tenant_direct_use(PERIOD, A, agent_rows=agent_rows, broker_rows=broker_rows)
     assert use["llm"]["turns"] == 1 and use["cad"]["runs_without_job_id"] == 1
+    assert use["llm"]["coverage"] == use["cad"]["coverage"] == "partial"
+    assert aps_usage_observation(PERIOD, broker_rows)["coverage"] == "partial"
     assert direct_usage.load_agent_rows(tmp_path / "absent.jsonl") == []
     assert direct_usage.load_broker_rows(tmp_path / "absent.jsonl") == []
     monkeypatch.setenv("LEAF_AGENT_LEDGER", str(agent_path))
@@ -215,6 +217,100 @@ def test_loaders_read_jsonl_missing_is_zero(tmp_path, monkeypatch):
     assert direct_usage.load_agent_rows() is None
     with pytest.raises(ValueError, match="period"):
         direct_usage.load_broker_rows()
+
+
+@pytest.mark.parametrize("offset,utc,month", [
+    ("2026-08-31T23:30:00-05:00", "2026-09-01T04:30:00Z", "2026-09"),
+    ("2026-09-01T00:30:00+05:00", "2026-08-31T19:30:00Z", "2026-08"),
+    ("2026-09-30T23:30:00-05:00", "2026-10-01T04:30:00Z", "2026-10"),
+    ("2026-10-01T00:30:00+05:00", "2026-09-30T19:30:00Z", "2026-09"),
+])
+@pytest.mark.parametrize("representation", ["offset", "z", "aware", "naive", "epoch", "int_epoch"])
+def test_direct_use_and_aps_bucket_timestamps_by_utc_month(offset, utc, month, representation):
+    utc_dt = datetime.fromisoformat(utc.replace("Z", "+00:00"))
+    ts = {"offset": offset, "z": utc, "aware": datetime.fromisoformat(offset),
+          "naive": utc_dt.replace(tzinfo=None).isoformat(), "epoch": utc_dt.timestamp(),
+          "int_epoch": int(utc_dt.timestamp())}[representation]
+    agent = [_turn(A, ts=ts), _turn(B, ts=ts, usd=99)]
+    broker = [_run(A, ts=ts, seconds=2), _run(B, ts=ts, seconds=99)]
+    for period in ("2026-08", "2026-09", "2026-10"):
+        expected = int(period == month)
+        use = tenant_direct_use(period, A, agent_rows=agent, broker_rows=broker)
+        assert use["llm"]["coverage"] == use["cad"]["coverage"] == "complete"
+        assert use["llm"]["turns"] == use["cad"]["runs"] == expected
+        assert use["llm"]["usd_est"] == ("0.1" if expected else "0")
+        assert use["cad"]["engine_seconds"] == ("2" if expected else "0")
+        obs = aps_usage_observation(period, broker)
+        assert obs["coverage"] == "complete" and obs["status"] == MEASURED
+        assert obs["total_usage"] == ("101" if expected else "0")
+        assert obs["usages"] == ({"tenant_a|": "2", "tenant_b|": "99"} if expected else {})
+
+
+@pytest.mark.parametrize("ts", ["2026-09-garbage", "2026-09-30Tbad", "2026-09-31T00:00:00Z",
+                              "2026-09", "", "not a timestamp"])
+def test_malformed_timestamps_are_unattributed_and_partial(ts):
+    use = tenant_direct_use(PERIOD, A, agent_rows=[_turn(A, ts=ts)], broker_rows=[_run(A, ts=ts)])
+    assert use["llm"]["coverage"] == use["cad"]["coverage"] == "partial"
+    assert use["llm"]["turns"] == use["cad"]["runs"] == 0
+    assert use["llm"]["usd_est"] == use["cad"]["engine_seconds"] == "0"
+    obs = aps_usage_observation(PERIOD, [_run(A, ts=ts)])
+    assert obs["coverage"] == "partial" and obs["status"] == ESTIMATED
+    assert obs["total_usage"] == "0" and obs["usages"] == {}
+    foreign = tenant_direct_use(PERIOD, A, agent_rows=[_turn(B, ts=ts)], broker_rows=[_run(B, ts=ts)])
+    assert foreign["llm"]["coverage"] == foreign["cad"]["coverage"] == "complete"
+    assert foreign["llm"]["turns"] == foreign["cad"]["runs"] == 0
+
+
+@pytest.mark.parametrize("bad_line", ["{broken", "[]", "null", "42", '"text"'])
+@pytest.mark.parametrize("with_valid_rows", [False, True])
+def test_jsonl_skipped_lines_preserve_coverage_and_tenant_isolation(tmp_path, bad_line, with_valid_rows):
+    agent_path = tmp_path / "agent.jsonl"
+    broker_path = tmp_path / "broker.jsonl"
+    agent = [_turn(A), _turn(B, usd=99)] if with_valid_rows else []
+    broker = [_run(A, seconds=2), _run(B, seconds=99)] if with_valid_rows else []
+    for path, rows in ((agent_path, agent), (broker_path, broker)):
+        path.write_text("\n".join([json.dumps(row) for row in rows] + [bad_line, ""]), encoding="utf-8")
+    agent_rows = direct_usage.load_agent_rows(agent_path)
+    broker_rows = direct_usage.load_broker_rows(broker_path)
+    assert agent_rows == agent and broker_rows == broker
+    assert agent_rows.skipped_count == broker_rows.skipped_count == 1
+    use = tenant_direct_use(PERIOD, A, agent_rows=agent_rows, broker_rows=broker_rows)
+    assert use["llm"]["coverage"] == use["cad"]["coverage"] == "partial"
+    assert use["llm"]["turns"] == use["cad"]["runs"] == int(with_valid_rows)
+    assert use["llm"]["usd_est"] == ("0.1" if with_valid_rows else "0")
+    assert use["cad"]["engine_seconds"] == ("2" if with_valid_rows else "0")
+    obs = aps_usage_observation(PERIOD, broker_rows)
+    assert obs["coverage"] == "partial" and obs["status"] == ESTIMATED
+    assert obs["total_usage"] == ("101" if with_valid_rows else "0")
+
+
+@pytest.mark.parametrize("contents", ["", "\n  \n"])
+def test_clean_empty_jsonl_is_complete_zero(tmp_path, contents):
+    path = tmp_path / "empty.jsonl"
+    path.write_text(contents, encoding="utf-8")
+    agent = direct_usage.load_agent_rows(path)
+    broker = direct_usage.load_broker_rows(path)
+    assert agent == broker == []
+    assert agent.skipped_count == broker.skipped_count == 0
+    use = tenant_direct_use(PERIOD, A, agent_rows=agent, broker_rows=broker)
+    assert use["llm"]["coverage"] == use["cad"]["coverage"] == "complete"
+    assert use["llm"]["turns"] == use["cad"]["runs"] == 0
+    obs = aps_usage_observation(PERIOD, broker)
+    assert obs["coverage"] == "complete" and obs["status"] == MEASURED
+    assert obs["total_usage"] == "0" and obs["usages"] == {}
+
+
+def test_marathon_utc_month_and_malformed_start(tmp_path):
+    _marathon_run(tmp_path, A, "run-oct", "2026-09-30T23:30:00-05:00")
+    _marathon_run(tmp_path, A, "run-sep", "2026-10-01T00:30:00+05:00")
+    _marathon_run(tmp_path, A, "run-bad", "2026-09-garbage")
+    _marathon_run(tmp_path, B, "run-foreign", "2026-09-15T00:00:00Z")
+    for period, run_id in (("2026-09", "run-sep"), ("2026-10", "run-oct")):
+        marathon = tenant_direct_use(period, A, agent_rows=[], broker_rows=[],
+                                     marathon_root=tmp_path)["marathon"]
+        assert marathon["coverage"] == "partial"
+        assert marathon["runs"] == 1 and marathon["run_ids"] == [run_id]
+        assert marathon["undated_runs"] == 1
 
 
 @pytest.mark.parametrize("truncated", [False, True])

@@ -92,12 +92,18 @@ def _dec_str(d: Decimal) -> str:
 def _row_period(ts: Any) -> Optional[str]:
     """The UTC YYYY-MM a row falls in: ISO string (agent ledger), epoch seconds
     (broker ledger) or datetime (a Postgres row). None when it cannot be placed."""
-    if isinstance(ts, datetime):
-        dt = ts if ts.tzinfo is None else ts.astimezone(timezone.utc)
-        return dt.strftime("%Y-%m")
     if isinstance(ts, str):
-        head = ts.strip()[:7]
-        return head if PERIOD_RE.fullmatch(head) else None
+        text = ts.strip()
+        try:
+            ts = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
+        except ValueError:
+            return None
+    if isinstance(ts, datetime):
+        try:
+            dt = ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts.astimezone(timezone.utc)
+            return dt.strftime("%Y-%m")
+        except (OverflowError, ValueError):
+            return None
     if isinstance(ts, (int, float)) and not isinstance(ts, bool):
         try:
             return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m")
@@ -124,7 +130,7 @@ def _llm_section(period: str, tenant_id: str, agent_rows: Optional[Iterable[Any]
     tokens: Dict[str, Optional[int]] = {name: 0 for name, _ in _TOKEN_FIELDS}
     usd = Decimal(0)
     by_payer: Dict[str, Dict[str, Any]] = {}
-    gaps = int(bool(getattr(agent_rows, "truncated", False)))
+    gaps = int(bool(getattr(agent_rows, "truncated", False))) + getattr(agent_rows, "skipped_count", 0)
     for row in _dicts(agent_rows):
         if row is None:
             gaps += 1
@@ -196,7 +202,7 @@ def _cad_section(period: str, tenant_id: str, broker_rows: Optional[Iterable[Any
     seconds = Decimal(0)
     usd = Decimal(0)
     without_job = 0
-    gaps = int(bool(getattr(broker_rows, "truncated", False)))
+    gaps = int(bool(getattr(broker_rows, "truncated", False))) + getattr(broker_rows, "skipped_count", 0)
     for row in _dicts(broker_rows):
         if row is None:
             gaps += 1
@@ -331,7 +337,7 @@ def aps_usage_observation(period: str, broker_rows: Optional[Iterable[Any]]) -> 
                 "coverage": "unknown"}
     total = Decimal(0)
     per_tenant: Dict[str, Decimal] = {}
-    gaps = int(bool(getattr(broker_rows, "truncated", False)))
+    gaps = int(bool(getattr(broker_rows, "truncated", False))) + getattr(broker_rows, "skipped_count", 0)
     for row in _dicts(broker_rows):
         if row is None:
             gaps += 1
@@ -365,8 +371,9 @@ def aps_usage_observation(period: str, broker_rows: Optional[Iterable[Any]]) -> 
 # --------------------------------------------------------------------------- #
 # thin loaders: reuse the existing ledgers' own readers
 # --------------------------------------------------------------------------- #
-def _parse_jsonl(lines: Iterable[str]) -> List[Dict[str, Any]]:
+def _parse_jsonl(lines: Iterable[str]) -> tuple[List[Dict[str, Any]], int]:
     out: List[Dict[str, Any]] = []
+    skipped_count = 0
     for line in lines:
         line = line.strip()
         if not line:
@@ -374,10 +381,13 @@ def _parse_jsonl(lines: Iterable[str]) -> List[Dict[str, Any]]:
         try:
             entry = json.loads(line)
         except json.JSONDecodeError:
+            skipped_count += 1
             continue
         if isinstance(entry, dict):
             out.append(entry)
-    return out
+        else:
+            skipped_count += 1
+    return out, skipped_count
 
 
 def load_agent_rows(
@@ -409,23 +419,26 @@ def load_agent_rows(
         lines = agent_ledger._read_lines(target, raise_on_read_error=True)
     except OSError:
         return None
-    return _parse_jsonl(lines)
+    rows, skipped_count = _parse_jsonl(lines)
+    return AgentRows(rows, truncated=False, skipped_count=skipped_count)
 
 
 class AgentRows(list):
-    """Agent rows retaining evidence that the monthly read hit its cap."""
+    """Agent rows retaining evidence of capped reads and skipped JSONL lines."""
 
-    def __init__(self, rows: Iterable[Dict[str, Any]], *, truncated: bool):
+    def __init__(self, rows: Iterable[Dict[str, Any]], *, truncated: bool, skipped_count: int = 0):
         super().__init__(rows)
         self.truncated = truncated
+        self.skipped_count = skipped_count
 
 
 class BrokerRows(list):
     """Ledger rows with scan coverage preserved for both cost consumers."""
 
-    def __init__(self, rows: Iterable[Dict[str, Any]], *, truncated: bool):
+    def __init__(self, rows: Iterable[Dict[str, Any]], *, truncated: bool, skipped_count: int = 0):
         super().__init__(rows)
         self.truncated = truncated
+        self.skipped_count = skipped_count
 
 
 def load_broker_rows(path: Optional[Path] = None, *, period: Optional[str] = None) -> Optional[List[Dict[str, Any]]]:
@@ -457,6 +470,7 @@ def load_broker_rows(path: Optional[Path] = None, *, period: Optional[str] = Non
     if not target.exists():
         return []
     try:
-        return _parse_jsonl(target.read_text(encoding="utf-8").splitlines())
+        rows, skipped_count = _parse_jsonl(target.read_text(encoding="utf-8").splitlines())
     except OSError:
         return None
+    return BrokerRows(rows, truncated=False, skipped_count=skipped_count)

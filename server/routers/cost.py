@@ -195,11 +195,12 @@ def cost(period: Optional[str] = Query(default=None),
                     ctx.prec = 60
                     your_total += _your_implied_cost(revision, tenant_id)
             now = datetime.now(timezone.utc)
-            if period == now.strftime("%Y-%m") and info.get("published_at"):
-                published_at = datetime.fromisoformat(info["published_at"].replace("Z", "+00:00"))
-                if published_at.tzinfo is None:
-                    published_at = published_at.replace(tzinfo=timezone.utc)
-                stale = now - published_at > timedelta(hours=36)
+            freshness_at = info.get("checked_at") or info.get("published_at")
+            if period == now.strftime("%Y-%m") and freshness_at:
+                checked_at = datetime.fromisoformat(freshness_at.replace("Z", "+00:00"))
+                if checked_at.tzinfo is None:
+                    checked_at = checked_at.replace(tzinfo=timezone.utc)
+                stale = now - checked_at > timedelta(hours=36)
     except (LedgerCorrupt, KeyError, ValueError, OSError):
         # An unreadable publication is shown as none, flagged degraded, never guessed at.
         publication_id, rows, gross, credits = None, [], Decimal(0), Decimal(0)
@@ -211,11 +212,18 @@ def cost(period: Optional[str] = Query(default=None),
         "period": period,
         "publication_id": publication_id,
         "published_at": info.get("published_at"),
+        "checked_at": info.get("checked_at"),
         "stale": stale,
+        "provisional": bool(publication_id and period < datetime.now(timezone.utc).strftime("%Y-%m")
+                            and (info.get("missing_sources")
+                                 or info.get("metadata_status") != "ok"
+                                 or any(row["coverage"] in ("partial", "unknown") for row in rows))),
         "stale_reason": "This month's cost publication is more than 36 hours old. Recent use may be missing." if stale else None,
         "your_total_implied_cost_usd": _implied_amount(your_total),
         "coverage_summary": _coverage_summary(rows),
         "missing_sources": list(info.get("missing_sources") or []),
+        "carried_forward": list(info.get("carried_forward") or []),
+        "source_health": "ok" if info.get("metadata_status") == "ok" else "unknown",
         "own_use": own_use,
         "totals": {"gross_cost_usd": _dec(gross), "credits_usd": _dec(credits)},
         "resources": rows,
