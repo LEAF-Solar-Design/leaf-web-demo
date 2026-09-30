@@ -2033,6 +2033,11 @@ export default function App() {
     setSolarFlowEditor(null)
   }, [])
 
+  const onSolarFlowChange = useCallback(() => {
+    onCloseSolarFlowStep()
+    setSolarFormTool(null)
+  }, [onCloseSolarFlowStep])
+
   // Dismissing the confirm strip ends a step run that never ran, so the rail stops showing it pending.
   const onDismissSolarFlowRoute = useCallback(() => {
     clearSolarFlowStaged()
@@ -4028,6 +4033,7 @@ export default function App() {
                 runs={solarFlowRunsFor(solarFlowRuns, catalogRunContext?.drawingId)}
                 openName={solarFlowEditor?.name ?? solarFormTool?.name ?? null}
                 onOpenStep={onOpenSolarFlowStep}
+                onFlowChange={onSolarFlowChange}
               />
               {solarFlowEditor && (
                 <SolarStepEditor

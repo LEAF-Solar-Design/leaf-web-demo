@@ -61,6 +61,11 @@ describe('Solar settings build fence', () => {
     expect(offText).not.toContain('solar-flow-rail')
   })
 
+  it('FL16 fence the flag-off build ships no Solar flow selector', () => {
+    expect(onText).toContain('solar-flow-select')
+    expect(offText).not.toContain('solar-flow-select')
+  })
+
   it('SF2 fence the positive control ships in both builds', () => {
     expect(onText).toContain('solar-tool-form')
     expect(offText).toContain('solar-tool-form')

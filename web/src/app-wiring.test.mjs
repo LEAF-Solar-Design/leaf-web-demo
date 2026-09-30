@@ -293,6 +293,21 @@ describe('Solar step rail wiring', () => {
     const effect = appSource.slice(appSource.indexOf('const onDismissSolarFlowRoute = useCallback'))
     assert.ok(effect.includes("route?.runIntent?.intentId !== staged.intentId) clearSolarFlowStaged(staged.intentId)"))
   })
+
+  it('FL15 App closes the step editor and Solar settings form on a flow switch', () => {
+    const rail = appSource.indexOf('<SolarFlowRail')
+    const props = appSource.slice(rail, appSource.indexOf('/>', rail))
+    assert.ok(props.includes('onFlowChange={onSolarFlowChange}'))
+    assert.ok(props.includes('onOpenStep={onOpenSolarFlowStep}'))
+    assert.equal(appSource.split('onFlowChange').length - 1, 1)
+    const change = appSource.indexOf('const onSolarFlowChange = useCallback(() => {')
+    assert.notEqual(change, -1)
+    const end = appSource.indexOf('}, [onCloseSolarFlowStep])', change)
+    assert.notEqual(end, -1)
+    const body = appSource.slice(change, end)
+    assert.match(body, /onCloseSolarFlowStep\(\)/)
+    assert.match(body, /setSolarFormTool\(null\)/)
+  })
 })
 
 describe('J1 Browser composition', () => {
