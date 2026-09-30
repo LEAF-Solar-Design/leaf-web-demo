@@ -35,8 +35,13 @@ class TestCodebuildCiScript(unittest.TestCase):
         self.assertEqual(gate_runs, [invocations[0]])
         for flag in ("--retry 1", "--result-json", "--log-dir"):
             self.assertIn(flag, invocations[0])
+        shard_start = script.index(
+            'if [[ "${CI_SHARD_MODE:-all}" == shard && ${#only_args[@]} == 0 ]]; then\n')
+        shard_end = script.index('\nfi\n', shard_start)
         for flag in ("--shard-count", "--shard-index"):
-            self.assertNotIn(flag, script)
+            self.assertEqual(script.count(flag), 1)
+            self.assertLess(shard_start, script.index(flag))
+            self.assertLess(script.index(flag), shard_end)
         proof = script.split("# LEAF_GATE_PROOF_BEGIN\n", 1)[1].split(
             "# LEAF_GATE_PROOF_END", 1)[0]
         self.assertEqual(script.count("--verify-shard-results"), 1)

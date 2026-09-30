@@ -1,5 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# BEGIN SHARD ENV
+CI_SHARD_TOTAL_N=1
+CI_SHARD_INDEX_N=0
+CI_SHARD_MODE=all
+shard_env_valid=0
+if [[ -z "${CI_SHARD_TOTAL:-}" && -z "${CI_SHARD_INDEX:-}" ]]; then
+  shard_env_valid=1
+elif [[ "${CI_SHARD_TOTAL:-}" =~ ^0*1$ && ( -z "${CI_SHARD_INDEX:-}" || "${CI_SHARD_INDEX:-}" =~ ^0+$ ) ]]; then
+  shard_env_valid=1
+elif [[ "${CI_SHARD_TOTAL:-}" =~ ^0*[2-8]$ && "${CI_SHARD_INDEX:-}" =~ ^0*[0-7]$ ]]; then
+  CI_SHARD_TOTAL_N=$((10#$CI_SHARD_TOTAL))
+  CI_SHARD_INDEX_N=$((10#$CI_SHARD_INDEX))
+  if (( CI_SHARD_INDEX_N < CI_SHARD_TOTAL_N )); then
+    CI_SHARD_MODE=shard
+    shard_env_valid=1
+  fi
+fi
+if [[ "$shard_env_valid" != 1 ]]; then
+  echo "ci.sh: refusing unsupported shard env CI_SHARD_INDEX=${CI_SHARD_INDEX:-} CI_SHARD_TOTAL=${CI_SHARD_TOTAL:-}" >&2
+  exit 2
+fi
+echo "LEAF_EVENT shard mode=$CI_SHARD_MODE index=$CI_SHARD_INDEX_N total=$CI_SHARD_TOTAL_N"
+# END SHARD ENV
 # Freeze policy before any candidate installation, import, or test collection.
 TRUSTED_SHA=""
 HEAD_SHA=""
@@ -412,6 +435,7 @@ echo "base=$(cat /tmp/base_ref) head=$(git rev-parse --short HEAD) event=${CODEB
 export BASE="$(cat /tmp/base_ref)"
 echo "LEAF_T end setup $(date +%s%3N) rc=0"
 
+if [[ "${CI_SHARD_MODE:-all}" == all || "$CI_SHARD_INDEX_N" == 0 ]]; then
 echo "LEAF_T start contract $(date +%s%3N)"
 echo "=== job contract ==="
 cd "$CODEBUILD_SRC_DIR"
@@ -423,6 +447,9 @@ PYTHONSAFEPATH=1 python -m pytest -q \
   tests/test_contract_workflow_shape.py \
   tests/test_dispatch_staging_deploys_shape.py
 echo "LEAF_T end contract $(date +%s%3N) rc=0"
+else
+  echo "contract: runs on shard 0"
+fi
 
 echo "=== job license-fence ==="
 echo "LEAF_T start webdeps $(date +%s%3N)"
@@ -430,6 +457,7 @@ cd "$CODEBUILD_SRC_DIR/web"
 echo "--- 1/4 Install web dependencies"
 npm ci
 echo "LEAF_T end webdeps $(date +%s%3N) rc=0"
+if [[ "${CI_SHARD_MODE:-all}" == all || "$CI_SHARD_INDEX_N" == 0 ]]; then
 echo "LEAF_T start webbundle $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR/web"
 echo "--- 2/4 Build web bundle"
@@ -443,6 +471,9 @@ cd "$CODEBUILD_SRC_DIR"
 echo "--- 4/4 License fence scan"
 python scripts/check_license_fence.py .
 echo "LEAF_T end license-fence $(date +%s%3N) rc=0"
+else
+  echo "license fence: runs on shard 0"
+fi
 
 echo "=== job test-gate ==="
 echo "LEAF_T start pydeps $(date +%s%3N)"
@@ -546,15 +577,24 @@ fi
 if [[ "$tracing_helpers_ready" != 1 || "$reporters_ready" != 1 ]]; then
   echo 'WARNING: trusted capture unavailable; readsets and test reports remain incomplete' >&2
 fi
+if [[ "${CI_SHARD_MODE:-all}" == all || ${#only_args[@]} == 0 || "$CI_SHARD_INDEX_N" == 0 ]]; then
+if [[ "${CI_SHARD_MODE:-all}" == shard && ${#only_args[@]} == 0 ]]; then
+  only_args+=(--shard-count "$CI_SHARD_TOTAL_N" --shard-index "$CI_SHARD_INDEX_N")
+fi
 gate_status=0
 unset PYTHONSAFEPATH
 python scripts/run-all-gates.py --jobs "${LEAF_GATE_JOBS:-auto}" --retry 1 --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs "${only_args[@]}" || gate_status=$?
+else
+  echo "gate: selected mode runs on shard 0 only"
+  gate_status=0
+fi
 echo "LEAF_T end gate $(date +%s%3N) rc=$gate_status"
 if [[ -f /tmp/gate-results/gate-result.json ]]; then
   tail -n 200 /tmp/gate-results/gate-result.json || true
 else
   echo "No gate result JSON was written (runner exit $gate_status)"
 fi
+if [[ "${CI_SHARD_MODE:-all}" == all || "$CI_SHARD_INDEX_N" == 0 ]]; then
 echo "LEAF_T start change-impact $(date +%s%3N)"
 echo "=== job change-impact ==="
 # Advisory in S1: prints the assessment, never changes gate_status. Kill switch honoured.
@@ -563,6 +603,9 @@ python scripts/ci/change_impact_job.py --repo . --head "${CODEBUILD_RESOLVED_SOU
   --event "${CODEBUILD_WEBHOOK_EVENT:-manual}" --gate-result /tmp/gate-results/gate-result.json \
   --receipt-dir /tmp/impact || echo "change-impact: helper exit $? (advisory)"
 echo "LEAF_T end change-impact $(date +%s%3N) rc=0"
+else
+  echo "change-impact: runs on shard 0"
+fi
 # Read-set publication is advisory and only runs after a traced gate.
 # Compute completeness and the full-run binding before packing any evidence.
 manifest_failed=0
@@ -833,6 +876,9 @@ if detail.get("phase") == "shadow":
     print("LEAF_SHADOW " + canonical(shadow))
 LEAF_SELECTION_PUBLISHED
 # LEAF_GATE_PROOF_BEGIN
+if [[ "${CI_SHARD_MODE:-all}" == shard ]]; then
+  echo 'INFO: gate proof skipped in sharded mode; build verdict unchanged'
+else
 # Reuse only this run's result. Proof publication is advisory to the CI verdict.
 # Eligibility follows what executed (full, unfiltered, no trusted-SHA override), never the selector's phase.
 if [[ "$gate_status" == 0 ]] && python -I -B - "$selection_dir/detail.json" <<'LEAF_GATE_PROOF_ELIGIBLE'
@@ -872,6 +918,7 @@ then
   else
     echo 'WARNING: gate proof mint or verification failed; build verdict unchanged' >&2
   fi
+fi
 fi
 # LEAF_GATE_PROOF_END
 exit "$gate_status"
