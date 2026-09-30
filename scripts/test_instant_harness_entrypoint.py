@@ -30,6 +30,12 @@ class InstantHarnessEntrypointTests(unittest.TestCase):
         self.assertIn("LEAF_INSTANT_EXECUTION_ENABLED=0", self.dockerfile)
         self.assertIn("chmod 0555 /app/scripts/start-harness.sh", self.dockerfile)
 
+    def test_image_drops_package_managers_after_build(self) -> None:
+        self.assertIn("rm -rf /usr/local/lib/node_modules/npm", self.dockerfile)
+        removal_index = self.dockerfile.index("rm -rf /usr/local/lib/node_modules/npm")
+        self.assertGreater(removal_index, self.dockerfile.index("npm prune --omit=dev"))
+        self.assertLess(removal_index, self.dockerfile.index("USER 10002:10002"))
+
 
 if __name__ == "__main__":
     unittest.main()
