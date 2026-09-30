@@ -1,8 +1,17 @@
 import { useState } from 'react'
 import SchemaForm, { defaultsOf } from '../components/SchemaForm.jsx'
 import { solarFormKeys, solarView } from './solarView.js'
+import SolarPresetForm from './SolarPresetForm.jsx'
+import { PRESET_TOOL } from './solarPresetModel.js'
 
-export default function SolarToolForm({ tool, onSubmit, onClose }) {
+export default function SolarToolForm({ tool, onSubmit, onClose, presetListing, presetRevision }) {
+  if (tool?.name === PRESET_TOOL) {
+    return <SolarPresetForm tool={tool} onSubmit={onSubmit} onClose={onClose} listing={presetListing} revision={presetRevision} />
+  }
+  return <GenericSolarToolForm tool={tool} onSubmit={onSubmit} onClose={onClose} />
+}
+
+function GenericSolarToolForm({ tool, onSubmit, onClose }) {
   const { view } = solarView(tool)
   const schema = {
     ...tool.params,
