@@ -99,6 +99,20 @@ export function unprojectClientToPlane(camera, rect, clientX, clientY) {
   return hit ? { x: out.x, y: out.y } : null
 }
 
+/** safeRect is canvas-local, with canvasWidth/canvasHeight identifying its layout. */
+export function viewportFromCamera(camera, safeRect) {
+  if (!camera || !safeRect) return null
+  const { left, top, width, height, canvasWidth, canvasHeight } = safeRect
+  if (![left, top, width, height, canvasWidth, canvasHeight].every(Number.isFinite)
+    || width <= 0 || height <= 0 || canvasWidth <= 0 || canvasHeight <= 0) return null
+  const rect = { left: 0, top: 0, width: canvasWidth, height: canvasHeight }
+  const points = [[left, top], [left + width, top], [left, top + height], [left + width, top + height]]
+    .map(([x, y]) => unprojectClientToPlane(camera, rect, x, y))
+  if (points.some((p) => !p || !Number.isFinite(p.x) || !Number.isFinite(p.y))) return null
+  return { minX: Math.min(...points.map((p) => p.x)), minY: Math.min(...points.map((p) => p.y)),
+    maxX: Math.max(...points.map((p) => p.x)), maxY: Math.max(...points.map((p) => p.y)) }
+}
+
 /**
  * Recenter/zoom the camera while PRESERVING the camera-to-target offset
  * vector, so a sculpture-mode tilt survives a recenter (setting position.x/y

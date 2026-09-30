@@ -19,6 +19,7 @@ import esbuild from 'esbuild'
 
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
 const viewerSource = readFileSync(new URL('./components/Viewer.jsx', import.meta.url), 'utf8')
+const occluderSource = decomment(readFileSync(new URL('./site/drawingOccluders.js', import.meta.url), 'utf8'))
 
 describe('Conductor form wiring', () => {
   it('SZ23 the live ribbon branch routes conductors and sizing to the step editor', () => {
@@ -887,9 +888,10 @@ describe('studio unobstructed drawing viewport', () => {
     assert.ok(framing.includes('viewer.setView('))
   })
   it('names all eight occluders and excludes growing command chrome and the view cube', () => {
-    const start = appNoComments.indexOf('const STUDIO_DRAWING_OCCLUDERS = Object.freeze(')
+    assert.match(appNoComments, /import \{ STUDIO_DRAWING_OCCLUDERS \} from '.\/site\/drawingOccluders.js'/)
+    const start = occluderSource.indexOf('const STUDIO_DRAWING_OCCLUDERS = Object.freeze(')
     assert.ok(start >= 0)
-    const list = appNoComments.slice(start, appNoComments.indexOf('])', start))
+    const list = occluderSource.slice(start, occluderSource.indexOf('])', start))
     for (const selector of ['header.top', '#drafting-ribbon', '.viewer-toolbar', '[data-testid="cockpit-view"]',
       '.properties-dock', '.bar.bar-command-line', 'footer.foot-bar', '.rail-stack']) assert.ok(list.includes(selector), selector)
     assert.ok(list.includes('reserve: 50'))
