@@ -18,7 +18,13 @@
 # (broker stays server+da only, per the header comment above).
 FROM node:20-slim AS e2bdeps
 WORKDIR /helper
-RUN npm init -y && npm install e2b@^2.35.0
+# undici and brace-expansion are pinned to their fixed releases (HIGH
+# advisories CVE-2026-19534, CVE-2026-84961, CVE-2026-102276 and
+# CVE-2026-102278 failed cve-harvest on 2026-09-30); raise the pins, never
+# allowlist them.
+RUN npm init -y \
+    && npm pkg set overrides.undici=7.30.0 overrides.brace-expansion=5.0.12 \
+    && npm install e2b@^2.35.0
 
 FROM python:3.12-slim AS broker
 
