@@ -113,6 +113,32 @@ def _implied_amount(value: Decimal) -> str:
         return _dec(value.quantize(_IMPLIED_QUANTUM, rounding=ROUND_HALF_UP))
 
 
+def _is_provisional(period: str, publication_id: Optional[str],
+                    info: Dict[str, Any], rows: List[Dict[str, Any]]) -> bool:
+    return bool(publication_id and period < datetime.now(timezone.utc).strftime("%Y-%m")
+                and (info.get("missing_sources")
+                     or info.get("metadata_status") != "ok"
+                     or any(row["coverage"] in ("partial", "unknown") for row in rows)))
+
+
+def _month_number(period: str) -> int:
+    year, month = period.split("-")
+    return int(year) * 12 + int(month) - 1
+
+
+def _history_periods(from_period: Optional[str], to_period: Optional[str]) -> List[str]:
+    if from_period is None or to_period is None:
+        raise HTTPException(status_code=400, detail="from and to are required")
+    if not PERIOD_RE.fullmatch(from_period) or not PERIOD_RE.fullmatch(to_period):
+        raise HTTPException(status_code=400, detail="from and to must be YYYY-MM")
+    first, last = _month_number(from_period), _month_number(to_period)
+    if first > last:
+        raise HTTPException(status_code=400, detail="from must not be after to")
+    if last - first + 1 > 24:
+        raise HTTPException(status_code=400, detail="history range must not exceed 24 months")
+    return [f"{number // 12:04d}-{number % 12 + 1:02d}" for number in range(first, last + 1)]
+
+
 def _physical_row(entry: Any) -> Optional[Dict[str, str]]:
     """Leaf's whole physical quantity for the resource (never per tenant), or None."""
     if not isinstance(entry, dict):
@@ -214,10 +240,7 @@ def cost(period: Optional[str] = Query(default=None),
         "published_at": info.get("published_at"),
         "checked_at": info.get("checked_at"),
         "stale": stale,
-        "provisional": bool(publication_id and period < datetime.now(timezone.utc).strftime("%Y-%m")
-                            and (info.get("missing_sources")
-                                 or info.get("metadata_status") != "ok"
-                                 or any(row["coverage"] in ("partial", "unknown") for row in rows))),
+        "provisional": _is_provisional(period, publication_id, info, rows),
         "stale_reason": "This month's cost publication is more than 36 hours old. Recent use may be missing." if stale else None,
         "your_total_implied_cost_usd": _implied_amount(your_total),
         "coverage_summary": _coverage_summary(rows),
@@ -229,3 +252,76 @@ def cost(period: Optional[str] = Query(default=None),
         "resources": rows,
     }
     return with_envelope_fields(deps.tenant_echo(body, tenant), degraded_mode=degraded)
+
+
+@router.get("/api/cost/history")
+def cost_history(from_period: Optional[str] = Query(default=None, alias="from"),
+                 to_period: Optional[str] = Query(default=None, alias="to"),
+                 tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
+    """Cumulative tenant cost transparency over an inclusive month range."""
+    periods = _history_periods(from_period, to_period)
+    tenant_id = str(tenant)
+    store = CostLedgerStore()
+    months: List[Dict[str, Any]] = []
+    cumulative: Dict[str, Dict[str, Any]] = {}
+    gross = Decimal(0)
+    credits = Decimal(0)
+    your_total = Decimal(0)
+
+    for period in periods:
+        publication_id: Optional[str] = None
+        try:
+            publication_id = publisher.latest_publication_id(store, period)
+            if publication_id is None:
+                months.append({"period": period, "publication_id": None,
+                               "status": "unpublished", "provisional": False,
+                               "your_implied_cost_usd": _implied_amount(Decimal(0))})
+                continue
+            revisions = store.read_publication(publication_id)
+            info = publisher.publication_info(store, publication_id)
+            resource_rows = [_resource_row(revision, tenant_id) for revision in revisions]
+            month_total = Decimal(0)
+            for revision, row in zip(revisions, resource_rows):
+                rp = revision.resource_period
+                implied = _your_implied_cost(revision, tenant_id)
+                month_total += implied
+                gross += rp.gross_cost_usd
+                credits += rp.credits_usd
+                your_total += implied
+                item = cumulative.setdefault(rp.resource_id, {
+                    "resource_id": rp.resource_id,
+                    "display_name": display_name(rp.resource_id),
+                    "gross": Decimal(0), "credits": Decimal(0), "implied": Decimal(0),
+                    "monthly_shares": [],
+                })
+                item["gross"] += rp.gross_cost_usd
+                item["credits"] += rp.credits_usd
+                item["implied"] += implied
+                item["monthly_shares"].append({"period": period, "your_share": row["your_share"]})
+            months.append({"period": period, "publication_id": publication_id,
+                           "status": "published",
+                           "provisional": _is_provisional(period, publication_id, info, resource_rows),
+                           "your_implied_cost_usd": _implied_amount(month_total)})
+        except (LedgerCorrupt, KeyError, ValueError, OSError):
+            months.append({"period": period, "publication_id": publication_id,
+                           "status": "unreadable", "provisional": False,
+                           "your_implied_cost_usd": _implied_amount(Decimal(0))})
+
+    resources = [{
+        "resource_id": item["resource_id"],
+        "display_name": item["display_name"],
+        "gross_cost_usd": _dec(item["gross"]),
+        "credits_usd": _dec(item["credits"]),
+        "your_implied_cost_usd": _implied_amount(item["implied"]),
+        "monthly_shares": item["monthly_shares"],
+    } for item in sorted(cumulative.values(), key=lambda item: item["resource_id"])]
+    body = {
+        "from": from_period,
+        "to": to_period,
+        "months": months,
+        "totals": {"gross_cost_usd": _dec(gross), "credits_usd": _dec(credits),
+                   "your_implied_cost_usd": _implied_amount(your_total)},
+        "resources": resources,
+    }
+    return with_envelope_fields(deps.tenant_echo(body, tenant),
+                                degraded_mode=any(month["status"] == "unreadable" for month in months))

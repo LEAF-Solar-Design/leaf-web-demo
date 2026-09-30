@@ -24,6 +24,23 @@ const fixture = {
   tenants: [{ tenant_id: 'other-private-tenant', share: '0.9' }],
 }
 
+const historyFixture = {
+  from: '2026-07', to: '2026-09',
+  months: [
+    { period: '2026-07', publication_id: 'pub-jul', status: 'published', provisional: false, your_implied_cost_usd: '1.000000' },
+    { period: '2026-08', publication_id: null, status: 'unpublished', provisional: false, your_implied_cost_usd: '0.000000' },
+    { period: '2026-09', publication_id: 'pub-sep', status: 'published', provisional: true, your_implied_cost_usd: '2.000000' },
+  ],
+  totals: { gross_cost_usd: '30.00', credits_usd: '3.00', your_implied_cost_usd: '3.000001' },
+  resources: [{
+    resource_id: 'aps:engine', display_name: 'APS engine', gross_cost_usd: '30.00', credits_usd: '3.00',
+    your_implied_cost_usd: '3.000000', monthly_shares: [
+      { period: '2026-07', your_share: '0.100000000000' },
+      { period: '2026-09', your_share: '0.200000000000' },
+    ],
+  }],
+}
+
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
@@ -188,6 +205,32 @@ describe('cost transparency', () => {
     fireEvent.keyDown(screen.getByLabelText('Month'), { key: 'Escape' })
     expect(screen.queryByRole('region', { name: title })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: title })).toHaveFocus()
+  })
+
+  it('shows three-month history with month states, cumulative rows and totals', async () => {
+    const fetchMock = vi.fn(async (url) => new Response(JSON.stringify(
+      String(url).includes('/api/cost/history?') ? historyFixture : fixture,
+    ), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const panel = await openPanel()
+    fireEvent.click(within(panel).getByRole('button', { name: 'History' }))
+    const historyRegion = await screen.findByRole('region', { name: 'Cumulative resource costs' })
+    const expectedTo = new Date().toISOString().slice(0, 7)
+    const expectedFromDate = new Date(`${expectedTo}-01T00:00:00Z`)
+    expectedFromDate.setUTCMonth(expectedFromDate.getUTCMonth() - 2)
+    const expectedFrom = expectedFromDate.toISOString().slice(0, 7)
+    expect(screen.getByLabelText('From month')).toHaveValue(expectedFrom)
+    expect(screen.getByLabelText('To month')).toHaveValue(expectedTo)
+    expect(screen.getByText('2026-08: unpublished. Your implied amount: $0.00')).toBeInTheDocument()
+    expect(screen.getByText(/2026-09: published.*provisional/)).toBeInTheDocument()
+    expect(within(historyRegion).getByText('2026-07: 0.100000 (10.0000%)')).toBeInTheDocument()
+    expect(within(historyRegion).getByText('2026-09: 0.200000 (20.0000%)')).toBeInTheDocument()
+    const totals = within(historyRegion).getByRole('rowheader', { name: 'Cumulative totals' }).closest('tr')
+    expect(within(totals).getByText('$30.00')).toBeInTheDocument()
+    expect(within(totals).getByText('$3.00')).toBeInTheDocument()
+    expect(within(totals).getByText('$3.000001')).toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([url]) => String(url) === `${config.apiBase}/api/cost/history?from=${expectedFrom}&to=${expectedTo}`)).toBe(true)
+    expect(screen.queryAllByRole('button', { name: /run/i })).toHaveLength(0)
   })
 
   it.each(['null', 'offline', '503'])('keeps the entry and retries after %s', async (failure) => {
