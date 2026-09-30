@@ -38,7 +38,10 @@ QUANTITY_GROUP_BY = (
     {"Type": "DIMENSION", "Key": "USAGE_TYPE"},
 )
 # SERVICE -> (usage type marker, unit)
+# Lambda Build-Sec usage is ignored: physical usage holds only one unit per resource,
+# so seconds cannot be reported alongside or added to build-minutes.
 PHYSICAL_USAGE_RULES = {
+    "CodeBuild": ("Build-Min", "build-minutes"),
     "AWS CodeBuild": ("Build-Min", "build-minutes"),
     "Amazon Elastic Compute Cloud - Compute": ("BoxUsage", "instance-hours"),
 }
