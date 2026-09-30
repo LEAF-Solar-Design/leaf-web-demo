@@ -393,6 +393,7 @@
     "server-solar-geo-formats",
     "server-solar-ground-analysis",
     "server-solar-ground-buildout",
+    "server-solar-ground-conversion-evidence",
     "server-solar-ground-dialogs",
     "server-solar-ground-dsteps",
     "server-solar-ground-frames",

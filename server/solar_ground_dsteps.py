@@ -27,6 +27,11 @@ Literal ports of Branch2025 (read 2026-09-23 at C:/tmp/solar-parity/wt-b25-s53):
                                           (:551-590), TryBuildLeafBlockSpec (:592-616)
   Terrain/TrackerRowReader.cs             through server/solar_ground_buildout.py (its port): the
                                           key-aware reader d3 uses instead of the positional one
+  LeafSolarDesign.Core/BranchCmdCore.cs   the direct tracker path (read 2026-09-29 at Branch2025
+                                          c26204dd): BuildAndSaveDirectTrackerPanelGroups (:503-678),
+                                          BuildDirectTrackerMatrixJson (:708-784),
+                                          BuildDirectTrackerPanelDef (:809-839)
+  LeafSolarDesign.Core/DoubleExtensions.cs  AngleRationalise (:44-52)
 
 Pure functions over NEUTRAL data: polylines as {"layer", "vertices", "closed"}, circles as
 {"layer", "center", "radius"}, blocks as {"name", "extents"}, tracker entities as the buildout
@@ -152,12 +157,15 @@ INSUNITS_NAMES = {0: "Unitless", 1: "Inches", 2: "Feet", 4: "Millimeters", 5: "C
 
 # LEAFTRACKERSTOPANELGROUPS
 TRACKER_EPSILON = 1e-9                            # LeafTrackersToPanelGroupsCommand.cs:42
+PANEL_GROUP_NUMBER_DEFAULT = 1                    # BranchCmdCore.cs:581 names Group <counter>; a new drawing starts at 1
+TWO_PI = math.pi * 2                              # DoubleExtensions.cs:46
 
 # Studio-side bounds. The plugin has none; these refuse inputs that would pin a worker.
 MAX_ENTITIES = 500_000
 MAX_VERTICES = 20_000
 MAX_ARRAYS = 1_000
 MAX_CABLES = 100_000
+MAX_LAYOUT_PANELS = 1_000_000   # tracker_panel_layout refuses a site with more module slots
 MAX_ABS = 1e15            # keeps every custom-format text exact inside Decimal's precision
 
 
@@ -648,17 +656,13 @@ def panel_group_settings(created, stored=None):
     return {"PanelGroupNumber": number + created, "PanelGroupColour": colour + created}
 
 
-def trackers_to_panel_groups(tracker_entities, meters_per_unit=1.0):
-    """LEAFTRACKERSTOPANELGROUPS as INTENDED (G28): CollectTrackers (:251-317) keeps every
-    tracker with module slots, reading each tracker's row fields through the key-aware row
-    reader (the buildout port of TrackerRowReader.cs) instead of the positional read that
-    throws on the drawer's rows (:618-637). A footprint polyline also needs a non-degenerate
-    axis and cross-axis half width (TryBuildLeafPolylineSpec, :557-578). Each tracker becomes
-    one panel group of its slots (the direct path, :693-731). Returns {"trackers",
-    "panel_groups_created", "panel_group_slots"}."""
+def _accepted_trackers(tracker_entities, meters_per_unit):
+    """The trackers LEAFTRACKERSTOPANELGROUPS converts, in drawing order: yields
+    (entity_index, entity, row) for every entity CollectTrackers (:251-317) keeps. Linear in
+    the entities. The one acceptance rule trackers_to_panel_groups and tracker_panel_layout
+    share, so their counts cannot disagree."""
     ents = _entities(tracker_entities)
-    trackers, slots = 0, 0
-    for ent in ents:
+    for index, ent in enumerate(ents):
         row = _bo.read_tracker_rows([ent], meters_per_unit)
         if not row or row[0]["module_slots"] <= 0:                       # :560, :598
             continue
@@ -669,9 +673,142 @@ def trackers_to_panel_groups(tracker_entities, meters_per_unit=1.0):
                 continue
             if math.sqrt((x1 - ax) ** 2 + (y1 - ay) ** 2) <= TRACKER_EPSILON:   # :578
                 continue
+        yield index, ent, row[0]
+
+
+def trackers_to_panel_groups(tracker_entities, meters_per_unit=1.0):
+    """LEAFTRACKERSTOPANELGROUPS as INTENDED (G28): CollectTrackers (:251-317) keeps every
+    tracker with module slots, reading each tracker's row fields through the key-aware row
+    reader (the buildout port of TrackerRowReader.cs) instead of the positional read that
+    throws on the drawer's rows (:618-637). A footprint polyline also needs a non-degenerate
+    axis and cross-axis half width (TryBuildLeafPolylineSpec, :557-578). Each tracker becomes
+    one panel group of its slots (the direct path, :693-731). Returns {"trackers",
+    "panel_groups_created", "panel_group_slots"}."""
+    trackers, slots = 0, 0
+    for _, _, row in _accepted_trackers(tracker_entities, meters_per_unit):
         trackers += 1
-        slots += row[0]["module_slots"]
+        slots += row["module_slots"]
     return {"trackers": trackers, "panel_groups_created": trackers, "panel_group_slots": slots}
+
+
+def _half_cross_axis(ent, row):
+    """A tracker's half cross-axis vector in drawing units. A footprint polyline: vertex 1
+    minus the axis start (TryBuildLeafPolylineSpec, :576-587). A drawn row: half its keyed
+    cross_axis_width_du (else the block's Y scale, as TrackerRowReader.cs reads the width)
+    along the axis's left normal, the vector TryBuildLeafBlockSpec (:600-613) builds from
+    the block rotation. Fails closed on a drawn row with no positive width."""
+    ax, ay = _xy(row["axis_start"], "tracker axis start")
+    bx, by = _xy(row["axis_end"], "tracker axis end")
+    if ent.get("kind") == "polyline":
+        (x1, y1) = _vertices(ent.get("vertices"), "tracker polyline")[1]
+        return (x1 - ax, y1 - ay)
+    raw = ent.get("cross_axis_width_du")
+    if raw is None:
+        scale = ent.get("scale")
+        if not isinstance(scale, (list, tuple)) or len(scale) < 2:
+            raise DStepsInputError("a drawn tracker needs cross_axis_width_du or a block scale")
+        raw = scale[1]
+    width = abs(_finite(raw, "tracker cross-axis width"))
+    if width <= TRACKER_EPSILON:
+        raise DStepsInputError("a drawn tracker needs a positive cross-axis width")
+    dx, dy = bx - ax, by - ay
+    length = math.sqrt(dx * dx + dy * dy)
+    if length <= TRACKER_EPSILON:
+        raise DStepsInputError("a drawn tracker needs a non-degenerate axis")
+    half = width * 0.5
+    return (-(dy / length) * half, (dx / length) * half)
+
+
+def tracker_panel_layout(tracker_entities, meters_per_unit=1.0, stored=None):
+    """The panel geometry LEAFTRACKERSTOPANELGROUPS writes, per tracker, in drawing units.
+    Above AutoSwitchThresholdModules (LeafTrackersToPanelGroupsCommand.cs:22, :382) the
+    command takes the direct path: one outline per tracker (EmitTrackerOutline, :693-731),
+    then BranchCmdCore.BuildAndSaveDirectTrackerPanelGroups (:503-678) makes one panel group
+    per outline whose matrix is ONE row of module_slots panels at the axis slot centres
+    (BuildDirectTrackerMatrixJson, :708-784): slot length = axis length / slots, centre i =
+    axis start + unit axis * slot length * (i + 0.5), angle = atan2 of the axis rationalised
+    to [0, 2 pi] (DoubleExtensions.cs:44-52). A panel is one slot length along the row by
+    twice the half cross axis across it (BuildDirectTrackerPanelDef, :809-839). Groups are
+    numbered from the stored PanelGroupNumber (default 1; BranchCmdCore.cs:581).
+
+    Returns {"trackers": [...], "panel_groups_created", "panel_count", "settings"}. Each
+    tracker is {"ordinal", "entity_index", "entity_kind", "group_number", "row_index",
+    "module_slots", "axis_start", "axis_end", "half_cross_axis", "center", "outline",
+    "row_angle_rad", "slot_length_du", "panel_height_du", "panels"}; "panels" lists the
+    [x, y] slot centres in slot order (the plugin's panel id suffix is T<slot + 1>).
+    Linear in entities plus slots; refuses more than MAX_LAYOUT_PANELS slots before it
+    builds a panel past the bound."""
+    try:
+        result = _tracker_panel_layout(tracker_entities, meters_per_unit, stored)
+        _layout_finite_output(result)
+        return result
+    except (_bo.BuildoutInputError, _bo.BuildoutBoundsError, OverflowError, ZeroDivisionError) as exc:
+        raise DStepsInputError(str(exc)) from None
+
+
+def _layout_finite_output(value):
+    """Last guard on every emitted number, without changing float values or signs."""
+    if isinstance(value, dict):
+        for item in value.values():
+            _layout_finite_output(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _layout_finite_output(item)
+    elif isinstance(value, Real) and not math.isfinite(value):
+        raise DStepsInputError("tracker panel layout must emit only finite numbers")
+
+
+def _layout_accepted_trackers(tracker_entities, meters_per_unit):
+    """Bound drawn coordinates before the row reader does axis arithmetic."""
+    for index, ent in enumerate(_entities(tracker_entities)):
+        if ent.get("kind") == "tracker":
+            for key in ("axis_start", "axis_end"):
+                if ent.get(key) is not None:
+                    _xy(ent[key], key)
+        for _, accepted, row in _accepted_trackers([ent], meters_per_unit):
+            yield index, accepted, row
+
+
+def _tracker_panel_layout(tracker_entities, meters_per_unit, stored):
+    """Implementation behind the layout-only refusal boundary."""
+    stored = {} if stored is None else stored
+    if not isinstance(stored, dict):
+        raise DStepsInputError("stored settings must be an object")
+    number = _int(stored.get("PanelGroupNumber", PANEL_GROUP_NUMBER_DEFAULT), "PanelGroupNumber")
+    trackers, total = [], 0
+    for index, ent, row in _layout_accepted_trackers(tracker_entities, meters_per_unit):
+        slots = row["module_slots"]
+        total += slots
+        if total > MAX_LAYOUT_PANELS:
+            raise DStepsInputError(f"more than {MAX_LAYOUT_PANELS} module slots")
+        ax, ay = _xy(row["axis_start"], "tracker axis start")
+        bx, by = _xy(row["axis_end"], "tracker axis end")
+        dx, dy = bx - ax, by - ay
+        axis_len = math.sqrt(dx * dx + dy * dy)
+        if axis_len <= TRACKER_EPSILON:
+            raise DStepsInputError("a drawn tracker needs a non-degenerate axis")
+        hx, hy = _half_cross_axis(ent, row)
+        ux, uy = dx / axis_len, dy / axis_len
+        slot_len = axis_len / slots
+        angle = math.atan2(dy, dx)
+        while angle > TWO_PI:
+            angle -= TWO_PI
+        while angle < 0.0:
+            angle += TWO_PI
+        panels = [[ax + ux * slot_len * (i + 0.5), ay + uy * slot_len * (i + 0.5)]
+                  for i in range(slots)]
+        ordinal = len(trackers)
+        trackers.append({
+            "ordinal": ordinal, "entity_index": index, "entity_kind": ent.get("kind"),
+            "group_number": number + ordinal, "row_index": row["row_index"],
+            "module_slots": slots, "axis_start": [ax, ay], "axis_end": [bx, by],
+            "half_cross_axis": [hx, hy], "center": [(ax + bx) * 0.5, (ay + by) * 0.5],
+            "outline": [[ax - hx, ay - hy], [ax + hx, ay + hy],
+                        [bx + hx, by + hy], [bx - hx, by - hy]],
+            "row_angle_rad": angle, "slot_length_du": slot_len,
+            "panel_height_du": 2.0 * math.sqrt(hx * hx + hy * hy), "panels": panels})
+    return {"trackers": trackers, "panel_groups_created": len(trackers), "panel_count": total,
+            "settings": panel_group_settings(len(trackers), stored)}
 
 
 # ---------------------------------------------------------------------------
