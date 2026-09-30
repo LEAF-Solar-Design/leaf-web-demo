@@ -335,6 +335,10 @@ def build_suites() -> List[Suite]:
         # sf-solar-electrical-bridge: the kernel state to design graph topology mapping, both ways.
         Suite("server-solar-electrical-bridge", "server tests/test_solar_electrical_state_bridge.py", "pytest", SERVER,
               _py_pytest("tests/test_solar_electrical_state_bridge.py"), 83),
+        # sf-solar-electrical-bridge-routes: homerun and feeder routes projected both ways beside the legacy
+        # equipment bridge (C4, C5, C10). Hermetic and nothing skips: 96 + 30 correction cases = 126.
+        Suite("server-solar-electrical-route-bridge", "server tests/test_solar_electrical_route_bridge.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_electrical_route_bridge.py"), 126),
         # 31 -> 35 on 2026-09-22: the zone-aware entry point (group_panels_by_zone,
         # the port of BuildAndSaveGroupsForZone) added four hermetic, unparametrized
         # tests. Nothing in this file skips, so the count is the same on every runner.
