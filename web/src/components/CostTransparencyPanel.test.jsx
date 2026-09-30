@@ -88,6 +88,61 @@ describe('cost transparency', () => {
     expect(screen.getByRole('region', { name: 'Resource costs' })).toHaveAttribute('tabindex', '0')
   })
 
+  it.each([
+    ['321714', 'build-minutes', 'complete', 'share'],
+    ['5003.04', 'instance-hours', 'partial', 'usd-by-environment'],
+    ['0', 'build-minutes', 'unknown', 'share'],
+  ])('shows physical use %s %s separately from the allocation basis', async (amount, unit, coverage, allocationUnit) => {
+    respond({ ...fixture, resources: [{ ...fixture.resources[0], total_usage: '1', unit: allocationUnit,
+      physical_usage: { quantity: amount, unit, coverage } }] })
+    const panel = await openPanel()
+    const row = screen.getByRole('rowheader', { name: /APS engine/ }).closest('tr')
+    const cell = within(row).getAllByRole('cell')[0]
+    expect(within(cell).getByText(`${amount} ${unit}`)).toBeInTheDocument()
+    expect(within(cell).getByText(`Physical use coverage: ${coverage}`)).toBeInTheDocument()
+    expect(within(cell).getByText(`Allocation basis: 1 ${allocationUnit}`)).toBeInTheDocument()
+    expect(screen.queryAllByRole('button', { name: /run/i })).toHaveLength(0)
+    expect(panel.textContent).not.toMatch(/[\u2013\u2014]/)
+  })
+
+  it.each([null, undefined])('preserves allocation-only cells when physical usage is %s', async (physical_usage) => {
+    respond({ ...fixture, resources: fixture.resources.map((row) => ({ ...row, physical_usage })) })
+    await openPanel()
+    const engine = screen.getByRole('rowheader', { name: /APS engine/ }).closest('tr')
+    const storage = screen.getByRole('rowheader', { name: /Storage/ }).closest('tr')
+    expect(within(engine).getAllByRole('cell')[0]).toHaveTextContent(/^245 engine-second$/)
+    expect(within(storage).getAllByRole('cell')[0]).toHaveTextContent(/^Unavailable GB-month$/)
+    expect(screen.queryByText(/Physical use coverage:|Allocation basis:/)).not.toBeInTheDocument()
+  })
+
+  it('shows each payer bucket without adding tenant-funded value to Leaf totals', async () => {
+    respond({ ...fixture, own_use: { ...fixture.own_use, llm: { ...fixture.own_use.llm,
+      payer: 'mixed', usd_est: '1020.1534567', by_payer: {
+        tenant_plan: { turns: 4, usd_est: '1000.1234567' },
+        tenant_api_key: { turns: 3, usd_est: '20.00' },
+        leaf: { turns: 2, usd_est: '0.03' },
+        unknown: { turns: 1, usd_est: null },
+        mixed: { turns: 2, usd_est: '0' },
+      },
+    } } })
+    const panel = await openPanel()
+    const breakdown = screen.getByText('LLM API-equivalent value').nextElementSibling
+    for (const line of [
+      'Your Claude plan: 4 turns · $1000.123457 API-equivalent value',
+      'Your own API key: 3 turns · $20.00 API-equivalent value',
+      'Leaf: 2 turns · $0.03 API-equivalent value',
+      'Payer unknown: 1 turn · Unavailable API-equivalent value',
+      'Mixed payers: 2 turns · $0.00 API-equivalent value',
+    ]) expect(within(breakdown).getByText(line)).toBeInTheDocument()
+    expect(breakdown.querySelectorAll('div')).toHaveLength(5)
+    const totals = screen.getByRole('rowheader', { name: 'Totals' }).closest('tr')
+    expect(within(totals).getAllByRole('cell').map((cell) => cell.textContent)).toEqual([
+      'Not applicable', '$100.30', '$10.00', 'Not applicable', '$0.300009', 'Not applicable', 'Not applicable',
+    ])
+    expect(screen.queryAllByRole('button', { name: /run/i })).toHaveLength(0)
+    expect(panel.textContent).not.toMatch(/[\u2013\u2014]/)
+  })
+
   it('shows stale publication details and the environment estimate basis', async () => {
     respond({ ...fixture, stale: true, stale_reason: 'This publication is more than 36 hours old.',
       resources: fixture.resources.map((row) => ({ ...row, unit: 'usd-by-environment' })) })
