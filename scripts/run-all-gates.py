@@ -577,6 +577,12 @@ def build_suites() -> List[Suite]:
         # Auto-fill plan preview (2026-09-29, sf-w2-autofill-plan): the solver's plan from the persisted graph, proven against solar-autofill. COUNTED: 38 tests + 73 more parametrizations = 111.
         Suite("server-solar-tool-solar-autofill-plan", "server tests/test_solar_tool_solar_autofill_plan.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_autofill_plan.py"), 111),
+        # Elevation zones over the W1 graph (2026-09-29, sf-w2-zone-metadata): one local-graph-commit tool
+        # for ZONEHEIGHT and the two zone assigns over server/solar_batch2_simple.py, the z1, z2 and z3
+        # receipts replayed. Inputs are authored in the file, so the floor is the exact count on every
+        # runner. COUNTED: 17 tests + 50 more parametrizations = 67.
+        Suite("server-solar-tool-solar-elevation-zones", "server tests/test_solar_tool_solar_elevation_zones.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_elevation_zones.py"), 68),
         # Guardrails as a W2 registry graph read (2026-09-29, sf-w2-presets-guardrails): the plugin's 14
         # rules on the stored graph plus the recorded g1/g2 rule set replayed through the tool's row path.
         # Inputs are authored in the file, so the floor is the exact count on every runner. PLANNED: 59.

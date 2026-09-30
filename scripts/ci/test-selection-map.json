@@ -439,6 +439,7 @@
     "server-solar-tool-solar-assign-equipment",
     "server-solar-tool-solar-autofill",
     "server-solar-tool-solar-autofill-plan",
+    "server-solar-tool-solar-elevation-zones",
     "server-solar-tool-solar-schedule",
     "server-solar-tool-solar-size-strings",
     "server-solar-tool-solar-string-conductors",
