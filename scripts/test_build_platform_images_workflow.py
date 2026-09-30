@@ -4114,7 +4114,10 @@ def check_docs_noop_filter(text: str) -> None:
         # times and keep the newest; the successor gate refuses only a strictly
         # newer contract. No new endpoint, token, secret reference or
         # `gh workflow run` site.
-        "1a90b6cc28189b73462ffb017c7e92ac92df5f06f2d4bc4432752f921359c627"
+        # 2026-09-30: the first contract read validates each nonempty read id
+        # and fails closed on a malformed one, per the sol6 critic finding on
+        # #1599; no new endpoint, token, secret or dispatch site.
+        "730f948950d0778a53a42dfb5228efde8500a5ae46dc4c705bab9405abb7a0be"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -7403,6 +7406,9 @@ def test_relay_selects_only_successful_consumer_contract_producer_runs() -> None
         filtered = normalized.index('.conclusion == "success"')
         assert filtered < normalized.index("sort_by(-.id)"), label
     assert "missing successful contract producer run" in contract_code
+    assert '[[ "$READ_ID" =~ ^[1-9][0-9]*$ ]]' in contract_code
+    assert "::error::The Terraform consumer-contract listing returned a malformed run id." in contract_code
+    assert contract_code.index('[[ "$READ_ID" =~ ^[1-9][0-9]*$ ]]') < contract_code.index('-gt "$RUN_ID"')
     assert '[ "$READ_ID" -gt "$RUN_ID" ]' in contract_code
     assert 'RUN_ID="$READ_ID"' in contract_code
     assert 'cp consumer-contract-read.json consumer-contract-runs.json' in contract_code
