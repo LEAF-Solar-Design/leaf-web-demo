@@ -427,6 +427,7 @@
     "server-solar-pvcase-solve",
     "server-solar-registry",
     "server-solar-rooftop-chain",
+    "server-solar-settings-invalidation",
     "server-solar-solaredge-import",
     "server-solar-solaredge-parse",
     "server-solar-solaredge-pdf",

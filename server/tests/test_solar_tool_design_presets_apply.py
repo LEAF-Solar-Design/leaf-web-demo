@@ -49,7 +49,7 @@ GRAPH_BETA = {"string_layer": "B-String", "home_run_layer": "B-Home", "panel_gro
 # canonical sha256 (solar_sizing_client.digest) of graph["settings"] after f1 on the fixture graph.
 F1_SETTINGS_SHA256 = "e260816996efd904294ccb9883a990fed60de7750889a5b71a5bccaf8e16e9c4"
 # canonical sha256 of the whole graph after test_design_presets_apply_solar_settings_edit_round_trip.
-ROUND_TRIP_GRAPH_SHA256 = "25d5c4d1cc0910ff0c0bf6fd3548fb62c923f7ef3d34721756634de40130e1d0"
+ROUND_TRIP_GRAPH_SHA256 = "bd1b0f51216a2e57de7621790c174a3dcf618591f93706749e6b7e38b454dd0b"
 
 
 def commit_builtin():
@@ -159,8 +159,27 @@ def test_design_presets_apply_f1_writes_the_snapshot_layers(graph):
     assert settings["global_string_sizing_confirmed"] is False
     assert (settings["rev"], settings["provenance"]["last_writer"], settings["provenance"]["tool_id"],
             settings["provenance"]["source_rev"]) == (1, TOOL, TOOL, 0)
-    assert [e for e in entities(after) if e["kind"] != "settings"] == \
-        [e for e in entities(graph) if e["kind"] != "settings"]
+    # The layer change stales the homerun and the schedule (solar_settings_invalidation.py) and
+    # nothing else.
+    moved = ("settings", "route", "schedule")
+    assert [e for e in entities(after) if e["kind"] not in moved] == \
+        [e for e in entities(graph) if e["kind"] not in moved]
+    for item in after["routes"] + after["schedules"]:
+        assert item["validity"] == {"state": "stale", "reasons": ["settings_changed"]}
+        assert (item["rev"], item["provenance"]["last_writer"], item["provenance"]["tool_id"],
+                item["provenance"]["source_rev"]) == (1, TOOL, TOOL, 0)
+    expected_outputs = copy.deepcopy(graph["routes"] + graph["schedules"])
+    for item in expected_outputs:
+        item["validity"] = {"state": "stale", "reasons": ["settings_changed"]}
+        item["rev"] = 1
+        item["provenance"].update(last_writer=TOOL, tool_id=TOOL, source_rev=0)
+    actual_outputs = after["routes"] + after["schedules"]
+    assert len(actual_outputs) == len(expected_outputs)
+    for actual, expected in zip(actual_outputs, expected_outputs):
+        assert json.dumps(actual, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                          allow_nan=False) == \
+            json.dumps(expected, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                       allow_nan=False)
     assert digest(settings) == F1_SETTINGS_SHA256
 
 

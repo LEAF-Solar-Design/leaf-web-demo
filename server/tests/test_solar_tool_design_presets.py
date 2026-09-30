@@ -55,20 +55,22 @@ STEP_PARAMS = {"f1": {"subcommand": "Create", "name": "Alpha"}, "f2": {"subcomma
 # measured with python -B from the untouched fixture graph (f4 is the read; no commit). The graph
 # digests moved with sf-w2-design-presets-apply: f1 now writes the snapshot's three layer names into
 # graph["settings"] (test_solar_tool_design_presets_apply.py); the store and List digests did not.
+# They moved again with sf-solar-settings-invalidation: that layer change also stales the fixture's
+# homerun and schedule ("settings_changed", test_solar_settings_invalidation.py).
 STEP_DIGESTS = {
-    "f1": (1, "1ca13567d2c45e99fb05cf3c0aec4ff22fe62e6f94b1bc28e52d07bf3fbc926d",
+    "f1": (1, "e8dde958ddf3a2cd088b6c7ece18fbf04dd12837190195c3332c633759c8d8ed",
            "91f98d47e719f4db929471228ee6bf1a03abfcb34e70534c44abcd8fdb958be8",
            3694, "cc28171c8f6b097be6e5def3b1a7beec21ff787862a01031cd3ffc89f86daca6"),
-    "f2": (2, "c552831ce946de2fae75464f9127dcfdd1e92436bbca23d25f31d5f4ad086c93",
+    "f2": (2, "1840be7581405191ee268e3712f810baa0de1f459d2c768ac9cfc0f12f6305d2",
            "fd5dffb7e157fb1a1da860d63ca9e0efee6ba262962bd794dabd90d7c6ced791",
            5545, "7881da1cdb0087e205727f0dc45bc954f86214e12765328e3b1ab7b83885ddf6"),
-    "f3": (3, "70fa485315ff47b89139a5357acb70fa5431dbbde535adaa90fc114dcc333c3d",
+    "f3": (3, "127944108878bb34fc04e3eefac29930cbff299011dfaf43046d6590f9730a02",
            "b51ab618f294153e1b5bf703e4bd53606694400f788834721a02445ea8695b88",
            5545, "279101e78d1b50e351bbdd5ace9ec1f6bcd4f8303f6fcbced7cf823c057568e1"),
-    "f4": (3, "70fa485315ff47b89139a5357acb70fa5431dbbde535adaa90fc114dcc333c3d",
+    "f4": (3, "127944108878bb34fc04e3eefac29930cbff299011dfaf43046d6590f9730a02",
            "b51ab618f294153e1b5bf703e4bd53606694400f788834721a02445ea8695b88",
            5545, "279101e78d1b50e351bbdd5ace9ec1f6bcd4f8303f6fcbced7cf823c057568e1"),
-    "f5": (4, "3c4d2702dd69d861e83fb6bea8a30bd64e6dd3cdd87ab96303bd9410961f945e",
+    "f5": (4, "7d5ce8681b3a75d623b8f44a33dfe16d09406a5d04894f28439f78c7bd3a5d9a",
            "91f98d47e719f4db929471228ee6bf1a03abfcb34e70534c44abcd8fdb958be8",
            3694, "cc28171c8f6b097be6e5def3b1a7beec21ff787862a01031cd3ffc89f86daca6"),
 }
