@@ -375,7 +375,7 @@ def test_a_tenant_sees_its_own_share_and_never_another_tenants_id(published):
     assert body["own_use"]["tenant_id"] == A
     aps = _rows(body)["aps:engine"]
     assert aps["your_share"] == "0.600000000000"
-    assert aps["your_implied_cost_usd"] == "30.00"
+    assert aps["your_implied_cost_usd"] == "30.000000"
     assert aps["other_customers_share"] == "0.300000000000"
     assert aps["leaf_share"] == {"ci": "0.000000000000", "development": "0.000000000000",
                                  "fleet": "0.000000000000", "unattributed": "0.100000000000"}
@@ -386,13 +386,15 @@ def test_a_tenant_sees_its_own_share_and_never_another_tenants_id(published):
     assert efs["status"] == ESTIMATED
     assert efs["display_name"] == "Amazon Elastic File System"
     figma = _rows(body)["vendor:figma"]
-    assert figma["your_share"] == "0.000000000000" and figma["your_implied_cost_usd"] == "0.00"
+    assert figma["your_share"] == "0.000000000000" and figma["your_implied_cost_usd"] == "0.000000"
     assert figma["leaf_share"]["unattributed"] == "1.000000000000"
 
 
 def test_two_tenants_see_identical_totals_and_rows_apart_from_their_own_share(published):
     a, b = _get(A).json(), _get(B).json()
     assert a["totals"] == b["totals"] == {"gross_cost_usd": "95.00", "credits_usd": "3.00"}
+    assert a["your_total_implied_cost_usd"] == "40.000000"
+    assert b["your_total_implied_cost_usd"] == "25.000000"
     assert a["coverage_summary"] == b["coverage_summary"]
     assert a["publication_id"] == b["publication_id"]
     assert _rows(b)["aps:engine"]["your_share"] == "0.300000000000"
@@ -407,6 +409,53 @@ def test_two_tenants_see_identical_totals_and_rows_apart_from_their_own_share(pu
     assert strip(a) == strip(b)
 
 
+def test_subcent_amounts_and_total_are_rounded_only_after_summing(ledger_dir):
+    observations = []
+    for resource_id, usage in (("vendor:small", "0.001"),
+                               ("vendor:tiny-a", "0.0000004"),
+                               ("vendor:tiny-b", "0.0000004")):
+        observations.extend([_cost(resource_id, "1.00"),
+                             _usage(resource_id, "1", {f"{A}|": usage})])
+    publisher.publish_period(CostLedgerStore(ledger_dir), PERIOD, observations, "subcent")
+    response = _get(A)
+    assert response.status_code == 200
+    body = response.json()
+    rows = _rows(body)
+    assert rows["vendor:small"]["your_implied_cost_usd"] == "0.001000"
+    assert rows["vendor:tiny-a"]["your_implied_cost_usd"] == "0.000000"
+    assert rows["vendor:tiny-b"]["your_implied_cost_usd"] == "0.000000"
+    assert body["your_total_implied_cost_usd"] == "0.001001"
+    assert _get(B).json()["your_total_implied_cost_usd"] == "0.000000"
+
+
+@pytest.mark.parametrize("hours, current_month, expected", [
+    (35, True, False), (36, True, False), (37, True, True), (37, False, False),
+])
+def test_stale_publication_only_in_current_utc_month(published, monkeypatch, hours, current_month, expected):
+    from datetime import datetime, timedelta, timezone
+    from routers import cost as cost_router
+
+    now = datetime(2026, 9 if current_month else 10, 20, tzinfo=timezone.utc)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(cost_router, "datetime", Clock)
+    publication_id = publisher.latest_publication_id(CostLedgerStore(published), PERIOD)
+    manifest_path = published / publisher.PUBLICATIONS_DIR / f"{publication_id}.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["published_at"] = (now - timedelta(hours=hours)).isoformat()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    response = _get(A)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["publication_id"] == publication_id
+    assert body["stale"] is expected
+    assert bool(body["stale_reason"]) is expected
+
+
 def test_the_tenant_id_cannot_come_from_the_query(published):
     own = _get(A).json()
     spoofed = _get(A, tenant_id=B, tenant=B, x_tenant_id=B)
@@ -414,6 +463,7 @@ def test_the_tenant_id_cannot_come_from_the_query(published):
     assert B not in spoofed.text
     assert spoofed.json()["own_use"]["tenant_id"] == A
     assert _rows(spoofed.json()) == _rows(own)
+    assert spoofed.json()["your_total_implied_cost_usd"] == own["your_total_implied_cost_usd"]
     anonymous = _get(None, tenant_id=A).json()  # no header: the default tenant, not the query's
     assert anonymous["own_use"]["tenant_id"] != A
     assert _rows(anonymous)["aps:engine"]["your_share"] == "0.000000000000"
@@ -437,6 +487,8 @@ def test_an_empty_ledger_returns_no_resources(ledger_dir, monkeypatch):
     body = r.json()
     assert body["resources"] == [] and body["publication_id"] is None
     assert body["totals"] == {"gross_cost_usd": "0", "credits_usd": "0"}
+    assert body["your_total_implied_cost_usd"] == "0.000000"
+    assert body["stale"] is False and body["stale_reason"] is None
     monkeypatch.delenv("LEAF_COST_LEDGER_DIR")
     disabled = _get(A).json()
     assert disabled["resources"] == [] and disabled["publication_id"] is None

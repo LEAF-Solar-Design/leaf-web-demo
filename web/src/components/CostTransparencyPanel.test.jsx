@@ -8,6 +8,7 @@ const copy = 'This page shows what Leaf actually costs to run and your share of 
 const fixture = {
   period: '2026-09', publication_id: 'pub-1', published_at: '2026-09-28T12:00:00Z',
   missing_sources: ['aws-storage'],
+  your_total_implied_cost_usd: '0.300009', stale: false, stale_reason: null,
   own_use: {
     tenant_id: 'my-tenant',
     llm: { turns: 12, tokens: { input: 100, output: 50, cache_read: 25, cache_write: 5 }, payer: 'tenant_plan', usd_est: '0.1234567' },
@@ -74,15 +75,41 @@ describe('cost transparency', () => {
     expect(within(table).getByText('ESTIMATED · partial')).toBeInTheDocument()
     expect(within(table).getAllByText('covered by credits')).toHaveLength(2)
     const totals = within(table).getByRole('rowheader', { name: 'Totals' }).closest('tr')
-    expect(within(totals).getByText('$100.300000')).toBeInTheDocument()
-    expect(within(totals).getByText('$10.000000')).toBeInTheDocument()
-    // Sum the original decimals before display rounding, not the rounded cells.
-    expect(within(totals).getByText('$0.300001')).toBeInTheDocument()
+    expect(within(totals).getByText('$100.30')).toBeInTheDocument()
+    expect(within(totals).getByText('$10.00')).toBeInTheDocument()
+    // The API total is authoritative, even when it differs from the row sum.
+    expect(within(totals).getByText('$0.300009')).toBeInTheDocument()
+    expect(within(table).getByText('Estimated share, not metered')).toBeInTheDocument()
+    expect(screen.queryByText(/Cost publication is stale/)).not.toBeInTheDocument()
     expect(screen.getByText(/Missing sources: aws-storage\. Published: 2026-09-28T12:00:00Z/)).toBeInTheDocument()
     expect(panel.textContent).not.toContain('other-private-tenant')
     expect(panel.textContent).not.toContain('my-tenant')
     expect(panel.textContent).not.toMatch(/[\u2013\u2014]/)
     expect(screen.getByRole('region', { name: 'Resource costs' })).toHaveAttribute('tabindex', '0')
+  })
+
+  it('shows stale publication details and the environment estimate basis', async () => {
+    respond({ ...fixture, stale: true, stale_reason: 'This publication is more than 36 hours old.',
+      resources: fixture.resources.map((row) => ({ ...row, unit: 'usd-by-environment' })) })
+    const panel = await openPanel()
+    expect(screen.getByText(/Cost publication is stale.*more than 36 hours old/)).toBeInTheDocument()
+    expect(screen.getAllByText('Split by environment tag and activity')).toHaveLength(1)
+    expect(screen.queryAllByRole('button', { name: /run/i })).toHaveLength(0)
+    expect(panel.textContent).not.toMatch(/[\u2013\u2014]/)
+  })
+
+  it.each([['0.001000', '$0.001'], ['0.000001', '$0.000001'], ['0.000000', '$0.00']])('displays the API total %s precisely', async (amount, displayed) => {
+    respond({ ...fixture, your_total_implied_cost_usd: amount })
+    await openPanel()
+    const totals = screen.getByRole('rowheader', { name: 'Totals' }).closest('tr')
+    expect(within(totals).getByText(displayed)).toBeInTheDocument()
+  })
+
+  it('does not infer a missing API total from resource rows', async () => {
+    respond({ ...fixture, your_total_implied_cost_usd: undefined })
+    await openPanel()
+    const totals = screen.getByRole('rowheader', { name: 'Totals' }).closest('tr')
+    expect(within(totals).getByText('Unavailable')).toBeInTheDocument()
   })
 
   it('preserves large decimal amounts without floating-point loss', async () => {

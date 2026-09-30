@@ -22,8 +22,8 @@ publication_id null and resources [].
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from decimal import Decimal
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal, ROUND_HALF_UP, localcontext
 from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
@@ -33,14 +33,14 @@ import deps
 from cost_meter import publisher
 from cost_meter.direct_usage import load_agent_rows, load_broker_rows, tenant_direct_use
 from cost_meter.ledger import (
-    COVERAGES, ESTIMATED, LEAF, LEAF_DIMENSIONS, MEASURED, PERIOD_RE, SHARE_QUANTUM, implied_cost,
+    COVERAGES, ESTIMATED, LEAF, LEAF_DIMENSIONS, MEASURED, PERIOD_RE, SHARE_QUANTUM,
 )
 from cost_meter.store import CostLedgerStore, LedgerCorrupt
 from envelopes import with_envelope_fields
 
 router = APIRouter()
 
-_ZERO_USD = "0.00"
+_IMPLIED_QUANTUM = Decimal("0.000001")
 
 
 def _dec(value: Decimal) -> str:
@@ -97,6 +97,21 @@ def _own_use(period: str, tenant_id: str) -> tuple[Optional[Dict[str, Any]], boo
         return None, True
 
 
+def _your_implied_cost(revision: Any, tenant_id: str) -> Decimal:
+    for share in revision.shares:
+        if share.participant_id == tenant_id and share.dimension == "":
+            with localcontext() as ctx:
+                ctx.prec = 60
+                return revision.resource_period.gross_cost_usd * share.usage_share
+    return Decimal(0)
+
+
+def _implied_amount(value: Decimal) -> str:
+    with localcontext() as ctx:
+        ctx.prec = 60
+        return _dec(value.quantize(_IMPLIED_QUANTUM, rounding=ROUND_HALF_UP))
+
+
 def _resource_row(revision: Any, tenant_id: str) -> Dict[str, Any]:
     """One resource as the caller may see it. Another tenant appears only inside
     other_customers_share, as part of a sum."""
@@ -124,7 +139,7 @@ def _resource_row(revision: Any, tenant_id: str) -> Dict[str, Any]:
         "status": status,
         "coverage": rp.coverage,
         "your_share": _share(your.usage_share) if your is not None else _ZERO_SHARE,
-        "your_implied_cost_usd": _dec(implied_cost(your, rp).gross_usd) if your is not None else _ZERO_USD,
+        "your_implied_cost_usd": _implied_amount(_your_implied_cost(revision, tenant_id)),
         "leaf_share": {dim: _share(leaf[dim]) for dim in sorted(LEAF_DIMENSIONS)},
         "other_customers_share": _share(others),
     }
@@ -155,6 +170,8 @@ def cost(period: Optional[str] = Query(default=None),
     rows: List[Dict[str, Any]] = []
     gross = Decimal(0)
     credits = Decimal(0)
+    your_total = Decimal(0)
+    stale = False
     try:
         publication_id = publisher.latest_publication_id(store, period)
         if publication_id is not None:
@@ -164,9 +181,19 @@ def cost(period: Optional[str] = Query(default=None),
                 rows.append(_resource_row(revision, tenant_id))
                 gross += revision.resource_period.gross_cost_usd
                 credits += revision.resource_period.credits_usd
+                with localcontext() as ctx:
+                    ctx.prec = 60
+                    your_total += _your_implied_cost(revision, tenant_id)
+            now = datetime.now(timezone.utc)
+            if period == now.strftime("%Y-%m") and info.get("published_at"):
+                published_at = datetime.fromisoformat(info["published_at"].replace("Z", "+00:00"))
+                if published_at.tzinfo is None:
+                    published_at = published_at.replace(tzinfo=timezone.utc)
+                stale = now - published_at > timedelta(hours=36)
     except (LedgerCorrupt, KeyError, ValueError, OSError):
         # An unreadable publication is shown as none, flagged degraded, never guessed at.
         publication_id, rows, gross, credits = None, [], Decimal(0), Decimal(0)
+        your_total, stale = Decimal(0), False
         info = {"published_at": None, "missing_sources": []}
         degraded = True
 
@@ -174,6 +201,9 @@ def cost(period: Optional[str] = Query(default=None),
         "period": period,
         "publication_id": publication_id,
         "published_at": info.get("published_at"),
+        "stale": stale,
+        "stale_reason": "This month's cost publication is more than 36 hours old. Recent use may be missing." if stale else None,
+        "your_total_implied_cost_usd": _implied_amount(your_total),
         "coverage_summary": _coverage_summary(rows),
         "missing_sources": list(info.get("missing_sources") or []),
         "own_use": own_use,
