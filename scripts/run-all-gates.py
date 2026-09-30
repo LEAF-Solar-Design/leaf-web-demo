@@ -577,6 +577,12 @@ def build_suites() -> List[Suite]:
         # so the floor is the exact count on every runner. COUNTED: 21 tests + 38 more parametrizations = 59.
         Suite("server-solar-tool-solar-string-multi-add", "server tests/test_solar_tool_solar_string_multi_add.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_string_multi_add.py"), 59),
+        # String midpoint connection over the W1 graph (2026-09-30, sf-w2-string-midpoint): LEAFSTRINGMID as one
+        # local-graph-commit over server/solar_batch2_simple.string_midpoint_rows, receipt m1 replayed. Inputs
+        # are authored in the file or are committed evidence, so the floor is the exact count on every runner.
+        # COUNTED: 20 tests + 38 more parametrizations = 58.
+        Suite("server-solar-tool-solar-string-midpoint", "server tests/test_solar_tool_solar_string_midpoint.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_string_midpoint.py"), 58),
         # Auto-fill registry and persisted plan round trips: 17 tests + 50 more parametrizations = 67.
         Suite("server-solar-tool-solar-autofill", "server tests/test_solar_tool_solar_autofill.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_autofill.py"), 67),
