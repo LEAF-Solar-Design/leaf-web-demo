@@ -54,6 +54,7 @@ import sys
 import threading
 import time
 import uuid
+import zlib
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -2261,10 +2262,32 @@ class UploadBodyLimitMiddleware:
 # --------------------------------------------------------------------------- #
 # upload validation
 # --------------------------------------------------------------------------- #
+_DXF_ZIP_MAGICS = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
+_DXF_ZIP_SCAN_BYTES = 8192          # the first 8 KB only: real files carry PK bytes deeper in
+_DXF_BOMB_MIN_BYTES = 4096          # below this a compression ratio is noise
+_DXF_BOMB_COMPRESSION_RATIO = 40.0  # real DXF max measured 30.7
+_DXF_MAX_ENTITY_MARKERS = 150_000   # real DXF max measured 61,622
+
+
+# DXF only; bounded by the caller's upload cap; fails closed with a reason
+def _dxf_bomb_reason(data: bytes) -> Optional[str]:
+    if any(magic in data[:_DXF_ZIP_SCAN_BYTES] for magic in _DXF_ZIP_MAGICS):
+        return "embedded zip signature in a DXF payload is rejected"
+    if (len(data) >= _DXF_BOMB_MIN_BYTES
+            and len(data) / max(1, len(zlib.compress(data, 6)))
+            > _DXF_BOMB_COMPRESSION_RATIO):
+        return "pathological compression ratio in a DXF payload (possible decompression bomb)"
+    if (data.count(b"\nINSERT") + data.count(b"\nPOLYLINE")
+            + data.count(b"\nVERTEX") > _DXF_MAX_ENTITY_MARKERS):
+        return "implausible DXF entity count (possible entity-expansion bomb)"
+    return None
+
+
 def validate_upload(filename: str, data: bytes) -> Tuple[str, Optional[str]]:
     """Returns (ext, None) when acceptable, else ("", reason). Checks extension,
     emptiness, and cheap content sniffs (DWG magic 'AC1…'; DXF ASCII group-code
-    structure or the binary sentinel). The size cap is enforced by the caller
+    structure or the binary sentinel), and DXF zip, compression-ratio and entity
+    bomb checks. The size cap is enforced by the caller
     (it needs the pre-read length)."""
     name = str(filename or "").lower()
     ext = next((e for e in ACCEPTED_EXTENSIONS if name.endswith(e)), "")
@@ -2278,7 +2301,13 @@ def validate_upload(filename: str, data: bytes) -> Tuple[str, Optional[str]]:
         return ext, None
     head = data[:4096]
     if head.startswith(b"AutoCAD Binary DXF"):
+        reason = _dxf_bomb_reason(data)
+        if reason:
+            return "", reason
         return ext, None
     if b"SECTION" in head or b"HEADER" in head or b"ENTITIES" in head:
+        reason = _dxf_bomb_reason(data)
+        if reason:
+            return "", reason
         return ext, None
     return "", "not a DXF file (no group-code structure in the first 4 KB)"
