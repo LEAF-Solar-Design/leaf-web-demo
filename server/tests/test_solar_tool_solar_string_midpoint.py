@@ -265,11 +265,15 @@ def test_string_midpoint_commits_on_the_grid(graph, start, end, path, tag_index,
 def test_string_midpoint_extents(graph):
     module = builtin()
     frame = {"module_width_along_row": 2, "module_height_across_row": 1}
-    assert module.extents(frame, {"angle": 0}) == (2.0, 1.0)
-    assert module.extents(frame, {"angle": 90}) == (1.0000000000000002, 2.0)
-    assert module.extents(frame, {"angle": 30}) == (2.232050807568877, 1.8660254037844386)
-    assert module.extents(frame, {"angle": -45}) == (2.121320343559643, 2.121320343559643)
-    assert module.extents(frame, {"angle": 180}) == (2.0, 1.0000000000000002)
+    # Trig-derived values: glibc and MSVC libm differ in the last bit (Linux CI read
+    # 2.1213203435596424 where Windows reads 2.121320343559643), so compare within 1e-12.
+    def near(angle, expected):
+        assert module.extents(frame, {"angle": angle}) == pytest.approx(expected, rel=1e-12, abs=1e-12)
+    near(0, (2.0, 1.0))
+    near(90, (1.0000000000000002, 2.0))
+    near(30, (2.232050807568877, 1.8660254037844386))
+    near(-45, (2.121320343559643, 2.121320343559643))
+    near(180, (2.0, 1.0000000000000002))
     turned = builtin().add_midpoint_string(variant(graph, "ROT"), request())
     assert turned["ordered_panel_refs"] == [P(0, c) for c in range(6)]
 
