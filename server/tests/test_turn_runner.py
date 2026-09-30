@@ -279,7 +279,11 @@ def test_start_turn_omits_context_packet_when_build_fails(monkeypatch, turn_stub
     assert len(calls) == 1
     assert "context_packet" not in stub.LAST_BODY
     assert stub.LAST_BODY["text"] == "hello"
-    assert capsys.readouterr().err.splitlines() == [
+    # Only this row's own line is asserted: another thread may log an unrelated [leaf-agent] line
+    # while stderr is captured (native CI build a392ddbd, 2026-09-30).
+    err = capsys.readouterr().err
+    assert "sensitive detail must not be logged" not in err
+    assert [line for line in err.splitlines() if line.startswith("[leaf-agent] context packet")] == [
         f"[leaf-agent] context packet omitted: {error.__name__}",
     ]
 
