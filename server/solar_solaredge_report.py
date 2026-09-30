@@ -6,17 +6,25 @@ a request digest over source id, source content digest, tolerance and selection
 order. Repeated requests reuse that JSON without parsing. Requests are bounded
 to 4096 bytes, tolerance to 1e-6 through 1e6, frames to 10,000, panels to 200,000
 and displayed match candidates to 16. Parsing runs behind a per-process limit
-of MAX_CONCURRENT_PARSES. The report creates no electrical entity, string,
-graph revision or Solve state, and fails closed. On a loaded host the 1 MB
-fixture's first report took about 9 s (budget 10 s); reuse took under 1 s
-(budget 1.5 s).
+of MAX_CONCURRENT_PARSES, in a child process (solar_solaredge_parse_worker.py)
+under a fixed wall-time deadline of PARSE_DEADLINE_S: at the deadline the child
+is killed and reaped before the parse slot is released, and the request is
+refused as REPORT_PARSE_TIMEOUT with nothing stored. The report creates no
+electrical entity, string, graph revision or Solve state, and fails closed. On
+a loaded host the 1 MB fixture's first report took about 9 s (budget 10 s);
+reuse took under 1 s (budget 1.5 s).
 """
 
 import json
 import math
+import os
 import re
+import subprocess
+import sys
+import tempfile
 import threading
 import write_loop
+import solar_solaredge_parse_worker as parse_worker
 import solar_artifacts
 import solar_import_sources
 import solar_solaredge_import as si
@@ -32,7 +40,7 @@ RESULT_SCHEMA = "leaf.solar-solaredge-report-result.v1"
 REPORT_KIND = "solaredge-report"
 REPORT_MEDIA_TYPE = "application/json"
 REPORT_FILENAME = "solaredge-report.json"
-PARSE_BASE_NAME = "solaredge"
+PARSE_BASE_NAME = parse_worker.PARSE_BASE_NAME
 SELECTION_ORDERS = ("unknown", "recorded")
 MIN_ALIGNMENT_TOLERANCE = 1e-6
 MAX_ALIGNMENT_TOLERANCE = 1e6
@@ -41,6 +49,10 @@ MAX_REPORT_PANELS = 200_000
 MAX_CONCURRENT_PARSES = 2
 MAX_REPORT_CANDIDATES = 16
 MAX_REPORT_REQUEST_BYTES = 4096
+# Wall time from starting the parse child to its reaped verdict. The 1 MB C14 fixture took 6.9 to
+# 11.1 s through the child on a fully loaded 20-core host (two and four at once); 60 s is more than
+# five times the worst case and leaves half of the 120 s load balancer idle timeout for the rest.
+PARSE_DEADLINE_S = 60.0
 _REQUEST_KEYS = frozenset(("source_artifact_id", "alignment_tolerance", "selection_order", "project_id"))
 _PARSE_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_PARSES)
 
@@ -158,14 +170,49 @@ def report_from_matrices(graph, matrices, *, alignment_tolerance, selection_orde
             "strings": strings, "unassigned_panel_refs": unassigned}
 
 
+def _worker_argv():
+    """The parse child: this interpreter running solar_solaredge_parse_worker.py as a script."""
+    return [sys.executable, "-B", os.path.abspath(parse_worker.__file__)]
+
+
 def parse_source(content):
-    import solar_solaredge_pdf
-    import solar_solaredge_parse
+    """The PDF's matrices, parsed in a child process under a hard wall-time deadline.
+
+    Returns only after the child has exited and been reaped, on every path, so a caller holding a
+    parse slot never releases it while a parse is still running. A deadline miss kills the child
+    (REPORT_PARSE_TIMEOUT); a child that cannot start is REPORT_PARSE_UNAVAILABLE; any other
+    failure, including a crash or a malformed verdict, is REPORT_PDF_UNSUPPORTED.
+    """
+    if not isinstance(content, (bytes, bytearray)) or len(content) > parse_worker.MAX_INPUT_BYTES:
+        raise SolarEdgeReportError("REPORT_PDF_UNSUPPORTED")
+    source = tempfile.TemporaryFile()
     try:
-        return solar_solaredge_parse.parse_primitives(
-            solar_solaredge_pdf.extract_primitives(content), PARSE_BASE_NAME)[1]
-    except (ValueError, LookupError, TypeError, ArithmeticError, RecursionError, MemoryError):
-        raise SolarEdgeReportError("REPORT_PDF_UNSUPPORTED") from None
+        # Windows communicate writes pipe input synchronously before applying its timeout.
+        source.write(content)
+        source.seek(0)
+        try:
+            child = subprocess.Popen(_worker_argv(), stdin=source, stdout=subprocess.PIPE,
+                                     stderr=subprocess.DEVNULL)
+        except (OSError, ValueError):
+            raise SolarEdgeReportError("REPORT_PARSE_UNAVAILABLE") from None
+        timed_out = False
+        try:
+            out, _ = child.communicate(timeout=PARSE_DEADLINE_S)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+        finally:
+            if child.returncode is None:
+                # A killed child always exits; wait for it (no timeout) so the slot outlives it.
+                child.kill()
+                child.communicate()
+    finally:
+        source.close()
+    if timed_out:
+        raise SolarEdgeReportError("REPORT_PARSE_TIMEOUT")
+    matrices = parse_worker.decode_verdict(child.returncode, out)
+    if matrices is None:
+        raise SolarEdgeReportError("REPORT_PDF_UNSUPPORTED")
+    return matrices
 
 
 def build_solaredge_report(backend, tenant_id, drawing_id, request):

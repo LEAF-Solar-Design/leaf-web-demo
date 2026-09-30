@@ -691,6 +691,11 @@ def build_suites() -> List[Suite]:
         # string, inverter or Solve state. Hermetic, so the floor is the exact count. COUNTED: 111.
         Suite("server-solar-tool-solaredge-accept", "server tests/test_solar_tool_solaredge_accept.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_solaredge_accept.py"), 111),
+        # SolarEdge parse deadline (2026-09-30, sf-w4-solaredge-parse-deadline): the PDF parse runs in a child
+        # process killed and reaped at a fixed 60 s deadline before its slot is released; named retryable
+        # refusals; C14 output unchanged. Hermetic (no PostgreSQL, no skips): 37 + 9 decoder + 4 coverage cases. COUNTED: 50.
+        Suite("server-solar-solaredge-parse-deadline", "server tests/test_solar_solaredge_parse_deadline.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_solaredge_parse_deadline.py"), 50),
         Suite("server-solar-guardrails", "server tests/test_solar_guardrails.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_guardrails.py"), 17),  # R31b: two intake/branch cases
         Suite("server-solar-pile-block-mapping", "server tests/test_solar_pile_block_mapping.py",
