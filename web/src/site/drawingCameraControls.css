@@ -1,0 +1,5 @@
+.drawing-camera-controls { padding-top: 8px; }
+.drawing-camera-directions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; }
+.drawing-camera-directions button { min-height: 44px; padding: 4px; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 3px; }
+.drawing-camera-controls p { margin: 6px 0; font-size: 12px; }
+.drawing-camera-controls button:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }

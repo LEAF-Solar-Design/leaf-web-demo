@@ -36,11 +36,13 @@
  * so a flag-off build folds this whole module away — and, transitively, the
  * provider and engineSession.js, which nothing else imports.
  */
-import { useCallback, useEffect, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { ENV_CAD_EDIT } from './flag.js'
 import { DEFAULT_EDIT_INPUTS, useEngineSessionOptional } from './EngineSessionProvider.jsx'
-import LiveRegion from '../components/LiveRegion.jsx'
+import LiveRegion, { HIDE_WITH_STYLE } from '../components/LiveRegion.jsx'
+import DrawingObjectList from './DrawingObjectList.jsx'
+import DrawingCameraControls from '../site/DrawingCameraControls.jsx'
 
 function fmt(n) {
   return Number.isInteger(n) ? String(n) : n.toFixed(2)
@@ -50,6 +52,7 @@ const noop = () => {}
 
 export default function CadEditSurface({
   enabled = ENV_CAD_EDIT,
+  viewerRef,
   // The engine attribution NOTICE, served by the capability contract at
   // runtime (the client tree may not name the engine — license fence).
   notice = '',
@@ -59,6 +62,24 @@ export default function CadEditSurface({
   const inputs = engine?.inputs ?? DEFAULT_EDIT_INPUTS
   const setInput = engine?.setInput ?? noop
   const canSave = !!engine?.canSave
+  const [objectsOpen, setObjectsOpen] = useState(false)
+  const [announcement, setAnnouncement] = useState('')
+  const announcementFrame = useRef(0)
+  useEffect(() => () => {
+    if (announcementFrame.current) window.cancelAnimationFrame(announcementFrame.current)
+  }, [])
+  const announce = useCallback((text) => {
+    setAnnouncement('')
+    if (typeof window.requestAnimationFrame !== 'function') {
+      setAnnouncement(text)
+      return
+    }
+    if (announcementFrame.current) window.cancelAnimationFrame(announcementFrame.current)
+    announcementFrame.current = window.requestAnimationFrame(() => {
+      announcementFrame.current = 0
+      setAnnouncement(text)
+    })
+  }, [])
   const {
     documentId = '', entities = [], entityCount = 0, selectedId = '', selectedIds = [], selected = null,
     status = '', savedBytes = null, busy = false,
@@ -96,6 +117,16 @@ export default function CadEditSurface({
   const canEdit = selected !== null && selected.editable !== false && !busy
 
   return (
+    <>
+    <details className="drawing-objects-panel" data-nav-objects
+      onToggle={(event) => setObjectsOpen(event.currentTarget.open)}>
+      <summary>Objects</summary>
+      {objectsOpen && <div className="drawing-objects-content">
+        <DrawingCameraControls viewerRef={viewerRef} announce={announce} />
+        {entities.length > 0 ? <DrawingObjectList session={session} announce={announce} /> : <p>No drawing objects are loaded.</p>}
+      </div>}
+    </details>
+    <LiveRegion atomic visuallyHidden={HIDE_WITH_STYLE} label="Drawing navigation" data-testid="drawing-navigation-live">{announcement}</LiveRegion>
     <section className="cad-edit-workbench" data-testid="cad-edit-workbench" aria-label="CAD editing surface">
       <h3 className="cad-edit-workbench-title">Edit a DXF drawing</h3>
       <p className="cad-edit-workbench-hint">
@@ -237,5 +268,6 @@ export default function CadEditSurface({
         </p>
       )}
     </section>
+    </>
   )
 }
