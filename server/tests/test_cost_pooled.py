@@ -276,7 +276,14 @@ def _publish_setup(monkeypatch, agent_rows):
 
     client = PublishCostExplorer()
     monkeypatch.setitem(sys.modules, "boto3", SimpleNamespace(client=lambda *a, **k: client))
-    monkeypatch.setattr(direct_usage, "load_agent_rows", lambda: agent_rows)
+    agent_periods = []
+
+    def load_agent_rows(*, period):
+        agent_periods.append(period)
+        return agent_rows
+
+    monkeypatch.setattr(direct_usage, "load_agent_rows", load_agent_rows)
+    client.agent_periods = agent_periods
     broker_periods = []
 
     def broker_rows(*, period):
@@ -315,6 +322,7 @@ def test_default_publish_collects_pooled_and_internal_wins(monkeypatch):
     assert "pooled-aws" in result["sources"]
     assert "agent-activity" not in result["missing_sources"]
     assert periods == [PERIOD, PERIOD]
+    assert client.agent_periods == [PERIOD]
     assert any(call["GroupBy"][1] == {"Type": "TAG", "Key": "Environment"}
                for call in client.calls)
     resources = {r["resource_period"]["resource_id"]: r for r in result["resources"]}

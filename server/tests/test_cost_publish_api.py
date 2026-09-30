@@ -6,6 +6,7 @@ minimal FastAPI with only the cost router mounted.
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import io
 import json
@@ -209,18 +210,44 @@ def test_snapshot_removes_absent_resources_and_partial_snapshot_carries_previous
     assert store.read_publication(first) == frozen
 
 
-def test_source_health_changes_identity_without_changing_revisions(tmp_path):
+def test_source_health_replaces_metadata_without_changing_identity_or_revisions(tmp_path):
     store = CostLedgerStore(tmp_path / "ledger")
     observations = [_cost(EFS, "10")]
     first = publisher.publish_period(store, PERIOD, observations, "outage",
                                      sources=["test"], missing_sources=["vendors"])
-    old_info = publisher.publication_info(store, first)
+    assert publisher.publication_info(store, first)["missing_sources"] == ["vendors"]
+    manifest_path = tmp_path / "ledger" / "publications" / f"{first}.json"
+    original_manifest = manifest_path.read_bytes()
     second = publisher.publish_period(store, PERIOD, observations, "recovered", sources=["test"])
-    assert second != first
+    assert second == first
     assert publisher.publication_info(store, second)["missing_sources"] == []
-    assert publisher.publication_info(store, first) == old_info
+    assert manifest_path.read_bytes() == original_manifest
+    third = publisher.publish_period(store, PERIOD, observations, "another outage",
+                                     sources=["replacement"], missing_sources=["agent-activity"])
+    assert third == first
+    assert publisher.publication_info(store, first)["missing_sources"] == ["agent-activity"]
+    assert publisher.publication_info(store, first)["sources"] == ["replacement"]
+    assert publisher.latest_publication_id(store, PERIOD) == first
     assert store.read_publication(first) == store.read_publication(second)
     assert len(store.history(EFS, PERIOD)) == 1
+
+
+def test_new_publication_passes_deployed_reader_manifest_rule(tmp_path):
+    store = CostLedgerStore(tmp_path)
+    publication_id = publisher.publish_period(
+        store, PERIOD, _fixture_observations(), "compatible",
+        sources=["test"], missing_sources=["vendors"])
+    manifest = json.loads((tmp_path / "publications" / f"{publication_id}.json").read_text(
+        encoding="utf-8"))
+    assert manifest["schema"] == "leaf.cost-share-publication.v1"
+    assert manifest["publication_id"] == publication_id
+    assert manifest["period"] == PERIOD
+    assert isinstance(manifest["revisions"], list)
+    canonical = json.dumps(manifest["revisions"], sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=True).encode("ascii")
+    assert hashlib.sha256(canonical).hexdigest()[:20] == publication_id.rsplit("-", 1)[1]
+    assert "metadata" not in manifest
+    assert len(store.read_publication(publication_id)) == 3
 
 
 @pytest.mark.parametrize("coverage", ["partial", "unknown"])
@@ -289,17 +316,21 @@ def test_physical_usage_is_metadata_only_and_changes_no_share_amount_or_digest(t
                                      sources=["test"])
     physical = publisher.publish_period(physical_store, PERIOD, _physical_observations(), "snapshot",
                                         sources=["test"], physical_usage=PHYSICAL)
+    assert plain == physical
     assert _content(plain_store, plain) == _content(physical_store, physical)
     assert publisher.publication_info(plain_store, plain)["physical_usage"] == {}
     assert publisher.publication_info(physical_store, physical)["physical_usage"] == PHYSICAL
 
     again = publisher.publish_period(plain_store, PERIOD, _physical_observations(), "with physical",
                                      sources=["test"], physical_usage=PHYSICAL)
+    assert again == plain
+    assert publisher.publication_info(plain_store, plain)["physical_usage"] == PHYSICAL
     assert _content(plain_store, again) == _content(plain_store, plain)
     for resource_id in (EFS, "aps:engine", "vendor:figma", CODEBUILD, EC2):
         assert len(plain_store.history(resource_id, PERIOD)) == 1
     assert publisher.publish_period(plain_store, PERIOD, _physical_observations(), "empty map",
                                     sources=["test"], physical_usage={}) == plain
+    assert publisher.publication_info(plain_store, plain)["physical_usage"] == {}
 
 
 @pytest.mark.parametrize("bad", [

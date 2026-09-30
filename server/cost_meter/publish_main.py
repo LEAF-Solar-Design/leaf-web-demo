@@ -126,7 +126,7 @@ class _CollectedObservations(list):
 def _collect_pooled(period: str, now: datetime) -> List[dict]:
     import boto3
 
-    agent_rows = direct_usage.load_agent_rows()
+    agent_rows = direct_usage.load_agent_rows(period=period)
     broker_rows = direct_usage.load_broker_rows(period=period)
     missing = []
     if agent_rows is None:

@@ -288,7 +288,7 @@ class CostLedgerStore:
         """Freeze the current revision of every resource in `period`; returns the publication id.
 
         Explicit revision_ids freeze only that snapshot, including an empty snapshot.
-        Metadata, when supplied, also participates in the immutable identity.
+        Metadata is accepted for caller compatibility but is not stored in the manifest.
         The id is derived from the named revisions, so publishing the same state twice
         returns the same id and never rewrites the manifest.
         """
@@ -314,8 +314,7 @@ class CostLedgerStore:
                  "revision": r.revision, "digest": r.digest}
                 for r in (newest[k] for k in sorted(newest))
             ]
-            identity = entries if metadata is None else {"revisions": entries, "metadata": metadata}
-            publication_id = f"pub-{period}-{hashlib.sha256(_canon_json(identity)).hexdigest()[:20]}"
+            publication_id = f"pub-{period}-{hashlib.sha256(_canon_json(entries)).hexdigest()[:20]}"
             path = root / "publications" / f"{publication_id}.json"
             if not path.exists():
                 manifest = {
@@ -325,8 +324,6 @@ class CostLedgerStore:
                     "published_at": _utc_now(),
                     "revisions": entries,
                 }
-                if metadata is not None:
-                    manifest["metadata"] = metadata
                 _write_atomic(path, _canon_json(manifest) + b"\n")
             return publication_id
 
@@ -351,13 +348,15 @@ class CostLedgerStore:
         try:
             manifest = json.loads(raw.decode("utf-8"))
             entries = manifest["revisions"]
-            identity = ({"revisions": entries, "metadata": manifest["metadata"]}
-                        if "metadata" in manifest else entries)
+            identities = [entries]
+            if "metadata" in manifest:
+                identities.append({"revisions": entries, "metadata": manifest["metadata"]})
             ok = (manifest["schema"] == PUBLICATION_SCHEMA
                   and manifest["publication_id"] == publication_id
                   and manifest["period"] == match.group(1)
                   and isinstance(entries, list)
-                  and hashlib.sha256(_canon_json(identity)).hexdigest()[:20] == match.group(2))
+                  and any(hashlib.sha256(_canon_json(identity)).hexdigest()[:20] == match.group(2)
+                          for identity in identities))
         except (ValueError, TypeError, KeyError):
             ok = False
         if not ok:

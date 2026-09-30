@@ -8,7 +8,7 @@ as a revision (identical content is a no-op, per CostLedgerStore) and freezes th
 month with store.publish.
 
 Beside the store's immutable manifests, publish_period writes two small files:
-  publication-meta/<publication_id>.json  which sources were used and missing (first writer wins)
+  publication-meta/<publication_id>.json  which sources were used and missing (atomic replace)
   latest/<YYYY-MM>.json                   the newest publication of the month (atomic replace)
 so a reader finds the current publication in O(1) instead of scanning every manifest.
 
@@ -378,11 +378,11 @@ def publish_period(store: CostLedgerStore, period: str, observations: Iterable[A
     """Append every resource's revision, then publish the month. Returns the publication id.
 
     Re-publishing identical input appends nothing and returns the same id. The
-    publication's membership and source health are part of its immutable identity,
-    and latest/<period>.json is atomically pointed at the returned id.
+    publication's membership defines its immutable identity; source health metadata
+    is replaced on every publish, and latest/<period>.json atomically points at the id.
     physical_usage ({resource_id: {quantity, unit, coverage}}) is display metadata
     only: it lands in the publication metadata and never touches shares, amounts,
-    coverage or revision digests. An empty map leaves the metadata as before.
+    coverage or revision digests. An empty map clears earlier physical usage metadata.
     lock_timeout and stale_after are seconds; foreign-host locks are never reclaimed.
     """
     period = _check_period(period)
@@ -411,16 +411,15 @@ def _publish_period_locked(store: CostLedgerStore, period: str,
                 "carried_forward": sorted(r.resource_id for r in carried)}
     if physical:
         metadata["physical_usage"] = physical
-    publication_id = store.publish(period, revision_ids=revision_ids, metadata=metadata)
+    publication_id = store.publish(period, revision_ids=revision_ids)
 
     meta_path = root / META_DIR / f"{publication_id}.json"
-    if not meta_path.exists():
-        _write_atomic(meta_path, _canon_json({
-            "schema": META_SCHEMA,
-            "publication_id": publication_id,
-            "period": period,
-            **metadata,
-        }) + b"\n")
+    _write_atomic(meta_path, _canon_json({
+        "schema": META_SCHEMA,
+        "publication_id": publication_id,
+        "period": period,
+        **metadata,
+    }) + b"\n")
     _write_atomic(root / LATEST_DIR / f"{period}.json", _canon_json({
         "schema": LATEST_SCHEMA,
         "period": period,
@@ -497,6 +496,9 @@ def publication_info(store: CostLedgerStore, publication_id: str) -> Dict[str, A
         raise ValueError(f"invalid publication id: {publication_id!r}")
     manifest = _read_json(root / PUBLICATIONS_DIR / f"{publication_id}.json") or {}
     meta = _read_json(root / META_DIR / f"{publication_id}.json") or {}
+    if meta.get("publication_id") != publication_id:
+        legacy = manifest.get("metadata")
+        meta = {**legacy, "publication_id": publication_id} if isinstance(legacy, dict) else {}
     published_at = manifest.get("published_at")
     missing = meta.get("missing_sources") if meta.get("publication_id") == publication_id else None
     sources = meta.get("sources") if meta.get("publication_id") == publication_id else None
