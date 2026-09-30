@@ -19,9 +19,10 @@ describe('createViewHistory', () => {
     expect(h.size()).toBe(2)
     expect(h.peek().pose.target).toEqual([2, 2, 0])
     const second = h.pop()
-    expect(second).toEqual({ pose: pose(2), selectedHandle: null, visibleLayers: { L1: false } })
+    expect(second).toEqual({ pose: pose(2), selectedHandle: null, selectedHandles: [], focusedId: null, query: '', drawingKey: null, visibleLayers: { L1: false } })
     const first = h.pop()
     expect(first.selectedHandle).toBe('A')
+    expect(first.selectedHandles).toEqual(['A'])
     expect(first.visibleLayers).toEqual({ L1: true })
     expect(h.size()).toBe(0)
   })
@@ -34,6 +35,16 @@ describe('createViewHistory', () => {
     expect(h.size()).toBe(0)
     expect(h.push({ pose: pose(0) })).toBe(true)
     expect(h.size()).toBe(1)
+  })
+
+  it('copies multi-selection and retains focus, query and drawing scope', () => {
+    const h = createViewHistory()
+    const selectedHandles = ['2A', '2B', '2C']
+    h.push({ pose: pose(1), selectedHandle: 'old', selectedHandles, focusedId: 'g:frame', query: 'go to North', drawingKey: 'engine:guest' })
+    selectedHandles.splice(0, 3, 'FF')
+    expect(h.pop()).toMatchObject({ selectedHandles: ['2A', '2B', '2C'], focusedId: 'g:frame', query: 'go to North', drawingKey: 'engine:guest' })
+    h.push({ pose: pose(1), selectedHandle: 'old', selectedHandles: [] })
+    expect(h.pop().selectedHandles).toEqual([])
   })
 
   it('copies the layer map and pose so later mutation never reaches a snapshot', () => {

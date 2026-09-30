@@ -278,12 +278,12 @@ describe('ViewCluster Back and Up (S3)', () => {
     expect(liveText()).toBe('Back to your previous view')
   })
 
-  it('Up with a selected entity clears the selection and frames its layer; Back returns to the entity', async () => {
+  it('Up with a selected entity preserves the selection and frames its layer; Back returns to the entity', async () => {
     const viewer = fakeViewer()
     const probe = { current: null }
     render(<NavHarness viewer={viewer} probe={probe} initialSelected="P1" />)
     fireEvent.click(upButton())
-    expect(probe.current.selectedHandle).toBeNull()
+    expect(probe.current.selectedHandle).toBe('P1')
     expect(viewer.frame).toHaveBeenCalledTimes(1)
     expect(viewer.frame.mock.calls[0][0]).toEqual({ minX: 0, minY: 0, maxX: 10, maxY: 4 })
     expect(viewer.setView).not.toHaveBeenCalled()
@@ -305,7 +305,7 @@ describe('ViewCluster Back and Up (S3)', () => {
     fireEvent.click(upButton())
     expect(viewer.frame).toHaveBeenCalledTimes(1)
     expect(viewer.setView).toHaveBeenLastCalledWith('home')
-    expect(probe.current.selectedHandle).toBeNull()
+    expect(probe.current.selectedHandle).toBe('P1')
     await flushFrame()
     expect(liveText()).toBe('Showing the whole drawing')
   })

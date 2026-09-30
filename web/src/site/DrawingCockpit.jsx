@@ -12,6 +12,7 @@
 // write, never React state: pointer-rate re-renders were risk R11 in the
 // convergence plan.
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 
 import CockpitIcon from './CockpitIcon.jsx'
 import LiveRegion, { HIDE_WITH_STYLE } from '../components/LiveRegion.jsx'
@@ -68,9 +69,11 @@ export function useViewNavigation({
   viewerRef, history, setHistorySize,
   selectedHandle = null, selectedLayer = null, setSelectedHandle,
   visibleLayers = null, setVisibleLayers, intake = null,
+  navigationSource = null,
 }) {
   const latest = useRef(null)
-  latest.current = { history, setHistorySize, selectedHandle, selectedLayer, setSelectedHandle, visibleLayers, setVisibleLayers, intake }
+  latest.current = { history, setHistorySize, selectedHandle, selectedLayer, setSelectedHandle, visibleLayers, setVisibleLayers, intake, navigationSource }
+  const scope = useRef(undefined)
   const [announcement, setAnnouncement] = useState('')
   const frameRef = useRef(0)
   useEffect(() => () => {
@@ -92,15 +95,43 @@ export function useViewNavigation({
     })
   }, [])
 
-  const pushView = useCallback(() => {
+  const syncScope = useCallback(() => {
     const now = latest.current
-    if (!now.history) return false
+    const source = now.navigationSource?.current
+    if (source && scope.current !== source.drawingKey) {
+      scope.current = source.drawingKey
+      now.history?.clear()
+      now.setHistorySize?.(0)
+    }
+    return source
+  }, [])
+
+  const capture = useCallback(() => {
+    const source = syncScope(), now = latest.current
     const viewer = viewerRef.current
-    const pose = typeof viewer?.getPose === 'function' ? viewer.getPose() : null
-    const pushed = now.history.push({ pose, selectedHandle: now.selectedHandle, visibleLayers: now.visibleLayers })
+    const current = typeof viewer?.getPose === 'function' ? viewer.getPose() : null
+    const pose = current ? { ...current, target: [...(current.target || [])], position: current.position && [...current.position] } : null
+    return { pose, selectedHandle: now.selectedHandle, visibleLayers: { ...now.visibleLayers }, ...source?.capture() }
+  }, [syncScope, viewerRef])
+
+  const commit = useCallback((snapshot) => {
+    const now = latest.current
+    const pushed = now.history?.push(snapshot) ?? false
     if (pushed) now.setHistorySize?.(now.history.size())
     return pushed
-  }, [viewerRef])
+  }, [])
+
+  const pushView = useCallback(() => commit(capture()), [capture, commit])
+
+  const jump = useCallback((id) => {
+    const source = syncScope(), now = latest.current
+    if (!source) return { ok: false, reason: 'viewer not ready' }
+    if (!source.isVisible(id, now.visibleLayers)) return { ok: false, reason: 'This object is hidden by its layers.' }
+    const snapshot = capture()
+    const result = source.focus(id)
+    if (result.ok) commit(snapshot)
+    return result
+  }, [capture, commit, syncScope])
 
   const fit = useCallback(() => {
     pushView()
@@ -108,10 +139,16 @@ export function useViewNavigation({
   }, [pushView, viewerRef])
 
   const back = useCallback(() => {
+    const source = syncScope()
     const now = latest.current
     const snap = now.history?.pop() ?? null
     if (!snap) return false
     now.setHistorySize?.(now.history.size())
+    if (source && snap.drawingKey !== source.drawingKey) return false
+    // Commit visibility before focus frames, then let the saved camera win.
+    flushSync(() => now.setVisibleLayers?.({ ...snap.visibleLayers }))
+    const restoredSelection = source?.restore(snap)
+    if (!restoredSelection) now.setSelectedHandle?.(snap.selectedHandle)
     const viewer = viewerRef.current
     const { pose } = snap
     // Restore the SCALE, not the raw zoom: Fit and resize recompute the
@@ -120,18 +157,26 @@ export function useViewNavigation({
     const scaled = current && pose.worldPerPixel > 0 ? current.zoom * current.worldPerPixel / pose.worldPerPixel : NaN
     const zoom = Number.isFinite(scaled) && scaled > 0 ? scaled : pose.zoom
     viewer?.setView?.({ center: { x: pose.target[0], y: pose.target[1] }, zoom })
-    now.setSelectedHandle?.(snap.selectedHandle)
-    now.setVisibleLayers?.({ ...snap.visibleLayers })
     announce(backAnnouncement(snap.selectedHandle))
     return true
-  }, [announce, viewerRef])
+  }, [announce, syncScope, viewerRef])
 
   const up = useCallback(() => {
-    pushView()
+    const source = syncScope()
+    const parent = source?.parent()
+    if (parent) {
+      const result = jump(parent.id)
+      announce(result.ok ? `Showing ${parent.name}` : result.reason)
+      return
+    }
     const now = latest.current
     const viewer = viewerRef.current
+    if (now.selectedHandle && now.visibleLayers?.[now.selectedLayer] === false) {
+      announce('This object is hidden by its layers.')
+      return
+    }
+    pushView()
     if (now.selectedHandle) {
-      now.setSelectedHandle?.(null)
       const bounds = layerBounds(now.intake, now.selectedLayer)
       if (bounds && typeof viewer?.frame === 'function' && viewer.frame(bounds, UP_LAYER_SHARE) === true) {
         announce(`Showing layer ${now.selectedLayer}`)
@@ -140,9 +185,9 @@ export function useViewNavigation({
     }
     viewer?.setView?.('home')
     announce('Showing the whole drawing')
-  }, [announce, pushView, viewerRef])
+  }, [announce, jump, pushView, syncScope, viewerRef])
 
-  return { pushView, fit, back, up, announcement }
+  return { pushView, fit, back, up, jump, syncScope, announcement }
 }
 
 export function ViewCluster({ viewerRef, onFit = null, canBack = false, onBack = null, onUp = null, announcement = '' }) {

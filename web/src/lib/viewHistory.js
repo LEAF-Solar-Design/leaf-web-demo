@@ -2,7 +2,7 @@
 // "Exit: Back versus Up" and R13 "Restore complete navigation state").
 //
 // Each entry is a full navigation snapshot: the camera pose (the Viewer's
-// getPose() result), the selected handle, and a COPY of the layer visibility
+// getPose() result), focus, selection, query, and a COPY of the layer visibility
 // map, so Back returns to exactly what was shown. This is navigation, never an
 // edit history: engine undo and version undo stay separate.
 //
@@ -49,11 +49,15 @@ export function createViewHistory(limit = VIEW_HISTORY_LIMIT) {
   const entries = []
   return {
     /** Push one snapshot; returns false (and stores nothing) for a null pose. */
-    push({ pose, selectedHandle = null, visibleLayers = {} } = {}) {
+    push({ pose, selectedHandle = null, selectedHandles, focusedId = null, query = '', drawingKey = null, visibleLayers = {} } = {}) {
       if (!poseUsable(pose)) return false
       entries.push({
         pose: { ...pose, target: [...pose.target], position: Array.isArray(pose.position) ? [...pose.position] : pose.position },
         selectedHandle: selectedHandle ?? null,
+        selectedHandles: Array.isArray(selectedHandles) ? [...selectedHandles] : selectedHandle == null ? [] : [selectedHandle],
+        focusedId,
+        query,
+        drawingKey,
         visibleLayers: { ...(visibleLayers || {}) },
       })
       if (entries.length > bound) entries.splice(0, entries.length - bound)
