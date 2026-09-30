@@ -1,0 +1,47 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-elevation-zones",
+  "builtin": "builtins/solar_elevation_zones.py",
+  "family": "placement",
+  "adapter": "local-graph-commit",
+  "entitlement": "run_write",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_ELEVATION_ZONE_REQUEST",
+  "readiness": {"kind": "hook"},
+  "engine": "server-builtin",
+  "interaction": {"mode": "form"},
+  "record_store": "registry",
+  "record": {
+    "name": "solar-elevation-zones",
+    "version": "1.0.0",
+    "description": "Add rooftop elevation (height) zones with an offset, or move every matching panel, or every string, into one zone.",
+    "kind": "script",
+    "family_id": "placement",
+    "engine_op": "solar_elevation_zones",
+    "entry": "builtins/solar_elevation_zones.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {"type": "string", "maxLength": 128},
+        "operation": {"type": "string", "enum": ["add-zones", "assign-panels", "assign-strings"]},
+        "expected_rev": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+        "add": {"type": "integer", "minimum": 1, "maximum": 1000},
+        "offset": {"type": "number", "minimum": 0, "maximum": 10000},
+        "zone_name": {"type": "string", "minLength": 1, "maxLength": 255},
+        "reference_panel_ref": {"type": "string", "minLength": 1, "maxLength": 128}
+      },
+      "required": ["operation", "expected_rev"],
+      "additionalProperties": false
+    },
+    "returns": {"type": "object"},
+    "capabilities": ["drawing.write"],
+    "allow_local_fallback": false
+  },
+  "ledger": ["zone-height-settings", "elevation-zone-assign-panels", "elevation-zone-assign-strings"],
+  "trusted_inputs": [],
+  "maturity": "preview",
+  "wave": 2,
+  "order": 25,
+  "scenario": "w2-rooftop"
+}
