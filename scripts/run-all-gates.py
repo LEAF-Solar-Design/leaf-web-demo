@@ -555,6 +555,10 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_panels_from_drawing.py"), 64),
         Suite("server-solar-tool-solar-schedule", "server tests/test_solar_tool_solar_schedule.py", "pytest", SERVER,
               _py_pytest("tests/test_solar_tool_solar_schedule.py"), 30),
+        # sf-solar-w1-route-consumers: W1 homeruns, schedule and readiness keep feeders, trenches and
+        # pathways and judge only the homerun subset. COUNTED: 18 test functions + 23 additional parametrizations = 41.
+        Suite("server-solar-w1-route-consumers", "server tests/test_solar_w1_route_consumers.py", "pytest",
+              SERVER, _py_pytest("tests/test_solar_w1_route_consumers.py"), 41),
         # solar-size-strings through the local graph commit rail with a recorded String Sizer and a
         # fake grant, so the floor is the exact count on every runner. MEASURED from the collected
         # cases: 13 tests + 27 more parametrizations = 40 passed.
