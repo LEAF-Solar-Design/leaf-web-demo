@@ -1,0 +1,55 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-design-presets-list",
+  "builtin": "builtins/solar_design_presets_list.py",
+  "family": "settings",
+  "adapter": "local-graph-read",
+  "entitlement": "run_read",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_DESIGN_PRESET_LIST_REQUEST",
+  "readiness": {
+    "kind": "facets",
+    "facets": []
+  },
+  "engine": "server-builtin",
+  "interaction": {
+    "mode": "form"
+  },
+  "record_store": "registry",
+  "record": {
+    "name": "solar-design-presets-list",
+    "version": "1.0.0",
+    "description": "List the drawing's design presets (LEAFPROFILE List): each preset's name, prefix and settings, and which one is active.",
+    "kind": "script",
+    "family_id": "settings",
+    "engine_op": "solar_design_presets_list",
+    "entry": "builtins/solar_design_presets_list.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {
+          "type": "string",
+          "maxLength": 128
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "returns": {
+      "type": "object"
+    },
+    "capabilities": [
+      "drawing.read"
+    ],
+    "allow_local_fallback": false
+  },
+  "ledger": [
+    "design-profile-manage"
+  ],
+  "trusted_inputs": [],
+  "maturity": "preview",
+  "wave": 2,
+  "order": 14,
+  "scenario": "w2-rooftop"
+}
