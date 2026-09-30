@@ -606,6 +606,13 @@ def build_suites() -> List[Suite]:
         # on every runner. COUNTED: 28 tests + 32 more parametrizations = 60.
         Suite("server-solar-tool-solar-assign-strings", "server tests/test_solar_tool_solar_assign_strings.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_assign_strings.py"), 60),
+        # Electrical schedules as a W2 registry graph read (2026-09-30, sf-w2-electrical-output): the plugin's
+        # InsertSchedules tables over the bridged graph, written as ElectricalSchedules.json; the recorded i7
+        # design rebuilt as a graph reproduces the i8 receipt. Inputs are authored in the file or read from
+        # committed evidence, so the floor is the exact count on every runner. COUNTED: 20 tests + 36 more
+        # parametrizations = 56.
+        Suite("server-solar-tool-electrical-schedules", "server tests/test_solar_tool_electrical_schedules.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_electrical_schedules.py"), 56),
         # W5 inverter family (2026-09-24, contract G35): the shared state and delta module and the
         # device, string and output engines (literal ports of the plugin's inverter commands). Inputs
         # are authored in each file, so each floor is the exact count on every runner. MEASURED.

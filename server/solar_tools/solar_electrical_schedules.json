@@ -1,0 +1,64 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-electrical-schedules",
+  "builtin": "builtins/solar_electrical_schedules.py",
+  "family": "schedules",
+  "adapter": "local-graph-read",
+  "entitlement": "run_read",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_SCHEDULES_REQUEST",
+  "readiness": {"kind": "hook"},
+  "engine": "server-builtin",
+  "interaction": {"mode": "form"},
+  "record_store": "registry",
+  "record": {
+    "name": "solar-electrical-schedules",
+    "version": "1.0.0",
+    "description": "Write ElectricalSchedules.json: the plugin's equipment, combiner or inverter, and string schedule tables for the stored design.",
+    "kind": "script",
+    "family_id": "schedules",
+    "engine_op": "solar_electrical_schedules",
+    "entry": "builtins/solar_electrical_schedules.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {"type": "string", "maxLength": 128},
+        "circuit_source": {"type": "string", "enum": ["topology", "labels"]},
+        "inverter_record": {
+          "type": "object",
+          "properties": {
+            "companyName": {"type": "string", "maxLength": 128},
+            "modelName": {"type": "string", "maxLength": 128},
+            "seriesName": {"type": "string", "maxLength": 128},
+            "maxDCPower": {"type": "string", "maxLength": 20, "pattern": "^(-?[0-9]{1,12}(\\.[0-9]{1,6})?)?$(?![\\s\\S])"},
+            "maxDCVoltage": {"type": "string", "maxLength": 20, "pattern": "^(-?[0-9]{1,12}(\\.[0-9]{1,6})?)?$(?![\\s\\S])"},
+            "minDCVoltageFeed": {"type": "string", "maxLength": 20, "pattern": "^(-?[0-9]{1,12}(\\.[0-9]{1,6})?)?$(?![\\s\\S])"},
+            "mpptVoltageRangeMin": {"type": "string", "maxLength": 20, "pattern": "^(-?[0-9]{1,12}(\\.[0-9]{1,6})?)?$(?![\\s\\S])"},
+            "mpptVoltageRangeMax": {"type": "string", "maxLength": 20, "pattern": "^(-?[0-9]{1,12}(\\.[0-9]{1,6})?)?$(?![\\s\\S])"},
+            "numMpptTrackers": {"type": "string", "maxLength": 20, "pattern": "^(-?[0-9]{1,12}(\\.[0-9]{1,6})?)?$(?![\\s\\S])"},
+            "DCInputers": {"type": "string", "maxLength": 20, "pattern": "^(-?[0-9]{1,12}(\\.[0-9]{1,6})?)?$(?![\\s\\S])"},
+            "maxACPower": {"type": "string", "maxLength": 20, "pattern": "^(-?[0-9]{1,12}(\\.[0-9]{1,6})?)?$(?![\\s\\S])"},
+            "nominalACVoltage": {"type": "string", "maxLength": 20, "pattern": "^(-?[0-9]{1,12}(\\.[0-9]{1,6})?)?$(?![\\s\\S])"},
+            "maxACCurrent": {"type": "string", "maxLength": 20, "pattern": "^(-?[0-9]{1,12}(\\.[0-9]{1,6})?)?$(?![\\s\\S])"}
+          },
+          "required": ["companyName", "modelName", "seriesName", "maxDCPower", "maxDCVoltage",
+                       "minDCVoltageFeed", "mpptVoltageRangeMin", "mpptVoltageRangeMax", "numMpptTrackers",
+                       "DCInputers", "maxACPower", "nominalACVoltage", "maxACCurrent"],
+          "additionalProperties": false
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "returns": {"type": "object"},
+    "capabilities": ["drawing.read"],
+    "allow_local_fallback": false
+  },
+  "ledger": ["insert-schedules"],
+  "trusted_inputs": [],
+  "maturity": "preview",
+  "wave": 2,
+  "order": 110,
+  "scenario": "w2-rooftop"
+}
