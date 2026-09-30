@@ -1,0 +1,39 @@
+# Run 36711671971 stuck acquiring runners after #1598 and wedged staging.
+# Cancel stalled main push builds and workflow_run staging relays; rerun only
+# the newest cancelled main-head push build, with fewer than three attempts.
+# Kill switch: disable this workflow or set REAP_STALLED_STAGING_RUNS=off.
+name: Reap stalled staging runs
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Plan actions without cancelling or rerunning
+        type: boolean
+        default: false
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: reap-stalled-staging-runs
+  cancel-in-progress: true
+
+jobs:
+  reap:
+    if: ${{ vars.REAP_STALLED_STAGING_RUNS != 'off' }}
+    runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}-small
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reap stalled runs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          args=()
+          if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          python3 scripts/reap_stalled_staging_runs.py "${args[@]}"
