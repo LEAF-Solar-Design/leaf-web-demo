@@ -2188,11 +2188,9 @@ def main() -> None:
     )[0]
 
     # Speculative dispatches must never queue inside the release concurrency
-    # group (they are dispatched on the main ref). Cancellation is
-    # newest-wins for speculative runs AND for main push runs (merge-burst
-    # coalescing: the latest-main-only relay discards a superseded build's
-    # images anyway, so completing them only burns runners and queues the
-    # winning run behind them). A receipt-only handoff gets a run-specific
+    # group (they are dispatched on the main ref). Speculative runs stay
+    # newest-wins. Push builds run to completion because the relay deploys
+    # finished ancestors of main. A receipt-only handoff gets a run-specific
     # group so a later push cannot evict it before or during its evidence reads.
     # Non-push dispatches (promote, draft-PR builds) still cancel nothing.
     assert (
@@ -2204,7 +2202,7 @@ def main() -> None:
     ) in text
     assert (
         "cancel-in-progress: "
-        "${{ inputs.speculative || github.event_name == 'push' }}"
+        "${{ inputs.speculative == true }}"
     ) in text
 
     # The spec tag IS the tree, derived in prepare, and the derivation
@@ -4025,7 +4023,7 @@ def check_docs_noop_filter(text: str) -> None:
         # Hash updated 2026-08-24 for ATOMIC TWO-LEG DISPATCH. The serial
         # dispatch/watch loop became: plan every service, take ONE tip read,
         # dispatch every leg, resolve every run, then watch every leg. The
-        # bodies moved into plan_service / require_tip_current /
+        # bodies moved into plan_service / require_build_on_main /
         # dispatch_service / resolve_service_run / watch_service and per-service
         # state moved into associative arrays; the statements inside them are
         # otherwise carried over unchanged. The run-name reader was widened from
@@ -4043,7 +4041,7 @@ def check_docs_noop_filter(text: str) -> None:
         # relay's concurrency group stopped cancelling a running relay (pinned
         # above and in tests/test_dispatch_staging_deploys_shape.py), which
         # made the superseder classifier and the convergence-receipt wait in
-        # require_tip_current a deadlock by construction: the relay they waited
+        # require_build_on_main a deadlock by construction: the relay they waited
         # on is queued behind the waiting run. classify_superseder_once,
         # superseder_deploys, wait_for_receipt, the superseder-attempt file
         # and the stale-tip re-read are DELETED; the arm now fails RED at once
@@ -4108,7 +4106,11 @@ def check_docs_noop_filter(text: str) -> None:
         # action-download timeout). REVIEWED FOR DISPATCH CAPABILITY: only the
         # query string and the jq filter of two existing read-only GETs change.
         # No new endpoint, token, secret reference or `gh workflow run` site.
-        "9332d2aeea4d47857fc593f4fe35a5f15c6d9f8378c4cf03c66711d0348ee3e9"
+        # Hash updated 2026-09-30: the initial and fresh pre-dispatch gates
+        # accept exact ancestors of main. Each adds a read-only compare on
+        # the workflow token, with malformed or unreadable results failing RED.
+        # Dispatch sites, infra PAT use, inputs, and receipt logic are unchanged.
+        "d0ad6390f0ed4f0bc9a609082d3bada68170cd332060da2e196007e9c587ab50"
     ), (
         "relay step scripts changed: review the diff for dispatch "
         "capability, then update this hash in the same PR"
@@ -4786,7 +4788,7 @@ def check_staging_relay_convergence(text: str) -> None:
     # dispatched without a fresh, ungated tip read preceding it.
     assert "branches/main" in code, (
         "each dispatch must be preceded by a fresh tip-of-main read")
-    assert code.count("require_tip_current") == 3, (
+    assert code.count("require_build_on_main") == 3, (
         "exactly one definition and two call sites: once before the dispatch "
         "phase, and once again before an eviction re-dispatch, which happens "
         "minutes later and so needs its own read")
@@ -4796,14 +4798,14 @@ def check_staging_relay_convergence(text: str) -> None:
     # rindex, not index: the eviction-retry path inside watch_service also
     # calls dispatch_service, and it is defined earlier in the file than the
     # phase driver at the bottom. The LAST occurrence of each is the phase loop.
-    gate_call_at = code.index('require_tip_current "$SERVICES"')
+    gate_call_at = code.index('require_build_on_main "$SERVICES"')
     dispatch_loop_at = code.rindex('dispatch_service "$SERVICE"')
     watch_loop_at = code.rindex('watch_service "$SERVICE"')
     assert gate_call_at < dispatch_loop_at < watch_loop_at, (
         "every leg must be dispatched before any leg is watched; interleaving "
         "them is the abandoned-leg defect")
     assert code.count("branches/main") == 1, (
-        "exactly one tip read: require_tip_current freezes the source before "
+        "exactly one tip read: require_build_on_main freezes the source before "
         "both dispatches. A later read must not veto a receipt after both "
         "exact child deployments settled; per-leg reads would also mean the "
         "two legs no longer share one observation")
@@ -4816,7 +4818,7 @@ def check_staging_relay_convergence(text: str) -> None:
     # green. Ordering legs within one relay never orders two relays against
     # each other; the infra workflow's in-lock monotonic-forward guard does.
     # A visible split is survivable; a silent backwards deploy is not.
-    gate_body = code[code.index("require_tip_current() {"):].splitlines()[1:]
+    gate_body = code[code.index("require_build_on_main() {"):].splitlines()[1:]
     first_stmt = next(ln.strip() for ln in gate_body if ln.strip())
     assert first_stmt.startswith("local "), first_stmt
     first_action = next(
@@ -4857,8 +4859,8 @@ def check_staging_relay_convergence(text: str) -> None:
     # and the wait and classifier must not exist anywhere in the script, so
     # no later edit can call them back into a path where they deadlock.
     gate_fn = re.search(
-        r"^([ ]*)require_tip_current\(\) \{\n(.*?)\n\1\}$", code, re.S | re.M)
-    assert gate_fn, "require_tip_current must stay one extractable function"
+        r"^([ ]*)require_build_on_main\(\) \{\n(.*?)\n\1\}$", code, re.S | re.M)
+    assert gate_fn, "require_build_on_main must stay one extractable function"
     gate_src = gate_fn.group(2)
     split_arm = gate_src[gate_src.index('if [ "$DISPATCHED_ANY" != "true" ]'):]
     assert re.search(
@@ -4881,7 +4883,18 @@ def check_staging_relay_convergence(text: str) -> None:
             "a run serialized behind this one, and a dispatch here lands an "
             "older tag on a moved tip")
     assert gate_src.count("gh api") == 1, (
-        "the tip gate makes exactly one read, of this repo's main tip")
+        "the gate makes one main read; ancestry is in its helper")
+    ancestry_fn = re.search(
+        r"^([ ]*)build_is_on_main\(\) \{\n(.*?)\n\1\}$", code, re.S | re.M)
+    assert ancestry_fn, "the ancestry predicate must stay extractable"
+    ancestry_src = ancestry_fn.group(2)
+    assert 'if build_is_on_main; then' in gate_src
+    assert 'compare/$BUILD_HEAD_SHA...$MAIN_SHA' in ancestry_src
+    assert '[ "$out" = "ahead 0 $BUILD_HEAD_SHA" ] && return 0' in ancestry_src
+    assert '|| return 2' in ancestry_src
+    assert 'return 1' in ancestry_src and 'return 2' in ancestry_src
+    assert 'if [ "$relation_rc" -eq 2 ]; then' in gate_src
+    assert '::error::Unreadable ancestry compare' in gate_src
     for fn in ("wait_for_receipt", "superseder_deploys", "classify_superseder_once"):
         defs = (code.count(f"{fn}() {{")
                 + len(re.findall(rf"^\s*function\s+{fn}\b", code, re.M)))
@@ -5143,6 +5156,12 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
                    '"repos/$GITHUB_REPOSITORY" --jq \'.default_branch\')'),
         ),
         (
+            "ancestry predicate also accepts diverged history",
+            mutate(original,
+                   '[ "$out" = "ahead 0 $BUILD_HEAD_SHA" ] && return 0',
+                   '[[ "$out" = "ahead 0 $BUILD_HEAD_SHA" || "$out" = diverged* ]] && return 0'),
+        ),
+        (
             "a second dispatch nobody watches",
             mutate(original,
                    '            echo "Dispatched $SERVICE reconciliation of $SERVICE_TAG',
@@ -5368,8 +5387,12 @@ case "${args[0]}" in
         ;;
       *"/actions/artifacts/3000/zip") cat "$FAKE_WEB_RESULT_ZIP" ;;
       *"/actions/artifacts/3001/zip") cat "$FAKE_APP_RESULT_ZIP" ;;
+      *"/compare/$FAKE_BUILD_SHA..."*)
+        if [ "$FAKE_ANCESTRY" = "unreadable" ]; then exit 4; fi
+        printf '%s\n' "$FAKE_ANCESTRY"
+        ;;
       *"/compare/"*)      printf '%s\n' "$FAKE_RELATION" ;;
-      *"/jobs"*)          printf '%s\n' "1" ;;
+      *"/jobs"*)          printf '%s\n' "${FAKE_JOBS:-1}" ;;
       # No receipt or classifier endpoints (2026-09-02): the moved-tip arm
       # after dispatch polls nothing, so a read of either here is a
       # regression and fails the rehearsal loudly below instead of being
@@ -5390,7 +5413,14 @@ case "${args[0]}" in
           printf '%s\n' '[{"databaseId":1000}]'
         fi
         ;;
-      view) printf '%s\n' "completed success" ;;
+      view)
+        if [ "$(cat "$FAKE_EVICT_FILE")" = "1" ]; then
+          printf '0' > "$FAKE_EVICT_FILE"
+          printf '%s\n' "completed cancelled"
+        else
+          printf '%s\n' "completed success"
+        fi
+        ;;
       *) echo "fake gh: unhandled run ${args[1]}" >&2; exit 9 ;;
     esac
     ;;
@@ -5402,7 +5432,8 @@ esac
 
 def _rehearse_relay_dispatch(*, image_tag="prod-9999999", web_title, app_title,
                              relation="ahead", main_sha="deadbee",
-                             history_fails=False, tip_ok_reads=99, v3=False):
+                             history_fails=False, tip_ok_reads=99, v3=False,
+                             ancestry=None, evict=False):
     """Execute the relay's ACTUAL dispatch script (extracted from the parsed
     YAML, never re-typed here) against a fake `gh`. Legacy rehearsals return
     (returncode, stdout, [(service, image_tag)] in dispatch order). A v3
@@ -5451,6 +5482,8 @@ def _rehearse_relay_dispatch(*, image_tag="prod-9999999", web_title, app_title,
         log.write_text("", encoding="utf-8")
         tip_file = tmp / "tip"
         tip_file.write_text(str(tip_ok_reads), encoding="utf-8")
+        evict_file = tmp / "evict"
+        evict_file.write_text("1" if evict else "0", encoding="utf-8")
         receipt = None
         web_result_zip = tmp / "web-result.zip"
         app_result_zip = tmp / "app-result.zip"
@@ -5516,6 +5549,10 @@ def _rehearse_relay_dispatch(*, image_tag="prod-9999999", web_title, app_title,
             GH_TOKEN="fake-pat",
             HOME_TOKEN="fake-token",
             FAKE_MAIN_SHA=main_sha,
+            FAKE_BUILD_SHA=build_sha,
+            FAKE_ANCESTRY=ancestry if ancestry is not None else f"ahead 0 {build_sha}",
+            FAKE_EVICT_FILE=str(evict_file),
+            FAKE_JOBS="0" if evict else "1",
             FAKE_TIP_FILE=str(tip_file),
             FAKE_RELATION=relation,
             FAKE_HISTORY=json.dumps(history),
@@ -5703,21 +5740,45 @@ def test_staging_relay_orders_the_starved_service_first() -> None:
         "one tip read covers both legs, so a tip that moves after it must not "
         f"strand the second service; got {deployed}")
 
-    # THE RESIDUAL WINDOW, PINNED RATHER THAN DENIED. The cost is reduced, not
-    # removed: a tip that has ALREADY moved when the single read is taken still
-    # stops the whole release, and a relay cancelled between its two
-    # `gh workflow run` calls still leaves one leg undispatched. The first of
-    # those is rehearsable and asserted immediately below; the second is a
-    # cancellation of the relay process itself, which this in-process rehearsal
-    # cannot stage, exactly as the relay's 95-minute watch deadline is covered
-    # statically for the same reason.
-
-    # And the stand-down still wins over ordering: main moved, nothing goes out.
+    # Main already advanced to a descendant before the single dispatch read.
     rc, out, deployed = _rehearse_relay_dispatch(
         web_title=WEB_NEW, app_title=APP_OLD, relation="behind",
         main_sha="0ther")
-    assert (rc, deployed) == (0, [])
-    assert "standing down" in out
+    assert (rc, deployed) == (0, [("app", TAG), ("web", TAG)])
+    assert "forward guard orders relays" in out
+
+    # Readable non-ancestors stand down cleanly before any dispatch.
+    for ancestry in ("diverged 1 abcdef0", "behind 1 abcdef0",
+                     "identical 0 abcdef0", "ahead 1 deadbee", "ahead 0 abcdef0"):
+        rc, out, deployed = _rehearse_relay_dispatch(
+            web_title=WEB_NEW, app_title=APP_OLD, main_sha="0ther",
+            ancestry=ancestry)
+        assert (rc, deployed) == (0, []), (ancestry, out, deployed)
+        assert "not on main's history" in out and "standing down" in out
+
+    # Unreadable and malformed compares fail RED rather than skip or deploy.
+    for ancestry in ("unreadable", "", "ahead 0 deadbee extra",
+                     "ahead nope deadbee", "ahead 0 null"):
+        rc, out, deployed = _rehearse_relay_dispatch(
+            web_title=WEB_NEW, app_title=APP_OLD, main_sha="0ther",
+            ancestry=ancestry)
+        assert (rc, deployed) == (1, []), (ancestry, out, deployed)
+        assert "Unreadable ancestry compare" in out
+
+    # Eviction retries accept descendant main; removal after dispatch is RED.
+    rc, out, deployed = _rehearse_relay_dispatch(
+        web_title=WEB_NEW, app_title=APP_OLD, tip_ok_reads=1, evict=True)
+    assert (rc, deployed) == (
+        0, [("web", TAG), ("app", TAG), ("web", TAG)]), (out, deployed)
+    for ancestry, message in (
+        ("diverged 1 abcdef0", "STAGING IS SPLIT AND UNCONVERGED"),
+        ("unreadable", "Unreadable ancestry compare"),
+    ):
+        rc, out, deployed = _rehearse_relay_dispatch(
+            web_title=WEB_NEW, app_title=APP_OLD, tip_ok_reads=1, evict=True,
+            ancestry=ancestry)
+        assert (rc, deployed) == (1, [("web", TAG), ("app", TAG)])
+        assert message in out
 
     print("staging relay need-first ordering rehearsal: PASS")
 

@@ -11,10 +11,12 @@ name: Dispatch staging deploys
 # artifact (leaf.staging-supply-set.v1, field build_tag), never re-derived,
 # so the deployed tag is exactly the tag the build recorded.
 #
-# Ordering guard: deploys dispatch only while the built commit is still the
-# tip of main (latest-main-only staging). An older overlapping build can never
-# roll staging backwards; if the newer commit's own build fails, staging stays
-# on its previous deploy until the next successful main build.
+# Ordering guard: deploys the newest FINISHED build whose commit is on main's
+# history, either its tip or an exact ancestor on an unbroken commit chain.
+# Relays run one at a time and pending relays collapse to the newest.
+# Backwards ordering is the infra workflow's in-lock forward guard's job.
+# A rerun of an older build can dispatch and will be refused loudly by that
+# guard if it would move staging backwards.
 #
 # Docs-only no-op: a docs-only push's build run succeeds without building
 # (its noop gate skips the graph) and publishes a docs-noop marker artifact
@@ -44,31 +46,25 @@ name: Dispatch staging deploys
 # queueing loss rather than a deploy failure and is the one conclusion this
 # relay retries. Every other non-success fails the relay red.
 #
-# Superseded mid-release (rewritten 2026-09-02; see COALESCE ACROSS COMMITS
-# below): the relay's own concurrency group no longer cancels a running relay,
-# so a relay that has dispatched its legs watches EVERY one of them to a
-# terminal state whatever main does meanwhile, and the newer commit's relay
-# is queued behind it and deploys once it exits. The one place a moved tip
-# still matters after dispatch is an eviction re-dispatch (a leg cancelled
-# with zero jobs, which `queue: max` on the infra lock should make
-# unreachable). That arm must not re-dispatch its older tag onto a moved tip
-# (finishing an older tag on a moved tip is the backwards-deploy race PRs
-# #508 and #519 closed), and it CANNOT wait for the newer commit's relay to
-# converge staging, because that relay is serialized behind this run and
-# cannot start, let alone publish a receipt, until this run exits. So it
-# fails RED at once, names the split and names the queued converger. The
-# superseder classifier and the convergence-receipt wait that used to sit in
-# that arm (PRs #508, #519) are gone: under a no-cancel group a wait on a run
-# queued behind you can only expire, and it held the one converger back for
-# the whole 95-minute deadline before going RED anyway. The receipt itself is
-# still published by every relay that lands every leg; its consumer is now
-# scripts/platform_staging_convergence.py, not a waiting sibling relay.
+# Main movement during a release: the no-cancel relay watches EVERY
+# dispatched leg to a terminal state. An eviction re-dispatch accepts a build
+# still on main's history, including an exact ancestor of the new tip.
+# If main's history no longer contains the build after any dispatch, the
+# relay fails RED immediately. A newer relay is queued behind this run and
+# cannot converge staging until this run exits, so waiting here deadlocks.
+# The receipt remains proof that every leg landed, consumed by
+# scripts/platform_staging_convergence.py rather than a waiting relay.
 # Observed 2026-08-07 under the ORIGINAL stand-down-and-finish behaviour:
 # relay 31144164225 stood down after deploying web, the superseding commit
 # was docs-only, nothing converged, and the run still concluded success, so
 # leaf-platform-web-alt ran prod-d9306c3 while leaf-platform-app-alt ran
 # prod-87294a9 with a ::warning:: on a green run as the only trace. A split
 # that is left behind is still announced RED, never as a warning on green.
+# HISTORICAL SERIAL DESIGN. The need-first discussion through CLAIM
+# DISCIPLINE below records the former per-service tip checks and their costs.
+# Today both legs dispatch under one fresh history check; ordinary main
+# advances leave that check valid, and the forward guard prevents backwards
+# moves. Need-first still chooses order only, using best-effort history.
 # NEED-FIRST ORDERING (2026-08-07). The service loop used to be a hardcoded
 # `for SERVICE in web app`, so web won every race and app lost every race. A
 # relay superseded mid-release always dies before its SECOND service, so under
@@ -239,10 +235,10 @@ name: Dispatch staging deploys
 # build. When the running relay exits, the relay that starts is that newest
 # one: it deploys its own tag or, for a docs-only build, reconciles both
 # relay services onto the newest ancestor tag through the manifest step's
-# reconcile arm. Builds replaced while pending are never deployed, which is
-# latest-main-only staging by construction. Nothing races the infra lock:
-# one relay runs at a time, and the infra workflow's in-lock forward guard
-# still orders relays against every other dispatcher of that workflow.
+# reconcile arm. Builds replaced while pending are never deployed. The relay
+# deploys the newest FINISHED build on main's history even if main advances.
+# One relay runs at a time, and the infra workflow's in-lock forward guard
+# orders relays against every other dispatcher of that workflow.
 #
 # THE GROUP IS PREDICATED ON THE JOB'S OWN GATE. workflow_run fires for EVERY
 # completion of "Build platform images", including workflow_dispatch builds
@@ -257,12 +253,11 @@ name: Dispatch staging deploys
 # cannot drift apart.
 #
 # WHAT THIS DOES NOT DO: it does not bound how far staging trails main. A
-# relay runs for as long as its legs sit behind the shared infra lock (60 to
-# 75 minutes per relay on 2026-09-02), every merge that lands meanwhile waits
-# for the next relay, and that relay deploys only the newest of them. It does
-# not guarantee the queued relay converges either: its own tip check stands
-# it down if main has moved again by the time it starts, and its build can
-# fail. The receipt is still the only proof that a relay landed every leg.
+# relay can wait behind the shared infra lock, builds can fail, and the
+# forward guard can refuse an older rerun. Main advances alone do not stand
+# down a finished ancestral build. A commit removed from main's history
+# stands down before dispatch or fails RED after dispatch. The receipt is
+# still the only proof that a relay landed every leg.
 # ---------------------------------------------------------------------------
 
 on:
@@ -325,20 +320,39 @@ jobs:
       BUILD_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
 
     steps:
-      - name: Skip when the built commit is no longer the tip of main
+      - name: Skip when the built commit is not on main's history
         id: tip
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          build_is_on_main() {
+            local out
+            [ "$MAIN_SHA" = "$BUILD_HEAD_SHA" ] && return 0
+            if ! out=$(GH_TOKEN="${HOME_TOKEN:-$GH_TOKEN}" gh api \
+              "repos/$GITHUB_REPOSITORY/compare/$BUILD_HEAD_SHA...$MAIN_SHA" \
+              --jq '"\(.status) \(.behind_by) \(.merge_base_commit.sha)"'); then
+              return 2
+            fi
+            [[ "$out" =~ ^(ahead|behind|diverged|identical)\ [0-9]+\ [0-9a-f]{7,40}$ ]] || return 2
+            [ "$out" = "ahead 0 $BUILD_HEAD_SHA" ] && return 0
+            return 1
+          }
           MAIN_SHA=$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
-          if [ "$MAIN_SHA" != "$BUILD_HEAD_SHA" ]; then
-            echo "::notice::main moved to $MAIN_SHA past built $BUILD_HEAD_SHA; skipping (latest-main-only staging: the next successful main build deploys)."
-            echo "current=false" >> "$GITHUB_OUTPUT"
-          else
+          if build_is_on_main; then
+            if [ "$MAIN_SHA" != "$BUILD_HEAD_SHA" ]; then
+              echo "::notice::main has moved to $MAIN_SHA past built $BUILD_HEAD_SHA; deploying the finished build anyway. The in-lock forward guard orders relays."
+            fi
             echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            relation_rc=$?
+            if [ "$relation_rc" -eq 2 ]; then
+              echo "::error::Unreadable ancestry compare $BUILD_HEAD_SHA...$MAIN_SHA."
+              exit 1
+            fi
+            echo "::notice::Built commit $BUILD_HEAD_SHA is not on main's history (main is now $MAIN_SHA); skipping."
+            echo "current=false" >> "$GITHUB_OUTPUT"
           fi
-
       - name: Configure AWS credentials for the immutable release transport
         if: steps.tip.outputs.current == 'true'
         uses: aws-actions/configure-aws-credentials@v6.1.0
@@ -1766,43 +1780,51 @@ jobs:
             ATTEMPT_OF[$SERVICE]=0
           }
 
-          # The tip gate, unchanged in substance and never gated: dispatching a
-          # tag that is no longer current rolls staging BACKWARDS. It runs ONCE
-          # before the dispatch phase, so both legs provably carry the same tag
-          # from the same tip observation, and again before any eviction
-          # re-dispatch, which happens minutes later and therefore still needs
-          # its own read.
+          # Read main freshly before the dispatch phase and before any eviction
+          # re-dispatch. The build may be the tip or an exact ancestor of main.
+          # The in-lock forward guard orders relays against other dispatchers.
+          # A rerun of an older build can dispatch and that guard refuses a
+          # backwards move loudly.
           #
-          # The clean stand-down keys on DISPATCHED_ANY, not DEPLOYED_ANY. Once
-          # anything has been dispatched, a deploy may still land after this
-          # relay exits, so "nothing of this release is live" stops being
-          # provable and this relay must not claim it.
-          #
-          # NO WAIT ON A MOVED TIP AFTER DISPATCH (2026-09-02). This arm used to
-          # classify the superseding commit from its build receipt and then
-          # wait, up to this step's deadline, for that commit's relay to publish
-          # its convergence receipt. Under the header's no-cancel concurrency
-          # group that relay is QUEUED BEHIND THIS RUN and cannot start, let
-          # alone publish, until this run exits, so the wait could only ever
-          # expire: a 95-minute stall that held the one converger back for
-          # exactly that long and then went RED anyway. The arm now fails RED
-          # at once and names who converges. It still dispatches nothing:
-          # finishing an older tag on a moved tip is the backwards-deploy race
-          # PRs #508 and #519 closed, and one relay at a time is not a licence
-          # to reopen it, because operators and sibling lanes dispatch the same
-          # infra workflow outside this group.
-          require_tip_current() {
+          # The clean stand-down keys on DISPATCHED_ANY. Once anything has
+          # been dispatched it may still land after this relay exits, so a
+          # commit removed from main's history leaves a split announced RED.
+          # Never wait for a newer relay queued behind this run.
+          build_is_on_main() {
+            local out
+            [ "$MAIN_SHA" = "$BUILD_HEAD_SHA" ] && return 0
+            if ! out=$(GH_TOKEN="${HOME_TOKEN:-$GH_TOKEN}" gh api \
+              "repos/$GITHUB_REPOSITORY/compare/$BUILD_HEAD_SHA...$MAIN_SHA" \
+              --jq '"\(.status) \(.behind_by) \(.merge_base_commit.sha)"'); then
+              return 2
+            fi
+            [[ "$out" =~ ^(ahead|behind|diverged|identical)\ [0-9]+\ [0-9a-f]{7,40}$ ]] || return 2
+            [ "$out" = "ahead 0 $BUILD_HEAD_SHA" ] && return 0
+            return 1
+          }
+          require_build_on_main() {
             local pending=$1
-            local MAIN_SHA
+            local MAIN_SHA relation_rc
             MAIN_SHA=$(GH_TOKEN="$HOME_TOKEN" gh api \
               "repos/$GITHUB_REPOSITORY/branches/main" --jq '.commit.sha')
-            [ "$MAIN_SHA" = "$BUILD_HEAD_SHA" ] && return 0
+            if build_is_on_main; then
+              if [ "$MAIN_SHA" != "$BUILD_HEAD_SHA" ]; then
+                echo "::notice::main has moved to $MAIN_SHA past built $BUILD_HEAD_SHA; deploying the finished build anyway. The in-lock forward guard orders relays."
+              fi
+              return 0
+            else
+              relation_rc=$?
+            fi
+            if [ "$relation_rc" -eq 2 ]; then
+              echo "::error::Unreadable ancestry compare $BUILD_HEAD_SHA...$MAIN_SHA."
+              exit 1
+            fi
 
             if [ "$DISPATCHED_ANY" != "true" ]; then
-              echo "::notice::main moved to $MAIN_SHA past built $BUILD_HEAD_SHA before this release dispatched anything; standing down (latest-main-only staging: the newer commit's relay owns the deploy)."
+              echo "::notice::Built commit $BUILD_HEAD_SHA is not on main's history (main is now $MAIN_SHA) before this release dispatched anything; standing down."
               exit 0
             fi
-            echo "::error::STAGING IS SPLIT AND UNCONVERGED: main moved to $MAIN_SHA past built $BUILD_HEAD_SHA after this release already dispatched a service, so $pending stays on its previous image. This relay will not land $IMAGE_TAG on a moved tip, and it cannot wait for $MAIN_SHA's relay to converge staging: that relay is queued behind this run in the dispatch-staging-deploys concurrency group and cannot start until this run exits. Exiting RED now so it can. Staging is NOT converged on $BUILD_HEAD_SHA; $MAIN_SHA's relay (if its build succeeded) or the next successful main build converges it."
+            echo "::error::STAGING IS SPLIT AND UNCONVERGED: main moved to $MAIN_SHA and main's history no longer contains $BUILD_HEAD_SHA after this release already dispatched a service, so $pending stays on its previous image. It cannot wait for $MAIN_SHA's relay to converge staging: that relay is queued behind this run in the dispatch-staging-deploys concurrency group and cannot start until this run exits. Exiting RED now so it can. Staging is NOT converged on $BUILD_HEAD_SHA; $MAIN_SHA's relay (if its build succeeded) or the next successful main build converges it."
             exit 1
           }
 
@@ -1963,7 +1985,7 @@ jobs:
                 && [ "${ATTEMPT_OF[$SERVICE]}" -lt "$EVICTION_RETRIES" ]; then
                 ATTEMPT_OF[$SERVICE]=$(( ${ATTEMPT_OF[$SERVICE]} + 1 ))
                 echo "::warning::The $SERVICE deploy run $RUN_ID was evicted from the staging lock before starting a job; re-dispatching."
-                require_tip_current "$SERVICE"
+                require_build_on_main "$SERVICE"
                 dispatch_service "$SERVICE"
                 resolve_service_run "$SERVICE"
                 continue
@@ -1983,7 +2005,7 @@ jobs:
           # SEPARATE pass: it polls for up to five minutes, and doing it
           # between the dispatches would reopen the very window this phase
           # closes.
-          require_tip_current "$SERVICES"
+          require_build_on_main "$SERVICES"
           for SERVICE in $SERVICES; do
             dispatch_service "$SERVICE"
           done
@@ -2001,7 +2023,7 @@ jobs:
           # that as an artifact, which is the only evidence that distinguishes
           # a relay that COULD have deployed from one that DID. Its consumer is
           # scripts/platform_staging_convergence.py (the finalize workflow);
-          # no sibling relay waits on it any more (see require_tip_current).
+          # no sibling relay waits on it any more (see require_build_on_main).
           #
           # Reached only by falling out of the loop. Every stand-down and every
           # failure above exits first, so the receipt cannot be written by a
