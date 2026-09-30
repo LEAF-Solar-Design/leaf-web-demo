@@ -586,6 +586,12 @@ def build_suites() -> List[Suite]:
         # runner. COUNTED: 17 tests + 51 more parametrizations = 68.
         Suite("server-solar-tool-solar-elevation-zones", "server tests/test_solar_tool_solar_elevation_zones.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_elevation_zones.py"), 68),
+        # Design presets (2026-09-29, sf-w2-design-presets): LEAFPROFILE Create, Swap and Delete as a
+        # local-graph-commit and List as a local-graph-read over the drawing-owned store in graph extra;
+        # the recorded f1 to f5 parity chain replayed row for row. Inputs are authored in the file or are
+        # committed evidence, so the floor is the exact count on every runner. PLANNED: 143.
+        Suite("server-solar-tool-design-presets", "server tests/test_solar_tool_design_presets.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_design_presets.py"), 143),
         # Guardrails as a W2 registry graph read (2026-09-29, sf-w2-presets-guardrails): the plugin's 14
         # rules on the stored graph plus the recorded g1/g2 rule set replayed through the tool's row path.
         # Inputs are authored in the file, so the floor is the exact count on every runner. PLANNED: 59.

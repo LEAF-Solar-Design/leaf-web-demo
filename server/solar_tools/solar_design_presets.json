@@ -1,0 +1,404 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-design-presets",
+  "builtin": "builtins/solar_design_presets.py",
+  "family": "settings",
+  "adapter": "local-graph-commit",
+  "entitlement": "run_write",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_DESIGN_PRESET_REQUEST",
+  "readiness": {
+    "kind": "facets",
+    "facets": []
+  },
+  "engine": "server-builtin",
+  "interaction": {
+    "mode": "form"
+  },
+  "record_store": "registry",
+  "record": {
+    "name": "solar-design-presets",
+    "version": "1.0.0",
+    "description": "Create, swap or delete the drawing's design presets (LEAFPROFILE); each preset keeps a copy of the drawing's 60 preset settings.",
+    "kind": "script",
+    "family_id": "settings",
+    "engine_op": "solar_design_presets",
+    "entry": "builtins/solar_design_presets.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "expected_rev": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "subcommand": {
+          "type": "string",
+          "enum": [
+            "Create",
+            "Swap",
+            "Delete"
+          ]
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "prefix": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 3
+        },
+        "current_settings": {
+          "type": "object",
+          "properties": {
+            "InstallationDesign": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "MaxPanelGap": {
+              "type": "number",
+              "minimum": -1000000,
+              "maximum": 1000000
+            },
+            "AlignmentTolerance": {
+              "type": "number",
+              "minimum": -1000000,
+              "maximum": 1000000
+            },
+            "ExtractPanelsFromRackBlocks": {
+              "type": "boolean"
+            },
+            "ModuleLayer": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "PanelGroupLayer": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "PanelGroupLabelHeight": {
+              "type": "number",
+              "minimum": -1000000,
+              "maximum": 1000000
+            },
+            "PanelGroupOutlineWidth": {
+              "type": "number",
+              "minimum": -1000000,
+              "maximum": 1000000
+            },
+            "StringLayer": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "StringWidth": {
+              "type": "number",
+              "minimum": -1000000,
+              "maximum": 1000000
+            },
+            "TagHeight": {
+              "type": "number",
+              "minimum": -1000000,
+              "maximum": 1000000
+            },
+            "LabelPlacement": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "TagFirst": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "TagSecond": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "TagThird": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "TagDelim1": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "TagDelim2": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "NumPanelsInSequence": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            "NumMppt": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            "StringsPerMppt": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            "UseCombinerBox": {
+              "type": "boolean"
+            },
+            "CombinerBoxSize": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            "CombinerBoxConnections": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            "SolarEdgeContinuousNumbering": {
+              "type": "boolean"
+            },
+            "SolarEdgeMatchPdfColors": {
+              "type": "boolean"
+            },
+            "OptimizerBlock": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "UseL2Collectors": {
+              "type": "boolean"
+            },
+            "L1CollectorsPerL2": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            "L2NumMppt": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            "L2StringsPerMppt": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            },
+            "InverterSelection": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "ModuleSelection": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "Vmp": {
+              "type": "number",
+              "minimum": -1000000,
+              "maximum": 1000000
+            },
+            "Imp": {
+              "type": "number",
+              "minimum": -1000000,
+              "maximum": 1000000
+            },
+            "Pmp": {
+              "type": "number",
+              "minimum": -1000000,
+              "maximum": 1000000
+            },
+            "Voc": {
+              "type": "number",
+              "minimum": -1000000,
+              "maximum": 1000000
+            },
+            "BVoc": {
+              "type": "number",
+              "minimum": -1000000,
+              "maximum": 1000000
+            },
+            "MinTemp": {
+              "type": "number",
+              "minimum": -1000000,
+              "maximum": 1000000
+            },
+            "WireSize": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "CableMaterial": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "NecCableType": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "MaxConductorTemp": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "ConduitType": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "CableInstallationMethod": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "AmbientTemperature": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "NoGroupedConductors": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "DistanceAboveRoof": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "CableTray": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "VdRunMax": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "SafetyFactor": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "DeratingFactor": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "HomeRunLayer": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "InverterBlock": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "InverterBlockSize": {
+              "type": "number",
+              "minimum": -1000000,
+              "maximum": 1000000
+            },
+            "TagColor": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "UseInverterColor": {
+              "type": "boolean"
+            },
+            "UseOptimizers": {
+              "type": "boolean"
+            },
+            "OptimizerRatio": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "L2InverterSelection": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "NumPanels": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            }
+          },
+          "required": [
+            "InstallationDesign",
+            "MaxPanelGap",
+            "AlignmentTolerance",
+            "ExtractPanelsFromRackBlocks",
+            "ModuleLayer",
+            "PanelGroupLayer",
+            "PanelGroupLabelHeight",
+            "PanelGroupOutlineWidth",
+            "StringLayer",
+            "StringWidth",
+            "TagHeight",
+            "LabelPlacement",
+            "TagFirst",
+            "TagSecond",
+            "TagThird",
+            "TagDelim1",
+            "TagDelim2",
+            "NumPanelsInSequence",
+            "NumMppt",
+            "StringsPerMppt",
+            "UseCombinerBox",
+            "CombinerBoxSize",
+            "CombinerBoxConnections",
+            "SolarEdgeContinuousNumbering",
+            "SolarEdgeMatchPdfColors",
+            "OptimizerBlock",
+            "UseL2Collectors",
+            "L1CollectorsPerL2",
+            "L2NumMppt",
+            "L2StringsPerMppt",
+            "InverterSelection",
+            "ModuleSelection",
+            "Vmp",
+            "Imp",
+            "Pmp",
+            "Voc",
+            "BVoc",
+            "MinTemp",
+            "WireSize",
+            "CableMaterial",
+            "NecCableType",
+            "MaxConductorTemp",
+            "ConduitType",
+            "CableInstallationMethod",
+            "AmbientTemperature",
+            "NoGroupedConductors",
+            "DistanceAboveRoof",
+            "CableTray",
+            "VdRunMax",
+            "SafetyFactor",
+            "DeratingFactor",
+            "HomeRunLayer",
+            "InverterBlock",
+            "InverterBlockSize",
+            "TagColor",
+            "UseInverterColor",
+            "UseOptimizers",
+            "OptimizerRatio",
+            "L2InverterSelection",
+            "NumPanels"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "expected_rev",
+        "subcommand"
+      ],
+      "additionalProperties": false
+    },
+    "returns": {
+      "type": "object"
+    },
+    "capabilities": [
+      "drawing.write"
+    ],
+    "allow_local_fallback": false
+  },
+  "ledger": [
+    "design-profile-manage"
+  ],
+  "trusted_inputs": [],
+  "maturity": "preview",
+  "wave": 2,
+  "order": 12,
+  "scenario": "w2-rooftop"
+}
