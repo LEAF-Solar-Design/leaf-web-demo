@@ -430,6 +430,7 @@
     "server-solar-settings-invalidation",
     "server-solar-solaredge-import",
     "server-solar-solaredge-parse",
+    "server-solar-solaredge-parse-deadline",
     "server-solar-solaredge-pdf",
     "server-solar-solaredge-report",
     "server-solar-terrain",
