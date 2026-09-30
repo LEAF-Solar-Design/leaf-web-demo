@@ -21,9 +21,27 @@ import {
   safeCenterShift,
   safeRectCameraAction,
   unprojectClientToPlane,
+  viewportFromCamera,
 } from './viewerMath.js'
 
 const RECT = { left: 10, top: 20, width: 800, height: 600 }
+
+describe('viewportFromCamera', () => {
+  const safe = { left: 200, top: 100, width: 400, height: 300, canvasWidth: 800, canvasHeight: 600 }
+  it('projects a smaller safe rectangle to the drawing plane', () => {
+    const result = viewportFromCamera(flatCamera(), safe)
+    for (const [key, value] of Object.entries({ minX: -200, minY: -100, maxX: 200, maxY: 200 })) expect(result[key]).toBeCloseTo(value, 9)
+  })
+  it('respects zoom and negative drawing coordinates', () => {
+    const result = viewportFromCamera(flatCamera({ cx: -500, cy: -400, zoom: 2 }), safe)
+    for (const [key, value] of Object.entries({ minX: -600, minY: -450, maxX: -400, maxY: -300 })) expect(result[key]).toBeCloseTo(value, 9)
+  })
+  it('returns null without a finite usable layout', () => {
+    for (const rect of [null, {}, { ...safe, canvasWidth: 0 }, { ...safe, height: NaN }, { ...safe, top: Infinity }]) {
+      expect(viewportFromCamera(flatCamera(), rect)).toBeNull()
+    }
+  })
+})
 
 describe('nextFitState', () => {
   const fitted = Object.freeze({ fitted: true, interacting: false })

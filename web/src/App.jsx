@@ -5,6 +5,11 @@ import { createPortal, flushSync } from 'react-dom'
 import { track, setTourStep } from './telemetry.js'
 import { useStudioGround } from './site/studioGround.js'
 import useDrawingViewport from './site/useDrawingViewport.js'
+import { STUDIO_DRAWING_OCCLUDERS } from './site/drawingOccluders.js'
+import { DrawingObjectsProvider, useDrawingObjects } from './site/DrawingObjectsContext.jsx'
+import DrawingNavigationTools from './site/DrawingNavigationTools.jsx'
+import { buildDrawingObjectIndex } from './lib/drawingObjectIndex.js'
+import EngineObjectBridge from './cadedit/EngineObjectBridge.jsx'
 import { useLeavingGround, useStudioTransition } from './site/useStudioTransition.js'
 import SurfaceGrounds, { groundShowsDrawing } from './site/SurfaceGrounds.jsx'
 import { START_BOARD_COPY } from './site/startBoardCopy.js'
@@ -52,13 +57,6 @@ const WORKSPACE_QUICK_AFTER = Object.freeze([
   { id: 'sep-1', kind: 'sep' },
   { id: 'quick-undo', label: 'Undo version', icon: 'undo', disabled: true, reason: REASONS.noVersions },
   { id: 'quick-redo', label: 'Redo version', icon: 'redo', disabled: true, reason: REASONS.noVersions },
-])
-// Bottom occluders include the footer, phone drawer headings, and command line's fixed-height well plus a constant 50 px reserve for the prompt's two rows, so an armed prompt never covers fitted geometry and arming or disarming a command still never moves the drawing.
-const STUDIO_DRAWING_OCCLUDERS = Object.freeze([
-  ['header.top', 'top'], ['#drafting-ribbon', 'top'], ['.viewer-toolbar', 'top'],
-  ['[data-testid="cockpit-view"]', 'top'], ['.properties-dock', 'left'],
-  ['.bar.bar-command-line', 'bottom', Object.freeze({ reserve: 50 })],
-  ['footer.foot-bar', 'bottom'], ['.studio-drawer-tabs', 'bottom'], ['.rail-stack', 'nearest'],
 ])
 import Legend from './components/Legend.jsx'
 import ResultPanel from './components/ResultPanel.jsx'
@@ -298,6 +296,13 @@ function LiveProjectMaterialIntake({ project, artifacts, onAttached }) {
   return <ProjectMaterialIntake project={project} upload={projectUpload}
     intake={materialIntake} artifacts={artifacts} onStartUpload={startMaterialUpload}
     onRetry={materialIntake.retry} mock={false} />
+}
+
+function ConsoleDrawingObjects({ index, selectedHandle }) {
+  const { publish, publishSelection } = useDrawingObjects()
+  useEffect(() => index ? publish('console', { index }) : undefined, [index, publish])
+  useEffect(() => { publishSelection('console', selectedHandle == null ? [] : [selectedHandle]) }, [index, selectedHandle, publishSelection])
+  return null
 }
 
 export default function App() {
@@ -588,6 +593,8 @@ export default function App() {
   }, [agentSessionId, mock])
 
   const viewerRef = useRef(null)
+  const [, setDrawingViewerRevision] = useState(0)
+  const onDrawingSceneReady = useCallback(() => setDrawingViewerRevision((n) => n + 1), [])
   // S3 Back and Up: ONE bounded navigation history for this viewer (never the
   // operator stage's), plus a size counter so every consumer re-renders when
   // it changes. Cleared on every drawing scope change.
@@ -1419,6 +1426,11 @@ export default function App() {
   // insert/face-only layers (e.g. the ?fixture=edit Blocks/Surfaces layers)
   // stop reading 0 in the legend.
   const drawingIntake = activeIntake || shown
+  const consoleDrawingKey = `console:${drawingLoad.drawingId}`
+  const consoleObjectIndex = useMemo(() => intake && drawingLoad.drawingId === REQUESTED_DRAWING_ID ? buildDrawingObjectIndex({
+    drawingKey: consoleDrawingKey, intake,
+    solarGraph: intake.solar_design_graph ? { drawingKey: consoleDrawingKey, graph: intake.solar_design_graph } : null,
+  }) : null, [consoleDrawingKey, intake, drawingLoad.drawingId, REQUESTED_DRAWING_ID])
   const layerCounts = useMemo(() => countEntitiesByLayer(drawingIntake), [drawingIntake])
 
   // resolve the picked handle to an entity descriptor for the readout
@@ -3453,6 +3465,8 @@ export default function App() {
     // render each shared element exactly where it already stood, so this adds
     // no DOM. Local names are aliased HERE, at the call boundary, so the frame
     // never learns App's private vocabulary.
+    <DrawingObjectsProvider viewerRef={viewerRef}>
+    <ConsoleDrawingObjects index={consoleObjectIndex} selectedHandle={selectedHandle} />
     <SurfaceFrame
       scene="console"
       mock={mock}
@@ -4098,6 +4112,7 @@ export default function App() {
               shows the ENGINE document through the viewer's own
               applyVersion seam (the console drawing returns on close);
               the card carries data-engine-document for the pins. */}
+          {ENV_CAD_EDIT && <EngineObjectBridge active={!!studioGround && groundShowsDrawing(activeSurface)} intake={activeIntake} />}
           {ENV_CAD_EDIT && studioGround && (
             <EngineDocumentView
               viewerRef={viewerRef}
@@ -4381,6 +4396,8 @@ export default function App() {
                 <Viewer
                   ref={intake ? viewerRef : solarStarterViewerRef}
                   intake={intake ?? SOLAR_STARTER_EMPTY_INTAKE}
+                  drawingKey={consoleDrawingKey}
+                  onSceneReady={onDrawingSceneReady}
                   colorForLayer={studioGround ? studioColorForLayer : surfaceColorForLayer}
                   paletteRevision={studioGround ? (surfaceSlots.groundMaterial.layerAccent === 'solar' ? 'solar' : 'base') : undefined}
                   stringRoutes={solarStringRoutes}
@@ -4483,6 +4500,7 @@ export default function App() {
               return <>{legendEl}{readoutEl}</>
             })()}
             {/* W4b cockpit: view snaps on the drawing (studio only). */}
+            <DrawingNavigationTools />
             {studioGround && intake && groundShowsDrawing(activeSurface) && (
               <ViewCluster
                 viewerRef={viewerRef}
@@ -4861,5 +4879,6 @@ export default function App() {
       {!mock && <OperatorEntry />}
     </div>
     </SurfaceFrame>
+    </DrawingObjectsProvider>
   )
 }

@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react'
 import { applyCameraCarry, applyViewPose, cameraCarry, cameraCarryKey, cameraPose, captureCameraCarry, nextFitState, pickLineThreshold, resizeCameraAction, safeFitFrustum, safeCenterShift, safeRectCameraAction, unprojectClientToPlane } from './viewerMath.js'
 import { blockDefinitions } from './viewerIntake.js'
+import { createCameraChannel } from './cameraChannel.js'
+import { viewportFromCamera } from './viewerMath.js'
+import { validObjectBounds } from '../lib/drawingObjectIndex.js'
 import { expandBulgedPolylines, intakeRoundPolylines } from '../cadedit/engineIntake.js'
 import { formatElementId } from '../lib/elementIdentity.js'
 import { marqueeMode, worldRect, marqueeHandles } from '../lib/marqueeSelection.js'
@@ -140,12 +143,56 @@ const Viewer = forwardRef(function Viewer(
     selectedHandle, onSelectEntity, pendingEdit,
     marqueeGate, onMarqueeSelect,
     background, controlsEnabled = true, rotateEnabled = false,
-    panelSculpture = false, stringRoutes, onGlError, safeRect = null,
+    panelSculpture = false, stringRoutes, onGlError, safeRect = null, drawingKey = null, onSceneReady,
   },
   ref,
 ) {
   const mountRef = useRef(null)
   const stateRef = useRef(null)
+  const channelRef = useRef(null)
+  const focusMarkerRef = useRef(null)
+  const desiredSceneRef = useRef(null)
+  const onSceneReadyRef = useRef(onSceneReady)
+  onSceneReadyRef.current = onSceneReady
+  const channel = () => channelRef.current || (channelRef.current = createCameraChannel({
+    schedule: (fn) => requestAnimationFrame(fn), cancel: (id) => cancelAnimationFrame(id),
+  }))
+  const sceneReady = () => {
+    const s = stateRef.current
+    return !!s && s.intake === desiredSceneRef.current?.intake && s.drawingKey === desiredSceneRef.current?.drawingKey
+      && !s.pending && s.renderer.domElement.clientWidth > 0 && s.renderer.domElement.clientHeight > 0
+  }
+  const publishCamera = () => {
+    const s = stateRef.current
+    if (!sceneReady()) { channel().publish({ pose: null, viewport: null }); return }
+    s.camera.updateMatrixWorld(true)
+    const rect = s.renderer.domElement.getBoundingClientRect()
+    channel().publish({ pose: cameraPose(s.camera, s.controls.target, rect),
+      viewport: viewportFromCamera(s.camera, { ...(safeRectRef.current || { left: 0, top: 0, width: rect.width, height: rect.height }),
+        canvasWidth: rect.width, canvasHeight: rect.height }) })
+  }
+  const setFocusMarker = (bounds) => {
+    const s = stateRef.current
+    if (!sceneReady() || (bounds !== null && !validObjectBounds(bounds))) return false
+    if (s.focusOutline && bounds && ['minX', 'minY', 'maxX', 'maxY'].every((key) => bounds[key] === focusMarkerRef.current?.bounds[key])) return true
+    if (s.focusOutline) {
+      s.scene.remove(s.focusOutline)
+      s.focusOutline.geometry.dispose(); s.focusOutline.material.dispose()
+      s.focusOutline = null
+    }
+    focusMarkerRef.current = bounds ? { drawingKey: s.drawingKey, bounds: { ...bounds } } : null
+    if (bounds) {
+      const { minX: x, minY: y, maxX: X, maxY: Y } = bounds
+      const geometry = new THREE.BufferGeometry().setFromPoints([[x, y], [X, y], [X, Y], [x, Y], [x, y]]
+        .map(([px, py]) => new THREE.Vector3(px, py, 3)))
+      const unit = Math.max(X - x, Y - y, 1) / 24
+      const material = new THREE.LineDashedMaterial({ color: s.tokens.select, dashSize: unit, gapSize: unit, depthTest: false })
+      s.focusOutline = new THREE.Line(geometry, material)
+      s.focusOutline.computeLineDistances(); s.focusOutline.renderOrder = 11
+      s.scene.add(s.focusOutline)
+    }
+    return true
+  }
   const colorForLayerRef = useRef(colorForLayer)
   colorForLayerRef.current = colorForLayer
   const safeRectRef = useRef(safeRect)
@@ -178,6 +225,8 @@ const Viewer = forwardRef(function Viewer(
   useEffect(() => { setGroupHighlight([]) }, [intake])
   useEffect(() => { setInternalIntake(null) }, [intake])
   const activeIntake = internalIntake || intake
+  const sceneDrawingKey = activeIntake?.source === 'engine' ? `engine:${activeIntake.documentId}` : drawingKey
+  desiredSceneRef.current = { intake: activeIntake, drawingKey: sceneDrawingKey }
 
   // Bumped at the end of each scene build so the dynamic-overlay effects
   // (highlight/markers/overlay/selection/pending) re-apply against the fresh
@@ -189,6 +238,8 @@ const Viewer = forwardRef(function Viewer(
 
   // --- scene build (re-runs on activeIntake / colorForLayer change) --------
   useEffect(() => {
+    channel().cancelPending()
+    channel().publish({ pose: null, viewport: null })
     if (!activeIntake) return
     const mount = mountRef.current
     const width = mount.clientWidth
@@ -538,6 +589,7 @@ const Viewer = forwardRef(function Viewer(
       controls.target.set(centerX, centerY, targetZ)
       controls.update()
       updateFitState('fit')
+      publishCamera()
     }
     // An edit to the same engine document rebuilds the scene; a view the
     // drafter moved stays where it was, anything else refits.
@@ -558,7 +610,7 @@ const Viewer = forwardRef(function Viewer(
       interactingRef.current = next.interacting
     }
     const onControlsStart = () => updateFitState('start')
-    const onControlsChange = () => updateFitState('change')
+    const onControlsChange = () => { updateFitState('change'); publishCamera() }
     const onControlsEnd = () => updateFitState('end')
     controls.addEventListener('start', onControlsStart)
     controls.addEventListener('change', onControlsChange)
@@ -763,16 +815,23 @@ const Viewer = forwardRef(function Viewer(
       })
       if (action === 'refit') fitToBounds()
       else if (action === 'frustum') applyFrustum()
+      if (!stateRef.current?.focusOutline && focusMarkerRef.current?.drawingKey === sceneDrawingKey) setFocusMarker(focusMarkerRef.current.bounds)
+      publishCamera()
     }
-    const ro = new ResizeObserver(onResize)
+    const ro = new ResizeObserver(() => { onResize(); publishCamera() })
     ro.observe(mount)
 
     stateRef.current = {
+      intake: activeIntake, drawingKey: sceneDrawingKey,
       scene, camera, renderer, controls, layerGroups, pickIndex,
       highlightGroup, markerGroup, overlayGroup, selectionGroup, pendingGroup,
       stringGroup, rubberGroup, snapGroup, stringAnim: null,
       fitToBounds, dataSpan, tokens, sculpture,
     }
+    if (focusMarkerRef.current?.drawingKey === sceneDrawingKey) setFocusMarker(focusMarkerRef.current.bounds)
+    else focusMarkerRef.current = null
+    publishCamera()
+    onSceneReadyRef.current?.()
 
     const depthSpan = isFinite(minDisplayZ) && isFinite(maxDisplayZ)
       ? maxDisplayZ - minDisplayZ
@@ -825,6 +884,7 @@ const Viewer = forwardRef(function Viewer(
     setBuildTick((t) => t + 1)
 
     return () => {
+      channel().cancelPending()
       viewCarryRef.current = captureCameraCarry(camera, controls.target, {
         key: carryKey, fitted: fittedRef.current,
         width: frustumWidth, height: frustumHeight,
@@ -858,8 +918,10 @@ const Viewer = forwardRef(function Viewer(
       delete mount.dataset.cameraTarget
       delete mount.__cadviewer
       stateRef.current = null
+      channel().publish({ pose: null, viewport: null })
     }
-  }, [activeIntake, paletteRevision === undefined ? colorForLayer : null, background, panelSculpture])
+  }, [activeIntake, paletteRevision === undefined ? colorForLayer : null, background, panelSculpture, sceneDrawingKey])
+  useEffect(() => () => { channelRef.current?.dispose(); channelRef.current = null }, [])
 
   useEffect(() => {
     if (paletteRevision === undefined || !stateRef.current) return
@@ -883,8 +945,13 @@ const Viewer = forwardRef(function Viewer(
     s.controls.target.x += dx; s.controls.target.y += dy
     s.controls.update()
   }, [safeRect])
+  useEffect(() => { publishCamera() }, [safeRect])
 
   useImperativeHandle(ref, () => ({
+    subscribeCamera: (listener) => channel().subscribe(listener),
+    getDrawingScene: () => ({ ...desiredSceneRef.current, ready: sceneReady() }),
+    canSetFocusMarker: (bounds) => sceneReady() && validObjectBounds(bounds),
+    setFocusMarker,
     fit: () => stateRef.current?.fitToBounds(),
     frame: (bounds, share = 0.4) => {
       const s = stateRef.current
@@ -898,12 +965,16 @@ const Viewer = forwardRef(function Viewer(
         zoom: (s.camera.right - s.camera.left) / (width * fit.unitsPerPixel) })
       s.controls.update()
       fittedRef.current = false
+      publishCamera()
       return true
     },
     // Rebuild scene geometry from a new intake version (e.g. a backend push of
     // the next drawing version). Disposes old geometry and clears the pending
     // ghost as part of the rebuild.
-    applyVersion: (newIntake) => { setGroupHighlight([]); setInternalIntake(newIntake) },
+    applyVersion: (newIntake) => {
+      if (stateRef.current && stateRef.current.intake !== (newIntake || intake)) stateRef.current.pending = true
+      publishCamera(); setGroupHighlight([]); setInternalIntake(newIntake)
+    },
     // Project a world point to a client pixel (production twin of the DEV
     // mount.__cadviewer hook — used by the site layer and automated checks).
     project: (wx, wy) => {
@@ -936,6 +1007,7 @@ const Viewer = forwardRef(function Viewer(
       if (pose && typeof pose === 'object') fittedRef.current = false
       const changed = applyViewPose(s.camera, s.controls.target, pose)
       if (changed) s.controls.update()
+      publishCamera()
       return changed
     },
     // Camera pose as plain data (position/target/zoom/near/far/worldPerPixel)
