@@ -1,0 +1,324 @@
+{
+  "schema": "leaf.solar-ground-conversion-evidence.v1",
+  "capability": "trackers-to-panelgroups",
+  "source": {
+    "intake": "docs/parity/evidence/ground/terrain/intake.json",
+    "intake_sha256": "debbefb274c3f5f2956dc7a6e00cdf01579d01253e59d585b12fd014c7b33326",
+    "state": "scripts/solar_ground_dsteps_evidence.py b18_state",
+    "receipt": "docs/parity/receipts/trackers-to-panelgroups/ground-terrain-d3.json",
+    "meters_per_unit": 1.0
+  },
+  "rule": "Direct path above 10000 module slots: one panel group per tracker, one matrix row of module_slots panels at axis start + unit axis * (axis length / slots) * (slot + 0.5); Branch2025 c26204dd BranchCmdCore.cs:708-785, LeafTrackersToPanelGroupsCommand.cs:22,382,693-731",
+  "geometry_basis": "ported-rule",
+  "counts": {
+    "trackers": 237,
+    "panels": 69678,
+    "settings": {
+      "PanelGroupNumber": 238,
+      "PanelGroupColour": 237
+    },
+    "by_source_command": {
+      "LEAFTRACK": {
+        "trackers": 119,
+        "panels": 34986,
+        "first_ordinal": 0,
+        "last_ordinal": 118
+      },
+      "LEAFSAT": {
+        "trackers": 118,
+        "panels": 34692,
+        "first_ordinal": 119,
+        "last_ordinal": 236
+      }
+    }
+  },
+  "digests": {
+    "layout": "a070a11672127b04ed5b635eec738b44d8dc0c88f1f44a02f8d4ddfde08a533c",
+    "trackers_without_panels": "a1ab2dd56f5ddf1e507c175320e5972adba21d882b41e7896f86b2bf39848eee",
+    "panels": "e2dc89b77859ce982ed70c9b9eb09710ff762b4a35f5be3d7439a724fb498e52"
+  },
+  "membership": {
+    "distinct_centres": 69678,
+    "centres_in_own_outline": 69678,
+    "centres_in_two_outlines": 25284,
+    "centres_in_two_outlines_same_source_command": 0
+  },
+  "samples": [
+    {
+      "ordinal": 0,
+      "entity_index": 1197,
+      "entity_kind": "tracker",
+      "group_number": 1,
+      "row_index": 0,
+      "module_slots": 294,
+      "axis_start": [
+        2.1,
+        0.010000000000002271
+      ],
+      "axis_end": [
+        2.1,
+        299.99
+      ],
+      "half_cross_axis": [
+        -1.05,
+        0.0
+      ],
+      "center": [
+        2.1,
+        150.0
+      ],
+      "outline": [
+        [
+          3.1500000000000004,
+          0.010000000000002271
+        ],
+        [
+          1.05,
+          0.010000000000002271
+        ],
+        [
+          1.05,
+          299.99
+        ],
+        [
+          3.1500000000000004,
+          299.99
+        ]
+      ],
+      "row_angle_rad": 1.5707963267948966,
+      "slot_length_du": 1.0203401360544218,
+      "panel_height_du": 2.1,
+      "source_command": "LEAFTRACK",
+      "panel_samples": [
+        {
+          "slot": 0,
+          "centre": [
+            2.1,
+            0.5201700680272131
+          ]
+        },
+        {
+          "slot": 1,
+          "centre": [
+            2.1,
+            1.5405102040816347
+          ]
+        },
+        {
+          "slot": 293,
+          "centre": [
+            2.1,
+            299.4798299319728
+          ]
+        }
+      ]
+    },
+    {
+      "ordinal": 118,
+      "entity_index": 1315,
+      "entity_kind": "tracker",
+      "group_number": 119,
+      "row_index": 118,
+      "module_slots": 294,
+      "axis_start": [
+        497.6979448609354,
+        0.010000000000002271
+      ],
+      "axis_end": [
+        497.6979448609354,
+        299.99
+      ],
+      "half_cross_axis": [
+        -1.05,
+        0.0
+      ],
+      "center": [
+        497.6979448609354,
+        150.0
+      ],
+      "outline": [
+        [
+          498.74794486093543,
+          0.010000000000002271
+        ],
+        [
+          496.6479448609354,
+          0.010000000000002271
+        ],
+        [
+          496.6479448609354,
+          299.99
+        ],
+        [
+          498.74794486093543,
+          299.99
+        ]
+      ],
+      "row_angle_rad": 1.5707963267948966,
+      "slot_length_du": 1.0203401360544218,
+      "panel_height_du": 2.1,
+      "source_command": "LEAFTRACK",
+      "panel_samples": [
+        {
+          "slot": 0,
+          "centre": [
+            497.6979448609354,
+            0.5201700680272131
+          ]
+        },
+        {
+          "slot": 1,
+          "centre": [
+            497.6979448609354,
+            1.5405102040816347
+          ]
+        },
+        {
+          "slot": 293,
+          "centre": [
+            497.6979448609354,
+            299.4798299319728
+          ]
+        }
+      ]
+    },
+    {
+      "ordinal": 119,
+      "entity_index": 1316,
+      "entity_kind": "tracker",
+      "group_number": 120,
+      "row_index": 0,
+      "module_slots": 294,
+      "axis_start": [
+        2.1139997212799813,
+        0.010000000000002271
+      ],
+      "axis_end": [
+        2.1139997212799813,
+        299.99
+      ],
+      "half_cross_axis": [
+        -1.05,
+        0.0
+      ],
+      "center": [
+        2.1139997212799813,
+        150.0
+      ],
+      "outline": [
+        [
+          3.163999721279981,
+          0.010000000000002271
+        ],
+        [
+          1.0639997212799812,
+          0.010000000000002271
+        ],
+        [
+          1.0639997212799812,
+          299.99
+        ],
+        [
+          3.163999721279981,
+          299.99
+        ]
+      ],
+      "row_angle_rad": 1.5707963267948966,
+      "slot_length_du": 1.0203401360544218,
+      "panel_height_du": 2.1,
+      "source_command": "LEAFSAT",
+      "panel_samples": [
+        {
+          "slot": 0,
+          "centre": [
+            2.1139997212799813,
+            0.5201700680272131
+          ]
+        },
+        {
+          "slot": 1,
+          "centre": [
+            2.1139997212799813,
+            1.5405102040816347
+          ]
+        },
+        {
+          "slot": 293,
+          "centre": [
+            2.1139997212799813,
+            299.4798299319728
+          ]
+        }
+      ]
+    },
+    {
+      "ordinal": 236,
+      "entity_index": 1433,
+      "entity_kind": "tracker",
+      "group_number": 237,
+      "row_index": 117,
+      "module_slots": 294,
+      "axis_start": [
+        496.78780121501075,
+        0.010000000000002271
+      ],
+      "axis_end": [
+        496.78780121501075,
+        299.99
+      ],
+      "half_cross_axis": [
+        -1.05,
+        0.0
+      ],
+      "center": [
+        496.78780121501075,
+        150.0
+      ],
+      "outline": [
+        [
+          497.83780121501076,
+          0.010000000000002271
+        ],
+        [
+          495.73780121501073,
+          0.010000000000002271
+        ],
+        [
+          495.73780121501073,
+          299.99
+        ],
+        [
+          497.83780121501076,
+          299.99
+        ]
+      ],
+      "row_angle_rad": 1.5707963267948966,
+      "slot_length_du": 1.0203401360544218,
+      "panel_height_du": 2.1,
+      "source_command": "LEAFSAT",
+      "panel_samples": [
+        {
+          "slot": 0,
+          "centre": [
+            496.78780121501075,
+            0.5201700680272131
+          ]
+        },
+        {
+          "slot": 1,
+          "centre": [
+            496.78780121501075,
+            1.5405102040816347
+          ]
+        },
+        {
+          "slot": 293,
+          "centre": [
+            496.78780121501075,
+            299.4798299319728
+          ]
+        }
+      ]
+    }
+  ]
+}

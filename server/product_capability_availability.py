@@ -337,6 +337,10 @@ def w1_graph_readiness(graph):
     mark(["solar-panel-groups"], sized, "sizing_confirmation_required")
     if sized and not sizing_power_ready(graph):
         mark(["solar-panel-groups"], False, "module_power_required")
+    if graph["project"]["installation_design"] != "Roof":
+        # builtins/solar_panel_groups.py makes Roof frames only; validate_graph refuses them on a
+        # Ground project (INSTALLATION_DESIGN_MISMATCH), so readiness must never advertise the run.
+        mark(["solar-panel-groups"], False, "roof_installation_required")
     grouped = sized and bool(graph["frames"]) and bool(graph["panels"]) and all(
         item["validity"]["state"] == "valid"
         for item in graph["frames"] + graph["panels"] + graph["electrical_zones"]
