@@ -339,6 +339,182 @@ def test_malformed_input_fails_closed():
         aws_import.to_cost_observations("2026-8", [], CLOSED)
 
 
+# --------------------------------------------------------------------------- #
+# physical usage (TCM-21): build-minutes for CodeBuild, instance-hours for EC2
+# --------------------------------------------------------------------------- #
+EC2 = "Amazon Elastic Compute Cloud - Compute"
+CODEBUILD_ID = "aws:aws-codebuild"
+EC2_ID = "aws:amazon-elastic-compute-cloud-compute"
+
+
+def _quantity(service, usage_type, amount, unit):
+    return {"Keys": [service, usage_type],
+            "Metrics": {"UsageQuantity": {"Amount": amount, "Unit": unit}}}
+
+
+def _quantity_page(start="2026-08-01", token=None):
+    return _page([
+        _quantity("AWS CodeBuild", "USE1-Build-Min:Linux:g1.small", "120.5", "Minutes"),
+        _quantity("AWS CodeBuild", "USE1-Build-Min:Linux:g1.large", "30", "Minutes"),
+        _quantity("AWS CodeBuild", "USE1-Storage", "4", "GB"),
+        _quantity(EC2, "USE1-BoxUsage:t3.medium", "720", "Hrs"),
+        _quantity(EC2, "BoxUsage:t3.micro", "10.25", "Hrs"),
+        _quantity(EC2, "USE1-EBS:VolumeUsage.gp3", "300", "GB-Mo"),
+        _quantity(EC2, "USE1-DataTransfer-Out-Bytes", "12.5", "GB"),
+        _quantity("AWS Lambda", "USE1-Request", "1000000", "Requests"),
+    ], start=start, token=token)
+
+
+class RoutingCostExplorer:
+    """Answers cost and quantity requests from separate queues; quantities may raise."""
+
+    def __init__(self, cost_pages, quantity_pages=(), quantity_error=None):
+        self.cost_pages = list(cost_pages)
+        self.quantity_pages = list(quantity_pages)
+        self.quantity_error = quantity_error
+        self.metrics = []
+
+    def get_cost_and_usage(self, **kwargs):
+        self.metrics.append(kwargs["Metrics"])
+        if kwargs["Metrics"] == ["UsageQuantity"]:
+            if self.quantity_error is not None:
+                raise self.quantity_error
+            return copy.deepcopy(self.quantity_pages.pop(0))
+        return copy.deepcopy(self.cost_pages.pop(0))
+
+
+def test_fetch_quantities_asks_for_usage_quantity_of_codebuild_and_ec2_only():
+    client = FakeCostExplorer([_quantity_page(token="tok-2"), _page([])])
+    responses = aws_import.fetch_quantities(client, "2026-08", today=date(2026, 9, 3))
+    assert len(responses) == 2
+    assert [c.get("NextPageToken") for c in client.calls] == [None, "tok-2"]
+    first = client.calls[0]
+    assert first["TimePeriod"] == {"Start": "2026-08-01", "End": "2026-09-01"}
+    assert first["Granularity"] == "MONTHLY"
+    assert first["Metrics"] == ["UsageQuantity"]
+    assert first["GroupBy"] == [{"Type": "DIMENSION", "Key": "SERVICE"},
+                                {"Type": "DIMENSION", "Key": "USAGE_TYPE"}]
+    assert first["Filter"] == {"Dimensions": {"Key": "SERVICE", "Values": ["AWS CodeBuild", EC2]}}
+    cost_client = FakeCostExplorer([_page([])])
+    aws_import.fetch(cost_client, "2026-08", today=date(2026, 9, 3))
+    assert "Filter" not in cost_client.calls[0]
+    with pytest.raises(RuntimeError, match="pagination exceeded 3 pages"):
+        aws_import.fetch_quantities(EndlessCostExplorer(), "2026-08", today=date(2026, 9, 3), max_pages=3)
+
+
+def test_physical_usage_sums_like_units_and_ignores_every_other_usage_type():
+    usage = aws_import.to_physical_usage([_quantity_page()], period="2026-08", fetched_at=CLOSED)
+    assert usage == {
+        CODEBUILD_ID: {"quantity": "150.5", "unit": "build-minutes", "coverage": "complete"},
+        EC2_ID: {"quantity": "730.25", "unit": "instance-hours", "coverage": "complete"},
+    }
+    assert list(usage) == sorted(usage)
+    only_ebs = _page([_quantity(EC2, "USE1-EBS:VolumeUsage.gp3", "300", "GB-Mo"),
+                      _quantity(EC2, "USE1-DataTransfer-Out-Bytes", "12.5", "GB")])
+    assert aws_import.to_physical_usage([only_ebs]) == {}
+
+
+def test_physical_usage_sums_across_pages():
+    first = _page([_quantity("AWS CodeBuild", "USE1-Build-Min:Linux:g1.small", "10", "Minutes")],
+                  token="next")
+    last = _page([_quantity("AWS CodeBuild", "USE1-Build-Min:ARM:g1.small", "2.25", "Minutes")])
+    usage = aws_import.to_physical_usage([first, last], period="2026-08", fetched_at=CLOSED)
+    assert usage == {CODEBUILD_ID: {"quantity": "12.25", "unit": "build-minutes", "coverage": "complete"}}
+
+
+@pytest.mark.parametrize("estimated,coverage", [(True, "partial"), (False, "complete")])
+def test_an_estimated_period_gives_partial_physical_usage(estimated, coverage):
+    page = _quantity_page()
+    page["ResultsByTime"][0]["Estimated"] = estimated
+    usage = aws_import.to_physical_usage([page], period="2026-08", fetched_at=CLOSED)
+    assert {entry["coverage"] for entry in usage.values()} == {coverage}
+    assert {entry["coverage"] for entry in aws_import.to_physical_usage([page]).values()} == {coverage}
+
+
+def test_the_current_month_physical_usage_is_partial():
+    fetched = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+    usage = aws_import.to_physical_usage([_quantity_page()], period="2026-08", fetched_at=fetched)
+    assert {entry["coverage"] for entry in usage.values()} == {"partial"}
+
+
+def test_physical_usage_fails_closed_and_never_holds_a_float():
+    usage = aws_import.to_physical_usage([_quantity_page()], period="2026-08", fetched_at=CLOSED)
+    text = json.dumps(usage)
+    assert json.loads(text, parse_float=lambda s: pytest.fail(f"float {s}")) == usage
+    with pytest.raises(TypeError):
+        aws_import.to_physical_usage(
+            [_page([_quantity("AWS CodeBuild", "USE1-Build-Min:Linux:g1.small", 1.5, "Minutes")])])
+    with pytest.raises(ValueError, match="negative"):
+        aws_import.to_physical_usage(
+            [_page([_quantity("AWS CodeBuild", "USE1-Build-Min:Linux:g1.small", "-1", "Minutes")])])
+    with pytest.raises(ValueError, match="units differ"):
+        aws_import.to_physical_usage([_page([
+            _quantity("AWS CodeBuild", "USE1-Build-Min:Linux:g1.small", "1", "Minutes"),
+            _quantity("AWS CodeBuild", "USE1-Build-Min:Linux:g1.large", "1", "Hrs"),
+        ])])
+    with pytest.raises(ValueError, match="outside"):
+        aws_import.to_physical_usage([_quantity_page(start="2026-07-01")], period="2026-08",
+                                     fetched_at=CLOSED)
+
+
+def test_publish_carries_physical_usage_into_the_publication(tmp_path):
+    from cost_meter import publish_main, publisher
+    from cost_meter.store import CostLedgerStore, ENV_DIR
+
+    cost_page = _page([_group("AWS CodeBuild", "Usage", "12.34"), _group(EC2, "Usage", "5.00")])
+
+    def collect(period, now):
+        client = RoutingCostExplorer([cost_page], [_quantity_page()])
+        return publish_main._aws_observations(client, period, now)
+
+    out = io.StringIO()
+    code = publish_main.main(["--period", "2026-08"], collectors={"aws-cost-explorer": collect},
+                             environ={ENV_DIR: str(tmp_path)}, stdout=out, now=CLOSED)
+    assert code == 0
+    summary = json.loads(out.getvalue())
+    assert summary["missing_sources"] == []
+    store = CostLedgerStore(tmp_path)
+    info = publisher.publication_info(store, summary["publication_id"])
+    assert info["physical_usage"] == {
+        CODEBUILD_ID: {"quantity": "150.5", "unit": "build-minutes", "coverage": "complete"},
+        EC2_ID: {"quantity": "730.25", "unit": "instance-hours", "coverage": "complete"},
+    }
+    rows = {r.resource_id: r.resource_period for r in store.read_publication(summary["publication_id"])}
+    assert rows[CODEBUILD_ID].gross_cost_usd == Decimal("12.34")
+    assert rows[EC2_ID].gross_cost_usd == Decimal("5.00")
+
+
+def test_a_failed_quantities_fetch_is_missing_and_costs_still_publish(tmp_path, capsys):
+    from cost_meter import publish_main, publisher
+    from cost_meter.store import CostLedgerStore, ENV_DIR
+
+    cost_page = _page([_group("AWS CodeBuild", "Usage", "12.34"), _group(EC2, "Usage", "5.00")])
+    clients = []
+
+    def collect(period, now):
+        client = RoutingCostExplorer([cost_page], quantity_error=RuntimeError("AccessDenied"))
+        clients.append(client)
+        return publish_main._aws_observations(client, period, now)
+
+    out = io.StringIO()
+    code = publish_main.main(["--period", "2026-08"], collectors={"aws-cost-explorer": collect},
+                             environ={ENV_DIR: str(tmp_path)}, stdout=out, now=CLOSED)
+    assert code == 0
+    assert clients[0].metrics == [["UnblendedCost"], ["UsageQuantity"]]
+    summary = json.loads(out.getvalue())
+    assert summary["missing_sources"] == ["aws-usage-quantities"]
+    assert summary["resources"] == 2
+    store = CostLedgerStore(tmp_path)
+    rows = {r.resource_id: r.resource_period for r in store.read_publication(summary["publication_id"])}
+    assert rows[CODEBUILD_ID].gross_cost_usd == Decimal("12.34")
+    assert rows[EC2_ID].gross_cost_usd == Decimal("5.00")
+    info = publisher.publication_info(store, summary["publication_id"])
+    assert info["missing_sources"] == ["aws-usage-quantities"]
+    assert info["sources"] == ["aws-cost-explorer"]
+    assert info["physical_usage"] == {}
+    assert "aws-usage-quantities failed: RuntimeError: AccessDenied" in capsys.readouterr().err
+
+
 def _load_script():
     spec = importlib.util.spec_from_file_location("collect_cost_aws", SCRIPT)
     module = importlib.util.module_from_spec(spec)

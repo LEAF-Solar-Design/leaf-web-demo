@@ -265,6 +265,59 @@ def test_publish_records_missing_sources_and_points_latest_at_the_newest(tmp_pat
     assert publisher.latest_publication_id(store, "2026-08") is None
 
 
+CODEBUILD = "aws:aws-codebuild"
+EC2 = "aws:amazon-elastic-compute-cloud-compute"
+PHYSICAL = {
+    CODEBUILD: {"quantity": "150.5", "unit": "build-minutes", "coverage": "complete"},
+    EC2: {"quantity": "730.25", "unit": "instance-hours", "coverage": "partial"},
+}
+
+
+def _physical_observations():
+    return _fixture_observations() + [_cost(CODEBUILD, "12.34", batch="ce"), _cost(EC2, "5.00", batch="ce")]
+
+
+def _content(store, publication_id):
+    return [(r.resource_id, r.revision_id, r.digest, r.resource_period.to_dict(),
+             [s.to_dict() for s in r.shares]) for r in store.read_publication(publication_id)]
+
+
+def test_physical_usage_is_metadata_only_and_changes_no_share_amount_or_digest(tmp_path):
+    plain_store = CostLedgerStore(tmp_path / "plain")
+    physical_store = CostLedgerStore(tmp_path / "physical")
+    plain = publisher.publish_period(plain_store, PERIOD, _physical_observations(), "snapshot",
+                                     sources=["test"])
+    physical = publisher.publish_period(physical_store, PERIOD, _physical_observations(), "snapshot",
+                                        sources=["test"], physical_usage=PHYSICAL)
+    assert _content(plain_store, plain) == _content(physical_store, physical)
+    assert publisher.publication_info(plain_store, plain)["physical_usage"] == {}
+    assert publisher.publication_info(physical_store, physical)["physical_usage"] == PHYSICAL
+
+    again = publisher.publish_period(plain_store, PERIOD, _physical_observations(), "with physical",
+                                     sources=["test"], physical_usage=PHYSICAL)
+    assert _content(plain_store, again) == _content(plain_store, plain)
+    for resource_id in (EFS, "aps:engine", "vendor:figma", CODEBUILD, EC2):
+        assert len(plain_store.history(resource_id, PERIOD)) == 1
+    assert publisher.publish_period(plain_store, PERIOD, _physical_observations(), "empty map",
+                                    sources=["test"], physical_usage={}) == plain
+
+
+@pytest.mark.parametrize("bad", [
+    {CODEBUILD: {"quantity": 150.5, "unit": "build-minutes", "coverage": "complete"}},
+    {CODEBUILD: {"quantity": "-1", "unit": "build-minutes", "coverage": "complete"}},
+    {CODEBUILD: {"quantity": "1", "unit": "build-minutes", "coverage": "sometimes"}},
+    {CODEBUILD: {"quantity": "1", "unit": "build-minutes"}},
+    {"not a resource": {"quantity": "1", "unit": "build-minutes", "coverage": "complete"}},
+    ["not", "a", "map"],
+])
+def test_malformed_physical_usage_is_refused_and_writes_nothing(tmp_path, bad):
+    root = tmp_path / "ledger"
+    with pytest.raises((TypeError, ValueError)):
+        publisher.publish_period(CostLedgerStore(root), PERIOD, _physical_observations(), "bad",
+                                 physical_usage=bad)
+    assert not any(p.is_file() for p in root.rglob("*"))
+
+
 # --------------------------------------------------------------------------- #
 # GET /api/cost
 # --------------------------------------------------------------------------- #
@@ -479,6 +532,32 @@ def test_the_response_carries_no_floats(published):
                     "your_implied_cost_usd", "other_customers_share"):
             assert row[key] is None or isinstance(row[key], str), key
         assert all(isinstance(v, str) for v in row["leaf_share"].values())
+
+
+def test_rows_carry_physical_usage_for_codebuild_and_ec2_and_null_for_others(ledger_dir):
+    publisher.publish_period(CostLedgerStore(ledger_dir), PERIOD, _physical_observations(), "physical",
+                             sources=["aws-cost-explorer"], physical_usage=PHYSICAL)
+
+    def refuse(text):
+        raise AssertionError(f"float in /api/cost JSON: {text}")
+
+    response = _get(A)
+    assert response.status_code == 200
+    body = json.loads(response.text, parse_float=refuse)
+    rows = _rows(body)
+    assert rows[CODEBUILD]["physical_usage"] == PHYSICAL[CODEBUILD]
+    assert rows[EC2]["physical_usage"] == PHYSICAL[EC2]
+    for resource_id in (EFS, "aps:engine", "vendor:figma"):
+        assert rows[resource_id]["physical_usage"] is None
+    assert body["totals"] == {"gross_cost_usd": "112.34", "credits_usd": "3.00"}
+    # Leaf's whole quantity, never per tenant: every tenant sees the same figure
+    other = _rows(_get(B).json())
+    assert other[CODEBUILD]["physical_usage"] == rows[CODEBUILD]["physical_usage"]
+    assert other[EC2]["physical_usage"] == rows[EC2]["physical_usage"]
+
+
+def test_a_publication_without_physical_usage_serves_null_rows(published):
+    assert all(row["physical_usage"] is None for row in _get(A).json()["resources"])
 
 
 def test_an_empty_ledger_returns_no_resources(ledger_dir, monkeypatch):
