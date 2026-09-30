@@ -143,6 +143,8 @@ MAX_PROVIDER_LOG_BYTES = 16 * 1024 * 1024
 MAX_PROVIDER_READ_ATTEMPTS = 3
 MAX_PROVIDER_RETRY_DELAY_SECONDS = 30
 MAX_PROVIDER_RUN_SNAPSHOT_SCANS = 3
+# Measured 2026-09-30: stale run listing pages only show older runs.
+STALE_LISTING_READS = 3
 # Bound on one recursive tree listing, so a hostile or corrupt provider answer
 # cannot make the arrival comparison allocate without limit. Well above this
 # repo's real tree; the truncation flag is the load-bearing check, not this.
@@ -584,6 +586,51 @@ def _artifact_rows(provider: Provider, repository: str, run_id: int) -> list[dic
     return [row for row in raw["artifacts"] if isinstance(row, dict)]
 
 
+def _listing_top_id(rows: list[Any]) -> int:
+    return max(
+        (
+            row["id"]
+            for row in rows
+            if isinstance(row, dict)
+            and isinstance(row.get("id"), int)
+            and not isinstance(row["id"], bool)
+            and row["id"] > 0
+        ),
+        default=0,
+    )
+
+
+def _freshest_workflow_run_rows(
+    provider: Provider,
+    repository: str,
+    workflow: str,
+    parameters: dict[str, object],
+) -> list[dict[str, Any]]:
+    chosen: list[dict[str, Any]] | None = None
+    chosen_id = 0
+    top_ids: list[int | str] = []
+    for _read in range(STALE_LISTING_READS):
+        try:
+            rows = _workflow_run_rows(provider, repository, workflow, parameters)
+        except ContractError as exc:
+            if exc.reason != "PROVIDER_RUN_LIST_DRIFT":
+                raise
+            top_ids.append("drift")
+            continue
+        top_id = _listing_top_id(rows)
+        top_ids.append(top_id)
+        if chosen is None or top_id > chosen_id:
+            chosen, chosen_id = rows, top_id
+    if chosen is None:
+        raise ContractError("PROVIDER_RUN_LIST_DRIFT")
+    if "drift" in top_ids or len(set(top_ids)) > 1:
+        print(
+            f"Stale run listing: {workflow} read top ids {top_ids}; chose {chosen_id}",
+            file=sys.stderr,
+        )
+    return chosen
+
+
 def _workflow_run_rows(
     provider: Provider,
     repository: str,
@@ -708,7 +755,7 @@ def _consumer_contract_for_head(
     provider: Provider, head_sha: str, request_slot: dict[str, Any],
 ) -> dict[str, Any]:
     """Resolve the provider envelope actually bound by this receipt, not main."""
-    rows = _workflow_run_rows(
+    rows = _freshest_workflow_run_rows(
         provider,
         TF_REPOSITORY,
         "publish-leaf-platform-staging-consumer-contract.yml",

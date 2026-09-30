@@ -955,6 +955,87 @@ def failed_relay_fixture() -> FakeProvider:
 
 
 class ConvergenceFinalizerTests(unittest.TestCase):
+    def test_consumer_contract_listing_stale_then_fresh_and_all_stale(self) -> None:
+        endpoint = (
+            "/actions/workflows/publish-leaf-platform-staging-consumer-contract.yml/runs?"
+            "branch=main&event=push&status=success&per_page=100"
+        )
+        key = (subject.TF_REPOSITORY, endpoint)
+        stale = {"total_count": 0, "workflow_runs": []}
+        provider = fixture()
+
+        class StaleFirstProvider:
+            def __init__(self) -> None:
+                self.reads = 0
+
+            def json(self, repository: str, request: str) -> object:
+                if (repository, request) == key:
+                    self.reads += 1
+                    if self.reads <= 2:
+                        return copy.deepcopy(stale)
+                return provider.json(repository, request)
+
+            def bytes(self, repository: str, request: str) -> bytes:
+                return provider.bytes(repository, request)
+
+        wrapped = StaleFirstProvider()
+        result = subject._build_receipt(wrapped, BUILD_RUN, FRONTIER_RUN)
+        self.assertTrue(result["terminal_complete"])
+        self.assertGreaterEqual(wrapped.reads, 6)
+
+        provider = fixture()
+        provider.json_values[key] = stale
+        self.assert_reason("SERVICE_RECEIPT_CONSUMER_CONTRACT_MISMATCH", provider)
+
+    def test_listing_top_id_ignores_invalid_ids(self) -> None:
+        self.assertEqual(subject._listing_top_id([
+            None, [], "row", {"id": True}, {"id": False}, {},
+            {"id": 0}, {"id": -10}, {"id": "99"}, {"id": 3.5},
+        ]), 0)
+        self.assertEqual(subject._listing_top_id([{"id": 2}, {"id": 9}, {"id": 4}]), 9)
+
+    def test_freshest_listing_skips_drift_and_keeps_earliest_tie(self) -> None:
+        provider = FakeProvider()
+        workflow = "publish-leaf-platform-staging-consumer-contract.yml"
+        endpoint = f"/actions/workflows/{workflow}/runs?per_page=100"
+        fresh = {"total_count": 1, "workflow_runs": [{"id": 9, "marker": "first"}]}
+        tie = {"total_count": 1, "workflow_runs": [{"id": 9, "marker": "tie"}]}
+        stale = {"total_count": 0, "workflow_runs": []}
+        provider.json_sequences[(subject.TF_REPOSITORY, endpoint)] = [
+            fresh, stale, fresh, fresh, tie, tie,
+        ]
+        with mock.patch.object(subject.sys, "stderr", new_callable=io.StringIO) as stderr:
+            rows = subject._freshest_workflow_run_rows(
+                provider, subject.TF_REPOSITORY, workflow, {"per_page": 100},
+            )
+        self.assertEqual(rows, fresh["workflow_runs"])
+        self.assertEqual(provider.calls.count(("GET_JSON", subject.TF_REPOSITORY, endpoint)), 6)
+        self.assertEqual(stderr.getvalue(), f"Stale run listing: {workflow} read top ids ['drift', 9, 9]; chose 9\n")
+
+    def test_freshest_listing_three_drifting_reads_fail_closed(self) -> None:
+        provider = FakeProvider()
+        workflow = "publish-leaf-platform-staging-consumer-contract.yml"
+        endpoint = f"/actions/workflows/{workflow}/runs?per_page=100"
+        fresh = {"total_count": 1, "workflow_runs": [{"id": 9}]}
+        stale = {"total_count": 0, "workflow_runs": []}
+        provider.json_sequences[(subject.TF_REPOSITORY, endpoint)] = [fresh, stale] * 3
+        with self.assertRaisesRegex(subject.ContractError, "^PROVIDER_RUN_LIST_DRIFT$"):
+            subject._freshest_workflow_run_rows(
+                provider, subject.TF_REPOSITORY, workflow, {"per_page": 100},
+            )
+        self.assertEqual(provider.calls.count(("GET_JSON", subject.TF_REPOSITORY, endpoint)), 6)
+
+    def test_freshest_listing_non_drift_error_propagates_immediately(self) -> None:
+        provider = FakeProvider()
+        workflow = "publish-leaf-platform-staging-consumer-contract.yml"
+        endpoint = f"/actions/workflows/{workflow}/runs?per_page=100"
+        provider.json_sequences[(subject.TF_REPOSITORY, endpoint)] = [{"workflow_runs": None}]
+        with self.assertRaisesRegex(subject.ContractError, "^PROVIDER_RUN_LIST_INVALID$"):
+            subject._freshest_workflow_run_rows(
+                provider, subject.TF_REPOSITORY, workflow, {"per_page": 100},
+            )
+        self.assertEqual(provider.calls.count(("GET_JSON", subject.TF_REPOSITORY, endpoint)), 1)
+
     def setUp(self) -> None:
         self.schema = json.loads(
             (ROOT / "contract/platform-staging-convergence.v1.schema.json").read_text(
