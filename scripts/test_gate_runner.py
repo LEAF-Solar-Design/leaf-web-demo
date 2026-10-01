@@ -1033,6 +1033,166 @@ def test_required_database_that_is_unreachable_fails_loudly_never_skips(
     assert not gated_seen.exists()
 
 
+def _migration_fixture(g, monkeypatch, tmp_path, *, migrate_result, jobs=1):
+    """main() over two database suites and one hermetic suite, with a fake
+    subprocess that only answers the migration child. Returns the event list
+    (migrations and suite starts, in order), the migration calls, and argv."""
+    suites = [
+        g.Suite("db-one", "db one", "pytest", SCRIPTS, [sys.executable, "-c", "pass"], 1,
+                uses_database=True),
+        g.Suite("db-two", "db two", "pytest", SCRIPTS, [sys.executable, "-c", "pass"], 1,
+                db_gated=True),
+        g.Suite("hermetic", "hermetic", "pytest", SCRIPTS, [sys.executable, "-c", "pass"], 1),
+    ]
+    events: list = []
+    migrations: list = []
+
+    def fake_run(argv, **kwargs):
+        if len(argv) >= 3 and argv[2] == g._MIGRATE:
+            events.append("migrate")
+            migrations.append({"argv": argv, **kwargs})
+            if isinstance(migrate_result, BaseException):
+                raise migrate_result
+            return migrate_result
+        raise AssertionError(f"unexpected child: {argv!r}")
+
+    def fake_suite(suite, log_dir, attempt, **_kw):
+        events.append(suite.id)
+        return g.Result(suite, "PASS", "ok", 0.01)
+
+    monkeypatch.setattr(g, "build_suites", lambda: suites)
+    monkeypatch.setattr(g.subprocess, "run", fake_run)
+    monkeypatch.setattr(g, "run_suite_guarded", fake_suite)
+    monkeypatch.setattr(g, "record_attempt", lambda *a, **kw: None)
+    monkeypatch.setattr(sys, "argv", ["run-all-gates.py", "--jobs", str(jobs),
+                                      "--log-dir", str(tmp_path / "logs")])
+    return events, migrations
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_gate_database_is_migrated_once_before_any_suite_runs(
+        monkeypatch, tmp_path, capsys, jobs):
+    g = _load_runner()
+    _clear_gate_database_env(monkeypatch)
+    monkeypatch.setenv("LEAF_GATE_DATABASE_URL", _GATE_DSN)
+
+    def must_not_probe():
+        raise AssertionError("an explicit gate DSN is migrated without a probe")
+
+    monkeypatch.setattr(g, "probe_platform_db", must_not_probe)
+    ok = subprocess.CompletedProcess(["python"], 0, "MIGRATED\n", "")
+    events, migrations = _migration_fixture(g, monkeypatch, tmp_path,
+                                            migrate_result=ok, jobs=jobs)
+
+    assert g.main() == 0
+    assert len(migrations) == 1, "the gate migrates exactly once per run"
+    assert events[0] == "migrate"
+    assert sorted(events[1:]) == ["db-one", "db-two", "hermetic"]
+    call = migrations[0]
+    assert call["env"]["DATABASE_URL"] == _GATE_DSN
+    assert "LEAF_GATE_DATABASE_URL" not in call["env"]
+    # Out of the repo root, so the stdlib-shadowing platform/ cannot leak in.
+    assert Path(call["cwd"]) == g.REPO_PARENT
+    assert Path(call["argv"][3]) == g.REPO / "platform"
+    assert call["timeout"] == g.MIGRATE_TIMEOUT_S
+    assert "platform migrations applied once in" in capsys.readouterr().out
+
+
+def test_migration_child_uses_the_platform_fixture_mechanism():
+    g = _load_runner()
+    assert '"leaf_platform"' in g._MIGRATE
+    assert "spec_from_file_location" in g._MIGRATE
+    assert "db.apply_migration()" in g._MIGRATE
+
+
+def test_no_gate_database_means_no_migration(monkeypatch, tmp_path, capsys):
+    g = _load_runner()
+    _clear_gate_database_env(monkeypatch)
+    # An ambient developer DSN is not the gate's database: never migrated.
+    monkeypatch.setenv("DATABASE_URL", "postgresql://ambient/db")
+
+    def must_not_probe():
+        raise AssertionError("no gate database requested, so no probe")
+
+    monkeypatch.setattr(g, "probe_platform_db", must_not_probe)
+    events, migrations = _migration_fixture(
+        g, monkeypatch, tmp_path,
+        migrate_result=AssertionError("a DB-less gate must not migrate"))
+
+    assert g.main() == 0
+    assert migrations == []
+    assert "migrate" not in events
+    assert "platform migrations applied" not in capsys.readouterr().out
+
+
+def test_required_database_migrates_only_what_the_probe_reaches(monkeypatch):
+    g = _load_runner()
+    _clear_gate_database_env(monkeypatch)
+    monkeypatch.setenv("LEAF_GATE_REQUIRE_DATABASE", "1")
+    db_suite = g.Suite("db", "db", "pytest", SCRIPTS, [sys.executable, "-c", "pass"], 1,
+                       uses_database=True)
+    calls: list = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(kwargs["env"]["DATABASE_URL"])
+        return subprocess.CompletedProcess(argv, 0, "MIGRATED\n", "")
+
+    monkeypatch.setattr(g.subprocess, "run", fake_run)
+    # Unreachable: left to run_suite's per-suite FAIL rows, nothing migrated.
+    monkeypatch.setattr(g, "probe_platform_db",
+                        lambda: (False, "UNREACHABLE: refused", _GATE_DSN))
+    assert g.migrate_gate_database([db_suite]) is None
+    assert calls == []
+    # Reachable: the probe's DSN is migrated once.
+    monkeypatch.setattr(g, "probe_platform_db", lambda: (True, "REACHABLE", _GATE_DSN))
+    assert g.migrate_gate_database([db_suite]) is None
+    assert calls == [_GATE_DSN]
+    # No selected suite touches a database: nothing to migrate.
+    hermetic = g.Suite("h", "h", "pytest", SCRIPTS, [sys.executable, "-c", "pass"], 1)
+    assert g.migrate_gate_database([hermetic]) is None
+    assert calls == [_GATE_DSN]
+
+
+def test_failed_migration_fails_the_run_before_any_suite(monkeypatch, tmp_path, capsys):
+    g = _load_runner()
+    _clear_gate_database_env(monkeypatch)
+    monkeypatch.setenv("LEAF_GATE_DATABASE_URL", _GATE_DSN)
+    boom = ("RuntimeError: platform PostgreSQL schema is incomplete: "
+            "campaign_developer_allocations")
+    failed = subprocess.CompletedProcess(["python"], 1, "", f"Traceback\n{boom}\n")
+    events, migrations = _migration_fixture(g, monkeypatch, tmp_path,
+                                            migrate_result=failed)
+
+    assert g.main() == 1
+    assert events == ["migrate"], "no suite may start against a half-migrated database"
+    out = capsys.readouterr().out
+    assert "gate database migration failed (exit 1" in out
+    assert boom in out, "the child's own output is surfaced"
+    assert "nothing ran" in out
+
+
+def test_migration_timeout_or_spawn_error_fails_loudly(monkeypatch):
+    g = _load_runner()
+    _clear_gate_database_env(monkeypatch)
+    monkeypatch.setenv("LEAF_GATE_DATABASE_URL", _GATE_DSN)
+    db_suite = g.Suite("db", "db", "pytest", SCRIPTS, [sys.executable, "-c", "pass"], 1,
+                       uses_database=True)
+
+    def timed_out(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"], output="applying 0042")
+
+    monkeypatch.setattr(g.subprocess, "run", timed_out)
+    problem = g.migrate_gate_database([db_suite])
+    assert problem and "timed out" in problem and "applying 0042" in problem
+
+    def no_spawn(argv, **kwargs):
+        raise OSError("no interpreter")
+
+    monkeypatch.setattr(g.subprocess, "run", no_spawn)
+    problem = g.migrate_gate_database([db_suite])
+    assert problem and "could not start" in problem and "no interpreter" in problem
+
+
 def test_parse_pytest_reports_xfailed_and_xpassed():
     g = _load_runner()
     counts = g.parse_pytest("5 passed, 1 xfailed, 2 xpassed in 0.01s")
