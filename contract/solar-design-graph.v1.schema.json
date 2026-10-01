@@ -1158,6 +1158,9 @@
         },
         "tracker": {
           "$ref": "#/$defs/tracker"
+        },
+        "ground_slots": {
+          "$ref": "#/$defs/ground_slots"
         }
       },
       "required": [
@@ -1854,6 +1857,29 @@
         "column_units"
       ],
       "additionalProperties": true
+    },
+    "ground_slots": {
+      "type": "object",
+      "properties": {
+        "codec": {"const": "leaf.solar-ground-slots.v1"},
+        "count": {"type": "integer", "minimum": 1, "maximum": 10000},
+        "panel_ids": {"type": "string", "minLength": 24, "maxLength": 213336},
+        "centres": {"type": "string", "minLength": 24, "maxLength": 213336},
+        "angle": {"type": "number"},
+        "panel": {
+          "type": "object",
+          "properties": {
+            "rev": {"type": "integer", "minimum": 0, "maximum": 1000000},
+            "provenance": {"$ref": "#/$defs/provenance"},
+            "validity": {"$ref": "#/$defs/validity"},
+            "extra": {"type": "object"}
+          },
+          "required": ["rev", "provenance", "validity", "extra"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["codec", "count", "panel_ids", "centres", "angle", "panel"],
+      "additionalProperties": false
     }
   }
 }
