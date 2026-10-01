@@ -4,7 +4,8 @@ import { resolve } from 'node:path';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import SolarSettingsForm from './SolarSettingsForm.jsx';
-import { SOLAR_SETTINGS_REASONS } from './solarSettingsModel.js';
+import { L2_COLLECTORS_NOTE, SOLAR_SETTINGS_REASONS } from './solarSettingsModel.js';
+import { solarSettingsRunFeedback } from './solarSettingsWire.js';
 
 const SHA = 'a'.repeat(64);
 const C = { drawingId: 'd1', drawingVersion: 3, projectId: null };
@@ -56,6 +57,19 @@ const blankZip = 'ZIP code is blank. You can save setup, but string sizing is un
 const clearingZip = 'Changing the ZIP code clears saved coordinates unless you enter both coordinates again.';
 const changeInput = (label, value) => fireEvent.change(screen.getByLabelText(label), { target: { value } });
 const applyButton = () => screen.getByRole('button', { name: 'Apply settings' });
+const l2 = () => screen.getByRole('checkbox', { name: 'L2 collectors' });
+const withMode = (mode) => ({
+  ...IE,
+  intake: { ...IE.intake, solar_design_graph: { rev: 2, settings: { ...S, use_l2_collectors: mode }, project: P } },
+});
+const refusedEnvelope = (code) => ({
+  ok: false,
+  reason_code: code,
+  error: {
+    actor: 'user', error_code: 'BAD_PARAMS', message: code,
+    next_action: 'Review the inputs, correct them, and submit again.', retry_class: 'after_action', retryable: false,
+  },
+});
 
 describe('Solar project settings', () => {
   it('PJ17 omits the ZIP clearing warning for an untouched normalized blank ZIP', async () => {
@@ -426,13 +440,158 @@ describe('Solar settings form', () => {
     expect(screen.getByTestId('solar-settings-reason').textContent).toBe(SOLAR_SETTINGS_REASONS.no_changes);
   });
 
-  it('keeps L2 collectors off and says why', async () => {
+  it('L2F1 L2 collectors is an editable checkbox with its note', async () => {
     render(<SolarSettingsForm {...props()} />);
     await waitForMode('edit');
-    const checkbox = screen.getByRole('checkbox', { name: 'L2 collectors' });
-    expect(checkbox.disabled).toBe(true);
-    expect(checkbox.checked).toBe(false);
-    expect(screen.getByText(SOLAR_SETTINGS_REASONS.l2_collectors_unavailable)).toBeTruthy();
+    expect(screen.getAllByRole('checkbox')).toHaveLength(1);
+    expect(l2().disabled).toBe(false);
+    expect(l2().checked).toBe(false);
+    expect(screen.getByText(L2_COLLECTORS_NOTE)).toBeTruthy();
+    expect(screen.queryByText('L2 collectors are not supported yet, so this setting stays off.')).toBeNull();
+    expect(screen.getAllByRole('textbox')).toHaveLength(16);
+  });
+
+  it('L2F2 entering L2 submits only the mode', async () => {
+    const supplied = props();
+    render(<SolarSettingsForm {...supplied} />);
+    await waitForMode('edit');
+    fireEvent.click(l2());
+    expect(l2().checked).toBe(true);
+    expect(screen.getByText(consequence)).toBeTruthy();
+    expect(screen.queryByTestId('solar-settings-reason')).toBeNull();
+    fireEvent.click(applyButton());
+    expect(supplied.onSubmit).toHaveBeenCalledExactlyOnceWith({ expected_rev: 2, changes: { use_l2_collectors: true } });
+    expect(supplied.onSubmit.mock.calls[0][0].changes.use_l2_collectors).toBe(true);
+  });
+
+  it('L2F3 toggling back to the saved mode sends nothing', async () => {
+    const supplied = props();
+    render(<SolarSettingsForm {...supplied} />);
+    await waitForMode('edit');
+    fireEvent.click(l2());
+    fireEvent.click(l2());
+    expect(l2().checked).toBe(false);
+    expect(screen.queryByText(consequence)).toBeNull();
+    expect(screen.getByTestId('solar-settings-reason').textContent).toBe(SOLAR_SETTINGS_REASONS.no_changes);
+    expect(applyButton().disabled).toBe(true);
+    fireEvent.click(applyButton());
+    expect(supplied.onSubmit).not.toHaveBeenCalled();
+    changeInput('MPPT count', '4');
+    fireEvent.click(applyButton());
+    expect(supplied.onSubmit).toHaveBeenCalledExactlyOnceWith({ expected_rev: 2, changes: { num_mppt: 4 } });
+  });
+
+  it('L2F4 a saved L2 drawing shows the box checked and leaving sends false', async () => {
+    const supplied = props({ readIntake: vi.fn().mockResolvedValue(withMode(true)) });
+    render(<SolarSettingsForm {...supplied} />);
+    await waitForMode('edit');
+    expect(l2().checked).toBe(true);
+    expect(applyButton().disabled).toBe(true);
+    fireEvent.click(l2());
+    expect(l2().checked).toBe(false);
+    fireEvent.click(applyButton());
+    expect(supplied.onSubmit).toHaveBeenCalledExactlyOnceWith({ expected_rev: 2, changes: { use_l2_collectors: false } });
+    expect(supplied.onSubmit.mock.calls[0][0].changes.use_l2_collectors).toBe(false);
+  });
+
+  it('L2F5 the mode rides with another setting in field order', async () => {
+    const supplied = props();
+    render(<SolarSettingsForm {...supplied} />);
+    await waitForMode('edit');
+    fireEvent.click(l2());
+    changeInput('MPPT letter', 'B');
+    changeInput('MPPT count', '4');
+    fireEvent.click(applyButton());
+    expect(supplied.onSubmit).toHaveBeenCalledExactlyOnceWith({
+      expected_rev: 2, changes: { num_mppt: 4, use_l2_collectors: true, mppt_letter: 'B' },
+    });
+    expect(Object.keys(supplied.onSubmit.mock.calls[0][0].changes)).toEqual(['num_mppt', 'use_l2_collectors', 'mppt_letter']);
+  });
+
+  // The two envelopes are the server's own answers, measured over POST /api/run?wait=1 on Forge main
+  // 4fdb411a (HTTP 400, head unchanged): leaving L2 on a drawing with a combiner box and a central
+  // inverter, and entering L2 on a drawing whose two inverters share a number.
+  it.each([
+    ['leaving with L2 equipment', true, 'DESIGN_PRESET_L2_EQUIPMENT_PRESENT'],
+    ['entering with duplicate inverter numbers', false, 'DUPLICATE_EQUIPMENT_NUMBER'],
+  ])('L2F6 the server refusal for %s shows through the run message and keeps the draft', async (_name, saved, code) => {
+    const supplied = props({ readIntake: vi.fn().mockResolvedValue(withMode(saved)) });
+    const view = render(<SolarSettingsForm {...supplied} />);
+    await waitForMode('edit');
+    fireEvent.click(l2());
+    fireEvent.click(applyButton());
+    expect(supplied.onSubmit).toHaveBeenCalledExactlyOnceWith({ expected_rev: 2, changes: { use_l2_collectors: !saved } });
+    const runMessage = solarSettingsRunFeedback({
+      association: { intentId: 'i1', drawingId: 'd1', drawingVersion: 3, envelope: refusedEnvelope(code) }, context: C,
+    });
+    expect(runMessage).toEqual({ text: 'Solar settings were not applied.', code });
+    view.rerender(<SolarSettingsForm {...supplied} runMessage={runMessage} />);
+    expect(screen.getByTestId('solar-settings-run').textContent).toBe(`Solar settings were not applied. (${code})`);
+    expect(l2().checked).toBe(!saved);
+    expect(screen.queryByTestId('solar-settings-reason')).toBeNull();
+    expect(applyButton().disabled).toBe(false);
+    expect(supplied.readIntake).toHaveBeenCalledTimes(1);
+    fireEvent.click(applyButton());
+    expect(supplied.onSubmit).toHaveBeenCalledTimes(2);
+    expect(supplied.onSubmit.mock.calls[1][0]).toEqual(supplied.onSubmit.mock.calls[0][0]);
+  });
+
+  it('L2F7 a graphless head can start the design in L2 mode', async () => {
+    const supplied = props({ readIntake: vi.fn().mockResolvedValue(IG) });
+    render(<SolarSettingsForm {...supplied} />);
+    await waitForMode('initialize');
+    expect(l2().checked).toBe(false);
+    fireEvent.click(l2());
+    expect(screen.getByTestId('solar-settings-reason').textContent).toBe(SOLAR_SETTINGS_REASONS.units_required);
+    changeInput('Drawing units', 'ft');
+    fireEvent.click(screen.getByRole('button', { name: 'Start Solar design' }));
+    expect(supplied.onSubmit).toHaveBeenCalledExactlyOnceWith({
+      expected_rev: 0,
+      changes: { use_l2_collectors: true },
+      initialize: {
+        schema_version: 1, source_intake_sha256: SHA,
+        units: {
+          drawing_units: 'ft', wcs_to_ucs: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+          elevation_datum: 'unknown', crs: null,
+        },
+      },
+    });
+  });
+
+  it('L2F8 the checkout and busy reasons still gate a mode change', async () => {
+    const supplied = props({ checkoutHeld: false });
+    const view = render(<SolarSettingsForm {...supplied} />);
+    await waitForMode('edit');
+    fireEvent.click(l2());
+    expect(l2().checked).toBe(true);
+    expect(screen.getByTestId('solar-settings-reason').textContent).toBe(SOLAR_SETTINGS_REASONS.checkout_required);
+    expect(applyButton().disabled).toBe(true);
+    fireEvent.click(applyButton());
+    view.rerender(<SolarSettingsForm {...supplied} checkoutHeld busy />);
+    expect(screen.getByTestId('solar-settings-reason').textContent).toBe(SOLAR_SETTINGS_REASONS.run_in_progress);
+    fireEvent.click(applyButton());
+    expect(supplied.onSubmit).not.toHaveBeenCalled();
+    expect(l2().checked).toBe(true);
+  });
+
+  it.each([1, 'true', null])('L2F9 a served mode that is not a boolean refuses the form and renders no checkbox %j', async (mode) => {
+    const supplied = props({ readIntake: vi.fn().mockResolvedValue(withMode(mode)) });
+    render(<SolarSettingsForm {...supplied} />);
+    await waitForMode('refused');
+    expect(screen.getByTestId('solar-settings-reason').textContent).toBe(SOLAR_SETTINGS_REASONS.graph_unreadable);
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
+  });
+
+  it('L2F10 the mode draft resets when the drawing changes', async () => {
+    const supplied = props();
+    const view = render(<SolarSettingsForm {...supplied} />);
+    await waitForMode('edit');
+    fireEvent.click(l2());
+    expect(l2().checked).toBe(true);
+    view.rerender(<SolarSettingsForm {...supplied} context={{ ...C, drawingId: 'd2' }} />);
+    await waitForMode('edit');
+    expect(l2().checked).toBe(false);
+    expect(screen.getByTestId('solar-settings-reason').textContent).toBe(SOLAR_SETTINGS_REASONS.no_changes);
   });
 
   it('marks an out of range field invalid and names the reason', async () => {
