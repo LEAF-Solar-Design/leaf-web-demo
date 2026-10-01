@@ -38,9 +38,35 @@ def digest(value):
     return hashlib.sha256(canonical_bytes(value)).hexdigest()
 
 
+def _slot_tables(graph):
+    """{frame id: SlotTable} for every compact Ground frame (codec leaf.solar-ground-slots.v1), in
+    frame order. A graph with no ground_slots block returns {} without importing the codec.
+    Decoding fails closed with the codec's own refusal; no slot is expanded."""
+    if not any("ground_slots" in frame for frame in graph["frames"]):
+        return {}
+    try:
+        from . import solar_ground_graph_codec as codec
+    except ImportError:
+        import solar_ground_graph_codec as codec
+    return codec.decode_graph_slots(graph)
+
+
+def _slot_ids(graph, tables):
+    return tuple(panel_id for frame in graph["frames"] if frame["id"] in tables
+                 for panel_id in tables[frame["id"]].ids)
+
+
 def upstream_basis(graph):
-    """Detect upstream edits even when another builtin has not marked validity."""
-    return digest({
+    """Detect upstream edits even when another builtin has not marked validity. The digest of a
+    compact graph equals the digest of its expansion: a compact frame contributes its slot ids as
+    panel_refs and every slot panel's id, frame, cell, centre and angle, in expansion order."""
+    return _upstream_basis(graph, _slot_tables(graph))
+
+
+def _upstream_basis(graph, tables):
+    """upstream_basis over slot tables the caller already decoded (one decode per call chain).
+    A graph with no block takes the unchanged digest path, byte for byte."""
+    value = {
         "source_hash": graph["source_hash"], "catalog_versions": graph["catalog_versions"],
         "project": graph["project"], "zones": graph["electrical_zones"],
         "settings": {key: value for key, value in graph["settings"].items()
@@ -52,7 +78,23 @@ def upstream_basis(graph):
         "panels": [{key: panel[key] for key in (
             "id", "frame_ref", "matrix_cell", "centre", "angle",
         )} for panel in graph["panels"]],
-    })
+    }
+    if not tables:
+        return digest(value)
+    for view in value["frames"]:
+        table = tables.get(view["id"])
+        if table is None:
+            continue
+        view["panel_refs"] = list(table.ids)
+        xy, angle, frame_ref = table.centres, table.angle, view["id"]
+        value["panels"].extend(
+            {"id": panel_id, "frame_ref": frame_ref, "matrix_cell": {"row": 0, "col": col},
+             "centre": [xy[2 * col], xy[2 * col + 1]], "angle": angle}
+            for col, panel_id in enumerate(table.ids))
+    # Bounded by the codec's MAX_GRAPH_SLOTS on a graph decode_graph_slots already admitted. The
+    # validator's node limit is not applied to this derived view: a full site (69,678 slots) has
+    # no admissible expansion, and its basis must still exist.
+    return hashlib.sha256(canonical_bytes(value)).hexdigest()
 
 
 def _frame_request(graph, frame_ref, request):
@@ -159,15 +201,7 @@ def slot_panel_ids(graph):
     """Every compact Ground slot panel id (codec leaf.solar-ground-slots.v1), frames in graph
     order then slot order. A graph with no ground_slots block returns () without importing the
     codec. Decoding fails closed with the codec's own refusal; no slot is expanded."""
-    if not any("ground_slots" in frame for frame in graph["frames"]):
-        return ()
-    try:
-        from . import solar_ground_graph_codec as codec
-    except ImportError:
-        import solar_ground_graph_codec as codec
-    tables = codec.decode_graph_slots(graph)
-    return tuple(panel_id for frame in graph["frames"] if frame["id"] in tables
-                 for panel_id in tables[frame["id"]].ids)
+    return _slot_ids(graph, _slot_tables(graph))
 
 
 def _coverage(graph, slot_ids):
@@ -597,14 +631,41 @@ def feeders_follow_topology(graph):
                for route in graph["routes"] if route["route_kind"] == "feeder")
 
 
+def _slot_templates_valid(graph):
+    """True when every compact frame's shared slot panel template is valid. The template is the
+    validity of each of that frame's slot panels, which entities() does not list."""
+    return all(frame["ground_slots"]["panel"]["validity"].get("state") == "valid"
+               for frame in graph["frames"] if "ground_slots" in frame)
+
+
+def _solve_stamps_current(graph, tables):
+    """True when every frame's recorded solve digest equals the graph's upstream basis. Fails
+    closed on a solve record that is not an object. The basis is computed only when a frame
+    carries a digest, so an unsolved full site pays no basis pass."""
+    stamps = []
+    for frame in graph["frames"]:
+        if "solve" not in frame["extra"]:
+            continue
+        solve = frame["extra"]["solve"]
+        if type(solve) is not dict:
+            return False
+        if "upstream_sha256" in solve:
+            stamps.append(solve["upstream_sha256"])
+    if not stamps:
+        return True
+    basis = _upstream_basis(graph, tables)
+    return all(stamp == basis for stamp in stamps)
+
+
 def require_current_export(graph):
-    """Export adapters must call this before labelling output current."""
+    """Export adapters must call this before labelling output current. A compact graph and its
+    expansion get the same answer; slots are decoded once and never expanded."""
     graph = validate_graph(graph)
-    basis = upstream_basis(graph)
+    tables = _slot_tables(graph)
     if (any(e["validity"]["state"] != "valid" for e in entities(graph))
-            or any(f["extra"].get("solve", {}).get("upstream_sha256", basis) != basis
-                   for f in graph["frames"])
-            or any(coverage(graph).values())
+            or not _slot_templates_valid(graph)
+            or not _solve_stamps_current(graph, tables)
+            or any(_coverage(graph, _slot_ids(graph, tables)).values())
             or not homeruns_follow_topology(graph)
             or not feeders_follow_topology(graph)):
         raise GraphValidationError("SOLAR_OUTPUT_NOT_CURRENT")
