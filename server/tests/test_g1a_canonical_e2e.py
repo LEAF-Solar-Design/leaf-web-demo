@@ -29,7 +29,10 @@ def test_production_shaped_authenticated_restart_safe_real_solve(monkeypatch):
     version = store.create_drawing_version(
         org.org_id, project.project_id, oss_object="g1a/roof.dwg",
         intake_ref="g1a/roof-intake.json", created_by="g1a-test")
-    store.create_identity_binding(org.org_id, "auth0", "auth0|wave5", role="owner")
+    # Unique per run: the gate database is shared across suites, and an earlier
+    # suite may already hold a fixed subject bound to its own tenant.
+    store.create_identity_binding(org.org_id, "auth0", f"auth0|wave5-g1a-{uuid.uuid4().hex}",
+                                  role="owner")
     store.set_project_authority_mode(org.org_id, project.project_id, "postgres_canonical")
 
     monkeypatch.setenv("LEAF_AUTH_LIVE", "1")

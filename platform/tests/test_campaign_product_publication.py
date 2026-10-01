@@ -16,6 +16,11 @@ from test_campaign_bridge import mounted, call, bind_body, admit_body, expire, S
 from test_campaign_plan_adoption import document, prepare, snapshot
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'server' / 'tests'))
+# campaign_product_execution and project_repository_edit_contract live in server/
+# itself; appended so server modules never shadow a platform import.
+_SERVER = str(Path(__file__).resolve().parents[2] / 'server')
+if _SERVER not in sys.path:
+    sys.path.append(_SERVER)
 from test_campaign_product_execution import native_output
 import campaign_product_execution as product
 from project_repository_edit_contract import parse_staged_receipt, staged_receipt_digest, STAGED_RECEIPT_CONTRACT

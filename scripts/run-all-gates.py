@@ -1249,8 +1249,7 @@ def build_suites() -> List[Suite]:
         # g1a canonical e2e self-skips without a reachable Postgres; gate it the
         # same way as the platform suite so the skip is visible, not silent.
         Suite("server-g1a-canonical-e2e", "server tests/test_g1a_canonical_e2e.py", "pytest",
-              SERVER, _py_pytest("tests/test_g1a_canonical_e2e.py"), 1, db_gated=True,
-              db_deferred="shares the gate database with earlier suites, so its verified subject is already bound to another tenant; needs a per-suite database (studio-lanes follow-up)"),
+              SERVER, _py_pytest("tests/test_g1a_canonical_e2e.py"), 1, db_gated=True),
         Suite("server-engine-registry-scripts", "server tests/test_engine_registry_scripts.py",
               "pytest", SERVER, _py_pytest("tests/test_engine_registry_scripts.py"), 7),
         Suite("server-cost-internal", "server tests/test_cost_internal.py",
@@ -1911,8 +1910,7 @@ def build_suites() -> List[Suite]:
         # sets LEAF_GATE_REQUIRE_DATABASE=1, so this floor IS enforced there
         # against a pristine database, and an unreachable DB is a FAIL row.
         Suite("platform", "platform/tests (Postgres)", "pytest", REPO_PARENT,
-              _py_pytest(f"{repo_name}/platform/tests"), 247, db_gated=True,
-              db_deferred="platform/tests cannot import campaign_product_execution under the gate (path), first seen once the gate supplied a database (studio-lanes follow-up)"),
+              _py_pytest(f"{repo_name}/platform/tests"), 247, db_gated=True),
         # W4h S1 rows: eight store (rows 1-7 and 13), five router (rows 8-11 and 14), one static.
         # Execution counts are verified by the paired planner.
         Suite("platform-ios-ship-source-catalog", "platform iOS source catalog", "pytest",
