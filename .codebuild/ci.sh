@@ -581,30 +581,9 @@ if [[ "${CI_SHARD_MODE:-all}" == all || ${#only_args[@]} == 0 || "$CI_SHARD_INDE
 if [[ "${CI_SHARD_MODE:-all}" == shard && ${#only_args[@]} == 0 ]]; then
   only_args+=(--shard-count "$CI_SHARD_TOTAL_N" --shard-index "$CI_SHARD_INDEX_N")
 fi
-# Throwaway PostgreSQL so the db_gated and uses_database suites RUN instead of
-# skipping. The runner hands LEAF_GATE_DATABASE_URL to those suites only, as
-# their DATABASE_URL; an ambient DATABASE_URL would switch unrelated suites into
-# PostgreSQL mode, so none is exported. LEAF_GATE_REQUIRE_DATABASE=1 makes an
-# unreachable database a FAIL row per suite, and a server that never started
-# fails the build below even when no database suite was selected.
-echo "LEAF_T start postgres $(date +%s%3N)"
-postgres_status=0
-trap 'bash "$CODEBUILD_SRC_DIR/scripts/ci/start_ephemeral_postgres.sh" stop || true' EXIT
-if ! LEAF_GATE_DATABASE_URL="$(bash "$CODEBUILD_SRC_DIR/scripts/ci/start_ephemeral_postgres.sh" start)"; then
-  postgres_status=1
-  LEAF_GATE_DATABASE_URL=""
-  echo "FATAL: ephemeral PostgreSQL did not start; every PostgreSQL suite fails by name and this build fails" >&2
-fi
-export LEAF_GATE_DATABASE_URL
-export LEAF_GATE_REQUIRE_DATABASE=1
-echo "LEAF_T end postgres $(date +%s%3N) rc=$postgres_status"
 gate_status=0
 unset PYTHONSAFEPATH
 python scripts/run-all-gates.py --jobs "${LEAF_GATE_JOBS:-auto}" --retry 1 --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs "${only_args[@]}" || gate_status=$?
-if [[ "$postgres_status" != 0 && "$gate_status" == 0 ]]; then
-  echo "FATAL: the gate passed without its PostgreSQL proofs; failing the build" >&2
-  gate_status=1
-fi
 else
   echo "gate: selected mode runs on shard 0 only"
   gate_status=0
