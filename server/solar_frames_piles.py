@@ -345,7 +345,8 @@ def _operate(backend, tenant_id, drawing_id, operation, base, project_id, reques
     if (head is not None and head["parent"] == base and head_document["capability"] == operation
             and head_document["source"]["sha256"] == request_sha256):
         return _result(operation, "retry", False, drawing_id, project, base, head_document, head,
-                       _terrain_view(head_document["state"]), None)
+                       _terrain_view(head_document["state"]), None,
+                       terrain_standing(head_document["state"], head_document["units"]["meters_per_unit"]))
     if (None if head is None else head["state"]["artifact_id"]) != base:
         raise FramesPilesError("FRAMES_PILES_STALE_BASE")
     if head is None:
@@ -362,6 +363,7 @@ def _operate(backend, tenant_id, drawing_id, operation, base, project_id, reques
         frame = head_document["frame"]
     mpu = ps.UNITS[units]
     stored_terrain_view = _terrain_view(state) if operation in (COLLISION, RANGE) else None
+    terrain_standing(state, mpu)  # the incoming state: a malformed native entity is refused before an operation can replace it
     try:
         terrain_view, summary = _RUN[operation](state, mpu, inputs)
     except frames.GroundFramesError as exc:
@@ -375,14 +377,15 @@ def _operate(backend, tenant_id, drawing_id, operation, base, project_id, reques
         raise FramesPilesError("FRAMES_PILES_STATE_INVALID") from None
     if terrain_view is None:
         terrain_view = stored_terrain_view
+    standing = terrain_standing(state, mpu)  # incoming and returned states are checked before anything is written
     if head is not None and repr(state) == repr(head_document["state"]):
         return _result(operation, "unchanged", False, drawing_id, project, base, head_document, head,
-                       terrain_view, summary)
+                       terrain_view, summary, standing)
     document = ps.physical_document(state, drawing_units=units, source_sha256=request_sha256,
                                     capability=operation, parent=base, frame=frame)
     published = ph.publish_physical_state(backend, tenant_id, drawing_id, document, project_id=project)
     return _result(operation, "published" if published["created"] else "retry", published["created"],
-                   drawing_id, project, base, document, published["head"], terrain_view, summary)
+                   drawing_id, project, base, document, published["head"], terrain_view, summary, standing)
 
 
 def _terrain_view(state):
@@ -391,13 +394,85 @@ def _terrain_view(state):
     return terrain_sampler(state, required=False)[1]
 
 
-def _result(operation, outcome, created, drawing_id, project, base, document, head, terrain_view, summary):
+STANDING_SCHEMA = "leaf.solar-frames-piles-terrain-standing.v1"
+STANDINGS = ("absent", "current", "stale")
+STANDING_TOLERANCE = 1e-6       # drawing units; a stored elevation this close to the resample is current
+
+
+def _finite_number(value):
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def _native(ent, kind, layer):
+    return (type(ent) is dict and str(ent.get("type", "")).upper() == kind
+            and type(ent.get("layer")) is str and ent["layer"].upper() == layer)
+
+
+def _standing(checked, stale):
+    return {"state": "absent" if checked == 0 else ("stale" if stale else "current"),
+            "checked": checked, "stale": stale}
+
+
+def terrain_standing(state, meters_per_unit):
+    """Whether the terrain-derived values the frame and pile operations stored still match the
+    document's current grid: each native frame's elevation (LWPOLYLINE on LEAF-TRACKERS) and each
+    native pile's bottom (CIRCLE on LEAF-PILING) is re-sampled on the grid it holds now, exactly
+    as generate and piling sample it (no grid, or a point the grid does not cover, is elevation
+    0.0). Detected at read time, never written. Pure; one grid read and one sample per entity."""
+    mpu = meters_per_unit
+    sample, view = terrain_sampler(state, required=False)
+
+    def ground(x, y):
+        z = None if sample is None else sample(x, y)
+        return 0.0 if z is None else z / mpu
+
+    frames_checked = frames_stale = 0
+    for ent in _list(state, "frames"):
+        if not _native(ent, "LWPOLYLINE", frames.LAYER_TRACKERS):
+            continue
+        vertices = ent.get("vertices")
+        if (type(vertices) not in (list, tuple) or not vertices
+                or any(type(v) not in (list, tuple) or len(v) != 2 or not all(map(_finite_number, v))
+                       for v in vertices)
+                or not _finite_number(ent.get("elevation", 0.0))):
+            raise FramesPilesError("FRAMES_PILES_STATE_INVALID")
+        cx = sum(v[0] for v in vertices) / len(vertices)
+        cy = sum(v[1] for v in vertices) / len(vertices)
+        frames_checked += 1
+        frames_stale += abs(ent.get("elevation", 0.0) - ground(cx, cy)) > STANDING_TOLERANCE
+    piles_checked = piles_stale = 0
+    for ent in _list(state, "piles"):
+        if not _native(ent, "CIRCLE", frames.LAYER_PILING):
+            continue
+        center, record = ent.get("center"), ent.get("pile")
+        if (type(center) not in (list, tuple) or len(center) != 3 or not all(map(_finite_number, center))
+                or type(record) is not dict or not _finite_number(record.get("embedment_m"))):
+            raise FramesPilesError("FRAMES_PILES_STATE_INVALID")
+        piles_checked += 1
+        expected = ground(center[0], center[1]) - record["embedment_m"] / mpu
+        piles_stale += abs(center[2] - expected) > STANDING_TOLERANCE
+    return {"schema": STANDING_SCHEMA, "maturity": MATURITY, "grid_sha256": view["grid_sha256"],
+            "frames": _standing(frames_checked, frames_stale), "piles": _standing(piles_checked, piles_stale)}
+
+
+def read_terrain_standing(backend, tenant_id, drawing_id, *, project_id):
+    """(head view, terrain standing) of the drawing's current physical head; (None, None) for a
+    drawing with no physical state. Reads only."""
+    _project_id(project_id)
+    head, document = ph.load_physical_head(backend, tenant_id, drawing_id, project_id=project_id)
+    if head is None:
+        return None, None
+    return head, terrain_standing(document["state"], document["units"]["meters_per_unit"])
+
+
+def _result(operation, outcome, created, drawing_id, project, base, document, head, terrain_view, summary,
+            standing):
     return {"schema": RESULT_SCHEMA, "operation": operation, "maturity": MATURITY, "outcome": outcome,
             "created": created, "drawing_id": drawing_id, "project_id": project, "base": base,
             "units": {"drawing_units": document["units"]["drawing_units"],
                       "meters_per_unit": document["units"]["meters_per_unit"]},
             "terrain": dict(terrain_view, sampled=terrain_view["present"] and operation in (GENERATE, PILING)),
-            "summary": summary, "preview": state_summary(document["state"]),
+            "summary": summary, "preview": state_summary(document["state"]), "standing": standing,
             "head": head}
 
 
