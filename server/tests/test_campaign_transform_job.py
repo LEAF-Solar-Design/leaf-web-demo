@@ -569,7 +569,7 @@ def test_context_is_closed_and_row_scoped(published):
         adapter.execution_context({'completion_provenance': p.ctx, 'capability_provenance': {}})
 
 
-@pytest.mark.parametrize('value', [None, True, 42, '', 'not-a-uuid', str(uuid.uuid4()).upper(), {}])
+@pytest.mark.parametrize('value', [None, True, 42, '', 'not-a-uuid', '8A5CE64E-B8A3-4FC1-B8AA-11E0A81CF5BD', {}])
 def test_retry_broker_identity_rejects_malformed_uuid(published, value):
     with pytest.raises(ValueError):
         adapter.validate_context(dict(published.ctx, broker_job_id=value))
