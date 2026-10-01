@@ -129,6 +129,7 @@
     "server-adapter-combiner",
     "server-adapter-inverter",
     "server-agent-approvals",
+    "server-engine-changes",
     "server-agent-e2e",
     "server-agent-gate",
     "server-cost-direct-use",
