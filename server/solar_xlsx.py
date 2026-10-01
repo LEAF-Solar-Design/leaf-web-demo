@@ -518,6 +518,9 @@ def write_workbook(sheets):
             info = zipfile.ZipInfo(name, date_time=_ZIP_DATE)
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = 0o600 << 16
+            # ZipInfo stamps the host OS (0 on Windows, 3 elsewhere) into every central-directory entry, so
+            # the same workbook would carry a different digest per host. Pin Unix, the platform that serves it.
+            info.create_system = 3
             archive.writestr(info, payload)
 
         put("[Content_Types].xml", _content_types_xml(count))
