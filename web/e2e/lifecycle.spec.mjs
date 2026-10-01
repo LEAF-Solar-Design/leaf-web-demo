@@ -12,14 +12,14 @@ import { captureStagingIdentity } from './staging/stagingIdentity.mjs'
 //   acceptance shape; doubles as the lifecycle_ui flip-time proof.
 //
 // The lifecycle_ui React surface (web/src/projects/*, cards B-U1..B-U7) is
-// not yet mounted to any route — there is no matching entry in
-// web/src/site/router.js today, so no real browser has anything to click
-// yet. This harness instead drives the exact HTTP contract that surface
-// calls through web/src/projects/api.js (platform/api.py's live
-// /api/projects* routes), which IS deployed on staging today. Once
-// lifecycle_ui is wired to a route, that wiring change can layer page-level
-// assertions on top of this file without touching the tenant-isolation
-// assertions below, which is why this file lives outside e2e/staging/ and
+// mounted on the /try workspace's Project tab (web/src/site/ToolCast.jsx,
+// behind ENV_LIFECYCLE_UI). Its clicks are proven separately in the browser
+// by e2e/project-lifecycle-panel.spec.mjs (playwright.lifecycle.config.mjs),
+// against mocked APIs that cannot speak to tenancy. This harness stays
+// HTTP-only on purpose: it drives the exact contract that surface calls
+// through web/src/projects/api.js (platform/api.py's live /api/projects*
+// routes) on staging, which is where the tenant-isolation assertions below
+// mean something. That is why this file lives outside e2e/staging/ and
 // resolves its own staging base URL rather than depending on
 // playwright.staging.config.mjs's testDir scoping.
 //

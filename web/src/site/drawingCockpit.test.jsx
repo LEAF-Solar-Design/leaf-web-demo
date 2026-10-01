@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { useCallback, useRef, useState } from 'react'
 
-import { BACK_UNAVAILABLE, CockpitStatus, FootRegion, StatusToggles, ViewCluster, formatCoordinate, formatScale, useViewNavigation, zoomViewer } from './DrawingCockpit.jsx'
+import { BACK_UNAVAILABLE, CockpitStatus, FootRegion, StatusToggles, ViewCluster, ViewerGrid, formatCoordinate, formatScale, gridLayout, gridStep, paintGrid, useViewNavigation, zoomViewer } from './DrawingCockpit.jsx'
 import { createViewHistory } from '../lib/viewHistory.js'
 import useDrawingVersionController from '../controllers/useDrawingVersionController.js'
 
@@ -127,6 +127,240 @@ describe('StatusToggles', () => {
       remove.mockRestore()
     }
   })
+
+  it('enables GRID from the viewer detail and keeps snap and polar disabled with their reason', () => {
+    render(<StatusToggles />)
+    const placeholders = ['snap', 'polar'].map((id) => button(id).outerHTML)
+    modes({ grid: false })
+    expect(button('grid').disabled).toBe(false)
+    expect(button('grid').getAttribute('aria-pressed')).toBe('false')
+    expect(button('grid').getAttribute('aria-label')).toBe('Grid display')
+    expect(button('grid').title).toBe('Grid display off. Shows a reference grid behind the drawing.')
+    modes({ grid: true })
+    expect(button('grid').getAttribute('aria-pressed')).toBe('true')
+    expect(button('grid').title).toBe('Grid display on. Shows a reference grid behind the drawing.')
+    for (const id of ['snap', 'polar']) {
+      expect(button(id).disabled).toBe(true)
+      expect(button(id).getAttribute('aria-label')).toContain(reason)
+      expect(button(id).title).toContain('Not in the browser viewer yet.')
+    }
+    expect(['snap', 'polar'].map((id) => button(id).outerHTML)).toEqual(placeholders)
+    // The engine is still absent, so ORTHO and OSNAP stay disabled too.
+    expect(button('ortho').disabled).toBe(true)
+    expect(button('osnap').disabled).toBe(true)
+  })
+
+  it('keeps GRID and the engine modes independent on the shared modes path', () => {
+    render(<StatusToggles />)
+    modes({ grid: true })
+    modes({ live: true, ortho: true, osnap: false })
+    expect(button('grid').getAttribute('aria-pressed')).toBe('true')
+    expect(button('ortho').getAttribute('aria-pressed')).toBe('true')
+    modes({ grid: false })
+    expect(button('ortho').getAttribute('aria-pressed')).toBe('true')
+    expect(button('osnap').getAttribute('aria-pressed')).toBe('false')
+    modes({ live: false })
+    expect(button('grid').disabled).toBe(false)
+    expect(button('grid').getAttribute('aria-pressed')).toBe('false')
+    expect(button('ortho').disabled).toBe(true)
+  })
+
+  it('dispatches one GRID toggle and restores the byte-identical disabled DOM when the grid owner goes away', () => {
+    const { container } = render(<StatusToggles />)
+    const before = container.innerHTML
+    modes({ grid: false })
+    const listener = vi.fn()
+    window.addEventListener('cockpit:mode-toggle', listener)
+    try {
+      fireEvent.click(button('grid'))
+      expect(listener).toHaveBeenCalledTimes(1)
+      expect(listener.mock.calls[0][0].detail).toEqual({ id: 'grid' })
+      expect(button('grid').getAttribute('aria-pressed')).toBe('false')
+    } finally {
+      window.removeEventListener('cockpit:mode-toggle', listener)
+    }
+    modes({ grid: null })
+    expectDisabled()
+    expect(container.innerHTML).toBe(before)
+  })
+
+  it('ignores a malformed grid value without changing the rendered state', () => {
+    const { container } = render(<StatusToggles />)
+    modes({ grid: true })
+    const before = container.innerHTML
+    for (const detail of [{ grid: 'on' }, { grid: 1 }, { grid: undefined }, { grid: true, live: true, ortho: 'x', osnap: true }]) {
+      modes(detail)
+      expect(container.innerHTML).toBe(before)
+    }
+  })
+})
+
+describe('grid geometry', () => {
+  it('picks the smallest 1-2-5 step at least twelve pixels wide, majors every fifth', () => {
+    expect(gridStep(0.25)).toEqual({ minor: 5, major: 25 })
+    expect(gridStep(0.5)).toEqual({ minor: 10, major: 50 })
+    expect(gridStep(1 / 12)).toEqual({ minor: 1, major: 5 })
+    expect(gridStep(0.15).minor).toBe(2)
+    expect(gridStep(0.0004).minor).toBeCloseTo(0.005, 12)
+    expect(gridStep(2000).minor).toBe(50000)
+    for (const bad of [0, -1, NaN, Infinity, undefined]) expect(gridStep(bad)).toBeNull()
+  })
+
+  it('anchors the tiles to world (0, 0) and keeps every offset inside one tile', () => {
+    const layout = gridLayout({ x: 105, y: 207 }, 0.5, { left: 0, top: 0 })
+    expect(layout).toEqual({ step: 10, minorPx: 20, majorPx: 100, minorX: 5, minorY: 7, majorX: 5, majorY: 7 })
+    const shifted = gridLayout({ x: -3, y: 40 }, 0.5, { left: 10, top: 20 })
+    expect(shifted.minorX).toBe(7)
+    expect(shifted.majorX).toBe(87)
+    expect(shifted.minorY).toBe(0)
+    expect(shifted.majorY).toBe(20)
+    expect(gridLayout(null, 0.5, { left: 0, top: 0 })).toBeNull()
+    expect(gridLayout({ x: 1, y: 1 }, 0, { left: 0, top: 0 })).toBeNull()
+    expect(gridLayout({ x: NaN, y: 1 }, 0.5, { left: 0, top: 0 })).toBeNull()
+  })
+
+  it('paints a top-down pose and clears a tilted or missing one', () => {
+    const layer = document.createElement('div')
+    const viewer = { project: vi.fn(() => ({ x: 105, y: 207 })) }
+    expect(paintGrid(layer, viewer, { position: [0, 0, 100], target: [0, 0, 0], worldPerPixel: 0.5 })).toBe(true)
+    expect(layer.getAttribute('data-grid-step')).toBe('10')
+    expect(viewer.project).toHaveBeenCalledWith(0, 0)
+    expect(paintGrid(layer, viewer, { position: [50, 0, 100], target: [0, 0, 0], worldPerPixel: 0.5 })).toBe(false)
+    expect(layer.hasAttribute('data-grid-step')).toBe(false)
+    expect(layer.style.backgroundSize).toBe('')
+    expect(paintGrid(layer, viewer, null)).toBe(false)
+    expect(paintGrid(layer, null, { position: [0, 0, 100], target: [0, 0, 0], worldPerPixel: 0.5 })).toBe(false)
+    expect(paintGrid(null, viewer, null)).toBe(false)
+  })
+})
+
+describe('ViewerGrid', () => {
+  const flat = (worldPerPixel) => ({ position: [0, 0, 100], target: [0, 0, 0], worldPerPixel })
+  function cameraViewer(pose) {
+    const listeners = new Set()
+    let snapshot = { pose, viewport: null }
+    return {
+      project: vi.fn(() => ({ x: 105, y: 207 })),
+      subscribeCamera: vi.fn((listener) => { listeners.add(listener); listener(snapshot); return () => listeners.delete(listener) }),
+      emit(next) { snapshot = { pose: next, viewport: null }; act(() => listeners.forEach((listener) => listener(snapshot))) },
+      listeners,
+    }
+  }
+  function withGround(run) {
+    const ground = document.createElement('div')
+    document.body.appendChild(ground)
+    const published = vi.fn()
+    window.addEventListener('cockpit:modes', published)
+    try { run(ground, published) } finally {
+      cleanup()
+      window.removeEventListener('cockpit:modes', published)
+      ground.remove()
+    }
+  }
+  const toggle = () => act(() => { window.dispatchEvent(new CustomEvent('cockpit:mode-toggle', { detail: { id: 'grid' } })) })
+  const last = (published) => published.mock.calls.at(-1)[0].detail
+
+  it('publishes off on mount, answers requests, and draws nothing until toggled', () => withGround((ground, published) => {
+    const viewer = cameraViewer(flat(0.5))
+    render(<ViewerGrid ground={ground} viewerRef={{ current: viewer }} />)
+    expect(last(published)).toEqual({ grid: false })
+    published.mockClear()
+    act(() => { window.dispatchEvent(new CustomEvent('cockpit:modes-request')) })
+    expect(published).toHaveBeenCalledTimes(1)
+    expect(last(published)).toEqual({ grid: false })
+    expect(ground.querySelector('[data-testid="viewer-grid"]')).toBeNull()
+    expect(viewer.subscribeCamera).not.toHaveBeenCalled()
+  }))
+
+  it('toggles a layer behind the drawing that follows the camera and lets the pointer through', () => withGround((ground, published) => {
+    const viewer = cameraViewer(flat(0.5))
+    render(<ViewerGrid ground={ground} viewerRef={{ current: viewer }} />)
+    toggle()
+    expect(last(published)).toEqual({ grid: true })
+    const layer = ground.querySelector('[data-testid="viewer-grid"]')
+    expect(layer).not.toBeNull()
+    expect(layer.parentElement).toBe(ground)
+    expect(layer.getAttribute('aria-hidden')).toBe('true')
+    expect(layer.style.zIndex).toBe('-1')
+    expect(layer.style.pointerEvents).toBe('none')
+    expect(layer.style.position).toBe('absolute')
+    expect(viewer.subscribeCamera).toHaveBeenCalledTimes(1)
+    expect(layer.getAttribute('data-grid-step')).toBe('10')
+    viewer.emit(flat(0.25))
+    expect(layer.getAttribute('data-grid-step')).toBe('5')
+    viewer.emit({ position: [40, 0, 100], target: [0, 0, 0], worldPerPixel: 0.25 })
+    expect(layer.hasAttribute('data-grid-step')).toBe(false)
+    toggle()
+    expect(last(published)).toEqual({ grid: false })
+    expect(ground.querySelector('[data-testid="viewer-grid"]')).toBeNull()
+    expect(viewer.listeners.size).toBe(0)
+  }))
+
+  it('waits for a lazy viewer to attach before subscribing', async () => {
+    const ground = document.createElement('div')
+    document.body.appendChild(ground)
+    const viewerRef = { current: null }
+    try {
+      render(<ViewerGrid ground={ground} viewerRef={viewerRef} />)
+      toggle()
+      const layer = ground.querySelector('[data-testid="viewer-grid"]')
+      expect(layer.hasAttribute('data-grid-step')).toBe(false)
+      const viewer = cameraViewer(flat(0.5))
+      viewerRef.current = viewer
+      await act(async () => { await nextFrame() })
+      expect(viewer.subscribeCamera).toHaveBeenCalledTimes(1)
+      expect(layer.getAttribute('data-grid-step')).toBe('10')
+    } finally {
+      cleanup()
+      ground.remove()
+    }
+  })
+
+  it('publishes null and removes its layer and listeners on unmount', () => withGround((ground, published) => {
+    const add = vi.spyOn(window, 'addEventListener')
+    const remove = vi.spyOn(window, 'removeEventListener')
+    try {
+      const viewer = cameraViewer(flat(0.5))
+      const { unmount } = render(<ViewerGrid ground={ground} viewerRef={{ current: viewer }} />)
+      const listeners = add.mock.calls.filter(([type]) => ['cockpit:modes-request', 'cockpit:mode-toggle'].includes(type))
+      expect(listeners).toHaveLength(2)
+      toggle()
+      published.mockClear()
+      unmount()
+      expect(last(published)).toEqual({ grid: null })
+      expect(ground.querySelector('[data-testid="viewer-grid"]')).toBeNull()
+      expect(viewer.listeners.size).toBe(0)
+      for (const [type, listener] of listeners) expect(remove).toHaveBeenCalledWith(type, listener)
+    } finally {
+      add.mockRestore()
+      remove.mockRestore()
+    }
+  }))
+
+  it('never portals into a ground that is not an element', () => withGround((ground, published) => {
+    render(<ViewerGrid ground={{}} viewerRef={{ current: null }} />)
+    expect(() => toggle()).not.toThrow()
+    expect(last(published)).toEqual({ grid: true })
+    expect(document.querySelector('[data-testid="viewer-grid"]')).toBeNull()
+  }))
+
+  it('drives the status bar GRID toggle end to end while snap and polar stay disabled', () => withGround((ground) => {
+    const viewer = cameraViewer(flat(0.5))
+    render(<><StatusToggles /><ViewerGrid ground={ground} viewerRef={{ current: viewer }} /></>)
+    const grid = () => document.querySelector('[data-toggle="grid"]')
+    expect(grid().disabled).toBe(false)
+    expect(grid().getAttribute('aria-pressed')).toBe('false')
+    fireEvent.click(grid())
+    expect(grid().getAttribute('aria-pressed')).toBe('true')
+    expect(ground.querySelector('[data-testid="viewer-grid"]')).not.toBeNull()
+    fireEvent.click(grid())
+    expect(grid().getAttribute('aria-pressed')).toBe('false')
+    expect(ground.querySelector('[data-testid="viewer-grid"]')).toBeNull()
+    for (const id of ['snap', 'polar']) {
+      expect(document.querySelector(`[data-toggle="${id}"]`).disabled).toBe(true)
+      expect(document.querySelector(`[data-toggle="${id}"]`).getAttribute('aria-label')).toContain('not in the browser viewer yet')
+    }
+  }))
 })
 
 const nextFrame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()))

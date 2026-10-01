@@ -138,6 +138,49 @@ it('shows a Projects affordance and preserves keyboard selection and project cre
   expect(trigger.getAttribute('aria-expanded')).toBe('false')
 })
 
+describe('stu2-h: creation never falls back to a native dialog', () => {
+  it('a create request opens the menu on the focused workspace field', () => {
+    const onCreateOrg = vi.fn().mockResolvedValue(null)
+    const { rerender } = render(<ProjectSwitcher onCreateOrg={onCreateOrg} />)
+    expect(chip().getAttribute('aria-expanded')).toBe('false')
+    rerender(<ProjectSwitcher createRequest={1} onCreateOrg={onCreateOrg} />)
+    expect(chip().getAttribute('aria-expanded')).toBe('true')
+    const field = screen.getByLabelText('Workspace name')
+    expect(document.activeElement).toBe(field)
+    fireEvent.change(field, { target: { value: 'Ridge workspace' } })
+    fireEvent.submit(field.closest('form'))
+    expect(onCreateOrg).toHaveBeenCalledExactlyOnceWith('Ridge workspace')
+  })
+
+  it('each new create request reopens the menu on the focused project field', () => {
+    const onCreateProject = vi.fn().mockResolvedValue(null)
+    const props = { orgId: 'org-1', projects: [], onCreateProject, onOpenProject: () => {} }
+    const { rerender } = render(<ProjectSwitcher {...props} createRequest={1} />)
+    expect(document.activeElement).toBe(screen.getByLabelText('New project'))
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(chip().getAttribute('aria-expanded')).toBe('false')
+    rerender(<ProjectSwitcher {...props} createRequest={2} />)
+    expect(chip().getAttribute('aria-expanded')).toBe('true')
+    const field = screen.getByLabelText('New project')
+    expect(document.activeElement).toBe(field)
+    fireEvent.change(field, { target: { value: 'Cedar' } })
+    fireEvent.submit(field.closest('form'))
+    expect(onCreateProject).toHaveBeenCalledExactlyOnceWith('Cedar')
+  })
+
+  it('a zero create request leaves the menu closed', () => {
+    render(<ProjectSwitcher orgId="org-1" createRequest={0} />)
+    expect(chip().getAttribute('aria-expanded')).toBe('false')
+    expect(screen.queryByLabelText('New project')).toBeNull()
+  })
+
+  it('App holds no window.prompt for org or project creation', () => {
+    const src = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
+    expect(src).not.toMatch(/window\.prompt|\bprompt\(/)
+    expect(src).toMatch(/createRequest=\{projectCreateRequest\}/)
+  })
+})
+
 describe('project-service error copy', () => {
   it('shows the permission error and keeps the drawing name', async () => {
     const unavailable = 'platform role does not permit mutation'
