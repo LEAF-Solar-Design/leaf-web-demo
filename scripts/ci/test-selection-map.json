@@ -396,6 +396,7 @@
     "server-solar-electrical-route-bridge",
     "server-solar-frames-piles",
     "server-solar-geo-formats",
+    "server-solar-graph-date-time",
     "server-solar-ground-analysis",
     "server-solar-ground-buildout",
     "server-solar-ground-compact-consumers",
