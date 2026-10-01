@@ -38,8 +38,8 @@ from leaf_cloud_client import canonical_bytes  # noqa: E402
 from solar_design_graph import GraphValidationError  # noqa: E402
 from solar_sizing_client import digest  # noqa: E402
 from test_solar_ground_terrain_adapter import (  # noqa: E402,F401
-    CAPTURE_GRID_SHA, FRAME_M, TINYTEST, backend, g1_state, imp, mesh, publish, slope, steep_file,
-    steep_head)
+    CAPTURE_GRID_SHA, FRAME_M, TINYTEST, backend, g1_state, imp, kernel_report_sha256, mesh, publish, slope,
+    steep_file, steep_head)
 from test_solar_landxml_import import REAL_SHA  # noqa: E402
 from test_solar_physical_state import DRAWING, GENERATE_SHA, PROJECT, TENANT  # noqa: E402
 from test_w1_design_graph import graph  # noqa: E402,F401
@@ -77,10 +77,17 @@ OUTPUTS = {
     "mesh": (2110, "3f18e5f670a6092ad6857749177aa78f217aa4cd9acc69934b3475806ccff7ac"),
     "stale": (2066, "4ede878f70420c135388f2833cd8e37da65ad553e117259877ccc4fd5825d5f6"),
     "steep": (1693, "2400ab7ac62f41aef9c6ecc2a3fd7559ff08a7eeed224e1e6eca4151c029054b"),
-    "slope": (2296, "edfac7a56192aa51d09942d3fc5cfa6132a9a3a3c2d8e2ef98b3771d1b41784b"),
-    "feet": (1660, "9ca40cda51c6ddd8807826bfe4695a9768b8063dd69325c37e52de9dc2f1bb1a"),
+    "feet":(1660, "9ca40cda51c6ddd8807826bfe4695a9768b8063dd69325c37e52de9dc2f1bb1a"),
     "nogrid": (1260, "859905f2c3797e38662c43394ddf3f090369a68f4d097cea1761fff9ca0dcc60"),
 }
+# The slope reading's preview record carries the kernel's report digest, and that report holds floats
+# from the terrain kernel's trigonometry that differ in the last bit between platform math libraries
+# (see test_solar_ground_terrain_adapter.kernel_report_sha256), so the head and the whole-output digest
+# chain through a platform-dependent value: one literal cannot hold on Windows and Linux. The slope row
+# derives the report digest from the kernel, pins the head by relation, and pins everything else by a
+# digest over the output with the head and the report digest removed.
+SLOPE_OUTPUT_BYTES = 2296
+SLOPE_REST_SHA = "9cf6836819e8b2beb7e63843a6b44141890df206f5efe5d3381d4452a778a966"
 
 
 # ---------------------------------------------------------------- helpers
@@ -303,8 +310,20 @@ def test_terrain_read_slope_preview(backend, g1_state):
     output = pinned(run_read(backend), "steep")
     assert output["terrain"]["previews"] == NO_PREVIEWS
     slope(backend, limits=TINYTEST)
-    output = pinned(run_read(backend), "slope")
-    assert output["head"]["index"] == 2
+    result = run_read(backend)
+    output = result["output"]
+    assert result["output_bytes"] == SLOPE_OUTPUT_BYTES
+    assert result["request_sha256"] == REQUEST
+    assert (result["source_version"], result["graph_sha256"]) == (1, GRAPH)
+    assert result["drawing_changed"] is False
+    assert len(canonical_bytes(output)) == result["output_bytes"]
+    assert digest(output) == result["output_sha256"]
+    head = ph.physical_head(backend, TENANT, DRAWING, project_id=PROJECT)
+    assert (output["head"]["index"], output["head"]["state"]["artifact_id"]) == (2, head["state"]["artifact_id"])
+    rest = copy.deepcopy(output)
+    del rest["head"]
+    del rest["terrain"]["previews"]["tracker-slope-violations"]["record"]["report_sha256"]
+    assert digest(rest) == SLOPE_REST_SHA
     assert output["state"]["capability"] == "tracker-slope-violations"
     assert output["terrain"]["slope_markers"] == 109
     preview = output["terrain"]["previews"]["tracker-slope-violations"]
@@ -314,8 +333,8 @@ def test_terrain_read_slope_preview(backend, g1_state):
         "maturity": "preview", "grid_sha256": STEEP_GRID_SHA, "meters_per_unit": 1.0, "limits": TINYTEST,
         "frames": 144, "markers": 109,
         "status": "Tracker slope: 107/144 axial / 2/132 cross / 7/132 row-to-row deg exceed active preset limits.",
-        "report_sha256": "0256753360246769da5bc7a6ca8b6be8b6572a7df9503c6a5411838ce68f04ab"}
-    assert proof(run_read(backend), backend)["output_sha256"] == OUTPUTS["slope"][1]
+        "report_sha256": kernel_report_sha256(backend, g1_state)}
+    assert proof(run_read(backend), backend)["output_sha256"] == result["output_sha256"]
 
 
 def test_terrain_read_feet_drawing(backend):
