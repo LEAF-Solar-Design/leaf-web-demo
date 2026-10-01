@@ -7,6 +7,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 import pytest
 from fastapi.testclient import TestClient
@@ -17,19 +18,57 @@ pytestmark = pytest.mark.skipif(not os.environ.get("DATABASE_URL"),
                                 reason="G1A walkthrough requires PostgreSQL")
 
 
-def test_production_shaped_authenticated_restart_safe_real_solve(monkeypatch):
+@pytest.fixture
+def isolated_database(monkeypatch):
+    """Run the walkthrough in its own throwaway database on the caller's server.
+
+    Suites sharing the gate database must never see this test's org, job or
+    identity binding, so the caller's database is never written: a fresh
+    database is created, DATABASE_URL points the in-process store and the worker
+    subprocesses at it, and it is dropped on teardown even when the test fails.
+    """
+    import psycopg
+    from psycopg import sql
+
+    caller_url = os.environ["DATABASE_URL"]
+    name = f"g1a_e2e_{uuid.uuid4().hex[:12]}"
+    parts = urlsplit(caller_url)
+    isolated_url = urlunsplit(parts._replace(path=f"/{name}"))
+
+    with psycopg.connect(caller_url, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+    try:
+        monkeypatch.setenv("DATABASE_URL", isolated_url)
+        from app import app  # noqa: F401  (sets up the leaf_platform alias)
+        from leaf_platform import db as platform_db
+        platform_db.reset_pool()
+        try:
+            yield isolated_url
+        finally:
+            platform_db.reset_pool()
+    finally:
+        with psycopg.connect(caller_url, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)")
+                          .format(sql.Identifier(name)))
+
+
+def test_production_shaped_authenticated_restart_safe_real_solve(monkeypatch, isolated_database):
     from test_wave5 import AUD, ISS, NS, _JWKS_FILE, bearer
     from app import app
     from leaf_platform import canonical_jobs, db as platform_db, store
     from leaf_platform.db import cursor
 
     platform_db.apply_migration()
-    org = store.create_org("G1A production-shaped")
+    # Tier comes from the org, not the token claim; the solve needs hosted_pro.
+    org = store.create_org("G1A production-shaped", tier="hosted_pro")
     project = store.create_project(org.org_id, "AutoFill solve")
     version = store.create_drawing_version(
         org.org_id, project.project_id, oss_object="g1a/roof.dwg",
         intake_ref="g1a/roof-intake.json", created_by="g1a-test")
-    store.create_identity_binding(org.org_id, "auth0", "auth0|wave5", role="owner")
+    # The server resolves the token's verified `sub` (test_wave5.mint signs
+    # auth0|wave5|<tier>) under authority auth0.
+    subject = "auth0|wave5|hosted_pro"
+    store.create_identity_binding(org.org_id, "auth0", subject, role="owner")
     store.set_project_authority_mode(org.org_id, project.project_id, "postgres_canonical")
 
     monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
@@ -54,10 +93,15 @@ def test_production_shaped_authenticated_restart_safe_real_solve(monkeypatch):
                "X-Org-Id": str(org.org_id), "X-Project-Id": str(project.project_id),
                "Idempotency-Key": "g1a-real-solve-1"}
     with TestClient(app, raise_server_exceptions=True) as client:
-        submitted = client.post(
-            "/api/run", headers=headers,
-            json={"tool": "string-autofill-opt", "params": params,
-                  "dwg": str(version.version_id)})
+        # A run must echo the catalog digest the tool list issued, as a client does
+        # after confirming the tool.
+        listed = client.get("/api/tools", headers=headers)
+        assert listed.status_code == 200, listed.text
+        catalog_digest = next(t["catalog_digest"] for t in listed.json()["tools"]
+                              if t.get("name") == "string-autofill-opt")
+        run_body = {"tool": "string-autofill-opt", "params": params,
+                    "dwg": str(version.version_id), "catalog_digest": catalog_digest}
+        submitted = client.post("/api/run", headers=headers, json=run_body)
         assert submitted.status_code == 202, submitted.text
         job_id = submitted.json()["job_id"]
         assert client.get(f"/api/jobs/{job_id}", headers=headers).json()["status"] == "submitted"
@@ -67,11 +111,10 @@ def test_production_shaped_authenticated_restart_safe_real_solve(monkeypatch):
                      "X-Org-Id": str(org.org_id),
                      "X-Project-Id": str(project.project_id),
                      "Idempotency-Key": "g1a-confused-deputy"},
-            json={"tool": "string-autofill-opt", "params": params,
-                  "dwg": str(version.version_id)},
+            json=run_body,
         )
         assert confused.status_code == 409
-        assert "must match" in confused.text
+        assert "conflicts with the active platform binding" in confused.text
 
     # A first worker process claims and dies. After its short lease expires, a
     # distinct worker must reclaim attempt 2 and produce the sole terminal result.
@@ -105,10 +148,7 @@ def test_production_shaped_authenticated_restart_safe_real_solve(monkeypatch):
         assert set(record["result"]["snapshotPins"]) == {"catalog", "standards", "ahj"}
         assert record["execution_context"]["capability_state"] == "connected_degraded"
         assert record["provenance"]["solver_revision"]
-        replay = reconnected.post(
-            "/api/run", headers=headers,
-            json={"tool": "string-autofill-opt", "params": params,
-                  "dwg": str(version.version_id)})
+        replay = reconnected.post("/api/run", headers=headers, json=run_body)
         assert replay.status_code == 202
         assert replay.json()["job_id"] == job_id
 
@@ -117,8 +157,7 @@ def test_production_shaped_authenticated_restart_safe_real_solve(monkeypatch):
                                   "X-Org-Id": str(org.org_id),
                                   "X-Project-Id": str(project.project_id),
                                   "Idempotency-Key": "g1a-denied"},
-            json={"tool": "string-autofill-opt", "params": params,
-                  "dwg": str(version.version_id)})
+            json=run_body)
         assert denied.status_code == 403
 
     saved = canonical_jobs.get_job_for_tenant(uuid.UUID(job_id), str(org.org_id))
