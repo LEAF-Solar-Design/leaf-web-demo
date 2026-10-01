@@ -2,7 +2,8 @@
 
 Returns the store's state in the two row shapes the parity receipts record (the Create, Swap and
 Delete state rows and the List rows), the active prefix and the drawing's current preset settings
-(the three always-synced layer names read from graph["settings"], server/solar_preset_sync.py).
+(the three always-synced layer names read from graph["settings"] and InstallationDesign from
+graph["project"], server/solar_preset_sync.py).
 A drawing with no store lists no presets. Pure: linear in the preset count, no I/O; a malformed
 store is DESIGN_PRESETS_STORE_INVALID. Graph layer names are returned verbatim, including names
 the preset store cannot hold: List does not write them into the store.

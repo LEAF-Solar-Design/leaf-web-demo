@@ -656,6 +656,15 @@ def build_suites() -> List[Suite]:
         # committed evidence, so the floor is the exact count on every runner. COUNTED: 22.
         Suite("server-solar-tool-design-presets-apply", "server tests/test_solar_tool_design_presets_apply.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_design_presets_apply.py"), 22),
+        # Design presets and the installation design (2026-10-01, sf-w2-design-presets-installation):
+        # a preset of the other design is written to a drawing with no frame through the project-change
+        # rule and refused on one with frames (DESIGN_PRESET_INSTALLATION_POPULATED); the design is read
+        # back before every commit. Inputs are authored in the file or are committed evidence, so the
+        # floor is the exact count on every runner. COUNTED: 13 unparametrized tests + 9 resolution
+        # cases + 8 refusal cases + 3 project-change refusal cases = 33.
+        Suite("server-solar-tool-design-presets-installation",
+              "server tests/test_solar_tool_design_presets_installation.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_design_presets_installation.py"), 33),
         # A drawing-settings change stales the outputs built under the old settings (2026-09-30,
         # sf-solar-settings-invalidation): solar-settings and preset apply stale every homerun route and
         # schedule, so the export guard refuses them on a graph with no solve digest. Inputs are authored

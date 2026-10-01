@@ -12,8 +12,9 @@ applying the target's layers and keeping the outgoing preset's; a solar-settings
 into the outgoing preset and restored on the round trip; the <= 0 seeds; the delete of the active
 preset; supplied settings that match the graph change nothing (sizing kept) and ones that differ
 invalidate sizing exactly as solar-settings does; the fields never synced (panel layer filter, L2
-flag, optimizer ratio, installation design, counters, cable fields); the graph layer name the store
-cannot hold; List reading the graph's layer names; purity; the rail.
+flag, optimizer ratio, counters, cable fields); the graph layer name the store cannot hold; List
+reading the graph's layer names; purity; the rail. The installation design rule has its own file,
+test_solar_tool_design_presets_installation.py.
 """
 import copy
 import json
@@ -49,7 +50,8 @@ GRAPH_BETA = {"string_layer": "B-String", "home_run_layer": "B-Home", "panel_gro
 # canonical sha256 (solar_sizing_client.digest) of graph["settings"] after f1 on the fixture graph.
 F1_SETTINGS_SHA256 = "e260816996efd904294ccb9883a990fed60de7750889a5b71a5bccaf8e16e9c4"
 # canonical sha256 of the whole graph after test_design_presets_apply_solar_settings_edit_round_trip.
-ROUND_TRIP_GRAPH_SHA256 = "bd1b0f51216a2e57de7621790c174a3dcf618591f93706749e6b7e38b454dd0b"
+# Moved with sf-w2-design-presets-installation: snapshot_current() carries InstallationDesign "Roof".
+ROUND_TRIP_GRAPH_SHA256 = "0d6ee64f30aca99268ae041e51dfeb8dac40241fbd889724eb1071143b4accf1"
 
 
 def commit_builtin():
@@ -69,7 +71,11 @@ def kernel():
 
 
 def snapshot_current():
-    return kernel().current_settings_from_preset(json.loads(SNAPSHOT.read_text(encoding="utf-8")))
+    """The committed snapshot's current settings on this rooftop fixture: InstallationDesign "Roof",
+    since the snapshot's own "Ground" is refused on a drawing with Roof frames
+    (sf-w2-design-presets-installation, test_solar_tool_design_presets_installation.py)."""
+    return dict(kernel().current_settings_from_preset(json.loads(SNAPSHOT.read_text(encoding="utf-8"))),
+                InstallationDesign="Roof")
 
 
 def commit(value, params):
