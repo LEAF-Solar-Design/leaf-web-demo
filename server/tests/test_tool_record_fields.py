@@ -281,7 +281,7 @@ def test_an_authored_row_never_emits_the_fallback_warning(caplog):
 
 def test_the_ribbon_tab_set_matches_what_the_web_declares():
     """ONE definition server-side; the web's RIBBON_TABS is the named source."""
-    band = (SERVER_DIR.parent / "web" / "src" / "site" / "CockpitTopBand.jsx").read_text(
+    band = (SERVER_DIR.parent / "web" / "src" / "lib" / "ribbonTabs.data.js").read_text(
         encoding="utf-8")
     head = "RIBBON_TABS = Object.freeze(["
     start = band.index(head) + len(head)
