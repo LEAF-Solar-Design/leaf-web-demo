@@ -1274,6 +1274,7 @@ def write_workbook(sheets):
         for name in sorted(parts):
             info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
             info.compress_type = zipfile.ZIP_DEFLATED
+            info.create_system = 3  # ZipInfo would stamp the host OS (0 on Windows), changing the digest per host
             archive.writestr(info, parts[name].encode("utf-8"))
     return buffer.getvalue()
 

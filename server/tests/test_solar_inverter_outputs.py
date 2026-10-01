@@ -654,3 +654,11 @@ def test_i9_workbook_equals_the_plugin_workbook(i9_text):
         if name == "Homeruns":
             assert all(line.startswith("-\t-\tFeeder\t") for line in plugin_lines[-FEEDER_ROWS:])
         assert studio_lines == plugin_lines, name
+
+
+def test_the_workbook_bytes_do_not_depend_on_the_host_os():
+    """zipfile stamps the host OS into every entry unless told otherwise (0 on Windows, 3 elsewhere), so the
+    cable export would hash differently on a developer's machine and on the server. Every entry is pinned."""
+    data = out.write_workbook([("Homeruns", [["Circuit", "Length"], ["A01", "12.5"]])])
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        assert {info.create_system for info in archive.infolist()} == {3}

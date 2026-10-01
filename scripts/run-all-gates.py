@@ -703,6 +703,13 @@ def build_suites() -> List[Suite]:
         # COUNTED: 21 tests + 42 more parametrizations = 63.
         Suite("server-solar-tool-equipment-move", "server tests/test_solar_tool_equipment_move.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_equipment_move.py"), 63),
+        # CableExport Export All as a W2 registry graph read (2026-10-01, sf-w2-electrical-output-workbook): the
+        # plugin's workbook over the route-bridged graph, written as CableExport.xlsx; the recorded i8 design rebuilt
+        # as a graph with its feeders reproduces the four sheets of the plugin's i9 workbook. Inputs are authored in
+        # the file or read from committed evidence, so the floor is the exact count on every runner. COUNTED: 24
+        # tests + 70 more parametrizations = 94.
+        Suite("server-solar-tool-cable-export", "server tests/test_solar_tool_cable_export.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_cable_export.py"), 94),
         # W5 inverter family (2026-09-24, contract G35): the shared state and delta module and the
         # device, string and output engines (literal ports of the plugin's inverter commands). Inputs
         # are authored in each file, so each floor is the exact count on every runner. MEASURED.
