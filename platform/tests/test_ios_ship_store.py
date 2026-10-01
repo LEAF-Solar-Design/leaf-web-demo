@@ -310,7 +310,7 @@ def test_terminal_controller_receipt_rejects_identity_and_proof_drift(
     with pytest.raises(ios_ship.IosShipError):
         ios_ship.record_provider_receipt(
             org.org_id, tenant, project.project_id, execution["execution_id"], "run-1",
-            _controller_receipt(project.project_id, **{field: bad}))
+            {**_controller_receipt(project.project_id), field: bad})
     assert ios_ship.get_execution(
         org.org_id, project.project_id, execution["execution_id"])["status"] == "dispatched"
 

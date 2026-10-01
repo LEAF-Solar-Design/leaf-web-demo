@@ -223,9 +223,15 @@ def test_export_rejects_stale_authority_and_invalid_source(mounted, monkeypatch,
 
 
 def test_nonplanning_attempt_and_closed_requests_fail_before_mutation(mounted):
-    capability = execution.claim_task(*mounted.scope, worker_id='enrollment-' + mounted.eid, lease_seconds=900)
+    # Host-enrollment capability tasks are never claimable; claim an ordinary task instead.
+    execution.submit_task(*mounted.scope, task_key='ordinary-task', idempotency_key='ordinary-task',
+        title='Ordinary task', spec='A nonplanning task the bridge must not export',
+        capability='recipe.organize', stages=['implementation', 'build_test'], owned_paths=['recipes/'],
+        source_sha='a' * 40, verify_command='pytest', declared_artifacts=['diff'], depends_on=[])
+    ordinary = execution.claim_task(*mounted.scope, worker_id='enrollment-' + mounted.eid, lease_seconds=900)
+    assert ordinary['task_key'] == 'ordinary-task'
     with pytest.raises(mounted.bridge.BridgeError) as error:
-        call(mounted, 'export', attempt_id=capability['attempt_id'], fence=capability['fence'])
+        call(mounted, 'export', attempt_id=ordinary['attempt_id'], fence=ordinary['fence'])
     assert error.value.status == 403
     for op, body in [('next', {'org_id': str(mounted.scope[0])}), ('other', {}),
                      ('export', {'attempt_id': str(uuid.uuid4()), 'fence': True}),
