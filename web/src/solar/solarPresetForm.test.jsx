@@ -286,3 +286,21 @@ it('PF16 turns the browser validation off on the form', () => {
   expect(element.noValidate).toBe(true)
   expect(element.hasAttribute('novalidate')).toBe(true)
 })
+
+it('PF17 reports an out-of-bounds numeric List value as unfit in drawing mode', () => {
+  const listing = { ...LIST_TWO, current_settings: { ...SNAP, Vmp: 1000001 } }
+  const { onSubmit } = open({ listing, revision: 2 })
+  type('Preset name', 'Gamma')
+  fireEvent.click(screen.getByLabelText("Use the drawing's current settings"))
+  fireEvent.click(button())
+  reason('drawing_settings_unfit')
+  expect(button().disabled).toBe(true)
+  expect(onSubmit).not.toHaveBeenCalled()
+})
+
+it('PF18 gives the integer field a numeric keyboard', () => {
+  open()
+  supply()
+  expect(screen.getByLabelText('MPPT count').getAttribute('inputmode')).toBe('numeric')
+  expect(screen.getByLabelText('Vmp').getAttribute('inputmode')).toBe('decimal')
+})
