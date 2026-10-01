@@ -1,0 +1,48 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-trench-manual",
+  "builtin": "builtins/solar_trench_manual.py",
+  "family": "routing",
+  "adapter": "local-graph-commit",
+  "entitlement": "run_write",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_TRENCH_MANUAL_REQUEST",
+  "readiness": {"kind": "facets", "facets": []},
+  "engine": "server-builtin",
+  "interaction": {"mode": "form"},
+  "record_store": "registry",
+  "record": {
+    "name": "solar-trench-manual",
+    "version": "1.0.0",
+    "description": "Route one trench between two picked points, or re-route a trench and mark the routes riding it out of date.",
+    "kind": "script",
+    "family_id": "routing",
+    "engine_op": "solar_trench_manual",
+    "entry": "builtins/solar_trench_manual.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {"type": "string", "maxLength": 128},
+        "operation": {"type": "string", "enum": ["add-trench", "reroute-trench"], "default": "add-trench"},
+        "expected_rev": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+        "start_x": {"type": "number", "minimum": -1000000000000, "maximum": 1000000000000},
+        "start_y": {"type": "number", "minimum": -1000000000000, "maximum": 1000000000000},
+        "end_x": {"type": "number", "minimum": -1000000000000, "maximum": 1000000000000},
+        "end_y": {"type": "number", "minimum": -1000000000000, "maximum": 1000000000000},
+        "trench_ref": {"type": "string", "minLength": 1, "maxLength": 128}
+      },
+      "required": ["operation", "expected_rev", "start_x", "start_y", "end_x", "end_y"],
+      "additionalProperties": false
+    },
+    "returns": {"type": "object"},
+    "capabilities": ["drawing.write"],
+    "allow_local_fallback": false
+  },
+  "ledger": ["trench-routing"],
+  "trusted_inputs": [],
+  "maturity": "preview",
+  "wave": 3,
+  "order": 50,
+  "scenario": "w3-ground-routing"
+}
