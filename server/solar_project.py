@@ -1,4 +1,9 @@
-"""Pure project edits, readiness and invalidation for the Solar graph."""
+"""Pure project edits, readiness and invalidation for the Solar graph.
+
+Two writers change graph["project"]: solar-settings (apply_project_changes: name, zip code and
+coordinates) and a design preset commit (set_installation_design, through solar_preset_sync.sync).
+Both run the one project invalidation rule (invalidate_project_dependents) on a material change.
+"""
 import copy
 import math
 import re
@@ -9,6 +14,8 @@ from solar_solve_results import DERIVED_KINDS
 
 
 ZIP_RE = re.compile(r"^[0-9]{5}(-[0-9]{4})?$")
+# The graph contract's closed project.installation_design enum (contract/solar-design-graph.v1.schema.json).
+INSTALLATION_DESIGNS = ("Roof", "Ground")
 SEED_VOC_COLD = {
     "passes": None, "override_accepted": False, "suggested_string_length": None,
     "per_module": None, "string_voltage": None, "max_dc_voltage": None,
@@ -79,13 +86,45 @@ def apply_project_changes(graph, patch):
     project["validity"] = project_validity(project)
     material = canonical_bytes(project) != before
     if material:
-        settings = graph["settings"]
-        settings["global_string_sizing_confirmed"] = False
-        settings["extra"].pop("string_sizing", None)
-        for target in [settings] + graph["electrical_zones"]:
-            target["voc_cold"] = copy.deepcopy(SEED_VOC_COLD)
-        for entity in entities(graph):
-            if (entity["kind"] in DERIVED_KINDS
-                    and entity["validity"]["state"] != "stale"):
-                entity["validity"] = {"state": "stale", "reasons": ["project_changed"]}
+        invalidate_project_dependents(graph)
     return material
+
+
+def invalidate_project_dependents(graph):
+    """The project-change rule, in place: sizing confirmation cleared, settings.extra.string_sizing
+    dropped, voc_cold reseeded on the settings and every electrical zone, and every derived entity
+    not already stale marked stale with the one reason "project_changed" (an entity already stale
+    keeps its first cause). One pass over the entities, no I/O."""
+    settings = graph["settings"]
+    settings["global_string_sizing_confirmed"] = False
+    settings["extra"].pop("string_sizing", None)
+    for target in [settings] + graph["electrical_zones"]:
+        target["voc_cold"] = copy.deepcopy(SEED_VOC_COLD)
+    for entity in entities(graph):
+        if (entity["kind"] in DERIVED_KINDS
+                and entity["validity"]["state"] != "stale"):
+            entity["validity"] = {"state": "stale", "reasons": ["project_changed"]}
+
+
+def set_installation_design(graph, design):
+    """Set graph["project"]["installation_design"] to `design` ("Roof" or "Ground"), in place.
+
+    Returns False and changes nothing when the drawing already has that design. A drawing with any
+    frame cannot change design: the validator requires every frame to carry the project's design
+    (INSTALLATION_DESIGN_MISMATCH), a Ground frame must carry a tracker and a Roof frame must not
+    (the frame if/then/else in the graph contract), so no frame converts. That case raises
+    INSTALLATION_DESIGN_MISMATCH; callers refuse it first with their own named code. Otherwise the
+    design is written, the project validity recomputed and the project-change rule run
+    (invalidate_project_dependents). A design outside INSTALLATION_DESIGNS is
+    INVALID_PROJECT_REQUEST. Fails closed before any write."""
+    if type(design) is not str or design not in INSTALLATION_DESIGNS:
+        raise GraphValidationError("INVALID_PROJECT_REQUEST")
+    project = graph["project"]
+    if project["installation_design"] == design:
+        return False
+    if graph["frames"]:
+        raise GraphValidationError("INSTALLATION_DESIGN_MISMATCH")
+    project["installation_design"] = design
+    project["validity"] = project_validity(project)
+    invalidate_project_dependents(graph)
+    return True

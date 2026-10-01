@@ -32,7 +32,8 @@ from solar_design_graph import GraphValidationError, entities
 from solar_graph_context import resolve_graph_context
 from solar_sizing_client import digest, require_sizing, sizing_basis
 from solar_solve_results import upstream_basis
-from test_w1_design_graph import graph  # noqa: F401
+from test_solar_ground_graph import ground_of
+from test_w1_design_graph import graph as w1_graph  # noqa: F401
 from test_w1_local_graph_adapter import held
 from test_w1_local_graph_jobs import isolated_jobs, no_network  # noqa: F401
 from test_w1_local_graph_rail import api, body  # noqa: F401
@@ -56,21 +57,23 @@ STEP_PARAMS = {"f1": {"subcommand": "Create", "name": "Alpha"}, "f2": {"subcomma
 # digests moved with sf-w2-design-presets-apply: f1 now writes the snapshot's three layer names into
 # graph["settings"] (test_solar_tool_design_presets_apply.py); the store and List digests did not.
 # They moved again with sf-solar-settings-invalidation: that layer change also stales the fixture's
-# homerun and schedule ("settings_changed", test_solar_settings_invalidation.py).
+# homerun and schedule ("settings_changed", test_solar_settings_invalidation.py). They moved again with
+# sf-w2-design-presets-installation: the chain now runs on the Ground fixture (the `graph` fixture
+# below); the store and List digests did not move.
 STEP_DIGESTS = {
-    "f1": (1, "e8dde958ddf3a2cd088b6c7ece18fbf04dd12837190195c3332c633759c8d8ed",
+    "f1": (1, "8cb4355afe353363251f19056d4f612d646442d7b1c8d4c8d4e1624579d24b89",
            "91f98d47e719f4db929471228ee6bf1a03abfcb34e70534c44abcd8fdb958be8",
            3694, "cc28171c8f6b097be6e5def3b1a7beec21ff787862a01031cd3ffc89f86daca6"),
-    "f2": (2, "1840be7581405191ee268e3712f810baa0de1f459d2c768ac9cfc0f12f6305d2",
+    "f2": (2, "54908d0c21588e05f6a2694fb0f5dcec80703840092aed36c1022d8e8747e0f4",
            "fd5dffb7e157fb1a1da860d63ca9e0efee6ba262962bd794dabd90d7c6ced791",
            5545, "7881da1cdb0087e205727f0dc45bc954f86214e12765328e3b1ab7b83885ddf6"),
-    "f3": (3, "127944108878bb34fc04e3eefac29930cbff299011dfaf43046d6590f9730a02",
+    "f3": (3, "f7908fa9cf69dcc7e6be73836485c7d72bd355920cbc30ec3e2373aab7699cc9",
            "b51ab618f294153e1b5bf703e4bd53606694400f788834721a02445ea8695b88",
            5545, "279101e78d1b50e351bbdd5ace9ec1f6bcd4f8303f6fcbced7cf823c057568e1"),
-    "f4": (3, "127944108878bb34fc04e3eefac29930cbff299011dfaf43046d6590f9730a02",
+    "f4": (3, "f7908fa9cf69dcc7e6be73836485c7d72bd355920cbc30ec3e2373aab7699cc9",
            "b51ab618f294153e1b5bf703e4bd53606694400f788834721a02445ea8695b88",
            5545, "279101e78d1b50e351bbdd5ace9ec1f6bcd4f8303f6fcbced7cf823c057568e1"),
-    "f5": (4, "7d5ce8681b3a75d623b8f44a33dfe16d09406a5d04894f28439f78c7bd3a5d9a",
+    "f5": (4, "6446ff842a1b4a29b4666d01be0c940b3080ab80b3e5259584a2be43b44a3a4b",
            "91f98d47e719f4db929471228ee6bf1a03abfcb34e70534c44abcd8fdb958be8",
            3694, "cc28171c8f6b097be6e5def3b1a7beec21ff787862a01031cd3ffc89f86daca6"),
 }
@@ -82,8 +85,18 @@ STOCKED_64_STORE_BYTES = 112978
 STOCKED_64_LIST = (120401, "de5b3471fc45e837afe1ec41031cfb5c93e58b26a8422a943b66483a10a02169")
 WORST_CREATES = 14
 WORST_STORE_BYTES = 261785
-WORST_LIST_BYTES = 485841
+# List reads InstallationDesign from the graph ("Ground"), not the 256-quote worst value
+# (sf-w2-design-presets-installation).
+WORST_LIST_BYTES = 485335
 LIST_REQUEST_SHA256 = "4ba9a006e7eccb1ab0ca8957278f6f176a2bef77ee0acac51b70a5990a2478bf"
+
+
+@pytest.fixture
+def graph(w1_graph):
+    """The W1 fixture as a populated Ground drawing (test_solar_ground_graph.ground_of): the parity
+    receipts were recorded on a ground drawing and the snapshot's InstallationDesign is "Ground", and a
+    preset of the other design is refused on a drawing with frames (sf-w2-design-presets-installation)."""
+    return ground_of(w1_graph)
 
 
 def commit_builtin():
@@ -634,7 +647,8 @@ def test_design_presets_store_size_limit(graph):
                                if kind == "s" and name not in ("Name",)})
     value = create(graph, "w0", current_settings=worst)
     for index in range(1, WORST_CREATES):
-        value = create(value, f"w{index}")
+        # Supplied each time: a Create without settings reads InstallationDesign back from the graph.
+        value = create(value, f"w{index}", current_settings=worst)
     assert len(canonical_bytes(value["extra"]["design_profiles"])) == WORST_STORE_BYTES
     output = listed(value)
     assert len(canonical_bytes(output)) == WORST_LIST_BYTES
