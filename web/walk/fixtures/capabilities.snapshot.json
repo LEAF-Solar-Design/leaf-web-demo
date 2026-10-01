@@ -1,0 +1,38 @@
+{
+  "snapshot_version": 1,
+  "catalog_version": "cat-proof-unpublished-v1",
+  "endpoint": "/api/capabilities",
+  "sources": ["server/routers/capabilities.py", "web/e2e/catProofFixture.mjs"],
+  "response": {
+    "families": [{
+      "family_id": "drawing-tools",
+      "label": "Drawing tools",
+      "description": "Read and transform the current drawing.",
+      "capabilities": [{
+        "name": "count-panels",
+        "version": "1.0.0",
+        "description": "Count every panel in the current drawing.",
+        "kind": "script",
+        "capabilities": ["drawing.read"],
+        "params": {"type": "object", "properties": {}},
+        "provenance": {"author": "user"}
+      }, {
+        "name": "arrange-panels-as-cat",
+        "version": "1.0.0",
+        "description": "Rearrange existing panels into a sitting cat.",
+        "kind": "script",
+        "capabilities": ["drawing.write"],
+        "params": {
+          "type": "object",
+          "properties": {
+            "template": {"type": "string", "default": "sitting-v1"},
+            "drawing_id": {"type": "string", "default": "cat-panels"},
+            "expected_head": {"type": "number", "default": 1}
+          }
+        },
+        "provenance": {"author": "user"}
+      }]
+    }],
+    "source": "registry"
+  }
+}

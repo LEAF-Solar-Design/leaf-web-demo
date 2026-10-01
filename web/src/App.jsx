@@ -30,6 +30,7 @@ import { familiesForSurface, familyMonogram } from './lib/surfaceRails.js'
 import { byId, ladderListener, slashCommandHandlers } from './lib/actionRegistry.js'
 import { REASONS, RIBBON_RATIONALE, profileRibbonTabs, profileEntryTab, solarRouteStatus, solarRouteDisplay, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels } from './lib/ribbonClusters.js'
 import { isWriteTool } from './lib/toolRecord.js'
+import { STUDIO_DRAWERS } from './lib/studioDrawers.js'
 import SolarToolForm from './solar/SolarToolForm.jsx'
 import SolarSettingsForm from './solar/SolarSettingsForm.jsx'
 import { ENV_SOLAR_SETTINGS_FORM } from './solar/flag.js'
@@ -46,7 +47,6 @@ import { loadDemoSolve } from './site/intakeCache.js'
 // The 3D viewer drags in `three`; loading it lazily (mirroring the auth.js
 // dynamic-import pattern) keeps first paint off the critical path.
 const Viewer = React.lazy(() => import('./components/Viewer.jsx'))
-const STUDIO_DRAWERS = Object.freeze(['nav', 'jobs', 'result', 'plan', 'none'])
 const WORKSPACE_QUICK_BEFORE = Object.freeze([
   { id: 'new', label: 'New drawing', icon: 'new-file', disabled: true, reason: 'new drawings start on the project board (Start tab)' },
   { id: 'quick-import-dxf', dataTool: 'quick-import-dxf', label: 'Open DXF', icon: 'open', disabled: true, reason: 'Drawing upload is unavailable in this session' },
