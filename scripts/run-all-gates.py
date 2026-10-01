@@ -342,6 +342,11 @@ def build_suites() -> List[Suite]:
         # equipment bridge (C4, C5, C10). Hermetic and nothing skips: 96 + 30 correction cases = 126.
         Suite("server-solar-electrical-route-bridge", "server tests/test_solar_electrical_route_bridge.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_electrical_route_bridge.py"), 126),
+        # sf-w2-combiners piece one: the recorded combiner intake bound to the graph, LEAFCOMBINERAUTO run on
+        # the route bridge state and persisted (C5: 14 combiners, 346 homerun routes, 14 feeders). Hermetic
+        # and nothing skips: 31 + 9 parametrized refusals + 22 single tests + 31 correction cases = 93.
+        Suite("server-solar-combiner-graph", "server tests/test_solar_combiner_graph.py", "pytest", SERVER,
+              _py_pytest("tests/test_solar_combiner_graph.py"), 93),
         # 31 -> 35 on 2026-09-22: the zone-aware entry point (group_panels_by_zone,
         # the port of BuildAndSaveGroupsForZone) added four hermetic, unparametrized
         # tests. Nothing in this file skips, so the count is the same on every runner.
