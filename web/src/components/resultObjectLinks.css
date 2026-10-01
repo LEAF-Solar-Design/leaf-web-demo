@@ -1,0 +1,9 @@
+.result-object-links { margin-block: 0.5rem; }
+.result-object-links summary { cursor: pointer; }
+.result-object-links ul { list-style: none; padding: 0; max-height: 24rem; overflow: auto; }
+.result-object-links li > button, .result-object-links li > span { display: block; width: 100%; padding: 0.5rem; text-align: left; overflow-wrap: anywhere; }
+.result-object-links li > button { color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 4px; cursor: pointer; }
+.result-object-links li + li { margin-top: 0.25rem; }
+.result-object-links small { display: block; opacity: 0.75; }
+.result-object-links button:focus-visible, .result-object-links summary:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.result-object-announcement { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }

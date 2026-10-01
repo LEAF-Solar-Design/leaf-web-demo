@@ -18,6 +18,53 @@ import { describe, it } from 'node:test'
 import esbuild from 'esbuild'
 
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
+describe('report object origin wiring', () => {
+  it('mounts the origin bridge inside the object provider and passes its key to jobs', () => {
+    const live = esbuild.transformSync(appSource, { loader: 'jsx' }).code
+    const provider = live.search(/React\.createElement\(\s*DrawingObjectsProvider,/)
+    const bridge = provider + live.slice(provider).search(/React\.createElement\(\s*DrawingOriginBridge,/)
+    const shell = provider + live.slice(provider).search(/React\.createElement\(\s*SurfaceFrame,/)
+    assert.ok(provider >= 0 && bridge > provider && shell > bridge)
+    assert.match(live.slice(bridge, shell), /onChange: setResultDrawingKey/)
+    assert.match(live, /drawingKey: resultDrawingKey/)
+    assert.match(live, /\[resultDrawingKey, setResultDrawingKey\] = useState\(null\)/)
+  })
+  it('passes named navigation to the result panel and suppresses mismatched handles only', () => {
+    const live = esbuild.transformSync(appSource, { loader: 'jsx' }).code
+    const panel = live.search(/React\.createElement\(\s*ResultPanel,/)
+    assert.ok(panel >= 0)
+    assert.match(live.slice(panel, panel + 250), /navigation: viewNavigation/)
+    assert.match(live, /typeof result\?\.origin\?\.drawingKey === "string" && result\.origin\.drawingKey\.length > 0 && resultDrawingKey && result\.origin\.drawingKey !== resultDrawingKey/)
+    const overlay = live.slice(live.indexOf('const overlay ='), live.indexOf('const applied ='))
+    assert.match(overlay, /!overlayStale/)
+    assert.match(overlay, /resultDrawingMismatch && result\.overlay/)
+    assert.match(overlay, /\.\.\.result\.overlay,\s*highlight_handles: \[\]/)
+  })
+})
+describe('report overlay drawing identity', () => {
+  const start = appSource.indexOf('const resultDrawingMismatch =')
+  const end = appSource.indexOf('const applied =', start)
+  assert.ok(start >= 0 && end > start, 'App overlay derivation exists')
+  const derive = new Function('result', 'resultDrawingKey', 'overlayStale',
+    appSource.slice(start, end) + '\nreturn overlay')
+
+  it('keeps highlights after the index loads when origin is absent or has no key', () => {
+    const overlay = { highlight_handles: ['AB'], markers: [{ pt: [1, 2] }] }
+    for (const origin of [undefined, { drawingKey: null }, { drawingKey: '' }]) {
+      const result = origin === undefined ? { overlay } : { overlay, origin }
+      assert.equal(derive(result, 'engine:loaded-v1.dxf', false), overlay)
+    }
+  })
+
+  it('suppresses only highlights for a known different origin and still respects stale overlays', () => {
+    const overlay = { highlight_handles: ['AB'], markers: [{ pt: [1, 2] }], polylines: [] }
+    const result = { overlay, origin: { drawingKey: 'engine:first-v1.dxf' } }
+    assert.deepEqual(derive(result, 'engine:second-v1.dxf', false), { ...overlay, highlight_handles: [] })
+    assert.equal(derive(result, 'engine:first-v1.dxf', false), overlay)
+    assert.equal(derive(result, null, false), overlay)
+    assert.equal(derive(result, 'engine:first-v1.dxf', true), null)
+  })
+})
 const viewerSource = readFileSync(new URL('./components/Viewer.jsx', import.meta.url), 'utf8')
 const occluderSource = decomment(readFileSync(new URL('./site/drawingOccluders.js', import.meta.url), 'utf8'))
 
