@@ -364,7 +364,6 @@ def build_suites() -> List[Suite]:
         # compact Ground frames, each equal to the expansion; 28 cases.
         Suite("server-solar-ground-compact-consumers", "server tests/test_solar_ground_compact_consumers.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_ground_compact_consumers.py"), 28),
-        # sf-w3-conversion-graph piece 2: the physical head's trackers as compact Ground frames; 68 cases.
         # sf-w3-conversion-graph piece 2: the physical head's trackers as compact Ground frames; 87 cases.
         Suite("server-solar-ground-conversion", "server tests/test_solar_ground_conversion.py", "pytest",
               SERVER, _py_pytest("tests/test_solar_ground_conversion.py"), 87),
