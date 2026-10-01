@@ -119,19 +119,25 @@ def test_annotation_migration_is_in_the_unconditional_readiness_inventory():
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
     assert "0042_annotation_batches.sql" in manifest_names
     _assert_closed_world_pin(
-        manifest_names[-1], "0070_aps_completion_receipts.sql",
+        manifest_names[-1], "0071_engine_change_cards.sql",
         "Update this pin to the new last migration filename once main adds "
         "one (and the migration_ids pin below to match).",
     )
     _assert_closed_world_pin(
-        inventory["scope"]["migration_ids"][-1], "0070",
+        inventory["scope"]["migration_ids"][-1], "0071",
         "Update this pin (and authority-inventory.json's "
         "scope.migration_ids) to the new last migration id.",
     )
     assert "annotation_targets" in db._REQUIRED_COLUMNS
     assert "annotation_batches" in db._REQUIRED_COLUMNS
     assert "annotation_audit" in db._REQUIRED_COLUMNS
+    assert {"operation_id", "payload_sha256", "hold_requested_at"} <= db._REQUIRED_COLUMNS["engine_change_cards"]
+    assert db._REQUIRED_COLUMNS["engine_change_card_reads"] == {"card_id", "subject", "read_at"}
     catalog = db.required_catalog_for_selected_authorities({})
+    assert "engine_change_cards_operation_id_key" in catalog["constraints"]
+    assert "engine_change_cards_state_check" in catalog["constraints"]
+    assert "engine_change_card_reads_card_id_fkey" in catalog["constraints"]
+    assert "engine_change_cards_guard" in catalog["triggers"]
     assert "annotation_batches_target_fk" in catalog["constraints"]
     assert "annotation_batches_request_key_uq" in catalog["indexes"]
 

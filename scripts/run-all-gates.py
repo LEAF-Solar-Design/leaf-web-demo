@@ -1271,6 +1271,8 @@ def build_suites() -> List[Suite]:
               )),
         Suite("server-agent-approvals", "server tests/test_agent_approvals.py", "pytest",
               SERVER, _py_pytest("tests/test_agent_approvals.py"), 24),
+        Suite("server-engine-changes", "server tests/test_engine_changes.py", "pytest",
+              SERVER, _py_pytest("tests/test_engine_changes.py"), 23, db_gated=True),
         Suite("server-approval-consume", "server tests/test_approval_consume.py", "pytest",
               SERVER, _py_pytest("tests/test_approval_consume.py"), 20),
         Suite("server-drawings-bootstrap", "server tests/test_drawings_bootstrap.py", "pytest",
@@ -2011,7 +2013,7 @@ def build_suites() -> List[Suite]:
         # sets LEAF_GATE_REQUIRE_DATABASE=1, so this floor IS enforced there
         # against a pristine database, and an unreachable DB is a FAIL row.
         Suite("platform", "platform/tests (Postgres)", "pytest", REPO_PARENT,
-              _py_pytest(f"{repo_name}/platform/tests"), 247, db_gated=True,
+              _py_pytest(f"{repo_name}/platform/tests"), 256, db_gated=True,
               # The overlay and annotation PostgreSQL proofs skipif-gate on
               # their own variables, so they get the gate DSN under those too.
               db_env_aliases=("OVERLAY_PG_URL", "ANNOTATION_PG_URL")),

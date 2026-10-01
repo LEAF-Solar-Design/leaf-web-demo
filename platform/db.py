@@ -50,6 +50,13 @@ _MIGRATION_LEDGER_COLUMNS = {"name", "sha256", "applied_at"}
 # compatibility contract, not a provider choice. Additions stay additive so an
 # older application can continue to read a database prepared by a newer image.
 _REQUIRED_COLUMNS = {
+    "engine_change_cards": {
+        "card_id", "operation_id", "created_at", "updated_at", "state",
+        "incident_fingerprint", "feature_id", "title", "summary", "change",
+        "evidence", "acceptance", "deployment_identity", "hold_requested_at",
+        "hold_requested_by", "payload_sha256",
+    },
+    "engine_change_card_reads": {"card_id", "subject", "read_at"},
     "campaign_developer_allocations": {
         "org_id", "project_id", "campaign_id", "allocation_id", "limit_microusd", "max_active", "spent_microusd", "reserved_microusd", "evidence_ref", "created_at",
     },
@@ -663,6 +670,16 @@ def _catalog_contract(relation: str, *definition_fragments: str) -> Dict[str, An
 # stores, the project lifecycle is part of the canonical platform API whenever
 # this application image is running.
 _REQUIRED_CONSTRAINTS = {
+    "engine_change_cards_pkey": _catalog_contract(
+        "engine_change_cards", "PRIMARY KEY (card_id)"),
+    "engine_change_cards_operation_id_key": _catalog_contract(
+        "engine_change_cards", "UNIQUE (operation_id)"),
+    "engine_change_cards_state_check": _catalog_contract(
+        "engine_change_cards", "CHECK", "accepted", "landed", "live", "reverted", "held"),
+    "engine_change_card_reads_pkey": _catalog_contract(
+        "engine_change_card_reads", "PRIMARY KEY (card_id, subject)"),
+    "engine_change_card_reads_card_id_fkey": _catalog_contract(
+        "engine_change_card_reads", "FOREIGN KEY (card_id)", "REFERENCES engine_change_cards(card_id)"),
     "identity_bindings_display_name_check": _catalog_contract(
         "identity_bindings", "char_length(display_name) <= 100", "btrim(display_name)"),
     "campaign_developer_allocations_pkey": _catalog_contract(
@@ -794,6 +811,8 @@ _REQUIRED_CONSTRAINTS = {
 }
 
 _REQUIRED_INDEXES = {
+    "engine_change_cards_newest": _catalog_contract(
+        "engine_change_cards", "(created_at DESC, card_id DESC)"),
     "campaign_host_operations_poll_idx": _catalog_contract(
         "campaign_host_operations", "(machine_id, created_at, operation_id)", "WHERE", "outcome IS NULL"),
     "campaigns_host_scope_uq": _catalog_contract(
@@ -829,6 +848,9 @@ _REQUIRED_INDEXES = {
 }
 
 _REQUIRED_TRIGGERS = {
+    "engine_change_cards_guard": _catalog_contract(
+        "engine_change_cards", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
+        "EXECUTE FUNCTION guard_engine_change_card()"),
     "campaign_invocation_identity_immutable": _catalog_contract(
         "campaign_capability_invocations", "BEFORE UPDATE", "FOR EACH ROW",
         "EXECUTE FUNCTION campaign_invocation_identity_immutable()"),
