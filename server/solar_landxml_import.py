@@ -36,6 +36,7 @@ or graph write lives here.
 import hashlib
 import json
 import re
+from xml.parsers import expat
 
 import solar_artifacts
 import solar_geo_formats as geo
@@ -146,6 +147,42 @@ def _file_crs(root):
     return "EPSG:" + code
 
 
+def _xml_events(source):
+    """Compare intake text with the stored bytes' BOM and declaration-aware reading."""
+    parser = expat.ParserCreate()
+    parser.SetParamEntityParsing(expat.XML_PARAM_ENTITY_PARSING_NEVER)
+    parser.ordered_attributes = True
+    parser.buffer_text = True
+    parser.buffer_size = 1 << 16
+    events = []
+    chunks = []
+
+    def refuse(*args):
+        raise ValueError("DTD and entity declarations are forbidden")
+
+    def flush_text():
+        if chunks:
+            events.append(("t", "".join(chunks)))
+            chunks.clear()
+
+    def start(name, attributes):
+        flush_text()
+        events.append(("s", name, tuple(attributes)))
+
+    def end(name):
+        flush_text()
+        events.append(("e", name))
+
+    parser.StartDoctypeDeclHandler = refuse
+    parser.EntityDeclHandler = refuse
+    parser.StartElementHandler = start
+    parser.EndElementHandler = end
+    parser.CharacterDataHandler = chunks.append
+    parser.Parse(source, True)
+    flush_text()
+    return events
+
+
 def inspect_landxml(data):
     """The typed reading of one LandXML upload, or a LANDXML_* refusal. Pure: no store.
 
@@ -170,6 +207,12 @@ def inspect_landxml(data):
         raise LandXmlImportError("LANDXML_UNSAFE") from None
     except geo.GeoFormatError:
         raise LandXmlImportError("LANDXML_MALFORMED") from None
+    try:
+        same_reading = _xml_events(text) == _xml_events(data)
+    except (expat.ExpatError, LookupError, ValueError):
+        raise LandXmlImportError("LANDXML_ENCODING_INVALID") from None
+    if not same_reading:
+        raise LandXmlImportError("LANDXML_ENCODING_INVALID")
     if root.local_name != "LandXML":
         raise LandXmlImportError("LANDXML_NOT_LANDXML")
     linear_unit, meters_per_source_unit = _units(root)
