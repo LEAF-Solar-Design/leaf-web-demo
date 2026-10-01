@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "leaf.studio-walk.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "deployment_identity", "fixture_version", "catalog_version", "browser_version", "attempt", "created_at", "verdicts", "coverage_gaps", "flakes", "unavailable_features", "failures", "findings"],
+  "oneOf": [{"required": ["feature_id"]}, {"required": ["incident_id"]}],
+  "properties": {
+    "schema": {"const": "leaf.studio-walk.v1"},
+    "deployment_identity": {
+      "oneOf": [{"type": "string", "minLength": 1}, {"type": "object", "minProperties": 1}]
+    },
+    "fixture_version": {"type": "string", "minLength": 1},
+    "catalog_version": {"type": "string", "minLength": 1},
+    "browser_version": {"type": "string", "minLength": 1},
+    "feature_id": {"$ref": "#/$defs/id"},
+    "incident_id": {"$ref": "#/$defs/id"},
+    "attempt": {"type": "integer", "minimum": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "started_at": {"type": "string", "format": "date-time"},
+    "completed_at": {"type": "string", "format": "date-time"},
+    "verdicts": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["feature_id", "verdict"],
+        "properties": {
+          "feature_id": {"$ref": "#/$defs/id"},
+          "verdict": {"enum": ["PASS", "FAIL", "FLAKY", "UNAVAILABLE", "UNKNOWN"]},
+          "assertion_id": {"$ref": "#/$defs/id"},
+          "reason": {"type": "string"}
+        }
+      }
+    },
+    "coverage_gaps": {"type": "array", "items": {"$ref": "#/$defs/gap"}},
+    "flakes": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["feature_id"],
+        "properties": {
+          "feature_id": {"$ref": "#/$defs/id"}, "reason": {"type": "string"},
+          "occurrences": {"type": "integer", "minimum": 1},
+          "assertion_id": {"$ref": "#/$defs/id"}
+        }
+      }
+    },
+    "unavailable_features": {"type": "array", "items": {"$ref": "#/$defs/gap"}},
+    "failures": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["assertion_id", "fixture_recipe", "expected_effect"],
+        "properties": {
+          "assertion_id": {"$ref": "#/$defs/id"}, "feature_id": {"$ref": "#/$defs/id"},
+          "fixture_recipe": {"oneOf": [{"type": "object", "minProperties": 1}, {"type": "string", "minLength": 1}]},
+          "expected_effect": {"type": "string", "minLength": 1},
+          "state": {"type": "string", "minLength": 1, "maxLength": 64},
+          "viewport": {"type": "string", "minLength": 1, "maxLength": 32},
+          "first_error_line": {"type": "string", "maxLength": 300},
+          "observed_effect": {"type": "string"}, "evidence": {}
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["feature_id"],
+        "properties": {
+          "feature_id": {"$ref": "#/$defs/id"}, "summary": {"type": "string"},
+          "category": {"type": "string"}, "severity": {"type": "string"},
+          "assertion_id": {"$ref": "#/$defs/id"}, "evidence": {}
+        }
+      }
+    },
+    "evidence": {}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 200, "pattern": "^[A-Za-z][A-Za-z0-9_-]*(?:[.:][A-Za-z0-9_-]+)*$"},
+    "gap": {
+      "type": "object", "additionalProperties": false, "required": ["feature_id", "reason"],
+      "properties": {"feature_id": {"$ref": "#/$defs/id"}, "reason": {"type": "string", "minLength": 1}}
+    }
+  }
+}
