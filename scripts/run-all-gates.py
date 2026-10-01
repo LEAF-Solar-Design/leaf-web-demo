@@ -2285,6 +2285,12 @@ def build_suites() -> List[Suite]:
         Suite("unit-economics-owner-report",
               "scripts test_render_unit_economics_issue.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_render_unit_economics_issue.py"), 3),
+        # Auth0 Action drift check (P-088), registered WITH the file per the #29
+        # fix-then-register rule. A read-only wrapper over deploy_auth0_actions.py
+        # --check driven by a fake transport: no network, no DB, no skipif, no
+        # parametrize, so 14 = its 14 test functions on every runner.
+        Suite("auth0-action-drift-check", "scripts test_check_auth0_action_drift.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_check_auth0_action_drift.py"), 14),
         # Actions cache bucket prune (2026-08-31). The bucket was at 92.7% of
         # its 10 GiB ceiling with 87% of the bytes in unreachable CodeQL
         # overlay-base databases, and the merge gate's 279 MB Playwright entry

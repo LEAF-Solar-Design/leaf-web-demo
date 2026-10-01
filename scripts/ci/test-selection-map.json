@@ -49,6 +49,7 @@
     ".gitignore"
   ],
   "mandatory_suite_ids": [
+    "auth0-action-drift-check",
     "build-platform-images-workflow",
     "da-client-credentials",
     "da-extract-dxf-activity",
