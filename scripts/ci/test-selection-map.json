@@ -419,6 +419,7 @@
     "server-solar-inverter-outputs",
     "server-solar-inverter-state",
     "server-solar-inverter-strings",
+    "server-solar-landxml-import",
     "server-solar-lite-cabling",
     "server-solar-local-read",
     "server-solar-nec",

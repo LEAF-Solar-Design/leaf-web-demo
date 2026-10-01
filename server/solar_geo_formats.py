@@ -95,6 +95,14 @@ class UnsafeXmlError(GeoFormatError):
     """A document refused for its SHAPE: a DTD, an entity, or a size bound."""
 
 
+class XmlCountError(UnsafeXmlError):
+    """A document whose count of one local element name exceeds its limit."""
+
+    def __init__(self, local_name):
+        self.local_name = local_name
+        super().__init__("XML document exceeds count limit for %s" % local_name)
+
+
 class KmlArgumentError(GeoFormatError):
     """C# ArgumentException; str() is its Message, parameter suffix included."""
 
@@ -105,6 +113,7 @@ class KmlArgumentError(GeoFormatError):
 MAX_XML_CHARS = 16 * 1024 * 1024
 MAX_XML_ELEMENTS = 1_000_000
 MAX_XML_DEPTH = 256
+MAX_KEPT_ATTRIBUTES = 64
 
 
 class XmlElement:
@@ -114,11 +123,14 @@ class XmlElement:
     reproduces XElement.Value (every descendant text node, concatenated).
     """
 
-    __slots__ = ("local_name", "content")
+    __slots__ = ("local_name", "content", "attributes")
 
-    def __init__(self, local_name):
+    def __init__(self, local_name, attributes=None):
         self.local_name = local_name
         self.content = []
+        # Unqualified attributes, kept only for the local names a caller asked parse_xml
+        # for (None otherwise), so a million-element document allocates no attribute dicts.
+        self.attributes = attributes
 
     def children(self):
         return [item for item in self.content if isinstance(item, XmlElement)]
@@ -162,7 +174,7 @@ def _refuse(what):
     return handler
 
 
-def parse_xml(text):
+def parse_xml(text, *, max_depth=MAX_XML_DEPTH, attributes_of=frozenset(), count_limits=None):
     """Parse an XML document with no DTD, no entities and bounded size.
 
     Returns the root XmlElement. Fails closed with UnsafeXmlError on a DOCTYPE,
@@ -170,9 +182,35 @@ def parse_xml(text):
     element-count or depth bound, and with GeoFormatError on anything that is
     not well-formed XML (C# XDocument.Parse throws XmlException there). A single
     leading byte order mark is encoding and is dropped, as File.ReadAllText does.
+
+    `max_depth` tightens the depth bound for one caller (1 to MAX_XML_DEPTH; it
+    can never loosen it). An element whose local name is in `attributes_of`
+    keeps its unqualified attributes as a dict in `.attributes`; every other
+    element's `.attributes` is None. The defaults are this module's own readers'.
+    `count_limits` optionally tightens per-local-name counts with a dict of non-empty
+    str names to int limits from 1 to MAX_XML_ELEMENTS, checked before construction.
+    MAX_KEPT_ATTRIBUTES bounds the number of attributes on a kept element before copying.
+    Expat materialises every element's attribute dict before the handler runs, so that
+    allocation is bounded by MAX_XML_CHARS, not by MAX_KEPT_ATTRIBUTES.
     """
     if not isinstance(text, str):
         raise TypeError("XML content must be text")
+    if type(max_depth) is not int or not 1 <= max_depth <= MAX_XML_DEPTH:
+        raise ValueError("max_depth must be an int from 1 to %d" % MAX_XML_DEPTH)
+    if not isinstance(attributes_of, frozenset):
+        raise TypeError("attributes_of must be a frozenset of local names")
+    if count_limits is not None:
+        if not isinstance(count_limits, dict):
+            raise TypeError("count_limits must be a dict of local names to limits")
+        for local_name, limit in count_limits.items():
+            if not isinstance(local_name, str):
+                raise TypeError("count_limits names must be str")
+            if not local_name:
+                raise ValueError("count_limits names must not be empty")
+            if not isinstance(limit, int) or isinstance(limit, bool):
+                raise TypeError("count_limits values must be int, not bool")
+            if not 1 <= limit <= MAX_XML_ELEMENTS:
+                raise ValueError("count_limits values must be from 1 to %d" % MAX_XML_ELEMENTS)
     if len(text) > MAX_XML_CHARS:
         raise UnsafeXmlError("XML document exceeds %d characters" % MAX_XML_CHARS)
     if text.startswith(BOM):
@@ -192,14 +230,27 @@ def parse_xml(text):
     stack = []
     holder = []
     count = [0]
+    name_counts = {} if count_limits is None else dict.fromkeys(count_limits, 0)
 
-    def start(name, _attributes):
+    def start(name, attributes):
         count[0] += 1
         if count[0] > MAX_XML_ELEMENTS:
             raise UnsafeXmlError("XML document exceeds %d elements" % MAX_XML_ELEMENTS)
-        if len(stack) >= MAX_XML_DEPTH:
-            raise UnsafeXmlError("XML document exceeds depth %d" % MAX_XML_DEPTH)
-        element = XmlElement(name.rsplit(" ", 1)[-1])
+        if len(stack) >= max_depth:
+            raise UnsafeXmlError("XML document exceeds depth %d" % max_depth)
+        local_name = name.rsplit(" ", 1)[-1]
+        if local_name in name_counts:
+            name_counts[local_name] += 1
+            if name_counts[local_name] > count_limits[local_name]:
+                raise XmlCountError(local_name)
+        kept = None
+        if local_name in attributes_of:
+            if len(attributes) > MAX_KEPT_ATTRIBUTES:
+                raise UnsafeXmlError("XML element exceeds %d attributes" % MAX_KEPT_ATTRIBUTES)
+            # A namespace-qualified attribute arrives as "<uri> <local>"; only the
+            # unqualified ones (no separator) are kept.
+            kept = {key: value for key, value in attributes.items() if " " not in key}
+        element = XmlElement(local_name, kept)
         if stack:
             stack[-1].content.append(element)
         else:
@@ -813,7 +864,16 @@ def parse_landxml_points(xml_content):
     """
     if xml_content is None:
         raise TypeError("xmlContent is required")
-    root = parse_xml(xml_content)
+    return survey_points(parse_xml(xml_content))
+
+
+def survey_points(root):
+    """ParseLandXmlPoints's walk over an already parsed root (TerrainImporter.cs:105-138).
+
+    The one implementation of the N E Z rule: parse_landxml_points calls it, and so
+    does the typed LandXML intake (server/solar_landxml_import.py), so the two can
+    never read a point differently.
+    """
     points = []
     candidates = [root] + root.descendants()
     # XDocument.Descendants() includes the root element itself.
