@@ -392,14 +392,24 @@ def w1_graph_readiness(graph):
         # builtins/solar_panel_groups.py makes Roof frames only; validate_graph refuses them on a
         # Ground project (INSTALLATION_DESIGN_MISMATCH), so readiness must never advertise the run.
         mark(["solar-panel-groups"], False, "roof_installation_required")
-    grouped = sized and bool(graph["frames"]) and bool(graph["panels"]) and all(
+    templates = [frame["ground_slots"]["panel"] for frame in graph["frames"] if "ground_slots" in frame]
+    grouped = sized and not templates and bool(graph["frames"]) and bool(graph["panels"]) and all(
         item["validity"]["state"] == "valid"
         for item in graph["frames"] + graph["panels"] + graph["electrical_zones"]
     ) and all(panel["frame_ref"] is not None for panel in graph["panels"])
     mark(["solar-solve-proposal", "solar-commit-solve"], grouped,
          "sized_panel_groups_required")
+    # The equipment chain also counts the slot panels of compact Ground frames (codec
+    # leaf.solar-ground-slots.v1): each frame's shared template is the validity of every one of its
+    # slot panels, and a slot panel always sits in its own frame, so this equals `grouped` on the
+    # graph's expansion without expanding. A graph with no block gives exactly `grouped`. The solve
+    # keeps `grouped`: its request binding refuses a compact frame.
+    panelled = sized and bool(graph["frames"]) and bool(graph["panels"] or templates) and all(
+        item["validity"]["state"] == "valid"
+        for item in graph["frames"] + graph["panels"] + graph["electrical_zones"] + templates
+    ) and all(panel["frame_ref"] is not None for panel in graph["panels"])
     basis = upstream_basis(graph)
-    strings_current = grouped and bool(graph["strings"]) and not any(coverage(graph).values()) and all(
+    strings_current = panelled and bool(graph["strings"]) and not any(coverage(graph).values()) and all(
         isinstance(frame["extra"].get("solve", {}), dict) and
         frame["extra"].get("solve", {}).get("upstream_sha256", basis) == basis
         for frame in graph["frames"])
