@@ -13,6 +13,15 @@ import leaf_platform.store as store
 
 _READ_PREFIXES = ("list_", "get_", "find_", "count_", "hydrate_")
 
+# Documented equivalents of the org_id predicate, one per named function. Every
+# other function must still bind org_id itself.
+_EQUIVALENT_ORG_PREDICATES = {
+    # project_repository_authorities names its org column organization_id and is
+    # read by the full authority tuple (tenant_id AND organization_id AND project_id).
+    "resolve_project_repository_authority":
+        r"where[\s\S]*?tenant_id\s*=[\s\S]*?organization_id\s*=[\s\S]*?project_id\s*=",
+}
+
 
 def _public_functions():
     for name, fn in inspect.getmembers(store, inspect.isfunction):
@@ -61,6 +70,7 @@ def test_every_select_binds_org_id_predicate():
         if not re.search(r"\bSELECT\b", sql_literals, re.IGNORECASE):
             continue
         # a WHERE clause that mentions org_id must appear in the function body
-        if not re.search(r"where[\s\S]*?org_id", sql_literals, re.IGNORECASE):
+        predicate = _EQUIVALENT_ORG_PREDICATES.get(name, r"where[\s\S]*?org_id")
+        if not re.search(predicate, sql_literals, re.IGNORECASE):
             offenders.append(name)
     assert not offenders, f"store read functions missing an org_id predicate: {offenders}"

@@ -167,6 +167,7 @@ def test_automatic_resume_keeps_eligible_pending_work_moving(make_org, monkeypat
 
 def _outstanding_job(scope, principal, row):
     from job_pg_store import PostgresJobStore
+    from jobs import tenant_max_inflight
     job = str(uuid.uuid4())
     context = dict(schema='leaf.campaign-transform.v1', capability='campaign.records-to-csv',
                    recipe_id='json-records-to-csv', recipe_version=1, tenant_id=str(scope[0]),
@@ -179,7 +180,8 @@ def _outstanding_job(scope, principal, row):
     writer.submit(dict(job_id=job, tenant_id=str(scope[0]), org_id=str(scope[0]), project_id=str(scope[1]),
                        tool=context['tool_name'], params=json.dumps({'source_json': '[{"x":1}]'}), dwg='',
                        created_at=time.time(), execution=json.dumps({'completion_provenance': context}),
-                       authority_mode='legacy_sqlite', idempotency_key=job, submission_fingerprint='a' * 64, dwg_version=None))
+                       authority_mode='legacy_sqlite', idempotency_key=job, submission_fingerprint='a' * 64, dwg_version=None),
+                  max_inflight=tenant_max_inflight())
     return writer, job
 
 

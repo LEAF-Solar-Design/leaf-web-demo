@@ -164,6 +164,10 @@ class Suite:
     # DATABASE_URL flips unrelated code into PostgreSQL mode (customization
     # binding resolution, platform_link), so CI never exports it globally.
     uses_database: bool = False
+    # Extra environment variables that receive the SAME gate DSN alongside
+    # DATABASE_URL, for suites whose tests gate on their own variable name.
+    # Injected only when the gate hands this suite a database.
+    db_env_aliases: tuple[str, ...] = ()
     # Skip reasons tolerated ONLY while no gate database reached this suite (a
     # DB-less checkout or the hermetic GitHub test-gate). Once the gate injects
     # its DSN, a skip with one of these reasons FAILS the suite, so native CI,
@@ -353,6 +357,9 @@ def build_suites() -> List[Suite]:
         # sf-solar-ground-graph-scale piece 1: exact expansion; 96 cases + 4 template/row guards = 100.
         Suite("server-solar-ground-graph-codec", "server tests/test_solar_ground_graph_codec.py", "pytest", SERVER,
               _py_pytest("tests/test_solar_ground_graph_codec.py"), 100),
+        # sf-w3-conversion-graph piece 1: compact Ground frames in the graph contract; 41 cases.
+        Suite("server-solar-ground-compact-graph", "server tests/test_solar_ground_compact_graph.py", "pytest",
+              SERVER, _py_pytest("tests/test_solar_ground_compact_graph.py"), 41),
         # sf-solar-electrical-bridge: the kernel state to design graph topology mapping, both ways.
         Suite("server-solar-electrical-bridge", "server tests/test_solar_electrical_state_bridge.py", "pytest", SERVER,
               _py_pytest("tests/test_solar_electrical_state_bridge.py"), 83),
@@ -618,6 +625,13 @@ def build_suites() -> List[Suite]:
         # COUNTED: 20 tests + 38 more parametrizations = 58.
         Suite("server-solar-tool-solar-string-midpoint", "server tests/test_solar_tool_solar_string_midpoint.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_string_midpoint.py"), 58),
+        # Manual trench over the design graph (2026-10-01, sf-w3-trench-routing-manual): LEAFTRENCH between two
+        # picked points as one local-graph-commit, routed in drawing units by solar_inverter_outputs.route_path
+        # with the R27 metric options; reroute stales the routes riding the trench and their schedules. Inputs
+        # are authored in the file or are committed evidence, so the floor is the exact count on every runner.
+        # COUNTED: 20 tests + 25 more parametrizations = 45 (36 + 3 obstacle angles + 2 segment caps + 4 exceptions).
+        Suite("server-solar-tool-solar-trench-manual", "server tests/test_solar_tool_solar_trench_manual.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_trench_manual.py"), 45),
         # Auto-fill registry and persisted plan round trips: 17 tests + 50 more parametrizations = 67.
         Suite("server-solar-tool-solar-autofill", "server tests/test_solar_tool_solar_autofill.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_autofill.py"), 67),
@@ -642,6 +656,15 @@ def build_suites() -> List[Suite]:
         # committed evidence, so the floor is the exact count on every runner. COUNTED: 22.
         Suite("server-solar-tool-design-presets-apply", "server tests/test_solar_tool_design_presets_apply.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_design_presets_apply.py"), 22),
+        # Design presets and the installation design (2026-10-01, sf-w2-design-presets-installation):
+        # a preset of the other design is written to a drawing with no frame through the project-change
+        # rule and refused on one with frames (DESIGN_PRESET_INSTALLATION_POPULATED); the design is read
+        # back before every commit. Inputs are authored in the file or are committed evidence, so the
+        # floor is the exact count on every runner. COUNTED: 13 unparametrized tests + 9 resolution
+        # cases + 8 refusal cases + 3 project-change refusal cases = 33.
+        Suite("server-solar-tool-design-presets-installation",
+              "server tests/test_solar_tool_design_presets_installation.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_design_presets_installation.py"), 33),
         # A drawing-settings change stales the outputs built under the old settings (2026-09-30,
         # sf-solar-settings-invalidation): solar-settings and preset apply stale every homerun route and
         # schedule, so the export guard refuses them on a graph with no solve digest. Inputs are authored
@@ -1939,7 +1962,9 @@ def build_suites() -> List[Suite]:
         # against a pristine database, and an unreachable DB is a FAIL row.
         Suite("platform", "platform/tests (Postgres)", "pytest", REPO_PARENT,
               _py_pytest(f"{repo_name}/platform/tests"), 247, db_gated=True,
-              db_deferred="platform/tests cannot import campaign_product_execution under the gate (path), first seen once the gate supplied a database (studio-lanes follow-up)"),
+              # The overlay and annotation PostgreSQL proofs skipif-gate on
+              # their own variables, so they get the gate DSN under those too.
+              db_env_aliases=("OVERLAY_PG_URL", "ANNOTATION_PG_URL")),
         # W4h S1 rows: eight store (rows 1-7 and 13), five router (rows 8-11 and 14), one static.
         # Execution counts are verified by the paired planner.
         Suite("platform-ios-ship-source-catalog", "platform iOS source catalog", "pytest",
@@ -4026,6 +4051,7 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
             # with that DSN anyway, so its PostgreSQL tests fail by name.
         if dsn:
             db_env["DATABASE_URL"] = dsn
+            db_env.update(dict.fromkeys(suite.db_env_aliases, dsn))
     # A skip that only means "no database" is tolerated only when none was
     # handed to this child (see Suite.database_skip_reasons).
     allowed_skips = suite.allowed_skip_reasons + (

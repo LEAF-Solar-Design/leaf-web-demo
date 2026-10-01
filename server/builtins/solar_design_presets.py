@@ -8,15 +8,18 @@ drawing's current preset settings take the three always-synced layer names from 
 plugin's SyncFromGlobalSettings rule is applied to graph["settings"]: a Swap, the delete of the
 active preset, or supplied settings that differ from the graph change the graph's three layer
 names (and seed its string length and MPPT topology where they are still 0) through the
-solar-settings rule, which clears sizing confirmation. Otherwise no entity changes and no design
-output goes stale. The graph has no layer table and no DrawingStateSnapshot yet, so adoption and
+solar-settings rule, which clears sizing confirmation. The installation design is read back from
+graph["project"] the same way, and a preset of the other design is written to a drawing with no
+frame (the project-change rule) or refused on a drawing with frames
+(DESIGN_PRESET_INSTALLATION_POPULATED, server/solar_preset_sync.py). Otherwise no entity changes
+and no design output goes stale. The graph has no layer table and no DrawingStateSnapshot yet, so adoption and
 layer freeze or thaw touch nothing and every profile keeps the plugin's default drawing state.
 The 12 cable fields restore only when the target preset's CableMaterial is non-empty; the graph
 has no cable field, so they stay in the store.
 
 Refusals are named and checked in a fixed order: request shape, settings range, revision, stored
-store, graph settings the store cannot hold, then the subcommand's own rules. Pure: linear in the
-preset count, no I/O, no clock.
+store, graph settings the store cannot hold, then the subcommand's own rules, the kernel, and last
+the installation design. Pure: linear in the preset count, no I/O, no clock.
 """
 import re
 from datetime import datetime, timezone

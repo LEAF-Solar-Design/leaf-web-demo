@@ -30,11 +30,11 @@ MIGRATION = Path(__file__).resolve().parent.parent / "migrations" / "0042_annota
 BASE_DDL = """
 CREATE TABLE orgs (
   org_id UUID PRIMARY KEY, name TEXT NOT NULL, tier TEXT NOT NULL DEFAULT 'hosted_starter',
-  status TEXT NOT NULL DEFAULT 'active'
+  status TEXT NOT NULL DEFAULT 'active', deleted_at TIMESTAMPTZ
 );
 CREATE TABLE projects (
   project_id UUID PRIMARY KEY, org_id UUID NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
-  name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active',
+  name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', deleted_at TIMESTAMPTZ,
   UNIQUE (org_id, project_id)
 );
 CREATE TABLE drawing_artifacts (

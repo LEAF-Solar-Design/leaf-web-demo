@@ -139,6 +139,15 @@ def entities(graph: dict) -> list[dict]:
     ]
 
 
+def _ground_slots_codec():
+    """The compact Ground slot codec, imported only for a graph that carries a block."""
+    try:
+        from . import solar_ground_graph_codec as codec
+    except ImportError:
+        import solar_ground_graph_codec as codec
+    return codec
+
+
 def validate_graph(graph: dict) -> dict:
     """Return an isolated, unchanged graph, or refuse unsupported/malformed input.
 
@@ -182,6 +191,22 @@ def validate_graph(graph: dict) -> dict:
     index = {entity["id"]: entity for entity in all_entities}
     if len(index) != len(all_entities):
         raise GraphValidationError("DUPLICATE_APPLICATION_ID")
+    # Compact Ground frames (codec leaf.solar-ground-slots.v1): decided without expansion.
+    slot_frame = {}
+    compact_ids = set()
+    if any("ground_slots" in frame for frame in graph["frames"]):
+        _codec = _ground_slots_codec()
+        tables = _codec.decode_graph_slots(graph)
+        compact_ids = set(tables)
+        for frame_id, table in tables.items():
+            if table.panel["rev"] > rev or table.panel["provenance"]["source_rev"] > rev:
+                raise GraphValidationError("FUTURE_ENTITY_REVISION")
+            for panel_id in table.ids:
+                if panel_id in index:
+                    raise GraphValidationError("DUPLICATE_APPLICATION_ID")
+                slot_frame[panel_id] = frame_id
+        if len(graph["panels"]) + len(slot_frame) > _codec.MAX_GRAPH_SLOTS:
+            raise GraphValidationError("GRAPH_LIMIT_EXCEEDED")
     for entity in all_entities:
         if entity["id"].split(":")[1] != entity["kind"]:
             raise GraphValidationError("ID_KIND_MISMATCH")
@@ -221,9 +246,10 @@ def validate_graph(graph: dict) -> dict:
         for seq, panel_id in enumerate(string["ordered_panel_refs"]):
             if panel_id in members:
                 raise GraphValidationError("DUPLICATE_PANEL_MEMBERSHIP")
-            panel = index.get(panel_id)
-            if panel is None or panel["kind"] != "panel":
-                raise GraphValidationError("MISSING_PANEL")
+            if panel_id not in slot_frame:
+                panel = index.get(panel_id)
+                if panel is None or panel["kind"] != "panel":
+                    raise GraphValidationError("MISSING_PANEL")
             members[panel_id] = (string["id"], seq)
     for panel in graph["panels"]:
         assignment = panel["assignment"]
@@ -239,6 +265,8 @@ def validate_graph(graph: dict) -> dict:
             zone = index.get(frame["electrical_zone_ref"])
             if zone is None or zone["kind"] != "zone-el":
                 raise GraphValidationError("MISSING_ELECTRICAL_ZONE")
+        if frame["id"] in compact_ids:
+            continue
         if len(frame["matrix"]) != frame["module_rows"] or any(
             len(row) != frame["module_columns"] for row in frame["matrix"]
         ) or frame["module_slots"] != frame["module_rows"] * frame["module_columns"]:
@@ -284,7 +312,7 @@ def validate_graph(graph: dict) -> dict:
         if sequence_panels != {panel_id for panel_id in cell_panels if index[panel_id]["assignment"]["string_ref"] is not None}:
             raise GraphValidationError("FRAME_SEQUENCE_MISMATCH")
     for zone in graph["electrical_zones"]:
-        if any(index.get(panel_id, {}).get("kind") != "panel" for panel_id in zone["panel_refs"]):
+        if any(panel_id not in slot_frame and index.get(panel_id, {}).get("kind") != "panel" for panel_id in zone["panel_refs"]):
             raise GraphValidationError("MISSING_PANEL")
     assigned_strings = set()
     string_inputs = {}

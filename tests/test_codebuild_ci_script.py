@@ -70,6 +70,43 @@ class TestCodebuildCiScript(unittest.TestCase):
         self.assertLess(script.index("=== job contract ==="), script.index("=== job license-fence ==="))
         self.assertLess(script.index("=== job license-fence ==="), script.index("=== job test-gate ==="))
 
+    def test_autofill_solver_fetch_is_pinned_and_fail_open(self):
+        script = CI_PATH.read_text(encoding="utf-8")
+        block = script.split("# LEAF_AUTOFILL_SOLVER_BEGIN\n", 1)[1].split(
+            "# LEAF_AUTOFILL_SOLVER_END", 1)[0]
+        self.assertLess(script.index("# LEAF_AUTOFILL_SOLVER_END"),
+                        script.index("python scripts/run-all-gates.py"))
+        self.assertIn("deploy/autofill-solver-sources.json", block)
+        self.assertIn('prefix="forge-ci-relay/LEAF-Solar-Design/autofill-solver/'
+                      '${autofill_solver_revision}/"', block)
+        self.assertIn('aws s3api list-objects-v2 --bucket "$bucket" --prefix "$prefix"', block)
+        self.assertIn('manifest.get("head_sha") != revision', block)
+        self.assertIn('"LEAF-Solar-Design/autofill-solver"', block)
+        self.assertIn('git -C /tmp/autofill-solver checkout -q --detach "$autofill_solver_revision"',
+                      block)
+        self.assertIn('[[ "$(timeout 5 git -C /tmp/autofill-solver rev-parse HEAD)" == '
+                      '"$autofill_solver_revision" ]]', block)
+        # Every network, git and python call is bounded by timeout.
+        for line in block.splitlines():
+            if re.search(r"\b(?:aws|git|python3)\s", line) and "timeout" not in line \
+                    and not line.lstrip().startswith(("#", "echo")):
+                self.fail(f"unbounded command in solver fetch: {line.strip()}")
+        self.assertNotIn("unzip", block)
+        self.assertNotIn("set -e", block)
+        self.assertNotRegex(block, r"\bexit\s")
+        # AUTOFILL_SOLVER_ROOT is exported only on the success path; the
+        # fallback keeps the previous ABSENT_OK behavior.
+        branch = block.split("if fetch_autofill_solver; then\n", 1)[1]
+        success, fallback = branch.split("\nelse\n", 1)
+        self.assertEqual(script.count("AUTOFILL_SOLVER_ROOT="), 1)
+        self.assertIn("export AUTOFILL_SOLVER_ROOT=/tmp/autofill-solver "
+                      'AUTOFILL_SOLVER_REVISION="$autofill_solver_revision"', success)
+        self.assertIn("autofill-solver: pinned", success)
+        self.assertNotIn("LEAF_AUTOFILL_SOLVER_ABSENT_OK", success)
+        self.assertIn("export LEAF_AUTOFILL_SOLVER_ABSENT_OK=1", fallback)
+        self.assertNotIn("AUTOFILL_SOLVER_ROOT", fallback)
+        self.assertEqual(script.count("export LEAF_AUTOFILL_SOLVER_ABSENT_OK=1"), 1)
+
     def test_gate_proof_receipt_guard(self):
         script = CI_PATH.read_text(encoding="utf-8")
         guard = script.split("<<'LEAF_GATE_PROOF_ELIGIBLE'\n", 1)[1].split(

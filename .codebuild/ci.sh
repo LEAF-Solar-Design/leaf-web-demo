@@ -543,7 +543,94 @@ echo "LEAF_T end chromium $(date +%s%3N) rc=0"
 echo "LEAF_T start gate $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR"
 echo "--- 6/6 Run unsharded test gate and print scoreboard"
-export LEAF_AUTOFILL_SOLVER_ABSENT_OK=1
+# LEAF_AUTOFILL_SOLVER_BEGIN
+# Fetch the pinned autofill-solver from its Forge relay snapshot so the solver
+# suites run against the real checkout. Bounded and fail-open: every command
+# runs under timeout (about 80 s worst case), the function is only ever called
+# as an if condition so errexit never aborts the build, and any failure falls
+# back to LEAF_AUTOFILL_SOLVER_ABSENT_OK, the previous behavior. Integrity is
+# git's own: the cloned HEAD must equal the pinned 40-hex revision.
+autofill_solver_fail() {
+  echo "autofill-solver: $1 failed; falling back to LEAF_AUTOFILL_SOLVER_ABSENT_OK" >&2
+  return 1
+}
+fetch_autofill_solver() {
+  local bucket=leaf-developer-platform-artifacts-807034087062-us-east-1
+  local work listing
+  autofill_solver_revision=""
+  autofill_solver_key=""
+  autofill_solver_revision="$(timeout 5 python3 -I -B - deploy/autofill-solver-sources.json <<'LEAF_AUTOFILL_PIN'
+import json
+import re
+import sys
+try:
+    pins = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    sys.exit(1)
+if not isinstance(pins, dict) or len(pins) != 1:
+    sys.exit(1)
+revision = next(iter(pins))
+if not re.fullmatch(r"[0-9a-f]{40}", revision):
+    sys.exit(1)
+print(revision)
+LEAF_AUTOFILL_PIN
+)" || { autofill_solver_fail "pin read"; return 1; }
+  [[ "$autofill_solver_revision" =~ ^[0-9a-f]{40}$ ]] || { autofill_solver_fail "pin read"; return 1; }
+  local prefix="forge-ci-relay/LEAF-Solar-Design/autofill-solver/${autofill_solver_revision}/"
+  listing="$(timeout 10 aws s3api list-objects-v2 --bucket "$bucket" --prefix "$prefix" \
+    --max-items 1000 --output json 2>/dev/null)" || { autofill_solver_fail "snapshot list"; return 1; }
+  autofill_solver_key="$(printf '%s' "$listing" | timeout 5 python3 -I -B -c '
+import json
+import sys
+try:
+    contents = json.load(sys.stdin).get("Contents") or []
+except ValueError:
+    sys.exit(1)
+zips = [o for o in contents if str(o.get("Key", "")).endswith(".zip")]
+if not zips:
+    sys.exit(1)
+print(max(zips, key=lambda o: str(o.get("LastModified", "")))["Key"])
+')" || { autofill_solver_fail "snapshot select"; return 1; }
+  [[ "$autofill_solver_key" == "$prefix"*.zip ]] || { autofill_solver_fail "snapshot select"; return 1; }
+  work="$(mktemp -d)" || { autofill_solver_fail "mktemp"; return 1; }
+  timeout 30 aws s3api get-object --bucket "$bucket" --key "$autofill_solver_key" \
+    "$work/snapshot.zip" >/dev/null 2>&1 || { autofill_solver_fail "snapshot download"; return 1; }
+  timeout 10 python3 -I -B - "$work/snapshot.zip" "$work" "$autofill_solver_revision" <<'LEAF_AUTOFILL_EXTRACT' || { autofill_solver_fail "snapshot extract"; return 1; }
+import json
+import shutil
+import sys
+import zipfile
+from pathlib import Path
+archive, out, revision = sys.argv[1], Path(sys.argv[2]), sys.argv[3]
+try:
+    with zipfile.ZipFile(archive) as zf:
+        for name in ("manifest.json", "snapshot.bundle"):
+            with zf.open(name) as src, open(out / name, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+except (OSError, ValueError, KeyError, zipfile.BadZipFile):
+    sys.exit(1)
+if manifest.get("head_sha") != revision:
+    sys.exit(1)
+if manifest.get("repository") != "LEAF-Solar-Design/autofill-solver":
+    sys.exit(1)
+LEAF_AUTOFILL_EXTRACT
+  rm -rf /tmp/autofill-solver
+  timeout 15 git clone -q --no-checkout "$work/snapshot.bundle" /tmp/autofill-solver \
+    || { autofill_solver_fail "bundle clone"; return 1; }
+  timeout 5 git -C /tmp/autofill-solver checkout -q --detach "$autofill_solver_revision" \
+    || { autofill_solver_fail "revision checkout"; return 1; }
+  [[ "$(timeout 5 git -C /tmp/autofill-solver rev-parse HEAD)" == "$autofill_solver_revision" ]] \
+    || { autofill_solver_fail "HEAD verification"; return 1; }
+  rm -rf "$work"
+}
+if fetch_autofill_solver; then
+  export AUTOFILL_SOLVER_ROOT=/tmp/autofill-solver AUTOFILL_SOLVER_REVISION="$autofill_solver_revision"
+  echo "autofill-solver: pinned $autofill_solver_revision from relay snapshot $autofill_solver_key"
+else
+  export LEAF_AUTOFILL_SOLVER_ABSENT_OK=1
+fi
+# LEAF_AUTOFILL_SOLVER_END
 export LEAF_MANAGED_WEB_BROWSER_MODE=trusted-template-container
 mkdir -p /tmp/gate-results
 if [[ "$reporters_ready" == 1 ]]; then

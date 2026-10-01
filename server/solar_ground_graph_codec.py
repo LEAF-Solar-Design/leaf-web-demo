@@ -45,8 +45,12 @@ import re
 import struct
 from typing import NamedTuple
 
-import solar_design_graph as _graph
-from solar_design_graph import GraphValidationError, _bounded_json
+try:
+    from . import solar_design_graph as _graph
+    from .solar_design_graph import GraphValidationError, _bounded_json
+except ImportError:
+    import solar_design_graph as _graph
+    from solar_design_graph import GraphValidationError, _bounded_json
 
 CODEC = "leaf.solar-ground-slots.v1"
 SLOTS_KEY = "ground_slots"

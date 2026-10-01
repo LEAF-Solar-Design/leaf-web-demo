@@ -57,9 +57,12 @@ def _assert_section10_shape(body):
     assert body["ok"] is False
     assert isinstance(body["degraded_mode"], bool)
     assert body["error"] is not None
-    assert set(body["error"].keys()) == {"error_code", "message", "retryable"}
+    assert set(body["error"].keys()) == {
+        "error_code", "message", "retryable", "retry_class", "actor", "next_action"}
     assert body["error"]["message"]
     assert isinstance(body["error"]["retryable"], bool)
+    for key in ("retry_class", "actor", "next_action"):
+        assert isinstance(body["error"][key], str) and body["error"][key]
 
 
 # --------------------------------------------------------------------------- #
