@@ -70,7 +70,8 @@
       "0066",
       "0067",
       "0068",
-      "0069"
+      "0069",
+      "0070"
     ],
     "completeness": "partial",
     "reason": "Historical backfill commands are not present in this repository, and most live staging and production selector values are still unrecorded. A recorded value names the task-definition revision, and where the value is the shipped image default, the image digest it was read from. Status measured_no_override means no deployment-layer override was set and the value is the repository default the image bakes; it is not an operator selection for that environment. Every named revision and digest ages."
@@ -238,7 +239,8 @@
       ],
       "postgres_tables": [
         "async_jobs",
-        "async_job_terminal_conflicts"
+        "async_job_terminal_conflicts",
+        "aps_completion_receipts"
       ],
       "legacy_source": [
         "JOBS_DB SQLite jobs table"

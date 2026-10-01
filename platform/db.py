@@ -400,9 +400,14 @@ _AUTHORITY_REQUIRED_COLUMNS = {
             "lease_owner", "lease_expires_at", "heartbeat_at", "provenance_json",
             "terminal_fingerprint", "terminal_conflict_json", "org_id", "project_id",
             "authority_mode", "idempotency_key", "submission_fingerprint", "dwg_version",
+            "aps_workitem_id", "aps_workitem_attempt",
         },
         "async_job_terminal_conflicts": {
             "job_id", "fingerprint", "evidence_json", "received_at",
+        },
+        "aps_completion_receipts": {
+            "job_id", "attempt", "workitem_id", "body", "timestamp", "nonce",
+            "signature", "reserved_at",
         },
     },
     "callback_replay": {
