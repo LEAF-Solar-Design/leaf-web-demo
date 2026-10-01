@@ -3283,8 +3283,12 @@ def reporting_command(suite: Suite, argv: List[str], trace_env: dict) -> List[st
                 "  if (name.startsWith('.')) name = rebase(name);\n"
                 "  if (options?.outputFolder) options = {...options, outputFolder: rebase(options.outputFolder)};\n"
                 "  return options ? [name, options] : [name]; });\n"
+                # Playwright resolves webServer.cwd against the config file, which now lives in the report directory.
+                "const server = item => ({...item, cwd: rebase(item.cwd || '.')});\n"
                 "export default {...paths(config), testDir: rebase(config.testDir || '.'),\n"
                 "  ...(config.projects ? {projects: config.projects.map(paths)} : {}),\n"
+                "  ...(config.webServer ? {webServer: Array.isArray(config.webServer)\n"
+                "    ? config.webServer.map(server) : server(config.webServer)} : {}),\n"
                 "  reporter: [...reporters, [" + json.dumps(reporter) + "]]};\n",
                 encoding="utf-8")
             command[index] = str(wrapper)
