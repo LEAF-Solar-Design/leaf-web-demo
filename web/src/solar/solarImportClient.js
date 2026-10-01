@@ -10,11 +10,14 @@
 // bytes), POST .../imports/solaredge-pdf/report (a JSON match request of at
 // most 4096 bytes) and GET .../artifacts/{artifact_id}. Every refusal body
 // carries its code, never prose, so this module owns the sentence for each.
+// The guest gate (server/deps.py) answers all three with a 403 that carries no
+// reason code; that body is FORBIDDEN, the rule solarLandxmlClient.js applies.
 //
 // Wall time: each call has one deadline, its budget from SOLAREDGE_TIMEOUTS_MS,
-// measured from the call's start. It covers the request, the headers and every
-// body read, so a server that sends headers and then stalls its body still
-// settles the call. Body size is bounded in bytes while reading, never after.
+// measured from the call's start, before its arguments are read. It covers the
+// prechecks, the request, the headers, every body read and the work after the
+// last read, so a success is never returned once the budget has elapsed.
+// Body size is bounded in bytes while reading, never after.
 //
 // A download is kept only after its SHA-256 matches the record. The default
 // digest is crypto.subtle, present in Node and in browsers on a secure origin
@@ -99,6 +102,7 @@ export const SOLAREDGE_IMPORT_REASONS = Object.freeze({
   SOLAREDGE_REPORT_AMBIGUOUS: 'The report matched a panel group more than one way, so make it with the recorded order',
   STALE_GRAPH_REVISION: 'The solar design changed since this step opened, so try again',
   UNAUTHENTICATED: 'Sign in again to import a SolarEdge PDF',
+  FORBIDDEN: 'A guest session cannot use the SolarEdge import, so sign in to an account',
   ENTITLEMENT_REQUIRED: 'Your plan does not include this SolarEdge import step',
   ENTITLEMENT_POLICY_UNAVAILABLE: 'The plan policy could not be read, so this step stays off',
   SOLAREDGE_CLIENT_REQUEST_INVALID: 'This SolarEdge step was given input it cannot send',
@@ -115,6 +119,7 @@ const DRAWING_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,62}$/
 const HEX64_PATTERN = /^[0-9a-f]{64}$/
 const FILENAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,119}\.(pdf|json)$/
 const EXTENSION_OF_MEDIA_TYPE = Object.freeze({ 'application/pdf': 'pdf', 'application/json': 'json' })
+const MAX_PROJECT_ID_CHARS = 100
 const MAX_SOURCE_VERSION = 2147483647
 const MAX_PAGES = 50
 const MAX_COUNT = 10_000_000
@@ -163,8 +168,10 @@ function isIntegerIn(value, low, high) {
   return Number.isInteger(value) && value >= low && value <= high
 }
 
+// 1 to 100 code points, the routes' own bound (Python len counts code points).
 function isProjectId(value) {
-  return typeof value === 'string' && value.length >= 1 && value.length <= 100
+  if (typeof value !== 'string' || value.length === 0 || value.length > 2 * MAX_PROJECT_ID_CHARS) return false
+  return [...value].length <= MAX_PROJECT_ID_CHARS
 }
 
 function isDrawingId(value) {
@@ -293,12 +300,13 @@ function headerOf(response, name) {
   }
 }
 
-// True when a present all-digit content-length is over the cap. More than 16 digits is over every
-// cap; a value that is not all digits leaves the decision to the bytes actually read.
+// True when a present all-digit content-length is over the cap. Leading zeros are not digits of
+// the value; more than 16 digits after them is over every cap; a value that is not all digits
+// leaves the decision to the bytes actually read.
 function declaredOver(response, cap) {
   const value = headerOf(response, 'content-length')
   if (value === null) return false
-  const digits = value.trim()
+  const digits = value.trim().replace(/^0+(?=\d)/, '')
   if (!/^\d+$/.test(digits)) return false
   return digits.length > 16 || Number(digits) > cap
 }
@@ -323,13 +331,13 @@ function monotonicNow() {
   return typeof globalThis.performance?.now === 'function' ? globalThis.performance.now() : Date.now()
 }
 
-// One call's deadline and cancellation. The deadline runs from the call's start and covers the
+// One call's deadline and cancellation. The deadline runs from startedAt (the call's start, taken
+// before its arguments are read) and covers the prechecks, the
 // request, the headers and every body read; the caller's signal is forwarded while the call lives.
 // Two things end a call at its deadline: the timer ends a stalled read, and expired() ends a flood
 // of reads that are always ready (they settle on the microtask queue, so the timer never runs).
-function openCall(timeoutMs, callerSignal) {
+function openCall(timeoutMs, callerSignal, startedAt) {
   const controller = new AbortController()
-  const startedAt = monotonicNow()
   let reason = null
   let wake
   const stopped = new Promise((resolve) => { wake = resolve })
@@ -340,10 +348,18 @@ function openCall(timeoutMs, callerSignal) {
     controller.abort()
   }
   const onCallerAbort = () => halt('aborted')
-  const timer = setTimeout(() => halt('timeout'), timeoutMs)
+  const timer = setTimeout(() => halt('timeout'), Math.max(0, timeoutMs - (monotonicNow() - startedAt)))
   if (callerSignal) {
-    if (callerSignal.aborted) onCallerAbort()
-    else callerSignal.addEventListener('abort', onCallerAbort, { once: true })
+    // A signal that throws while registering leaves no timer and no listener behind.
+    try {
+      if (callerSignal.aborted) onCallerAbort()
+      else callerSignal.addEventListener('abort', onCallerAbort, { once: true })
+    } catch (error) {
+      clearTimeout(timer)
+      // Either error reaches the method's own catch, which answers REQUEST_INVALID.
+      callerSignal.removeEventListener('abort', onCallerAbort)
+      throw error
+    }
   }
   return {
     signal: controller.signal,
@@ -372,7 +388,11 @@ function openCall(timeoutMs, callerSignal) {
     },
     close() {
       clearTimeout(timer)
-      callerSignal?.removeEventListener('abort', onCallerAbort)
+      try {
+        callerSignal?.removeEventListener('abort', onCallerAbort)
+      } catch {
+        // A cleanup failure never changes the result.
+      }
     },
   }
 }
@@ -406,7 +426,14 @@ async function readStream(call, body, cap) {
       releaseBody(null, reader)
       return UNREADABLE
     }
-    if (step.done === true) break
+    if (step.done === true) {
+      // The read that ends the body is inside the deadline too.
+      if (call.expired()) {
+        releaseBody(null, reader)
+        return STOPPED
+      }
+      break
+    }
     if (!isByteChunk(step.value)) {
       releaseBody(null, reader)
       return UNREADABLE
@@ -460,6 +487,8 @@ async function readBody(call, response, cap, fallback) {
     if (typeof value !== 'string') return UNREADABLE
     // Every UTF-16 unit is at least one UTF-8 byte, so the length alone can refuse without encoding.
     if (value.length > cap || new TextEncoder().encode(value).byteLength > cap) return OVERSIZE
+    // A replaced invalid byte and a literal U+FFFD are the same once decoded, so this path fails closed.
+    if (value.includes('\uFFFD')) return UNREADABLE
     return { ok: true, text: value }
   }
   if (!(value instanceof ArrayBuffer)) return UNREADABLE
@@ -506,6 +535,10 @@ async function refusalOf(call, response, status) {
   if (isPlainObject(body) && isPlainObject(body.error)
     && typeof body.error.reason_code === 'string' && CODE_PATTERN.test(body.error.reason_code)) {
     return refuse(status, body.error.reason_code, body.error.retryable === true)
+  }
+  // The guest gate (server/deps.py) answers 403 FORBIDDEN with no reason code.
+  if (status === 403 && isPlainObject(body) && isPlainObject(body.error) && body.error.error_code === 'FORBIDDEN') {
+    return refuse(status, 'FORBIDDEN', false)
   }
   return refuse(status, 'SOLAREDGE_CLIENT_RESPONSE_INVALID', retryableServer)
 }
@@ -565,7 +598,8 @@ export function createSolarImportClient({ fetchImpl, apiBase = '', headers, onRe
       return null
     }
     if (!isPlainObject(value)) return null
-    const copy = {}
+    // No prototype, so a header named __proto__ is an own key like any other.
+    const copy = Object.create(null)
     for (const key of Reflect.ownKeys(value)) {
       if (typeof key !== 'string' || typeof value[key] !== 'string') return null
       copy[key] = value[key]
@@ -574,28 +608,57 @@ export function createSolarImportClient({ fetchImpl, apiBase = '', headers, onRe
   }
 
   // Opens one bounded call, runs it and always closes it. An invalid caller signal sends nothing.
-  async function bounded(timeoutMs, signal, run) {
+  // startedAt is the moment the method was entered, so the prechecks spend the same budget.
+  async function bounded(timeoutMs, signal, startedAt, run) {
     if (!isSignal(signal)) return refuse(null, 'SOLAREDGE_CLIENT_REQUEST_INVALID', false)
-    const call = openCall(timeoutMs, signal)
+    const call = openCall(timeoutMs, signal, startedAt)
+    let result
     try {
-      return await run(call)
+      if (call.expired()) return call.failure(null)
+      result = await run(call)
     } finally {
       call.close()
     }
+    // The call is closed before its last check, so a success never leaves a call that has stopped: the
+    // work after the last read (assembling the chunks, parsing, reading a header) and the cleanup of the
+    // caller's signal are inside the deadline too, and an abort the caller made before we answer counts.
+    if (result.ok === true) {
+      try {
+        if (signal?.aborted === true) call.halt('aborted')
+      } catch {
+        // A signal whose aborted getter throws leaves the answer as the call decided it.
+      }
+      if (call.expired()) return call.failure(200)
+    }
+    return result
   }
 
   // One exchange inside a call. Resolves to { failure } or, on a 200, { response, status }.
   async function exchange(call, { drawingId, path, query = '', method, extraHeaders = {}, body, signal }) {
     const base = requestHeaders(drawingId)
     if (base === null) return { failure: refuse(null, 'SOLAREDGE_CLIENT_REQUEST_INVALID', false) }
-    const sent = { ...base, ...extraHeaders }
+    // A header this call sets replaces an injected one of the same name in any casing.
+    const forced = Object.keys(extraHeaders).map((key) => key.toLowerCase())
+    const sent = Object.create(null)
+    for (const key of Object.keys(base)) {
+      if (!forced.includes(key.toLowerCase())) sent[key] = base[key]
+    }
+    for (const key of Object.keys(extraHeaders)) sent[key] = extraHeaders[key]
     const init = { method, headers: sent, signal: call.signal }
     if (body !== undefined) init.body = body
     // fetchImpl receives the call's own signal, so an abort after the headers still reaches the
     // transport; the budget's own timer is forwarded into the call as its deadline.
-    const callFetch = (input, budgetInit) => {
+    const callFetch = async (input, budgetInit) => {
       budgetInit?.signal?.addEventListener?.('abort', () => call.halt('timeout'), { once: true })
-      return fetchImpl(input, { ...budgetInit, signal: call.signal })
+      const raw = Promise.resolve().then(() => fetchImpl(input, { ...budgetInit, signal: call.signal }))
+      const settled = await call.race(() => raw)
+      if (settled === STOPPED) {
+        // The helper's finally must run now, so its timer and listener are released with the call.
+        raw.then((late) => releaseBody(late), () => {})
+        throw new Error('solaredge call stopped')
+      }
+      if ('error' in settled) throw settled.error
+      return settled.value
     }
     const pending = Promise.resolve()
       .then(() => fetchWithBudget(callFetch, `${apiBase}${path}${query}`, init, call.timeoutMs))
@@ -642,15 +705,17 @@ export function createSolarImportClient({ fetchImpl, apiBase = '', headers, onRe
     return value === null ? refuse(200, 'SOLAREDGE_CLIENT_RESPONSE_INVALID', false) : succeed(value)
   }
 
-  async function uploadPdf({ drawingId, file, projectId = null, signal } = {}) {
+  async function uploadPdf(options) {
     try {
+      const startedAt = monotonicNow()
+      const { drawingId, file, projectId = null, signal } = options === undefined ? {} : options
       if (!isDrawingId(drawingId)) return refuse(null, 'IMPORT_DRAWING_ID_INVALID', false)
       if (projectId !== null && !isProjectId(projectId)) return refuse(null, 'IMPORT_PROJECT_ID_INVALID', false)
       const size = sizeOf(file)
       if (size === null) return refuse(null, 'SOLAREDGE_CLIENT_REQUEST_INVALID', false)
       if (size === 0) return refuse(null, 'IMPORT_PDF_EMPTY', false)
       if (size > SOLAREDGE_PDF_MAX_BYTES) return refuse(null, 'IMPORT_PDF_TOO_LARGE', false)
-      return await bounded(budgets.upload, signal, async (call) => {
+      return await bounded(budgets.upload, signal, startedAt, async (call) => {
         const exchanged = await exchange(call, {
           drawingId,
           path: `/api/drawings/${encodeURIComponent(drawingId)}/imports/solaredge-pdf`,
@@ -668,10 +733,12 @@ export function createSolarImportClient({ fetchImpl, apiBase = '', headers, onRe
     }
   }
 
-  async function requestReport({
-    drawingId, sourceArtifactId, alignmentTolerance, selectionOrder = 'unknown', projectId = null, signal,
-  } = {}) {
+  async function requestReport(options) {
     try {
+      const startedAt = monotonicNow()
+      const {
+        drawingId, sourceArtifactId, alignmentTolerance, selectionOrder = 'unknown', projectId = null, signal,
+      } = options === undefined ? {} : options
       if (!isDrawingId(drawingId)) return refuse(null, 'REPORT_DRAWING_ID_INVALID', false)
       if (typeof sourceArtifactId !== 'string' || !HEX64_PATTERN.test(sourceArtifactId)
         || typeof alignmentTolerance !== 'number' || !Number.isFinite(alignmentTolerance)
@@ -688,7 +755,7 @@ export function createSolarImportClient({ fetchImpl, apiBase = '', headers, onRe
         ...(projectId === null ? {} : { project_id: projectId }),
       })
       if (utf8Length(body) > SOLAREDGE_REPORT_REQUEST_MAX_BYTES) return refuse(null, 'REPORT_REQUEST_TOO_LARGE', false)
-      return await bounded(budgets.report, signal, async (call) => {
+      return await bounded(budgets.report, signal, startedAt, async (call) => {
         const exchanged = await exchange(call, {
           drawingId,
           path: `/api/drawings/${encodeURIComponent(drawingId)}/imports/solaredge-pdf/report`,
@@ -707,15 +774,19 @@ export function createSolarImportClient({ fetchImpl, apiBase = '', headers, onRe
     }
   }
 
-  async function downloadArtifact({ drawingId, ref, current = false, signal, maxBytes = SOLAR_ARTIFACT_MAX_BYTES } = {}) {
+  async function downloadArtifact(options) {
     try {
+      const startedAt = monotonicNow()
+      const {
+        drawingId, ref, current = false, signal, maxBytes = SOLAR_ARTIFACT_MAX_BYTES,
+      } = options === undefined ? {} : options
       if (!isDrawingId(drawingId) || typeof current !== 'boolean'
         || !isIntegerIn(maxBytes, 1, SOLAR_ARTIFACT_MAX_BYTES)
         || !validateSolarArtifactRef(ref, drawingId, { maxBytes })) {
         return refuse(null, 'ARTIFACT_ID_INVALID', false)
       }
       const record = copyRef(ref)
-      return await bounded(budgets.artifact, signal, async (call) => {
+      return await bounded(budgets.artifact, signal, startedAt, async (call) => {
         const exchanged = await exchange(call, {
           drawingId,
           path: record.download,
