@@ -125,6 +125,275 @@ def _temp_blob(data: bytes) -> str:
     return name
 
 
+@pytest.fixture
+def drawing_reconciler():
+    import importlib.util
+    path = Path(__file__).resolve().parents[2] / "scripts" / "reconcile_drawing_authority.py"
+    spec = importlib.util.spec_from_file_location("drawing_reconciler", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture
+def drained_drawing(tmp_path):
+    import json
+    token = uuid.uuid4().hex
+    tenant, drawing = f"backfill-{token}", f"drawing-{token}"
+    root = tmp_path / "legacy"
+    versions = []
+    blobs = {}
+    for number in (1, 2):
+        data = f"immutable drawing {number}".encode()
+        key = store.drawing_version_key(tenant, drawing, number)
+        path = root / key
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        blobs[key] = data
+        versions.append({
+            "v": number, "parent": number - 1 if number > 1 else None,
+            "created": f"2026-09-01T12:00:0{number}+00:00",
+            "ready_at": f"2026-09-01T12:01:0{number}+00:00",
+            "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(),
+            "workitem_id": f"workitem-{number}", "tool": "fixture-tool",
+            "note": "initial ingest" if number == 1 else "authored change",
+            "source_ref": "a" * 64 if number == 2 else None,
+        })
+    manifest = {
+        "schema": 1, "tenant_id": tenant, "drawing_id": drawing,
+        "head": 1, "latest": 2, "checkout": None, "checkout_fence": 17,
+        "created_at": "2026-09-01T12:00:01+00:00",
+        "updated_at": "2026-09-01T12:02:00+00:00", "versions": versions,
+    }
+    path = root / store.manifest_key(tenant, drawing)
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    return root, tenant, drawing, manifest, blobs
+
+
+def _reconcile_fixture(reconciler, fixture, database, mode="backfill", **kwargs):
+    root, tenant, drawing, _manifest, _blobs = fixture
+    return reconciler.reconcile(
+        mode=mode, source_dir=root, tenant_id=tenant, drawing_id=drawing,
+        database=database, **kwargs,
+    )
+
+
+@requires_database
+def test_drawing_backfill_repeat_reverse_reimport_preserves_metadata_and_blobs(
+    postgres_authority, drawing_reconciler, drained_drawing, tmp_path,
+):
+    import json
+    root, tenant, drawing, manifest, blobs = drained_drawing
+    first = _reconcile_fixture(drawing_reconciler, drained_drawing, postgres_authority)
+    assert first["inserted"] == {"manifests": 1, "versions": 2}
+    second = _reconcile_fixture(drawing_reconciler, drained_drawing, postgres_authority)
+    assert second["inserted_total"] == 0
+    assert second["parity"]
+    assert _reconcile_fixture(drawing_reconciler, drained_drawing, postgres_authority, "parity")["parity"]
+    output = tmp_path / "reverse"
+    _reconcile_fixture(drawing_reconciler, drained_drawing, postgres_authority,
+                       "reverse", output_dir=output)
+    exported = json.loads((output / store.manifest_key(tenant, drawing)).read_text())
+    expected = drawing_reconciler.validate_manifest(
+        manifest, tenant_id=tenant, drawing_id=drawing, blob_dir=root,
+    )
+    assert exported == expected
+    assert list(output.rglob("*.dwg")) == []
+    with postgres_authority.transaction() as conn:
+        conn.execute("DELETE FROM drawing_store_manifests WHERE tenant_id = %s AND drawing_id = %s",
+                     (tenant, drawing))
+    restored = drawing_reconciler.reconcile(
+        mode="backfill", source_dir=output, blob_dir=root, tenant_id=tenant,
+        drawing_id=drawing, database=postgres_authority,
+    )
+    assert restored["inserted_total"] == 3
+    assert drawing_reconciler.reconcile(
+        mode="parity", source_dir=output, blob_dir=root, tenant_id=tenant,
+        drawing_id=drawing, database=postgres_authority,
+    )["parity"]
+    for key, original in blobs.items():
+        assert (root / key).read_bytes() == original
+        assert hashlib.sha256((root / key).read_bytes()).digest() == hashlib.sha256(original).digest()
+
+
+@requires_database
+def test_drawing_backfill_conflict_rolls_back_and_does_not_overwrite(
+    postgres_authority, drawing_reconciler, drained_drawing,
+):
+    import json
+    root, tenant, drawing, manifest, _blobs = drained_drawing
+    _reconcile_fixture(drawing_reconciler, drained_drawing, postgres_authority)
+    manifest["versions"][1]["note"] = "conflicting note"
+    (root / store.manifest_key(tenant, drawing)).write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="version conflict"):
+        _reconcile_fixture(drawing_reconciler, drained_drawing, postgres_authority)
+    assert not _reconcile_fixture(drawing_reconciler, drained_drawing, postgres_authority, "parity")["parity"]
+    with postgres_authority.cursor() as cur:
+        rows = cur.execute(
+            "SELECT note FROM drawing_store_versions WHERE tenant_id = %s AND drawing_id = %s ORDER BY version",
+            (tenant, drawing),
+        ).fetchall()
+    assert [row["note"] for row in rows] == ["initial ingest", "authored change"]
+
+
+@requires_database
+def test_drawing_backfill_accepts_real_legacy_manifest_and_defaults_reverse_to_sibling(
+    postgres_authority, drawing_reconciler, monkeypatch, tmp_path,
+):
+    import json
+    token = uuid.uuid4().hex
+    tenant, drawing = f"legacy-{token}", f"drawing-{token}"
+    root = tmp_path / "legacy"
+    backend = store.FilesystemBackend(str(root))
+    original = tmp_path / "drawing.dwg"
+    original.write_bytes(b"real legacy ingest")
+    monkeypatch.setenv("LEAF_DRAWING_STORE", "legacy")
+    store.ingest_drawing(backend, tenant, str(original), drawing_id=drawing)
+    source_bytes = (root / store.manifest_key(tenant, drawing)).read_bytes()
+    args = dict(source_dir=root, tenant_id=tenant, drawing_id=drawing, database=postgres_authority)
+    assert drawing_reconciler.reconcile(mode="backfill", **args)["inserted_total"] == 2
+    assert drawing_reconciler.reconcile(mode="backfill", **args)["inserted_total"] == 0
+    exported = drawing_reconciler.reconcile(mode="reverse", **args)
+    output = root.with_name("legacy-drawing-reverse")
+    assert exported["output_dir"] == str(output.resolve())
+    manifest = json.loads((output / store.manifest_key(tenant, drawing)).read_text())
+    assert manifest["checkout_fence"] == 0
+    assert manifest["versions"][0]["source_ref"] is None
+    assert (root / store.manifest_key(tenant, drawing)).read_bytes() == source_bytes
+    assert backend.get(store.drawing_version_key(tenant, drawing, 1)) == b"real legacy ingest"
+    assert os.environ["LEAF_DRAWING_STORE"] == "legacy"
+
+
+@requires_database
+@pytest.mark.parametrize("defect", ["blob", "intake"])
+def test_drawing_reverse_rejects_corruption_and_unsupported_proof_without_output(
+    postgres_authority, drawing_reconciler, drained_drawing, tmp_path, defect,
+):
+    root, tenant, drawing, _manifest, _blobs = drained_drawing
+    _reconcile_fixture(drawing_reconciler, drained_drawing, postgres_authority)
+    if defect == "blob":
+        (root / store.drawing_version_key(tenant, drawing, 2)).write_bytes(b"corrupted fixture")
+    else:
+        with postgres_authority.transaction() as conn:
+            conn.execute(
+                "UPDATE drawing_store_versions SET intake_ref='unsupported-proof', intake_sha256=%s "
+                "WHERE tenant_id=%s AND drawing_id=%s AND version=2",
+                ("b" * 64, tenant, drawing),
+            )
+    output = tmp_path / "reverse"
+    with pytest.raises(ValueError, match="hash/size|unsupported"):
+        _reconcile_fixture(drawing_reconciler, drained_drawing, postgres_authority,
+                           "reverse", output_dir=output)
+    assert not output.exists()
+
+
+@requires_database
+def test_drawing_backfill_late_unique_conflict_commits_no_partial_drawing(
+    postgres_authority, drawing_reconciler, drained_drawing,
+):
+    root, tenant, drawing, manifest, blobs = drained_drawing
+    other = f"other-{uuid.uuid4().hex}"
+    # A different scoped row occupying the second immutable key causes a real
+    # SQL failure after the manifest and first version have been inserted.
+    with postgres_authority.transaction() as conn:
+        conn.execute("INSERT INTO drawing_store_manifests (tenant_id,drawing_id,head,latest) VALUES (%s,%s,1,1)",
+                     (other, drawing))
+        entry = manifest["versions"][1]
+        conn.execute(
+            "INSERT INTO drawing_store_versions (tenant_id,drawing_id,version,object_key,byte_count,content_sha256,state) "
+            "VALUES (%s,%s,1,%s,%s,%s,'ready')",
+            (other, drawing, store.drawing_version_key(tenant, drawing, 2), entry["bytes"], entry["sha256"]),
+        )
+    import psycopg
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        _reconcile_fixture(drawing_reconciler, drained_drawing, postgres_authority)
+    with postgres_authority.cursor() as cur:
+        assert cur.execute("SELECT 1 FROM drawing_store_manifests WHERE tenant_id = %s AND drawing_id = %s",
+                           (tenant, drawing)).fetchone() is None
+        assert cur.execute("SELECT 1 FROM drawing_store_versions WHERE tenant_id = %s AND drawing_id = %s",
+                           (tenant, drawing)).fetchone() is None
+        assert cur.execute("SELECT 1 FROM drawing_store_versions WHERE tenant_id = %s AND drawing_id = %s",
+                           (other, drawing)).fetchone() is not None
+    assert all((root / key).read_bytes() == data for key, data in blobs.items())
+
+
+@requires_database
+@pytest.mark.parametrize("defect", [
+    "unsupported", "scope", "checkout", "reservation", "size", "hash", "parent", "source_ref", "timestamp", "missing_blob",
+])
+def test_drawing_backfill_invalid_input_fails_before_mutation(
+    postgres_authority, drawing_reconciler, drained_drawing, defect,
+):
+    import json
+    root, tenant, drawing, manifest, blobs = drained_drawing
+    if defect == "unsupported":
+        manifest["extra"] = {"silently_lost": True}
+    elif defect == "scope":
+        manifest["tenant_id"] = "another-tenant"
+    elif defect == "checkout":
+        manifest["checkout"] = {"holder": "writer", "expires": "2099-01-01T00:00:00Z"}
+    elif defect == "reservation":
+        manifest["versions"][1]["reservation_token"] = "live-owner"
+    elif defect == "size":
+        manifest["versions"][1]["bytes"] += 1
+    elif defect == "hash":
+        manifest["versions"][1]["sha256"] = "0" * 64
+    elif defect == "parent":
+        manifest["versions"][1]["parent"] = 2
+    elif defect == "source_ref":
+        manifest["versions"][1]["source_ref"] = {"unexpected": "object"}
+    elif defect == "timestamp":
+        manifest["versions"][1]["created"] = "2026-09-01T12:00:00"
+    elif defect == "missing_blob":
+        (root / store.drawing_version_key(tenant, drawing, 2)).unlink()
+    (root / store.manifest_key(tenant, drawing)).write_text(json.dumps(manifest))
+    with pytest.raises((ValueError, FileNotFoundError)):
+        _reconcile_fixture(drawing_reconciler, drained_drawing, postgres_authority)
+    with postgres_authority.cursor() as cur:
+        assert cur.execute("SELECT 1 FROM drawing_store_manifests WHERE tenant_id = %s AND drawing_id = %s",
+                           (tenant, drawing)).fetchone() is None
+    for key, data in blobs.items():
+        if (root / key).exists():
+            assert (root / key).read_bytes() == data
+
+
+@requires_database
+@pytest.mark.parametrize("lease", ["checkout", "reservation"])
+def test_drawing_reverse_and_parity_fail_closed_on_database_leases(
+    postgres_authority, drawing_reconciler, drained_drawing, tmp_path, lease,
+):
+    root, tenant, drawing, _manifest, _blobs = drained_drawing
+    _reconcile_fixture(drawing_reconciler, drained_drawing, postgres_authority)
+    with postgres_authority.transaction() as conn:
+        if lease == "checkout":
+            conn.execute(
+                "UPDATE drawing_store_manifests SET checkout_holder='writer', checkout_acquired_at=NOW(), "
+                "checkout_expires_at=NOW()+INTERVAL '1 hour' WHERE tenant_id=%s AND drawing_id=%s",
+                (tenant, drawing),
+            )
+        else:
+            conn.execute(
+                "UPDATE drawing_store_versions SET reservation_token='writer', "
+                "reservation_expires_at=NOW()+INTERVAL '1 hour' WHERE tenant_id=%s AND drawing_id=%s AND version=2",
+                (tenant, drawing),
+            )
+    output = tmp_path / "reverse"
+    for mode in ("backfill", "parity", "reverse"):
+        with pytest.raises(ValueError, match="drained"):
+            _reconcile_fixture(drawing_reconciler, drained_drawing, postgres_authority, mode, output_dir=output)
+    assert not output.exists()
+
+
+@requires_database
+def test_drawing_reverse_rejects_source_output_overlap(
+    postgres_authority, drawing_reconciler, drained_drawing,
+):
+    root, _tenant, _drawing, _manifest, _blobs = drained_drawing
+    with pytest.raises(ValueError, match="separate output tree"):
+        _reconcile_fixture(drawing_reconciler, drained_drawing, postgres_authority,
+                           "reverse", output_dir=root / "exports")
+
+
 def test_live_write_manifest_probe_uses_selected_authority(monkeypatch):
     tenant, drawing = "authority-tenant", "authority-drawing"
     backend = store.InMemoryBackend()

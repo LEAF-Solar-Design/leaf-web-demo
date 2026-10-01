@@ -179,6 +179,7 @@ COPY contract/  /app/contract/
 COPY data/      /app/data/
 COPY scripts/reconcile_customization_authority.py /app/scripts/reconcile_customization_authority.py
 COPY scripts/reconcile_sessions_authority.py /app/scripts/reconcile_sessions_authority.py
+COPY scripts/reconcile_drawing_authority.py /app/scripts/reconcile_drawing_authority.py
 COPY server/start-app.sh /app/server/start-app.sh
 # 0555 ROOT-OWNED, and the ownership is the point. This image now drops
 # privilege (below), so the runtime uid must be able to EXECUTE its entrypoint —
@@ -260,7 +261,7 @@ WORKDIR /app/server
 # every static check still green. A review confirmed it by replaying the
 # mutation. Exec form names the interpreter itself and ignores SHELL, so no
 # instruction above the guard can change what the guard means.
-RUN ["/bin/sh", "-c", "test -f /app/scripts/reconcile_customization_authority.py && test -s /app/scripts/reconcile_customization_authority.py && test -r /app/scripts/reconcile_customization_authority.py && test -f /app/scripts/reconcile_sessions_authority.py && test -s /app/scripts/reconcile_sessions_authority.py && test -r /app/scripts/reconcile_sessions_authority.py"]
+RUN ["/bin/sh", "-c", "test -f /app/scripts/reconcile_customization_authority.py && test -s /app/scripts/reconcile_customization_authority.py && test -r /app/scripts/reconcile_customization_authority.py && test -f /app/scripts/reconcile_drawing_authority.py && test -s /app/scripts/reconcile_drawing_authority.py && test -r /app/scripts/reconcile_drawing_authority.py && test -f /app/scripts/reconcile_sessions_authority.py && test -s /app/scripts/reconcile_sessions_authority.py && test -r /app/scripts/reconcile_sessions_authority.py"]
 
 # Declared below every non-consuming instruction, deliberately: this value is a
 # new commit sha on every build, and a changed in-scope ARG is a buildx cache

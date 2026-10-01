@@ -675,20 +675,20 @@
         "LEAF_STORE_DIR per-drawing manifest JSON and version files"
       ],
       "backfill": {
-        "command": null,
-        "status": "not_implemented",
-        "note": "No manifest, version, checkout, or reservation import command exists."
+        "command": "python /app/scripts/reconcile_drawing_authority.py --mode backfill --source-dir <LEAF_STORE_DIR> --tenant-id <tenant> --drawing-id <drawing>",
+        "status": "implemented_drained_drawing_scope",
+        "note": "One explicit tenant/drawing at a time, with writers drained: schema-1 manifests, ready versions, timestamps, checkout fence generations and source_ref provenance. Unsupported fields, checkout or reservation state, intake proofs and graph-bundle metadata fail closed. Inserts only; immutable blobs and selectors are untouched. Requires explicit DATABASE_URL and an already migrated database."
       },
       "parity": {
-        "command": "python -m pytest -q server/tests/test_drawing_upload_authority_postgres.py",
-        "status": "contract_tests_only",
-        "note": "Tests cover authority behavior, not filesystem-to-table parity."
+        "command": "python /app/scripts/reconcile_drawing_authority.py --mode parity --source-dir <LEAF_STORE_DIR> --tenant-id <tenant> --drawing-id <drawing>",
+        "status": "implemented_drained_drawing_scope",
+        "note": "Read-only semantic equality for the explicit drawing, including timestamps, provenance and fences; verifies every referenced DWG hash and size. Focused disposable-PostgreSQL fixtures are in server/tests/test_drawing_upload_authority_postgres.py. Drawing-only evidence does not establish upload or live-cutover readiness."
       },
       "cutover_modes": [
         "legacy",
         "postgres"
       ],
-      "rollback_mode": "Set LEAF_DRAWING_STORE=legacy only after draining checkout and reservation leases and rebuilding legacy manifests from PostgreSQL. No rebuild command exists.",
+      "rollback_mode": "Drain writers, checkout and reservation leases. Rebuild supported legacy manifests with python /app/scripts/reconcile_drawing_authority.py --mode reverse --source-dir <LEAF_STORE_DIR> --output-dir <separate-output-tree> --tenant-id <tenant> --drawing-id <drawing>. Reverse verifies source blobs and atomically writes manifests only; the default output is a separate sibling tree named <source-dir>-drawing-reverse. Reimport/parity of the exported tree uses --source-dir <separate-output-tree> --blob-dir <LEAF_STORE_DIR>. Provision the verified blob tree and manifests before an operator sets LEAF_DRAWING_STORE=legacy; this command neither deletes PostgreSQL rows nor switches selectors.",
       "current_selection": {
         "staging": {
           "value": null,
