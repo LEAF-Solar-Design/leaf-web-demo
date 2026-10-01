@@ -38,11 +38,13 @@ from __future__ import annotations
 
 import base64
 import binascii
+from collections import OrderedDict
 import copy
 import json
 import math
 import re
 import struct
+import threading
 from typing import NamedTuple
 
 try:
@@ -71,6 +73,14 @@ SLOT_FLOOR_NODES = 59
 _PANEL_ID = re.compile(
     r"leaf:panel:([0-9a-f]{8})-([0-9a-f]{4})-(4[0-9a-f]{3})-([89ab][0-9a-f]{3})-([0-9a-f]{12})")
 _DERIVED_LISTS = ("panel_refs", "matrix", "panel_assignments", "sequences")
+# Decoded rows of recently seen blocks, keyed by (count, panel_ids text, centres text). A decode is
+# a pure function of those three, so a hit IS the decode; a refused block is never stored. Bounded
+# to MEMO_MAX_SLOTS slots in total (least recently used evicted first), so the memo holds at most
+# one full-size site; every access is under one lock and no decode runs while it is held.
+MEMO_MAX_SLOTS = MAX_GRAPH_SLOTS
+_ROWS_MEMO: OrderedDict = OrderedDict()
+_ROWS_MEMO_SLOTS = 0
+_ROWS_MEMO_LOCK = threading.Lock()
 
 
 class SlotTable(NamedTuple):
@@ -174,10 +184,17 @@ def _rows(text: str, count: int) -> bytes:
     return raw
 
 
-def decode_slots(block) -> SlotTable:
-    """Decode one block, bounded: shape and lengths first, then rows. Returns a SlotTable whose
-    `panel` is the block's own template (not copied)."""
-    count = _check_block_shape(block)
+def reset_slot_memo() -> None:
+    """Drop every memoized decode (test isolation and the memo's own tests)."""
+    global _ROWS_MEMO_SLOTS
+    with _ROWS_MEMO_LOCK:
+        _ROWS_MEMO.clear()
+        _ROWS_MEMO_SLOTS = 0
+
+
+def _decode_rows(block, count: int) -> tuple:
+    """(ids, centres) of a block whose shape _check_block_shape proved: the only place a row is
+    decoded. Refuses exactly as decode_slots always has, ids before centres."""
     ids_hex = _rows(block["panel_ids"], count).hex()
     ids = []
     for start in range(0, count * 32, 32):
@@ -190,7 +207,30 @@ def decode_slots(block) -> SlotTable:
     centres = struct.unpack(f"<{2 * count}d", _rows(block["centres"], count))
     if not all(map(_is_number, centres)):
         raise _invalid()
-    return SlotTable(tuple(ids), centres, block["angle"], block["panel"])
+    return tuple(ids), centres
+
+
+def decode_slots(block) -> SlotTable:
+    """Decode one block, bounded: shape and lengths first (every call), then rows, which a block
+    with the same row texts decoded before in this process reuses from the memo. Returns a
+    SlotTable whose `panel` is the block's own template (not copied)."""
+    global _ROWS_MEMO_SLOTS
+    count = _check_block_shape(block)
+    key = (count, block["panel_ids"], block["centres"])
+    with _ROWS_MEMO_LOCK:
+        rows = _ROWS_MEMO.get(key)
+        if rows is not None:
+            _ROWS_MEMO.move_to_end(key)
+    if rows is None:
+        rows = _decode_rows(block, count)
+        with _ROWS_MEMO_LOCK:
+            if key not in _ROWS_MEMO:
+                _ROWS_MEMO[key] = rows
+                _ROWS_MEMO_SLOTS += count
+                while _ROWS_MEMO_SLOTS > MEMO_MAX_SLOTS:
+                    (old_count, _, _), _ = _ROWS_MEMO.popitem(last=False)
+                    _ROWS_MEMO_SLOTS -= old_count
+    return SlotTable(rows[0], rows[1], block["angle"], block["panel"])
 
 
 def encode_slots(panel_ids, centres, angle, panel) -> dict:

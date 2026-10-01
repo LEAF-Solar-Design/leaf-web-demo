@@ -76,7 +76,10 @@ def run(graph, params):
             raise GraphValidationError("STRING_EDIT_BOUNDS_EXCEEDED")
     scale = graph["project"]["units"]["meters_per_unit"]
     tables = single.slot_tables(graph)
-    panel_sur = {p["id"]: format(i + 1, "X") for i, p in enumerate(single.panel_views(graph, tables))}
+    # Ids only, in panel_views order: no view is built for a slot panel.
+    ids = [p["id"] for p in graph["panels"]]
+    ids.extend(ref for f in graph["frames"] if f["id"] in tables for ref in tables[f["id"]].ids)
+    panel_sur = {ref: format(i + 1, "X") for i, ref in enumerate(ids)}
     frames = graph["frames"]
     try:
         groups = [{"handle": format(k + 1, "X"), "name": f["name"],

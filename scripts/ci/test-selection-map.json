@@ -415,6 +415,7 @@
     "server-solar-ground-route-kinds",
     "server-solar-ground-scene",
     "server-solar-ground-shade",
+    "server-solar-ground-string-decode-memo",
     "server-solar-ground-terrain",
     "server-solar-ground-terrain-adapter",
     "server-solar-ground-topology",
