@@ -369,6 +369,10 @@ def build_suites() -> List[Suite]:
         # equal to the expansion, rooftop byte-identical; 30 cases.
         Suite("server-solar-ground-compact-string-tools", "server tests/test_solar_ground_compact_string_tools.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_ground_compact_string_tools.py"), 30),
+        # sf-w3-string-decode-memo: each compact Ground block's rows decoded once per process (bounded
+        # memo in the codec) and slot views built only for the slots a string tool names; 30 cases.
+        Suite("server-solar-ground-string-decode-memo", "server tests/test_solar_ground_string_decode_memo.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_ground_string_decode_memo.py"), 30),
         # sf-w3-conversion-graph piece 2: the physical head's trackers as compact Ground frames; 87 cases.
         Suite("server-solar-ground-conversion", "server tests/test_solar_ground_conversion.py", "pytest",
               SERVER, _py_pytest("tests/test_solar_ground_conversion.py"), 87),

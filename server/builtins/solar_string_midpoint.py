@@ -83,14 +83,31 @@ def extents(frame, panel):
     return width * cos + height * sin, width * sin + height * cos
 
 
-def midpoint_intake(graph, start_ref, end_ref):
+def _frame_views(graph, frame_ref, tables):
+    """(index, panel) for every panel of one frame, in panel_views order, index being the panel's
+    position in panel_views(graph, tables): stored panels first, then that frame's slots after
+    every slot of the compact frames before it. Builds views for this frame's slots only."""
+    found = [(index, panel) for index, panel in enumerate(graph["panels"])
+             if panel["frame_ref"] == frame_ref]
+    offset = len(graph["panels"])
+    for frame in graph["frames"]:
+        table = tables.get(frame["id"])
+        if table is None:
+            continue
+        if frame["id"] == frame_ref:
+            found.extend((offset + col, single.slot_view(frame["id"], table, col))
+                         for col in range(len(table.ids)))
+        offset += len(table.ids)
+    return found
+
+
+def midpoint_intake(graph, start_ref, end_ref, tables):
     """(intake, surrogate -> panel id, diagonal in metres) for the kernel, in drawing units.
 
     Surrogates are the panel's position in graph["panels"] as eight hex digits, so the
     kernel's handle-order tie break is graph order.
     """
-    views = single.panel_views(graph)
-    panels = {panel["id"]: panel for panel in views}
+    panels = single.find_panels(graph, (start_ref, end_ref), tables)
     if start_ref not in panels or end_ref not in panels:
         raise GraphValidationError("MISSING_PANEL")
     start, end = panels[start_ref], panels[end_ref]
@@ -104,9 +121,7 @@ def midpoint_intake(graph, start_ref, end_ref):
     ex, ey = extents(frame, start)
     diagonal = math.hypot(ex, ey)
     names, rows = {}, []
-    for index, panel in enumerate(views):
-        if panel["frame_ref"] != frame_ref:
-            continue
+    for index, panel in _frame_views(graph, frame_ref, tables):
         name = format(index, "08X")
         names[name] = panel["id"]
         rows.append({"handle": name, "x": panel["centre"][0] / scale, "y": panel["centre"][1] / scale})
@@ -115,9 +130,10 @@ def midpoint_intake(graph, start_ref, end_ref):
     return intake, surrogate[start_ref], surrogate[end_ref], names, diagonal
 
 
-def _new_string(graph, path, tag_index, label_height_m):
-    """The circuit LEAFSTRINGMID commits, on the private copy only, after every refusal ran."""
-    panels = {panel["id"]: panel for panel in single.panel_views(graph)}
+def _new_string(graph, path, tag_index, label_height_m, tables):
+    """The circuit LEAFSTRINGMID commits, on the private copy only, after every refusal ran;
+    `tables` are the slot tables of the graph it was copied from."""
+    panels = single.find_panels(graph, path, tables)
     tags = {string["circuit_tag"] for string in graph["strings"]}
     number = graph["settings"]["string_number"]
     if type(number) is float and number.is_integer():
@@ -170,7 +186,8 @@ def add_midpoint_string(graph, request):
     before = checked_graph(graph, request["expected_rev"])
     longest = single.max_string_length(before)
     try:
-        intake, start, end, names, diagonal_m = midpoint_intake(before, start_ref, end_ref)
+        tables = single.slot_tables(before)
+        intake, start, end, names, diagonal_m = midpoint_intake(before, start_ref, end_ref, tables)
         (_, fields), = kernel.string_midpoint_rows(intake, start, end)
     except kernel.BatchTwoError as exc:
         raise GraphValidationError(KERNEL_REFUSALS.get(str(exc), "STRING_MIDPOINT_MAPPING_FAILED")) from None
@@ -186,7 +203,7 @@ def add_midpoint_string(graph, request):
         raise GraphValidationError("PANEL_ALREADY_ASSIGNED")
     result = copy.deepcopy(before)
     label_height_m = diagonal_m * kernel.MID_LABEL_HEIGHT_DIAGONALS
-    string = _new_string(result, path, fields["label_index"], label_height_m)
+    string = _new_string(result, path, fields["label_index"], label_height_m, tables)
     result["strings"].append(string)
     sync_assignments(result)
     path_refs = set(path)

@@ -96,6 +96,31 @@ def panel_views(graph, tables=None):
     return views
 
 
+def slot_view(frame_id, table, col):
+    """The read-only view panel_views gives slot `col` of a compact frame: a fresh dict."""
+    xy = table.centres
+    return {"id": table.ids[col], "frame_ref": frame_id, "centre": [xy[2 * col], xy[2 * col + 1]],
+            "angle": table.angle}
+
+
+def find_panels(graph, refs, tables):
+    """{ref: panel} for exactly the named refs that exist, equal to the same lookup in
+    {p["id"]: p for p in panel_views(graph, tables)} without building a view per slot: a stored
+    panel is the graph's own dict, a slot panel a fresh slot_view, and a ref that is neither is
+    absent. One pass over the stored panels and one allocation-free scan of the slot ids; a view
+    is built only for a named slot, so the work beyond the scan is linear in the refs."""
+    wanted = set(refs)
+    found = {panel["id"]: panel for panel in graph["panels"] if panel["id"] in wanted}
+    for frame in graph["frames"]:
+        table = tables.get(frame["id"])
+        if table is None:
+            continue
+        for col, panel_id in enumerate(table.ids):
+            if panel_id in wanted:
+                found[panel_id] = slot_view(frame["id"], table, col)
+    return found
+
+
 def _valid_request(params):
     """True for exactly {expected_rev, ordered_panel_refs}, no coercion anywhere."""
     if type(params) is not dict or set(params) != {"expected_rev", "ordered_panel_refs"}:
@@ -106,12 +131,13 @@ def _valid_request(params):
             and all(type(ref) is str and ref for ref in refs))
 
 
-def _new_string(graph, refs):
+def _new_string(graph, refs, tables):
     """The circuit SINGLESTRING commits: one polyline through the panels, in order.
 
-    Called on the private copy only, after every refusal has already run.
+    Called on the private copy only, after every refusal has already run; `tables` are the slot
+    tables of the graph it was copied from (the copy carries the same blocks).
     """
-    panels = {panel["id"]: panel for panel in panel_views(graph)}
+    panels = find_panels(graph, refs, tables)
     tags = {string["circuit_tag"] for string in graph["strings"]}
     number = graph["settings"]["string_number"]
     # Bounded by the number of circuits the drawing already holds: the loop can only
@@ -169,8 +195,8 @@ def add_string(graph, params):
         # The drawing's own sized length, not a constant: a longer circuit is one the
         # cold-Voc guard never cleared.
         raise GraphValidationError("STRING_TOO_LONG")
-    panels = {panel["id"] for panel in panel_views(before)}
-    if not set(refs) <= panels:
+    tables = slot_tables(before)
+    if len(find_panels(before, refs, tables)) != len(refs):
         raise GraphValidationError("MISSING_PANEL")
     wired = {ref for string in before["strings"] for ref in string["ordered_panel_refs"]}
     if not wired.isdisjoint(refs):
@@ -178,7 +204,7 @@ def add_string(graph, params):
         # reaching one here is a caller error, never a drawing state.
         raise GraphValidationError("PANEL_ALREADY_ASSIGNED")
     result = copy.deepcopy(before)
-    string = _new_string(result, refs)
+    string = _new_string(result, refs, tables)
     result["strings"].append(string)
     # Panel assignments, frame sequences, frame panel_assignments and matrix cells are
     # redundant views of string membership: one pass rebuilds all of them, so the newly
