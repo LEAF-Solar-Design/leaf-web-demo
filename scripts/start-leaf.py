@@ -31,13 +31,16 @@ web/vite.config.js (5175), deploy/README.md (env table).
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import secrets
 import shutil
 import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -72,23 +75,28 @@ def say(msg: str) -> None:
     print(f"[start-leaf] {msg}", flush=True)
 
 
-def is_port_free(port: str | int) -> bool:
+def is_port_free(port: str | int, exclusive: bool = False) -> bool:
     """A port is free if we can bind 127.0.0.1:<port> right now."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         try:
+            if exclusive and IS_WIN:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
             s.bind(("127.0.0.1", int(port)))
             return True
         except OSError:
             return False
 
 
-def pick_port(name: str, preferred: int, taken: set[int]) -> int:
+def pick_port(name: str, preferred: int, taken: set[int], strict: bool = False) -> int:
     """Return the preferred port if free, else the next free one (skipping ports
     already claimed for this run). Warn loudly when we move off the default so a
     stale squatter never silently breaks the wiring."""
-    if preferred not in taken and is_port_free(preferred):
+    if preferred not in taken and is_port_free(preferred, exclusive=strict):
         taken.add(preferred)
         return preferred
+    if strict:
+        # Strict mode fails closed on a busy port, before spawning any child.
+        raise SystemExit(f"ERROR: {name} port {preferred} is busy (--strict-ports)")
     say(f"WARNING: {name} default port {preferred} is busy (stale squatter?) — finding a free one")
     for candidate in range(preferred + 1, preferred + 200):
         if candidate not in taken and is_port_free(candidate):
@@ -98,26 +106,82 @@ def pick_port(name: str, preferred: int, taken: set[int]) -> int:
     raise SystemExit(f"could not find a free port for {name} near {preferred}")
 
 
-def http_ok(url: str, timeout: float = 1.5) -> bool:
+def http_ok(url: str, timeout: float = 1.5, strict: bool = False) -> bool:
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
-            return 200 <= resp.status < 500  # any real HTTP answer means it's up
+            status = resp.status
     except urllib.error.HTTPError as exc:
+        if strict:
+            raise RuntimeError(f"health probe {url} returned HTTP {exc.code}; 2xx required") from exc
         return 200 <= exc.code < 500  # a 4xx still proves the server is listening
     except Exception:
         return False
+    if strict:
+        # Ready-file health probes accept 2xx only.
+        if not 200 <= status < 300:
+            raise RuntimeError(f"health probe {url} returned HTTP {status}; 2xx required")
+        return True
+    return 200 <= status < 500  # any real HTTP answer means it's up
 
 
-def wait_healthy(name: str, url: str, deadline_s: float = 40.0) -> bool:
+def wait_healthy(name: str, url: str, deadline_s: float = 40.0, strict: bool = False) -> bool:
     """Poll a health URL until it answers or we time out."""
     start = time.time()
     while time.time() - start < deadline_s:
-        if http_ok(url):
+        if strict:
+            for child in _children:
+                if child.proc.poll() is not None:
+                    raise RuntimeError(f"{child.name} exited during startup (code {child.proc.returncode})")
+        if http_ok(url, strict=strict):
             say(f"OK   {name:<8} healthy  ({url})")
             return True
         time.sleep(0.5)
+    if strict:
+        raise RuntimeError(f"{name} did not report 2xx healthy within {int(deadline_s)}s ({url})")
     say(f"WARN {name:<8} did not report healthy within {int(deadline_s)}s ({url})")
     return False
+
+
+OS_ENV_NAMES = frozenset({
+    "PATH", "SYSTEMROOT", "TEMP", "TMP", "HOME", "USERPROFILE", "APPDATA",
+    "LOCALAPPDATA", "PATHEXT", "COMSPEC", "LANG",
+})
+
+
+def build_child_env(parent: dict[str, str], allowlist: list[str] | None) -> dict[str, str]:
+    """An omitted list preserves inheritance; an empty list permits only OS essentials."""
+    if allowlist is None:
+        return dict(parent)
+    names = set(OS_ENV_NAMES)
+    for group in allowlist:
+        for name in filter(None, (part.strip() for part in group.split(","))):
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                raise ValueError(f"invalid environment variable name in --env-allowlist: {name!r}")
+            names.add(name.upper() if IS_WIN else name)
+    # Database URLs have no implicit exception: each must be explicitly named.
+    return {key: value for key, value in parent.items()
+            if (key.upper() if IS_WIN else key) in names}
+
+
+def write_ready_file(path: Path, ports: dict[str, int | None]) -> None:
+    """Publish a complete readiness record by replacing a temp file on the same volume."""
+    payload = {
+        "ports": {role: port for role, port in ports.items() if port is not None},
+        "pids": {child.name: child.proc.pid for child in _children},
+        "launcher_pid": os.getpid(),
+    }
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix=f".{path.name}.", delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump(payload, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def harness_authoring_defaults(env: dict[str, str]) -> tuple[str, str]:
@@ -170,6 +234,7 @@ def source_revision(env: dict[str, str]) -> str | None:
             ["git", "-C", str(REPO), "rev-parse", "HEAD"],
             capture_output=True,
             text=True,
+            env=env,
             timeout=5,
             check=True,
         )
@@ -285,8 +350,6 @@ def spawn(name: str, cmd: list[str], cwd: Path, env: dict) -> Child:
 
 def kill_child(child: Child) -> None:
     proc = child.proc
-    if proc.poll() is not None:
-        return
     try:
         if IS_WIN:
             # /T kills the whole tree (npm -> node -> vite; node -> git worker).
@@ -295,7 +358,8 @@ def kill_child(child: Child) -> None:
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
             )
         else:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            # The group can outlive its leader (npm -> node -> vite).
+            os.killpg(proc.pid, signal.SIGTERM)
     except Exception:
         try:
             proc.kill()
@@ -304,7 +368,8 @@ def kill_child(child: Child) -> None:
 
 
 def cleanup() -> None:
-    if not _children:
+    global _win_job
+    if not _children and not _win_job:
         return
     say("shutting down (Ctrl-C) - stopping child processes ...")
     for child in reversed(_children):
@@ -317,6 +382,27 @@ def cleanup() -> None:
             time.sleep(0.1)
         state = "stopped" if child.proc.poll() is not None else "signaled"
         say(f"  {child.name:<8} {state}")
+    if _win_job:
+        from ctypes import wintypes
+        k32, job = _win_job
+        k32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        k32.TerminateJobObject(job, 1)  # includes descendants whose parent already exited
+        k32.CloseHandle(job)
+        _win_job = None
+    if not IS_WIN:
+        for child in reversed(_children):
+            try:
+                os.killpg(child.proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    for child in _children:
+        try:
+            child.proc.wait(timeout=2.5)
+        except subprocess.TimeoutExpired:
+            child.proc.kill()
+            child.proc.wait()
+    _children.clear()
     say("done.")
 
 
@@ -338,7 +424,36 @@ def main() -> int:
     ap.add_argument("--app-port", type=int, default=int(os.environ.get("APP_PORT", DEFAULT_APP_PORT)))
     ap.add_argument("--harness-port", type=int, default=int(os.environ.get("HARNESS_PORT", DEFAULT_HARNESS_PORT)))
     ap.add_argument("--web-port", type=int, default=DEFAULT_WEB_PORT)
+    ap.add_argument("--strict-ports", action="store_true", help="fail if a requested service port is busy")
+    ap.add_argument("--ready-file", type=Path, help="atomically write JSON after all services return 2xx")
+    ap.add_argument("--env-allowlist", action="append", metavar="NAME[,NAME...]",
+                    help="inherit only named variables plus OS essentials (repeatable)")
+    ap.add_argument("--print-child-env", action="store_true", help="print the base child environment as JSON and exit")
     args = ap.parse_args()
+
+    operator_env = build_child_env(os.environ, args.env_allowlist)
+    base_env = dict(operator_env, APS_LIVE="0")
+    if args.env_allowlist is not None:
+        base_env["LEAF_AUTH_LIVE"] = "0"
+    if args.print_child_env:
+        base_env.setdefault(
+            "LEAF_TENANTS_DIR",
+            "C:/tmp/leaf-tenants" if os.name == "nt" else "/tmp/leaf-tenants",
+        )
+        print(json.dumps(base_env), flush=True)
+        return 0
+    if args.ready_file:
+        # A previous boot's receipt must never be mistaken for this boot's readiness.
+        args.ready_file.unlink(missing_ok=True)
+    if args.strict_ports:
+        requested = [("broker", args.broker_port), ("app", args.app_port)]
+        if args.with_harness:
+            requested.append(("harness", args.harness_port))
+        if not args.no_web:
+            requested.append(("web", args.web_port))
+        checked: set[int] = set()
+        for role, port in requested:
+            pick_port(role, port, checked, strict=True)
 
     # Sanity: the two backend entrypoints must exist.
     for entry in (SERVER_DIR / "app.py", SERVER_DIR / "broker.py"):
@@ -356,22 +471,23 @@ def main() -> int:
 
     npm = resolve_exe("npm") if want_web else None
     if want_web and not npm:
+        if args.ready_file:
+            raise RuntimeError("npm not found on PATH; cannot start the requested web service")
         say("WARNING: npm not found on PATH — skipping the web dev server (backend still boots).")
         want_web = False
 
     # ---- Allocate ports up front so every dependent URL is wired correctly ---
     taken: set[int] = set()
-    broker_port = pick_port("broker", args.broker_port, taken)
-    app_port = pick_port("app", args.app_port, taken)
-    harness_port = pick_port("harness", args.harness_port, taken) if want_harness else None
-    web_port = pick_port("web", args.web_port, taken) if want_web else None
+    broker_port = pick_port("broker", args.broker_port, taken, args.strict_ports)
+    app_port = pick_port("app", args.app_port, taken, args.strict_ports)
+    harness_port = pick_port("harness", args.harness_port, taken, args.strict_ports) if want_harness else None
+    web_port = pick_port("web", args.web_port, taken, args.strict_ports) if want_web else None
 
     broker_url = f"http://127.0.0.1:{broker_port}"
     app_url = f"http://127.0.0.1:{app_port}"
     harness_url = f"http://127.0.0.1:{harness_port}" if harness_port else None
     web_url = f"http://127.0.0.1:{web_port}" if web_port else None
 
-    base_env = os.environ.copy()
     base_env["APS_LIVE"] = "0"  # local dev is always mock — no cloud, no secrets
     revision = source_revision(base_env)
     if revision:
@@ -390,10 +506,20 @@ def main() -> int:
     # 401s and every spine tool is denied while all four services report healthy —
     # a silent dead end. Mint one ephemeral value per boot and give it to BOTH
     # children so a clean environment works; an operator-set secret always wins.
-    dispatch_secret = os.environ.get("LEAF_APP_DISPATCH_SECRET", "").strip()
+    dispatch_secret = operator_env.get("LEAF_APP_DISPATCH_SECRET", "").strip()
     ephemeral_dispatch = want_harness and not dispatch_secret
     if ephemeral_dispatch:
         dispatch_secret = secrets.token_urlsafe(32)
+
+    def _startup_stop(_signum=None, _frame=None):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGINT, _startup_stop)
+    if IS_WIN:
+        if hasattr(signal, "SIGBREAK"):
+            signal.signal(signal.SIGBREAK, _startup_stop)
+    else:
+        signal.signal(signal.SIGTERM, _startup_stop)
 
     _make_win_job()  # arm the kill-on-close guard before any child is spawned
 
@@ -429,17 +555,17 @@ def main() -> int:
             LEAF_REPO_ROOT=str(REPO),
             # Repo mutation also needs the PostgreSQL writer lease. Keep the
             # sidecar read-only when that database is not configured.
-            LEAF_AUTHORED_EXECUTION=os.environ.get(
+            LEAF_AUTHORED_EXECUTION=operator_env.get(
                 "LEAF_AUTHORED_EXECUTION", authored_execution
             ),
-            LEAF_HARNESS_AUTHORING_MODE=os.environ.get(
+            LEAF_HARNESS_AUTHORING_MODE=operator_env.get(
                 "LEAF_HARNESS_AUTHORING_MODE", authoring_mode
             ),
-            LEAF_HARNESS_SESSION_STORE=os.environ.get(
+            LEAF_HARNESS_SESSION_STORE=operator_env.get(
                 "LEAF_HARNESS_SESSION_STORE",
                 harness_session_store_default(base_env),
             ),
-            LEAF_SPINE_TURN_TIMEOUT_S=os.environ.get(
+            LEAF_SPINE_TURN_TIMEOUT_S=operator_env.get(
                 "LEAF_SPINE_TURN_TIMEOUT_S", DEFAULT_SPINE_TURN_TIMEOUT_S
             ),
             # Converse back-edge: the harness must call the SAME app this launcher
@@ -454,7 +580,7 @@ def main() -> int:
         base_env,
         APP_PORT=str(app_port),
         BROKER_URL=broker_url,
-        LEAF_AGENT_STORE=os.environ.get(
+        LEAF_AGENT_STORE=operator_env.get(
             "LEAF_AGENT_STORE", agent_store_default(base_env)
         ),
     )
@@ -465,13 +591,13 @@ def main() -> int:
         # A live harness can take longer than the historical synchronous proxy
         # budget. Keep both sides aligned and never mask a harness failure with
         # the deterministic template path in this real-service launcher.
-        app_env["LEAF_AUTHOR_TIMEOUT_S"] = os.environ.get(
+        app_env["LEAF_AUTHOR_TIMEOUT_S"] = operator_env.get(
             "LEAF_AUTHOR_TIMEOUT_S", DEFAULT_AUTHOR_TIMEOUT_S
         )
-        app_env["TURN_MAX_S"] = os.environ.get(
+        app_env["TURN_MAX_S"] = operator_env.get(
             "TURN_MAX_S", DEFAULT_TURN_MAX_S
         )
-        app_env["LEAF_AUTHOR_TEMPLATE_FALLBACK"] = os.environ.get(
+        app_env["LEAF_AUTHOR_TEMPLATE_FALLBACK"] = operator_env.get(
             "LEAF_AUTHOR_TEMPLATE_FALLBACK", "0"
         )
     spawn("app", [sys.executable, "app.py"], SERVER_DIR, app_env)
@@ -491,14 +617,21 @@ def main() -> int:
     # ---- Readiness (health endpoints) ---------------------------------------
     say("-" * 70)
     say("waiting for services to report healthy ...")
-    wait_healthy("broker", f"{broker_url}/broker/health")
+    wait_healthy("broker", f"{broker_url}/broker/health", strict=bool(args.ready_file))
     if want_harness:
-        wait_healthy("harness", f"{harness_url}/health")
-    wait_healthy("app", f"{app_url}/api/health")
+        wait_healthy("harness", f"{harness_url}/health", strict=bool(args.ready_file))
+    wait_healthy("app", f"{app_url}/api/health", strict=bool(args.ready_file))
     if worker_enabled:
-        wait_healthy("worker", f"{app_url}/api/ready")
+        wait_healthy("worker", f"{app_url}/api/ready", strict=bool(args.ready_file))
     if want_web:
-        wait_healthy("web", f"{web_url}/")
+        wait_healthy("web", f"{web_url}/", strict=bool(args.ready_file))
+    if args.ready_file:
+        for child in _children:
+            if child.proc.poll() is not None:
+                raise RuntimeError(f"{child.name} exited before readiness could be published")
+        write_ready_file(args.ready_file, {
+            "broker": broker_port, "app": app_port, "harness": harness_port, "web": web_port,
+        })
 
     # ---- Summary banner ------------------------------------------------------
     say("=" * 70)
@@ -547,6 +680,8 @@ def main() -> int:
 
     # ---- Monitor loop: block until a stop signal, watching for a core crash --
     core = {"broker", "app"} | ({"worker"} if worker_enabled else set())
+    if args.ready_file:
+        core.update(child.name for child in _children)
     rc = 0
     try:
         while not stop["requested"]:
@@ -569,4 +704,12 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        raise SystemExit(130)
+    except Exception as exc:
+        print(f"[start-leaf] ERROR: {exc}", file=sys.stderr, flush=True)
+        raise SystemExit(1)
+    finally:
+        cleanup()
