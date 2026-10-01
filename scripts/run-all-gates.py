@@ -1379,6 +1379,11 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_data_lifecycle_matrix.py"), 11),
         Suite("server-aps-callback-adapter", "server tests/test_aps_callback_adapter.py",
               "pytest", SERVER, _py_pytest("tests/test_aps_callback_adapter.py"), 50),
+        # P-079 dispatch bind: live dispatch binds the APS WorkItem to its
+        # PostgreSQL job row once per attempt, inert while polling is the only
+        # completion mode. Hermetic (fake store, fake APS client), exact count.
+        Suite("server-broker-aps-workitem-bind", "server tests/test_broker_aps_workitem_bind.py",
+              "pytest", SERVER, _py_pytest("tests/test_broker_aps_workitem_bind.py"), 17),
         # --- modules that were registered in NO suite at all --- #
         # These 19 files existed in server/tests and ran nowhere: not in this
         # runner, not in any directory-target suite. A "*_postgres" name is not
