@@ -760,6 +760,12 @@ def build_suites() -> List[Suite]:
         # nothing skips: the floor is the exact count, 57.
         Suite("server-solar-physical-head", "server tests/test_solar_physical_head.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_physical_head.py"), 57),
+        # sf-w4-landxml-import: the typed LandXML terrain intake (server/solar_landxml_import.py): bounded
+        # upload, units and CRS read from the file and declared by the caller, the plugin's N E Z reader and
+        # IDW grid, the source stored and the grid published on the physical head. Hermetic and nothing
+        # skips: the floor is the exact count, 85 (including 16 parser and source-loader cases).
+        Suite("server-solar-landxml-import", "server tests/test_solar_landxml_import.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_landxml_import.py"), 85),
         # W5 dialog batch (2026-09-23, contract G30): server/solar_ground_dialogs.py (the shading
         # object form and PlaceTree, the project-area manager's Add Area and OK, the pile-template
         # manager's "+" and OK with the store file byte for byte). Every input is authored in the
