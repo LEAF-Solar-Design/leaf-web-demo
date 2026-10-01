@@ -47,6 +47,7 @@ import entitlements
 import guest_uploads
 import jobs
 import solar_artifacts
+import solar_combiner_intake_import
 import solar_import_sources
 import solar_landxml_import
 import solar_physical_state
@@ -246,6 +247,124 @@ def get_dxf(drawing_id: str, request: Request, version: str = "head",
         return Response(status_code=304, headers=headers)
     headers["Content-Disposition"] = f'inline; filename="{drawing_id}-v{v}.dxf"'
     return Response(content=data, media_type="application/dxf", headers=headers)
+
+
+# sf-w2-combiners-intake-producer: the combiner intake import. Every reason the route can answer, as
+# (HTTP status, envelope code, retryable). The keys are closed: the 18 codes of
+# solar_combiner_intake_import.CODES, its 8 passthrough binding codes, the two route codes (drawing id and
+# media type) and the fallback COMBINER_IMPORT_FAILED that any other code collapses to, so a client only
+# ever sees a key of this map.
+COMBINER_INTAKE_MEDIA_TYPES = frozenset({"application/json"})
+COMBINER_INTAKE_IMPORT_REFUSALS = {
+    "COMBINER_IMPORT_DRAWING_ID_INVALID": (400, ErrorCode.BAD_PARAMS, False),
+    "COMBINER_IMPORT_PROJECT_ID_INVALID": (400, ErrorCode.BAD_PARAMS, False),
+    "COMBINER_IMPORT_MEDIA_TYPE_REFUSED": (415, ErrorCode.BAD_PARAMS, False),
+    "COMBINER_IMPORT_EMPTY": (400, ErrorCode.BAD_PARAMS, False),
+    "COMBINER_IMPORT_TOO_LARGE": (413, ErrorCode.BAD_PARAMS, False),
+    "COMBINER_IMPORT_ENCODING_INVALID": (400, ErrorCode.BAD_PARAMS, False),
+    "COMBINER_IMPORT_JSON_INVALID": (400, ErrorCode.BAD_PARAMS, False),
+    "COMBINER_IMPORT_BODY_INVALID": (400, ErrorCode.BAD_PARAMS, False),
+    "COMBINER_INTAKE_INVALID": (400, ErrorCode.BAD_PARAMS, False),
+    "COMBINER_OUTLINES_INVALID": (400, ErrorCode.BAD_PARAMS, False),
+    "COMBINER_IMPORT_CHECKOUT_DENIED": (403, ErrorCode.BAD_PARAMS, False),
+    "COMBINER_IMPORT_DRAWING_NOT_FOUND": (404, ErrorCode.BAD_PARAMS, False),
+    "COMBINER_IMPORT_GRAPH_REQUIRED": (409, ErrorCode.BAD_PARAMS, False),
+    "COMBINER_IMPORT_GRAPH_NOT_LOCAL": (409, ErrorCode.BAD_PARAMS, False),
+    "COMBINER_IMPORT_PROJECT_MISMATCH": (409, ErrorCode.BAD_PARAMS, False),
+    "COMBINER_IMPORT_HEAD_MOVED": (409, ErrorCode.BAD_PARAMS, True),
+    "COMBINER_L2_MODE_REQUIRED": (409, ErrorCode.BAD_PARAMS, False),
+    "COMBINER_EXISTING_L1": (409, ErrorCode.BAD_PARAMS, False),
+    "COMBINER_INTAKE_UNITS_MISMATCH": (409, ErrorCode.BAD_PARAMS, False),
+    "COMBINER_INTAKE_CONTEXT_MISMATCH": (409, ErrorCode.BAD_PARAMS, False),
+    "COMBINER_INTAKE_L2_MISMATCH": (409, ErrorCode.BAD_PARAMS, False),
+    "COMBINER_INTAKE_STRING_MISMATCH": (409, ErrorCode.BAD_PARAMS, False),
+    "COMBINER_IMPORT_INTAKE_TOO_LARGE": (413, ErrorCode.BAD_PARAMS, False),
+    "COMBINER_IMPORT_SOURCE_CORRUPT": (500, ErrorCode.INTERNAL, False),
+    "COMBINER_IMPORT_WRITE_REFUSED": (500, ErrorCode.INTERNAL, False),
+    "COMBINER_IMPORT_FAILED": (500, ErrorCode.INTERNAL, False),
+    "COMBINER_IMPORT_WRITES_DRAINED": (503, ErrorCode.INTERNAL, True),
+    "COMBINER_IMPORT_STORE_UNAVAILABLE": (503, ErrorCode.INTERNAL, True),
+    "COMBINER_IMPORT_CHECKOUT_UNAVAILABLE": (503, ErrorCode.INTERNAL, True),
+}
+
+
+def _combiner_intake_refused(reason):
+    """The envelope for one refusal. A code outside COMBINER_INTAKE_IMPORT_REFUSALS answers
+    COMBINER_IMPORT_FAILED, so the reason a client sees is always a key of that map."""
+    if reason not in COMBINER_INTAKE_IMPORT_REFUSALS:
+        reason = "COMBINER_IMPORT_FAILED"
+    status, code, retryable = COMBINER_INTAKE_IMPORT_REFUSALS[reason]
+    env = err_envelope(code, reason, retryable=retryable)
+    env["error"]["reason_code"] = reason
+    return JSONResponse(status_code=status, content=env)
+
+
+def _import_combiner_intake(tenant_id, drawing_id, data, project_id, capability):
+    refusal = solar_combiner_intake_import.CombinerIntakeImportError
+    try:
+        backend = _backend(tenant_id)
+    except (RuntimeError, OSError):
+        raise refusal("COMBINER_IMPORT_STORE_UNAVAILABLE") from None
+
+    def authorize():
+        try:
+            return _lock_authorization(drawing_id, tenant_id, backend, capability)
+        except checkout_capability.CapabilityRejected:
+            raise refusal("COMBINER_IMPORT_CHECKOUT_DENIED") from None
+        except checkout_capability.CapabilityUnavailable:
+            raise refusal("COMBINER_IMPORT_CHECKOUT_UNAVAILABLE") from None
+        except (KeyError, ValueError, OSError):
+            raise refusal("COMBINER_IMPORT_STORE_UNAVAILABLE") from None
+
+    return solar_combiner_intake_import.import_combiner_intake(
+        backend, tenant_id, drawing_id, data, project_id=project_id, authorize=authorize)
+
+
+@router.post("/api/drawings/{drawing_id}/imports/combiner-intake")
+async def import_combiner_intake(drawing_id: str, request: Request, project_id: Optional[str] = None,
+                                 tenant=Depends(deps.require_active_tenant),
+                                 x_checkout_capability: Optional[str] = Header(default=None)):
+    """Store the drawing's recorded combiner intake and panel-group outlines on a new version.
+
+    The body is one JSON object (application/json) with exactly "combiner_intake" (format
+    combiner-intake-v1) and "panel_groups" ([{handle, outlines}]), at most
+    solar_combiner_intake_import.MAX_IMPORT_BYTES, bounded by Content-Length and again while streaming,
+    before anything is decoded. The dump must bind to the head graph. Fails closed: every refusal is a
+    key of COMBINER_INTAKE_IMPORT_REFUSALS and writes nothing."""
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", drawing_id):
+        return _combiner_intake_refused("COMBINER_IMPORT_DRAWING_ID_INVALID")
+    if (project_id is not None
+            and not 1 <= len(project_id) <= solar_combiner_intake_import.MAX_PROJECT_ID_CHARS):
+        return _combiner_intake_refused("COMBINER_IMPORT_PROJECT_ID_INVALID")
+    tier = entitlements.resolve_tier(tenant)
+    try:
+        roles, elevated = entitlements.resolve_roles(tenant)
+        if not entitlements.entitlements_for(tier, roles, elevated).get("upload", False):
+            return entitlements.entitlement_denied_response("upload", tier)
+    except entitlements.EntitlementsError:
+        return entitlements.policy_unavailable_response("upload", tier)
+    if write_loop.drawing_mutations_refusal() is not None:
+        return _combiner_intake_refused("COMBINER_IMPORT_WRITES_DRAINED")
+    media = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if media not in COMBINER_INTAKE_MEDIA_TYPES:
+        return _combiner_intake_refused("COMBINER_IMPORT_MEDIA_TYPE_REFUSED")
+    limit = solar_combiner_intake_import.MAX_IMPORT_BYTES
+    length = request.headers.get("content-length", "")
+    if re.fullmatch(r"[0-9]+", length):
+        stripped = length.lstrip("0")
+        if len(stripped) > 12 or int(stripped or "0") > limit:
+            return _combiner_intake_refused("COMBINER_IMPORT_TOO_LARGE")
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > limit:
+            return _combiner_intake_refused("COMBINER_IMPORT_TOO_LARGE")
+        body.extend(chunk)
+    try:
+        result = await run_in_threadpool(_import_combiner_intake, str(tenant), drawing_id, bytes(body),
+                                         project_id, x_checkout_capability)
+    except solar_combiner_intake_import.CombinerIntakeImportError as exc:
+        return _combiner_intake_refused(exc.code)
+    return JSONResponse(content=with_envelope_fields(result))
 
 
 # sf-w4-landxml-import-surface: the LandXML terrain upload. Every reason the route can answer, as
