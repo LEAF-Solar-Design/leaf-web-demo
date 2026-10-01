@@ -586,9 +586,10 @@ def build_suites() -> List[Suite]:
         # runner. COUNTED from the collected cases: 48 tests + 41 more parametrizations = 89.
         Suite("server-solar-rooftop-chain", "server tests/test_solar_rooftop_chain.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_rooftop_chain.py"), 89),
-        # 88 + 3 opt-in history lookup rows (sf-w4-solaredge-tracking-read-b: e, f, g) = 91.
+        # 88 + 3 opt-in history lookup rows (sf-w4-solaredge-tracking-read-b: e, f, g) = 91, plus 31
+        # opt-in physical head rows (sf-w4-landxml-terrain-read: h to p) and 12 store fault rows = 134.
         Suite("server-solar-local-read", "server tests/test_solar_local_read.py",
-              "pytest", SERVER, _py_pytest("tests/test_solar_local_read.py"), 91),
+              "pytest", SERVER, _py_pytest("tests/test_solar_local_read.py"), 134),
         Suite("server-solar-artifacts", "server tests/test_solar_artifacts.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_artifacts.py"), 99),
         Suite("server-solar-tool-select-by-zone", "server tests/test_solar_tool_select_by_zone.py",
@@ -830,6 +831,12 @@ def build_suites() -> List[Suite]:
         # drawing's history (sf-w4-solaredge-tracking-read-b: 3 refusal cases + 1 own-history row) = 95.
         Suite("server-solar-tool-solaredge-tracking-read", "server tests/test_solar_tool_solaredge_tracking_read.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_solaredge_tracking_read.py"), 95),
+        # Terrain read (sf-w4-landxml-terrain-read): the terrain stored on the drawing's physical head read
+        # back through the catalog (grid summary, frame, source digest, preview standing), handed to the
+        # builtin by the read adapter's opt-in physical head and re-read by index, with its chain, in the
+        # terminal proof. Reads only. Hermetic and nothing skips: the floor is the exact count, 96.
+        Suite("server-solar-tool-terrain-read", "server tests/test_solar_tool_terrain_read.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_terrain_read.py"), 96),
         Suite("server-solar-guardrails", "server tests/test_solar_guardrails.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_guardrails.py"), 17),  # R31b: two intake/branch cases
         Suite("server-solar-pile-block-mapping", "server tests/test_solar_pile_block_mapping.py",
