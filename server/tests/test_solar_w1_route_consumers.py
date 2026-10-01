@@ -324,7 +324,8 @@ def test_route_consumers_w1_outputs_are_unchanged(assigned, routed):
     assert [item["id"] for item in routed["routes"]] == ROUTE_IDS
     assert all("pathway_ref" not in item for item in routed["routes"])
     tabled = schedule().run(copy.deepcopy(routed), {"expected_rev": 2, "insertion_point": [10, 20]})
-    assert canon_sha(tabled) == "4ece445f56a4140aa719623bdc1d1072ec3ebe9dcb0e2a88efdaf26c9d9264a3"
+    # The stale schedule the fixture carries is now replaced (wave 15).
+    assert canon_sha(tabled) == "a2ad6254e7a0ed5697c7ff97e2f4e947603ccb9821af4d8c24d5f455e790db29"
     assert canon_sha(tabled["schedules"][-1]["rows"]) == SCHEDULE_ROWS
     readiness = availability.w1_graph_readiness(copy.deepcopy(routed))
     assert readiness["solar-homeruns"] == readiness["solar-schedule"] == {

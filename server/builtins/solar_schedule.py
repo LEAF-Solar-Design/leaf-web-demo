@@ -43,6 +43,7 @@ def _schedule(intake, params):
     return graph, schedule
 
 
+# The licensed path keeps stale schedules; licensed_preview has no removal channel, so a replacement there needs a removal-aware adapter first.
 def create_schedule(intake, params, *, licensed_write=None):
     graph, schedule = _schedule(intake, params)
     if schedule is None:
@@ -65,5 +66,7 @@ def run(graph, params):
                 if route["from_ref"] == graph["strings"][0]["id"]
                 and route["route_kind"] == "start homerun")
     schedule["provenance"]["created_at"] = lead["provenance"]["created_at"]
+    # A stale schedule left in the graph makes require_current_export refuse every export.
+    graph["schedules"] = [s for s in graph["schedules"] if s["validity"]["state"] == "valid"]
     graph["schedules"].append(schedule)
     return advance(graph, [schedule], "solar-schedule")
