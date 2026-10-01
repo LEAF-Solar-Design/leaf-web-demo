@@ -519,3 +519,236 @@ def test_read_source_has_no_dynamic_import():
     source = Path(local.__file__).read_text(encoding="utf-8")
     assert all(word not in source for word in (
         "tool_loader", "import_module", "exec(", "publish_version", "solar-select-by-zone"))
+
+
+# ---------------------------------------------------------------- the opt-in physical head (sf-w4-landxml-terrain-read)
+
+
+def _physical_builtin(monkeypatch, run_builtin, **flags):
+    monkeypatch.setattr(local, "_load_builtin", lambda tool: SimpleNamespace(run=run_builtin, **flags))
+
+
+def _publish_head(backend, state=None, parent=None):
+    """Publish a tiny physical state as the head of drawing "solar"; its head view."""
+    import solar_physical_head
+    import solar_physical_state
+
+    document = solar_physical_state.physical_document(
+        {"mesh_faces": 3} if state is None else state, drawing_units="m", source_sha256="a" * 64,
+        capability="frame-generate", parent=parent)
+    return solar_physical_head.publish_physical_state(backend, TENANT, "solar", document)["head"]
+
+
+def _echo_head(graph, params, physical_head=None):
+    if physical_head is None:
+        return {"head": None, "handed": None}
+    return {"head": physical_head["head"], "handed": sorted(physical_head),
+            "mesh_faces": physical_head["document"]["state"].get("mesh_faces")}
+
+
+@pytest.mark.parametrize("flags", [
+    {}, {"READS_PHYSICAL_HEAD": 1}, {"READS_PHYSICAL_HEAD": "yes"}, {"READS_PHYSICAL_HEAD": False},
+    {"READS_PHYSICAL_HEAD": None},
+])
+def test_read_builtin_without_physical_head_never_reads_the_head_log(backend, monkeypatch, flags):
+    # (h) Every builtin that does not declare READS_PHYSICAL_HEAD = True (exactly) is called as
+    # before, and the head log is never read for it, in the read or in its proof.
+    import solar_physical_head
+
+    calls = []
+
+    def spy(*args, **kwargs):
+        calls.append((len(args), kwargs))
+        return {"status": "spied"}
+
+    for name in ("load_physical_head", "physical_head"):
+        monkeypatch.setattr(solar_physical_head, name, forbidden)
+    _physical_builtin(monkeypatch, spy, **flags)
+    result = run(backend)
+    assert proof(result, backend)["output_sha256"] == digest({"status": "spied"})
+    assert calls == [(2, {}), (2, {})]
+
+
+def test_read_physical_head_is_handed_to_a_declaring_builtin(backend, graph, monkeypatch):
+    # (i) None for a drawing with no physical state; else the head view and its decoded document.
+    import solar_physical_head
+
+    _physical_builtin(monkeypatch, _echo_head, READS_PHYSICAL_HEAD=True)
+    absent = run(backend)
+    assert absent["output"] == {"head": None, "handed": None}
+    assert proof(absent, backend)["output_sha256"] == digest(absent["output"])
+    view = _publish_head(backend)
+    assert view == solar_physical_head.physical_head(backend, TENANT, "solar",
+                                                     project_id=graph["project"]["id"])
+    result = run(backend)
+    assert result["output"] == {"head": view, "handed": ["document", "head"], "mesh_faces": 3}
+    assert (view["index"], view["parent"], view["project_id"]) == (0, None, graph["project"]["id"])
+    assert proof(result, backend)["output_sha256"] == digest(result["output"])
+    # The proof of the earlier "nothing stored" answer no longer holds: the log is not empty.
+    with pytest.raises(ValueError, match="^graph read terminal proof rejected$"):
+        proof(absent, backend)
+
+
+def test_read_physical_head_proof_rereads_the_recorded_entry(backend, monkeypatch):
+    # (j) After the head moves, the proof of an earlier read re-reads the entry it recorded.
+    import solar_physical_head
+
+    _physical_builtin(monkeypatch, _echo_head, READS_PHYSICAL_HEAD=True)
+    first_view = _publish_head(backend)
+    first = run(backend)
+    second_view = _publish_head(backend, {"mesh_faces": 4}, parent=first_view["state"]["artifact_id"])
+    second = run(backend)
+    assert (second_view["index"], second["output"]["mesh_faces"]) == (1, 4)
+    monkeypatch.setattr(solar_physical_head, "load_physical_head", forbidden)
+    assert proof(first, backend)["output_sha256"] == digest(first["output"])
+    assert proof(second, backend)["output_sha256"] == digest(second["output"])
+    assert first["output"]["mesh_faces"] == 3
+
+
+@pytest.mark.parametrize("case", ["no-head-key", "other-head", "mutated-head", "list", "none-for-stored"])
+def test_read_physical_head_output_must_name_the_head_it_read(backend, monkeypatch, case):
+    # (k) The proof re-reads the head the output names, so an output that does not name it fails.
+    def run_builtin(graph, params, physical_head=None):
+        head = physical_head["head"]
+        if case == "no-head-key":
+            return {"status": "read"}
+        if case == "other-head":
+            return {"head": dict(head, index=head["index"] + 1)}
+        if case == "mutated-head":
+            head["state"]["byte_length"] += 1
+            return {"head": head}
+        # The list case pins the generic non-dict refusal; the other four pin the physical-head guard.
+        if case == "list":
+            return [head]
+        return {"head": None}
+
+    _physical_builtin(monkeypatch, run_builtin, READS_PHYSICAL_HEAD=True)
+    _publish_head(backend)
+    with pytest.raises(GraphValidationError) as exc:
+        run(backend)
+    assert exc.value.code == "READ_OUTPUT_INVALID"
+
+
+def test_read_physical_head_and_history_can_both_be_declared(backend, graph, monkeypatch):
+    # (l) The two opt-ins are independent keyword arguments.
+    def both(graph_value, params, version_graph_sha256=None, physical_head=None):
+        return {"head": None if physical_head is None else physical_head["head"],
+                "version_1": version_graph_sha256(1)}
+
+    _physical_builtin(monkeypatch, both, READS_PHYSICAL_HEAD=True, READS_VERSION_HISTORY=True)
+    view = _publish_head(backend)
+    result = run(backend)
+    assert result["output"] == {"head": view, "version_1": digest(graph)}
+    assert proof(result, backend)["output_sha256"] == digest(result["output"])
+
+
+def test_read_output_refuses_a_declaring_builtin_called_without_a_head(backend, monkeypatch):
+    # (m) _read_output never runs a declaring builtin on a head nobody resolved.
+    _physical_builtin(monkeypatch, _echo_head, READS_PHYSICAL_HEAD=True)
+    context = local.resolve_graph_context(backend, TENANT, "solar", 1)
+    with pytest.raises(GraphValidationError) as exc:
+        local._read_output(TOOL, context["graph"], {})
+    assert exc.value.code == "READ_OUTPUT_INVALID"
+    output, _ = local._read_output(TOOL, context["graph"], {}, physical_head=None)
+    assert output == {"head": None, "handed": None}
+
+
+@pytest.mark.parametrize("case,code", [
+    ("store-down", "PHYSICAL_HEAD_STORE_UNAVAILABLE"),
+    ("entry-garbled", "PHYSICAL_HEAD_CORRUPT"),
+    ("os-error", "PHYSICAL_HEAD_STORE_UNAVAILABLE"),
+    ("runtime-error", "PHYSICAL_HEAD_STORE_UNAVAILABLE"),
+])
+def test_read_physical_head_failures_are_named(backend, monkeypatch, case, code):
+    # (n) A head the store cannot serve refuses the read with the physical head code.
+    import solar_physical_head
+
+    _physical_builtin(monkeypatch, _echo_head, READS_PHYSICAL_HEAD=True)
+    _publish_head(backend)
+    original = backend.get
+    entry = solar_physical_head.entry_key(TENANT, "solar", 0)
+    if case == "store-down":
+        def get(key):
+            if "/physical/" in key:
+                raise OSError("down")
+            return original(key)
+        monkeypatch.setattr(backend, "get", get)
+    elif case == "entry-garbled":
+        monkeypatch.setattr(backend, "get", lambda key: b"{}" if key == entry else original(key))
+    else:
+        error = OSError("down") if case == "os-error" else RuntimeError("down")
+
+        def fail(*args, **kwargs):
+            raise error
+        monkeypatch.setattr(solar_physical_head, "load_physical_head", fail)
+    with pytest.raises(GraphValidationError) as exc:
+        run(backend)
+    assert exc.value.code == code
+
+
+@pytest.mark.parametrize("error", (ValueError, TypeError, AttributeError, ZeroDivisionError))
+@pytest.mark.parametrize("which", ("metadata", "blob", "log"))
+def test_read_physical_head_store_fault_is_named(backend, monkeypatch, error, which):
+    _physical_builtin(monkeypatch, _echo_head, READS_PHYSICAL_HEAD=True)
+    _publish_head(backend)
+    original = backend.get
+
+    def get(key):
+        if ((which == "log" and "/physical/head-" in key)
+                or (which in ("metadata", "blob") and "/artifacts/" in key
+                    and key.endswith(".json") == (which == "metadata"))):
+            raise error("store failed")
+        return original(key)
+
+    monkeypatch.setattr(backend, "get", get)
+    with pytest.raises(GraphValidationError) as exc:
+        run(backend)
+    assert exc.value.code == "PHYSICAL_HEAD_STORE_UNAVAILABLE"
+
+
+@pytest.mark.parametrize("recorded", [
+    {"index": True}, {"index": "0"}, {"index": -1}, {"index": 4096}, {"state": None}, {"state": []},
+    {"parent": 7}, "x", [], 0,
+])
+def test_read_physical_head_proof_rejects_a_malformed_recorded_head(backend, monkeypatch, recorded):
+    # (o) The proof validates the recorded head before it reads anything by it.
+    _physical_builtin(monkeypatch, _echo_head, READS_PHYSICAL_HEAD=True)
+    _publish_head(backend)
+    result = run(backend)
+    output = copy.deepcopy(result["output"])
+    output["head"] = dict(output["head"], **recorded) if type(recorded) is dict else recorded
+    forged = dict(result, output=output, output_sha256=digest(output),
+                  output_bytes=len(canonical_bytes(output)))
+    with pytest.raises(ValueError, match="^graph read terminal proof rejected$"):
+        proof(forged, backend)
+
+
+@pytest.mark.parametrize("case", ["predecessor-garbled", "predecessor-absent", "predecessor-other-state"])
+def test_read_physical_head_proof_requires_the_recorded_entry_to_chain(backend, monkeypatch, case):
+    # (p) The recorded entry must chain to a valid predecessor, as the head reader requires: a log
+    # the head reader calls corrupt at that index never proves.
+    import solar_physical_head
+
+    _physical_builtin(monkeypatch, _echo_head, READS_PHYSICAL_HEAD=True)
+    first_view = _publish_head(backend)
+    _publish_head(backend, {"mesh_faces": 4}, parent=first_view["state"]["artifact_id"])
+    second = run(backend)
+    assert second["output"]["head"]["index"] == 1
+    assert proof(second, backend)["output_sha256"] == digest(second["output"])
+    original = backend.get
+    key = solar_physical_head.entry_key(TENANT, "solar", 0)
+    stored = json.loads(original(key))
+
+    def get(wanted):
+        if wanted != key:
+            return original(wanted)
+        if case == "predecessor-garbled":
+            return b"{}"
+        if case == "predecessor-absent":
+            raise KeyError(wanted)
+        return solar_physical_head.entry_bytes(0, stored["project_id"], None, "0" * 64,
+                                               stored["content_sha256"])
+
+    monkeypatch.setattr(backend, "get", get)
+    with pytest.raises(ValueError, match="^graph read terminal proof rejected$"):
+        proof(second, backend)

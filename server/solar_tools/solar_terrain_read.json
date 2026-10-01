@@ -1,0 +1,55 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-terrain-read",
+  "builtin": "builtins/solar_terrain_read.py",
+  "family": "terrain",
+  "adapter": "local-graph-read",
+  "entitlement": "run_read",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_TERRAIN_READ_REQUEST",
+  "readiness": {
+    "kind": "facets",
+    "facets": []
+  },
+  "engine": "server-builtin",
+  "interaction": {
+    "mode": "form"
+  },
+  "record_store": "registry",
+  "record": {
+    "name": "solar-terrain-read",
+    "version": "1.0.0",
+    "description": "Show the terrain stored for this drawing: the grid's rows, columns, extents, cell size and elevation range, its units, CRS and elevation datum, its digest and source file digest, and whether the terrain mesh and slope check previews still match it. Reads only; a drawing with no stored terrain answers that plainly.",
+    "kind": "script",
+    "family_id": "terrain",
+    "engine_op": "solar_terrain_read",
+    "entry": "builtins/solar_terrain_read.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {
+          "type": "string",
+          "maxLength": 128
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "returns": {
+      "type": "object"
+    },
+    "capabilities": [
+      "drawing.read"
+    ],
+    "allow_local_fallback": false
+  },
+  "ledger": [
+    "landxml-import"
+  ],
+  "trusted_inputs": [],
+  "maturity": "preview",
+  "wave": 4,
+  "order": 40,
+  "scenario": "w4-landxml"
+}

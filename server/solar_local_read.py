@@ -6,7 +6,9 @@ from pathlib import Path
 
 import solar_tools
 import solar_artifacts
-import write_loop
+import write_loop  # before solar_physical_head: it puts da/ on sys.path for that module's `import store`
+import solar_physical_head
+import solar_physical_state
 from leaf_cloud_client import canonical_bytes
 from solar_design_graph import GraphValidationError, _bounded_json
 from solar_graph_context import resolve_graph_context
@@ -80,14 +82,106 @@ def _history_argument(tool, backend, tenant_id, drawing_id):
     return {"version_graph_sha256": _version_history_lookup(backend, tenant_id, drawing_id)}
 
 
-def _read_output(tool, graph, builtin_params, sink=None, *, version_graph_sha256=None):
+def _reads_physical_head(module):
+    """Only a builtin that declares READS_PHYSICAL_HEAD = True (exactly) receives the head."""
+    return getattr(module, "READS_PHYSICAL_HEAD", False) is True
+
+
+def _current_physical_head(backend, tenant_id, drawing_id, project_id):
+    """The drawing's current physical head for a read: None when no state was ever published,
+    else {"head": view, "document": document}. One bounded head search (at most 13 log reads)
+    and one artifact read; never writes. A physical state or head refusal passes through with
+    its own PHYSICAL_* code."""
+    try:
+        view, document = solar_physical_head.load_physical_head(
+            backend, tenant_id, drawing_id, project_id=project_id)
+    except solar_physical_state.PhysicalStateError as exc:
+        raise GraphValidationError(exc.code) from None
+    except (OSError, RuntimeError, ValueError, LookupError, TypeError, AttributeError, ArithmeticError):
+        raise GraphValidationError("PHYSICAL_HEAD_STORE_UNAVAILABLE") from None
+    return None if view is None else {"head": view, "document": document}
+
+
+def _recorded_physical_head(backend, tenant_id, drawing_id, project_id, output):
+    """The physical head a finished read recorded under output["head"], re-read for its
+    terminal proof. The head log is append-only and a later import or operation moves the
+    current head, so the proof re-reads the entry the output names: the log entry at the
+    recorded index must be byte-equal to the entry the recorded head implies, the state it
+    names is loaded by id, and the head view is rebuilt from the stored state's own metadata,
+    never copied from the output. The entry must also be chained the way the head reader
+    requires: entry 0 names no parent, and any later entry's parent is the state of its
+    predecessor, which is read through the head module's own validated entry reader. A log the
+    head reader calls corrupt at that index therefore never proves. A recorded None is provable only
+    while the head reader finds no head: its search reads the log's contiguous prefix from entry 0,
+    so a log whose first entries were removed reads as empty to this proof exactly as it does to
+    every reader (an inherited solar_physical_head limitation). At most two entry reads and one
+    artifact read (or one head search for None); never writes.
+    A malformed or mismatched record raises a ValueError, LookupError, TypeError or
+    AttributeError, each of which graph_read_provenance turns into its one rejection."""
+    recorded = output["head"]
+    if recorded is None:
+        if solar_physical_head.physical_head(backend, tenant_id, drawing_id,
+                                             project_id=project_id) is not None:
+            raise ValueError()
+        return None
+    index, parent = recorded["index"], recorded["parent"]
+    artifact_id = recorded["state"]["artifact_id"]
+    log = solar_physical_head._Log(backend, tenant_id, drawing_id)
+    if log.get(index) != solar_physical_head.entry_bytes(index, project_id, parent, artifact_id,
+                                                         recorded["state"]["content_sha256"]):
+        raise ValueError()
+    # Byte equality pins the recorded entry; its chain is the head reader's rule.
+    if index == 0:
+        if parent is not None:
+            raise ValueError()
+    elif log.entry(index - 1)["state"] != parent:
+        raise ValueError()
+    meta, document = solar_physical_state.load_physical_state(
+        backend, tenant_id, drawing_id, artifact_id, project_id=project_id)
+    state = {key: meta[key] for key in ("artifact_id", "media_type", "filename", "byte_length",
+                                        "content_sha256", "source_version")}
+    state.update(schema=solar_artifacts.REF_SCHEMA,
+                 download=f"/api/drawings/{drawing_id}/artifacts/{meta['artifact_id']}")
+    view = {"schema": solar_physical_head.HEAD_SCHEMA, "drawing_id": drawing_id,
+            "project_id": project_id, "index": index, "parent": parent, "state": state}
+    return {"head": view, "document": document}
+
+
+def _physical_argument(tool, backend, tenant_id, drawing_id, project_id, recorded_output=None,
+                       *, proof=False):
+    """{} for every builtin that does not declare the physical head need, so its call is
+    unchanged; else {"physical_head": ...}: the current head for a read, the recorded head for
+    its terminal proof."""
+    if not _reads_physical_head(_load_builtin(tool)):
+        return {}
+    if proof:
+        return {"physical_head": _recorded_physical_head(
+            backend, tenant_id, drawing_id, project_id, recorded_output)}
+    return {"physical_head": _current_physical_head(backend, tenant_id, drawing_id, project_id)}
+
+
+_UNSET = object()
+
+
+def _read_output(tool, graph, builtin_params, sink=None, *, version_graph_sha256=None,
+                 physical_head=_UNSET):
     try:
         module = _load_builtin(tool)
+        extra = {}
         if _reads_version_history(module):
-            output = module.run(copy.deepcopy(graph), copy.deepcopy(builtin_params),
-                                version_graph_sha256=version_graph_sha256)
-        else:
-            output = module.run(copy.deepcopy(graph), copy.deepcopy(builtin_params))
+            extra["version_graph_sha256"] = version_graph_sha256
+        if _reads_physical_head(module):
+            if physical_head is _UNSET:
+                raise GraphValidationError("READ_OUTPUT_INVALID")
+            # The document was decoded for this call alone; only the head view is compared below.
+            extra["physical_head"] = None if physical_head is None else {
+                "head": copy.deepcopy(physical_head["head"]), "document": physical_head["document"]}
+        output = module.run(copy.deepcopy(graph), copy.deepcopy(builtin_params), **extra)
+        if _reads_physical_head(module):
+            # The terminal proof re-reads the head the output names, so the output must name it.
+            expected = None if physical_head is None else physical_head["head"]
+            if type(output) is not dict or "head" not in output or output["head"] != expected:
+                raise GraphValidationError("READ_OUTPUT_INVALID")
     except GraphValidationError:
         raise
     except (LookupError, ArithmeticError, TypeError, ValueError, RecursionError):
@@ -138,7 +232,9 @@ def run_local_graph_read(backend, tenant_id, tool, params, *, drawing_id, source
     sink = solar_artifacts.ArtifactSink(backend, tenant_id, drawing_id, context, tool,
                                         request_sha256, False)
     output, data = _read_output(tool, context["graph"], builtin_params, sink,
-                                **_history_argument(tool, backend, tenant_id, drawing_id))
+                                **_history_argument(tool, backend, tenant_id, drawing_id),
+                                **_physical_argument(tool, backend, tenant_id, drawing_id,
+                                                     context["project_id"]))
     return {
         "schema_version": RESULT_SCHEMA, "adapter": ADAPTER_KIND,
         "tenant_id": tenant_id, "job_id": job_id, "tool": tool,
@@ -185,7 +281,10 @@ def graph_read_provenance(result, params, tenant_id, job_id, tool, source_versio
         for reference in solar_artifacts.artifact_references(result["output"]):
             sink.verify_reference(reference)
         output, data = _read_output(tool, context["graph"], builtin_params, sink,
-                                    **_history_argument(tool, backend, tenant_id, drawing_id))
+                                    **_history_argument(tool, backend, tenant_id, drawing_id),
+                                    **_physical_argument(tool, backend, tenant_id, drawing_id,
+                                                         context["project_id"], result["output"],
+                                                         proof=True))
         output_sha256 = digest(output)
         if (type(result["output"]) is not dict or output != result["output"]
                 or output_sha256 != result["output_sha256"]
