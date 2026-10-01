@@ -88,6 +88,7 @@ export const SOLAR_REFUSAL_REASONS = Object.freeze({
   schedules_mapping_failed: 'Electrical schedules cannot match this design to its circuits',
   schedules_optimizers_unsupported: 'Electrical schedules do not cover optimizer designs yet',
   schedules_zone_sizing_unsupported: 'Electrical schedules need one global string sizing, not zone sizing',
+  solar_output_not_current: 'Rerun the earlier Solar steps so the whole design is current first',
   capability_availability_unavailable: 'Tool readiness has not loaded for this drawing',
   capability_not_ready: 'This solar tool is not ready for this drawing',
   unlisted: 'The server refused this solar tool',
