@@ -5,6 +5,7 @@ No solver, drawing adapter, network client or execution rail lives here.
 """
 from __future__ import annotations
 
+import calendar
 import copy
 import hashlib
 import json
@@ -28,6 +29,13 @@ KINDS = {"project", "settings", "zone-el", "frame", "panel", "string", "inverter
 L1_EQUIPMENT_TYPES = ("combiner_box", "string_inverter")
 # A trench end is open (a picked point or the LEAFTRENCHAUTO hub), a panel group (frame) or a device.
 TRENCH_ENDPOINT_KINDS = ("frame", "inverter")
+
+# RFC 3339 section 5.6 date-time, decided here on every host. jsonschema registers its own
+# date-time checker only when the optional rfc3339_validator package imports, so the graph
+# validator never relies on it. Whole string, ASCII digits only, t and z in either case.
+_RFC3339_DATE_TIME = re.compile(
+    r"(\d{4})-(0[1-9]|1[0-2])-(\d{2})[Tt](?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d"
+    r"(?:\.\d+)?(?:[Zz]|[+-](?:[01]\d|2[0-3]):[0-5]\d)", re.ASCII)
 
 # Schema validators are built once per process from the packaged schema; reused, never mutated.
 _SCHEMA_VALIDATORS = None
@@ -90,6 +98,37 @@ def _bounded_json(value):
             raise GraphValidationError("GRAPH_LIMIT_EXCEEDED")
 
 
+def is_rfc3339_date_time(value) -> bool:
+    """True only for an exact str that is one whole RFC 3339 date-time. Never raises.
+
+    Year 0001..9999, a real calendar day, hour 00..23, minute and second 00..59 (no leap
+    second), an optional fraction of one or more digits, then Z or an offset of at most 23:59.
+    Linear in the length of the value; the caller bounds that length (the schema's maxLength)."""
+    if type(value) is not str:
+        return False
+    match = _RFC3339_DATE_TIME.fullmatch(value)
+    if match is None:
+        return False
+    year, month, day = map(int, match.groups())
+    return year >= 1 and 1 <= day <= calendar.monthrange(year, month)[1]
+
+
+def _date_time_format(instance) -> bool:
+    # JSON Schema: a format constrains strings only; the type keyword refuses everything else.
+    return not isinstance(instance, str) or is_rfc3339_date_time(instance)
+
+
+def graph_format_checker():
+    """A new jsonschema FormatChecker that knows exactly one format, date-time, on every host.
+
+    It starts empty, so no optional package can add or remove a checker."""
+    from jsonschema import FormatChecker
+
+    checker = FormatChecker(formats=())
+    checker.checks("date-time")(_date_time_format)
+    return checker
+
+
 def load_schema() -> dict:
     # Trusted, packaged local asset; never resolve a schema supplied by a caller.
     with SCHEMA_PATH.open("rb") as source:
@@ -107,12 +146,12 @@ def _schema_validators():
         with _SCHEMA_VALIDATORS_LOCK:
             validators = _SCHEMA_VALIDATORS
             if validators is None:
-                from jsonschema import Draft202012Validator, FormatChecker
+                from jsonschema import Draft202012Validator
 
                 schema = load_schema()
                 validators = (
                     Draft202012Validator(schema["$defs"]["units"]),
-                    Draft202012Validator(schema, format_checker=FormatChecker()),
+                    Draft202012Validator(schema, format_checker=graph_format_checker()),
                 )
                 _SCHEMA_VALIDATORS = validators
     return validators

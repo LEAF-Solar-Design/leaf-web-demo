@@ -1,0 +1,42 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-trackers-to-panel-groups",
+  "builtin": "builtins/solar_trackers_to_panel_groups.py",
+  "family": "stringing",
+  "adapter": "local-graph-commit",
+  "entitlement": "run_write",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_TRACKER_CONVERSION_REQUEST",
+  "readiness": {"kind": "hook"},
+  "engine": "server-builtin",
+  "interaction": {"mode": "form"},
+  "record_store": "registry",
+  "record": {
+    "name": "solar-trackers-to-panel-groups",
+    "version": "1.0.0",
+    "description": "Turn every tracker of the drawing's Ground layout into one panel group of module slots, as LEAFTRACKERSTOPANELGROUPS does, replacing any earlier conversion in one step.",
+    "kind": "script",
+    "family_id": "stringing",
+    "engine_op": "solar_trackers_to_panel_groups",
+    "entry": "builtins/solar_trackers_to_panel_groups.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {"type": "string", "maxLength": 128},
+        "expected_rev": {"type": "integer", "minimum": 0, "maximum": 2147483647}
+      },
+      "required": ["expected_rev"],
+      "additionalProperties": false
+    },
+    "returns": {"type": "object"},
+    "capabilities": ["drawing.write"],
+    "allow_local_fallback": false
+  },
+  "ledger": ["trackers-to-panelgroups"],
+  "trusted_inputs": ["physical_state"],
+  "maturity": "preview",
+  "wave": 3,
+  "order": 5,
+  "scenario": "w3-ground-electrical"
+}

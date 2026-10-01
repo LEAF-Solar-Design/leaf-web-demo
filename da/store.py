@@ -152,6 +152,12 @@ class ImmutableConflict(ValueError):
     tell the two apart without string matching."""
 
 
+# How many abandoned version blobs one publication will walk past before it
+# refuses. Bounds the exists/get round trips a single write can spend; fails
+# closed past it. Shared by the graph-bundle and the plain write path.
+MAX_ABANDONED_VERSION_SLOTS = 1000
+
+
 class CheckoutDenied(Exception):
     """A write was attempted by someone who is not the single-writer lock holder.
 
@@ -1853,6 +1859,16 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
     Returns the new integer version. A write from a non-latest head branches the
     DAG (parent linkage is enough; we keep the model simple).
 
+    ABANDONED BLOBS (legacy authority). A publication that wrote its DWG and
+    then failed to save the manifest leaves a blob beyond latest that no
+    manifest row names. The new version takes the first slot after latest that
+    holds no blob. A slot whose blob has exactly these bytes is adopted, not
+    rewritten. A slot holding other bytes is walked past, at most
+    MAX_ABANDONED_VERSION_SLOTS times, so version numbers can skip; on a
+    backend with no cross-process lock a plain (non-bundle) write refuses any
+    occupied slot instead, identical bytes included. No existing version blob
+    is ever written over.
+
     SINGLE-WRITER AUTHORIZATION (`holder`, `fence`). The lock only ever proved
     that A checkout was live, never that the CALLER owned it, so session B could
     publish a version under session A's lease. `holder` is the caller's own
@@ -1943,23 +1959,41 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
 
         new_v = int(m["latest"]) + 1
         vkey = drawing_version_key(tid, did, new_v)
-        if bundle is not None:
-            # Failed publications can leave immutable DWGs beyond latest.
-            # Adopt matching bytes, otherwise reserve a fresh bounded slot.
-            for _ in range(1000):
-                if not backend.exists(vkey) or _sha256(backend.get(vkey)) == _sha256(data):
-                    break
-                new_v += 1
-                vkey = drawing_version_key(tid, did, new_v)
-            else:
-                raise ValueError("too many abandoned version reservations")
-        if bundle is None and backend.exists(vkey):  # immutability guard
-            raise ValueError(f"refuse to overwrite immutable version key {vkey}")
+        digest = _sha256(data)
+        # Failed publications can leave immutable DWGs beyond latest: the blob
+        # write landed and the manifest save after it did not, so no manifest
+        # row names the blob and `latest` never moved past it. Refusing here
+        # for good would block every later writer of the drawing. Adopt
+        # matching bytes, otherwise reserve a fresh bounded slot. Never
+        # overwrites a blob; fails closed on anything it cannot read.
+        #
+        # The plain (non-bundle) path adopts or walks past a blob only where
+        # this guard really is exclusive (`cross_process_checkout_safe`). On a
+        # backend with no cross-process lock a foreign blob beyond latest may
+        # be a second replica's write still in flight, identical bytes included,
+        # so that case keeps the refusal and reads no blob.
+        adopted = False
+        for _ in range(MAX_ABANDONED_VERSION_SLOTS):
+            if not backend.exists(vkey):
+                break
+            if bundle is None and not backend.cross_process_checkout_safe:
+                raise ValueError(f"refuse to overwrite immutable version key {vkey}")
+            existing = backend.get(vkey)
+            if not isinstance(existing, (bytes, bytearray)):
+                raise ValueError(f"version key {vkey} holds an unreadable object")
+            if len(existing) == len(data) and _sha256(existing) == digest:
+                adopted = True
+                break
+            new_v += 1
+            vkey = drawing_version_key(tid, did, new_v)
+        else:
+            raise ValueError("too many abandoned version reservations")
 
         if bundle is None:
-            backend.put(vkey, data)
+            if not adopted:
+                backend.put(vkey, data)
         else:
-            _put_or_verify_blob(backend, vkey, data, _sha256(data))
+            _put_or_verify_blob(backend, vkey, data, digest)
             _publish_graph_bundle(backend, tid, did, bundle)
             if not _is_active(m.get("checkout"), datetime.now(timezone.utc)):
                 raise CheckoutDenied("checkout expired during graph publication")
@@ -1968,7 +2002,7 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
         parent = int(parent_version) if parent_version is not None else None
         m["versions"].append({
             "v": new_v, "parent": parent, "created": _now_iso(),
-            "bytes": len(data), "sha256": _sha256(data),
+            "bytes": len(data), "sha256": digest,
             "workitem_id": meta.get("workitem_id"), "tool": meta.get("tool"),
             "note": meta.get("note"),
             # Authored-tool provenance: the server's own sha256 over the
