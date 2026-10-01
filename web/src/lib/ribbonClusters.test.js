@@ -7,6 +7,8 @@ import { describe, expect, it, vi } from 'vitest'
 import { readFileSync, readdirSync } from 'node:fs'
 import { canOpenSolarSettingsForm } from '../solar/solarSettingsWire.js'
 import { SOLAR_REFUSAL_REASONS, solarRailReason } from './ribbonClusters.js'
+import { solarRefusalEnvelope, solarRunRefusal } from './ribbonClusters.js'
+import conversionDeclaration from '../../../server/solar_tools/solar_trackers_to_panel_groups.json'
 
 import { DEFERRED_REASONS } from './actionRegistry.js'
 import { RIBBON_TABS } from '../site/CockpitTopBand.jsx'
@@ -1636,5 +1638,113 @@ describe('solar refusal copy', () => {
     expect(raisedCodes('raise GraphValidationError(\'GUARDRAILS_SIZING_REQUIRED\')')).toEqual(['GUARDRAILS_SIZING_REQUIRED'])
     expect(raisedCodes('raise GraphValidationError(code)')).toEqual([])
     expect(raisedCodes('raise GraphValidationError("lowercase")')).toEqual([])
+  })
+})
+
+describe('conversion surface (sf-w3-conversion-graph-surface)', () => {
+  // The catalog row the server serves for the conversion tool: the record plus
+  // the leaf.solar-tool-view.v1 projection (server/solar_tools/__init__.py catalog_view).
+  const view = Object.fromEntries(['name', 'family', 'wave', 'order', 'maturity', 'engine', 'adapter',
+    'entitlement', 'interaction', 'ledger'].map((key) => [key, conversionDeclaration[key]]))
+  const conversionRow = {
+    name: conversionDeclaration.name, description: conversionDeclaration.record.description,
+    capabilities: conversionDeclaration.record.capabilities, params: conversionDeclaration.record.params,
+    solar: { schema: 'leaf.solar-tool-view.v1', ...view },
+  }
+  const error = (code) => ({
+    actor: 'user', error_code: 'BAD_PARAMS', message: code,
+    next_action: 'Review the inputs, correct them, and submit again.', retry_class: 'after_action', retryable: false,
+  })
+  // Measured with python -B on 3293e8cd: POST /api/run?wait=1 answers these bodies verbatim, and api.js
+  // returns a body that carries `ok` unchanged.
+  const syncRefusal = (code, timing) => ({
+    cost: null, degraded_mode: false, error: error(code), ok: false, overlay: null, reason_code: code,
+    result: null, timing_ms: timing, tool: 'solar-trackers-to-panel-groups', version: null,
+  })
+  // Measured: POST /api/run (202) then GET /api/jobs/<id>; this is api.js recordToEnvelope of that failed record.
+  const jobRefusal = {
+    ok: false, tool: 'solar-trackers-to-panel-groups', version: null, result: null, overlay: null, timing_ms: 81,
+    cost: null, error: { ...error('GROUND_TRACKER_ROWS_REQUIRED'), reason_code: 'GROUND_TRACKER_ROWS_REQUIRED' },
+    degraded_mode: false,
+  }
+  // Measured: the 409 readiness body has no `ok`, so api.js builds this envelope around body.error.
+  const readinessRefusal = {
+    ok: false, tool: 'solar-trackers-to-panel-groups', version: null, result: null, overlay: null, timing_ms: 0,
+    cost: null, error: error('ground_physical_state_required'), degraded_mode: false,
+  }
+
+  it('CS1 solarRunRefusal reads every conversion refusal the server emits as its map sentence', () => {
+    expect(solarRunRefusal('GROUND_UNITS_MISMATCH')).toBe('The Ground layout and the solar design use different drawing units')
+    expect(solarRunRefusal('GROUND_LAYOUT_INVALID')).toBe('The Ground layout cannot be converted into panel groups')
+    expect(solarRunRefusal('GROUND_TRACKER_ROWS_REQUIRED')).toBe('Add tracker rows to the Ground layout first')
+    for (const code of ['GROUND_INSTALLATION_REQUIRED', 'GROUND_CONVERSION_IN_USE', 'GROUND_PHYSICAL_STATE_REQUIRED',
+      'GROUND_LAYOUT_TOO_LARGE']) {
+      expect(solarRunRefusal(code)).toBe(SOLAR_REFUSAL_REASONS[code.toLowerCase()])
+    }
+    expect(solarRunRefusal('ground_physical_state_required')).toBe('Lay out the Ground trackers first, then convert them')
+    expect(solarRunRefusal('UNRESOLVED_UNITS')).toBe('Set the drawing units in Solar settings first')
+  })
+
+  it('CS2 solarRunRefusal answers null for anything that is not one map key in one case', () => {
+    for (const code of ['STALE_GRAPH_REVISION', 'PHYSICAL_STATE_UNAVAILABLE', 'PHYSICAL_STATE_UNBOUND',
+      'INVALID_TRACKER_CONVERSION_REQUEST', 'Ground_Units_Mismatch', 'ground_units_MISMATCH', 'UNLISTED', 'unlisted',
+      'CAPABILITY_NOT_READY', 'capability_availability_unavailable', 'constructor', 'CONSTRUCTOR', '__proto__',
+      'GROUND_UNITS_MISMATCH ', ' GROUND_UNITS_MISMATCH', '', 'G'.repeat(65)]) {
+      expect(solarRunRefusal(code)).toBeNull()
+    }
+    for (const value of [null, undefined, 42, {}, ['GROUND_UNITS_MISMATCH'], new String('GROUND_UNITS_MISMATCH')]) {
+      expect(solarRunRefusal(value)).toBeNull()
+    }
+  })
+
+  it('CS3 a failed conversion run shows the sentence and keeps every other field', () => {
+    const cases = [
+      [syncRefusal('GROUND_TRACKER_ROWS_REQUIRED', 142), 'Add tracker rows to the Ground layout first'],
+      [syncRefusal('GROUND_UNITS_MISMATCH', 32), 'The Ground layout and the solar design use different drawing units'],
+      [syncRefusal('GROUND_LAYOUT_INVALID', 24), 'The Ground layout cannot be converted into panel groups'],
+      [jobRefusal, 'Add tracker rows to the Ground layout first'],
+      [readinessRefusal, 'Lay out the Ground trackers first, then convert them'],
+    ]
+    for (const [envelope, sentence] of cases) {
+      const before = structuredClone(envelope)
+      const shown = solarRefusalEnvelope(envelope, conversionRow)
+      expect(shown).toEqual({ ...before, error: { ...before.error, message: sentence } })
+      expect(envelope).toEqual(before)
+    }
+  })
+
+  it('CS4 the top-level reason_code wins over the job record code and the message', () => {
+    const envelope = {
+      ...syncRefusal('GROUND_LAYOUT_INVALID', 1), reason_code: 'GROUND_UNITS_MISMATCH',
+      error: { ...error('GROUND_TRACKER_ROWS_REQUIRED'), reason_code: 'GROUND_LAYOUT_INVALID' },
+    }
+    expect(solarRefusalEnvelope(envelope, conversionRow).error.message)
+      .toBe('The Ground layout and the solar design use different drawing units')
+    const job = { ...jobRefusal, error: { ...jobRefusal.error, message: 'job failed' } }
+    expect(solarRefusalEnvelope(job, conversionRow).error.message).toBe('Add tracker rows to the Ground layout first')
+  })
+
+  it('CS5 everything else comes back as the same envelope object', () => {
+    const ok = { ok: true, error: null, tool: 'solar-trackers-to-panel-groups', result: { after_rev: 1 } }
+    const stale = syncRefusal('STALE_GRAPH_REVISION', 32)
+    const units = syncRefusal('GROUND_UNITS_MISMATCH', 32)
+    const { solar, ...plainRow } = conversionRow
+    const cases = [
+      [ok, conversionRow],
+      [{ ...units, ok: true }, conversionRow],
+      [stale, conversionRow],
+      [units, plainRow],
+      [units, { ...conversionRow, solar: { ...solar, schema: 'leaf.solar-tool-view.v0' } }],
+      [{ ...units, tool: 'solar-string-add' }, conversionRow],
+      [units, null],
+      [units, { ...conversionRow, name: 42 }],
+      [{ ...units, error: 'GROUND_UNITS_MISMATCH' }, conversionRow],
+      [{ ...units, error: ['GROUND_UNITS_MISMATCH'] }, conversionRow],
+      [[units], conversionRow],
+    ]
+    for (const [envelope, tool] of cases) expect(solarRefusalEnvelope(envelope, tool)).toBe(envelope)
+    for (const envelope of [null, undefined, 'GROUND_UNITS_MISMATCH']) {
+      expect(solarRefusalEnvelope(envelope, conversionRow)).toBe(envelope)
+    }
   })
 })

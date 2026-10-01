@@ -3,8 +3,9 @@ import ampacityDeclaration from '../../../server/solar_tools/solar_nec_ampacity_
 import voltageDeclaration from '../../../server/solar_tools/solar_nec_ac_voltage_drop.json'
 import conduitDeclaration from '../../../server/solar_tools/solar_nec_conduit_fill.json'
 import ocpdDeclaration from '../../../server/solar_tools/solar_nec_feeder_ocpd.json'
+import conversionDeclaration from '../../../server/solar_tools/solar_trackers_to_panel_groups.json'
 import {
-  MAX_FLOW_STEPS, solarFlowPrefill, solarFlowReadyMap, solarFlowReasonCodes, solarFlowRecordRun,
+  MAX_FLOW_STEPS, admittedOverlays, solarFlowPrefill, solarFlowReadyMap, solarFlowReasonCodes, solarFlowRecordRun,
   solarFlowRunOutcome, solarFlowRunStatus, solarFlowRunsFor, solarFlowState, solarFlowStepId, solarFlowSteps,
 } from './solarFlowModel.js'
 import {
@@ -18,6 +19,35 @@ const W1 = [
   ['solar-assign-equipment', 70], ['solar-homeruns', 80], ['solar-schedule', 90],
 ]
 const READY = Object.freeze({ entitled: true, implemented: true, engine_ready: true, input_ready: true, refusal_reasons: [] })
+
+it('FL14 closed params admit only their own selection overlay keys without mutation', () => {
+  const overlays = { target_handle: 'AB', handle: 'AB' }
+  const params = conversionDeclaration.record.params
+  const before = structuredClone({ params, overlays })
+  expect(admittedOverlays(params, overlays)).toEqual({})
+  expect(admittedOverlays({ additionalProperties: false, properties: { handle: { type: 'string' } } }, overlays))
+    .toEqual({ handle: 'AB' })
+  const inherited = Object.assign(Object.create({ handle: {} }), { target_handle: {} })
+  expect(admittedOverlays({ additionalProperties: false, properties: inherited }, overlays)).toEqual({})
+  const nullProperties = Object.assign(Object.create(null), { handle: {} })
+  expect(admittedOverlays({ additionalProperties: false, properties: nullProperties }, overlays)).toEqual({ handle: 'AB' })
+  expect({ params, overlays }).toEqual(before)
+})
+
+it('FL15 open params keep overlay identity and unusable closed schemas admit nothing', () => {
+  const overlays = { target_handle: 'AB', handle: 'AB' }
+  for (const params of [{ properties: {} }, { additionalProperties: true }, { additionalProperties: 'false' }]) {
+    expect(admittedOverlays(params, overlays)).toBe(overlays)
+    expect(admittedOverlays(params, null)).toBeNull()
+  }
+  for (const params of [null, [], { additionalProperties: false, properties: null },
+    { additionalProperties: false, properties: [] }]) {
+    expect(admittedOverlays(params, overlays)).toEqual({})
+  }
+  for (const value of [null, undefined, [], 'AB']) {
+    expect(admittedOverlays({ additionalProperties: false, properties: { handle: {} } }, value)).toEqual({})
+  }
+})
 
 function blocked(...codes) {
   return { entitled: true, implemented: true, engine_ready: true, input_ready: false, refusal_reasons: codes }
@@ -141,10 +171,13 @@ describe('Solar flow selection', () => {
     }
   })
 
-  it('FL2 names only the four real NEC declarations in registry order', () => {
+  it('FL2 names the conversion tool and the four real NEC declarations in registry order', () => {
     const names = SOLAR_FLOWS.flatMap((flow) => (flow.stages ?? []).flatMap((stage) => stage.capabilities))
-    expect(names).toEqual(['solar-nec-ampacity-correction', 'solar-nec-ac-voltage-drop', 'solar-nec-conduit-fill', 'solar-nec-feeder-ocpd'])
-    for (const [index, declaration] of [ampacityDeclaration, voltageDeclaration, conduitDeclaration, ocpdDeclaration].entries()) {
+    expect(names).toEqual(['solar-trackers-to-panel-groups', 'solar-nec-ampacity-correction', 'solar-nec-ac-voltage-drop',
+      'solar-nec-conduit-fill', 'solar-nec-feeder-ocpd'])
+    expect(SOLAR_FLOWS[1].stages[0].capabilities).toEqual(['solar-trackers-to-panel-groups'])
+    for (const [index, declaration] of [conversionDeclaration, ampacityDeclaration, voltageDeclaration, conduitDeclaration,
+      ocpdDeclaration].entries()) {
       expect(declaration.name).toBe(names[index])
       expect(declaration.wave).toBe(3)
     }
@@ -164,6 +197,24 @@ describe('Solar flow selection', () => {
       reasonKey: 'stages_missing', reason: SOLAR_FLOW_UNAVAILABLE_REASONS.stages_missing,
       missing: ['Tracker conversion', 'Sizing and stringing', 'Equipment', 'Feeders and routes', 'Schedules and exports'],
     })
+  })
+
+  it('FL4b a catalog carrying the conversion tool leaves Tracker conversion off the missing stages', () => {
+    const withConversion = LIVE.map((family) => family.family_id !== 'stringing' ? family : {
+      ...family,
+      capabilities: [...family.capabilities, liveRow('solar-trackers-to-panel-groups', 'stringing', 3, 5, 'run_write')],
+    })
+    expect(solarFlowSelect(withConversion, 'ground-electrical')).toEqual({
+      flow: 'ground-electrical', label: 'Ground Mount Electrical', maturity: 'production', available: false, steps: [],
+      reasonKey: 'stages_missing', reason: SOLAR_FLOW_UNAVAILABLE_REASONS.stages_missing,
+      missing: ['Sizing and stringing', 'Equipment', 'Feeders and routes', 'Schedules and exports'],
+    })
+    expect(solarFlowOptions(withConversion).map(solarFlowOptionLabel)).toEqual(OPTION_LABELS)
+    const invalidRow = { ...liveRow('solar-trackers-to-panel-groups', 'stringing', 3, 5, 'run_write') }
+    invalidRow.solar = { ...invalidRow.solar, wave: 9 }
+    const withInvalid = LIVE.map((family) => family.family_id !== 'stringing' ? family
+      : { ...family, capabilities: [...family.capabilities, invalidRow] })
+    expect(solarFlowSelect(withInvalid, 'ground-electrical').missing[0]).toBe('Tracker conversion')
   })
 
   it('FL5 the other flows and live options explain availability and maturity', () => {

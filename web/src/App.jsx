@@ -28,7 +28,7 @@ import DraftingRibbon from './site/DraftingRibbon.jsx'
 import PropertiesDock, { drawingExtents } from './site/PropertiesDock.jsx'
 import { familiesForSurface, familyMonogram } from './lib/surfaceRails.js'
 import { byId, ladderListener, slashCommandHandlers } from './lib/actionRegistry.js'
-import { REASONS, RIBBON_RATIONALE, profileRibbonTabs, profileEntryTab, solarRouteStatus, solarRouteDisplay, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels } from './lib/ribbonClusters.js'
+import { REASONS, RIBBON_RATIONALE, profileRibbonTabs, profileEntryTab, solarRouteStatus, solarRouteDisplay, solarRefusalEnvelope, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels } from './lib/ribbonClusters.js'
 import { isWriteTool } from './lib/toolRecord.js'
 import { STUDIO_DRAWERS } from './lib/studioDrawers.js'
 import SolarToolForm from './solar/SolarToolForm.jsx'
@@ -39,7 +39,7 @@ import { ENV_SOLAR_FLOW_RAIL } from './solar/flag.js'
 import { SOLAR_SETTINGS_TOOL_NAME } from './solar/solarSettingsWire.js'
 import SolarFlowRail from './solar/SolarFlowRail.jsx'
 import SolarStepEditor from './solar/SolarStepEditor.jsx'
-import { MAX_FLOW_STEPS, solarFlowRecordRun, solarFlowRunOutcome, solarFlowRunStatus, solarFlowRunsFor } from './solar/solarFlowModel.js'
+import { MAX_FLOW_STEPS, admittedOverlays, solarFlowRecordRun, solarFlowRunOutcome, solarFlowRunStatus, solarFlowRunsFor } from './solar/solarFlowModel.js'
 import { resolvePublishedCatalogTool } from './site/publishedCatalogTool.js'
 import { entityGeometry } from './lib/entityMetrics.js'
 import { setCredentialMountAvailable } from './lib/secretGuardTransport.js'
@@ -1651,7 +1651,7 @@ export default function App() {
 
   const prepareRunParams = useCallback((tool, params) => {
     const isWrite = (tool.capabilities || []).includes('drawing.write')
-    const overlays = catalogRunOverlays({ enabled: ENV_SOLAR_SETTINGS_FORM, toolName: tool?.name, selectedHandle, isWrite })
+    const overlays = admittedOverlays(tool?.params, catalogRunOverlays({ enabled: ENV_SOLAR_SETTINGS_FORM, toolName: tool?.name, selectedHandle, isWrite }))
     return prepareCatalogRunParams(tool, params, catalogRunContextRef.current, overlays)
   }, [selectedHandle])
 
@@ -2529,6 +2529,11 @@ export default function App() {
       foot: 'Esc closes. Provenance is read-only.',
     })
   }, [result, currentJobId, selectedTool])
+
+  // A failed Solar tool run reads as its refusal sentence in the result card;
+  // the Details drawer above still shows the raw code from `result` itself.
+  const shownResult = useMemo(() => (ENV_CAD_EDIT ? solarRefusalEnvelope(result, selectedTool) : result),
+    [result, selectedTool])
 
   // Header "Details" -> session identity/spend drawer (metadata demoted from
   // the permanent header chrome per the standard).
@@ -4040,6 +4045,9 @@ export default function App() {
             ) : <SolarToolForm
               key={solarFormTool.name}
               tool={solarFormTool}
+              readIntake={SOLAR_SETTINGS_LOADERS?.readIntake}
+              drawingId={catalogRunContext?.drawingId ?? null}
+              drawingVersion={catalogRunContext?.drawingVersion ?? null}
               onSubmit={(tool, params) => onRequestCatalogRun(tool, params, RIBBON_RATIONALE, 'ribbon')}
               onClose={() => setSolarFormTool(null)}
             />
@@ -4534,7 +4542,7 @@ export default function App() {
             runProgress={runProgress}
             runElapsedMs={runElapsedMs}
             error={runErr}
-            result={result}
+            result={shownResult}
             tool={selectedTool}
             onRetry={onRetry}
             notices={
