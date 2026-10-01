@@ -1,14 +1,15 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { readFile, readdir, stat } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import http from 'node:http'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { test } from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
-import { allocatePorts, pidAlive, portListening, QueuedError, StoppedError, startStack } from './stack.mjs'
+import { allocatePorts, pidAlive, portListening, QueuedError, resolveStackSolver, SolverMissingError, StoppedError, startStack } from './stack.mjs'
 import { backendPaths, prepareProductionBundle, startSameOriginProxy } from './sameOriginProxy.mjs'
+import { PostgresUnavailableError, queryPostgres, stackAdminUrl } from './pgStack.mjs'
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const firstSlot = Number(process.env.LEAF_WALK_TEST_SLOT || 0)
@@ -127,6 +128,68 @@ test('queued/stopped admission and zero slots cannot allocate or launch', async 
     else process.env.LEAF_WALK_SLOTS = previous
   }
   assert.equal(calls, 4, 'exactly one admission decision per attempted launch')
+  assert.deepEqual((await readdir(tmpdir())).filter((name) => name.startsWith(`leaf-walk-stack-${firstSlot}-`)).sort(), before)
+  assert.deepEqual(await Promise.all(Object.values(ports).map(portListening)), [false, false, false, false, false])
+})
+
+test('missing solver fails closed before database creation or launch', { timeout: 60000 }, async () => {
+  const parent = await mkdtemp(join(tmpdir(), 'leaf-walk-solver-'))
+  const empty = join(parent, 'empty')
+  const previous = process.env.AUTOFILL_SOLVER_ROOT
+  const adminUrl = stackAdminUrl(process.env.LEAF_WALK_PG_ADMIN_URL || process.env.LEAF_GATE_DATABASE_URL || 'postgresql://leaf@127.0.0.1:25432/postgres')
+  // Use a slot outside the database helper tests so their parallel CREATE and
+  // DROP operations cannot change this preflight's catalog comparison.
+  const slot = 474
+  const catalog = () => queryPostgres(adminUrl, "SELECT datname FROM pg_database WHERE starts_with(datname, %s) ORDER BY datname", [`leaf_walk_${slot}_`])
+  let admissions = 0
+  try {
+    await mkdir(empty)
+    const before = await catalog()
+    process.env.AUTOFILL_SOLVER_ROOT = empty
+    const missing = (error) => {
+      assert.ok(error instanceof SolverMissingError)
+      assert.equal(error.code, 'SOLVER_MISSING')
+      assert.deepEqual(error.paths, [join(empty, 'solver.py')])
+      assert.ok(error.message.includes(join(empty, 'solver.py')))
+      return true
+    }
+    await assert.rejects(resolveStackSolver({ repoParent: parent }), missing)
+    await assert.rejects(startStack({ slot, postgres: { adminUrl },
+      admission: () => { admissions++; return { status: 'admitted', slots: 2 } },
+    }), missing)
+    assert.equal(admissions, 0, 'solver preflight must precede admission and database provisioning')
+    assert.deepEqual(await catalog(), before, 'missing solver must not create a database')
+    await assert.rejects(resolveStackSolver({ repoParent: parent, env: {} }), (error) => {
+      assert.ok(error instanceof SolverMissingError)
+      assert.deepEqual(error.paths, [join(parent, 'autofill-solver', 'solver.py')])
+      return true
+    })
+    const root = join(parent, 'autofill-solver')
+    await mkdir(root)
+    await writeFile(join(root, 'solver.py'), '# resolver fixture\n')
+    assert.deepEqual(await resolveStackSolver({ repoParent: parent, env: {} }), { AUTOFILL_SOLVER_ROOT: root })
+    assert.deepEqual(await resolveStackSolver({ repoParent: parent, env: {
+      AUTOFILL_SOLVER_ROOT: root, AUTOFILL_SOLVER_REVISION: 'fixture-revision',
+    } }), { AUTOFILL_SOLVER_ROOT: root, AUTOFILL_SOLVER_REVISION: 'fixture-revision' })
+  } finally {
+    if (previous === undefined) delete process.env.AUTOFILL_SOLVER_ROOT
+    else process.env.AUTOFILL_SOLVER_ROOT = previous
+    await rm(parent, { recursive: true, force: true })
+  }
+})
+
+test('unreachable PostgreSQL fails closed before creating a stack root or launching services', { timeout: 60000 }, async () => {
+  const ports = await allocatePorts(firstSlot)
+  const before = (await readdir(tmpdir())).filter((name) => name.startsWith(`leaf-walk-stack-${firstSlot}-`)).sort()
+  await assert.rejects(startStack({ slot: firstSlot, admission: () => ({ status: 'admitted', slots: 2 }),
+    postgres: { adminUrl: 'postgresql://leaf@127.0.0.1:1/postgres' },
+  }), (error) => {
+    assert.ok(error instanceof PostgresUnavailableError)
+    assert.equal(error.code, 'postgres_unavailable')
+    assert.ok(error.cause instanceof Error)
+    assert.ok(error.cause.message.length > 0, 'retain the redacted driver diagnostic')
+    return true
+  })
   assert.deepEqual((await readdir(tmpdir())).filter((name) => name.startsWith(`leaf-walk-stack-${firstSlot}-`)).sort(), before)
   assert.deepEqual(await Promise.all(Object.values(ports).map(portListening)), [false, false, false, false, false])
 })
@@ -384,4 +447,140 @@ test('two simultaneous real stacks isolate public API state and leave metrics wi
       console.log('STACK_METRICS ' + JSON.stringify(saved))
     }
   })
+})
+
+test('two PostgreSQL-backed stacks isolate projects and run authored work', { timeout: 600000 }, async (t) => {
+  const adminUrl = stackAdminUrl(process.env.LEAF_WALK_PG_ADMIN_URL || process.env.LEAF_GATE_DATABASE_URL || 'postgresql://leaf@127.0.0.1:25432/postgres')
+  const stacks = []
+  const unsupported = []
+  const admission = () => ({ status: 'admitted', slots: 2 })
+  try {
+    // Exercise postgres:true's documented environment resolution while also
+    // poisoning host authority. The fixture must supply both child DSNs itself.
+    const previous = { admin: process.env.LEAF_WALK_PG_ADMIN_URL, database: process.env.DATABASE_URL, harness: process.env.LEAF_HARNESS_DATABASE_URL }
+    let boots
+    try {
+      process.env.LEAF_WALK_PG_ADMIN_URL = adminUrl
+      process.env.DATABASE_URL = 'postgresql://must-not-leak.invalid/host'
+      process.env.LEAF_HARNESS_DATABASE_URL = 'postgresql://must-not-leak.invalid/harness'
+      boots = await Promise.allSettled([firstSlot, firstSlot + 1].map((slot) => startStack({ slot, admission, postgres: true })))
+    } finally {
+      for (const [key, value] of [['LEAF_WALK_PG_ADMIN_URL', previous.admin], ['DATABASE_URL', previous.database], ['LEAF_HARNESS_DATABASE_URL', previous.harness]]) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
+    for (const boot of boots) if (boot.status === 'fulfilled') stacks.push(boot.value)
+    const failures = boots.filter((boot) => boot.status === 'rejected')
+    if (failures.length) throw new AggregateError(failures.map((boot) => boot.reason),
+      'Both PostgreSQL stacks must boot; database or canonical worker prerequisite failed:\n' +
+      failures.map((boot) => boot.reason.stack || String(boot.reason)).join('\n'))
+    const [a, b] = stacks
+    assert.notEqual(a.database.name, b.database.name)
+    for (const stack of stacks) {
+      assert.equal(stack.env.DATABASE_URL, stack.database.url)
+      assert.equal(stack.env.LEAF_HARNESS_DATABASE_URL, stack.database.url)
+      assert.equal(stack.env.LEAF_AUTHORED_EXECUTION, '0', 'local queued solves must not arm the E2B-only authored execution boundary')
+      assert.equal(stack.env.AUTOFILL_SOLVER_ROOT, resolve(process.env.AUTOFILL_SOLVER_ROOT || join(dirname(repo), 'autofill-solver')))
+      assert.equal(stack.env.AUTOFILL_SOLVER_REVISION, process.env.AUTOFILL_SOLVER_REVISION || undefined)
+      assert.deepEqual(await queryPostgres(stack.database.url, 'SELECT current_database() AS name'), [{ name: stack.database.name }])
+      const ready = expectStatus(await request(stack, '/api/ready'), 200)
+      assert.equal(ready.dependencies.database.state, 'ready', JSON.stringify(ready))
+      assert.equal(ready.dependencies.worker.state, 'ready', JSON.stringify(ready))
+      assert.equal(ready.dependencies.worker.required, true)
+    }
+
+    const org = expectStatus(await request(a, '/api/orgs', { method: 'POST', json: { name: 'walk PostgreSQL ' + randomUUID(), tier: 'hosted_pro' } }), 200).org
+    const headers = { 'X-Org-Id': org.org_id, 'X-Tenant-Id': org.org_id }
+    let project
+    await t.test('project created through the public API on A is absent on B', async () => {
+      project = expectStatus(await request(a, '/api/projects', { method: 'POST', headers, json: { name: 'walk isolated project ' + randomUUID() } }), 200).project
+      assert.match(project.project_id, /^[0-9a-f-]{36}$/i)
+      expectStatus(await request(a, `/api/projects/${project.project_id}`, { headers }), 200)
+      expectStatus(await request(b, `/api/projects/${project.project_id}`, { headers }), 404)
+      const listedA = expectStatus(await request(a, '/api/projects', { headers }), 200)
+      const listedB = expectStatus(await request(b, '/api/projects', { headers }), 200)
+      assert.ok(listedA.projects.some((item) => item.project_id === project.project_id))
+      assert.equal(listedB.projects.some((item) => item.project_id === project.project_id), false)
+    })
+
+    await t.test('a real canonical queued solve completes on A and is invisible on B', async () => {
+      assert.ok(project, 'the public project factory must succeed first')
+      // Seed only the input drawing version, matching the canonical server
+      // walkthrough; project creation, enqueue and all reads remain public API.
+      const drawingId = randomUUID()
+      const versionId = randomUUID()
+      await queryPostgres(a.database.url,
+        'INSERT INTO drawing_artifacts (drawing_id, project_id, org_id, name) VALUES (%s, %s, %s, %s)',
+        [drawingId, project.project_id, org.org_id, 'walk solver input'])
+      await queryPostgres(a.database.url,
+        'INSERT INTO drawing_versions (version_id, drawing_id, project_id, org_id, seq, oss_object, intake_ref, created_by) VALUES (%s, %s, %s, %s, 1, %s, %s, %s)',
+        [versionId, drawingId, project.project_id, org.org_id, 'walk/roof.dwg', 'walk/roof-intake.json', 'walk-fixture'])
+      const catalog = expectStatus(await request(a, '/api/tools', { headers }), 200)
+      const tool = catalog.tools.find((item) => item.name === 'string-autofill-opt')
+      assert.ok(tool?.catalog_digest, 'the server must issue the canonical tool confirmation digest')
+      const runHeaders = { ...headers, 'X-Project-Id': project.project_id, 'Idempotency-Key': 'walk-solve-' + randomUUID() }
+      const submitted = expectStatus(await request(a, '/api/run', { method: 'POST', headers: runHeaders, json: {
+        tool: tool.name, catalog_digest: tool.catalog_digest, dwg: versionId,
+        params: {
+          groups: [
+            { handle: 'A', name: 'A', count: 25, centroidX: 0, centroidY: 0, electricalZone: 'Z', elevationZone: '' },
+            { handle: 'B', name: 'B', count: 15, centroidX: 10, centroidY: 0, electricalZone: 'Z', elevationZone: '' },
+          ], panelsPerString: 10,
+          options: { drainThreshold: 23, drainDiscount: 0, activeGroupPenalty: 10, concentrationBias: 0.15, clusterMarginPitches: 2 },
+        },
+      } }), 202)
+      assert.ok(submitted.job_id)
+      let terminal
+      await until(async () => {
+        const record = expectStatus(await request(a, `/api/jobs/${submitted.job_id}`, { headers }), 200)
+        if (['complete', 'failed'].includes(record.status)) { terminal = record; return true }
+        assert.ok(['submitted', 'running'].includes(record.status), JSON.stringify(record))
+        return false
+      }, 90000, 'Canonical worker did not claim and terminate the queued job')
+      assert.ok(terminal.attempt >= 1, 'terminal job must carry an actual worker claim')
+      assert.ok(terminal.started_at && terminal.finished_at)
+      assert.equal(terminal.execution_context.authority_mode, 'postgres_canonical')
+      assert.equal(terminal.provenance.attempt, terminal.attempt)
+      assert.equal(terminal.status, 'complete', JSON.stringify(terminal))
+      assert.deepEqual(terminal.result.solver_result.groupTargets, { A: 40, B: 0 })
+      assert.equal(terminal.result.result_sha256, '525e2d417d916ab896ab25525352783302c98f6f436631777731a4c08bb1ed59')
+      assert.ok(terminal.result.solve_hash && terminal.result.history_hash)
+      assert.ok(terminal.provenance.solver_revision)
+      if (a.env.AUTOFILL_SOLVER_REVISION) assert.equal(terminal.provenance.solver_revision, a.env.AUTOFILL_SOLVER_REVISION)
+      expectStatus(await request(b, `/api/jobs/${submitted.job_id}`, { headers }), 404)
+      const jobsB = expectStatus(await request(b, '/api/jobs', { headers }), 200)
+      assert.equal(jobsB.jobs.some((item) => item.job_id === submitted.job_id), false)
+      assert.deepEqual(await queryPostgres(b.database.url, 'SELECT job_id FROM jobs WHERE job_id = %s', [submitted.job_id]), [])
+    })
+
+    await t.test('stop retries a failed database drop after its children are dead', async () => {
+      const drop = a.database.drop
+      a.database.drop = async () => { throw new Error('fixture PostgreSQL drop failure') }
+      try {
+        await assert.rejects(a.stop(), /fixture PostgreSQL drop failure/)
+        assert.deepEqual(await Promise.all(Object.values(a.ports).map(portListening)), [false, false, false, false, false])
+        assert.ok([...a.pids].every((pid) => !pidAlive(pid)), 'children must be dead before attempting the drop')
+        assert.equal((await stat(a.root)).isDirectory(), true, 'failed drop must retain the root until cleanup can retry')
+        assert.equal((await queryPostgres(adminUrl, 'SELECT datname FROM pg_database WHERE datname = %s', [a.database.name])).length, 1)
+      } finally { a.database.drop = drop }
+      await a.stop()
+      await assertStopped(a)
+      assert.deepEqual(await queryPostgres(adminUrl, 'SELECT datname FROM pg_database WHERE datname = %s', [a.database.name]), [])
+    })
+  } finally {
+    // No PostgreSQL feature is silently labelled unsupported: a failed public
+    // probe or real queued solve failure fails this test.
+    console.log('UNSUPPORTED_LOCAL ' + JSON.stringify(unsupported))
+    const stopped = await Promise.allSettled(stacks.map((stack) => stack.stop()))
+    const cleanupFailures = stopped.filter((result) => result.status === 'rejected')
+    if (cleanupFailures.length) throw new AggregateError(cleanupFailures.map((result) => result.reason), 'PostgreSQL stack teardown failed')
+    for (const stack of stacks) {
+      await assertStopped(stack)
+      assert.deepEqual(await queryPostgres(adminUrl, 'SELECT datname FROM pg_database WHERE datname = %s', [stack.database.name]), [])
+      await stack.stop()
+    }
+  }
+  assert.equal(stacks.length, 2)
+  assert.ok(unsupported.length < 1, 'PostgreSQL must remove the non-PostgreSQL project limitation')
 })
