@@ -555,7 +555,7 @@ def build_suites() -> List[Suite]:
         Suite("server-solar-tool-panels-from-drawing", "server tests/test_solar_tool_solar_panels_from_drawing.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_panels_from_drawing.py"), 64),
         Suite("server-solar-tool-solar-schedule", "server tests/test_solar_tool_solar_schedule.py", "pytest", SERVER,
-              _py_pytest("tests/test_solar_tool_solar_schedule.py"), 30),
+              _py_pytest("tests/test_solar_tool_solar_schedule.py"), 39),
         # sf-solar-w1-route-consumers: W1 homeruns, schedule and readiness keep feeders, trenches and
         # pathways and judge only the homerun subset. COUNTED: 18 test functions + 23 additional parametrizations = 41.
         Suite("server-solar-w1-route-consumers", "server tests/test_solar_w1_route_consumers.py", "pytest",

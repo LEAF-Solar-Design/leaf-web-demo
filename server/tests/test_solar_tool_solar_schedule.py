@@ -17,11 +17,12 @@ import deps
 import jobs
 import product_capability_availability as availability
 import solar_local_graph
+import solar_solve_results
 import solar_tools
 import store
 import write_loop
 from product_capability_availability import is_cloud_proposal, is_local_graph_commit
-from solar_design_graph import GraphValidationError
+from solar_design_graph import GraphValidationError, validate_graph
 from solar_graph_context import resolve_graph_context
 from solar_sizing_client import digest
 from solar_wiring_client import local_routes
@@ -156,6 +157,121 @@ def test_run_is_deterministic(routed):
     second = builtin().run(copy.deepcopy(routed), params())
     assert first == second
     assert digest(first) == digest(second)
+
+
+def _w15s_stale_schedule(case):
+    graph, equipment_params, drawing_intake = case
+    source = equipment.assign_equipment(
+        graph, equipment_params, drawing_intake=drawing_intake,
+        licensed_equipment=licensed_equipment)["graph"]
+    source["routes"] = local_routes(source)
+    source["schedules"] = []
+    scheduled = builtin().run(source, dict(params(), expected_rev=source["rev"]))
+    return solar_local_graph._load_builtin("solar-homeruns").run(
+        scheduled, {"expected_rev": scheduled["rev"]})
+
+
+def test_w15s_rerun_replaces_a_stale_schedule(case):
+    """The real homerun writer marks the first schedule stale before replacement."""
+    source = _w15s_stale_schedule(case)
+    stale = source["schedules"][0]
+    assert stale["validity"] == {"state": "stale", "reasons": ["ROUTES_CHANGED"]}
+    result = builtin().run(source, dict(params(), expected_rev=source["rev"]))
+    assert len(result["schedules"]) == 1
+    assert result["schedules"][0]["validity"]["state"] == "valid"
+    assert result["schedules"][0]["id"] != stale["id"]
+    solar_solve_results.require_current_export(result)
+
+
+@pytest.mark.parametrize("state", ["invalid", "unknown"])
+def test_w15s_every_non_valid_state_is_replaced(case, state):
+    """Set each other schema-admitted state on the existing scheduled graph."""
+    source = _w15s_stale_schedule(case)
+    previous = source["schedules"][0]
+    previous["validity"] = {"state": state, "reasons": []}
+    assert validate_graph(source) == source
+    result = builtin().run(source, dict(params(), expected_rev=source["rev"]))
+    assert len(result["schedules"]) == 1
+    assert result["schedules"][0]["validity"]["state"] == "valid"
+    assert result["schedules"][0]["id"] != previous["id"]
+    solar_solve_results.require_current_export(result)
+
+
+def test_w15s_valid_schedules_are_kept(routed):
+    source = copy.deepcopy(routed)
+    source["schedules"] = []
+    first = builtin().run(source, params())
+    result = builtin().run(first, {
+        "expected_rev": first["rev"], "insertion_point": [30, 40]})
+    assert len(result["schedules"]) == 2
+    assert result["schedules"][0] == first["schedules"][0]
+    assert result["schedules"][1]["insertion_point"] == [30.0, 40.0, 0.0]
+    assert result["schedules"][1]["id"] != result["schedules"][0]["id"]
+    assert all(s["validity"]["state"] == "valid" for s in result["schedules"])
+
+
+def test_w15s_only_stale_ones_are_removed(routed, case):
+    """Mix a valid fixture schedule with one made stale by the real homerun writer."""
+    source = _w15s_stale_schedule(case)
+    stale_id = source["schedules"][0]["id"]
+    valid = copy.deepcopy(routed["schedules"][0])
+    source["schedules"].insert(0, valid)
+    result = builtin().run(source, dict(params(), expected_rev=source["rev"]))
+    assert len(result["schedules"]) == 2
+    assert result["schedules"][0] == valid
+    assert stale_id not in [s["id"] for s in result["schedules"]]
+    assert result["schedules"][-1]["id"] != valid["id"]
+    assert result["schedules"][-1]["validity"]["state"] == "valid"
+
+
+def test_w15s_cancel_removes_nothing(case):
+    """Cancellation preserves a schedule made stale by the real homerun writer."""
+    source = _w15s_stale_schedule(case)
+    before = copy.deepcopy(source)
+    result = builtin().run(source, {"expected_rev": source["rev"], "cancel": True})
+    assert result == source == before
+    assert result["rev"] == before["rev"]
+    assert result["schedules"][0]["validity"]["state"] == "stale"
+
+
+def test_w15s_refusal_removes_nothing(case):
+    """A routing refusal preserves the real homerun writer's stale schedule."""
+    source = _w15s_stale_schedule(case)
+    source["routes"].pop()
+    schedules = source["schedules"]
+    before = copy.deepcopy(schedules)
+    with pytest.raises(GraphValidationError) as error:
+        builtin().run(source, dict(params(), expected_rev=source["rev"]))
+    assert error.value.code == "COMPLETE_ROUTING_REQUIRED"
+    assert source["schedules"] is schedules
+    assert source["schedules"] == before
+    assert [s["id"] for s in source["schedules"]] == [s["id"] for s in before]
+
+
+def test_w15s_id_is_computed_over_the_source_graph(case):
+    """Identity includes the schedule made stale by the real homerun writer."""
+    source = _w15s_stale_schedule(case)
+    before = copy.deepcopy(source)
+    identity = digest({"tool": TOOL, "source_graph_sha256": digest(source),
+                       "insertion_point": [10.0, 20.0, 0.0]})
+    expected_id = "leaf:schedule:" + str(
+        uuid.UUID(bytes=bytes.fromhex(identity)[:16], version=4))
+    result = builtin().run(source, dict(params(), expected_rev=source["rev"]))
+    assert [s["id"] for s in result["schedules"]] == [expected_id]
+    assert source == before
+
+
+def test_w15s_licensed_path_is_unchanged(case):
+    """Licensed preview keeps the real homerun writer's stale schedule."""
+    source = _w15s_stale_schedule(case)
+    before = copy.deepcopy(source)
+    result = builtin().create_schedule(
+        source, dict(params(), expected_rev=source["rev"]), licensed_write=licensed)["graph"]
+    assert len(result["schedules"]) == 2
+    assert result["schedules"][0] == before["schedules"][0]
+    assert result["schedules"][0]["validity"]["state"] == "stale"
+    assert result["schedules"][-1]["validity"]["state"] == "valid"
+    assert source == before
 
 
 def test_licensed_and_local_rows_agree(routed):
