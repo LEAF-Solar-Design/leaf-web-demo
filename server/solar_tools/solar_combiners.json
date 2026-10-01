@@ -1,0 +1,52 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-combiners",
+  "builtin": "builtins/solar_combiners.py",
+  "family": "equipment",
+  "adapter": "local-graph-commit",
+  "entitlement": "run_write",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_COMBINER_REQUEST",
+  "readiness": {"kind": "hook"},
+  "engine": "server-builtin",
+  "interaction": {"mode": "form"},
+  "record_store": "registry",
+  "record": {
+    "name": "solar-combiners",
+    "version": "1.0.0",
+    "description": "Place combiner boxes for every string from the drawing's recorded combiner intake, as LEAFCOMBINERAUTO does, and save them with their DC homeruns and feeders in one step.",
+    "kind": "script",
+    "family_id": "equipment",
+    "engine_op": "solar_combiners",
+    "entry": "builtins/solar_combiners.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {"type": "string", "maxLength": 128},
+        "expected_rev": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+        "hardware": {
+          "type": "object",
+          "properties": {
+            "model": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "\\S"},
+            "max_dc_voltage": {"type": "number", "exclusiveMinimum": 0, "maximum": 1000000},
+            "max_ac_power_kw": {"type": "number", "exclusiveMinimum": 0, "maximum": 1000000}
+          },
+          "required": ["model", "max_dc_voltage", "max_ac_power_kw"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["expected_rev", "hardware"],
+      "additionalProperties": false
+    },
+    "returns": {"type": "object"},
+    "capabilities": ["drawing.write"],
+    "allow_local_fallback": false
+  },
+  "ledger": ["combiner-auto-place"],
+  "trusted_inputs": ["source_intake"],
+  "maturity": "preview",
+  "wave": 2,
+  "order": 105,
+  "scenario": "w2-rooftop"
+}

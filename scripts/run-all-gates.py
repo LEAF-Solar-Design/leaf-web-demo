@@ -723,6 +723,13 @@ def build_suites() -> List[Suite]:
         # tests + 70 more parametrizations = 94; sf-xlsx-xml-chars adds 6 cases = 100.
         Suite("server-solar-tool-cable-export", "server tests/test_solar_tool_cable_export.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_cable_export.py"), 100),
+        # LEAFCOMBINERAUTO as a tool (2026-10-01, sf-w2-combiners-tool): the drawing's recorded combiner intake
+        # carried by source_intake, bound and placed by solar_combiner_graph, persisted in one commit (C5: 14
+        # combiners, 346 homeruns, 14 feeders) with the rail's replay proof. Inputs are authored in the file and
+        # nothing skips, so the floor is the exact count on every runner. COUNTED: 26 tests + 39 more
+        # parametrizations = 65.
+        Suite("server-solar-tool-combiners", "server tests/test_solar_tool_combiners.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_combiners.py"), 73),
         # W5 inverter family (2026-09-24, contract G35): the shared state and delta module and the
         # device, string and output engines (literal ports of the plugin's inverter commands). Inputs
         # are authored in each file, so each floor is the exact count on every runner. MEASURED.

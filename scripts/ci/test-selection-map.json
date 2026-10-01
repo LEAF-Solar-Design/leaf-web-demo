@@ -442,6 +442,7 @@
     "server-solar-solaredge-report",
     "server-solar-terrain",
     "server-solar-tool-color-strings",
+    "server-solar-tool-combiners",
     "server-solar-tool-design-presets",
     "server-solar-tool-electrical-schedules",
     "server-solar-tool-equipment-move",
