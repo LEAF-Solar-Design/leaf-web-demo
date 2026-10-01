@@ -811,6 +811,13 @@ def build_suites() -> List[Suite]:
         # Hermetic and nothing skips: the floor is the exact count, 60.
         Suite("server-solar-landxml-route", "server tests/test_solar_landxml_route.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_landxml_route.py"), 60),
+        # sf-w5-terrain: Ground terrain operations over the reopened physical state
+        # (server/solar_ground_terrain_adapter.py): the frozen frame, units and current-state selection,
+        # the slope mesh and the tracker slope check and clear published as preview children of the
+        # physical head, and the t2, t6 and t7 parity receipts reproduced through the head. Hermetic and
+        # nothing skips: the floor is the exact count, 80.
+        Suite("server-solar-ground-terrain-adapter", "server tests/test_solar_ground_terrain_adapter.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_ground_terrain_adapter.py"), 80),
         # W5 dialog batch (2026-09-23, contract G30): server/solar_ground_dialogs.py (the shading
         # object form and PlaceTree, the project-area manager's Add Area and OK, the pile-template
         # manager's "+" and OK with the store file byte for byte). Every input is authored in the
