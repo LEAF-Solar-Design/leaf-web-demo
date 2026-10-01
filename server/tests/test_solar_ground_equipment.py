@@ -58,7 +58,9 @@ CONVERTED_BASIS = "fb773c11b8a39a7e5786b4301a4a3e66cb568fb6273214f4b92c6409e09a7
 SIZED_SHA = "06a45caf35639bac12b0490d62f02d2f85475be3d141fdce5ac879562e91ac57"
 STRUNG_SHA = "121d573b486694d785f878d62ada107c40dbefbaaea1b8fc9ee1c7232d1eb91f"
 EQUIPPED_SHA = "9b5b6c07a4f2bbd412acefb917774843716f17e10e108ea74407c82955011af3"
-W1_READINESS_SHA = "62fd760c2112a3f3cd8e97102ac40e68e350104fefc4cdef68a7a154c86aff70"
+# The digest covers the whole readiness map, so it moves when a sibling registers a tool: re-pinned on Forge
+# main 7ae6013f, where terrain-read (#1705) adds one null solar-terrain-read entry and nothing else changed.
+W1_READINESS_SHA = "2d204f0d2883abbe8c6d54a8f19c0b6b7213d051d853c96a655a1b6a2f3e87e7"
 
 
 class FixedDatetime:
