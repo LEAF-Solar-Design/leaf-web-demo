@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   SETTINGS_FIELDS, SEED_SETTINGS, DRAWING_UNITS, IDENTITY_WCS_TO_UCS,
-  SOLAR_SETTINGS_REASONS, deriveFormState, buildSettingsParams, pyStrip,
+  SOLAR_SETTINGS_REASONS, L2_COLLECTORS_NOTE, deriveFormState, buildSettingsParams, parseField, pyStrip,
 } from './solarSettingsModel.js';
 
 const SHA = 'a'.repeat(64);
@@ -160,10 +160,10 @@ describe('Solar settings model', () => {
   it('B13 lone surrogate string', () => {
     expect(buildSettingsParams(E, { string_layer: 'Str\uD800' })).toEqual(invalid('string_layer'));
   });
-  it('B14 L2 collectors refused', () => {
-    expect(buildSettingsParams(E, { use_l2_collectors: true })).toEqual({
-      ok: false, reason: 'l2_collectors_unavailable', field: 'use_l2_collectors',
-    });
+  it('B14 L2 collectors on is sent as a boolean', () => {
+    const result = buildSettingsParams(E, { use_l2_collectors: true });
+    expect(result).toEqual(edited({ use_l2_collectors: true }));
+    expect(result.params.changes.use_l2_collectors).toBe(true);
   });
   it('B15 two changes in field order', () => {
     const result = buildSettingsParams(E, { num_mppt: '4', panel_layer_contains: 'Module' });
@@ -204,6 +204,125 @@ describe('Solar settings model', () => {
   });
   it('B24 served exponent ratio stays out of the request', () => {
     expect(buildSettingsParams(R, { num_mppt: '4' })).toEqual(edited({ num_mppt: 4 }));
+  });
+});
+
+// L2 collectors (sf-w2-settings-form-l2-toggle). Every server answer named here was measured over
+// POST /api/run?wait=1 on Forge main 4fdb411a with the real solar-settings builtin (python -B).
+const L2 = 'use_l2_collectors';
+const EL2 = { ...E, settings: { ...settings, [L2]: true } };
+// The W1 fixture's settings and project exactly as the server serves them (rev 0); the L2 fixtures
+// (topology, central only, combiner only, composite, string-only L2) serve the same with the mode true.
+const W1_SETTINGS = {
+  panel_layer_contains: 'Panels', panel_group_layer: 'Groups', string_layer: 'Strings',
+  home_run_layer: 'Homeruns', panels_in_sequence: 2, num_mppt: 1, strings_per_mppt: 2,
+  optimizer_ratio: 1, use_l2_collectors: false, panel_group_number: 2, string_number: 3,
+  inverter_number: 2, mppt_letter: 'A',
+};
+const W1_PROJECT = { name: 'Synthetic rooftop', zip_code: '00000', latitude: null, longitude: null };
+const served = (mode) => ({
+  ...IE,
+  intake: {
+    ...IE.intake,
+    solar_design_graph: {
+      rev: 0, settings: { ...W1_SETTINGS, [L2]: mode, global_string_sizing_confirmed: false, extra: {} },
+      project: W1_PROJECT,
+    },
+  },
+});
+
+describe('Solar settings L2 collectors', () => {
+  it('L2-1 the field is a boolean and the seed keeps it off', () => {
+    expect(SETTINGS_FIELDS.find(({ key }) => key === L2)).toEqual({ key: L2, label: 'L2 collectors', kind: 'boolean' });
+    expect(SETTINGS_FIELDS.filter(({ kind }) => kind === 'boolean').map(({ key }) => key)).toEqual([L2]);
+    expect(SETTINGS_FIELDS.some(({ kind }) => kind === 'fixed')).toBe(false);
+    expect(SEED_SETTINGS[L2]).toBe(false);
+  });
+  it('L2-2 leaving L2 is sent as false', () => {
+    const result = buildSettingsParams(EL2, { [L2]: false });
+    expect(result).toEqual(edited({ [L2]: false }));
+    expect(result.params.changes[L2]).toBe(false);
+  });
+  it.each([[E, false], [EL2, true]])('L2-3 a draft equal to the saved mode sends nothing %#', (state, draft) => {
+    expect(buildSettingsParams(state, { [L2]: draft })).toEqual({ ok: false, reason: 'no_changes' });
+    expect(buildSettingsParams(state, { [L2]: draft, num_mppt: '4' })).toEqual(edited({ num_mppt: 4 }));
+  });
+  it('L2-4 the mode rides with other changes in field order', () => {
+    const result = buildSettingsParams(E, { [L2]: true, mppt_letter: 'B', num_mppt: '4' });
+    expect(result).toEqual(edited({ num_mppt: 4, [L2]: true, mppt_letter: 'B' }));
+    expect(Object.keys(result.params.changes)).toEqual(['num_mppt', L2, 'mppt_letter']);
+    expect(buildSettingsParams(E, { [L2]: true }, {}, { zip_code: '37601' })).toEqual({
+      ok: true, params: { expected_rev: 2, changes: { [L2]: true }, project_changes: { zip_code: '37601' } },
+    });
+  });
+  // The server answers INVALID_GRAPH_SCHEMA for 1, 0, 1.0, "true" and null (type(mode) is bool); the model never sends them.
+  it.each([1, 0, 1.5, 'true', 'false', '', null, undefined, [], {}, NaN])('L2-5 a draft that is not a boolean is refused %j', (draft) => {
+    expect(buildSettingsParams(E, { [L2]: draft })).toEqual(invalid(L2));
+    expect(buildSettingsParams(EL2, { [L2]: draft })).toEqual(invalid(L2));
+  });
+  it('L2-6 an invalid earlier field is named before the mode', () => {
+    expect(buildSettingsParams(E, { [L2]: 'true', num_mppt: 'x' })).toEqual(invalid('num_mppt'));
+    expect(buildSettingsParams(E, { [L2]: 'true', mppt_letter: 'x'.repeat(4097) })).toEqual(invalid(L2));
+  });
+  it('L2-7 initialize sends the mode only when it is on', () => {
+    const request = seedRequest();
+    request.params.changes = { [L2]: true };
+    const result = buildSettingsParams(I, { [L2]: true }, U);
+    expect(result).toEqual(request);
+    expect(JSON.stringify(result.params)).toBe(JSON.stringify(request.params));
+    expect(buildSettingsParams(I, { [L2]: false }, U)).toEqual({ ok: false, reason: 'no_changes' });
+    expect(buildSettingsParams(I, { [L2]: true }, { ...U, drawing_units: '' })).toEqual({ ok: false, reason: 'units_required' });
+  });
+  it('L2-8 a refused state passes its reason before the mode is read', () => {
+    expect(buildSettingsParams(refused('not_current_head'), { [L2]: true })).toEqual({ ok: false, reason: 'not_current_head' });
+    expect(buildSettingsParams(refused('graph_unreadable'), { [L2]: 'true' })).toEqual({ ok: false, reason: 'graph_unreadable' });
+  });
+  it('L2-9 a served L2 drawing opens for editing', () => {
+    expect(derive(withGraph({ settings: { ...S, [L2]: true } }))).toEqual(EL2);
+  });
+  it.each([1, 0, 'true', 'false', null, undefined, [], {}])('L2-10 a served mode that is not a boolean is unreadable %j', (mode) => {
+    expect(derive(withGraph({ settings: { ...S, [L2]: mode } }))).toEqual(refused('graph_unreadable'));
+  });
+  it('L2-11 a served graph without the mode is unreadable', () => {
+    const missing = { ...S };
+    delete missing[L2];
+    expect(derive(withGraph({ settings: missing }))).toEqual(refused('graph_unreadable'));
+  });
+  it('L2-12 parseField takes a boolean only for the boolean field', () => {
+    expect(parseField(L2, true)).toEqual({ ok: true, value: true });
+    expect(parseField(L2, false)).toEqual({ ok: true, value: false });
+    for (const text of ['true', 'false', '', 1, 0, null, undefined]) expect(parseField(L2, text)).toEqual({ ok: false });
+    for (const key of ['num_mppt', 'optimizer_ratio', 'mppt_letter']) {
+      expect(parseField(key, true)).toEqual({ ok: false });
+      expect(parseField(key, false)).toEqual({ ok: false });
+    }
+    expect(parseField('unknown_field', true)).toEqual({ ok: false });
+    expect(parseField('toString', true)).toEqual({ ok: false });
+  });
+  // Measured: W1 (L1, one untyped inverter) with this request commits version 2, the mode true and the
+  // inverter typed string_inverter (graph digest 24acf04e...); two inverters sharing a number answer
+  // DUPLICATE_EQUIPMENT_NUMBER with the head unchanged.
+  it('L2-13 entering L2 on the served W1 drawing builds the request the server commits', () => {
+    const state = derive(served(false));
+    expect(state).toEqual({ mode: 'edit', drawingId: 'd1', version: 3, rev: 0, settings: W1_SETTINGS, project: W1_PROJECT });
+    expect(buildSettingsParams(state, { [L2]: true })).toEqual({ ok: true, params: { expected_rev: 0, changes: { [L2]: true } } });
+  });
+  // Measured: this one request is refused with DESIGN_PRESET_L2_EQUIPMENT_PRESENT (HTTP 400, head unchanged)
+  // on the topology, central-only, combiner-only and composite drawings, and commits version 2 on the
+  // string-only L2 drawing (the inverter untyped again, digest 8d1e77aa...) and on an L2 drawing with no
+  // inverter. The model builds the same request for all of them: the equipment rule is the server's.
+  it('L2-14 leaving L2 on a served L2 drawing builds the one request the server decides', () => {
+    const state = derive(served(true));
+    expect(state).toEqual({
+      mode: 'edit', drawingId: 'd1', version: 3, rev: 0, settings: { ...W1_SETTINGS, [L2]: true }, project: W1_PROJECT,
+    });
+    expect(buildSettingsParams(state, { [L2]: false })).toEqual({ ok: true, params: { expected_rev: 0, changes: { [L2]: false } } });
+    expect(buildSettingsParams(state, { [L2]: true })).toEqual({ ok: false, reason: 'no_changes' });
+  });
+  it('L2-15 the note is one frozen sentence and the retired reason is gone', () => {
+    expect(L2_COLLECTORS_NOTE).toBe('Turning L2 collectors off is refused while the design has a combiner box, a central inverter or an inverter linked to an L2 collector.');
+    expect(Object.hasOwn(SOLAR_SETTINGS_REASONS, 'l2_collectors_unavailable')).toBe(false);
+    expect(Object.values(SOLAR_SETTINGS_REASONS).some((sentence) => sentence.includes('not supported yet'))).toBe(false);
   });
 });
 
@@ -266,10 +385,20 @@ describe('Solar settings server parity', () => {
       string: { type: 'string', maxLength: 4096 },
       integer: { type: 'integer', minimum: 0, maximum: 1000000 },
       ratio: { type: 'number', exclusiveMinimum: 0 },
-      // The graph schema admits L2 mode since the typed topology slice; the form still offers only false.
-      fixed: { type: 'boolean' },
+      // The graph schema admits L2 mode since the typed topology slice; the form sends true or false.
+      boolean: { type: 'boolean' },
     };
-    for (const { key, kind } of SETTINGS_FIELDS) expect(properties[key]).toMatchObject(bounds[kind]);
+    for (const { key, kind } of SETTINGS_FIELDS) {
+      expect(Object.hasOwn(bounds, kind)).toBe(true);
+      expect(properties[key]).toMatchObject(bounds[kind]);
+    }
+  });
+  it('the mode rule the model mirrors is the builtin rule', () => {
+    const builtin = readRoot('server', 'builtins', 'solar_settings.py');
+    expect(builtin).toContain('mode_flip = type(mode) is bool and mode != settings["use_l2_collectors"]');
+    expect(builtin).toContain('if mode_flip and not mode and leaves_l2_blocked(graph):');
+    expect(builtin).toContain('raise GraphValidationError(L2_EQUIPMENT_PRESENT)');
+    expect(readRoot('server', 'solar_preset_sync.py')).toContain('L2_EQUIPMENT_PRESENT = "DESIGN_PRESET_L2_EQUIPMENT_PRESENT"');
   });
   it('seed defaults match solar_graph_seed.new_empty_graph', () => {
     const source = readRoot('server', 'solar_graph_seed.py');
@@ -295,7 +424,7 @@ describe('Solar settings server parity', () => {
     for (const value of [SETTINGS_FIELDS, ...SETTINGS_FIELDS, SEED_SETTINGS, DRAWING_UNITS, IDENTITY_WCS_TO_UCS, SOLAR_SETTINGS_REASONS]) {
       expect(Object.isFrozen(value)).toBe(true);
     }
-    expect(Object.keys(SOLAR_SETTINGS_REASONS)).toHaveLength(19);
+    expect(Object.keys(SOLAR_SETTINGS_REASONS)).toHaveLength(18);
     for (const sentence of Object.values(SOLAR_SETTINGS_REASONS)) {
       expect(typeof sentence).toBe('string');
       expect(sentence.length).toBeGreaterThanOrEqual(12);
