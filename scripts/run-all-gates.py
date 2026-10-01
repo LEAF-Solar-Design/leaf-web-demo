@@ -27,6 +27,8 @@ Special handling, all documented on the scoreboard:
     reason rather than reported red, unless LEAF_GATE_REQUIRE_DATABASE=1
     (native CI), which makes it a FAIL row. LEAF_GATE_DATABASE_URL hands a
     DSN to the db_gated and uses_database suites only, as their DATABASE_URL.
+    That gate database is migrated ONCE before any suite starts (see
+    migrate_gate_database); a failed migration fails the run with no suite run.
   * harness `npm test` + `npx tsc --noEmit` + `npx tsc -p tsconfig.build.json`
     are included.
   * `web-demo-gate` shells out to dispatch/run-local-ci.sh's demo-gate bucket,
@@ -3488,6 +3490,85 @@ def probe_platform_db() -> tuple[bool, str, str]:
     return proc.returncode == 0, msg, dsn
 
 
+# Applies every platform migration with the SAME mechanism the platform test
+# fixtures use (platform/tests/conftest.py): the package loaded under the
+# non-colliding alias leaf_platform, then db.apply_migration(). It runs in a
+# child from REPO_PARENT so the stdlib-shadowing platform/ never reaches the
+# runner process.
+_MIGRATE = r"""
+import importlib.util
+import sys
+from pathlib import Path
+pkg = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location(
+    "leaf_platform", pkg / "__init__.py", submodule_search_locations=[str(pkg)])
+mod = importlib.util.module_from_spec(spec)
+sys.modules["leaf_platform"] = mod
+spec.loader.exec_module(mod)
+from leaf_platform import db
+db.apply_migration()
+db.reset_pool()
+print("MIGRATED")
+"""
+
+MIGRATE_TIMEOUT_S = 300
+_MIGRATE_OUTPUT_TAIL = 8000  # chars of child output echoed on a failure
+
+
+def gate_database_to_migrate() -> str:
+    """The DSN the gate migrates before any suite runs, '' for none. Only a
+    database the GATE owns qualifies: LEAF_GATE_DATABASE_URL, or (under
+    LEAF_GATE_REQUIRE_DATABASE=1) the DSN probe_platform_db() reaches. A
+    developer's ambient DATABASE_URL or platform/.env.local is never migrated
+    by the runner on its own; an unreachable required database is left to the
+    per-suite FAIL rows run_suite already writes."""
+    explicit = os.environ.get("LEAF_GATE_DATABASE_URL", "").strip()
+    if explicit:
+        return explicit
+    if database_required():
+        ok, _msg, dsn = probe_platform_db()
+        if ok and dsn:
+            return dsn
+    return ""
+
+
+def migrate_gate_database(suites: List[Suite]) -> Optional[str]:
+    """Migrate the gate's PostgreSQL ONCE, before any suite starts, so no
+    suite's verdict depends on whether an earlier one happened to migrate.
+    Returns None on success or when there is nothing to do (no gate database,
+    or no selected suite touches one); otherwise the failure text, which the
+    caller must treat as a failed run: suites never run against a
+    half-migrated database. Bounded by MIGRATE_TIMEOUT_S."""
+    if not any((s.db_gated or s.uses_database) and not s.db_deferred for s in suites):
+        return None
+    dsn = gate_database_to_migrate()
+    if not dsn:
+        return None
+    env = clean_env()
+    env["DATABASE_URL"] = dsn
+    t0 = time.perf_counter()
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", _MIGRATE, str(REPO / "platform")],
+            cwd=str(REPO_PARENT), env=env,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=MIGRATE_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        out = (_text(exc.stdout) + _text(exc.stderr)).strip()
+        return (f"gate database migration timed out after {MIGRATE_TIMEOUT_S}s"
+                + (f"\n{out[-_MIGRATE_OUTPUT_TAIL:]}" if out else ""))
+    except OSError as exc:
+        return f"gate database migration could not start: {type(exc).__name__}: {exc}"
+    elapsed = time.perf_counter() - t0
+    out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    if proc.returncode != 0:
+        return (f"gate database migration failed (exit {proc.returncode}, "
+                f"{elapsed:.1f}s)" + (f"\n{out[-_MIGRATE_OUTPUT_TAIL:]}" if out else ""))
+    print(f"  gate database: platform migrations applied once in {elapsed:.1f}s")
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # count parsing
 # --------------------------------------------------------------------------- #
@@ -5803,6 +5884,16 @@ def main() -> int:
     print(f"leaf-web-demo gate runner -- {len(suites)} suites, "
           f"separate processes, logs -> {log_dir}")
     print(f"  selection: {selection}")
+
+    # Before any suite: some suites migrate the schema in their own fixtures
+    # and others assume it, so without this a shard's verdict depended on
+    # suite order. A failed migration fails the run; no suite starts.
+    problem = migrate_gate_database(suites)
+    if problem:
+        print(f"FAIL: {problem}")
+        print("nothing ran: the gate database could not be migrated, and no "
+              "suite may run against a half-migrated schema.")
+        return 1
 
     # Preserve the operator's authored_tools.json: the nl-router gate resets it to
     # clean (gitignored runtime pollution otherwise flakes NL routing), but we
