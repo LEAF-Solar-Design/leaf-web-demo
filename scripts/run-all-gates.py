@@ -1628,6 +1628,15 @@ def build_suites() -> List[Suite]:
         Suite("server-postgres-authority-inventory",
               "server tests/test_postgres_authority_inventory_contract.py", "pytest",
               SERVER, _py_pytest("tests/test_postgres_authority_inventory_contract.py"), 9),
+        # The drained upload-marker reconciler (P-076 residual). Fully offline:
+        # an injected in-memory store stands in for PostgreSQL, so nothing
+        # skips and the floor is the exact count, 60 (14 functions; the refusal
+        # matrix is 21 cases x dry-run/apply, plus 6 argument refusals). It
+        # pins dry-run default, an identical second run, zero writes on every
+        # refusal and the inventory's PARTIAL upload coverage claim.
+        Suite("reconcile-upload-authority",
+              "scripts test_reconcile_upload_authority.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("test_reconcile_upload_authority.py"), 60),
         # The annex authority the sessions flip strands without. Fully
         # offline: the PostgreSQL halves run against a fake in place of
         # platform.db, so nothing here skips on a no-DB host and the floor
