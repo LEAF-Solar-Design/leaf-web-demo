@@ -1,6 +1,9 @@
 import { expect, test } from '@playwright/test'
 import { CAT_PROJECT, CAT_PROJECT_VERSION, catProofResponse, makeCatProofState } from './catProofFixture.mjs'
 
+// The cat proof fixture's fake session token (not a credential).
+const FIXTURE_TOKEN = 'fixture-token'
+
 // iOS ship-surface browser proof. Runs ONLY under playwright.ios.config.mjs,
 // which serves the same /app from two Vite instances: one built with
 // VITE_IOS_SURFACE=0 (project ios-flag-off) and one with VITE_IOS_SURFACE=1
@@ -129,7 +132,7 @@ async function openProjectRevision(page, calls) {
   await expect(version).toHaveValue(REVISION)
   // The workspace really is live: hydrated from the API with the bearer.
   expect(calls.some((call) => call.method === 'GET' && call.path === `/api/projects/${PROJECT_ID}`
-    && call.headers.authorization === 'Bearer fixture-token')).toBe(true)
+    && call.headers.authorization === `Bearer ${FIXTURE_TOKEN}`)).toBe(true)
 }
 
 async function showIosSurface(page) {
@@ -194,7 +197,7 @@ test('@flag-on a full readiness contract makes the approved revision launchable'
   expect(reads.length).toBeGreaterThan(0)
   for (const read of reads) {
     expect(read.query).toEqual({ project_id: PROJECT_ID, revision: REVISION })
-    expect(read.headers.authorization).toBe('Bearer fixture-token')
+    expect(read.headers.authorization).toBe(`Bearer ${FIXTURE_TOKEN}`)
     expect(read.headers['x-tenant-id']).toBe(TENANT)
   }
   expect(calls.filter((call) => call.path === '/api/ios-ship/launch')).toEqual([])
