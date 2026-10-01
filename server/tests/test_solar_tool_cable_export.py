@@ -456,8 +456,9 @@ DECLARATION_PARAMS = json.loads((ROOT / "server" / "solar_tools" / "solar_cable_
     ({"project_location": "Akron\uffff", "inverter_record": CAPTURE_RECORD}, False),
     ({"inverter_record": record(companyName="Sun\ufffe")}, False),
     ({"inverter_record": record(modelName="SG\uffff")}, False),
+    ({"inverter_record": record(seriesName="SG\ufffe")}, False),
     ({"project_location": "Akron\ufffd", "inverter_record": CAPTURE_RECORD}, True),
-], ids=["location-fffe", "location-ffff", "company-fffe", "model-ffff", "location-fffd"])
+], ids=["location-fffe", "location-ffff", "company-fffe", "model-ffff", "series-fffe", "location-fffd"])
 def test_cable_export_text_refuses_noncharacters(graph, params, accepted):
     assert Draft7Validator(DECLARATION_PARAMS).is_valid(params) is accepted
     if not accepted:
@@ -467,6 +468,39 @@ def test_cable_export_text_refuses_noncharacters(graph, params, accepted):
     else:
         sheets = dict(reopened(builtin().run(copy.deepcopy(graph), params)))
         assert ["Project Location", "Akron\ufffd"] in [cells for _, cells in sheets["Equipment Schedule"]]
+
+
+@pytest.mark.parametrize("ch", ["\x00", "\x1f", "\ufffe", "\uffff"])
+def test_xml_chars_circuit_tag_refused(graph, ch):
+    g = copy.deepcopy(graph)
+    g["strings"][0]["circuit_tag"] = "+1/1a" + ch
+    with pytest.raises(GraphValidationError) as error:
+        builtin().run(g, {"circuit_source": "labels"})
+    assert error.value.code == "SCHEDULES_KERNEL_REFUSED"
+
+
+def test_xml_chars_start_and_midpoint_scale(graph, monkeypatch):
+    module = builtin()
+    real = module.bridge.state_from_graph
+
+    def with_points(*args, **kwargs):
+        state, binding = real(*args, **kwargs)
+        for geometry in state["geometry"]["strings"]:
+            geometry["start"] = [3.0, 4.0]
+            geometry["midpoint"] = [5.0, 6.0]
+        return state, binding
+
+    monkeypatch.setattr(module.bridge, "state_from_graph", with_points)
+    g = copy.deepcopy(graph)
+    g["project"]["units"].update(drawing_units="m", meters_per_unit=1.0, drawing_unit_is_feet=False)
+    state = module.export_state(validate_graph(g), "topology")
+    assert state["geometry"]["strings"]
+    for geometry in state["geometry"]["strings"]:
+        for key, expected in (("start", [3 / 0.0254, 4 / 0.0254]),
+                              ("midpoint", [5 / 0.0254, 6 / 0.0254])):
+            assert len(geometry[key]) == 2
+            assert all(math.isclose(value, target, rel_tol=1e-12)
+                       for value, target in zip(geometry[key], expected))
 
 
 @pytest.mark.parametrize("unit,mpu", [("m", 1.0), ("ft", 0.3048), ("mm", 0.001)],

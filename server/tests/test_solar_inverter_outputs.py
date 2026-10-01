@@ -40,6 +40,52 @@ def _load(name, path):
 st = _load("solar_inverter_state", ROOT / "server" / "solar_inverter_state.py")
 out = _load("solar_inverter_outputs", ROOT / "server" / "solar_inverter_outputs.py")
 
+
+def test_xml_chars_every_forbidden_code_point_is_refused():
+    forbidden = (set(range(0x00, 0x09)) | {0x0B, 0x0C} | set(range(0x0E, 0x20))
+                 | set(range(0xD800, 0xE000)) | {0xFFFE, 0xFFFF})
+    assert len(forbidden) == 2079
+    for code_point in sorted(forbidden):
+        with pytest.raises(out.InverterOutputError):
+            out.write_workbook([("S", [["a" + chr(code_point) + "b"]])])
+
+
+@pytest.mark.parametrize("name", ["S\x00", "S\ufffe", "S\ud800"])
+def test_xml_chars_forbidden_sheet_name_is_refused(name):
+    with pytest.raises(out.InverterOutputError):
+        out.write_workbook([(name, [["text"]])])
+
+
+@pytest.mark.parametrize("ch", ["\t", "\n", "\r", "\r\n", "\u0020", "\ud7ff", "\ue000",
+                               "\ufffd", "\U00010000", "\U0010ffff"])
+def test_xml_chars_boundary_characters_round_trip(ch):
+    xlsx = _load("solar_xlsx", ROOT / "server" / "solar_xlsx.py")
+    text = "a" + ch + "b"
+    sheets = xlsx.read_workbook(out.write_workbook([("S", [[text]])]))
+    assert sheets[0].rows[0].cells == [text]
+
+
+def test_xml_chars_patterns_agree():
+    xlsx = _load("solar_xlsx", ROOT / "server" / "solar_xlsx.py")
+    assert out._XML_FORBIDDEN.pattern == xlsx.XML_FORBIDDEN.pattern
+
+
+def test_xml_chars_iterator_rows_round_trip():
+    xlsx = _load("solar_xlsx", ROOT / "server" / "solar_xlsx.py")
+    row = ["plain text", "a\rb"]
+    workbook = out.write_workbook([("S", [iter(row)])])
+    assert workbook == out.write_workbook([("S", [row])])
+    assert xlsx.read_workbook(workbook)[0].rows[0].cells == row
+
+
+def test_xml_chars_iterator_grid_round_trip():
+    xlsx = _load("solar_xlsx", ROOT / "server" / "solar_xlsx.py")
+    row = ["plain text", "a\rb"]
+    workbook = out.write_workbook([("S", iter([row]))])
+    assert workbook == out.write_workbook([("S", [row])])
+    assert xlsx.read_workbook(workbook)[0].rows[0].cells == row
+
+
 SQUARE = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]]
 HOST = {"UseL2Collectors": True, "UseOptimizers": False,
         "InverterCatalogRecord": {"companyName": "Maker", "modelName": "M250", "seriesName": "S",

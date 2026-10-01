@@ -387,18 +387,19 @@ def read_workbook_file(path, *, max_bytes=MAX_ARCHIVE_BYTES):
 # --------------------------------------------------------------------------- #
 # Writing
 # --------------------------------------------------------------------------- #
-_ESCAPES = (("&", "&amp;"), ("<", "&lt;"), (">", "&gt;"), ('"', "&quot;"))
-# Neither XML 1.0 nor a worksheet cell can carry a control character; a value
-# holding one is refused rather than silently stripped into a different string.
-_FORBIDDEN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+_ESCAPES = (("&", "&amp;"), ("<", "&lt;"), (">", "&gt;"), ('"', "&quot;"), ("\r", "&#13;"))
+# Refuse characters outside XML 1.0's Char production rather than silently
+# stripping them into a different string.
+XML_FORBIDDEN = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
+_FORBIDDEN = XML_FORBIDDEN
 _DECLARATION = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
 # One fixed timestamp so the same workbook is the same bytes on every run.
 _ZIP_DATE = (1980, 1, 1, 0, 0, 0)
 
 
 def _escape(text):
-    if _FORBIDDEN.search(text):
-        raise XlsxError("cell text holds a control character")
+    if XML_FORBIDDEN.search(text):
+        raise XlsxError("cell text holds a character XML 1.0 cannot carry")
     for char, entity in _ESCAPES:
         text = text.replace(char, entity)
     return text
