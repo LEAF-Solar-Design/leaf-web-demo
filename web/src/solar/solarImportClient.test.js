@@ -39,6 +39,9 @@ const ENTITLEMENT_DENIED = {
   required: 'upload',
   tier: 'free',
 }
+// The guest gate's 403, byte for byte as server/deps.py answered it on each of the three routes
+// (measured with a minted guest session under LEAF_AUTH_LIVE=1; it carries no reason_code).
+const GUEST_TEXT = '{"ok":false,"tool":null,"version":null,"result":null,"overlay":null,"timing_ms":0,"cost":null,"error":{"error_code":"FORBIDDEN","message":"guest sessions are upload-only: upload, upload-status, intake and versions reads; create an account for everything else","retryable":false,"retry_class":"after_action","actor":"workspace_admin","next_action":"Ask a workspace admin to grant the required access."},"degraded_mode":false}'
 const POLICY_UNAVAILABLE = {
   degraded_mode: false,
   entitlement_required: true,
@@ -89,7 +92,7 @@ const ACCEPT_CODES = [
   'SOLAREDGE_REPORT_REQUIRED', 'SOLAREDGE_REPORT_STALE', 'SOLAREDGE_REPORT_UNAVAILABLE',
 ]
 const CLIENT_AND_SESSION_CODES = [
-  'ENTITLEMENT_POLICY_UNAVAILABLE', 'ENTITLEMENT_REQUIRED', 'SOLAREDGE_CLIENT_ABORTED',
+  'ENTITLEMENT_POLICY_UNAVAILABLE', 'ENTITLEMENT_REQUIRED', 'FORBIDDEN', 'SOLAREDGE_CLIENT_ABORTED',
   'SOLAREDGE_CLIENT_ARTIFACT_MISMATCH', 'SOLAREDGE_CLIENT_DIGEST_UNAVAILABLE', 'SOLAREDGE_CLIENT_NETWORK',
   'SOLAREDGE_CLIENT_REQUEST_INVALID', 'SOLAREDGE_CLIENT_RESPONSE_INVALID', 'SOLAREDGE_CLIENT_TIMEOUT',
   'STALE_GRAPH_REVISION', 'UNAUTHENTICATED',
@@ -242,7 +245,7 @@ describe('solar import client', () => {
       expect(list).toEqual([...list].sort())
     }
     const allCodes = [...ROUTE_CODES_TODAY, ...ACCEPT_CODES, ...CLIENT_AND_SESSION_CODES].sort()
-    expect(allCodes).toHaveLength(74)
+    expect(allCodes).toHaveLength(75)
     expect(Object.keys(SOLAREDGE_IMPORT_REASONS).sort()).toEqual(allCodes)
     for (const sentence of Object.values(SOLAREDGE_IMPORT_REASONS)) {
       expect(typeof sentence).toBe('string')
@@ -886,5 +889,420 @@ describe('solar import client', () => {
     }
     expect(signal.aborted).toBe(false)
     expect(settles).toBe(12)
+  })
+
+  it('SI33 the guest gate answer is FORBIDDEN on every route', async () => {
+    expect(JSON.parse(GUEST_TEXT).error.reason_code).toBe(undefined)
+    expect(new TextEncoder().encode(GUEST_TEXT).byteLength).toBe(424)
+    const answer = (text, status) => answering(() => jsonResponse(text, status))
+    for (const run of everyRoute) {
+      await expect(run(clientWith(answer(GUEST_TEXT, 403)).client)).resolves.toEqual(refused(403, 'FORBIDDEN', false))
+      await expect(run(clientWith(answer(GUEST_TEXT, 400)).client))
+        .resolves.toEqual(refused(400, 'SOLAREDGE_CLIENT_RESPONSE_INVALID', false))
+      await expect(run(clientWith(answer(GUEST_TEXT, 503)).client))
+        .resolves.toEqual(refused(503, 'SOLAREDGE_CLIENT_RESPONSE_INVALID', true))
+    }
+    const edited = (edit) => {
+      const body = JSON.parse(GUEST_TEXT)
+      edit(body)
+      return JSON.stringify(body)
+    }
+    const cases = [
+      [edited((b) => { b.error.retryable = true }), refused(403, 'FORBIDDEN', false)],
+      [edited((b) => { b.error.reason_code = 'IMPORT_PROJECT_MISMATCH' }), refused(403, 'IMPORT_PROJECT_MISMATCH', false)],
+      [edited((b) => { b.error.error_code = 'forbidden' }), refused(403, 'SOLAREDGE_CLIENT_RESPONSE_INVALID', false)],
+      [edited((b) => { b.error.error_code = ['FORBIDDEN'] }), refused(403, 'SOLAREDGE_CLIENT_RESPONSE_INVALID', false)],
+      [edited((b) => { b.error = 'FORBIDDEN' }), refused(403, 'SOLAREDGE_CLIENT_RESPONSE_INVALID', false)],
+      [edited((b) => { b.entitlement_required = true }), refused(403, 'ENTITLEMENT_REQUIRED', false)],
+      ['["FORBIDDEN"]', refused(403, 'SOLAREDGE_CLIENT_RESPONSE_INVALID', false)],
+      ['null', refused(403, 'SOLAREDGE_CLIENT_RESPONSE_INVALID', false)],
+    ]
+    for (const [text, expected] of cases) {
+      const { client } = clientWith(answer(text, 403))
+      await expect(client.uploadPdf({ drawingId: 'solar', file: pdfBlob() })).resolves.toEqual(expected)
+    }
+    expect(solarEdgeReason('FORBIDDEN')).toBe('A guest session cannot use the SolarEdge import, so sign in to an account')
+  })
+
+  it('SI34 arguments that throw or are null resolve', async () => {
+    const fetchImpl = vi.fn()
+    const { client } = clientWith(fetchImpl)
+    const firstCheck = {
+      uploadPdf: 'IMPORT_DRAWING_ID_INVALID', requestReport: 'REPORT_DRAWING_ID_INVALID',
+      downloadArtifact: 'ARTIFACT_ID_INVALID',
+    }
+    for (const [method, code] of Object.entries(firstCheck)) {
+      const throwing = { get drawingId() { throw new Error('getter') } }
+      const trapped = new Proxy({}, { get() { throw new Error('trap') } })
+      for (const options of [null, throwing, trapped]) {
+        await expect(client[method](options))
+          .resolves.toEqual(refused(null, 'SOLAREDGE_CLIENT_REQUEST_INVALID', false))
+      }
+      for (const options of [undefined, 7, 'x', true, [], () => {}]) {
+        await expect(client[method](options)).resolves.toEqual(refused(null, code, false))
+      }
+      await expect(client[method]()).resolves.toEqual(refused(null, code, false))
+    }
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it('SI35 the deadline starts at the call and covers the last read', async () => {
+    const spin = (ms) => {
+      const until = performance.now() + ms
+      while (performance.now() < until) { /* a synchronous delay no timer can interrupt */ }
+    }
+    const timedOut = refused(null, 'SOLAREDGE_CLIENT_TIMEOUT', true)
+    const slowFile = new Blob([new Uint8Array(10)])
+    Object.defineProperty(slowFile, 'size', { get() { spin(60); return 10 } })
+    const unused = vi.fn()
+    const precheck = clientWith(unused, FAST_BUDGETS).client
+    expect(await settleWithin(precheck.uploadPdf({ drawingId: 'solar', file: slowFile }), 5000)).toEqual(timedOut)
+    const slowOptions = (rest) => ({ ...rest, get drawingId() { spin(60); return 'solar' } })
+    const { drawingId: ignored, ...reportRest } = reportArgs()
+    expect(ignored).toBe('solar')
+    expect(await settleWithin(precheck.uploadPdf(slowOptions({ file: pdfBlob() })), 5000)).toEqual(timedOut)
+    expect(await settleWithin(precheck.requestReport(slowOptions(reportRest)), 5000)).toEqual(timedOut)
+    expect(await settleWithin(precheck.downloadArtifact(slowOptions({ ref: REPORT_REF })), 5000)).toEqual(timedOut)
+    expect(unused).not.toHaveBeenCalled()
+    // The read that ends the body arrives after the deadline: every byte is in, the call still times out.
+    const endsLate = (json) => answering(() => {
+      const bytes = new TextEncoder().encode(JSON.stringify(json))
+      let first = true
+      return new Response(new ReadableStream({
+        pull(controller) {
+          if (first) {
+            first = false
+            controller.enqueue(bytes)
+          } else {
+            spin(60)
+            controller.close()
+          }
+        },
+      }, { highWaterMark: 0 }), { status: 200 })
+    })
+    const late = refused(200, 'SOLAREDGE_CLIENT_TIMEOUT', true)
+    expect(await settleWithin(everyRoute[0](clientWith(endsLate(UPLOAD_SMALL), FAST_BUDGETS).client), 5000)).toEqual(late)
+    expect(await settleWithin(everyRoute[1](clientWith(endsLate(REPORT_SMALL), FAST_BUDGETS).client), 5000)).toEqual(late)
+  })
+
+  it('SI36 a content type the call sets replaces an injected one in any casing', async () => {
+    const posts = [
+      [everyRoute[0], () => jsonResponse(UPLOAD_SMALL), 'application/pdf'],
+      [everyRoute[1], () => jsonResponse(REPORT_SMALL), 'application/json'],
+    ]
+    const injected = [
+      [{ Authorization: 'Bearer t', 'content-type': 'text/plain' }, 'Authorization', 'Bearer t'],
+      [{ 'CONTENT-TYPE': 'text/plain', 'X-Tenant-Id': 'acme' }, 'X-Tenant-Id', 'acme'],
+      [{ 'Content-Type': 'text/plain', 'X-Tenant-Id': 'acme' }, 'X-Tenant-Id', 'acme'],
+    ]
+    for (const [run, success, mediaType] of posts) {
+      for (const [headers, otherKey, otherValue] of injected) {
+        const fetchImpl = answering(success)
+        const { client } = clientWith(fetchImpl, { headers: () => headers })
+        expect((await run(client)).ok).toBe(true)
+        const sent = fetchImpl.mock.calls[0][1].headers
+        expect(Object.keys(sent).filter((key) => /^content-type$/i.test(key))).toEqual(['Content-Type'])
+        expect(sent['Content-Type']).toBe(mediaType)
+        expect(new Headers(sent).get('content-type')).toBe(mediaType)
+        expect(sent[otherKey]).toBe(otherValue)
+      }
+    }
+    // The download sets no content type, so an injected one is sent as given.
+    const fetchImpl = answering(() => new Response(reportBytes(), { status: 200, headers: DOWNLOAD_HEADERS }))
+    const { client } = clientWith(fetchImpl, { headers: () => ({ 'content-type': 'text/plain', 'X-Tenant-Id': 'acme' }) })
+    expect((await everyRoute[2](client)).ok).toBe(true)
+    expect({ ...fetchImpl.mock.calls[0][1].headers }).toEqual({ 'content-type': 'text/plain', 'X-Tenant-Id': 'acme' })
+  })
+
+  it('SI37 a signal that throws while registering leaves no listener and no timer', async () => {
+    vi.useFakeTimers()
+    try {
+      for (const run of everyRoute) {
+        const added = []
+        const removed = []
+        const signal = {
+          aborted: false,
+          addEventListener(type, fn) { added.push(fn); throw new Error('boom') },
+          removeEventListener(type, fn) { removed.push(fn) },
+        }
+        const fetchImpl = vi.fn()
+        const { client } = clientWith(fetchImpl)
+        await expect(run(client, signal)).resolves.toEqual(refused(null, 'SOLAREDGE_CLIENT_REQUEST_INVALID', false))
+        expect(fetchImpl).not.toHaveBeenCalled()
+        expect(added).toHaveLength(1)
+        expect(removed).toContain(added[0])
+        expect(vi.getTimerCount()).toBe(0)
+        const both = {
+          aborted: false,
+          addEventListener() { throw new Error('boom') },
+          removeEventListener() { throw new Error('boom again') },
+        }
+        await expect(run(client, both)).resolves.toEqual(refused(null, 'SOLAREDGE_CLIENT_REQUEST_INVALID', false))
+        expect(vi.getTimerCount()).toBe(0)
+      }
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('SI38 the bodiless text path refuses a replaced invalid byte', async () => {
+    const bodiless = (text, status) => () => ({ status, headers: new Headers(), body: null, text: async () => text })
+    const refusal = clone(REPORT_AMBIGUOUS)
+    refusal.error.message = '\uFFFD'
+    const refusalText = JSON.stringify(refusal)
+    const invalid409 = refused(409, 'SOLAREDGE_CLIENT_RESPONSE_INVALID', false)
+    const replaced = clientWith(answering(bodiless(refusalText, 409))).client
+    await expect(replaced.requestReport(reportArgs())).resolves.toEqual(invalid409)
+    // The same refusal with the byte 0xff where the message was, streamed: the fatal decoder refuses it.
+    const [before, after] = refusalText.split('\uFFFD').map((part) => new TextEncoder().encode(part))
+    const bytes = new Uint8Array(before.byteLength + 1 + after.byteLength)
+    bytes.set(before)
+    bytes[before.byteLength] = 0xff
+    bytes.set(after, before.byteLength + 1)
+    const streamed = clientWith(answering(() => new Response(bytes, { status: 409 }))).client
+    await expect(streamed.requestReport(reportArgs())).resolves.toEqual(invalid409)
+    // A stream is decoded strictly, so a literal U+FFFD there is real text and is kept.
+    const literal = clientWith(answering(() => jsonResponse(refusalText, 409))).client
+    await expect(literal.requestReport(reportArgs())).resolves.toEqual(refused(409, 'REPORT_AMBIGUOUS_MATCH', false))
+    const success = JSON.stringify({ ...UPLOAD_SMALL, project_id: 'p\uFFFD' })
+    const textSuccess = clientWith(answering(bodiless(success, 200))).client
+    await expect(textSuccess.uploadPdf({ drawingId: 'solar', file: pdfBlob() }))
+      .resolves.toEqual(refused(200, 'SOLAREDGE_CLIENT_RESPONSE_INVALID', false))
+    const plain = clientWith(answering(bodiless(JSON.stringify(UPLOAD_SMALL), 200))).client
+    await expect(plain.uploadPdf({ drawingId: 'solar', file: pdfBlob() }))
+      .resolves.toEqual({ ok: true, status: 200, value: withoutEnvelope(UPLOAD_SMALL) })
+  })
+
+  it('SI39 a content length with leading zeros is read as its value', async () => {
+    const zeros = '0'.repeat(17)
+    const routes = [
+      [everyRoute[0], (length) => jsonResponse(UPLOAD_SMALL, 200, { 'content-length': length }),
+        new TextEncoder().encode(JSON.stringify(UPLOAD_SMALL)).byteLength, '65537',
+        refused(200, 'SOLAREDGE_CLIENT_RESPONSE_INVALID', false)],
+      [everyRoute[1], (length) => jsonResponse(REPORT_SMALL, 200, { 'content-length': length }),
+        new TextEncoder().encode(JSON.stringify(REPORT_SMALL)).byteLength, '65537',
+        refused(200, 'SOLAREDGE_CLIENT_RESPONSE_INVALID', false)],
+      [everyRoute[2], (length) => new Response(reportBytes(), {
+        status: 200, headers: { ...DOWNLOAD_HEADERS, 'content-length': length },
+      }), 1803, '16777217', refused(200, 'SOLAREDGE_CLIENT_ARTIFACT_MISMATCH', false)],
+    ]
+    expect(routes.map((route) => route[2])).toEqual([724, 1034, 1803])
+    for (const [run, respond, length, over, overResult] of routes) {
+      for (const declared of [zeros + String(length), zeros, ` ${zeros}${length} `]) {
+        const result = await run(clientWith(answering(() => respond(declared))).client)
+        expect(result).toMatchObject({ ok: true, status: 200 })
+      }
+      for (const declared of [zeros + over, '1'.repeat(17), `${zeros}1${zeros}`]) {
+        await expect(run(clientWith(answering(() => respond(declared))).client)).resolves.toEqual(overResult)
+      }
+    }
+  })
+
+  it('SI40 a stopped call leaves no timer behind', async () => {
+    vi.useFakeTimers()
+    try {
+      for (const run of everyRoute) {
+        const fetchImpl = vi.fn(() => new Promise(() => {}))
+        const { client } = clientWith(fetchImpl, { timeouts: { upload: 1000, report: 1000, artifact: 1000 } })
+        const caller = new AbortController()
+        const pending = run(client, caller.signal)
+        await vi.advanceTimersByTimeAsync(0)
+        expect(fetchImpl).toHaveBeenCalledTimes(1)
+        expect(vi.getTimerCount()).toBeGreaterThanOrEqual(1)
+        caller.abort()
+        await expect(pending).resolves.toEqual(refused(null, 'SOLAREDGE_CLIENT_ABORTED', false))
+        await vi.advanceTimersByTimeAsync(0)
+        expect(vi.getTimerCount()).toBe(0)
+        // The deadline ends a fetch that never answers the same way.
+        const timed = run(clientWith(vi.fn(() => new Promise(() => {})), FAST_BUDGETS).client)
+        await vi.advanceTimersByTimeAsync(30)
+        await expect(timed).resolves.toEqual(refused(null, 'SOLAREDGE_CLIENT_TIMEOUT', true))
+        await vi.advanceTimersByTimeAsync(0)
+        expect(vi.getTimerCount()).toBe(0)
+      }
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('SI41 an injected header named __proto__ is kept', async () => {
+    const successes = [
+      () => jsonResponse(UPLOAD_SMALL), () => jsonResponse(REPORT_SMALL),
+      () => new Response(reportBytes(), { status: 200, headers: DOWNLOAD_HEADERS }),
+    ]
+    const expectedKeys = [
+      ['__proto__', 'X-Tenant-Id', 'Content-Type'], ['__proto__', 'X-Tenant-Id', 'Content-Type'],
+      ['__proto__', 'X-Tenant-Id'],
+    ]
+    for (const [index, run] of everyRoute.entries()) {
+      const fetchImpl = answering(successes[index])
+      const { client } = clientWith(fetchImpl, {
+        headers: () => {
+          const injected = Object.create(null)
+          for (const [name, value] of [['__proto__', 'retained'], ['X-Tenant-Id', 'acme']]) {
+            Object.defineProperty(injected, name, { value, enumerable: true, writable: true, configurable: true })
+          }
+          return injected
+        },
+      })
+      expect((await run(client)).ok).toBe(true)
+      const sent = fetchImpl.mock.calls[0][1].headers
+      expect(Object.getOwnPropertyDescriptor(sent, '__proto__')?.value).toBe('retained')
+      expect(Reflect.ownKeys(sent)).toEqual(expectedKeys[index])
+      expect(sent['X-Tenant-Id']).toBe('acme')
+    }
+    // A plain object's own __proto__ key (JSON.parse makes one) is kept too.
+    const parsed = JSON.parse('{"__proto__":"retained","Authorization":"Bearer t"}')
+    const fetchImpl = answering(successes[0])
+    const onResponse = vi.fn()
+    const { client } = clientWith(fetchImpl, { headers: () => parsed, onResponse })
+    expect((await everyRoute[0](client)).ok).toBe(true)
+    expect(Reflect.ownKeys(fetchImpl.mock.calls[0][1].headers)).toEqual(['__proto__', 'Authorization', 'Content-Type'])
+    expect(onResponse.mock.calls[0][2]).toBe('Bearer t')
+  })
+
+  it('SI42 a signal whose removeEventListener throws does not change the result', async () => {
+    const cases = [
+      [everyRoute[0], () => jsonResponse(UPLOAD_SMALL), { ok: true, status: 200, value: withoutEnvelope(UPLOAD_SMALL) }],
+      [everyRoute[1], () => jsonResponse(REPORT_SMALL), { ok: true, status: 200, value: withoutEnvelope(REPORT_SMALL) }],
+      [everyRoute[2], () => new Response(reportBytes(), { status: 200, headers: DOWNLOAD_HEADERS }), { ok: true, status: 200 }],
+    ]
+    for (const [run, success, expected] of cases) {
+      const signal = { aborted: false, addEventListener() {}, removeEventListener() { throw new Error('boom') } }
+      expect(await run(clientWith(answering(success)).client, signal)).toMatchObject(expected)
+      expect(await run(clientWith(answering(() => jsonResponse(REPORT_BUSY, 503))).client, signal))
+        .toEqual(refused(503, 'REPORT_BUSY', true))
+    }
+  })
+
+  it('SI43 a project id is bounded in code points, as the routes bound it', async () => {
+    const face = '\u{1F600}'
+    const hundred = face.repeat(100)
+    expect(hundred.length).toBe(200)
+    const upload = answering(() => jsonResponse({ ...UPLOAD_SMALL, project_id: hundred }))
+    const uploaded = await clientWith(upload).client.uploadPdf({ drawingId: 'solar', file: pdfBlob(), projectId: hundred })
+    expect(uploaded.ok).toBe(true)
+    expect(uploaded.value.project_id).toBe(hundred)
+    expect(upload.mock.calls[0][0])
+      .toBe(`https://studio.test/api/drawings/solar/imports/solaredge-pdf?project_id=${'%F0%9F%98%80'.repeat(100)}`)
+    const report = answering(() => jsonResponse({ ...REPORT_SMALL, project_id: hundred }))
+    const reported = await clientWith(report).client.requestReport(reportArgs({ projectId: hundred }))
+    expect(reported.ok).toBe(true)
+    expect(JSON.parse(report.mock.calls[0][1].body).project_id).toBe(hundred)
+    expect(new TextEncoder().encode(report.mock.calls[0][1].body).byteLength).toBe(558)
+    const unused = vi.fn()
+    const { client } = clientWith(unused)
+    for (const projectId of [face.repeat(101), 'p'.repeat(101), `${'p'.repeat(100)}${face}`, 'p'.repeat(201), '', 7]) {
+      await expect(client.uploadPdf({ drawingId: 'solar', file: pdfBlob(), projectId }))
+        .resolves.toEqual(refused(null, 'IMPORT_PROJECT_ID_INVALID', false))
+      await expect(client.requestReport(reportArgs({ projectId })))
+        .resolves.toEqual(refused(null, 'REPORT_REQUEST_INVALID', false))
+    }
+    expect(unused).not.toHaveBeenCalled()
+    const tooLong = clientWith(answering(() => jsonResponse({ ...UPLOAD_SMALL, project_id: face.repeat(101) }))).client
+    await expect(tooLong.uploadPdf({ drawingId: 'solar', file: pdfBlob() }))
+      .resolves.toEqual(refused(200, 'SOLAREDGE_CLIENT_RESPONSE_INVALID', false))
+  })
+
+  it('SI44 a success never leaves a call whose budget has elapsed', async () => {
+    const spin = (ms) => {
+      const until = performance.now() + ms
+      while (performance.now() < until) { /* a synchronous delay no timer can interrupt */ }
+    }
+    const late = refused(200, 'SOLAREDGE_CLIENT_TIMEOUT', true)
+    // Every read ends inside the budget. The chunk's length turns slow once the body has ended, so the
+    // time is spent assembling the chunks, after the last read.
+    const slowAssembly = (json) => answering(() => {
+      const chunk = new TextEncoder().encode(JSON.stringify(json))
+      const length = chunk.byteLength
+      let ended = false
+      Object.defineProperty(chunk, 'byteLength', { get() { if (ended) spin(60); return length } })
+      let sent = false
+      const reader = {
+        async read() {
+          if (!sent) {
+            sent = true
+            return { done: false, value: chunk }
+          }
+          ended = true
+          return { done: true, value: undefined }
+        },
+        async cancel() {},
+      }
+      return { status: 200, headers: new Headers({ 'content-type': 'application/json' }), body: { getReader: () => reader } }
+    })
+    expect(await settleWithin(everyRoute[0](clientWith(slowAssembly(UPLOAD_SMALL), FAST_BUDGETS).client), 5000))
+      .toEqual(late)
+    expect(await settleWithin(everyRoute[1](clientWith(slowAssembly(REPORT_SMALL), FAST_BUDGETS).client), 5000))
+      .toEqual(late)
+    // The download's bytes and digest are in time; the header read after them is slow.
+    const slowHeader = answering(() => {
+      const headers = new Headers(DOWNLOAD_HEADERS)
+      const get = headers.get.bind(headers)
+      headers.get = (name) => {
+        if (name === 'x-leaf-artifact-id') spin(60)
+        return get(name)
+      }
+      const response = new Response(reportBytes(), { status: 200 })
+      Object.defineProperty(response, 'headers', { value: headers })
+      return response
+    })
+    const sha256Hex = async () => REPORT_REF.content_sha256
+    expect(await settleWithin(everyRoute[2](clientWith(slowHeader, { ...FAST_BUDGETS, sha256Hex }).client), 5000))
+      .toEqual(late)
+    // Positive control: the same three answers with nothing slow succeed inside the same budgets.
+    const plain = (json) => answering(() => new Response(JSON.stringify(json), {
+      status: 200, headers: { 'content-type': 'application/json' },
+    }))
+    expect((await everyRoute[0](clientWith(plain(UPLOAD_SMALL), FAST_BUDGETS).client)).ok).toBe(true)
+    expect((await everyRoute[1](clientWith(plain(REPORT_SMALL), FAST_BUDGETS).client)).ok).toBe(true)
+    const download = answering(() => new Response(reportBytes(), { status: 200, headers: DOWNLOAD_HEADERS }))
+    expect((await everyRoute[2](clientWith(download, { ...FAST_BUDGETS, sha256Hex }).client)).ok).toBe(true)
+  })
+
+  it('SI45 the caller signal cleanup is inside the deadline, and an abort made during it counts', async () => {
+    const spin = (ms) => {
+      const until = performance.now() + ms
+      while (performance.now() < until) { /* a synchronous delay no timer can interrupt */ }
+    }
+    const plain = (json) => answering(() => new Response(JSON.stringify(json), {
+      status: 200, headers: { 'content-type': 'application/json' },
+    }))
+    const sha256Hex = async () => REPORT_REF.content_sha256
+    const clients = () => [
+      clientWith(plain(UPLOAD_SMALL), FAST_BUDGETS).client,
+      clientWith(plain(REPORT_SMALL), FAST_BUDGETS).client,
+      clientWith(answering(() => new Response(reportBytes(), { status: 200, headers: DOWNLOAD_HEADERS })),
+        { ...FAST_BUDGETS, sha256Hex }).client,
+    ]
+    // A real caller signal whose removeEventListener does something before or after the real removal.
+    const wrapped = (before, after = () => {}) => {
+      const caller = new AbortController()
+      const { signal } = caller
+      const remove = signal.removeEventListener.bind(signal)
+      signal.removeEventListener = (...args) => {
+        before(caller)
+        remove(...args)
+        after(caller)
+      }
+      return signal
+    }
+    const late = refused(200, 'SOLAREDGE_CLIENT_TIMEOUT', true)
+    const aborted = refused(200, 'SOLAREDGE_CLIENT_ABORTED', false)
+    // The cleanup is slow: the call answers after its budget, so it answers the deadline.
+    for (const [i, client] of clients().entries()) {
+      expect(await settleWithin(everyRoute[i](client, wrapped(() => spin(60))), 5000)).toEqual(late)
+    }
+    // The caller aborts during the cleanup, before or after its listener is removed: the abort counts.
+    for (const [i, client] of clients().entries()) {
+      expect(await settleWithin(everyRoute[i](client, wrapped((c) => c.abort())), 5000)).toEqual(aborted)
+    }
+    for (const [i, client] of clients().entries()) {
+      expect(await settleWithin(everyRoute[i](client, wrapped(() => {}, (c) => c.abort())), 5000)).toEqual(aborted)
+    }
+    // Positive control: the same wrapped signal with a cleanup that does nothing succeeds on every route.
+    for (const [i, client] of clients().entries()) {
+      expect((await everyRoute[i](client, wrapped(() => {}))).ok).toBe(true)
+    }
   })
 })

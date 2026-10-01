@@ -30,7 +30,6 @@ Contract:
 """
 from __future__ import annotations
 
-import calendar
 import copy
 import hashlib
 import json
@@ -63,9 +62,6 @@ MAX_PROVENANCE_DEPTH = sdg.MAX_DEPTH - 5
 MAX_PLAN_COORDINATE = 1_000_000_000  # $defs.plan_point item bound
 MAX_TEXT = 4096                      # $defs.provenance string bound
 _HEX64 = re.compile(r"[0-9a-f]{64}")
-_RFC3339 = re.compile(
-    r"^(\d{4})-(0[1-9]|1[0-2])-(\d{2})T(?:[01]\d|2[0123]):(?:[0-5]\d):(?:[0-5]\d)"
-    r"(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0123]):[0-5]\d)$", re.ASCII)
 _INPUT_ERRORS = (ValueError, TypeError, KeyError, IndexError, AttributeError, OverflowError,
                  ZeroDivisionError, RecursionError)
 _PROVENANCE_VALIDATOR = None
@@ -193,23 +189,13 @@ def _provenance_validator():
         with _PROVENANCE_VALIDATOR_LOCK:
             validator = _PROVENANCE_VALIDATOR
             if validator is None:
-                from jsonschema import Draft202012Validator, FormatChecker
+                from jsonschema import Draft202012Validator
 
                 validator = Draft202012Validator(
                     {"$ref": "#/$defs/provenance", "$defs": sdg.load_schema()["$defs"]},
-                    format_checker=FormatChecker())
+                    format_checker=sdg.graph_format_checker())
                 _PROVENANCE_VALIDATOR = validator
     return validator
-
-
-def _rfc3339(value):
-    match = _RFC3339.match(value.upper())
-    if match is None:
-        return False
-    year, month, day = map(int, match.groups())
-    if not year:
-        return False
-    return 1 <= day <= calendar.monthrange(year, month)[1]
 
 
 def _check_provenance(provenance):
@@ -275,7 +261,7 @@ def _check_provenance(provenance):
     try:
         if not _provenance_validator().is_valid(provenance):
             raise _invalid()
-        if not _rfc3339(provenance["created_at"]):
+        if not sdg.is_rfc3339_date_time(provenance["created_at"]):
             raise _invalid()
     except _INPUT_ERRORS:
         raise _invalid() from None

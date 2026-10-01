@@ -372,6 +372,14 @@ def build_suites() -> List[Suite]:
         # sf-w3-conversion-graph piece 2: the physical head's trackers as compact Ground frames; 87 cases.
         Suite("server-solar-ground-conversion", "server tests/test_solar_ground_conversion.py", "pytest",
               SERVER, _py_pytest("tests/test_solar_ground_conversion.py"), 87),
+        # The graph validator decides RFC 3339 date-time itself (2026-10-01, sf-graph-date-time-deterministic):
+        # one module-local rule on a FormatChecker that knows only date-time, shared with the conversion
+        # kernel, so a host without the optional rfc3339_validator package refuses what every other host
+        # refuses. Three rows run a child interpreter with the package absent, accepting all and refusing
+        # all, and pin one table digest. Inputs are authored in the file, so the floor is the exact count
+        # on every runner. COUNTED: 11 unparametrized tests + 18 accepted + 49 refused + 3 hosts = 81.
+        Suite("server-solar-graph-date-time", "server tests/test_solar_graph_date_time.py", "pytest",
+              SERVER, _py_pytest("tests/test_solar_graph_date_time.py"), 81),
         # sf-solar-electrical-bridge: the kernel state to design graph topology mapping, both ways.
         Suite("server-solar-electrical-bridge", "server tests/test_solar_electrical_state_bridge.py", "pytest", SERVER,
               _py_pytest("tests/test_solar_electrical_state_bridge.py"), 83),
@@ -1681,6 +1689,16 @@ def build_suites() -> List[Suite]:
                   r"manifest, version, and checkout rows behind, which would mutate "
                   r"a staging or production database whose URL happens to be in the "
                   r"environment\.",)),
+        # Orphaned version blobs (2026-10-01, sf-store-orphan-version-adopt): a legacy write whose
+        # manifest save failed after its blob landed no longer blocks the drawing. Identical bytes
+        # are adopted, different bytes take the next free slot under the checkout guard (bounded
+        # at 1000), a backend with no cross-process lock keeps the refusal, and no version blob
+        # is ever written over. Hermetic (in-memory and tmp_path stores), nothing skipped; the
+        # floor is the exact count on purpose.
+        # COUNTED: 16 unparametrized tests + 27 parametrized cases (12 functions) = 43.
+        Suite("server-store-orphan-version-adopt",
+              "server tests/test_store_orphan_version_adopt.py", "pytest", SERVER,
+              _py_pytest("tests/test_store_orphan_version_adopt.py"), 43),
         Suite("server-agent-gate-postgres", "server tests/test_agent_gate_postgres.py",
               "pytest", SERVER, _py_pytest("tests/test_agent_gate_postgres.py"), 14,
               uses_database=True, database_skip_reasons=(r"DATABASE_URL is not set",)),
