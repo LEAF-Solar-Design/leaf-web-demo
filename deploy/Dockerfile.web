@@ -97,9 +97,10 @@ FROM nginx:alpine AS web
 # nginx base and passes it here. The digest is both a cache-key input and a
 # fail-closed check on the bytes apk uses, so a repository update rebuilds this
 # layer even when nginx:alpine still resolves to the same base digest.
-# Targeted upgrades only (libexpat, libuuid), each with a version floor at or
+# Targeted upgrades only (libexpat, libuuid, pcre2), each with a version floor at or
 # above the Trivy-named fix, so a stale index fails the build instead of
 # shipping the vulnerable package (libuuid 2.42.1-r0: seven HIGH CVEs, 2026-09-05).
+# pcre2 10.48-r0: CVE-2026-103111 HIGH, 2026-10-01.
 ARG WEB_ALPINE_MAIN_APKINDEX_SHA256
 RUN printf '%s\n' "$WEB_ALPINE_MAIN_APKINDEX_SHA256" \
       | grep -Eq '^[0-9a-f]{64}$' \
@@ -115,7 +116,7 @@ RUN printf '%s\n' "$WEB_ALPINE_MAIN_APKINDEX_SHA256" \
   && [ "$#" -eq 1 ] \
   && printf '%s  %s\n' "$WEB_ALPINE_MAIN_APKINDEX_SHA256" "$1" \
       | sha256sum -c - \
-  && apk --repositories-file "$repositories_file" upgrade libexpat libuuid \
+  && apk --repositories-file "$repositories_file" upgrade libexpat libuuid pcre2 \
   && installed_version="$(apk list --installed libexpat \
       | sed -n 's/^libexpat-\([^ ]*\).*/\1/p')" \
   && [ -n "$installed_version" ] \
@@ -124,6 +125,10 @@ RUN printf '%s\n' "$WEB_ALPINE_MAIN_APKINDEX_SHA256" \
       | sed -n 's/^libuuid-\([^ ]*\).*/\1/p')" \
   && [ -n "$libuuid_version" ] \
   && [ "$(apk version -t "$libuuid_version" 2.42.3-r0)" != '<' ] \
+  && pcre2_version="$(apk list --installed pcre2 \
+      | sed -n 's/^pcre2-\([^ ]*\).*/\1/p')" \
+  && [ -n "$pcre2_version" ] \
+  && [ "$(apk version -t "$pcre2_version" 10.49-r0)" != '<' ] \
   && rm -f "$repositories_file" \
   && rm -rf /var/cache/apk/*
 
