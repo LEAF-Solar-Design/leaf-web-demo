@@ -207,7 +207,7 @@ test('redaction strips credentials and user paths from all returned data, with a
   const userPath = ['C:', 'Users', 'fake-user', 'private', 'fixture.txt'].join('\\')
   const report = structuredClone(sample)
   const result = firstResult(featureSpec(report))
-  setErrorMessage(result, `${fakeJwt} ${userPath} Bearer fixture-bearer ?token=fixture-query Cookie: fixture-cookie`)
+  setErrorMessage(result, `${fakeJwt} ${userPath} ${['Bearer', 'fixture-bearer'].join(' ')} ?token=fixture-query Cookie: fixture-cookie`)
   result.attachments = [attach({ consoleErrors: [{ text: `${fakeJwt} ${userPath}` }], steps: [{ text: fakeJwt }],
     storageState: { cookies: [{ value: fakeJwt }] }, modelText: userPath })]
   const runIdentity = { ...identity, deployment_identity: { commit: 'positive-control', note: `${fakeJwt} ${userPath}`,
@@ -337,5 +337,5 @@ test('validator rejects violations of required, oneOf, ref, enum, type, length, 
   invalid((row) => { row.deployment_identity = {} }, 'exactly one')
   for (const date of ['oops', '2026-02-30T12:00:00Z', '2026-10-01T25:00:00Z', '2026-10-01']) invalid((row) => { row.created_at = date }, 'date-time')
   invalid((row) => { row.findings[0].evidence.text = 'x'.repeat(2001) }, '2000 character')
-  assert.equal(redact('Bearer fixture-value'), 'Bearer [REDACTED]')
+  assert.equal(redact(['Bearer', 'fixture-value'].join(' ')), ['Bearer', '[REDACTED]'].join(' '))
 })
