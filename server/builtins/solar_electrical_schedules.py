@@ -11,10 +11,15 @@ the drawing and no graph entity changes.
 What the bridge does not project and this read adds, one way and read-only:
   - each string row's panel count (the graph string's module_count), which the string schedule prints;
   - one dc-homerun cable row per W1 homerun route ("start homerun" or "end homerun" from a string), its points
-    converted from metres to inches, which the HR (ft) column sums with the string's own route.
+    converted from metres to inches, which the HR (ft) column sums with the string's own route;
+  - one feeder cable row per "feeder" route, in graph route order: from its L1's number, to its L2's number,
+    circuit "F<l1>/<l2>", its points converted from metres to inches exactly as the homerun rows (never through
+    meters_per_unit). The feeder schedule prints each row's polyline length / 12 from these points (never the
+    stored length_ft) and the L2 the drawing's L1ToL2Assignments give the L1, as the plugin does.
 The bridge's string geometry is rescaled from drawing units to inches for the schedule kernel too.
-When sf-solar-electrical-bridge-routes lands, the bridge projects homerun legs itself and this projection is
-replaced by it.
+The route-aware bridge (solar_electrical_route_bridge.py) projects the same legs and feeders in drawing units
+and refuses graphs this read accepts (BRIDGE_ROUTE_TOPOLOGY_MISMATCH on a detached homerun), so this read keeps
+its own one-way projection.
 
 Circuit source (request `circuit_source`):
   - "topology" (default): the bridge's circuit, which follows the graph's topology: the graph tag when it parses
@@ -31,10 +36,14 @@ Host inputs (none of which the graph carries) are fixed and stated in the summar
     Zone sizing is not ported (the kernel reads the global response): SCHEDULES_ZONE_SIZING_UNSUPPORTED.
   - UseL2Collectors: the graph settings.use_l2_collectors value.
   - UseOptimizers false; a SolarEdge inverter refuses SCHEDULES_OPTIMIZERS_UNSUPPORTED (optimizer section not
-    ported). SessionCableIndexHasFeeders false: the graph carries no feeder routes, so no feeder schedule.
+    ported).
+  - SessionCableIndexHasFeeders: true exactly when the graph holds a feeder route. The plugin lists feeders from
+    its in-memory cable index; the graph's routes are Studio's persisted index, so a reopened design keeps its
+    feeder schedule. The feeder schedule still needs UseL2Collectors and a non-empty L1ToL2Assignments.
 
 Fails closed: every check runs before the kernel; a stale design refuses SOLAR_OUTPUT_NOT_CURRENT. Linear in
-strings, inverters and routes (one dict per lookup). Pure: no I/O, no clock, no network; inputs never mutated.
+strings, inverters, routes and route points (one dict per lookup); feeders are bounded by the validator (one per
+L1) and every table by the kernel's MAX_SCHEDULE_ROWS. Pure: no I/O, no clock, no network; inputs never mutated.
 """
 import json
 import re
@@ -55,6 +64,7 @@ FILENAME = "ElectricalSchedules.json"
 MEDIA_TYPE = "application/json"
 CIRCUIT_SOURCES = ("topology", "labels")
 HOMERUN_SEGMENTS = {"start homerun": "start", "end homerun": "end"}
+FEEDER_KIND = "feeder"  # graph route_kind; the kernel's cable_kind has the same spelling
 TEXT_FIELDS = ("companyName", "modelName", "seriesName")
 NUMBER_FIELDS = ("maxDCPower", "maxDCVoltage", "minDCVoltageFeed", "mpptVoltageRangeMin",
                  "mpptVoltageRangeMax", "numMpptTrackers", "DCInputers", "maxACPower",
@@ -114,7 +124,7 @@ def label_mismatches(graph):
 
 
 def schedule_state(graph, source):
-    """The bridge's state plus panel counts and homerun cable rows (see the module docstring)."""
+    """The bridge's state plus panel counts, homerun and feeder cable rows (see the module docstring)."""
     try:
         state, binding = bridge.state_from_graph(graph)
     except bridge.ElectricalBridgeError as error:
@@ -140,6 +150,18 @@ def schedule_state(graph, source):
         circuits[row["string"]] = row["_detail"]["circuit"]
     cables = []
     for k, route in enumerate(graph["routes"], 1):
+        if route["route_kind"] == FEEDER_KIND:
+            # validate_graph proved from_ref an L1 and to_ref an L2; the bridge proved both numbered (an integral
+            # float is accepted there), and the kernel reads an int source only.
+            l1 = int(numbers[route["from_ref"]])
+            l2 = int(numbers[route["to_ref"]])
+            cables.append({"cable_kind": "feeder", "from": l1, "to": l2,
+                           "vertices": [st.coordinate(p[0] / INCH_M, p[1] / INCH_M) for p in route["points"]],
+                           "length": {"kind": "length", "value": float(route["length_ft"]), "unit": "ft"},
+                           "_detail": {"circuit": f"F{l1}/{l2}", "gauge": route["wire_gauge"] or "NA",
+                                       "closed": False},
+                           "_pair": f"cable:schedules-{k}"})
+            continue
         if route["route_kind"] not in HOMERUN_SEGMENTS or route["from_ref"] not in handles:
             continue
         handle = handles[route["from_ref"]]
@@ -174,7 +196,7 @@ def run(graph, params):
     state = schedule_state(graph, source)
     host = {"UseL2Collectors": graph["settings"]["use_l2_collectors"], "UseOptimizers": False,
             "InverterCatalogRecord": record, "ModuleCatalogRecord": None, "StringSizerStandard": sizer,
-            "SessionCableIndexHasFeeders": False}
+            "SessionCableIndexHasFeeders": any(row["cable_kind"] == FEEDER_KIND for row in state["rows"]["cable"])}
     try:
         records = kernel.string_records(state, host)
         tables = [{"title": table["title"], "cells": kernel.table_cells(table)}
