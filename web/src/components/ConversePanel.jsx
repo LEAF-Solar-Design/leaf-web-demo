@@ -585,7 +585,7 @@ export default function ConversePanel({
   // it: a click that lands while the box is busy returns early below and
   // authorises exactly nothing, which is the fail-closed direction and the
   // round-3 fix for the latch two earlier rounds shipped.
-  const send = async (nextText = input, { allowSecretOnce = false, includeAttachments = true } = {}) => {
+  const send = async (nextText = input, { allowSecretOnce = false, includeAttachments = true, clearInput = true } = {}) => {
     const text = String(nextText).trim()
     if ((!text && !(includeAttachments && attachments.length)) || busy) return false
     let delivered = false
@@ -603,7 +603,7 @@ export default function ConversePanel({
       } else {
         setLocalTurns((prev) => [...prev, { turnId: res.turn_id, text, images }])
       }
-      setInput('')
+      if (clearInput) setInput('')
       if (includeAttachments) {
         clearAttachments()
         setAttachmentError(null)
@@ -1192,7 +1192,7 @@ export default function ConversePanel({
               onDiscuss={(seed) => {
                 setAssistantTab('conversation')
                 conversationTabRef.current?.focus()
-                void send(seed, { includeAttachments: false })
+                void send(seed, { includeAttachments: false, clearInput: false })
               }} />
           </div>
         </>

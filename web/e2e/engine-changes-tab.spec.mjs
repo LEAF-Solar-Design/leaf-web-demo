@@ -95,6 +95,8 @@ async function mockStudio(page, { forbidden = false } = {}) {
 
 test('an admin reads, discusses, and requests a hold on an engine change in the existing assistant', async ({ page }) => {
   const { requests, cards, panel } = await mockStudio(page)
+  const draft = 'Keep this unsent question about the roof layout.'
+  await panel.getByRole('textbox', { name: 'Reply to the assistant' }).fill(draft)
   await panel.getByRole('textbox', { name: 'Reply to the assistant' }).evaluate((element) => {
     const clipboardData = new DataTransfer()
     clipboardData.items.add(new File([Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aWuoAAAAASUVORK5CYII='), (char) => char.charCodeAt(0))], 'pending.png', { type: 'image/png' }))
@@ -133,7 +135,17 @@ test('an admin reads, discusses, and requests a hold on an engine change in the 
   await expect.poll(() => requests.turns.length).toBe(1)
   expect(requests.turns[0]).toContain(cards[0].title)
   expect(requests.turns[0]).toContain(cards[0].evidence.regression_spec)
+  expect(requests.turns[0]).toBe([
+    `Discuss engine change: ${cards[0].title}`,
+    `State: ${cards[0].state}`,
+    `Feature: ${cards[0].feature_id}`,
+    `What broke / what changed: ${cards[0].summary}`,
+    `PR: ${cards[0].change.pr_number}`,
+    `Head SHA: ${cards[0].change.head_sha}`,
+    `Regression spec: ${cards[0].evidence.regression_spec}`,
+  ].join('\n'))
   expect(requests.turnBodies[0]).not.toHaveProperty('images')
+  await expect(panel.getByRole('textbox', { name: 'Reply to the assistant' })).toHaveValue(draft)
   await expect(panel.getByRole('button', { name: 'Remove image attachment' })).toBeVisible()
   await expect(panel.getByAltText('Pending image attachment')).toBeVisible()
   await expect(panel.getByAltText('User attached image')).toHaveCount(0)
