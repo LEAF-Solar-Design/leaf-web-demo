@@ -361,9 +361,14 @@ def build_suites() -> List[Suite]:
         Suite("server-solar-ground-compact-graph", "server tests/test_solar_ground_compact_graph.py", "pytest",
               SERVER, _py_pytest("tests/test_solar_ground_compact_graph.py"), 41),
         # sf-w3-conversion-graph-consumers: coverage, sync, correction, export currency and settings on
-        # compact Ground frames, each equal to the expansion; 28 cases.
+        # compact Ground frames, each equal to the expansion; 25 cases (sf-w3-string-tools-compact moved
+        # the three add/multi-add/midpoint refusal rows to the string-tools suite as successes).
         Suite("server-solar-ground-compact-consumers", "server tests/test_solar_ground_compact_consumers.py",
-              "pytest", SERVER, _py_pytest("tests/test_solar_ground_compact_consumers.py"), 28),
+              "pytest", SERVER, _py_pytest("tests/test_solar_ground_compact_consumers.py"), 25),
+        # sf-w3-string-tools-compact: the nine string tools on slot panels of compact Ground frames, each
+        # equal to the expansion, rooftop byte-identical; 30 cases.
+        Suite("server-solar-ground-compact-string-tools", "server tests/test_solar_ground_compact_string_tools.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_ground_compact_string_tools.py"), 30),
         # sf-w3-conversion-graph piece 2: the physical head's trackers as compact Ground frames; 87 cases.
         Suite("server-solar-ground-conversion", "server tests/test_solar_ground_conversion.py", "pytest",
               SERVER, _py_pytest("tests/test_solar_ground_conversion.py"), 87),
@@ -681,6 +686,16 @@ def build_suites() -> List[Suite]:
         Suite("server-solar-tool-design-presets-l2-mode",
               "server tests/test_solar_tool_design_presets_l2_mode.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_design_presets_l2_mode.py"), 21),
+        # solar-settings and the L1/L2 mode (2026-10-01, sf-w2-settings-l2-collectors): a boolean
+        # use_l2_collectors edit that differs from the drawing's mode retypes every inverter in the same
+        # commit by the design-preset rule, and leaving L2 mode with a combiner box, a central inverter
+        # or an L1 to L2 link is refused (DESIGN_PRESET_L2_EQUIPMENT_PRESENT); every other request is
+        # pinned to a table digest measured on main. Inputs are authored in the file or are committed
+        # evidence, so the floor is the exact count on every runner. COUNTED: 14 unparametrized tests +
+        # 6 refusal cases = 20.
+        Suite("server-solar-tool-settings-l2-mode",
+              "server tests/test_solar_tool_settings_l2_mode.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_settings_l2_mode.py"), 20),
         # A drawing-settings change stales the outputs built under the old settings (2026-09-30,
         # sf-solar-settings-invalidation): solar-settings and preset apply stale every homerun route and
         # schedule, so the export guard refuses them on a graph with no solve digest. Inputs are authored
@@ -733,6 +748,13 @@ def build_suites() -> List[Suite]:
         # parametrizations = 65.
         Suite("server-solar-tool-combiners", "server tests/test_solar_tool_combiners.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_combiners.py"), 73),
+        # sf-w2-combiners-intake-producer: the combiner intake import (server/solar_combiner_intake_import.py
+        # and POST /api/drawings/{id}/imports/combiner-intake in server/routers/drawings.py): the recorded
+        # LEAFCOMBINERAUTO input bound to the head graph and stored on a new version, bounded before decode,
+        # a closed refusal map, nothing written on refusal, and the combiners tool placing C5 from the
+        # imported version. Hermetic and nothing skips: the floor is the exact count, 68.
+        Suite("server-solar-combiner-intake-import", "server tests/test_solar_combiner_intake_import.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_combiner_intake_import.py"), 68),
         # W5 inverter family (2026-09-24, contract G35): the shared state and delta module and the
         # device, string and output engines (literal ports of the plugin's inverter commands). Inputs
         # are authored in each file, so each floor is the exact count on every runner. MEASURED.
@@ -835,10 +857,11 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_solar_ground_terrain_adapter.py"), 80),
         # sf-w5-frames-piles: native Ground frame and pile operations (server/solar_frames_piles.py) over the
         # drawing's current physical head: generate, collision, piling on the stored terrain, pile length window,
-        # each published as a child state and reopened unchanged (preview). Hermetic and nothing skips: the
-        # floor is the exact count, 80.
+        # each published as a child state and reopened unchanged (preview), and every result and the read
+        # report whether the stored frame elevations and piles still match the current grid. Hermetic and
+        # nothing skips: the floor is the exact count, 106.
         Suite("server-solar-frames-piles", "server tests/test_solar_frames_piles.py",
-              "pytest", SERVER, _py_pytest("tests/test_solar_frames_piles.py"), 80),
+              "pytest", SERVER, _py_pytest("tests/test_solar_frames_piles.py"), 106),
         # W5 dialog batch (2026-09-23, contract G30): server/solar_ground_dialogs.py (the shading
         # object form and PlaceTree, the project-area manager's Add Area and OK, the pile-template
         # manager's "+" and OK with the store file byte for byte). Every input is authored in the
@@ -1271,6 +1294,8 @@ def build_suites() -> List[Suite]:
               )),
         Suite("server-agent-approvals", "server tests/test_agent_approvals.py", "pytest",
               SERVER, _py_pytest("tests/test_agent_approvals.py"), 24),
+        Suite("server-engine-changes", "server tests/test_engine_changes.py", "pytest",
+              SERVER, _py_pytest("tests/test_engine_changes.py"), 23, db_gated=True),
         Suite("server-approval-consume", "server tests/test_approval_consume.py", "pytest",
               SERVER, _py_pytest("tests/test_approval_consume.py"), 20),
         Suite("server-drawings-bootstrap", "server tests/test_drawings_bootstrap.py", "pytest",
@@ -2011,7 +2036,7 @@ def build_suites() -> List[Suite]:
         # sets LEAF_GATE_REQUIRE_DATABASE=1, so this floor IS enforced there
         # against a pristine database, and an unreachable DB is a FAIL row.
         Suite("platform", "platform/tests (Postgres)", "pytest", REPO_PARENT,
-              _py_pytest(f"{repo_name}/platform/tests"), 247, db_gated=True,
+              _py_pytest(f"{repo_name}/platform/tests"), 256, db_gated=True,
               # The overlay and annotation PostgreSQL proofs skipif-gate on
               # their own variables, so they get the gate DSN under those too.
               db_env_aliases=("OVERLAY_PG_URL", "ANNOTATION_PG_URL")),

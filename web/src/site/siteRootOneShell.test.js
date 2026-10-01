@@ -10,6 +10,7 @@
 // never satisfy a pin after the live code is deleted (panel finding).
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
+import { STUDIO_DRAWERS } from '../lib/studioDrawers.js'
 
 const raw = (rel) => readFileSync(new URL(rel, import.meta.url), 'utf8').replace(/\r\n/g, '\n')
 
@@ -135,7 +136,9 @@ describe('App portal wiring', () => {
   })
 
   it('keeps the phone drawer state inside the studio shell with a bounded default', () => {
-    expect(src).toContain("const STUDIO_DRAWERS = Object.freeze(['nav', 'jobs', 'result', 'plan', 'none'])")
+    expect(src).toContain("import { STUDIO_DRAWERS } from './lib/studioDrawers.js'")
+    expect(STUDIO_DRAWERS).toEqual(['nav', 'jobs', 'result', 'plan', 'none'])
+    expect(Object.isFrozen(STUDIO_DRAWERS)).toBe(true)
     expect(src).toContain("const [studioDrawer, setStudioDrawer] = useState('none')")
     expect(src).toContain("STUDIO_DRAWERS.includes(name) ? name : 'none'")
     expect(src).toContain('data-drawer={studioShell ? studioDrawer : undefined}')

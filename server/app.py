@@ -304,6 +304,7 @@ app.include_router(search_router.router)  # slice 10c: GET /api/search, the bar'
 app.include_router(usage.router)  # UI wave 1: per-tenant spend/quota meter (GET /api/usage)
 app.include_router(cost_router.router)  # TCM-09a: the caller's view of the monthly resource share ledger (GET /api/cost)
 app.include_router(ops.router)  # UI wave 2: ops surface (role-gated tenant spend + kill-switch proxy)
+app.include_router(__import__("routers.engine_changes", fromlist=["router"]).router)
 app.include_router(ops_metrics.router)  # APS observability read-API: fleet metrics + in-flight tail + ledger<->job drill-down (X-Ops-Secret)
 app.include_router(tenant.router)  # wave 4: per-tenant Claude grant linking (proxy to harness store)
 app.include_router(tenant_mcp.router)  # slice 8b: tenant MCP server registry (server-side OAuth connect)

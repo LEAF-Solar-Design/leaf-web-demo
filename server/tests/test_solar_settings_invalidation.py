@@ -36,6 +36,7 @@ from test_w1_local_graph_adapter import held
 from test_w1_sizing_groups import confirm, passing, service, sizing_params  # noqa: F401
 from test_w1_solve_commit import seed
 import test_solar_ground_route_kinds as route_kinds
+from test_solar_ground_topology import topology_of
 
 STALE = {"state": "stale", "reasons": ["settings_changed"]}
 VALID = {"state": "valid", "reasons": []}
@@ -181,22 +182,25 @@ def test_settings_invalidation_every_material_field(graph, field):
 @pytest.mark.parametrize("entry", ("builtin", "rail"))
 def test_settings_invalidation_l2_flag_is_refused_and_writes_nothing(
         graph, tmp_path, monkeypatch, entry):
-    # The candidate is refused because the fixture's inverter carries no equipment_type.
-    before = copy.deepcopy(graph)
-    backend, _ = seed(tmp_path, monkeypatch, graph)
+    # Leaving L2 mode with a combiner box and a central inverter is refused before anything is
+    # written (the design-preset rule, sf-w2-settings-l2-collectors); entering it now types the
+    # inverters (test_solar_tool_settings_l2_mode.py).
+    typed = topology_of(graph)
+    before = copy.deepcopy(typed)
+    backend, _ = seed(tmp_path, monkeypatch, typed)
     version, head = latest(backend), copy.deepcopy(head_graph(backend))
     with pytest.raises(GraphValidationError) as caught:
         if entry == "builtin":
-            settings_builtin().run(graph, {"expected_rev": graph["rev"],
-                                           "changes": {"use_l2_collectors": True}})
+            settings_builtin().run(typed, {"expected_rev": typed["rev"],
+                                           "changes": {"use_l2_collectors": False}})
         else:
             with held(backend) as fence:
                 dispatch(backend, fence, "solar-settings",
-                         {"expected_rev": graph["rev"], "changes": {"use_l2_collectors": True}})
-    assert caught.value.code == "EQUIPMENT_TYPE_REQUIRED"
+                         {"expected_rev": typed["rev"], "changes": {"use_l2_collectors": False}})
+    assert caught.value.code == "DESIGN_PRESET_L2_EQUIPMENT_PRESENT"
     assert latest(backend) == version
     assert head_graph(backend) == head
-    assert graph == before
+    assert typed == before
 
 
 def test_settings_invalidation_string_number_equal_value_and_cancel_stale_nothing(graph):
@@ -267,10 +271,10 @@ def test_settings_invalidation_leaves_feeders_trenches_strings_and_inverters(gra
         ("route", "trench", VALID), ("schedule", None, STALE)]
     assert export_code(after) == NOT_CURRENT
     assert digest(after) == TOPOLOGY_EDIT_SHA256
-    # Leaving L2 mode with an L2 device on the graph is refused by graph validation.
+    # Leaving L2 mode with an L2 device on the graph is refused before anything is written.
     with pytest.raises(GraphValidationError) as caught:
         edit(typed, {"use_l2_collectors": False})
-    assert caught.value.code == "L2_MODE_REQUIRED"
+    assert caught.value.code == "DESIGN_PRESET_L2_EQUIPMENT_PRESENT"
 
 
 def test_settings_invalidation_agrees_with_the_dependency_index(graph):
