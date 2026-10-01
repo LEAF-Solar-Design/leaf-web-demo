@@ -20,7 +20,7 @@ const card = {
 }
 const reply = (status, data) => ({ status, ok: status >= 200 && status < 300, json: async () => data })
 const calls = [
-  ['list', () => listEngineChanges(), { cards: [card], unread_count: 1, next_before: null }],
+  ['list', () => listEngineChanges(), { cards: [card], unread_count: 1, next_cursor: null }],
   ['detail', () => getEngineChange(card.card_id), card],
   ['read', () => markEngineChangeRead(card.card_id), { ...card, unread: false }],
   ['hold', () => requestEngineChangeHold(card.card_id), { ...card, hold_requested_at: '2026-10-01T12:00:00Z' }],
@@ -30,6 +30,16 @@ beforeEach(() => { vi.stubGlobal('fetch', vi.fn()); vi.clearAllMocks() })
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals() })
 
 describe('engine changes transport', () => {
+  it('exposes the server cursor and sends it back as before', async () => {
+    const cursor = '2026-10-01T12:00:00+00:00|change /1'
+    fetch.mockResolvedValueOnce(reply(200, { cards: [card], unread_count: 1, next_cursor: cursor }))
+      .mockResolvedValueOnce(reply(200, { cards: [], unread_count: 1, next_cursor: null }))
+    const first = await listEngineChanges()
+    expect(first.next_cursor).toBe(cursor)
+    const last = await listEngineChanges({ before: first.next_cursor })
+    expect(new URL(fetch.mock.calls[1][0]).searchParams.get('before')).toBe(cursor)
+    expect(last.next_cursor).toBeNull()
+  })
   for (const [name, call, body] of calls) {
     it(`${name} returns an ok result for 200`, async () => {
       fetch.mockResolvedValue(reply(200, body))

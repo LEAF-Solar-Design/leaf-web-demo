@@ -585,9 +585,9 @@ export default function ConversePanel({
   // it: a click that lands while the box is busy returns early below and
   // authorises exactly nothing, which is the fail-closed direction and the
   // round-3 fix for the latch two earlier rounds shipped.
-  const send = async (nextText = input, { allowSecretOnce = false } = {}) => {
+  const send = async (nextText = input, { allowSecretOnce = false, includeAttachments = true } = {}) => {
     const text = String(nextText).trim()
-    if ((!text && !attachments.length) || busy) return false
+    if ((!text && !(includeAttachments && attachments.length)) || busy) return false
     let delivered = false
     setSending(true); setSendErr(null)
     const accept = (res, images) => {
@@ -604,13 +604,15 @@ export default function ConversePanel({
         setLocalTurns((prev) => [...prev, { turnId: res.turn_id, text, images }])
       }
       setInput('')
-      clearAttachments()
-      setAttachmentError(null)
+      if (includeAttachments) {
+        clearAttachments()
+        setAttachmentError(null)
+      }
       // The send landed, so whatever refusal was on screen is spent.
       setSecretNotice(null)
     }
     try {
-      const images = await attachmentPayloads()
+      const images = includeAttachments ? await attachmentPayloads() : []
       try {
         accept(await postMessage(sessionId, {
           ...(text ? { text } : {}),
@@ -1190,7 +1192,7 @@ export default function ConversePanel({
               onDiscuss={(seed) => {
                 setAssistantTab('conversation')
                 conversationTabRef.current?.focus()
-                void send(seed)
+                void send(seed, { includeAttachments: false })
               }} />
           </div>
         </>

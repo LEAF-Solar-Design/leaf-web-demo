@@ -55,11 +55,11 @@ export async function listEngineChanges(input = {}) {
     if (typeof before === 'string' && before) query.set('before', before)
     const result = await request(`/api/engine-changes?${query}`, 'GET', options)
     if (result.kind !== 'ok') return result
-    const { cards, unread_count, next_before } = result.data
+    const { cards, unread_count, next_cursor } = result.data
     if (!Array.isArray(cards) || !Number.isInteger(unread_count) || unread_count < 0) {
       return { kind: 'error', reason: 'response' }
     }
-    return { kind: 'ok', cards, unread_count, next_before: next_before || null }
+    return { kind: 'ok', cards, unread_count, next_cursor: next_cursor || null }
   } catch {
     return { kind: 'error', reason: 'request' }
   }

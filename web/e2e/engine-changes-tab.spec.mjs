@@ -37,7 +37,7 @@ async function mockStudio(page, { forbidden = false } = {}) {
   const proof = makeCatProofState()
   const cards = [makeCard('change-1', 'Restore panel selection focus', '2026-10-01T12:00:00Z'),
     makeCard('change-2', 'Repair panel export', '2026-09-30T12:00:00Z')]
-  const requests = { list: 0, read: [], holds: [], turns: [], sessions: 0 }
+  const requests = { list: 0, read: [], holds: [], turns: [], turnBodies: [], sessions: 0 }
   await page.route('http://leaf-proof.invalid/api/**', async (route) => {
     const request = route.request()
     const url = new URL(request.url())
@@ -46,7 +46,7 @@ async function mockStudio(page, { forbidden = false } = {}) {
     let result
     if (method === 'GET' && url.pathname === '/api/engine-changes') {
       requests.list += 1
-      result = forbidden ? { status: 403, body: {} } : { status: 200, body: { cards, unread_count: cards.filter((card) => card.unread).length, next_before: null } }
+      result = forbidden ? { status: 403, body: {} } : { status: 200, body: { cards, unread_count: cards.filter((card) => card.unread).length, next_cursor: null } }
     } else if (url.pathname.startsWith('/api/engine-changes/') && method !== 'OPTIONS') {
       const [, id, action] = url.pathname.match(/^\/api\/engine-changes\/([^/]+)(?:\/([^/]+))?$/) || []
       const card = cards.find((item) => item.card_id === id)
@@ -65,7 +65,7 @@ async function mockStudio(page, { forbidden = false } = {}) {
       result = catProofResponse({ method, path: url.pathname, body }, proof)
     } else if (method === 'POST' && url.pathname === '/api/sessions/cat-session/messages' && body.text) {
       const initializing = body.text === REQUEST
-      if (!initializing) requests.turns.push(body.text)
+      if (!initializing) { requests.turns.push(body.text); requests.turnBodies.push(body) }
       const turnId = initializing ? 'setup-turn' : `discussion-${requests.turns.length}`
       const event = (type, data, seq) => ({ v: 1, session_id: 'cat-session', turn_id: turnId, seq, type, data })
       proof.events.push(event('turn_started', {}, proof.events.length + 1),
@@ -95,6 +95,12 @@ async function mockStudio(page, { forbidden = false } = {}) {
 
 test('an admin reads, discusses, and requests a hold on an engine change in the existing assistant', async ({ page }) => {
   const { requests, cards, panel } = await mockStudio(page)
+  await panel.getByRole('textbox', { name: 'Reply to the assistant' }).evaluate((element) => {
+    const clipboardData = new DataTransfer()
+    clipboardData.items.add(new File([Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aWuoAAAAASUVORK5CYII='), (char) => char.charCodeAt(0))], 'pending.png', { type: 'image/png' }))
+    element.dispatchEvent(new ClipboardEvent('paste', { clipboardData, bubbles: true, cancelable: true }))
+  })
+  await expect(panel.getByRole('button', { name: 'Remove image attachment' })).toBeVisible()
   const tab = panel.getByRole('tab', { name: 'Engine changes, 2 unread' })
   await expect(tab).toBeVisible()
   await expect(tab.locator('.engine-changes-badge')).toHaveText('2')
@@ -127,10 +133,20 @@ test('an admin reads, discusses, and requests a hold on an engine change in the 
   await expect.poll(() => requests.turns.length).toBe(1)
   expect(requests.turns[0]).toContain(cards[0].title)
   expect(requests.turns[0]).toContain(cards[0].evidence.regression_spec)
+  expect(requests.turnBodies[0]).not.toHaveProperty('images')
+  await expect(panel.getByRole('button', { name: 'Remove image attachment' })).toBeVisible()
+  await expect(panel.getByAltText('Pending image attachment')).toBeVisible()
+  await expect(panel.getByAltText('User attached image')).toHaveCount(0)
   expect(requests.sessions).toBe(1)
   await expect(panel.getByRole('log')).toContainText(cards[0].title)
 
-  await panel.getByRole('tab', { name: 'Engine changes, 1 unread' }).click()
+  await expect(panel.getByRole('log')).toContainText('Let’s review the accepted engine change.')
+  await expect(panel.getByRole('button', { name: 'Send', exact: true })).toBeEnabled()
+  // Discuss focuses Conversation. Use the tablist's keyboard navigation once
+  // the streamed reply has settled, then verify activation before the hold.
+  await panel.getByRole('tab', { name: 'Conversation', exact: true }).press('ArrowRight')
+  await expect(panel.getByRole('tab', { name: 'Engine changes, 1 unread' })).toHaveAttribute('aria-selected', 'true')
+  await expect(panel.getByRole('tabpanel', { name: 'Engine changes, 1 unread' })).toBeVisible()
   await panel.getByRole('button', { name: 'Request hold', exact: true }).click()
   await expect(panel.getByRole('group', { name: 'Confirm hold request' })).toBeVisible()
   expect(requests.holds).toHaveLength(0)

@@ -2,6 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import {
   engineChangeDiscussText,
   getEngineChange,
+  listEngineChanges,
   markEngineChangeRead,
   requestEngineChangeHold,
 } from '../engineChanges.js'
@@ -57,6 +58,11 @@ export default function EngineChangesTab({
   const [confirmHold, setConfirmHold] = useState(false)
   const [holding, setHolding] = useState(false)
   const [patches, setPatches] = useState({})
+  const [olderCards, setOlderCards] = useState([])
+  const [olderCursor, setOlderCursor] = useState(undefined)
+  const [olderLoading, setOlderLoading] = useState(false)
+  const [olderError, setOlderError] = useState(false)
+  const olderLatchRef = useRef(false)
   const patchesRef = useRef({})
   const rowsRef = useRef(new Map())
   const backRef = useRef(null)
@@ -84,8 +90,26 @@ export default function EngineChangesTab({
     setDetail((current) => current?.card_id === id ? { ...current, ...patch } : current)
     onCardChange?.(id, patch)
   }
-  const cards = useMemo(() => (result?.cards || []).map((card) => ({ ...card, ...patches[card.card_id] }))
-    .sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0)), [result, patches])
+  const cards = useMemo(() => [...new Map([...olderCards, ...(result?.cards || [])]
+    .map((card) => [card.card_id, card])).values()]
+    .map((card) => ({ ...card, ...patches[card.card_id] }))
+    .sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0)), [result, olderCards, patches])
+  const nextCursor = olderCursor === undefined ? result?.next_cursor : olderCursor
+  const loadOlder = async () => {
+    if (!nextCursor || olderLatchRef.current) return
+    olderLatchRef.current = true
+    setOlderLoading(true)
+    setOlderError(false)
+    const response = await listEngineChanges({ before: nextCursor })
+    olderLatchRef.current = false
+    if (!mountedRef.current) return
+    setOlderLoading(false)
+    if (response.kind === 'ok') {
+      setOlderCards((current) => [...new Map([...current, ...response.cards]
+        .map((card) => [card.card_id, card])).values()])
+      setOlderCursor(response.next_cursor)
+    } else setOlderError(true)
+  }
 
   const loadDetail = async (row) => {
     const requestId = ++requestRef.current
@@ -226,7 +250,7 @@ export default function EngineChangesTab({
   }
 
   return (
-    <div className="engine-changes-body" aria-busy={loading}>
+    <div className="engine-changes-body" aria-busy={loading || olderLoading}>
       <div className="engine-changes-status" role="status">{loading ? 'Loading engine changes…' : ''}</div>
       {result?.kind !== 'ok' && !loading ? (
         <p>Engine changes are unavailable. <button type="button" className="chip-neutral" onClick={onRetry}>Retry</button></p>
@@ -246,6 +270,9 @@ export default function EngineChangesTab({
           ))}
         </ul>
       ) : !loading && <p>No engine changes have been accepted yet.</p>}
+      {olderError && <p role="status">Could not load older changes. Try again.</p>}
+      {nextCursor && <button type="button" className="chip-neutral" disabled={loading || olderLoading}
+        onClick={loadOlder}>{olderLoading ? 'Loading older changes…' : olderError ? 'Retry loading older changes' : 'Load older changes'}</button>}
     </div>
   )
 }

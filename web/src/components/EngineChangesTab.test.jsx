@@ -33,7 +33,7 @@ const card = {
   hold_requested_at: null, hold_requested_by: null,
 }
 const older = { ...card, card_id: 'change-2', title: 'Repair export', feature_id: 'export', state: 'live', created_at: '2026-09-30T12:00:00Z' }
-const list = { kind: 'ok', cards: [older, card], unread_count: 2, next_before: null }
+const list = { kind: 'ok', cards: [older, card], unread_count: 2, next_cursor: null }
 const deferred = () => { let resolve; const promise = new Promise((done) => { resolve = done }); return { promise, resolve } }
 
 function ControlledTab({ result = list, onCardChange, ...props }) {
@@ -57,9 +57,41 @@ beforeEach(() => {
   requestEngineChangeHold.mockResolvedValue({ kind: 'ok', card: { ...card, hold_requested_at: '2026-10-01T13:00:00Z', hold_requested_by: 'Admin' } })
   postMessage.mockResolvedValue({ turn_id: 'discussion-turn', status: 'started' })
 })
-afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks() })
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 describe('engine changes list and detail', () => {
+  it('loads older pages with the server cursor and appends without duplicate cards', async () => {
+    const oldest = { ...older, card_id: 'change-3', title: 'Repair save', created_at: '2026-09-29T12:00:00Z' }
+    const pending = deferred()
+    listEngineChanges.mockReturnValueOnce(pending.promise)
+    setup({ result: { ...list, cards: [card], next_cursor: 'cursor-one' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Load older changes' }))
+    expect(listEngineChanges).toHaveBeenCalledWith({ before: 'cursor-one' })
+    expect(screen.getByRole('button', { name: 'Loading older changes…' }).disabled).toBe(true)
+    await act(async () => pending.resolve({ ...list, cards: [card, older], next_cursor: 'cursor-two' }))
+    expect(screen.getAllByRole('listitem')).toHaveLength(2)
+    listEngineChanges.mockResolvedValueOnce({ ...list, cards: [older, oldest], next_cursor: null })
+    fireEvent.click(screen.getByRole('button', { name: 'Load older changes' }))
+    await screen.findByRole('button', { name: /Repair save/ })
+    expect(listEngineChanges).toHaveBeenLastCalledWith({ before: 'cursor-two' })
+    expect(screen.getAllByRole('listitem')).toHaveLength(3)
+    expect(screen.queryByRole('button', { name: 'Load older changes' })).toBeNull()
+  })
+  it('keeps loaded rows and retries the same cursor after a page failure', async () => {
+    listEngineChanges.mockResolvedValueOnce({ ...list, cards: [older], next_cursor: 'cursor-two' })
+      .mockResolvedValueOnce({ kind: 'unavailable' })
+      .mockResolvedValueOnce({ ...list, cards: [], next_cursor: null })
+    setup({ result: { ...list, cards: [card], next_cursor: 'cursor-one' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Load older changes' }))
+    await screen.findByRole('button', { name: /Repair export/ })
+    fireEvent.click(screen.getByRole('button', { name: 'Load older changes' }))
+    const retry = await screen.findByRole('button', { name: 'Retry loading older changes' })
+    expect(screen.getAllByRole('listitem')).toHaveLength(2)
+    fireEvent.click(retry)
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Retry loading older changes' })).toBeNull())
+    expect(listEngineChanges.mock.calls.map(([input]) => input.before)).toEqual(['cursor-one', 'cursor-two', 'cursor-two'])
+    expect(screen.getAllByRole('listitem')).toHaveLength(2)
+  })
   it('shows newest first, states, feature IDs, relative time, and unread indicators', () => {
     setup()
     const rows = screen.getAllByRole('listitem')
@@ -223,6 +255,31 @@ describe('assistant tab integration', () => {
     await waitFor(() => expect(listEngineChanges).toHaveBeenCalledTimes(1))
     expect(screen.queryByRole('tablist')).toBeNull()
     expect(screen.getByRole('textbox', { name: 'Reply to the assistant' })).toBeTruthy()
+  })
+  it('Discuss sends only the seed and preserves an unsent composer image', async () => {
+    const revoke = vi.fn()
+    vi.stubGlobal('URL', class extends URL {
+      static createObjectURL = vi.fn(() => 'blob:pending-image')
+      static revokeObjectURL = revoke
+    })
+    const readImage = vi.spyOn(FileReader.prototype, 'readAsDataURL')
+    render(<ConversePanel sessionId="session-1" />)
+    const changes = await screen.findByRole('tab', { name: 'Engine changes, 2 unread' })
+    const file = new File(['unsent image'], 'pending.png', { type: 'image/png' })
+    fireEvent.paste(screen.getByRole('textbox', { name: 'Reply to the assistant' }), {
+      clipboardData: { items: [{ kind: 'file', type: 'image/png', getAsFile: () => file }] },
+    })
+    expect(screen.getByRole('button', { name: 'Remove image attachment' })).toBeTruthy()
+    fireEvent.click(changes)
+    await openCard()
+    fireEvent.click(screen.getByRole('button', { name: 'Discuss' }))
+    await waitFor(() => expect(postMessage).toHaveBeenCalledTimes(1))
+    expect(postMessage).toHaveBeenCalledWith('session-1', { text: engineChangeDiscussText(card), allowSecretOnce: false })
+    expect(readImage).not.toHaveBeenCalled()
+    expect(revoke).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Remove image attachment' })).toBeTruthy()
+    expect(screen.getByAltText('Pending image attachment').getAttribute('src')).toBe('blob:pending-image')
+    expect(screen.queryByAltText('User attached image')).toBeNull()
   })
   it('supports roving tabs, updates the unread badge, and sends Discuss into the existing session', async () => {
     render(<ConversePanel sessionId="session-1" />)
