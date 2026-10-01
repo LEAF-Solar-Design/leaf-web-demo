@@ -360,6 +360,10 @@ def build_suites() -> List[Suite]:
         # sf-w3-conversion-graph piece 1: compact Ground frames in the graph contract; 41 cases.
         Suite("server-solar-ground-compact-graph", "server tests/test_solar_ground_compact_graph.py", "pytest",
               SERVER, _py_pytest("tests/test_solar_ground_compact_graph.py"), 41),
+        # sf-w3-conversion-graph-consumers: coverage, sync, correction, export currency and settings on
+        # compact Ground frames, each equal to the expansion; 28 cases.
+        Suite("server-solar-ground-compact-consumers", "server tests/test_solar_ground_compact_consumers.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_ground_compact_consumers.py"), 28),
         # sf-solar-electrical-bridge: the kernel state to design graph topology mapping, both ways.
         Suite("server-solar-electrical-bridge", "server tests/test_solar_electrical_state_bridge.py", "pytest", SERVER,
               _py_pytest("tests/test_solar_electrical_state_bridge.py"), 83),

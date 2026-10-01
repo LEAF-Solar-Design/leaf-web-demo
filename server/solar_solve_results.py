@@ -155,21 +155,46 @@ def complete_search(graph, binding, proposal):
             "background_complete": binding["phase"] == "background"}
 
 
-def coverage(graph):
+def slot_panel_ids(graph):
+    """Every compact Ground slot panel id (codec leaf.solar-ground-slots.v1), frames in graph
+    order then slot order. A graph with no ground_slots block returns () without importing the
+    codec. Decoding fails closed with the codec's own refusal; no slot is expanded."""
+    if not any("ground_slots" in frame for frame in graph["frames"]):
+        return ()
+    try:
+        from . import solar_ground_graph_codec as codec
+    except ImportError:
+        import solar_ground_graph_codec as codec
+    tables = codec.decode_graph_slots(graph)
+    return tuple(panel_id for frame in graph["frames"] if frame["id"] in tables
+                 for panel_id in tables[frame["id"]].ids)
+
+
+def _coverage(graph, slot_ids):
     counts = {}
     for string in graph["strings"]:
         for ref in string["ordered_panel_refs"]:
             counts[ref] = counts.get(ref, 0) + 1
+    unassigned = [p["id"] for p in graph["panels"] if p["id"] not in counts]
+    unassigned.extend(ref for ref in slot_ids if ref not in counts)
     return {"duplicate_panel_refs": sorted(ref for ref, count in counts.items() if count > 1),
-            "unassigned_panel_refs": sorted(p["id"] for p in graph["panels"]
-                                            if p["id"] not in counts)}
+            "unassigned_panel_refs": sorted(unassigned)}
+
+
+def coverage(graph):
+    """Duplicate and unassigned panel ids; slot panels of compact frames count as panels, so the
+    report equals the report of the graph's expansion."""
+    return _coverage(graph, slot_panel_ids(graph))
 
 
 def sync_assignments(graph):
-    """Update all redundant membership views while retaining unknown fields."""
-    report = coverage(graph)
+    """Update all redundant membership views while retaining unknown fields. A slot panel of a
+    compact frame is a known panel whose views are derived (codec), so nothing is stored for it."""
+    slot_ids = slot_panel_ids(graph)
+    report = _coverage(graph, slot_ids)
     if report["duplicate_panel_refs"]:
         raise GraphValidationError("DUPLICATE_PANEL_MEMBERSHIP")
+    slots = frozenset(slot_ids)
     panels = {p["id"]: p for p in graph["panels"]}
     for panel in panels.values():
         panel["assignment"].update(string_ref=None, seq=None)
@@ -177,9 +202,10 @@ def sync_assignments(graph):
         refs = string["ordered_panel_refs"]
         string["module_count"] = len(refs)
         for seq, ref in enumerate(refs):
-            if ref not in panels:
+            if ref in panels:
+                panels[ref]["assignment"].update(string_ref=string["id"], seq=seq)
+            elif ref not in slots:
                 raise GraphValidationError("MISSING_PANEL")
-            panels[ref]["assignment"].update(string_ref=string["id"], seq=seq)
     inputs = {a["string_ref"]: (i["id"], a["input_number"])
               for i in graph["inverters"] for a in i["input_assignments"]}
     for frame in graph["frames"]:
