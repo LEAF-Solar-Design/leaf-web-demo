@@ -1,0 +1,50 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-equipment-move",
+  "builtin": "builtins/solar_equipment_move.py",
+  "family": "equipment",
+  "adapter": "local-graph-commit",
+  "entitlement": "run_write",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_EQUIPMENT_MOVE_REQUEST",
+  "readiness": {"kind": "hook"},
+  "engine": "server-builtin",
+  "interaction": {"mode": "form"},
+  "record_store": "registry",
+  "record": {
+    "name": "solar-equipment-move",
+    "version": "1.0.0",
+    "description": "Move one inverter or collector to a picked point and reroute its homeruns there, as MOVEINV does; feeders stay where they are and go stale.",
+    "kind": "script",
+    "family_id": "equipment",
+    "engine_op": "solar_equipment_move",
+    "entry": "builtins/solar_equipment_move.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {"type": "string", "maxLength": 128},
+        "operation": {"type": "string", "enum": ["move-equipment"], "default": "move-equipment"},
+        "expected_rev": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+        "inverter_ref": {"type": "string", "minLength": 1, "maxLength": 128},
+        "point": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {"type": "number", "minimum": -1000000000000, "maximum": 1000000000000}
+        }
+      },
+      "required": ["operation", "expected_rev", "inverter_ref", "point"],
+      "additionalProperties": false
+    },
+    "returns": {"type": "object"},
+    "capabilities": ["drawing.write"],
+    "allow_local_fallback": false
+  },
+  "ledger": ["inverter-move"],
+  "trusted_inputs": [],
+  "maturity": "preview",
+  "wave": 2,
+  "order": 100,
+  "scenario": "w2-rooftop"
+}
