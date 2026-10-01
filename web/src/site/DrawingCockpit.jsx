@@ -12,7 +12,7 @@
 // write, never React state: pointer-rate re-renders were risk R11 in the
 // convergence plan.
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
-import { flushSync } from 'react-dom'
+import { createPortal, flushSync } from 'react-dom'
 
 import CockpitIcon from './CockpitIcon.jsx'
 import LiveRegion, { HIDE_WITH_STYLE } from '../components/LiveRegion.jsx'
@@ -339,14 +339,154 @@ export function FootRegion({ on, name, children }) {
   )
 }
 
+// `source` names who owns a live toggle: 'engine' modes come from
+// StatusModesBridge, 'viewer' modes from ViewerGrid; no source stays disabled.
 const STATUS_TOGGLES = Object.freeze([
   { id: 'snap', label: 'Snap mode', icon: 'snap', effect: 'moves the cursor in fixed steps' },
-  { id: 'grid', label: 'Grid display', icon: 'grid', effect: 'shows a reference grid behind the drawing' },
-  { id: 'ortho', label: 'Ortho mode', icon: 'ortho', live: true, effect: 'locks drawing to horizontal and vertical' },
+  { id: 'grid', label: 'Grid display', icon: 'grid', source: 'viewer', effect: 'shows a reference grid behind the drawing' },
+  { id: 'ortho', label: 'Ortho mode', icon: 'ortho', source: 'engine', key: 'F8', effect: 'locks drawing to horizontal and vertical' },
   { id: 'polar', label: 'Polar tracking', icon: 'polar', effect: 'guides the cursor along set angles' },
-  { id: 'osnap', label: 'Object snap', icon: 'osnap', live: true, effect: 'locks the cursor onto existing geometry, like endpoints and midpoints' },
+  { id: 'osnap', label: 'Object snap', icon: 'osnap', source: 'engine', key: 'F3', effect: 'locks the cursor onto existing geometry, like endpoints and midpoints' },
 ])
 const TOGGLE_REASON = 'not in the browser viewer yet'
+
+function toggleLive(toggle, state) {
+  if (toggle.source === 'engine') return state.live
+  if (toggle.source === 'viewer') return typeof state[toggle.id] === 'boolean'
+  return false
+}
+
+// The grid's minor step in drawing units: the smallest 1-2-5 step whose
+// spacing is at least `minPx` screen pixels, so lines never crowd at any zoom.
+// Major lines fall every fifth minor step. Null on a missing or bad scale.
+export const GRID_MIN_PX = 12
+export function gridStep(worldPerPixel, minPx = GRID_MIN_PX) {
+  if (!Number.isFinite(worldPerPixel) || worldPerPixel <= 0 || !Number.isFinite(minPx) || minPx <= 0) return null
+  const raw = worldPerPixel * minPx
+  const decade = 10 ** Math.floor(Math.log10(raw))
+  if (!Number.isFinite(decade) || decade <= 0) return null
+  const minor = [1, 2, 5, 10].map((m) => decade * m).find((step) => step >= raw * (1 - 1e-9))
+  return { minor, major: minor * 5 }
+}
+
+// Pure layout for the grid layer: tile sizes and offsets in CSS pixels so the
+// world lines x = k*step and y = k*step pass through `origin`, the client
+// position of world (0, 0). `box` is the layer's own client rect.
+export function gridLayout(origin, worldPerPixel, box) {
+  const step = gridStep(worldPerPixel)
+  if (!step || !origin || !box || ![origin.x, origin.y, box.left, box.top].every(Number.isFinite)) return null
+  const minorPx = step.minor / worldPerPixel
+  const majorPx = step.major / worldPerPixel
+  const mod = (value, size) => ((value % size) + size) % size
+  const ox = origin.x - box.left, oy = origin.y - box.top
+  return {
+    step: Number(step.minor.toPrecision(6)),
+    minorPx, majorPx,
+    minorX: mod(ox, minorPx), minorY: mod(oy, minorPx),
+    majorX: mod(ox, majorPx), majorY: mod(oy, majorPx),
+  }
+}
+
+const GRID_MINOR_LINE = 'rgba(255, 255, 255, 0.06)'
+const GRID_MAJOR_LINE = 'rgba(255, 255, 255, 0.13)'
+const GRID_IMAGE = [GRID_MAJOR_LINE, GRID_MAJOR_LINE, GRID_MINOR_LINE, GRID_MINOR_LINE]
+  .map((color, i) => `linear-gradient(to ${i % 2 ? 'bottom' : 'right'}, ${color} 1px, transparent 1px)`).join(', ')
+
+// One DOM write per camera publish, never React state. A tilted camera (the
+// 3D sculpture view) or a pose before layout clears the layer: a flat grid
+// would lie about a view that is not top-down.
+export function paintGrid(layer, viewer, pose) {
+  if (!layer) return false
+  const position = pose?.position, target = pose?.target
+  const flat = Array.isArray(position) && Array.isArray(target)
+    && Math.hypot(position[0] - target[0], position[1] - target[1]) <= 1e-3 * Math.max(1, Math.abs(position[2] - target[2]))
+  const origin = flat && typeof viewer?.project === 'function' ? viewer.project(0, 0) : null
+  const layout = origin ? gridLayout(origin, pose.worldPerPixel, layer.getBoundingClientRect()) : null
+  if (!layout) {
+    layer.style.backgroundImage = ''
+    layer.style.backgroundSize = ''
+    layer.style.backgroundPosition = ''
+    layer.removeAttribute('data-grid-step')
+    return false
+  }
+  const { minorPx, majorPx } = layout
+  layer.style.backgroundImage = GRID_IMAGE
+  layer.style.backgroundSize = `${majorPx}px ${majorPx}px, ${majorPx}px ${majorPx}px, ${minorPx}px ${minorPx}px, ${minorPx}px ${minorPx}px`
+  layer.style.backgroundPosition = `${layout.majorX}px ${layout.majorY}px, ${layout.majorX}px ${layout.majorY}px, ${layout.minorX}px ${layout.minorY}px, ${layout.minorX}px ${layout.minorY}px`
+  layer.setAttribute('data-grid-step', String(layout.step))
+  return true
+}
+
+const GRID_LAYER_STYLE = Object.freeze({ position: 'absolute', inset: 0, zIndex: -1, pointerEvents: 'none' })
+
+// GRID display, owned by the viewer (no engine involved): publishes
+// { grid } on cockpit:modes, answers cockpit:modes-request, flips on a
+// cockpit:mode-toggle for 'grid', and publishes { grid: null } when it goes
+// away so the status bar disables the toggle again. While on, it portals one
+// layer into the drawing ground BEHIND the transparent viewer canvas
+// (z-index -1 inside the ground's stacking context), anchored to world (0, 0)
+// and repainted from the viewer's camera channel, so it pans and zooms with
+// the drawing.
+export function ViewerGrid({ ground, viewerRef }) {
+  const [on, setOn] = useState(false)
+  const current = useRef(on)
+  current.current = on
+  const layer = useRef(null)
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    window.dispatchEvent(new CustomEvent('cockpit:modes', { detail: { grid: on } }))
+  }, [on])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined
+    const onRequest = () => window.dispatchEvent(new CustomEvent('cockpit:modes', { detail: { grid: current.current } }))
+    const onToggle = ({ detail }) => {
+      if (detail && typeof detail === 'object' && detail.id === 'grid') setOn((value) => !value)
+    }
+    window.addEventListener('cockpit:modes-request', onRequest)
+    window.addEventListener('cockpit:mode-toggle', onToggle)
+    return () => {
+      window.removeEventListener('cockpit:modes-request', onRequest)
+      window.removeEventListener('cockpit:mode-toggle', onToggle)
+      window.dispatchEvent(new CustomEvent('cockpit:modes', { detail: { grid: null } }))
+    }
+  }, [])
+
+  const attached = on && typeof Element !== 'undefined' && ground instanceof Element
+  useEffect(() => {
+    if (!attached || typeof window === 'undefined') return undefined
+    let api = null, off = null, frame = 0, stopped = false
+    const paint = (snapshot) => { paintGrid(layer.current, api, snapshot?.pose) }
+    // The Viewer is lazy, so its ref can attach after this effect runs:
+    // retry once per frame until a camera channel exists, then stop polling.
+    const attach = () => {
+      frame = 0
+      if (stopped) return
+      const next = viewerRef?.current ?? null
+      if (next !== api) {
+        off?.()
+        off = null
+        api = next
+        if (typeof api?.subscribeCamera === 'function') off = api.subscribeCamera(paint)
+        else paint(null)
+      }
+      if (!off) frame = window.requestAnimationFrame(attach)
+    }
+    attach()
+    return () => {
+      stopped = true
+      if (frame) window.cancelAnimationFrame(frame)
+      off?.()
+    }
+  }, [attached, ground, viewerRef])
+
+  if (!attached) return null
+  return createPortal(
+    <div ref={layer} className="viewer-grid" data-testid="viewer-grid" aria-hidden="true" style={GRID_LAYER_STYLE} />,
+    ground,
+  )
+}
 
 function requestFullscreen() {
   if (typeof document === 'undefined') return false
@@ -357,16 +497,27 @@ function requestFullscreen() {
 }
 
 // The status bar's right end: the reference's drafting toggles. This viewer
-// mirrors real ORTHO and OSNAP through StatusModesBridge window events;
-// snap, grid and polar stay disabled. Fullscreen is also real.
+// mirrors real ORTHO and OSNAP through StatusModesBridge window events and
+// real GRID through ViewerGrid on the same cockpit:modes path; snap and
+// polar stay disabled. Fullscreen is also real. An engine detail carries
+// `live`; a viewer detail carries `grid` (null when the grid owner is gone).
 export function StatusToggles() {
-  const [state, setState] = useState({ live: false, ortho: false, osnap: true })
+  const [state, setState] = useState({ live: false, ortho: false, osnap: true, grid: null })
   useEffect(() => {
     if (typeof window === 'undefined') return undefined
     const onModes = ({ detail }) => {
-      if (!detail || typeof detail !== 'object' || typeof detail.live !== 'boolean') return
-      if (detail.live && (typeof detail.ortho !== 'boolean' || typeof detail.osnap !== 'boolean')) return
-      setState(detail.live ? { live: true, ortho: detail.ortho, osnap: detail.osnap } : { live: false, ortho: false, osnap: true })
+      if (!detail || typeof detail !== 'object') return
+      const hasGrid = Object.prototype.hasOwnProperty.call(detail, 'grid')
+      if (hasGrid && detail.grid !== null && typeof detail.grid !== 'boolean') return
+      const hasEngine = typeof detail.live === 'boolean'
+      if (hasEngine && detail.live && (typeof detail.ortho !== 'boolean' || typeof detail.osnap !== 'boolean')) return
+      if (!hasGrid && !hasEngine) return
+      setState((previous) => ({
+        ...(!hasEngine
+          ? { live: previous.live, ortho: previous.ortho, osnap: previous.osnap }
+          : detail.live ? { live: true, ortho: detail.ortho, osnap: detail.osnap } : { live: false, ortho: false, osnap: true }),
+        grid: hasGrid ? detail.grid : previous.grid,
+      }))
     }
     window.addEventListener('cockpit:modes', onModes)
     window.dispatchEvent(new CustomEvent('cockpit:modes-request'))
@@ -374,13 +525,13 @@ export function StatusToggles() {
   }, [])
   return (
     <span className="cockpit-status-toggles" role="toolbar" aria-label="Drafting settings" data-testid="cockpit-status-toggles">
-      {STATUS_TOGGLES.map((t) => t.live && state.live ? (
+      {STATUS_TOGGLES.map((t) => toggleLive(t, state) ? (
         <button
           key={t.id + '-live'}
           type="button"
           data-toggle={t.id}
           aria-pressed={state[t.id]}
-          title={`${t.label} ${state[t.id] ? 'on' : 'off'} (${t.id === 'ortho' ? 'F8' : 'F3'}). ${t.effect[0].toUpperCase() + t.effect.slice(1)}.`}
+          title={`${t.label} ${state[t.id] ? 'on' : 'off'}${t.key ? ` (${t.key})` : ''}. ${t.effect[0].toUpperCase() + t.effect.slice(1)}.`}
           aria-label={t.label}
           onClick={() => {
             if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('cockpit:mode-toggle', { detail: { id: t.id } }))
@@ -421,6 +572,7 @@ export function CockpitStatus({ ground, viewerRef, shown = null, selectedHandle 
       <span className="cockpit-sel" data-selected={selectedHandle ? 'true' : 'false'}>
         {selectedHandle ? `sel ${selectedHandle}` : 'no selection'}
       </span>
+      <ViewerGrid ground={ground} viewerRef={viewerRef} />
     </span>
   )
 }

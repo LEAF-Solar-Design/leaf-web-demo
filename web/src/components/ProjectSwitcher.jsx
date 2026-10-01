@@ -27,9 +27,12 @@ export default function ProjectSwitcher({
   mock, projectName, orgId, projects = [], openProjectId,
   bootstrapState, projectsLoaded = false, orgDraftError, projectDraftError, orgConflict,
   unavailable, loading, orgBusy, projectBusy, workspaceProject = null,
+  createRequest = 0,
   onCreateOrg, onCreateProject, onOpenProject, onLoadProjects,
 }) {
   const [open, setOpen] = useState(false)
+  const [focusCreate, setFocusCreate] = useState(false)
+  const createFieldRef = useRef(null)
   const [hi, setHi] = useState(0) // keyboard-highlighted row (resolver "active")
   const [orgName, setOrgName] = useState('My workspace')
   const [projectDraft, setProjectDraft] = useState('')
@@ -54,6 +57,21 @@ export default function ProjectSwitcher({
     } catch (error) { setSubmitError(String(error?.message || error)) }
     finally { submitting.current = false }
   }
+
+  // A caller's create request (the ribbon's Create project) opens the menu on
+  // whichever inline create field the state shows. There is no native dialog
+  // fallback: every creation goes through these fields.
+  useEffect(() => {
+    if (!createRequest) return
+    setOpen(true)
+    setFocusCreate(true)
+  }, [createRequest])
+
+  useEffect(() => {
+    if (!focusCreate || !menu.shown) return
+    createFieldRef.current?.focus()
+    setFocusCreate(false)
+  }, [focusCreate, menu.shown])
 
   // On open, start the highlight on the currently open project.
   useEffect(() => {
@@ -149,7 +167,7 @@ export default function ProjectSwitcher({
               <form className="proj-create" onSubmit={(event) => { event.preventDefault(); submit('org', orgName) }}>
                 <label>
                   Workspace name
-                  <input value={orgName} onChange={(event) => setOrgName(event.target.value)} disabled={orgBusy} />
+                  <input ref={createFieldRef} value={orgName} onChange={(event) => setOrgName(event.target.value)} disabled={orgBusy} />
                 </label>
                 <button className="btn primary proj-act" type="submit" disabled={orgBusy || !orgName.trim()}>
                   {orgBusy ? 'Creating…' : 'Create workspace org'}
@@ -207,7 +225,7 @@ export default function ProjectSwitcher({
               }}>
                 <label>
                   New project
-                  <input value={projectDraft} onChange={(event) => setProjectDraft(event.target.value)} disabled={projectBusy} />
+                  <input ref={createFieldRef} value={projectDraft} onChange={(event) => setProjectDraft(event.target.value)} disabled={projectBusy} />
                 </label>
                 <button className="chip-act proj-act" type="submit" disabled={projectBusy || !projectDraft.trim()}>
                   {projectBusy ? 'Creating…' : 'Create project'}

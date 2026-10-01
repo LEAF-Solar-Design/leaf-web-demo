@@ -1623,23 +1623,18 @@ export default function App() {
   // --- version-history browser + read-only preview -------------------------
   // --- projects / orgs workspace handlers (item 1) -------------------------
   // Re-hydrate the open project (after a terminal run so jobs[] visibly grows).
-  // Both creators accept the name from an inline F1 field (ProjectSwitcher);
-  // the window.prompt fallback only fires when no name is passed (legacy path —
-  // native dialogs are off-standard and slated for removal with the switcher).
+  // Both creators take the name from an inline field (ProjectSwitcher, the
+  // board slot) and never open a native dialog. A caller with no name (an
+  // event object, no argument) is ignored; the ribbon's Create project opens
+  // the switcher's inline field instead (projectCreateRequest).
   const onCreateOrg = useCallback(async (givenName) => {
-    const name = typeof givenName === 'string'
-      ? givenName
-      : window.prompt('Name your workspace org', 'My workspace')
-    if (name == null) return
-    return createWorkspaceOrg(name)
+    if (typeof givenName !== 'string') return
+    return createWorkspaceOrg(givenName)
   }, [createWorkspaceOrg])
 
   const onCreateProject = useCallback(async (givenName) => {
-    const name = typeof givenName === 'string'
-      ? givenName
-      : window.prompt('New project name', 'rooftop demo')
-    if (name == null || !name.trim()) return
-    return createWorkspaceProject(name)
+    if (typeof givenName !== 'string' || !givenName.trim()) return
+    return createWorkspaceProject(givenName)
   }, [createWorkspaceProject])
 
   const catalogRunContext = useMemo(() => createCatalogRunContext({
@@ -2930,6 +2925,8 @@ export default function App() {
   const studioShell = !!studioGround && surfaceSlots.chrome.shell === 'cockpit'
   const [studioRibbonHost, setStudioRibbonHost] = useState(null)
   const projectSwitcherRef = useRef(null)
+  // Each bump opens the header switcher on its inline create field.
+  const [projectCreateRequest, setProjectCreateRequest] = useState(0)
   // Every studio profile shares the status regions at the wide breakpoint.
   // Below it the flat footer rules still own the segments, and each
   // FootRegion is a fragment.
@@ -3130,7 +3127,8 @@ export default function App() {
       project: {
         onOpen: !mock && signedIn && !projectsErr ? openProjects : null,
         onChange: !mock && signedIn && !projectsErr ? openProjects : null,
-        onCreate: !mock && signedIn && orgId && !projectsErr && !projectBusy ? onCreateProject : null,
+        onCreate: !mock && signedIn && orgId && !projectsErr && !projectBusy
+          ? () => setProjectCreateRequest((count) => count + 1) : null,
       },
       files: { onUpload: !mock && signedIn && openProjectId ? () => setProjectPane('material') : null },
       conversation: {
@@ -3142,7 +3140,7 @@ export default function App() {
     })
   }, [surfaceSlots.toolbar.profile, railFamilies, onRequestCatalogRun, setFamilyOpen,
     running, previewing, writeLocked, canRunWrite, engineDirty, mock, signedIn, projectsErr,
-    orgId, openProjectId, projectBusy, onCreateProject, agentDisabled, routing, clearAgentSession,
+    orgId, openProjectId, projectBusy, agentDisabled, routing, clearAgentSession,
     openAgentMode, jobs.length, ship, setNavExpanded, setJobRailExpanded,
     solarRoutesStatus, showSolarStrings, selectedHandle, drafting, catalog.families, solarFormTool, catalogRunContext?.projectId])
   const previousRibbonProfile = useRef(null)
@@ -3655,6 +3653,7 @@ export default function App() {
             loading={projectsLoading}
             orgBusy={orgBusy}
             projectBusy={projectBusy}
+            createRequest={projectCreateRequest}
             onCreateOrg={onCreateOrg}
             onCreateProject={onCreateProject}
             onOpenProject={onOpenProject}
