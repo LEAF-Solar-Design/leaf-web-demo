@@ -772,6 +772,13 @@ def build_suites() -> List[Suite]:
         # imported version. Hermetic and nothing skips: the floor is the exact count, 68.
         Suite("server-solar-combiner-intake-import", "server tests/test_solar_combiner_intake_import.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_combiner_intake_import.py"), 68),
+        # sf-w2-combiner-intake-survives-saves: a browser CAD save (POST .../versions/edited and the dxf-sidecar
+        # leg of POST .../versions/plan in server/routers/drawings.py) keeps the solar design graph, its digest,
+        # the combiner intake and the panel-group outlines of the version it replaces, and refuses with nothing
+        # written when that version cannot be read, fails its digest, or the carried intake passes the design
+        # bound. Hermetic and nothing skips: the floor is the exact count, 23 (19 + 4 corrupt-byte cases).
+        Suite("server-solar-design-survives-saves", "server tests/test_solar_design_survives_saves.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_design_survives_saves.py"), 23),
         # LEAFTRACKERSTOPANELGROUPS as a tool (2026-10-01, sf-w3-conversion-graph-tool): the drawing's Ground
         # physical head carried by the physical_state trusted input, converted into compact Ground frames that
         # replace any earlier conversion, published in one commit with the bound head-log entry; the replay proof
