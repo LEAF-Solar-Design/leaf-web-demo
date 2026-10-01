@@ -48,6 +48,8 @@ import guest_uploads
 import jobs
 import solar_artifacts
 import solar_import_sources
+import solar_landxml_import
+import solar_physical_state
 import solar_solaredge_report
 import write_loop
 from envelopes import ErrorCode, err_envelope, error_obj, error_response, with_envelope_fields
@@ -244,6 +246,133 @@ def get_dxf(drawing_id: str, request: Request, version: str = "head",
         return Response(status_code=304, headers=headers)
     headers["Content-Disposition"] = f'inline; filename="{drawing_id}-v{v}.dxf"'
     return Response(content=data, media_type="application/dxf", headers=headers)
+
+
+# sf-w4-landxml-import-surface: the LandXML terrain upload. Every reason the route can answer, as
+# (HTTP status, envelope code, retryable). The keys are closed: the 28 codes of
+# solar_landxml_import.CODES, the two route codes (drawing id and media type), the physical state
+# and head codes an import can pass through unchanged, and the fallback LANDXML_IMPORT_FAILED that
+# any other code collapses to, so a client only ever sees a key of this map.
+LANDXML_MEDIA_TYPES = frozenset({"application/xml", "text/xml"})
+LANDXML_IMPORT_REFUSALS = {
+    "LANDXML_DRAWING_ID_INVALID": (400, ErrorCode.BAD_PARAMS, False),
+    "LANDXML_PROJECT_ID_INVALID": (400, ErrorCode.BAD_PARAMS, False),
+    "LANDXML_DRAWING_UNITS_INVALID": (400, ErrorCode.BAD_PARAMS, False),
+    "LANDXML_CRS_INVALID": (400, ErrorCode.BAD_PARAMS, False),
+    "LANDXML_TARGET_CELLS_INVALID": (400, ErrorCode.BAD_PARAMS, False),
+    "LANDXML_MEDIA_TYPE_REFUSED": (415, ErrorCode.BAD_PARAMS, False),
+    "LANDXML_EMPTY": (400, ErrorCode.BAD_PARAMS, False),
+    "LANDXML_TOO_LARGE": (413, ErrorCode.BAD_PARAMS, False),
+    "LANDXML_ENCODING_INVALID": (400, ErrorCode.BAD_PARAMS, False),
+    "LANDXML_UNSAFE": (400, ErrorCode.BAD_PARAMS, False),
+    "LANDXML_MALFORMED": (400, ErrorCode.BAD_PARAMS, False),
+    "LANDXML_NOT_LANDXML": (400, ErrorCode.BAD_PARAMS, False),
+    "LANDXML_UNITS_MISSING": (400, ErrorCode.BAD_PARAMS, False),
+    "LANDXML_UNITS_UNSUPPORTED": (400, ErrorCode.BAD_PARAMS, False),
+    "LANDXML_CRS_UNSUPPORTED": (400, ErrorCode.BAD_PARAMS, False),
+    "LANDXML_TOO_MANY_POINTS": (400, ErrorCode.BAD_PARAMS, False),
+    "LANDXML_TOO_FEW_POINTS": (400, ErrorCode.BAD_PARAMS, False),
+    "LANDXML_COORDINATE_OUT_OF_RANGE": (400, ErrorCode.BAD_PARAMS, False),
+    "LANDXML_SOURCE_ID_INVALID": (400, ErrorCode.BAD_PARAMS, False),
+    "LANDXML_DRAWING_NOT_FOUND": (404, ErrorCode.BAD_PARAMS, False),
+    "LANDXML_SOURCE_NOT_FOUND": (404, ErrorCode.BAD_PARAMS, False),
+    "LANDXML_GRAPH_REQUIRED": (409, ErrorCode.BAD_PARAMS, False),
+    "LANDXML_PROJECT_MISMATCH": (409, ErrorCode.BAD_PARAMS, False),
+    "LANDXML_CRS_MISMATCH": (409, ErrorCode.BAD_PARAMS, False),
+    "LANDXML_UNITS_MISMATCH": (409, ErrorCode.BAD_PARAMS, False),
+    "LANDXML_SOURCE_KIND_MISMATCH": (409, ErrorCode.BAD_PARAMS, False),
+    "LANDXML_RESAMPLE_TOO_LARGE": (422, ErrorCode.BAD_PARAMS, False),
+    "LANDXML_WRITES_DRAINED": (503, ErrorCode.INTERNAL, True),
+    "LANDXML_STORE_UNAVAILABLE": (503, ErrorCode.INTERNAL, True),
+    "LANDXML_SOURCE_CORRUPT": (500, ErrorCode.INTERNAL, False),
+    "PHYSICAL_HEAD_CONFLICT": (409, ErrorCode.BAD_PARAMS, True),
+    "PHYSICAL_HEAD_LOG_FULL": (409, ErrorCode.BAD_PARAMS, False),
+    "PHYSICAL_HEAD_PROJECT_MISMATCH": (409, ErrorCode.BAD_PARAMS, False),
+    "PHYSICAL_STATE_PROJECT_MISMATCH": (409, ErrorCode.BAD_PARAMS, False),
+    "PHYSICAL_HEAD_WRITES_DRAINED": (503, ErrorCode.INTERNAL, True),
+    "PHYSICAL_STATE_WRITES_DRAINED": (503, ErrorCode.INTERNAL, True),
+    "PHYSICAL_HEAD_STORE_UNAVAILABLE": (503, ErrorCode.INTERNAL, True),
+    "PHYSICAL_STATE_STORE_UNAVAILABLE": (503, ErrorCode.INTERNAL, True),
+    "PHYSICAL_HEAD_CORRUPT": (500, ErrorCode.INTERNAL, False),
+    "PHYSICAL_HEAD_STORE_UNSAFE": (500, ErrorCode.INTERNAL, False),
+    "PHYSICAL_STATE_CORRUPT": (500, ErrorCode.INTERNAL, False),
+    "LANDXML_IMPORT_FAILED": (500, ErrorCode.INTERNAL, False),
+}
+
+
+def _landxml_refused(reason):
+    """The envelope for one refusal. A code outside LANDXML_IMPORT_REFUSALS answers
+    LANDXML_IMPORT_FAILED, so the reason a client sees is always a key of that map."""
+    if reason not in LANDXML_IMPORT_REFUSALS:
+        reason = "LANDXML_IMPORT_FAILED"
+    status, code, retryable = LANDXML_IMPORT_REFUSALS[reason]
+    env = err_envelope(code, reason, retryable=retryable)
+    env["error"]["reason_code"] = reason
+    return JSONResponse(status_code=status, content=env)
+
+
+def _import_landxml(tenant_id, drawing_id, data, drawing_units, crs, cells, project_id):
+    try:
+        backend = _backend(tenant_id)
+    except (RuntimeError, OSError):
+        raise solar_landxml_import.LandXmlImportError("LANDXML_STORE_UNAVAILABLE") from None
+    return solar_landxml_import.import_landxml_terrain(
+        backend, tenant_id, drawing_id, data, drawing_units=drawing_units, crs=crs,
+        target_cells=cells, project_id=project_id)
+
+
+@router.post("/api/drawings/{drawing_id}/imports/landxml")
+async def import_landxml(drawing_id: str, request: Request, drawing_units: Optional[str] = None,
+                         crs: Optional[str] = None, target_cells: Optional[str] = None,
+                         project_id: Optional[str] = None,
+                         tenant=Depends(deps.require_active_tenant)):
+    """Store one LandXML source and publish its terrain grid on the drawing's physical head.
+
+    The body is the file's bytes (application/xml or text/xml), at most
+    solar_landxml_import.MAX_LANDXML_BYTES, bounded by Content-Length and again while
+    streaming, before anything is decoded. drawing_units ("m" or "ft") and crs ("none" or
+    "EPSG:n") are required and validated by the intake; target_cells is 2 to 200 (default 30).
+    Fails closed: every refusal is a key of LANDXML_IMPORT_REFUSALS and writes nothing."""
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", drawing_id):
+        return _landxml_refused("LANDXML_DRAWING_ID_INVALID")
+    if (project_id is not None
+            and not 1 <= len(project_id) <= solar_landxml_import.MAX_PROJECT_ID_CHARS):
+        return _landxml_refused("LANDXML_PROJECT_ID_INVALID")
+    if target_cells is None:
+        cells = solar_landxml_import.DEFAULT_TARGET_CELLS
+    elif re.fullmatch(r"[0-9]{1,3}", target_cells):
+        cells = int(target_cells)
+    else:
+        return _landxml_refused("LANDXML_TARGET_CELLS_INVALID")
+    tier = entitlements.resolve_tier(tenant)
+    try:
+        roles, elevated = entitlements.resolve_roles(tenant)
+        if not entitlements.entitlements_for(tier, roles, elevated).get("upload", False):
+            return entitlements.entitlement_denied_response("upload", tier)
+    except entitlements.EntitlementsError:
+        return entitlements.policy_unavailable_response("upload", tier)
+    if write_loop.drawing_mutations_refusal() is not None:
+        return _landxml_refused("LANDXML_WRITES_DRAINED")
+    media = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if media not in LANDXML_MEDIA_TYPES:
+        return _landxml_refused("LANDXML_MEDIA_TYPE_REFUSED")
+    limit = solar_landxml_import.MAX_LANDXML_BYTES
+    length = request.headers.get("content-length", "")
+    if re.fullmatch(r"[0-9]+", length):
+        stripped = length.lstrip("0")
+        if len(stripped) > 12 or int(stripped or "0") > limit:
+            return _landxml_refused("LANDXML_TOO_LARGE")
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > limit:
+            return _landxml_refused("LANDXML_TOO_LARGE")
+        body.extend(chunk)
+    try:
+        result = await run_in_threadpool(_import_landxml, str(tenant), drawing_id, bytes(body),
+                                         drawing_units, crs, cells, project_id)
+    except solar_physical_state.PhysicalStateError as exc:
+        return _landxml_refused(exc.code)
+    return JSONResponse(content=with_envelope_fields(result))
 
 
 @router.get("/api/drawings/{drawing_id}/artifacts/{artifact_id}")

@@ -805,6 +805,12 @@ def build_suites() -> List[Suite]:
         # skips: the floor is the exact count, 85 (including 16 parser and source-loader cases).
         Suite("server-solar-landxml-import", "server tests/test_solar_landxml_import.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_landxml_import.py"), 85),
+        # sf-w4-landxml-import-surface: the LandXML terrain upload route (POST
+        # /api/drawings/{id}/imports/landxml in server/routers/drawings.py): bounded before decode,
+        # a closed refusal map, nothing written on refusal, the stored terrain reopened unchanged.
+        # Hermetic and nothing skips: the floor is the exact count, 60.
+        Suite("server-solar-landxml-route", "server tests/test_solar_landxml_route.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_landxml_route.py"), 60),
         # W5 dialog batch (2026-09-23, contract G30): server/solar_ground_dialogs.py (the shading
         # object form and PlaceTree, the project-area manager's Add Area and OK, the pile-template
         # manager's "+" and OK with the store file byte for byte). Every input is authored in the
