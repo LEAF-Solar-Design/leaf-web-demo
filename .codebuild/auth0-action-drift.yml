@@ -1,0 +1,38 @@
+version: 0.2
+
+# Scheduled read-only Auth0 Action drift check (P-088). Runs
+# scripts/check_auth0_action_drift.py, a thin wrapper over
+# deploy_auth0_actions.py --check: no deploy mode, no Action writes, no registry
+# push or service dispatch.
+# External inputs, set on the CodeBuild project and never in this file:
+#   LEAF_AUTH0_DOMAIN, LEAF_AUTH0_ACTIONS_CLIENT_ID and
+#   LEAF_AUTH0_ACTIONS_CLIENT_SECRET (a client granted read:actions read:triggers
+#   only), plus optional LEAF_AUTH0_DRIFT_STATE_DIR, a durable directory for the
+#   dedupe state. Without it each build starts fresh, so a standing drift
+#   notifies once per build instead of once per change.
+# Exit 0 match, 1 drift and 2 unavailable all complete the build: the outcome is
+# in the receipt artifact and the LEAF_AUTH0_DRIFT_NOTICE line. Exit 3 (receipt
+# or state write failed) fails it.
+# Rollback: disable the schedule; nothing in Auth0 changes.
+env:
+  shell: bash
+phases:
+  build:
+    commands:
+      - |
+        set -euo pipefail
+        : "${LEAF_AUTH0_DOMAIN:?LEAF_AUTH0_DOMAIN is an external input}"
+        state_dir="${LEAF_AUTH0_DRIFT_STATE_DIR:-auth0-drift-artifacts/state}"
+        rc=0
+        python3 scripts/check_auth0_action_drift.py \
+          --domain "$LEAF_AUTH0_DOMAIN" \
+          --receipt-dir auth0-drift-artifacts/receipts \
+          --state-file "$state_dir/auth0-action-drift-state.json" || rc=$?
+        case "$rc" in
+          0|1|2) echo "auth0 action drift check completed with exit $rc" ;;
+          *) exit "$rc" ;;
+        esac
+artifacts:
+  base-directory: auth0-drift-artifacts
+  files:
+    - '**/*'
