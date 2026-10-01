@@ -9,7 +9,7 @@ export const SETTINGS_FIELDS = Object.freeze([
   { key: 'num_mppt', label: 'MPPT count', kind: 'integer', max: 1000000 },
   { key: 'strings_per_mppt', label: 'Strings per MPPT', kind: 'integer', max: 1000000 },
   { key: 'optimizer_ratio', label: 'Optimizer ratio', kind: 'ratio' },
-  { key: 'use_l2_collectors', label: 'L2 collectors', kind: 'fixed' },
+  { key: 'use_l2_collectors', label: 'L2 collectors', kind: 'boolean' },
   { key: 'panel_group_number', label: 'Panel group number', kind: 'integer', max: 1000000 },
   { key: 'string_number', label: 'String number', kind: 'integer', max: 1000000 },
   { key: 'inverter_number', label: 'Inverter number', kind: 'integer', max: 1000000 },
@@ -52,7 +52,6 @@ export const SOLAR_SETTINGS_REASONS = Object.freeze({
   units_required: 'Choose the drawing units before starting a Solar design.',
   invalid_elevation_datum: 'Name the elevation datum in 1 to 4096 characters.',
   invalid_crs: 'Keep the coordinate system name to 4096 characters or fewer.',
-  l2_collectors_unavailable: 'L2 collectors are not supported yet, so this setting stays off.',
   checkout_required: 'Take the drawing checkout before changing Solar settings.',
   run_in_progress: 'A run is in progress. Wait for it to finish.',
 });
@@ -60,6 +59,13 @@ export const SOLAR_SETTINGS_REASONS = Object.freeze({
 const owns = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
 const PYTHON_WHITESPACE = String.raw`[\u0009-\u000D\u001C-\u001F\u0020\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]`;
 const PYTHON_STRIP = new RegExp(`^${PYTHON_WHITESPACE}+|${PYTHON_WHITESPACE}+$`, 'g');
+
+// The mode is a JSON boolean and nothing else: the server tests it with `type(mode) is bool` and answers
+// INVALID_GRAPH_SCHEMA for 1, 0, 1.0, "true" and null (builtins/solar_settings.py). The request carries it
+// only when it differs from the saved mode. Whether the drawing's equipment allows the change is the
+// server's decision (DESIGN_PRESET_L2_EQUIPMENT_PRESENT, DUPLICATE_EQUIPMENT_NUMBER); the form shows that
+// answer through its run message.
+export const L2_COLLECTORS_NOTE = 'Turning L2 collectors off is refused while the design has a combiner box, a central inverter or an inverter linked to an L2 collector.';
 
 export function pyStrip(text) {
   return text.replace(PYTHON_STRIP, '');
@@ -79,7 +85,7 @@ function validValue(kind, value) {
   if (kind === 'string') return validString(value);
   if (kind === 'integer') return Number.isInteger(value) && value >= 0 && value <= 1000000;
   if (kind === 'ratio') return typeof value === 'number' && Number.isFinite(value) && value > 0 && value < 1e15;
-  return kind === 'fixed' && value === false;
+  return kind === 'boolean' && typeof value === 'boolean';
 }
 
 const EMPTY_PROJECT = Object.freeze({ name: '', zip_code: '', latitude: null, longitude: null });
@@ -131,7 +137,10 @@ function projectChanges(saved, drafts) {
 
 export function parseField(key, text) {
   const field = SETTINGS_FIELDS.find((item) => item.key === key);
-  if (!field || field.kind === 'fixed' || typeof text !== 'string') return { ok: false };
+  if (!field) return { ok: false };
+  // A boolean field's draft is the checkbox state itself, never text.
+  if (field.kind === 'boolean') return typeof text === 'boolean' ? { ok: true, value: text } : { ok: false };
+  if (typeof text !== 'string') return { ok: false };
   if (field.kind === 'string') return validString(text) ? { ok: true, value: text } : { ok: false };
   const trimmed = text.trim();
   const pattern = field.kind === 'integer' ? /^[0-9]{1,7}$/ : /^(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)$/;
@@ -179,9 +188,8 @@ export function deriveFormState({ context, intakeView, versionsView }) {
 export function buildSettingsParams(state, drafts = {}, units = {}, projectDrafts = {}) {
   if (state.mode === 'refused') return { ok: false, reason: state.reason };
   const changes = {};
-  for (const { key, kind } of SETTINGS_FIELDS) {
+  for (const { key } of SETTINGS_FIELDS) {
     if (!owns(drafts, key)) continue;
-    if (kind === 'fixed') return { ok: false, reason: 'l2_collectors_unavailable', field: key };
     const parsed = parseField(key, drafts[key]);
     if (!parsed.ok) return { ok: false, reason: 'invalid_value', field: key };
     if (parsed.value !== state.settings[key]) changes[key] = parsed.value;

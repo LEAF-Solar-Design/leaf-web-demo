@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  SETTINGS_FIELDS, DRAWING_UNITS, SOLAR_SETTINGS_REASONS,
+  SETTINGS_FIELDS, DRAWING_UNITS, SOLAR_SETTINGS_REASONS, L2_COLLECTORS_NOTE,
   parseField, deriveFormState, buildSettingsParams, pyStrip,
 } from './solarSettingsModel.js';
 
@@ -107,15 +107,24 @@ function SettingsForContext({ context, readIntake, readVersions, checkoutHeld, b
           {zipChanged && coordinatesUnchanged && <p>Changing the ZIP code clears saved coordinates unless you enter both coordinates again.</p>}
           {hasChanges && <p>Re-size strings after this change</p>}
           {SETTINGS_FIELDS.map(({ key, label, kind }) => {
-            if (kind === 'fixed') {
+            const hasDraft = Object.prototype.hasOwnProperty.call(drafts, key);
+            if (kind === 'boolean') {
               return (
                 <div className="param" key={key}>
-                  <label><input type="checkbox" checked={false} disabled />{label}</label>
-                  <span>{SOLAR_SETTINGS_REASONS.l2_collectors_unavailable}</span>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={(hasDraft ? drafts[key] : state.settings[key]) === true}
+                      onChange={(event) => {
+                        const checked = event.target.checked === true;
+                        setDrafts((previous) => ({ ...previous, [key]: checked }));
+                      }}
+                    />{label}
+                  </label>
+                  <span>{L2_COLLECTORS_NOTE}</span>
                 </div>
               );
             }
-            const hasDraft = Object.prototype.hasOwnProperty.call(drafts, key);
             return (
               <label className="param" key={key}>
                 <span>{label}</span>

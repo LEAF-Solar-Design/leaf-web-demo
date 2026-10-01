@@ -1369,6 +1369,13 @@ describe('solar refusal copy', () => {
     ['schedules_mapping_failed', 'Electrical schedules cannot match this design to its circuits'],
     ['schedules_optimizers_unsupported', 'Electrical schedules do not cover optimizer designs yet'],
     ['schedules_zone_sizing_unsupported', 'Electrical schedules need one global string sizing, not zone sizing'],
+    ['ground_installation_required', 'This solar tool works on Ground designs only'],
+    ['ground_conversion_in_use', 'Remove the strings, equipment, panels and other panel groups from this Ground design first'],
+    ['ground_physical_state_required', 'Lay out the Ground trackers first, then convert them'],
+    ['ground_tracker_rows_required', 'Add tracker rows to the Ground layout first'],
+    ['ground_units_mismatch', 'The Ground layout and the solar design use different drawing units'],
+    ['ground_layout_invalid', 'The Ground layout cannot be converted into panel groups'],
+    ['ground_layout_too_large', 'The Ground layout holds more panel slots, in total or on one tracker, than a design can carry'],
   ]
   const availabilityFor = (code) => ({
     entitled: true, implemented: true, engine_ready: true, input_ready: false, refusal_reasons: [code],
@@ -1434,6 +1441,7 @@ describe('solar refusal copy', () => {
       'rooftop_required', 'drawing_units_unsupported', 'guardrails_sizing_required',
       'guardrails_sizing_ambiguous', 'guardrails_project_coordinates_required',
       'guardrails_mixed_inverters', 'guardrails_input_unsupported', 'solar_output_not_current',
+      'ground_installation_required', 'ground_conversion_in_use', 'ground_physical_state_required',
     ]
     for (const code of SERVER_CODES) {
       expect(Object.hasOwn(SOLAR_REFUSAL_REASONS, code)).toBe(true)
@@ -1465,6 +1473,7 @@ describe('solar refusal copy', () => {
       'drawing_units_unsupported', 'electrical_zones_unsupported', 'guardrails_input_unsupported',
       'panel_layer_filter_required', 'panels_already_present', 'rooftop_required',
       'schedules_input_unsupported', 'string_collectors_required', 'unassigned_strings_required',
+      'ground_installation_required', 'ground_conversion_in_use',
     ]))
     expect(result.codes).toEqual(expect.arrayContaining(Object.values(DYNAMIC_HOOK_CODES).flat()))
   })
@@ -1475,7 +1484,9 @@ describe('solar refusal copy', () => {
       'complete_routing_required', 'degenerate_route', 'drawing_context_required', 'drawing_units_unsupported',
       'electrical_zones_required', 'electrical_zones_unsupported', 'entitlement_policy_unavailable',
       'entitlement_required', 'equipment_assignment_required', 'frames_required', 'graph_already_embedded',
-      'graph_seed_required', 'guardrails_input_unsupported', 'guardrails_mixed_inverters',
+      'graph_seed_required', 'ground_conversion_in_use', 'ground_installation_required', 'ground_layout_invalid',
+      'ground_layout_too_large', 'ground_physical_state_required', 'ground_tracker_rows_required',
+      'ground_units_mismatch', 'guardrails_input_unsupported', 'guardrails_mixed_inverters',
       'guardrails_project_coordinates_required', 'guardrails_sizing_ambiguous', 'guardrails_sizing_required',
       'invalid_drawing_context', 'invalid_route_point', 'invalid_seed_request', 'inverter_assignment_mismatch',
       'licensed_graph_commit_required', 'module_power_required', 'not_current_head', 'panel_layer_filter_required',
