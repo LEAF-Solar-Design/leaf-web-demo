@@ -127,6 +127,7 @@ export default function useJobController({
   onCompleteVersion,
   onNotice,
   onAuthRequired,
+  drawingKey,
 } = {}) {
   const [jobs, setJobs] = useState([])
   const [authRequired, setAuthRequired] = useState(false)
@@ -155,6 +156,8 @@ export default function useJobController({
   const callbacksRef = useRef({ formatError, onCompleteVersion, onNotice, onAuthRequired })
   const servicesRef = useRef(services)
   const storageRef = useRef(storage)
+  const drawingKeyRef = useRef(drawingKey)
+  drawingKeyRef.current = drawingKey
   callbacksRef.current = { formatError, onCompleteVersion, onNotice, onAuthRequired }
   servicesRef.current = { ...defaultServices, ...services }
   storageRef.current = storage
@@ -355,6 +358,9 @@ export default function useJobController({
   // lifecycle is unchanged.
   const runJob = useCallback(async ({ toolName, execute, submission = null }) => {
     if (!execute) throw new TypeError('runJob requires an execute callback')
+    const capturedDrawingKey = drawingKeyRef.current
+    const origin = typeof capturedDrawingKey === 'string' && capturedDrawingKey.length > 0
+      ? { drawingKey: capturedDrawingKey } : undefined
     const sequence = ++sequenceRef.current
     runStartRef.current = sequence
     const epoch = epochRef.current
@@ -381,7 +387,7 @@ export default function useJobController({
       setAuth(true)
     }
     try {
-      const envelope = await execute({
+      const output = await execute({
         onSubmit: (jobId) => {
           if (sequenceRef.current !== sequence) return
           submittedJobId = jobId
@@ -391,6 +397,7 @@ export default function useJobController({
         },
         onStatus: (update) => acceptStatus(update, sequence),
       })
+      const envelope = origin && output ? { ...output, origin } : output
       if (!submittedJobId && isUnauthenticatedEnvelope(envelope)) signInExpired()
       await finishEnvelope(envelope, sequence, toolName, { jobId: submittedJobId, epoch })
       return sequenceRef.current === sequence ? envelope : null

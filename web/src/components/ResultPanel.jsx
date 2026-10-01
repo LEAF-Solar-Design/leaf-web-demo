@@ -1,4 +1,6 @@
-import { useEffect } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { useDrawingObjects } from '../site/DrawingObjectsContext.jsx'
+import './resultObjectLinks.css'
 import { humanKey } from '../labels.js'
 import { errorActorLabel, errorPresentation } from '../errorPresentation.js'
 import { modChord } from '../lib/keys.js'
@@ -182,12 +184,66 @@ function fmtUsd(v) {
   return n < 0.01 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`
 }
 
+export const OBJECT_LINK_REASONS = Object.freeze({
+  noOrigin: 'This result does not record which drawing it ran on.',
+  differentDrawing: 'This result ran on a different drawing or version than the one open now.',
+  loading: "The drawing's object list is still loading.",
+  missing: 'This object is not in the drawing that is open now.',
+  navigation: 'The drawing viewer is not ready.',
+})
+
+function ResultObjectLinks({ result, navigation, announce }) {
+  const index = useDrawingObjects()?.index
+  const [page, setPage] = useState(0)
+  const handles = result.overlay?.highlight_handles || []
+  useEffect(() => { setPage(0) }, [result])
+  let unavailable = null
+  if (!result.origin?.drawingKey) unavailable = OBJECT_LINK_REASONS.noOrigin
+  else if (!index?.drawingKey) unavailable = OBJECT_LINK_REASONS.loading
+  else if (result.origin.drawingKey !== index.drawingKey) unavailable = OBJECT_LINK_REASONS.differentDrawing
+  const choose = (record) => {
+    const outcome = navigation?.jump(record.id)
+    if (outcome?.ok) announce(`Showing ${record.name}`)
+    else announce(outcome?.reason || OBJECT_LINK_REASONS.navigation)
+  }
+  if (!handles.length) return unavailable === OBJECT_LINK_REASONS.differentDrawing ? <p>{unavailable}</p> : null
+  return <div className="result-object-links">
+    {unavailable && <p>{unavailable}</p>}
+    <details>
+      <summary>Show highlighted objects</summary>
+      <ul>
+        {handles.slice(page * 100, (page + 1) * 100).map((handle, offset) => {
+          const record = index?.byHandle.get(String(handle).replace(/^0x/i, '').toUpperCase())
+          return <li key={`${page}:${offset}`}>
+            {!unavailable && record ? <button type="button" onClick={() => choose(record)}>
+              <span>{record.name}</span><small>{record.path}</small>
+            </button> : <span>
+              <span>Handle {handle}</span>
+              {!unavailable && <small>{OBJECT_LINK_REASONS.missing}</small>}
+            </span>}
+          </li>
+        })}
+      </ul>
+      {page > 0 && <button type="button" onClick={() => setPage((value) => value - 1)}>Previous 100</button>}
+      {(page + 1) * 100 < handles.length && <button type="button" onClick={() => setPage((value) => value + 1)}>Show 100 more</button>}
+    </details>
+  </div>
+}
+
 // Note: run progress (runStatus / runProgress / runElapsedMs) moved to the
 // SB3 running strip at the bar dock; callers may still pass them — ignored here.
 // `notices` is the NR banner slot: ongoing-condition banners dock UNDER the
 // header of the pane they affect, so App passes them in and they render
 // immediately after the <h3> — never above the pane.
-export default function ResultPanel({ running, error, result, tool, onRetry, notices }) {
+export default function ResultPanel({ running, error, result, tool, onRetry, notices, navigation }) {
+  const [announcement, setAnnouncement] = useState('')
+  const announcementFrame = useRef(null)
+  useEffect(() => () => cancelAnimationFrame(announcementFrame.current), [])
+  const announce = (message) => {
+    cancelAnimationFrame(announcementFrame.current)
+    setAnnouncement('')
+    announcementFrame.current = requestAnimationFrame(() => setAnnouncement(message))
+  }
   // A quota rejection (broker hard cap, HTTP 402) is an expected budget state,
   // not a failure to alarm about — render it in the amber calm posture (matching
   // QuotaCard), never red 'Failed'. Only this error_code softens; all others stay red.
@@ -223,6 +279,7 @@ export default function ResultPanel({ running, error, result, tool, onRetry, not
   return (
     <section className="card result-panel">
       <h3>Result</h3>
+      <div className="result-object-announcement" role="status" aria-live="polite" aria-atomic="true">{announcement}</div>
       {notices}
       {!running && !result && !error && (
         <p className="panel-sub">
@@ -250,6 +307,7 @@ export default function ResultPanel({ running, error, result, tool, onRetry, not
           {result.ok && <ResultBody result={result} />}
           {result.error && <ErrorLine err={result.error} onRetry={onRetry} retry={!isEnt && isRetryable(result.error)} quota={calm} toolName={result.tool} />}
           {!result.ok && !result.error && <p className="result-empty">The run failed without reporting a reason.</p>}
+          {!result.overlay && <ResultObjectLinks result={result} navigation={navigation} announce={announce} />}
 
           {result.overlay && (
             <div className="overlay-summary">
@@ -259,6 +317,7 @@ export default function ResultPanel({ running, error, result, tool, onRetry, not
                   {result.overlay.highlight_handles.length.toLocaleString()} panel{result.overlay.highlight_handles.length === 1 ? '' : 's'} highlighted in the viewer
                 </div>
               )}
+              <ResultObjectLinks result={result} navigation={navigation} announce={announce} />
               {result.overlay.markers?.length > 0 && (
                 <div className="ov-row">
                   <span className="ov-dot mk" />

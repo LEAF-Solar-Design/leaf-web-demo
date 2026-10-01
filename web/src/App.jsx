@@ -8,6 +8,7 @@ import useDrawingViewport from './site/useDrawingViewport.js'
 import { STUDIO_DRAWING_OCCLUDERS } from './site/drawingOccluders.js'
 import { DrawingObjectsProvider, useDrawingObjects } from './site/DrawingObjectsContext.jsx'
 import DrawingNavigationTools from './site/DrawingNavigationTools.jsx'
+import DrawingOriginBridge from './site/DrawingOriginBridge.jsx'
 import CadOverview from './site/CadOverview.jsx'
 import { buildDrawingObjectIndex } from './lib/drawingObjectIndex.js'
 import EngineObjectBridge from './cadedit/EngineObjectBridge.jsx'
@@ -1243,6 +1244,7 @@ export default function App() {
   // dirty (kimi on #1008, finding 1). The state drives the ribbon's reasons;
   // the ref drives the refusal.
   const engineDirtyRef = useRef(false)
+  const [resultDrawingKey, setResultDrawingKey] = useState(null)
   const pendingSavesRef = useRef(new Map())
   const onEngineDirtyChange = useCallback((dirty) => {
     engineDirtyRef.current = !!dirty
@@ -1274,6 +1276,7 @@ export default function App() {
     discardPendingRun,
   } = useJobController({
     mock,
+    drawingKey: resultDrawingKey,
     resetKey: `${isEditFixture}:${intakeRetryKey}`,
     formatError: humanizeError,
     // W2b: the RISING edge only, exactly as /try wires it. useJobController
@@ -2723,7 +2726,9 @@ export default function App() {
   // The last run's overlay only describes the version it produced; once the user
   // undoes/redoes to a different version, suppress it so the viewer never shows a
   // stale "deleted" marker over restored geometry (the result receipt still shows).
-  const overlay = (result && !overlayStale) ? (result.overlay || null) : null
+  const resultDrawingMismatch = !!(typeof result?.origin?.drawingKey === 'string' && result.origin.drawingKey.length > 0 && resultDrawingKey && result.origin.drawingKey !== resultDrawingKey)
+  const overlay = (result && !overlayStale) ? (resultDrawingMismatch && result.overlay
+    ? { ...result.overlay, highlight_handles: [] } : (result.overlay || null)) : null
   const applied = versionIntake != null
 
   // Pending-edit ghost (live, §11 nicety): when an open write tool + a picked
@@ -3470,6 +3475,7 @@ export default function App() {
     // no DOM. Local names are aliased HERE, at the call boundary, so the frame
     // never learns App's private vocabulary.
     <DrawingObjectsProvider viewerRef={viewerRef}>
+    <DrawingOriginBridge onChange={setResultDrawingKey} />
     <ConsoleDrawingObjects index={consoleObjectIndex} selectedHandle={selectedHandle} />
     <SurfaceFrame
       scene="console"
@@ -4523,6 +4529,7 @@ export default function App() {
 
         <div className="result-block enter" style={{ '--rank': 2 }} ref={resultBlockRef}>
           <ResultPanel
+            navigation={viewNavigation}
             running={running}
             runStatus={runStatus}
             runProgress={runProgress}
