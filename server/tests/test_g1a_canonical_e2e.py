@@ -7,6 +7,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 import pytest
 from fastapi.testclient import TestClient
@@ -17,7 +18,41 @@ pytestmark = pytest.mark.skipif(not os.environ.get("DATABASE_URL"),
                                 reason="G1A walkthrough requires PostgreSQL")
 
 
-def test_production_shaped_authenticated_restart_safe_real_solve(monkeypatch):
+@pytest.fixture
+def isolated_database(monkeypatch):
+    """Run the walkthrough in its own throwaway database on the caller's server.
+
+    Suites sharing the gate database must never see this test's org, job or
+    identity binding, so the caller's database is never written: a fresh
+    database is created, DATABASE_URL points the in-process store and the worker
+    subprocesses at it, and it is dropped on teardown even when the test fails.
+    """
+    import psycopg
+    from psycopg import sql
+
+    caller_url = os.environ["DATABASE_URL"]
+    name = f"g1a_e2e_{uuid.uuid4().hex[:12]}"
+    parts = urlsplit(caller_url)
+    isolated_url = urlunsplit(parts._replace(path=f"/{name}"))
+
+    with psycopg.connect(caller_url, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+    try:
+        monkeypatch.setenv("DATABASE_URL", isolated_url)
+        from app import app  # noqa: F401  (sets up the leaf_platform alias)
+        from leaf_platform import db as platform_db
+        platform_db.reset_pool()
+        try:
+            yield isolated_url
+        finally:
+            platform_db.reset_pool()
+    finally:
+        with psycopg.connect(caller_url, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)")
+                          .format(sql.Identifier(name)))
+
+
+def test_production_shaped_authenticated_restart_safe_real_solve(monkeypatch, isolated_database):
     from test_wave5 import AUD, ISS, NS, _JWKS_FILE, bearer
     from app import app
     from leaf_platform import canonical_jobs, db as platform_db, store
@@ -31,16 +66,8 @@ def test_production_shaped_authenticated_restart_safe_real_solve(monkeypatch):
         org.org_id, project.project_id, oss_object="g1a/roof.dwg",
         intake_ref="g1a/roof-intake.json", created_by="g1a-test")
     # The server resolves the token's verified `sub` (test_wave5.mint signs
-    # auth0|wave5|<tier>) under authority auth0. That subject is fixed, and an
-    # earlier suite in the shared gate database may have bound it to another
-    # tenant: revoke that binding here so this walkthrough is independent of
-    # what ran before it.
+    # auth0|wave5|<tier>) under authority auth0.
     subject = "auth0|wave5|hosted_pro"
-    with cursor() as cur:
-        cur.execute("UPDATE identity_bindings SET status = 'revoked', revoked_at = NOW() "
-                    "WHERE external_authority = %(authority)s "
-                    "AND external_subject = %(subject)s AND status = 'active'",
-                    {"authority": "auth0", "subject": subject})
     store.create_identity_binding(org.org_id, "auth0", subject, role="owner")
     store.set_project_authority_mode(org.org_id, project.project_id, "postgres_canonical")
 
