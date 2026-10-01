@@ -1221,10 +1221,18 @@ def _column(index):
     return name
 
 
+_XML_FORBIDDEN = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
+
+
 def write_workbook(sheets):
     """A minimal, deterministic .xlsx (stdlib zip and XML, inline strings, a fixed timestamp):
     sheets is [(name, grid)]."""
+    sheets = [(name, [list(row) for row in grid]) for name, grid in sheets]
     names = [name for name, _ in sheets]
+    if (any(_XML_FORBIDDEN.search(name) for name in names)
+            or any(_XML_FORBIDDEN.search(str(text))
+                   for _, grid in sheets for row in grid for text in row)):
+        raise InverterOutputError("workbook text holds a character XML 1.0 cannot carry")
     if not names or len(set(names)) != len(names) or any(len(n) > 31 or re.search(r"[\[\]:*?/\\]", n)
                                                           for n in names):
         raise InverterOutputError("workbook sheet names must be unique, at most 31 characters, no []:*?/\\")
@@ -1249,7 +1257,7 @@ def write_workbook(sheets):
             '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
             '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
             'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>'
-            + "".join(f'<sheet name="{escape(n, {chr(34): "&quot;"})}" sheetId="{i}" r:id="rId{i}"/>'
+            + "".join(f'<sheet name="{escape(n, {chr(34): "&quot;", chr(13): "&#13;"})}" sheetId="{i}" r:id="rId{i}"/>'
                       for i, n in enumerate(names, 1)) + "</sheets></workbook>",
         "xl/_rels/workbook.xml.rels":
             '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
@@ -1263,7 +1271,7 @@ def write_workbook(sheets):
         body = []
         for r, row_cells in enumerate(grid, 1):
             cells = "".join(f'<c r="{_column(c)}{r}" t="inlineStr"><is><t xml:space="preserve">'
-                            f"{escape(str(text))}</t></is></c>" for c, text in enumerate(row_cells) if text != "")
+                            f"{escape(str(text), {chr(13): '&#13;'})}</t></is></c>" for c, text in enumerate(row_cells) if text != "")
             body.append(f'<row r="{r}">{cells}</row>')
         parts[f"xl/worksheets/sheet{i}.xml"] = (
             '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'

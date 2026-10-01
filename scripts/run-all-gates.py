@@ -716,9 +716,9 @@ def build_suites() -> List[Suite]:
         # plugin's workbook over the route-bridged graph, written as CableExport.xlsx; the recorded i8 design rebuilt
         # as a graph with its feeders reproduces the four sheets of the plugin's i9 workbook. Inputs are authored in
         # the file or read from committed evidence, so the floor is the exact count on every runner. COUNTED: 24
-        # tests + 70 more parametrizations = 94.
+        # tests + 70 more parametrizations = 94; sf-xlsx-xml-chars adds 6 cases = 100.
         Suite("server-solar-tool-cable-export", "server tests/test_solar_tool_cable_export.py",
-              "pytest", SERVER, _py_pytest("tests/test_solar_tool_cable_export.py"), 94),
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_cable_export.py"), 100),
         # W5 inverter family (2026-09-24, contract G35): the shared state and delta module and the
         # device, string and output engines (literal ports of the plugin's inverter commands). Inputs
         # are authored in each file, so each floor is the exact count on every runner. MEASURED.
@@ -729,7 +729,7 @@ def build_suites() -> List[Suite]:
         Suite("server-solar-inverter-strings", "server tests/test_solar_inverter_strings.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_inverter_strings.py"), 16),
         Suite("server-solar-inverter-outputs", "server tests/test_solar_inverter_outputs.py",
-              "pytest", SERVER, _py_pytest("tests/test_solar_inverter_outputs.py"), 22),
+              "pytest", SERVER, _py_pytest("tests/test_solar_inverter_outputs.py"), 63),  # sf-xlsx-xml-chars: 61 measured + 2 iterator cases = 63.
         Suite("server-solar-inverter-cabling", "server tests/test_solar_inverter_cabling.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_inverter_cabling.py"), 22),
         Suite("server-solar-inverter-combiner", "server tests/test_solar_inverter_combiner.py",
@@ -858,9 +858,9 @@ def build_suites() -> List[Suite]:
         # zip-bomb-shaped documents refused outright. Hermetic (no fixture beyond
         # the committed capture, no network), so the floor is the exact count on
         # every runner. Floor MEASURED at 114 on the first green run (2026-09-22,
-        # 1.1 s).
+        # 1.1 s). sf-xlsx-xml-chars: COUNTED 129.
         Suite("server-solar-xlsx", "server tests/test_solar_xlsx.py",
-              "pytest", SERVER, _py_pytest("tests/test_solar_xlsx.py"), 114),
+              "pytest", SERVER, _py_pytest("tests/test_solar_xlsx.py"), 129),
         Suite("server-w1-sizing-groups", "server tests/test_w1_sizing_groups.py", "pytest", SERVER,
               _py_pytest("tests/test_w1_sizing_groups.py"), 52),
         # sf-solar-project-readiness: project setup, sizing invalidation, and ZIP binding.

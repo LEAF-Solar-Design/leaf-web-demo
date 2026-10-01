@@ -45,6 +45,30 @@ def _load(name, path):
 
 xlsx = _load("solar_xlsx", ROOT / "server" / "solar_xlsx.py")
 
+
+def test_xml_chars_every_forbidden_code_point_is_refused():
+    forbidden = (set(range(0x00, 0x09)) | {0x0B, 0x0C} | set(range(0x0E, 0x20))
+                 | set(range(0xD800, 0xE000)) | {0xFFFE, 0xFFFF})
+    assert len(forbidden) == 2079
+    for code_point in sorted(forbidden):
+        with pytest.raises(xlsx.XlsxError):
+            xlsx.write_workbook([("S", [(1, ["a" + chr(code_point) + "b"])])])
+
+
+@pytest.mark.parametrize("ch", ["\x00", "\ufffe", "\ud800"])
+def test_xml_chars_forbidden_sheet_name_is_refused(ch):
+    with pytest.raises(xlsx.XlsxError):
+        xlsx.write_workbook([("S" + ch, [(1, ["text"])])])
+
+
+@pytest.mark.parametrize("ch", ["\t", "\n", "\r", "\r\n", "\u0020", "\ud7ff", "\ue000",
+                               "\ufffd", "\U00010000", "\U0010ffff"])
+def test_xml_chars_boundary_characters_round_trip(ch):
+    text = "a" + ch + "b"
+    sheets = xlsx.read_workbook(xlsx.write_workbook([("S", [(1, [text])])]))
+    assert sheets[0].rows[0].cells == [text]
+
+
 # The licensed capture is committed in this repo, so every runner carries it.
 REFERENCE_DIR = ROOT / "docs/parity/evidence/probes/demo-probes-20260923"
 LICENSED_WORKBOOKS = ("leafbomxlsx_demo.xlsx", "leafharness_bom_demo.xlsx",
