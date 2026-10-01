@@ -1,0 +1,47 @@
+{
+  "schema": "leaf.ux-baseline.v1",
+  "id": "synthetic-first-run-v1",
+  "synthetic": true,
+  "description": "Authored synthetic baseline; not a live capture or measured discoverability.",
+  "goldenPathVersion": "1",
+  "goldenUserActionCount": 3,
+  "scope": {
+    "journey": "first-run-open",
+    "state": "drawing-visible",
+    "fixtureVersion": "synthetic-rooftop-v1",
+    "catalogVersion": "synthetic-catalog-v1",
+    "viewport": {
+      "width": 4,
+      "height": 3
+    },
+    "browser": "chromium-fixture",
+    "axeVersion": "4.13.0"
+  },
+  "accessibility": {
+    "violations": [
+      {
+        "id": "color-contrast",
+        "impact": "serious",
+        "nodes": [
+          {
+            "target": [
+              "#retained"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "label",
+        "impact": "serious",
+        "nodes": [
+          {
+            "target": [
+              "#resolved"
+            ]
+          }
+        ]
+      }
+    ],
+    "incomplete": []
+  }
+}
