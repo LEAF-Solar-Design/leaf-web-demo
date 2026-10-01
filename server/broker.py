@@ -1282,14 +1282,104 @@ def active_workitem_for(job_id: Optional[str]) -> Optional[str]:
 _active_workitems.update(_replay_persisted_workitems())
 
 
+def _aps_bind_store() -> Any:
+    """The PostgreSQL job store, or None. Never raises.
+
+    Binding the APS WorkItem to the job row is a PostgreSQL-only dispatch
+    prerequisite (P-079). A legacy or misconfigured job store means no bind,
+    so the run's `on_submitted` callback stays exactly what it was before.
+    """
+    try:
+        import jobs as _jobs
+        if _jobs.job_store_mode() != "postgres":
+            return None
+        return _jobs._pg_store
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _aps_bind_identity(store: Any, job_id: str) -> Optional[Tuple[int, str]]:
+    """Snapshot the job's (attempt, lease owner) at dispatch, or None.
+
+    Read BEFORE submission on purpose: when the lease moves between dispatch and
+    APS accepting the WorkItem, the store's conditional bind refuses this stale
+    identity instead of attaching the WorkItem to the newer attempt. Fails soft:
+    an unreadable row means no bind, never a failed run.
+    """
+    try:
+        rec = store.get(job_id)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[leaf-broker] could not read the job lease for the APS bind of "
+              f"{job_id}: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+        return None
+    if not isinstance(rec, dict):
+        return None
+    attempt = rec.get("attempt")
+    lease = rec.get("lease")
+    owner = lease.get("owner") if isinstance(lease, dict) else None
+    if type(attempt) is not int or attempt < 1 or not isinstance(owner, str) or not owner:
+        return None
+    return attempt, owner
+
+
+class _ApsWorkitemBinder:
+    """`on_submitted` for a PostgreSQL job: record the cancel correlation, then
+    bind the WorkItem to the job row at most once for this attempt.
+
+    Inert for completion: polling stays the only completion mode while
+    callback-primary is refused (_require_supported_live_completion_mode). The
+    bind never raises into the poll; a False (stale attempt, wrong owner, lapsed
+    lease, already bound to another WorkItem) is logged and ignored.
+    """
+
+    def __init__(self, job_id: str, run_token: Optional[str], store: Any,
+                 attempt: int, worker_id: str) -> None:
+        self.job_id = job_id
+        self.run_token = run_token
+        self.store = store
+        self.attempt = attempt
+        self.worker_id = worker_id
+        self.bound: Optional[bool] = None
+        self._claimed = False
+        self._lock = threading.Lock()
+
+    def __call__(self, workitem_id: Optional[str]) -> None:
+        _record_active_workitem(self.job_id, workitem_id, run_token=self.run_token)
+        if not workitem_id:
+            return
+        with self._lock:
+            if self._claimed:
+                return  # once per attempt: a later WorkItem never rebinds
+            self._claimed = True
+        try:
+            bound = self.store.bind_aps_workitem(
+                self.job_id, self.attempt, self.worker_id, str(workitem_id))
+            self.bound = bound is True
+        except Exception as exc:  # noqa: BLE001
+            self.bound = False
+            print(f"[leaf-broker] APS WorkItem bind failed for job {self.job_id}: "
+                  f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+            return
+        if not self.bound:
+            print(f"[leaf-broker] APS WorkItem bind refused for job {self.job_id} "
+                  f"attempt {self.attempt} (stale attempt or not the lease owner)",
+                  file=sys.stderr, flush=True)
+
+
 def _submission_recorder(req: "Union[BrokerRunRequest, BrokerPlanRunRequest]",
                          run_token: Optional[str]):
     """The `on_submitted` callback for one run, or None when there is nothing to
-    correlate. No job_id -> no callback -> the call is byte-for-byte unchanged."""
+    correlate. No job_id -> no callback -> the call is byte-for-byte unchanged.
+    A non-PostgreSQL job store, or no readable live lease, keeps the plain
+    correlation recorder."""
     if not req.job_id:
         return None
-    return functools.partial(_record_active_workitem, req.job_id,
-                             run_token=run_token)
+    store = _aps_bind_store()
+    identity = _aps_bind_identity(store, req.job_id) if store is not None else None
+    if identity is None:
+        return functools.partial(_record_active_workitem, req.job_id,
+                                 run_token=run_token)
+    return _ApsWorkitemBinder(req.job_id, run_token, store, *identity)
 
 
 class BrokerRunRequest(BaseModel):
