@@ -89,7 +89,8 @@ def midpoint_intake(graph, start_ref, end_ref):
     Surrogates are the panel's position in graph["panels"] as eight hex digits, so the
     kernel's handle-order tie break is graph order.
     """
-    panels = {panel["id"]: panel for panel in graph["panels"]}
+    views = single.panel_views(graph)
+    panels = {panel["id"]: panel for panel in views}
     if start_ref not in panels or end_ref not in panels:
         raise GraphValidationError("MISSING_PANEL")
     start, end = panels[start_ref], panels[end_ref]
@@ -103,7 +104,7 @@ def midpoint_intake(graph, start_ref, end_ref):
     ex, ey = extents(frame, start)
     diagonal = math.hypot(ex, ey)
     names, rows = {}, []
-    for index, panel in enumerate(graph["panels"]):
+    for index, panel in enumerate(views):
         if panel["frame_ref"] != frame_ref:
             continue
         name = format(index, "08X")
@@ -116,7 +117,7 @@ def midpoint_intake(graph, start_ref, end_ref):
 
 def _new_string(graph, path, tag_index, label_height_m):
     """The circuit LEAFSTRINGMID commits, on the private copy only, after every refusal ran."""
-    panels = {panel["id"]: panel for panel in graph["panels"]}
+    panels = {panel["id"]: panel for panel in single.panel_views(graph)}
     tags = {string["circuit_tag"] for string in graph["strings"]}
     number = graph["settings"]["string_number"]
     if type(number) is float and number.is_integer():

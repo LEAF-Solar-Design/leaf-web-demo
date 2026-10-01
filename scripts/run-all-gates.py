@@ -361,9 +361,14 @@ def build_suites() -> List[Suite]:
         Suite("server-solar-ground-compact-graph", "server tests/test_solar_ground_compact_graph.py", "pytest",
               SERVER, _py_pytest("tests/test_solar_ground_compact_graph.py"), 41),
         # sf-w3-conversion-graph-consumers: coverage, sync, correction, export currency and settings on
-        # compact Ground frames, each equal to the expansion; 28 cases.
+        # compact Ground frames, each equal to the expansion; 25 cases (sf-w3-string-tools-compact moved
+        # the three add/multi-add/midpoint refusal rows to the string-tools suite as successes).
         Suite("server-solar-ground-compact-consumers", "server tests/test_solar_ground_compact_consumers.py",
-              "pytest", SERVER, _py_pytest("tests/test_solar_ground_compact_consumers.py"), 28),
+              "pytest", SERVER, _py_pytest("tests/test_solar_ground_compact_consumers.py"), 25),
+        # sf-w3-string-tools-compact: the nine string tools on slot panels of compact Ground frames, each
+        # equal to the expansion, rooftop byte-identical; 30 cases.
+        Suite("server-solar-ground-compact-string-tools", "server tests/test_solar_ground_compact_string_tools.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_ground_compact_string_tools.py"), 30),
         # sf-w3-conversion-graph piece 2: the physical head's trackers as compact Ground frames; 87 cases.
         Suite("server-solar-ground-conversion", "server tests/test_solar_ground_conversion.py", "pytest",
               SERVER, _py_pytest("tests/test_solar_ground_conversion.py"), 87),
