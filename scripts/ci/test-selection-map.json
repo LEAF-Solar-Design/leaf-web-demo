@@ -261,6 +261,7 @@
     "server-entity-scope-transport",
     "server-error-guidance-contract",
     "server-exact-write-pins",
+    "server-export-style-fidelity",
     "server-g1a-canonical-e2e",
     "server-glug-adoption",
     "server-glug-executor",
