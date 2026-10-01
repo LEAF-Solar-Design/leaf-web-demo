@@ -108,7 +108,7 @@ def test_cursor_round_trips_created_at_and_message_id() -> None:
     "not-base64-!!!",
     base64.urlsafe_b64encode(b"missing-separator").decode("ascii"),
     base64.urlsafe_b64encode(b"2026-08-19|not-a-uuid").decode("ascii"),
-    base64.urlsafe_b64encode(b"not-a-date|" + str(uuid.uuid4()).encode()).decode("ascii"),
+    base64.urlsafe_b64encode(b"not-a-date|" + b"e6505248-34cc-4cb8-82b8-a44b49ac4e4c").decode("ascii"),
     "",
 ])
 def test_cursor_rejects_malformed_input(garbage: str) -> None:
