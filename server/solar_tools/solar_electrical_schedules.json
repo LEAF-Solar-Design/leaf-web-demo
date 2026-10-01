@@ -15,7 +15,7 @@
   "record": {
     "name": "solar-electrical-schedules",
     "version": "1.0.0",
-    "description": "Write ElectricalSchedules.json: the plugin's equipment, combiner or inverter, and string schedule tables for the stored design.",
+    "description": "Write ElectricalSchedules.json: the plugin's equipment, combiner or inverter, string and feeder schedule tables for the stored design.",
     "kind": "script",
     "family_id": "schedules",
     "engine_op": "solar_electrical_schedules",
