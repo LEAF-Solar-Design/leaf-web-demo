@@ -3099,6 +3099,23 @@ def build_suites() -> List[Suite]:
         Suite("web-link-service-flow", "web managed link service OAuth flow", "script", WEB,
               [_npx(), "--no-install", "playwright", "test", "--config", "playwright.local.config.mjs",
                "e2e/local/link-service-flow.spec.mjs", "e2e/local/trust-state.spec.mjs", "--workers=1"], None),
+        # Browser proofs from studio-lanes-20260930 (lanes C, stu2-d, stu2-h, the
+        # lifecycle panel, the iOS ship surface, the viewer grid toggle). One row
+        # per Playwright config; every config derives its dev server port from
+        # LEAF_NATIVE_GATE_WORKER, and the web-tree lock serialises them in a run.
+        Suite("web-studio-panels-proof", "web campaign, recovery, workspace-create and grid browser proofs",
+              "script", WEB,
+              [_npx(), "--no-install", "playwright", "test", "--config", "playwright.config.mjs",
+               "e2e/campaign-panel.spec.mjs", "e2e/recovery-controls.spec.mjs",
+               "e2e/workspace-create-no-prompt.spec.mjs", "e2e/viewer-grid-toggle.spec.mjs",
+               "--workers=1"], None),
+        Suite("web-lifecycle-panel-proof", "web mounted project lifecycle panel browser proof", "script", WEB,
+              [_npx(), "--no-install", "playwright", "test", "--config", "playwright.lifecycle.config.mjs",
+               "e2e/project-lifecycle-panel.spec.mjs", "--workers=1"], None),
+        Suite("web-ios-ship-surface-proof", "web iOS ship surface flag-off and flag-on browser proof",
+              "script", WEB,
+              [_npx(), "--no-install", "playwright", "test", "--config", "playwright.ios.config.mjs",
+               "e2e/ios-ship-surface.spec.mjs", "--workers=1"], None),
         Suite("web-build", "web production build", "script", WEB,
               [_npm(), "run", "build"], None),
         # --- containerized harness smoke (census #13) — OPT-IN --- #
