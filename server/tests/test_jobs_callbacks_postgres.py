@@ -411,6 +411,144 @@ print(response.json()["completion"])
     assert record["result"]["source"] == "broker-process"
 
 
+def _aps_receipt_job(postgres_authority):
+    from job_pg_store import PostgresJobStore
+    store = PostgresJobStore()
+    # The adapter emits cloud completion provenance, so its durable job must
+    # carry the APS execution context, just like the broker callback fixture.
+    job_id = jobs.submit_job(
+        "aps-" + uuid.uuid4().hex, TOOL, {}, "demo", True,
+        project_id="project-" + uuid.uuid4().hex,
+        idempotency_key=uuid.uuid4().hex,
+        authority_mode="postgres_canonical",
+    )
+    now = time.time()
+    # Explicit long lease: process startup on a saturated host is not the subject.
+    assert store.claim(job_id, "aps-owner", now, now + 300, 3) == 1
+    assert store.bind_aps_workitem(job_id, 1, "aps-owner", "wi-" + job_id)
+    return store, job_id
+
+
+def test_aps_receipts_race_restart_and_terminal_replay(postgres_authority, monkeypatch):
+    from da import aps_callback_adapter as adapter
+    from job_pg_store import PostgresJobStore
+    from fastapi.testclient import TestClient
+    db, _ = postgres_authority
+    store, job_id = _aps_receipt_job(postgres_authority)
+    secret = b"aps-postgres-receipt-secret"
+    monkeypatch.setenv("LEAF_CALLBACK_SECRET", secret.decode())
+    barrier = threading.Barrier(2)
+
+    def translate(nonce):
+        barrier.wait(timeout=10)
+        now = time.time()
+        return adapter.translate_authoritative(
+            adapter.ApsWorkItemCompletion(job_id, "wi-" + job_id, 1, "success", nonce, now + 300),
+            b"persisted-output", job_id=job_id, store=PostgresJobStore(), secret=secret, now=now)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first, second = list(pool.map(translate, ("delivery-a", "delivery-b")))
+    assert first.body == second.body and first.headers() == second.headers()
+    with db.cursor() as cur:
+        cur.execute("SELECT count(*) AS count FROM aps_completion_receipts WHERE job_id = %s", (job_id,))
+        assert cur.fetchone()["count"] == 1
+
+    script = r'''
+import json, sys, time
+sys.path.insert(0, sys.argv[1])
+from da import aps_callback_adapter as adapter
+from job_pg_store import PostgresJobStore
+now = time.time()
+completion = adapter.ApsWorkItemCompletion(sys.argv[2], "wi-" + sys.argv[2], 1,
+                                         "success", "restart", now + 300)
+receipt = adapter.translate_authoritative(completion, b"persisted-output",
+    job_id=sys.argv[2], store=PostgresJobStore(), secret=sys.argv[3].encode(), now=now)
+print(json.dumps({"body": receipt.body.hex(), "headers": receipt.headers()}))
+'''
+    process = subprocess.run(
+        [sys.executable, "-c", script, str(SERVER_DIR), job_id, secret.decode()],
+        capture_output=True, text=True, timeout=45, env=dict(os.environ))
+    assert process.returncode == 0, process.stderr
+    recovered = json.loads(process.stdout.strip().splitlines()[-1])
+    assert recovered == {"body": first.body.hex(), "headers": first.headers()}
+
+    before = store.get(job_id)
+    with pytest.raises(adapter.AdapterError, match="bad_completion_guard"):
+        adapter.translate_authoritative(
+            adapter.ApsWorkItemCompletion(job_id, "wi-" + job_id, 1, "success", "changed", time.time() + 300),
+            b"different-output", job_id=job_id, store=store, secret=secret, now=time.time())
+    assert store.get(job_id) == before
+    with TestClient(broker.app) as client:
+        response = client.post("/da/callback", content=first.body, headers=first.headers())
+        assert response.status_code == 200, response.text
+        assert response.json()["completion"] == "applied"
+        terminal = store.get(job_id)
+        replay = client.post("/da/callback", content=second.body, headers=second.headers())
+        assert replay.status_code != 200
+    assert store.get(job_id) == terminal
+    assert terminal["status"] == "complete"
+    assert terminal["result"]["execution_provenance"] == {
+        "attempt": 1, "execution_path": "cloud", "workitem_id": "wi-" + job_id,
+    }
+    # Recovery after terminalization cannot mint a fresh nonce/result.
+    now = time.time()
+    recovered = adapter.translate_authoritative(
+        adapter.ApsWorkItemCompletion(job_id, "wi-" + job_id, 1, "success", "terminal", now + 300),
+        b"persisted-output", job_id=job_id, store=store, secret=secret, now=now)
+    assert recovered.body == first.body and recovered.headers() == first.headers()
+
+
+def test_aps_receipt_identity_and_lease_refusals_leave_authority_unchanged(postgres_authority):
+    from da import aps_callback_adapter as adapter
+    db, _ = postgres_authority
+    store, job_id = _aps_receipt_job(postgres_authority)
+    secret = b"aps-refusal-secret"
+
+    def translate(attempt=1, workitem=None, identity=None):
+        now = time.time()
+        return adapter.translate_authoritative(
+            adapter.ApsWorkItemCompletion(identity or job_id, workitem or "wi-" + job_id,
+                                         attempt, "success", "refusal", now + 300),
+            b"output", job_id=job_id, store=store, secret=secret, now=now)
+
+    before = store.get(job_id)
+    # Mint only a candidate to exercise the locked store's recheck separately
+    # from the adapter's preliminary context validation.
+    now = time.time()
+    candidate = adapter.translate(
+        adapter.ApsWorkItemCompletion(job_id, "wi-" + job_id, 1, "success", "candidate", now + 300),
+        b"output", job_id=job_id, job_attempt=1, job_workitem_id="wi-" + job_id,
+        job_lease_expiry=now + 300, secret=secret, now=now,
+        reserve_completion=lambda *args: True)
+    for args, reason in (({"identity": "another-job"}, "wrong_job"),
+                         ({"attempt": 2}, "wrong_attempt"),
+                         ({"workitem": "another-workitem"}, "wrong_workitem")):
+        with pytest.raises(adapter.AdapterError, match=reason):
+            translate(**args)
+        assert store.get(job_id) == before
+        assert store.read_aps_completion(job_id, 1) is None
+    assert not store.bind_aps_workitem(job_id, 1, "another-owner", "replacement")
+    assert not store.bind_aps_workitem(job_id, 1, "aps-owner", "replacement")
+    with db.transaction() as conn:
+        conn.execute("UPDATE async_jobs SET lease_expires_at = %s WHERE job_id = %s",
+                     (time.time() - 1, job_id))
+    expired = store.get(job_id)
+    with pytest.raises(ValueError, match="expired_lease"):
+        store.reserve_aps_completion(job_id, 1, "wi-" + job_id, candidate)
+    with pytest.raises(adapter.AdapterError, match="expired_lease"):
+        translate()
+    assert store.get(job_id) == expired
+    assert store.read_aps_completion(job_id, 1) is None
+    assert store.claim(job_id, "new-owner", time.time(), time.time() + 300, 3) == 2
+    assert store.bind_aps_workitem(job_id, 2, "new-owner", "wi-new")
+    with pytest.raises(ValueError, match="wrong_attempt"):
+        store.reserve_aps_completion(job_id, 1, "wi-" + job_id, candidate)
+    with pytest.raises(adapter.AdapterError, match="wrong_workitem|wrong_attempt"):
+        translate()
+    assert store.read_aps_completion(job_id, 1) is None
+    assert store.read_aps_completion(job_id, 2) is None
+
+
 def test_real_postgres_capability_job_context_and_operation_replay(
     postgres_authority, monkeypatch, tmp_path,
 ):

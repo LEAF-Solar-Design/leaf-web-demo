@@ -50,6 +50,46 @@ def callback_env(monkeypatch, tmp_path):
     monkeypatch.setenv("JOBS_DB", str(tmp_path / "jobs.db"))
 
 
+def test_authoritative_entry_reconstructs_receipt_and_rechecks_reservation():
+    saved = {}
+
+    class Authority:
+        def aps_completion_context(self, job_id):
+            assert job_id == "job-1"
+            return {"attempt": 2, "workitem_attempt": 2, "workitem_id": "wi-1",
+                    "lease_expires_at": NOW + 60}
+
+        def read_aps_completion(self, job_id, attempt):
+            return saved.get((job_id, attempt))
+
+        def reserve_aps_completion(self, job_id, attempt, workitem_id, envelope):
+            assert workitem_id == "wi-1"
+            return saved.setdefault((job_id, attempt), {
+                "body": envelope.body, "timestamp": envelope.timestamp,
+                "nonce": envelope.nonce, "signature": envelope.signature,
+            })
+
+    first = adapter.translate_authoritative(
+        _completion(), b"output", job_id="job-1", store=Authority(), secret=SECRET, now=NOW)
+    second = adapter.translate_authoritative(
+        _completion(nonce="redelivery"), b"output", job_id="job-1", store=Authority(),
+        secret=SECRET, now=NOW + 120)
+    assert second.body == first.body and second.headers() == first.headers()
+    with pytest.raises(adapter.AdapterError, match="bad_completion_guard"):
+        adapter.translate_authoritative(
+            _completion(), b"changed", job_id="job-1", store=Authority(),
+            secret=SECRET, now=NOW + 120)
+    assert saved[("job-1", 2)]["body"] == first.body
+
+    class Reclaimed(Authority):
+        def reserve_aps_completion(self, *args):
+            raise ValueError("wrong_attempt")
+
+    with pytest.raises(adapter.AdapterError, match="wrong_attempt"):
+        adapter.translate_authoritative(
+            _completion(), b"output", job_id="job-1", store=Reclaimed(), secret=SECRET, now=NOW)
+
+
 def _win(job_id, attempt, envelope=None):
     """Reservation that always succeeds, for tests whose subject is NOT the
     duplicate check. Returns True = "you won the claim"."""

@@ -276,6 +276,50 @@ def _is_our_receipt(envelope: "CallbackEnvelope", payload: Dict[str, Any],
         return False
 
 
+def translate_authoritative(
+    completion: ApsWorkItemCompletion, output: Optional[bytes], *,
+    job_id: str, store: Any, secret: bytes, now: float,
+) -> CallbackEnvelope:
+    """Durable integration seam; no callback-primary activation or dispatch.
+
+    Dispatch must first call the store's bind_aps_workitem with its live owner.
+    Context reads are advisory: reservation rechecks identity under the job lock.
+    """
+    if not _is_finite_number(now):
+        raise AdapterError("bad_clock")
+    # Snapshot before calling authority; never let changing properties retarget it.
+    claimed = ApsWorkItemCompletion(
+        completion.job_id, completion.workitem_id, completion.attempt,
+        completion.status, completion.nonce, completion.lease_expiry,
+    )
+    context = store.aps_completion_context(job_id)
+    if context is None:
+        raise AdapterError("missing_job")
+    if context["workitem_attempt"] != context["attempt"]:
+        raise AdapterError("wrong_workitem")
+    recovered = store.read_aps_completion(job_id, context["attempt"])
+
+    def reserve(identity, attempt, envelope):
+        try:
+            row = store.reserve_aps_completion(
+                identity, attempt, context["workitem_id"], envelope)
+        except ValueError as exc:
+            raise AdapterError(str(exc)) from exc
+        return CallbackEnvelope(
+            body=bytes(row["body"]), timestamp=row["timestamp"],
+            nonce=row["nonce"], signature=row["signature"],
+        )
+
+    # An existing reservation is recoverable even after its lease expires. The
+    # locked reservation still fences against a changed attempt or WorkItem.
+    return translate(
+        claimed, output, job_id=job_id, job_attempt=context["attempt"],
+        job_workitem_id=context["workitem_id"],
+        job_lease_expiry=now + 1 if recovered is not None else context["lease_expires_at"],
+        secret=secret, now=now, reserve_completion=reserve,
+    )
+
+
 def translate(
     completion: ApsWorkItemCompletion,
     output: Optional[bytes],

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -183,6 +184,92 @@ class PostgresJobStore:
             cur.execute("SELECT * FROM async_jobs WHERE job_id = %s", (job_id,))
             row = cur.fetchone()
         return _record(row) if row else None
+
+    def bind_aps_workitem(
+        self, job_id: str, attempt: int, worker_id: str, workitem_id: str,
+    ) -> bool:
+        """Dispatch prerequisite: bind once, only by the current live owner."""
+        if type(attempt) is not int or attempt < 1:
+            raise ValueError("wrong_attempt")
+        if type(workitem_id) is not str or not workitem_id.strip() or len(workitem_id) > 512:
+            raise ValueError("invalid APS WorkItem identity")
+        with _db().transaction() as conn:
+            row = conn.execute(
+                "UPDATE async_jobs SET aps_workitem_id = %s, aps_workitem_attempt = %s "
+                "WHERE job_id = %s AND attempt = %s AND status = 'running' "
+                "AND progress <> 'closed' AND lease_owner = %s "
+                "AND lease_expires_at > EXTRACT(EPOCH FROM clock_timestamp()) "
+                "AND (aps_workitem_attempt IS DISTINCT FROM attempt OR aps_workitem_id = %s) "
+                "RETURNING job_id",
+                (workitem_id, attempt, job_id, attempt, worker_id, workitem_id),
+            ).fetchone()
+        return row is not None
+
+    def aps_completion_context(self, job_id: str) -> Optional[Dict[str, Any]]:
+        with _db().cursor() as cur:
+            cur.execute(
+                "SELECT job_id, attempt, aps_workitem_id AS workitem_id, "
+                "aps_workitem_attempt AS workitem_attempt, lease_expires_at "
+                "FROM async_jobs WHERE job_id = %s", (job_id,),
+            )
+            return cur.fetchone()
+
+    def read_aps_completion(self, job_id: str, attempt: int) -> Optional[Dict[str, Any]]:
+        with _db().cursor() as cur:
+            cur.execute(
+                "SELECT * FROM aps_completion_receipts WHERE job_id = %s AND attempt = %s",
+                (job_id, attempt),
+            )
+            row = cur.fetchone()
+        if row is not None:
+            row = dict(row)
+            row["body"] = bytes(row["body"])
+        return row
+
+    def reserve_aps_completion(
+        self, job_id: str, attempt: int, workitem_id: str, envelope: Any,
+    ) -> Dict[str, Any]:
+        """Serialize with reclaim/close/terminalization; never replace a receipt.
+
+        Recovery may outlive the lease, but cannot retarget a newer attempt.
+        Envelope comparison/signature verification belongs to the adapter.
+        """
+        with _db().transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM async_jobs WHERE job_id = %s FOR UPDATE", (job_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("missing_job")
+            if type(attempt) is not int or attempt < 1 or row["attempt"] != attempt:
+                raise ValueError("wrong_attempt")
+            if row["aps_workitem_attempt"] != attempt or row["aps_workitem_id"] != workitem_id:
+                raise ValueError("wrong_workitem")
+            existing = conn.execute(
+                "SELECT * FROM aps_completion_receipts WHERE job_id = %s AND attempt = %s",
+                (job_id, attempt),
+            ).fetchone()
+            if existing is not None:
+                return {**existing, "body": bytes(existing["body"])}
+            if row["status"] != "running" or row["progress"] == "closed":
+                raise ValueError("not_running")
+            clock = conn.execute(
+                "SELECT EXTRACT(EPOCH FROM clock_timestamp()) AS now",
+            ).fetchone()["now"]
+            expiry = row["lease_expires_at"]
+            if not row["lease_owner"] or expiry is None or not math.isfinite(expiry) or expiry <= clock:
+                raise ValueError("expired_lease")
+            payload = json.loads(envelope.body)
+            if (payload.get("job_id") != job_id or type(payload.get("attempt")) is not int
+                    or payload["attempt"] != attempt or payload.get("workitem_id") != workitem_id):
+                raise ValueError("bad_completion_guard")
+            saved = conn.execute(
+                "INSERT INTO aps_completion_receipts "
+                "(job_id, attempt, workitem_id, body, timestamp, nonce, signature) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                (job_id, attempt, workitem_id, envelope.body, envelope.timestamp,
+                 envelope.nonce, envelope.signature),
+            ).fetchone()
+            return {**saved, "body": bytes(saved["body"])}
 
     def record_first_delivery(self, job_id: str, now: float) -> Optional[float]:
         """Atomically stamp a terminal job once across application processes."""
