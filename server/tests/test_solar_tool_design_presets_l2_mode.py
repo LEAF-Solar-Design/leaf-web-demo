@@ -5,8 +5,9 @@ Settings.Default (DrawingPropertiesJson.cs:608-623), so a LEAFPROFILE Swap to a 
 mode changes the drawing's mode. The graph contract ties the inverters to that mode: in L2 mode every
 inverter carries an equipment_type (EQUIPMENT_TYPE_REQUIRED), in L1 mode none does (L2_MODE_REQUIRED),
 and an untyped inverter is never an L2. So the flag alone cannot change (solar-settings' own boolean
-edit is refused, last row). The frozen policy (server/solar_preset_sync.py): a preset whose mode
-equals the drawing's changes nothing; entering L2 mode types every inverter as an unconnected string
+edit takes the same rule since sf-w2-settings-l2-collectors, last row before the rail). The frozen
+policy (server/solar_preset_sync.py): a preset whose mode equals the drawing's changes nothing;
+entering L2 mode types every inverter as an unconnected string
 inverter (equipment_type "string_inverter", l2_ref null) in the same commit, and the graph is
 validated; leaving L2 mode removes equipment_type and l2_ref, and is refused with
 DESIGN_PRESET_L2_EQUIPMENT_PRESENT, before anything is written, when any inverter is a combiner box or
@@ -18,8 +19,8 @@ electrical bridge reading the typed inverter as the same device; every refusal w
 untouched; matching modes commit and change no entity; the read back into Create and List; Swap
 both ways and the delete of the active preset; a duplicate inverter number refused by validation;
 the mode with the installation design on a drawing with no frame; the refusal order; solar-settings
-left as it was; the rail both ways. Inputs are authored here or are committed evidence, so every
-count and digest is exact.
+typing the same inverters; the rail both ways. Inputs are authored here or are committed evidence,
+so every count and digest is exact.
 """
 import copy
 import json
@@ -376,12 +377,14 @@ def test_presets_l2_mode_refusal_order(graph):
     assert refusal(value, leave) == PRESENT
 
 
-def test_presets_l2_mode_solar_settings_unchanged(graph):
-    # A boolean assignment alone cannot implement the mode: solar-settings still refuses it.
-    with pytest.raises(GraphValidationError) as caught:
-        solar_local_graph._load_builtin("solar-settings").run(
-            copy.deepcopy(graph), {"expected_rev": graph["rev"], "changes": {"use_l2_collectors": True}})
-    assert caught.value.code == "EQUIPMENT_TYPE_REQUIRED"
+def test_presets_l2_mode_solar_settings_takes_the_same_rule(graph):
+    # solar-settings' own boolean edit retypes the inverters the same way (sf-w2-settings-l2-collectors).
+    by_settings = solar_local_graph._load_builtin("solar-settings").run(
+        copy.deepcopy(graph), {"expected_rev": graph["rev"], "changes": {"use_l2_collectors": True}})
+    by_preset = create(graph, "Alpha", True)
+    assert by_settings["settings"]["use_l2_collectors"] is by_preset["settings"]["use_l2_collectors"] is True
+    assert [{k: v for k, v in i.items() if k != "provenance"} for i in by_settings["inverters"]] == \
+        [{k: v for k, v in i.items() if k != "provenance"} for i in by_preset["inverters"]]
 
 
 # ------------------------------------------------------------------------ the rail --

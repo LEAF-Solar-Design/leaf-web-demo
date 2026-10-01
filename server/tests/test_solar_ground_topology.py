@@ -339,16 +339,18 @@ def test_ground_topology_store_publish_reopen(graph, drawing):
     assert reopened["settings"]["use_l2_collectors"] is True
 
 
-def test_ground_topology_settings_builtin_admits_mode_only_with_topology(graph):
+def test_ground_topology_settings_builtin_moves_the_mode_with_the_equipment(graph):
+    # Entering L2 mode types every inverter; leaving it with a combiner box or a central inverter is
+    # refused (sf-w2-settings-l2-collectors, the design-preset rule in solar_preset_sync.py).
     spec = importlib.util.spec_from_file_location("solar_settings", SERVER / "builtins" / "solar_settings.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     empty = bare(graph)
     empty["settings"]["use_l2_collectors"] = False
     for value, mode, code in (
-        (graph, True, "EQUIPMENT_TYPE_REQUIRED"),
+        (graph, True, None),
         (empty, True, None),
-        (topology_of(graph), False, "L2_MODE_REQUIRED"),
+        (topology_of(graph), False, "DESIGN_PRESET_L2_EQUIPMENT_PRESENT"),
     ):
         intake = deepcopy(value)
         params = {"expected_rev": 0, "changes": {"use_l2_collectors": mode}}
