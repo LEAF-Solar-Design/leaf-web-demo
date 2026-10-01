@@ -24,6 +24,7 @@ import platform as _stdlib_platform  # noqa: E402
 _stdlib_platform.python_implementation()
 
 import sys  # noqa: E402
+from datetime import datetime, timezone  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 import pytest  # noqa: E402
@@ -34,8 +35,22 @@ if str(SERVER_DIR) not in sys.path:
 
 import agent_ledger  # noqa: E402
 
-TURN_LINE = ('{"kind":"turn","ts":"2026-09-01T00:00:00.000Z","tenant_id":'
-             '"tenant-a","cost_tokens":1250,"usd_est":0.03}\n')
+# aggregate() counts the current UTC calendar month, so a turn pinned at a fixed date leaves the cycle
+# the day the month turns (a 2026-09-01 stamp failed every run from 2026-10-01). The module's clock is
+# frozen for every row and the turn is stamped from the same instant, so no run can straddle a month end.
+FROZEN_NOW = datetime(2026, 9, 15, 12, 0, 0, tzinfo=timezone.utc)
+
+
+class _FrozenDatetime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return FROZEN_NOW if tz is not None else FROZEN_NOW.replace(tzinfo=None)
+
+
+def _turn_line() -> str:
+    ts = FROZEN_NOW.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    return ('{"kind":"turn","ts":"' + ts + '","tenant_id":'
+            '"tenant-a","cost_tokens":1250,"usd_est":0.03}\n')
 
 
 @pytest.fixture(autouse=True)
@@ -47,6 +62,7 @@ def agent_env(tmp_path, monkeypatch):
     monkeypatch.setenv("LEAF_BROKER_STORE", "legacy")
     monkeypatch.setenv("LEAF_AGENT_TENANTS_FILE", str(tmp_path / "agent_tenants.json"))
     monkeypatch.setenv("LEAF_USAGE_LEDGER", str(tmp_path / "broker_ledger.jsonl"))
+    monkeypatch.setattr(agent_ledger, "datetime", _FrozenDatetime)
     yield tmp_path
 
 
@@ -67,7 +83,7 @@ def client():
 def _ledger(tmp_path, monkeypatch, *, exists: bool) -> Path:
     target = tmp_path / "agent_ledger.jsonl"
     if exists:
-        target.write_text(TURN_LINE, encoding="utf-8")
+        target.write_text(_turn_line(), encoding="utf-8")
     monkeypatch.setenv("LEAF_AGENT_LEDGER", str(target))
     return target
 
