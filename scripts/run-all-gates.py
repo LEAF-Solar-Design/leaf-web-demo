@@ -24,7 +24,9 @@ Special handling, all documented on the scoreboard:
     file is backed up into the log dir first.
   * the platform suite needs a reachable Postgres (DATABASE_URL, or
     platform/.env.local). If it is unreachable the suite is SKIPPED with a
-    reason rather than reported red.
+    reason rather than reported red, unless LEAF_GATE_REQUIRE_DATABASE=1
+    (native CI), which makes it a FAIL row. LEAF_GATE_DATABASE_URL hands a
+    DSN to the db_gated and uses_database suites only, as their DATABASE_URL.
   * harness `npm test` + `npx tsc --noEmit` + `npx tsc -p tsconfig.build.json`
     are included.
   * `web-demo-gate` shells out to dispatch/run-local-ci.sh's demo-gate bucket,
@@ -151,6 +153,16 @@ class Suite:
     allowed_vitest_skips: tuple[tuple[str, int], ...] = ()
     reset_authored: bool = False   # reset authored_tools.json before this suite
     db_gated: bool = False         # SKIP unless the platform DB is reachable
+    # Receives the gate's DSN as DATABASE_URL and holds the postgres lock. Only
+    # these suites (and db_gated ones) see LEAF_GATE_DATABASE_URL: an ambient
+    # DATABASE_URL flips unrelated code into PostgreSQL mode (customization
+    # binding resolution, platform_link), so CI never exports it globally.
+    uses_database: bool = False
+    # Skip reasons tolerated ONLY while no gate database reached this suite (a
+    # DB-less checkout or the hermetic GitHub test-gate). Once the gate injects
+    # its DSN, a skip with one of these reasons FAILS the suite, so native CI,
+    # which starts its own PostgreSQL, can never go green on a skipped proof.
+    database_skip_reasons: tuple[str, ...] = ()
     opt_in_env: str = ""           # SKIP unless this env flag is truthy (opt-in suite)
     timeout_s: int = 900           # per-attempt subprocess timeout
 
@@ -797,8 +809,8 @@ def build_suites() -> List[Suite]:
         Suite("server-w1-bound-proposal", "server tests/test_w1_bound_proposal.py", "pytest", SERVER,
               _py_pytest("tests/test_w1_bound_proposal.py"), 15),
         Suite("server-w1-commit-solve-adapter", "server tests/test_w1_commit_solve_adapter.py", "pytest", SERVER,
-              _py_pytest("tests/test_w1_commit_solve_adapter.py"), 50,
-              allowed_skip_reasons=(r"DATABASE_URL is required for PostgreSQL job tests",)),
+              _py_pytest("tests/test_w1_commit_solve_adapter.py"), 50, uses_database=True,
+              database_skip_reasons=(r"DATABASE_URL is required for PostgreSQL job tests",)),
         Suite("server-w1-solve-parity", "server tests/test_w1_solve_parity.py", "pytest", SERVER,
               _py_pytest("tests/test_w1_solve_parity.py"), 11),
         Suite("server-w1-grid-split", "server tests/test_w1_grid_split.py", "pytest", SERVER,
@@ -1139,7 +1151,7 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_jobs_reaper_start_race.py"), 2),
         Suite("server-jobs-tenant-inflight-cap", "server tests/test_jobs_tenant_inflight_cap.py",
               "pytest", SERVER, _py_pytest("tests/test_jobs_tenant_inflight_cap.py"), 18,
-              allowed_skip_reasons=(
+              uses_database=True, database_skip_reasons=(
                   r"DATABASE_URL is required for PostgreSQL job tests",)),
         Suite("server-canonical-worker", "server tests/test_canonical_worker.py", "pytest",
               SERVER, _py_pytest("tests/test_canonical_worker.py"), 25),
@@ -1170,11 +1182,13 @@ def build_suites() -> List[Suite]:
         # tests need no database, and its DB-only tests skip themselves via
         # @requires_database. Gating the whole suite would hide the un-gated half on
         # a clean checkout. Four structural tests execute without a database; the
-        # remaining race tests are named skips until DATABASE_URL is supplied.
+        # race tests run against the gate's DSN (uses_database). Their DATABASE_URL
+        # skip is tolerated only on a DB-less host: native CI starts its own
+        # PostgreSQL, so a race test that skips there is a FAIL, never a quiet green.
         Suite("server-drawing-authority-postgres",
               "server tests/test_drawing_upload_authority_postgres.py", "pytest",
               SERVER, _py_pytest("tests/test_drawing_upload_authority_postgres.py"), 4,
-              allowed_skip_reasons=(
+              uses_database=True, database_skip_reasons=(
                   r"PostgreSQL race test requires explicit DATABASE_URL",)),
         Suite("server-entitlements", "server tests/test_entitlements.py", "pytest", SERVER,
               _py_pytest("tests/test_entitlements.py"), 26),
@@ -1536,23 +1550,23 @@ def build_suites() -> List[Suite]:
                   r"environment\.",)),
         Suite("server-agent-gate-postgres", "server tests/test_agent_gate_postgres.py",
               "pytest", SERVER, _py_pytest("tests/test_agent_gate_postgres.py"), 14,
-              allowed_skip_reasons=(r"DATABASE_URL is not set",)),
+              uses_database=True, database_skip_reasons=(r"DATABASE_URL is not set",)),
         Suite("server-agent-ops-postgres", "server tests/test_agent_ops_postgres.py",
               "pytest", SERVER, _py_pytest("tests/test_agent_ops_postgres.py"), 6,
-              allowed_skip_reasons=(r"DATABASE_URL is not set",)),
+              uses_database=True, database_skip_reasons=(r"DATABASE_URL is not set",)),
         Suite("server-broker-pg-store", "server tests/test_broker_pg_store.py",
               "pytest", SERVER, _py_pytest("tests/test_broker_pg_store.py"), 28,
-              allowed_skip_reasons=(r"DATABASE_URL is not configured",)),
+              uses_database=True, database_skip_reasons=(r"DATABASE_URL is not configured",)),
         Suite("server-broker-usage-postgres", "server tests/test_broker_usage_postgres.py",
               "pytest", SERVER, _py_pytest("tests/test_broker_usage_postgres.py"), 4),
         Suite("server-guest-caps-postgres", "server tests/test_guest_caps_postgres.py",
               "pytest", SERVER, _py_pytest("tests/test_guest_caps_postgres.py"), 11,
-              allowed_skip_reasons=(
+              uses_database=True, database_skip_reasons=(
                   r"DATABASE_URL is required for PostgreSQL concurrency tests",)),
         Suite("server-jobs-callbacks-postgres",
               "server tests/test_jobs_callbacks_postgres.py", "pytest", SERVER,
               _py_pytest("tests/test_jobs_callbacks_postgres.py"), 1,
-              allowed_skip_reasons=(
+              uses_database=True, database_skip_reasons=(
                   r"DATABASE_URL is required for PostgreSQL job tests",)),
         # No allowed_skip_reasons ON PURPOSE. This suite proves the terminal write
         # and its platform mirror share one transaction, using a fake connection
@@ -1573,7 +1587,7 @@ def build_suites() -> List[Suite]:
         # four of main's new tests disappear without reddening the gate.
         Suite("server-session-store-postgres", "server tests/test_session_store_postgres.py",
               "pytest", SERVER, _py_pytest("tests/test_session_store_postgres.py"), 13,
-              allowed_skip_reasons=(
+              uses_database=True, database_skip_reasons=(
                   r"PostgreSQL integration test requires explicit DATABASE_URL",)),
         # The one module in the 19 with NO offline coverage: every test needs a
         # live DB. Registering it plain would report "1 skipped" as a PASS -- the
@@ -1593,7 +1607,7 @@ def build_suites() -> List[Suite]:
         Suite("server-reconcile-sessions-authority",
               "server tests/test_reconcile_sessions_authority.py", "pytest",
               SERVER, _py_pytest("tests/test_reconcile_sessions_authority.py"), 46,
-              allowed_skip_reasons=(
+              uses_database=True, database_skip_reasons=(
                   r"PostgreSQL integration test requires explicit DATABASE_URL",)),
         # Floor 8, re-measured when the session_annex dependency was added. It
         # was 7; the earlier added case is the one that stops an inferred default
@@ -1880,9 +1894,11 @@ def build_suites() -> List[Suite]:
         # verification re-derives; pinned by
         # test_signature_verifies_when_countersigned_with_a_non_utc_now.
         # 247 was measured both ways -- TimeZone=America/Chicago and UTC.
-        # Raising this cannot red-fail CI: the suite is db_gated and the
-        # test-gate workflow is hermetic, so run_suite returns SKIP with
-        # "platform DB unreachable" before any executed-count check runs.
+        # The GitHub test-gate workflow is hermetic, so there run_suite returns
+        # SKIP with "platform DB unreachable" before any executed-count check.
+        # Native CI (.codebuild/ci.sh) starts a fresh PostgreSQL per build and
+        # sets LEAF_GATE_REQUIRE_DATABASE=1, so this floor IS enforced there
+        # against a pristine database, and an unreachable DB is a FAIL row.
         Suite("platform", "platform/tests (Postgres)", "pytest", REPO_PARENT,
               _py_pytest(f"{repo_name}/platform/tests"), 247, db_gated=True),
         # W4h S1 rows: eight store (rows 1-7 and 13), five router (rows 8-11 and 14), one static.
@@ -1957,7 +1973,7 @@ def build_suites() -> List[Suite]:
                  f"{repo_name}/platform/tests/test_identity_display_name_static.py",
                  f"{repo_name}/platform/tests/test_binding_grant_static.py",
                  f"{repo_name}/platform/tests/test_binding_grant_issuance_static.py"], 208,
-              allowed_skip_reasons=(
+              uses_database=True, database_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
         # The committed replay fixture is dependency-free and catches hash or
         # replay drift before a PR reaches the GitHub simulator-gate workflow.
@@ -2576,7 +2592,9 @@ def build_suites() -> List[Suite]:
               # were building at the time. The count is the contract; the
               # clock is not.
               # 2026-09-09 app pause verification reported 87 executed self-test rows, formerly 85.
-              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 87),
+              # +6 (2026-10-01, ephemeral PostgreSQL lane): the gate-DSN, required-database
+              # and database-catalog tests, none environment-gated.
+              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 93),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the
@@ -2876,8 +2894,8 @@ def build_suites() -> List[Suite]:
         Suite("server-cost-pooled", "server tests/test_cost_pooled.py", "pytest", SERVER,
               _py_pytest("tests/test_cost_pooled.py"), 13),
         Suite("server-cad-timing-client-delivery", "server tests/test_cad_timing_client_delivery.py", "pytest", SERVER,
-              _py_pytest("tests/test_cad_timing_client_delivery.py"), 6,
-              allowed_skip_reasons=(r"DATABASE_URL is required for PostgreSQL job tests",)),
+              _py_pytest("tests/test_cad_timing_client_delivery.py"), 6, uses_database=True,
+              database_skip_reasons=(r"DATABASE_URL is required for PostgreSQL job tests",)),
         Suite("server-cad-versions", "server tests/test_cad_versions.py", "pytest", SERVER,
               _py_pytest("tests/test_cad_versions.py"), 21),
         Suite("server-campaign-native-developer-bridge", "server tests/test_campaign_native_developer_bridge.py", "pytest", SERVER,
@@ -3096,6 +3114,10 @@ _ENV_DENYLIST = (
     # gate-runner fault injection (see run_suite) must never leak into nested
     # runners or suite children.
     "LEAF_GATE_FAULT_INJECT",
+    # The gate's own database contract. run_suite injects the DSN as
+    # DATABASE_URL into uses_database/db_gated suites only; every other child
+    # stays hermetic, and no nested runner inherits the require flag.
+    "LEAF_GATE_DATABASE_URL", "LEAF_GATE_REQUIRE_DATABASE",
 )
 
 
@@ -3376,24 +3398,44 @@ def _dsn_from_env_local() -> str:
     return ""
 
 
+def gate_database_url() -> str:
+    """The DSN Postgres suites receive: LEAF_GATE_DATABASE_URL (the native CI's
+    ephemeral server) wins over an ambient DATABASE_URL, which wins over
+    platform/.env.local. '' when none resolves."""
+    return (os.environ.get("LEAF_GATE_DATABASE_URL", "").strip()
+            or os.environ.get("DATABASE_URL", "").strip()
+            or _dsn_from_env_local())
+
+
+def database_required() -> bool:
+    """LEAF_GATE_REQUIRE_DATABASE=1 (native CI) turns an unreachable database
+    into a FAIL row for every db_gated and uses_database suite, never a SKIP."""
+    return os.environ.get("LEAF_GATE_REQUIRE_DATABASE", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
 def probe_platform_db() -> tuple[bool, str, str]:
     """(reachable, message, dsn). The dsn is returned so db_gated suites can
     receive it as DATABASE_URL: the probe accepts a file-only DSN
     (platform/.env.local), but suites that gate themselves on the ENV VAR
     (server/tests/test_g1a_canonical_e2e.py's skipif) would then silently skip
-    inside a green suite — probe REACHABLE must mean the suite actually runs."""
+    inside a green suite — probe REACHABLE must mean the suite actually runs.
+    The probe connects with exactly the dsn it returns."""
     envf = REPO / "platform" / ".env.local"
+    dsn = gate_database_url()
+    env = clean_env()
+    if dsn:
+        env["DATABASE_URL"] = dsn
     try:
         proc = subprocess.run(
             [sys.executable, "-c", _PROBE, str(envf)],
-            cwd=str(REPO_PARENT), env=clean_env(),
+            cwd=str(REPO_PARENT), env=env,
             capture_output=True, text=True, timeout=30,
         )
     except subprocess.TimeoutExpired:
-        return False, "probe timed out (>30s)", ""
+        return False, "probe timed out (>30s)", dsn
     out = (proc.stdout + proc.stderr).strip().splitlines()
     msg = out[-1] if out else f"probe exit {proc.returncode}"
-    dsn = os.environ.get("DATABASE_URL") or _dsn_from_env_local()
     return proc.returncode == 0, msg, dsn
 
 
@@ -3802,15 +3844,36 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
     # REACHABLE, inject the resolved DSN as DATABASE_URL for the child: the
     # probe accepts a file-only DSN (platform/.env.local), and a suite that
     # skipif-gates on the env var must RUN in that case, not green-skip.
+    # uses_database suites get the same probe and injection whenever the gate
+    # supplies a database (LEAF_GATE_DATABASE_URL) or requires one; otherwise
+    # they keep the ambient environment, so a DB-less checkout still runs
+    # their offline half. Under LEAF_GATE_REQUIRE_DATABASE=1 an unreachable
+    # database is a FAIL row for both kinds, never a SKIP: the run fails loudly
+    # instead of reporting a green gate whose PostgreSQL proofs never ran.
     db_env: dict = {}
-    if suite.db_gated:
+    wants_gate_db = suite.uses_database and (
+        database_required() or os.environ.get("LEAF_GATE_DATABASE_URL", "").strip())
+    if suite.db_gated or wants_gate_db:
         ok, msg, dsn = probe_platform_db()
         if not ok:
-            return Result(suite, "SKIP", "skip", 0.0,
-                          note=f"platform DB unreachable ({msg})", log_path=None,
-                          skipped_by_gate="db_gated")
+            if database_required():
+                note = (f"PostgreSQL required (LEAF_GATE_REQUIRE_DATABASE=1) but "
+                        f"unreachable ({msg})")
+                with open(log_path, "w", encoding="utf-8", errors="replace") as logf:
+                    logf.write(f"[DATABASE REQUIRED] {note}\n")
+                return Result(suite, "FAIL", "err", 0.0, note=note, log_path=log_path)
+            if suite.db_gated:
+                return Result(suite, "SKIP", "skip", 0.0,
+                              note=f"platform DB unreachable ({msg})", log_path=None,
+                              skipped_by_gate="db_gated")
+            # An explicit but unreachable LEAF_GATE_DATABASE_URL: run the suite
+            # with that DSN anyway, so its PostgreSQL tests fail by name.
         if dsn:
             db_env["DATABASE_URL"] = dsn
+    # A skip that only means "no database" is tolerated only when none was
+    # handed to this child (see Suite.database_skip_reasons).
+    allowed_skips = suite.allowed_skip_reasons + (
+        () if db_env else suite.database_skip_reasons)
 
     # Opt-in suites: SKIP-with-reason unless their env flag is truthy.
     if suite.opt_in_env and os.environ.get(suite.opt_in_env, "").strip().lower() \
@@ -3946,7 +4009,7 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
             reported = sum(count for count, _ in c["skip_reasons"])
             unexpected = [reason for _, reason in c["skip_reasons"]
                           if not any(re.fullmatch(pattern, reason)
-                                     for pattern in suite.allowed_skip_reasons)]
+                                     for pattern in allowed_skips)]
             if reported != c["skipped"]:
                 passed = False
                 note += (f"; skip details incomplete: pytest reported {c['skipped']} "
@@ -4280,9 +4343,9 @@ def serial_suite_reason(suite: Suite) -> str:
     """A nonempty reason assigns a suite to the one shared-state worker."""
     if suite.reset_authored:
         return "resets shared authored_tools.json"
-    if suite.db_gated:
+    if suite.db_gated or suite.uses_database:
         return "shared PostgreSQL through DATABASE_URL"
-    executable = str(suite.argv[0]).replace("\\", "/").rsplit("/", 1)[-1].lower()
+    executable =str(suite.argv[0]).replace("\\", "/").rsplit("/", 1)[-1].lower()
     if executable in ("npm", "npm.cmd", "npm.exe", "npx", "npx.cmd", "npx.exe"):
         return "npm/npx shares node_modules and build outputs in its cwd"
     return _SERIAL_SUITE_REASONS.get(suite.id, "")
@@ -4327,8 +4390,9 @@ def conflict_resources(suite: Suite) -> frozenset[str]:
     # server/authored_tools.json is reset in place before the suite runs.
     if suite.reset_authored:
         held.add("authored-store")
-    # DATABASE_URL points every db-gated suite at the one PostgreSQL schema.
-    if suite.db_gated:
+    # DATABASE_URL points every db-gated or uses_database suite at the one
+    # PostgreSQL schema.
+    if suite.db_gated or suite.uses_database:
         held.add("postgres")
     # The authored catalog and tool bodies the older author paths read and write.
     if table_reason == "shared authored catalog or tool bodies":
@@ -4616,6 +4680,8 @@ def catalog_fingerprint(suites: List[Suite]) -> str:
         "allowed_skip_reasons": list(s.allowed_skip_reasons),
         "allowed_vitest_skips": [list(pair) for pair in s.allowed_vitest_skips],
         "reset_authored": s.reset_authored, "db_gated": s.db_gated,
+        "uses_database": s.uses_database,
+        "database_skip_reasons": list(s.database_skip_reasons),
         "opt_in_env": s.opt_in_env, "timeout_s": s.timeout_s,
     } for s in suites]
     blob = json.dumps(entries, sort_keys=True, separators=(",", ":"))
@@ -4646,7 +4712,9 @@ def selection_catalog(root: Path) -> dict:
                 "reset_authored": suite.reset_authored,
                 "skip_rules": {"allowed_skip_reasons": list(suite.allowed_skip_reasons),
                                "allowed_vitest_skips": [list(pair) for pair in suite.allowed_vitest_skips],
-                               "db_gated": suite.db_gated, "opt_in_env": suite.opt_in_env},
+                               "db_gated": suite.db_gated, "opt_in_env": suite.opt_in_env,
+                               "uses_database": suite.uses_database,
+                               "database_skip_reasons": list(suite.database_skip_reasons)},
                 "collection_identity": None, "test_ids": [], "collection_complete": False,
                 "trace_kind": "python" if python_child else "unsupported",
                 "python_only": False, "classification": "unclassified",
