@@ -46,10 +46,25 @@ def dependency_index(graph: dict) -> dict[str, set[str]]:
         edge(project_id, entity["id"])
         if entity["kind"] not in ("project", "settings"):
             edge(settings_id, entity["id"])
+    if any("ground_slots" in frame for frame in graph["frames"]):
+        try:
+            from . import solar_ground_graph_codec as codec
+        except ImportError:
+            import solar_ground_graph_codec as codec
+        tables = codec.decode_graph_slots(graph)
+    else:
+        tables = {}
     for frame in graph["frames"]:
         edge(frame["electrical_zone_ref"], frame["id"])
         for panel_id in frame["panel_refs"]:
             edge(frame["id"], panel_id)
+        table = tables.get(frame["id"])
+        if table is not None:
+            for panel_id in table.ids:
+                index.setdefault(panel_id, set())
+                edge(project_id, panel_id)
+                edge(settings_id, panel_id)
+                edge(frame["id"], panel_id)
     for zone in graph["electrical_zones"]:
         for panel_id in zone["panel_refs"]:
             edge(zone["id"], panel_id)

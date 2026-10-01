@@ -353,6 +353,9 @@ def build_suites() -> List[Suite]:
         # sf-solar-ground-graph-scale piece 1: exact expansion; 96 cases + 4 template/row guards = 100.
         Suite("server-solar-ground-graph-codec", "server tests/test_solar_ground_graph_codec.py", "pytest", SERVER,
               _py_pytest("tests/test_solar_ground_graph_codec.py"), 100),
+        # sf-w3-conversion-graph piece 1: compact Ground frames in the graph contract; 41 cases.
+        Suite("server-solar-ground-compact-graph", "server tests/test_solar_ground_compact_graph.py", "pytest",
+              SERVER, _py_pytest("tests/test_solar_ground_compact_graph.py"), 41),
         # sf-solar-electrical-bridge: the kernel state to design graph topology mapping, both ways.
         Suite("server-solar-electrical-bridge", "server tests/test_solar_electrical_state_bridge.py", "pytest", SERVER,
               _py_pytest("tests/test_solar_electrical_state_bridge.py"), 83),

@@ -282,6 +282,23 @@ The root contains `project`, `settings`, `electrical_zones`, `frames`, `panels`,
 the schema, including the six cold-voltage values, sizing confirmation,
 counters, matrix cells, sequences, panel assignments, circuit endpoints,
 inverter input assignments, route units and schedule source revision.
+
+A Ground tracker frame may carry `ground_slots` using codec
+`leaf.solar-ground-slots.v1` in `server/solar_ground_graph_codec.py` instead of
+listing its slot panels. Such a frame keeps `panel_refs`, `matrix`,
+`panel_assignments` and `sequences` empty, and its slot panels are absent from
+`panels`. Strings and electrical zones may name those slot panels.
+Apart from the node and byte limits, compact validation is equivalent to
+validating the expansion except in two known ways it is stricter. Integers
+inside a compact frame must be JSON integers: `count`, `panel.rev`, the frame's
+`module_rows`, `module_columns` and `module_slots`, and each tracker's
+`module_slots`. A schema-valid integral float such as `3.0` in any of these
+fields is refused with `INVALID_GROUND_SLOTS`; a non-integral value is refused
+earlier by the schema with `INVALID_GRAPH_SCHEMA`. Every graph the server
+writes spells these values as integers. The compact document's own nesting
+counts against `MAX_DEPTH` (32), so a panel template within the limit as an
+expanded panel can still be refused compact with `GRAPH_LIMIT_EXCEEDED`.
+
 Every entity has `id`, `kind`, `rev`, `provenance`, `extra` and `validity`.
 Entity `kind` is the stable type; `circuit_kind` and `route_kind` hold subtypes.
 Assignments use zero-based `seq`, matrix row/column and input numbers. Null
