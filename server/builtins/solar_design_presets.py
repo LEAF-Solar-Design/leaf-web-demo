@@ -11,15 +11,18 @@ names (and seed its string length and MPPT topology where they are still 0) thro
 solar-settings rule, which clears sizing confirmation. The installation design is read back from
 graph["project"] the same way, and a preset of the other design is written to a drawing with no
 frame (the project-change rule) or refused on a drawing with frames
-(DESIGN_PRESET_INSTALLATION_POPULATED, server/solar_preset_sync.py). Otherwise no entity changes
-and no design output goes stale. The graph has no layer table and no DrawingStateSnapshot yet, so adoption and
+(DESIGN_PRESET_INSTALLATION_POPULATED, server/solar_preset_sync.py). The L1/L2 mode
+(UseL2Collectors) is read back from graph["settings"] the same way, and a preset of the other mode
+is written with every inverter retyped in the same commit, or refused when leaving L2 mode would
+drop a combiner box, a central inverter or an L1 to L2 link (DESIGN_PRESET_L2_EQUIPMENT_PRESENT).
+Otherwise no entity changes and no design output goes stale. The graph has no layer table and no DrawingStateSnapshot yet, so adoption and
 layer freeze or thaw touch nothing and every profile keeps the plugin's default drawing state.
 The 12 cable fields restore only when the target preset's CableMaterial is non-empty; the graph
 has no cable field, so they stay in the store.
 
 Refusals are named and checked in a fixed order: request shape, settings range, revision, stored
-store, graph settings the store cannot hold, then the subcommand's own rules, the kernel, and last
-the installation design. Pure: linear in the preset count, no I/O, no clock.
+store, graph settings the store cannot hold, then the subcommand's own rules, the kernel, the
+installation design, and last the L1/L2 mode. Pure: linear in the preset count, no I/O, no clock.
 """
 import re
 from datetime import datetime, timezone

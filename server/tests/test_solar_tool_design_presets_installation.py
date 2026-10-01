@@ -48,18 +48,20 @@ POPULATED = "DESIGN_PRESET_INSTALLATION_POPULATED"
 # the design rule is exercised.
 FIXTURE_LAYERS = {"StringLayer": "Strings", "HomeRunLayer": "Homeruns", "PanelGroupLayer": "Groups"}
 SCHEDULE_ID = "leaf:schedule:00000000-0000-4000-8000-000000000001"
-# Measured with python -B (solar_sizing_client.digest, canonical sha256) on the bare fixture.
+# Measured with python -B (solar_sizing_client.digest, canonical sha256) on the bare fixture. Moved
+# with sf-w2-design-presets-l2-mode: settings_of() carries the fixture's UseL2Collectors false, so the
+# stored presets do (the revisions and designs did not move).
 BARE_CREATE_STEPS = [
-    (1, "Roof", 0, 0, 0, "7da2dddf2eb69e52b64296d7b33048cd0c4a5a2336542d43d4a17d5a0b08e799"),
-    (2, "Ground", 2, 2, 2, "761120de1a524fec84715f92f709e99d2b6846f2c249fd2462f2b240b1803f76"),
-    (3, "Roof", 3, 2, 2, "8315f79fc33ca74b7a2e7df9ec740bc832378dd5d1d05888daa2d41058a1775e"),
+    (1, "Roof", 0, 0, 0, "c38a035204c821fc6323174515ce380504a9da025ecc65ad823fc473d76b6cd6"),
+    (2, "Ground", 2, 2, 2, "b6194c1bbc1442a36071d4bd31ac4fef7596b030833e92592cde26b6dfb5ba11"),
+    (3, "Roof", 3, 2, 2, "163a6071235ac3ca616787e89acb9656eccbc7eebbb5a9bb1d8a7da372faecae"),
 ]
 BARE_SWAP_STEPS = [
-    (1, "Ground", "f023fb2035957d77dff5e879ff705cea0859deb6a6e26fe0a00a00bf36c5f9b8"),
-    (2, "Roof", "7b943dbe6b264d9ac7b9fb11dd5d58ac46d6b6c83398769dd98691a9e9dc78ea"),
-    (3, "Ground", "f0f9cb219e4af1a7231e1d14bc3ce5a3adbf4e61870ae86800ac55b4da85064f"),
+    (1, "Ground", "89a52b3d4f3d71822b6f3da193f8c969b2c85ca66b68ed05a944f87d93f954d6"),
+    (2, "Roof", "850599aeae3b64024afbce33e38670a41478b3293ddda404b9faa4500c1ed817"),
+    (3, "Ground", "d6f0d761e7e2f00719fbbb6df5fdf6aaf50b8c178d3492b16fad3d9a06b85040"),
 ]
-BARE_DELETE_DIGEST = "39a21315356d971e6d4212d9ad0f4781878221837c36df77cc516f53304bd3b8"
+BARE_DELETE_DIGEST = "1f162bacc918b0ceedb58af94455fb52b2d63e047088c7af2576258a200cb262"
 PROJECT_CHANGES_DIGEST = "eaa8ce23f2b9d1cc1a7dd8c3f4681cacb38841cb9598b85dd3bce8d19492b6e0"
 
 
@@ -76,11 +78,12 @@ def kernel():
 
 
 def settings_of(design, **patch):
-    """The committed snapshot's current settings with InstallationDesign `design` (any text) and
-    the fixture's three layer names."""
+    """The committed snapshot's current settings with InstallationDesign `design` (any text), the
+    fixture's three layer names and its L1 mode (UseL2Collectors false; the mode rule has its own
+    file, test_solar_tool_design_presets_l2_mode.py)."""
     snapshot = json.loads(SNAPSHOT.read_text(encoding="utf-8"))
     return dict(kernel().current_settings_from_preset(snapshot), **FIXTURE_LAYERS,
-                InstallationDesign=design, **patch)
+                UseL2Collectors=False, InstallationDesign=design, **patch)
 
 
 def commit(value, params):
@@ -274,7 +277,7 @@ def test_presets_installation_create_recomputes_project_validity(graph):
                            "current_settings": settings_of("Ground")})
     assert after["project"]["validity"] == {"state": "valid", "reasons": []}
     assert after["project"]["installation_design"] == "Ground"
-    assert digest(after) == "1b8a92a0ef9da44f4094056762bd9c85f52bf45510d6b5847b47de9d8dbcb392"
+    assert digest(after) == "675da87198cda7a40cd41c6d5ff858b599b8e5d095bc4c38f94b72e8ce923cc6"
 
 
 def test_presets_installation_bare_swap_both_ways(graph):

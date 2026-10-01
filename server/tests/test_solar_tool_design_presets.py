@@ -59,21 +59,23 @@ STEP_PARAMS = {"f1": {"subcommand": "Create", "name": "Alpha"}, "f2": {"subcomma
 # They moved again with sf-solar-settings-invalidation: that layer change also stales the fixture's
 # homerun and schedule ("settings_changed", test_solar_settings_invalidation.py). They moved again with
 # sf-w2-design-presets-installation: the chain now runs on the Ground fixture (the `graph` fixture
-# below); the store and List digests did not move.
+# below); the store and List digests did not move. They moved again with sf-w2-design-presets-l2-mode:
+# that fixture is now in L1/L2 mode with its inverter typed (the snapshot's UseL2Collectors is true);
+# the store and List digests did not move.
 STEP_DIGESTS = {
-    "f1": (1, "8cb4355afe353363251f19056d4f612d646442d7b1c8d4c8d4e1624579d24b89",
+    "f1": (1, "cabf873da95c20781dd696da43218b75b00f19d6a31d48ff5d6e62878ebb4196",
            "91f98d47e719f4db929471228ee6bf1a03abfcb34e70534c44abcd8fdb958be8",
            3694, "cc28171c8f6b097be6e5def3b1a7beec21ff787862a01031cd3ffc89f86daca6"),
-    "f2": (2, "54908d0c21588e05f6a2694fb0f5dcec80703840092aed36c1022d8e8747e0f4",
+    "f2": (2, "4765f2dceb60ff07ef419c6f6d10ff826ab4205ae159eab27f24f86a04f1b605",
            "fd5dffb7e157fb1a1da860d63ca9e0efee6ba262962bd794dabd90d7c6ced791",
            5545, "7881da1cdb0087e205727f0dc45bc954f86214e12765328e3b1ab7b83885ddf6"),
-    "f3": (3, "f7908fa9cf69dcc7e6be73836485c7d72bd355920cbc30ec3e2373aab7699cc9",
+    "f3": (3, "4daf054a1776d2f529705306f6fed60172425fc06d59df9d76e27d0ac269d856",
            "b51ab618f294153e1b5bf703e4bd53606694400f788834721a02445ea8695b88",
            5545, "279101e78d1b50e351bbdd5ace9ec1f6bcd4f8303f6fcbced7cf823c057568e1"),
-    "f4": (3, "f7908fa9cf69dcc7e6be73836485c7d72bd355920cbc30ec3e2373aab7699cc9",
+    "f4": (3, "4daf054a1776d2f529705306f6fed60172425fc06d59df9d76e27d0ac269d856",
            "b51ab618f294153e1b5bf703e4bd53606694400f788834721a02445ea8695b88",
            5545, "279101e78d1b50e351bbdd5ace9ec1f6bcd4f8303f6fcbced7cf823c057568e1"),
-    "f5": (4, "6446ff842a1b4a29b4666d01be0c940b3080ab80b3e5259584a2be43b44a3a4b",
+    "f5": (4, "a00c72b0bdfab86fd36da40d4346031a616ebcbc2fb0bc3c06a4649e32f7ffd8",
            "91f98d47e719f4db929471228ee6bf1a03abfcb34e70534c44abcd8fdb958be8",
            3694, "cc28171c8f6b097be6e5def3b1a7beec21ff787862a01031cd3ffc89f86daca6"),
 }
@@ -93,10 +95,16 @@ LIST_REQUEST_SHA256 = "4ba9a006e7eccb1ab0ca8957278f6f176a2bef77ee0acac51b70a5990
 
 @pytest.fixture
 def graph(w1_graph):
-    """The W1 fixture as a populated Ground drawing (test_solar_ground_graph.ground_of): the parity
-    receipts were recorded on a ground drawing and the snapshot's InstallationDesign is "Ground", and a
-    preset of the other design is refused on a drawing with frames (sf-w2-design-presets-installation)."""
-    return ground_of(w1_graph)
+    """The W1 fixture as a populated Ground drawing (test_solar_ground_graph.ground_of) in L1/L2 mode:
+    the parity receipts were recorded on a ground drawing whose snapshot carries InstallationDesign
+    "Ground" and UseL2Collectors true, a preset of the other design is refused on a drawing with
+    frames (sf-w2-design-presets-installation), and a preset of the other mode retypes the inverters
+    (sf-w2-design-presets-l2-mode). In L1/L2 mode every inverter carries an equipment_type; the
+    fixture's one inverter is an unconnected string inverter."""
+    value = ground_of(w1_graph)
+    value["settings"]["use_l2_collectors"] = True
+    value["inverters"][0].update(equipment_type="string_inverter", l2_ref=None)
+    return value
 
 
 def commit_builtin():

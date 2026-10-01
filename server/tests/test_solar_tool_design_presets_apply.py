@@ -11,10 +11,11 @@ Covered: the rule table; the parity chain's one settings write (f1) and nothing 
 applying the target's layers and keeping the outgoing preset's; a solar-settings edit captured
 into the outgoing preset and restored on the round trip; the <= 0 seeds; the delete of the active
 preset; supplied settings that match the graph change nothing (sizing kept) and ones that differ
-invalidate sizing exactly as solar-settings does; the fields never synced (panel layer filter, L2
-flag, optimizer ratio, counters, cable fields); the graph layer name the store cannot hold; List
+invalidate sizing exactly as solar-settings does; the fields never synced (panel layer filter,
+optimizer ratio, counters, cable fields); the graph layer name the store cannot hold; List
 reading the graph's layer names; purity; the rail. The installation design rule has its own file,
-test_solar_tool_design_presets_installation.py.
+test_solar_tool_design_presets_installation.py, and so does the L1/L2 mode rule,
+test_solar_tool_design_presets_l2_mode.py.
 """
 import copy
 import json
@@ -39,7 +40,7 @@ TOOL = "solar-design-presets"
 LIST = "solar-design-presets-list"
 LAYERS = ("string_layer", "home_run_layer", "panel_group_layer")
 SEEDED_KEYS = ("panels_in_sequence", "num_mppt", "strings_per_mppt")
-NEVER = ("panel_layer_contains", "use_l2_collectors", "optimizer_ratio", "panel_group_number",
+NEVER = ("panel_layer_contains", "optimizer_ratio", "panel_group_number",
          "string_number", "inverter_number", "mppt_letter")
 # The fixture graph's settings before any preset commit (test_w1_design_graph.graph), measured.
 FIXTURE_LAYERS = {"string_layer": "Strings", "home_run_layer": "Homeruns", "panel_group_layer": "Groups"}
@@ -51,7 +52,8 @@ GRAPH_BETA = {"string_layer": "B-String", "home_run_layer": "B-Home", "panel_gro
 F1_SETTINGS_SHA256 = "e260816996efd904294ccb9883a990fed60de7750889a5b71a5bccaf8e16e9c4"
 # canonical sha256 of the whole graph after test_design_presets_apply_solar_settings_edit_round_trip.
 # Moved with sf-w2-design-presets-installation: snapshot_current() carries InstallationDesign "Roof".
-ROUND_TRIP_GRAPH_SHA256 = "0d6ee64f30aca99268ae041e51dfeb8dac40241fbd889724eb1071143b4accf1"
+# Moved with sf-w2-design-presets-l2-mode: snapshot_current() carries UseL2Collectors false.
+ROUND_TRIP_GRAPH_SHA256 = "7da64599053e6852405eb733367a79792dc8399ec277c523389df4b0a3229d49"
 
 
 def commit_builtin():
@@ -73,9 +75,11 @@ def kernel():
 def snapshot_current():
     """The committed snapshot's current settings on this rooftop fixture: InstallationDesign "Roof",
     since the snapshot's own "Ground" is refused on a drawing with Roof frames
-    (sf-w2-design-presets-installation, test_solar_tool_design_presets_installation.py)."""
+    (sf-w2-design-presets-installation, test_solar_tool_design_presets_installation.py), and
+    UseL2Collectors false, the fixture's L1 mode, since the snapshot's own true retypes the inverters
+    (sf-w2-design-presets-l2-mode, test_solar_tool_design_presets_l2_mode.py)."""
     return dict(kernel().current_settings_from_preset(json.loads(SNAPSHOT.read_text(encoding="utf-8"))),
-                InstallationDesign="Roof")
+                InstallationDesign="Roof", UseL2Collectors=False)
 
 
 def commit(value, params):
@@ -142,7 +146,7 @@ def located(value):
 def test_design_presets_apply_rule_table():
     sync = commit_builtin().preset_sync
     assert sync.ALWAYS == (("string_layer", "StringLayer"), ("home_run_layer", "HomeRunLayer"),
-                           ("panel_group_layer", "PanelGroupLayer"))
+                           ("panel_group_layer", "PanelGroupLayer"), ("use_l2_collectors", "UseL2Collectors"))
     assert sync.SEEDED == (("panels_in_sequence", "NumPanelsInSequence", False),
                            ("strings_per_mppt", "StringsPerMppt", True), ("num_mppt", "NumMppt", True))
     assert sync.GRAPH_SETTINGS_OUT_OF_RANGE == "DESIGN_PRESET_GRAPH_SETTINGS_OUT_OF_RANGE"
