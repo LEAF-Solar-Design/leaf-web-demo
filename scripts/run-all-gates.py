@@ -748,6 +748,13 @@ def build_suites() -> List[Suite]:
         # parametrizations = 65.
         Suite("server-solar-tool-combiners", "server tests/test_solar_tool_combiners.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_combiners.py"), 73),
+        # sf-w2-combiners-intake-producer: the combiner intake import (server/solar_combiner_intake_import.py
+        # and POST /api/drawings/{id}/imports/combiner-intake in server/routers/drawings.py): the recorded
+        # LEAFCOMBINERAUTO input bound to the head graph and stored on a new version, bounded before decode,
+        # a closed refusal map, nothing written on refusal, and the combiners tool placing C5 from the
+        # imported version. Hermetic and nothing skips: the floor is the exact count, 68.
+        Suite("server-solar-combiner-intake-import", "server tests/test_solar_combiner_intake_import.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_combiner_intake_import.py"), 68),
         # W5 inverter family (2026-09-24, contract G35): the shared state and delta module and the
         # device, string and output engines (literal ports of the plugin's inverter commands). Inputs
         # are authored in each file, so each floor is the exact count on every runner. MEASURED.
