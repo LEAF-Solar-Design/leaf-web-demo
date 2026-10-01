@@ -11,9 +11,11 @@
 // the sentence for each key of the route's LANDXML_IMPORT_REFUSALS.
 //
 // Wall time: the call has one deadline, LANDXML_TIMEOUT_MS unless the client was created with
-// another, measured from the call's start. It covers the request, the headers and every body
-// read, so a server that sends headers and then stalls its body still settles the call. The
-// response body is bounded in bytes while reading, never after.
+// another, measured from the call's start. It covers the request, the headers, every body read
+// and the work after the last read, so a server that sends headers and then stalls its body
+// still settles the call, and a success is never returned once the budget has elapsed or the
+// caller has aborted. A refusal already decided is returned as it is. The response body is
+// bounded in bytes while reading, never after.
 import { FetchTimeoutError, fetchWithBudget } from '../fetchBudget.js'
 
 export const LANDXML_MAX_BYTES = 16_777_216
@@ -604,6 +606,7 @@ export function createSolarLandxmlClient({ fetchImpl, apiBase = '', headers, onR
       const url = `${apiBase}/api/drawings/${encodeURIComponent(drawingId)}/imports/landxml${query}`
       const request = { drawingId, drawingUnits, crs, targetCells, projectId, byteLength: size }
       const call = openCall(budget, signal, startedAt)
+      let success
       try {
         if (call.expired()) return call.failure(null)
         const exchanged = await exchange(call, { drawingId, url, file, signal })
@@ -611,12 +614,21 @@ export function createSolarLandxmlClient({ fetchImpl, apiBase = '', headers, onR
         const read = await readBoundedJson(call, exchanged.response)
         if (read === STOPPED) return call.failure(200)
         const value = read.ok ? validateLandxmlImport(read.value, request) : null
-        return value === null
-          ? refuse(200, 'LANDXML_CLIENT_RESPONSE_INVALID', false)
-          : { ok: true, status: 200, value }
+        if (value === null) return refuse(200, 'LANDXML_CLIENT_RESPONSE_INVALID', false)
+        success = { ok: true, status: 200, value }
       } finally {
         call.close()
       }
+      // The call is closed before its last check, so a success never leaves a call that has stopped: the
+      // work after the last read (assembling the chunks, decoding, parsing, validating) and the cleanup of
+      // the caller's signal are inside the deadline too, and an abort the caller made before we answer
+      // counts. A refusal already decided above is returned as it is.
+      try {
+        if (signal?.aborted === true) call.halt('aborted')
+      } catch {
+        // A signal whose aborted getter throws leaves the answer as the call decided it.
+      }
+      return call.expired() ? call.failure(200) : success
     } catch {
       return refuse(null, 'LANDXML_CLIENT_REQUEST_INVALID', false)
     }

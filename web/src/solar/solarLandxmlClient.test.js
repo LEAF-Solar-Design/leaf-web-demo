@@ -765,4 +765,124 @@ describe('solar LandXML client', () => {
     await expect(client.uploadLandxml(args({ signal }))).resolves
       .toEqual({ ok: true, status: 200, value: withoutEnvelope(FIRST) })
   })
+
+  it('LX27 a success never leaves a call whose budget has elapsed', async () => {
+    const spin = (ms) => {
+      const until = performance.now() + ms
+      while (performance.now() < until) { /* a synchronous delay no timer can interrupt */ }
+    }
+    // Every read ends inside the budget. The chunk's length is read again while the chunks are
+    // assembled, after the read that ends the body, and `afterEnd` runs once inside that work.
+    const slowAssembly = (text, status, afterEnd) => answering(() => {
+      const chunk = new TextEncoder().encode(text)
+      const length = chunk.byteLength
+      let ended = false
+      let ran = false
+      Object.defineProperty(chunk, 'byteLength', {
+        get() {
+          if (ended && !ran) {
+            ran = true
+            afterEnd()
+          }
+          return length
+        },
+      })
+      let sent = false
+      const reader = {
+        async read() {
+          if (!sent) {
+            sent = true
+            return { done: false, value: chunk }
+          }
+          ended = true
+          return { done: true, value: undefined }
+        },
+        async cancel() {},
+      }
+      return { status, headers: new Headers({ 'content-type': 'application/json' }), body: { getReader: () => reader } }
+    })
+    const success = { ok: true, status: 200, value: withoutEnvelope(FIRST) }
+    const late = refused(200, 'LANDXML_CLIENT_TIMEOUT', true)
+    const FAST = { timeoutMs: 30 }
+    const slow = clientWith(slowAssembly(FIRST_TEXT, 200, () => spin(60)), FAST)
+    expect(await settleWithin(slow.client.uploadLandxml(args()), 5000)).toEqual(late)
+    // The bodiless text() path: the text arrives in time and the parse after it is slow.
+    const realParse = JSON.parse
+    let parses = 0
+    const parse = vi.spyOn(JSON, 'parse').mockImplementation((text, ...rest) => {
+      if (text === FIRST_TEXT) {
+        parses += 1
+        if (parses === 1) spin(60)
+      }
+      return realParse(text, ...rest)
+    })
+    try {
+      const bodiless = answering(() => ({ status: 200, headers: new Headers(), body: null, text: async () => FIRST_TEXT }))
+      expect(await settleWithin(clientWith(bodiless, FAST).client.uploadLandxml(args()), 5000)).toEqual(late)
+      expect(parses).toBe(1)
+      // The same answer with a quick parse succeeds through the same code path.
+      expect(await clientWith(bodiless).client.uploadLandxml(args())).toEqual(success)
+      expect(parses).toBe(2)
+    } finally {
+      parse.mockRestore()
+    }
+    // A caller abort that lands in the same place, with the whole default budget left.
+    const caller = new AbortController()
+    const aborted = clientWith(slowAssembly(FIRST_TEXT, 200, () => caller.abort()))
+    expect(await settleWithin(aborted.client.uploadLandxml(args({ signal: caller.signal })), 5000))
+      .toEqual(refused(200, 'LANDXML_CLIENT_ABORTED', false))
+    // Only a success is replaced: an answer that was already a refusal is returned unchanged.
+    const refusal = clientWith(slowAssembly(UNSAFE_TEXT, 400, () => spin(60)), FAST)
+    expect(await settleWithin(refusal.client.uploadLandxml(args()), 5000)).toEqual(refused(400, 'LANDXML_UNSAFE', false))
+    const unreadable = clientWith(slowAssembly('{', 200, () => spin(60)), FAST)
+    expect(await settleWithin(unreadable.client.uploadLandxml(args()), 5000))
+      .toEqual(refused(200, 'LANDXML_CLIENT_RESPONSE_INVALID', false))
+    // The bound, on a clock the row controls: one millisecond inside the budget is a success (the
+    // positive control, through the same reader) and the budget itself is not.
+    vi.useFakeTimers()
+    try {
+      const within = clientWith(slowAssembly(FIRST_TEXT, 200, () => vi.advanceTimersByTime(999)), { timeoutMs: 1000 })
+      expect(await within.client.uploadLandxml(args())).toEqual(success)
+      expect(vi.getTimerCount()).toBe(0)
+      const atBudget = clientWith(slowAssembly(FIRST_TEXT, 200, () => vi.advanceTimersByTime(1000)), { timeoutMs: 1000 })
+      expect(await atBudget.client.uploadLandxml(args())).toEqual(late)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('LX28 the caller signal cleanup is inside the deadline, and an abort made during it counts', async () => {
+    const spin = (ms) => {
+      const until = performance.now() + ms
+      while (performance.now() < until) { /* a synchronous delay no timer can interrupt */ }
+    }
+    const bodiless = () => answering(() => ({ status: 200, headers: new Headers(), body: null, text: async () => FIRST_TEXT }))
+    // A real caller signal whose removeEventListener does something before or after the real removal.
+    const wrapped = (before, after = () => {}) => {
+      const caller = new AbortController()
+      const { signal } = caller
+      const remove = signal.removeEventListener.bind(signal)
+      signal.removeEventListener = (...rest) => {
+        before(caller)
+        remove(...rest)
+        after(caller)
+      }
+      return signal
+    }
+    const success = { ok: true, status: 200, value: withoutEnvelope(FIRST) }
+    // The cleanup is slow: the call answers after its budget, so it answers the deadline.
+    expect(await settleWithin(clientWith(bodiless(), { timeoutMs: 30 }).client
+      .uploadLandxml(args({ signal: wrapped(() => spin(60)) })), 5000))
+      .toEqual(refused(200, 'LANDXML_CLIENT_TIMEOUT', true))
+    // The caller aborts during the cleanup, before or after its listener is removed: the abort counts.
+    expect(await settleWithin(clientWith(bodiless()).client
+      .uploadLandxml(args({ signal: wrapped((c) => c.abort()) })), 5000))
+      .toEqual(refused(200, 'LANDXML_CLIENT_ABORTED', false))
+    expect(await settleWithin(clientWith(bodiless()).client
+      .uploadLandxml(args({ signal: wrapped(() => {}, (c) => c.abort()) })), 5000))
+      .toEqual(refused(200, 'LANDXML_CLIENT_ABORTED', false))
+    // Positive control: the same wrapped signal with a cleanup that does nothing succeeds.
+    expect(await clientWith(bodiless()).client.uploadLandxml(args({ signal: wrapped(() => {}) }))).toEqual(success)
+  })
 })
