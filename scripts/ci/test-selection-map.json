@@ -406,6 +406,7 @@
     "server-solar-ground-conversion-evidence",
     "server-solar-ground-dialogs",
     "server-solar-ground-dsteps",
+    "server-solar-ground-export-currency",
     "server-solar-ground-frames",
     "server-solar-ground-graph",
     "server-solar-ground-graph-codec",

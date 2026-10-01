@@ -365,6 +365,10 @@ def build_suites() -> List[Suite]:
         # the three add/multi-add/midpoint refusal rows to the string-tools suite as successes).
         Suite("server-solar-ground-compact-consumers", "server tests/test_solar_ground_compact_consumers.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_ground_compact_consumers.py"), 25),
+        # sf-w3-compact-export-currency: require_current_export and upstream_basis give a compact Ground
+        # graph, its partial compaction and its expansion the same answer; full site without expansion; 32 cases.
+        Suite("server-solar-ground-export-currency", "server tests/test_solar_ground_export_currency.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_ground_export_currency.py"), 32),
         # sf-w3-string-tools-compact: the nine string tools on slot panels of compact Ground frames, each
         # equal to the expansion, rooftop byte-identical; 30 cases.
         Suite("server-solar-ground-compact-string-tools", "server tests/test_solar_ground_compact_string_tools.py",
