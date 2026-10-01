@@ -1087,6 +1087,59 @@ def test_required_database_that_is_unreachable_fails_loudly_never_skips(
     assert not gated_seen.exists()
 
 
+_PLATFORM_DB_VARS = ("DATABASE_URL", "OVERLAY_PG_URL", "ANNOTATION_PG_URL")
+
+
+def _platform_suite_recorder(g, tmp_path):
+    """The real platform Suite row, its argv swapped for a child that records
+    which of the three PostgreSQL variables it was handed."""
+    from dataclasses import replace
+    seen = tmp_path / "platform.seen"
+    code = (
+        "import json, os, pathlib\n"
+        f"pathlib.Path({str(seen)!r}).write_text(json.dumps({{name: os.environ.get(name)"
+        f" for name in {_PLATFORM_DB_VARS!r}}}), encoding='utf-8')\n"
+        "print('1 passed in 0.01s')\n"
+    )
+    platform = {suite.id: suite for suite in g.build_suites()}["platform"]
+    assert not platform.db_deferred, "the platform suite's PostgreSQL proof must run"
+    return replace(platform, cwd=SCRIPTS, argv=[sys.executable, "-c", code],
+                   expected=1), seen
+
+
+def test_platform_suite_gets_all_three_database_urls_only_with_a_gate_dsn(
+        monkeypatch, tmp_path):
+    g = _load_runner()
+    _clear_gate_database_env(monkeypatch)
+    for name in ("OVERLAY_PG_URL", "ANNOTATION_PG_URL"):
+        monkeypatch.delenv(name, raising=False)
+
+    # Gate DSN present and reachable: the child sees it under all three names.
+    monkeypatch.setenv("LEAF_GATE_DATABASE_URL", _GATE_DSN)
+    monkeypatch.setattr(g, "probe_platform_db", lambda: (True, "REACHABLE", _GATE_DSN))
+    suite, seen = _platform_suite_recorder(g, tmp_path)
+    result = g.run_suite(suite, tmp_path)
+    assert result.status == "PASS", result.note
+    assert json.loads(seen.read_text(encoding="utf-8")) == dict.fromkeys(
+        _PLATFORM_DB_VARS, _GATE_DSN)
+
+    # No gate DSN: nothing is injected and no child receives any of them.
+    seen.unlink()
+    _clear_gate_database_env(monkeypatch)
+    monkeypatch.setattr(g, "probe_platform_db", lambda: (False, "NO_DSN", ""))
+    result = g.run_suite(suite, tmp_path)
+    assert result.status == "SKIP" and result.skipped_by_gate == "db_gated"
+    assert not seen.exists()
+
+    # A database-less child of the same suite shape is handed none of the three.
+    from dataclasses import replace
+    hermetic = replace(suite, db_gated=False)
+    result = g.run_suite(hermetic, tmp_path)
+    assert result.status == "PASS", result.note
+    assert json.loads(seen.read_text(encoding="utf-8")) == dict.fromkeys(
+        _PLATFORM_DB_VARS)
+
+
 def _migration_fixture(g, monkeypatch, tmp_path, *, migrate_result, jobs=1):
     """main() over two database suites and one hermetic suite, with a fake
     subprocess that only answers the migration child. Returns the event list
