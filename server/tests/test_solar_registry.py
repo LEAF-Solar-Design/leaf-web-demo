@@ -93,11 +93,12 @@ def extra_declaration(package):
     return declaration
 
 
-def bind_records(monkeypatch, registry):
+def bind_records(monkeypatch, registry, tmp_path):
     monkeypatch.setattr(solar_tools, "registry_records", registry.registry_records)
     monkeypatch.setattr(deps, "tenant_repo_dir", lambda tenant: None)
     monkeypatch.setattr(deps, "load_tenant_repo_tools", lambda tenant: [])
     monkeypatch.setattr(deps, "_AUTHORED", [])
+    monkeypatch.setattr(deps, "AUTHORED_STORE", tmp_path / "absent_authored_tools.json")
 
 
 def test_manifest_equals_a_fresh_scan():
@@ -398,7 +399,7 @@ def test_declared_entitlement_matches_record_class(package, monkeypatch):
 def test_registry_record_folds_into_write_seed(package, monkeypatch):
     declaration = extra_declaration(package)
     registry = load_package(package)
-    bind_records(monkeypatch, registry)
+    bind_records(monkeypatch, registry, package[0])
     legacy = json.loads(deps.WRITE_TOOLS_STORE.read_text(encoding="utf-8"))["tools"]
     assert deps.load_seed_write_tools() == legacy + registry.registry_records()
     assert declaration["record"] in registry.registry_records()
@@ -407,12 +408,31 @@ def test_registry_record_folds_into_write_seed(package, monkeypatch):
     assert (declaration["record"], deps.TOOL_SOURCE_WRITE_SEED) in rows
 
 
+def test_bound_registry_ignores_duplicate_default_authored_store(package, monkeypatch, tmp_path):
+    declaration = extra_declaration(package)
+    registry = load_package(package)
+    default_store = tmp_path / "authored_tools.json"
+    default_store.write_text(json.dumps({"tools": [
+        {"name": "count-panels"}, {"name": "count-panels"},
+    ]}), encoding="utf-8")
+    monkeypatch.setattr(deps, "AUTHORED_STORE", default_store)
+
+    bind_records(monkeypatch, registry, tmp_path)
+
+    assert default_store.exists()
+    assert not deps.AUTHORED_STORE.exists()
+    assert declaration["record"] in deps.all_tools("solar-registry-test")
+    rows = deps.effective_tools_with_provenance("solar-registry-test")
+    assert (declaration["record"], deps.TOOL_SOURCE_WRITE_SEED) in rows
+    assert all(source != deps.TOOL_SOURCE_AUTHORED for _, source in rows)
+
+
 @pytest.mark.parametrize("store_name", ["WRITE_TOOLS_STORE", "CATALOG_TOOLS_STORE", "ENGINE_REGISTRY"])
 @pytest.mark.parametrize("loader", ["load_seed_write_tools", "all_tools", "effective_tools_with_provenance"])
 def test_registry_record_collision_is_refused(package, monkeypatch, store_name, loader):
     declaration = extra_declaration(package)
     registry = load_package(package)
-    bind_records(monkeypatch, registry)
+    bind_records(monkeypatch, registry, package[0])
     path = package[0] / (store_name + ".json")
     path.write_text(json.dumps({"tools": [declaration["record"]]}), encoding="utf-8")
     monkeypatch.setattr(deps, store_name, path)
