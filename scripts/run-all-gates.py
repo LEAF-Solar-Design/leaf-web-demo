@@ -674,6 +674,12 @@ def build_suites() -> List[Suite]:
         # recorded i7 feeders): 24 tests + 40 more parametrizations = 64.
         Suite("server-solar-tool-electrical-schedules", "server tests/test_solar_tool_electrical_schedules.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_electrical_schedules.py"), 64),
+        # Equipment move through the route bridge (2026-09-30, sf-w2-equipment-move): MOVEINV as a
+        # local-graph-commit tool, the C4 combiner move persisted with its rerouted homeruns, feeders left in
+        # place and staled. Inputs are authored in the file, so the floor is the exact count on every runner.
+        # COUNTED: 21 tests + 42 more parametrizations = 63.
+        Suite("server-solar-tool-equipment-move", "server tests/test_solar_tool_equipment_move.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_equipment_move.py"), 63),
         # W5 inverter family (2026-09-24, contract G35): the shared state and delta module and the
         # device, string and output engines (literal ports of the plugin's inverter commands). Inputs
         # are authored in each file, so each floor is the exact count on every runner. MEASURED.
