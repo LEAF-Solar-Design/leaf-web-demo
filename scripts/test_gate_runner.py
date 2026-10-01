@@ -17,8 +17,10 @@ repo parent).
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -824,6 +826,58 @@ def test_spawn_normalization_leaves_linux_and_native_windows_commands_unchanged(
     assert g.normalize_spawn_command(windows_exe, os_name="nt") == (
         windows_exe, False, None
     )
+
+
+def test_playwright_reporting_wrapper_keeps_web_server_in_the_original_config_directory(
+        tmp_path, monkeypatch):
+    # Playwright resolves webServer.cwd against the config file; the CI wrapper lives in the
+    # report directory, so an unmapped webServer ran `npm run dev` there and every first attempt failed.
+    g = _load_runner()
+    trusted = tmp_path / "reporters"
+    trusted.mkdir()
+    monkeypatch.setenv("LEAF_TRUSTED_CI_DIR", str(trusted))
+    web = tmp_path / "web"
+    web.mkdir()
+    absolute = (tmp_path / "elsewhere").resolve()
+    config = web / "playwright.fixture.config.mjs"
+    config.write_text(
+        "export default {testDir: './tests', webServer: [\n"
+        "  {command: 'npm run dev', port: 5173},\n"
+        "  {command: 'npm run api', cwd: 'server'},\n"
+        "  {command: 'npm run other', cwd: " + json.dumps(str(absolute)) + "}]};\n",
+        encoding="utf-8")
+    single = web / "playwright.single.config.mjs"
+    single.write_text("export default {webServer: {command: 'npm run dev'}};\n", encoding="utf-8")
+    report = tmp_path / "report"
+    suite = g.Suite("wrapper-fixture", "wrapper fixture", "playwright", web,
+                    ["npx", "playwright", "test", "--config", config.name], None)
+    command = g.reporting_command(suite, suite.argv, {"LEAF_TEST_REPORT_DIR": str(report)})
+    wrapper = Path(command[command.index("--config") + 1])
+    assert wrapper.parent == report
+    text = wrapper.read_text(encoding="utf-8")
+    assert "const base = " + json.dumps(str(web.resolve())) in text
+    assert "cwd: rebase(item.cwd || '.')" in text
+    assert "config.webServer.map(server) : server(config.webServer)" in text
+
+    node = shutil.which("node")
+    if node is None:
+        return
+    def web_servers(path):
+        script = ("import c from " + json.dumps(path.as_uri())
+                  + "; process.stdout.write(JSON.stringify(c.webServer));")
+        proc = subprocess.run([node, "--input-type=module", "-e", script], capture_output=True,
+                              text=True, timeout=60, encoding="utf-8", errors="replace")
+        assert proc.returncode == 0, proc.stderr
+        return json.loads(proc.stdout)
+    servers = web_servers(wrapper)
+    assert [Path(s["cwd"]) for s in servers] == [web.resolve(), (web / "server").resolve(), absolute]
+    assert [s["command"] for s in servers] == ["npm run dev", "npm run api", "npm run other"]
+    assert servers[0]["port"] == 5173
+
+    suite.argv[-1] = single.name
+    command = g.reporting_command(suite, suite.argv, {"LEAF_TEST_REPORT_DIR": str(tmp_path / "r2")})
+    single_server = web_servers(Path(command[command.index("--config") + 1]))
+    assert Path(single_server["cwd"]) == web.resolve()
 
 
 def _summary_suite(g, *, expected, reason, allowed=()):
