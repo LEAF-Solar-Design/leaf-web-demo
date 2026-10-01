@@ -8,6 +8,7 @@ import { dirname, join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { prepareProductionBundle, startSameOriginProxy } from './sameOriginProxy.mjs'
+import { createStackDatabase, dropStaleStackDatabases, prepareStackDatabase } from './pgStack.mjs'
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const python = process.env.LEAF_TEST_PYTHON || process.env.PYTHON || 'python'
@@ -23,6 +24,31 @@ export class QueuedError extends Error {
 }
 export class StoppedError extends Error {
   constructor(message = 'Local stack admission is stopped', admission) { super(message); this.name = 'StoppedError'; this.code = 'STOPPED'; this.admission = admission }
+}
+
+export class SolverMissingError extends Error {
+  constructor(paths) {
+    super(`AutoFill solver.py is missing; checked: ${paths.join(', ')}`)
+    this.name = 'SolverMissingError'
+    this.code = 'SOLVER_MISSING'
+    this.paths = paths
+  }
+}
+
+export async function resolveStackSolver({ repoParent = dirname(repo), env = process.env } = {}) {
+  // An explicit override is authoritative: never silently use another solver
+  // when the configured checkout is missing.
+  const root = resolve(env.AUTOFILL_SOLVER_ROOT || join(repoParent, 'autofill-solver'))
+  const source = join(root, 'solver.py')
+  try {
+    if ((await stat(source)).isFile()) return {
+      AUTOFILL_SOLVER_ROOT: root,
+      ...(env.AUTOFILL_SOLVER_REVISION ? { AUTOFILL_SOLVER_REVISION: env.AUTOFILL_SOLVER_REVISION } : {}),
+    }
+  } catch (error) {
+    if (!['ENOENT', 'ENOTDIR'].includes(error.code)) throw error
+  }
+  throw new SolverMissingError([source])
 }
 
 export async function portListening(port) {
@@ -295,8 +321,13 @@ process.once('SIGINT', () => { void stopAll('SIGINT') })
 process.once('SIGTERM', () => { void stopAll('SIGTERM') })
 process.on('beforeExit', () => { for (const state of running) void state.stop().catch((error) => { console.error(error); process.exitCode = 1 }) })
 
-export async function startStack({ slot, admission = defaultAdmission, slots, databaseURL, harnessDatabaseURL, timeoutMs = 180000 } = {}) {
+export async function startStack({ slot, admission = defaultAdmission, slots, databaseURL, harnessDatabaseURL, postgres, timeoutMs = 180000 } = {}) {
   if (typeof admission !== 'function') throw new TypeError('admission must be a function')
+  if (postgres !== undefined && postgres !== false && postgres !== true && (!postgres || typeof postgres !== 'object' || Array.isArray(postgres))) throw new TypeError('postgres must be true or an object with adminUrl')
+  if (postgres && (databaseURL || harnessDatabaseURL)) throw new TypeError('postgres owns database authority; do not also pass databaseURL or harnessDatabaseURL')
+  // The canonical worker resolves its descriptor before it can claim a job.
+  // Check its source before provisioning a database or launching any child.
+  const solverEnv = postgres ? await resolveStackSolver() : undefined
   // No root, build, listener or stack child exists before this per-launch hook.
   const answer = await admission({ slot, kind: 'walk_local' })
   const status = typeof answer === 'string' ? answer.toLowerCase() : String(answer?.status || answer?.decision || (answer?.admitted === true ? 'admitted' : '')).toLowerCase()
@@ -328,6 +359,11 @@ export async function startStack({ slot, admission = defaultAdmission, slots, da
         killSync(state, true)
         await until(async () => (!state.child || state.closed) && [...state.pids].every((pid) => !pidAlive(pid)) && (await Promise.all(Object.values(state.ports || {}).map(portListening))).every((open) => !open), 15000, 'Stack teardown failed after force-kill')
       }
+      // Drop only after the app, worker and harness have lost their database
+      // connections. FORCE also clears a pooled connection left by a crash.
+      // Keep its root and lease registered until the drop succeeds, so a
+      // transient admin failure can be retried through stop().
+      if (state.database) await state.database.drop()
       const record = metrics(state)
       if (state.root) {
         const temporary = join(state.root, 'metrics.json')
@@ -342,7 +378,10 @@ export async function startStack({ slot, admission = defaultAdmission, slots, da
       running.delete(state)
       if (errors.length) throw new AggregateError(errors, 'Stack stopped with cleanup errors')
       return record
-    })()
+    })().catch((error) => {
+      if (state.database) stopping = undefined
+      throw error
+    })
     return stopping
   }
   running.add(state)
@@ -350,15 +389,32 @@ export async function startStack({ slot, admission = defaultAdmission, slots, da
     state.lease = await acquireLease(cap, slot)
     state.ports = await allocatePorts(slot)
     // Fail closed if a repo-local dotenv could silently reconnect to host data.
-    if (!databaseURL && existsSync(join(repo, 'platform', '.env.local'))) {
+    if (!databaseURL && !postgres && existsSync(join(repo, 'platform', '.env.local'))) {
       const local = await readFile(join(repo, 'platform', '.env.local'), 'utf8')
       if (/^\s*(?:export\s+)?DATABASE_URL\s*=/m.test(local)) throw new Error('platform/.env.local contains database authority; remove it from this isolated checkout or pass an explicitly private databaseURL')
     }
     if (!existsSync(join(repo, 'harness', 'dist', 'scripts', 'serve.js'))) throw new Error('Missing prerequisite harness/dist/scripts/serve.js; compile the harness before running the stack fixture')
+    if (postgres) {
+      const adminUrl = postgres === true ? undefined : postgres.adminUrl
+      await dropStaleStackDatabases({ adminUrl })
+      state.database = await createStackDatabase({ adminUrl, slot })
+      databaseURL = harnessDatabaseURL = state.database.url
+      // The canonical worker asserts the complete schema before its first
+      // claim, so apply the platform's own migrations before launching it.
+      const schema = await prepareStackDatabase(databaseURL)
+      if (schema.database !== state.database.name || schema.ok !== true) throw new Error('Platform migrations did not prepare the private stack database')
+    }
     const bundleDir = await prepareProductionBundle()
     state.root = await mkdtemp(join(tmpdir(), `leaf-walk-stack-${slot}-`))
     state.metricsPath = join(dirname(state.root), `leaf-walk-stack-metrics-${slot}.json`)
     const env = await privateEnvironment(state.root, state.ports, databaseURL, harnessDatabaseURL)
+    if (solverEnv) Object.assign(env, solverEnv, {
+      // PostgreSQL enables the canonical solver worker, but the launcher's
+      // authored-execution default also arms an E2B-only harness boundary.
+      // This local stack has no E2B authority; exercise queued solver work
+      // without arming generated tenant-code execution.
+      LEAF_AUTHORED_EXECUTION: '0',
+    })
     const readyPath = join(state.root, 'ready.json')
     const args = ['-B', '-u', join(repo, 'scripts', 'start-leaf.py'), '--no-web', '--with-harness', '--strict-ports', '--ready-file', readyPath,
       '--env-allowlist', Object.keys(env).filter((key) => !osNames.has(key.toUpperCase())).join(','),
@@ -386,7 +442,7 @@ export async function startStack({ slot, admission = defaultAdmission, slots, da
     for (const role of ['web', 'proxy']) state.proxies.push(await startSameOriginProxy({ port: state.ports[role], appPort: state.ports.app, bundleDir }))
     if (state.closed || (await Promise.all(Object.values(state.ports).map(portListening))).some((open) => !open)) throw new Error('Stack lost a listener before boot completed')
     state.bootSeconds = (performance.now() - start) / 1000
-    return { baseURL: `http://127.0.0.1:${state.ports.proxy}`, ports: state.ports, pids: state.pids, root: state.root, env, metricsPath: state.metricsPath, output: () => state.output, stop: state.stop }
+    return { baseURL: `http://127.0.0.1:${state.ports.proxy}`, ports: state.ports, pids: state.pids, root: state.root, env, ...(state.database ? { database: state.database } : {}), metricsPath: state.metricsPath, output: () => state.output, stop: state.stop }
   } catch (error) {
     try { await state.stop() } catch (cleanupError) { throw new AggregateError([error, cleanupError], 'Stack boot failed and cleanup failed') }
     throw error
