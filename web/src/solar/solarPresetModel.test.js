@@ -258,3 +258,11 @@ it('PM17 pins every label to the declared settings keys', () => {
   expect(Object.keys(PRESET_LABELS)).toEqual(declared)
   expect(Object.keys(labels)).toEqual(declared)
 })
+
+it('PM18 refuses two presets that share a prefix', () => {
+  const listing = { ...LIST_TWO, active_prefix: 'A',
+    list_rows: [row('report-profile-1', 'profile-1', 'A Alpha'), row('report-profile-2', 'profile-2', 'A Beta'), row('report-profiles', 'profiles', 2)] }
+  expect(presetListing(listing, spec).ok).toBe(false)
+  expect(presetListing({ ...listing,
+    list_rows: [row('report-profile-1', 'profile-1', 'A Alpha'), row('report-profile-2', 'profile-2', 'B Beta'), row('report-profiles', 'profiles', 2)] }, spec).ok).toBe(true)
+})
