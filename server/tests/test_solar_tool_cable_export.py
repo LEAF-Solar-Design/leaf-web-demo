@@ -227,27 +227,27 @@ ALL_SHEETS = ["Homeruns", "Equipment Schedule", "Inverter Schedule", "String Sch
 NO_EQUIPMENT = ["Homeruns", "Inverter Schedule", "String Schedule", "Feeder Schedule"]
 OUTPUTS = [
     ("i8", {}, NO_EQUIPMENT, [534, 37, 179, 15], 35322,
-     "9f285dc0f0e658efacfc2295b3ec5592da43c78ebd3be620c427e06b7a3a50d8", SUMMARY),
+     "37c572b36392c664c3369d2bb74af1bcb0d881726bb984a05f288a71329b3b0e", SUMMARY),
     ("i8", {"inverter_record": CAPTURE_RECORD}, ALL_SHEETS, [534, 16, 37, 179, 15], 36430,
-     "e22b5c7fdf017410b7ed6fdab00f240f2405024e405a69cd182b2dd9e2298016", dict(SUMMARY, inverter_record="caller")),
+     "b75d8f17c8668d2590c7222131a4eb1a67092007c9e1bf2d237333c366c1f1a2", dict(SUMMARY, inverter_record="caller")),
     ("i8", {"circuit_source": "labels"}, NO_EQUIPMENT, [534, 39, 179, 15], 35683,
-     "c386f059353aa354e46a0407fd1a8d7618b3f97c4ca17ea604a7d1ff7a28140a", dict(SUMMARY, circuit_source="labels")),
+     "42f7b59cc0c01fbf3acfec2e5e5accb39eed4423e56304635a8389bb7919503c", dict(SUMMARY, circuit_source="labels")),
     ("i8", I9_PARAMS, ALL_SHEETS, [534, 16, 39, 179, 15], 36796,
-     "45081e58827a8ae516012e9bd5b15add6fde0c3f055f2f0c42287fb5344d8c74",
+     "0bb20c4234c1d5c50bec8a039d5e86c227b5f232440af62143f3e1380ef8a4eb",
      dict(SUMMARY, circuit_source="labels", inverter_record="caller")),
     ("i8", dict(I9_PARAMS, project_location="Akron, OH", design_min_temp_c=-23.5), ALL_SHEETS,
-     [534, 17, 39, 179, 15], 36825, "858b30883d79867c4f760ba517c347e432b23087664108627feb7b6fe1362947",
+     [534, 17, 39, 179, 15], 36825, "935ffb14da3274a2f1f97ebd5abb09b659380af54a078677a9823381590c99a6",
      dict(SUMMARY, circuit_source="labels", inverter_record="caller")),
     ("w1", {}, ["Homeruns", "Inverter Schedule", "String Schedule"], [4, 7, 8], 3376,
-     "9ce6e932c80e9afb1acccfa79001f9afbcb24e155175818d521f24eb7f99c001", W1_SUMMARY),
+     "f10611f481701d4a27c8e59f62b7d10a3c24034ce760c1a5a4b5499bc2b88ad4", W1_SUMMARY),
     ("w1", {"circuit_source": "labels"}, ["Homeruns"], [4], 1790,
-     "91ac4bf4f199f95de913e71755cf8a3d86143a3d9dab9e41968ce98261216a3f",
+     "95824cf2b1dd68339e2b4afc1fc874802e84ceb25147e1e4eb77634ab913f03c",
      dict(W1_SUMMARY, circuit_source="labels", strings=0, modules=0)),
     ("w1", {"inverter_record": CAPTURE_RECORD}, PLUGIN_SHEETS, [4, 16, 7, 8], 4387,
-     "0d760b4dbc37d9aa808fd274b29ec7698bbdfb4312cf9c43cfe897397075adbe", dict(W1_SUMMARY, inverter_record="caller")),
+     "8cd0c1000faa2237da224e5c876dceec87e160b7be6361d3ca490d393f913913", dict(W1_SUMMARY, inverter_record="caller")),
     ("w1", {"inverter_record": CAPTURE_RECORD, "suggested_inverter_count": 3, "design_min_temp_c": -12,
             "project_location": "Akron, OH"}, PLUGIN_SHEETS, [4, 17, 7, 8], 4421,
-     "946555bd9b86fefbd56b4beade4aaa40573252fa54f5862e8e519a63952898d8", dict(W1_SUMMARY, inverter_record="caller")),
+     "475c7c55ac1ee7eff28cc8d7a0bbf9d63b9d988d94624231f6077e39012be6e2", dict(W1_SUMMARY, inverter_record="caller")),
 ]
 
 
@@ -317,7 +317,7 @@ def test_cable_export_w1_lengths_use_inches(graph, unit, mpu):
 
 
 I8_UNITS = [("m", 1.0), ("ft", 0.3048), ("mm", 0.001), ("cm", 0.01)]
-I8_UNSIZED_SHA = "7665b81f25c38149323332e61619137a6ee2472f978032b098a2d3ba1c9d92d2"
+I8_UNSIZED_SHA = "c0d7d50a81a9d7284cb3f8ec777259fe231e1c42e2cd827d0089b0b1fd1067c6"
 
 
 @pytest.mark.parametrize("unit,mpu", I8_UNITS, ids=[row[0] for row in I8_UNITS])
@@ -700,7 +700,7 @@ def test_cable_export_api_writes_one_artifact(api, graph):
     ref = output["artifact"]
     assert (ref["schema"], ref["media_type"], ref["filename"], ref["byte_length"], ref["content_sha256"],
             ref["source_version"]) == ("leaf.solar-artifact-ref.v1", XLSX, "CableExport.xlsx", 4421,
-                                       "946555bd9b86fefbd56b4beade4aaa40573252fa54f5862e8e519a63952898d8", 1)
+                                       "475c7c55ac1ee7eff28cc8d7a0bbf9d63b9d988d94624231f6077e39012be6e2", 1)
     assert ref["download"] == "/api/drawings/solar/artifacts/" + ref["artifact_id"]
     assert (result["output_sha256"], result["output_bytes"]) == (OUTPUT_SHA256, OUTPUT_BYTES)
     meta, content = solar_artifacts.read_artifact(api[1], TENANT, "solar", ref["artifact_id"], require_head=True)
@@ -715,7 +715,7 @@ def test_cable_export_api_writes_one_artifact(api, graph):
     assert store.load_manifest(api[1], TENANT, "solar")["head"] == 1
 
 
-OUTPUT_SHA256 = "393301cbe0361bab5d64029798fbc7d5d3df342c5571d35aa69dccc646e2b4a2"
+OUTPUT_SHA256 = "8e74a3c4458786952c3d1ef54af45f7716abc16a31708fa0f5476ed518a0a9b2"
 OUTPUT_BYTES = 743
 
 API_REFUSALS = [

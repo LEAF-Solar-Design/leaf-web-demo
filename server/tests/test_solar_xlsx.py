@@ -177,6 +177,14 @@ def test_the_writer_is_deterministic():
     assert xlsx.write_workbook(ROUND_TRIP) == xlsx.write_workbook(ROUND_TRIP)
 
 
+def test_the_writer_bytes_do_not_depend_on_the_host_os():
+    """zipfile stamps the host OS into every entry unless told otherwise (0 on Windows, 3 elsewhere), so the
+    same workbook would hash differently on a developer's machine and on the server. Every entry is pinned."""
+    with zipfile.ZipFile(io.BytesIO(xlsx.write_workbook(ROUND_TRIP))) as archive:
+        stamps = {(info.create_system, info.external_attr) for info in archive.infolist()}
+    assert stamps == {(3, 0o600 << 16)}
+
+
 def test_read_workbook_file_reads_what_write_workbook_wrote(tmp_path):
     path = tmp_path / "book.xlsx"
     path.write_bytes(xlsx.write_workbook(ROUND_TRIP))
