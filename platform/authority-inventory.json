@@ -727,14 +727,14 @@
         "LEAF_UPLOADS_DIR marker JSON and purge receipt files"
       ],
       "backfill": {
-        "command": null,
-        "status": "not_implemented",
-        "note": "No upload marker, extraction lease, purge lease, or receipt import command exists."
+        "command": "python /app/scripts/reconcile_upload_authority.py --mode backfill --source-dir <LEAF_UPLOADS_DIR> --tenant-id <tenant> --drawing-id <drawing> --apply",
+        "status": "partial_markers_only_drained_scope",
+        "note": "PARTIAL coverage. One explicit tenant/drawing at a time, with writers drained: imports a terminal (ready or failed) schema-1 upload marker into drawing_upload_attempts. Without --apply the command is a dry run in a read-only transaction and writes nothing. Refuses with zero writes: extracting or purging markers, any active extraction or purge lease on the target row, a conflicting or purged row, a ready marker whose drawing version is not yet in PostgreSQL (run reconcile_drawing_authority.py first), and any purge receipt scope. Purge receipt import, extraction and purge lease migration, and bulk enumeration of LEAF_UPLOADS_DIR remain unimplemented. Requires explicit DATABASE_URL and an already migrated database. Offline injected-store tests in scripts/test_reconcile_upload_authority.py do not prove PostgreSQL concurrency or authorize cutover."
       },
       "parity": {
-        "command": "python -m pytest -q server/tests/test_drawing_upload_authority_postgres.py",
-        "status": "contract_tests_only",
-        "note": "Tests cover PostgreSQL upload lifecycle behavior, not live file parity."
+        "command": "python /app/scripts/reconcile_upload_authority.py --mode parity --source-dir <LEAF_UPLOADS_DIR> --tenant-id <tenant> --drawing-id <drawing>",
+        "status": "partial_markers_only_drained_scope",
+        "note": "PARTIAL coverage. Read-only marker equality (attempt, status, retention and marker JSON) for the explicit drawing. Purge receipt parity and live selection are not covered and remain open. PostgreSQL upload lifecycle behavior is covered separately by server/tests/test_drawing_upload_authority_postgres.py."
       },
       "cutover_modes": [
         "legacy",

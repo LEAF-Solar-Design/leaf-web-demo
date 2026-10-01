@@ -73,6 +73,7 @@ SURFACE_INPUTS: dict[str, tuple[str, ...]] = {
         "scripts/reconcile_customization_authority.py",
         "scripts/reconcile_drawing_authority.py",
         "scripts/reconcile_sessions_authority.py",
+        "scripts/reconcile_upload_authority.py",
     ),
     "broker": (
         ".dockerignore",
