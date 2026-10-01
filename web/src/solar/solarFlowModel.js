@@ -25,7 +25,7 @@ function flowEntry(id, label, maturity, stages) {
 export const SOLAR_FLOWS = Object.freeze([
   flowEntry('rooftop', 'Rooftop', 'production', null),
   flowEntry('ground-electrical', 'Ground Mount Electrical', 'production', [
-    flowStage('conversion', 'Tracker conversion'),
+    flowStage('conversion', 'Tracker conversion', ['solar-trackers-to-panel-groups']),
     flowStage('stringing', 'Sizing and stringing'),
     flowStage('equipment', 'Equipment'),
     flowStage('feeders', 'Feeders and routes'),
@@ -140,6 +140,19 @@ const NO_RUNS = Object.freeze({})
 function plainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     && [Object.prototype, null].includes(Object.getPrototypeOf(value))
+}
+
+/** Selection overlays may supply only keys admitted by a closed params schema. */
+export function admittedOverlays(params, overlays) {
+  try {
+    if (!plainObject(params)) return {}
+    if (params.additionalProperties !== false) return overlays
+    if (!plainObject(params.properties) || !plainObject(overlays)) return {}
+    return Object.fromEntries(Object.entries(overlays)
+      .filter(([key]) => Object.prototype.hasOwnProperty.call(params.properties, key)))
+  } catch {
+    return {}
+  }
 }
 
 function ownValue(record, key) {

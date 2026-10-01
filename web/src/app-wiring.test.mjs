@@ -99,7 +99,7 @@ describe('Conductor form wiring', () => {
     const live = esbuild.transformSync(appSource, { loader: 'jsx' }).code
     const rail = live.slice(live.indexOf('row: solarFlowEditor'), live.indexOf('row: solarFlowEditor') + 700)
     assert.match(rail, /projectId: catalogRunContext\?\.projectId/)
-    const start = live.indexOf('const overlays = catalogRunOverlays(')
+    const start = live.indexOf('catalogRunOverlays({ enabled')
     assert.ok(start >= 0)
     assert.match(live.slice(start, start + 220), /toolName: tool\?\.name/)
   })
@@ -1665,5 +1665,38 @@ describe('App.jsx wiring', () => {
       assert.match(source, new RegExp('studioPresentation=\\{Boolean\\(studioGround\\)\\}'))
       assert.match(source, new RegExp('mock=\\{mock\\}'))
     }
+  })
+})
+
+// sf-w3-conversion-graph-surface. Text pins over App.jsx (they pin the wiring, not the behaviour; the
+// behaviour rows live in SolarToolForm.test.jsx CS/TF and ribbonClusters.test.js CS).
+describe('Conversion surface wiring', () => {
+  it('CW3 prepareRunParams admits selection overlays through the tool params schema', () => {
+    const start = appSource.indexOf('const prepareRunParams = useCallback')
+    const end = appSource.indexOf('}, [selectedHandle])', start)
+    assert.ok(start >= 0 && end > start)
+    const prepare = appSource.slice(start, end)
+    assert.ok(prepare.includes('const overlays = admittedOverlays(tool?.params, catalogRunOverlays({'))
+    assert.ok(prepare.indexOf('admittedOverlays(') < prepare.indexOf('catalogRunOverlays({'))
+  })
+
+  it('CW1 the generic Solar form reads the drawing intake for its graph revision', () => {
+    const live = esbuild.transformSync(appSource, { loader: 'jsx' }).code
+    const start = live.search(/React\.createElement\(\s*SolarToolForm,/)
+    assert.ok(start >= 0)
+    const form = live.slice(start, start + 700)
+    assert.match(form, /readIntake: SOLAR_SETTINGS_LOADERS\?\.readIntake/)
+    assert.match(form, /drawingId: catalogRunContext\?\.drawingId \?\? null/)
+    assert.match(form, /drawingVersion: catalogRunContext\?\.drawingVersion \?\? null/)
+  })
+
+  it('CW2 the result card gets the Solar refusal sentence behind the engine flag and Details keeps the raw code', () => {
+    const live = esbuild.transformSync(appSource, { loader: 'jsx' }).code
+    const panel = live.search(/React\.createElement\(\s*ResultPanel,/)
+    assert.ok(panel >= 0)
+    assert.match(live.slice(panel, panel + 400), /result: shownResult,/)
+    assert.match(live, /const shownResult = useMemo\(\s*\(\) => ENV_CAD_EDIT \? solarRefusalEnvelope\(result, selectedTool\) : result,\s*\[result, selectedTool\]\s*\)/)
+    const details = live.slice(live.indexOf('const openRunDetails = useCallback'), live.indexOf('const shownResult = useMemo'))
+    assert.match(details, /const env = result;/)
   })
 })

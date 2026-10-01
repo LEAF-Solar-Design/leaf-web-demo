@@ -114,6 +114,41 @@ export function solarRailReason(availability, options) {
     : `${SOLAR_REFUSAL_REASONS.unlisted} (${code})`).join('; ')
 }
 
+// A Solar run refusal names its code in the server's case: a readiness refusal
+// in lower case (ground_physical_state_required), a builtin refusal in upper case
+// (GROUND_TRACKER_ROWS_REQUIRED). Both are one key of the map above. The three
+// keys that describe the client's own state, never a server answer, are not run
+// refusals. Bounded: at most 64 characters, one case, no regex on anything longer.
+const SOLAR_RUN_REFUSAL_EXCLUDED = new Set(['capability_availability_unavailable', 'capability_not_ready', 'unlisted'])
+
+export function solarRunRefusal(code) {
+  if (typeof code !== 'string' || code.length === 0 || code.length > 64) return null
+  if (!/^[a-z][a-z0-9_]*$/.test(code) && !/^[A-Z][A-Z0-9_]*$/.test(code)) return null
+  const key = code.toLowerCase()
+  if (SOLAR_RUN_REFUSAL_EXCLUDED.has(key) || !Object.hasOwn(SOLAR_REFUSAL_REASONS, key)) return null
+  return SOLAR_REFUSAL_REASONS[key]
+}
+
+const plainRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
+  && [Object.prototype, null].includes(Object.getPrototypeOf(value))
+
+// The envelope ResultPanel shows for a failed run of a Solar catalog tool: the
+// error's message becomes the map's sentence when the refusal code is a map key.
+// Everything else (another tool, a success, an unmapped code, any malformed part)
+// returns the SAME envelope object, so nothing re-renders and the run's Details
+// drawer still reads the raw code from the unmapped envelope.
+export function solarRefusalEnvelope(envelope, tool) {
+  if (!plainRecord(envelope) || envelope.ok === true || !plainRecord(envelope.error)) return envelope
+  if (!plainRecord(tool) || envelope.tool !== tool.name) return envelope
+  if (solarView(tool).state !== 'valid') return envelope
+  // The synchronous rail answers reason_code at the top; a job record carries it
+  // on the error (api.js recordToEnvelope); error.message repeats it either way.
+  const code = [envelope.reason_code, envelope.error.reason_code, envelope.error.message]
+    .find((value) => solarRunRefusal(value) !== null)
+  if (code === undefined) return envelope
+  return { ...envelope, error: { ...envelope.error, message: solarRunRefusal(code) } }
+}
+
 // Every catalog tool used to be one hardcoded icon and one hardcoded size. The
 // record now answers both, and a record that answers neither renders exactly as
 // it did — that equality is pinned in ribbonClusters.test.js.
