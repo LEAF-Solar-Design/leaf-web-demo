@@ -665,6 +665,15 @@ def build_suites() -> List[Suite]:
         Suite("server-solar-tool-design-presets-installation",
               "server tests/test_solar_tool_design_presets_installation.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_design_presets_installation.py"), 33),
+        # Design presets and the L1/L2 mode (2026-10-01, sf-w2-design-presets-l2-mode): a preset of the
+        # other mode retypes every inverter in the same commit (entering L2 mode, an unconnected string
+        # inverter) and leaving L2 mode with a combiner box, a central inverter or an L1 to L2 link is
+        # refused (DESIGN_PRESET_L2_EQUIPMENT_PRESENT); the mode is read back before every commit. Inputs
+        # are authored in the file or are committed evidence, so the floor is the exact count on every
+        # runner. COUNTED: 15 unparametrized tests + 6 refusal cases = 21.
+        Suite("server-solar-tool-design-presets-l2-mode",
+              "server tests/test_solar_tool_design_presets_l2_mode.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_design_presets_l2_mode.py"), 21),
         # A drawing-settings change stales the outputs built under the old settings (2026-09-30,
         # sf-solar-settings-invalidation): solar-settings and preset apply stale every homerun route and
         # schedule, so the export guard refuses them on a graph with no solve digest. Inputs are authored
