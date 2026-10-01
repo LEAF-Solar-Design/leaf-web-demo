@@ -618,6 +618,13 @@ def build_suites() -> List[Suite]:
         # COUNTED: 20 tests + 38 more parametrizations = 58.
         Suite("server-solar-tool-solar-string-midpoint", "server tests/test_solar_tool_solar_string_midpoint.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_string_midpoint.py"), 58),
+        # Manual trench over the design graph (2026-10-01, sf-w3-trench-routing-manual): LEAFTRENCH between two
+        # picked points as one local-graph-commit, routed in drawing units by solar_inverter_outputs.route_path
+        # with the R27 metric options; reroute stales the routes riding the trench and their schedules. Inputs
+        # are authored in the file or are committed evidence, so the floor is the exact count on every runner.
+        # COUNTED: 20 tests + 25 more parametrizations = 45 (36 + 3 obstacle angles + 2 segment caps + 4 exceptions).
+        Suite("server-solar-tool-solar-trench-manual", "server tests/test_solar_tool_solar_trench_manual.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_trench_manual.py"), 45),
         # Auto-fill registry and persisted plan round trips: 17 tests + 50 more parametrizations = 67.
         Suite("server-solar-tool-solar-autofill", "server tests/test_solar_tool_solar_autofill.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_autofill.py"), 67),
