@@ -14,19 +14,11 @@ import { accessibleName, reasonCode } from '../lib/actionRegistry.js'
 import { formatElementId } from '../lib/elementIdentity.js'
 import { moveRovingTab } from '../lib/roving.js'
 import CockpitIcon from './CockpitIcon.jsx'
+import { RIBBON_TABS } from '../lib/ribbonTabs.data.js'
+
+export { RIBBON_TABS } from '../lib/ribbonTabs.data.js'
 
 export const QUICK_FILE_SLOT_ID = 'cockpit-quick-file'
-
-export const RIBBON_TABS = Object.freeze([
-  { id: 'draw', label: 'Draw' },
-  // The reason never says "browser": the product tabs include one named
-  // Browser and accessible-name matching is a substring test.
-  { id: 'model', label: 'Model', reason: '3D modelling is not in this engine yet' },
-  { id: 'insert', label: 'Insert' },
-  { id: 'annotate', label: 'Annotate' },
-  { id: 'view', label: 'View' },
-  { id: 'manage', label: 'Manage' },
-])
 
 export function QuickButton({ tool }) {
   const { id, label, icon, title = '', reason = '', disabled = false, expanded, controls, onClick, kind = 'button', dataTool = '' } = tool

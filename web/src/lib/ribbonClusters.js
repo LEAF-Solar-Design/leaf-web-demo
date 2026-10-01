@@ -22,7 +22,7 @@
 import { zoomViewer } from '../site/DrawingCockpit.jsx'
 import { deriveIosState } from '../ios/IosSurface.jsx'
 import { iosSourceApprovalState } from '../site/iosShipReadiness.js'
-import { RIBBON_TABS } from '../site/CockpitTopBand.jsx'
+import { RIBBON_TABS, profileRibbonTabData } from './ribbonTabs.data.js'
 import { DEFERRED_REASONS, REASONS, forCluster, ribbonTool } from './actionRegistry.js'
 import { DEFAULT_TOOL_ICON, isWriteTool, toolIcon, toolMcpSource, toolPlacementSize, toolPlacementTab } from './toolRecord.js'
 import { solarFormKeys, solarView } from '../solar/solarView.js'
@@ -408,7 +408,7 @@ export function profileRibbonTabs(profile, ctx = {}) {
     const onToggle = profileHandler(solar.onToggle)
     const onClear = profileHandler(context.onClearSelection)
     const tabs = drafting()
-    tabs.splice(1, 0, { id: 'solar', label: 'Solar', clusters: [
+    tabs.splice(1, 0, { ...profileRibbonTabData('solar')[1], clusters: [
       // The engine consumer fills this seat with its four registry records.
       profileGroup('solar-panels', 'Panel placement', []),
       profileGroup('stringing', 'Stringing', [
@@ -442,7 +442,7 @@ export function profileRibbonTabs(profile, ctx = {}) {
     const onJobs = profileHandler(activity.onJobs)
     const onReceipts = profileHandler(activity.onReceipts)
     return [
-      { id: 'project', label: 'Project', clusters: [
+      { ...profileRibbonTabData('project')[0], clusters: [
         profileGroup('project', 'Project', [
           { ...profileBase('project:open', 'Open project'), disabled: !onOpen, reason: PROFILE_REASONS.openProject, onClick: onOpen ?? undefined },
           { ...profileBase('project:change', 'Change project'), disabled: !onChange, reason: PROFILE_REASONS.changeProject, onClick: onChange ?? undefined },
@@ -455,8 +455,8 @@ export function profileRibbonTabs(profile, ctx = {}) {
           { ...profileBase('conversation:new', 'New conversation'), disabled: !onNew, reason: PROFILE_REASONS.newConversation, onClick: onNew ?? undefined },
         ]),
       ] },
-      { id: 'tools', label: 'Tools', clusters: catalogClusters(families, catalogOptions) },
-      { id: 'activity', label: 'Activity', clusters: [
+      { ...profileRibbonTabData('project')[1], clusters: catalogClusters(families, catalogOptions) },
+      { ...profileRibbonTabData('project')[2], clusters: [
         profileGroup('jobs', 'Jobs', [
           { ...profileBase('activity:jobs', 'Open job monitor'), disabled: !onJobs, reason: PROFILE_REASONS.openJobs, onClick: onJobs ?? undefined },
         ]),
@@ -472,7 +472,7 @@ export function profileRibbonTabs(profile, ctx = {}) {
   const onShipReceipts = profileHandler(ship.onReceipts)
   const [revision, readiness] = shipStatusRows(ship.contract, ship.revision, onShipReceipts, ship)
   const approveRow = shipApproveRow(ship)
-  return [{ id: 'ship', label: 'Ship', clusters: [
+  return [{ ...profileRibbonTabData('ship')[0], clusters: [
     profileGroup('revision', 'Revision', [
       revision,
     ]),
