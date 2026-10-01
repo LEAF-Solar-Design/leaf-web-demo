@@ -27,6 +27,8 @@ Special handling, all documented on the scoreboard:
     reason rather than reported red, unless LEAF_GATE_REQUIRE_DATABASE=1
     (native CI), which makes it a FAIL row. LEAF_GATE_DATABASE_URL hands a
     DSN to the db_gated and uses_database suites only, as their DATABASE_URL.
+    That gate database is migrated ONCE before any suite starts (see
+    migrate_gate_database); a failed migration fails the run with no suite run.
   * harness `npm test` + `npx tsc --noEmit` + `npx tsc -p tsconfig.build.json`
     are included.
   * `web-demo-gate` shells out to dispatch/run-local-ci.sh's demo-gate bucket,
@@ -672,6 +674,12 @@ def build_suites() -> List[Suite]:
         # recorded i7 feeders): 24 tests + 40 more parametrizations = 64.
         Suite("server-solar-tool-electrical-schedules", "server tests/test_solar_tool_electrical_schedules.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_electrical_schedules.py"), 64),
+        # Equipment move through the route bridge (2026-09-30, sf-w2-equipment-move): MOVEINV as a
+        # local-graph-commit tool, the C4 combiner move persisted with its rerouted homeruns, feeders left in
+        # place and staled. Inputs are authored in the file, so the floor is the exact count on every runner.
+        # COUNTED: 21 tests + 42 more parametrizations = 63.
+        Suite("server-solar-tool-equipment-move", "server tests/test_solar_tool_equipment_move.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_equipment_move.py"), 63),
         # W5 inverter family (2026-09-24, contract G35): the shared state and delta module and the
         # device, string and output engines (literal ports of the plugin's inverter commands). Inputs
         # are authored in each file, so each floor is the exact count on every runner. MEASURED.
@@ -1404,6 +1412,11 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_data_lifecycle_matrix.py"), 11),
         Suite("server-aps-callback-adapter", "server tests/test_aps_callback_adapter.py",
               "pytest", SERVER, _py_pytest("tests/test_aps_callback_adapter.py"), 50),
+        # P-079 dispatch bind: live dispatch binds the APS WorkItem to its
+        # PostgreSQL job row once per attempt, inert while polling is the only
+        # completion mode. Hermetic (fake store, fake APS client), exact count.
+        Suite("server-broker-aps-workitem-bind", "server tests/test_broker_aps_workitem_bind.py",
+              "pytest", SERVER, _py_pytest("tests/test_broker_aps_workitem_bind.py"), 17),
         # --- modules that were registered in NO suite at all --- #
         # These 19 files existed in server/tests and ran nowhere: not in this
         # runner, not in any directory-target suite. A "*_postgres" name is not
@@ -1628,6 +1641,15 @@ def build_suites() -> List[Suite]:
         Suite("server-postgres-authority-inventory",
               "server tests/test_postgres_authority_inventory_contract.py", "pytest",
               SERVER, _py_pytest("tests/test_postgres_authority_inventory_contract.py"), 9),
+        # The drained upload-marker reconciler (P-076 residual). Fully offline:
+        # an injected in-memory store stands in for PostgreSQL, so nothing
+        # skips and the floor is the exact count, 60 (14 functions; the refusal
+        # matrix is 21 cases x dry-run/apply, plus 6 argument refusals). It
+        # pins dry-run default, an identical second run, zero writes on every
+        # refusal and the inventory's PARTIAL upload coverage claim.
+        Suite("reconcile-upload-authority",
+              "scripts test_reconcile_upload_authority.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("test_reconcile_upload_authority.py"), 60),
         # The annex authority the sessions flip strands without. Fully
         # offline: the PostgreSQL halves run against a fake in place of
         # platform.db, so nothing here skips on a no-DB host and the floor
@@ -2313,6 +2335,12 @@ def build_suites() -> List[Suite]:
         Suite("unit-economics-owner-report",
               "scripts test_render_unit_economics_issue.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_render_unit_economics_issue.py"), 3),
+        # Auth0 Action drift check (P-088), registered WITH the file per the #29
+        # fix-then-register rule. A read-only wrapper over deploy_auth0_actions.py
+        # --check driven by a fake transport: no network, no DB, no skipif, no
+        # parametrize, so 14 = its 14 test functions on every runner.
+        Suite("auth0-action-drift-check", "scripts test_check_auth0_action_drift.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_check_auth0_action_drift.py"), 14),
         # Actions cache bucket prune (2026-08-31). The bucket was at 92.7% of
         # its 10 GiB ceiling with 87% of the bytes in unreachable CodeQL
         # overlay-base databases, and the merge gate's 279 MB Playwright entry
@@ -3086,6 +3114,23 @@ def build_suites() -> List[Suite]:
         Suite("web-link-service-flow", "web managed link service OAuth flow", "script", WEB,
               [_npx(), "--no-install", "playwright", "test", "--config", "playwright.local.config.mjs",
                "e2e/local/link-service-flow.spec.mjs", "e2e/local/trust-state.spec.mjs", "--workers=1"], None),
+        # Browser proofs from studio-lanes-20260930 (lanes C, stu2-d, stu2-h, the
+        # lifecycle panel, the iOS ship surface, the viewer grid toggle). One row
+        # per Playwright config; every config derives its dev server port from
+        # LEAF_NATIVE_GATE_WORKER, and the web-tree lock serialises them in a run.
+        Suite("web-studio-panels-proof", "web campaign, recovery, workspace-create and grid browser proofs",
+              "script", WEB,
+              [_npx(), "--no-install", "playwright", "test", "--config", "playwright.config.mjs",
+               "e2e/campaign-panel.spec.mjs", "e2e/recovery-controls.spec.mjs",
+               "e2e/workspace-create-no-prompt.spec.mjs", "e2e/viewer-grid-toggle.spec.mjs",
+               "--workers=1"], None),
+        Suite("web-lifecycle-panel-proof", "web mounted project lifecycle panel browser proof", "script", WEB,
+              [_npx(), "--no-install", "playwright", "test", "--config", "playwright.lifecycle.config.mjs",
+               "e2e/project-lifecycle-panel.spec.mjs", "--workers=1"], None),
+        Suite("web-ios-ship-surface-proof", "web iOS ship surface flag-off and flag-on browser proof",
+              "script", WEB,
+              [_npx(), "--no-install", "playwright", "test", "--config", "playwright.ios.config.mjs",
+               "e2e/ios-ship-surface.spec.mjs", "--workers=1"], None),
         Suite("web-build", "web production build", "script", WEB,
               [_npm(), "run", "build"], None),
         # --- containerized harness smoke (census #13) — OPT-IN --- #
@@ -3245,8 +3290,12 @@ def reporting_command(suite: Suite, argv: List[str], trace_env: dict) -> List[st
                 "  if (name.startsWith('.')) name = rebase(name);\n"
                 "  if (options?.outputFolder) options = {...options, outputFolder: rebase(options.outputFolder)};\n"
                 "  return options ? [name, options] : [name]; });\n"
+                # Playwright resolves webServer.cwd against the config file, which now lives in the report directory.
+                "const server = item => ({...item, cwd: rebase(item.cwd || '.')});\n"
                 "export default {...paths(config), testDir: rebase(config.testDir || '.'),\n"
                 "  ...(config.projects ? {projects: config.projects.map(paths)} : {}),\n"
+                "  ...(config.webServer ? {webServer: Array.isArray(config.webServer)\n"
+                "    ? config.webServer.map(server) : server(config.webServer)} : {}),\n"
                 "  reporter: [...reporters, [" + json.dumps(reporter) + "]]};\n",
                 encoding="utf-8")
             command[index] = str(wrapper)
@@ -3456,6 +3505,85 @@ def probe_platform_db() -> tuple[bool, str, str]:
     out = (proc.stdout + proc.stderr).strip().splitlines()
     msg = out[-1] if out else f"probe exit {proc.returncode}"
     return proc.returncode == 0, msg, dsn
+
+
+# Applies every platform migration with the SAME mechanism the platform test
+# fixtures use (platform/tests/conftest.py): the package loaded under the
+# non-colliding alias leaf_platform, then db.apply_migration(). It runs in a
+# child from REPO_PARENT so the stdlib-shadowing platform/ never reaches the
+# runner process.
+_MIGRATE = r"""
+import importlib.util
+import sys
+from pathlib import Path
+pkg = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location(
+    "leaf_platform", pkg / "__init__.py", submodule_search_locations=[str(pkg)])
+mod = importlib.util.module_from_spec(spec)
+sys.modules["leaf_platform"] = mod
+spec.loader.exec_module(mod)
+from leaf_platform import db
+db.apply_migration()
+db.reset_pool()
+print("MIGRATED")
+"""
+
+MIGRATE_TIMEOUT_S = 300
+_MIGRATE_OUTPUT_TAIL = 8000  # chars of child output echoed on a failure
+
+
+def gate_database_to_migrate() -> str:
+    """The DSN the gate migrates before any suite runs, '' for none. Only a
+    database the GATE owns qualifies: LEAF_GATE_DATABASE_URL, or (under
+    LEAF_GATE_REQUIRE_DATABASE=1) the DSN probe_platform_db() reaches. A
+    developer's ambient DATABASE_URL or platform/.env.local is never migrated
+    by the runner on its own; an unreachable required database is left to the
+    per-suite FAIL rows run_suite already writes."""
+    explicit = os.environ.get("LEAF_GATE_DATABASE_URL", "").strip()
+    if explicit:
+        return explicit
+    if database_required():
+        ok, _msg, dsn = probe_platform_db()
+        if ok and dsn:
+            return dsn
+    return ""
+
+
+def migrate_gate_database(suites: List[Suite]) -> Optional[str]:
+    """Migrate the gate's PostgreSQL ONCE, before any suite starts, so no
+    suite's verdict depends on whether an earlier one happened to migrate.
+    Returns None on success or when there is nothing to do (no gate database,
+    or no selected suite touches one); otherwise the failure text, which the
+    caller must treat as a failed run: suites never run against a
+    half-migrated database. Bounded by MIGRATE_TIMEOUT_S."""
+    if not any((s.db_gated or s.uses_database) and not s.db_deferred for s in suites):
+        return None
+    dsn = gate_database_to_migrate()
+    if not dsn:
+        return None
+    env = clean_env()
+    env["DATABASE_URL"] = dsn
+    t0 = time.perf_counter()
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", _MIGRATE, str(REPO / "platform")],
+            cwd=str(REPO_PARENT), env=env,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=MIGRATE_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        out = (_text(exc.stdout) + _text(exc.stderr)).strip()
+        return (f"gate database migration timed out after {MIGRATE_TIMEOUT_S}s"
+                + (f"\n{out[-_MIGRATE_OUTPUT_TAIL:]}" if out else ""))
+    except OSError as exc:
+        return f"gate database migration could not start: {type(exc).__name__}: {exc}"
+    elapsed = time.perf_counter() - t0
+    out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    if proc.returncode != 0:
+        return (f"gate database migration failed (exit {proc.returncode}, "
+                f"{elapsed:.1f}s)" + (f"\n{out[-_MIGRATE_OUTPUT_TAIL:]}" if out else ""))
+    print(f"  gate database: platform migrations applied once in {elapsed:.1f}s")
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -5773,6 +5901,16 @@ def main() -> int:
     print(f"leaf-web-demo gate runner -- {len(suites)} suites, "
           f"separate processes, logs -> {log_dir}")
     print(f"  selection: {selection}")
+
+    # Before any suite: some suites migrate the schema in their own fixtures
+    # and others assume it, so without this a shard's verdict depended on
+    # suite order. A failed migration fails the run; no suite starts.
+    problem = migrate_gate_database(suites)
+    if problem:
+        print(f"FAIL: {problem}")
+        print("nothing ran: the gate database could not be migrated, and no "
+              "suite may run against a half-migrated schema.")
+        return 1
 
     # Preserve the operator's authored_tools.json: the nl-router gate resets it to
     # clean (gitignored runtime pollution otherwise flakes NL routing), but we

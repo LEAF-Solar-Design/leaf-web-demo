@@ -17,8 +17,10 @@ repo parent).
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -826,6 +828,58 @@ def test_spawn_normalization_leaves_linux_and_native_windows_commands_unchanged(
     )
 
 
+def test_playwright_reporting_wrapper_keeps_web_server_in_the_original_config_directory(
+        tmp_path, monkeypatch):
+    # Playwright resolves webServer.cwd against the config file; the CI wrapper lives in the
+    # report directory, so an unmapped webServer ran `npm run dev` there and every first attempt failed.
+    g = _load_runner()
+    trusted = tmp_path / "reporters"
+    trusted.mkdir()
+    monkeypatch.setenv("LEAF_TRUSTED_CI_DIR", str(trusted))
+    web = tmp_path / "web"
+    web.mkdir()
+    absolute = (tmp_path / "elsewhere").resolve()
+    config = web / "playwright.fixture.config.mjs"
+    config.write_text(
+        "export default {testDir: './tests', webServer: [\n"
+        "  {command: 'npm run dev', port: 5173},\n"
+        "  {command: 'npm run api', cwd: 'server'},\n"
+        "  {command: 'npm run other', cwd: " + json.dumps(str(absolute)) + "}]};\n",
+        encoding="utf-8")
+    single = web / "playwright.single.config.mjs"
+    single.write_text("export default {webServer: {command: 'npm run dev'}};\n", encoding="utf-8")
+    report = tmp_path / "report"
+    suite = g.Suite("wrapper-fixture", "wrapper fixture", "playwright", web,
+                    ["npx", "playwright", "test", "--config", config.name], None)
+    command = g.reporting_command(suite, suite.argv, {"LEAF_TEST_REPORT_DIR": str(report)})
+    wrapper = Path(command[command.index("--config") + 1])
+    assert wrapper.parent == report
+    text = wrapper.read_text(encoding="utf-8")
+    assert "const base = " + json.dumps(str(web.resolve())) in text
+    assert "cwd: rebase(item.cwd || '.')" in text
+    assert "config.webServer.map(server) : server(config.webServer)" in text
+
+    node = shutil.which("node")
+    if node is None:
+        return
+    def web_servers(path):
+        script = ("import c from " + json.dumps(path.as_uri())
+                  + "; process.stdout.write(JSON.stringify(c.webServer));")
+        proc = subprocess.run([node, "--input-type=module", "-e", script], capture_output=True,
+                              text=True, timeout=60, encoding="utf-8", errors="replace")
+        assert proc.returncode == 0, proc.stderr
+        return json.loads(proc.stdout)
+    servers = web_servers(wrapper)
+    assert [Path(s["cwd"]) for s in servers] == [web.resolve(), (web / "server").resolve(), absolute]
+    assert [s["command"] for s in servers] == ["npm run dev", "npm run api", "npm run other"]
+    assert servers[0]["port"] == 5173
+
+    suite.argv[-1] = single.name
+    command = g.reporting_command(suite, suite.argv, {"LEAF_TEST_REPORT_DIR": str(tmp_path / "r2")})
+    single_server = web_servers(Path(command[command.index("--config") + 1]))
+    assert Path(single_server["cwd"]) == web.resolve()
+
+
 def _summary_suite(g, *, expected, reason, allowed=()):
     output = (
         f"SKIPPED [1] fake_test.py:7: {reason}\n"
@@ -1031,6 +1085,166 @@ def test_required_database_that_is_unreachable_fails_loudly_never_skips(
         log_text = (tmp_path / f"{sid}.log").read_text(encoding="utf-8")
         assert "[DATABASE REQUIRED]" in log_text
     assert not gated_seen.exists()
+
+
+def _migration_fixture(g, monkeypatch, tmp_path, *, migrate_result, jobs=1):
+    """main() over two database suites and one hermetic suite, with a fake
+    subprocess that only answers the migration child. Returns the event list
+    (migrations and suite starts, in order), the migration calls, and argv."""
+    suites = [
+        g.Suite("db-one", "db one", "pytest", SCRIPTS, [sys.executable, "-c", "pass"], 1,
+                uses_database=True),
+        g.Suite("db-two", "db two", "pytest", SCRIPTS, [sys.executable, "-c", "pass"], 1,
+                db_gated=True),
+        g.Suite("hermetic", "hermetic", "pytest", SCRIPTS, [sys.executable, "-c", "pass"], 1),
+    ]
+    events: list = []
+    migrations: list = []
+
+    def fake_run(argv, **kwargs):
+        if len(argv) >= 3 and argv[2] == g._MIGRATE:
+            events.append("migrate")
+            migrations.append({"argv": argv, **kwargs})
+            if isinstance(migrate_result, BaseException):
+                raise migrate_result
+            return migrate_result
+        raise AssertionError(f"unexpected child: {argv!r}")
+
+    def fake_suite(suite, log_dir, attempt, **_kw):
+        events.append(suite.id)
+        return g.Result(suite, "PASS", "ok", 0.01)
+
+    monkeypatch.setattr(g, "build_suites", lambda: suites)
+    monkeypatch.setattr(g.subprocess, "run", fake_run)
+    monkeypatch.setattr(g, "run_suite_guarded", fake_suite)
+    monkeypatch.setattr(g, "record_attempt", lambda *a, **kw: None)
+    monkeypatch.setattr(sys, "argv", ["run-all-gates.py", "--jobs", str(jobs),
+                                      "--log-dir", str(tmp_path / "logs")])
+    return events, migrations
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_gate_database_is_migrated_once_before_any_suite_runs(
+        monkeypatch, tmp_path, capsys, jobs):
+    g = _load_runner()
+    _clear_gate_database_env(monkeypatch)
+    monkeypatch.setenv("LEAF_GATE_DATABASE_URL", _GATE_DSN)
+
+    def must_not_probe():
+        raise AssertionError("an explicit gate DSN is migrated without a probe")
+
+    monkeypatch.setattr(g, "probe_platform_db", must_not_probe)
+    ok = subprocess.CompletedProcess(["python"], 0, "MIGRATED\n", "")
+    events, migrations = _migration_fixture(g, monkeypatch, tmp_path,
+                                            migrate_result=ok, jobs=jobs)
+
+    assert g.main() == 0
+    assert len(migrations) == 1, "the gate migrates exactly once per run"
+    assert events[0] == "migrate"
+    assert sorted(events[1:]) == ["db-one", "db-two", "hermetic"]
+    call = migrations[0]
+    assert call["env"]["DATABASE_URL"] == _GATE_DSN
+    assert "LEAF_GATE_DATABASE_URL" not in call["env"]
+    # Out of the repo root, so the stdlib-shadowing platform/ cannot leak in.
+    assert Path(call["cwd"]) == g.REPO_PARENT
+    assert Path(call["argv"][3]) == g.REPO / "platform"
+    assert call["timeout"] == g.MIGRATE_TIMEOUT_S
+    assert "platform migrations applied once in" in capsys.readouterr().out
+
+
+def test_migration_child_uses_the_platform_fixture_mechanism():
+    g = _load_runner()
+    assert '"leaf_platform"' in g._MIGRATE
+    assert "spec_from_file_location" in g._MIGRATE
+    assert "db.apply_migration()" in g._MIGRATE
+
+
+def test_no_gate_database_means_no_migration(monkeypatch, tmp_path, capsys):
+    g = _load_runner()
+    _clear_gate_database_env(monkeypatch)
+    # An ambient developer DSN is not the gate's database: never migrated.
+    monkeypatch.setenv("DATABASE_URL", "postgresql://ambient/db")
+
+    def must_not_probe():
+        raise AssertionError("no gate database requested, so no probe")
+
+    monkeypatch.setattr(g, "probe_platform_db", must_not_probe)
+    events, migrations = _migration_fixture(
+        g, monkeypatch, tmp_path,
+        migrate_result=AssertionError("a DB-less gate must not migrate"))
+
+    assert g.main() == 0
+    assert migrations == []
+    assert "migrate" not in events
+    assert "platform migrations applied" not in capsys.readouterr().out
+
+
+def test_required_database_migrates_only_what_the_probe_reaches(monkeypatch):
+    g = _load_runner()
+    _clear_gate_database_env(monkeypatch)
+    monkeypatch.setenv("LEAF_GATE_REQUIRE_DATABASE", "1")
+    db_suite = g.Suite("db", "db", "pytest", SCRIPTS, [sys.executable, "-c", "pass"], 1,
+                       uses_database=True)
+    calls: list = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(kwargs["env"]["DATABASE_URL"])
+        return subprocess.CompletedProcess(argv, 0, "MIGRATED\n", "")
+
+    monkeypatch.setattr(g.subprocess, "run", fake_run)
+    # Unreachable: left to run_suite's per-suite FAIL rows, nothing migrated.
+    monkeypatch.setattr(g, "probe_platform_db",
+                        lambda: (False, "UNREACHABLE: refused", _GATE_DSN))
+    assert g.migrate_gate_database([db_suite]) is None
+    assert calls == []
+    # Reachable: the probe's DSN is migrated once.
+    monkeypatch.setattr(g, "probe_platform_db", lambda: (True, "REACHABLE", _GATE_DSN))
+    assert g.migrate_gate_database([db_suite]) is None
+    assert calls == [_GATE_DSN]
+    # No selected suite touches a database: nothing to migrate.
+    hermetic = g.Suite("h", "h", "pytest", SCRIPTS, [sys.executable, "-c", "pass"], 1)
+    assert g.migrate_gate_database([hermetic]) is None
+    assert calls == [_GATE_DSN]
+
+
+def test_failed_migration_fails_the_run_before_any_suite(monkeypatch, tmp_path, capsys):
+    g = _load_runner()
+    _clear_gate_database_env(monkeypatch)
+    monkeypatch.setenv("LEAF_GATE_DATABASE_URL", _GATE_DSN)
+    boom = ("RuntimeError: platform PostgreSQL schema is incomplete: "
+            "campaign_developer_allocations")
+    failed = subprocess.CompletedProcess(["python"], 1, "", f"Traceback\n{boom}\n")
+    events, migrations = _migration_fixture(g, monkeypatch, tmp_path,
+                                            migrate_result=failed)
+
+    assert g.main() == 1
+    assert events == ["migrate"], "no suite may start against a half-migrated database"
+    out = capsys.readouterr().out
+    assert "gate database migration failed (exit 1" in out
+    assert boom in out, "the child's own output is surfaced"
+    assert "nothing ran" in out
+
+
+def test_migration_timeout_or_spawn_error_fails_loudly(monkeypatch):
+    g = _load_runner()
+    _clear_gate_database_env(monkeypatch)
+    monkeypatch.setenv("LEAF_GATE_DATABASE_URL", _GATE_DSN)
+    db_suite = g.Suite("db", "db", "pytest", SCRIPTS, [sys.executable, "-c", "pass"], 1,
+                       uses_database=True)
+
+    def timed_out(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"], output="applying 0042")
+
+    monkeypatch.setattr(g.subprocess, "run", timed_out)
+    problem = g.migrate_gate_database([db_suite])
+    assert problem and "timed out" in problem and "applying 0042" in problem
+
+    def no_spawn(argv, **kwargs):
+        raise OSError("no interpreter")
+
+    monkeypatch.setattr(g.subprocess, "run", no_spawn)
+    problem = g.migrate_gate_database([db_suite])
+    assert problem and "could not start" in problem and "no interpreter" in problem
 
 
 def test_parse_pytest_reports_xfailed_and_xpassed():
