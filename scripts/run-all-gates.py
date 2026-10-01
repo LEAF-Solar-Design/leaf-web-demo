@@ -802,9 +802,10 @@ def build_suites() -> List[Suite]:
         # sf-w4-landxml-import: the typed LandXML terrain intake (server/solar_landxml_import.py): bounded
         # upload, units and CRS read from the file and declared by the caller, the plugin's N E Z reader and
         # IDW grid, the source stored and the grid published on the physical head. Hermetic and nothing
-        # skips: the floor is the exact count, 85 (including 16 parser and source-loader cases).
+        # skips: the floor is the exact count, 116 (including 15 declaration reader-agreement cases
+        # and three text-comparison and linear-time regression cases).
         Suite("server-solar-landxml-import", "server tests/test_solar_landxml_import.py",
-              "pytest", SERVER, _py_pytest("tests/test_solar_landxml_import.py"), 85),
+              "pytest", SERVER, _py_pytest("tests/test_solar_landxml_import.py"), 116),
         # sf-w4-landxml-import-surface: the LandXML terrain upload route (POST
         # /api/drawings/{id}/imports/landxml in server/routers/drawings.py): bounded before decode,
         # a closed refusal map, nothing written on refusal, the stored terrain reopened unchanged.

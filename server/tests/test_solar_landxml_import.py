@@ -9,7 +9,9 @@ import hashlib
 import json
 import re
 import sys
+import time
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 import pytest
 
@@ -207,6 +209,88 @@ def test_landxml_import_skips_are_counted():
     assert (source["declared_points"], len(source["points"])) == (8, 4)
 
 
+@pytest.mark.parametrize("case,encoding,non_ascii,bom,accepted", [
+    ("utf-8", "utf-8", False, False, True),
+    ("UTF-8", "UTF-8", False, False, True),
+    ("utf8", "utf8", False, False, True),
+    ("ISO-8859-1 ASCII", "ISO-8859-1", False, False, True),
+    ("windows-1252", "windows-1252", False, False, True),
+    ("us-ascii", "us-ascii", False, False, True),
+    ("UTF-8 BOM", "utf-8", False, True, True),
+    ("no encoding", None, False, False, True),
+    ("UTF-16", "UTF-16", False, False, False),
+    ("UTF-16LE", "UTF-16LE", False, False, False),
+    ("ISO-8859-1 non-ASCII", "ISO-8859-1", True, False, False),
+    ("ascii non-ASCII", "ascii", True, False, False),
+    ("bogus", "bogus", False, False, False),
+])
+def test_landxml_import_declared_encoding(case, encoding, non_ascii, bom, accepted):
+    data = landxml()
+    if encoding is None:
+        data = data.replace(b' encoding="utf-8"', b"", 1)
+    else:
+        data = data.replace(b'encoding="utf-8"', ('encoding="' + encoding + '"').encode("ascii"), 1)
+    if non_ascii:
+        data = data.replace(b'name="S"', 'name="é"'.encode("utf-8"), 1)
+    if bom:
+        data = b"\xef\xbb\xbf" + data
+    if accepted:
+        assert lx.inspect_landxml(data)["points"] == lx.inspect_landxml(landxml())["points"]
+    else:
+        refused("LANDXML_ENCODING_INVALID", lx.inspect_landxml, data)
+
+
+@pytest.mark.parametrize("case,encoding,padding,non_ascii,extra,bom,code", [
+    ("UTF-16 padded 600", "UTF-16", 600, False, "", False, "LANDXML_ENCODING_INVALID"),
+    ("UTF-16 padded 246", "UTF-16", 246, False, "", False, "LANDXML_ENCODING_INVALID"),
+    ("ISO-8859-1 padded non-ASCII", "ISO-8859-1", 600, True, "<Note>\u00e9</Note>", False,
+     "LANDXML_ENCODING_INVALID"),
+    ("utf8 non-ASCII text", "utf8", 1, False, "<Note>\u00e9</Note>", False, "LANDXML_ENCODING_INVALID"),
+    ("UTF8 non-ASCII", "UTF8", 1, True, "", False, "LANDXML_ENCODING_INVALID"),
+    ("utf_8 non-ASCII", "utf_8", 1, True, "", False, "LANDXML_ENCODING_INVALID"),
+    ("cp65001 non-ASCII", "cp65001", 1, True, "", False, "LANDXML_ENCODING_INVALID"),
+    ("utf-8-sig non-ASCII", "utf-8-sig", 1, True, "", False, "LANDXML_ENCODING_INVALID"),
+    ("utf8 BOM non-ASCII", "utf8", 1, True, "", True, "LANDXML_ENCODING_INVALID"),
+    ("empty padded encoding", "", 600, False, "", False, "LANDXML_MALFORMED"),
+    ("ISO-8859-1 BOM ASCII", "ISO-8859-1", 1, False, "", True, None),
+    ("windows-1252 BOM ASCII", "windows-1252", 1, False, "", True, None),
+    ("us-ascii BOM ASCII", "us-ascii", 1, False, "", True, None),
+    ("utf-8-sig BOM ASCII", "utf-8-sig", 1, False, "", True, None),
+    ("utf-8 non-ASCII", "utf-8", 1, True, "", False, None),
+])
+def test_landxml_import_declared_encoding_readers_agree(case, encoding, padding, non_ascii,
+                                                       extra, bom, code):
+    data = landxml(extra=extra).replace(
+        b' encoding="utf-8"', b" " * padding + ('encoding="' + encoding + '"').encode("ascii"), 1)
+    if non_ascii:
+        data = data.replace(b'name="S"', 'name="\u00e9"'.encode("utf-8"), 1)
+    if bom:
+        data = b"\xef\xbb\xbf" + data
+
+    def tree(element):
+        return (element.tag, element.attrib, element.text, element.tail,
+                tuple(tree(child) for child in element))
+
+    if code is None:
+        assert lx.inspect_landxml(data)["points"] == lx.inspect_landxml(landxml())["points"]
+    else:
+        refused(code, lx.inspect_landxml, data)
+    if code == "LANDXML_MALFORMED":
+        with pytest.raises(ET.ParseError):
+            ET.fromstring(data.decode("utf-8").removeprefix("\ufeff"))
+        return
+    intake_tree = tree(ET.fromstring(data.decode("utf-8").removeprefix("\ufeff")))
+    if code is None:
+        assert tree(ET.fromstring(data)) == intake_tree
+    else:
+        try:
+            stored_tree = tree(ET.fromstring(data))
+        except (ET.ParseError, LookupError, ValueError):
+            pass
+        else:
+            assert stored_tree != intake_tree
+
+
 @pytest.mark.parametrize("case,data,code", [
     ("empty", b"", "LANDXML_EMPTY"),
     ("text", "<LandXML/>", "LANDXML_EMPTY"),
@@ -236,6 +320,29 @@ def test_landxml_import_skips_are_counted():
 ])
 def test_landxml_import_inspect_refusals(case, data, code):
     refused(code, lx.inspect_landxml, data)
+
+
+def test_landxml_import_declared_encoding_text_only_lie():
+    data = landxml(extra="<Note>\u00e9</Note>").replace(
+        b' encoding="utf-8"', b' encoding="ISO-8859-1"', 1)
+    refused("LANDXML_ENCODING_INVALID", lx.inspect_landxml, data)
+
+
+def test_landxml_import_declared_encoding_text_events_merge():
+    assert lx._xml_events("<a>x\ny\nz</a>") == [
+        ("s", "a", ()), ("t", "x\ny\nz"), ("e", "a")]
+
+
+def test_landxml_import_declared_encoding_newline_upload_bound():
+    data = landxml(extra="<Note>" + "\n" * (
+        16_777_216 - len(landxml(extra="<Note></Note>"))) + "</Note>")
+    assert len(data) == 16_777_216
+    started = time.perf_counter()
+    source = lx.inspect_landxml(data)
+    elapsed = time.perf_counter() - started
+    assert source["points"] == [(0.0, 0.0, 10.0), (10.0, 0.0, 11.0),
+                                (0.0, 10.0, 12.0), (10.0, 10.0, 13.0)]
+    assert elapsed < 10
 
 
 def test_landxml_import_inspect_bounds():
