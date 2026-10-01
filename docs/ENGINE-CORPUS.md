@@ -176,7 +176,8 @@ define identity: entities without source handles match in document order
 within their kind, including when the engine assigns them handles. Numeric
 values compare with absolute tolerance `1e-6`. Blocks must match and every
 source layer must survive; adding the default layer is allowed. Style
-properties, including block-child properties, are excluded. The rule is:
+properties, including block-child properties, are excluded from this geometry
+receipt and are judged by the separate style receipt below. The rule is:
 byte identity is recorded, never required. Each receipt also requires the
 source file's hash to remain unchanged and elapsed time to stay within 10 s.
 Input is capped at 16 MiB and output at 64 MiB.
@@ -238,9 +239,44 @@ which passed), pending an idle-host re-measure.
 Measured sample result: web/public/sample.dxf: 2345 of 2345 source handles preserved.
 The measured total is 2351 preserved source handles across eight drawings.
 
+### Style receipt (colour, linetype, lineweight)
+
+`python engine/export_fidelity.py --styles` runs a second, separate receipt
+over the same tracked drawings, with the same input, output, source-hash and
+10 s bounds. The geometry receipt and its keys are unchanged. The style
+oracle is the intake parser's `properties` shape (groups 62, 420, 6 and 370)
+for polylines, lines, circles, arcs and inserts, plus every intake-read block
+child. Entities match the geometry receipt's way: by real handle, else in
+document order within their kind; block children match by block name and
+child order. A missing counterpart fails, like a changed one.
+
+Normalization rules, compared on declared values, never resolved:
+
+- An absent group or absent `properties` entry reads as ByLayer (ACI 256,
+  linetype ByLayer, lineweight -1), so writing an explicit default passes.
+- Linetype names compare case-insensitively, as DXF table names do.
+- A true colour (420) is the displayed colour and replaces its ACI (62)
+  fallback; dropping it, or changing it, fails.
+- ByBlock (ACI 0, linetype ByBlock, lineweight -2) stays distinct from ByLayer.
+- A value the writer resolved through its layer or block is a change and
+  fails closed, even when the rendered appearance would match.
+
+`tests/test_export_style_fidelity.py` (from `server/`, no compiled engine)
+proves that one controlled mutation of each property, on keyed, handle-less
+and block-child entities, fails the style receipt while the geometry
+comparison still passes, and that every tracked drawing passes unchanged.
+
+Not covered by the style receipt: text, dimension and multileader style (the
+intake parser does not read it), the own style of a handle-less INSERT (the
+intake keys INSERT style by handle), block children past the intake's
+60-child cap, blocks past its 200-block cap, anonymous blocks, and layer
+table styles.
+
 Not proven here:
 
 - Native CI execution: runners have no Rust toolchain. This is the
   `cad-export-fidelity-ci` follow-on.
-- Style property fidelity.
+- Real-engine style fidelity: the style receipt is proven against the
+  identity adapter and controlled mutations only; no acadrust style receipt
+  has been measured.
 - The DWG path.

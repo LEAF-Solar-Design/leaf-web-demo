@@ -2917,6 +2917,13 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_egress_guard_telemetry.py"), 9),
         Suite("server-engine-corpus-harness", "server tests/test_engine_corpus_harness.py", "pytest", SERVER,
               _py_pytest("tests/test_engine_corpus_harness.py"), 24),
+        # Registered WITH the file, per the #29 fix-then-register rule. The
+        # style receipt (colour, linetype, lineweight, block children) beside
+        # the geometry receipt above; hermetic, identity adapter only, no
+        # compiled engine. Floor 24 = 8 unparametrized tests + 8 entity, 4
+        # block-child and 4 normalization parametrizations.
+        Suite("server-export-style-fidelity", "server tests/test_export_style_fidelity.py", "pytest", SERVER,
+              _py_pytest("tests/test_export_style_fidelity.py"), 24),
         Suite("server-engine-selector", "server tests/test_engine_selector.py", "pytest", SERVER,
               _py_pytest("tests/test_engine_selector.py"), 4),
         Suite("server-error-guidance-contract", "server tests/test_error_guidance_contract.py", "pytest", SERVER,
