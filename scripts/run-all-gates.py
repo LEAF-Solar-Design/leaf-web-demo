@@ -164,6 +164,10 @@ class Suite:
     # DATABASE_URL flips unrelated code into PostgreSQL mode (customization
     # binding resolution, platform_link), so CI never exports it globally.
     uses_database: bool = False
+    # Extra environment variables that receive the SAME gate DSN alongside
+    # DATABASE_URL, for suites whose tests gate on their own variable name.
+    # Injected only when the gate hands this suite a database.
+    db_env_aliases: tuple[str, ...] = ()
     # Skip reasons tolerated ONLY while no gate database reached this suite (a
     # DB-less checkout or the hermetic GitHub test-gate). Once the gate injects
     # its DSN, a skip with one of these reasons FAILS the suite, so native CI,
@@ -1950,7 +1954,9 @@ def build_suites() -> List[Suite]:
         # against a pristine database, and an unreachable DB is a FAIL row.
         Suite("platform", "platform/tests (Postgres)", "pytest", REPO_PARENT,
               _py_pytest(f"{repo_name}/platform/tests"), 247, db_gated=True,
-              db_deferred="platform/tests cannot import campaign_product_execution under the gate (path), first seen once the gate supplied a database (studio-lanes follow-up)"),
+              # The overlay and annotation PostgreSQL proofs skipif-gate on
+              # their own variables, so they get the gate DSN under those too.
+              db_env_aliases=("OVERLAY_PG_URL", "ANNOTATION_PG_URL")),
         # W4h S1 rows: eight store (rows 1-7 and 13), five router (rows 8-11 and 14), one static.
         # Execution counts are verified by the paired planner.
         Suite("platform-ios-ship-source-catalog", "platform iOS source catalog", "pytest",
@@ -4037,6 +4043,7 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
             # with that DSN anyway, so its PostgreSQL tests fail by name.
         if dsn:
             db_env["DATABASE_URL"] = dsn
+            db_env.update(dict.fromkeys(suite.db_env_aliases, dsn))
     # A skip that only means "no database" is tolerated only when none was
     # handed to this child (see Suite.database_skip_reasons).
     allowed_skips = suite.allowed_skip_reasons + (
