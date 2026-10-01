@@ -8,7 +8,7 @@
 // Approve = §7 split turn: record the approval, then post the confirm message
 // that starts the resume turn — the deterministic dispatch happens server-side.
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import {
   openStream,
   postMessage,
@@ -36,6 +36,9 @@ import Markdown from './Markdown.jsx'
 import LiveRegion from './LiveRegion.jsx'
 import { contextPct, fmtDetail, orDash, usageCost, usageCostLabel, usageModel } from '../usage.js'
 import { errorActorLabel, errorPresentation } from '../errorPresentation.js'
+import { listEngineChanges } from '../engineChanges.js'
+import { moveRovingTab } from '../lib/roving.js'
+import EngineChangesTab from './EngineChangesTab.jsx'
 
 // Calm inline parameter summary — the same rendering RoutePanel gives a
 // route's params ("layer roofline · n 4"). Always the SERVER-truth dict.
@@ -210,6 +213,15 @@ export default function ConversePanel({
   const [expandedTools, setExpandedTools] = useState({}) // chip key -> expanded (full args/result)
   const [attachments, setAttachments] = useState([])
   const [attachmentError, setAttachmentError] = useState(null)
+  const [assistantTab, setAssistantTab] = useState('conversation')
+  const [engineChangesAccess, setEngineChangesAccess] = useState(false)
+  const [engineChangesResult, setEngineChangesResult] = useState(null)
+  const [engineChangesLoading, setEngineChangesLoading] = useState(false)
+  const assistantTabsId = useId()
+  const conversationTabRef = useRef(null)
+  const engineChangesFlightRef = useRef(null)
+  const engineChangesRevisionRef = useRef(0)
+  const refreshEngineChangesRef = useRef(null)
   // The credential refusal the TRANSPORT raised, held only to render it:
   // {id, reason, masked, overridable} or null. This composer evaluates nothing
   // itself (round 3) — converse.postMessage refuses and throws, send() catches.
@@ -293,6 +305,69 @@ export default function ConversePanel({
     const timer = window.setInterval(refresh, 5000)
     return () => { closed = true; window.clearInterval(timer) }
   }, [sessionId])
+
+  useEffect(() => {
+    let closed = false
+    let forbidden = false
+    const refresh = async () => {
+      if (closed || forbidden) return
+      setEngineChangesLoading(true)
+      if (!engineChangesFlightRef.current) {
+        engineChangesFlightRef.current = {
+          promise: listEngineChanges(), revision: engineChangesRevisionRef.current,
+        }
+      }
+      const flight = engineChangesFlightRef.current
+      const result = await flight.promise
+      if (engineChangesFlightRef.current === flight) engineChangesFlightRef.current = null
+      if (closed) return
+      setEngineChangesLoading(false)
+      if (result.kind === 'forbidden') {
+        forbidden = true
+        setEngineChangesAccess(false)
+        setEngineChangesResult(null)
+        setAssistantTab('conversation')
+      } else if (flight.revision === engineChangesRevisionRef.current) {
+        setEngineChangesResult((current) => result.kind === 'ok' ? result : {
+          ...result, unread_count: current?.unread_count || 0,
+          cards: current?.cards || [],
+        })
+        if (result.kind === 'ok') setEngineChangesAccess(true)
+      }
+    }
+    const refreshVisible = () => { if (document.visibilityState === 'visible') void refresh() }
+    refreshEngineChangesRef.current = refresh
+    void refresh()
+    const timer = window.setInterval(refreshVisible, 30_000)
+    document.addEventListener('visibilitychange', refreshVisible)
+    return () => {
+      closed = true
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', refreshVisible)
+      if (refreshEngineChangesRef.current === refresh) refreshEngineChangesRef.current = null
+    }
+  }, [])
+
+  const patchEngineChange = (cardId, patch) => {
+    // A poll begun before an optimistic read must not resurrect its unread
+    // badge. The next poll reads the server's reconciled receipt.
+    engineChangesRevisionRef.current += 1
+    setEngineChangesResult((current) => {
+      if (!current?.cards) return current
+      const previous = current.cards.find((card) => card.card_id === cardId)
+      const unreadDelta = previous && typeof patch.unread === 'boolean'
+        ? Number(patch.unread) - Number(!!previous.unread) : 0
+      return {
+        ...current,
+        unread_count: Math.max(0, current.unread_count + unreadDelta),
+        cards: current.cards.map((card) => card.card_id === cardId ? { ...card, ...patch } : card),
+      }
+    })
+  }
+  const openAssistantTab = (tab) => {
+    setAssistantTab(tab)
+    if (tab === 'engine-changes') void refreshEngineChangesRef.current?.()
+  }
 
   // Keep the log pinned to the newest event while streaming - but ONLY when
   // the reader is already at (or near) the bottom. Yanking a user who
@@ -484,7 +559,7 @@ export default function ConversePanel({
   // Both only happen when there is actually a turn to stop; otherwise the key
   // is left entirely alone.
   useEffect(() => {
-    if (!busy || !stoppableTurnId) return undefined
+    if (assistantTab !== 'conversation' || !busy || !stoppableTurnId) return undefined
     const onEsc = (e) => {
       if (e.key !== 'Escape' || e.defaultPrevented) return
       e.preventDefault()
@@ -493,7 +568,7 @@ export default function ConversePanel({
     }
     document.addEventListener('keydown', onEsc)
     return () => document.removeEventListener('keydown', onEsc)
-  }, [busy, stoppableTurnId, stopping]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [assistantTab, busy, stoppableTurnId, stopping]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const attachmentPayloads = async () => Promise.all(attachments.map((image) => new Promise((resolve, reject) => {
     const reader = new FileReader()
@@ -894,27 +969,8 @@ export default function ConversePanel({
     return null
   }
 
-  return (
-    <div className="converse-card enter" style={{ '--rank': 3 }}>
-      <div className="converse-head">
-        <span className={model.active || busy ? 'dot live pulse' : 'dot'} aria-hidden="true" />
-        <span className="converse-title">Assistant</span>
-        <span className="dim">plans and explains, deterministic tools do the work</span>
-        <span className="converse-spacer" />
-        {/* Status strip — the terminal client's persistent model/context/cost
-            reading, as a component rather than a shell script. Every field is
-            optional: an unknown value shows "—", never a fabricated number. */}
-        <span className="converse-status" aria-label="session status">
-          <span className="dim">model</span>{' '}
-          <span className="route-tool">{orDash(usageModel(model.latestUsage))}</span>
-          <span className="dim"> · context </span>
-          <span className="route-tool">{orDash(contextPct(model.latestUsage), (p) => `${p}%`)}</span>
-          <span className="dim"> · </span>
-          <span className="route-tool">{usageCostLabel(model.latestUsage?.cost_tokens, usageCost(model.latestUsage))}</span>
-        </span>
-        <button type="button" className="chip-neutral" onClick={dismiss}>Hide</button>
-      </div>
-
+  const conversation = (
+    <>
       {showQuota && (
         <div className="banner"><span><b>AI paused</b>. Your built tools keep working.
           {model.quotaRetry && <>{' '}The affected provider reported a retry interval of {model.quotaRetry.seconds} seconds.
@@ -1083,6 +1139,62 @@ export default function ConversePanel({
           </button>
         )}
       </div>
+    </>
+  )
+
+  const unreadCount = engineChangesResult?.unread_count || 0
+  return (
+    <div className={engineChangesAccess ? 'converse-card enter engine-changes-assistant' : 'converse-card enter'} style={{ '--rank': 3 }}>
+      <div className="converse-head">
+        <span className={model.active || busy ? 'dot live pulse' : 'dot'} aria-hidden="true" />
+        <span className="converse-title">Assistant</span>
+        <span className="dim">plans and explains, deterministic tools do the work</span>
+        <span className="converse-spacer" />
+        {/* Status strip — the terminal client's persistent model/context/cost
+            reading, as a component rather than a shell script. Every field is
+            optional: an unknown value shows "—", never a fabricated number. */}
+        <span className="converse-status" aria-label="session status">
+          <span className="dim">model</span>{' '}
+          <span className="route-tool">{orDash(usageModel(model.latestUsage))}</span>
+          <span className="dim"> · context </span>
+          <span className="route-tool">{orDash(contextPct(model.latestUsage), (p) => `${p}%`)}</span>
+          <span className="dim"> · </span>
+          <span className="route-tool">{usageCostLabel(model.latestUsage?.cost_tokens, usageCost(model.latestUsage))}</span>
+        </span>
+        <button type="button" className="chip-neutral" onClick={dismiss}>Hide</button>
+      </div>
+      {engineChangesAccess ? (
+        <>
+          <div className="engine-changes-tabs" role="tablist" aria-label="Assistant tabs" onKeyDown={moveRovingTab}>
+            <button type="button" role="tab" className="chip-neutral" ref={conversationTabRef}
+              id={`${assistantTabsId}-conversation-tab`} aria-controls={`${assistantTabsId}-conversation-panel`}
+              aria-selected={assistantTab === 'conversation'} tabIndex={assistantTab === 'conversation' ? 0 : -1}
+              onClick={() => openAssistantTab('conversation')}>Conversation</button>
+            <button type="button" role="tab" className="chip-neutral"
+              id={`${assistantTabsId}-changes-tab`} aria-controls={`${assistantTabsId}-changes-panel`}
+              aria-selected={assistantTab === 'engine-changes'} tabIndex={assistantTab === 'engine-changes' ? 0 : -1}
+              aria-label={unreadCount ? `Engine changes, ${unreadCount} unread` : 'Engine changes'}
+              onClick={() => openAssistantTab('engine-changes')}>
+              Engine changes{unreadCount > 0 && <span className="engine-changes-badge" aria-hidden="true">{unreadCount > 9 ? '9+' : unreadCount}</span>}
+            </button>
+          </div>
+          <div className="engine-changes-conversation" role="tabpanel" id={`${assistantTabsId}-conversation-panel`}
+            aria-labelledby={`${assistantTabsId}-conversation-tab`} hidden={assistantTab !== 'conversation'}>
+            {conversation}
+          </div>
+          <div className="engine-changes-panel" role="tabpanel" id={`${assistantTabsId}-changes-panel`}
+            aria-labelledby={`${assistantTabsId}-changes-tab`} hidden={assistantTab !== 'engine-changes'}>
+            <EngineChangesTab result={engineChangesResult} loading={engineChangesLoading}
+              onRetry={() => refreshEngineChangesRef.current?.()} onCardChange={patchEngineChange}
+              discussDisabledReason={busy ? 'Wait for the assistant to finish before discussing this change.' : ''}
+              onDiscuss={(seed) => {
+                setAssistantTab('conversation')
+                conversationTabRef.current?.focus()
+                void send(seed)
+              }} />
+          </div>
+        </>
+      ) : conversation}
     </div>
   )
 }

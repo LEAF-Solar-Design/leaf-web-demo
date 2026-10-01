@@ -2027,6 +2027,37 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
   background: var(--accent-tint);
 }
 .converse-pending-head { display: flex; align-items: center; gap: 8px; }
+/* The assistant's tabs and detail actions must sit above drawing instruments
+   (levels 3–5), while headers, command controls and drawers stay above it. */
+.engine-changes-assistant { position: relative; z-index: 6; display: flex; flex-direction: column; min-height: 0; }
+.engine-changes-assistant > .converse-head, .engine-changes-tabs { flex-shrink: 0; }
+.engine-changes-panel { min-height: 0; overflow-y: auto; }
+.engine-changes-tabs { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+.engine-changes-tabs [aria-selected="true"] { color: var(--primary); background: var(--accent-tint); }
+.engine-changes-badge { margin-left: 6px; font: 500 11px var(--font-mono); }
+.engine-changes-panel[hidden], .engine-changes-conversation[hidden] { display: none; }
+.engine-changes-body { height: clamp(280px, 55vh, 520px); box-sizing: border-box; overflow-y: auto; padding: 12px 14px; color: var(--foreground); font-size: 12.5px; overflow-wrap: anywhere; }
+.engine-changes-status { min-height: 22px; color: var(--muted-2); }
+.engine-changes-list { list-style: none; padding: 0; margin: 0; max-width: 640px; }
+.engine-changes-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; width: 100%; min-height: 54px; padding: 10px 6px; border: 0; border-bottom: 1px solid var(--border); background: var(--card); color: var(--foreground); text-align: left; font: inherit; cursor: pointer; }
+.engine-changes-row:hover { background: var(--accent-tint); }
+.engine-changes-row-title { flex: 1 1 100%; font-weight: 600; }
+.engine-changes-state { padding: 2px 6px; border-radius: 4px; background: var(--bar-chip); font-size: 11.5px; color: var(--muted); }
+.engine-changes-unread { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: var(--primary); }
+.engine-changes-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+.engine-changes-heading h3 { flex: 1 1 100%; margin: 0; font-size: 15px; }
+.engine-changes-body h4 { margin: 16px 0 8px; font-size: 12.5px; }
+.engine-changes-summary { white-space: pre-wrap; line-height: 1.5; }
+.engine-changes-facts { display: grid; grid-template-columns: minmax(80px, 120px) minmax(0, 1fr); gap: 6px 12px; margin: 0; }
+.engine-changes-facts dt { color: var(--muted-2); }
+.engine-changes-facts dd { margin: 0; min-width: 0; }
+.engine-changes-facts ul { margin: 0; padding-left: 16px; }
+.engine-changes-body a { color: var(--primary); }
+.engine-changes-actions, .engine-changes-confirm { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.engine-changes-body button:focus-visible, .engine-changes-body a:focus-visible, .engine-changes-tabs button:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
+@media (max-width: 480px) {
+  .engine-changes-facts { grid-template-columns: minmax(70px, 90px) minmax(0, 1fr); gap: 6px 8px; }
+}
 .converse-note { display: flex; align-items: center; gap: 8px; font-size: 12px; }
 .converse-turnfoot {
   display: flex; align-items: center; gap: 10px;
