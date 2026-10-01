@@ -81,6 +81,13 @@ tenants/{tenant_id}/drawings/{drawing_id}/manifest.json         # version index 
 - **`head` vs `latest`:** `undo` sets `head=2` but `latest` stays `3` (v3's object still
   exists → **redo** is possible). A new write from `head=2` creates `v=latest+1` with
   `parent=2` — a branch in the DAG. `parent` linkage is the whole model; we keep it simple.
+- **Abandoned blobs (legacy authority):** a write that stored its DWG and then failed to
+  save the manifest leaves a blob beyond `latest` that no manifest row names. The next
+  `put_drawing` adopts that blob when its bytes are identical, and otherwise takes the next
+  free slot (at most `MAX_ABANDONED_VERSION_SLOTS` = 1000 slots are walked), so version
+  numbers can skip. No existing version blob is ever written over. A backend with no
+  cross-process lock (OSS) refuses a plain write at any occupied slot, identical bytes
+  included, because the blob may be another replica's write still in flight.
 
 ## Storage backend abstraction (so tests run offline)
 
@@ -101,7 +108,7 @@ path injects OSS.
 | function | contract |
 |----------|----------|
 | `ingest_drawing(be, tenant_id, local_path, drawing_id=None)` | PUT v1 + write initial manifest → `{"drawing_id","version":1}`. Refuses to clobber an existing drawing. |
-| `put_drawing(be, tenant_id, drawing_id, local_path, parent_version, meta=None)` | Append immutable `v=latest+1` (parent=`parent_version`), advance head+latest → `int`. **The write-path primitive.** |
+| `put_drawing(be, tenant_id, drawing_id, local_path, parent_version, meta=None)` | Append immutable `v` = the first free slot after `latest` (normally `latest+1`; parent=`parent_version`), advance head+latest → `int`. **The write-path primitive.** |
 | `resolve_version(be, tenant_id, drawing_id, version="head")` | `version` = int, `"head"`, or `"latest"` → `(version_int, object_key)`. |
 | `undo(be, tenant_id, drawing_id, *, holder=None, fence=None)` | Repoint head → head's parent (no deletion; redo-able) → new head `int`. Raises at root. `holder`/`fence` apply the SAME single-writer check as `put_drawing`: head is drawing state every session reads, so moving it is not a lesser act than publishing. |
 | `redo(be, tenant_id, drawing_id, *, holder=None, fence=None)` | Inverse of `undo`; same single-writer check. |

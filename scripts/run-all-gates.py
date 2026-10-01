@@ -1689,6 +1689,16 @@ def build_suites() -> List[Suite]:
                   r"manifest, version, and checkout rows behind, which would mutate "
                   r"a staging or production database whose URL happens to be in the "
                   r"environment\.",)),
+        # Orphaned version blobs (2026-10-01, sf-store-orphan-version-adopt): a legacy write whose
+        # manifest save failed after its blob landed no longer blocks the drawing. Identical bytes
+        # are adopted, different bytes take the next free slot under the checkout guard (bounded
+        # at 1000), a backend with no cross-process lock keeps the refusal, and no version blob
+        # is ever written over. Hermetic (in-memory and tmp_path stores), nothing skipped; the
+        # floor is the exact count on purpose.
+        # COUNTED: 16 unparametrized tests + 27 parametrized cases (12 functions) = 43.
+        Suite("server-store-orphan-version-adopt",
+              "server tests/test_store_orphan_version_adopt.py", "pytest", SERVER,
+              _py_pytest("tests/test_store_orphan_version_adopt.py"), 43),
         Suite("server-agent-gate-postgres", "server tests/test_agent_gate_postgres.py",
               "pytest", SERVER, _py_pytest("tests/test_agent_gate_postgres.py"), 14,
               uses_database=True, database_skip_reasons=(r"DATABASE_URL is not set",)),
