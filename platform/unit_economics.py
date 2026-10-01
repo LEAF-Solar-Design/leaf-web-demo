@@ -319,7 +319,8 @@ def fleet_report(period_start: datetime, period_end: datetime) -> Dict[str, Any]
                 "SELECT COUNT(*) AS runs, COALESCE(SUM(engine_seconds), 0) AS engine_seconds, "
                 "COALESCE(SUM(usd_est), 0) AS usd_est FROM broker_usage_ledger "
                 "WHERE ts >= %(start)s AND ts < %(end)s AND status = 'ok'",
-                {"start": start, "end": end},
+                # broker_usage_ledger.ts is epoch seconds (DOUBLE PRECISION).
+                {"start": start.timestamp(), "end": end.timestamp()},
             )
             aps = dict(cur.fetchone())
 

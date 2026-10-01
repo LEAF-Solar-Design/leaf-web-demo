@@ -272,7 +272,13 @@ def test_real_postgres_scope_denial_has_no_producer_or_task(enrolled, denial):
 
 def test_real_postgres_remote_recovery_precedes_source_and_filters_machine(enrolled):
     scope, principal, eid, service, calls = enrolled
+    # Host-enrollment capability tasks are never claimable; bind an ordinary task instead.
+    execution.submit_task(*scope, task_key='ordinary-recovery', idempotency_key='ordinary-recovery',
+        title='Ordinary recovery task', spec='Recover the remote binding before any source I/O',
+        capability='recipe.organize', stages=['implementation', 'build_test'], owned_paths=['recipes/'],
+        source_sha='a' * 40, verify_command='pytest', declared_artifacts=['diff'], depends_on=[])
     attempt = execution.claim_task(*scope, worker_id='enrollment-' + eid, lease_seconds=30)
+    assert attempt['task_key'] == 'ordinary-recovery'
     binding = execution.bind_remote_dispatch(*scope, attempt['attempt_id'], fence=attempt['fence'],
         machine_id='VM-C', run_id='planning-recovery', registration_id='planning-registration',
         root_request_id='planning-root', gateway_project_id='planning-project', source_ref='a' * 40,
