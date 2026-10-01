@@ -396,6 +396,7 @@
     "server-solar-geo-formats",
     "server-solar-ground-analysis",
     "server-solar-ground-buildout",
+    "server-solar-ground-compact-consumers",
     "server-solar-ground-compact-graph",
     "server-solar-ground-conversion-evidence",
     "server-solar-ground-dialogs",
