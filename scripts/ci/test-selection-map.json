@@ -487,6 +487,7 @@
     "server-solar-workflow-flow",
     "server-solar-xlsx",
     "server-start-leaf-harness-config",
+    "server-store-orphan-version-adopt",
     "server-submit-latency-metric",
     "server-surface-config",
     "server-surface-entitlements",
