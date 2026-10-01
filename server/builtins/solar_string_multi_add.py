@@ -68,7 +68,7 @@ def _sizes(string_length, count):
 
 def _new_strings(graph, chunks):
     """Build and append circuits on the private copy, sharing maps and timestamp."""
-    panels = {panel["id"]: panel for panel in graph["panels"]}
+    panels = {panel["id"]: panel for panel in single.panel_views(graph)}
     tags = {string["circuit_tag"] for string in graph["strings"]}
     number = int(graph["settings"]["string_number"])
     stamp = datetime.now(timezone.utc).isoformat()
@@ -126,7 +126,7 @@ def add_strings(graph, params):
     before = checked_graph(graph, params["expected_rev"])
     if params["string_length"] > single.max_string_length(before):
         raise GraphValidationError("STRING_TOO_LONG")
-    panels = {panel["id"] for panel in before["panels"]}
+    panels = {panel["id"] for panel in single.panel_views(before)}
     if not set(refs) <= panels:
         raise GraphValidationError("MISSING_PANEL")
     wired = {ref for string in before["strings"] for ref in string["ordered_panel_refs"]}
