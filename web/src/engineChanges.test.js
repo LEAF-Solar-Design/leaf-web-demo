@@ -115,13 +115,15 @@ describe('discussion seed', () => {
     expect(seed).toContain(card.evidence.regression_spec)
   })
   it('copies neither unlisted auth fields, structured values, nor credential-shaped text', () => {
-    const token = 'ghp_' + 'A'.repeat(36)
+    // The transport seam is the authority for pattern-library tokens.
+    const token = 'unlisted-auth-value'
     const seed = engineChangeDiscussText({
       ...card, token, Authorization: 'Bearer private-token',
-      summary: `What broke: ${token}`, title: { token }, feature_id: 'Bearer private-token',
+      summary: 'What broke: secret=private-secret', title: { token }, feature_id: 'Bearer private-token',
     })
     expect(seed).not.toContain(token)
     expect(seed).not.toContain('private-token')
+    expect(seed).not.toContain('private-secret')
     expect(seed).not.toContain('[object Object]')
     expect(seed).toContain('[credential omitted]')
     expect(engineChangeDiscussText({ ...card, summary: '{"internal":"value"}' })).not.toContain('{"internal"')

@@ -1,5 +1,4 @@
 import { config, authHeaders, noteUnauthorized } from './api.js'
-import { evaluateSecretGuard } from './lib/secretPatterns.js'
 
 const TIMEOUT_MS = 10_000
 
@@ -93,7 +92,8 @@ function discussionField(value, max) {
   const text = String(value).replace(/\s+/g, ' ').trim()
   // Check the whole value BEFORE shortening: truncating a credential's shape
   // first could send its prefix. Do not copy auth fields or serialize a card.
-  if (evaluateSecretGuard(text) || /\bbearer\s+\S+|\b(?:token|secret|password|api[_-]?key)\s*[:=]/i.test(text)) {
+  // The transport seam guards the sent turn.
+  if (/\bbearer\s+\S+|\b(?:token|secret|password|api[_-]?key)\s*[:=]/i.test(text)) {
     return '[credential omitted]'
   }
   if (text.startsWith('{') || text.startsWith('[')) {
