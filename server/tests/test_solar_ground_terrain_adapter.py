@@ -382,8 +382,20 @@ def test_terrain_adapter_needs_a_grid(backend):
 
 # --------------------------------------------------------- the slope check --
 
+def kernel_report_sha256(backend, g1_state):
+    """The kernel's own report digest for the head's grid. The report carries floats from the terrain
+    kernel's trigonometry that differ in the last bit between platform math libraries (one axial
+    slope_degrees reads 5.130657164906042 on Windows and 5.130657164906041 on Linux), so a row derives
+    this digest from the kernel and never pins it as a literal."""
+    document = head_document(backend)
+    entities = [{"kind": "LWPOLYLINE", "layer": f["layer"], "vertices": f["vertices"],
+                 "frame_cell": {"row": f["row"], "col": f["col"]}} for f in g1_state["frames"]]
+    return canonical(terrain.tracker_slope_violations(document["state"]["grid"], entities, TINYTEST, 1.0)["report"])
+
+
 def test_terrain_adapter_slope_on_a_steep_terrain(backend, g1_state):
     steep_head(backend, g1_state)
+    prior = ph.physical_head(backend, TENANT, DRAWING, project_id=PROJECT)["state"]["artifact_id"]
     before = keys(backend)
     result = slope(backend, limits=TINYTEST)
     assert result["report"] == {
@@ -397,11 +409,16 @@ def test_terrain_adapter_slope_on_a_steep_terrain(backend, g1_state):
         "grid_sha256": "b84cd3b8a511775bad580bb9cf29206f7e51f5c85626d5844df2b3737d2ee2d3",
         "meters_per_unit": 1.0, "limits": TINYTEST, "frames": 144, "markers": 109,
         "status": result["report"]["status"],
-        "report_sha256": "0256753360246769da5bc7a6ca8b6be8b6572a7df9503c6a5411838ce68f04ab"}
+        "report_sha256": kernel_report_sha256(backend, g1_state)}
     assert (result["operation"], result["created"], result["replaced"], result["head"]["index"]) == (
         "slope", True, 0, 2)
     assert (result["grid"]["rows"], result["grid"]["cols"], result["grid"]["elevation_max_m"]) == (30, 15, 20.0)
-    assert canonical(result) == "e1e2d57b467d264d0d5e06b58c3dba46089d55ecd9d2bdb12b1fa945a50016f7"
+    # The record is asserted field by field above and the head chains through its report digest
+    # (see kernel_report_sha256), so the rest is pinned by digest, measured identical on Windows and
+    # Linux, and the head by relation.
+    assert canonical({key: value for key, value in result.items() if key not in ("head", "record")}) == (
+        "e161e2070a3571674b45046b2b82b69e44bb4e58d5ad0de3c6746b0bab0d5038")
+    assert result["head"]["parent"] == prior
     assert len(keys(backend) - before) == 3
     markers = head_document(backend)["state"]["slope_markers"]
     assert len(markers) == 109
@@ -455,10 +472,16 @@ def test_terrain_adapter_new_grid_makes_the_slope_stale(backend, g1_state):
 def test_terrain_adapter_clear(backend, g1_state):
     steep_head(backend, g1_state)
     slope(backend, limits=TINYTEST)
+    prior = ph.physical_head(backend, TENANT, DRAWING, project_id=PROJECT)["state"]["artifact_id"]
     result = clear(backend)
     assert (result["operation"], result["capability"], result["created"], result["replaced"], result["grid"],
             result["record"], result["head"]["index"]) == ("slope-clear", SLOPE, True, 109, None, None, 3)
-    assert canonical(result) == "6ab0874eb649573eb5e5c2d3db28d705c952e0f97dfe77fd127202a4341aecb8"
+    # The head's identity chains through the slope record's report digest, which carries a platform
+    # dependent last bit (see kernel_report_sha256), so the head is pinned by relation and the rest
+    # of the result by its digest, measured identical on Windows and Linux.
+    assert canonical({key: value for key, value in result.items() if key != "head"}) == (
+        "1d025bab57061e28fc297200e30ff5dd267498face8d59b82d38f00324e4c15c")
+    assert result["head"]["parent"] == prior
     state = head_document(backend)["state"]
     assert (state["slope_markers"], state["status_records"]) == ([], {})
     assert read(backend)[1]["previews"][SLOPE] == {"state": "absent", "record": None}
