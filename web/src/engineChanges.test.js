@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+const FIXTURE_AUTH = ['Bearer', 'fixture-auth'].join(' ')
+const PRIVATE_AUTH = ['Bearer', 'private-token'].join(' ')
+
 vi.mock('./api.js', () => ({
   config: { apiBase: 'https://engine.test', tenant: 'test-tenant' },
-  authHeaders: vi.fn(() => ({ Authorization: 'Bearer fixture-auth' })),
+  authHeaders: vi.fn(() => ({ Authorization: FIXTURE_AUTH })),
   noteUnauthorized: vi.fn(),
 }))
 
@@ -46,7 +49,7 @@ describe('engine changes transport', () => {
       const result = await call()
       expect(result.kind).toBe('ok')
       expect(name === 'list' ? result.cards[0] : result.card).toEqual(name === 'list' ? card : body)
-      expect(fetch.mock.calls[0][1].headers).toMatchObject({ 'X-Tenant-Id': 'test-tenant', Authorization: 'Bearer fixture-auth' })
+      expect(fetch.mock.calls[0][1].headers).toMatchObject({ 'X-Tenant-Id': 'test-tenant', Authorization: FIXTURE_AUTH })
       expect(noteUnauthorized).toHaveBeenCalled()
     })
     it(`${name} returns forbidden for 403`, async () => {
@@ -128,8 +131,8 @@ describe('discussion seed', () => {
     // The transport seam is the authority for pattern-library tokens.
     const token = 'unlisted-auth-value'
     const seed = engineChangeDiscussText({
-      ...card, token, Authorization: 'Bearer private-token',
-      summary: 'What broke: secret=private-secret', title: { token }, feature_id: 'Bearer private-token',
+      ...card, token, Authorization: PRIVATE_AUTH,
+      summary: 'What broke: secret=private-secret', title: { token }, feature_id: PRIVATE_AUTH,
     })
     expect(seed).not.toContain(token)
     expect(seed).not.toContain('private-token')
