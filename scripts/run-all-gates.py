@@ -647,9 +647,10 @@ def build_suites() -> List[Suite]:
         # InsertSchedules tables over the bridged graph, written as ElectricalSchedules.json; the recorded i7
         # design rebuilt as a graph reproduces the i8 receipt. Inputs are authored in the file or read from
         # committed evidence, so the floor is the exact count on every runner. COUNTED: 20 tests + 36 more
-        # parametrizations = 56.
+        # parametrizations = 56. sf-w2-electrical-output-feeders adds the feeder schedule rows (C10 and the
+        # recorded i7 feeders): 24 tests + 40 more parametrizations = 64.
         Suite("server-solar-tool-electrical-schedules", "server tests/test_solar_tool_electrical_schedules.py",
-              "pytest", SERVER, _py_pytest("tests/test_solar_tool_electrical_schedules.py"), 56),
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_electrical_schedules.py"), 64),
         # W5 inverter family (2026-09-24, contract G35): the shared state and delta module and the
         # device, string and output engines (literal ports of the plugin's inverter commands). Inputs
         # are authored in each file, so each floor is the exact count on every runner. MEASURED.

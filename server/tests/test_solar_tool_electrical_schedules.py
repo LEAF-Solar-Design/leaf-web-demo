@@ -17,6 +17,7 @@ import entitlements
 import jobs
 import product_capability_availability as availability
 import solar_artifacts
+import solar_electrical_route_bridge as rb
 import solar_electrical_state_bridge as br
 import solar_local_read as local
 import solar_tools
@@ -24,6 +25,7 @@ import store
 import write_loop
 from solar_design_graph import GraphValidationError, validate_graph
 from solar_solve_results import require_current_export
+import test_solar_electrical_route_bridge as rbt
 from test_solar_electrical_state_bridge import CREATED, DEFAULTS, minter
 from test_solar_ground_topology import bare
 from test_solar_tool_guardrails_read import located
@@ -483,6 +485,111 @@ def test_electrical_schedules_readiness(graph):
             "input_ready": False, "input_reason": reason}
     assert availability.w1_local_commit_inputs(variant("units", graph))[TOOL] == {
         "input_ready": False, "input_reason": "unresolved_units"}
+
+
+# ------------------------------------------------------------------ feeders (sf-w2-electrical-output-feeders) --
+
+FEEDER_TITLES = ["COMBINER / INVERTER SCHEDULE", "STRING SCHEDULE", "FEEDER SCHEDULE"]
+FEEDER_HEADER = [["FEEDER SCHEDULE", "", ""], ["Combiner Box #", "Inverter #", "Feeder Length (ft)"]]
+C10_FEEDER_CELLS = FEEDER_HEADER + [["1", "1", "41.7"], ["2", "2", "41.7"]]
+C10_SUMMARY = {"circuit_source": "topology", "strings": 2, "modules": 0, "label_mismatches": 0,
+               "inverter_record": "absent", "sizing": "absent", "module_catalog": "unresolved"}
+
+
+def c10_graphs(w1):
+    """The C10 positive feeders (test_solar_electrical_route_bridge.py): the unfed graph, then the graph the
+    route bridge writes after the kernel's nearest-lane routing draws two 500 / 12 ft feeders."""
+    before, unfed, binding = rbt._c10(copy.deepcopy(w1))
+    after, lines = rbt.cab.route_l2_feeders(before, rbt.ct.GROUPS, rbt.ct.HOST)
+    assert "2 nearest-lane comb feeder(s) drawn." in lines
+    fed, _ = rb.graph_from_state(unfed, after, binding, new_id=rbt.minter(200), created_at=rbt.CREATED)
+    assert (sha(unfed), sha(fed)) == ("4ce106a4fa6ca94481fa7d1ae99c4e77f7408b4f872f77ded21e662e74890570",
+                                      "e8cd97b7fbbbdddc85bc421fd643d01b5c2abcbe4dc9dc1bfe7e351b0cc45a32")
+    return unfed, fed
+
+
+def feeder_cells(document):
+    return [table["cells"] for table in document["tables"] if table["title"] == "FEEDER SCHEDULE"]
+
+
+C10_OUTPUTS = [
+    ({}, FEEDER_TITLES, 1161, "ce5c148513338836fb578ea964b0c9baf77a27d6ba511be7e22ba55e3cf8578d", C10_SUMMARY,
+     ["INVERTER SCHEDULE", "STRING SCHEDULE"]),
+    ({"circuit_source": "labels"}, ["FEEDER SCHEDULE"], 235,
+     "99ac29cd34eb2330dea376062efd28a1e28a603fbc243171f4ed77b7d67d2222",
+     dict(C10_SUMMARY, circuit_source="labels", strings=0), []),
+]
+
+
+@pytest.mark.parametrize("params,titles,size,content_sha,summary,unfed_titles", C10_OUTPUTS,
+                         ids=["topology", "labels"])
+def test_electrical_schedules_c10_feeders(graph, params, titles, size, content_sha, summary, unfed_titles):
+    unfed, fed = c10_graphs(graph)
+    before = copy.deepcopy(fed)
+    out = builtin().run(fed, params)
+    document = artifact(out)
+    assert [table["title"] for table in document["tables"]] == titles
+    assert (len(out.content), hashlib.sha256(out.content).hexdigest()) == (size, content_sha)
+    assert out.summary == {"status": "written", "tables": titles, **summary}
+    assert feeder_cells(document) == [C10_FEEDER_CELLS]
+    assert fed == before
+    floats = copy.deepcopy(fed)
+    for inverter in floats["inverters"]:
+        inverter["number"] = float(inverter["number"])
+    assert builtin().run(floats, params).content == out.content
+    unfed_out = builtin().run(unfed, params)
+    unfed_summary = unfed_out.summary if type(unfed_out) is solar_artifacts.ArtifactOutput else unfed_out
+    assert unfed_summary.get("tables", []) == unfed_titles
+    assert availability.w1_graph_readiness(fed)[TOOL] == {"input_ready": True, "input_reason": None}
+
+
+@pytest.mark.parametrize("unit,mpu", [("in", 0.0254), ("m", 1.0), ("ft", 0.3048), ("mm", 0.001)],
+                         ids=["inches", "metres", "feet", "millimetres"])
+def test_electrical_schedules_feeders_use_inches(graph, unit, mpu):
+    _, fed = c10_graphs(graph)
+    fed["project"]["units"].update(drawing_units=unit, meters_per_unit=mpu, drawing_unit_is_feet=(unit == "ft"))
+    out = builtin().run(fed, {})
+    assert feeder_cells(artifact(out)) == [C10_FEEDER_CELLS]
+    assert hashlib.sha256(out.content).hexdigest() == C10_OUTPUTS[0][3]
+
+
+def test_electrical_schedules_feeders_follow_geometry_and_route_order(graph):
+    _, fed = c10_graphs(graph)
+    assert [r["route_kind"] for r in fed["routes"]] == ["end homerun", "start homerun"] * 2 + ["feeder"] * 2
+    reordered = copy.deepcopy(fed)
+    reordered["routes"] = reordered["routes"][:4] + reordered["routes"][4:][::-1]
+    assert feeder_cells(artifact(builtin().run(reordered, {}))) == [
+        FEEDER_HEADER + [["2", "2", "41.7"], ["1", "1", "41.7"]]]
+    moved = copy.deepcopy(fed)
+    moved["routes"][5]["points"][1:3] = [[27.94, 10.16], [27.94, 0.0]]
+    assert moved["routes"][5]["length_ft"] == 500.0 / 12.0
+    assert feeder_cells(artifact(builtin().run(moved, {}))) == [
+        FEEDER_HEADER + [["1", "1", "41.7"], ["2", "2", "65.2"]]]
+    point = copy.deepcopy(fed)
+    point["routes"][5]["points"] = [[22.86, 5.08]]
+    assert feeder_cells(artifact(builtin().run(point, {}))) == [
+        FEEDER_HEADER + [["1", "1", "41.7"], ["2", "2", "0"]]]
+
+
+def test_electrical_schedules_i7_feeders_match_the_kernel(graph):
+    module = builtin()
+    state = module.st.load_state(STATES / "state-i7.json")
+    g, _ = rbt.adopt_write(copy.deepcopy(graph), state)
+    kinds = [route["route_kind"] for route in g["routes"]]
+    assert (sha(g), len(kinds), kinds.count("feeder")) == (
+        "3750f6267686e402cfa0111bdf067058cce841b7103ca74a1cdd0bed39e93044", 360, 14)
+    out = module.run(g, {})
+    document = artifact(out)
+    assert [table["title"] for table in document["tables"]] == FEEDER_TITLES
+    assert (len(out.content), hashlib.sha256(out.content).hexdigest()) == (
+        15693, "e29783948537e3e7e4f1e042cc91b11127c3227bd8c7663dc3b575f2e6401ce7")
+    host = {"UseL2Collectors": True, "SessionCableIndexHasFeeders": True}
+    kernel = module.kernel
+    recorded = kernel.table_cells(kernel.feeder_schedule(state, host, kernel._l1_to_l2(state, host)))
+    (cells,) = feeder_cells(document)
+    assert cells == recorded and len(cells) == 16
+    assert sha(cells) == "38da4d19fef9777504abaad9e97eac68940e7580269243e49675a27ccbb5bfc1"
+    assert (cells[2], cells[4], cells[-1]) == (["1", "1", "164.3"], ["3", "2", "410.6"], ["14", "8", "272.4"])
 
 
 # ------------------------------------------------------------------------------ the rail --
