@@ -184,7 +184,7 @@ def test_frames_piles_first_generate_is_the_evidence_g1(backend):
 
 
 MEASURED_G1_STATE = ("4431effa54c7630c12269f5ae9ee2b9a9edd54d5b152ba810bf409e5ca9bfc3b", 50469)
-MEASURED_G1_RESULT = "fc2015ae59c5254f6a4f1146f2e5f01f227a8c255cd893a89931cfd1ded6403e"
+MEASURED_G1_RESULT = "b2a79f4436980d9d4b15a12c6d752b7727874e09a38e5c767d2d95c9ac61da4c"
 
 
 def test_frames_piles_retry_returns_the_same_head(backend):
@@ -647,3 +647,176 @@ def test_frames_piles_typed_refusal_inside_a_run_keeps_its_code(backend, monkeyp
     monkeypatch.setitem(fp._RUN, fp.COLLISION, typed_refusal)
     refused(code, fp.detect_collisions, backend, TENANT, DRAWING, base=base)
     assert keys(backend) == before and head_id(backend) == base
+
+
+# ------------------------------- terrain standing (sf-w5-piles-terrain-staleness) --
+
+def standing(frames_state, frames_checked, frames_stale, piles_state, piles_checked, piles_stale, grid_sha256):
+    return {"schema": "leaf.solar-frames-piles-terrain-standing.v1", "maturity": "preview",
+            "grid_sha256": grid_sha256,
+            "frames": {"state": frames_state, "checked": frames_checked, "stale": frames_stale},
+            "piles": {"state": piles_state, "checked": piles_checked, "stale": piles_stale}}
+
+
+def read_standing(backend):
+    return fp.read_terrain_standing(backend, TENANT, DRAWING, project_id=PROJECT)
+
+
+LX_M_GRID = "1c78f602025556918336710801265c08a50a9e9098b48d2bda4a669bc9927452"
+LX_M_GRID_10 = "256ae101729b837f56251969b9dcf252af45cdd1126b92e9bf5dc3caac7a9213"
+LX_FT_GRID = "a67a1a71ae3f8404398909e2a9dc836b2a83b02ec421b41e6c2dae8332b04fed"
+LX_FT_GRID_10 = "b647f3d440f6fc0d80087553aef55268abb0ba7a017b912aa2dd9bc666214e1c"
+T4_GRID = "fccde59f5f7e53f6d92bf88a03ffb97c00323406765c7678bcb5bdb0e5393524"
+
+
+def test_frames_piles_standing_constants():
+    assert fp.STANDING_SCHEMA == "leaf.solar-frames-piles-terrain-standing.v1"
+    assert fp.STANDINGS == ("absent", "current", "stale")
+    assert fp.STANDING_TOLERANCE == 1e-6
+    assert len(fp.CODES) == 25
+
+
+def test_frames_piles_standing_follows_the_grid_in_metres(backend):
+    base = landxml_head(backend)
+    made = generate(backend, base=base, boundary=SQUARE_M)
+    assert made["standing"] == standing("current", 242, 0, "absent", 0, 0, LX_M_GRID)
+    placed = piles(backend, made["head"]["state"]["artifact_id"])
+    assert placed["standing"] == standing("current", 242, 0, "current", 1936, 0, LX_M_GRID)
+    before = keys(backend)
+    assert read_standing(backend) == (placed["head"], placed["standing"])
+    assert keys(backend) == before
+    moved = lx.import_landxml_terrain(backend, TENANT, DRAWING, REAL, drawing_units="m", crs="none",
+                                      target_cells=10)
+    assert moved["created"] is True
+    stale = standing("stale", 242, 242, "stale", 1936, 1936, LX_M_GRID_10)
+    assert read_standing(backend) == (moved["head"], stale)
+    collision = fp.detect_collisions(backend, TENANT, DRAWING, base=moved["head"]["state"]["artifact_id"])
+    assert collision["outcome"] == "unchanged" and collision["standing"] == stale
+    assert collision["terrain"]["grid_sha256"] == LX_M_GRID_10
+    window = fp.check_pile_lengths(backend, TENANT, DRAWING, base=moved["head"]["state"]["artifact_id"],
+                                   preset=PRESET)
+    assert window["outcome"] == "unchanged" and window["standing"] == stale
+    again = piles(backend, moved["head"]["state"]["artifact_id"])
+    assert again["outcome"] == "published" and again["summary"]["piles_replaced"] == 1936
+    assert again["standing"] == standing("stale", 242, 242, "current", 1936, 0, LX_M_GRID_10)
+    back = lx.import_landxml_terrain(backend, TENANT, DRAWING, REAL, drawing_units="m", crs="none")
+    assert read_standing(backend) == (back["head"], standing("current", 242, 0, "stale", 1936, 1936, LX_M_GRID))
+
+
+def test_frames_piles_standing_follows_the_grid_in_feet(backend):
+    base = landxml_head(backend, "ft")
+    made = generate(backend, base=base, boundary=SQUARE_FT, drawing_units="ft")
+    placed = piles(backend, made["head"]["state"]["artifact_id"])
+    assert placed["standing"] == standing("current", 242, 0, "current", 1936, 0, LX_FT_GRID)
+    lx.import_landxml_terrain(backend, TENANT, DRAWING, REAL, drawing_units="ft", crs="none", target_cells=10)
+    assert read_standing(backend)[1] == standing("stale", 242, 242, "stale", 1936, 1936, LX_FT_GRID_10)
+
+
+def test_frames_piles_standing_flat_frames_go_stale_under_a_new_grid(backend):
+    made = generate(backend)
+    assert made["standing"] == standing("current", 144, 0, "absent", 0, 0, None)
+    lx.import_landxml_terrain(backend, TENANT, DRAWING, REAL, drawing_units="m", crs="none")
+    assert read_standing(backend)[1] == standing("stale", 144, 72, "absent", 0, 0, LX_M_GRID)
+
+
+def test_frames_piles_standing_of_the_evidence_t4(backend, terrain_chain):
+    seed_head(backend, copy.deepcopy(terrain_chain["t4"]))
+    assert read_standing(backend)[1] == standing("current", 1197, 0, "current", 9576, 0, T4_GRID)
+
+
+@pytest.mark.parametrize("delta, stale", [(5e-7, 0), (2e-6, 1), (-2e-6, 1)])
+def test_frames_piles_standing_tolerance(backend, delta, stale):
+    base = landxml_head(backend)
+    made = generate(backend, base=base, boundary=SQUARE_M)
+    piles(backend, made["head"]["state"]["artifact_id"])
+    state = copy.deepcopy(state_of(backend))
+    state["frames"][0]["elevation"] += delta
+    x, y, z = state["piles"][0]["center"]
+    state["piles"][0]["center"] = (x, y, z + delta)
+    head = ph.physical_head(backend, TENANT, DRAWING, project_id=PROJECT)
+    document = ps.physical_document(state, drawing_units="m", source_sha256=TERRAIN_SHA, capability="hand-edit",
+                                    parent=head["state"]["artifact_id"])
+    ph.publish_physical_state(backend, TENANT, DRAWING, document)
+    word = "stale" if stale else "current"
+    assert read_standing(backend)[1] == standing(word, 242, stale, word, 1936, stale, LX_M_GRID)
+
+
+def test_frames_piles_standing_ignores_entities_it_did_not_draw(backend):
+    state = copy.deepcopy(TINY)
+    state["frames"].append({"type": "INSERT", "layer": "PVCASE-TRACKERS", "name": "TRK"})
+    state["piles"].append({"type": "CIRCLE", "layer": "OTHER", "center": (0.0, 0.0, 9.0)})
+    seed_head(backend, state, capability="frame-generate")
+    assert read_standing(backend)[1] == standing("absent", 0, 0, "absent", 0, 0, None)
+
+
+NATIVE_FRAME = {"type": "LWPOLYLINE", "layer": "LEAF-TRACKERS", "closed": True,
+                "vertices": [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)], "row": 0, "col": 0}
+NATIVE_PILE = {"type": "CIRCLE", "layer": "LEAF-PILING", "center": (0.5, 0.5, -1.5), "pile": {"embedment_m": 1.5}}
+
+
+@pytest.mark.parametrize("key, change", [
+    ("frames", {"vertices": 1}),
+    ("frames", {"vertices": []}),
+    ("frames", {"vertices": [(0.0, 0.0, 0.0)]}),
+    ("frames", {"vertices": [(0.0, "1")]}),
+    ("frames", {"elevation": "0"}),
+    ("frames", {"elevation": True}),
+    ("piles", {"center": (0.5, 0.5)}),
+    ("piles", {"center": None}),
+    ("piles", {"pile": None}),
+    ("piles", {"pile": {"embedment_m": "1.5"}}),
+    ("piles", {"pile": {}}),
+])
+def test_frames_piles_standing_refuses_a_malformed_native_entity(backend, key, change):
+    entity = dict(NATIVE_FRAME if key == "frames" else NATIVE_PILE, **change)
+    state = {"grid": None, "frames": [], "piles": []}
+    state[key] = [entity]
+    base = seed_head(backend, state)
+    refused("FRAMES_PILES_STATE_INVALID", fp.read_terrain_standing, backend, TENANT, DRAWING, project_id=PROJECT)
+    before = keys(backend)
+    refused("FRAMES_PILES_STATE_INVALID", generate, backend, base=base, boundary=SQUARE_M)
+    assert keys(backend) == before and head_id(backend) == base
+
+
+@pytest.mark.parametrize("change", [
+    {"pile": {"embedment_m": "1.5"}},
+    {"pile": None},
+    {"center": None},
+])
+def test_frames_piles_standing_piling_refuses_a_malformed_existing_pile(backend, change):
+    base = landxml_head(backend)
+    made = generate(backend, base=base, boundary=SQUARE_M)
+    placed = piles(backend, made["head"]["state"]["artifact_id"])
+    again = piles(backend, placed["head"]["state"]["artifact_id"])
+    assert again["outcome"] in ("published", "unchanged")
+    assert again["standing"] == standing("current", 242, 0, "current", 1936, 0, LX_M_GRID)
+    state = copy.deepcopy(state_of(backend))
+    state["piles"][0].update(change)
+    document = ps.physical_document(state, drawing_units="m", source_sha256=TERRAIN_SHA, capability="hand-edit",
+                                    parent=head_id(backend))
+    child = ph.publish_physical_state(backend, TENANT, DRAWING, document)
+    base = child["head"]["state"]["artifact_id"]
+    before = keys(backend)
+    refused("FRAMES_PILES_STATE_INVALID", piles, backend, base)
+    assert keys(backend) == before and head_id(backend) == base
+
+
+def test_frames_piles_standing_native_entities_on_a_flat_drawing_are_current(backend):
+    seed_head(backend, {"grid": None, "frames": [dict(NATIVE_FRAME)], "piles": [dict(NATIVE_PILE)]})
+    assert read_standing(backend)[1] == standing("current", 1, 0, "current", 1, 0, None)
+
+
+def test_frames_piles_standing_refuses_an_unreadable_grid(backend):
+    seed_head(backend, {"grid": {"elevations": [1.0], "rows": 1, "cols": 1, "x_min": 0.0, "x_max": 1.0,
+                                 "y_min": 0.0, "y_max": 1.0}})
+    refused("FRAMES_PILES_TERRAIN_INVALID", fp.read_terrain_standing, backend, TENANT, DRAWING, project_id=PROJECT)
+
+
+def test_frames_piles_standing_read_empty_and_project(backend):
+    assert read_standing(backend) == (None, None)
+    refused("FRAMES_PILES_PROJECT_ID_INVALID", fp.read_terrain_standing, backend, TENANT, DRAWING, project_id="")
+    refused("FRAMES_PILES_PROJECT_ID_INVALID", fp.read_terrain_standing, backend, TENANT, DRAWING,
+            project_id="p" * 101)
+    generate(backend)
+    refused("PHYSICAL_HEAD_PROJECT_MISMATCH", fp.read_terrain_standing, backend, TENANT, DRAWING,
+            project_id="leaf:project:other")

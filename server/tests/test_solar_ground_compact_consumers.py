@@ -328,26 +328,6 @@ def test_ground_compact_consumers_string_edits_match_expansion(
     assert canon_sha(result) == digest
 
 
-@pytest.mark.parametrize("name", [
-    "solar_string_add", "solar_string_multi_add", "solar_string_midpoint",
-], ids=["add", "multi_add", "midpoint"])
-def test_ground_compact_consumers_panel_lookup_tools_refuse_slot_panels(graph, b18, name):
-    s = strung(graph, b18)
-    s["settings"]["panels_in_sequence"] = 21
-    free = slot_ids(s, 1, 294)[100:103]
-    before = deepcopy(s)
-    if name == "solar_string_add":
-        params = {"operation": "add-string", "expected_rev": 0, "ordered_panel_refs": list(free)}
-    elif name == "solar_string_multi_add":
-        params = {"operation": "add-strings", "expected_rev": 0,
-                  "ordered_panel_refs": list(free), "string_length": 3}
-    else:
-        params = {"operation": "add-midpoint-string", "expected_rev": 0,
-                  "start_panel_ref": free[0], "end_panel_ref": free[2]}
-    assert _code(_builtin(name).run, s, params) == "MISSING_PANEL"
-    assert s == before
-
-
 def test_ground_compact_consumers_module_import_never_loads_the_codec():
     program = (
         "import sys\n"

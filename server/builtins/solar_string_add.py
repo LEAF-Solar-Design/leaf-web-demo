@@ -68,6 +68,34 @@ def max_string_length(graph):
     return longest
 
 
+def slot_tables(graph):
+    """{frame id: SlotTable} for every compact Ground frame (codec leaf.solar-ground-slots.v1), frames
+    in graph order. A graph with no ground_slots block returns {} without importing the codec.
+    Decoding fails closed with the codec's own refusal; no slot is expanded."""
+    if not any("ground_slots" in frame for frame in graph["frames"]):
+        return {}
+    import solar_ground_graph_codec as codec
+    return codec.decode_graph_slots(graph)
+
+
+def panel_views(graph, tables=None):
+    """Every panel in expansion order: the stored panels themselves, then, frames in graph order
+    and slots in slot order, one fresh read-only view {"id", "frame_ref", "centre", "angle"} per
+    compact slot panel carrying the values codec.expand_graph gives that panel. Nothing is stored
+    for a slot panel; linear in the panel count."""
+    views = list(graph["panels"])
+    if tables is None:
+        tables = slot_tables(graph)
+    for frame in graph["frames"]:
+        table = tables.get(frame["id"])
+        if table is None:
+            continue
+        xy = table.centres
+        views.extend({"id": panel_id, "frame_ref": frame["id"], "centre": [xy[2 * col], xy[2 * col + 1]],
+                      "angle": table.angle} for col, panel_id in enumerate(table.ids))
+    return views
+
+
 def _valid_request(params):
     """True for exactly {expected_rev, ordered_panel_refs}, no coercion anywhere."""
     if type(params) is not dict or set(params) != {"expected_rev", "ordered_panel_refs"}:
@@ -83,7 +111,7 @@ def _new_string(graph, refs):
 
     Called on the private copy only, after every refusal has already run.
     """
-    panels = {panel["id"]: panel for panel in graph["panels"]}
+    panels = {panel["id"]: panel for panel in panel_views(graph)}
     tags = {string["circuit_tag"] for string in graph["strings"]}
     number = graph["settings"]["string_number"]
     # Bounded by the number of circuits the drawing already holds: the loop can only
@@ -141,8 +169,8 @@ def add_string(graph, params):
         # The drawing's own sized length, not a constant: a longer circuit is one the
         # cold-Voc guard never cleared.
         raise GraphValidationError("STRING_TOO_LONG")
-    panels = {panel["id"]: panel for panel in before["panels"]}
-    if not set(refs) <= set(panels):
+    panels = {panel["id"] for panel in panel_views(before)}
+    if not set(refs) <= panels:
         raise GraphValidationError("MISSING_PANEL")
     wired = {ref for string in before["strings"] for ref in string["ordered_panel_refs"]}
     if not wired.isdisjoint(refs):

@@ -82,12 +82,77 @@ def _solaredge_report(backend, tenant_id, drawing_id, version, graph_sha256, par
         backend, tenant_id, drawing_id, version, graph_sha256, params)
 
 
+def _physical_state(backend, tenant_id, drawing_id, project_id):
+    """The drawing's current Ground physical head as {"view", "document"}, both None when no state
+    was ever published (solar_physical_head.load_physical_head: at most 13 log reads plus the head
+    artifact, read once). Any head refusal is PHYSICAL_STATE_UNAVAILABLE, payload-free."""
+    import solar_physical_state as ps  # first: its write_loop import puts da/ (store) on sys.path
+    import solar_physical_head as ph
+    try:
+        view, document = ph.load_physical_head(backend, tenant_id, drawing_id, project_id=project_id)
+    except (ps.PhysicalStateError, OSError, RuntimeError, TypeError, KeyError):
+        raise GraphValidationError("PHYSICAL_STATE_UNAVAILABLE") from None
+    return {"view": view, "document": document}
+
+
+PHYSICAL_SOURCE_KEYS = frozenset({"head_index", "state_artifact_id", "state_content_sha256"})
+
+
+def physical_state_source(view):
+    """The graph.extra.physical_state record a physical_state tool must write for `view`."""
+    return {"head_index": view["index"], "state_artifact_id": view["state"]["artifact_id"],
+            "state_content_sha256": view["state"]["content_sha256"]}
+
+
+def _physical_state_entry(backend, tenant_id, drawing_id, project_id, source):
+    """The physical state a committed graph names in graph.extra.physical_state, re-read for the
+    replay proof: head-log entry `head_index` must be canonical and chained to a predecessor
+    that is a valid log entry at its own index,
+    naming that state artifact and content digest for this project, and the artifact must be this drawing's and
+    project's physical state. Both are immutable, so a later physical publish never changes the
+    answer. Any disagreement raises ValueError (the proof's rejection)."""
+    import solar_physical_state as ps  # first: its write_loop import puts da/ (store) on sys.path
+    import solar_physical_head as ph
+    if type(source) is not dict or set(source) != PHYSICAL_SOURCE_KEYS:
+        raise ValueError()
+    index, artifact_id = source["head_index"], source["state_artifact_id"]
+    content_sha256 = source["state_content_sha256"]
+    if type(index) is not int or type(artifact_id) is not str or type(content_sha256) is not str:
+        raise ValueError()
+    raw = backend.get(ph.entry_key(tenant_id, drawing_id, index))
+    entry = json.loads(raw)
+    if (type(entry) is not dict
+            or raw != ph.entry_bytes(index, project_id, entry.get("parent"), artifact_id, content_sha256)):
+        raise ValueError()
+    parent = entry["parent"]
+    if index == 0:
+        if parent is not None:
+            raise ValueError()
+    elif index > 0:
+        try:
+            previous = ph._Log(backend, tenant_id, drawing_id).entry(index - 1)
+        except ph.PhysicalHeadError:
+            raise ValueError() from None
+        except ValueError:
+            raise
+        except Exception:
+            raise ValueError() from None
+        if type(previous) is not dict or previous.get("state") != parent:
+            raise ValueError()
+    meta, document = ps.load_physical_state(backend, tenant_id, drawing_id, artifact_id,
+                                            project_id=project_id)
+    if meta["content_sha256"] != content_sha256:
+        raise ValueError()
+    view = {"index": index, "state": {"artifact_id": artifact_id, "content_sha256": content_sha256}}
+    return {"view": view, "document": document}
+
+
 _TRUSTED_RESOLVERS = {"source_intake": _source_intake, "proposal_candidate": _proposal_candidate,
-                      "solaredge_report": _solaredge_report}
+                      "solaredge_report": _solaredge_report, "physical_state": _physical_state}
 
 
 def _resolve_trusted(tool, backend, tenant_id, drawing_id, version, graph_sha256, snapshot,
-                     params=None):
+                     params=None, *, project_id=None):
     names = solar_tools.get(tool)["trusted_inputs"]
     if snapshot is not None and "proposal_candidate" not in names:
         raise GraphValidationError("INVALID_COMMIT_REQUEST")
@@ -99,6 +164,8 @@ def _resolve_trusted(tool, backend, tenant_id, drawing_id, version, graph_sha256
         elif name == "solaredge_report":
             resolved[name] = _TRUSTED_RESOLVERS[name](
                 backend, tenant_id, drawing_id, version, graph_sha256, params)
+        elif name == "physical_state":
+            resolved[name] = _TRUSTED_RESOLVERS[name](backend, tenant_id, drawing_id, project_id)
         else:
             resolved[name] = _TRUSTED_RESOLVERS[name](
                 backend, tenant_id, drawing_id, version, graph_sha256)
@@ -208,6 +275,14 @@ def graph_commit_provenance(result, params, tenant_id, job_id, tool, source_vers
                                         parent["graph_sha256"], None, builtin_params)
             after = _load_builtin(tool).run(copy.deepcopy(parent["graph"]), builtin_params,
                                             **resolved)
+            if digest(after) != result["graph_sha256"]:
+                raise ValueError()
+        if "physical_state" in trusted_inputs:
+            # The state the commit names, never the head now: a later physical publish moves the head.
+            state = _physical_state_entry(backend, tenant_id, drawing_id, parent["project_id"],
+                                          context["graph"]["extra"]["physical_state"])
+            after = _load_builtin(tool).run(copy.deepcopy(parent["graph"]), builtin_params,
+                                            physical_state=state)
             if digest(after) != result["graph_sha256"]:
                 raise ValueError()
         return {"execution_mode": "local_graph_commit", "adapter": ADAPTER_KIND,
@@ -333,7 +408,8 @@ def run_local_graph_commit(backend, tenant_id, tool, params, *, drawing_id, sour
         if context["representation"] == "dwg-bundle":
             raise GraphValidationError("LICENSED_GRAPH_COMMIT_REQUIRED")
         resolved = _resolve_trusted(tool, backend, tenant_id, drawing_id, source_version,
-                                    context["graph_sha256"], proposal_candidate, builtin_params)
+                                    context["graph_sha256"], proposal_candidate, builtin_params,
+                                    project_id=context["project_id"])
         module = _load_builtin(tool)
         run_bound = getattr(module, "run_bound", None)
         if callable(run_bound):
@@ -344,6 +420,13 @@ def run_local_graph_commit(backend, tenant_id, tool, params, *, drawing_id, sour
             after = module.run(copy.deepcopy(context["graph"]), builtin_params, **resolved)
         if builtin_params.get("cancel") is True:
             raise GraphValidationError("GRAPH_COMMIT_CANCELLED")
+        if "physical_state" in resolved:
+            # The replay proof re-reads the state the graph names, so it must name the head read here.
+            view = resolved["physical_state"]["view"]
+            extra = after.get("extra") if type(after) is dict else None
+            if (view is None or type(extra) is not dict
+                    or extra.get("physical_state") != physical_state_source(view)):
+                raise GraphValidationError("PHYSICAL_STATE_UNBOUND")
         request_sha256 = request_digest(tool, drawing_id, source_version, builtin_params,
                                        proposal_candidate=proposal_candidate)
         receipt = publish_version(

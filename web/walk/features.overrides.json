@@ -1,0 +1,92 @@
+{
+  "version": 1,
+  "state_cases": {
+    "action": {
+      "baseline": {
+        "hasDrawing": true, "hasVersions": true, "canUndo": true, "canRedo": true,
+        "entitled": true, "available": true,
+        "session": {"engineParsed": true, "selected": {"editable": true, "type": "LINE"}, "selectedIds": ["one"], "clipboard": {"type": "LINE"}}
+      },
+      "patches": {
+        "no-drawing": {"hasDrawing": false, "hasVersions": false, "session": null},
+        "no-versioned-drawing": {"hasVersions": false},
+        "version-changing": {"versionBusy": true},
+        "job-running": {"running": true},
+        "read-only": {"previewing": true},
+        "mutations-blocked": {"mutationsBlocked": true},
+        "nothing-to-undo": {"canUndo": false},
+        "nothing-to-redo": {"canRedo": false},
+        "unentitled": {"entitled": false},
+        "authoring-off": {"available": false},
+        "engine-not-parsed": {"session": {"engineParsed": false}},
+        "engine-crashed": {"session": {"errorKind": "crashed"}},
+        "engine-busy": {"session": {"busy": true}},
+        "no-selection": {"session": {"selected": null, "selectedIds": []}},
+        "multiple-selected": {"session": {"selectedIds": ["one", "two"]}},
+        "read-only-entity": {"session": {"selected": {"editable": false, "type": "LINE"}}},
+        "placed-insert": {"session": {"selected": {"editable": false, "type": "INSERT"}}},
+        "placed-dimension": {"session": {"selected": {"editable": false, "type": "DIMENSION"}}},
+        "empty-clipboard": {"session": {"clipboard": null}},
+        "pane-open": {"paneOpen": true},
+        "result-owns-retry": {"rTarget": "result"},
+        "drawer-open": {"drawer": "nav"},
+        "history-open": {"historyOpen": true},
+        "start-open": {"startOpen": true},
+        "route-open": {"route": {"tool": "count-panels"}},
+        "errors-present": {"routeErr": "failed"},
+        "selection-present": {"selectedHandle": "one"},
+        "project-open": {"openProjectId": "walk-project"}
+      }
+    },
+    "surface": {
+      "baseline": {"sessionActive": true, "hasDrawing": true, "apsLive": true, "iosReady": true, "solarReady": true},
+      "patches": {
+        "signed-out": {"sessionActive": false},
+        "no-drawing": {"hasDrawing": false, "solarReady": false},
+        "execution-paused": {"apsLive": false},
+        "solar-not-ready": {"solarReady": false},
+        "apple-not-ready": {"iosReady": false}
+      }
+    },
+    "tool": {
+      "baseline": {"writeEntitled": true},
+      "patches": {
+        "job-running": {"running": true},
+        "read-only": {"previewing": true},
+        "write-locked": {"writeLocked": true},
+        "write-unentitled": {"writeEntitled": false},
+        "unsaved-engine-edits": {"engineDirty": true}
+      }
+    }
+  },
+  "overrides": {
+    "action:fit": {"effect": {"kind": "renders", "target": "viewer-home"}, "sources": ["web/src/lib/ribbonClusters.js"]},
+    "action:zoom-in": {"effect": {"kind": "renders", "target": "viewer-zoom-in"}, "sources": ["web/src/lib/ribbonClusters.js"]},
+    "action:zoom-out": {"effect": {"kind": "renders", "target": "viewer-zoom-out"}, "sources": ["web/src/lib/ribbonClusters.js"]},
+    "action:properties-pane": {"effect": {"kind": "toggles", "target": "properties-pane"}, "viewports": ["desktop", "phone"], "sources": ["web/src/App.jsx"]},
+    "action:undo": {"effect": {"kind": "submits", "target": "drawing-version-undo"}, "sources": ["web/src/lib/ribbonClusters.js"]},
+    "action:redo": {"effect": {"kind": "submits", "target": "drawing-version-redo"}, "sources": ["web/src/lib/ribbonClusters.js"]},
+    "action:history": {"effect": {"kind": "toggles", "target": "version-history"}, "sources": ["web/src/lib/ribbonClusters.js"]},
+    "action:rail-expand": {"effect": {"kind": "opens", "target": "drawer:nav"}, "viewports": ["desktop", "phone"], "sources": ["web/src/App.jsx"]},
+    "action:author-tool": {"effect": {"kind": "opens", "target": "author-panel"}, "sources": ["web/src/lib/ribbonClusters.js"]},
+    "action:slash-help": {"effect": {"kind": "opens", "target": "command-menu"}},
+    "action:slash-mcp": {"effect": {"kind": "opens", "target": "mounted-mcp-servers"}},
+    "action:bar-focus": {"effect": {"kind": "opens", "target": "command-bar-focus"}},
+    "action:bar-escape": {"effect": {"kind": "toggles", "target": "topmost-surface"}},
+    "action:bar-retry": {"effect": {"kind": "submits", "target": "failed-step"}},
+    "action:bar-shortcuts": {"effect": {"kind": "opens", "target": "keyboard-shortcut-sheet"}},
+    "action:modify-set-color": {"effect": {"kind": "opens", "target": "pending-property-change"}},
+    "action:modify-set-linetype": {"effect": {"kind": "opens", "target": "pending-property-change"}},
+    "action:modify-set-lineweight": {"effect": {"kind": "opens", "target": "pending-property-change"}},
+    "action:clipboard-copy-clip": {"effect": {"kind": "toggles", "target": "browser-clipboard"}, "sources": ["web/src/cadedit/EngineRibbonClusters.jsx"]},
+    "action:clipboard-cut-clip": {"effect": {"kind": "submits", "target": "browser-clipboard-cut"}, "sources": ["web/src/cadedit/EngineRibbonClusters.jsx"]},
+    "drawer:nav": {"viewports": ["desktop", "phone"], "sources": ["web/src/App.jsx"]},
+    "drawer:jobs": {"viewports": ["desktop", "phone"], "sources": ["web/src/App.jsx"]},
+    "drawer:result": {"viewports": ["desktop", "phone"], "sources": ["web/src/App.jsx"]},
+    "drawer:plan": {"viewports": ["desktop", "phone"], "sources": ["web/src/App.jsx"]},
+    "drawer:none": {"viewports": ["desktop", "phone"], "sources": ["web/src/App.jsx"]},
+    "surface:ios": {"certify": "staging", "certify_reason": "Mounted Apple readiness is provided by the staging ship lane; the local stack cannot certify that provider."},
+    "tab:ship:ship": {"certify": "staging", "certify_reason": "The ship profile requires mounted Apple readiness on staging."}
+  },
+  "exemptions": []
+}

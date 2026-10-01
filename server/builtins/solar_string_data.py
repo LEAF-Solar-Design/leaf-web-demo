@@ -12,8 +12,10 @@ handles are graph ids: frame id, string id, from_ref, to_ref.
 Position surrogates (upper-case hex) carry identity into the pure kernel and a
 strict inverse carries it back. Fails closed; linear in panels plus selection.
 """
+import importlib.util
 import json
 import math
+from pathlib import Path
 
 import solar_artifacts
 import solar_rooftop_chain as chain
@@ -25,6 +27,17 @@ MAX_REF = 128
 MAX_SELECTED = 10000
 FILENAME = "StringData.json"
 MEDIA_TYPE = "application/json"
+
+
+def _load_single_add():
+    path = Path(__file__).resolve().with_name("solar_string_add.py")
+    spec = importlib.util.spec_from_file_location("_solar_string_data_single", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+single = _load_single_add()
 
 
 def _refs(value):
@@ -62,11 +75,13 @@ def run(graph, params):
         if len(selected) > MAX_SELECTED:
             raise GraphValidationError("STRING_EDIT_BOUNDS_EXCEEDED")
     scale = graph["project"]["units"]["meters_per_unit"]
-    panel_sur = {p["id"]: format(i + 1, "X") for i, p in enumerate(graph["panels"])}
+    tables = single.slot_tables(graph)
+    panel_sur = {p["id"]: format(i + 1, "X") for i, p in enumerate(single.panel_views(graph, tables))}
     frames = graph["frames"]
     try:
         groups = [{"handle": format(k + 1, "X"), "name": f["name"],
-                   "panels": [panel_sur[ref] for ref in f["panel_refs"]]}
+                   "panels": [panel_sur[ref] for ref in (tables[f["id"]].ids if f["id"] in tables
+                                                         else f["panel_refs"])]}
                   for k, f in enumerate(frames)]
         sent = []
         for i, s in enumerate(selected):
