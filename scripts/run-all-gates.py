@@ -823,6 +823,12 @@ def build_suites() -> List[Suite]:
         # nothing skips: the floor is the exact count, 80.
         Suite("server-solar-ground-terrain-adapter", "server tests/test_solar_ground_terrain_adapter.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_ground_terrain_adapter.py"), 80),
+        # sf-w5-frames-piles: native Ground frame and pile operations (server/solar_frames_piles.py) over the
+        # drawing's current physical head: generate, collision, piling on the stored terrain, pile length window,
+        # each published as a child state and reopened unchanged (preview). Hermetic and nothing skips: the
+        # floor is the exact count, 80.
+        Suite("server-solar-frames-piles", "server tests/test_solar_frames_piles.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_frames_piles.py"), 80),
         # W5 dialog batch (2026-09-23, contract G30): server/solar_ground_dialogs.py (the shading
         # object form and PlaceTree, the project-area manager's Add Area and OK, the pile-template
         # manager's "+" and OK with the store file byte for byte). Every input is authored in the
