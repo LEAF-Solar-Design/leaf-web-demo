@@ -400,6 +400,8 @@ def build_suites() -> List[Suite]:
         # and nothing skips: 31 + 9 parametrized refusals + 22 single tests + 31 correction cases = 93.
         Suite("server-solar-combiner-graph", "server tests/test_solar_combiner_graph.py", "pytest", SERVER,
               _py_pytest("tests/test_solar_combiner_graph.py"), 93),
+        Suite("server-solar-feeder-graph", "server tests/test_solar_feeder_graph.py", "pytest", SERVER,
+              _py_pytest("tests/test_solar_feeder_graph.py"), 19),
         # 31 -> 35 on 2026-09-22: the zone-aware entry point (group_panels_by_zone,
         # the port of BuildAndSaveGroupsForZone) added four hermetic, unparametrized
         # tests. Nothing in this file skips, so the count is the same on every runner.
