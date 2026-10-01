@@ -4345,7 +4345,7 @@ def serial_suite_reason(suite: Suite) -> str:
         return "resets shared authored_tools.json"
     if suite.db_gated or suite.uses_database:
         return "shared PostgreSQL through DATABASE_URL"
-    executable =str(suite.argv[0]).replace("\\", "/").rsplit("/", 1)[-1].lower()
+    executable = str(suite.argv[0]).replace("\\", "/").rsplit("/", 1)[-1].lower()
     if executable in ("npm", "npm.cmd", "npm.exe", "npx", "npx.cmd", "npx.exe"):
         return "npm/npx shares node_modules and build outputs in its cwd"
     return _SERIAL_SUITE_REASONS.get(suite.id, "")
