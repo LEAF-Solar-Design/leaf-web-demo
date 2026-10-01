@@ -755,6 +755,12 @@ def build_suites() -> List[Suite]:
         # imported version. Hermetic and nothing skips: the floor is the exact count, 68.
         Suite("server-solar-combiner-intake-import", "server tests/test_solar_combiner_intake_import.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_combiner_intake_import.py"), 68),
+        # LEAFTRACKERSTOPANELGROUPS as a tool (2026-10-01, sf-w3-conversion-graph-tool): the drawing's Ground
+        # physical head carried by the physical_state trusted input, converted into compact Ground frames that
+        # replace any earlier conversion, published in one commit with the bound head-log entry; the replay proof
+        # re-reads that entry. Inputs are authored in the file and nothing skips. COUNTED: 54.
+        Suite("server-solar-tool-trackers-to-panel-groups", "server tests/test_solar_tool_trackers_to_panel_groups.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_trackers_to_panel_groups.py"), 54),
         # W5 inverter family (2026-09-24, contract G35): the shared state and delta module and the
         # device, string and output engines (literal ports of the plugin's inverter commands). Inputs
         # are authored in each file, so each floor is the exact count on every runner. MEASURED.
