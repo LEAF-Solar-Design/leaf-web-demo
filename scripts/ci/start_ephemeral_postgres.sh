@@ -85,7 +85,7 @@ start_native() {
   as_pg "$bin/initdb" -D "$data" -U "$PG_USER" -A trust -E UTF8 --no-locale >&2 || return 1
   if ! as_pg "$bin/pg_ctl" -D "$data" -l "$data/server.log" -w -t 60 \
       -o "-c listen_addresses=127.0.0.1 -p $PG_PORT -k $data -c fsync=off -c synchronous_commit=off -c full_page_writes=off -c max_connections=200" \
-      start >&2; then
+      start >&2 3>&-; then
     log "server log:"
     tail -n 50 "$data/server.log" >&2 || true
     return 1
@@ -136,10 +136,10 @@ cmd_start() {
     fi
   fi
   if [[ -n "$bin" ]]; then
-    start_native "$bin" || die "native PostgreSQL from $bin did not start"
+    start_native "$bin" 3>&- || die "native PostgreSQL from $bin did not start"
   else
     log "falling back to docker postgres:$PG_MIN_MAJOR"
-    start_docker || die "no PostgreSQL >= $PG_MIN_MAJOR could be installed or started (apt and docker both failed)"
+    start_docker 3>&- || die "no PostgreSQL >= $PG_MIN_MAJOR could be installed or started (apt and docker both failed)"
   fi
   log "ready on 127.0.0.1:$PG_PORT database $PG_DB"
   printf 'postgresql://%s@127.0.0.1:%s/%s\n' "$PG_USER" "$PG_PORT" "$PG_DB" >&3
