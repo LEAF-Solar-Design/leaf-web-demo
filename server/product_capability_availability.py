@@ -269,9 +269,34 @@ def w1_input_readiness(tenant, drawing_id=None, *, project_id=None, version="hea
         if seed_request is not NO_SEED_REQUEST and context["representation"] == "intake":
             readiness[solar_tools.seed_tool()] = {
                 "input_ready": False, "input_reason": "graph_already_embedded"}
+        physical_state_readiness(readiness, backend, str(tenant), drawing_id)
         return seed_overrides(readiness)
     except (KeyError, ValueError, TypeError, OSError):
         return unavailable("persisted_graph_unavailable")
+
+
+def physical_state_readiness(readiness, backend, tenant, drawing_id):
+    """A tool that reads the drawing's Ground physical state (trusted input physical_state) is ready
+    only when a state was ever published: one existence probe of head-log entry 0, never the state
+    itself. Only a ready answer can turn into ground_physical_state_required. A probe that fails, of
+    any class, leaves the answer unchanged: the run reads the head and refuses on its own. Mutates
+    `readiness` in place."""
+    names = [row["name"] for row in solar_tools.entries()
+             if "physical_state" in row["trusted_inputs"]
+             and (readiness.get(row["name"]) or {}).get("input_ready") is True]
+    if not names:
+        return readiness
+    try:
+        import solar_physical_state  # noqa: F401  (first: its write_loop import puts da/ (store) on sys.path)
+        import solar_physical_head
+
+        present = backend.exists(solar_physical_head.entry_key(tenant, drawing_id, 0))
+    except Exception:
+        return readiness
+    if present is False:
+        for name in names:
+            readiness[name] = {"input_ready": False, "input_reason": "ground_physical_state_required"}
+    return readiness
 
 
 @lru_cache(maxsize=solar_tools.MAX_DECLARATIONS)

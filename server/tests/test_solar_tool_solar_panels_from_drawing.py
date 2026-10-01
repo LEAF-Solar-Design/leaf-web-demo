@@ -200,7 +200,7 @@ def test_registry_refuses_source_intake_on_seed_or_non_local_tools(package, adap
 
 
 def test_trusted_resolvers_match_the_registry():
-    assert solar_tools.TRUSTED_INPUTS == ("source_intake", "proposal_candidate", "solaredge_report")
+    assert solar_tools.TRUSTED_INPUTS == ("source_intake", "proposal_candidate", "solaredge_report", "physical_state")
     assert set(local._TRUSTED_RESOLVERS) == set(solar_tools.TRUSTED_INPUTS)
     assert local._TRUSTED_RESOLVERS["source_intake"] is local._source_intake
 
