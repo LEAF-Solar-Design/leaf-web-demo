@@ -341,6 +341,32 @@ def test_ground_conversion_kernel_provenance_schema_and_nested_text_bounds(graph
     refused("GROUND_CONVERSION_INPUT_INVALID", convert, graph, prov=prov)
 
 
+@pytest.mark.parametrize("case", [
+    "deep-tuple", "deep-list-subclass", "shallow-tuple", "dict-subclass", "set",
+])
+def test_ground_conversion_kernel_non_json_container_refused(graph, case):
+    class ListSubclass(list):
+        pass
+
+    class DictSubclass(dict):
+        pass
+
+    if case in ("deep-tuple", "deep-list-subclass"):
+        nested = () if case == "deep-tuple" else ListSubclass()
+        for _ in range(800):
+            nested = (nested,) if case == "deep-tuple" else ListSubclass([nested])
+        parameters = {"x": nested}
+    elif case == "shallow-tuple":
+        parameters = {"x": (1,)}
+    elif case == "dict-subclass":
+        parameters = DictSubclass(x=1)
+    else:
+        parameters = {"x": {1}}
+    prov = provenance()
+    prov["parameters"] = parameters
+    refused("GROUND_CONVERSION_INPUT_INVALID", convert, graph, prov=prov)
+
+
 def test_ground_conversion_kernel_provenance_deep_parameters(graph):
     nested = []
     for _ in range(3000):
@@ -348,6 +374,88 @@ def test_ground_conversion_kernel_provenance_deep_parameters(graph):
     prov = provenance()
     prov["parameters"] = {"nested": nested}
     refused("GROUND_CONVERSION_INPUT_INVALID", convert, graph, prov=prov)
+
+
+@pytest.mark.parametrize("created_at,accepted", [
+    ("oops", False),
+    ("2026-13-01T00:00:00Z", False),
+    ("2026-02-30T00:00:00Z", False),
+    ("0000-01-01T00:00:00Z", False),
+    ("2026-10-01", False),
+    ("2026-10-01T24:00:00Z", False),
+    ("2026-10-01T10:00:60Z", False),
+    ("2026-10-01T10:00:00+24:00", False),
+    ("2026-10-01T10:00:00Z", True),
+    ("2026-10-01t10:00:00z", True),
+    ("2024-02-29T23:59:59.123+05:30", True),
+])
+def test_ground_conversion_kernel_created_at_without_format_checker(graph, monkeypatch, created_at, accepted):
+    from jsonschema import Draft202012Validator
+
+    validator = Draft202012Validator(
+        {"$ref": "#/$defs/provenance", "$defs": sdg.load_schema()["$defs"]})
+    monkeypatch.setattr(conv, "_PROVENANCE_VALIDATOR", validator)
+    prov = provenance()
+    prov["created_at"] = created_at
+    if accepted:
+        assert convert(graph, prov=prov)["counts"] == {"trackers": 2, "slots": 5}
+    else:
+        refused("GROUND_CONVERSION_INPUT_INVALID", convert, graph, prov=prov)
+
+
+def test_ground_conversion_kernel_provenance_depth_bound(graph):
+    nested = "leaf"
+    # parameters is depth 1, its nested value depth 2; each list adds one.
+    for _ in range(conv.MAX_PROVENANCE_DEPTH - 2):
+        nested = [nested]
+    prov = provenance()
+    prov["parameters"] = {"nested": nested}
+    result = convert(graph, prov=prov)
+    g = ground_base(graph)
+    g["frames"] = result["frames"]
+    sdg._reset_validation_caches()
+    assert sdg.validate_graph(g) == g
+    prov["parameters"]["nested"] = [nested]
+    refused("GROUND_CONVERSION_INPUT_INVALID", convert, graph, prov=prov)
+
+
+def test_ground_conversion_kernel_depth_refused_before_serialization(graph, monkeypatch):
+    nested = []
+    for _ in range(3000):
+        nested = [nested]
+    prov = provenance()
+    prov["parameters"] = {"nested": nested}
+
+    def never(*args, **kwargs):
+        raise AssertionError("provenance must be bounded before serialization")
+
+    doc = small_doc()
+    g = ground_base(graph)
+    monkeypatch.setattr(conv.json, "dumps", never)
+    refused("GROUND_CONVERSION_INPUT_INVALID", conv.convert_physical_state, VIEW, doc, g,
+            provenance=prov, rev=0)
+
+
+def test_ground_conversion_kernel_provenance_depth_is_derived(graph):
+    prov = {key: provenance()[key] for key in ("created_by", "created_at", "last_writer", "source_rev")}
+    result = convert(graph, prov=prov)
+    g = ground_base(graph)
+    g["frames"] = result["frames"]
+    roots = {id(root) for frame in result["frames"]
+             for root in (frame["provenance"], frame["ground_slots"]["panel"]["provenance"])}
+    depths = []
+    stack = [(g, 0)]
+    while stack:
+        value, depth = stack.pop()
+        if id(value) in roots:
+            depths.append(depth)
+        if type(value) is dict:
+            stack.extend((key, depth + 1) for key in value)
+            stack.extend((child, depth + 1) for child in value.values())
+        elif type(value) is list:
+            stack.extend((child, depth + 1) for child in value)
+    assert len(depths) == len(roots) and set(depths) == {3, 5}
+    assert conv.MAX_PROVENANCE_DEPTH == sdg.MAX_DEPTH - max(depths)
 
 
 def test_ground_conversion_kernel_inputs_untouched_outputs_unaliased(graph, monkeypatch):

@@ -30,6 +30,7 @@ Contract:
 """
 from __future__ import annotations
 
+import calendar
 import copy
 import hashlib
 import json
@@ -56,9 +57,15 @@ CODES = frozenset({
 MAX_REV = 1000000                    # the schema's entity rev bound
 MAX_GRID_CELLS = 2_000_000           # overlap grid budget (cells summed over tracker boxes)
 MAX_PROVENANCE_BYTES = 16384         # canonical JSON of the caller's provenance
+# Deepest root: graph (0) -> frames (1) -> frame (2) -> ground_slots (3)
+# -> panel (4) -> provenance (5); frame provenance alone sits at depth 3.
+MAX_PROVENANCE_DEPTH = sdg.MAX_DEPTH - 5
 MAX_PLAN_COORDINATE = 1_000_000_000  # $defs.plan_point item bound
 MAX_TEXT = 4096                      # $defs.provenance string bound
 _HEX64 = re.compile(r"[0-9a-f]{64}")
+_RFC3339 = re.compile(
+    r"^(\d{4})-(0[1-9]|1[0-2])-(\d{2})T(?:[01]\d|2[0123]):(?:[0-5]\d):(?:[0-5]\d)"
+    r"(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0123]):[0-5]\d)$", re.ASCII)
 _INPUT_ERRORS = (ValueError, TypeError, KeyError, IndexError, AttributeError, OverflowError,
                  ZeroDivisionError, RecursionError)
 _PROVENANCE_VALIDATOR = None
@@ -195,6 +202,16 @@ def _provenance_validator():
     return validator
 
 
+def _rfc3339(value):
+    match = _RFC3339.match(value.upper())
+    if match is None:
+        return False
+    year, month, day = map(int, match.groups())
+    if not year:
+        return False
+    return 1 <= day <= calendar.monthrange(year, month)[1]
+
+
 def _check_provenance(provenance):
     """The caller's provenance: created_by, created_at and last_writer strings of 1..4096
     characters, source_rev an int in 0..MAX_REV, canonical JSON at most MAX_PROVENANCE_BYTES."""
@@ -228,6 +245,27 @@ def _check_provenance(provenance):
             except UnicodeEncodeError:
                 raise _invalid() from None
     try:
+        stack = [(provenance, 0)]
+        nodes = 0
+        while stack:
+            value, depth = stack.pop()
+            nodes += 1
+            if nodes > sdg.MAX_NODES or depth > MAX_PROVENANCE_DEPTH:
+                raise _invalid()
+            if type(value) is dict:
+                stack.extend((key, depth + 1) for key in value)
+                stack.extend((child, depth + 1) for child in value.values())
+            elif type(value) is list:
+                stack.extend((child, depth + 1) for child in value)
+            elif type(value) is str:
+                if len(value) > MAX_TEXT:
+                    raise _invalid()
+                value.encode("utf-8")
+            elif type(value) not in (int, float, bool, type(None)):
+                raise _invalid()
+    except _INPUT_ERRORS:
+        raise _invalid() from None
+    try:
         size = len(json.dumps(provenance, sort_keys=True, separators=(",", ":"),
                               allow_nan=False, ensure_ascii=False).encode("utf-8"))
     except _INPUT_ERRORS:
@@ -237,18 +275,8 @@ def _check_provenance(provenance):
     try:
         if not _provenance_validator().is_valid(provenance):
             raise _invalid()
-        stack = [provenance]
-        while stack:
-            value = stack.pop()
-            if type(value) is dict:
-                stack.extend(value.keys())
-                stack.extend(value.values())
-            elif type(value) is list:
-                stack.extend(value)
-            elif type(value) is str:
-                if len(value) > MAX_TEXT:
-                    raise _invalid()
-                value.encode("utf-8")
+        if not _rfc3339(provenance["created_at"]):
+            raise _invalid()
     except _INPUT_ERRORS:
         raise _invalid() from None
 
