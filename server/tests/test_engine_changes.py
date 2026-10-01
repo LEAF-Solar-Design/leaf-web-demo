@@ -20,15 +20,13 @@ from fastapi import FastAPI, Header  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from psycopg import connect  # noqa: E402
 import deps  # noqa: E402
-import operator_deps  # noqa: E402
-import operator_principals  # noqa: E402
 import platform_link  # noqa: E402
 from routers import engine_changes  # noqa: E402
 
 PG_URL = os.environ.get("DATABASE_URL")
 pytestmark = pytest.mark.skipif(not PG_URL, reason="DATABASE_URL is required for engine change cards")
 INGEST = "/internal/ops/engine-changes/cards"
-LIST = "/api/operator/engine-changes"
+LIST = "/api/engine-changes"
 SECRET = {"X-Ops-Secret": "engine-card-test-secret"}
 
 
@@ -62,12 +60,12 @@ def client(monkeypatch):
     app = FastAPI()
     app.include_router(engine_changes.router)
 
-    def operator(x_test_subject: str = Header(default="operator-a")):
-        return operator_deps.OperatorContext(
-            subject=x_test_subject, role="operator", role_revision=1,
-            profiles=("default",), environment="staging", profile="default")
+    def admin(x_test_subject: str = Header(default="operator-a")):
+        return deps.TenantContext(
+            "tenant-a", tier="admin", subject=x_test_subject,
+            authority_resolved=True)
 
-    app.dependency_overrides[operator_deps.require_operator] = operator
+    app.dependency_overrides[deps.require_active_tenant] = admin
     with TestClient(app, raise_server_exceptions=False) as result:
         yield result
 
@@ -228,18 +226,67 @@ def test_hold_request_is_first_write_and_does_not_change_state(client, payload):
     assert publish(client, payload) == first.json()
 
 
-def test_nonoperators_refused_on_every_operator_route(client, payload, monkeypatch):
+def test_nonadmins_refused_on_every_browser_route(client, payload):
     card = publish(client, payload)
-    client.app.dependency_overrides.pop(operator_deps.require_operator)
-    client.app.dependency_overrides[deps.require_tenant] = lambda: SimpleNamespace(subject="intruder")
-    monkeypatch.setattr(operator_principals, "resolve_principal", lambda subject: None)
-    for method, path in (("get", LIST), ("get", f"{LIST}/{card['card_id']}"),
-                         ("post", f"{LIST}/{card['card_id']}/read"),
-                         ("post", f"{LIST}/{card['card_id']}/hold-request")):
-        response = getattr(client, method)(path)
-        assert response.status_code == 404, response.text
-        assert response.json()["detail"] == "operator_not_found"
+    for tier in ("free", "pro", "restricted", "guest", None):
+        client.app.dependency_overrides[deps.require_active_tenant] = lambda: SimpleNamespace(
+            subject="intruder", tier=tier)
+        for method, path in (("get", LIST), ("get", f"{LIST}/{card['card_id']}"),
+                             ("post", f"{LIST}/{card['card_id']}/read"),
+                             ("post", f"{LIST}/{card['card_id']}/hold-request")):
+            response = getattr(client, method)(path)
+            assert response.status_code == 403, response.text
+            assert response.json()["detail"] == "engine_changes_admin_required"
     assert platform_link.engine_change_cards_store().get_card(card["card_id"])["hold_requested_at"] is None
+
+
+def test_browser_routes_require_both_admin_elevation_factors(client, payload, monkeypatch):
+    import auth
+    import tenancy
+
+    card = publish(client, payload)
+    client.app.dependency_overrides.pop(deps.require_active_tenant)
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    subject = "verified-admin-" + uuid.uuid4().hex
+    claims = {"sub": subject, auth.claim_ns() + "tenant_id": "tenant-a"}
+    monkeypatch.setattr(auth, "verify_platform_token", lambda authorization: claims)
+    monkeypatch.setattr(deps, "resolve_active_platform_tenant_authority", lambda sub: ("tenant-a", "pro"))
+    monkeypatch.setattr(tenancy, "get_store", lambda: SimpleNamespace(resolve_workspace=lambda tid: None))
+    routes = (("get", LIST), ("get", f"{LIST}/{card['card_id']}"),
+              ("post", f"{LIST}/{card['card_id']}/read"),
+              ("post", f"{LIST}/{card['card_id']}/hold-request"))
+    for claim_tier, allowlisted in (("pro", False), ("admin", False),
+                                    ("pro", True), ("admin", True)):
+        claims[auth.claim_ns() + "tier"] = claim_tier
+        monkeypatch.setenv("LEAF_PLATFORM_ADMIN_SUBJECTS", subject if allowlisted else "")
+        allowed = claim_tier == "admin" and allowlisted
+        for method, path in routes:
+            response = getattr(client, method)(path, headers={"X-Test-Subject": "spoofed-subject"})
+            assert response.status_code == (200 if allowed else 403), response.text
+            if not allowed:
+                assert response.json()["detail"] == "engine_changes_admin_required"
+            elif path.endswith("/read"):
+                assert response.json()["subject"] == subject
+            elif path.endswith("/hold-request"):
+                assert response.json()["hold_requested_by"] == subject
+        if not allowed:
+            stored = platform_link.engine_change_cards_store().get_card(card["card_id"])
+            assert stored["hold_requested_at"] is None
+            with platform_link.platform_db().cursor() as cur:
+                cur.execute("SELECT count(*) AS n FROM engine_change_card_reads WHERE card_id = %s", (card["card_id"],))
+                assert cur.fetchone()["n"] == 0
+
+
+def test_unauthenticated_refused_on_every_browser_route(client, monkeypatch):
+    client.app.dependency_overrides.pop(deps.require_active_tenant)
+    card_id = str(uuid.uuid4())
+    for mode, status in (("0", 403), ("1", 401)):
+        monkeypatch.setenv("LEAF_AUTH_LIVE", mode)
+        for method, path in (("get", LIST), ("get", f"{LIST}/{card_id}"),
+                             ("post", f"{LIST}/{card_id}/read"),
+                             ("post", f"{LIST}/{card_id}/hold-request")):
+            response = getattr(client, method)(path)
+            assert response.status_code == status, response.text
 
 
 def test_missing_database_returns_503_on_every_route(client, payload, monkeypatch):

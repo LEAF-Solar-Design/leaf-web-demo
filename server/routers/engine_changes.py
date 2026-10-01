@@ -1,4 +1,4 @@
-"""Machine-published acceptance cards and server-granted operator receipts."""
+"""Machine-published acceptance cards and two-factor admin receipts."""
 from __future__ import annotations
 
 import json
@@ -6,7 +6,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 
-import operator_deps
+import deps
 import platform_link
 from routers.ops import _ops_secret, _require_ops
 
@@ -42,6 +42,16 @@ def _found(value):
     return value
 
 
+def _require_admin(tenant=Depends(deps.require_active_tenant)):
+    # The active tenant dependency resolves the verified token and the existing
+    # two-factor admin elevation; request headers/body never grant this tier.
+    if (getattr(tenant, "tier", None) != "admin"
+            or not isinstance(getattr(tenant, "subject", None), str)
+            or not tenant.subject.strip()):
+        raise HTTPException(status_code=403, detail="engine_changes_admin_required")
+    return tenant
+
+
 @router.post("/internal/ops/engine-changes/cards")
 async def ingest_card(request: Request, x_ops_secret: Optional[str] = Header(default=None)):
     refusal = _require_ops(x_ops_secret)
@@ -65,25 +75,25 @@ async def ingest_card(request: Request, x_ops_secret: Optional[str] = Header(def
     return _call("upsert_card", operation_id, payload)
 
 
-@router.get("/api/operator/engine-changes")
+@router.get("/api/engine-changes")
 def list_cards(
     limit: int = Query(default=100, ge=1, le=100),
     before: Optional[str] = Query(default=None, max_length=36),
-    operator=Depends(operator_deps.require_operator),
+    tenant=Depends(_require_admin),
 ):
-    return _call("list_cards", operator.subject, limit=limit, before=before)
+    return _call("list_cards", tenant.subject, limit=limit, before=before)
 
 
-@router.get("/api/operator/engine-changes/{card_id}")
-def get_card(card_id: str, operator=Depends(operator_deps.require_operator)):
+@router.get("/api/engine-changes/{card_id}")
+def get_card(card_id: str, tenant=Depends(_require_admin)):
     return _found(_call("get_card", card_id))
 
 
-@router.post("/api/operator/engine-changes/{card_id}/read")
-def mark_read(card_id: str, operator=Depends(operator_deps.require_operator)):
-    return _found(_call("mark_read", card_id, operator.subject))
+@router.post("/api/engine-changes/{card_id}/read")
+def mark_read(card_id: str, tenant=Depends(_require_admin)):
+    return _found(_call("mark_read", card_id, tenant.subject))
 
 
-@router.post("/api/operator/engine-changes/{card_id}/hold-request")
-def request_hold(card_id: str, operator=Depends(operator_deps.require_operator)):
-    return _found(_call("request_hold", card_id, operator.subject))
+@router.post("/api/engine-changes/{card_id}/hold-request")
+def request_hold(card_id: str, tenant=Depends(_require_admin)):
+    return _found(_call("request_hold", card_id, tenant.subject))

@@ -64,6 +64,15 @@ BEGIN
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
-DROP TRIGGER IF EXISTS engine_change_cards_guard ON engine_change_cards;
-CREATE TRIGGER engine_change_cards_guard BEFORE UPDATE OR DELETE ON engine_change_cards
-  FOR EACH ROW EXECUTE FUNCTION guard_engine_change_card();
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_trigger
+    WHERE tgname = 'engine_change_cards_guard'
+      AND tgrelid = 'engine_change_cards'::regclass
+  ) THEN
+    CREATE TRIGGER engine_change_cards_guard BEFORE UPDATE OR DELETE ON engine_change_cards
+      FOR EACH ROW EXECUTE FUNCTION guard_engine_change_card();
+  END IF;
+END;
+$$;
