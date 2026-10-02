@@ -60,7 +60,7 @@ STRUNG_SHA = "d9fbe549a60289ec083f339992f9bd580207c0bded2197535627df5dcf9e6717"
 EQUIPPED_SHA = "9f344ba1e0746ccf22364e550e5a0ae11f5564f35fda61bfacd70c165ee83b47"
 # The digest covers the whole readiness map, so it moves when a sibling registers a tool: re-pinned on Forge
 # main 6c8ff5db plus solar-feeders: 47 entries, adding only solar-feeders: valid_settings_required.
-W1_READINESS_SHA = "5a5dae5780226eacfb4c07627c7658f0c3f4f776766d83d7c3980793adfe075b"
+W1_READINESS_SHA = "019771eb0b388d9aea5a4791bd63d040b693611892fcbad005dcf84f8a189bcb"
 
 
 class FixedDatetime:
