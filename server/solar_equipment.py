@@ -51,9 +51,15 @@ def _configuration(value):
         raise GraphValidationError("INVALID_EQUIPMENT_TRANSFORM")
 
 
-def _validity(entity, reasons):
+# Reasons the equipment producer owns on an inverter: recomputing the inverter's
+# assignments, capacity, voltage and power is exactly the refresh they ask for.
+INVERTER_REFRESHED_REASONS = frozenset({"upstream_corrected"})
+
+
+def _validity(entity, reasons, refreshed=frozenset()):
     previous = entity["validity"]
-    retained = [reason for reason in previous["reasons"] if not reason.startswith("EQUIPMENT_")]
+    retained = [reason for reason in previous["reasons"]
+                if not reason.startswith("EQUIPMENT_") and reason not in refreshed]
     unresolved = previous["state"] != "valid" and not previous["reasons"]
     entity["validity"] = {**previous, "reasons": retained + sorted(set(reasons)),
                           "state": "invalid" if retained or reasons else
@@ -163,7 +169,7 @@ def equipment_candidate(graph, params):
             inverter_issues[ref].append("EQUIPMENT_POWER_EXCEEDED")
             for assignment in item["input_assignments"]:
                 issues[assignment["string_ref"]].append("EQUIPMENT_POWER_EXCEEDED")
-        _validity(item, inverter_issues[ref])
+        _validity(item, inverter_issues[ref], INVERTER_REFRESHED_REASONS)
     for ref, string in strings.items():
         _validity(string, issues[ref])
     inputs = {a["string_ref"]: (item["id"], a["input_number"])
