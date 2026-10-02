@@ -1,0 +1,341 @@
+{
+  "cases": {
+    "accessibility.dialog-keyboard": {
+      "schema": "leaf.walk-evidence.v1",
+      "test": "Open and edit drawing",
+      "featureId": "drawing-edit",
+      "journeyId": "first-run-open",
+      "viewport": "phone",
+      "state": "ready",
+      "consoleErrors": [],
+      "pageErrors": [],
+      "failedRequests": [],
+      "abortedRequests": [],
+      "httpErrors": [],
+      "responses": [],
+      "steps": [],
+      "accessibility": null,
+      "startedAt": "2026-10-01T23:00:00.000Z",
+      "measurements": {
+        "reference": "trace:accessibility.dialog-keyboard",
+        "overlay": {
+          "role": "dialog",
+          "name": "Version history",
+          "modal": true
+        },
+        "focus": {
+          "openTarget": "close-history",
+          "actualOpenTarget": "close-history",
+          "tabRemainsInside": true,
+          "escapeClosed": true,
+          "returnTarget": "history",
+          "actualReturnTarget": "history"
+        }
+      }
+    },
+    "end-user.expected-effect": {
+      "schema": "leaf.walk-evidence.v1",
+      "test": "Open and edit drawing",
+      "featureId": "drawing-edit",
+      "journeyId": "first-run-open",
+      "viewport": "phone",
+      "state": "ready",
+      "consoleErrors": [],
+      "pageErrors": [],
+      "failedRequests": [],
+      "abortedRequests": [],
+      "httpErrors": [],
+      "responses": [],
+      "steps": [],
+      "accessibility": null,
+      "startedAt": "2026-10-01T23:00:00.000Z",
+      "measurements": {
+        "reference": "trace:end-user.expected-effect",
+        "task": {
+          "expectedEffect": "line-created",
+          "observedEffect": "line-created",
+          "manualApplyCount": 0
+        }
+      }
+    },
+    "mobile-touch.reachable-target": {
+      "schema": "leaf.walk-evidence.v1",
+      "test": "Open and edit drawing",
+      "featureId": "drawing-edit",
+      "journeyId": "first-run-open",
+      "viewport": "phone",
+      "state": "ready",
+      "consoleErrors": [],
+      "pageErrors": [],
+      "failedRequests": [],
+      "abortedRequests": [],
+      "httpErrors": [],
+      "responses": [],
+      "steps": [],
+      "accessibility": null,
+      "startedAt": "2026-10-01T23:00:00.000Z",
+      "measurements": {
+        "reference": "trace:mobile-touch.reachable-target",
+        "input": {
+          "touch": true,
+          "coarsePointer": true
+        },
+        "control": {
+          "reachable": true,
+          "clipped": false,
+          "rect": {
+            "x": 10,
+            "y": 20,
+            "width": 44,
+            "height": 44
+          }
+        },
+        "viewport": {
+          "width": 390,
+          "height": 844
+        }
+      }
+    },
+    "ops-sre.wait-recovery": {
+      "schema": "leaf.walk-evidence.v1",
+      "test": "Open and edit drawing",
+      "featureId": "drawing-edit",
+      "journeyId": "first-run-open",
+      "viewport": "phone",
+      "state": "ready",
+      "consoleErrors": [],
+      "pageErrors": [],
+      "failedRequests": [],
+      "abortedRequests": [],
+      "httpErrors": [],
+      "responses": [],
+      "steps": [],
+      "accessibility": null,
+      "startedAt": "2026-10-01T23:00:00.000Z",
+      "measurements": {
+        "reference": "trace:ops-sre.wait-recovery",
+        "wait": {
+          "observed": true,
+          "progress": "Loading drawing",
+          "reason": ""
+        },
+        "recovery": {
+          "failureObserved": true,
+          "action": "Retry",
+          "outcome": "Drawing loaded",
+          "outcomeVisible": true
+        }
+      }
+    },
+    "performance.declared-baseline": {
+      "schema": "leaf.walk-evidence.v1",
+      "test": "Open and edit drawing",
+      "featureId": "drawing-edit",
+      "journeyId": "first-run-open",
+      "viewport": "phone",
+      "state": "ready",
+      "consoleErrors": [],
+      "pageErrors": [],
+      "failedRequests": [],
+      "abortedRequests": [],
+      "httpErrors": [],
+      "responses": [],
+      "steps": [],
+      "accessibility": null,
+      "startedAt": "2026-10-01T23:00:00.000Z",
+      "measurements": {
+        "reference": "trace:performance.declared-baseline",
+        "baseline": {
+          "reference": "task-study-v1",
+          "maxDurationMs": 1200,
+          "maxRequiredSteps": 3
+        },
+        "task": {
+          "durationMs": 900,
+          "requiredSteps": 3
+        },
+        "wait": {
+          "observed": true,
+          "progress": "Preparing",
+          "reason": ""
+        }
+      }
+    },
+    "qc-dev.action-result-sequence": {
+      "schema": "leaf.walk-evidence.v1",
+      "test": "Open and edit drawing",
+      "featureId": "drawing-edit",
+      "journeyId": "first-run-open",
+      "viewport": "phone",
+      "state": "ready",
+      "consoleErrors": [],
+      "pageErrors": [],
+      "failedRequests": [],
+      "abortedRequests": [],
+      "httpErrors": [],
+      "responses": [],
+      "steps": [],
+      "accessibility": null,
+      "startedAt": "2026-10-01T23:00:00.000Z",
+      "measurements": {
+        "reference": "trace:qc-dev.action-result-sequence",
+        "sequence": {
+          "action": "save",
+          "expectedResult": "saved-version",
+          "observedResult": "saved-version",
+          "expectedOrder": [
+            "save",
+            "pending",
+            "saved-version"
+          ],
+          "observedOrder": [
+            "save",
+            "pending",
+            "saved-version"
+          ]
+        }
+      }
+    },
+    "red-hat.failure-refusal": {
+      "schema": "leaf.walk-evidence.v1",
+      "test": "Open and edit drawing",
+      "featureId": "drawing-edit",
+      "journeyId": "first-run-open",
+      "viewport": "phone",
+      "state": "ready",
+      "consoleErrors": [],
+      "pageErrors": [],
+      "failedRequests": [],
+      "abortedRequests": [],
+      "httpErrors": [],
+      "responses": [],
+      "steps": [],
+      "accessibility": null,
+      "startedAt": "2026-10-01T23:00:00.000Z",
+      "measurements": {
+        "reference": "trace:red-hat.failure-refusal",
+        "failure": {
+          "visibleText": "Access denied. Ask an administrator."
+        },
+        "refusal": {
+          "observed": true,
+          "protectedBefore": "version-1",
+          "protectedAfter": "version-1"
+        }
+      }
+    },
+    "support.error-recovery": {
+      "schema": "leaf.walk-evidence.v1",
+      "test": "Open and edit drawing",
+      "featureId": "drawing-edit",
+      "journeyId": "first-run-open",
+      "viewport": "phone",
+      "state": "ready",
+      "consoleErrors": [],
+      "pageErrors": [],
+      "failedRequests": [],
+      "abortedRequests": [],
+      "httpErrors": [],
+      "responses": [],
+      "steps": [],
+      "accessibility": null,
+      "startedAt": "2026-10-01T23:00:00.000Z",
+      "measurements": {
+        "reference": "trace:support.error-recovery",
+        "error": {
+          "observed": true,
+          "message": "Upload failed: unsupported format. Try DXF.",
+          "whatHappened": "Unsupported format",
+          "recoveryName": "Choose another file",
+          "recoveryReachable": true
+        }
+      }
+    },
+    "ui-ux-dev.completion-proxy": {
+      "schema": "leaf.walk-evidence.v1",
+      "test": "Open and edit drawing",
+      "featureId": "drawing-edit",
+      "journeyId": "first-run-open",
+      "viewport": "phone",
+      "state": "ready",
+      "consoleErrors": [],
+      "pageErrors": [],
+      "failedRequests": [],
+      "abortedRequests": [],
+      "httpErrors": [],
+      "responses": [],
+      "steps": [],
+      "accessibility": null,
+      "startedAt": "2026-10-01T23:00:00.000Z",
+      "measurements": {
+        "reference": "trace:ui-ux-dev.completion-proxy",
+        "layout": {
+          "controls": [
+            { "id": "save", "x": 10, "y": 20, "width": 80, "height": 44 },
+            { "id": "cancel", "x": 100, "y": 20, "width": 80, "height": 44 }
+          ]
+        },
+        "completion": {
+          "observed": true,
+          "acknowledgement": "Saved",
+          "inPlace": true
+        }
+      }
+    },
+    "ui-ux-dev.human-reaction": {
+      "schema": "leaf.walk-evidence.v1",
+      "test": "Open and edit drawing",
+      "featureId": "drawing-edit",
+      "journeyId": "first-run-open",
+      "viewport": "phone",
+      "state": "ready",
+      "consoleErrors": [],
+      "pageErrors": [],
+      "failedRequests": [],
+      "abortedRequests": [],
+      "httpErrors": [],
+      "responses": [],
+      "steps": [],
+      "accessibility": null,
+      "startedAt": "2026-10-01T23:00:00.000Z",
+      "measurements": {
+        "reference": "trace:ui-ux-dev.human-reaction",
+        "humanFeedback": {
+          "quote": "I could complete the task comfortably.",
+          "reaction": "satisfied",
+          "reference": "participant-1-task-1"
+        }
+      }
+    },
+    "unfamiliar.next-step": {
+      "schema": "leaf.walk-evidence.v1",
+      "test": "Open and edit drawing",
+      "featureId": "drawing-edit",
+      "journeyId": "first-run-open",
+      "viewport": "phone",
+      "state": "ready",
+      "consoleErrors": [],
+      "pageErrors": [],
+      "failedRequests": [],
+      "abortedRequests": [],
+      "httpErrors": [],
+      "responses": [],
+      "steps": [],
+      "accessibility": null,
+      "startedAt": "2026-10-01T23:00:00.000Z",
+      "measurements": {
+        "reference": "trace:unfamiliar.next-step",
+        "primary": {
+          "name": "Open drawing",
+          "role": "button",
+          "reachable": true
+        },
+        "navigation": {
+          "name": "Workspace",
+          "role": "navigation",
+          "nextStepFound": true
+        }
+      }
+    }
+  }
+}
