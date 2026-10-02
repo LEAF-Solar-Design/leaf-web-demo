@@ -29,6 +29,8 @@ Frozen decisions (sf-solar-electrical-bridge-routes):
     length_ft is stored, never recomputed: graph length_ft is the row's length value in feet verbatim,
     and the row's length value in feet is the graph length_ft verbatim (the kernels compute feet from
     drawing units as inches; the bridge never re-derives a length from points).
+    A caller may pass metres_per_unit to project into a different kernel unit, passing the same value
+    to graph_from_state for the round trip; the feeder graph passes inches.
   - No drift. A route whose projected vertices, length, gauge and endpoint all equal the row keeps every
     field exactly. Otherwise each point whose projection equals the row's vertex at the same index is
     kept verbatim (its type and any z) and every other point becomes [x_du * mpu, y_du * mpu]; a route
@@ -201,12 +203,13 @@ def _projected(g, mpu):
     return out
 
 
-def state_from_graph(graph):
+def state_from_graph(graph, *, metres_per_unit=None):
     """The legacy bridge's state of the graph plus its homerun and feeder routes as cable rows."""
+    legacy._validate_metres_per_unit(metres_per_unit)
     g = validate_graph(graph)
-    mpu = legacy._meters_per_unit(g)
+    mpu = legacy._meters_per_unit(g) if metres_per_unit is None else metres_per_unit
     projected = _projected(g, mpu)
-    state, binding = legacy.state_from_graph(g)
+    state, binding = legacy.state_from_graph(g, metres_per_unit=metres_per_unit)
     handles = {item["id"]: handle for handle, item in binding["strings"].items()}
     circuits = {row["string"]: row["_detail"]["circuit"] for row in state["rows"]["string-assignment"]}
     inverters = {inverter["id"]: inverter for inverter in g["inverters"]}
@@ -372,19 +375,22 @@ def _update(route, item, mpu):
         route["to_ref"] = target
 
 
-def graph_from_state(graph, state, binding, *, defaults=None, new_id=None, created_at=None):
+def graph_from_state(graph, state, binding, *, defaults=None, new_id=None, created_at=None,
+                     metres_per_unit=None):
     """The graph with the state's equipment topology (the legacy bridge) and its homerun and feeder rows
     written onto a copy, validated, and the binding of that state to the result."""
+    legacy._validate_metres_per_unit(metres_per_unit)
     _check_raw_state(state)
     g = validate_graph(graph)
-    _projected(g, legacy._meters_per_unit(g))
+    _projected(g, legacy._meters_per_unit(g) if metres_per_unit is None else metres_per_unit)
     # Malformed coordinates must not reach the legacy ordering-key serialization.
     _check_row_types(state)
     s = legacy._state(state)
     _check_row_types(s)
     mint = graph_new_id if new_id is None else new_id
-    result, rebound = legacy.graph_from_state(g, s, binding, defaults=defaults, new_id=mint, created_at=created_at)
-    mpu = legacy._meters_per_unit(result)
+    result, rebound = legacy.graph_from_state(g, s, binding, defaults=defaults, new_id=mint, created_at=created_at,
+                                              metres_per_unit=metres_per_unit)
+    mpu = legacy._meters_per_unit(result) if metres_per_unit is None else metres_per_unit
     strings_by_handle = {handle: item["id"] for handle, item in rebound["strings"].items()}
     strings_after = {string["id"]: string for string in result["strings"]}
     by_level = {(inverter["is_l2"], _number(inverter["number"])): inverter for inverter in result["inverters"]}

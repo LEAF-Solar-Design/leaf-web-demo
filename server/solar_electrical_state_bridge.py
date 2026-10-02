@@ -32,6 +32,8 @@ Frozen decisions (sf-solar-electrical-bridge):
   - Positions. The graph holds metres, the state drawing units: x_du = x_m / meters_per_unit. A device
     whose state position equals the position the binding recorded keeps its graph position exactly
     (no float drift on a round trip); a moved or new device gets [x_du * mpu, y_du * mpu].
+    A caller may pass metres_per_unit to project into a different kernel unit, passing the same value
+    to graph_from_state for the round trip; the feeder graph passes inches.
   - Association. A string's collector is, in order: the device every one of its dc-homerun legs ends
     at (a leg ending at no device, at two devices, or legs disagreeing is ASSOCIATION_CONFLICT); else
     the device number in its circuit (the kernels' grammar, cab._HOMERUN_CIRCUIT) resolved against the
@@ -155,6 +157,11 @@ def _meters_per_unit(graph):
     return float(value)
 
 
+def _validate_metres_per_unit(value):
+    if value is not None and (not _finite(value) or value <= 0):
+        raise ValueError("metres_per_unit must be a positive finite number")
+
+
 def _state(value):
     try:
         return st.validate_state(value)
@@ -254,10 +261,11 @@ def _stored(mapping):
 
 # ----------------------------------------------------------- graph -> state --
 
-def state_from_graph(graph):
+def state_from_graph(graph, *, metres_per_unit=None):
     """The G35 state of the graph's equipment topology and its binding (see the module docstring)."""
+    _validate_metres_per_unit(metres_per_unit)
     g = validate_graph(graph)
-    mpu = _meters_per_unit(g)
+    mpu = _meters_per_unit(g) if metres_per_unit is None else metres_per_unit
     if len(g["strings"]) > MAX_STRINGS or len(g["inverters"]) > MAX_DEVICES:
         raise ElectricalBridgeError("BRIDGE_BOUNDS_EXCEEDED")
     by_id = {inverter["id"]: inverter for inverter in g["inverters"]}
@@ -408,16 +416,18 @@ def _int_map(state, name):
         raise ElectricalBridgeError("BRIDGE_STATE_INVALID") from None
 
 
-def graph_from_state(graph, state, binding, *, defaults=None, new_id=None, created_at=None):
+def graph_from_state(graph, state, binding, *, defaults=None, new_id=None, created_at=None,
+                     metres_per_unit=None):
     """The graph with the state's equipment topology written onto a copy, validated, and the binding of
     that state to the result (see the module docstring for every rule)."""
+    _validate_metres_per_unit(metres_per_unit)
     g = validate_graph(graph)
     s = _state(state)
     b = _binding(binding)
     values = _defaults(defaults)
     if b["graph_sha256"] != canonical_sha256(g):
         raise ElectricalBridgeError("BRIDGE_BINDING_STALE")
-    mpu = _meters_per_unit(g)
+    mpu = _meters_per_unit(g) if metres_per_unit is None else metres_per_unit
     mode = g["settings"]["use_l2_collectors"]
     by_id = {inverter["id"]: inverter for inverter in g["inverters"]}
     strings_by_id = {string["id"]: string for string in g["strings"]}

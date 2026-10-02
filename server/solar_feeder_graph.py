@@ -1,4 +1,6 @@
-"""Pure regeneration of L1-to-L2 feeders through the route-aware electrical bridge."""
+"""Pure regeneration of L1-to-L2 feeders through the route-aware electrical bridge.
+The kernel runs in inches, and stored outlines are rescaled from drawing units.
+"""
 from __future__ import annotations
 
 from collections import Counter
@@ -6,6 +8,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import re
 
 import solar_electrical_route_bridge as rb
@@ -13,6 +16,7 @@ from solar_design_graph import validate_graph
 
 cab = rb.cab
 st = rb.st
+KERNEL_METRES_PER_UNIT = 0.0254  # the legacy cabling kernels compute feet as inches / 12
 CODES = ("FEEDER_L2_MODE_REQUIRED", "FEEDER_COMBINERS_REQUIRED", "FEEDER_COLLECTORS_REQUIRED",
          "FEEDER_CAPACITY_AMBIGUOUS", "FEEDER_OUTLINES_INVALID", "FEEDER_NOT_PORTED",
          "FEEDER_KERNEL_REFUSED", "FEEDER_POSTCONDITION_FAILED")
@@ -110,12 +114,28 @@ def route_feeders(graph, panel_groups, *, new_id=None, created_at=None):
             _fail("FEEDER_OUTLINES_INVALID")
         cab.validate_outlines(panel_groups)
         groups = deepcopy(panel_groups)
+        mpu = rb.legacy._meters_per_unit(g)
+        if mpu != KERNEL_METRES_PER_UNIT:
+            for group in groups:
+                if not group.get("outlines"):
+                    continue
+                outlines = []
+                for ring in group["outlines"]:
+                    points = []
+                    for point in ring:
+                        x = point[0] * mpu / KERNEL_METRES_PER_UNIT
+                        y = point[1] * mpu / KERNEL_METRES_PER_UNIT
+                        if not math.isfinite(x) or not math.isfinite(y):
+                            _fail("FEEDER_OUTLINES_INVALID")
+                        points.append([x, y, *point[2:]])
+                    outlines.append(points)
+                group["outlines"] = outlines
     except FeederGraphError:
         raise
     except Exception:
         # Includes validator overflow, malformed containers and recursive custom values.
         _fail("FEEDER_OUTLINES_INVALID")
-    state, binding = rb.state_from_graph(g)
+    state, binding = rb.state_from_graph(g, metres_per_unit=KERNEL_METRES_PER_UNIT)
     state = deepcopy(state)
     state["rows"]["cable"] = [r for r in state["rows"]["cable"] if r.get("cable_kind") != "feeder"]
     host = {"UseL2Collectors": True, "L1CollectorsPerL2": next(iter(capacities))}
@@ -153,7 +173,8 @@ def route_feeders(graph, panel_groups, *, new_id=None, created_at=None):
     try:
         result, _ = rb.graph_from_state(g, after, binding, new_id=mint if new_id is None else new_id,
                                         created_at=_default_created_at(g["project"]["provenance"]["created_at"])
-                                        if created_at is None else created_at)
+                                        if created_at is None else created_at,
+                                        metres_per_unit=KERNEL_METRES_PER_UNIT)
         _prove(g, result, after)
         result = validate_graph(result)
     except FeederGraphError:
