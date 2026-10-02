@@ -1,4 +1,4 @@
-import { ACTIONS, accessibleName } from '../../src/lib/actionRegistry.js'
+import { ACTIONS, REASONS, accessibleName, reasonCode } from '../../src/lib/actionRegistry.js'
 import { PRODUCT_SURFACES } from '../../src/site/productSurfaces.js'
 import { PROFILE_RIBBON_TABS } from '../../src/lib/ribbonTabs.data.js'
 import { STUDIO_DRAWERS } from '../../src/lib/studioDrawers.js'
@@ -12,6 +12,7 @@ const profileSurfaces = Object.freeze({ drafting: 'cad', solar: 'solar', project
 const effects = new Set(['opens', 'toggles', 'navigates', 'submits', 'disabled_with_reason', 'renders'])
 const step = (kind, properties = {}) => ({ kind, ...properties })
 const role = (name, accessible, scope) => ({ role: name, name: accessible, exact: true, ...(scope ? { scope } : {}) })
+const escapePattern = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 function actionRecord(entry) {
   const record = ACTIONS.find((action) => action.id === entry.source_id)
@@ -31,8 +32,30 @@ export function locatorRecipe(entry, state) {
     }
     if (action.surface === 'slash') return { ...role('option', new RegExp(`^/${action.label}(?:\\s|$)`)), trigger: 'click' }
     const property = ['setColor', 'setLinetype', 'setLineweight'].includes(action.op)
+    if (state === 'no-drawing') {
+      const labels = [...new Set([action.label, action.text].filter(Boolean))]
+      const disabledVariants = [{ name: accessibleName(property ? action.text : action.label, why), reason: why }]
+      if (action.surface === 'engine') {
+        disabledVariants.push({ name: accessibleName(action.text, why), reason: why })
+        // referencePanels uses this reason for these registry panels and Text.
+        // Keep its JSX consumers out of the plain-Node probe module.
+        const fallback = ['block', 'properties', 'groups', 'clipboard'].includes(action.panel)
+          || (action.panel === 'annotation' && action.op === 'createText')
+        if (fallback) {
+          disabledVariants.push({ name: accessibleName(action.text, REASONS.notInEngine), reason: REASONS.notInEngine })
+        }
+      }
+      return { ...role(property ? 'combobox' : 'button',
+        new RegExp(`^(?:${disabledVariants.map((variant) => escapePattern(variant.name)).join('|')})$`),
+        role('toolbar', 'Drafting tools')), trigger: property ? 'select' : 'click',
+      availableName: property ? action.text : action.label,
+      unavailableName: new RegExp(`^(?:${labels.map(escapePattern).join('|')})(?: \\(unavailable: .+\\))?$`),
+      disabledVariants: disabledVariants.map((variant) => ({ ...variant, reason_code: reasonCode(variant.reason) })),
+      ...(action.panel || action.cluster || action.group ? { group: action.panel || action.cluster || action.group } : {}) }
+    }
     return { ...role(property ? 'combobox' : 'button', accessibleName(property ? action.text : action.label, why),
       role('toolbar', 'Drafting tools')), trigger: property ? 'select' : 'click',
+    ...(state === 'no-drawing' ? { availableName: property ? action.text : action.label } : {}),
     ...(action.panel || action.cluster || action.group ? { group: action.panel || action.cluster || action.group } : {}) }
   }
   if (entry.kind === 'surface') {
@@ -82,11 +105,16 @@ export function stateRecipe(entry, state) {
     : entry.kind === 'surface' ? entry.source_id : 'cad'
   const steps = []
   if (surface === 'sheets') return { context, steps: [step('navigate', { url: '/sheets' })] }
+  if (state === 'no-drawing' && entry.kind === 'action') {
+    return { context, steps: [
+      step('open-failed-drawing', { url: '/app?surface=cad&drawing=missing.invalid' }),
+      step('failed-drawing-ribbon-tab', { name: actionTab(actionRecord(entry)) }),
+    ] }
+  }
   if (state === 'engine-busy') steps.push(step('prepare-engine-transport'))
   if (state === 'engine-not-parsed') steps.push(step('hold-engine-boot'))
   const empty = ['no-drawing', 'signed-out', 'no-versioned-drawing'].includes(state)
-  steps.push(step(empty ? 'open-empty-workspace' : 'open-private-drawing', { surface, signedOut: state === 'signed-out',
-    ...(state === 'no-drawing' && entry.kind === 'action' && actionRecord(entry).surface === 'ribbon' ? { cadWorkspace: true } : {}) }))
+  steps.push(step(empty ? 'open-empty-workspace' : 'open-private-drawing', { surface, signedOut: state === 'signed-out' }))
   if (entry.kind === 'action') {
     const action = actionRecord(entry)
     if (action.surface === 'slash') steps.push(step('slash-menu', { command: action.label }))

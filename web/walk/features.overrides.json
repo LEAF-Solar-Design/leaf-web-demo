@@ -60,7 +60,7 @@
     }
   },
   "overrides": {
-    "action:fit": {"effect": {"kind": "renders", "target": "viewer-home"}, "sources": ["web/src/lib/ribbonClusters.js"], "exclude_states": ["no-drawing"], "reason": "Studio never shows an empty CAD workspace: ensure_demo_drawing provisions any drawing id when APS_LIVE=0"},
+    "action:fit": {"effect": {"kind": "renders", "target": "viewer-home"}, "sources": ["web/src/lib/ribbonClusters.js"]},
     "action:zoom-in": {"effect": {"kind": "renders", "target": "viewer-zoom-in"}, "sources": ["web/src/lib/ribbonClusters.js"]},
     "action:zoom-out": {"effect": {"kind": "renders", "target": "viewer-zoom-out"}, "sources": ["web/src/lib/ribbonClusters.js"]},
     "action:properties-pane": {"effect": {"kind": "toggles", "target": "properties-pane"}, "viewports": ["desktop", "phone"], "sources": ["web/src/App.jsx"]},
