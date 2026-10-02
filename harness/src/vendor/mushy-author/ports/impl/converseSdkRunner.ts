@@ -184,7 +184,7 @@ export interface ConverseSdkRunnerOptions {
   /** The tenant's Agent SDK credential (Concern 2). Resolved by the caller per
    *  session; injected into a scrubbed child env, never logged. */
   grant: AgentGrant;
-  /** Model id. Default: LEAF_SPINE_MODEL env, else claude-sonnet-5. */
+  /** Model id. Default: LEAF_SPINE_MODEL env, else claude-sonnet-5-5. */
   model?: string;
   /** Wall-clock turn timeout in seconds. Default: LEAF_SPINE_TURN_TIMEOUT_S env, else 120. */
   turnTimeoutS?: number;
@@ -209,7 +209,7 @@ export class ConverseSdkRunner implements SpineConverseRunner {
 
   constructor(opts: ConverseSdkRunnerOptions) {
     this.grant = opts.grant;
-    this.model = opts.model ?? process.env.LEAF_SPINE_MODEL ?? "claude-sonnet-5";
+    this.model = opts.model ?? process.env.LEAF_SPINE_MODEL ?? "claude-sonnet-5-5";
     this.turnTimeoutS =
       opts.turnTimeoutS ?? (Number(process.env.LEAF_SPINE_TURN_TIMEOUT_S || "") || 120);
     this.maxTurns = opts.maxTurns ?? 24;

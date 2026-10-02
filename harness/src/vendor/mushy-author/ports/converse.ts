@@ -125,7 +125,7 @@ export interface ConverseTurnInput {
   /**
    * OPTIONAL per-session model override ("mount your LLM"). When present it
    * overrides the runner's env-default model (LEAF_SPINE_MODEL, else
-   * claude-sonnet-5) for THIS turn. The app validates it against the allowed
+   * claude-sonnet-5-5) for THIS turn. The app validates it against the allowed
    * Claude family (server/turn_runner.py ALLOWED_MODELS); the harness validates
    * again defensively (ports/modelAllowlist.ts) before it reaches sdk.query().
    */

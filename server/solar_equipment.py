@@ -8,7 +8,7 @@ import math
 from datetime import datetime, timezone
 
 from solar_design_graph import GraphValidationError, _bounded_json, new_id, validate_graph
-from solar_sizing_client import advance, checked_graph, require_sizing
+from solar_sizing_client import compact_slot_tables, advance, checked_graph, require_sizing
 
 
 FIELDS = {"id", "number", "type_key", "model", "position", "rotation", "scale",
@@ -70,7 +70,9 @@ def equipment_candidate(graph, params):
     result = checked_graph(graph, params.get("expected_rev"))
     if params.get("cancel", False):
         return result
-    require_sizing(result)
+    # One decode of the compact Ground slot blocks serves the sizing check and the slot frames.
+    tables = compact_slot_tables(result)
+    require_sizing(result, tables)
     equipment, requests = params.get("equipment"), params.get("assignments")
     if (type(equipment) is not list or not 1 <= len(equipment) <= 128
             or type(requests) is not list or len(requests) > 100000):
@@ -123,7 +125,12 @@ def equipment_candidate(graph, params):
         occupied.add(slot)
         item["input_assignments"].append({k: request[k] for k in ("string_ref", "mppt_letter", "input_number")})
         strings[ref].update(inverter_ref=inverter_ref, to_ref=inverter_ref)
-    panels = {p["id"]: p for p in result["panels"]}
+    # The frame each panel sits in. A compact Ground frame's slot panels are panels (codec
+    # leaf.solar-ground-slots.v1): each maps to its frame without expanding, so a slot string is
+    # sized exactly as on the graph's expansion. Linear in the slot count.
+    frame_of = {p["id"]: p["frame_ref"] for p in result["panels"]}
+    for frame_ref, table in tables.items():
+        frame_of.update(dict.fromkeys(table.ids, frame_ref))
     frames = {f["id"]: f for f in result["frames"]}
     zones = {z["id"]: z for z in result["electrical_zones"]}
     mode = result["settings"]["extra"]["string_sizing"]["mode"]
@@ -138,7 +145,7 @@ def equipment_candidate(graph, params):
         if not string["ordered_panel_refs"]:
             issues[ref].append("EQUIPMENT_EMPTY_STRING")
         for panel_ref in string["ordered_panel_refs"]:
-            frame = frames.get(panels[panel_ref]["frame_ref"])
+            frame = frames.get(frame_of[panel_ref])
             target = result["settings"] if mode == "global" else zones.get(frame["electrical_zone_ref"] if frame else None)
             if target is None or not _number(target["voc_cold"].get("per_module")):
                 issues[ref].append("EQUIPMENT_VOLTAGE_UNKNOWN")
@@ -161,7 +168,9 @@ def equipment_candidate(graph, params):
         _validity(string, issues[ref])
     inputs = {a["string_ref"]: (item["id"], a["input_number"])
               for item in inverters.values() for a in item["input_assignments"]}
+    panels = {p["id"]: p for p in result["panels"]}
     for frame in result["frames"]:
+        # A compact frame stores no panel records: its slot views derive from the inverters.
         records = frame["panel_assignments"] + [c for row in frame["matrix"] for c in row if c["panel_ref"] is not None]
         for record in records:
             string_ref = panels[record["panel_ref"]]["assignment"]["string_ref"]
@@ -190,4 +199,5 @@ def equipment_ready(graph):
     return bool(candidate["strings"]) and all(
         item["validity"]["state"] == "valid"
         for item in [candidate["project"], candidate["settings"]] + candidate["electrical_zones"]
-        + candidate["frames"] + candidate["panels"] + candidate["strings"] + candidate["inverters"])
+        + candidate["frames"] + candidate["panels"] + candidate["strings"] + candidate["inverters"]
+        + [frame["ground_slots"]["panel"] for frame in candidate["frames"] if "ground_slots" in frame])

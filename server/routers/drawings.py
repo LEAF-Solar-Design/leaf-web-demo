@@ -48,6 +48,7 @@ import guest_uploads
 import jobs
 import solar_artifacts
 import solar_combiner_intake_import
+import solar_design_graph
 import solar_import_sources
 import solar_landxml_import
 import solar_physical_state
@@ -1354,6 +1355,68 @@ def restore_version(drawing_id: str, version: int,
     return with_envelope_fields(view)
 
 
+# sf-w2-combiner-intake-survives-saves: the stored intake keys a browser CAD edit cannot describe. A DXF
+# save replaces the version payload with the parse of the edited bytes, which never holds these keys, so the
+# save copies them from the version it replaces: the embedded solar design graph and its digest, and the
+# combiner intake and panel-group outlines the solar-combiners tool reads. Graph commits, the mock writer,
+# restore and the combiner intake import already keep them.
+SOLAR_CARRIED_KEYS = ("solar_design_graph", "solar_design_graph_sha256", "combiner_intake", "panel_groups")
+
+
+def _carry_solar_state(backend, tenant_id: str, drawing_id: str, parent_version: int,
+                       intake: Dict[str, Any], parent_bytes: Optional[bytes] = None):
+    """(payload intake, None) or (None, refusal) for a DXF save over `parent_version`.
+
+    Each SOLAR_CARRIED_KEYS key the parent's stored intake holds is copied onto the parsed edit, its value
+    unchanged; a key the parent lacks stays absent, and a parent with none of them leaves the parsed intake
+    exactly as it was. A parent version the manifest does not name carries nothing: it cannot be the head,
+    so the store's compare-and-set refuses the save as before. Every named parent's bytes are checked
+    against its manifest digest before parsing, whether or not it carries solar keys. Parent bytes that
+    match the digest but are not a JSON object (a DWG source) carry nothing. Fails closed: a named parent
+    whose bytes cannot be read answers 503 and one whose bytes do not match its manifest digest answers
+    500, so a read fault never drops a solar design;
+    a carried intake past the design bound (solar_design_graph._bounded_json, which every later graph
+    commit applies) answers 413. Nothing is written on any refusal. Cost: one manifest read, at most one
+    blob read (none when the caller passes the bytes it already holds), one digest per save, one JSON
+    parse of the parent and, only when something is carried, one bound pass."""
+    import store  # da/store.py; importable via write_loop's sys.path setup
+
+    try:
+        _, key, entry = store.resolve_version_entry(backend, tenant_id, drawing_id, int(parent_version))
+    except (KeyError, ValueError):
+        return intake, None
+    try:
+        raw = parent_bytes if parent_bytes is not None else backend.get(key)
+    except (KeyError, OSError):
+        return None, error_response(
+            ErrorCode.INTERNAL,
+            "the version this save replaces could not be read, so its solar design could not be "
+            "carried; nothing was saved", retryable=True, status_code=503)
+    if hashlib.sha256(raw).hexdigest() != entry.get("sha256"):
+        return None, error_response(
+            ErrorCode.INTERNAL,
+            "the version this save replaces does not match its stored record; nothing was saved",
+            retryable=False, status_code=500)
+    try:
+        parent = json.loads(raw)
+    except (ValueError, RecursionError):
+        return intake, None
+    if type(parent) is not dict:
+        return intake, None
+    carried = {name: parent[name] for name in SOLAR_CARRIED_KEYS if name in parent}
+    if not carried:
+        return intake, None
+    merged = dict(intake, **carried)
+    try:
+        solar_design_graph._bounded_json(merged)
+    except solar_design_graph.GraphValidationError:
+        return None, error_response(
+            ErrorCode.BAD_PARAMS,
+            "the edited drawing and its solar design together exceed the stored design bound; "
+            "nothing was saved", retryable=False, status_code=413)
+    return merged, None
+
+
 def _receive_edited_dxf(file: UploadFile, source_digest: str):
     """The integrity half every browser-edit save shares (F-3 and the W4g-3
     plan route): read the body under the upload cap, refuse a non-.dxf name,
@@ -1463,6 +1526,9 @@ def save_edited_version(drawing_id: str,
                               "drawing unavailable or malformed request",
                               retryable=False, status_code=400)
 
+    intake, refused = _carry_solar_state(backend, str(tenant_id), drawing_id, int(parent_version), intake)
+    if refused is not None:
+        return refused
     intake_payload = json.dumps(intake, separators=(",", ":")).encode("utf-8")
     intake_digest = hashlib.sha256(intake_payload).hexdigest()
     try:
@@ -1848,6 +1914,10 @@ def save_plan_version(drawing_id: str,
                 "note": "browser edit plan, mock writer (intake payload)"}
         cost = {"engine_usd": 0.0, "engine": "mock-writer"}
     else:
+        intake, refused = _carry_solar_state(backend, str(tenant_id), drawing_id, int(head_v), intake,
+                                             parent_bytes=head_source)
+        if refused is not None:
+            return refused
         payload = json.dumps(intake, separators=(",", ":")).encode("utf-8")
         intake_digest = hashlib.sha256(payload).hexdigest()
         meta = {"tool": "cad-edit-surface", "source": "cad_edit",

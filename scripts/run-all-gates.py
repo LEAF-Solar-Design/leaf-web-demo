@@ -400,6 +400,8 @@ def build_suites() -> List[Suite]:
         # and nothing skips: 31 + 9 parametrized refusals + 22 single tests + 31 correction cases = 93.
         Suite("server-solar-combiner-graph", "server tests/test_solar_combiner_graph.py", "pytest", SERVER,
               _py_pytest("tests/test_solar_combiner_graph.py"), 93),
+        Suite("server-solar-feeder-graph", "server tests/test_solar_feeder_graph.py", "pytest", SERVER,
+              _py_pytest("tests/test_solar_feeder_graph.py"), 19),
         # 31 -> 35 on 2026-09-22: the zone-aware entry point (group_panels_by_zone,
         # the port of BuildAndSaveGroupsForZone) added four hermetic, unparametrized
         # tests. Nothing in this file skips, so the count is the same on every runner.
@@ -772,12 +774,25 @@ def build_suites() -> List[Suite]:
         # imported version. Hermetic and nothing skips: the floor is the exact count, 68.
         Suite("server-solar-combiner-intake-import", "server tests/test_solar_combiner_intake_import.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_combiner_intake_import.py"), 68),
+        # sf-w2-combiner-intake-survives-saves: a browser CAD save (POST .../versions/edited and the dxf-sidecar
+        # leg of POST .../versions/plan in server/routers/drawings.py) keeps the solar design graph, its digest,
+        # the combiner intake and the panel-group outlines of the version it replaces, and refuses with nothing
+        # written when that version cannot be read, fails its digest, or the carried intake passes the design
+        # bound. Hermetic and nothing skips: the floor is the exact count, 23 (19 + 4 corrupt-byte cases).
+        Suite("server-solar-design-survives-saves", "server tests/test_solar_design_survives_saves.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_design_survives_saves.py"), 23),
         # LEAFTRACKERSTOPANELGROUPS as a tool (2026-10-01, sf-w3-conversion-graph-tool): the drawing's Ground
         # physical head carried by the physical_state trusted input, converted into compact Ground frames that
         # replace any earlier conversion, published in one commit with the bound head-log entry; the replay proof
         # re-reads that entry. Inputs are authored in the file and nothing skips. COUNTED: 54.
         Suite("server-solar-tool-trackers-to-panel-groups", "server tests/test_solar_tool_trackers_to_panel_groups.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_trackers_to_panel_groups.py"), 54),
+        # Equipment on a converted Ground design (2026-10-01, sf-w3-solve-equipment): compact Ground slot panels
+        # are panels to string sizing, the equipment kernel and the equipment readiness chain, equal to the
+        # expansion; conversion, sizing, strings and equipment commit through the rail with every proof accepted.
+        # Inputs are authored in the file and nothing skips. COUNTED: 29.
+        Suite("server-solar-ground-equipment", "server tests/test_solar_ground_equipment.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_ground_equipment.py"), 29),
         # W5 inverter family (2026-09-24, contract G35): the shared state and delta module and the
         # device, string and output engines (literal ports of the plugin's inverter commands). Inputs
         # are authored in each file, so each floor is the exact count on every runner. MEASURED.
@@ -883,7 +898,7 @@ def build_suites() -> List[Suite]:
         # physical head, and the t2, t6 and t7 parity receipts reproduced through the head. Hermetic and
         # nothing skips: the floor is the exact count, 80.
         Suite("server-solar-ground-terrain-adapter", "server tests/test_solar_ground_terrain_adapter.py",
-              "pytest", SERVER, _py_pytest("tests/test_solar_ground_terrain_adapter.py"), 80),
+              "pytest", SERVER, _py_pytest("tests/test_solar_ground_terrain_adapter.py"), 94),
         # sf-w5-frames-piles: native Ground frame and pile operations (server/solar_frames_piles.py) over the
         # drawing's current physical head: generate, collision, piling on the stored terrain, pile length window,
         # each published as a child state and reopened unchanged (preview), and every result and the read

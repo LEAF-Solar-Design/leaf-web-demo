@@ -29,7 +29,10 @@ def size_strings(graph, params, *, tenant_id, job_id):
     if params.get("cancel", False):
         return {"graph": result, "confirmed": False, "records": {}}
     mode = params.get("mode")
-    targets = cloud.sizing_targets(result, mode)
+    # One decode of the compact Ground slot blocks (codec leaf.solar-ground-slots.v1) serves the
+    # targets, the basis and the frame members below; sizing never changes a block.
+    slots = cloud.compact_slot_tables(result)
+    targets = cloud.sizing_targets(result, mode, slots)
     requests = params.get("requests")
     if type(requests) is not dict or set(requests) != set(targets):
         raise GraphValidationError("INVALID_SIZING_COVERAGE")
@@ -61,20 +64,25 @@ def size_strings(graph, params, *, tenant_id, job_id):
     settings = result["settings"]
     settings["global_string_sizing_confirmed"] = mode == "global"
     settings["extra"]["string_sizing"] = {
-        "mode": mode, "basis_sha256": cloud.sizing_basis(result), "records": records}
+        "mode": mode, "basis_sha256": cloud.sizing_basis(result, slots), "records": records}
     changed = list(targets.values())
     if mode != "global":
         changed.append(settings)
+    # A compact Ground frame stores no panel_refs: its slot panel ids are its members, exactly
+    # the panel_refs of its expansion.
+    zone_members = ({zone["id"]: set(zone["panel_refs"]) for zone in result["electrical_zones"]}
+                    if mode == "zones" else {})
     for frame in result["frames"]:
         zone_ref = frame["electrical_zone_ref"]
+        table = slots.get(frame["id"])
+        members = frame["panel_refs"] if table is None else list(table.ids)
         if mode == "zones":
-            covering = [zone["id"] for zone in result["electrical_zones"]
-                        if set(frame["panel_refs"]) <= set(zone["panel_refs"])]
+            covering = [zone_id for zone_id, refs in zone_members.items() if refs.issuperset(members)]
             # Existing frames may span zones after switching from global sizing.
-            power = (frame_module_power(result, frame["panel_refs"], covering[0])
+            power = (frame_module_power(result, members, covering[0])
                      if len(covering) == 1 else 0.0)
         else:
-            power = frame_module_power(result, frame["panel_refs"], zone_ref)
+            power = frame_module_power(result, members, zone_ref)
         if frame["module_power_watts"] != power:
             frame["module_power_watts"] = power
             changed.append(frame)
