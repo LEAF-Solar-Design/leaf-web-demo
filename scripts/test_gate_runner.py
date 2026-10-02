@@ -46,6 +46,135 @@ def _load_runner():
     return mod
 
 
+@pytest.mark.parametrize("text, expected", [
+    ("Bearer abc123", "[redacted]"),
+    ("Basic dXNlcjpwYXNz", "[redacted]"),
+    ("LEAF_OPS_SECRET=private-value", "LEAF_OPS_SECRET=[redacted]"),
+    ('"token": "private value"', '"token": [redacted]'),
+    ("Password: 'private value'", "Password: [redacted]"),
+    ("AKIA1234567890ABCDEF ASIA1234567890ABCDEF", "[redacted] [redacted]"),
+    ("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature", "[redacted]"),
+    ("https://user:pass@example.com/path", "https://[redacted]@example.com/path"),
+    ("a1" * 20, "[redacted]"),
+    ("\x1b[31merror\x1b[0m\x00\r\n\tend", "error\n\tend"),
+    ("\x1b]0;window title\x07ordinary", "ordinary"),
+    ("ordinary /tmp/test.py C:\\tmp\\test.py deadbeef 123abc",
+     "ordinary /tmp/test.py C:\\tmp\\test.py deadbeef 123abc"),
+    ("python: error while loading shared libraries: libpython3.12.so.1.0",
+     "python: error while loading shared libraries: libpython3.12.so.1.0"),
+    (None, ""),
+])
+def test_scrub_evidence_masks_credentials_and_preserves_diagnostics(text, expected):
+    g = _load_runner()
+    assert g.scrub_evidence(text) == expected
+
+
+@pytest.mark.parametrize("name", [
+    "key", "token", "secret", "password", "passwd", "authorization",
+    "cookie", "credential", "LEAF_API_KEY", "clientToken",
+])
+def test_scrub_evidence_masks_each_assignment_name(name):
+    g = _load_runner()
+    assert g.scrub_evidence(f"{name}=private") == f"{name}=[redacted]"
+
+
+def _evidence_result(g, log_path, *, status="FAIL", suite_id="studio-walk-regressions"):
+    suite = g.Suite(suite_id, "Evidence suite", "script", SCRIPTS, ["python"], None)
+    return g.Result(suite, status, "-", 1.0, log_path=log_path)
+
+
+def test_failed_suite_evidence_prints_first_error_and_scrubbed_tail(tmp_path, capsys):
+    g = _load_runner()
+    log = tmp_path / "last-attempt.log"
+    cause = "python: error while loading shared libraries: libpython3.12.so.1.0"
+    log.write_text(f"$ python web/walk.py\n{cause}\ntoken=private\n\nlast line\n",
+                   encoding="utf-8")
+    result = _evidence_result(g, log)
+    assert g.failed_suite_evidence([result]) == [
+        "FAILED SUITE EVIDENCE: studio-walk-regressions",
+        f"  first error: {cause}", "  tail:", "$ python web/walk.py",
+        cause, "token=[redacted]", "last line",
+    ]
+    g.print_scoreboard([result], tmp_path, 1.0)
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[-8:-1] == g.failed_suite_evidence([result])
+
+
+def test_failed_suite_evidence_reports_no_matching_error(tmp_path):
+    g = _load_runner()
+    log = tmp_path / "quiet.log"
+    log.write_text("$ python test.py\nordinary output\n", encoding="utf-8")
+    assert "  first error: none matched" in g.failed_suite_evidence([
+        _evidence_result(g, log)])
+
+
+@pytest.mark.parametrize("path_kind", ["missing", "absent", "unreadable"])
+def test_failed_suite_evidence_handles_unavailable_logs(tmp_path, path_kind):
+    g = _load_runner()
+    path = None if path_kind == "absent" else tmp_path / "missing.log"
+    if path_kind == "unreadable":
+        path.mkdir()
+    assert g.failed_suite_evidence([_evidence_result(g, path)]) == [
+        "FAILED SUITE EVIDENCE: studio-walk-regressions", "  log is unavailable",
+    ]
+
+
+def test_failed_suite_evidence_limits_suite_count_in_result_order():
+    g = _load_runner()
+    results = [_evidence_result(g, None, suite_id=f"suite-{i}") for i in range(6)]
+    lines = g.failed_suite_evidence(results)
+    assert [line for line in lines if line.startswith("FAILED SUITE EVIDENCE:")] == [
+        *(f"FAILED SUITE EVIDENCE: suite-{i}" for i in range(5)),
+        "FAILED SUITE EVIDENCE: 1 more failed suites not shown",
+    ]
+
+
+def test_failed_suite_evidence_reads_only_the_end_of_a_large_log(tmp_path):
+    g = _load_runner()
+    log = tmp_path / "large.log"
+    log.write_bytes(b"fatal excluded beginning\n" + b"ordinary padding\n" * 655360 +
+                    b"error retained ending\nlast line\n")
+    assert log.stat().st_size > 10 * 1024 * 1024
+    lines = g.failed_suite_evidence([_evidence_result(g, log)], tail_lines=2)
+    assert lines == [
+        "FAILED SUITE EVIDENCE: studio-walk-regressions",
+        "  first error: error retained ending", "  tail:",
+        "error retained ending", "last line",
+    ]
+
+
+def test_failed_suite_evidence_bounds_lines_tail_and_block_after_scrubbing(tmp_path):
+    g = _load_runner()
+    log = tmp_path / "long.log"
+    log.write_text("error " + "!" * 600 + "\n" +
+                   "\n".join(f"line {i} " + "!" * 600 for i in range(40)),
+                   encoding="utf-8")
+    result = _evidence_result(g, log)
+    lines = g.failed_suite_evidence([result], max_chars=20000)
+    assert len(lines[1]) == len("  first error: ") + 400
+    assert len(lines[3:]) == 30
+    assert lines[3].startswith("line 10 ")
+    assert all(len(line) == 300 for line in lines[3:])
+    assert len("\n".join(g.failed_suite_evidence([result], max_chars=150))) <= 150
+
+
+@pytest.mark.parametrize("status", ["PASS", "SKIP", "UNAVAILABLE"])
+def test_failed_suite_evidence_ignores_non_failed_results(status):
+    g = _load_runner()
+    assert g.failed_suite_evidence([_evidence_result(g, None, status=status)]) == []
+
+
+def test_pass_scoreboard_existing_lines_are_unchanged(tmp_path, capsys, monkeypatch):
+    g = _load_runner()
+    result = _evidence_result(g, None, status="PASS")
+    g.print_scoreboard([result], tmp_path, 1.0)
+    actual = capsys.readouterr().out
+    monkeypatch.setattr(g, "failed_suite_evidence", lambda results: [])
+    g.print_scoreboard([result], tmp_path, 1.0)
+    assert actual == capsys.readouterr().out
+    assert "FAILED SUITE EVIDENCE:" not in actual
+
+
 def test_postgres_proof_files_are_registered_with_exact_counts():
     g = _load_runner()
     suites = {suite.id: suite for suite in g.build_suites()}
