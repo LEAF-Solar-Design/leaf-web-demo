@@ -54,6 +54,7 @@ endpoint match (never a scan of strings per string).
 from __future__ import annotations
 
 from collections import Counter
+from copy import deepcopy
 import math
 
 import solar_electrical_route_bridge as rb
@@ -78,6 +79,7 @@ MAX_TEXT = legacy.MAX_TEXT                 # 4,096
 MAX_LINES = 64
 MAX_LINE_CHARS = 512
 SYMBOL_SCALE = 1.0
+KERNEL_METRES_PER_UNIT = 0.0254  # the legacy cabling kernels compute feet as inches / 12
 PLAN = {"combiner_input_plan": cab.INPUT_PLAN_APPLY}
 HARDWARE_KEYS = frozenset({"model", "max_dc_voltage", "max_ac_power_kw"})
 CODES = ("COMBINER_L2_MODE_REQUIRED", "COMBINER_EXISTING_L1", "COMBINER_INTAKE_INVALID",
@@ -162,7 +164,12 @@ def _point(value, what, upper=False):
 
 
 def _du(point, mpu):
-    return (float(point[0]) / mpu, float(point[1]) / mpu)
+    """A graph point in the intake's drawing units, by the kernel's own arithmetic: graph metres to kernel
+    inches (the state bridge's projection), then inches to drawing units (cab._source_xy). Binding and the
+    kernel's matchers then compare bit-identical numbers, so an intake that binds is never refused by a
+    matcher for a rounding difference."""
+    k = mpu / KERNEL_METRES_PER_UNIT
+    return cab._source_xy((float(point[0]) / KERNEL_METRES_PER_UNIT, float(point[1]) / KERNEL_METRES_PER_UNIT), k)
 
 
 # ------------------------------------------------------------------ binding --
@@ -195,7 +202,7 @@ def _bind_l2(raw, l2s, mpu):
             _fail("COMBINER_INTAKE_INVALID")
         point = _point(item.get("InsertPt"), f"l2Inverters[{i}].InsertPt", upper=True)
         inverter = by_number.get(number)
-        if inverter is None or str(number) in bound or math.dist(_du(inverter["position"], mpu), point) > MATCH_EPSILON:
+        if inverter is None or str(number) in bound or cab._dist(_du(inverter["position"], mpu), point) > MATCH_EPSILON:
             _fail("COMBINER_INTAKE_L2_MISMATCH")
         bound[str(number)] = inverter["id"]
     if len(bound) != len(l2s):
@@ -217,7 +224,7 @@ def _bind_strings(raw, strings, mpu):
             _fail("COMBINER_INTAKE_INVALID")
         a = _point(item.get("endpointA"), f"preBuiltStrings[{i}].endpointA")
         b = _point(item.get("endpointB"), f"preBuiltStrings[{i}].endpointB")
-        hits = [ident for ident, last in index.near(a) if math.dist(last, b) <= MATCH_EPSILON]
+        hits = [ident for ident, last in index.near(a) if cab._dist(last, b) <= MATCH_EPSILON]
         if len(hits) != 1 or hits[0] in used:
             _fail("COMBINER_INTAKE_STRING_MISMATCH")
         used.add(hits[0])
@@ -264,6 +271,30 @@ def bind_intake(graph, intake):
     """The binding of `intake` to `graph` (see the module docstring); fails closed on any disagreement."""
     binding, _ = _bind(validate_graph(graph), intake)
     return binding
+
+
+# ------------------------------------------------------------- kernel units --
+
+def _kernel_outlines(panel_groups, mpu):
+    """The stored outlines in kernel inches; the list itself on an inch drawing."""
+    if mpu == KERNEL_METRES_PER_UNIT:
+        return panel_groups
+    groups = deepcopy(panel_groups)
+    for group in groups:
+        if not group.get("outlines"):
+            continue
+        outlines = []
+        for ring in group["outlines"]:
+            points = []
+            for point in ring:
+                x = point[0] * mpu / KERNEL_METRES_PER_UNIT
+                y = point[1] * mpu / KERNEL_METRES_PER_UNIT
+                if not math.isfinite(x) or not math.isfinite(y):
+                    _fail("COMBINER_OUTLINES_INVALID")
+                points.append([x, y, *point[2:]])
+            outlines.append(points)
+        group["outlines"] = outlines
+    return groups
 
 
 # ---------------------------------------------------------------- placement --
@@ -328,10 +359,14 @@ def place_combiners(graph, intake, panel_groups, *, hardware, new_id=None, creat
         cab.validate_outlines(panel_groups)
     except (cab.InverterCablingError, OverflowError, TypeError, ValueError):
         _fail("COMBINER_OUTLINES_INVALID")
-    state, state_binding = rb.state_from_graph(g)
+    mpu = legacy._meters_per_unit(g)
+    scale = mpu / KERNEL_METRES_PER_UNIT
+    kernel_groups = _kernel_outlines(panel_groups, mpu)
+    state, state_binding = rb.state_from_graph(g, metres_per_unit=KERNEL_METRES_PER_UNIT)
     host = {"UseL2Collectors": True, "L1CollectorsPerL2": cap, "CombinerSymbolScale": SYMBOL_SCALE}
     try:
-        after, lines = cab.combiner_auto_place(state, panel_groups, host, dict(PLAN), intake)
+        after, lines = cab.combiner_auto_place(state, kernel_groups, host, dict(PLAN), intake,
+                                               coordinate_scale=scale)
     except cab.InverterCablingNotPortedError:
         _fail("COMBINER_NOT_PORTED")
     except (cab.InverterCablingError, ValueError, ArithmeticError):
@@ -339,7 +374,8 @@ def place_combiners(graph, intake, panel_groups, *, hardware, new_id=None, creat
     if not cab.levels(after)[0]:
         _fail("COMBINER_NOTHING_PLACED")
     result, _ = rb.graph_from_state(g, after, state_binding, defaults={"combiner_box": values},
-                                    new_id=new_id, created_at=created_at)
+                                    new_id=new_id, created_at=created_at,
+                                    metres_per_unit=KERNEL_METRES_PER_UNIT)
     l1 = _prove(result, binding, after, values)
     kinds = Counter(r["route_kind"] for r in result["routes"])
     receipt = {

@@ -95,7 +95,7 @@ GRAPH_ROWS = [
     ("string_add", "cd839dc52cf8cdc27464fa6cdc4cf234538f19c3a5d383023ce9c10208518f91"),
     ("string_multi_add", "5a9f2466fc1b90659e87b24fdec762572e3531da89519d5b559149386159e85a"),
     ("string_flip", "f5351b8f233ed5ebe7329007d239f3cfde8725024005b177bb4dadd9394a0359"),
-    ("string_swap", "d8b536e2871182bed2121a6c24c11ae5325e76820ed6094c97685dc947f3c77b"),
+    ("string_swap", "431260a936d6a14c1a051fca131c6aafd39b38fd9b5483baef8ff409ab434d41"),
     ("string_conductors", "ce6c9fd3f1bd6d4bc0fcc5f7ae53fc5f7ae69e57733cfeb2022d82d499348fda"),
 ]
 
@@ -148,6 +148,7 @@ def test_ground_admission_graph_tools(admission_base, admission_equipped, monkey
         assert [s["circuit_tag"] for s in out["strings"]] == ["S4", "S3"]
         inverter = out["inverters"][0]
         assert [a["string_ref"] for a in inverter["input_assignments"]] == strings[::-1]
+        assert [r["string_ref"] for r in out["extra"]["equipment"]["assignment_requests"]] == strings[::-1]
         assert inverter["validity"] == {"state": "valid", "reasons": []}
     elif row == "string_conductors":
         assert [s["wire_gauge"] for s in out["strings"]] == ["8 AWG", "8 AWG"]
@@ -199,21 +200,16 @@ def test_ground_admission_string_midpoint_refuses_short_row(admission_base, monk
     assert exc.value.code == "MIDPOINT_PATH_TOO_SHORT"
 
 
-def test_ground_admission_string_delete_refuses_after_equipment(admission_equipped, monkeypatch):
+def test_ground_admission_string_delete_after_equipment_prunes_the_request(admission_equipped, monkeypatch):
+    # This row is the evidence of the delete's behaviour after equipment.
     deleted_ref = admission_equipped["strings"][1]["id"]
     requests = admission_equipped["extra"]["equipment"]["assignment_requests"]
     assert sum(request["string_ref"] == deleted_ref for request in requests) == 1
     params = {"operation": "delete-strings", "expected_rev": 5,
               "string_refs": [deleted_ref]}
-    with pytest.raises(GraphValidationError) as exc:
-        _run("solar-string-delete", admission_equipped, params, monkeypatch)
-    assert exc.value.code == "STRING_REFERENCE_NOT_CLEARED"
-
     remaining_requests = [request for request in requests if request["string_ref"] != deleted_ref]
-    control = copy.deepcopy(admission_equipped)
-    control["extra"]["equipment"]["assignment_requests"] = copy.deepcopy(remaining_requests)
-    out = _run("solar-string-delete", control, params, monkeypatch)
-    assert (control["rev"], out["rev"]) == (5, 6)
+    out = _run("solar-string-delete", admission_equipped, params, monkeypatch)
+    assert (admission_equipped["rev"], out["rev"]) == (5, 6)
     assert [string["id"] for string in out["strings"]] == [admission_equipped["strings"][0]["id"]]
     assert out["extra"]["equipment"]["assignment_requests"] == remaining_requests
     for inverter in out["inverters"]:

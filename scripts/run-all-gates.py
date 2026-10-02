@@ -406,6 +406,9 @@ def build_suites() -> List[Suite]:
         # Drawing-unit invariance, bridge overrides and outline refusals: 15 hermetic cases.
         Suite("server-solar-feeder-units", "server tests/test_solar_feeder_units.py", "pytest", SERVER,
               _py_pytest("tests/test_solar_feeder_units.py"), 15),
+        # Drawing-unit reconstruction and inch-kernel combiner equivalence: 44 hermetic cases.
+        Suite("server-solar-combiner-units", "server tests/test_solar_combiner_units.py", "pytest", SERVER,
+              _py_pytest("tests/test_solar_combiner_units.py"), 44),
         # 31 -> 35 on 2026-09-22: the zone-aware entry point (group_panels_by_zone,
         # the port of BuildAndSaveGroupsForZone) added four hermetic, unparametrized
         # tests. Nothing in this file skips, so the count is the same on every runner.
@@ -802,6 +805,10 @@ def build_suites() -> List[Suite]:
         # W20 Ground admission: 17 tools proven on the converted chain; COUNTED: 28.
         Suite("server-solar-ground-admission", "server tests/test_solar_ground_admission.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_ground_admission.py"), 28),
+        # W2 equipment intent: 10 plain cases + 2 compatible edits + 2 refusals + 6 validity cases
+        # + 1 several-survivors ordering case = 21.
+        Suite("server-w2-equipment-intent", "server tests/test_w2_equipment_intent.py",
+              "pytest", SERVER, _py_pytest("tests/test_w2_equipment_intent.py"), 21),
         # W5 inverter family (2026-09-24, contract G35): the shared state and delta module and the
         # device, string and output engines (literal ports of the plugin's inverter commands). Inputs
         # are authored in each file, so each floor is the exact count on every runner. MEASURED.

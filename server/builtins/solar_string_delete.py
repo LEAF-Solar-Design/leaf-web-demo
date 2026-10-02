@@ -93,6 +93,13 @@ def delete_strings(graph, params):
         # the solve commit drops one the same way when it replaces a frame's strings.
         inverter["input_assignments"] = [assignment for assignment in inverter["input_assignments"]
                                          if assignment["string_ref"] not in removed]
+    # A request naming an erased cable is the same dangling intent as the input assignment pruned above.
+    equipment = result["extra"].get("equipment")
+    if type(equipment) is dict and type(equipment.get("assignment_requests")) is list:
+        equipment["assignment_requests"] = [
+            request for request in equipment["assignment_requests"]
+            if not (type(request) is dict and type(request.get("string_ref")) is str
+                    and request["string_ref"] in removed)]
     # Panel assignments, frame sequences, frame panel_assignments and matrix cells are
     # redundant views of string membership: one pass rebuilds all of them from the
     # strings that remain, so a freed panel is unwired everywhere at once.

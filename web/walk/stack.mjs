@@ -9,6 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { prepareProductionBundle, startSameOriginProxy } from './sameOriginProxy.mjs'
 import { createStackDatabase, dropStaleStackDatabases, prepareStackDatabase } from './pgStack.mjs'
+import { readProcessTable, measureWithRetry } from './processTable.mjs'
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const python = process.env.LEAF_TEST_PYTHON || process.env.PYTHON || 'python'
@@ -248,33 +249,6 @@ async function processTable() {
   try { return await measuring } finally { measuring = undefined }
 }
 
-async function readProcessTable() {
-  const windows = process.platform === 'win32'
-  const child = windows
-    ? spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,WorkingSetSize,Name | ConvertTo-Json -Compress'], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
-    : spawn('ps', ['-e', '-o', 'pid=,ppid=,rss='], { stdio: ['ignore', 'pipe', 'pipe'] })
-  let stdout = ''
-  let stderr = ''
-  let failure
-  child.stdout.on('data', (data) => {
-    stdout += data.toString()
-    if (Buffer.byteLength(stdout) > 8 * 1024 * 1024) { failure = new Error('Process table exceeds 8 MiB'); child.kill('SIGKILL') }
-  })
-  child.stderr.on('data', (data) => { stderr = (stderr + data).slice(-4000) })
-  const timer = setTimeout(() => { failure = new Error('Process table probe timed out'); child.kill('SIGKILL') }, 10000)
-  try {
-    const code = await new Promise((accept, reject) => { child.once('error', reject); child.once('close', accept) })
-    if (failure || code !== 0) throw failure || new Error(`Cannot measure stack process tree: ${stderr || code}`)
-  } finally { clearTimeout(timer) }
-  if (windows) {
-    const data = JSON.parse(stdout)
-    return (Array.isArray(data) ? data : [data]).map((row) => ({ pid: Number(row.ProcessId), parent: Number(row.ParentProcessId), rss: Number(row.WorkingSetSize), name: row.Name }))
-  }
-  return stdout.trim().split('\n').filter(Boolean).map((line) => {
-    const [pid, parent, rss] = line.trim().split(/\s+/).map(Number)
-    return { pid, parent, rss: rss * 1024 }
-  })
-}
 
 async function sample(state) {
   if (!state.child?.pid) return
@@ -464,7 +438,11 @@ export async function startStack({ slot, admission = defaultAdmission, slots, da
     }, timeoutMs, () => `Stack did not publish readiness within ${timeoutMs}ms:\n${state.output}`)
     state.receipt = JSON.parse(await readFile(readyPath, 'utf8'))
     if (state.receipt.launcher_pid !== state.child.pid || ['app', 'broker', 'harness'].some((role) => state.receipt.ports[role] !== state.ports[role] || !Number.isInteger(state.receipt.pids[role]) || !pidAlive(state.receipt.pids[role]))) throw new Error('Readiness receipt does not identify the requested live stack')
-    await sample(state)
+    if (state.peakRssBytes > 0) {
+      try { await sample(state) } catch (error) { state.sampleError = error }
+    } else {
+      await measureWithRetry(() => sample(state))
+    }
     if (state.peakRssBytes <= 0) throw state.sampleError || new Error('No process-tree RSS measurement was obtained')
     for (const role of ['web', 'proxy']) state.proxies.push(await startSameOriginProxy({ port: state.ports[role], appPort: state.ports.app, bundleDir }))
     if (state.closed || (await Promise.all(Object.values(state.ports).map(portListening))).some((open) => !open)) throw new Error('Stack lost a listener before boot completed')

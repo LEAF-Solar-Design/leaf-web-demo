@@ -10,6 +10,7 @@ entries in place, rebuilds membership views, and stales only directly dependent
 routes and schedules (including schedules of changed inverters). String and
 inverter validity remain untouched. Fails closed: every check precedes any
 mutation, and all mutation is confined to a private graph copy.
+The stored equipment requests follow the swapped inputs, so assignment intent and inverter inputs agree after a swap.
 """
 import copy
 
@@ -89,6 +90,12 @@ def swap_strings(graph, params):
             if donor in receivers and receivers[donor] != donor:
                 assignment["string_ref"] = receivers[donor]
                 changed_inverters.add(inverter["id"])
+    equipment = after["extra"].get("equipment")
+    if type(equipment) is dict and type(equipment.get("assignment_requests")) is list:
+        for request in equipment["assignment_requests"]:
+            donor = request.get("string_ref") if type(request) is dict else None
+            if type(donor) is str and donor in receivers and receivers[donor] != donor:
+                request["string_ref"] = receivers[donor]
     sync_assignments(after)
     _invalidate(after, set(refs), changed_inverters)
     after = finish_mutation(before, after, TOOL)
