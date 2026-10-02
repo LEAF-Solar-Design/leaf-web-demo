@@ -8,6 +8,8 @@ LEAFLANDXMLDEMO capture imported by server/solar_landxml_import.py and the commi
 intake's t1 to t5 Studio chain, whose t2, t6 and t7 parity receipts are reproduced through the head."""
 import hashlib
 import json
+import math
+import random
 import re
 import sys
 from pathlib import Path
@@ -768,6 +770,180 @@ def test_terrain_adapter_feet_mesh_coordinates_above_scalar_bound_refuse(backend
     refused("TERRAIN_GRID_INVALID", ta.mesh_of, document)
     assert ph.physical_head(backend, TENANT, DRAWING, project_id=PROJECT) == head
     assert {key: backend.get(key) for key in keys(backend)} == before
+
+
+def representable_grid(x_min=1e14, x_max=None, *, rows=2, cols=3, y_min=0.0, y_max=1.0):
+    return {"rows": rows, "cols": cols, "x_min": x_min,
+            "x_max": math.nextafter(x_min, math.inf) if x_max is None else x_max,
+            "y_min": y_min, "y_max": y_max, "elevations": [0.0] * (rows * cols)}
+
+
+def representable_kernel_faces(grid):
+    return terrain.draw_grid_mesh(grid["elevations"], grid["rows"], grid["cols"],
+                                  grid["x_min"], grid["x_max"], grid["y_min"], grid["y_max"], 1.0)
+
+
+def representable_collapsed(face):
+    vertices = face["vertices"]
+    return vertices[1][0] <= vertices[0][0] or vertices[3][1] <= vertices[0][1]
+
+
+def test_terrain_adapter_representable_x_collapse_refused(backend):
+    grid = representable_grid()
+    assert all(representable_collapsed(face) for face in representable_kernel_faces(grid))
+    publish(backend, {"grid": grid})
+    before = keys(backend)
+    refused("TERRAIN_GRID_INVALID", mesh, backend)
+    assert keys(backend) == before
+
+
+def test_terrain_adapter_representable_y_collapse_refused(backend):
+    grid = representable_grid(0.0, 1.0, rows=3, cols=2, y_min=1e14,
+                              y_max=math.nextafter(1e14, math.inf))
+    assert all(representable_collapsed(face) for face in representable_kernel_faces(grid))
+    publish(backend, {"grid": grid})
+    before = keys(backend)
+    refused("TERRAIN_GRID_INVALID", mesh, backend)
+    assert keys(backend) == before
+
+
+def test_terrain_adapter_representable_slope_refused_before_kernel(backend, g1_state, monkeypatch):
+    grid = representable_grid()
+    assert any(representable_collapsed(face) for face in representable_kernel_faces(grid))
+    publish(backend, dict(g1_state, grid=grid))
+
+    def unexpected_report(*args, **kw):
+        pytest.fail("collapsed grid must be refused before the slope kernel")
+
+    monkeypatch.setattr(terrain, "build_report", unexpected_report)
+    before = keys(backend)
+    refused("TERRAIN_GRID_INVALID", slope, backend)
+    assert keys(backend) == before
+
+
+def test_terrain_adapter_representable_matches_the_kernel_sweep():
+    rng = random.Random(20261001)
+    collapsed_count = 0
+    for _ in range(200):
+        x_min = 10.0 ** rng.randint(3, 15) * rng.uniform(0.5, 1.0)
+        grid = representable_grid(x_min, x_min + rng.randint(1, 8) * math.ulp(x_min),
+                                  cols=rng.randint(2, 6))
+        collapsed = any(representable_collapsed(face) for face in representable_kernel_faces(grid))
+        document = ps.physical_document({"grid": grid}, drawing_units="m",
+                                        source_sha256=TERRAIN_SHA, capability="terrain-import")
+        if collapsed:
+            collapsed_count += 1
+            refused("TERRAIN_GRID_INVALID", ta.document_grid, document)
+        else:
+            assert ta.document_grid(document) == grid
+    assert 0 < collapsed_count < 200
+
+
+def test_terrain_adapter_representable_partial_collapse_refused():
+    found = None
+    for exponent in range(10, 50):
+        x_min = math.nextafter(2.0 ** exponent, -math.inf)
+        for span in range(1, 9):
+            x_max = x_min
+            for _ in range(span):
+                x_max = math.nextafter(x_max, math.inf)
+            for cols in range(2, 7):
+                grid = representable_grid(x_min, x_max, cols=cols)
+                collapsed = [representable_collapsed(face) for face in representable_kernel_faces(grid)]
+                if any(collapsed) and not all(collapsed):
+                    found = grid
+                    break
+            if found is not None:
+                break
+        if found is not None:
+            break
+    assert found is not None, "kernel sweep must find a partially collapsed grid"
+    document = ps.physical_document({"grid": found}, drawing_units="m",
+                                    source_sha256=TERRAIN_SHA, capability="terrain-import")
+    refused("TERRAIN_GRID_INVALID", ta.document_grid, document)
+
+
+def test_terrain_adapter_representable_two_ulp_span_passes(backend):
+    grid = representable_grid(1e14, 1e14 + 2 * math.ulp(1e14))
+    faces = representable_kernel_faces(grid)
+    assert len(faces) == (grid["rows"] - 1) * (grid["cols"] - 1)
+    assert not any(representable_collapsed(face) for face in faces)
+    publish(backend, {"grid": grid})
+    result = mesh(backend)
+    assert result["created"] is True
+    assert result["record"]["faces"] == len(faces)
+    assert ta.mesh_of(head_document(backend)) == faces
+
+
+def test_terrain_adapter_representable_small_grid_passes(backend):
+    grid = representable_grid(0.0, 1e-6)
+    assert not any(representable_collapsed(face) for face in representable_kernel_faces(grid))
+    publish(backend, {"grid": grid})
+    assert mesh(backend)["created"] is True
+
+
+def test_terrain_adapter_representable_subnormal_span_refused(backend):
+    grid = representable_grid(0.0, math.nextafter(0.0, math.inf))
+    assert all(representable_collapsed(face) for face in representable_kernel_faces(grid))
+    publish(backend, {"grid": grid})
+    before = keys(backend)
+    refused("TERRAIN_GRID_INVALID", mesh, backend)
+    assert keys(backend) == before
+
+
+def test_terrain_adapter_representable_document_grid_refuses_subnormal_span():
+    grid = representable_grid(0.0, math.nextafter(0.0, math.inf))
+    assert all(representable_collapsed(face) for face in representable_kernel_faces(grid))
+    with pytest.raises(ta.TerrainAdapterError) as exc:
+        ta.document_grid({"state": {"grid": grid}})
+    assert exc.value.code == "TERRAIN_GRID_INVALID"
+
+
+@pytest.mark.parametrize("field", ["x_max", "elevation"])
+def test_terrain_adapter_document_grid_overflowing_number_refused(field):
+    grid = representable_grid(0.0, 1.0)
+    if field == "x_max":
+        grid["x_max"] = 10**400
+    else:
+        grid["elevations"][0] = 10**400
+    with pytest.raises(ta.TerrainAdapterError) as exc:
+        ta.document_grid({"state": {"grid": grid}})
+    assert exc.value.code == "TERRAIN_GRID_INVALID"
+
+
+def test_terrain_adapter_representable_read_refuses_collapsed_head(backend):
+    grid = representable_grid()
+    assert any(representable_collapsed(face) for face in representable_kernel_faces(grid))
+    publish(backend, {"grid": grid})
+    before = keys(backend)
+    refused("TERRAIN_GRID_INVALID", read, backend)
+    assert keys(backend) == before
+
+
+def test_terrain_adapter_representable_clear_slope_unaffected(backend):
+    grid = representable_grid()
+    assert any(representable_collapsed(face) for face in representable_kernel_faces(grid))
+    marker = {"role": "slope", "bbox": [0.0, 0.0, 1.0, 1.0]}
+    head = publish(backend, {"grid": grid, "slope_markers": [marker]})
+    result = clear(backend)
+    assert (result["operation"], result["created"], result["replaced"], result["grid"],
+            result["record"]) == ("slope-clear", True, 1, None, None)
+    assert result["head"]["parent"] == head["state"]["artifact_id"]
+    assert head_document(backend)["state"]["grid"] == grid
+    assert head_document(backend)["state"]["slope_markers"] == []
+    before = keys(backend)
+    assert (clear(backend)["created"], clear(backend)["replaced"]) == (False, 0)
+    assert keys(backend) == before
+
+
+def test_terrain_adapter_representable_capture_grid_unchanged(backend):
+    imp(backend)
+    record = {"schema": "leaf.solar-terrain-preview.v1", "capability": MESH, "maturity": "preview",
+              "grid_sha256": CAPTURE_GRID_SHA, "meters_per_unit": 1.0, "faces": 841,
+              "buckets": {"Green": 717, "Yellow": 124, "Red": 0}, "max_slope_percent": 8.913350836855564,
+              "mesh_sha256": "3c396f556cb26e26f98afcf2a0599bb4279c3529829ea7629a8f9e1b2b21a05e"}
+    assert json.dumps(mesh(backend)["record"], sort_keys=True, separators=(",", ":")) == json.dumps(
+        record, sort_keys=True, separators=(",", ":"))
 
 
 def test_terrain_adapter_concurrent_writer_conflicts(backend, monkeypatch):
