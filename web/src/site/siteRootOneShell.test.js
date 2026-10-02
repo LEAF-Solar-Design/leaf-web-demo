@@ -151,10 +151,30 @@ describe('rollback contract', () => {
     const css = read('./studioShell.css')
     const shell = '.studio-shell .app[data-studio-shell="cockpit"][data-surface]'
     const selector = `${shell}:has(aside.nav:not([data-spine])) .drawing-navigation`
-    const start = css.indexOf(`@media (min-width: 981px) {\n\n${selector} {`)
-    expect(start).toBeGreaterThan(-1)
-    const rule = css.slice(css.indexOf(`${selector} {`, start))
-    expect(rule.slice(0, rule.indexOf('}'))).toContain('left: calc(var(--ck-nav-width) + 8px);')
+    const desktopBodies = []
+    const outsideDesktop = []
+    const media = /@media\s*\(\s*min-width\s*:\s*981px\s*\)\s*\{/g
+    let previousEnd = 0
+    let match
+    while ((match = media.exec(css))) {
+      const bodyStart = media.lastIndex
+      let depth = 1
+      let end = bodyStart
+      for (; end < css.length && depth > 0; end++) {
+        if (css[end] === '{') depth++
+        if (css[end] === '}') depth--
+      }
+      expect(depth).toBe(0)
+      desktopBodies.push(css.slice(bodyStart, end - 1))
+      outsideDesktop.push(css.slice(previousEnd, match.index))
+      previousEnd = end
+      media.lastIndex = end
+    }
+    outsideDesktop.push(css.slice(previousEnd))
+    const offset = /\bleft\s*:\s*calc\(\s*var\(--ck-nav-width\)\s*\+\s*8px\s*\)\s*;/
+    const rules = desktopBodies.flatMap(body => [...body.matchAll(/([^{}]+)\{([^{}]*)\}/g)])
+    expect(rules.some(rule => rule[1].trim() === selector && offset.test(rule[2]))).toBe(true)
+    expect(outsideDesktop.join('\n')).not.toMatch(offset)
     const rail = css.slice(css.indexOf(`${shell} aside.nav:not([data-spine]) {`))
     expect(rail.slice(0, rail.indexOf('}'))).toContain('width: var(--ck-nav-width);')
   })
