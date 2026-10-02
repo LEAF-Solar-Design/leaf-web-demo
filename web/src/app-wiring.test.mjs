@@ -723,7 +723,17 @@ describe('Solar rooftop starter', () => {
     assert.ok(appSource.includes("useState({ drawingId: REQUESTED_DRAWING_ID, state: 'pending' })"))
     assert.ok(appSource.includes("resetDrawing(); setDrawingLoad({ drawingId: loadDrawingId, state: 'pending' })"))
     assert.ok(appSource.includes("setDrawingLoad({ drawingId: loadDrawingId, state: d != null ? 'seated' : 'absent' })"))
-    assert.ok(appSource.includes("setDrawingLoad({ drawingId: loadDrawingId, state: e?.status === 404 ? 'absent' : 'failed' })"))
+    assert.ok(appSource.includes("setDrawingLoad({ drawingId: loadDrawingId, state: e?.status === 404 ? 'absent' : 'failed', failure: classifyDrawingLoadFailure(e) })"))
+  })
+  it('row16 permanent drawing load failures explain the failure and offer Retry only for non-permanent failures', () => {
+    assert.ok(appSource.includes("import { classifyDrawingLoadFailure } from './drawing/loadFailure.js'"))
+    const start = appSource.indexOf('{loadErr && !signedOut && (')
+    const end = appSource.indexOf('{signedOut &&', start)
+    assert.ok(start >= 0 && end > start, 'drawing load failure block exists')
+    const failedLoad = appSource.slice(start, end)
+    assert.ok(failedLoad.includes("<span className=\"pane-fail-reason\">{drawingLoad.failure === 'permanent' ? 'This drawing could not be found or opened.' : loadErr}</span>"))
+    assert.match(failedLoad, new RegExp(String.raw`\{drawingLoad\.failure !== 'permanent' && \(\s*<button className="chip-act" onClick=\{\(\) => setIntakeRetryKey\(\(k\) => k \+ 1\)\}>Retry</button>\s*\)\}`))
+    assert.equal(failedLoad.split('>Retry</button>').length - 1, 1, 'the failed-load Retry button appears only in the non-permanent conditional')
   })
   it('row19 pins drawing identity and drops superseded loader replies before cleanup', async () => {
     assert.ok(appSource.includes('requestedDrawingIdRef.current = REQUESTED_DRAWING_ID'))
