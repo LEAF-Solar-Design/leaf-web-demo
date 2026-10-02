@@ -3720,6 +3720,7 @@ def test_web_walk_unit_is_one_mandatory_fixed_script_row():
     package = json.loads((g.WEB / "package.json").read_text(encoding="utf-8"))
     assert package["scripts"]["check:walk-unit"].split() == [
         "node", "--test", "walk/featureMap.test.mjs", "walk/pureRegistries.test.mjs",
+        "walk/controlInventory.test.mjs",
         "walk/report.test.mjs", "e2e/walk/probes.test.mjs", "e2e/walk/lenses.test.mjs",
         "e2e/walk/uxMetrics.test.mjs",
     ]

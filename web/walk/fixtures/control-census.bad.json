@@ -1,0 +1,17 @@
+{
+  "map": { "entries": [{ "id": "action:fit" }] },
+  "inventory": {
+    "version": 1,
+    "mappings": [],
+    "baseline_unmapped": [{ "scope": "document", "role": "button", "name": "Removed control", "reason": "Shell control pending coverage" }]
+  },
+  "derivedMappings": [{ "index": 0, "feature_id": "action:fit" }],
+  "normalization_collisions": [
+    ["Panels 1", "Panels 29"],
+    ["Redo version (unavailable: nothing to redo)", "Redo version (unavailable: no versioned drawing)"]
+  ],
+  "controls": [
+    { "index": 0, "scope": "toolbar:\"View\"", "role": "button", "name": "Fit drawing", "disabled": false, "visible": true },
+    { "index": 1, "scope": "document", "role": "button", "name": "New control", "disabled": false, "visible": true }
+  ]
+}
