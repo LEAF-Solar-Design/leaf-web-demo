@@ -141,6 +141,23 @@ function evidenceFor(result) {
   return records.length ? attachmentJson(records[0]) : {}
 }
 
+function stackWitness(evidence, featureId) {
+  if (!Object.hasOwn(evidence, 'stack')) return undefined
+  const stack = evidence.stack
+  // Frozen pre-witness reports used stack only for launcher metadata.
+  if (stack && typeof stack === 'object' && !Array.isArray(stack)
+    && !Object.hasOwn(stack, 'ready') && !Object.hasOwn(stack, 'instance')
+    && Object.keys(stack).every((key) => ['baseURL', 'ports', 'metricsPath'].includes(key))
+    && typeof stack.baseURL === 'string' && typeof stack.metricsPath === 'string'
+    && stack.ports && typeof stack.ports === 'object' && !Array.isArray(stack.ports)) return undefined
+  if (!stack || typeof stack !== 'object' || Array.isArray(stack) || typeof stack.ready !== 'boolean'
+    || (stack.ready && !Object.hasOwn(stack, 'instance'))
+    || (Object.hasOwn(stack, 'instance') && (typeof stack.instance !== 'string' || !/^[a-f0-9]{64}$/.test(stack.instance)))) {
+    throw new TypeError(`Invalid stack witness for ${featureId}`)
+  }
+  return { stack_ready: stack.ready, ...(stack.instance === undefined ? {} : { stack_ref: stack.instance }) }
+}
+
 function errorsFor(result) {
   return result.errors?.length ? result.errors : result.error ? [result.error] : []
 }
@@ -258,6 +275,11 @@ export function buildReceipt({ playwrightReport, featureMap, identity }) {
   }
   const journeys = new Map()
   const censuses = new Map()
+  let evidenceRuns = 0
+  let readyRuns = 0
+  let unready = false
+  let witnessed = false
+  const stackRefs = new Set()
   for (const spec of specs(playwrightReport.suites)) {
     const census = spec.title?.match(/^(control-census:[a-z0-9]+(?:-[a-z0-9]+)*) \[([^\]]+)\] @(desktop|phone)$/)
     const match = spec.title?.match(/^([^\s]+) \[([^\]]+)\] @(desktop|phone)$/)
@@ -282,6 +304,14 @@ export function buildReceipt({ playwrightReport, featureMap, identity }) {
     for (const test of spec.tests || []) for (const result of test.results || []) {
       if (test.projectName && test.projectName !== row.triple.viewport) throw new Error('Test project does not match viewport')
       const evidence = evidenceFor(result)
+      if ((result.attachments || []).some((item) => item.name === 'walk-evidence')) evidenceRuns++
+      const stack = stackWitness(evidence, row.entry.id)
+      if (stack) {
+        witnessed = true
+        if (stack.stack_ready) readyRuns++
+        else unready = true
+        if (stack.stack_ref) stackRefs.add(stack.stack_ref)
+      }
       let ux
       if (Object.hasOwn(evidence, 'ux_observations')) {
         try { ux = packUxEvidence(evidence.ux_observations).ux_observations }
@@ -292,7 +322,11 @@ export function buildReceipt({ playwrightReport, featureMap, identity }) {
       if (test.expectedStatus === 'failed' && outcome.verdict === 'pass') outcome.verdict = 'fail'
       if (test.expectedStatus === 'skipped') { outcome.verdict = 'queued'; outcome.reason = 'Skipped effect assertion' }
       row.runs.push(outcome)
-      if (outcome.verdict === 'fail') receipt.failures.push(oracle(row.entry, row.triple.state, row.triple.viewport, result, row.journey, row.census))
+      if (outcome.verdict === 'fail') {
+        const failure = oracle(row.entry, row.triple.state, row.triple.viewport, result, row.journey, row.census)
+        if (stack) failure.evidence.context = stack
+        receipt.failures.push(failure)
+      }
       if (outcome.verdict === 'unsupported_local') receipt.unavailable_features.push({ feature_id: row.entry.id,
         reason: `${row.triple.state} @${row.triple.viewport}: ${redact(outcome.reason)}` })
       if (Object.keys(evidence).length) receipt.findings.push(...observations(row.entry.id, row.triple.state, row.triple.viewport, evidence))
@@ -326,6 +360,12 @@ export function buildReceipt({ playwrightReport, featureMap, identity }) {
       receipt.evidence.flakes.push({ ...triple, occurrences: runs.length })
     }
     for (const run of runs) if (run.verdict === 'unsupported_local') receipt.evidence.unavailable.push({ ...triple, reason: redact(run.reason) })
+  }
+  if (witnessed) {
+    if (stackRefs.size > 16) throw new Error(`Stack witness has ${stackRefs.size} distinct instance refs; maximum is 16`)
+    receipt.evidence.context = { stack_refs: [...stackRefs].sort(compare) }
+    if (unready) receipt.evidence.context.stack_ready = false
+    else if (evidenceRuns > 0 && readyRuns === evidenceRuns) receipt.evidence.context.stack_ready = true
   }
   const output = clean(receipt)
   if (Buffer.byteLength(JSON.stringify(output)) > MAX_RECEIPT_BYTES) throw new Error('Receipt exceeds 1 MiB bound')

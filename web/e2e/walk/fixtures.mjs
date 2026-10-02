@@ -2,6 +2,8 @@ import { test as base, expect } from '@playwright/test'
 import { startStack } from '../../walk/stack.mjs'
 import { prepareProductionBundle } from '../../walk/sameOriginProxy.mjs'
 import { readFile, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { basename, join } from 'node:path'
 import { PRODUCT_SURFACES } from '../../src/site/productSurfaces.js'
 import { toolPlacementTab } from '../../src/lib/toolRecord.js'
 import { normalizedControlKey } from './probes.mjs'
@@ -12,21 +14,36 @@ export { expect }
 export const LOCAL_IDENTITY = Object.freeze({ tenant: 'demo-tenant', token: 'j1-presentation-fixture' })
 export const COACH_STORAGE_KEY = 'leaf.coach.dismissed.v1'
 
+export function stackInstanceRef(root, launcherPid, bootTimeMs) {
+  return createHash('sha256').update(JSON.stringify([basename(root), launcherPid, bootTimeMs])).digest('hex')
+}
+
 export const test = base.extend({
   firstRun: [false, { option: true }],
-  stack: [async ({}, use, workerInfo) => {
+  workerStack: [async ({}, use, workerInfo) => {
     let stack
+    let bootError
+    let witness
     try {
       // workerIndex also distinguishes replacement workers after a failure.
-      stack = await startStack({ slot: workerInfo.workerIndex, slots: workerInfo.config.workers })
-      await use(stack)
-    } catch (error) {
-      if (error.code === 'QUEUED') throw new Error(`QUEUED: ${error.message}`, { cause: error })
-      throw error
+      try {
+        stack = await startStack({ slot: workerInfo.workerIndex, slots: workerInfo.config.workers })
+        const bootTimeMs = Date.now()
+        const readiness = JSON.parse(await readFile(join(stack.root, 'ready.json'), 'utf8'))
+        witness = { ready: true, instance: stackInstanceRef(stack.root, readiness.launcher_pid, bootTimeMs) }
+      } catch (error) {
+        bootError = error.code === 'QUEUED' ? new Error(`QUEUED: ${error.message}`, { cause: error }) : error
+      }
+      await use({ stack, bootError, witness })
     } finally {
       if (stack) await stack.stop()
     }
   }, { scope: 'worker', timeout: 300_000 }],
+  stack: async ({ workerStack, walkEvidence }, use) => {
+    walkEvidence.stack = workerStack.witness || { ready: false }
+    if (workerStack.bootError) throw workerStack.bootError
+    await use(workerStack.stack)
+  },
   baseURL: async ({ stack }, use) => { await use(stack.baseURL) },
   extraHTTPHeaders: async ({}, use) => {
     await use({ 'X-Tenant-Id': LOCAL_IDENTITY.tenant })
@@ -46,7 +63,6 @@ export const test = base.extend({
     }
   }, { auto: true }],
   page: async ({ page, stack, firstRun, walkEvidence }, use) => {
-    walkEvidence.stack = { baseURL: stack.baseURL, ports: stack.ports, metricsPath: stack.metricsPath }
     const consoleError = (message) => {
       if (message.type() === 'error') walkEvidence.consoleErrors.push({ text: message.text(), location: message.location() })
     }
