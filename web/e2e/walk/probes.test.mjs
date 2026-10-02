@@ -56,3 +56,46 @@ test('unknown states and incomplete effect contracts fail closed', () => {
   entry.expected_effect[state] = { kind: 'opens' }
   assert.throws(() => effectAssertion(entry, state), /needs a target/)
 })
+
+test('nav uses the visible desktop rail disclosure and its phone toggle', () => {
+  const entry = map.entries.find((entry) => entry.id === 'drawer:nav')
+  for (const state of ['closed', 'open']) {
+    const probe = resolveProbe(entry, state)
+    assert.equal(probe.locator.role, 'button')
+    assert.equal(probe.locator.name, state === 'open' ? 'Collapse the tool rail to a spine' : 'Tool rail')
+    assert.equal(probe.locator.phone.name, 'Tool rail')
+    assert.equal(probe.locator.trigger, 'click')
+    assert.deepEqual(probe.setup.steps.at(-1), { kind: 'tool-rail-state', name: 'Catalog', open: state === 'open' })
+  }
+})
+
+test('the feature map excludes Fit no-drawing and keeps Fit ready', () => {
+  const entry = map.entries.find((entry) => entry.id === 'action:fit')
+  assert.ok(entry)
+  assert.equal(entry.states.includes('no-drawing'), false)
+  assert.equal(Object.hasOwn(entry.expected_effect, 'no-drawing'), false)
+  assert.equal(entry.states.includes('ready'), true)
+  assert.equal(resolveProbe(entry, 'ready').state, 'ready')
+  assert.throws(() => resolveProbe(entry, 'no-drawing'), /Unknown state no-drawing for action:fit/)
+})
+
+test('Fit ready changes the viewport before asserting its return home', () => {
+  const probe = resolveProbe(map.entries.find((entry) => entry.id === 'action:fit'), 'ready')
+  assert.equal(probe.setup.steps.at(-1).kind, 'zoom-before-fit')
+  assert.deepEqual(probe.setup.steps.at(-1).control, {
+    role: 'button', name: 'Zoom in', exact: true,
+    scope: { role: 'toolbar', name: 'View', exact: true },
+  })
+  assert.equal(probe.assertion.target, 'viewer-home')
+})
+
+test('the refreshed read tool has ready, read-only and running probes', () => {
+  const entry = map.entries.find((entry) => entry.id === 'tool:count-by-layer')
+  assert.ok(entry)
+  assert.equal(map.entries.some((entry) => entry.id === 'tool:count-panels'), false)
+  for (const state of ['ready', 'read-only', 'job-running']) {
+    const probe = resolveProbe(entry, state)
+    assert.ok(probe.setup.steps.some((step) => step.kind === 'catalog-tool' && step.name === 'count-by-layer'))
+    assert.equal(probe.assertion.kind, state === 'ready' ? 'opens' : 'disabled_with_reason')
+  }
+})

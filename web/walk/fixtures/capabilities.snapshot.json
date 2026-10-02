@@ -1,38 +1,4997 @@
 {
   "snapshot_version": 1,
-  "catalog_version": "cat-proof-unpublished-v1",
+  "catalog_version": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
   "endpoint": "/api/capabilities",
-  "sources": ["server/routers/capabilities.py", "web/e2e/catProofFixture.mjs"],
+  "sources": [
+    "server/routers/capabilities.py",
+    "server/catalog.py"
+  ],
+  "recorded_evidence": "isolated stack /api/capabilities, walk smoke run 2026-10-01",
   "response": {
-    "families": [{
-      "family_id": "drawing-tools",
-      "label": "Drawing tools",
-      "description": "Read and transform the current drawing.",
-      "capabilities": [{
-        "name": "count-panels",
-        "version": "1.0.0",
-        "description": "Count every panel in the current drawing.",
-        "kind": "script",
-        "capabilities": ["drawing.read"],
-        "params": {"type": "object", "properties": {}},
-        "provenance": {"author": "user"}
-      }, {
-        "name": "arrange-panels-as-cat",
-        "version": "1.0.0",
-        "description": "Rearrange existing panels into a sitting cat.",
-        "kind": "script",
-        "capabilities": ["drawing.write"],
-        "params": {
-          "type": "object",
-          "properties": {
-            "template": {"type": "string", "default": "sitting-v1"},
-            "drawing_id": {"type": "string", "default": "cat-panels"},
-            "expected_head": {"type": "number", "default": 1}
+    "families": [
+      {
+        "family_id": "measurement",
+        "label": "Measurement",
+        "description": "Count and measure entities in the drawing.",
+        "capabilities": [
+          {
+            "name": "count-by-layer",
+            "version": "1.0.0",
+            "description": "Counts every model-space entity per layer.",
+            "params_schema": {
+              "type": "object",
+              "properties": {},
+              "required": []
+            },
+            "capabilities": [
+              "drawing.read"
+            ],
+            "provenance": {
+              "author": "agent",
+              "created": "2026-07-17T00:00:00Z"
+            },
+            "kind": "script",
+            "engine_op": "count_by_layer",
+            "catalog_digest": "sha256:ef86e3f0ac955084364af8d7e705e9dd176d3662fd66c767ad3ebeab20a26017",
+            "tool_manifest_sha256": "sha256:ef86e3f0ac955084364af8d7e705e9dd176d3662fd66c767ad3ebeab20a26017",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false
+          },
+          {
+            "name": "measure-panel-area",
+            "version": "1.0.0",
+            "description": "Sums closed-polyline area (total + per layer) in square feet; assumes 1 drawing unit = 1 inch.",
+            "params_schema": {
+              "type": "object",
+              "properties": {},
+              "required": []
+            },
+            "capabilities": [
+              "drawing.read"
+            ],
+            "provenance": {
+              "author": "agent",
+              "created": "2026-07-17T00:00:00Z"
+            },
+            "kind": "script",
+            "engine_op": "measure_panel_area",
+            "catalog_digest": "sha256:1493fce2f849a3a9a8c4190189db789d1cc3a6e7cd597fd90d5de68e1caaf65a",
+            "tool_manifest_sha256": "sha256:1493fce2f849a3a9a8c4190189db789d1cc3a6e7cd597fd90d5de68e1caaf65a",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false
           }
-        },
-        "provenance": {"author": "user"}
-      }]
-    }],
-    "source": "registry"
+        ]
+      },
+      {
+        "family_id": "selection",
+        "label": "Selection & highlighting",
+        "description": "Select or highlight entities matching spatial criteria.",
+        "capabilities": [
+          {
+            "name": "highlight-panels-near-edge",
+            "version": "1.0.0",
+            "description": "Returns handles of polylines on a layer whose centroid is within a distance of the drawing extents edge.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "layer": {
+                  "type": "string",
+                  "default": "Panels",
+                  "description": "Layer whose polylines are tested."
+                },
+                "distance": {
+                  "type": "number",
+                  "default": 200,
+                  "description": "Max distance (drawing units / inches) from an extents edge."
+                }
+              },
+              "required": []
+            },
+            "capabilities": [
+              "drawing.read"
+            ],
+            "provenance": {
+              "author": "agent",
+              "created": "2026-07-17T00:00:00Z"
+            },
+            "kind": "script",
+            "engine_op": "highlight_panels_near_edge",
+            "catalog_digest": "sha256:a1f7d1718d1883b7168dfe6244435f420b1400ff5ac155eea32adccf5c9187c4",
+            "tool_manifest_sha256": "sha256:a1f7d1718d1883b7168dfe6244435f420b1400ff5ac155eea32adccf5c9187c4",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false
+          }
+        ]
+      },
+      {
+        "family_id": "custom",
+        "label": "Custom authored tools",
+        "description": "Tools authored in this workspace via /api/author.",
+        "capabilities": [
+          {
+            "name": "string-panels",
+            "version": "1.2.0",
+            "description": "Bank-clustered, rotation-aware serpentine DC string routing over the Panels layer with an NEC 690.7 cold-temperature string-size check.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "module_model": {
+                  "type": "string",
+                  "default": "Q.Peak DUO XL-G11.7 / 425",
+                  "description": "Module model label (marketing-demo default)."
+                },
+                "voc": {
+                  "type": "number",
+                  "default": 48.5,
+                  "description": "Module open-circuit voltage at STC, volts (demo default)."
+                },
+                "temp_coeff_pct_per_c": {
+                  "type": "number",
+                  "default": -0.27,
+                  "description": "Voc temperature coefficient, %/degC (demo default)."
+                },
+                "design_min_temp_c": {
+                  "type": "number",
+                  "default": -25,
+                  "description": "Design minimum ambient temperature, degC (demo default)."
+                },
+                "max_system_voltage": {
+                  "type": "number",
+                  "default": 1000,
+                  "description": "NEC 690.7 maximum system voltage, volts (commercial-rooftop demo default)."
+                },
+                "panel_layer": {
+                  "type": "string",
+                  "default": "Panels",
+                  "description": "Intake layer carrying the closed panel polylines."
+                },
+                "cluster_radius_factor": {
+                  "type": "number",
+                  "default": 3,
+                  "description": "Bank clustering radius as a multiple of the median nearest-neighbor panel distance; strings never cross bank gaps."
+                }
+              },
+              "required": []
+            },
+            "capabilities": [
+              "drawing.read"
+            ],
+            "provenance": {
+              "author": "site-demo-lane",
+              "created": "2026-07-20T00:00:00Z"
+            },
+            "kind": "script",
+            "engine_op": "string_panels",
+            "catalog_digest": "sha256:655f7c691ec391bbc71f207fa6a9b84df0b3b4534fc6b62f43fbc2416e39f199",
+            "tool_manifest_sha256": "sha256:655f7c691ec391bbc71f207fa6a9b84df0b3b4534fc6b62f43fbc2416e39f199",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false
+          },
+          {
+            "name": "instant-list-layers",
+            "version": "1.0.0",
+            "description": "Lists layers from the drawing context preloaded when the session opens.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "prefix": {
+                  "type": "string"
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.read"
+            ],
+            "provenance": {
+              "author": "agent",
+              "created": "2026-07-28T00:00:00Z"
+            },
+            "kind": "script",
+            "engine_op": "instant_list_layers",
+            "catalog_digest": "sha256:e0ed69d4820d15758b51438c64a7c4fbbde5a7a7cbe62e78b2d1a4d1817960ae",
+            "tool_manifest_sha256": "sha256:e0ed69d4820d15758b51438c64a7c4fbbde5a7a7cbe62e78b2d1a4d1817960ae",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "sha256:50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "instant",
+            "runtime": "python-3.12",
+            "limits": {
+              "max_wall_ms": 500,
+              "max_cpu_ms": 100,
+              "max_memory_mb": 64,
+              "max_output_bytes": 65536,
+              "max_tool_calls": 0
+            },
+            "artifact_digest": "sha256:3b77e442801655fbc89e6bca0cf15d13bf5482d7ea28d1f856abc7a307c1fbd2",
+            "batch_fallback": false,
+            "aps_live": false
+          },
+          {
+            "name": "delete-marked-panel",
+            "version": "1.0.0",
+            "description": "Deletes one marked panel polyline (by handle; default = first on layer Panels) and adds a marker entity — produces a new immutable drawing version.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "default": "demo",
+                  "description": "Target drawing in the versioned store (well-known demo id at APS_LIVE=0)."
+                },
+                "handle": {
+                  "type": "string",
+                  "description": "Handle of the polyline to delete; default = first polyline on `layer`."
+                },
+                "layer": {
+                  "type": "string",
+                  "default": "Panels",
+                  "description": "Layer to pick the default deletion target from."
+                }
+              },
+              "required": []
+            },
+            "capabilities": [
+              "drawing.write"
+            ],
+            "provenance": {
+              "author": "agent",
+              "created": "2026-07-18T00:00:00Z"
+            },
+            "kind": "script",
+            "engine_op": "delete_marked_panel",
+            "catalog_digest": "sha256:f4da48b09c8860c2e5fc7fadf9fbb98e75f5e745d218895c582b4a60caa151fa",
+            "tool_manifest_sha256": "sha256:f4da48b09c8860c2e5fc7fadf9fbb98e75f5e745d218895c582b4a60caa151fa",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false
+          }
+        ]
+      },
+      {
+        "family_id": "stringing",
+        "label": "Stringing",
+        "description": "Panel-to-inverter string layout and target-count solving. Two names, one capability (operator ruling R-A, 2026-07-22): the heuristic autofill-string-targets and the real optimizer string-autofill-opt.",
+        "capabilities": [
+          {
+            "name": "string-autofill-opt",
+            "version": "1.0.0",
+            "description": "Runs the existing AutoFill target solver and records deterministic input/result hashes and source revision.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "groups": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  },
+                  "minItems": 1
+                },
+                "panelsPerString": {
+                  "type": "integer",
+                  "minimum": 3
+                },
+                "options": {
+                  "type": "object"
+                },
+                "panelAngle": {
+                  "type": "number",
+                  "default": 0
+                },
+                "panelWidth": {
+                  "type": "number",
+                  "default": 0
+                },
+                "panelHeight": {
+                  "type": "number",
+                  "default": 0
+                }
+              },
+              "required": [
+                "groups",
+                "panelsPerString"
+              ]
+            },
+            "capabilities": [
+              "solve"
+            ],
+            "provenance": {
+              "source": "autofill-solver/solver.py",
+              "entry": "solve_targets"
+            },
+            "kind": "solver",
+            "engine_op": "autofill_string_targets",
+            "catalog_digest": "sha256:b2475559429113fb3cb382024003ce9b1167eec851d8e321bb5d8841c5432113",
+            "tool_manifest_sha256": "sha256:b2475559429113fb3cb382024003ce9b1167eec851d8e321bb5d8841c5432113",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false
+          },
+          {
+            "name": "solar-solve-proposal",
+            "version": "1.0.0",
+            "description": "Leaf Automation cloud stringer proposal. Provisional wire schema; never changes the drawing.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "grant_ref": {
+                  "type": "string",
+                  "pattern": "^[a-zA-Z0-9_-]{1,64}$"
+                },
+                "request": {
+                  "type": "object"
+                }
+              },
+              "required": [
+                "grant_ref",
+                "request"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "solve"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_solve_proposal",
+            "catalog_digest": "sha256:33ca2f21d777762c0e3dd1ad6925599c1d3533aa6341dffa39167fdd5728132d",
+            "tool_manifest_sha256": "sha256:33ca2f21d777762c0e3dd1ad6925599c1d3533aa6341dffa39167fdd5728132d",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-solve-proposal",
+              "family": "stringing",
+              "wave": 1,
+              "order": 40,
+              "maturity": "production",
+              "engine": "cloud-service",
+              "adapter": "cloud-proposal",
+              "entitlement": "solve",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "solve"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": true,
+              "input_reason": null,
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [],
+              "runnable": true
+            }
+          },
+          {
+            "name": "autofill-string-targets",
+            "version": "1.0.0",
+            "description": "Derive string targets from the drawing's panel polylines: bank-clustered, rotation-aware serpentine DC string routing over the Panels layer with an NEC 690.7 cold-temperature string-size check. Read-only; runs server/builtins/string_panels.py against the intake.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "voc": {
+                  "type": "number",
+                  "default": 48.5,
+                  "description": "Module open-circuit voltage at STC, volts (demo default)."
+                },
+                "temp_coeff_pct_per_c": {
+                  "type": "number",
+                  "default": -0.27,
+                  "description": "Voc temperature coefficient, %/degC (demo default)."
+                },
+                "design_min_temp_c": {
+                  "type": "number",
+                  "default": -25,
+                  "description": "Design minimum ambient temperature, degC (demo default)."
+                },
+                "max_system_voltage": {
+                  "type": "number",
+                  "default": 1000,
+                  "description": "NEC 690.7 maximum system voltage, volts (commercial-rooftop demo default)."
+                },
+                "panel_layer": {
+                  "type": "string",
+                  "default": "Panels",
+                  "description": "Intake layer carrying the closed panel polylines."
+                },
+                "cluster_radius_factor": {
+                  "type": "number",
+                  "default": 3,
+                  "description": "Bank clustering radius as a multiple of the median nearest-neighbor panel distance; strings never cross bank gaps."
+                }
+              },
+              "required": []
+            },
+            "capabilities": [
+              "drawing.read"
+            ],
+            "provenance": {
+              "author": "agent",
+              "created": "2026-07-22T00:00:00Z"
+            },
+            "kind": "script",
+            "engine_op": "autofill_string_targets",
+            "catalog_digest": "sha256:454430210dda4678d66eef2b4e6a1df9f4eda9be3773114982a22676f695c86c",
+            "tool_manifest_sha256": "sha256:454430210dda4678d66eef2b4e6a1df9f4eda9be3773114982a22676f695c86c",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false
+          },
+          {
+            "name": "solar-settings",
+            "version": "1.0.0",
+            "description": "Edit drawing-owned solar settings.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "expected_rev": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "cancel": {
+                  "type": "boolean"
+                },
+                "changes": {
+                  "type": "object",
+                  "minProperties": 1,
+                  "maxProperties": 14
+                },
+                "project_changes": {
+                  "type": "object",
+                  "minProperties": 1,
+                  "maxProperties": 4,
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "maxLength": 4096
+                    },
+                    "zip_code": {
+                      "type": "string",
+                      "maxLength": 10
+                    },
+                    "latitude": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "minimum": -90,
+                      "maximum": 90
+                    },
+                    "longitude": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "minimum": -180,
+                      "maximum": 180
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "initialize": {
+                  "type": "object",
+                  "properties": {
+                    "schema_version": {
+                      "type": "integer",
+                      "enum": [
+                        1
+                      ]
+                    },
+                    "source_intake_sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "units": {
+                      "type": "object",
+                      "properties": {
+                        "drawing_units": {
+                          "type": "string",
+                          "enum": [
+                            "m",
+                            "mm",
+                            "cm",
+                            "km",
+                            "in",
+                            "ft",
+                            "yd"
+                          ]
+                        },
+                        "wcs_to_ucs": {
+                          "type": "array",
+                          "minItems": 16,
+                          "maxItems": 16,
+                          "items": {
+                            "type": "number"
+                          }
+                        },
+                        "elevation_datum": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 4096
+                        },
+                        "crs": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "maxLength": 4096
+                        }
+                      },
+                      "required": [
+                        "drawing_units",
+                        "wcs_to_ucs",
+                        "elevation_datum",
+                        "crs"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "schema_version",
+                    "source_intake_sha256",
+                    "units"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "expected_rev"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.write"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_settings",
+            "catalog_digest": "sha256:a560ec3662e09efb3fefb2d7fa683cdbc55f2630abe633910b0bdd6645528559",
+            "tool_manifest_sha256": "sha256:a560ec3662e09efb3fefb2d7fa683cdbc55f2630abe633910b0bdd6645528559",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-settings",
+              "family": "stringing",
+              "wave": 1,
+              "order": 10,
+              "maturity": "production",
+              "engine": "server-builtin",
+              "adapter": "local-graph-commit",
+              "entitlement": "run_write",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": []
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-size-strings",
+            "version": "1.0.0",
+            "description": "Confirm cloud string sizing for this drawing.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "expected_rev": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "cancel": {
+                  "type": "boolean"
+                },
+                "mode": {
+                  "enum": [
+                    "global",
+                    "zones"
+                  ]
+                },
+                "requests": {
+                  "type": "object",
+                  "maxProperties": 4096
+                },
+                "grant_ref": {
+                  "type": "string",
+                  "pattern": "^[a-zA-Z0-9_-]{1,64}$"
+                },
+                "confirm": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "expected_rev"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.write"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_size_strings",
+            "catalog_digest": "sha256:48d2c171a8c9da862ae6da44987fcb8fec528e2abe1a268bcf875dc6e236233f",
+            "tool_manifest_sha256": "sha256:48d2c171a8c9da862ae6da44987fcb8fec528e2abe1a268bcf875dc6e236233f",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-size-strings",
+              "family": "stringing",
+              "wave": 1,
+              "order": 20,
+              "maturity": "production",
+              "engine": "cloud-service",
+              "adapter": "local-graph-commit",
+              "entitlement": "run_write",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "string-sizer"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-panel-groups",
+            "version": "1.0.0",
+            "description": "Build panel groups with the licensed drawing engine.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "expected_rev": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "cancel": {
+                  "type": "boolean"
+                },
+                "groups": {
+                  "type": "array",
+                  "maxItems": 128,
+                  "items": {
+                    "type": "object"
+                  }
+                }
+              },
+              "required": [
+                "expected_rev"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.write"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_panel_groups",
+            "catalog_digest": "sha256:098e6563d15837eccc55d63f81b45011fa6efc679130b27c8241fef77e47425a",
+            "tool_manifest_sha256": "sha256:098e6563d15837eccc55d63f81b45011fa6efc679130b27c8241fef77e47425a",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-panel-groups",
+              "family": "stringing",
+              "wave": 1,
+              "order": 30,
+              "maturity": "production",
+              "engine": "server-builtin",
+              "adapter": "local-graph-commit",
+              "entitlement": "run_write",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "panel-group-create"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-commit-solve",
+            "version": "1.0.0",
+            "description": "Commit a broker-validated solar solve candidate.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "expected_rev": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "cancel": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "expected_rev"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.write"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_commit_solve",
+            "catalog_digest": "sha256:69b70748c4383c2503ed385a63942528a09719a9df69568c1c97524ef00421fa",
+            "tool_manifest_sha256": "sha256:69b70748c4383c2503ed385a63942528a09719a9df69568c1c97524ef00421fa",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-commit-solve",
+              "family": "stringing",
+              "wave": 1,
+              "order": 50,
+              "maturity": "production",
+              "engine": "server-builtin",
+              "adapter": "local-graph-commit",
+              "entitlement": "run_write",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "solve"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-correct-string",
+            "version": "1.0.0",
+            "description": "Correct persisted string membership or settings.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "expected_rev": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "cancel": {
+                  "type": "boolean"
+                },
+                "memberships": {
+                  "type": "array",
+                  "maxItems": 1000,
+                  "items": {
+                    "type": "object"
+                  }
+                },
+                "settings_changes": {
+                  "type": "object",
+                  "maxProperties": 4096
+                }
+              },
+              "required": [
+                "expected_rev"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.write"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_correct_string",
+            "catalog_digest": "sha256:7eafd72428523b7d36a0047cb56ab84625c7e42f285376726c4da8334db8a427",
+            "tool_manifest_sha256": "sha256:7eafd72428523b7d36a0047cb56ab84625c7e42f285376726c4da8334db8a427",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-correct-string",
+              "family": "stringing",
+              "wave": 1,
+              "order": 60,
+              "maturity": "production",
+              "engine": "server-builtin",
+              "adapter": "local-graph-commit",
+              "entitlement": "run_write",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": []
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-assign-equipment",
+            "version": "1.0.0",
+            "description": "Place equipment and assign valid strings.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "expected_rev": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "cancel": {
+                  "type": "boolean"
+                },
+                "equipment": {
+                  "type": "array",
+                  "maxItems": 4096,
+                  "items": {
+                    "type": "object"
+                  }
+                },
+                "assignments": {
+                  "type": "array",
+                  "maxItems": 4096,
+                  "items": {
+                    "type": "object"
+                  }
+                },
+                "preview": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "expected_rev"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.write"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_assign_equipment",
+            "catalog_digest": "sha256:f6f53fc166c6247e0676f929fc7bfef6f0d46f198e8c1c8152ccb8fab26a8892",
+            "tool_manifest_sha256": "sha256:f6f53fc166c6247e0676f929fc7bfef6f0d46f198e8c1c8152ccb8fab26a8892",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-assign-equipment",
+              "family": "stringing",
+              "wave": 1,
+              "order": 70,
+              "maturity": "production",
+              "engine": "server-builtin",
+              "adapter": "local-graph-commit",
+              "entitlement": "run_write",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "inverter-add"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-homeruns",
+            "version": "1.0.0",
+            "description": "Route terminal leads for assigned strings.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "expected_rev": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "cancel": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "expected_rev"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.write"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_homeruns",
+            "catalog_digest": "sha256:0872050b6d4aec9ac3145ba9893ded785943097bc8b60d57c8a857e6699b24d7",
+            "tool_manifest_sha256": "sha256:0872050b6d4aec9ac3145ba9893ded785943097bc8b60d57c8a857e6699b24d7",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-homeruns",
+              "family": "stringing",
+              "wave": 1,
+              "order": 80,
+              "maturity": "production",
+              "engine": "server-builtin",
+              "adapter": "local-graph-commit",
+              "entitlement": "run_write",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "homeruns"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-schedule",
+            "version": "1.0.0",
+            "description": "Create a circuit schedule from complete routing.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "expected_rev": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "cancel": {
+                  "type": "boolean"
+                },
+                "insertion_point": {
+                  "type": "array",
+                  "minItems": 2,
+                  "maxItems": 3,
+                  "items": {
+                    "type": "number"
+                  }
+                }
+              },
+              "required": [
+                "expected_rev"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.write"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_schedule",
+            "catalog_digest": "sha256:df46c4d27c872c9f00025999ab984ca48c4bf4e0dae830ab7a5b01de8461fea9",
+            "tool_manifest_sha256": "sha256:df46c4d27c872c9f00025999ab984ca48c4bf4e0dae830ab7a5b01de8461fea9",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-schedule",
+              "family": "stringing",
+              "wave": 1,
+              "order": 90,
+              "maturity": "production",
+              "engine": "server-builtin",
+              "adapter": "local-graph-commit",
+              "entitlement": "run_write",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": []
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-string-add",
+            "version": "1.0.0",
+            "description": "Add one string over named panels, in the named order.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "operation": {
+                  "type": "string",
+                  "enum": [
+                    "add-string"
+                  ],
+                  "default": "add-string"
+                },
+                "expected_rev": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 2147483647
+                },
+                "ordered_panel_refs": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 4096,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  }
+                }
+              },
+              "required": [
+                "operation",
+                "expected_rev",
+                "ordered_panel_refs"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.write"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_string_add",
+            "catalog_digest": "sha256:bbe5df60c7520c341ee241001506c671db2ee1e96a3cbab6db52ab96a7da5e5f",
+            "tool_manifest_sha256": "sha256:bbe5df60c7520c341ee241001506c671db2ee1e96a3cbab6db52ab96a7da5e5f",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-string-add",
+              "family": "stringing",
+              "wave": 2,
+              "order": 70,
+              "maturity": "preview",
+              "engine": "server-builtin",
+              "adapter": "local-graph-commit",
+              "entitlement": "run_write",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "string-single-add"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-string-multi-add",
+            "version": "1.0.0",
+            "description": "Split selected panels into strings: the MULTISTRING length combination cuts the panels, in the order given, into circuits of the target length and one shorter.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "operation": {
+                  "type": "string",
+                  "enum": [
+                    "add-strings"
+                  ],
+                  "default": "add-strings"
+                },
+                "expected_rev": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 2147483647
+                },
+                "string_length": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 900
+                },
+                "ordered_panel_refs": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 900,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  }
+                }
+              },
+              "required": [
+                "operation",
+                "expected_rev",
+                "string_length",
+                "ordered_panel_refs"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.write"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_string_multi_add",
+            "catalog_digest": "sha256:3363c4d5a1113804fe04ca0be87b6e7217d14527aea8bc5f7834dccdbafc1c1b",
+            "tool_manifest_sha256": "sha256:3363c4d5a1113804fe04ca0be87b6e7217d14527aea8bc5f7834dccdbafc1c1b",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-string-multi-add",
+              "family": "stringing",
+              "wave": 2,
+              "order": 71,
+              "maturity": "preview",
+              "engine": "server-builtin",
+              "adapter": "local-graph-commit",
+              "entitlement": "run_write",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "string-multi-add"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-string-flip",
+            "version": "1.0.0",
+            "description": "Reverse one string's panel order and trade its two ends; circuit and inverter stay.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "operation": {
+                  "type": "string",
+                  "enum": [
+                    "flip-string"
+                  ],
+                  "default": "flip-string"
+                },
+                "expected_rev": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 2147483647
+                },
+                "string_ref": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              },
+              "required": [
+                "operation",
+                "expected_rev",
+                "string_ref"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.write"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_string_flip",
+            "catalog_digest": "sha256:62946253ef663822414f2d1c06fdd516c3b1d35cf7959d7eb763a315ebed2d5b",
+            "tool_manifest_sha256": "sha256:62946253ef663822414f2d1c06fdd516c3b1d35cf7959d7eb763a315ebed2d5b",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-string-flip",
+              "family": "stringing",
+              "wave": 2,
+              "order": 72,
+              "maturity": "preview",
+              "engine": "server-builtin",
+              "adapter": "local-graph-commit",
+              "entitlement": "run_write",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "string-flip"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-string-midpoint",
+            "version": "1.0.0",
+            "description": "Add one string along the shortest panel path between two picked panels of one group, tagged MID at its middle panel.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "operation": {
+                  "type": "string",
+                  "enum": [
+                    "add-midpoint-string"
+                  ],
+                  "default": "add-midpoint-string"
+                },
+                "expected_rev": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 2147483647
+                },
+                "start_panel_ref": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "end_panel_ref": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              },
+              "required": [
+                "operation",
+                "expected_rev",
+                "start_panel_ref",
+                "end_panel_ref"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.write"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_string_midpoint",
+            "catalog_digest": "sha256:a1d4c2baceb0e36b73cf90fb850487632432fbcb9dd1d8aed2c0b87b40ec418c",
+            "tool_manifest_sha256": "sha256:a1d4c2baceb0e36b73cf90fb850487632432fbcb9dd1d8aed2c0b87b40ec418c",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-string-midpoint",
+              "family": "stringing",
+              "wave": 2,
+              "order": 73,
+              "maturity": "preview",
+              "engine": "server-builtin",
+              "adapter": "local-graph-commit",
+              "entitlement": "run_write",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "string-midpoint-connection"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-string-swap",
+            "version": "1.0.0",
+            "description": "Exchange two strings' circuit identities (circuit tag and inverter input); panels stay where they are.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "operation": {
+                  "type": "string",
+                  "enum": [
+                    "swap-strings"
+                  ],
+                  "default": "swap-strings"
+                },
+                "expected_rev": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 2147483647
+                },
+                "string_refs": {
+                  "type": "array",
+                  "minItems": 2,
+                  "maxItems": 2,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  }
+                }
+              },
+              "required": [
+                "operation",
+                "expected_rev",
+                "string_refs"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.write"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_string_swap",
+            "catalog_digest": "sha256:53c0d5e0d52e08827c02beb949c69b3b18d78d1a6663d108078cefbc71a5174e",
+            "tool_manifest_sha256": "sha256:53c0d5e0d52e08827c02beb949c69b3b18d78d1a6663d108078cefbc71a5174e",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-string-swap",
+              "family": "stringing",
+              "wave": 2,
+              "order": 74,
+              "maturity": "preview",
+              "engine": "server-builtin",
+              "adapter": "local-graph-commit",
+              "entitlement": "run_write",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "string-swap"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-string-rebuild",
+            "version": "1.0.0",
+            "description": "Rebuild every string's panel association (STRINGREBUILD, all) and report how many strings were rebuilt; the drawing is unchanged.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                }
+              },
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.read"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_string_rebuild",
+            "catalog_digest": "sha256:1763e522a52b04945c0c0a7fcf48cb6968c4043222797578393d740d70997bc9",
+            "tool_manifest_sha256": "sha256:1763e522a52b04945c0c0a7fcf48cb6968c4043222797578393d740d70997bc9",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-string-rebuild",
+              "family": "stringing",
+              "wave": 2,
+              "order": 76,
+              "maturity": "preview",
+              "engine": "server-builtin",
+              "adapter": "local-graph-read",
+              "entitlement": "run_read",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "string-rebuild"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-string-data",
+            "version": "1.0.0",
+            "description": "Write StringData.json: every panel group sorted by name, with the selected strings whose two ends lie in it and their end coordinates.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "string_refs": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 10000,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  }
+                }
+              },
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.read"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_string_data",
+            "catalog_digest": "sha256:7ff1f203d9f53c8a4cd096cfa232e808f20ef5abd42e956c489148ede623b439",
+            "tool_manifest_sha256": "sha256:7ff1f203d9f53c8a4cd096cfa232e808f20ef5abd42e956c489148ede623b439",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-string-data",
+              "family": "stringing",
+              "wave": 2,
+              "order": 78,
+              "maturity": "preview",
+              "engine": "server-builtin",
+              "adapter": "local-graph-read",
+              "entitlement": "run_read",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "string-data"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-string-delete",
+            "version": "1.0.0",
+            "description": "Delete named strings from a solved drawing.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "operation": {
+                  "type": "string",
+                  "enum": [
+                    "delete-strings"
+                  ],
+                  "default": "delete-strings"
+                },
+                "expected_rev": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 2147483647
+                },
+                "string_refs": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 4096,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  }
+                }
+              },
+              "required": [
+                "operation",
+                "expected_rev",
+                "string_refs"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.write"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_string_delete",
+            "catalog_digest": "sha256:fb277c510b89e70df7a5d98de392c9df30d77ad0a6c5fea4f0b59b631ed51e9b",
+            "tool_manifest_sha256": "sha256:fb277c510b89e70df7a5d98de392c9df30d77ad0a6c5fea4f0b59b631ed51e9b",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-string-delete",
+              "family": "stringing",
+              "wave": 2,
+              "order": 80,
+              "maturity": "preview",
+              "engine": "server-builtin",
+              "adapter": "local-graph-commit",
+              "entitlement": "run_write",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "string-delete"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-assign-strings",
+            "version": "1.0.0",
+            "description": "Assign every unassigned string to the drawing's inverters or L1 collectors by the plugin's pattern matcher, numbering and tagging each circuit.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "operation": {
+                  "type": "string",
+                  "enum": [
+                    "assign-strings"
+                  ]
+                },
+                "expected_rev": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 2147483647
+                },
+                "accept_excess_capacity": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "operation",
+                "expected_rev",
+                "accept_excess_capacity"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.write"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_assign_strings",
+            "catalog_digest": "sha256:e22f19f498a190d2f19e4daf33a321d9185547a7fd8ec593783d0dedf880d287",
+            "tool_manifest_sha256": "sha256:e22f19f498a190d2f19e4daf33a321d9185547a7fd8ec593783d0dedf880d287",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-assign-strings",
+              "family": "stringing",
+              "wave": 2,
+              "order": 82,
+              "maturity": "preview",
+              "engine": "server-builtin",
+              "adapter": "local-graph-commit",
+              "entitlement": "run_write",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "assign-strings"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-color-strings",
+            "version": "1.0.0",
+            "description": "Colour every string by its inverter, as LEAFCOLORSTRINGS does: the untyped colour of its inverter number, colour 7 when unassigned.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.read"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_color_strings",
+            "catalog_digest": "sha256:4c5240a9c375f6a0319b208afe5226313dbd4f25659d81074a24a17a001f7513",
+            "tool_manifest_sha256": "sha256:4c5240a9c375f6a0319b208afe5226313dbd4f25659d81074a24a17a001f7513",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-color-strings",
+              "family": "stringing",
+              "wave": 2,
+              "order": 83,
+              "maturity": "preview",
+              "engine": "server-builtin",
+              "adapter": "local-graph-read",
+              "entitlement": "run_read",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "color-strings"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-string-conductors",
+            "version": "1.0.0",
+            "description": "Set explicit conductor choices for named strings without certifying ampacity or voltage drop.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "operation": {
+                  "type": "string",
+                  "enum": [
+                    "set-conductors"
+                  ],
+                  "default": "set-conductors"
+                },
+                "expected_rev": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 2147483647
+                },
+                "assignments": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 4096,
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "string_ref": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128
+                      },
+                      "wire_gauge": {
+                        "type": "string",
+                        "enum": [
+                          "14 AWG",
+                          "12 AWG",
+                          "10 AWG",
+                          "8 AWG",
+                          "6 AWG",
+                          "4 AWG",
+                          "3 AWG",
+                          "2 AWG",
+                          "1 AWG",
+                          "1/0 AWG",
+                          "2/0 AWG",
+                          "3/0 AWG",
+                          "4/0 AWG",
+                          "250 kcmil",
+                          "300 kcmil",
+                          "350 kcmil",
+                          "400 kcmil",
+                          "500 kcmil",
+                          "600 kcmil",
+                          "750 kcmil",
+                          "1000 kcmil"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "string_ref",
+                      "wire_gauge"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "operation",
+                "expected_rev",
+                "assignments"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.write"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_string_conductors",
+            "catalog_digest": "sha256:7f08c4639bc411ea231755fb10d751143f65b48d9de19ef9d28544a6f9c889c5",
+            "tool_manifest_sha256": "sha256:7f08c4639bc411ea231755fb10d751143f65b48d9de19ef9d28544a6f9c889c5",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-string-conductors",
+              "family": "stringing",
+              "wave": 2,
+              "order": 85,
+              "maturity": "preview",
+              "engine": "server-builtin",
+              "adapter": "local-graph-commit",
+              "entitlement": "run_write",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "homeruns"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-trackers-to-panel-groups",
+            "version": "1.0.0",
+            "description": "Turn every tracker of the drawing's Ground layout into one panel group of module slots, as LEAFTRACKERSTOPANELGROUPS does, replacing any earlier conversion in one step.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "expected_rev": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 2147483647
+                }
+              },
+              "required": [
+                "expected_rev"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.write"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_trackers_to_panel_groups",
+            "catalog_digest": "sha256:19eb38f625bc3d7c2fa7742b0cb91f2a4be06502a454d781128272c9ad9f7ae4",
+            "tool_manifest_sha256": "sha256:19eb38f625bc3d7c2fa7742b0cb91f2a4be06502a454d781128272c9ad9f7ae4",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-trackers-to-panel-groups",
+              "family": "stringing",
+              "wave": 3,
+              "order": 5,
+              "maturity": "preview",
+              "engine": "server-builtin",
+              "adapter": "local-graph-commit",
+              "entitlement": "run_write",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "trackers-to-panelgroups"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          }
+        ]
+      },
+      {
+        "family_id": "placement",
+        "label": "Equipment placement",
+        "description": "Provisional family for inverter/combiner placement tools. No member is registered in the catalog yet; entries below are reservations for the R2 registry-promotion lane.",
+        "capabilities": [
+          {
+            "name": "arlo-design",
+            "version": "1.0.0",
+            "description": "Generate electrical feeder assembly proposals through the local ARLO design worker. Proposals require separate engineering review and native verification.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "contract": {
+                  "type": "string",
+                  "enum": [
+                    "arlo_design_request_v1"
+                  ]
+                },
+                "organization_id": {
+                  "type": "string"
+                },
+                "project_id": {
+                  "type": "string"
+                },
+                "input_version_id": {
+                  "type": "string"
+                },
+                "scenario": {
+                  "type": "object"
+                },
+                "catalog_version": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "requirements_version": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "catalog": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  },
+                  "minItems": 1
+                },
+                "requirements": {
+                  "type": "object"
+                },
+                "placement_candidates": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  }
+                },
+                "native_bindings": {
+                  "type": "object"
+                },
+                "budget": {
+                  "type": "object"
+                },
+                "seed": {
+                  "type": "integer"
+                },
+                "objective_version": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "contract",
+                "scenario",
+                "catalog_version",
+                "requirements_version",
+                "catalog",
+                "requirements",
+                "placement_candidates"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "solve"
+            ],
+            "provenance": {
+              "source": "arlo-3dml/arlo/design",
+              "entry": "python -m arlo.design"
+            },
+            "kind": "solver",
+            "engine_op": "arlo_design",
+            "catalog_digest": "sha256:ce20b7fde0c2c51d41904d61e27ec5b6b4b7aa292de6be7e19f5b5715d3d8ab4",
+            "tool_manifest_sha256": "sha256:ce20b7fde0c2c51d41904d61e27ec5b6b4b7aa292de6be7e19f5b5715d3d8ab4",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false
+          },
+          {
+            "name": "solar-panels-from-drawing",
+            "version": "1.0.0",
+            "description": "Create the drawing's panels from closed rectangular polylines on the panel layer.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "expected_rev": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "cancel": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "expected_rev"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.write"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_panels_from_drawing",
+            "catalog_digest": "sha256:2a2be3a666628299b38fc414dd6a2601fb37a79323e8a5e433533c7ef1212207",
+            "tool_manifest_sha256": "sha256:2a2be3a666628299b38fc414dd6a2601fb37a79323e8a5e433533c7ef1212207",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-panels-from-drawing",
+              "family": "placement",
+              "wave": 1,
+              "order": 15,
+              "maturity": "preview",
+              "engine": "server-builtin",
+              "adapter": "local-graph-commit",
+              "entitlement": "run_write",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": []
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-select-by-zone",
+            "version": "1.0.0",
+            "description": "List the panels of a named electrical zone, in the zone's stored order.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "zone_name": {
+                  "type": "string",
+                  "maxLength": 1024
+                }
+              },
+              "required": [
+                "zone_name"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.read"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_select_by_zone",
+            "catalog_digest": "sha256:d9c0bc836f697b8de024f22470b24dcb3c29c0ae90b27c4b142bec97b946ef21",
+            "tool_manifest_sha256": "sha256:d9c0bc836f697b8de024f22470b24dcb3c29c0ae90b27c4b142bec97b946ef21",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-select-by-zone",
+              "family": "placement",
+              "wave": 2,
+              "order": 10,
+              "maturity": "production",
+              "engine": "server-builtin",
+              "adapter": "local-graph-read",
+              "entitlement": "run_read",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "select-by-zone"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-electrical-zones",
+            "version": "1.0.0",
+            "description": "Add a named electrical zone, or assign panels to one, moving each panel out of any other zone.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "operation": {
+                  "type": "string",
+                  "enum": [
+                    "add",
+                    "assign-panels"
+                  ]
+                },
+                "expected_rev": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 2147483647
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 255
+                },
+                "color_index": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 256
+                },
+                "panel_refs": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 100000,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  }
+                }
+              },
+              "required": [
+                "operation",
+                "expected_rev",
+                "name"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.write"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_electrical_zones",
+            "catalog_digest": "sha256:cb5ca1d14f7421d118f3c26ebcbac5f84aed2797cf4c3090759993375087cceb",
+            "tool_manifest_sha256": "sha256:cb5ca1d14f7421d118f3c26ebcbac5f84aed2797cf4c3090759993375087cceb",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-electrical-zones",
+              "family": "placement",
+              "wave": 2,
+              "order": 20,
+              "maturity": "preview",
+              "engine": "server-builtin",
+              "adapter": "local-graph-commit",
+              "entitlement": "run_write",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "electrical-zone-add",
+                "electrical-zone-assign-panels"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-elevation-zones",
+            "version": "1.0.0",
+            "description": "Add rooftop elevation (height) zones with an offset, or move every matching panel, or every string, into one zone.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "operation": {
+                  "type": "string",
+                  "enum": [
+                    "add-zones",
+                    "assign-panels",
+                    "assign-strings"
+                  ]
+                },
+                "expected_rev": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 2147483647
+                },
+                "add": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 1000
+                },
+                "offset": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 10000
+                },
+                "zone_name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 255
+                },
+                "reference_panel_ref": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              },
+              "required": [
+                "operation",
+                "expected_rev"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.write"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_elevation_zones",
+            "catalog_digest": "sha256:094ac43c97c20928268f8d7a519068a37245738025b426904a083faecd136d15",
+            "tool_manifest_sha256": "sha256:094ac43c97c20928268f8d7a519068a37245738025b426904a083faecd136d15",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-elevation-zones",
+              "family": "placement",
+              "wave": 2,
+              "order": 25,
+              "maturity": "preview",
+              "engine": "server-builtin",
+              "adapter": "local-graph-commit",
+              "entitlement": "run_write",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "zone-height-settings",
+                "elevation-zone-assign-panels",
+                "elevation-zone-assign-strings"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-panel-add",
+            "version": "1.0.0",
+            "description": "Add named panels to one panel group.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "operation": {
+                  "type": "string",
+                  "enum": [
+                    "add-panels"
+                  ],
+                  "default": "add-panels"
+                },
+                "expected_rev": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 2147483647
+                },
+                "frame_ref": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "panel_refs": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 4096,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  }
+                }
+              },
+              "required": [
+                "operation",
+                "expected_rev",
+                "frame_ref",
+                "panel_refs"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.write"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_panel_add",
+            "catalog_digest": "sha256:b398f676acd08607b2c9e535e40cc7da7fc91aad8de767025c4edf550ab9210b",
+            "tool_manifest_sha256": "sha256:b398f676acd08607b2c9e535e40cc7da7fc91aad8de767025c4edf550ab9210b",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-panel-add",
+              "family": "placement",
+              "wave": 2,
+              "order": 30,
+              "maturity": "preview",
+              "engine": "server-builtin",
+              "adapter": "local-graph-commit",
+              "entitlement": "run_write",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "panel-add"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-panel-remove",
+            "version": "1.0.0",
+            "description": "Remove named panels from one panel group.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "operation": {
+                  "type": "string",
+                  "enum": [
+                    "remove-panels"
+                  ],
+                  "default": "remove-panels"
+                },
+                "expected_rev": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 2147483647
+                },
+                "frame_ref": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "panel_refs": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 4096,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  }
+                }
+              },
+              "required": [
+                "operation",
+                "expected_rev",
+                "frame_ref",
+                "panel_refs"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.write"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_panel_remove",
+            "catalog_digest": "sha256:21f2c2ac0add2cc1b95004a5adfd6542297e9709a3ae6a28b5ff6daa2d4f4aac",
+            "tool_manifest_sha256": "sha256:21f2c2ac0add2cc1b95004a5adfd6542297e9709a3ae6a28b5ff6daa2d4f4aac",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-panel-remove",
+              "family": "placement",
+              "wave": 2,
+              "order": 40,
+              "maturity": "preview",
+              "engine": "server-builtin",
+              "adapter": "local-graph-commit",
+              "entitlement": "run_write",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "panel-remove"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-panel-group-delete",
+            "version": "1.0.0",
+            "description": "Delete every panel group; the panels stay and leave their groups.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "operation": {
+                  "type": "string",
+                  "enum": [
+                    "delete-all"
+                  ],
+                  "default": "delete-all"
+                },
+                "expected_rev": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 2147483647
+                }
+              },
+              "required": [
+                "operation",
+                "expected_rev"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.write"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_panel_group_delete",
+            "catalog_digest": "sha256:71aa40df9e236a7e69a680ce407e9f6fc3a1c1c643ac7e203cb4209524071307",
+            "tool_manifest_sha256": "sha256:71aa40df9e236a7e69a680ce407e9f6fc3a1c1c643ac7e203cb4209524071307",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-panel-group-delete",
+              "family": "placement",
+              "wave": 2,
+              "order": 50,
+              "maturity": "preview",
+              "engine": "server-builtin",
+              "adapter": "local-graph-commit",
+              "entitlement": "run_write",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "panel-group-delete-all"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-autofill-plan",
+            "version": "1.0.0",
+            "description": "Preview the auto-fill correction plan for the current panel groups, ready to apply with solar-autofill.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "panels_per_string": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 4096
+                },
+                "alignment_tolerance": {
+                  "type": "number",
+                  "minimum": 0.000001,
+                  "maximum": 1000000
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.read"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_autofill_plan",
+            "catalog_digest": "sha256:bd27855e15a004a49d2d7aa494f0f4fe4d6a5305391ef7e09c4a14fded01ad12",
+            "tool_manifest_sha256": "sha256:bd27855e15a004a49d2d7aa494f0f4fe4d6a5305391ef7e09c4a14fded01ad12",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-autofill-plan",
+              "family": "placement",
+              "wave": 2,
+              "order": 58,
+              "maturity": "preview",
+              "engine": "server-builtin",
+              "adapter": "local-graph-read",
+              "entitlement": "run_read",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "auto-fill"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-autofill",
+            "version": "1.0.0",
+            "description": "Apply an auto-fill correction plan that rebalances panel group membership, or revert exactly that plan.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "operation": {
+                  "type": "string",
+                  "enum": [
+                    "apply-corrections",
+                    "revert-corrections"
+                  ]
+                },
+                "expected_rev": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 2147483647
+                },
+                "corrections": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 4096,
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "from_ref": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128
+                      },
+                      "to_ref": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128
+                      },
+                      "panel_refs": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 4096,
+                        "uniqueItems": true,
+                        "items": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        }
+                      }
+                    },
+                    "required": [
+                      "from_ref",
+                      "to_ref",
+                      "panel_refs"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "alignment_tolerance": {
+                  "type": "number",
+                  "minimum": 0.000001,
+                  "maximum": 1000000
+                }
+              },
+              "required": [
+                "operation",
+                "expected_rev",
+                "corrections"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.write"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_autofill",
+            "catalog_digest": "sha256:595321c4b4a520d072e6eea508cc95ef8f9b1ad06f56ed36e63d4685d08628f9",
+            "tool_manifest_sha256": "sha256:595321c4b4a520d072e6eea508cc95ef8f9b1ad06f56ed36e63d4685d08628f9",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-autofill",
+              "family": "placement",
+              "wave": 2,
+              "order": 60,
+              "maturity": "preview",
+              "engine": "server-builtin",
+              "adapter": "local-graph-commit",
+              "entitlement": "run_write",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "auto-fill",
+                "auto-fill-revert"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-guardrails-read",
+            "version": "1.0.0",
+            "description": "Run the plugin's 14 design guardrails on the stored design: verdicts in palette order and the health banner counts.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "mppt_voltage_window": {
+                  "type": "object",
+                  "properties": {
+                    "min_v": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 100000
+                    },
+                    "max_v": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 100000
+                    }
+                  },
+                  "required": [
+                    "min_v",
+                    "max_v"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.read"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_guardrails_read",
+            "catalog_digest": "sha256:a6710873f417cd16a80c6435bc37fc376d5ce698644fc32df3490188a8f5f6a3",
+            "tool_manifest_sha256": "sha256:a6710873f417cd16a80c6435bc37fc376d5ce698644fc32df3490188a8f5f6a3",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-guardrails-read",
+              "family": "placement",
+              "wave": 2,
+              "order": 95,
+              "maturity": "preview",
+              "engine": "server-builtin",
+              "adapter": "local-graph-read",
+              "entitlement": "run_read",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "guardrails-monitoring"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          }
+        ]
+      },
+      {
+        "family_id": "settings",
+        "label": "Settings",
+        "description": "Drawing-owned solar project settings.",
+        "capabilities": [
+          {
+            "name": "solar-unit-sync",
+            "version": "1.0.0",
+            "description": "Declare the drawing's distance unit as Meters or Feet; no geometry moves.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "expected_rev": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 2147483647
+                },
+                "distance_unit": {
+                  "type": "string",
+                  "enum": [
+                    "Meters",
+                    "Feet"
+                  ]
+                }
+              },
+              "required": [
+                "expected_rev",
+                "distance_unit"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.write"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_unit_sync",
+            "catalog_digest": "sha256:29a2daf5ba2f3ab14e604ec035af27189cba5109acb99eb5994ea36d03ec7598",
+            "tool_manifest_sha256": "sha256:29a2daf5ba2f3ab14e604ec035af27189cba5109acb99eb5994ea36d03ec7598",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-unit-sync",
+              "family": "settings",
+              "wave": 2,
+              "order": 10,
+              "maturity": "preview",
+              "engine": "server-builtin",
+              "adapter": "local-graph-commit",
+              "entitlement": "run_write",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "unit-sync"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-design-presets",
+            "version": "1.0.0",
+            "description": "Create, swap or delete the drawing's design presets (LEAFPROFILE); each preset keeps a copy of the drawing's 60 preset settings.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "expected_rev": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 2147483647
+                },
+                "subcommand": {
+                  "type": "string",
+                  "enum": [
+                    "Create",
+                    "Swap",
+                    "Delete"
+                  ]
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "prefix": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 3
+                },
+                "current_settings": {
+                  "type": "object",
+                  "properties": {
+                    "InstallationDesign": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "MaxPanelGap": {
+                      "type": "number",
+                      "minimum": -1000000,
+                      "maximum": 1000000
+                    },
+                    "AlignmentTolerance": {
+                      "type": "number",
+                      "minimum": -1000000,
+                      "maximum": 1000000
+                    },
+                    "ExtractPanelsFromRackBlocks": {
+                      "type": "boolean"
+                    },
+                    "ModuleLayer": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "PanelGroupLayer": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "PanelGroupLabelHeight": {
+                      "type": "number",
+                      "minimum": -1000000,
+                      "maximum": 1000000
+                    },
+                    "PanelGroupOutlineWidth": {
+                      "type": "number",
+                      "minimum": -1000000,
+                      "maximum": 1000000
+                    },
+                    "StringLayer": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "StringWidth": {
+                      "type": "number",
+                      "minimum": -1000000,
+                      "maximum": 1000000
+                    },
+                    "TagHeight": {
+                      "type": "number",
+                      "minimum": -1000000,
+                      "maximum": 1000000
+                    },
+                    "LabelPlacement": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "TagFirst": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "TagSecond": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "TagThird": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "TagDelim1": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "TagDelim2": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "NumPanelsInSequence": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 1000000
+                    },
+                    "NumMppt": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 1000000
+                    },
+                    "StringsPerMppt": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 1000000
+                    },
+                    "UseCombinerBox": {
+                      "type": "boolean"
+                    },
+                    "CombinerBoxSize": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 1000000
+                    },
+                    "CombinerBoxConnections": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 1000000
+                    },
+                    "SolarEdgeContinuousNumbering": {
+                      "type": "boolean"
+                    },
+                    "SolarEdgeMatchPdfColors": {
+                      "type": "boolean"
+                    },
+                    "OptimizerBlock": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "UseL2Collectors": {
+                      "type": "boolean"
+                    },
+                    "L1CollectorsPerL2": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 1000000
+                    },
+                    "L2NumMppt": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 1000000
+                    },
+                    "L2StringsPerMppt": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 1000000
+                    },
+                    "InverterSelection": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "ModuleSelection": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "Vmp": {
+                      "type": "number",
+                      "minimum": -1000000,
+                      "maximum": 1000000
+                    },
+                    "Imp": {
+                      "type": "number",
+                      "minimum": -1000000,
+                      "maximum": 1000000
+                    },
+                    "Pmp": {
+                      "type": "number",
+                      "minimum": -1000000,
+                      "maximum": 1000000
+                    },
+                    "Voc": {
+                      "type": "number",
+                      "minimum": -1000000,
+                      "maximum": 1000000
+                    },
+                    "BVoc": {
+                      "type": "number",
+                      "minimum": -1000000,
+                      "maximum": 1000000
+                    },
+                    "MinTemp": {
+                      "type": "number",
+                      "minimum": -1000000,
+                      "maximum": 1000000
+                    },
+                    "WireSize": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "CableMaterial": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "NecCableType": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "MaxConductorTemp": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "ConduitType": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "CableInstallationMethod": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "AmbientTemperature": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "NoGroupedConductors": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "DistanceAboveRoof": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "CableTray": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "VdRunMax": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "SafetyFactor": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "DeratingFactor": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "HomeRunLayer": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "InverterBlock": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "InverterBlockSize": {
+                      "type": "number",
+                      "minimum": -1000000,
+                      "maximum": 1000000
+                    },
+                    "TagColor": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "UseInverterColor": {
+                      "type": "boolean"
+                    },
+                    "UseOptimizers": {
+                      "type": "boolean"
+                    },
+                    "OptimizerRatio": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "L2InverterSelection": {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    "NumPanels": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 1000000
+                    }
+                  },
+                  "required": [
+                    "InstallationDesign",
+                    "MaxPanelGap",
+                    "AlignmentTolerance",
+                    "ExtractPanelsFromRackBlocks",
+                    "ModuleLayer",
+                    "PanelGroupLayer",
+                    "PanelGroupLabelHeight",
+                    "PanelGroupOutlineWidth",
+                    "StringLayer",
+                    "StringWidth",
+                    "TagHeight",
+                    "LabelPlacement",
+                    "TagFirst",
+                    "TagSecond",
+                    "TagThird",
+                    "TagDelim1",
+                    "TagDelim2",
+                    "NumPanelsInSequence",
+                    "NumMppt",
+                    "StringsPerMppt",
+                    "UseCombinerBox",
+                    "CombinerBoxSize",
+                    "CombinerBoxConnections",
+                    "SolarEdgeContinuousNumbering",
+                    "SolarEdgeMatchPdfColors",
+                    "OptimizerBlock",
+                    "UseL2Collectors",
+                    "L1CollectorsPerL2",
+                    "L2NumMppt",
+                    "L2StringsPerMppt",
+                    "InverterSelection",
+                    "ModuleSelection",
+                    "Vmp",
+                    "Imp",
+                    "Pmp",
+                    "Voc",
+                    "BVoc",
+                    "MinTemp",
+                    "WireSize",
+                    "CableMaterial",
+                    "NecCableType",
+                    "MaxConductorTemp",
+                    "ConduitType",
+                    "CableInstallationMethod",
+                    "AmbientTemperature",
+                    "NoGroupedConductors",
+                    "DistanceAboveRoof",
+                    "CableTray",
+                    "VdRunMax",
+                    "SafetyFactor",
+                    "DeratingFactor",
+                    "HomeRunLayer",
+                    "InverterBlock",
+                    "InverterBlockSize",
+                    "TagColor",
+                    "UseInverterColor",
+                    "UseOptimizers",
+                    "OptimizerRatio",
+                    "L2InverterSelection",
+                    "NumPanels"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "expected_rev",
+                "subcommand"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.write"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_design_presets",
+            "catalog_digest": "sha256:0120d5492a033e80c30f0b05777277d2c43cbeeb7ed01efbfde0a83b5ae4d466",
+            "tool_manifest_sha256": "sha256:0120d5492a033e80c30f0b05777277d2c43cbeeb7ed01efbfde0a83b5ae4d466",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-design-presets",
+              "family": "settings",
+              "wave": 2,
+              "order": 12,
+              "maturity": "preview",
+              "engine": "server-builtin",
+              "adapter": "local-graph-commit",
+              "entitlement": "run_write",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "design-profile-manage"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-design-presets-list",
+            "version": "1.0.0",
+            "description": "List the drawing's design presets (LEAFPROFILE List): each preset's name, prefix and settings, and which one is active.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.read"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_design_presets_list",
+            "catalog_digest": "sha256:ad92f7b2660c7c67329e2f15b9b05d0dc279f68bdb32490fe8ab50fa78ef0682",
+            "tool_manifest_sha256": "sha256:ad92f7b2660c7c67329e2f15b9b05d0dc279f68bdb32490fe8ab50fa78ef0682",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-design-presets-list",
+              "family": "settings",
+              "wave": 2,
+              "order": 14,
+              "maturity": "preview",
+              "engine": "server-builtin",
+              "adapter": "local-graph-read",
+              "entitlement": "run_read",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "design-profile-manage"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          }
+        ]
+      },
+      {
+        "family_id": "equipment",
+        "label": "Equipment",
+        "description": "Solar equipment assignment and configuration.",
+        "capabilities": [
+          {
+            "name": "solar-equipment-move",
+            "version": "1.0.0",
+            "description": "Move one inverter or collector to a picked point and reroute its homeruns there, as MOVEINV does; feeders stay where they are and go stale.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "operation": {
+                  "type": "string",
+                  "enum": [
+                    "move-equipment"
+                  ],
+                  "default": "move-equipment"
+                },
+                "expected_rev": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 2147483647
+                },
+                "inverter_ref": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "point": {
+                  "type": "array",
+                  "minItems": 2,
+                  "maxItems": 2,
+                  "items": {
+                    "type": "number",
+                    "minimum": -1000000000000,
+                    "maximum": 1000000000000
+                  }
+                }
+              },
+              "required": [
+                "operation",
+                "expected_rev",
+                "inverter_ref",
+                "point"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.write"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_equipment_move",
+            "catalog_digest": "sha256:0f00c7be393bdcc457035e22e9c3043c1562096cb8b9d66a1b2c603abcf42da4",
+            "tool_manifest_sha256": "sha256:0f00c7be393bdcc457035e22e9c3043c1562096cb8b9d66a1b2c603abcf42da4",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-equipment-move",
+              "family": "equipment",
+              "wave": 2,
+              "order": 100,
+              "maturity": "preview",
+              "engine": "server-builtin",
+              "adapter": "local-graph-commit",
+              "entitlement": "run_write",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "inverter-move"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-combiners",
+            "version": "1.0.0",
+            "description": "Place combiner boxes for every string from the drawing's recorded combiner intake, as LEAFCOMBINERAUTO does, and save them with their DC homeruns and feeders in one step.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "expected_rev": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 2147483647
+                },
+                "hardware": {
+                  "type": "object",
+                  "properties": {
+                    "model": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128,
+                      "pattern": "\\S"
+                    },
+                    "max_dc_voltage": {
+                      "type": "number",
+                      "exclusiveMinimum": 0,
+                      "maximum": 1000000
+                    },
+                    "max_ac_power_kw": {
+                      "type": "number",
+                      "exclusiveMinimum": 0,
+                      "maximum": 1000000
+                    }
+                  },
+                  "required": [
+                    "model",
+                    "max_dc_voltage",
+                    "max_ac_power_kw"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "expected_rev",
+                "hardware"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.write"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_combiners",
+            "catalog_digest": "sha256:375f1cf97c1ca20ee9a62eef6f4b0a5e50d8cd2267282cbfd14482326f8a68cf",
+            "tool_manifest_sha256": "sha256:375f1cf97c1ca20ee9a62eef6f4b0a5e50d8cd2267282cbfd14482326f8a68cf",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-combiners",
+              "family": "equipment",
+              "wave": 2,
+              "order": 105,
+              "maturity": "preview",
+              "engine": "server-builtin",
+              "adapter": "local-graph-commit",
+              "entitlement": "run_write",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "combiner-auto-place"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-nec-ampacity-correction",
+            "version": "1.0.0",
+            "description": "NEC 310.16 conductor ampacity with temperature and conduit-fill correction, as a cited calculation.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "base_ampacity": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 10000
+                },
+                "temp_factor": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 10
+                },
+                "conduit_factor": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 10
+                }
+              },
+              "required": [
+                "base_ampacity",
+                "temp_factor",
+                "conduit_factor"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.read"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_nec_ampacity_correction",
+            "catalog_digest": "sha256:676343a397c62dd235747c8885990e2264189e1f137b5497259646959d8062e7",
+            "tool_manifest_sha256": "sha256:676343a397c62dd235747c8885990e2264189e1f137b5497259646959d8062e7",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-nec-ampacity-correction",
+              "family": "equipment",
+              "wave": 3,
+              "order": 10,
+              "maturity": "production",
+              "engine": "server-builtin",
+              "adapter": "local-graph-read",
+              "entitlement": "run_read",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "nec-ampacity-correction"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-nec-ac-voltage-drop",
+            "version": "1.0.0",
+            "description": "NEC 210.19(A)(4) AC voltage drop with reactance, power factor and phase factor, as a cited calculation.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "current_a": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 10000
+                },
+                "one_way_length_ft": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 100000
+                },
+                "r_ohm_per_1000ft": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                "x_ohm_per_1000ft": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                "power_factor": {
+                  "type": "number",
+                  "minimum": -10,
+                  "maximum": 10
+                },
+                "phase": {
+                  "type": "integer",
+                  "enum": [
+                    1,
+                    3
+                  ]
+                },
+                "source_voltage": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 100000
+                }
+              },
+              "required": [
+                "current_a",
+                "one_way_length_ft",
+                "r_ohm_per_1000ft",
+                "x_ohm_per_1000ft",
+                "power_factor",
+                "phase",
+                "source_voltage"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.read"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_nec_ac_voltage_drop",
+            "catalog_digest": "sha256:d0b60a41e56b112d399ab78d927dae195cec5d004894788f67eff883560143f0",
+            "tool_manifest_sha256": "sha256:d0b60a41e56b112d399ab78d927dae195cec5d004894788f67eff883560143f0",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-nec-ac-voltage-drop",
+              "family": "equipment",
+              "wave": 3,
+              "order": 20,
+              "maturity": "production",
+              "engine": "server-builtin",
+              "adapter": "local-graph-read",
+              "entitlement": "run_read",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "nec-ac-voltage-drop"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-nec-conduit-fill",
+            "version": "1.0.0",
+            "description": "NEC Chapter 9 conduit fill: the smallest trade size for N conductors of one gauge plus an optional bare EGC, with Table 1, 4 and 5 values.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "conductor_gauge": {
+                  "type": "string",
+                  "enum": [
+                    "14 AWG",
+                    "12 AWG",
+                    "10 AWG",
+                    "8 AWG",
+                    "6 AWG",
+                    "4 AWG",
+                    "3 AWG",
+                    "2 AWG",
+                    "1 AWG",
+                    "1/0 AWG",
+                    "2/0 AWG",
+                    "3/0 AWG",
+                    "4/0 AWG",
+                    "250 kcmil",
+                    "300 kcmil",
+                    "350 kcmil",
+                    "400 kcmil",
+                    "500 kcmil",
+                    "600 kcmil",
+                    "750 kcmil",
+                    "1000 kcmil"
+                  ]
+                },
+                "current_carrying_count": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1000
+                },
+                "egc_gauge": {
+                  "type": "string",
+                  "enum": [
+                    "14 AWG",
+                    "12 AWG",
+                    "10 AWG",
+                    "8 AWG",
+                    "6 AWG",
+                    "4 AWG",
+                    "3 AWG",
+                    "2 AWG",
+                    "1 AWG",
+                    "1/0 AWG",
+                    "2/0 AWG",
+                    "3/0 AWG",
+                    "4/0 AWG",
+                    "250 kcmil",
+                    "300 kcmil",
+                    "350 kcmil",
+                    "400 kcmil",
+                    "500 kcmil",
+                    "600 kcmil",
+                    "750 kcmil",
+                    "1000 kcmil"
+                  ]
+                },
+                "conduit_type": {
+                  "type": "string",
+                  "enum": [
+                    "EMT",
+                    "PvcSch40",
+                    "PvcSch80",
+                    "RMC",
+                    "LFNC_B"
+                  ]
+                },
+                "conductor_insulation": {
+                  "type": "string",
+                  "enum": [
+                    "THWN2",
+                    "XHHW2",
+                    "USE2"
+                  ]
+                }
+              },
+              "required": [
+                "conductor_gauge",
+                "current_carrying_count",
+                "conduit_type",
+                "conductor_insulation"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.read"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_nec_conduit_fill",
+            "catalog_digest": "sha256:3660d0f4fa1490169b68546b14a8465133f045e19b86597dcd7bfc5aa44e3b6e",
+            "tool_manifest_sha256": "sha256:3660d0f4fa1490169b68546b14a8465133f045e19b86597dcd7bfc5aa44e3b6e",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-nec-conduit-fill",
+              "family": "equipment",
+              "wave": 3,
+              "order": 30,
+              "maturity": "production",
+              "engine": "server-builtin",
+              "adapter": "local-graph-read",
+              "entitlement": "run_read",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "nec-conduit-fill"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-nec-feeder-ocpd",
+            "version": "1.0.0",
+            "description": "NEC 215.3 and 210.20(A) feeder overcurrent device rating with its NEC 250.122 equipment grounding conductor, as a cited calculation.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "continuous_current_a": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 10000
+                },
+                "is_continuous": {
+                  "type": "boolean"
+                },
+                "egc_material": {
+                  "type": "string",
+                  "enum": [
+                    "Copper",
+                    "Aluminum"
+                  ],
+                  "maxLength": 8
+                }
+              },
+              "required": [
+                "continuous_current_a",
+                "is_continuous",
+                "egc_material"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.read"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_nec_feeder_ocpd",
+            "catalog_digest": "sha256:1ab42adaaa42070c6600676287c88f2047f60b6079ed36e52364a32f236a2255",
+            "tool_manifest_sha256": "sha256:1ab42adaaa42070c6600676287c88f2047f60b6079ed36e52364a32f236a2255",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-nec-feeder-ocpd",
+              "family": "equipment",
+              "wave": 3,
+              "order": 40,
+              "maturity": "production",
+              "engine": "server-builtin",
+              "adapter": "local-graph-read",
+              "entitlement": "run_read",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "nec-feeder-ocpd-sizing"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          }
+        ]
+      },
+      {
+        "family_id": "routing",
+        "label": "Routing",
+        "description": "Solar wiring routes and homeruns.",
+        "capabilities": [
+          {
+            "name": "solar-trench-manual",
+            "version": "1.0.0",
+            "description": "Route one trench between two picked points, or re-route a trench and mark the routes riding it out of date.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "operation": {
+                  "type": "string",
+                  "enum": [
+                    "add-trench",
+                    "reroute-trench"
+                  ],
+                  "default": "add-trench"
+                },
+                "expected_rev": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 2147483647
+                },
+                "start_x": {
+                  "type": "number",
+                  "minimum": -1000000000000,
+                  "maximum": 1000000000000
+                },
+                "start_y": {
+                  "type": "number",
+                  "minimum": -1000000000000,
+                  "maximum": 1000000000000
+                },
+                "end_x": {
+                  "type": "number",
+                  "minimum": -1000000000000,
+                  "maximum": 1000000000000
+                },
+                "end_y": {
+                  "type": "number",
+                  "minimum": -1000000000000,
+                  "maximum": 1000000000000
+                },
+                "trench_ref": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              },
+              "required": [
+                "operation",
+                "expected_rev",
+                "start_x",
+                "start_y",
+                "end_x",
+                "end_y"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.write"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_trench_manual",
+            "catalog_digest": "sha256:82ea6bbf3944c216129569754f87c84f2a0b3c608b4008b997cae1ec781d412f",
+            "tool_manifest_sha256": "sha256:82ea6bbf3944c216129569754f87c84f2a0b3c608b4008b997cae1ec781d412f",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-trench-manual",
+              "family": "routing",
+              "wave": 3,
+              "order": 50,
+              "maturity": "preview",
+              "engine": "server-builtin",
+              "adapter": "local-graph-commit",
+              "entitlement": "run_write",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "trench-routing"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          }
+        ]
+      },
+      {
+        "family_id": "schedules",
+        "label": "Schedules",
+        "description": "Solar equipment and wiring schedules.",
+        "capabilities": [
+          {
+            "name": "solar-electrical-schedules",
+            "version": "1.0.0",
+            "description": "Write ElectricalSchedules.json: the plugin's equipment, combiner or inverter, string and feeder schedule tables for the stored design.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "circuit_source": {
+                  "type": "string",
+                  "enum": [
+                    "topology",
+                    "labels"
+                  ]
+                },
+                "inverter_record": {
+                  "type": "object",
+                  "properties": {
+                    "companyName": {
+                      "type": "string",
+                      "maxLength": 128
+                    },
+                    "modelName": {
+                      "type": "string",
+                      "maxLength": 128
+                    },
+                    "seriesName": {
+                      "type": "string",
+                      "maxLength": 128
+                    },
+                    "maxDCPower": {
+                      "type": "string",
+                      "maxLength": 20,
+                      "pattern": "^(-?[0-9]{1,12}(\\.[0-9]{1,6})?)?$(?![\\s\\S])"
+                    },
+                    "maxDCVoltage": {
+                      "type": "string",
+                      "maxLength": 20,
+                      "pattern": "^(-?[0-9]{1,12}(\\.[0-9]{1,6})?)?$(?![\\s\\S])"
+                    },
+                    "minDCVoltageFeed": {
+                      "type": "string",
+                      "maxLength": 20,
+                      "pattern": "^(-?[0-9]{1,12}(\\.[0-9]{1,6})?)?$(?![\\s\\S])"
+                    },
+                    "mpptVoltageRangeMin": {
+                      "type": "string",
+                      "maxLength": 20,
+                      "pattern": "^(-?[0-9]{1,12}(\\.[0-9]{1,6})?)?$(?![\\s\\S])"
+                    },
+                    "mpptVoltageRangeMax": {
+                      "type": "string",
+                      "maxLength": 20,
+                      "pattern": "^(-?[0-9]{1,12}(\\.[0-9]{1,6})?)?$(?![\\s\\S])"
+                    },
+                    "numMpptTrackers": {
+                      "type": "string",
+                      "maxLength": 20,
+                      "pattern": "^(-?[0-9]{1,12}(\\.[0-9]{1,6})?)?$(?![\\s\\S])"
+                    },
+                    "DCInputers": {
+                      "type": "string",
+                      "maxLength": 20,
+                      "pattern": "^(-?[0-9]{1,12}(\\.[0-9]{1,6})?)?$(?![\\s\\S])"
+                    },
+                    "maxACPower": {
+                      "type": "string",
+                      "maxLength": 20,
+                      "pattern": "^(-?[0-9]{1,12}(\\.[0-9]{1,6})?)?$(?![\\s\\S])"
+                    },
+                    "nominalACVoltage": {
+                      "type": "string",
+                      "maxLength": 20,
+                      "pattern": "^(-?[0-9]{1,12}(\\.[0-9]{1,6})?)?$(?![\\s\\S])"
+                    },
+                    "maxACCurrent": {
+                      "type": "string",
+                      "maxLength": 20,
+                      "pattern": "^(-?[0-9]{1,12}(\\.[0-9]{1,6})?)?$(?![\\s\\S])"
+                    }
+                  },
+                  "required": [
+                    "companyName",
+                    "modelName",
+                    "seriesName",
+                    "maxDCPower",
+                    "maxDCVoltage",
+                    "minDCVoltageFeed",
+                    "mpptVoltageRangeMin",
+                    "mpptVoltageRangeMax",
+                    "numMpptTrackers",
+                    "DCInputers",
+                    "maxACPower",
+                    "nominalACVoltage",
+                    "maxACCurrent"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.read"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_electrical_schedules",
+            "catalog_digest": "sha256:b2128ff80fddd057554cd0794e053570ea1ad98962376b7dbae21583a46dcd14",
+            "tool_manifest_sha256": "sha256:b2128ff80fddd057554cd0794e053570ea1ad98962376b7dbae21583a46dcd14",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-electrical-schedules",
+              "family": "schedules",
+              "wave": 2,
+              "order": 110,
+              "maturity": "preview",
+              "engine": "server-builtin",
+              "adapter": "local-graph-read",
+              "entitlement": "run_read",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "insert-schedules"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-cable-export",
+            "version": "1.0.0",
+            "description": "Write CableExport.xlsx: the plugin's Export All workbook (homeruns, equipment, inverter, string and feeder sheets) for the stored design.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "circuit_source": {
+                  "type": "string",
+                  "enum": [
+                    "topology",
+                    "labels"
+                  ]
+                },
+                "inverter_record": {
+                  "type": "object",
+                  "properties": {
+                    "companyName": {
+                      "type": "string",
+                      "maxLength": 128,
+                      "pattern": "^[^\\u0000-\\u001f\\u007f\\ufffe\\uffff]*$(?![\\s\\S])"
+                    },
+                    "modelName": {
+                      "type": "string",
+                      "maxLength": 128,
+                      "pattern": "^[^\\u0000-\\u001f\\u007f\\ufffe\\uffff]*$(?![\\s\\S])"
+                    },
+                    "seriesName": {
+                      "type": "string",
+                      "maxLength": 128,
+                      "pattern": "^[^\\u0000-\\u001f\\u007f\\ufffe\\uffff]*$(?![\\s\\S])"
+                    },
+                    "maxDCPower": {
+                      "type": "string",
+                      "maxLength": 20,
+                      "pattern": "^(-?[0-9]{1,12}(\\.[0-9]{1,6})?)?$(?![\\s\\S])"
+                    },
+                    "maxDCVoltage": {
+                      "type": "string",
+                      "maxLength": 20,
+                      "pattern": "^(-?[0-9]{1,12}(\\.[0-9]{1,6})?)?$(?![\\s\\S])"
+                    },
+                    "minDCVoltageFeed": {
+                      "type": "string",
+                      "maxLength": 20,
+                      "pattern": "^(-?[0-9]{1,12}(\\.[0-9]{1,6})?)?$(?![\\s\\S])"
+                    },
+                    "mpptVoltageRangeMin": {
+                      "type": "string",
+                      "maxLength": 20,
+                      "pattern": "^(-?[0-9]{1,12}(\\.[0-9]{1,6})?)?$(?![\\s\\S])"
+                    },
+                    "mpptVoltageRangeMax": {
+                      "type": "string",
+                      "maxLength": 20,
+                      "pattern": "^(-?[0-9]{1,12}(\\.[0-9]{1,6})?)?$(?![\\s\\S])"
+                    },
+                    "numMpptTrackers": {
+                      "type": "string",
+                      "maxLength": 20,
+                      "pattern": "^(-?[0-9]{1,12}(\\.[0-9]{1,6})?)?$(?![\\s\\S])"
+                    },
+                    "DCInputers": {
+                      "type": "string",
+                      "maxLength": 20,
+                      "pattern": "^(-?[0-9]{1,12}(\\.[0-9]{1,6})?)?$(?![\\s\\S])"
+                    },
+                    "maxACPower": {
+                      "type": "string",
+                      "maxLength": 20,
+                      "pattern": "^(-?[0-9]{1,12}(\\.[0-9]{1,6})?)?$(?![\\s\\S])"
+                    },
+                    "nominalACVoltage": {
+                      "type": "string",
+                      "maxLength": 20,
+                      "pattern": "^(-?[0-9]{1,12}(\\.[0-9]{1,6})?)?$(?![\\s\\S])"
+                    },
+                    "maxACCurrent": {
+                      "type": "string",
+                      "maxLength": 20,
+                      "pattern": "^(-?[0-9]{1,12}(\\.[0-9]{1,6})?)?$(?![\\s\\S])"
+                    }
+                  },
+                  "required": [
+                    "companyName",
+                    "modelName",
+                    "seriesName",
+                    "maxDCPower",
+                    "maxDCVoltage",
+                    "minDCVoltageFeed",
+                    "mpptVoltageRangeMin",
+                    "mpptVoltageRangeMax",
+                    "numMpptTrackers",
+                    "DCInputers",
+                    "maxACPower",
+                    "nominalACVoltage",
+                    "maxACCurrent"
+                  ],
+                  "additionalProperties": false
+                },
+                "suggested_inverter_count": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 10000
+                },
+                "design_min_temp_c": {
+                  "type": "number",
+                  "minimum": -90,
+                  "maximum": 60
+                },
+                "project_location": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f\\ufffe\\uffff]*$(?![\\s\\S])"
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.read"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_cable_export",
+            "catalog_digest": "sha256:6a13dd9885744dc6ea8d97a8d1a6d427c1b5fcfdf5c3c5baf3b786cc3800923e",
+            "tool_manifest_sha256": "sha256:6a13dd9885744dc6ea8d97a8d1a6d427c1b5fcfdf5c3c5baf3b786cc3800923e",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-cable-export",
+              "family": "schedules",
+              "wave": 2,
+              "order": 120,
+              "maturity": "preview",
+              "engine": "server-builtin",
+              "adapter": "local-graph-read",
+              "entitlement": "run_read",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "cable-export"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          }
+        ]
+      },
+      {
+        "family_id": "imports",
+        "label": "Imports",
+        "description": "Solar design data imports.",
+        "capabilities": [
+          {
+            "name": "solar-solaredge-accept",
+            "version": "1.0.0",
+            "description": "Accept a SolarEdge report's tracking: record which PDF inverter and string input each panel belongs to, with the source PDF and report it came from. Creates no string, inverter or device and does not run Solve.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "expected_rev": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 2147483647
+                },
+                "report_artifact_id": {
+                  "type": "string",
+                  "minLength": 64,
+                  "maxLength": 64
+                }
+              },
+              "required": [
+                "expected_rev",
+                "report_artifact_id"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.write"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_solaredge_accept",
+            "catalog_digest": "sha256:4cb540d4bcdf71bf8582e892ae0f3d44f22dc0fd286cfecaa041302b8726560c",
+            "tool_manifest_sha256": "sha256:4cb540d4bcdf71bf8582e892ae0f3d44f22dc0fd286cfecaa041302b8726560c",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-solaredge-accept",
+              "family": "imports",
+              "wave": 4,
+              "order": 30,
+              "maturity": "preview",
+              "engine": "server-builtin",
+              "adapter": "local-graph-commit",
+              "entitlement": "run_write",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "import-solaredge-pdf"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          },
+          {
+            "name": "solar-solaredge-tracking-read",
+            "version": "1.0.0",
+            "description": "Show the accepted SolarEdge tracking: which PDF inverter and string input each panel was labelled with, the PDF and report it came from, and whether those panels still match the drawing. Labels only; no electrical design.",
+            "params_schema": {
+              "type": "object",
+              "properties": {
+                "drawing_id": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "section": {
+                  "type": "string",
+                  "enum": [
+                    "strings",
+                    "frames",
+                    "unassigned"
+                  ],
+                  "default": "strings"
+                },
+                "offset": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 200000,
+                  "default": 0
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            "capabilities": [
+              "drawing.read"
+            ],
+            "provenance": {},
+            "kind": "script",
+            "engine_op": "solar_solaredge_tracking_read",
+            "catalog_digest": "sha256:15acc375017ba1ea73a6ff4c003c6fe0a88fa85e48e4adc78ff71f07fdc8ea9d",
+            "tool_manifest_sha256": "sha256:15acc375017ba1ea73a6ff4c003c6fe0a88fa85e48e4adc78ff71f07fdc8ea9d",
+            "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
+            "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
+            "execution_class": "batch",
+            "runtime": null,
+            "limits": null,
+            "artifact_digest": null,
+            "batch_fallback": false,
+            "aps_live": false,
+            "solar": {
+              "schema": "leaf.solar-tool-view.v1",
+              "name": "solar-solaredge-tracking-read",
+              "family": "imports",
+              "wave": 4,
+              "order": 31,
+              "maturity": "preview",
+              "engine": "server-builtin",
+              "adapter": "local-graph-read",
+              "entitlement": "run_read",
+              "interaction": {
+                "mode": "form"
+              },
+              "ledger": [
+                "import-solaredge-pdf"
+              ]
+            },
+            "availability": {
+              "entitled": true,
+              "engine_ready": true,
+              "implemented": true,
+              "input_ready": false,
+              "input_reason": "drawing_context_required",
+              "entitlement_reason": null,
+              "engine_reason": null,
+              "implementation_reason": null,
+              "refusal_reasons": [
+                "drawing_context_required"
+              ],
+              "runnable": false
+            }
+          }
+        ]
+      }
+    ],
+    "cad_engine": {
+      "enabled": false,
+      "engine": null
+    },
+    "error": null,
+    "degraded_mode": false
   }
 }
