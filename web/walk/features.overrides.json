@@ -414,6 +414,564 @@
         "desktop"
       ],
       "certify": "both"
+    },
+    {
+      "id": "control:properties-close",
+      "source_id": "properties-close",
+      "title": "Close the properties pane",
+      "sources": [
+        "web/src/site/PropertiesDock.jsx",
+        "web/src/App.jsx"
+      ],
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "state_contexts": {
+        "ready": {
+          "complementary": "Properties",
+          "name": "Close the properties pane",
+          "visible": true
+        },
+        "failed-load": {
+          "complementary": "Properties",
+          "name": "Close the properties pane",
+          "visible": true,
+          "failedLoad": true
+        }
+      },
+      "expected_effect": {
+        "ready": {
+          "kind": "renders",
+          "target": "properties-pane",
+          "value": false
+        },
+        "failed-load": {
+          "kind": "renders",
+          "target": "properties-pane",
+          "value": false
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:properties-drawing",
+      "source_id": "properties-drawing",
+      "title": "Drawing",
+      "sources": [
+        "web/src/site/PropertiesDock.jsx",
+        "web/src/App.jsx"
+      ],
+      "states": [
+        "open",
+        "closed"
+      ],
+      "state_contexts": {
+        "open": {
+          "complementary": "Properties",
+          "name": "Drawing",
+          "expanded": true
+        },
+        "closed": {
+          "complementary": "Properties",
+          "name": "Drawing",
+          "expanded": false
+        }
+      },
+      "expected_effect": {
+        "open": {
+          "kind": "toggles",
+          "target": "properties-drawing-section",
+          "value": false
+        },
+        "closed": {
+          "kind": "toggles",
+          "target": "properties-drawing-section",
+          "value": true
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:properties-layers",
+      "source_id": "properties-layers",
+      "title": "Layers",
+      "sources": [
+        "web/src/site/PropertiesDock.jsx",
+        "web/src/App.jsx"
+      ],
+      "states": [
+        "open",
+        "closed",
+        "failed-load-open",
+        "failed-load-closed"
+      ],
+      "state_contexts": {
+        "open": {
+          "complementary": "Properties",
+          "name": "Layers",
+          "expanded": true
+        },
+        "closed": {
+          "complementary": "Properties",
+          "name": "Layers",
+          "expanded": false
+        },
+        "failed-load-open": {
+          "complementary": "Properties",
+          "name": "Layers",
+          "expanded": true,
+          "failedLoad": true
+        },
+        "failed-load-closed": {
+          "complementary": "Properties",
+          "name": "Layers",
+          "expanded": false,
+          "failedLoad": true
+        }
+      },
+      "expected_effect": {
+        "open": {
+          "kind": "toggles",
+          "target": "properties-layers-section",
+          "value": false
+        },
+        "closed": {
+          "kind": "toggles",
+          "target": "properties-layers-section",
+          "value": true
+        },
+        "failed-load-open": {
+          "kind": "toggles",
+          "target": "properties-layers-section",
+          "value": false
+        },
+        "failed-load-closed": {
+          "kind": "toggles",
+          "target": "properties-layers-section",
+          "value": true
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:properties-plan",
+      "source_id": "properties-plan",
+      "title": "Plan",
+      "sources": [
+        "web/src/site/PropertiesDock.jsx",
+        "web/src/App.jsx"
+      ],
+      "states": [
+        "closed",
+        "open",
+        "failed-load-open",
+        "failed-load-closed"
+      ],
+      "state_contexts": {
+        "closed": {
+          "complementary": "Properties",
+          "name": "Plan",
+          "expanded": false
+        },
+        "open": {
+          "complementary": "Properties",
+          "name": "Plan",
+          "expanded": true
+        },
+        "failed-load-open": {
+          "complementary": "Properties",
+          "name": "Plan",
+          "expanded": true,
+          "failedLoad": true
+        },
+        "failed-load-closed": {
+          "complementary": "Properties",
+          "name": "Plan",
+          "expanded": false,
+          "failedLoad": true
+        }
+      },
+      "expected_effect": {
+        "closed": {
+          "kind": "toggles",
+          "target": "properties-plan-section",
+          "value": true
+        },
+        "open": {
+          "kind": "toggles",
+          "target": "properties-plan-section",
+          "value": false
+        },
+        "failed-load-open": {
+          "kind": "toggles",
+          "target": "properties-plan-section",
+          "value": false
+        },
+        "failed-load-closed": {
+          "kind": "toggles",
+          "target": "properties-plan-section",
+          "value": true
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:properties-selection",
+      "source_id": "properties-selection",
+      "title": "Selection",
+      "sources": [
+        "web/src/site/PropertiesDock.jsx",
+        "web/src/App.jsx"
+      ],
+      "states": [
+        "open",
+        "closed",
+        "failed-load-open",
+        "failed-load-closed"
+      ],
+      "state_contexts": {
+        "open": {
+          "complementary": "Properties",
+          "name": "Selection",
+          "expanded": true
+        },
+        "closed": {
+          "complementary": "Properties",
+          "name": "Selection",
+          "expanded": false
+        },
+        "failed-load-open": {
+          "complementary": "Properties",
+          "name": "Selection",
+          "expanded": true,
+          "failedLoad": true
+        },
+        "failed-load-closed": {
+          "complementary": "Properties",
+          "name": "Selection",
+          "expanded": false,
+          "failedLoad": true
+        }
+      },
+      "expected_effect": {
+        "open": {
+          "kind": "toggles",
+          "target": "properties-selection-section",
+          "value": false
+        },
+        "closed": {
+          "kind": "toggles",
+          "target": "properties-selection-section",
+          "value": true
+        },
+        "failed-load-open": {
+          "kind": "toggles",
+          "target": "properties-selection-section",
+          "value": false
+        },
+        "failed-load-closed": {
+          "kind": "toggles",
+          "target": "properties-selection-section",
+          "value": true
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:properties-panels",
+      "source_id": "properties-panels",
+      "title": "Panels {n}",
+      "sources": [
+        "web/src/components/Legend.jsx",
+        "web/src/site/PropertiesDock.jsx",
+        "web/src/components/Viewer.jsx",
+        "web/src/App.jsx"
+      ],
+      "states": [
+        "shown",
+        "hidden"
+      ],
+      "state_contexts": {
+        "shown": {
+          "complementary": "Properties",
+          "name": "Panels {n}",
+          "namePolicy": "count",
+          "visible": true
+        },
+        "hidden": {
+          "complementary": "Properties",
+          "name": "Panels {n}",
+          "namePolicy": "count",
+          "visible": false
+        }
+      },
+      "expected_effect": {
+        "shown": {
+          "kind": "toggles",
+          "target": "layer-panels-visible",
+          "value": false
+        },
+        "hidden": {
+          "kind": "toggles",
+          "target": "layer-panels-visible",
+          "value": true
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:layer-panels",
+      "source_id": "layer-panels",
+      "title": "Panels",
+      "sources": [
+        "web/src/lib/ribbonClusters.js",
+        "web/src/site/DraftingRibbon.jsx",
+        "web/src/components/Viewer.jsx",
+        "web/src/App.jsx"
+      ],
+      "states": [
+        "shown",
+        "hidden"
+      ],
+      "state_contexts": {
+        "shown": {
+          "toolbar": "Drafting tools",
+          "group": "Layers",
+          "name": "Panels",
+          "visible": true
+        },
+        "hidden": {
+          "toolbar": "Drafting tools",
+          "group": "Layers",
+          "name": "Panels",
+          "visible": false
+        }
+      },
+      "expected_effect": {
+        "shown": {
+          "kind": "toggles",
+          "target": "layer-panels-visible",
+          "value": false
+        },
+        "hidden": {
+          "kind": "toggles",
+          "target": "layer-panels-visible",
+          "value": true
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:properties-walk",
+      "source_id": "properties-walk",
+      "title": "Walk {n}",
+      "sources": [
+        "web/src/components/Legend.jsx",
+        "web/src/site/PropertiesDock.jsx",
+        "web/src/components/Viewer.jsx",
+        "web/src/App.jsx"
+      ],
+      "states": [
+        "shown",
+        "hidden"
+      ],
+      "state_contexts": {
+        "shown": {
+          "complementary": "Properties",
+          "name": "Walk {n}",
+          "namePolicy": "count",
+          "visible": true
+        },
+        "hidden": {
+          "complementary": "Properties",
+          "name": "Walk {n}",
+          "namePolicy": "count",
+          "visible": false
+        }
+      },
+      "expected_effect": {
+        "shown": {
+          "kind": "toggles",
+          "target": "layer-walk-visible",
+          "value": false
+        },
+        "hidden": {
+          "kind": "toggles",
+          "target": "layer-walk-visible",
+          "value": true
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:layer-walk",
+      "source_id": "layer-walk",
+      "title": "Walk",
+      "sources": [
+        "web/src/lib/ribbonClusters.js",
+        "web/src/site/DraftingRibbon.jsx",
+        "web/src/components/Viewer.jsx",
+        "web/src/App.jsx"
+      ],
+      "states": [
+        "shown",
+        "hidden"
+      ],
+      "state_contexts": {
+        "shown": {
+          "toolbar": "Drafting tools",
+          "group": "Layers",
+          "name": "Walk",
+          "visible": true
+        },
+        "hidden": {
+          "toolbar": "Drafting tools",
+          "group": "Layers",
+          "name": "Walk",
+          "visible": false
+        }
+      },
+      "expected_effect": {
+        "shown": {
+          "kind": "toggles",
+          "target": "layer-walk-visible",
+          "value": false
+        },
+        "hidden": {
+          "kind": "toggles",
+          "target": "layer-walk-visible",
+          "value": true
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:job-monitor-expand",
+      "source_id": "job-monitor-expand",
+      "title": "Expand the job monitor ({n} live)",
+      "sources": [
+        "web/src/components/JobRail.jsx",
+        "web/src/site/SurfaceFrame.jsx",
+        "web/src/App.jsx"
+      ],
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "state_contexts": {
+        "ready": {
+          "toolbar": "Job monitor",
+          "name": "Expand the job monitor ({n} live)",
+          "namePolicy": "count",
+          "expanded": false
+        },
+        "failed-load": {
+          "toolbar": "Job monitor",
+          "name": "Expand the job monitor ({n} live)",
+          "namePolicy": "count",
+          "expanded": false,
+          "failedLoad": true
+        }
+      },
+      "expected_effect": {
+        "ready": {
+          "kind": "opens",
+          "target": "job-monitor"
+        },
+        "failed-load": {
+          "kind": "opens",
+          "target": "job-monitor"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:drawing-overview",
+      "source_id": "drawing-overview",
+      "title": "Drawing overview",
+      "sources": [
+        "web/src/site/CadOverview.jsx",
+        "web/src/site/cadOverviewMath.js"
+      ],
+      "states": [
+        "ready"
+      ],
+      "state_contexts": {
+        "ready": {
+          "document": true,
+          "name": "Drawing overview"
+        }
+      },
+      "expected_effect": {
+        "ready": {
+          "kind": "navigates",
+          "target": "viewer-overview-pan"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:drawing-overview-collapse",
+      "source_id": "drawing-overview-collapse",
+      "title": "Collapse drawing overview",
+      "sources": [
+        "web/src/site/CadOverview.jsx"
+      ],
+      "states": [
+        "expanded"
+      ],
+      "state_contexts": {
+        "expanded": {
+          "document": true,
+          "name": "Collapse drawing overview",
+          "expanded": true
+        }
+      },
+      "expected_effect": {
+        "expanded": {
+          "kind": "toggles",
+          "target": "drawing-overview-expanded",
+          "value": false
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
     }
   ],
   "state_cases": {

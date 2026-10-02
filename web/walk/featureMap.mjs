@@ -148,10 +148,20 @@ function validateControls(controls) {
     for (const state of record.states) {
       const effect = record.expected_effect[state]
       const context = record.state_contexts[state]
-      const contextFields = ['toolbar', 'name', 'tooltip', 'description', 'failedLoad', 'pressed', 'fullscreen']
-      if (!nonempty(context.toolbar) || !nonempty(context.name)
+      const contextFields = ['toolbar', 'complementary', 'group', 'document', 'name', 'namePolicy',
+        'tooltip', 'description', 'failedLoad', 'pressed', 'fullscreen', 'expanded', 'visible']
+      const scopes = [context.toolbar !== undefined, context.complementary !== undefined, context.document !== undefined]
+      if (scopes.filter(Boolean).length !== 1
+          || (context.toolbar !== undefined && !nonempty(context.toolbar))
+          || (context.complementary !== undefined && context.complementary !== 'Properties')
+          || (context.document !== undefined && context.document !== true)
+          || (context.group !== undefined && (context.toolbar !== 'Drafting tools' || context.group !== 'Layers'))
+          || !nonempty(context.name)
           || Object.keys(context).some((key) => !contextFields.includes(key))
-          || ['failedLoad', 'pressed', 'fullscreen'].some((key) => context[key] !== undefined && typeof context[key] !== 'boolean')) {
+          || ['failedLoad', 'pressed', 'fullscreen', 'expanded', 'visible'].some((key) => context[key] !== undefined && typeof context[key] !== 'boolean')
+          || (context.namePolicy !== undefined && (context.namePolicy !== 'count'
+            || !['Panels {n}', 'Walk {n}', 'Expand the job monitor ({n} live)'].includes(context.name)))
+          || (context.name.includes('{n}') && context.namePolicy !== 'count')) {
         throw new Error('featureMap: invalid control context ' + record.id + '/' + state)
       }
       if (effect.kind === 'disabled_with_reason') {
@@ -163,9 +173,25 @@ function validateControls(controls) {
       } else if (context.name !== record.title) {
         throw new Error('featureMap: control accessible name mismatch ' + record.id + '/' + state)
       }
+      const section = /^properties-(drawing|layers|plan|selection)-section$/.test(effect.target)
+      const layer = /^layer-(panels|walk)-visible$/.test(effect.target)
+      const overview = ['viewer-overview-pan', 'drawing-overview-expanded'].includes(effect.target)
+      if ((section && context.complementary !== 'Properties')
+          || (layer && !(context.complementary === 'Properties' && context.namePolicy === 'count'
+            || context.toolbar === 'Drafting tools' && context.group === 'Layers' && context.namePolicy === undefined))
+          || (overview && context.document !== true)
+          || (effect.target === 'job-monitor' && (context.toolbar !== 'Job monitor'
+            || context.group !== undefined || context.expanded !== false || effect.kind !== 'opens'))
+          || (record.source_id === 'properties-close' && (context.complementary !== 'Properties'
+            || context.visible !== true || effect.kind !== 'renders' || effect.value !== false))) {
+        throw new Error('featureMap: control scope or initial effect mismatch ' + record.id + '/' + state)
+      }
       if (effect.kind === 'toggles') {
         const initial = effect.target === 'drafting-grid' ? context.pressed
-          : effect.target === 'document-fullscreen' ? context.fullscreen : undefined
+          : effect.target === 'document-fullscreen' ? context.fullscreen
+            : /^properties-(drawing|layers|plan|selection)-section$/.test(effect.target)
+              || effect.target === 'drawing-overview-expanded' ? context.expanded
+              : /^layer-(panels|walk)-visible$/.test(effect.target) ? context.visible : undefined
         if (typeof initial !== 'boolean' || typeof effect.value !== 'boolean' || effect.value === initial) {
           throw new Error('featureMap: control toggle needs opposite setup and effect states ' + record.id + '/' + state)
         }

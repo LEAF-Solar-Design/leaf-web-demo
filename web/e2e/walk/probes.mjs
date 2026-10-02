@@ -37,12 +37,49 @@ export const CONTROL_CENSUS_BATCH = Object.freeze([
     states: ["ready","failed-load"], viewports: ['desktop'] },
   { feature_id: 'control:print', scope: 'toolbar:"Quick access"', role: 'button', name: 'Print',
     states: ["ready","failed-load"], viewports: ['desktop'] },
+  { feature_id: 'control:properties-close', scope: 'complementary:"Properties"', role: 'button', name: 'Close the properties pane',
+    states: ["ready","failed-load"], viewports: ['desktop'] },
+  { feature_id: 'control:properties-drawing', scope: 'complementary:"Properties"', role: 'button', name: 'Drawing',
+    states: ["ready"], viewports: ['desktop'] },
+  { feature_id: 'control:properties-layers', scope: 'complementary:"Properties"', role: 'button', name: 'Layers',
+    states: ["ready","failed-load"], viewports: ['desktop'] },
+  { feature_id: 'control:properties-panels', scope: 'complementary:"Properties"', role: 'button', name: 'Panels {n}',
+    states: ["ready"], viewports: ['desktop'] },
+  { feature_id: 'control:properties-plan', scope: 'complementary:"Properties"', role: 'button', name: 'Plan',
+    states: ["ready","failed-load"], viewports: ['desktop'] },
+  { feature_id: 'control:properties-selection', scope: 'complementary:"Properties"', role: 'button', name: 'Selection',
+    states: ["ready","failed-load"], viewports: ['desktop'] },
+  { feature_id: 'control:properties-walk', scope: 'complementary:"Properties"', role: 'button', name: 'Walk {n}',
+    states: ["ready"], viewports: ['desktop'] },
+  { feature_id: 'control:drawing-overview-collapse', scope: 'document', role: 'button', name: 'Collapse drawing overview',
+    states: ["ready"], viewports: ['desktop'] },
+  { feature_id: 'control:drawing-overview', scope: 'document', role: 'button', name: 'Drawing overview',
+    states: ["ready"], viewports: ['desktop'] },
+  { feature_id: 'control:layer-panels', scope: 'toolbar:"Drafting tools" > group:"Layers"', role: 'button', name: 'Panels',
+    states: ["ready"], viewports: ['desktop'] },
+  { feature_id: 'control:layer-walk', scope: 'toolbar:"Drafting tools" > group:"Layers"', role: 'button', name: 'Walk',
+    states: ["ready"], viewports: ['desktop'] },
+  { feature_id: 'control:job-monitor-expand', scope: 'toolbar:"Job monitor"', role: 'button', name: 'Expand the job monitor ({n} live)',
+    states: ["ready","failed-load"], viewports: ['desktop'] },
 ])
+
+export const normalizedControlKey = (row) => controlKey({ ...row,
+  name: row.name.replace(/^((?:Panels|Walk) )[0-9][0-9,]*$/, '$1{n}') })
+export function controlScope(context) {
+  if (context.complementary) return role('complementary', context.complementary)
+  if (context.group) return role('group', context.group, role('toolbar', context.toolbar))
+  return context.toolbar ? role('toolbar', context.toolbar) : undefined
+}
+export function controlName(context) {
+  if (context.namePolicy !== 'count') return context.name
+  const count = context.name.startsWith('Expand ') ? '[0-9]+' : '[0-9][0-9,]*'
+  return new RegExp('^' + context.name.split('{n}').map(escapePattern).join(count) + '$')
+}
 
 export function requireControlCensusBatch(census, { state = 'ready', viewport = 'desktop' } = {}) {
   for (const expected of CONTROL_CENSUS_BATCH) {
     if (!expected.states.includes(state) || !expected.viewports.includes(viewport)) continue
-    const matches = census.resolved.filter((row) => controlKey(row) === controlKey(expected))
+    const matches = census.resolved.filter((row) => normalizedControlKey(row) === normalizedControlKey(expected))
     if (matches.length !== 1 || matches[0].feature_id !== expected.feature_id) {
       throw new Error('control-census: required batch control missing or misresolved: ' + expected.feature_id)
     }
@@ -60,7 +97,8 @@ export function locatorRecipe(entry, state) {
   const effect = entry.expected_effect[state]
   if (entry.kind === 'control') {
     const context = entry.state_contexts[state]
-    return { ...role('button', context.name, role('toolbar', context.toolbar)), trigger: 'click',
+    return { ...role('button', controlName(context), controlScope(context)), trigger: 'click',
+      ...(context.namePolicy === 'count' ? { normalizedName: context.name } : {}),
       tooltip: context.tooltip, description: context.description }
   }
   if (entry.kind === 'action') {
@@ -154,6 +192,20 @@ export function stateRecipe(entry, state) {
     if (effect.target === 'document-fullscreen') steps.push(step('fullscreen-state', { control: locator, fullscreen: context.fullscreen }))
     if (entry.source_id === 'view-back') steps.push(step(state === 'empty-history' ? 'empty-view-history' : 'previous-view-history'))
     if (entry.source_id === 'view-up') steps.push(step('whole-drawing-view'))
+    if (context.complementary || effect.target?.startsWith('layer-')) steps.push(step('properties-state', { open: true }))
+    if (/^properties-(drawing|layers|plan|selection)-section$/.test(effect.target)) {
+      if (effect.target === 'properties-selection-section' && !context.failedLoad) {
+        steps.push(step('select-entity', { type: 'LINE', viewerOnly: true }))
+      }
+      steps.push(step('properties-section-state', { name: context.name, expanded: context.expanded }))
+    }
+    if (entry.source_id === 'properties-close') steps.push(step('properties-close-state'))
+    if (effect.target?.startsWith('layer-')) steps.push(step('layer-visible-state', {
+      name: effect.target === 'layer-panels-visible' ? 'Panels' : 'Walk', visible: context.visible,
+    }))
+    if (effect.target === 'job-monitor') steps.push(step('job-monitor-collapsed'))
+    if (effect.target === 'viewer-overview-pan') steps.push(step('overview-pan-state'))
+    if (effect.target === 'drawing-overview-expanded') steps.push(step('overview-expanded-state'))
     return { context, steps }
   }
   if (surface === 'sheets') return { context, steps: [step('navigate', { url: '/sheets' })] }

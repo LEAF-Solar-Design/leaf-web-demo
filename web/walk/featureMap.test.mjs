@@ -48,9 +48,12 @@ test('completeness rejects every omitted row, including tools and the none drawe
   assert.throws(() => checkCompleteness({ ...map, entries: [...map.entries, map.entries[0]] }), /duplicate/)
 })
 
-test('ten exact control declarations participate in independent completeness', () => {
+test('twenty-two exact control declarations participate in independent completeness', () => {
   const expected = ['fullscreen', 'grid-display', 'new-drawing', 'object-snap', 'ortho-mode',
-    'polar-tracking', 'print', 'snap-mode', 'view-back', 'view-up'].map((id) => 'control:' + id)
+    'polar-tracking', 'print', 'snap-mode', 'view-back', 'view-up',
+    'properties-close', 'properties-drawing', 'properties-layers', 'properties-panels', 'properties-plan',
+    'properties-selection', 'properties-walk', 'layer-panels', 'layer-walk', 'job-monitor-expand',
+    'drawing-overview', 'drawing-overview-collapse'].map((id) => 'control:' + id).sort()
   assert.deepEqual(map.entries.filter((row) => row.kind === 'control').map((row) => row.id), expected)
   for (const declaration of overrides.controls) {
     const entry = entryFor(declaration.id)
@@ -94,6 +97,40 @@ test('malformed control declarations, duplicate ids and missing contracts fail c
     mutate(config)
     assert.throws(() => buildFeatureMap({ overrides: config }), /featureMap:/)
   }
+})
+
+test('new control scopes, normalized names and initial toggle states fail closed', () => {
+  const mutateControl = (id, mutate) => {
+    const config = clone(overrides)
+    mutate(config.controls.find((row) => row.id === 'control:' + id))
+    assert.throws(() => buildFeatureMap({ overrides: config }), /featureMap:/)
+  }
+  for (const mutate of [
+    (row) => { row.state_contexts.open.toolbar = 'Drafting tools' },
+    (row) => { row.state_contexts.open.complementary = 'Elsewhere' },
+    (row) => { delete row.state_contexts.open.complementary },
+    (row) => { row.state_contexts.open.expanded = 'true' },
+    (row) => { row.expected_effect.open.value = true },
+    (row) => { delete row.expected_effect.open },
+  ]) mutateControl('properties-drawing', mutate)
+  for (const mutate of [
+    (row) => { row.state_contexts.shown.group = 'Panels' },
+    (row) => { row.state_contexts.shown.toolbar = 'View' },
+    (row) => { row.expected_effect.shown.value = true },
+    (row) => { delete row.state_contexts.shown.visible },
+  ]) mutateControl('layer-panels', mutate)
+  for (const mutate of [
+    (row) => { row.state_contexts.shown.namePolicy = 'regex' },
+    (row) => { delete row.state_contexts.shown.namePolicy },
+    (row) => { row.state_contexts.shown.name = 'Panels 1' },
+  ]) mutateControl('properties-panels', mutate)
+  mutateControl('drawing-overview', (row) => { row.state_contexts.ready.document = false })
+  mutateControl('drawing-overview', (row) => { row.state_contexts.ready.group = 'Layers' })
+  mutateControl('drawing-overview-collapse', (row) => { row.expected_effect.expanded.value = true })
+  mutateControl('properties-close', (row) => { row.expected_effect.ready.value = true })
+  mutateControl('properties-close', (row) => { row.state_contexts.ready.visible = false })
+  mutateControl('job-monitor-expand', (row) => { row.state_contexts.ready.expanded = true })
+  mutateControl('job-monitor-expand', (row) => { row.state_contexts.ready.toolbar = 'View' })
 })
 
 test('default build keeps engine drafting modes unavailable and viewer controls executable', () => {

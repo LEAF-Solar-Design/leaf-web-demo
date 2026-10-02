@@ -5,7 +5,7 @@ import { buildFeatureMap } from './featureMap.mjs'
 import { readControlInventory, validateControlInventory, resolveCensus, censusFailure, controlKey, controlNameAttributes, registryCensusMappings } from './controlInventory.mjs'
 import { enumerateControls } from '../e2e/walk/controlCensus.mjs'
 import { PROFILE_RIBBON_TABS } from '../src/lib/ribbonTabs.data.js'
-import { CONTROL_CENSUS_BATCH, requireControlCensusBatch } from '../e2e/walk/probes.mjs'
+import { CONTROL_CENSUS_BATCH, requireControlCensusBatch, locatorRecipe, normalizedControlKey } from '../e2e/walk/probes.mjs'
 
 const fixture = (name) => JSON.parse(readFileSync(new URL(`./fixtures/control-census.${name}.json`, import.meta.url), 'utf8'))
 const resolve = (data, context) => resolveCensus(data.controls, data.derivedMappings, data.map, data.inventory, context)
@@ -183,7 +183,7 @@ test('inventory refuses unknown ids, overlapping duplicate rows, empty reasons a
   assert.doesNotThrow(() => validateControlInventory(data.inventory, data.map))
 })
 
-test('batch one retires exactly ten keys and preserves the other thirty baseline rows', () => {
+test('batch two retires exactly twelve of the thirty rows and preserves the other eighteen', () => {
   const map = buildFeatureMap()
   const inventory = readControlInventory(map)
   const expected = [
@@ -219,11 +219,24 @@ test('batch one retires exactly ten keys and preserves the other thirty baseline
     ["toolbar:\"Job monitor\"","button","Expand the job monitor ({n} live)",["ready","failed-load"]],
   ].map(([scope, role, name, states]) => ({ scope, role, name, states, viewports: ['desktop'],
     reason: 'No feature-map coverage yet: no walk mapping' }))
-  assert.deepEqual(inventory.baseline_unmapped, expected)
-  assert.equal(inventory.baseline_unmapped.length, 30)
+  const retiredIndices = [0, 1, 2, 3, 4, 5, 6, 11, 14, 27, 28, 29]
+  const retiredIds = ['properties-close', 'properties-drawing', 'properties-layers', 'properties-panels',
+    'properties-plan', 'properties-selection', 'properties-walk', 'drawing-overview-collapse',
+    'drawing-overview', 'layer-panels', 'layer-walk', 'job-monitor-expand']
+  assert.equal(expected.length, 30, 'retain the independent batch-one reference')
+  assert.deepEqual(inventory.baseline_unmapped, expected.filter((row, index) => !retiredIndices.includes(index)))
+  assert.equal(inventory.baseline_unmapped.length, 18)
+  const retired = retiredIndices.map((index, position) => {
+    const { reason, ...row } = expected[index]
+    return { feature_id: 'control:' + retiredIds[position], ...row }
+  })
+  assert.deepEqual(inventory.mappings.slice(-12), retired)
+  assert.deepEqual(CONTROL_CENSUS_BATCH.slice(10), retired)
+  assert.deepEqual(expected.filter((row) => !inventory.baseline_unmapped.some((retained) => controlKey(retained) === controlKey(row)))
+    .map(controlKey), retired.map(controlKey))
   const mappings = inventory.mappings.filter((row) => row.feature_id.startsWith('control:'))
   assert.deepEqual(mappings, CONTROL_CENSUS_BATCH)
-  assert.equal(mappings.length, 10)
+  assert.equal(mappings.length, 22)
   for (const row of mappings) assert.ok(!inventory.baseline_unmapped.some((other) => controlKey(other) === controlKey(row)))
 })
 
@@ -240,6 +253,28 @@ test('batch census mappings cover available and unavailable names in each declar
       assert.equal(requireControlCensusBatch(result, { state, viewport: 'desktop' }), true)
       assert.deepEqual(result.resolved.map((row) => row.feature_id), expected.map((row) => row.feature_id))
     }
+  }
+})
+
+test('count-bearing batch controls resolve different live counts through anchored scoped recipes', () => {
+  const map = buildFeatureMap()
+  const inventory = { ...readControlInventory(map), baseline_unmapped: [] }
+  for (const count of ['1', '42', '1,234']) {
+    const expected = CONTROL_CENSUS_BATCH.filter((row) => row.states.includes('ready'))
+    const controls = expected.map((row, index) => ({ ...row, index, visible: true,
+      name: row.name.replace('{n}', row.feature_id === 'control:job-monitor-expand' ? count.replace(/,/g, '') : count) }))
+    const derived = []
+    for (const row of controls.filter((row) => row.name !== expected[row.index].name)) {
+      const entry = map.entries.find((entry) => entry.id === row.feature_id)
+      const recipe = locatorRecipe(entry, entry.states[0])
+      assert.match(row.name, recipe.name)
+      assert.equal(normalizedControlKey(row), normalizedControlKey(expected[row.index]))
+      derived.push({ index: row.index, feature_id: entry.id })
+    }
+    const result = resolveCensus(controls, derived, map, inventory)
+    assert.equal(result.ok, true)
+    assert.equal(requireControlCensusBatch(result), true)
+    assert.deepEqual(result.resolved.map((row) => row.feature_id), expected.map((row) => row.feature_id))
   }
 })
 
