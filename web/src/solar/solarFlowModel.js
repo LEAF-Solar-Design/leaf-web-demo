@@ -22,18 +22,27 @@ function flowEntry(id, label, maturity, stages) {
   return Object.freeze({ id, label, maturity, stages: stages === null ? null : Object.freeze(stages) })
 }
 
+// A Ground Electrical tool is bound only when a server test runs it to a pinned result on a graph produced by the conversion builtin:
+// test_solar_ground_admission.py, test_solar_tool_trackers_to_panel_groups.py, test_solar_ground_equipment.py.
 export const SOLAR_FLOWS = Object.freeze([
   flowEntry('rooftop', 'Rooftop', 'production', null),
   flowEntry('ground-electrical', 'Ground Mount Electrical', 'production', [
     flowStage('conversion', 'Tracker conversion', ['solar-trackers-to-panel-groups']),
-    flowStage('stringing', 'Sizing and stringing'),
-    flowStage('equipment', 'Equipment'),
+    flowStage('stringing', 'Sizing and stringing', [
+      'solar-settings', 'solar-size-strings', 'solar-string-add', 'solar-string-multi-add',
+      'solar-string-midpoint', 'solar-string-flip', 'solar-string-swap', 'solar-string-delete',
+      'solar-string-rebuild', 'solar-correct-string',
+    ]),
+    flowStage('equipment', 'Equipment', ['solar-assign-equipment', 'solar-string-conductors']),
+    // No tool runs on a converted Ground graph yet, because a converted version stores no panel-group outlines.
     flowStage('feeders', 'Feeders and routes'),
     flowStage('calculations', 'NEC calculations', [
       'solar-nec-ampacity-correction', 'solar-nec-ac-voltage-drop',
       'solar-nec-conduit-fill', 'solar-nec-feeder-ocpd',
     ]),
-    flowStage('outputs', 'Schedules and exports'),
+    flowStage('outputs', 'Schedules and exports', [
+      'solar-string-data', 'solar-electrical-schedules', 'solar-cable-export',
+    ]),
   ]),
   flowEntry('ground-physical', 'Ground Mount Physical', 'preview', [
     flowStage('terrain', 'Terrain'), flowStage('layout', 'Tracker layout'),
