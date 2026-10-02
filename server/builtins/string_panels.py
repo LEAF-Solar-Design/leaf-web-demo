@@ -3,8 +3,11 @@
 Serpentine DC string routing over the intake's closed "Panels"-layer polylines:
 
   1. compute each panel's centroid (WORLD coordinates — the same space as the
-     intake polylines; drawing units are inches, matching measure-panel-area's
-     units assumption),
+     intake polylines). Drawing units come from, in order: the caller's
+     ``meters_per_unit``; the Solar design graph embedded in this version's
+     intake (``project.units.meters_per_unit``); inches. Off inches, a COPY of
+     the geometry is scaled to inches for every distance rule below and the
+     returned points are scaled back),
   2. cluster panels into BANKS (roof sections): union-find over centroid pairs
      within ``cluster_radius_factor`` x the median nearest-neighbor distance —
      a string never leaps a roof-section gap,
@@ -52,6 +55,46 @@ DEFAULTS: Dict[str, Any] = {
 }
 
 INCHES_PER_FOOT = 12.0
+METERS_PER_INCH = 0.0254
+MAX_METERS_PER_UNIT = 1000.0
+SCALE_INVALID = "meters_per_unit must be a finite number greater than 0 and at most 1000"
+GRAPH_SCALE_INVALID = ("the drawing's Solar design does not declare a usable meters_per_unit; "
+                       "pass meters_per_unit")
+SCALE_OVERFLOW = "drawing coordinates are not finite at this meters_per_unit"
+
+
+def _scale(value, refusal):
+    """Inches per drawing unit for one meters_per_unit value; fails closed, never coerces."""
+    if type(value) not in (int, float) or not 0 < value <= MAX_METERS_PER_UNIT:
+        raise ValueError(refusal)
+    return value / METERS_PER_INCH
+
+
+def _inches_per_unit(intake, params):
+    """Inches per drawing unit: the caller's meters_per_unit, else the embedded design's, else 1.0.
+
+    An absent or null parameter is "not given". A boolean, a string, zero, a negative, NaN, an
+    infinity or a value over the maximum is refused, from either source. With neither source the
+    result is exactly 1.0, so an inch drawing keeps its arithmetic."""
+    given = (params or {}).get("meters_per_unit")
+    if given is not None:
+        return _scale(given, SCALE_INVALID)
+    graph = intake.get("solar_design_graph") if type(intake) is dict else None
+    if graph is None:
+        return 1.0
+    try:
+        declared = graph["project"]["units"]["meters_per_unit"]
+    except (KeyError, TypeError, IndexError):
+        raise ValueError(GRAPH_SCALE_INVALID) from None
+    return _scale(declared, GRAPH_SCALE_INVALID)
+
+
+def _in_inches(panel, k):
+    """A copy of one panel polyline with every coordinate in inches; the caller's intake is untouched."""
+    pts = [[c * k for c in pt] for pt in panel["pts"]]
+    if not all(math.isfinite(c) for pt in pts for c in pt):
+        raise ValueError(SCALE_OVERFLOW)
+    return dict(panel, pts=pts)
 
 
 def nec_max_modules(voc: float, temp_coeff_pct_per_c: float,
@@ -194,6 +237,7 @@ def _bank_serpentine(panels: List[Dict[str, Any]], idxs: List[int],
 
 
 def run(intake: Dict[str, Any], params: Dict[str, Any]):
+    scale = _inches_per_unit(intake, params)
     p = dict(DEFAULTS)
     p.update({k: v for k, v in (params or {}).items() if v is not None})
 
@@ -204,6 +248,8 @@ def run(intake: Dict[str, Any], params: Dict[str, Any]):
     ]
     if not panels:
         raise ValueError(f"no closed polylines found on layer {layer!r}")
+    if scale != 1.0:
+        panels = [_in_inches(pl, scale) for pl in panels]
 
     max_modules, worst_voc_per_module = nec_max_modules(
         p["voc"], p["temp_coeff_pct_per_c"], p["design_min_temp_c"],
@@ -219,9 +265,15 @@ def run(intake: Dict[str, Any], params: Dict[str, Any]):
         for si in range(0, len(ordered), max_modules):
             chunk = [cents[i] for i in ordered[si:si + max_modules]]
             pts = [[round(c[0], 3), round(c[1], 3)] for c in chunk]
+            if scale != 1.0:
+                # Back to drawing units; never rounded again, so the inch grid is what is kept.
+                pts = [[x / scale, y / scale] for x, y in pts]
             length_units = sum(
                 math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(chunk, chunk[1:]))
             length_ft = round(length_units / INCHES_PER_FOOT, 1)
+            if scale != 1.0 and not (math.isfinite(length_ft)
+                                 and all(math.isfinite(c) for pt in pts for c in pt)):
+                raise ValueError(SCALE_OVERFLOW)
             lengths_ft.append(length_ft)
             strings.append({
                 "id": f"S{len(strings) + 1:03d}",
