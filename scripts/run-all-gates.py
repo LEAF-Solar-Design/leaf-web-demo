@@ -814,6 +814,8 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_solar_ground_outlines.py"), 79),
         Suite("server-solar-ground-admission", "server tests/test_solar_ground_admission.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_ground_admission.py"), 28),
+        Suite("server-solar-ground-string-readiness", "server tests/test_solar_ground_string_readiness.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_ground_string_readiness.py"), 11),
         # W2 equipment intent: 10 plain cases + 2 compatible edits + 2 refusals + 6 validity cases
         # + 1 several-survivors ordering case = 21.
         Suite("server-w2-equipment-intent", "server tests/test_w2_equipment_intent.py",

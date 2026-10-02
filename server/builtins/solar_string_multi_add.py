@@ -40,6 +40,14 @@ def _load_single_add():
 single = _load_single_add()
 
 
+def input_readiness(graph):
+    """The single-add rule: multi-add strings the same panels. The reason is spelled here too so the
+    client's copy check finds every code this hook can answer."""
+    if single.input_readiness(graph)["input_ready"]:
+        return {"input_ready": True, "input_reason": None}
+    return {"input_ready": False, "input_reason": "panels_required"}
+
+
 def _valid_request(params):
     if type(params) is not dict or set(params) != {
             "expected_rev", "string_length", "ordered_panel_refs"}:
