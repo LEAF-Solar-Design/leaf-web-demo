@@ -3290,6 +3290,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_tool_publication_policy.py"), 13),
         Suite("server-tool-record-fields", "server tests/test_tool_record_fields.py", "pytest", SERVER,
               _py_pytest("tests/test_tool_record_fields.py"), 42),
+        Suite("server-tool-validate-structural", "server tests/test_tool_validate_structural.py", "pytest", SERVER,
+              _py_pytest("tests/test_tool_validate_structural.py"), 52),
         Suite("server-turn-queue", "server tests/test_turn_queue.py", "pytest", SERVER,
               _py_pytest("tests/test_turn_queue.py"), 16),
         # TCM-09a cost transparency: publish the monthly share ledger and GET /api/cost.

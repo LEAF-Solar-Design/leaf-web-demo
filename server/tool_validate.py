@@ -67,6 +67,25 @@ def validate_params(tool: Dict[str, Any], params: Dict[str, Any]) -> List[str]:
         return _structural_params(schema, params)
 
 
+def _matches_any_type(val: Any, names: List[Any]) -> bool:
+    """True when val satisfies at least one named JSON type. Never raises.
+
+    A name this fallback does not know (or an entry that is not a string) is not checked, so it
+    matches; an empty list names nothing to check. bool is a subclass of int and is refused for
+    number and integer."""
+    if not names:
+        return True
+    for name in names:
+        py = _PY_TYPES.get(name) if isinstance(name, str) else None
+        if py is None:
+            return True
+        if name in ("number", "integer") and isinstance(val, bool):
+            continue
+        if isinstance(val, py):
+            return True
+    return False
+
+
 def _structural_params(schema: Dict[str, Any], params: Any) -> List[str]:
     errs: List[str] = []
     if schema.get("type") == "object" and not isinstance(params, dict):
@@ -79,12 +98,10 @@ def _structural_params(schema: Dict[str, Any], params: Any) -> List[str]:
         for key, val in params.items():
             spec = props.get(key)
             if isinstance(spec, dict) and "type" in spec:
-                py = _PY_TYPES.get(spec["type"])
-                # bool is a subclass of int — reject it for number/integer
-                if spec["type"] in ("number", "integer") and isinstance(val, bool):
-                    errs.append(f"{key}: expected {spec['type']}")
-                elif py is not None and not isinstance(val, py):
-                    errs.append(f"{key}: expected {spec['type']}")
+                # JSON Schema allows one type name or a list of them (["number", "null"]).
+                names = spec["type"] if isinstance(spec["type"], list) else [spec["type"]]
+                if not _matches_any_type(val, names):
+                    errs.append(f"{key}: expected {' or '.join(str(n) for n in names)}")
         if schema.get("additionalProperties") is False:
             for key in params:
                 if key not in props:
