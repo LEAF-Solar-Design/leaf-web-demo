@@ -172,8 +172,8 @@ test('runtime-assembled credentials trigger findings and are redacted from findi
   const entry = find('red-hat.failure-refusal')
   const jwt = ['eyJ' + 'hbGciOiJIUzI1NiJ9', 'cGF5bG9hZA', 'c2lnbmF0dXJl'].join('.')
   const bearer = ['Bear', 'er', ' ', 'test-', 'credential'].join('')
-  const authorization = ['Author', 'ization', ': ', 'Basic ', 'dGVzdDp0ZXN0'].join('')
-  for (const credential of [jwt, bearer, authorization]) {
+  const basicHeader = ['Author', 'ization', ': ', 'Basic ', 'dGVzdDp0ZXN0'].join('')
+  for (const credential of [jwt, bearer, basicHeader]) {
     const evidence = clone(good[entry.id])
     evidence.measurements.failure.visibleText = `Request failed: ${credential}`
     const result = entry.evaluate(evidence)
