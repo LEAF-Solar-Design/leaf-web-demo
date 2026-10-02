@@ -295,17 +295,17 @@ describe('terrain workspace integration', () => {
       props.transport.fetchImpl.mockImplementation(async (url, init) =>
         init.method === method ? refused : terrainResponse())
       render(<SolarWorkspaceTools {...props} />)
-      localStorage.setItem('leaf.jwt', 'terrain-old')
+      localStorage.setItem('leaf.jwt', 'tr-old')
       openTerrain()
       if (method === 'POST') {
         await terrainReady()
-        localStorage.setItem('leaf.jwt', 'terrain-new')
+        localStorage.setItem('leaf.jwt', 'tr-new')
         fireEvent.click(terrainMesh())
       }
       await waitFor(() => expect(screen.getByTestId('solar-terrain-refusal')).toBeTruthy())
       const sent = props.transport.fetchImpl.mock.calls.find(([, init]) => init.method === method)
       expect(props.transport.onResponse).toHaveBeenCalledWith(refused, sent[0],
-        method === 'GET' ? 'Bearer terrain-old' : 'Bearer terrain-new')
+        method === 'GET' ? 'Bearer tr-old' : 'Bearer tr-new')
       expect(props.onPhysicalHeadChanged).not.toHaveBeenCalled()
       expect(props.onDrawingVersionChanged).not.toHaveBeenCalled()
       expect(terrainGets(props)).toHaveLength(1)
