@@ -1,0 +1,62 @@
+{
+  "synthetic": true,
+  "description": "Declared generated-image dimensions and measured synthetic canvas mask; no live capture.",
+  "dimensions": {
+    "width": 4,
+    "height": 3
+  },
+  "provenance": {
+    "before": {
+      "journey": "first-run-open",
+      "state": "drawing-visible",
+      "fixtureVersion": "synthetic-rooftop-v1",
+      "catalogVersion": "synthetic-catalog-v1",
+      "viewport": {
+        "width": 4,
+        "height": 3
+      },
+      "browser": "chromium-fixture",
+      "deviceScale": 1,
+      "captureConditions": {
+        "animations": "disabled",
+        "fonts": "fixture-ready",
+        "colorScheme": "light"
+      },
+      "deploymentId": "synthetic-before"
+    },
+    "after": {
+      "journey": "first-run-open",
+      "state": "drawing-visible",
+      "fixtureVersion": "synthetic-rooftop-v1",
+      "catalogVersion": "synthetic-catalog-v1",
+      "viewport": {
+        "width": 4,
+        "height": 3
+      },
+      "browser": "chromium-fixture",
+      "deviceScale": 1,
+      "captureConditions": {
+        "animations": "disabled",
+        "fonts": "fixture-ready",
+        "colorScheme": "light"
+      },
+      "deploymentId": "synthetic-after"
+    },
+    "threshold": 0.1
+  },
+  "masks": [
+    {
+      "x": 1,
+      "y": 1,
+      "width": 2,
+      "height": 1,
+      "source": "synthetic measured viewer canvas; PNG pixel coordinates"
+    }
+  ],
+  "expected": {
+    "comparedPixelCount": 10,
+    "unchanged": 0,
+    "unmaskedChanged": 1,
+    "canvasOnlyChanged": 0
+  }
+}

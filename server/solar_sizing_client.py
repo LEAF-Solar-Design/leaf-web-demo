@@ -266,17 +266,47 @@ def advance(graph, changed, tool):
     return validate_graph(graph)
 
 
-def sizing_basis(graph):
+def compact_slot_tables(graph):
+    """{frame id: SlotTable} for every compact Ground frame (codec leaf.solar-ground-slots.v1), in
+    frame order. A graph with no ground_slots block returns {} without importing the codec.
+    Decoding fails closed with the codec's own refusal; no slot is expanded."""
+    if not any("ground_slots" in frame for frame in graph["frames"]):
+        return {}
+    import solar_ground_graph_codec as codec
+    return codec.decode_graph_slots(graph)
+
+
+def sizing_basis(graph, tables=None):
+    """The design facts a confirmed sizing is bound to. A compact Ground frame's slot panels are
+    panels: each adds {id, centre, angle} after the stored panels, frames in graph order then slot
+    order, so the digest of a compact graph equals the digest of its expansion. `tables` is
+    compact_slot_tables(graph) of this same graph when the caller already decoded it, else None
+    (one decode here). Linear in the slot count; a graph with no block takes the unchanged path
+    byte for byte."""
+    panels = [{"id": p["id"], "centre": p["centre"], "angle": p["angle"]} for p in graph["panels"]]
+    if tables is None:
+        tables = compact_slot_tables(graph)
+    for frame in graph["frames"]:
+        table = tables.get(frame["id"])
+        if table is None:
+            continue
+        xy, angle = table.centres, table.angle
+        panels.extend({"id": panel_id, "centre": [xy[2 * col], xy[2 * col + 1]], "angle": angle}
+                      for col, panel_id in enumerate(table.ids))
     return digest({"project": graph["project"], "catalog_versions": graph["catalog_versions"],
-                   "panels": [{"id": p["id"], "centre": p["centre"], "angle": p["angle"]}
-                              for p in graph["panels"]],
+                   "panels": panels,
                    "zones": [{key: z[key] for key in ("id", "panel_refs", "module_model",
                                                       "inverter_model_a")}
                              for z in graph["electrical_zones"]]})
 
 
-def sizing_targets(graph, mode):
+def sizing_targets(graph, mode, tables=None):
+    """The settings (global) or the electrical zones (zones) a sizing covers. Slot panels of compact
+    Ground frames are panels here too, so zones must cover them exactly as on the expansion.
+    `tables` as in sizing_basis."""
     panels = {p["id"] for p in graph["panels"]}
+    for table in (compact_slot_tables(graph) if tables is None else tables).values():
+        panels.update(table.ids)
     if not panels:
         raise GraphValidationError("MISSING_PANEL")
     if mode == "global":
@@ -358,13 +388,16 @@ def _record_outcome(record):
     return response, request.module.model, request.inverter.model
 
 
-def require_sizing(graph):
-    """Recheck drawing-owned evidence before grouping, including after reopen."""
+def require_sizing(graph, tables=None):
+    """Recheck drawing-owned evidence before grouping, including after reopen. `tables` as in
+    sizing_basis; the slot blocks are decoded at most once per call."""
     try:
         evidence = graph["settings"]["extra"]["string_sizing"]
-        if evidence["basis_sha256"] != sizing_basis(graph):
+        if tables is None:
+            tables = compact_slot_tables(graph)
+        if evidence["basis_sha256"] != sizing_basis(graph, tables):
             raise ValueError()
-        targets = sizing_targets(graph, evidence["mode"])
+        targets = sizing_targets(graph, evidence["mode"], tables)
         if set(evidence["records"]) != set(targets):
             raise ValueError()
         if graph["settings"]["global_string_sizing_confirmed"] != (evidence["mode"] == "global"):

@@ -401,6 +401,8 @@ def build_suites() -> List[Suite]:
         # and nothing skips: 31 + 9 parametrized refusals + 22 single tests + 31 correction cases = 93.
         Suite("server-solar-combiner-graph", "server tests/test_solar_combiner_graph.py", "pytest", SERVER,
               _py_pytest("tests/test_solar_combiner_graph.py"), 93),
+        Suite("server-solar-feeder-graph", "server tests/test_solar_feeder_graph.py", "pytest", SERVER,
+              _py_pytest("tests/test_solar_feeder_graph.py"), 19),
         # 31 -> 35 on 2026-09-22: the zone-aware entry point (group_panels_by_zone,
         # the port of BuildAndSaveGroupsForZone) added four hermetic, unparametrized
         # tests. Nothing in this file skips, so the count is the same on every runner.
@@ -786,6 +788,12 @@ def build_suites() -> List[Suite]:
         # re-reads that entry. Inputs are authored in the file and nothing skips. COUNTED: 54.
         Suite("server-solar-tool-trackers-to-panel-groups", "server tests/test_solar_tool_trackers_to_panel_groups.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_trackers_to_panel_groups.py"), 54),
+        # Equipment on a converted Ground design (2026-10-01, sf-w3-solve-equipment): compact Ground slot panels
+        # are panels to string sizing, the equipment kernel and the equipment readiness chain, equal to the
+        # expansion; conversion, sizing, strings and equipment commit through the rail with every proof accepted.
+        # Inputs are authored in the file and nothing skips. COUNTED: 29.
+        Suite("server-solar-ground-equipment", "server tests/test_solar_ground_equipment.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_ground_equipment.py"), 29),
         # W5 inverter family (2026-09-24, contract G35): the shared state and delta module and the
         # device, string and output engines (literal ports of the plugin's inverter commands). Inputs
         # are authored in each file, so each floor is the exact count on every runner. MEASURED.
