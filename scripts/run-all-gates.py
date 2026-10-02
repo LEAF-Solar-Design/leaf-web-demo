@@ -32,8 +32,9 @@ Special handling, all documented on the scoreboard:
   * harness `npm test` + `npx tsc --noEmit` + `npx tsc -p tsconfig.build.json`
     are included.
   * `web-demo-gate` shells out to dispatch/run-local-ci.sh's demo-gate bucket,
-    the adapter for web/'s golden-path oracles (this runner has no other web/
-    test entry point). It needs a POSIX bash; see _bash().
+    the adapter for web/'s golden-path oracles. It needs a POSIX bash; see _bash().
+  * `studio-walk-regressions` runs the full strict Playwright regression config;
+    failure, skip, empty selection and unavailable admission all fail the row.
   * the containerized harness smoke (census #13) is OPT-IN: it builds + boots
     the compose stack, so it runs only with LEAF_CONTAINER_SMOKE=1 and SKIPs
     (with reason) otherwise, or when Docker is unavailable (script exit 3).
@@ -2785,7 +2786,8 @@ def build_suites() -> List[Suite]:
               # 2026-09-09 app pause verification reported 87 executed self-test rows, formerly 85.
               # +6 (2026-10-01, ephemeral PostgreSQL lane): the gate-DSN, required-database
               # and database-catalog tests, none environment-gated.
-              SCRIPTS_DIR, _py_pytest("test_gate_runner.py"), 93),
+              SCRIPTS_DIR, _py_pytest("test_gate_runner.py") +
+              ["test_studio_walk_regression_gate.py"], 93),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the
@@ -3304,6 +3306,9 @@ def build_suites() -> List[Suite]:
         Suite("web-demo-gate", "web dispatch/run-local-ci.sh --only demo-gate", "script",
               REPO, [_bash(), "dispatch/run-local-ci.sh", "--only", "demo-gate"], None,
               timeout_s=1200),
+        Suite("studio-walk-regressions", "studio walk strict regressions", "script",
+              REPO, ["node", "web/e2e/regressions/runGate.mjs"], None,
+              timeout_s=720),
     ]
     return suites
 
@@ -4638,6 +4643,7 @@ _SERIAL_SUITE_REASONS = {
     ), "shared PostgreSQL schema"),
     "server-sessions-e2e": "rebuilds shared harness/dist with npm",
     "web-demo-gate": "nested runner rebuilds web/dist and may unpack node_modules",
+    "studio-walk-regressions": "nested stack boots services and rebuilds shared production bundle",
     "harness-container-smoke": "fixed compose project and container ports 8130/8150",
 }
 
@@ -4663,6 +4669,7 @@ _CONFLICT_RESOURCES_OVERRIDE = {
     "server-sessions-e2e": frozenset({"harness-tree"}),
     # The nested runner rebuilds web/dist and may unpack web/node_modules.
     "web-demo-gate": frozenset({"web-tree"}),
+    "studio-walk-regressions": frozenset({"web-tree", "harness-tree"}),
     # One fixed compose project on container ports 8130/8150.
     "harness-container-smoke": frozenset({"compose-8130-8150"}),
 }
@@ -4673,6 +4680,7 @@ _CONFLICT_RESOURCES_OVERRIDE = {
 _PRELUDE_WRITERS = frozenset({
     "web-build", "harness-tsc-build", "web-demo-gate", "server-sessions-e2e",
     "web-link-service-flow",
+    "studio-walk-regressions",
 })
 
 

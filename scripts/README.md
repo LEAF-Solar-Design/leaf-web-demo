@@ -92,7 +92,7 @@ a cleaned env, captures pass/fail + counts, and reports a single scoreboard.
 | `harness-tsc-build` | `harness/` | `npx tsc -p tsconfig.build.json` |
 | `web-demo-gate` | repo root | `bash dispatch/run-local-ci.sh --only demo-gate` |
 
-`web-demo-gate` is this runner's only entry point into `web/`. It drives the
+`web-demo-gate` drives the
 demo-gate bucket, which runs web/'s seven golden-path node oracles
 (`test/check_routes.mjs`, `test/check_integration.mjs`,
 `scripts/check_author.mjs`, `check_writeloop.mjs`, `check_tourscript.mjs`, and
