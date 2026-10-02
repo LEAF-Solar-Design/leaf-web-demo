@@ -81,3 +81,30 @@ export async function collectControlSample(evaluate, handle) {
     }
   }, handle)
 }
+
+// Read-only, optional evidence: a slow or ambiguous target must not hold up
+// activation or supply a measurement from the post-activation page.
+export async function collectProbeUxEvidence(probe, locator, viewport, {
+  setTimer = setTimeout, clearTimer = clearTimeout,
+} = {}) {
+  if (!probe.locator?.role || ['surface', 'journey', 'census'].includes(probe.kind)) return []
+  let timer
+  let expired = false
+  const timeout = new Promise((resolve) => {
+    timer = setTimer(() => { expired = true; resolve([]) }, 2000)
+  })
+  const collect = async () => {
+    await locator.waitFor({ state: 'attached', timeout: 2000 })
+    if (expired || await locator.count() !== 1 || expired) return []
+    const sample = await collectControlSample((evaluate) => locator.evaluate(evaluate, undefined, { timeout: 2000 }))
+    if (expired || await locator.count() !== 1 || expired) return []
+    let state = String(probe.state).replace(/[^A-Za-z0-9_-]/g, '-')
+    if (!/^[A-Za-z0-9]/.test(state)) state = 'state-' + state
+    state = state.slice(0, 64)
+    return [['control_covered_at_rest', coveredAtRest(sample)], ['scroll_needed_steps', scrollNeeded(sample)]]
+      .filter(([, observed]) => observed !== null)
+      .map(([metricId, observed]) => uxObservation({ lensId: 'reachability', metricId, viewport, state, observed }))
+  }
+  try { return await Promise.race([collect().catch(() => []), timeout]) }
+  finally { clearTimer(timer) }
+}
