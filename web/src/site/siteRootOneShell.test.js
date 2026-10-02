@@ -147,6 +147,38 @@ describe('App portal wiring', () => {
 })
 
 describe('rollback contract', () => {
+  it('insets the fixed Find field past the open tool rail only on desktop', () => {
+    const css = read('./studioShell.css')
+    const shell = '.studio-shell .app[data-studio-shell="cockpit"][data-surface]'
+    const selector = `${shell}:has(aside.nav:not([data-spine])) .drawing-navigation`
+    const desktopBodies = []
+    const outsideDesktop = []
+    const media = /@media\s*\(\s*min-width\s*:\s*981px\s*\)\s*\{/g
+    let previousEnd = 0
+    let match
+    while ((match = media.exec(css))) {
+      const bodyStart = media.lastIndex
+      let depth = 1
+      let end = bodyStart
+      for (; end < css.length && depth > 0; end++) {
+        if (css[end] === '{') depth++
+        if (css[end] === '}') depth--
+      }
+      expect(depth).toBe(0)
+      desktopBodies.push(css.slice(bodyStart, end - 1))
+      outsideDesktop.push(css.slice(previousEnd, match.index))
+      previousEnd = end
+      media.lastIndex = end
+    }
+    outsideDesktop.push(css.slice(previousEnd))
+    const offset = /\bleft\s*:\s*calc\(\s*var\(--ck-nav-width\)\s*\+\s*8px\s*\)\s*;/
+    const rules = desktopBodies.flatMap(body => [...body.matchAll(/([^{}]+)\{([^{}]*)\}/g)])
+    expect(rules.some(rule => rule[1].trim() === selector && offset.test(rule[2]))).toBe(true)
+    expect(outsideDesktop.join('\n')).not.toMatch(offset)
+    const rail = css.slice(css.indexOf(`${shell} aside.nav:not([data-spine]) {`))
+    expect(rail.slice(0, rail.indexOf('}'))).toContain('width: var(--ck-nav-width);')
+  })
+
   it('the ground context defaults to null — no provider means the old shell', () => {
     const src = read('./studioGround.js')
     expect(src).toMatch(/createContext\(null\)/)
