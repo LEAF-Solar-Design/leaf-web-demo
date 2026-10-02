@@ -760,6 +760,8 @@ def build_suites() -> List[Suite]:
         # COUNTED: 21 tests + 42 more parametrizations = 63.
         Suite("server-solar-tool-equipment-move", "server tests/test_solar_tool_equipment_move.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_equipment_move.py"), 63),
+        Suite("server-solar-tool-central-inverter-add", "server tests/test_solar_tool_central_inverter_add.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_central_inverter_add.py"), 52),
         # CableExport Export All as a W2 registry graph read (2026-10-01, sf-w2-electrical-output-workbook): the
         # plugin's workbook over the route-bridged graph, written as CableExport.xlsx; the recorded i8 design rebuilt
         # as a graph with its feeders reproduces the four sheets of the plugin's i9 workbook. Inputs are authored in

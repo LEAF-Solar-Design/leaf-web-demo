@@ -1,0 +1,62 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-central-inverter-add",
+  "builtin": "builtins/solar_central_inverter_add.py",
+  "family": "equipment",
+  "adapter": "local-graph-commit",
+  "entitlement": "run_write",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_CENTRAL_INVERTER_REQUEST",
+  "readiness": {"kind": "hook"},
+  "engine": "server-builtin",
+  "interaction": {"mode": "form"},
+  "record_store": "registry",
+  "record": {
+    "name": "solar-central-inverter-add",
+    "version": "1.0.0",
+    "description": "Add one central inverter at a picked point, as ADDINVERTER does with the Central inverter choice; strings and existing equipment stay as they are.",
+    "kind": "script",
+    "family_id": "equipment",
+    "engine_op": "solar_central_inverter_add",
+    "entry": "builtins/solar_central_inverter_add.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {"type": "string", "maxLength": 128},
+        "expected_rev": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+        "number": {"type": "integer", "minimum": 1, "maximum": 999999},
+        "point": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {"type": "number", "minimum": -1000000, "maximum": 1000000}
+        },
+        "hardware": {
+          "type": "object",
+          "properties": {
+            "model": {"type": "string", "minLength": 1, "maxLength": 4096},
+            "max_dc_voltage": {"type": "number", "exclusiveMinimum": 0, "maximum": 1000000},
+            "max_ac_power_kw": {"type": "number", "exclusiveMinimum": 0, "maximum": 1000000},
+            "mppt_count": {"type": "integer", "minimum": 1, "maximum": 1000000},
+            "total_dc_inputs": {"type": "integer", "minimum": 1, "maximum": 1000000},
+            "collector_capacity": {"type": "integer", "minimum": 1, "maximum": 10000}
+          },
+          "required": ["model", "max_dc_voltage", "max_ac_power_kw", "mppt_count", "total_dc_inputs", "collector_capacity"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["expected_rev", "point", "hardware"],
+      "additionalProperties": false
+    },
+    "returns": {"type": "object"},
+    "capabilities": ["drawing.write"],
+    "allow_local_fallback": false
+  },
+  "ledger": ["inverter-add"],
+  "trusted_inputs": [],
+  "maturity": "preview",
+  "wave": 2,
+  "order": 105,
+  "scenario": "w2-rooftop"
+}
