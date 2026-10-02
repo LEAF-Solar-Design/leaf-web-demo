@@ -29,6 +29,7 @@ TENANT = "fixture-tenant"
 REF = {"type": "string", "minLength": 1, "maxLength": 128}
 REV = {"type": "integer", "minimum": 0, "maximum": 2147483647}
 # (name, family, order, invalid_request_code, facets, ledger, op, extra properties, extra required)
+# facets None: the tool declares a readiness hook (its builtin's input_readiness) instead.
 TOOLS = (
     ("solar-unit-sync", "settings", 10, "INVALID_UNIT_SYNC_REQUEST", [], ["unit-sync"], None,
      {"distance_unit": {"type": "string", "enum": ["Meters", "Feet"]}}, ["distance_unit"]),
@@ -52,7 +53,7 @@ TOOLS = (
     ("solar-panel-group-delete", "placement", 50, "INVALID_GROUP_DELETE_REQUEST", ["frames"],
      ["panel-group-delete-all"], "delete-all", {}, []),
     # No uniqueItems: the builtin reports a repeated panel as DUPLICATE_PANEL_MEMBERSHIP.
-    ("solar-string-add", "stringing", 70, "INVALID_STRING_ADD_REQUEST", ["panels"],
+    ("solar-string-add", "stringing", 70, "INVALID_STRING_ADD_REQUEST", None,
      ["string-single-add"], "add-string",
      {"ordered_panel_refs": {"type": "array", "minItems": 1, "maxItems": 4096, "items": REF}},
      ["ordered_panel_refs"]),
@@ -100,7 +101,8 @@ def expected_declaration(name, family, order, code, facets, ledger, op, extra, r
         "schema": "leaf.solar-tool.v1", "name": name, "builtin": builtin, "family": family,
         "adapter": "local-graph-commit", "entitlement": "run_write",
         "requires_persisted_graph": True, "seedable": False, "invalid_request_code": code,
-        "readiness": {"kind": "facets", "facets": facets}, "engine": "server-builtin",
+        "readiness": {"kind": "hook"} if facets is None else {"kind": "facets", "facets": facets},
+        "engine": "server-builtin",
         "interaction": {"mode": "form"}, "record_store": "registry", "record": record,
         "ledger": ledger, "trusted_inputs": [], "maturity": "preview", "wave": 2,
         "order": order, "scenario": "w2-rooftop",

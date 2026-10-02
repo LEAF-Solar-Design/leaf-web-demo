@@ -415,7 +415,7 @@ def test_string_multi_add_registry_and_catalog(monkeypatch):
     description = actual["record"].pop("description")
     assert type(description) is str and description.strip()
     assert actual == expected_declaration(
-        TOOL, "stringing", 71, "INVALID_STRING_MULTI_ADD_REQUEST", ["panels"],
+        TOOL, "stringing", 71, "INVALID_STRING_MULTI_ADD_REQUEST", None,
         ["string-multi-add"], "add-strings",
         {"string_length": {"type": "integer", "minimum": 1, "maximum": 900},
          "ordered_panel_refs": {"type": "array", "minItems": 1, "maxItems": 900,

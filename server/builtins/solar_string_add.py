@@ -121,6 +121,15 @@ def find_panels(graph, refs, tables):
     return found
 
 
+def input_readiness(graph):
+    """Whether a string can be added here: the graph holds panel rows, or a converted Ground frame
+    holds a compact slot block (the schema requires at least one slot). Reads frame keys only: no
+    slot is decoded. Never raises on a valid graph."""
+    if graph["panels"] or any("ground_slots" in frame for frame in graph["frames"]):
+        return {"input_ready": True, "input_reason": None}
+    return {"input_ready": False, "input_reason": "panels_required"}
+
+
 def _valid_request(params):
     """True for exactly {expected_rev, ordered_panel_refs}, no coercion anywhere."""
     if type(params) is not dict or set(params) != {"expected_rev", "ordered_panel_refs"}:

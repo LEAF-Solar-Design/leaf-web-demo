@@ -8,7 +8,7 @@
   "requires_persisted_graph": true,
   "seedable": false,
   "invalid_request_code": "INVALID_STRING_ADD_REQUEST",
-  "readiness": {"kind": "facets", "facets": ["panels"]},
+  "readiness": {"kind": "hook"},
   "engine": "server-builtin",
   "interaction": {"mode": "form"},
   "record_store": "registry",
