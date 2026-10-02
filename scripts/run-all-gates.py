@@ -381,6 +381,9 @@ def build_suites() -> List[Suite]:
         # sf-w3-conversion-graph piece 2: the physical head's trackers as compact Ground frames; 87 cases.
         Suite("server-solar-ground-conversion", "server tests/test_solar_ground_conversion.py", "pytest",
               SERVER, _py_pytest("tests/test_solar_ground_conversion.py"), 87),
+        # sf-units-ground-conversion: converted Ground frame geometry is metres in both drawing units; 12 cases.
+        Suite("server-solar-ground-conversion-units", "server tests/test_solar_ground_conversion_units.py", "pytest",
+              SERVER, _py_pytest("tests/test_solar_ground_conversion_units.py"), 12),
         # The graph validator decides RFC 3339 date-time itself (2026-10-01, sf-graph-date-time-deterministic):
         # one module-local rule on a FormatChecker that knows only date-time, shared with the conversion
         # kernel, so a host without the optional rfc3339_validator package refuses what every other host
@@ -3290,6 +3293,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_tool_publication_policy.py"), 13),
         Suite("server-tool-record-fields", "server tests/test_tool_record_fields.py", "pytest", SERVER,
               _py_pytest("tests/test_tool_record_fields.py"), 42),
+        Suite("server-tool-validate-structural", "server tests/test_tool_validate_structural.py", "pytest", SERVER,
+              _py_pytest("tests/test_tool_validate_structural.py"), 52),
         Suite("server-turn-queue", "server tests/test_turn_queue.py", "pytest", SERVER,
               _py_pytest("tests/test_turn_queue.py"), 16),
         # TCM-09a cost transparency: publish the monthly share ledger and GET /api/cost.

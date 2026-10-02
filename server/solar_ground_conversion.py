@@ -309,6 +309,11 @@ def convert_physical_state(view, document, graph, *, provenance, rev):
     "PanelGroupColour"}, "counts": {"trackers", "slots"}, "overlap": overlap_report(...)}.
     Every frame and slot template carries `rev` and a deep copy of `provenance`; the frame's
     module power is the stored module's TrackerModulePmaxW (solar_ground_layout.get_active_module).
+    Units: a frame's insertion_point, module_width_along_row, module_height_across_row and slot
+    centres are METRES (the layout's drawing-unit values times the document's meters_per_unit; a
+    metre drawing stores the layout's own values unchanged). The tracker axis_start / axis_end and
+    the stored outline stay in DRAWING units; length_m, rail_overhang_m and cross_axis_width_m are
+    metres.
     Refusals, in this order: PHYSICAL_HEAD_REQUIRED, INPUT_INVALID (view, document, rev,
     provenance, graph), GROUND_PROJECT_REQUIRED, UNITS_MISMATCH, TRACKER_ROWS_REQUIRED,
     INPUT_INVALID (the tracker layer), TRACKER_ROWS_REQUIRED (none accepted), LIMIT_EXCEEDED
@@ -373,21 +378,30 @@ def convert_physical_state(view, document, graph, *, provenance, rev):
             raise _invalid() from None
         slots = tracker["module_slots"]
         commands.append(metadata["source"]["source_command"])
+        # Ordinary graph geometry is metres (contract/CONTRACT.md); the tracker axes and the
+        # stored outline stay in drawing units. A metre drawing keeps the layout's own values.
+        if mpu == 1.0:
+            centre, centres = list(tracker["center"]), tracker["panels"]
+            along, across = tracker["slot_length_du"], tracker["panel_height_du"]
+        else:
+            centre = [value * mpu for value in tracker["center"]]
+            centres = [[x * mpu, y * mpu] for x, y in tracker["panels"]]
+            along, across = tracker["slot_length_du"] * mpu, tracker["panel_height_du"] * mpu
         frame = {
             "id": deterministic_id("frame", f"{seed}:ground-frame:{k}"), "kind": "frame", "rev": rev,
             "provenance": copy.deepcopy(provenance),
             "extra": {outlines.OUTLINE_KEY: outlines.outline_record(tracker["outline"])},
             "validity": {"state": "valid", "reasons": []}, "name": f"Group {tracker['group_number']}",
-            "insertion_point": list(tracker["center"]), "installation_design": "Ground",
+            "insertion_point": centre, "installation_design": "Ground",
             "panel_refs": [], "module_rows": 1, "module_columns": slots, "module_slots": slots,
-            "module_power_watts": power, "module_width_along_row": tracker["slot_length_du"],
-            "module_height_across_row": tracker["panel_height_du"], "electrical_zone_ref": None,
+            "module_power_watts": power, "module_width_along_row": along,
+            "module_height_across_row": across, "electrical_zone_ref": None,
             "matrix": [], "sequences": [], "panel_assignments": [], "tracker": metadata,
         }
         ids = [deterministic_id("panel", f"{seed}:ground-panel:{k}:{i}") for i in range(slots)]
         try:
             frame["ground_slots"] = codec.encode_slots(
-                ids, tracker["panels"], tracker["row_angle_rad"],
+                ids, centres, tracker["row_angle_rad"],
                 {"rev": rev, "provenance": copy.deepcopy(provenance),
                  "validity": {"state": "valid", "reasons": []}, "extra": {}})
         except GraphValidationError:
