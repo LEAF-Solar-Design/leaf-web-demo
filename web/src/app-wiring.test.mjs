@@ -18,6 +18,54 @@ import { describe, it } from 'node:test'
 import esbuild from 'esbuild'
 
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
+describe('W20-07b combiner workspace wiring', () => {
+  const appNoComments = decomment(appSource)
+  it('W20-07b mounts the placement callback on the existing workspace container', () => {
+    const start = appNoComments.indexOf('<SolarWorkspaceTools')
+    assert.ok(start >= 0)
+    const mount = appNoComments.slice(start, appNoComments.indexOf('/>', start))
+    assert.ok(mount.includes('onRunPlacement={onRunCombinerPlacement}'))
+    assert.ok(mount.includes('onDrawingVersionChanged={seatCompletedVersion}'))
+  })
+
+  it('W20-07b resolves the catalog row and stages through the confirm strip without the rail', () => {
+    const start = appNoComments.indexOf('const onRunCombinerPlacement = useCallback')
+    const end = appNoComments.indexOf('const onSubmitSolarFlowStep', start)
+    assert.ok(start >= 0 && end > start)
+    const body = appNoComments.slice(start, end)
+    assert.ok(body.includes("tools.find((tool) => tool.name === 'solar-combiners')"))
+    const absent = body.indexOf('if (!row)')
+    const message = body.indexOf("setRunErr('Combiner placement is not in this catalog.')")
+    const refusal = body.indexOf('return false', absent)
+    const stage = body.indexOf("return Boolean(onRequestCatalogRun(row, params, RIBBON_RATIONALE, 'ribbon')?.runIntent?.intentId)")
+    assert.ok(absent >= 0 && message > absent && refusal > message && stage > refusal)
+    assert.ok(body.includes('[onRequestCatalogRun, tools]'))
+    assert.equal(body.includes('onSubmitSolarFlowStep('), false)
+  })
+
+  it('W20-07b guards successful and failed head reads and seats quietly when requested', () => {
+    const start = appNoComments.indexOf('const seatCompletedVersion = useCallback')
+    const end = appNoComments.indexOf('completedVersionRef.current = seatCompletedVersion', start)
+    assert.ok(start >= 0 && end > start)
+    const body = appNoComments.slice(start, end)
+    assert.ok(body.includes('async (newVersion, envelope, options)'))
+    const read = body.indexOf("await getDrawingIntake(mock, newVersion.drawing_id, 'head')")
+    const guard = "if (typeof options?.isCurrent === 'function' && !options.isCurrent()) return false"
+    const successGuard = body.indexOf(guard, read)
+    const seat = body.indexOf('seatVersion(', read)
+    const accepted = body.indexOf('return true', seat)
+    const caught = body.indexOf('catch', seat)
+    const failureGuard = body.indexOf(guard, caught)
+    const toast = body.indexOf('showToast(', caught)
+    const failed = body.indexOf('markRefreshFailure(', caught)
+    const rejected = body.indexOf('return false', failed)
+    assert.ok(read >= 0 && successGuard > read && seat > successGuard && accepted > seat && caught > accepted)
+    assert.ok(failureGuard > caught && toast > failureGuard && failed > toast && rejected > failed)
+    assert.ok(body.slice(seat, accepted).includes('options?.announce === false ? null :'))
+    assert.ok(body.slice(caught, failed).includes('if (options?.announce !== false) showToast'))
+    assert.equal(body.split('return true').length, 2)
+  })
+})
 describe('report object origin wiring', () => {
   it('mounts the origin bridge inside the object provider and passes its key to jobs', () => {
     const live = esbuild.transformSync(appSource, { loader: 'jsx' }).code
