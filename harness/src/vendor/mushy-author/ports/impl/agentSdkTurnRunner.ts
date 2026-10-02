@@ -764,7 +764,7 @@ export class AgentSdkTurnRunner implements ConverseRunner {
     // Pin the effective selection before credentials or confirmation execution.
     // With no selection, retain the SDK/account default used by older callers.
     const model = snapshot.model === undefined
-      ? (this.opts.model === undefined ? (snapshot.reasoning_id === undefined ? undefined : "claude-sonnet-5") : this.opts.model)
+      ? (this.opts.model === undefined ? (snapshot.reasoning_id === undefined ? undefined : "claude-sonnet-5-5") : this.opts.model)
       : snapshot.model;
     try {
       if (model !== undefined || snapshot.reasoning_id !== undefined) reasoningOptions(model, snapshot.reasoning_id);

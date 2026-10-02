@@ -7,7 +7,7 @@
  *
  * Proven here:
  *   - a turn carrying {model} routes THAT model to the runner;
- *   - no wire model => the env default (LEAF_SPINE_MODEL, else claude-sonnet-5)
+ *   - no wire model => the env default (LEAF_SPINE_MODEL, else claude-sonnet-5-5)
  *     is preserved;
  *   - a supplied credential_grant is used for the runner's grant INSTEAD of the
  *     tenant's linked grant (the oauth provider is never consulted);
@@ -111,12 +111,12 @@ describe("mount your LLM — per-session model", () => {
     expect(runner.runs[0]!.model).toBe("claude-haiku-4-5");
   });
 
-  it("falls back to claude-sonnet-5 when neither wire model nor env is set", async () => {
+  it("falls back to claude-sonnet-5-5 when neither wire model nor env is set", async () => {
     vi.stubEnv("LEAF_SPINE_MODEL", undefined as unknown as string); // delete the var
     const { adapter, runner } = makeAdapter(new RecordingOAuthProvider());
     await drain(adapter.runTurn(turnInput({ text: "hi" })));
 
-    expect(runner.runs[0]!.model).toBe("claude-sonnet-5");
+    expect(runner.runs[0]!.model).toBe("claude-sonnet-5-5");
   });
 });
 

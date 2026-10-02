@@ -47,7 +47,7 @@ describe("Agent SDK author contract", () => {
     expect(resolveAuthorModel(undefined, { LEAF_SPINE_MODEL: "claude-haiku-4-5" })).toBe(
       "claude-haiku-4-5",
     );
-    expect(resolveAuthorModel(undefined, {})).toBe("claude-sonnet-5");
+    expect(resolveAuthorModel(undefined, {})).toBe("claude-sonnet-5-5");
   });
 
   it("requires model-visible validation and a passing broker test", () => {
