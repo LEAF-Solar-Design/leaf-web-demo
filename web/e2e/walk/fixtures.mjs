@@ -197,12 +197,20 @@ async function requireViewport(page, expected) {
 async function engineCount(page) {
   return Number(await page.getByTestId('cad-edit-entity-count').innerText())
 }
+export class UnsupportedLocalError extends Error {
+  constructor(probe, reason) {
+    super(`UNSUPPORTED_LOCAL: ${probe.featureId} [${probe.state}]: ${reason}`)
+    this.name = 'UnsupportedLocalError'
+    this.reason = reason
+  }
+}
+
 async function unsupported(probe, runtime, reason) {
   const result = { featureId: probe.featureId, state: probe.state, result: 'unsupported_local',
     declaredCertify: probe.certify, reason }
   runtime.evidence.result = result
   await runtime.testInfo.attach('walk-result', { body: Buffer.from(JSON.stringify(result)), contentType: 'application/json' })
-  throw new Error(`UNSUPPORTED_LOCAL: ${probe.featureId} [${probe.state}]: ${reason}`)
+  throw new UnsupportedLocalError(probe, reason)
 }
 async function engineReady(probe, runtime) {
   const { page } = runtime
@@ -1366,6 +1374,10 @@ export async function runProbe(probe, runtime) {
       ? 'disabled_with_reason' : 'available'
     evidence.result = { result: 'passed', featureId: probe.featureId, state: probe.state }
   } catch (error) {
+    if (error instanceof UnsupportedLocalError) {
+      runtime.testInfo.annotations.push({ type: 'unsupported_local', description: error.reason })
+      return { unsupported: true, reason: error.reason }
+    }
     evidence.failure = { message: error.message, assertionId: probe.assertion.assertionId }
     throw error
   } finally {
