@@ -62,7 +62,7 @@ def test_delete_prunes_intent(admission_equipped, monkeypatch):
     assert_assignments(out, requests(g)[:1])
     assert out["inverters"][0]["validity"] == STALE
     assert solar_equipment.equipment_ready(out) is True
-    assert lsha(out) == "1a0ee71a1dca1ada345b71c9d6303dca0182d333d5741b628d88f88b1a4539ef"
+    assert lsha(out) == "cdf2dcc14e65c2729a1e22e7731e5fddce39b4b50c23430d6e9b0da1a18ceeac"
 
 
 def test_equipment_refreshes_after_delete(admission_equipped, monkeypatch):
@@ -72,7 +72,7 @@ def test_equipment_refreshes_after_delete(admission_equipped, monkeypatch):
     assert out["rev"] == 7
     assert out["inverters"][0]["validity"] == VALID
     assert solar_equipment.equipment_ready(out) is True
-    assert lsha(out) == "51b7f60a45c39381351495a35c80ccc24d477b3fd738d8479502e331a460f405"
+    assert lsha(out) == "800bb11c6d374fc68f65972feac12046ed7f31b1ed6a96c9e12af332f621b625"
 
 
 def test_delete_every_string_prunes_every_request(admission_equipped, monkeypatch):
@@ -80,7 +80,7 @@ def test_delete_every_string_prunes_every_request(admission_equipped, monkeypatc
     assert out["rev"] == 6 and out["strings"] == []
     assert_assignments(out, [])
     assert solar_equipment.equipment_ready(out) is False
-    assert lsha(out) == "883fd4b7fbc4ec88fd356d6a938c2373dd567572b23e4b529b27d1c3d55fb37a"
+    assert lsha(out) == "41e742be6b5dd0d93d61293b39d455273fbb536b70f2effc4d112f56e0a41e62"
 
 
 def test_swap_moves_intent_with_inputs(admission_equipped, monkeypatch):
@@ -92,7 +92,7 @@ def test_swap_moves_intent_with_inputs(admission_equipped, monkeypatch):
     assert_assignments(out, expected)
     assert out["inverters"][0]["validity"] == VALID
     assert solar_equipment.equipment_ready(out) is True
-    assert lsha(out) == "431260a936d6a14c1a051fca131c6aafd39b38fd9b5483baef8ff409ab434d41"
+    assert lsha(out) == "4c2fb1101859a7a3a1c1d6a9d1e6f74bd7caef90a6e25ea032c3ce47494b3b2c"
 
 
 def test_equipment_preserves_swapped_inputs(admission_equipped, monkeypatch):
@@ -103,7 +103,7 @@ def test_equipment_preserves_swapped_inputs(admission_equipped, monkeypatch):
     assert [a["string_ref"] for a in out["inverters"][0]["input_assignments"]] == [
         s["id"] for s in admission_equipped["strings"]][::-1]
     assert solar_equipment.equipment_ready(out) is True
-    assert lsha(out) == "940bfce6712abd1679433186efc78e3ea18021a5a23a707c2eb8ead497648970"
+    assert lsha(out) == "d56e44425fe021cd9a37092f5817bdd1d84542566161a03f8b303f7a17e91820"
 
 
 def test_correction_keeps_intent_and_stales_dependents(admission_equipped, monkeypatch):
@@ -114,7 +114,7 @@ def test_correction_keeps_intent_and_stales_dependents(admission_equipped, monke
     assert out["inverters"][0]["validity"] == STALE
     assert requests(out) == requests(admission_equipped)
     assert solar_equipment.equipment_ready(out) is False
-    assert lsha(out) == "542294be9b0437a1b43aa64490d78ca03c1cdef2eedfb5205d1b6f95351cdf02"
+    assert lsha(out) == "1cb21ed2b109bb675b748a66affccce77c9655389438ae50334fc99a76f17988"
 
 
 def test_equipment_refreshes_inverter_but_not_corrected_strings(admission_equipped, monkeypatch):
@@ -124,12 +124,12 @@ def test_equipment_refreshes_inverter_but_not_corrected_strings(admission_equipp
     assert [s["validity"] for s in out["strings"]] == [INVALID, INVALID]
     assert out["inverters"][0]["validity"] == VALID
     assert solar_equipment.equipment_ready(out) is False
-    assert lsha(out) == "7ceb862c374bd50854ebac569e9dff8447ed815cdf14328330177fa71bced9c2"
+    assert lsha(out) == "119b130f05137fb02938468159a62d851d992d1dcc34353212e1082672fbc35b"
 
 
 @pytest.mark.parametrize("tool,digest", [
-    ("solar-string-flip", "f5351b8f233ed5ebe7329007d239f3cfde8725024005b177bb4dadd9394a0359"),
-    ("solar-string-conductors", "ce6c9fd3f1bd6d4bc0fcc5f7ae53fc5f7ae69e57733cfeb2022d82d499348fda"),
+    ("solar-string-flip", "fe7dffe7d096ef0f1aceba10a66d7843337b13477f863eae4fd2d17fe9d3506f"),
+    ("solar-string-conductors", "4fd107efd85035f3ab9ed8ff01edc0d7c41d4a92248510a8947e975ada48cd81"),
 ], ids=["flip", "conductors"])
 def test_compatible_edits_keep_readiness(admission_equipped, monkeypatch, tool, digest):
     refs = [s["id"] for s in admission_equipped["strings"]]

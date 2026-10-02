@@ -42,6 +42,7 @@ import solar_design_graph as sdg
 import solar_ground_buildout as buildout
 import solar_ground_dsteps as dsteps
 import solar_ground_graph_codec as codec
+import solar_ground_outlines as outlines
 import solar_ground_layout as ground_layout
 import solar_physical_state as ps  # first: its write_loop import puts da/ (store) on sys.path
 import solar_physical_head as ph
@@ -374,7 +375,8 @@ def convert_physical_state(view, document, graph, *, provenance, rev):
         commands.append(metadata["source"]["source_command"])
         frame = {
             "id": deterministic_id("frame", f"{seed}:ground-frame:{k}"), "kind": "frame", "rev": rev,
-            "provenance": copy.deepcopy(provenance), "extra": {},
+            "provenance": copy.deepcopy(provenance),
+            "extra": {outlines.OUTLINE_KEY: outlines.outline_record(tracker["outline"])},
             "validity": {"state": "valid", "reasons": []}, "name": f"Group {tracker['group_number']}",
             "insertion_point": list(tracker["center"]), "installation_design": "Ground",
             "panel_refs": [], "module_rows": 1, "module_columns": slots, "module_slots": slots,
@@ -389,6 +391,10 @@ def convert_physical_state(view, document, graph, *, provenance, rev):
                 {"rev": rev, "provenance": copy.deepcopy(provenance),
                  "validity": {"state": "valid", "reasons": []}, "extra": {}})
         except GraphValidationError:
+            raise _invalid() from None
+        try:
+            outlines.frame_outline(frame)   # never publish an outline its own reader would refuse
+        except outlines.GroundOutlineError:
             raise _invalid() from None
         frames.append(frame)
     return {"schema": RESULT_SCHEMA,

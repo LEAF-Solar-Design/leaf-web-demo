@@ -460,6 +460,7 @@
     "server-solar-tool-trackers-to-panel-groups",
     "server-solar-ground-equipment",
     "server-solar-ground-admission",
+    "server-solar-ground-outlines",
     "server-w2-equipment-intent",
     "server-solar-tool-design-presets",
     "server-solar-tool-electrical-schedules",
