@@ -5730,10 +5730,12 @@ def failed_suite_evidence(results, *, max_suites=5, tail_lines=30,
         except (OSError, TypeError, ValueError):
             block = [heading, "  log is unavailable"]
         else:
-            lines = scrub_evidence(text).splitlines()
+            header = re.compile(r"^\$ (?:attempt \d+ @ |\(cwd=)")
+            lines = [line for line in scrub_evidence(text).splitlines()
+                     if not header.match(line)]
             first = next((line for line in strip_ansi(text).splitlines() if re.search(
                 r"(?i)\b(error|exception|traceback|failed|fatal|panic|cannot|refused|timed out)\b",
-                line)), "none matched")
+                line) and not header.match(line)), "none matched")
             nonempty = [line for line in lines if line.strip()]
             tail = nonempty[-tail_lines:] if tail_lines > 0 else []
             block = [heading, f"  first error: {scrub_evidence(first)[:400]}", "  tail:"]

@@ -100,6 +100,35 @@ def test_failed_suite_evidence_prints_first_error_and_scrubbed_tail(tmp_path, ca
     assert lines[-8:-1] == g.failed_suite_evidence([result])
 
 
+def test_failed_suite_evidence_ignores_attempt_timestamp_and_cwd(tmp_path):
+    g = _load_runner()
+    logs = [tmp_path / "first.log", tmp_path / "second.log"]
+    for log, timestamp, cwd in zip(
+            logs, ["2026-10-02T12:00:00", "2026-10-02T12:00:01"],
+            ["/tmp/failed/first-run", "/tmp/error/second-run"]):
+        log.write_text(
+            f"$ python test.py\n$ (cwd={cwd})\n$ attempt 1 @ {timestamp}\n"
+            "error: suite failed\nlast line\n", encoding="utf-8")
+    evidence = [g.failed_suite_evidence([_evidence_result(g, log)]) for log in logs]
+    assert evidence[0] == evidence[1]
+    assert evidence[0] == [
+        "FAILED SUITE EVIDENCE: studio-walk-regressions",
+        "  first error: error: suite failed", "  tail:", "$ python test.py",
+        "error: suite failed", "last line",
+    ]
+
+
+def test_failed_suite_evidence_keeps_command_echo_in_tail(tmp_path):
+    g = _load_runner()
+    log = tmp_path / "command.log"
+    log.write_text(
+        "$ python test.py\n$ (cwd=/tmp/test-run)\n"
+        "$ attempt 2 @ 2026-10-02T12:00:00\nordinary output\n",
+        encoding="utf-8")
+    evidence = g.failed_suite_evidence([_evidence_result(g, log)])
+    assert evidence[3:] == ["$ python test.py", "ordinary output"]
+
+
 def test_failed_suite_evidence_reports_no_matching_error(tmp_path):
     g = _load_runner()
     log = tmp_path / "quiet.log"
