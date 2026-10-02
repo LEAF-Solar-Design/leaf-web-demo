@@ -30,15 +30,18 @@ export const TERRAIN_WORKSPACE_REASONS = Object.freeze({
   checkout_required: 'Take the drawing checkout before changing terrain previews',
 })
 
-function withoutCheckoutCapability(value) {
+function withCurrentCheckoutCapability(value, getCapability) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return value
   const proto = Object.getPrototypeOf(value)
   if (proto !== Object.prototype && proto !== null) return value
   const copy = {}
   for (const key of Reflect.ownKeys(value)) {
     if (typeof key === 'string' && key.toLowerCase() === 'x-checkout-capability') continue
+    if (typeof key !== 'string' || typeof value[key] !== 'string') return value
     Object.defineProperty(copy, key, { value: value[key], enumerable: true, configurable: true, writable: true })
   }
+  const cap = getCapability?.()
+  if (typeof cap === 'string' && cap.length > 0) copy['X-Checkout-Capability'] = cap
   return copy
 }
 
@@ -51,13 +54,13 @@ export default function SolarWorkspaceTools({
   const client = useMemo(() => createSolarLandxmlClient({
     fetchImpl: transport?.fetchImpl ?? ((...args) => fetch(...args)),
     apiBase: config.apiBase,
-    headers: transport?.headers ?? (() => ({ 'X-Tenant-Id': config.tenant, ...authHeaders() })),
+    headers: (id) => withCurrentCheckoutCapability(transport?.headers ? transport.headers(id) : { 'X-Tenant-Id': config.tenant, ...authHeaders() }, capability.current),
     onResponse: transport?.onResponse ?? ((response, url, sentAuth) => noteUnauthorized(response, url, sentAuth)),
   }), [transport])
   const terrainClient = useMemo(() => createSolarTerrainClient({
     fetchImpl: transport?.fetchImpl ?? ((...args) => fetch(...args)),
     apiBase: config.apiBase,
-    headers: (id) => withoutCheckoutCapability(transport?.headers ? transport.headers(id) : { 'X-Tenant-Id': config.tenant, ...authHeaders() }),
+    headers: (id) => withCurrentCheckoutCapability(transport?.headers ? transport.headers(id) : { 'X-Tenant-Id': config.tenant, ...authHeaders() }, capability.current),
     onResponse: transport?.onResponse ?? ((response, url, sentAuth) => noteUnauthorized(response, url, sentAuth)),
   }), [transport])
   const combinerClient = useMemo(() => createSolarCombinerIntakeClient({

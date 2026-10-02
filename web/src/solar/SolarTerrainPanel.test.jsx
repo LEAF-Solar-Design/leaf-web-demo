@@ -422,7 +422,7 @@ describe('SolarTerrainPanel', () => {
 
   it('W20-06a P6 every refusal shows exactly its sentence, keeps the drafts, and nothing is retried unasked', async () => {
     const sentences = [...Object.entries(TERRAIN_ROUTE_REASONS), ...Object.entries(TERRAIN_CLIENT_REASONS)]
-    expect(sentences).toHaveLength(45)
+    expect(sentences).toHaveLength(47)
     const draft = () => screen.getByLabelText('Axial slope limit, percent')
     const refuse = async (run) => {
       const client = fakeClient({ run })
