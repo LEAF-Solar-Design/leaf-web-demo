@@ -76,6 +76,27 @@ async function until(check, timeoutMs, reason) {
   throw new Error(typeof reason === 'function' ? reason() : reason)
 }
 
+export async function waitForStackTeardown(state, { timeoutMs = 15000, reason = 'Stack teardown failed after force-kill', alive = pidAlive, listening = portListening } = {}) {
+  let remaining
+  await until(async () => {
+    // Check all three conditions even when the launcher has not closed, so
+    // the timeout identifies every survivor rather than just the first one.
+    const pids = [...state.pids].filter(alive)
+    const ports = (await Promise.all(Object.entries(state.ports || {}).map(async ([role, port]) =>
+      await listening(port) ? `${role}:${port}` : null))).filter(Boolean)
+    const launcher = state.child && !state.closed
+      ? `launcher pid=${state.child.pid ?? 'unknown'} not closed` : null
+    const names = new Map(Object.entries(state.receipt?.pids || {}).map(([role, pid]) => [pid, role]))
+    for (const [pid, name] of state.processNames || []) {
+      names.set(pid, names.has(pid) ? `${names.get(pid)}/${name}` : name)
+    }
+    if (state.child?.pid) names.set(state.child.pid, 'launcher')
+    remaining = [launcher, pids.length ? `live pids=[${pids.map((pid) => `${pid}${names.has(pid) ? ` (${names.get(pid)})` : ''}`).join(', ')}]` : null,
+      ports.length ? `listening ports=[${ports.join(', ')}]` : null].filter(Boolean)
+    return remaining.length === 0
+  }, timeoutMs, () => `${reason}: ${remaining.join('; ')}`)
+}
+
 // Slot k owns [18000 + 100*k, 18099 + 100*k]: app +10, broker +20,
 // harness +30, production web +40, public same-origin proxy +0. No drift.
 export async function allocatePorts(slot) {
@@ -230,7 +251,7 @@ async function processTable() {
 async function readProcessTable() {
   const windows = process.platform === 'win32'
   const child = windows
-    ? spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,WorkingSetSize | ConvertTo-Json -Compress'], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    ? spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,WorkingSetSize,Name | ConvertTo-Json -Compress'], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
     : spawn('ps', ['-e', '-o', 'pid=,ppid=,rss='], { stdio: ['ignore', 'pipe', 'pipe'] })
   let stdout = ''
   let stderr = ''
@@ -247,7 +268,7 @@ async function readProcessTable() {
   } finally { clearTimeout(timer) }
   if (windows) {
     const data = JSON.parse(stdout)
-    return (Array.isArray(data) ? data : [data]).map((row) => ({ pid: Number(row.ProcessId), parent: Number(row.ParentProcessId), rss: Number(row.WorkingSetSize) }))
+    return (Array.isArray(data) ? data : [data]).map((row) => ({ pid: Number(row.ProcessId), parent: Number(row.ParentProcessId), rss: Number(row.WorkingSetSize), name: row.Name }))
   }
   return stdout.trim().split('\n').filter(Boolean).map((line) => {
     const [pid, parent, rss] = line.trim().split(/\s+/).map(Number)
@@ -273,6 +294,10 @@ async function sampleTree(state) {
   const rss = table.filter((row) => tree.has(row.pid)).reduce((sum, row) => sum + row.rss, 0)
   if (!Number.isFinite(rss)) throw new Error('Process tree returned invalid RSS')
   for (const pid of tree) state.pids.add(pid)
+  for (const row of table) if (tree.has(row.pid) && row.name) {
+    state.processNames ||= new Map()
+    state.processNames.set(row.pid, row.name)
+  }
   for (const row of table) if (row.parent === state.child.pid) state.groups.add(row.pid)
   state.peakRssBytes = Math.max(state.peakRssBytes, rss)
   state.rssSamples++
@@ -281,8 +306,10 @@ async function sampleTree(state) {
 function killSync(state, force = false) {
   if (!state.child?.pid) return
   if (process.platform === 'win32') {
-    // The launcher's kill-on-close job also covers descendants whose parent died.
-    const roots = [state.child.pid, ...Object.values(state.receipt?.pids || {})]
+    // taskkill /T cannot discover descendants once their parent has exited.
+    // The job object is best-effort in start-leaf; force cleanup must also
+    // target the descendants we measured, as the POSIX path does below.
+    const roots = new Set([state.child.pid, ...Object.values(state.receipt?.pids || {}), ...(force ? state.pids : [])])
     for (const pid of roots) if (pidAlive(pid)) {
       const result = spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, timeout: 15000, stdio: 'ignore' })
       if (result.error) throw result.error
@@ -354,10 +381,10 @@ export async function startStack({ slot, admission = defaultAdmission, slots, da
       for (const result of proxyResults) if (result.status === 'rejected') errors.push(result.reason)
       try { killSync(state) } catch (error) { errors.push(error) }
       try {
-        await until(async () => (!state.child || state.closed) && [...state.pids].every((pid) => !pidAlive(pid)) && (await Promise.all(Object.values(state.ports || {}).map(portListening))).every((open) => !open), 15000, 'Stack teardown left a listener or child process')
+        await waitForStackTeardown(state, { reason: 'Stack teardown left a listener or child process' })
       } catch {
         killSync(state, true)
-        await until(async () => (!state.child || state.closed) && [...state.pids].every((pid) => !pidAlive(pid)) && (await Promise.all(Object.values(state.ports || {}).map(portListening))).every((open) => !open), 15000, 'Stack teardown failed after force-kill')
+        await waitForStackTeardown(state)
       }
       // Drop only after the app, worker and harness have lost their database
       // connections. FORCE also clears a pooled connection left by a crash.
