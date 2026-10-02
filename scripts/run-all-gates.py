@@ -3018,6 +3018,8 @@ def build_suites() -> List[Suite]:
         # could gate anything.
         Suite("web-app-wiring", "App.jsx structural wiring pins", "script", WEB,
               [_npm(), "run", "check:app-wiring"], None),
+        Suite("web-walk-unit", "Studio walk unit tests", "script", WEB,
+              [_npm(), "run", "check:walk-unit"], None),
         # Standardization slice 13d. ribbonClusters.js has carried an HONESTY
         # CONTRACT in its file header since W4d ("a greyed control with no
         # reason is the gap ToolsPanel's lock-note closed"), and nothing
