@@ -6,6 +6,7 @@ import { PRODUCT_SURFACES } from '../../src/site/productSurfaces.js'
 import { toolPlacementTab } from '../../src/lib/toolRecord.js'
 import { normalizedControlKey } from './probes.mjs'
 import { buildDrawingObjectIndex } from '../../src/lib/drawingObjectIndex.js'
+import { collectProbeUxEvidence, packUxEvidence } from './uxEvidence.mjs'
 
 export { expect }
 export const LOCAL_IDENTITY = Object.freeze({ tenant: 'demo-tenant', token: 'j1-presentation-fixture' })
@@ -434,7 +435,7 @@ async function baselineThreeState(probe, runtime, recipe) {
   }
 }
 
-async function setupStep(probe, runtime, recipe) {
+export async function setupStep(probe, runtime, recipe) {
   const { page, stack, evidence } = runtime
   switch (recipe.kind) {
     case 'fresh-sign-out-page': {
@@ -1305,6 +1306,10 @@ export async function runProbe(probe, runtime) {
     }
     page = runtime.page
     const locator = control(page, runtime.testInfo.project.name === 'phone' && probe.locator.phone ? probe.locator.phone : probe.locator)
+    try {
+      const observations = await collectProbeUxEvidence(probe, locator, runtime.testInfo.project.name)
+      if (observations.length) Object.assign(evidence, packUxEvidence([...(evidence.ux_observations || []), ...observations]))
+    } catch { /* Optional UX evidence never changes the functional verdict. */ }
     const failedDrawingGroup = runtime.failedDrawing && probe.locator.group
       ? page.getByRole('toolbar', { name: 'Drafting tools', exact: true })
         .getByRole('group', { name: groupNames[probe.locator.group], exact: true, includeHidden: true }) : null
