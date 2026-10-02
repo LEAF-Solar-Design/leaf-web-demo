@@ -58,6 +58,37 @@ export function sizingResponseValid(response) {
   }, { weather_mode: note, mintemp: real })
 }
 
+const SLOT_CODEC = 'leaf.solar-ground-slots.v1'
+const MAX_FRAME_SLOTS = 10000
+const MAX_GRAPH_SLOTS = 100000
+
+// Slot panel ids of a converted Ground design, frames in graph order then slot order, exactly as the
+// server's slot codec reads them: 16 UUIDv4 bytes per slot in canonical padded base64. Returns null for
+// any block the server would refuse, so the form fails closed. Linear in the slot count; no id repeats.
+function slotPanelIds(frames) {
+  const ids = []
+  for (const frame of frames) {
+    if (!plain(frame) || !Object.hasOwn(frame, 'ground_slots')) continue
+    const block = frame.ground_slots
+    if (!plain(block) || block.codec !== SLOT_CODEC || !Number.isInteger(block.count) ||
+        block.count < 1 || block.count > MAX_FRAME_SLOTS || ids.length + block.count > MAX_GRAPH_SLOTS ||
+        typeof block.panel_ids !== 'string' ||
+        block.panel_ids.length !== Math.floor((block.count * 16 + 2) / 3) * 4) return null
+    let bytes
+    try { bytes = atob(block.panel_ids) } catch { return null }
+    if (bytes.length !== block.count * 16 || btoa(bytes) !== block.panel_ids) return null
+    for (let start = 0; start < bytes.length; start += 16) {
+      let hex = ''
+      for (let index = start; index < start + 16; index += 1) {
+        hex += bytes.charCodeAt(index).toString(16).padStart(2, '0')
+      }
+      if (hex[12] !== '4' || !'89ab'.includes(hex[16])) return null
+      ids.push(`leaf:panel:${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`)
+    }
+  }
+  return new Set(ids).size === ids.length ? ids : null
+}
+
 export function sizingGraph(view, drawingVersion) {
   const unavailable = { ok: false, reason: 'sizing_graph_unavailable' }
   if (!plain(view) || view.version !== drawingVersion) return unavailable
@@ -71,6 +102,10 @@ export function sizingGraph(view, drawingVersion) {
         zone.panel_refs.every((id) => typeof id === 'string') &&
         (zone.module_model === undefined || typeof zone.module_model === 'string') &&
         (zone.inverter_model_a === undefined || typeof zone.inverter_model_a === 'string'))) return unavailable
+  // A graph without frames (or without a slot block) takes the unchanged path: no slot ids.
+  if (graph.frames !== undefined && !Array.isArray(graph.frames)) return unavailable
+  const slotIds = slotPanelIds(graph.frames ?? [])
+  if (slotIds === null) return unavailable
   const records = graph.settings.extra?.string_sizing?.records
   const power = Object.fromEntries(plain(records) ? Object.entries(records).map(([id, record]) => {
     const watts = record?.response?.pmp
@@ -79,17 +114,18 @@ export function sizingGraph(view, drawingVersion) {
   }) : [])
   return { ok: true, rev: graph.rev, settingsId: graph.settings.id,
     zip: Array.from(pyStrip(graph.project.zip_code)).slice(0, 5).join(''),
-    panels: graph.panels, zones: graph.electrical_zones.map((zone) => ({ ...zone,
+    panels: graph.panels, slotIds, zones: graph.electrical_zones.map((zone) => ({ ...zone,
       module_model: zone.module_model ?? '', inverter_model_a: zone.inverter_model_a ?? '',
     })), power }
 }
 
 export function sizingTargets(graph, mode) {
   if (!graph?.ok) return fail('sizing_graph_unavailable')
-  if (graph.panels.length === 0) return fail('sizing_panels_required')
+  if (graph.panels.length === 0 && graph.slotIds.length === 0) return fail('sizing_panels_required')
   if (mode === 'global') return { ok: true, targets: [graph.settingsId] }
   if (mode !== 'zones') return fail('sizing_fields_invalid', ['mode'])
   const panels = new Set(graph.panels.map((panel) => panel.id))
+  for (const id of graph.slotIds) panels.add(id)
   const covered = new Set()
   for (const zone of graph.zones) {
     if (!zone.panel_refs.length) return fail('sizing_zones_invalid')
