@@ -20,6 +20,9 @@ export function stackInstanceRef(root, launcherPid, bootTimeMs) {
 
 export const test = base.extend({
   firstRun: [false, { option: true }],
+  workerFacts: [async ({}, use) => {
+    await use({ engineMounted: undefined })
+  }, { scope: 'worker' }],
   workerStack: [async ({}, use, workerInfo) => {
     let stack
     let bootError
@@ -48,13 +51,15 @@ export const test = base.extend({
   extraHTTPHeaders: async ({}, use) => {
     await use({ 'X-Tenant-Id': LOCAL_IDENTITY.tenant })
   },
-  walkEvidence: [async ({}, use, testInfo) => {
+  walkEvidence: [async ({ workerFacts }, use, testInfo) => {
     const evidence = {
       schema: 'leaf.walk-evidence.v1', test: testInfo.title, viewport: testInfo.project.name,
       consoleErrors: [], pageErrors: [], failedRequests: [], abortedRequests: [], httpErrors: [],
       responses: [], steps: [], accessibility: null,
       startedAt: new Date().toISOString(),
     }
+    // Share observations with existing callers without serializing mutable facts.
+    Object.defineProperty(evidence, 'workerFacts', { value: workerFacts })
     try { await use(evidence) } finally {
       evidence.finishedAt = new Date().toISOString()
       await testInfo.attach('walk-evidence', {
@@ -216,7 +221,9 @@ async function engineReady(probe, runtime) {
   const { page } = runtime
   // A missing build flag is an unavailable local capability, not an engine
   // test that passed because the spec silently returned before its assertions.
-  if (!await page.getByTestId('cad-edit-workbench').count()) {
+  const mounted = !!await page.getByTestId('cad-edit-workbench').count()
+  runtime.workerFacts.engineMounted = mounted
+  if (!mounted) {
     await unsupported(probe, runtime, 'The production bundle has no mounted browser editing engine')
   }
   await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(/^[1-9]\d*$/, { timeout: 60_000 })
@@ -457,6 +464,38 @@ async function baselineThreeState(probe, runtime, recipe) {
     await expect(locator).toBeVisible()
     await expect(page.getByRole('dialog', { name: 'Session · provenance', exact: true })).toBeHidden()
   }
+}
+
+export const HANDLED_SETUP_KINDS = Object.freeze(new Set([
+  'fresh-sign-out-page', 'baseline-three-state', 'prepare-engine-transport', 'hold-engine-boot',
+  'navigate', 'open-failed-drawing', 'failed-drawing-ribbon-tab', 'open-empty-workspace',
+  'open-private-drawing', 'ribbon-tab', 'control-pressed-state', 'fullscreen-state',
+  'empty-view-history', 'previous-view-history', 'whole-drawing-view', 'engine-ready',
+  'select-entity', 'clear-selection', 'copy-selection', 'drawer-state', 'tool-rail-state',
+  'properties-state', 'properties-section-state', 'properties-close-state', 'layer-visible-state',
+  'job-monitor-collapsed', 'overview-expanded-state', 'overview-pan-state', 'open-start',
+  'open-history', 'slash-menu', 'open-route', 'catalog-tool', 'foreign-checkout', 'private-policy',
+  'create-line', 'hold-engine-edit', 'start-pending-run', 'require-authoring-off', 'fresh-history',
+  'undo-edit', 'preview-version', 'zoom-before-fit', 'require-engine-state', 'crash-engine-worker',
+  'require-surface-context', 'require-local-state',
+]))
+export const ENGINE_SETUP_KINDS = Object.freeze(new Set([
+  'engine-ready', 'select-entity', 'create-line', 'hold-engine-edit',
+  'require-engine-state', 'crash-engine-worker',
+]))
+const localFixtureReason = (recipe) => `The isolated stack has no public fixture recipe for ${recipe.state}; required context ${JSON.stringify(recipe.context)}`
+
+export function unsupportedBeforeSetup(probe, workerFacts = {}) {
+  for (const recipe of probe.setup.steps) {
+    if (!HANDLED_SETUP_KINDS.has(recipe.kind) || recipe.kind === 'require-local-state') {
+      return localFixtureReason({ state: probe.state, context: probe.setup.context, ...recipe })
+    }
+    if (workerFacts.engineMounted === false && ENGINE_SETUP_KINDS.has(recipe.kind)
+      && !(recipe.kind === 'select-entity' && recipe.viewerOnly)) {
+      return 'The production bundle has no mounted browser editing engine'
+    }
+  }
+  return null
 }
 
 export async function setupStep(probe, runtime, recipe) {
@@ -905,7 +944,7 @@ export async function setupStep(probe, runtime, recipe) {
       // No synthetic React state, mocked response or silent ready-state
       // fallback may stand in for a registry context. Keep this coverage gap
       // red until a public setup/fault fixture for the named state is supplied.
-      await unsupported(probe, runtime, `The isolated stack has no public fixture recipe for ${recipe.state}; required context ${JSON.stringify(recipe.context)}`)
+      await unsupported(probe, runtime, localFixtureReason(recipe))
       return
     default: throw new Error(`Unknown walk setup step: ${recipe.kind}`)
   }
@@ -1321,7 +1360,12 @@ export async function runProbe(probe, runtime) {
   evidence.expectedEffect = probe.assertion
   evidence.assertionId = probe.assertion.assertionId
   runtime.cleanup = []
+  runtime.workerFacts ||= evidence.workerFacts || { engineMounted: undefined }
   try {
+    // Source-extracted fake runners may omit module dependencies.
+    const reason = typeof unsupportedBeforeSetup === 'function'
+      ? unsupportedBeforeSetup(probe, runtime.workerFacts) : null
+    if (reason) await unsupported(probe, runtime, reason)
     for (const recipe of probe.setup.steps) {
       await test.step(`Setup: ${recipe.kind}`, async () => {
         await setupStep(probe, runtime, recipe)
