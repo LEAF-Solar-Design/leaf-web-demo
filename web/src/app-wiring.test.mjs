@@ -348,13 +348,44 @@ describe('Solar step rail wiring', () => {
     assert.ok(props.includes('onFlowChange={onSolarFlowChange}'))
     assert.ok(props.includes('onOpenStep={onOpenSolarFlowStep}'))
     assert.equal(appSource.split('onFlowChange').length - 1, 1)
-    const change = appSource.indexOf('const onSolarFlowChange = useCallback(() => {')
+    const change = appSource.indexOf('const onSolarFlowChange = useCallback((next) => {')
     assert.notEqual(change, -1)
     const end = appSource.indexOf('}, [onCloseSolarFlowStep])', change)
     assert.notEqual(end, -1)
     const body = appSource.slice(change, end)
+    assert.ok(body.includes('setSolarFlow(solarFlowId(next))'))
     assert.match(body, /onCloseSolarFlowStep\(\)/)
     assert.match(body, /setSolarFormTool\(null\)/)
+  })
+
+  it('W20 mounts one live workspace container beside the rail under the same Solar fence', () => {
+    const fence = appSource.indexOf(condition)
+    const rail = appSource.indexOf('<SolarFlowRail', fence)
+    const tools = appSource.indexOf('<SolarWorkspaceTools', rail)
+    const editor = appSource.indexOf('{solarFlowEditor && (', rail)
+    assert.ok(fence >= 0 && rail > fence && tools > rail && editor > tools)
+    assert.equal(appSource.split('<SolarWorkspaceTools').length, 2)
+    const host = appSource.slice(fence, tools)
+    assert.ok(host.includes('<div className="solar-flow-host">'))
+    assert.ok(host.slice(host.indexOf('/>', host.indexOf('<SolarFlowRail'))).includes('{!mock && ('))
+    const props = appSource.slice(tools, appSource.indexOf('/>', tools))
+    for (const binding of [
+      'drawingId={catalogRunContext?.drawingId ?? null}',
+      'projectId={catalogRunContext?.projectId ?? null}',
+      'drawingVersion={catalogRunContext?.drawingVersion ?? null}',
+      'flow={solarFlow}', 'checkoutHeld={heldByUs}', 'busy={!!running}',
+      'getCheckoutCapability={() => checkoutCapabilityRef.current?.()}',
+      'onPhysicalHeadChanged={() => loadCatalog()}',
+      'onDrawingVersionChanged={seatCompletedVersion}',
+    ]) assert.ok(props.includes(binding), binding)
+  })
+
+  it('W20 resets the selected flow when the rail mount predicate becomes false', () => {
+    assert.ok(appSource.includes('const [solarFlow, setSolarFlow] = useState(DEFAULT_SOLAR_FLOW)'))
+    assert.ok(appSource.includes("if (!(ENV_SOLAR_FLOW_RAIL && ENV_CAD_EDIT && ENV_SOLAR_SETTINGS_FORM && drafting && surfaceSlots.toolbar.profile === 'solar'))"))
+    const start = appSource.indexOf("if (!(ENV_SOLAR_FLOW_RAIL && ENV_CAD_EDIT && ENV_SOLAR_SETTINGS_FORM && drafting")
+    const reset = appSource.slice(start, appSource.indexOf('}, [drafting, surfaceSlots.toolbar.profile])', start))
+    assert.ok(reset.includes('setSolarFlow(DEFAULT_SOLAR_FLOW)'))
   })
 })
 
