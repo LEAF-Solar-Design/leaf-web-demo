@@ -226,6 +226,18 @@ function routeMap() {
 }
 
 describe('solar terrain client', () => {
+  it('CHECKOUT-GATE CG5 terrain checkout refusals carry their sentences and retry flags', async () => {
+    for (const [code, status, retryable, sentence] of [
+      ['TERRAIN_CHECKOUT_DENIED', 403, false, 'The drawing checkout is held elsewhere or has ended, so take the checkout and try again'],
+      ['TERRAIN_CHECKOUT_UNAVAILABLE', 503, true, 'The drawing checkout could not be confirmed, so try the terrain operation again'],
+    ]) {
+      expect(terrainReason(code)).toBe(sentence)
+      expect(routeMap().get(code)).toEqual({ status, envelope: status === 503 ? 'INTERNAL' : 'BAD_PARAMS', retryable })
+      const { client } = clientWith(answering(() => jsonResponse(
+        errorEnvelope(status === 503 ? 'INTERNAL' : 'BAD_PARAMS', code, retryable, code), status)))
+      expect(await client.runTerrainOperation(MESH_ARGS)).toEqual(refused(status, code, retryable))
+    }
+  })
   it('W20-06a C1 the view is a GET with the project in the query, and an operation posts the head it was given as JSON', async () => {
     const headers = vi.fn(() => ({ 'content-type': 'text/plain', 'X-Tenant-Id': 'fixture-tenant', Authorization: 'Bearer t' }))
     const viewBody = viewOf({ project: 'p & q' })
@@ -307,7 +319,7 @@ describe('solar terrain client', () => {
 
   it('W20-06a C2 route codes follow the server refusal map, and every refusal keeps its status and retry flag', async () => {
     const rows = routeMap()
-    expect(rows.size).toBe(34)
+    expect(rows.size).toBe(36)
     expect(Object.keys(TERRAIN_ROUTE_REASONS).sort()).toEqual([...rows.keys()].sort())
     expect(Object.keys(TERRAIN_CLIENT_REASONS).sort()).toEqual(CLIENT_AND_SESSION_CODES)
     expect(Object.keys(TERRAIN_CLIENT_REASONS).filter((code) => rows.has(code))).toEqual([])

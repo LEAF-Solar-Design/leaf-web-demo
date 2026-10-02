@@ -242,6 +242,22 @@ def test_combiner_intake_import_under_a_checkout(world, client):
         assert latest(backend) == 1
 
 
+def test_combiner_intake_import_gate_receives_tenant_context(world, client, monkeypatch):
+    import deps
+    from routers import drawings
+    backend, g, intake, groups = world
+    tenant = deps.TenantContext(TENANT, tier="demo", subject="auth0|combiner-holder")
+    client.app.dependency_overrides[deps.require_active_tenant] = lambda: tenant
+    seen = []
+    def record(drawing_id, context, selected_backend, capability):
+        seen.append(context)
+        return None, None
+    monkeypatch.setattr(drawings, "_lock_authorization", record)
+    assert post(client, encode(intake, groups)).status_code == 200
+    assert seen == [tenant] and seen[0] is tenant
+    assert isinstance(seen[0], deps.TenantContext) and seen[0].subject == "auth0|combiner-holder"
+
+
 # ----------------------------------------------------------------- refusals --
 
 def _intake_patch(change):

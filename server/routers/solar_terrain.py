@@ -3,10 +3,11 @@ import json
 import re
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
+import checkout_capability
 import deps
 import entitlements
 import solar_ground_terrain_adapter as adapter
@@ -14,12 +15,14 @@ import solar_physical_head as physical_head
 import solar_physical_state
 import write_loop
 from envelopes import ErrorCode, err_envelope, with_envelope_fields
-from routers.drawings import _backend
+from routers.drawings import _backend, _lock_authorization
 
 router = APIRouter()
 MAX_TERRAIN_BODY_BYTES = 8192
 VIEW_RESPONSE_SCHEMA = "leaf.solar-terrain-view-response.v1"
 TERRAIN_ROUTE_REFUSALS = {
+    "TERRAIN_CHECKOUT_DENIED": (403, ErrorCode.BAD_PARAMS, False),
+    "TERRAIN_CHECKOUT_UNAVAILABLE": (503, ErrorCode.INTERNAL, True),
     "TERRAIN_PROJECT_ID_INVALID": (400, ErrorCode.BAD_PARAMS, False),
     "TERRAIN_EXPECTED_HEAD_INVALID": (400, ErrorCode.BAD_PARAMS, False),
     "TERRAIN_LIMITS_INVALID": (400, ErrorCode.BAD_PARAMS, False),
@@ -99,13 +102,24 @@ def _get_terrain(tenant, drawing_id, project_id):
             "head": head, "terrain": terrain}
 
 
-def _operate(tenant, drawing_id, project_id, body):
+def _operate(tenant, drawing_id, project_id, body, capability):
+    backend = _terrain_backend(str(tenant))
+    try:
+        _lock_authorization(drawing_id, tenant, backend, capability)
+    except checkout_capability.CapabilityRejected:
+        raise adapter.TerrainAdapterError("TERRAIN_CHECKOUT_DENIED") from None
+    except checkout_capability.CapabilityUnavailable:
+        raise adapter.TerrainAdapterError("TERRAIN_CHECKOUT_UNAVAILABLE") from None
+    except KeyError:
+        pass  # No manifest: the adapter answers TERRAIN_DRAWING_NOT_FOUND.
+    except (ValueError, OSError):
+        raise adapter.TerrainAdapterError("TERRAIN_STORE_UNAVAILABLE") from None
     call = {"mesh": adapter.render_mesh, "slope": adapter.check_tracker_slope,
             "slope-clear": adapter.clear_tracker_slope}[body["operation"]]
     kwargs = {"project_id": project_id, "expected_head": body["expected_head"]}
     if "limits" in body:
         kwargs["limits"] = body["limits"]
-    return call(_terrain_backend(tenant), tenant, drawing_id, **kwargs)
+    return call(backend, str(tenant), drawing_id, **kwargs)
 
 
 def _unique_object(pairs):
@@ -132,7 +146,8 @@ async def get_terrain(drawing_id: str, project_id: Optional[str] = None,
 
 @router.post("/api/drawings/{drawing_id}/terrain/operations")
 async def terrain_operation(drawing_id: str, request: Request, project_id: Optional[str] = None,
-                            tenant=Depends(deps.require_active_tenant)):
+                            tenant=Depends(deps.require_active_tenant),
+                            x_checkout_capability: Optional[str] = Header(default=None)):
     refusal = _scope_refusal(drawing_id, project_id, tenant, "run_write")
     if refusal is not None:
         return refusal
@@ -166,7 +181,8 @@ async def terrain_operation(drawing_id: str, request: Request, project_id: Optio
     if type(expected_head) is not str or not re.fullmatch(r"[0-9a-f]{64}", expected_head):
         return _terrain_refused("TERRAIN_EXPECTED_HEAD_INVALID")
     try:
-        result = await run_in_threadpool(_operate, str(tenant), drawing_id, project_id, body)
+        result = await run_in_threadpool(_operate, tenant, drawing_id, project_id, body,
+                                         x_checkout_capability)
     except solar_physical_state.PhysicalStateError as exc:
         return _terrain_refused(exc.code)
     return JSONResponse(content=with_envelope_fields(result))

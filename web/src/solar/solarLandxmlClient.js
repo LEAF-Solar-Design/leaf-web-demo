@@ -28,6 +28,8 @@ export const LANDXML_TIMEOUT_MS = 120_000
 export const LANDXML_IMPORT_FALLBACK = 'The LandXML import stopped'
 
 export const LANDXML_IMPORT_REASONS = Object.freeze({
+  LANDXML_CHECKOUT_DENIED: 'The drawing checkout is held elsewhere or has ended, so take the checkout and import again',
+  LANDXML_CHECKOUT_UNAVAILABLE: 'The drawing checkout could not be confirmed, so import the LandXML file again',
   LANDXML_DRAWING_ID_INVALID: 'This drawing cannot take a LandXML file because its id is not valid',
   LANDXML_PROJECT_ID_INVALID: 'The project named for this import is not valid',
   LANDXML_DRAWING_UNITS_INVALID: 'Choose meters or feet as the drawing units before importing',
