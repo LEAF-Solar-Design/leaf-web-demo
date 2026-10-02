@@ -799,6 +799,9 @@ def build_suites() -> List[Suite]:
         # Inputs are authored in the file and nothing skips. COUNTED: 29.
         Suite("server-solar-ground-equipment", "server tests/test_solar_ground_equipment.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_ground_equipment.py"), 29),
+        # W20 Ground admission: 17 tools proven on the converted chain; COUNTED: 28.
+        Suite("server-solar-ground-admission", "server tests/test_solar_ground_admission.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_ground_admission.py"), 28),
         # W5 inverter family (2026-09-24, contract G35): the shared state and delta module and the
         # device, string and output engines (literal ports of the plugin's inverter commands). Inputs
         # are authored in each file, so each floor is the exact count on every runner. MEASURED.
