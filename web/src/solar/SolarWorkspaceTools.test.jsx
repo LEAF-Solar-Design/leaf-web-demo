@@ -1,7 +1,9 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as api from '../api.js'
-import SolarWorkspaceTools from './SolarWorkspaceTools.jsx'
+import * as landxmlUpload from './SolarLandxmlUpload.jsx'
+import * as terrainClients from './solarTerrainClient.js'
+import SolarWorkspaceTools, { TERRAIN_WORKSPACE_REASONS } from './SolarWorkspaceTools.jsx'
 import { COMBINER_INTAKE_REASONS } from './solarCombinerIntakeClient.js'
 
 // The route capture also used by SolarLandxmlUpload.test.jsx; the real client validates it.
@@ -93,6 +95,638 @@ afterEach(() => {
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
   localStorage.removeItem('leaf.jwt')
+})
+
+// Synthetic route-shaped terrain fixtures, validated by the real client and panel.
+const TERRAIN_H1 = value().head.state.artifact_id
+const TERRAIN_H2 = 'b'.repeat(64)
+const TERRAIN_PROJECT = value().project_id
+function terrainHead(moved = false) {
+  const head = value().head
+  if (moved) {
+    head.index = 1
+    head.parent = TERRAIN_H1
+    head.state.artifact_id = TERRAIN_H2
+    head.state.download = `/api/drawings/solar/artifacts/${TERRAIN_H2}`
+  }
+  return head
+}
+const terrainFrame = () => ({
+  coordinate_system: 'world', transform: 'identity', drawing_units: 'm', meters_per_unit: 1, crs: 'none',
+  elevation_datum: 'unrecorded', horizontal: 'drawing-units', elevation: 'metres',
+})
+const terrainGrid = () => ({
+  rows: 2, cols: 2, x_min: 0, x_max: 10, y_min: 0, y_max: 10,
+  cell_x: 10, cell_y: 10, cell_x_m: 10, cell_y_m: 10,
+  elevation_min_m: 0, elevation_max_m: 0, grid_sha256: 'c'.repeat(64),
+})
+function terrainView(moved = false) {
+  return {
+    schema: 'leaf.solar-terrain-view-response.v1', stored: true, head: terrainHead(moved),
+    terrain: {
+      schema: 'leaf.solar-terrain-view.v1', maturity: 'preview', drawing_id: 'solar', project_id: TERRAIN_PROJECT,
+      frame: terrainFrame(), grid: terrainGrid(), mesh_faces: 0, slope_markers: 0,
+      previews: {
+        'terrain-mesh-render': { state: 'absent', record: null },
+        'tracker-slope-violations': { state: 'absent', record: null },
+      },
+    },
+    error: null, degraded_mode: false,
+  }
+}
+function terrainResult(created = true) {
+  return {
+    schema: 'leaf.solar-terrain-operation.v1', maturity: 'preview', operation: 'mesh',
+    capability: 'terrain-mesh-render', created, drawing_id: 'solar', project_id: TERRAIN_PROJECT,
+    frame: terrainFrame(), grid: terrainGrid(), head: terrainHead(created), replaced: 0,
+    record: {
+      schema: 'leaf.solar-terrain-preview.v1', capability: 'terrain-mesh-render', maturity: 'preview',
+      grid_sha256: 'c'.repeat(64), meters_per_unit: 1, faces: 1,
+      buckets: { Green: 1, Yellow: 0, Red: 0 }, max_slope_percent: 0, mesh_sha256: 'e'.repeat(64),
+    },
+    error: null, degraded_mode: false,
+  }
+}
+function terrainResponse(body = terrainView(), status = 200) {
+  return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+}
+function terrainProps(overrides = {}) {
+  const props = supplied(overrides)
+  let moved = false
+  props.transport.fetchImpl.mockImplementation(async (url, init) => {
+    if (url.includes('/imports/landxml')) return response()
+    if (init.method === 'POST') {
+      moved = true
+      return terrainResponse(terrainResult())
+    }
+    return terrainResponse(terrainView(moved))
+  })
+  return props
+}
+const terrainTrigger = () => screen.getByRole('button', { name: 'Terrain preview', exact: true })
+const terrainPanel = () => screen.queryByTestId('solar-terrain-panel')
+const terrainMesh = () => screen.getByRole('button', { name: 'Run mesh preview' })
+const openTerrain = () => fireEvent.click(terrainTrigger())
+const terrainReady = () => waitFor(() => expect(terrainPanel()?.getAttribute('data-phase')).toBe('ready'))
+const terrainGets = (props) => props.transport.fetchImpl.mock.calls.filter(([, init]) => init.method === 'GET')
+const terrainPosts = (props) => props.transport.fetchImpl.mock.calls.filter(([url, init]) =>
+  init.method === 'POST' && url.includes('/terrain/operations'))
+
+describe('terrain workspace integration', () => {
+  it('W20-06b T1 exposes terrain on Ground Physical for local and platform drawings without eager reads', () => {
+    const props = terrainProps()
+    const view = render(<SolarWorkspaceTools {...props} />)
+    for (const projectId of [null, TERRAIN_PROJECT]) {
+      for (const drawingId of [null, 'solar']) {
+        for (const flow of ['rooftop', 'ground-physical', 'ground-electrical', 'solaredge-import', 'pvcase-tutorial']) {
+          view.rerender(<SolarWorkspaceTools {...props} projectId={projectId} drawingId={drawingId} flow={flow} />)
+          expect(!!screen.queryByRole('button', { name: 'Terrain preview', exact: true }))
+            .toBe(!!drawingId && flow === 'ground-physical')
+          expect(!!screen.queryByRole('button', { name: 'Import combiner intake' }))
+            .toBe(!!drawingId && projectId === null && flow === 'rooftop')
+          expect(terrainPanel()).toBeNull()
+        }
+      }
+    }
+    expect(props.transport.fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it('W20-06b T2 opens one panel at a time and returns focus on Close', async () => {
+    const props = terrainProps()
+    render(<SolarWorkspaceTools {...props} />)
+    openTerrain()
+    expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Terrain preview' }))
+    expect(terrainTrigger().getAttribute('aria-expanded')).toBe('true')
+    expect(trigger().getAttribute('aria-expanded')).toBe('false')
+    await terrainReady()
+    open()
+    expect(terrainPanel()).toBeNull()
+    expect(document.activeElement).toBe(screen.getByLabelText('LandXML file'))
+    expect(terrainTrigger().getAttribute('aria-expanded')).toBe('false')
+    expect(trigger().getAttribute('aria-expanded')).toBe('true')
+    openTerrain()
+    expect(control()).toBeNull()
+    expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Terrain preview' }))
+    await terrainReady()
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(terrainPanel()).toBeNull()
+    expect(document.activeElement).toBe(terrainTrigger())
+    expect(terrainTrigger().getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('W20-06b T3 a flow change closes terrain and returning keeps it closed', async () => {
+    const props = terrainProps()
+    const view = render(<SolarWorkspaceTools {...props} />)
+    openTerrain()
+    await terrainReady()
+    view.rerender(<SolarWorkspaceTools {...props} flow="ground-electrical" />)
+    expect(terrainPanel()).toBeNull()
+    view.rerender(<SolarWorkspaceTools {...props} />)
+    expect(terrainPanel()).toBeNull()
+    expect(terrainTrigger().getAttribute('aria-expanded')).toBe('false')
+    expect(terrainGets(props)).toHaveLength(1)
+  })
+
+  it('W20-06b T4 reads current tenant and bearer per GET and POST and strips checkout overrides', async () => {
+    for (const override of [false, true]) {
+      const props = terrainProps()
+      props.transport.headers = override
+        ? vi.fn(() => ({ 'X-Tenant-Id': api.config.tenant, ...api.authHeaders(), 'x-CHECKOUT-capability': 'secret' }))
+        : undefined
+      render(<SolarWorkspaceTools {...props} />)
+      localStorage.setItem('leaf.jwt', 'terrain-a')
+      openTerrain()
+      await terrainReady()
+      expect(terrainGets(props)[0][1].headers).toMatchObject({
+        'X-Tenant-Id': api.config.tenant, Authorization: 'Bearer terrain-a',
+      })
+      localStorage.setItem('leaf.jwt', 'terrain-b')
+      fireEvent.click(terrainMesh())
+      await waitFor(() => expect(terrainGets(props)).toHaveLength(2))
+      await terrainReady()
+      expect(terrainPosts(props)[0][1].headers).toMatchObject({
+        'X-Tenant-Id': api.config.tenant, Authorization: 'Bearer terrain-b', 'Content-Type': 'application/json',
+      })
+      expect(terrainGets(props)[1][1].headers.Authorization).toBe('Bearer terrain-b')
+      for (const [, init] of props.transport.fetchImpl.mock.calls) {
+        expect(Object.keys(init.headers).some((key) => key.toLowerCase() === 'x-checkout-capability')).toBe(false)
+      }
+      if (override) expect(props.transport.headers).toHaveBeenNthCalledWith(3, 'solar')
+      expect(props.getCheckoutCapability).not.toHaveBeenCalled()
+      cleanup()
+    }
+  })
+
+  it('W20-06b T4 malformed header overrides retain the terrain client refusal', async () => {
+    for (const headers of [null, [], new Headers(), { Authorization: 42 }, { [Symbol('header')]: 'value' }]) {
+      const props = terrainProps()
+      props.transport.headers = () => headers
+      render(<SolarWorkspaceTools {...props} />)
+      openTerrain()
+      await waitFor(() => expect(terrainPanel()?.getAttribute('data-phase')).toBe('refused'))
+      expect(props.transport.fetchImpl).not.toHaveBeenCalled()
+      expect(props.getCheckoutCapability).not.toHaveBeenCalled()
+      cleanup()
+    }
+  })
+
+  it('W20-06b T4 platform GET and POST carry the project scope without a checkout capability', async () => {
+    const props = terrainProps({ projectId: TERRAIN_PROJECT })
+    render(<SolarWorkspaceTools {...props} />)
+    openTerrain()
+    await terrainReady()
+    fireEvent.click(terrainMesh())
+    await waitFor(() => expect(terrainGets(props)).toHaveLength(2))
+    await terrainReady()
+    expect(terrainPosts(props)).toHaveLength(1)
+    for (const [url, init] of props.transport.fetchImpl.mock.calls) {
+      expect(new URL(url, 'https://workspace.test').searchParams.get('project_id')).toBe(TERRAIN_PROJECT)
+      expect(Object.keys(init.headers).some((key) => key.toLowerCase() === 'x-checkout-capability')).toBe(false)
+    }
+    expect(props.getCheckoutCapability).not.toHaveBeenCalled()
+    expect(props.onPhysicalHeadChanged).toHaveBeenCalledTimes(1)
+  })
+
+  it('W20-06b T5 GET and POST unauthorized answers report the sent bearer without outward callbacks', async () => {
+    for (const method of ['GET', 'POST']) {
+      const props = terrainProps()
+      props.transport.headers = () => ({ 'X-Tenant-Id': 'workspace-test', ...api.authHeaders() })
+      const refused = terrainResponse(JSON.parse(UNAUTH_TEXT), 401)
+      props.transport.fetchImpl.mockImplementation(async (url, init) =>
+        init.method === method ? refused : terrainResponse())
+      render(<SolarWorkspaceTools {...props} />)
+      localStorage.setItem('leaf.jwt', 'tr-old')
+      openTerrain()
+      if (method === 'POST') {
+        await terrainReady()
+        localStorage.setItem('leaf.jwt', 'tr-new')
+        fireEvent.click(terrainMesh())
+      }
+      await waitFor(() => expect(screen.getByTestId('solar-terrain-refusal')).toBeTruthy())
+      const sent = props.transport.fetchImpl.mock.calls.find(([, init]) => init.method === method)
+      expect(props.transport.onResponse).toHaveBeenCalledWith(refused, sent[0],
+        method === 'GET' ? 'Bearer tr-old' : 'Bearer tr-new')
+      expect(props.onPhysicalHeadChanged).not.toHaveBeenCalled()
+      expect(props.onDrawingVersionChanged).not.toHaveBeenCalled()
+      expect(terrainGets(props)).toHaveLength(1)
+      cleanup()
+    }
+  })
+
+  it.each([true, false])('W20-06b T6 import created=%s signals a mounted terrain panel to read the new head', async (created) => {
+    const props = terrainProps()
+    const pending = workspaceDeferred()
+    const imported = value(created)
+    imported.head = terrainHead(true)
+    let deliverImport
+    let moved = false
+    const Upload = landxmlUpload.default
+    // Delay only callback delivery so the real import can notify an already mounted panel.
+    vi.spyOn(landxmlUpload, 'default').mockImplementation((uploadProps) => Upload({
+      ...uploadProps, onImported: (result) => { deliverImport = () => uploadProps.onImported(result) },
+    }))
+    props.transport.fetchImpl.mockImplementation(async (url, init) => {
+      if (url.includes('/imports/landxml')) return terrainResponse(imported)
+      return init.method === 'POST' ? pending.promise : terrainResponse(terrainView(moved))
+    })
+    render(<SolarWorkspaceTools {...props} />)
+    openTerrain()
+    await terrainReady()
+    expect(terrainPanel().getAttribute('data-head')).toBe(TERRAIN_H1)
+    open(); submit()
+    await waitFor(() => expect(deliverImport).toBeTypeOf('function'))
+    await waitFor(() => expect(terrainTrigger().disabled).toBe(false))
+    openTerrain()
+    await terrainReady()
+    const beforeImport = terrainGets(props).length
+    expect(beforeImport).toBe(2)
+    moved = true
+    act(() => deliverImport())
+    await waitFor(() => expect(terrainGets(props)).toHaveLength(beforeImport + 1))
+    await terrainReady()
+    expect(terrainPanel().getAttribute('data-head')).toBe(TERRAIN_H2)
+    expect(props.onPhysicalHeadChanged).toHaveBeenCalledTimes(1)
+    expect(props.onPhysicalHeadChanged).toHaveBeenCalledWith(imported)
+    fireEvent.click(terrainMesh())
+    await waitFor(() => expect(terrainPosts(props)).toHaveLength(1))
+    expect(JSON.parse(terrainPosts(props)[0][1].body).expected_head).toBe(TERRAIN_H2)
+    expect(props.onPhysicalHeadChanged).toHaveBeenCalledTimes(1)
+  })
+
+  it('W20-06b T7 a created mesh updates the container head with one POST and one follow-up GET', async () => {
+    const props = terrainProps()
+    const view = render(<SolarWorkspaceTools {...props} />)
+    openTerrain()
+    await terrainReady()
+    fireEvent.click(terrainMesh())
+    await waitFor(() => expect(props.onPhysicalHeadChanged).toHaveBeenCalledTimes(1))
+    await terrainReady()
+    expect(terrainPosts(props)).toHaveLength(1)
+    expect(terrainGets(props)).toHaveLength(2)
+    const expected = terrainResult()
+    delete expected.error
+    delete expected.degraded_mode
+    expect(props.onPhysicalHeadChanged).toHaveBeenCalledWith(expected)
+    expect(screen.getByRole('region', { name: 'Solar workspace tools' }).getAttribute('data-physical-head-index')).toBe('1')
+    expect(announcement()).toBe('')
+    expect(props.onDrawingVersionChanged).not.toHaveBeenCalled()
+    view.rerender(<SolarWorkspaceTools {...props} />)
+    await act(async () => {})
+    expect(terrainGets(props)).toHaveLength(2)
+  })
+
+  it('W20-06b T8 operation then LandXML remounts a fresh focused upload and retains the latest head', async () => {
+    const props = terrainProps()
+    render(<SolarWorkspaceTools {...props} />)
+    open()
+    fireEvent.change(screen.getByLabelText('LandXML file'), {
+      target: { files: [new File(['old'], 'old.xml', { type: 'application/xml' })] },
+    })
+    openTerrain()
+    await terrainReady()
+    fireEvent.click(terrainMesh())
+    await waitFor(() => expect(props.onPhysicalHeadChanged).toHaveBeenCalledTimes(1))
+    await terrainReady()
+    const count = props.transport.fetchImpl.mock.calls.length
+    open()
+    expect(terrainPanel()).toBeNull()
+    expect(control().getAttribute('data-phase')).toBe('idle')
+    expect(screen.getByLabelText('LandXML file').files).toHaveLength(0)
+    expect(document.activeElement).toBe(screen.getByLabelText('LandXML file'))
+    expect(screen.getByRole('region', { name: 'Solar workspace tools' }).getAttribute('data-physical-head-index')).toBe('1')
+    expect(props.transport.fetchImpl).toHaveBeenCalledTimes(count)
+  })
+
+  it.each(['existing', 'TERRAIN_HEAD_MOVED', 'PHYSICAL_HEAD_CONFLICT'])
+    ('W20-06b T9 %s reads once afterward without retrying or notifying the mount', async (outcome) => {
+      const props = terrainProps()
+      props.transport.fetchImpl.mockImplementation(async (url, init) => {
+        if (init.method === 'GET') return terrainResponse(terrainView(terrainGets(props).length > 1))
+        return outcome === 'existing' ? terrainResponse(terrainResult(false))
+          : terrainResponse({ error: { error_code: 'CONFLICT', reason_code: outcome, retryable: false } }, 409)
+      })
+      render(<SolarWorkspaceTools {...props} />)
+      openTerrain()
+      await terrainReady()
+      fireEvent.click(terrainMesh())
+      await waitFor(() => expect(terrainGets(props)).toHaveLength(2))
+      await terrainReady()
+      expect(screen.getByRole('region', { name: 'Solar workspace tools' }).getAttribute('data-physical-head-index')).toBe('1')
+      expect(terrainPanel().getAttribute('data-head')).toBe(TERRAIN_H2)
+      expect(terrainPosts(props)).toHaveLength(1)
+      expect(props.onPhysicalHeadChanged).not.toHaveBeenCalled()
+      expect(props.onDrawingVersionChanged).not.toHaveBeenCalled()
+    })
+
+  it('W20-06b T13 a late older read cannot move the container head backwards', async () => {
+    const props = terrainProps()
+    const older = workspaceDeferred()
+    const createClient = terrainClients.createSolarTerrainClient
+    let heldRead
+    vi.spyOn(terrainClients, 'createSolarTerrainClient').mockImplementation((options) => {
+      const client = createClient(options)
+      let reads = 0
+      return {
+        ...client,
+        getTerrain: async (request) => {
+          const number = ++reads
+          const result = await client.getTerrain(request)
+          if (number === 2) {
+            heldRead = result
+            return older.promise
+          }
+          return result
+        },
+      }
+    })
+    props.transport.fetchImpl.mockImplementation(async () =>
+      terrainResponse(terrainView(terrainGets(props).length >= 3)))
+    render(<SolarWorkspaceTools {...props} />)
+    openTerrain()
+    await terrainReady()
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh terrain preview' }))
+    await waitFor(() => expect(heldRead?.ok).toBe(true))
+    expect(heldRead.value.head.index).toBe(0)
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    openTerrain()
+    await terrainReady()
+    const region = screen.getByRole('region', { name: 'Solar workspace tools' })
+    expect(region.getAttribute('data-physical-head-index')).toBe('1')
+    await act(async () => { older.resolve(heldRead) })
+    expect(region.getAttribute('data-physical-head-index')).toBe('1')
+    expect(terrainPanel().getAttribute('data-head')).toBe(TERRAIN_H2)
+    expect(terrainGets(props)).toHaveLength(3)
+    expect(props.onPhysicalHeadChanged).not.toHaveBeenCalled()
+  })
+
+  it('W20-06b T14 a successful read naming another drawing changes no container head', async () => {
+    const props = terrainProps()
+    const createClient = terrainClients.createSolarTerrainClient
+    vi.spyOn(terrainClients, 'createSolarTerrainClient').mockImplementation((options) => {
+      const client = createClient(options)
+      let reads = 0
+      return {
+        ...client,
+        getTerrain: async (request) => {
+          const number = ++reads
+          const result = await client.getTerrain(request)
+          // Exercise the container boundary after the real transport and validation.
+          if (number === 2 && result.ok) {
+            result.value.head.drawing_id = 'other'
+            result.value.terrain.drawing_id = 'other'
+          }
+          return result
+        },
+      }
+    })
+    props.transport.fetchImpl.mockImplementation(async () =>
+      terrainResponse(terrainView(terrainGets(props).length > 1)))
+    render(<SolarWorkspaceTools {...props} />)
+    openTerrain()
+    await terrainReady()
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh terrain preview' }))
+    await waitFor(() => expect(terrainPanel().getAttribute('data-phase')).toBe('refused'))
+    expect(screen.getByRole('region', { name: 'Solar workspace tools' }).getAttribute('data-physical-head-index')).toBe('0')
+    expect(terrainPanel().getAttribute('data-head')).toBe(TERRAIN_H1)
+    expect(screen.getByTestId('solar-terrain-refusal').textContent)
+      .toBe(terrainClients.terrainReason('TERRAIN_CLIENT_RESPONSE_INVALID'))
+    expect(terrainGets(props)).toHaveLength(2)
+    expect(props.onPhysicalHeadChanged).not.toHaveBeenCalled()
+  })
+
+  it('W20-06b T15 a failed read retains the container head and reaches the panel unchanged', async () => {
+    const props = terrainProps()
+    props.transport.fetchImpl.mockImplementation(async () => terrainGets(props).length === 1
+      ? terrainResponse() : terrainResponse(JSON.parse(UNAUTH_TEXT), 401))
+    render(<SolarWorkspaceTools {...props} />)
+    openTerrain()
+    await terrainReady()
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh terrain preview' }))
+    await waitFor(() => expect(terrainPanel().getAttribute('data-phase')).toBe('refused'))
+    expect(screen.getByRole('region', { name: 'Solar workspace tools' }).getAttribute('data-physical-head-index')).toBe('0')
+    expect(terrainPanel().getAttribute('data-head')).toBe(TERRAIN_H1)
+    expect(screen.getByTestId('solar-terrain-refusal').textContent)
+      .toBe(terrainClients.terrainReason('UNAUTHENTICATED'))
+    expect(terrainGets(props)).toHaveLength(2)
+    expect(props.onPhysicalHeadChanged).not.toHaveBeenCalled()
+  })
+
+  it('W20-06b T10 reads and Refresh stay available behind the busy and checkout gates', async () => {
+    const props = terrainProps({ busy: true })
+    const view = render(<SolarWorkspaceTools {...props} />)
+    openTerrain()
+    await terrainReady()
+    for (const [busy, checkoutHeld, reason] of [
+      [true, true, TERRAIN_WORKSPACE_REASONS.run_in_progress],
+      [false, false, TERRAIN_WORKSPACE_REASONS.checkout_required],
+      [true, false, TERRAIN_WORKSPACE_REASONS.run_in_progress],
+    ]) {
+      view.rerender(<SolarWorkspaceTools {...props} busy={busy} checkoutHeld={checkoutHeld} />)
+      expect(screen.getByTestId('solar-terrain-reason').textContent).toBe(reason)
+      for (const name of ['Run mesh preview', 'Run slope preview', 'Clear slope preview']) {
+        const button = screen.getByRole('button', { name })
+        expect(button.disabled).toBe(true)
+        fireEvent.click(button)
+      }
+      const count = terrainGets(props).length
+      const refresh = screen.getByRole('button', { name: 'Refresh terrain preview' })
+      expect(refresh.disabled).toBe(false)
+      fireEvent.click(refresh)
+      await waitFor(() => expect(terrainGets(props)).toHaveLength(count + 1))
+      await terrainReady()
+    }
+    expect(terrainPosts(props)).toHaveLength(0)
+    view.rerender(<SolarWorkspaceTools {...props} busy={false} checkoutHeld={true} />)
+    expect(screen.queryByTestId('solar-terrain-reason')).toBeNull()
+    expect(terrainMesh().disabled).toBe(false)
+    fireEvent.click(terrainMesh())
+    await waitFor(() => expect(terrainPosts(props)).toHaveLength(1))
+    await terrainReady()
+  })
+
+  it.each(['success', 'refusal', 'rejection', 'Cancel', 'Close', 'flow'])
+    ('W20-06b T11 a pending import interlocks terrain until %s', async (outcome) => {
+      const props = terrainProps()
+      const pending = workspaceDeferred()
+      props.transport.fetchImpl.mockImplementationOnce(() => pending.promise)
+      const view = render(<SolarWorkspaceTools {...props} />)
+      open(); submit()
+      await waitFor(() => expect(props.transport.fetchImpl).toHaveBeenCalledTimes(1))
+      expect(terrainTrigger().disabled).toBe(true)
+      expect(terrainTrigger().textContent).toBe('Terrain preview')
+      expect(screen.getByTestId('solar-terrain-reason').textContent).toBe(TERRAIN_WORKSPACE_REASONS.landxml_importing)
+      fireEvent.click(terrainTrigger())
+      expect(terrainPanel()).toBeNull()
+      const signal = props.transport.fetchImpl.mock.calls[0][1].signal
+      if (outcome === 'success') await act(async () => { pending.resolve(response()) })
+      if (outcome === 'refusal') await act(async () => { pending.resolve(terrainResponse(JSON.parse(UNAUTH_TEXT), 401)) })
+      if (outcome === 'rejection') await act(async () => { pending.reject(new Error('network')) })
+      if (outcome === 'Cancel') fireEvent.click(screen.getByRole('button', { name: 'Cancel import' }))
+      if (outcome === 'Close') fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+      if (outcome === 'flow') {
+        view.rerender(<SolarWorkspaceTools {...props} flow="ground-electrical" />)
+        view.rerender(<SolarWorkspaceTools {...props} />)
+      }
+      await waitFor(() => expect(terrainTrigger().disabled).toBe(false))
+      expect(screen.queryByTestId('solar-terrain-reason')).toBeNull()
+      if (['Cancel', 'Close', 'flow'].includes(outcome)) {
+        expect(signal.aborted).toBe(true)
+        await act(async () => { pending.resolve(response()) })
+      }
+      if (outcome === 'success') expect(props.onPhysicalHeadChanged).toHaveBeenCalledTimes(1)
+      else expect(props.onPhysicalHeadChanged).not.toHaveBeenCalled()
+      expect(props.onDrawingVersionChanged).not.toHaveBeenCalled()
+    })
+
+  it('W20-06b T11 an older upload cannot settle a newer upload interlock', async () => {
+    const props = terrainProps()
+    const older = workspaceDeferred()
+    const newer = workspaceDeferred()
+    props.transport.fetchImpl.mockImplementationOnce(() => older.promise).mockImplementationOnce(() => newer.promise)
+    render(<SolarWorkspaceTools {...props} />)
+    open(); submit()
+    await waitFor(() => expect(props.transport.fetchImpl).toHaveBeenCalledTimes(1))
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel import' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Import terrain' }))
+    await waitFor(() => expect(props.transport.fetchImpl).toHaveBeenCalledTimes(2))
+    await act(async () => { older.resolve(response()) })
+    expect(terrainTrigger().disabled).toBe(true)
+    expect(screen.getByTestId('solar-terrain-reason').textContent).toBe(TERRAIN_WORKSPACE_REASONS.landxml_importing)
+    expect(props.onPhysicalHeadChanged).not.toHaveBeenCalled()
+    await act(async () => { newer.resolve(response()) })
+    await waitFor(() => expect(terrainTrigger().disabled).toBe(false))
+    expect(props.onPhysicalHeadChanged).toHaveBeenCalledTimes(1)
+  })
+
+  it('W20-06b T12 completed terrain heads reset on drawing and project changes', async () => {
+    for (const next of [{ drawingId: 'other' }, { projectId: TERRAIN_PROJECT }]) {
+      const props = terrainProps()
+      const view = render(<SolarWorkspaceTools {...props} />)
+      openTerrain()
+      await terrainReady()
+      fireEvent.click(terrainMesh())
+      await waitFor(() => expect(props.onPhysicalHeadChanged).toHaveBeenCalledTimes(1))
+      await terrainReady()
+      expect(screen.getByRole('region', { name: 'Solar workspace tools' }).getAttribute('data-physical-head-index')).toBe('1')
+      view.rerender(<SolarWorkspaceTools {...props} {...next} />)
+      expect(terrainPanel()).toBeNull()
+      expect(screen.getByRole('region', { name: 'Solar workspace tools' }).hasAttribute('data-physical-head-index')).toBe(false)
+      view.rerender(<SolarWorkspaceTools {...props} />)
+      expect(terrainPanel()).toBeNull()
+      expect(terrainTrigger().getAttribute('aria-expanded')).toBe('false')
+      view.unmount()
+    }
+  })
+
+  it.each(['GET', 'POST'])('W20-06b T12 deferred %s is aborted and forgotten at every scope boundary', async (method) => {
+    for (const boundary of ['drawing', 'project', 'A to B to A', 'Close', 'flow']) {
+      const props = terrainProps()
+      const pending = workspaceDeferred()
+      props.transport.fetchImpl.mockImplementation(async (url, init) =>
+        init.method === method ? pending.promise : terrainResponse())
+      const view = render(<SolarWorkspaceTools {...props} />)
+      openTerrain()
+      if (method === 'POST') {
+        await terrainReady()
+        fireEvent.click(terrainMesh())
+      }
+      await waitFor(() => expect(props.transport.fetchImpl.mock.calls.some(([, init]) => init.method === method)).toBe(true))
+      const request = props.transport.fetchImpl.mock.calls.find(([, init]) => init.method === method)
+      const count = props.transport.fetchImpl.mock.calls.length
+      const headIndexBeforeBoundary = screen.getByRole('region', { name: 'Solar workspace tools' }).getAttribute('data-physical-head-index')
+      if (boundary === 'drawing' || boundary === 'A to B to A') view.rerender(<SolarWorkspaceTools {...props} drawingId="other" />)
+      if (boundary === 'project') view.rerender(<SolarWorkspaceTools {...props} projectId={TERRAIN_PROJECT} />)
+      if (boundary === 'Close') fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+      if (boundary === 'flow') view.rerender(<SolarWorkspaceTools {...props} flow="ground-electrical" />)
+      expect(request[1].signal.aborted).toBe(true)
+      expect(terrainPanel()).toBeNull()
+      if (boundary === 'A to B to A' || boundary === 'flow') view.rerender(<SolarWorkspaceTools {...props} />)
+      await act(async () => { pending.resolve(terrainResponse(method === 'POST' ? terrainResult() : terrainView())) })
+      expect(props.onPhysicalHeadChanged).not.toHaveBeenCalled()
+      expect(props.onDrawingVersionChanged).not.toHaveBeenCalled()
+      expect(announcement()).toBe('')
+      expect(screen.queryByTestId('solar-terrain-announce')).toBeNull()
+      if (boundary === 'Close' || boundary === 'flow') {
+        expect(screen.getByRole('region', { name: 'Solar workspace tools' }).getAttribute('data-physical-head-index'))
+          .toBe(headIndexBeforeBoundary)
+      } else {
+        expect(screen.getByRole('region', { name: 'Solar workspace tools' }).hasAttribute('data-physical-head-index')).toBe(false)
+      }
+      expect(props.transport.fetchImpl).toHaveBeenCalledTimes(count)
+      view.rerender(<SolarWorkspaceTools {...props} />)
+      props.transport.fetchImpl.mockImplementation(async () => terrainResponse())
+      openTerrain()
+      await terrainReady()
+      expect(props.transport.fetchImpl).toHaveBeenCalledTimes(count + 1)
+      expect(terrainPanel().getAttribute('data-head')).toBe(TERRAIN_H1)
+      expect(terrainMesh().disabled).toBe(false)
+      view.unmount()
+    }
+  })
+
+  it.each(['Close', 'flow'])('W20-06b T16 a successful read delivered after %s retains the last observed head', async (boundary) => {
+    const props = terrainProps()
+    const pending = workspaceDeferred()
+    const createClient = terrainClients.createSolarTerrainClient
+    let heldRead, heldSignal
+    vi.spyOn(terrainClients, 'createSolarTerrainClient').mockImplementation((options) => {
+      const client = createClient(options)
+      let reads = 0
+      return {
+        ...client,
+        getTerrain: async (request) => {
+          const number = ++reads
+          const result = await client.getTerrain(request)
+          if (number === 2) {
+            heldRead = result
+            heldSignal = request.signal
+            return pending.promise
+          }
+          return result
+        },
+      }
+    })
+    props.transport.fetchImpl.mockImplementation(async () =>
+      terrainResponse(terrainView(terrainGets(props).length > 1)))
+    const view = render(<SolarWorkspaceTools {...props} />)
+    openTerrain()
+    await terrainReady()
+    const region = screen.getByRole('region', { name: 'Solar workspace tools' })
+    expect(region.getAttribute('data-physical-head-index')).toBe('0')
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh terrain preview' }))
+    await waitFor(() => expect(heldRead?.ok).toBe(true))
+    expect(heldRead.value.head.index).toBe(1)
+    if (boundary === 'Close') fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    else {
+      view.rerender(<SolarWorkspaceTools {...props} flow="ground-electrical" />)
+      view.rerender(<SolarWorkspaceTools {...props} />)
+    }
+    expect(heldSignal.aborted).toBe(true)
+    expect(terrainPanel()).toBeNull()
+    const currentRegion = screen.getByRole('region', { name: 'Solar workspace tools' })
+    expect(currentRegion.getAttribute('data-physical-head-index')).toBe('0')
+    await act(async () => { pending.resolve(heldRead) })
+    expect(currentRegion.getAttribute('data-physical-head-index')).toBe('0')
+    expect(props.onPhysicalHeadChanged).not.toHaveBeenCalled()
+    expect(terrainGets(props)).toHaveLength(2)
+  })
+
+  it('W20-06b T17 Close and opening LandXML retain the mesh head', async () => {
+    const props = terrainProps()
+    render(<SolarWorkspaceTools {...props} />)
+    openTerrain()
+    await terrainReady()
+    fireEvent.click(terrainMesh())
+    await waitFor(() => expect(terrainGets(props)).toHaveLength(2))
+    await terrainReady()
+    const region = screen.getByRole('region', { name: 'Solar workspace tools' })
+    await waitFor(() => expect(region.getAttribute('data-physical-head-index')).toBe('1'))
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(region.getAttribute('data-physical-head-index')).toBe('1')
+    open()
+    expect(control()).not.toBeNull()
+    expect(region.getAttribute('data-physical-head-index')).toBe('1')
+  })
 })
 
 describe('combiner workspace integration', () => {
