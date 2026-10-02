@@ -130,7 +130,8 @@ describe('Solar flow picker', () => {
     expect(screen.getByRole('combobox', { name: 'Solar flow' }).getAttribute('aria-describedby')).toBe('solar-flow-unavailable-reason')
     const list = screen.getByRole('list', { name: 'Stages not in this catalog' })
     expect([...list.children].map((item) => item.textContent))
-      .toEqual(['Tracker conversion', 'Sizing and stringing', 'Equipment', 'Feeders and routes', 'Schedules and exports'])
+      // W20-03: matches FL4's LIVE catalog missing stages.
+      .toEqual(['Tracker conversion', 'Feeders and routes'])
     expect(rail.getAttribute('data-flow')).toBe('ground-electrical')
     expect(onFlowChange).toHaveBeenCalledTimes(1)
     expect(onFlowChange).toHaveBeenCalledWith('ground-electrical')
