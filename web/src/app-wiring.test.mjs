@@ -66,6 +66,76 @@ describe('W20-07b combiner workspace wiring', () => {
     assert.equal(body.split('return true').length, 2)
   })
 })
+
+function maskSeatCss(cssText) {
+  const masked = cssText.split('')
+  for (let i = 0; i < cssText.length; i += 1) {
+    if (cssText.startsWith('/*', i)) {
+      const end = cssText.indexOf('*/', i + 2)
+      const stop = end < 0 ? cssText.length : end + 2
+      for (; i < stop; i += 1) masked[i] = ' '
+      i -= 1
+    } else if (cssText[i] === '"' || cssText[i] === "'") {
+      const quote = cssText[i]
+      masked[i] = ' '
+      for (i += 1; i < cssText.length; i += 1) {
+        masked[i] = ' '
+        if (cssText[i] === '\\') {
+          i += 1
+          if (i < cssText.length) masked[i] = ' '
+        } else if (cssText[i] === quote) break
+      }
+    }
+  }
+  return masked.join('')
+}
+
+function seatCssStructure(cssText) {
+  const css = maskSeatCss(cssText)
+  const headers = []
+  const rules = []
+  const occurrences = []
+  const failures = []
+  let headerStart = 0
+  for (let i = 0; i < css.length; i += 1) {
+    if (css.startsWith('.solar-flow-seat', i)) occurrences.push({ index: i, headers: headers.slice() })
+    if (css[i] === '{') {
+      const header = css.slice(headerStart, i).trim()
+      rules.push({ header, headers: headers.slice() })
+      headers.push(header)
+      headerStart = i + 1
+    } else if (css[i] === '}') {
+      if (headers.length === 0) failures.push('CSS closing brace has no opening brace')
+      else headers.pop()
+      headerStart = i + 1
+    } else if (css[i] === ';') headerStart = i + 1
+  }
+  if (headers.length) failures.push('CSS opening braces remain unclosed')
+  return { rules, occurrences, failures }
+}
+
+function seatRulePlacementFailures(cssText) {
+  const { rules, occurrences, failures } = seatCssStructure(cssText)
+  if (occurrences.length < 5) failures.push('seat rules must be present')
+  for (const { index, headers } of occurrences) {
+    if (!headers.some((header) => header.startsWith('@media '))) failures.push('seat occurrence outside media at ' + index)
+  }
+  for (const selector of [
+    '.studio-shell .app[data-start-open="true"] .solar-flow-seat',
+    '.studio-shell .app[data-surface="solar"] .workspace-card[data-cockpit-picking="1"] :is(.solar-flow-seat, .solar-flow-seat *)',
+    '.studio-shell .app[data-surface="solar"] .workspace-card[data-cockpit-picking="1"] .solar-flow-seat',
+  ]) {
+    const matches = rules.filter(({ header }) => header === maskSeatCss(selector))
+    if (matches.length !== 1) failures.push('expected one rule for ' + selector)
+    for (const { headers } of matches) {
+      if (!headers.some((header) => header.startsWith('@media ') && header.includes('min-width: 981px') && !header.includes('max-width'))) {
+        failures.push('rule must be inside unrestricted desktop media: ' + selector)
+      }
+    }
+  }
+  return failures
+}
+
 describe('report object origin wiring', () => {
   it('mounts the origin bridge inside the object provider and passes its key to jobs', () => {
     const live = esbuild.transformSync(appSource, { loader: 'jsx' }).code
@@ -434,6 +504,100 @@ describe('Solar step rail wiring', () => {
     const start = appSource.indexOf("if (!(ENV_SOLAR_FLOW_RAIL && ENV_CAD_EDIT && ENV_SOLAR_SETTINGS_FORM && drafting")
     const reset = appSource.slice(start, appSource.indexOf('}, [drafting, surfaceSlots.toolbar.profile])', start))
     assert.ok(reset.includes('setSolarFlow(DEFAULT_SOLAR_FLOW)'))
+  })
+
+  it('SEAT wiring W1 wraps the form and flow hosts once before the ribbon', () => {
+    const open = '<SolarFlowSeat seated={solarFlowSeated}>'
+    const close = '</SolarFlowSeat>'
+    assert.equal(appSource.split(open).length - 1, 1)
+    assert.equal(appSource.split(close).length - 1, 1)
+    const start = appSource.indexOf(open)
+    const host = appSource.indexOf("{ENV_CAD_EDIT && drafting && surfaceSlots.toolbar.profile === 'solar' && solarFormTool && (")
+    const editor = appSource.indexOf('{solarFlowEditor && (', host)
+    const end = appSource.indexOf(close)
+    assert.ok(start >= 0 && start < host && end > editor)
+    assert.ok(end < appSource.indexOf('{/* W4c-V1: the drafting ribbon'))
+    assert.ok(appSource.includes("import SolarFlowSeat from './solar/SolarFlowSeat.jsx'"))
+  })
+
+  it('SEAT wiring W2 uses the complete rail-first predicate and retains the single fence', () => {
+    assert.ok(appSource.includes("const solarFlowSeated = ENV_SOLAR_FLOW_RAIL && ENV_CAD_EDIT && ENV_SOLAR_SETTINGS_FORM && drafting && surfaceSlots.toolbar.profile === 'solar'"))
+    assert.equal(appSource.split(condition).length - 1, 1)
+  })
+
+  it('SEAT wiring W3 seats the panel beside the workbench and preserves Start and picking', () => {
+    const css = readFileSync(new URL('./site/cockpit.css', import.meta.url), 'utf8').split('\r').join('')
+    assert.equal(css.split('\n').find((line) => line.trim()), '.viewer-marquee {')
+    const selector = '.studio-shell .app[data-surface="solar"] .solar-flow-seat {'
+    const rules = []
+    for (let start = css.indexOf(selector); start !== -1; start = css.indexOf(selector, start + selector.length)) {
+      const end = css.indexOf('}', start)
+      rules.push({ start, body: css.slice(start + selector.length, end) })
+    }
+    const fixedRules = rules.filter(({ body }) => body.includes('position: fixed'))
+    assert.equal(fixedRules.length, 1)
+    const { start, body: rule } = fixedRules[0]
+    for (const value of ['position: fixed', 'left: calc(var(--ck-pane) + 458px)', 'top: calc(var(--ck-canvas-top) + 86px)']) assert.ok(rule.includes(value))
+    const fixed = css.indexOf('top: calc(var(--ck-canvas-top) + 36px)')
+    const workbench = css.lastIndexOf('.cad-edit-workbench {', fixed)
+    assert.ok(workbench >= 0 && start > fixed && start < css.indexOf('/* ---- y 880-905: the command line'))
+    assert.ok(css.includes('.studio-shell .app[data-start-open="true"] .solar-flow-seat { visibility: hidden; }'))
+    assert.ok(css.includes('.studio-shell .app[data-surface="solar"] .workspace-card[data-cockpit-picking="1"] :is(.solar-flow-seat, .solar-flow-seat *) { pointer-events: none; }'))
+    assert.ok(css.includes('.studio-shell .app[data-surface="solar"] .workspace-card[data-cockpit-picking="1"] .solar-flow-seat { opacity: 0.42; }'))
+  })
+
+  it('SEAT wiring W4 every seat rule sits inside a media block', () => {
+    const source = readFileSync(new URL('./site/cockpit.css', import.meta.url), 'utf8')
+    assert.deepEqual(seatRulePlacementFailures(source), [])
+  })
+
+  it('SEAT wiring W6 rejects misplaced Start rules while ignoring quoted braces', () => {
+    const source = readFileSync(new URL('./site/cockpit.css', import.meta.url), 'utf8')
+    const startRule = '.studio-shell .app[data-start-open="true"] .solar-flow-seat { visibility: hidden; }'
+    assert.equal(source.split(startRule).length - 1, 1)
+    const withoutStart = source.replace(startRule, '')
+    const narrowHeader = '@media (max-width: 980px) {'
+    assert.ok(withoutStart.includes(narrowHeader))
+    const narrow = withoutStart.replace(narrowHeader, narrowHeader + '\n' + startRule)
+    const spoofed = withoutStart + '\n.probe::before { content: ";@media (min-width: 981px) { .dummy {"; }\n'
+      + startRule + '\n.probe::after { content: "}}"; }\n'
+    const print = withoutStart + '\n@media print {\n' + startRule + '\n}\n'
+    for (const [name, mutated] of [['narrow', narrow], ['quoted spoof', spoofed], ['print', print]]) {
+      assert.ok(seatRulePlacementFailures(mutated).length > 0, name)
+    }
+    assert.deepEqual(seatRulePlacementFailures(source + '\n.probe::before { content: "{"; }\n'), [])
+  })
+
+  it('SEAT wiring W7 confines all seat material rules to desktop media', () => {
+    const source = readFileSync(new URL('./solar/solarFlow.css', import.meta.url), 'utf8')
+    const { occurrences, failures } = seatCssStructure(source)
+    assert.deepEqual(failures, [])
+    assert.ok(occurrences.length > 0, 'seat material rules must be present')
+    for (const { index, headers } of occurrences) {
+      assert.ok(headers.some((header) => header.startsWith('@media ') && header.includes('min-width: 981px')), 'seat material outside desktop media at ' + index)
+    }
+  })
+
+  it('SEAT wiring W5 the overview yields in the narrow desktop band', () => {
+    const css = readFileSync(new URL('./site/cockpit.css', import.meta.url), 'utf8').split('\r').join('')
+    const mediaBlock = (query) => {
+      const start = css.indexOf(query)
+      assert.ok(start >= 0, query)
+      const open = css.indexOf('{', start + query.length)
+      assert.ok(open >= 0)
+      let depth = 1
+      let end = open + 1
+      for (; end < css.length && depth > 0; end += 1) {
+        if (css[end] === '{') depth += 1
+        else if (css[end] === '}') depth -= 1
+      }
+      assert.equal(depth, 0)
+      return css.slice(open + 1, end - 1)
+    }
+    const band = mediaBlock('@media (min-width: 981px) and (max-width: 1199px)')
+    assert.ok(band.includes('.studio-shell .app[data-surface="solar"]:has(.solar-flow-seat):has(.properties-dock) .cad-overview { display: none; }'))
+    const narrow = mediaBlock('@media (max-width: 980px)')
+    assert.ok(narrow.includes('.studio-shell .app[data-surface="solar"] .solar-flow-seat { display: contents; }'))
   })
 })
 

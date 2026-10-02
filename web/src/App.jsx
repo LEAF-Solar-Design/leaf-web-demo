@@ -38,6 +38,7 @@ import { canOpenSolarSettingsForm, catalogRunOverlays, solarSettingsFormChoice, 
 import { ENV_SOLAR_FLOW_RAIL } from './solar/flag.js'
 import { SOLAR_SETTINGS_TOOL_NAME } from './solar/solarSettingsWire.js'
 import SolarFlowRail from './solar/SolarFlowRail.jsx'
+import SolarFlowSeat from './solar/SolarFlowSeat.jsx'
 import SolarWorkspaceTools from './solar/SolarWorkspaceTools.jsx'
 import SolarStepEditor from './solar/SolarStepEditor.jsx'
 import { DEFAULT_SOLAR_FLOW, MAX_FLOW_STEPS, admittedOverlays, solarFlowId, solarFlowRecordRun, solarFlowRunOutcome, solarFlowRunStatus, solarFlowRunsFor } from './solar/solarFlowModel.js'
@@ -2944,6 +2945,7 @@ export default function App() {
   // wiring pin (src/app-wiring.test.mjs) guards that exact shape against the
   // white screen it was written for. Was groundShowsDrawing(activeSurface).
   const drafting = surfaceSlots.chrome.cockpit
+  const solarFlowSeated = ENV_SOLAR_FLOW_RAIL && ENV_CAD_EDIT && ENV_SOLAR_SETTINGS_FORM && drafting && surfaceSlots.toolbar.profile === 'solar'
   useEffect(() => {
     if (!(ENV_SOLAR_FLOW_RAIL && ENV_CAD_EDIT && ENV_SOLAR_SETTINGS_FORM && drafting && surfaceSlots.toolbar.profile === 'solar')) {
       setSolarFlow(DEFAULT_SOLAR_FLOW)
@@ -4019,6 +4021,7 @@ export default function App() {
               </button>
             </div>
           )}
+          <SolarFlowSeat seated={solarFlowSeated}>
           {ENV_CAD_EDIT && drafting && surfaceSlots.toolbar.profile === 'solar' && solarFormTool && (
             ENV_SOLAR_SETTINGS_FORM && solarSettingsFormChoice({ enabled: ENV_SOLAR_SETTINGS_FORM, mock, toolName: solarFormTool.name, context: catalogRunContext }) === 'typed' ? (
               <div id="solar-tool-form" key={solarFormTool.name} onKeyDown={(event) => {
@@ -4120,6 +4123,7 @@ export default function App() {
               )}
             </div>
           )}
+          </SolarFlowSeat>
           {/* W4c-V1: the drafting ribbon — the drawing window's command
               strip, in the cockpit grammar. Studio-only (nothing renders
               before the ground attaches); tools are the ACTIVE SURFACE's fold, wired through
