@@ -4,6 +4,7 @@ import { prepareProductionBundle } from '../../walk/sameOriginProxy.mjs'
 import { readFile, writeFile } from 'node:fs/promises'
 import { PRODUCT_SURFACES } from '../../src/site/productSurfaces.js'
 import { toolPlacementTab } from '../../src/lib/toolRecord.js'
+import { normalizedControlKey } from './probes.mjs'
 
 export { expect }
 export const LOCAL_IDENTITY = Object.freeze({ tenant: 'demo-tenant', token: 'j1-presentation-fixture' })
@@ -106,6 +107,54 @@ const viewButton = (page, name) => page.getByRole('toolbar', { name: 'View', exa
   .getByRole('button', { name, exact: true })
 const layerButtons = (page) => page.getByRole('toolbar', { name: 'Drafting tools', exact: true })
   .getByRole('group', { name: 'Layers', exact: true }).getByRole('button')
+const propertiesPane = (page) => page.getByRole('complementary', { name: 'Properties', exact: true })
+const propertiesSection = (page, name) => propertiesPane(page).getByRole('button', { name, exact: true })
+  .locator('xpath=parent::section')
+const legendRow = (page, name) => propertiesPane(page).getByRole('button', {
+  name: new RegExp('^' + name + ' [0-9][0-9,]*$'),
+})
+const ribbonLayer = (page, name) => layerButtons(page).and(page.getByRole('button', { name, exact: true }))
+async function requireWorkspace(runtime) {
+  const { page } = runtime
+  await expect(page.getByRole('combobox', { name: 'Command bar', exact: true })).toBeVisible()
+  if (runtime.failedDrawing) {
+    await expect(page.getByRole('alert').filter({ hasText: /Couldn['’]t load drawing/ })).toBeVisible()
+    await expect(canvas(page)).toHaveCount(0)
+  } else await expect(canvas(page)).toBeVisible()
+}
+async function setSection(page, name, expanded) {
+  const section = propertiesSection(page, name)
+  const header = section.getByRole('button', { name, exact: true })
+  await expect(header).toHaveAttribute('aria-expanded', /^(true|false)$/)
+  if ((await header.getAttribute('aria-expanded') === 'true') !== expanded) await header.click()
+  await expect(header).toHaveAttribute('aria-expanded', String(expanded))
+  if (expanded) await expect(section.locator('.dock-section-body')).toBeVisible()
+  else await expect(section.locator('.dock-section-body')).toHaveCount(0)
+  return section
+}
+async function layersShown(page) {
+  return propertiesSection(page, 'Drawing').getByTestId('dock-drawing').evaluate((element) => {
+    const label = [...element.querySelectorAll('dt')].find((node) => node.textContent === 'Layers shown')
+    const value = Number(label?.nextElementSibling?.textContent.replace(/,/g, ''))
+    if (!Number.isInteger(value)) throw new Error('Drawing facts need a real Layers shown count')
+    return value
+  })
+}
+async function requireLayer(page, name, visible) {
+  await expect(ribbonLayer(page, name)).toHaveAttribute('aria-pressed', String(visible))
+  const row = legendRow(page, name)
+  await expect(row).toHaveCount(1)
+  await expect(row).toBeEnabled()
+  expect(Number((await row.locator('.legend-count').innerText()).replace(/,/g, ''))).toBeGreaterThan(0)
+  await expect.poll(() => row.evaluate((element) => element.classList.contains('off'))).toBe(!visible)
+  await expect.poll(() => row.locator('.swatch').evaluate((element) => Number(getComputedStyle(element).opacity))).toBe(visible ? 1 : 0.25)
+}
+async function setLayer(page, name, visible) {
+  const button = ribbonLayer(page, name)
+  await expect(button).toHaveAttribute('aria-pressed', /^(true|false)$/)
+  if ((await button.getAttribute('aria-pressed') === 'true') !== visible) await button.click()
+  await requireLayer(page, name, visible)
+}
 async function viewState(page) {
   return { viewport: await viewportBounds(page),
     selection: await page.getByTestId('cockpit-status').locator('.cockpit-sel').innerText(),
@@ -437,9 +486,91 @@ async function setupStep(probe, runtime, recipe) {
     case 'properties-state': {
       const dock = page.getByRole('complementary', { name: 'Properties', exact: true })
       if (await dock.isVisible() !== recipe.open) {
-        await page.getByRole('toolbar', { name: 'Drafting tools', exact: true }).getByRole('button', { name: 'Properties', exact: true }).click()
+        await setupStep(probe, runtime, { kind: 'ribbon-tab', name: 'View' })
+        await page.getByRole('toolbar', { name: 'Drafting tools', exact: true }).getByRole('button', { name: 'properties', exact: true }).click()
       }
       await expect(dock)[recipe.open ? 'toBeVisible' : 'toBeHidden']()
+      return
+    }
+    case 'properties-section-state': {
+      const section = await setSection(page, recipe.name, true)
+      const body = section.locator('.dock-section-body')
+      if (recipe.name === 'Drawing') await expect(section.getByTestId('dock-drawing')).toBeVisible()
+      if (recipe.name === 'Layers' && !runtime.failedDrawing) await expect(section.locator('.legend')).toBeVisible()
+      if (recipe.name === 'Selection' && !runtime.failedDrawing) {
+        await expect(section.locator('.selection-readout:not(.empty)')).toBeVisible()
+        await expect(section.locator('.sel-handle')).not.toHaveText('')
+      }
+      runtime.sectionContents = await body.innerText()
+      await setSection(page, recipe.name, recipe.expanded)
+      await requireWorkspace(runtime)
+      return
+    }
+    case 'properties-close-state':
+      await expect(propertiesPane(page)).toBeVisible()
+      await requireWorkspace(runtime)
+      runtime.cleanup.push(() => setupStep(probe, runtime, { kind: 'properties-state', open: true }))
+      return
+    case 'layer-visible-state': {
+      await setupStep(probe, runtime, { kind: 'ribbon-tab', name: 'Draw' })
+      await setSection(page, 'Layers', true)
+      await setSection(page, 'Drawing', true)
+      await page.keyboard.press('Escape')
+      await setLayer(page, 'Panels', true)
+      await setLayer(page, 'Walk', true)
+      runtime.cleanup.push(async () => {
+        await setLayer(page, 'Panels', true)
+        await setLayer(page, 'Walk', true)
+      })
+      await setLayer(page, recipe.name, recipe.visible)
+      evidence.layerVisibility = { name: recipe.name, initial: recipe.visible }
+      return
+    }
+    case 'job-monitor-collapsed': {
+      const collapse = page.getByRole('button', { name: 'Collapse the job monitor to a spine', exact: true })
+      if (await collapse.isVisible()) await collapse.click()
+      const toolbar = page.getByRole('toolbar', { name: 'Job monitor', exact: true })
+      await expect(toolbar).toBeVisible()
+      await expect(toolbar.getByRole('button', { name: /^Expand the job monitor \([0-9]+ live\)$/ })).toBeVisible()
+      await expect(page.locator('aside.rail .rail-ledger')).toHaveCount(0)
+      await requireWorkspace(runtime)
+      runtime.cleanup.push(async () => {
+        if (await collapse.isVisible()) await collapse.click()
+        await expect(toolbar).toBeVisible()
+      })
+      return
+    }
+    case 'overview-expanded-state': {
+      await viewportBounds(page)
+      await expect(page.getByRole('button', { name: 'Collapse drawing overview', exact: true })).toHaveAttribute('aria-expanded', 'true')
+      runtime.cleanup.push(async () => {
+        const expand = page.getByRole('button', { name: 'Expand drawing overview', exact: true })
+        if (await expand.isVisible()) await expand.click()
+        await expect(page.getByRole('button', { name: 'Drawing overview', exact: true })).toBeVisible()
+      })
+      return
+    }
+    case 'overview-pan-state': {
+      await setupStep(probe, runtime, { kind: 'overview-expanded-state' })
+      const outline = page.getByRole('button', { name: 'Drawing overview', exact: true }).locator('.cad-overview-outline')
+      const map = await outline.evaluate((element) => Object.fromEntries(['x', 'y', 'width', 'height']
+        .map((key) => [key, Number(element.getAttribute(key))])))
+      let viewport
+      for (let attempt = 0; attempt < 20; attempt++) {
+        viewport = await viewportBounds(page)
+        if (viewport.width < map.width * 0.4 && viewport.height < map.height * 0.4) break
+        await viewButton(page, 'Zoom in').click()
+      }
+      expect(viewport.width).toBeLessThan(map.width * 0.4)
+      expect(viewport.height).toBeLessThan(map.height * 0.4)
+      // Stay inside the outline so neither recenter nor the rectangle is clipped.
+      const center = { x: viewport.x + viewport.width / 2, y: viewport.y + viewport.height / 2 }
+      const point = { x: map.x + map.width * (center.x < map.x + map.width / 2 ? 0.65 : 0.35),
+        y: map.y + map.height * (center.y < map.y + map.height / 2 ? 0.65 : 0.35) }
+      expect(Math.abs(point.x - center.x)).toBeGreaterThan(0.2)
+      expect(Math.abs(point.y - center.y)).toBeGreaterThan(0.2)
+      runtime.overviewPan = { map, point, before: viewport }
+      evidence.overviewPan = runtime.overviewPan
       return
     }
     case 'open-start': await page.getByRole('button', { name: 'Start', exact: true }).click(); return
@@ -609,6 +740,22 @@ async function setupStep(probe, runtime, recipe) {
 async function captureBefore(probe, runtime) {
   const { page } = runtime
   const target = probe.assertion.target || ''
+  if (/^properties-(drawing|layers|plan|selection)-section$/.test(target)) {
+    return { expanded: await control(page, probe.locator).getAttribute('aria-expanded') === 'true' }
+  }
+  if (/^layer-(panels|walk)-visible$/.test(target)) {
+    const name = target === 'layer-panels-visible' ? 'Panels' : 'Walk'
+    const before = { layersShown: await layersShown(page),
+      visible: await ribbonLayer(page, name).getAttribute('aria-pressed') === 'true',
+      legend: await legendRow(page, name).ariaSnapshot() }
+    runtime.evidence.layerVisibility.before = before
+    return before
+  }
+  if (target === 'job-monitor') return { url: page.url(),
+    workspace: runtime.failedDrawing
+      ? await page.getByRole('alert').filter({ hasText: /Couldn['’]t load drawing/ }).innerText()
+      : await propertiesPane(page).getByTestId('dock-drawing').innerText(),
+    selection: runtime.failedDrawing ? null : await page.getByTestId('cockpit-status').locator('.cockpit-sel').innerText() }
   if (probe.featureId === 'control:view-back' && probe.state === 'empty-history') return viewState(page)
   if (target.startsWith('viewer-')) return { viewport: await viewportBounds(page) }
   if (target === 'properties-pane') return { visible: await page.getByRole('complementary', { name: 'Properties', exact: true }).isVisible() }
@@ -625,6 +772,15 @@ async function captureBefore(probe, runtime) {
 async function activate(probe, runtime, locator) {
   const { page } = runtime
   const recipe = probe.locator
+  if (probe.assertion.target === 'viewer-overview-pan') {
+    const svg = locator.locator('svg')
+    const box = await svg.boundingBox()
+    expect(box).toBeTruthy()
+    const size = await svg.evaluate((element) => ({ width: element.viewBox.baseVal.width, height: element.viewBox.baseVal.height }))
+    const point = runtime.overviewPan.point
+    await page.mouse.click(box.x + point.x * box.width / size.width, box.y + point.y * box.height / size.height)
+    return
+  }
   if (recipe.trigger === 'keyboard') {
     if (recipe.key === 'Mod+K') await page.keyboard.press('ControlOrMeta+k')
     else {
@@ -711,6 +867,72 @@ async function assertEffect(probe, runtime, locator, before) {
     runtime.evidence.fitViewport.fitted = await viewportBounds(page)
     return
   }
+  if (target === 'viewer-overview-pan') {
+    await expect.poll(async () => {
+      const current = await viewportBounds(page)
+      return current.x !== before.viewport.x || current.y !== before.viewport.y
+    }, { message: 'overview click must move the visible viewport rectangle' }).toBe(true)
+    const after = await viewportBounds(page)
+    expect(Math.abs(after.width - before.viewport.width)).toBeLessThanOrEqual(0.2)
+    expect(Math.abs(after.height - before.viewport.height)).toBeLessThanOrEqual(0.2)
+    await expect(locator.locator('[data-overview-viewport]')).toBeVisible()
+    runtime.evidence.overviewPan.after = after
+    await requireWorkspace(runtime)
+    return
+  }
+  if (target === 'drawing-overview-expanded') {
+    // viewportBounds expands the map; never use it in this collapse oracle.
+    await expect(page.getByRole('button', { name: 'Expand drawing overview', exact: true })).toHaveAttribute('aria-expanded', 'false')
+    await expect(page.getByRole('button', { name: 'Drawing overview', exact: true })).toHaveCount(0)
+    await expect(page.locator('[data-overview-viewport]')).toHaveCount(0)
+    await requireWorkspace(runtime)
+    return
+  }
+  if (/^properties-(drawing|layers|plan|selection)-section$/.test(target)) {
+    expect(effect.value).toBe(!before.expanded)
+    await expect(locator).toHaveAttribute('aria-expanded', String(effect.value))
+    const section = propertiesSection(page, probe.locator.name)
+    const body = section.locator('.dock-section-body')
+    if (effect.value) {
+      await expect(body).toBeVisible()
+      await expect(body).toHaveText(runtime.sectionContents, { useInnerText: true })
+    } else await expect(body).toHaveCount(0)
+    const content = target === 'properties-drawing-section' ? section.getByTestId('dock-drawing')
+      : target === 'properties-layers-section' && !runtime.failedDrawing ? section.locator('.legend')
+        : target === 'properties-selection-section' && !runtime.failedDrawing ? section.locator('.selection-readout:not(.empty)') : null
+    if (content) {
+      if (effect.value) await expect(content).toBeVisible()
+      else await expect(content).toHaveCount(0)
+    }
+    await requireWorkspace(runtime)
+    return
+  }
+  if (/^layer-(panels|walk)-visible$/.test(target)) {
+    const name = target === 'layer-panels-visible' ? 'Panels' : 'Walk'
+    expect(effect.value).toBe(!before.visible)
+    await requireLayer(page, name, effect.value)
+    await expect.poll(() => layersShown(page)).toBe(before.layersShown + (effect.value ? 1 : -1))
+    runtime.evidence.layerVisibility.after = { visible: effect.value, layersShown: await layersShown(page),
+      legend: await legendRow(page, name).ariaSnapshot() }
+    await requireWorkspace(runtime)
+    return
+  }
+  if (target === 'job-monitor') {
+    await expect(page.getByRole('toolbar', { name: 'Job monitor', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: /^Expand the job monitor \([0-9]+ live\)$/ })).toHaveCount(0)
+    const rail = page.locator('aside.rail').filter({ has: page.getByRole('button', { name: 'Collapse the job monitor to a spine', exact: true }) })
+    await expect(rail.getByRole('heading', { name: /^Job monitor/ })).toBeVisible()
+    await expect(rail.locator('.rail-ledger')).toHaveCount(1)
+    await expect(rail.locator('.rail-ske, .rail-empty, .rail-ledger > *').first()).toBeVisible()
+    await expect(rail.getByRole('button', { name: 'Collapse the job monitor to a spine', exact: true })).toBeVisible()
+    expect(page.url()).toBe(before.url)
+    if (runtime.failedDrawing) await expect(page.getByRole('alert').filter({ hasText: /Couldn['’]t load drawing/ }))
+      .toHaveText(before.workspace, { useInnerText: true })
+    else await expect(propertiesPane(page).getByTestId('dock-drawing')).toHaveText(before.workspace, { useInnerText: true })
+    if (!runtime.failedDrawing) await expect(page.getByTestId('cockpit-status').locator('.cockpit-sel')).toHaveText(before.selection)
+    await requireWorkspace(runtime)
+    return
+  }
   if (effect.kind === 'navigates') { await expect(page).toHaveURL(target); return }
   if (target === 'command-bar-focus') { await expect(locator).toBeFocused(); return }
   if (target === 'cockpit-prompt') {
@@ -729,6 +951,13 @@ async function assertEffect(probe, runtime, locator, before) {
   }
   if (target === 'author-panel') { await expect(page.getByRole('textbox', { name: /describe|build|tool/i }).first()).toBeVisible(); return }
   if (target === 'properties-pane') {
+    if (effect.value === false) {
+      expect(before.visible).toBe(true)
+      await expect(propertiesPane(page)).toHaveCount(0)
+      await expect(page.getByRole('button', { name: 'Close the properties pane', exact: true })).toHaveCount(0)
+      await requireWorkspace(runtime)
+      return
+    }
     await expect(page.getByRole('complementary', { name: 'Properties', exact: true }))[before.visible ? 'toBeHidden' : 'toBeVisible']()
     return
   }
@@ -861,12 +1090,25 @@ export async function runProbe(probe, runtime) {
       return
     }
     await expect(locator).toBeVisible()
+    if (probe.kind === 'control') {
+      await expect(locator).toHaveCount(1)
+      if (probe.locator.normalizedName) {
+        const snapshot = await locator.ariaSnapshot()
+        const match = snapshot.split('\n')[0].match(/^- button "((?:\\.|[^"\\])*)"/)
+        expect(match, 'count control must expose its accessible name').toBeTruthy()
+        const liveName = JSON.parse('"' + match[1] + '"')
+        expect(normalizedControlKey({ scope: 'document', role: 'button', name: liveName })).toBe(
+          normalizedControlKey({ scope: 'document', role: 'button', name: probe.locator.normalizedName }))
+        evidence.controlIdentity = { rawName: liveName, normalizedName: probe.locator.normalizedName }
+      }
+    }
     const before = await captureBefore(probe, runtime)
     if (probe.assertion.kind !== 'disabled_with_reason') {
       await test.step(`Activate ${probe.featureId}`, () => activate(probe, runtime, locator))
     }
     await test.step(probe.assertion.assertionId, () => assertEffect(probe, runtime, locator, before))
-    if (runtime.failedDrawing) evidence.failedDrawing.actionAvailability = 'disabled_with_reason'
+    if (runtime.failedDrawing) evidence.failedDrawing.actionAvailability = probe.assertion.kind === 'disabled_with_reason'
+      ? 'disabled_with_reason' : 'available'
     evidence.result = { result: 'passed', featureId: probe.featureId, state: probe.state }
   } catch (error) {
     evidence.failure = { message: error.message, assertionId: probe.assertion.assertionId }

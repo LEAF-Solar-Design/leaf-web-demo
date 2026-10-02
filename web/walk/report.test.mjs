@@ -173,10 +173,22 @@ test('failures preserve feature-map effects, probe recipes and bounded artifact 
 })
 
 test('assertion ids use the trusted expect call site and ignore error prose and forged evidence oracles', () => {
-  const stale = build()
-  const staleFailure = stale.failures.find((row) => row.feature_id === 'drawer:nav' && row.evidence.state === 'closed')
+  const sampleFailure = build().failures.find((row) => row.feature_id === 'drawer:nav' && row.evidence.state === 'closed')
+  const trustedLine = Number(sampleFailure.evidence.assertion_site.split(':').at(-1))
+  const fixtureLines = readFileSync(new URL('../e2e/walk/fixtures.mjs', import.meta.url), 'utf8').split(/\r?\n/)
+  const staleLine = fixtureLines.findIndex((line, index) => index + 1 !== trustedLine && !/\bexpect(?:\s*\(|\.poll\s*\()/.test(line)) + 1
+  assert.ok(staleLine > 0, 'live fixture must contain a non-assertion line distinct from the trusted site')
+  const stale = structuredClone(sample)
+  const staleResult = firstResult(featureSpec(stale))
+  const markStaleLocations = (item) => {
+    for (const error of [item.error, ...(item.errors || [])]) {
+      if (error?.location) error.location.line = staleLine
+    }
+    for (const step of item.steps || []) markStaleLocations(step)
+  }
+  markStaleLocations(staleResult)
+  const staleFailure = build(stale).failures.find((row) => row.feature_id === 'drawer:nav' && row.evidence.state === 'closed')
   assert.equal(staleFailure.evidence.assertion_observed, false)
-  const trustedLine = Number(staleFailure.evidence.assertion_site.split(':').at(-1))
   const matching = structuredClone(sample)
   const matchingResult = firstResult(featureSpec(matching))
   matchingResult.error.location.line = trustedLine
@@ -197,8 +209,7 @@ test('assertion ids use the trusted expect call site and ignore error prose and 
   const failure = second.failures.find((row) => row.feature_id === 'drawer:nav' && row.evidence.state === 'closed')
   assert.match(failure.evidence.assertion_site, /^web\/e2e\/walk\/fixtures\.mjs:\d+$/)
   const assertionLine = Number(failure.evidence.assertion_site.split(':').at(-1))
-  const fixtureLines = readFileSync(new URL('../e2e/walk/fixtures.mjs', import.meta.url), 'utf8').split(/\r?\n/)
-  assert.match(fixtureLines[assertionLine - 1], /\bexpect\s*\(/)
+  assert.match(fixtureLines[assertionLine - 1], /\bexpect(?:\s*\(|\.poll\s*\()/)
   const cleanFailure = first.failures.find((row) => row.feature_id === 'drawer:nav' && row.evidence.state === 'closed')
   assert.equal(failure.evidence.assertion_site, cleanFailure.evidence.assertion_site)
   assert.equal(cleanFailure.evidence.assertion_observed, true)

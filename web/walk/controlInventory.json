@@ -141,14 +141,12 @@
         "desktop"
       ],
       "feature_id": "control:print"
-    }
-  ],
-  "baseline_unmapped": [
+    },
     {
+      "feature_id": "control:properties-close",
       "scope": "complementary:\"Properties\"",
       "role": "button",
       "name": "Close the properties pane",
-      "reason": "No feature-map coverage yet: no walk mapping",
       "states": [
         "ready",
         "failed-load"
@@ -158,10 +156,10 @@
       ]
     },
     {
+      "feature_id": "control:properties-drawing",
       "scope": "complementary:\"Properties\"",
       "role": "button",
       "name": "Drawing",
-      "reason": "No feature-map coverage yet: no walk mapping",
       "states": [
         "ready"
       ],
@@ -170,10 +168,10 @@
       ]
     },
     {
+      "feature_id": "control:properties-layers",
       "scope": "complementary:\"Properties\"",
       "role": "button",
       "name": "Layers",
-      "reason": "No feature-map coverage yet: no walk mapping",
       "states": [
         "ready",
         "failed-load"
@@ -183,10 +181,10 @@
       ]
     },
     {
+      "feature_id": "control:properties-panels",
       "scope": "complementary:\"Properties\"",
       "role": "button",
       "name": "Panels {n}",
-      "reason": "No feature-map coverage yet: no walk mapping",
       "states": [
         "ready"
       ],
@@ -195,10 +193,10 @@
       ]
     },
     {
+      "feature_id": "control:properties-plan",
       "scope": "complementary:\"Properties\"",
       "role": "button",
       "name": "Plan",
-      "reason": "No feature-map coverage yet: no walk mapping",
       "states": [
         "ready",
         "failed-load"
@@ -208,10 +206,10 @@
       ]
     },
     {
+      "feature_id": "control:properties-selection",
       "scope": "complementary:\"Properties\"",
       "role": "button",
       "name": "Selection",
-      "reason": "No feature-map coverage yet: no walk mapping",
       "states": [
         "ready",
         "failed-load"
@@ -221,10 +219,10 @@
       ]
     },
     {
+      "feature_id": "control:properties-walk",
       "scope": "complementary:\"Properties\"",
       "role": "button",
       "name": "Walk {n}",
-      "reason": "No feature-map coverage yet: no walk mapping",
       "states": [
         "ready"
       ],
@@ -232,6 +230,69 @@
         "desktop"
       ]
     },
+    {
+      "feature_id": "control:drawing-overview-collapse",
+      "scope": "document",
+      "role": "button",
+      "name": "Collapse drawing overview",
+      "states": [
+        "ready"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "control:drawing-overview",
+      "scope": "document",
+      "role": "button",
+      "name": "Drawing overview",
+      "states": [
+        "ready"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "control:layer-panels",
+      "scope": "toolbar:\"Drafting tools\" > group:\"Layers\"",
+      "role": "button",
+      "name": "Panels",
+      "states": [
+        "ready"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "control:layer-walk",
+      "scope": "toolbar:\"Drafting tools\" > group:\"Layers\"",
+      "role": "button",
+      "name": "Walk",
+      "states": [
+        "ready"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "control:job-monitor-expand",
+      "scope": "toolbar:\"Job monitor\"",
+      "role": "button",
+      "name": "Expand the job monitor ({n} live)",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    }
+  ],
+  "baseline_unmapped": [
     {
       "scope": "document",
       "role": "button",
@@ -285,18 +346,6 @@
     {
       "scope": "document",
       "role": "button",
-      "name": "Collapse drawing overview",
-      "reason": "No feature-map coverage yet: no walk mapping",
-      "states": [
-        "ready"
-      ],
-      "viewports": [
-        "desktop"
-      ]
-    },
-    {
-      "scope": "document",
-      "role": "button",
       "name": "Collapse the notification inbox",
       "reason": "No feature-map coverage yet: no walk mapping",
       "states": [
@@ -315,18 +364,6 @@
       "states": [
         "ready",
         "failed-load"
-      ],
-      "viewports": [
-        "desktop"
-      ]
-    },
-    {
-      "scope": "document",
-      "role": "button",
-      "name": "Drawing overview",
-      "reason": "No feature-map coverage yet: no walk mapping",
-      "states": [
-        "ready"
       ],
       "viewports": [
         "desktop"
@@ -479,43 +516,6 @@
       "reason": "No feature-map coverage yet: no walk mapping",
       "states": [
         "ready"
-      ],
-      "viewports": [
-        "desktop"
-      ]
-    },
-    {
-      "scope": "toolbar:\"Drafting tools\" > group:\"Layers\"",
-      "role": "button",
-      "name": "Panels",
-      "reason": "No feature-map coverage yet: no walk mapping",
-      "states": [
-        "ready"
-      ],
-      "viewports": [
-        "desktop"
-      ]
-    },
-    {
-      "scope": "toolbar:\"Drafting tools\" > group:\"Layers\"",
-      "role": "button",
-      "name": "Walk",
-      "reason": "No feature-map coverage yet: no walk mapping",
-      "states": [
-        "ready"
-      ],
-      "viewports": [
-        "desktop"
-      ]
-    },
-    {
-      "scope": "toolbar:\"Job monitor\"",
-      "role": "button",
-      "name": "Expand the job monitor ({n} live)",
-      "reason": "No feature-map coverage yet: no walk mapping",
-      "states": [
-        "ready",
-        "failed-load"
       ],
       "viewports": [
         "desktop"

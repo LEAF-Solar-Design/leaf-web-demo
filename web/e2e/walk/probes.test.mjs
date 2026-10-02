@@ -2,9 +2,121 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { buildFeatureMap } from '../../walk/featureMap.mjs'
 import { ACTIONS, REASONS, accessibleName, reasonCode } from '../../src/lib/actionRegistry.js'
-import { effectAssertion, resolveProbe } from './probes.mjs'
+import { effectAssertion, resolveProbe, normalizedControlKey, requireControlCensusBatch, CONTROL_CENSUS_BATCH } from './probes.mjs'
+import { readFileSync } from 'node:fs'
 
 const map = buildFeatureMap()
+
+test('batch two uses exact complementary, nested group and document scope recipes', () => {
+  for (const id of ['properties-close', 'properties-drawing', 'properties-layers', 'properties-plan', 'properties-selection']) {
+    const entry = map.entries.find((row) => row.id === 'control:' + id)
+    for (const state of entry.states) {
+      const probe = resolveProbe(entry, state)
+      assert.equal(probe.locator.role, 'button')
+      assert.equal(probe.locator.name, entry.title)
+      assert.equal(probe.locator.exact, true)
+      assert.deepEqual(probe.locator.scope, { role: 'complementary', name: 'Properties', exact: true })
+      assert.equal(probe.setup.steps[0].kind, entry.state_contexts[state].failedLoad ? 'open-failed-drawing' : 'open-private-drawing')
+      assert.ok(probe.setup.steps.some((step) => step.kind === 'properties-state' && step.open))
+      assert.ok(probe.setup.steps.every((step) => !['engine-ready', 'require-local-state'].includes(step.kind)))
+      if (id === 'properties-close') assert.deepEqual(probe.assertion.value, false)
+      else {
+        const setup = probe.setup.steps.at(-1)
+        assert.equal(setup.kind, 'properties-section-state')
+        assert.equal(probe.assertion.value, !setup.expanded)
+        if (id === 'properties-selection' && !entry.state_contexts[state].failedLoad) {
+          assert.ok(probe.setup.steps.some((step) => step.kind === 'select-entity' && step.viewerOnly))
+        }
+      }
+    }
+  }
+  for (const layer of ['panels', 'walk']) for (const prefix of ['properties-', 'layer-']) {
+    const entry = map.entries.find((row) => row.id === 'control:' + prefix + layer)
+    for (const state of ['shown', 'hidden']) {
+      const probe = resolveProbe(entry, state)
+      assert.deepEqual(probe.locator.scope, prefix === 'properties-'
+        ? { role: 'complementary', name: 'Properties', exact: true }
+        : { role: 'group', name: 'Layers', exact: true, scope: { role: 'toolbar', name: 'Drafting tools', exact: true } })
+      assert.deepEqual(probe.setup.steps.at(-1), { kind: 'layer-visible-state',
+        name: layer === 'panels' ? 'Panels' : 'Walk', visible: state === 'shown' })
+      assert.equal(probe.assertion.value, state === 'hidden')
+    }
+  }
+  for (const id of ['drawing-overview', 'drawing-overview-collapse']) {
+    const entry = map.entries.find((row) => row.id === 'control:' + id)
+    const probe = resolveProbe(entry, entry.states[0])
+    assert.equal(probe.locator.scope, undefined)
+    assert.equal(probe.locator.name, entry.title)
+    assert.equal(probe.setup.steps.at(-1).kind, id === 'drawing-overview' ? 'overview-pan-state' : 'overview-expanded-state')
+  }
+})
+
+test('count names are anchored, independent of live counts and retain normalized identities', () => {
+  for (const [id, good, bad] of [
+    ['properties-panels', ['Panels 1', 'Panels 12', 'Panels 1,234'], ['Panels', 'Panels 1 extra', 'Other Panels 1']],
+    ['properties-walk', ['Walk 2', 'Walk 9,876'], ['Walk -1', 'Walk 1.2', 'Walk 1 extra']],
+    ['job-monitor-expand', ['Expand the job monitor (0 live)', 'Expand the job monitor (42 live)'],
+      ['Expand the job monitor (1,234 live)', 'Expand the job monitor (2 live) extra']],
+  ]) {
+    const entry = map.entries.find((row) => row.id === 'control:' + id)
+    for (const state of entry.states) {
+      const probe = resolveProbe(entry, state)
+      for (const name of good) {
+        assert.match(name, probe.locator.name)
+        assert.equal(normalizedControlKey({ scope: 'document', role: 'button', name }),
+          normalizedControlKey({ scope: 'document', role: 'button', name: probe.locator.normalizedName }))
+      }
+      for (const name of bad) assert.doesNotMatch(name, probe.locator.name)
+      if (id === 'job-monitor-expand') {
+        assert.deepEqual(probe.locator.scope, { role: 'toolbar', name: 'Job monitor', exact: true })
+        assert.equal(probe.setup.steps.at(-1).kind, 'job-monitor-collapsed')
+        assert.equal(probe.assertion.target, 'job-monitor')
+      }
+    }
+  }
+})
+
+test('presence obligations reject duplicate resolved observations even with the correct id', () => {
+  const resolved = CONTROL_CENSUS_BATCH.filter((row) => row.states.includes('ready'))
+  assert.equal(requireControlCensusBatch({ resolved }), true)
+  assert.throws(() => requireControlCensusBatch({ resolved: [...resolved, resolved.at(-1)] }), /missing or misresolved/)
+})
+
+test('camera navigation precedes URL navigation and collapse never invokes the reopening helper', () => {
+  const source = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
+  const oracle = source.slice(source.indexOf('async function assertEffect'))
+  assert.ok(oracle.indexOf("target === 'viewer-overview-pan'") < oracle.indexOf("effect.kind === 'navigates'"))
+  const collapse = oracle.slice(oracle.indexOf("if (target === 'drawing-overview-expanded')"),
+    oracle.indexOf("if (/^properties-(drawing|layers|plan|selection)-section$/"))
+  assert.match(collapse, /Expand drawing overview/)
+  assert.match(collapse, /toHaveCount\(0\)/)
+  assert.doesNotMatch(collapse, /await viewportBounds\(/)
+  assert.match(source.slice(source.indexOf('async function activate'), source.indexOf('async function assertEffect')), /page\.mouse\.click/)
+})
+
+test('batch two uses observed default-build effects rather than pixel hashes or predicted pan destinations', () => {
+  const source = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
+  const properties = source.slice(source.indexOf("case 'properties-state':"),
+    source.indexOf("case 'properties-section-state':"))
+  assert.match(properties, /name: 'properties', exact: true/)
+  assert.doesNotMatch(properties, /name: 'Properties', exact: true \}\)\.click/)
+  const layerSetup = source.slice(source.indexOf("case 'layer-visible-state':"),
+    source.indexOf("case 'job-monitor-collapsed':"))
+  assert.match(layerSetup, /setLayer\(page, recipe\.name, recipe\.visible\)/)
+  assert.doesNotMatch(source, /stableCanvas|layerImages|createHash/)
+  const oracle = source.slice(source.indexOf('async function assertEffect'))
+  const pan = oracle.slice(oracle.indexOf("if (target === 'viewer-overview-pan')"),
+    oracle.indexOf("if (target === 'drawing-overview-expanded')"))
+  assert.match(pan, /current\.x !== before\.viewport\.x \|\| current\.y !== before\.viewport\.y/)
+  assert.match(pan, /data-overview-viewport/)
+  assert.doesNotMatch(pan, /requireViewport|overviewPan\.expected/)
+  const layers = oracle.slice(oracle.indexOf("if (/^layer-(panels|walk)-visible$/"),
+    oracle.indexOf("if (target === 'job-monitor')"))
+  assert.match(layers, /effect\.value\)\.toBe\(!before\.visible\)/)
+  assert.match(layers, /requireLayer\(page, name, effect\.value\)/)
+  assert.match(layers, /before\.layersShown \+ \(effect\.value \? 1 : -1\)/)
+  assert.match(layers, /ariaSnapshot\(\)/)
+})
 
 for (const entry of map.entries) {
   for (const state of entry.states) {
