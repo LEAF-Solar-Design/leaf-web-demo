@@ -4,6 +4,7 @@ import { resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { buildFeatureMap } from './featureMap.mjs'
 import { stateRecipe } from '../e2e/walk/probes.mjs'
+import { assertionAlias, packUxEvidence, uxObservation } from '../e2e/walk/uxEvidence.mjs'
 
 export const MAX_RECEIPT_BYTES = 1024 * 1024
 export const MAX_INPUT_BYTES = 16 * MAX_RECEIPT_BYTES
@@ -281,7 +282,13 @@ export function buildReceipt({ playwrightReport, featureMap, identity }) {
     for (const test of spec.tests || []) for (const result of test.results || []) {
       if (test.projectName && test.projectName !== row.triple.viewport) throw new Error('Test project does not match viewport')
       const evidence = evidenceFor(result)
+      let ux
+      if (Object.hasOwn(evidence, 'ux_observations')) {
+        try { ux = packUxEvidence(evidence.ux_observations).ux_observations }
+        catch (error) { throw new TypeError(`Invalid UX evidence for ${row.entry.id}: ${error.message}`) }
+      }
       const outcome = resultClass(result, evidence)
+      if (ux) outcome.ux_observations = ux
       if (test.expectedStatus === 'failed' && outcome.verdict === 'pass') outcome.verdict = 'fail'
       if (test.expectedStatus === 'skipped') { outcome.verdict = 'queued'; outcome.reason = 'Skipped effect assertion' }
       row.runs.push(outcome)
@@ -289,6 +296,14 @@ export function buildReceipt({ playwrightReport, featureMap, identity }) {
       if (outcome.verdict === 'unsupported_local') receipt.unavailable_features.push({ feature_id: row.entry.id,
         reason: `${row.triple.state} @${row.triple.viewport}: ${redact(outcome.reason)}` })
       if (Object.keys(evidence).length) receipt.findings.push(...observations(row.entry.id, row.triple.state, row.triple.viewport, evidence))
+      for (const observation of ux || []) {
+        if (observation.observed > 0 && ['control_covered_at_rest', 'scroll_needed_steps', 'extra_steps'].includes(observation.metric_id)) {
+          receipt.findings.push({ feature_id: row.entry.id, assertion_id: assertionAlias(observation.metric_id), category: 'ux',
+            summary: `${observation.metric_id} = ${observation.observed} at ${observation.viewport}/${observation.state}`,
+            evidence: uxObservation({ lensId: observation.lens_id, metricId: observation.metric_id,
+              viewport: observation.viewport, state: observation.state, observed: observation.observed }) })
+        }
+      }
     }
   }
   for (const row of [...triples.values(), ...journeys.values(), ...censuses.values()]) {
@@ -301,6 +316,7 @@ export function buildReceipt({ playwrightReport, featureMap, identity }) {
     const outcome = runs.at(-1)
     const flaky = runs.some((run, index) => run.verdict === 'fail' && runs.slice(index + 1).some((later) => later.verdict === 'pass'))
     const detail = { ...triple, verdict: outcome.verdict }
+    if (runs.some((run) => run.ux_observations)) detail.ux_observations = runs.flatMap((run) => run.ux_observations || [])
     if (outcome.reason) detail.reason = redact(outcome.reason)
     receipt.evidence.cases.push(detail)
     receipt.verdicts.push({ feature_id: triple.feature_id, verdict: wireVerdict[outcome.verdict],
