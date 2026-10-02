@@ -158,6 +158,29 @@ describe('Solar flow picker', () => {
     expect(screen.getByRole('status').textContent).not.toContain('Solar settings finished')
   })
 
+  it('G2c FL16 a catalog with conversion and feeders lists the Ground Mount Electrical steps in stage order', () => {
+    const complete = [...LIVE, { family_id: 'routing', capabilities: [
+      liveRow('solar-trackers-to-panel-groups', 'stringing', 3, 5, 'run_write'),
+      liveRow('solar-feeders', 'routing', 3, 60, 'run_write'),
+    ] }]
+    render(<SolarFlowRail families={complete} drawingId="d1" />)
+    const select = screen.getByRole('combobox', { name: 'Solar flow' })
+    expect([...select.options].map((option) => option.textContent))
+      .toEqual(['Rooftop', 'Ground Mount Electrical', ...FLOW_OPTION_LABELS.slice(2)])
+    changeFlow('ground-electrical')
+    expect(screen.queryByTestId('solar-flow-unavailable')).toBeNull()
+    expect(items().map((item) => item.querySelector('button').id)).toEqual([
+      'solar-trackers-to-panel-groups',
+      'solar-settings', 'solar-size-strings', 'solar-string-add', 'solar-string-flip', 'solar-string-swap',
+      'solar-string-delete', 'solar-string-rebuild', 'solar-correct-string',
+      'solar-assign-equipment', 'solar-string-conductors', 'solar-feeders',
+      'solar-nec-ampacity-correction', 'solar-nec-ac-voltage-drop', 'solar-nec-conduit-fill', 'solar-nec-feeder-ocpd',
+      'solar-string-data',
+    ].map(solarFlowStepId))
+    changeFlow('rooftop')
+    expect(items().map((item) => item.querySelector('button').id)).toEqual(ROOFTOP_LIVE.map(solarFlowStepId))
+  })
+
   it('FL13 the live catalog renders all eleven Rooftop steps in order', () => {
     render(<SolarFlowRail families={LIVE} drawingId="d1" />)
     expect(items().map((item) => item.querySelector('button').id)).toEqual(ROOFTOP_LIVE.map(solarFlowStepId))

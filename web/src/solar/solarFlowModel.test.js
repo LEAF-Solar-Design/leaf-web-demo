@@ -133,8 +133,8 @@ const GROUND_ELECTRICAL_STAGES = [
     'solar-string-midpoint', 'solar-string-flip', 'solar-string-swap', 'solar-string-delete',
     'solar-string-rebuild', 'solar-correct-string',
   ]],
-  ['equipment', ['solar-assign-equipment', 'solar-string-conductors']],
-  ['feeders', []],
+  ['equipment', ['solar-assign-equipment', 'solar-string-conductors', 'solar-central-inverter-add']],
+  ['feeders', ['solar-feeders']],
   ['calculations', [
     'solar-nec-ampacity-correction', 'solar-nec-ac-voltage-drop',
     'solar-nec-conduit-fill', 'solar-nec-feeder-ocpd',
@@ -142,28 +142,42 @@ const GROUND_ELECTRICAL_STAGES = [
   ['outputs', ['solar-string-data', 'solar-electrical-schedules', 'solar-cable-export']],
 ]
 const GROUND_ELECTRICAL_NAMES = GROUND_ELECTRICAL_STAGES.flatMap(([, names]) => names)
+// The two tools Rooftop never lists carry their declaration waves, so one catalog proves both flows.
+const GROUND_ONLY_WAVES = { 'solar-central-inverter-add': 2, 'solar-feeders': 3 }
 const GROUND_ELECTRICAL_CATALOG = [{
-  family_id: 'stringing', capabilities: GROUND_ELECTRICAL_NAMES.map((name, index) => row(name, index + 1)),
+  family_id: 'stringing',
+  capabilities: GROUND_ELECTRICAL_NAMES.map((name, index) => row(name, index + 1, { wave: GROUND_ONLY_WAVES[name] ?? 1 })),
 }]
-const GROUND_WITH_FEEDERS = [{
-  ...GROUND_ELECTRICAL_CATALOG[0],
-  capabilities: [...GROUND_ELECTRICAL_CATALOG[0].capabilities, row('solar-feeders', 21)],
-}]
-function groundWithInvalidEquipment(omitConductors = false) {
+function groundWithout(...omitted) {
   return [{
     ...GROUND_ELECTRICAL_CATALOG[0],
-    capabilities: GROUND_ELECTRICAL_CATALOG[0].capabilities
-      .filter((capability) => !omitConductors || capability.name !== 'solar-string-conductors')
+    capabilities: GROUND_ELECTRICAL_CATALOG[0].capabilities.filter((capability) => !omitted.includes(capability.name)),
+  }]
+}
+const GROUND_WITHOUT_FEEDERS = groundWithout('solar-feeders')
+function groundWithInvalidEquipment(...omitted) {
+  return [{
+    ...GROUND_ELECTRICAL_CATALOG[0],
+    capabilities: groundWithout(...omitted)[0].capabilities
       .map((capability) => capability.name === 'solar-assign-equipment'
         ? { ...capability, solar: { ...capability.solar, wave: 9 } } : capability),
   }]
 }
+const GROUND_LIVE = [
+  'solar-trackers-to-panel-groups',
+  'solar-settings', 'solar-size-strings', 'solar-string-add', 'solar-string-flip', 'solar-string-swap',
+  'solar-string-delete', 'solar-string-rebuild', 'solar-correct-string',
+  'solar-assign-equipment', 'solar-string-conductors', 'solar-feeders',
+  'solar-nec-ampacity-correction', 'solar-nec-ac-voltage-drop', 'solar-nec-conduit-fill', 'solar-nec-feeder-ocpd',
+  'solar-string-data',
+]
 
 describe('W20-03 Ground Electrical admission', () => {
   it('W20-03 GE8 every bound Ground tool has converted-chain evidence', () => {
     const evidence = [
       'test_solar_ground_admission.py', 'test_solar_tool_trackers_to_panel_groups.py',
-      'test_solar_ground_equipment.py',
+      'test_solar_ground_equipment.py', 'test_solar_tool_central_inverter_add.py',
+      'test_solar_tool_solar_feeders_ground.py',
     ].map((file) => readFileSync(resolve('../server/tests', file), 'utf8'))
     for (const text of evidence) expect(text.trim().length).toBeGreaterThan(0)
     const hasEvidence = (name) => {
@@ -199,45 +213,74 @@ describe('W20-03 Ground Electrical admission', () => {
     expect(new Set(names).size).toBe(names.length)
   })
 
-  it('W20-03 GE3 a complete bound catalog still lacks Feeders and routes', () => {
-    expect(solarFlowSelect(GROUND_ELECTRICAL_CATALOG, 'ground-electrical')).toMatchObject({
+  it('W20-03 GE3 a complete bound catalog opens the flow in stage order', () => {
+    const selected = solarFlowSelect(GROUND_ELECTRICAL_CATALOG, 'ground-electrical')
+    expect(selected).toMatchObject({ available: true, reasonKey: null, reason: null, missing: [] })
+    expect(selected.steps.map((step) => step.name)).toEqual(GROUND_ELECTRICAL_NAMES)
+    expect(selected.steps).toHaveLength(22)
+  })
+
+  it('W20-03 GE4 Feeders and routes needs a valid solar-feeders row', () => {
+    expect(solarFlowSelect(GROUND_WITHOUT_FEEDERS, 'ground-electrical')).toMatchObject({
       available: false, steps: [], reasonKey: 'stages_missing', missing: ['Feeders and routes'],
     })
+    const invalid = [{
+      ...GROUND_WITHOUT_FEEDERS[0],
+      capabilities: [...GROUND_WITHOUT_FEEDERS[0].capabilities, row('solar-feeders', 99, { wave: 9 })],
+    }]
+    expect(solarFlowSelect(invalid, 'ground-electrical')).toEqual(solarFlowSelect(GROUND_WITHOUT_FEEDERS, 'ground-electrical'))
   })
 
-  it('W20-03 GE4 an unbound feeders catalog row cannot satisfy the stage', () => {
-    expect(solarFlowSelect(GROUND_WITH_FEEDERS, 'ground-electrical')).toEqual(
-      solarFlowSelect(GROUND_ELECTRICAL_CATALOG, 'ground-electrical'),
-    )
+  it('W20-03 GE5 invalid assignment with conductors and the central inverter absent leaves Equipment missing', () => {
+    expect(solarFlowSelect(groundWithInvalidEquipment('solar-string-conductors', 'solar-central-inverter-add'), 'ground-electrical'))
+      .toMatchObject({ available: false, steps: [], reasonKey: 'stages_missing', missing: ['Equipment'] })
   })
 
-  it('W20-03 GE5 invalid assignment and absent conductors leave Equipment missing', () => {
-    expect(solarFlowSelect(groundWithInvalidEquipment(true), 'ground-electrical')).toMatchObject({
-      available: false, steps: [], reasonKey: 'stages_missing', missing: ['Equipment', 'Feeders and routes'],
-    })
-  })
-
-  it('W20-03 GE6 valid conductors alone satisfy Equipment', () => {
-    expect(solarFlowSelect(groundWithInvalidEquipment(), 'ground-electrical')).toMatchObject({
-      available: false, steps: [], reasonKey: 'stages_missing', missing: ['Feeders and routes'],
-    })
+  it('W20-03 GE6 valid conductors alone, or a valid central inverter alone, satisfy Equipment', () => {
+    for (const [omitted, kept] of [
+      ['solar-central-inverter-add', 'solar-string-conductors'], ['solar-string-conductors', 'solar-central-inverter-add'],
+    ]) {
+      const selected = solarFlowSelect(groundWithInvalidEquipment(omitted), 'ground-electrical')
+      expect(selected).toMatchObject({ available: true, reasonKey: null, reason: null, missing: [] })
+      const names = selected.steps.map((step) => step.name)
+      expect(names).toEqual(GROUND_ELECTRICAL_NAMES.filter((name) => name !== omitted && name !== 'solar-assign-equipment'))
+      expect(names).toContain(kept)
+    }
   })
 
   it('W20-03 GE7 Rooftop retains selection and row identity on the same catalogs', () => {
-    const withoutConductors = GROUND_ELECTRICAL_NAMES.filter((name) => name !== 'solar-string-conductors')
+    const rooftop = GROUND_ELECTRICAL_NAMES.filter((name) => !(name in GROUND_ONLY_WAVES))
+    const withoutConductors = rooftop.filter((name) => name !== 'solar-string-conductors')
     const withoutAssignment = withoutConductors.filter((name) => name !== 'solar-assign-equipment')
     for (const [catalog, names] of [
       [GROUND_ELECTRICAL_CATALOG, [...withoutConductors, 'solar-string-conductors']],
-      [GROUND_WITH_FEEDERS, [...withoutConductors, 'solar-feeders', 'solar-string-conductors']],
-      [groundWithInvalidEquipment(true), withoutAssignment],
-      [groundWithInvalidEquipment(), [...withoutAssignment, 'solar-string-conductors']],
+      [GROUND_WITHOUT_FEEDERS, [...withoutConductors, 'solar-string-conductors']],
+      [groundWithInvalidEquipment('solar-string-conductors', 'solar-central-inverter-add'), withoutAssignment],
+      [groundWithInvalidEquipment('solar-central-inverter-add'), [...withoutAssignment, 'solar-string-conductors']],
       [LIVE, ROOFTOP_LIVE],
     ]) {
       const selected = solarFlowSelect(catalog, 'rooftop')
       expect(selected).toMatchObject({ available: true, reasonKey: null, reason: null, missing: [] })
       expect(selected.steps.map((step) => step.name)).toEqual(names)
+      expect(selected.steps.map((step) => step.name)).not.toContain('solar-central-inverter-add')
+      expect(selected.steps.map((step) => step.name)).not.toContain('solar-feeders')
       solarFlowSteps(catalog).forEach((step, index) => expect(selected.steps[index]).toBe(step))
     }
+  })
+
+  it('G2c GE9 the live catalog with conversion and feeders opens the flow and its option', () => {
+    const complete = [...LIVE, { family_id: 'routing', capabilities: [
+      liveRow('solar-trackers-to-panel-groups', 'stringing', 3, 5, 'run_write'),
+      liveRow('solar-feeders', 'routing', 3, 60, 'run_write'),
+    ] }]
+    const selected = solarFlowSelect(complete, 'ground-electrical')
+    expect(selected).toMatchObject({ available: true, reasonKey: null, reason: null, missing: [] })
+    expect(selected.steps.map((step) => step.name)).toEqual(GROUND_LIVE)
+    expect(solarFlowOptions(complete).map(solarFlowOptionLabel))
+      .toEqual(['Rooftop', 'Ground Mount Electrical', ...OPTION_LABELS.slice(2)])
+    expect(solarFlowSelect(complete, 'rooftop').steps.map((step) => step.name)).toEqual(ROOFTOP_LIVE)
+    const noFeeders = [complete[0], ...complete.slice(1, -1), { ...complete.at(-1), capabilities: [complete.at(-1).capabilities[0]] }]
+    expect(solarFlowSelect(noFeeders, 'ground-electrical')).toMatchObject({ available: false, missing: ['Feeders and routes'] })
   })
 })
 
@@ -296,7 +339,8 @@ describe('Solar flow selection', () => {
       'solar-settings', 'solar-size-strings', 'solar-string-add', 'solar-string-multi-add',
       'solar-string-midpoint', 'solar-string-flip', 'solar-string-swap', 'solar-string-delete',
       'solar-string-rebuild', 'solar-correct-string',
-      'solar-assign-equipment', 'solar-string-conductors',
+      'solar-assign-equipment', 'solar-string-conductors', 'solar-central-inverter-add',
+      'solar-feeders',
       'solar-nec-ampacity-correction', 'solar-nec-ac-voltage-drop',
       'solar-nec-conduit-fill', 'solar-nec-feeder-ocpd',
       'solar-string-data', 'solar-electrical-schedules', 'solar-cable-export',
@@ -304,7 +348,7 @@ describe('Solar flow selection', () => {
     expect(SOLAR_FLOWS[1].stages[0].capabilities).toEqual(['solar-trackers-to-panel-groups'])
     for (const [index, declaration] of [conversionDeclaration, ampacityDeclaration, voltageDeclaration, conduitDeclaration,
       ocpdDeclaration].entries()) {
-      expect(declaration.name).toBe([names[0], ...names.slice(13, 17)][index])
+      expect(declaration.name).toBe([names[0], ...names.slice(15, 19)][index])
       expect(declaration.wave).toBe(3)
     }
   })
