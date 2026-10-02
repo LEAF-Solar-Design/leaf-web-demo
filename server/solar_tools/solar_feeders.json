@@ -1,0 +1,42 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-feeders",
+  "builtin": "builtins/solar_feeders.py",
+  "family": "routing",
+  "adapter": "local-graph-commit",
+  "entitlement": "run_write",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_FEEDER_REQUEST",
+  "readiness": {"kind": "hook"},
+  "engine": "server-builtin",
+  "interaction": {"mode": "form"},
+  "record_store": "registry",
+  "record": {
+    "name": "solar-feeders",
+    "version": "1.0.0",
+    "description": "Route L1 feeders to L2 collectors using the drawing version's stored panel-group outlines and save the graph in one version.",
+    "kind": "script",
+    "family_id": "routing",
+    "engine_op": "solar_feeders",
+    "entry": "builtins/solar_feeders.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {"type": "string", "maxLength": 128},
+        "expected_rev": {"type": "integer", "minimum": 0, "maximum": 2147483647}
+      },
+      "required": ["expected_rev"],
+      "additionalProperties": false
+    },
+    "returns": {"type": "object"},
+    "capabilities": ["drawing.write"],
+    "allow_local_fallback": false
+  },
+  "ledger": ["route-l2-feeders"],
+  "trusted_inputs": ["source_intake"],
+  "maturity": "preview",
+  "wave": 3,
+  "order": 60,
+  "scenario": "w3-ground-routing"
+}
