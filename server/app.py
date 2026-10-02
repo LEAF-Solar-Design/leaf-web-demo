@@ -61,6 +61,7 @@ from routers import (
     deployment_identity,
     demand,
     drawings,
+    solar_terrain,
     ios_ship,
     ios_ship_provider as ios_ship_provider_router,
     ios_surface,
@@ -299,6 +300,7 @@ app.include_router(demand.router)  # public waitlist capture, no auth required
 app.include_router(author.router)
 app.include_router(platform_customize_router.router)  # W14 admin self-edit lane (R7): admin-tier + internal-mode gated, branch-only
 app.include_router(drawings.router)  # M2 write loop: versioned drawing endpoints
+app.include_router(solar_terrain.router)  # Head-bound Ground terrain preview operations
 app.include_router(prompt.router)  # M3: NL prompt router (MATRIX gap #2 — one prompt box -> lanes)
 app.include_router(search_router.router)  # slice 10c: GET /api/search, the bar's find-scope index
 app.include_router(usage.router)  # UI wave 1: per-tenant spend/quota meter (GET /api/usage)
