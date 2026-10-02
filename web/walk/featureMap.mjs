@@ -93,9 +93,19 @@ export function validateOverrides(config, knownIds) {
   for (const [id, override] of Object.entries(config.overrides)) {
     exactId(id, 'override')
     if (!override || typeof override !== 'object' || Array.isArray(override)) throw new Error(`featureMap: invalid override ${id}`)
-    const allowed = new Set(['title', 'effect', 'sources', 'viewports', 'certify', 'certify_reason'])
+    const allowed = new Set(['title', 'effect', 'sources', 'viewports', 'certify', 'certify_reason', 'exclude_states', 'reason'])
     for (const key of Object.keys(override)) {
       if (!allowed.has(key)) throw new Error(`featureMap: unknown override field ${id}.${key}`)
+    }
+    if (override.exclude_states !== undefined) {
+      if (!Array.isArray(override.exclude_states) || !override.exclude_states.length
+          || override.exclude_states.some((state) => !nonempty(state))
+          || new Set(override.exclude_states).size !== override.exclude_states.length) {
+        throw new Error(`featureMap: ${id} exclude_states requires a non-empty array of unique states`)
+      }
+      if (!nonempty(override.reason)) throw new Error(`featureMap: state exclusion ${id} requires a non-empty reason`)
+    } else if (override.reason !== undefined) {
+      throw new Error(`featureMap: ${id} reason requires exclude_states`)
     }
   }
   const exempted = new Set()
@@ -218,6 +228,16 @@ function buildEntry(item, config, snapshot, registries) {
     entry.states = record === 'none' ? ['drawer-open', 'drawers-closed'] : ['closed', 'open']
     for (const state of entry.states) entry.expected_effect[state] = {
       kind: 'toggles', target: id, value: record === 'none' || state === 'open' ? 'none' : record,
+    }
+  }
+  for (const state of override.exclude_states || []) {
+    if (!entry.states.includes(state)) throw new Error(`featureMap: state exclusion ${id} names unknown state: ${state}`)
+  }
+  if (override.exclude_states) {
+    entry.states = entry.states.filter((state) => !override.exclude_states.includes(state))
+    for (const state of override.exclude_states) {
+      delete entry.expected_effect[state]
+      delete entry.state_contexts[state]
     }
   }
   entry.sources = [...new Set([...entry.sources, ...(override.sources || [])])].sort(compare)
