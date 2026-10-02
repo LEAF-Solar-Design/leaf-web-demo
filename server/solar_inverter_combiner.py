@@ -2010,8 +2010,54 @@ def _read_polyline(raw, what):
     return [_point(p, f"{what}[{i}]") for i, p in enumerate(raw)]
 
 
-def place(intake, installation="Roof"):
-    """LEAFCOMBINERAUTO's placement phase on one intake; returns the plugin's solution shape."""
+def _scaled_xy(p, k, what):
+    """One reconstructed point in kernel inches: both coordinates times k, refused when not finite."""
+    x = p[0] * k
+    y = p[1] * k
+    if not (math.isfinite(x) and math.isfinite(y)):
+        raise PlacementError(f"{what} is not finite in kernel inches")
+    return (x, y)
+
+
+def _scaled_inputs(k, strings, l2s, panel_groups, trench, roads):
+    """The reconstructed placement inputs, every dimensional value times k; ids, counts, angles and keys
+    unchanged. Reconstruction (ownership, module selection, the extremes check) already ran in drawing
+    units, so no reconstruction decision depends on k."""
+    for s in strings:
+        s.centroid = _scaled_xy(s.centroid, k, f"string {s.string_number} centroid")
+        s.endpoint_a = _scaled_xy(s.endpoint_a, k, f"string {s.string_number} endpointA")
+        s.endpoint_b = _scaled_xy(s.endpoint_b, k, f"string {s.string_number} endpointB")
+        s.panels = [_scaled_xy(p, k, f"string {s.string_number} panel") for p in s.panels]
+    l2s = [(number, _scaled_xy(loc, k, f"L2 {number}")) for number, loc in l2s]
+    scaled_groups = []
+    for g in panel_groups:
+        panels = []
+        for p in g.panels:
+            width = p.width_along_row * k
+            height = p.height_across_row * k
+            if not (math.isfinite(width) and math.isfinite(height)):
+                raise PlacementError(f"panel group {g.group_id}: a module size is not finite in kernel inches")
+            panels.append(PanelInput(_scaled_xy(p.center, k, f"panel group {g.group_id} panel"), width, height))
+        scaled_groups.append(PanelGroupInput(g.group_id, g.row_angle_rad, panels, g.is_synthesized_from_outline))
+    trench = None if trench is None else [_scaled_xy(p, k, "inputs.alignmentLine") for p in trench]
+    roads = [None if line is None else [_scaled_xy(p, k, "inputs.accessRoadLines") for p in line]
+             for line in roads]
+    return strings, l2s, scaled_groups, trench, roads
+
+
+def place(intake, installation="Roof", *, coordinate_scale=1.0):
+    """LEAFCOMBINERAUTO's placement phase on one intake; returns the plugin's solution shape.
+
+    coordinate_scale is kernel inches per intake drawing unit (1.0 for an inch drawing). The intake is read
+    and its panel groups and strings reconstructed in drawing units; every reconstructed dimensional value
+    is then multiplied by it, so placement, routing and the returned locations are in inches."""
+    k = coordinate_scale
+    try:
+        k = float(k) if type(k) in (int, float) else math.nan
+    except OverflowError:
+        k = math.nan
+    if not math.isfinite(k) or k <= 0:
+        raise PlacementError("coordinate_scale must be a finite positive number")
     intake = _dict(intake, "intake")
     if intake.get("format") != INTAKE_FORMAT:
         raise PlacementError(f"intake format must be {INTAKE_FORMAT}")
@@ -2045,6 +2091,8 @@ def place(intake, installation="Roof"):
     for i, line in enumerate(_list(inputs.get("accessRoadLines", []), "inputs.accessRoadLines", MAX_PANELS)):
         pts = line.get("points") if isinstance(line, dict) else line
         roads.append(_read_polyline(pts, f"inputs.accessRoadLines[{i}]"))
+    if k != 1.0:
+        strings, l2s, panel_groups, trench, roads = _scaled_inputs(k, strings, l2s, panel_groups, trench, roads)
 
     empty = {"combiners": [], "l1ToL2Assignments": {}, "detectedAlleys": []}
     if not panel_groups and not strings:

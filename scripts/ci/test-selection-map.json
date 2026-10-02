@@ -393,6 +393,7 @@
     "server-solar-combiner-graph",
     "server-solar-feeder-graph",
     "server-solar-feeder-units",
+    "server-solar-combiner-units",
     "server-solar-design-profiles",
     "server-solar-electrical-bridge",
     "server-solar-electrical-route-bridge",

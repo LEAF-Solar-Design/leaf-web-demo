@@ -406,6 +406,9 @@ def build_suites() -> List[Suite]:
         # Drawing-unit invariance, bridge overrides and outline refusals: 15 hermetic cases.
         Suite("server-solar-feeder-units", "server tests/test_solar_feeder_units.py", "pytest", SERVER,
               _py_pytest("tests/test_solar_feeder_units.py"), 15),
+        # Drawing-unit reconstruction and inch-kernel combiner equivalence: 44 hermetic cases.
+        Suite("server-solar-combiner-units", "server tests/test_solar_combiner_units.py", "pytest", SERVER,
+              _py_pytest("tests/test_solar_combiner_units.py"), 44),
         # 31 -> 35 on 2026-09-22: the zone-aware entry point (group_panels_by_zone,
         # the port of BuildAndSaveGroupsForZone) added four hermetic, unparametrized
         # tests. Nothing in this file skips, so the count is the same on every runner.
