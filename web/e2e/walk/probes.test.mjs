@@ -17,9 +17,9 @@ const unsupportedStep = new AsyncFunction('probe', 'runtime', 'reason', 'Unsuppo
   functionBody('async function unsupported(probe, runtime, reason) {', '\nasync function engineReady'))
 const probeRunner = new AsyncFunction('probe', 'runtime', 'test', 'setupStep', 'UnsupportedLocalError',
   functionBody('export async function runProbe(probe, runtime) {', '\n// This reporter'))
-const evidenceFixture = new AsyncFunction('use', 'testInfo', fixtureSource.slice(
-  fixtureSource.indexOf('walkEvidence: [async ({}, use, testInfo) => {')
-    + 'walkEvidence: [async ({}, use, testInfo) => {'.length,
+const evidenceFixture = new AsyncFunction('use', 'testInfo', 'workerFacts', fixtureSource.slice(
+  fixtureSource.indexOf('walkEvidence: [async ({ workerFacts }, use, testInfo) => {')
+    + 'walkEvidence: [async ({ workerFacts }, use, testInfo) => {'.length,
   fixtureSource.indexOf('}, { auto: true }]')))
 
 async function unsupportedRuntime(error, log = [], attachments = []) {
