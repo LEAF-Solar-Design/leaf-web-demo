@@ -1554,7 +1554,7 @@ export default function App() {
     if (note) showToast({ text: `${note} · ${drawingId}`, action: { label: 'View', onClick: viewViewer } })
   }, [seatDrawingVersion, showToast, viewViewer])
 
-  const seatCompletedVersion = useCallback(async (newVersion, envelope) => {
+  const seatCompletedVersion = useCallback(async (newVersion, envelope, options) => {
     let version = newVersion?.version
     if (mock) {
       try {
@@ -1562,22 +1562,26 @@ export default function App() {
         const commit = mockVersions.applyDelete(envelope?.result?.removed)
         version = commit.version
       } catch {
-        showToast({ text: `Version ${version} created` })
+        if (options?.announce !== false) showToast({ text: `Version ${version} created` })
         markRefreshFailure({ drawing_id: newVersion.drawing_id, version })
-        return
+        return false
       }
     }
     if (envelope?.result?.new_version_readable === false) {
       recordCommittedUnreadableHead(newVersion)
-      showToast({ text: `Version ${version} created` })
-      return
+      if (options?.announce !== false) showToast({ text: `Version ${version} created` })
+      return false
     }
     try {
       const view = await getDrawingIntake(mock, newVersion.drawing_id, 'head')
-      seatVersion(view, newVersion.drawing_id, `Version ${version} created`)
+      if (typeof options?.isCurrent === 'function' && !options.isCurrent()) return false
+      seatVersion(view, newVersion.drawing_id, options?.announce === false ? null : `Version ${version} created`)
+      return true
     } catch {
-      showToast({ text: `Version ${version} created` })
+      if (typeof options?.isCurrent === 'function' && !options.isCurrent()) return false
+      if (options?.announce !== false) showToast({ text: `Version ${version} created` })
       markRefreshFailure({ drawing_id: newVersion.drawing_id, version })
+      return false
     }
   }, [intake, markRefreshFailure, mock, recordCommittedUnreadableHead, seatVersion, showToast])
   completedVersionRef.current = seatCompletedVersion
@@ -2032,6 +2036,15 @@ export default function App() {
   }, [])
 
   // A step submit arms the same confirm path as the ribbon; the rail never runs a tool itself.
+  const onRunCombinerPlacement = useCallback((params) => {
+    const row = tools.find((tool) => tool.name === 'solar-combiners')
+    if (!row) {
+      setRunErr('Combiner placement is not in this catalog.')
+      return false
+    }
+    return Boolean(onRequestCatalogRun(row, params, RIBBON_RATIONALE, 'ribbon')?.runIntent?.intentId)
+  }, [onRequestCatalogRun, tools])
+
   const onSubmitSolarFlowStep = useCallback((row, params) => {
     const drawingId = catalogRunContextRef.current?.drawingId ?? null
     const retained = solarFlowRetainedRef.current
@@ -4086,6 +4099,7 @@ export default function App() {
                   getCheckoutCapability={() => checkoutCapabilityRef.current?.()}
                   onPhysicalHeadChanged={() => loadCatalog()}
                   onDrawingVersionChanged={seatCompletedVersion}
+                  onRunPlacement={onRunCombinerPlacement}
                 />
               )}
               {solarFlowEditor && (
