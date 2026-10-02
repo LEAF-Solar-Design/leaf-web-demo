@@ -290,232 +290,232 @@
       "viewports": [
         "desktop"
       ]
+    },
+    {
+      "feature_id": "control:scope-add",
+      "scope": "document",
+      "role": "button",
+      "name": "Add: build a new capability",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "control:demo-return",
+      "scope": "document",
+      "role": "button",
+      "name": "Back to the demo",
+      "states": [
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "control:claude-accounts",
+      "scope": "document",
+      "role": "button",
+      "name": "Claude accounts not linked",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "control:drawing-close-start",
+      "scope": "document",
+      "role": "button",
+      "name": "Close the drawing view and return to Start",
+      "states": [
+        "ready"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "control:notification-collapse",
+      "scope": "document",
+      "role": "button",
+      "name": "Collapse the notification inbox",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "control:session-details",
+      "scope": "document",
+      "role": "button",
+      "name": "Details",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "control:version-history",
+      "scope": "document",
+      "role": "button",
+      "name": "History",
+      "states": [
+        "ready"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "control:linked-services",
+      "scope": "document",
+      "role": "button",
+      "name": "Linked services {n} linked",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "control:project-board",
+      "scope": "document",
+      "role": "button",
+      "name": "Open the project board",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "control:prompt-run",
+      "scope": "document",
+      "role": "button",
+      "name": "Run",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "control:prompt-scope",
+      "scope": "document",
+      "role": "button",
+      "name": "scope ▾",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "control:sign-out",
+      "scope": "document",
+      "role": "button",
+      "name": "Sign out",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "control:start-board",
+      "scope": "document",
+      "role": "button",
+      "name": "Start",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "control:take-edit-lock",
+      "scope": "document",
+      "role": "button",
+      "name": "Take edit lock",
+      "states": [
+        "ready"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "control:cost-panel",
+      "scope": "document",
+      "role": "button",
+      "name": "What Leaf costs to operate",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "control:command-bar",
+      "scope": "document",
+      "role": "combobox",
+      "name": "Command bar",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "control:find-drawing",
+      "scope": "document",
+      "role": "combobox",
+      "name": "Find in drawing",
+      "states": [
+        "ready"
+      ],
+      "viewports": [
+        "desktop"
+      ]
     }
   ],
   "baseline_unmapped": [
     {
       "scope": "document",
       "role": "button",
-      "name": "Add: build a new capability",
-      "reason": "No feature-map coverage yet: no walk mapping",
-      "states": [
-        "ready",
-        "failed-load"
-      ],
-      "viewports": [
-        "desktop"
-      ]
-    },
-    {
-      "scope": "document",
-      "role": "button",
-      "name": "Back to the demo",
-      "reason": "No feature-map coverage yet: no walk mapping",
-      "states": [
-        "failed-load"
-      ],
-      "viewports": [
-        "desktop"
-      ]
-    },
-    {
-      "scope": "document",
-      "role": "button",
-      "name": "Claude accounts not linked",
-      "reason": "No feature-map coverage yet: no walk mapping",
-      "states": [
-        "ready",
-        "failed-load"
-      ],
-      "viewports": [
-        "desktop"
-      ]
-    },
-    {
-      "scope": "document",
-      "role": "button",
-      "name": "Close the drawing view and return to Start",
-      "reason": "No feature-map coverage yet: no walk mapping",
-      "states": [
-        "ready"
-      ],
-      "viewports": [
-        "desktop"
-      ]
-    },
-    {
-      "scope": "document",
-      "role": "button",
-      "name": "Collapse the notification inbox",
-      "reason": "No feature-map coverage yet: no walk mapping",
-      "states": [
-        "ready",
-        "failed-load"
-      ],
-      "viewports": [
-        "desktop"
-      ]
-    },
-    {
-      "scope": "document",
-      "role": "button",
-      "name": "Details",
-      "reason": "No feature-map coverage yet: no walk mapping",
-      "states": [
-        "ready",
-        "failed-load"
-      ],
-      "viewports": [
-        "desktop"
-      ]
-    },
-    {
-      "scope": "document",
-      "role": "button",
-      "name": "History",
-      "reason": "No feature-map coverage yet: no walk mapping",
-      "states": [
-        "ready"
-      ],
-      "viewports": [
-        "desktop"
-      ]
-    },
-    {
-      "scope": "document",
-      "role": "button",
-      "name": "Linked services {n} linked",
-      "reason": "No feature-map coverage yet: no walk mapping",
-      "states": [
-        "ready",
-        "failed-load"
-      ],
-      "viewports": [
-        "desktop"
-      ]
-    },
-    {
-      "scope": "document",
-      "role": "button",
-      "name": "Open the project board",
-      "reason": "No feature-map coverage yet: no walk mapping",
-      "states": [
-        "ready",
-        "failed-load"
-      ],
-      "viewports": [
-        "desktop"
-      ]
-    },
-    {
-      "scope": "document",
-      "role": "button",
       "name": "Retry",
-      "reason": "No feature-map coverage yet: no walk mapping",
+      "reason": "Retry remains unmapped: the failed-load recipe uses a permanent missing drawing; bare Retry has multiple owners, and no checked public recovery recipe establishes a semantic successful retry for the observed owner.",
       "states": [
         "failed-load"
-      ],
-      "viewports": [
-        "desktop"
-      ]
-    },
-    {
-      "scope": "document",
-      "role": "button",
-      "name": "Run",
-      "reason": "No feature-map coverage yet: no walk mapping",
-      "states": [
-        "ready",
-        "failed-load"
-      ],
-      "viewports": [
-        "desktop"
-      ]
-    },
-    {
-      "scope": "document",
-      "role": "button",
-      "name": "scope ▾",
-      "reason": "No feature-map coverage yet: no walk mapping",
-      "states": [
-        "ready",
-        "failed-load"
-      ],
-      "viewports": [
-        "desktop"
-      ]
-    },
-    {
-      "scope": "document",
-      "role": "button",
-      "name": "Sign out",
-      "reason": "No feature-map coverage yet: no walk mapping",
-      "states": [
-        "ready",
-        "failed-load"
-      ],
-      "viewports": [
-        "desktop"
-      ]
-    },
-    {
-      "scope": "document",
-      "role": "button",
-      "name": "Start",
-      "reason": "No feature-map coverage yet: no walk mapping",
-      "states": [
-        "ready",
-        "failed-load"
-      ],
-      "viewports": [
-        "desktop"
-      ]
-    },
-    {
-      "scope": "document",
-      "role": "button",
-      "name": "Take edit lock",
-      "reason": "No feature-map coverage yet: no walk mapping",
-      "states": [
-        "ready"
-      ],
-      "viewports": [
-        "desktop"
-      ]
-    },
-    {
-      "scope": "document",
-      "role": "button",
-      "name": "What Leaf costs to operate",
-      "reason": "No feature-map coverage yet: no walk mapping",
-      "states": [
-        "ready",
-        "failed-load"
-      ],
-      "viewports": [
-        "desktop"
-      ]
-    },
-    {
-      "scope": "document",
-      "role": "combobox",
-      "name": "Command bar",
-      "reason": "No feature-map coverage yet: no walk mapping",
-      "states": [
-        "ready",
-        "failed-load"
-      ],
-      "viewports": [
-        "desktop"
-      ]
-    },
-    {
-      "scope": "document",
-      "role": "combobox",
-      "name": "Find in drawing",
-      "reason": "No feature-map coverage yet: no walk mapping",
-      "states": [
-        "ready"
       ],
       "viewports": [
         "desktop"

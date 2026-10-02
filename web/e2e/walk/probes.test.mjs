@@ -6,6 +6,137 @@ import { effectAssertion, resolveProbe, normalizedControlKey, requireControlCens
 import { readFileSync } from 'node:fs'
 
 const map = buildFeatureMap()
+test('batch three resolves seventeen document controls, semantic targets and public setup in every state', () => {
+  const expected = [["scope-add","Add: build a new capability","opens","scope-build-picker",["ready","failed-load"]],["demo-return","Back to the demo","renders","guided-demo",["failed-load"]],["claude-accounts","Claude accounts not linked","opens","claude-accounts-panel",["ready","failed-load"]],["drawing-close-start","Close the drawing view and return to Start","opens","project-board",["ready"]],["notification-collapse","Collapse the notification inbox","renders","notification-inbox-collapsed",["ready","failed-load"]],["session-details","Details","opens","session-provenance",["ready"]],["version-history","History","opens","version-history",["ready"]],["linked-services","Linked services {n} linked","opens","linked-services-panel",["ready","failed-load"]],["project-board","Open the project board","opens","project-board",["ready","failed-load"]],["prompt-run","Run","submits","unknown-tool-resolver",["ready","failed-load"]],["prompt-scope","scope ▾","opens","scope-picker",["ready","failed-load"]],["sign-out","Sign out","renders","signed-out-session",["ready","failed-load"]],["start-board","Start","opens","project-board",["ready","failed-load"]],["take-edit-lock","Take edit lock","renders","edit-lock-held",["ready"]],["cost-panel","What Leaf costs to operate","opens","cost-panel",["ready","failed-load"]],["command-bar","Command bar","opens","tool-commands",["ready","failed-load"]],["find-drawing","Find in drawing","renders","drawing-find-no-match",["ready"]]]
+  const overrides = JSON.parse(readFileSync(new URL('../../walk/features.overrides.json', import.meta.url), 'utf8')).overrides
+  const sessionDetails = JSON.parse(readFileSync(new URL('../../walk/features.overrides.json', import.meta.url), 'utf8')).controls.find((control) => control.id === 'control:session-details')
+  assert.deepEqual(sessionDetails.states, ['ready'])
+  assert.match(sessionDetails.certify_reason, /\bU3\b/)
+  for (const [id, name, kind, target, states] of expected) {
+    const entry = map.entries.find((row) => row.id === 'control:' + id)
+    assert.deepEqual(entry.states, [...states].sort())
+    for (const state of states) {
+      const probe = resolveProbe(entry, state)
+      assert.equal(probe.locator.scope, undefined)
+      assert.equal(probe.locator.role, ['command-bar', 'find-drawing'].includes(id) ? 'combobox' : 'button')
+      assert.equal(probe.locator.exact, true)
+      if (id !== 'linked-services') assert.equal(probe.locator.name, name)
+      assert.equal(probe.assertion.kind, kind)
+      assert.equal(probe.assertion.target, target)
+      assert.equal(probe.certification, null)
+      const workspace = probe.setup.steps[id === 'sign-out' ? 1 : 0]
+      assert.equal(workspace.kind, state === 'failed-load' ? 'open-failed-drawing' : 'open-private-drawing')
+      assert.deepEqual(probe.setup.steps.at(-1), { kind: 'baseline-three-state', sourceId: id, target,
+        control: probe.locator, expanded: entry.state_contexts[state].expanded })
+      assert.ok(probe.setup.steps.every((step) => !['engine-ready', 'require-local-state'].includes(step.kind)))
+      if (id === 'sign-out') assert.equal(probe.setup.steps[0].kind, 'fresh-sign-out-page')
+      if (id === 'command-bar') {
+        assert.equal(probe.locator.trigger, 'type')
+        assert.equal(probe.locator.inputValue, '/')
+      } else if (id === 'find-drawing') {
+        assert.equal(probe.locator.trigger, 'fill-enter')
+        assert.equal(probe.locator.inputValue, 'w1k-absent-object-7f942')
+      } else assert.equal(probe.locator.trigger, 'click')
+    }
+  }
+})
+
+test('linked-service numeric names match only the exact anchored count identity', () => {
+  const probe = resolveProbe(map.entries.find((row) => row.id === 'control:linked-services'), 'ready')
+  assert.equal(probe.locator.normalizedName, 'Linked services {n} linked')
+  for (const name of ['Linked services 0 linked', 'Linked services 12 linked', 'Linked services 1234 linked']) {
+    assert.match(name, probe.locator.name)
+    assert.equal(normalizedControlKey({ scope: 'document', role: 'button', name }),
+      normalizedControlKey({ scope: 'document', role: 'button', name: probe.locator.normalizedName }))
+  }
+  for (const name of ['Linked services checking', 'Linked services -1 linked', 'Linked services 1,234 linked',
+    'Other Linked services 2 linked', 'Linked services 2 linked extra']) assert.doesNotMatch(name, probe.locator.name)
+})
+
+test('batch three semantic oracles precede generic handlers and use real interactions', () => {
+  const source = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
+  const setup = source.slice(source.indexOf('async function baselineThreeState'), source.indexOf('async function setupStep'))
+  const oracle = source.slice(source.indexOf('async function assertEffect'), source.indexOf('export async function runProbe'))
+  for (const target of ['scope-build-picker', 'guided-demo', 'project-board', 'notification-inbox-collapsed',
+    'unknown-tool-resolver', 'signed-out-session', 'edit-lock-held', 'tool-commands', 'drawing-find-no-match']) {
+    assert.ok(setup.includes(target), target + ' initial setup')
+    assert.ok(oracle.indexOf(target) < oracle.indexOf("effect.kind === 'navigates'"), target + ' semantic oracle')
+  }
+  for (const text of ['Session · provenance', 'Claude accounts', 'Linked services', 'Version history',
+    'Close cost panel', 'rooftop_demo', 'Return to drawing', 'No matching object in this drawing.',
+    'You hold the edit lock', 'slash-menu-listbox', 'aria-selected']) assert.ok(source.includes(text), text)
+  assert.match(setup, /index\.resolve\(recipe\.control\.inputValue\)\.status/)
+  assert.match(setup, /expect\(names\)\.not\.toContain\('w1k-no-such-tool'\)/)
+  assert.match(setup, /toHaveValue\('\/w1k-no-such-tool'\)/)
+  assert.match(oracle, /expect\(runtime\.localDecisionRequests\)\.toEqual\(\[\]\)/)
+  assert.match(oracle, /session signed out/)
+  assert.match(oracle, /name: 'Refresh'/)
+  const activation = source.slice(source.indexOf('async function activate'), source.indexOf('async function assertEffect'))
+  assert.match(activation, /locator\.pressSequentially\(recipe\.inputValue\)/)
+  assert.match(activation, /locator\.fill\(recipe\.inputValue\)/)
+  assert.match(activation, /locator\.press\('Enter'\)/)
+  assert.match(activation, /page\.waitForEvent\('domcontentloaded'\), locator\.click\(\)/)
+  assert.doesNotMatch(setup, /dispatchEvent|__react|route\.fulfill|unsupported\(/)
+})
+
+test('batch three corrections use the default shell demo, inbox disclosure and session dialog', () => {
+  const source = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
+  const setup = source.slice(source.indexOf('async function baselineThreeState'), source.indexOf('async function setupStep'))
+  const oracle = source.slice(source.indexOf('async function assertEffect'), source.indexOf('export async function runProbe'))
+  const demo = oracle.slice(oracle.indexOf("if (target === 'guided-demo')"), oracle.indexOf("if (target === 'project-board')"))
+  assert.match(demo, /getByRole\('complementary', \{ name: 'Properties', exact: true \}\)/)
+  assert.match(demo, /getByRole\('definition'\)/)
+  assert.ok(demo.includes('^rooftop_demo\\.dwg$'))
+  assert.ok(demo.includes('^sample data$'))
+  assert.match(demo, /getByRole\('alert'\).*toHaveCount\(0\)/)
+  assert.doesNotMatch(demo, /Guided demo: sample rooftop|name: 'Guided demo'/)
+  const session = setup.slice(setup.indexOf("if (target === 'session-provenance')"),
+    setup.indexOf("if (target === 'notification-inbox-collapsed')"))
+  assert.match(session, /expect\(locator\)\.toHaveCount\(1\)/)
+  assert.match(session, /Session · provenance.*toBeHidden\(\)/)
+  assert.doesNotMatch(session, /setDrawer|Workspace panels/)
+  const panels = oracle.slice(oracle.indexOf('if (probe.kind === \'control\' && baselineThreePanels[target])'),
+    oracle.indexOf("if (target === 'scope-build-picker'"))
+  assert.match(panels, /expect\(panel\)\.toBeVisible\(\)/)
+  assert.doesNotMatch(panels, /diagnostics-block/)
+  const inboxSetup = setup.slice(setup.indexOf("if (target === 'notification-inbox-collapsed')"),
+    setup.indexOf("if (target === 'edit-lock-held')"))
+  assert.match(inboxSetup, /expect\(locator\)\.toHaveAttribute\('aria-expanded', 'true'\)/)
+  assert.doesNotMatch(inboxSetup, /getByRole\('heading'/)
+  const inbox = oracle.slice(oracle.indexOf("if (target === 'notification-inbox-collapsed')"),
+    oracle.indexOf("if (target === 'unknown-tool-resolver')"))
+  assert.match(inbox, /Expand the notification inbox.*toHaveAttribute\('aria-expanded', 'false'\)/)
+  assert.match(inbox, /Collapse the notification inbox.*toHaveCount\(0\)/)
+  assert.match(inbox, /Expand the notification inbox.*toBeVisible\(\)/)
+  assert.doesNotMatch(inbox, /getByRole\('heading'/)
+  assert.doesNotMatch(inbox, /\.locator\(/)
+  assert.doesNotMatch(setup, /\.job-inbox|\.rail-ledger|\.rail-note/)
+})
+
+test('sign-out seed is page-specific and cannot reinsert identity after logout reload', () => {
+  const source = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
+  const seed = source.slice(source.indexOf('export function seedSignOutIdentity'), source.indexOf('async function baselineThreeState'))
+  const storage = () => {
+    const values = new Map()
+    return { getItem: (key) => values.get(key) ?? null, setItem: (key, value) => values.set(key, value),
+      removeItem: (key) => values.delete(key) }
+  }
+  const local = storage(), session = storage()
+  const applySeed = new Function('localStorage', 'sessionStorage', seed.replace('export ', '') + '; return seedSignOutIdentity')
+    (local, session)
+  const config = { identity: { token: 'one-time-fixture' }, coachKey: 'coach' }
+  applySeed(config)
+  assert.equal(local.getItem('leaf.jwt'), config.identity.token)
+  local.removeItem('leaf.jwt')
+  applySeed(config)
+  assert.equal(local.getItem('leaf.jwt'), null)
+  assert.equal(session.getItem('leaf.walk.w1k.identity-seeded'), '1')
+  const fresh = source.slice(source.indexOf("case 'fresh-sign-out-page':"), source.indexOf("case 'baseline-three-state':"))
+  assert.match(fresh, /ordinaryPage\.context\(\)\.newPage\(\)/)
+  assert.match(fresh, /fresh\.addInitScript\(seedSignOutIdentity, \{ identity: LOCAL_IDENTITY/)
+  assert.match(fresh, /fresh\.close\(\)/)
+  assert.doesNotMatch(fresh, /context\(\)\.addInitScript/)
+})
 
 test('batch two uses exact complementary, nested group and document scope recipes', () => {
   for (const id of ['properties-close', 'properties-drawing', 'properties-layers', 'properties-plan', 'properties-selection']) {

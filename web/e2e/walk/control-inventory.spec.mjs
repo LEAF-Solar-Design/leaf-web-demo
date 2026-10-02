@@ -24,6 +24,9 @@ test.describe('rendered control census', () => {
       await expect(page.getByRole('combobox', { name: 'Command bar', exact: true })).toBeVisible()
       if (state === 'ready') await expect(page.getByRole('tablist', { name: 'Ribbon', exact: true })).toBeVisible()
       else await expect(page.getByRole('alert').filter({ hasText: /Couldn['’]t load drawing/ })).toBeVisible()
+      // Account and service discovery must settle before their exact identities are censused.
+      await expect(page.getByRole('button', { name: 'Claude accounts not linked', exact: true })).toHaveAttribute('aria-expanded', 'false')
+      await expect(page.getByRole('button', { name: /^Linked services [0-9]+ linked$/ })).toHaveAttribute('aria-expanded', 'false')
       const census = await censusControls(page, map, { state, viewport: 'desktop' })
       walkEvidence.censuses = [census]
       expect(census.total, 'a real workspace must render interactive controls').toBeGreaterThan(0)

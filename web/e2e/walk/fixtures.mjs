@@ -5,6 +5,7 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { PRODUCT_SURFACES } from '../../src/site/productSurfaces.js'
 import { toolPlacementTab } from '../../src/lib/toolRecord.js'
 import { normalizedControlKey } from './probes.mjs'
+import { buildDrawingObjectIndex } from '../../src/lib/drawingObjectIndex.js'
 
 export { expect }
 export const LOCAL_IDENTITY = Object.freeze({ tenant: 'demo-tenant', token: 'j1-presentation-fixture' })
@@ -294,9 +295,157 @@ async function setToolRail(page, open, phone) {
     }
   }
 }
+const baselineThreePanels = Object.freeze({
+  'claude-accounts-panel': { role: 'dialog', name: 'Claude accounts', close: 'Close Claude account panel' },
+  'linked-services-panel': { role: 'dialog', name: 'Linked services', close: 'Close linked services panel' },
+  'session-provenance': { role: 'dialog', name: 'Session · provenance', close: 'Close details' },
+  'version-history': { role: 'dialog', name: 'Version history', close: 'Close version history' },
+  'cost-panel': { role: 'region', name: 'What Leaf costs to operate', close: 'Close cost panel' },
+})
+const namedPanel = (page, spec) => page.getByRole(spec.role, { name: spec.name, exact: true })
+async function closeBaselinePanel(page, spec) {
+  const panel = namedPanel(page, spec)
+  if (await panel.isVisible()) await panel.getByRole('button', { name: spec.close, exact: true }).click()
+  await expect(panel).toBeHidden()
+}
+async function clearComposer(page) {
+  const bar = page.getByRole('combobox', { name: 'Command bar', exact: true })
+  await bar.fill('')
+  await bar.press('Escape')
+  await bar.press('Escape')
+  await expect(page.getByRole('listbox', { name: 'Scope', exact: true })).toBeHidden()
+  await expect(page.getByRole('listbox', { name: 'Tool commands', exact: true })).toBeHidden()
+  await expect(page.getByRole('listbox', { name: 'Actions and artifacts', exact: true })).toBeHidden()
+  await expect(page.getByRole('listbox', { name: 'Search results', exact: true })).toBeHidden()
+  await expect(page.getByRole('button', { name: 'scope ▾', exact: true })).toHaveAttribute('aria-expanded', 'false')
+  await expect(bar).toHaveValue('')
+  return bar
+}
+// A page-specific init script: the ordinary page fixture remains unchanged.
+export function seedSignOutIdentity({ identity, coachKey }) {
+  if (sessionStorage.getItem('leaf.walk.w1k.identity-seeded') !== '1') {
+    localStorage.setItem('leaf.jwt', identity.token)
+    localStorage.setItem(coachKey, '1')
+    sessionStorage.setItem('leaf.walk.w1k.identity-seeded', '1')
+  }
+}
+async function baselineThreeState(probe, runtime, recipe) {
+  const { page } = runtime
+  await requireWorkspace(runtime)
+  const locator = control(page, recipe.control)
+  const target = recipe.target
+  const panel = baselineThreePanels[target]
+  if (panel) {
+    await closeBaselinePanel(page, panel)
+    runtime.cleanup.push(() => closeBaselinePanel(page, panel))
+  }
+  if (recipe.expanded !== undefined) await expect(locator).toHaveAttribute('aria-expanded', String(recipe.expanded))
+  if (target === 'project-board') {
+    const back = page.getByRole('button', { name: 'Return to drawing', exact: true })
+    if (await back.isVisible()) await back.click()
+    await expect(page.getByRole('heading', { name: 'Project board', exact: true })).toBeHidden()
+    runtime.cleanup.push(async () => {
+      if (await back.isVisible()) await back.click()
+      await expect(page.getByRole('heading', { name: 'Project board', exact: true })).toBeHidden()
+    })
+  }
+  if (['scope-build-picker', 'scope-picker', 'tool-commands', 'unknown-tool-resolver'].includes(target)) {
+    const bar = await clearComposer(page)
+    runtime.cleanup.push(async () => { await clearComposer(page) })
+    if (target === 'tool-commands') await expect(bar).toHaveAttribute('aria-expanded', 'false')
+    if (target === 'unknown-tool-resolver') {
+      await expect(page.getByRole('listbox', { name: 'Route resolver', exact: true })).toBeHidden()
+      await expect.poll(() => runtime.evidence.responses.some((response) => new URL(response.url).pathname === '/api/capabilities'
+        && response.status === 200)).toBe(true)
+      const response = await page.request.get('/api/capabilities')
+      expect(response.ok()).toBe(true)
+      const catalog = await response.json()
+      const names = catalog.families.flatMap((family) => family.capabilities.map((tool) => tool.name))
+      expect(names.length).toBeGreaterThan(0)
+      expect(names).not.toContain('w1k-no-such-tool')
+      runtime.evidence.unknownTool = { name: 'w1k-no-such-tool', catalogNames: names }
+      await bar.fill('/w1k-no-such-tool')
+      await bar.press('Escape')
+      await expect(bar).toHaveValue('/w1k-no-such-tool')
+      await expect(page.getByRole('listbox', { name: 'Tool commands', exact: true })).toBeHidden()
+      await expect(locator).toBeEnabled()
+      runtime.localDecisionRequests = []
+      const observe = (request) => {
+        if (request.method() === 'POST' && /\/api\/(?:.*\/)?(?:route|run)(?:[-/]|$)/.test(new URL(request.url()).pathname)) {
+          runtime.localDecisionRequests.push(request.url())
+        }
+      }
+      page.on('request', observe)
+      runtime.cleanup.push(async () => {
+        page.off('request', observe)
+        await page.keyboard.press('Escape')
+        await expect(page.getByRole('listbox', { name: 'Route resolver', exact: true })).toBeHidden()
+      })
+    }
+  }
+  if (target === 'guided-demo') {
+    await expect(page.getByRole('complementary', { name: 'Properties', exact: true })
+      .getByRole('definition').filter({ hasText: /^rooftop_demo\.dwg$/ })).toBeHidden()
+    await expect(page.getByRole('alert').filter({ hasText: /Couldn['’]t load drawing/ })).toBeVisible()
+  }
+  if (target === 'session-provenance') {
+    await expect(locator).toHaveCount(1)
+    await expect(locator).toBeVisible()
+    await expect(page.getByRole('dialog', { name: 'Session · provenance', exact: true })).toBeHidden()
+  }
+  if (target === 'notification-inbox-collapsed') {
+    await expect(locator).toBeVisible()
+    await expect(locator).toHaveAttribute('aria-expanded', 'true')
+    runtime.cleanup.push(async () => {
+      const expand = page.getByRole('button', { name: 'Expand the notification inbox', exact: true })
+      if (await expand.isVisible()) await expand.click()
+      await expect(locator).toHaveAttribute('aria-expanded', 'true')
+    })
+  }
+  if (target === 'edit-lock-held') {
+    const release = page.getByRole('button', { name: 'Release', exact: true })
+    if (await release.isVisible()) { await expect(release).toBeEnabled(); await release.click() }
+    await expect(page.getByText('You hold the edit lock', { exact: true })).toBeHidden()
+    await expect(locator).toBeEnabled()
+    runtime.cleanup.push(async () => {
+      if (await release.isVisible()) { await expect(release).toBeEnabled(); await release.click() }
+      await expect(locator).toBeVisible()
+    })
+  }
+  if (target === 'drawing-find-no-match') {
+    await expect(locator).toBeVisible()
+    const reply = await page.request.get('/api/session?dwg=' + encodeURIComponent(runtime.drawingId))
+    expect(reply.ok()).toBe(true)
+    const { intake } = await reply.json()
+    expect(intake).toBeTruthy()
+    const index = buildDrawingObjectIndex({ drawingKey: runtime.drawingId, intake,
+      solarGraph: intake.solar_design_graph ? { drawingKey: runtime.drawingId, graph: intake.solar_design_graph } : null })
+    expect(index.records.length).toBeGreaterThan(0)
+    expect(index.resolve(recipe.control.inputValue).status).toBe('missing')
+    await locator.fill('')
+    await expect(page.getByRole('status').filter({ hasText: 'No matching object in this drawing.' })).toHaveCount(0)
+    await expect(locator).toHaveAttribute('aria-expanded', 'false')
+    runtime.cleanup.push(async () => { await locator.fill('') })
+  }
+  if (target === 'signed-out-session') {
+    await expect(locator).toHaveCount(1)
+    await expect(locator).toBeVisible()
+    await expect(page.getByRole('dialog', { name: 'Session · provenance', exact: true })).toBeHidden()
+  }
+}
+
 async function setupStep(probe, runtime, recipe) {
   const { page, stack, evidence } = runtime
   switch (recipe.kind) {
+    case 'fresh-sign-out-page': {
+      const ordinaryPage = runtime.page
+      const fresh = await ordinaryPage.context().newPage()
+      await fresh.addInitScript(seedSignOutIdentity, { identity: LOCAL_IDENTITY, coachKey: COACH_STORAGE_KEY })
+      runtime.page = fresh
+      runtime.cleanup.push(async () => { await fresh.close(); runtime.page = ordinaryPage })
+      return
+    }
+    case 'baseline-three-state': await baselineThreeState(probe, runtime, recipe); return
     case 'prepare-engine-transport':
       await page.addInitScript(() => {
         const NativeWorker = globalThis.Worker
@@ -772,6 +921,15 @@ async function captureBefore(probe, runtime) {
 async function activate(probe, runtime, locator) {
   const { page } = runtime
   const recipe = probe.locator
+  if (probe.assertion.target === 'signed-out-session') {
+    await Promise.all([page.waitForEvent('domcontentloaded'), locator.click()])
+    return
+  }
+  if (recipe.trigger === 'type' || recipe.trigger === 'fill-enter') {
+    if (recipe.trigger === 'type') await locator.pressSequentially(recipe.inputValue)
+    else { await locator.fill(recipe.inputValue); await locator.press('Enter') }
+    return
+  }
   if (probe.assertion.target === 'viewer-overview-pan') {
     const svg = locator.locator('svg')
     const box = await svg.boundingBox()
@@ -803,6 +961,80 @@ async function assertEffect(probe, runtime, locator, before) {
   const { page } = runtime
   const effect = probe.assertion
   const target = effect.target || ''
+  if (probe.kind === 'control' && baselineThreePanels[target]) {
+    const spec = baselineThreePanels[target]
+    const panel = namedPanel(page, spec)
+    await expect(panel).toBeVisible()
+    if (['claude-accounts-panel', 'linked-services-panel', 'version-history', 'cost-panel'].includes(target)) {
+      await expect(locator).toHaveAttribute('aria-expanded', 'true')
+    }
+    await expect(panel.getByRole('button', { name: spec.close, exact: true })).toBeVisible()
+    if (target === 'cost-panel') await expect(panel.getByRole('heading', { name: spec.name, exact: true })).toBeVisible()
+    return
+  }
+  if (target === 'scope-build-picker' || target === 'scope-picker') {
+    const scope = page.getByRole('listbox', { name: 'Scope', exact: true })
+    await expect(scope).toBeVisible()
+    if (target === 'scope-build-picker') await expect(scope.getByRole('option', { name: /^build ·/ })).toHaveAttribute('aria-selected', 'true')
+    else await expect(locator).toHaveAttribute('aria-expanded', 'true')
+    await page.keyboard.press('Escape')
+    await expect(scope).toBeHidden()
+    return
+  }
+  if (target === 'guided-demo') {
+    const properties = page.getByRole('complementary', { name: 'Properties', exact: true })
+    await expect(properties.getByRole('definition').filter({ hasText: /^rooftop_demo\.dwg$/ })).toBeVisible()
+    await expect(properties.getByRole('definition').filter({ hasText: /^sample data$/ })).toBeVisible()
+    await expect(page.getByRole('alert').filter({ hasText: /Couldn['’]t load drawing/ })).toHaveCount(0)
+    return
+  }
+  if (target === 'project-board') {
+    await expect(page.getByRole('heading', { name: 'Project board', exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Return to drawing', exact: true })).toBeVisible()
+    return
+  }
+  if (target === 'notification-inbox-collapsed') {
+    await expect(page.getByRole('button', { name: 'Expand the notification inbox', exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Expand the notification inbox', exact: true })).toHaveAttribute('aria-expanded', 'false')
+    await expect(page.getByRole('button', { name: 'Collapse the notification inbox', exact: true })).toHaveCount(0)
+    return
+  }
+  if (target === 'unknown-tool-resolver') {
+    const resolver = page.getByRole('listbox', { name: 'Route resolver', exact: true })
+    await expect(resolver).toBeVisible()
+    await expect(resolver.getByText('“/w1k-no-such-tool” isn’t a tool in this catalog. Pick an alternative:', { exact: true })).toBeVisible()
+    expect(runtime.localDecisionRequests).toEqual([])
+    return
+  }
+  if (target === 'signed-out-session') {
+    await expect(page.getByRole('button', { name: 'Sign out', exact: true })).toHaveCount(0)
+    const details = page.getByRole('button', { name: 'Details', exact: true })
+    await expect(details).toHaveCount(1)
+    await details.click()
+    const panel = page.getByRole('dialog', { name: 'Session · provenance', exact: true })
+    await expect(panel).toBeVisible()
+    await expect(panel.getByTestId('diagnostics-block')).toHaveText(/(?:^|\n)session signed out(?:\n|$)/)
+    await expect(panel.getByRole('button', { name: 'Refresh', exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Sign out', exact: true })).toHaveCount(0)
+    return
+  }
+  if (target === 'edit-lock-held') {
+    await expect(page.getByText('You hold the edit lock', { exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Release', exact: true })).toBeEnabled()
+    await expect(page.getByRole('button', { name: 'Take edit lock', exact: true })).toHaveCount(0)
+    return
+  }
+  if (target === 'tool-commands') {
+    await expect(locator).toHaveAttribute('aria-expanded', 'true')
+    await expect(locator).toHaveAttribute('aria-controls', 'slash-menu-listbox')
+    await expect(page.getByRole('listbox', { name: 'Tool commands', exact: true })).toBeVisible()
+    return
+  }
+  if (target === 'drawing-find-no-match') {
+    await expect(page.getByRole('status').filter({ hasText: /^No matching object in this drawing\.$/ })).toHaveText('No matching object in this drawing.')
+    await expect(locator).toHaveAttribute('aria-expanded', 'false')
+    return
+  }
   if (effect.kind === 'disabled_with_reason') {
     if (probe.kind === 'control') {
       await expect(locator).toBeDisabled()
@@ -1056,7 +1288,8 @@ async function assertEffect(probe, runtime, locator, before) {
 }
 
 export async function runProbe(probe, runtime) {
-  const { page, evidence } = runtime
+  const { evidence } = runtime
+  let page = runtime.page
   evidence.featureId = probe.featureId
   evidence.state = probe.state
   evidence.fixtureRecipe = probe.setup
@@ -1070,6 +1303,7 @@ export async function runProbe(probe, runtime) {
         evidence.steps.push({ phase: 'setup', ...recipe })
       })
     }
+    page = runtime.page
     const locator = control(page, runtime.testInfo.project.name === 'phone' && probe.locator.phone ? probe.locator.phone : probe.locator)
     const failedDrawingGroup = runtime.failedDrawing && probe.locator.group
       ? page.getByRole('toolbar', { name: 'Drafting tools', exact: true })

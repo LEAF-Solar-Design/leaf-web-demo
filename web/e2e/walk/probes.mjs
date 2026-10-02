@@ -61,6 +61,23 @@ export const CONTROL_CENSUS_BATCH = Object.freeze([
     states: ["ready"], viewports: ['desktop'] },
   { feature_id: 'control:job-monitor-expand', scope: 'toolbar:"Job monitor"', role: 'button', name: 'Expand the job monitor ({n} live)',
     states: ["ready","failed-load"], viewports: ['desktop'] },
+  {"feature_id":"control:scope-add","scope":"document","role":"button","name":"Add: build a new capability","states":["ready","failed-load"],"viewports":["desktop"]},
+  {"feature_id":"control:demo-return","scope":"document","role":"button","name":"Back to the demo","states":["failed-load"],"viewports":["desktop"]},
+  {"feature_id":"control:claude-accounts","scope":"document","role":"button","name":"Claude accounts not linked","states":["ready","failed-load"],"viewports":["desktop"]},
+  {"feature_id":"control:drawing-close-start","scope":"document","role":"button","name":"Close the drawing view and return to Start","states":["ready"],"viewports":["desktop"]},
+  {"feature_id":"control:notification-collapse","scope":"document","role":"button","name":"Collapse the notification inbox","states":["ready","failed-load"],"viewports":["desktop"]},
+  {"feature_id":"control:session-details","scope":"document","role":"button","name":"Details","states":["ready","failed-load"],"viewports":["desktop"]},
+  {"feature_id":"control:version-history","scope":"document","role":"button","name":"History","states":["ready"],"viewports":["desktop"]},
+  {"feature_id":"control:linked-services","scope":"document","role":"button","name":"Linked services {n} linked","states":["ready","failed-load"],"viewports":["desktop"]},
+  {"feature_id":"control:project-board","scope":"document","role":"button","name":"Open the project board","states":["ready","failed-load"],"viewports":["desktop"]},
+  {"feature_id":"control:prompt-run","scope":"document","role":"button","name":"Run","states":["ready","failed-load"],"viewports":["desktop"]},
+  {"feature_id":"control:prompt-scope","scope":"document","role":"button","name":"scope ▾","states":["ready","failed-load"],"viewports":["desktop"]},
+  {"feature_id":"control:sign-out","scope":"document","role":"button","name":"Sign out","states":["ready","failed-load"],"viewports":["desktop"]},
+  {"feature_id":"control:start-board","scope":"document","role":"button","name":"Start","states":["ready","failed-load"],"viewports":["desktop"]},
+  {"feature_id":"control:take-edit-lock","scope":"document","role":"button","name":"Take edit lock","states":["ready"],"viewports":["desktop"]},
+  {"feature_id":"control:cost-panel","scope":"document","role":"button","name":"What Leaf costs to operate","states":["ready","failed-load"],"viewports":["desktop"]},
+  {"feature_id":"control:command-bar","scope":"document","role":"combobox","name":"Command bar","states":["ready","failed-load"],"viewports":["desktop"]},
+  {"feature_id":"control:find-drawing","scope":"document","role":"combobox","name":"Find in drawing","states":["ready"],"viewports":["desktop"]},
 ])
 
 export const normalizedControlKey = (row) => controlKey({ ...row,
@@ -72,7 +89,7 @@ export function controlScope(context) {
 }
 export function controlName(context) {
   if (context.namePolicy !== 'count') return context.name
-  const count = context.name.startsWith('Expand ') ? '[0-9]+' : '[0-9][0-9,]*'
+  const count = context.name?.startsWith('Expand ') || context.name === 'Linked services {n} linked' ? '[0-9]+' : '[0-9][0-9,]*'
   return new RegExp('^' + context.name.split('{n}').map(escapePattern).join(count) + '$')
 }
 
@@ -97,7 +114,8 @@ export function locatorRecipe(entry, state) {
   const effect = entry.expected_effect[state]
   if (entry.kind === 'control') {
     const context = entry.state_contexts[state]
-    return { ...role('button', controlName(context), controlScope(context)), trigger: 'click',
+    return { ...role(context.role || 'button', controlName(context), controlScope(context)), trigger: context.interaction || 'click',
+      ...(context.inputValue !== undefined ? { inputValue: context.inputValue } : {}),
       ...(context.namePolicy === 'count' ? { normalizedName: context.name } : {}),
       tooltip: context.tooltip, description: context.description }
   }
@@ -184,10 +202,14 @@ export function stateRecipe(entry, state) {
     : entry.kind === 'surface' ? entry.source_id : 'cad'
   const steps = []
   if (entry.kind === 'control') {
+    if (effect.target === 'signed-out-session') steps.push(step('fresh-sign-out-page'))
     steps.push(context.failedLoad
       ? step('open-failed-drawing', { url: '/app?surface=cad&drawing=missing.invalid' })
       : step('open-private-drawing', { surface: 'cad' }))
     const locator = locatorRecipe(entry, state)
+    if (["control:scope-add","control:demo-return","control:claude-accounts","control:drawing-close-start","control:notification-collapse","control:session-details","control:version-history","control:linked-services","control:project-board","control:prompt-run","control:prompt-scope","control:sign-out","control:start-board","control:take-edit-lock","control:cost-panel","control:command-bar","control:find-drawing"].includes(entry.id)) {
+      steps.push(step('baseline-three-state', { sourceId: entry.source_id, target: effect.target, control: locator, expanded: context.expanded }))
+    }
     if (effect.target === 'drafting-grid') steps.push(step('control-pressed-state', { control: locator, pressed: context.pressed }))
     if (effect.target === 'document-fullscreen') steps.push(step('fullscreen-state', { control: locator, fullscreen: context.fullscreen }))
     if (entry.source_id === 'view-back') steps.push(step(state === 'empty-history' ? 'empty-view-history' : 'previous-view-history'))
