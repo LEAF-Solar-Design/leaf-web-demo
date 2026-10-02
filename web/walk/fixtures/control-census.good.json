@@ -1,0 +1,9 @@
+{
+  "map": { "entries": [{ "id": "control:known", "kind": "control", "locator": { "selector": "#known", "role": "button", "name": "Known", "trigger": "click" }, "states": ["ready"], "viewports": ["desktop"], "expected_effect": { "ready": { "kind": "disabled_with_reason", "reason": "Unavailable", "reason_code": "control:unavailable" } } }] },
+  "controls": [
+    { "index": 0, "tag": "button", "label": "Known", "visible": true, "disabled": true },
+    { "index": 1, "tag": "button", "label": "Hidden", "visible": false },
+    { "index": 2, "tag": "button", "label": "Inert", "visible": true, "inert": true }
+  ],
+  "mappings": [{ "key": "#known", "featureId": "control:known", "state": "ready", "viewports": ["desktop"], "indices": [0] }]
+}

@@ -6,6 +6,19 @@ import { effectAssertion, resolveProbe } from './probes.mjs'
 
 const map = buildFeatureMap()
 
+test('supplemental controls preserve explicit selectors, fixtures and typed effects', () => {
+  for (const entry of map.entries.filter((entry) => entry.kind === 'control')) {
+    for (const state of entry.states) {
+      const probe = resolveProbe(entry, state)
+      assert.deepEqual(probe.locator, entry.locator)
+      assert.deepEqual(probe.setup.steps, entry.fixture_recipe[state].steps)
+      assert.equal(probe.assertion.target, entry.expected_effect[state].target)
+      probe.setup.steps[0].kind = 'changed-copy'
+      assert.notEqual(entry.fixture_recipe[state].steps[0].kind, 'changed-copy')
+    }
+  }
+})
+
 for (const entry of map.entries) {
   for (const state of entry.states) {
     test(`${entry.id} [${state}] resolves a registry locator, state recipe and effect assertion`, () => {

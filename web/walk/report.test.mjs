@@ -25,6 +25,26 @@ const jsonLeaves = (value, path = []) => typeof value === 'string' ? [{ path, va
   : value && typeof value === 'object' ? Object.entries(value).flatMap(([key, item]) => jsonLeaves(item, [...path, key])) : []
 const withoutCreatedAt = (receipt) => { const { created_at, ...rest } = receipt; return rest }
 
+test('census titles produce independent verdicts and bounded failure oracles', () => {
+  for (const status of ['passed', 'failed']) {
+    const report = structuredClone(sample)
+    report.suites.push({ specs: [{ title: 'control-census:prompt [invalid] @desktop', tests: [{
+      projectName: 'desktop', expectedStatus: 'passed', results: [{ status,
+        errors: status === 'failed' ? [{ message: 'unmapped control' }] : [], attachments: [attach({ censuses: [{ ok: status === 'passed' }] })],
+      }],
+    }] }] })
+    const receipt = build(report)
+    assert.ok(receipt.verdicts.some((row) => row.feature_id === 'control-census:prompt' && row.verdict === (status === 'passed' ? 'PASS' : 'FAIL')))
+    if (status === 'failed') {
+      const failure = receipt.failures.find((row) => row.feature_id === 'control-census:prompt')
+      assert.equal(failure.state, 'invalid')
+      assert.equal(failure.fixture_recipe.parameters.steps[0].kind, 'control-census')
+      assert.match(failure.evidence.assertion_site, /^web\/e2e\/walk\/control-inventory.spec.mjs:\d+$/)
+    }
+    assert.equal(validateReceipt(receipt).valid, true)
+  }
+})
+
 test('real runner report produces a receipt conforming to the controller schema', () => {
   const receipt = build()
   assert.equal(receipt.schema, 'leaf.studio-walk.v1')

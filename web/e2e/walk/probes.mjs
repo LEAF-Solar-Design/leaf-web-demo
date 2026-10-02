@@ -22,6 +22,7 @@ function actionRecord(entry) {
 
 export function locatorRecipe(entry, state) {
   const effect = entry.expected_effect[state]
+  if (entry.kind === 'control') return structuredClone(entry.locator)
   if (entry.kind === 'action') {
     const action = actionRecord(entry)
     const why = effect.kind === 'disabled_with_reason' ? effect.reason : ''
@@ -99,6 +100,10 @@ function actionTab(action) {
 // These are recipes, not projected UI state. The executor must perform and
 // verify each step against the isolated product; it never assigns React state.
 export function stateRecipe(entry, state) {
+  if (entry.kind === 'control') {
+    if (!entry.fixture_recipe?.[state]?.steps?.length) throw new Error(`Missing control fixture recipe: ${entry.id}/${state}`)
+    return { context: {}, ...structuredClone(entry.fixture_recipe[state]) }
+  }
   const context = structuredClone(entry.state_contexts?.[state] || {})
   const effect = entry.expected_effect[state]
   const surface = entry.kind === 'tab' ? profileSurfaces[entry.profile]

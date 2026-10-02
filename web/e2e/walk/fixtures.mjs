@@ -83,6 +83,7 @@ const groupNames = { draw: 'Draw', modify: 'Modify', clipboard: 'Clipboard', pro
       view: 'View', version: 'Version', author: 'Author', rail: 'Rail' }
 const control = (page, recipe) => {
   let scope = recipe.scope ? control(page, recipe.scope) : page
+  if (recipe.selector) return scope.locator(recipe.selector)
   if (recipe.group && recipe.role !== 'combobox') {
     scope = scope.getByRole('group', { name: groupNames[recipe.group], exact: true })
   }
@@ -222,6 +223,27 @@ async function setToolRail(page, open, phone) {
 async function setupStep(probe, runtime, recipe) {
   const { page, stack, evidence } = runtime
   switch (recipe.kind) {
+    case 'reference-panel':
+      await setupStep(probe, runtime, { kind: 'ribbon-tab', name: recipe.name })
+      return
+    case 'prompt-state': {
+      await setupStep(probe, runtime, { kind: 'ribbon-tab', name: 'Draw' })
+      const bar = page.getByRole('combobox', { name: 'Command bar', exact: true })
+      await bar.fill('LINE')
+      await bar.press('Enter')
+      await expect(page.getByTestId('cockpit-prompt')).toBeVisible()
+      await page.getByLabel('ribbon x', { exact: true }).fill('0,0')
+      if (recipe.state !== 'incomplete') {
+        await page.getByLabel('ribbon x2', { exact: true }).fill(recipe.state === 'invalid' ? '0,0' : '10,0')
+      }
+      if (recipe.state === 'busy') {
+        await page.evaluate(() => { globalThis.__walkEngineTransport.hold = true })
+        await page.getByTestId('cockpit-prompt-run').click()
+        await expect.poll(() => page.evaluate(() => globalThis.__walkEngineTransport.pending.length)).toBeGreaterThan(0)
+      }
+      await expect(page.getByTestId('cockpit-prompt-run'))[recipe.state === 'valid' ? 'toBeEnabled' : 'toBeDisabled']()
+      return
+    }
     case 'prepare-engine-transport':
       await page.addInitScript(() => {
         const NativeWorker = globalThis.Worker
@@ -526,6 +548,8 @@ async function setupStep(probe, runtime, recipe) {
 async function captureBefore(probe, runtime) {
   const { page } = runtime
   const target = probe.assertion.target || ''
+  if (target === 'prompt-closed-without-submit') return { count: await engineCount(page) }
+  if (target === 'pressed-state') return { pressed: await control(page, probe.locator).getAttribute('aria-pressed') }
   if (target.startsWith('viewer-')) return { viewport: await viewportBounds(page) }
   if (target === 'properties-pane') return { visible: await page.getByRole('complementary', { name: 'Properties', exact: true }).isVisible() }
   if (target === 'version-history') return { visible: await page.getByRole('dialog', { name: 'Version history', exact: true }).isVisible() }
@@ -541,7 +565,8 @@ async function captureBefore(probe, runtime) {
 async function activate(probe, runtime, locator) {
   const { page } = runtime
   const recipe = probe.locator
-  if (recipe.trigger === 'keyboard') {
+  if (recipe.trigger === 'fill') await locator.fill(probe.assertion.value)
+  else if (recipe.trigger === 'keyboard') {
     if (recipe.key === 'Mod+K') await page.keyboard.press('ControlOrMeta+k')
     else {
       // Focus a real non-text control without clicking outside a drawer.
@@ -565,6 +590,16 @@ async function assertEffect(probe, runtime, locator, before) {
   const target = effect.target || ''
   if (effect.kind === 'disabled_with_reason') {
     await expect(locator).toBeDisabled()
+    if (probe.kind === 'control') {
+      const reason = effect.reason
+      if (probe.featureId.startsWith('control:prompt-') && probe.featureId !== 'control:prompt-run') {
+        await expect(page.getByTestId('cockpit-prompt-note')).toContainText(reason)
+      } else {
+        const holder = locator.locator('xpath=ancestor-or-self::*[@title][1]')
+        await expect(holder).toHaveAttribute('title', new RegExp(reason.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+      }
+      return
+    }
     if (runtime.failedDrawing) {
       const name = await locator.getAttribute('aria-label')
       const variant = probe.locator.disabledVariants.find((variant) => variant.name === name)
@@ -579,6 +614,16 @@ async function assertEffect(probe, runtime, locator, before) {
     // alone. Exact registry text must also remain on the native tooltip.
     await expect(locator).toHaveAccessibleName(new RegExp(effect.reason.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
     await expect(locator).toHaveAttribute('title', new RegExp(effect.reason.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    return
+  }
+  if (target === 'prompt-input') { await expect(locator).toHaveValue(effect.value); return }
+  if (target === 'pressed-state') {
+    await expect(locator).toHaveAttribute('aria-pressed', before.pressed === 'true' ? 'false' : 'true')
+    return
+  }
+  if (target === 'prompt-closed-without-submit') {
+    await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)
+    expect(await engineCount(page)).toBe(before.count)
     return
   }
   if (effect.kind === 'navigates') { await expect(page).toHaveURL(target); return }
@@ -741,6 +786,20 @@ export async function runProbe(probe, runtime) {
   } catch (error) {
     evidence.failure = { message: error.message, assertionId: probe.assertion.assertionId }
     throw error
+  } finally {
+    for (const cleanup of runtime.cleanup.reverse()) await cleanup()
+  }
+}
+
+// Census callers exercise setup transitions without activating the final control.
+export async function withProbeSetup(probe, runtime, visit) {
+  runtime.cleanup = []
+  try {
+    for (const recipe of probe.setup.steps) {
+      await setupStep(probe, runtime, recipe)
+      runtime.evidence.steps.push({ phase: 'setup', ...recipe })
+      await visit(recipe)
+    }
   } finally {
     for (const cleanup of runtime.cleanup.reverse()) await cleanup()
   }

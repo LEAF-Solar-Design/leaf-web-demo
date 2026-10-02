@@ -1,0 +1,1540 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "control:prompt-x",
+      "title": "ribbon x",
+      "sources": [
+        "web/src/cadedit/EngineRibbonClusters.jsx"
+      ],
+      "locator": {
+        "selector": "#cockpit-prompt [aria-label=\"ribbon x\"]",
+        "role": "textbox",
+        "name": "ribbon x",
+        "trigger": "fill"
+      },
+      "states": [
+        "valid",
+        "invalid",
+        "incomplete",
+        "busy"
+      ],
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both",
+      "fixture_recipe": {
+        "valid": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "valid"
+            }
+          ]
+        },
+        "invalid": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "invalid"
+            }
+          ]
+        },
+        "incomplete": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "incomplete"
+            }
+          ]
+        },
+        "busy": {
+          "steps": [
+            {
+              "kind": "prepare-engine-transport"
+            },
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "busy"
+            }
+          ]
+        }
+      },
+      "expected_effect": {
+        "valid": {
+          "kind": "renders",
+          "target": "prompt-input",
+          "value": "1",
+          "input": "x"
+        },
+        "invalid": {
+          "kind": "renders",
+          "target": "prompt-input",
+          "value": "1",
+          "input": "x"
+        },
+        "incomplete": {
+          "kind": "renders",
+          "target": "prompt-input",
+          "value": "1",
+          "input": "x"
+        },
+        "busy": {
+          "kind": "disabled_with_reason",
+          "reason_code": "control:engine-busy",
+          "reason": "engine busy: wait for the current edit"
+        }
+      }
+    },
+    {
+      "id": "control:prompt-y",
+      "title": "ribbon y",
+      "sources": [
+        "web/src/cadedit/EngineRibbonClusters.jsx"
+      ],
+      "locator": {
+        "selector": "#cockpit-prompt [aria-label=\"ribbon y\"]",
+        "role": "textbox",
+        "name": "ribbon y",
+        "trigger": "fill"
+      },
+      "states": [
+        "valid",
+        "invalid",
+        "incomplete",
+        "busy"
+      ],
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both",
+      "fixture_recipe": {
+        "valid": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "valid"
+            }
+          ]
+        },
+        "invalid": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "invalid"
+            }
+          ]
+        },
+        "incomplete": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "incomplete"
+            }
+          ]
+        },
+        "busy": {
+          "steps": [
+            {
+              "kind": "prepare-engine-transport"
+            },
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "busy"
+            }
+          ]
+        }
+      },
+      "expected_effect": {
+        "valid": {
+          "kind": "renders",
+          "target": "prompt-input",
+          "value": "1",
+          "input": "y"
+        },
+        "invalid": {
+          "kind": "renders",
+          "target": "prompt-input",
+          "value": "1",
+          "input": "y"
+        },
+        "incomplete": {
+          "kind": "renders",
+          "target": "prompt-input",
+          "value": "1",
+          "input": "y"
+        },
+        "busy": {
+          "kind": "disabled_with_reason",
+          "reason_code": "control:engine-busy",
+          "reason": "engine busy: wait for the current edit"
+        }
+      }
+    },
+    {
+      "id": "control:prompt-x2",
+      "title": "ribbon x2",
+      "sources": [
+        "web/src/cadedit/EngineRibbonClusters.jsx"
+      ],
+      "locator": {
+        "selector": "#cockpit-prompt [aria-label=\"ribbon x2\"]",
+        "role": "textbox",
+        "name": "ribbon x2",
+        "trigger": "fill"
+      },
+      "states": [
+        "valid",
+        "invalid",
+        "incomplete",
+        "busy"
+      ],
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both",
+      "fixture_recipe": {
+        "valid": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "valid"
+            }
+          ]
+        },
+        "invalid": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "invalid"
+            }
+          ]
+        },
+        "incomplete": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "incomplete"
+            }
+          ]
+        },
+        "busy": {
+          "steps": [
+            {
+              "kind": "prepare-engine-transport"
+            },
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "busy"
+            }
+          ]
+        }
+      },
+      "expected_effect": {
+        "valid": {
+          "kind": "renders",
+          "target": "prompt-input",
+          "value": "1",
+          "input": "x2"
+        },
+        "invalid": {
+          "kind": "renders",
+          "target": "prompt-input",
+          "value": "1",
+          "input": "x2"
+        },
+        "incomplete": {
+          "kind": "renders",
+          "target": "prompt-input",
+          "value": "1",
+          "input": "x2"
+        },
+        "busy": {
+          "kind": "disabled_with_reason",
+          "reason_code": "control:engine-busy",
+          "reason": "engine busy: wait for the current edit"
+        }
+      }
+    },
+    {
+      "id": "control:prompt-y2",
+      "title": "ribbon y2",
+      "sources": [
+        "web/src/cadedit/EngineRibbonClusters.jsx"
+      ],
+      "locator": {
+        "selector": "#cockpit-prompt [aria-label=\"ribbon y2\"]",
+        "role": "textbox",
+        "name": "ribbon y2",
+        "trigger": "fill"
+      },
+      "states": [
+        "valid",
+        "invalid",
+        "incomplete",
+        "busy"
+      ],
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both",
+      "fixture_recipe": {
+        "valid": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "valid"
+            }
+          ]
+        },
+        "invalid": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "invalid"
+            }
+          ]
+        },
+        "incomplete": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "incomplete"
+            }
+          ]
+        },
+        "busy": {
+          "steps": [
+            {
+              "kind": "prepare-engine-transport"
+            },
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "busy"
+            }
+          ]
+        }
+      },
+      "expected_effect": {
+        "valid": {
+          "kind": "renders",
+          "target": "prompt-input",
+          "value": "1",
+          "input": "y2"
+        },
+        "invalid": {
+          "kind": "renders",
+          "target": "prompt-input",
+          "value": "1",
+          "input": "y2"
+        },
+        "incomplete": {
+          "kind": "renders",
+          "target": "prompt-input",
+          "value": "1",
+          "input": "y2"
+        },
+        "busy": {
+          "kind": "disabled_with_reason",
+          "reason_code": "control:engine-busy",
+          "reason": "engine busy: wait for the current edit"
+        }
+      }
+    },
+    {
+      "id": "control:prompt-layer",
+      "title": "ribbon layer",
+      "sources": [
+        "web/src/cadedit/EngineRibbonClusters.jsx"
+      ],
+      "locator": {
+        "selector": "#cockpit-prompt [aria-label=\"ribbon layer\"]",
+        "role": "textbox",
+        "name": "ribbon layer",
+        "trigger": "fill"
+      },
+      "states": [
+        "valid",
+        "invalid",
+        "incomplete",
+        "busy"
+      ],
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both",
+      "fixture_recipe": {
+        "valid": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "valid"
+            }
+          ]
+        },
+        "invalid": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "invalid"
+            }
+          ]
+        },
+        "incomplete": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "incomplete"
+            }
+          ]
+        },
+        "busy": {
+          "steps": [
+            {
+              "kind": "prepare-engine-transport"
+            },
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "busy"
+            }
+          ]
+        }
+      },
+      "expected_effect": {
+        "valid": {
+          "kind": "renders",
+          "target": "prompt-input",
+          "value": "Walk",
+          "input": "layer"
+        },
+        "invalid": {
+          "kind": "renders",
+          "target": "prompt-input",
+          "value": "Walk",
+          "input": "layer"
+        },
+        "incomplete": {
+          "kind": "renders",
+          "target": "prompt-input",
+          "value": "Walk",
+          "input": "layer"
+        },
+        "busy": {
+          "kind": "disabled_with_reason",
+          "reason_code": "control:engine-busy",
+          "reason": "engine busy: wait for the current edit"
+        }
+      }
+    },
+    {
+      "id": "control:prompt-run",
+      "title": "Run",
+      "sources": [
+        "web/src/cadedit/EngineRibbonClusters.jsx"
+      ],
+      "locator": {
+        "selector": "[data-testid=\"cockpit-prompt-run\"]",
+        "role": "button",
+        "name": "Run",
+        "trigger": "click"
+      },
+      "states": [
+        "valid",
+        "invalid",
+        "incomplete",
+        "busy"
+      ],
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both",
+      "fixture_recipe": {
+        "valid": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "valid"
+            }
+          ]
+        },
+        "invalid": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "invalid"
+            }
+          ]
+        },
+        "incomplete": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "incomplete"
+            }
+          ]
+        },
+        "busy": {
+          "steps": [
+            {
+              "kind": "prepare-engine-transport"
+            },
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "busy"
+            }
+          ]
+        }
+      },
+      "expected_effect": {
+        "valid": {
+          "kind": "submits",
+          "target": "engine:createLine",
+          "operation": "createLine"
+        },
+        "invalid": {
+          "kind": "disabled_with_reason",
+          "reason_code": "control:line-points-differ",
+          "reason": "Line refused: the two points must differ."
+        },
+        "incomplete": {
+          "kind": "disabled_with_reason",
+          "reason_code": "control:line-next-point",
+          "reason": "Specify next point:"
+        },
+        "busy": {
+          "kind": "disabled_with_reason",
+          "reason_code": "control:engine-busy",
+          "reason": "engine busy: wait for the current edit"
+        }
+      }
+    },
+    {
+      "id": "control:prompt-cancel",
+      "title": "Cancel",
+      "sources": [
+        "web/src/cadedit/EngineRibbonClusters.jsx"
+      ],
+      "locator": {
+        "selector": "#cockpit-prompt .cp-cancel",
+        "role": "button",
+        "name": "Cancel",
+        "trigger": "click"
+      },
+      "states": [
+        "valid",
+        "invalid",
+        "incomplete",
+        "busy"
+      ],
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both",
+      "fixture_recipe": {
+        "valid": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "valid"
+            }
+          ]
+        },
+        "invalid": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "invalid"
+            }
+          ]
+        },
+        "incomplete": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "incomplete"
+            }
+          ]
+        },
+        "busy": {
+          "steps": [
+            {
+              "kind": "prepare-engine-transport"
+            },
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "busy"
+            }
+          ]
+        }
+      },
+      "expected_effect": {
+        "valid": {
+          "kind": "toggles",
+          "target": "prompt-closed-without-submit"
+        },
+        "invalid": {
+          "kind": "toggles",
+          "target": "prompt-closed-without-submit"
+        },
+        "incomplete": {
+          "kind": "toggles",
+          "target": "prompt-closed-without-submit"
+        },
+        "busy": {
+          "kind": "toggles",
+          "target": "prompt-closed-without-submit"
+        }
+      }
+    },
+    {
+      "id": "control:prompt-ortho",
+      "title": "ORTHO",
+      "sources": [
+        "web/src/cadedit/EngineRibbonClusters.jsx"
+      ],
+      "locator": {
+        "selector": "[data-testid=\"cockpit-ortho\"]",
+        "role": "button",
+        "name": "ORTHO",
+        "trigger": "click"
+      },
+      "states": [
+        "valid",
+        "invalid",
+        "incomplete",
+        "busy"
+      ],
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both",
+      "fixture_recipe": {
+        "valid": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "valid"
+            }
+          ]
+        },
+        "invalid": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "invalid"
+            }
+          ]
+        },
+        "incomplete": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "incomplete"
+            }
+          ]
+        },
+        "busy": {
+          "steps": [
+            {
+              "kind": "prepare-engine-transport"
+            },
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "busy"
+            }
+          ]
+        }
+      },
+      "expected_effect": {
+        "valid": {
+          "kind": "toggles",
+          "target": "pressed-state"
+        },
+        "invalid": {
+          "kind": "toggles",
+          "target": "pressed-state"
+        },
+        "incomplete": {
+          "kind": "toggles",
+          "target": "pressed-state"
+        },
+        "busy": {
+          "kind": "toggles",
+          "target": "pressed-state"
+        }
+      }
+    },
+    {
+      "id": "control:prompt-osnap",
+      "title": "OSNAP",
+      "sources": [
+        "web/src/cadedit/EngineRibbonClusters.jsx"
+      ],
+      "locator": {
+        "selector": "[data-testid=\"cockpit-osnap\"]",
+        "role": "button",
+        "name": "OSNAP",
+        "trigger": "click"
+      },
+      "states": [
+        "valid",
+        "invalid",
+        "incomplete",
+        "busy"
+      ],
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both",
+      "fixture_recipe": {
+        "valid": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "valid"
+            }
+          ]
+        },
+        "invalid": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "invalid"
+            }
+          ]
+        },
+        "incomplete": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "incomplete"
+            }
+          ]
+        },
+        "busy": {
+          "steps": [
+            {
+              "kind": "prepare-engine-transport"
+            },
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "engine-ready"
+            },
+            {
+              "kind": "prompt-state",
+              "state": "busy"
+            }
+          ]
+        }
+      },
+      "expected_effect": {
+        "valid": {
+          "kind": "toggles",
+          "target": "pressed-state"
+        },
+        "invalid": {
+          "kind": "toggles",
+          "target": "pressed-state"
+        },
+        "incomplete": {
+          "kind": "toggles",
+          "target": "pressed-state"
+        },
+        "busy": {
+          "kind": "toggles",
+          "target": "pressed-state"
+        }
+      }
+    },
+    {
+      "id": "control:reference-annotation-text",
+      "title": "Text",
+      "sources": [
+        "web/src/lib/ribbonClusters.js"
+      ],
+      "locator": {
+        "selector": "[data-tool=\"annotation:text\"][disabled][title=\"not in the browser engine yet\"]",
+        "role": "button",
+        "name": "Text",
+        "trigger": "click"
+      },
+      "states": [
+        "placeholder"
+      ],
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both",
+      "fixture_recipe": {
+        "placeholder": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "reference-panel",
+              "name": "Annotate"
+            }
+          ]
+        }
+      },
+      "expected_effect": {
+        "placeholder": {
+          "kind": "disabled_with_reason",
+          "reason_code": "control:not-in-engine",
+          "reason": "not in the browser engine yet"
+        }
+      }
+    },
+    {
+      "id": "control:reference-draw-create-block",
+      "title": "Create Block",
+      "sources": [
+        "web/src/lib/ribbonClusters.js"
+      ],
+      "locator": {
+        "selector": "[data-tool=\"draw:createBlock\"][disabled][title=\"not in the browser engine yet\"]",
+        "role": "button",
+        "name": "Create Block",
+        "trigger": "click"
+      },
+      "states": [
+        "placeholder"
+      ],
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both",
+      "fixture_recipe": {
+        "placeholder": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "reference-panel",
+              "name": "Insert"
+            }
+          ]
+        }
+      },
+      "expected_effect": {
+        "placeholder": {
+          "kind": "disabled_with_reason",
+          "reason_code": "control:not-in-engine",
+          "reason": "not in the browser engine yet"
+        }
+      }
+    },
+    {
+      "id": "control:reference-block-insert",
+      "title": "Insert Block",
+      "sources": [
+        "web/src/lib/ribbonClusters.js"
+      ],
+      "locator": {
+        "selector": "[data-tool=\"block:insert\"][disabled][title=\"not in the browser engine yet\"]",
+        "role": "button",
+        "name": "Insert Block",
+        "trigger": "click"
+      },
+      "states": [
+        "placeholder"
+      ],
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both",
+      "fixture_recipe": {
+        "placeholder": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "reference-panel",
+              "name": "Insert"
+            }
+          ]
+        }
+      },
+      "expected_effect": {
+        "placeholder": {
+          "kind": "disabled_with_reason",
+          "reason_code": "control:not-in-engine",
+          "reason": "not in the browser engine yet"
+        }
+      }
+    },
+    {
+      "id": "control:reference-properties-match",
+      "title": "Match",
+      "sources": [
+        "web/src/lib/ribbonClusters.js"
+      ],
+      "locator": {
+        "selector": "[data-tool=\"properties:match\"][disabled][title=\"not in the browser engine yet\"]",
+        "role": "button",
+        "name": "Match",
+        "trigger": "click"
+      },
+      "states": [
+        "placeholder"
+      ],
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both",
+      "fixture_recipe": {
+        "placeholder": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "reference-panel",
+              "name": "Draw"
+            }
+          ]
+        }
+      },
+      "expected_effect": {
+        "placeholder": {
+          "kind": "disabled_with_reason",
+          "reason_code": "control:not-in-engine",
+          "reason": "not in the browser engine yet"
+        }
+      }
+    },
+    {
+      "id": "control:reference-groups-group",
+      "title": "Group",
+      "sources": [
+        "web/src/lib/ribbonClusters.js"
+      ],
+      "locator": {
+        "selector": "[data-tool=\"groups:group\"][disabled][title=\"not in the browser engine yet\"]",
+        "role": "button",
+        "name": "Group",
+        "trigger": "click"
+      },
+      "states": [
+        "placeholder"
+      ],
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both",
+      "fixture_recipe": {
+        "placeholder": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "reference-panel",
+              "name": "Draw"
+            }
+          ]
+        }
+      },
+      "expected_effect": {
+        "placeholder": {
+          "kind": "disabled_with_reason",
+          "reason_code": "control:not-in-engine",
+          "reason": "not in the browser engine yet"
+        }
+      }
+    },
+    {
+      "id": "control:reference-groups-ungroup",
+      "title": "Ungroup",
+      "sources": [
+        "web/src/lib/ribbonClusters.js"
+      ],
+      "locator": {
+        "selector": "[data-tool=\"groups:ungroup\"][disabled][title=\"not in the browser engine yet\"]",
+        "role": "button",
+        "name": "Ungroup",
+        "trigger": "click"
+      },
+      "states": [
+        "placeholder"
+      ],
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both",
+      "fixture_recipe": {
+        "placeholder": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "reference-panel",
+              "name": "Draw"
+            }
+          ]
+        }
+      },
+      "expected_effect": {
+        "placeholder": {
+          "kind": "disabled_with_reason",
+          "reason_code": "control:not-in-engine",
+          "reason": "not in the browser engine yet"
+        }
+      }
+    },
+    {
+      "id": "control:reference-clipboard-paste",
+      "title": "Paste",
+      "sources": [
+        "web/src/lib/ribbonClusters.js"
+      ],
+      "locator": {
+        "selector": "[data-tool=\"clipboard:paste\"][disabled][title=\"not in the browser engine yet\"]",
+        "role": "button",
+        "name": "Paste",
+        "trigger": "click"
+      },
+      "states": [
+        "placeholder"
+      ],
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both",
+      "fixture_recipe": {
+        "placeholder": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "reference-panel",
+              "name": "Draw"
+            }
+          ]
+        }
+      },
+      "expected_effect": {
+        "placeholder": {
+          "kind": "disabled_with_reason",
+          "reason_code": "control:not-in-engine",
+          "reason": "not in the browser engine yet"
+        }
+      }
+    },
+    {
+      "id": "control:reference-clipboard-cut",
+      "title": "Cut",
+      "sources": [
+        "web/src/lib/ribbonClusters.js"
+      ],
+      "locator": {
+        "selector": "[data-tool=\"clipboard:cut\"][disabled][title=\"not in the browser engine yet\"]",
+        "role": "button",
+        "name": "Cut",
+        "trigger": "click"
+      },
+      "states": [
+        "placeholder"
+      ],
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both",
+      "fixture_recipe": {
+        "placeholder": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "reference-panel",
+              "name": "Draw"
+            }
+          ]
+        }
+      },
+      "expected_effect": {
+        "placeholder": {
+          "kind": "disabled_with_reason",
+          "reason_code": "control:not-in-engine",
+          "reason": "not in the browser engine yet"
+        }
+      }
+    },
+    {
+      "id": "control:reference-clipboard-copy",
+      "title": "Copy",
+      "sources": [
+        "web/src/lib/ribbonClusters.js"
+      ],
+      "locator": {
+        "selector": "[data-tool=\"clipboard:copy\"][disabled][title=\"not in the browser engine yet\"]",
+        "role": "button",
+        "name": "Copy",
+        "trigger": "click"
+      },
+      "states": [
+        "placeholder"
+      ],
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both",
+      "fixture_recipe": {
+        "placeholder": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "reference-panel",
+              "name": "Draw"
+            }
+          ]
+        }
+      },
+      "expected_effect": {
+        "placeholder": {
+          "kind": "disabled_with_reason",
+          "reason_code": "control:not-in-engine",
+          "reason": "not in the browser engine yet"
+        }
+      }
+    },
+    {
+      "id": "control:reference-prop-color",
+      "title": "Color",
+      "sources": [
+        "web/src/lib/ribbonClusters.js"
+      ],
+      "locator": {
+        "selector": "[data-widget=\"prop-color\"][title=\"not in the browser engine yet\"] select",
+        "role": "combobox",
+        "name": "Color",
+        "trigger": "click"
+      },
+      "states": [
+        "placeholder"
+      ],
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both",
+      "fixture_recipe": {
+        "placeholder": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "reference-panel",
+              "name": "Draw"
+            }
+          ]
+        }
+      },
+      "expected_effect": {
+        "placeholder": {
+          "kind": "disabled_with_reason",
+          "reason_code": "control:not-in-engine",
+          "reason": "not in the browser engine yet"
+        }
+      }
+    },
+    {
+      "id": "control:reference-prop-linetype",
+      "title": "Linetype",
+      "sources": [
+        "web/src/lib/ribbonClusters.js"
+      ],
+      "locator": {
+        "selector": "[data-widget=\"prop-linetype\"][title=\"not in the browser engine yet\"] select",
+        "role": "combobox",
+        "name": "Linetype",
+        "trigger": "click"
+      },
+      "states": [
+        "placeholder"
+      ],
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both",
+      "fixture_recipe": {
+        "placeholder": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "reference-panel",
+              "name": "Draw"
+            }
+          ]
+        }
+      },
+      "expected_effect": {
+        "placeholder": {
+          "kind": "disabled_with_reason",
+          "reason_code": "control:not-in-engine",
+          "reason": "not in the browser engine yet"
+        }
+      }
+    },
+    {
+      "id": "control:reference-prop-lineweight",
+      "title": "Lineweight",
+      "sources": [
+        "web/src/lib/ribbonClusters.js"
+      ],
+      "locator": {
+        "selector": "[data-widget=\"prop-lineweight\"][title=\"not in the browser engine yet\"] select",
+        "role": "combobox",
+        "name": "Lineweight",
+        "trigger": "click"
+      },
+      "states": [
+        "placeholder"
+      ],
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both",
+      "fixture_recipe": {
+        "placeholder": {
+          "steps": [
+            {
+              "kind": "open-private-drawing",
+              "surface": "cad"
+            },
+            {
+              "kind": "reference-panel",
+              "name": "Draw"
+            }
+          ]
+        }
+      },
+      "expected_effect": {
+        "placeholder": {
+          "kind": "disabled_with_reason",
+          "reason_code": "control:not-in-engine",
+          "reason": "not in the browser engine yet"
+        }
+      }
+    }
+  ],
+  "presentations": [
+    {
+      "feature_id": "action:fit",
+      "selector": ".cockpit-view [aria-label=\"Fit drawing to view\"]",
+      "state": "ready",
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "action:zoom-in",
+      "selector": ".cockpit-view [aria-label=\"Zoom in\"]",
+      "state": "ready",
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "action:zoom-out",
+      "selector": ".cockpit-view [aria-label=\"Zoom out\"]",
+      "state": "ready",
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "action:undo",
+      "selector": "[data-quick=\"quick-undo\"]",
+      "state": "nothing-to-undo",
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "action:redo",
+      "selector": "[data-quick=\"quick-redo\"]",
+      "state": "nothing-to-redo",
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "drawer:nav",
+      "selector": ".studio-drawer-tabs button:first-child",
+      "state": "closed",
+      "viewports": [
+        "desktop"
+      ]
+    }
+  ]
+}

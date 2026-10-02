@@ -7,13 +7,14 @@ import { PROFILE_RIBBON_TABS } from '../src/lib/ribbonTabs.data.js'
 import { STUDIO_DRAWERS } from '../src/lib/studioDrawers.js'
 import { PROMPTS } from '../src/cadedit/promptKeys.js'
 import { isWriteTool, toolMcpSource } from '../src/lib/toolRecord.js'
+import { controlEntries, readControlInventory, validateControlInventory } from './controlInventory.mjs'
 
 const readJson = (path) => JSON.parse(readFileSync(new URL(path, import.meta.url), 'utf8'))
 export const DEFAULT_REGISTRIES = Object.freeze({
   actions: ACTIONS, surfaces: PRODUCT_SURFACES, drawers: STUDIO_DRAWERS,
   tabs: PROFILE_RIBBON_TABS, surfaceStates: productSurfaceStates,
 })
-export const ID_GRAMMAR = /^(?:(?:action|surface|drawer|tool):[a-z0-9]+(?:-[a-z0-9]+)*|tab:[a-z0-9]+(?:-[a-z0-9]+)*:[a-z0-9]+(?:-[a-z0-9]+)*)$/
+export const ID_GRAMMAR = /^(?:(?:action|surface|drawer|tool|control):[a-z0-9]+(?:-[a-z0-9]+)*|tab:[a-z0-9]+(?:-[a-z0-9]+)*:[a-z0-9]+(?:-[a-z0-9]+)*)$/
 const EFFECT_KINDS = new Set(['opens', 'toggles', 'navigates', 'submits', 'disabled_with_reason', 'renders'])
 const CERTIFY_CLASSES = new Set(['local', 'staging', 'both', 'unsupported_local'])
 const nonempty = (value) => typeof value === 'string' && value.trim().length > 0
@@ -279,14 +280,15 @@ export function validateFeatureMap(map) {
       }
     }
   }
+  validateControlInventory({ version: 1, entries: map.entries.filter((entry) => entry.kind === 'control'), presentations: [] })
   return map
 }
 
 // An independent comparison seam: tests can supply fake registries, or remove
 // a produced row, without changing the reference inventory being checked.
 export function checkCompleteness(map, registries = DEFAULT_REGISTRIES,
-  snapshot = readJson('./fixtures/capabilities.snapshot.json')) {
-  const expected = inventory(registries, snapshot).map((item) => item.id)
+  snapshot = readJson('./fixtures/capabilities.snapshot.json'), controls = readControlInventory()) {
+  const expected = [...inventory(registries, snapshot).map((item) => item.id), ...controlEntries(controls).map((entry) => entry.id)]
   if (new Set(expected).size !== expected.length) throw new Error('featureMap: registry id collision')
   const actual = map.entries.map((entry) => entry.id)
   const missing = expected.filter((id) => !actual.includes(id))
@@ -300,14 +302,16 @@ export function checkCompleteness(map, registries = DEFAULT_REGISTRIES,
 
 export function buildFeatureMap({ registries = DEFAULT_REGISTRIES,
   snapshot = readJson('./fixtures/capabilities.snapshot.json'),
+  controls = readControlInventory(),
   overrides = readJson('./features.overrides.json') } = {}) {
   const items = inventory(registries, snapshot)
   validateOverrides(overrides, items.map((item) => item.id))
-  const entries = items.map((item) => buildEntry(item, overrides, snapshot, registries)).sort((a, b) => compare(a.id, b.id))
+  const entries = [...items.map((item) => buildEntry(item, overrides, snapshot, registries)), ...controlEntries(controls)]
+    .sort((a, b) => compare(a.id, b.id))
   const map = canonical({ schema_version: 1, catalog_version: snapshot.catalog_version,
     entries, exemptions: [...overrides.exemptions].sort((a, b) => compare(a.id, b.id)) })
   validateFeatureMap(map)
-  checkCompleteness(map, registries, snapshot)
+  checkCompleteness(map, registries, snapshot, controls)
   return map
 }
 

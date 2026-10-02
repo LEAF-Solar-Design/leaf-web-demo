@@ -12,7 +12,8 @@ const artifactsRoot = resolve(repoRoot, 'web/artifacts')
 const schema = JSON.parse(readFileSync(new URL('./fixtures/leaf.studio-walk.v1.schema.json', import.meta.url), 'utf8'))
 const runnerFile = 'web/e2e/walk/fixtures.mjs'
 const journeyFile = 'web/e2e/walk/journeys/first-run-open.spec.mjs'
-const sources = new Map([runnerFile, journeyFile].map((file) => [file,
+const censusFile = 'web/e2e/walk/control-inventory.spec.mjs'
+const sources = new Map([runnerFile, journeyFile, censusFile].map((file) => [file,
   readFileSync(resolve(repoRoot, file), 'utf8').split(/\r?\n/)]))
 const wireVerdict = { pass: 'PASS', fail: 'FAIL', unsupported_local: 'UNAVAILABLE', staging_only: 'UNAVAILABLE', queued: 'UNKNOWN' }
 const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0
@@ -165,7 +166,7 @@ function sourceLocation(file, line) {
   return known && /\bexpect(?:\s*\(|\.poll\s*\()/.test(sources.get(known)[line - 1] || '') ? `${known}:${line}` : null
 }
 
-function assertionSite(result, journey) {
+function assertionSite(result, journey, census = false) {
   const locations = []
   const visitSteps = (steps) => {
     for (const step of steps || []) {
@@ -179,9 +180,9 @@ function assertionSite(result, journey) {
     const site = sourceLocation(location.file, location.line)
     if (site) return { site, observed: true }
   }
-  const file = journey ? journeyFile : runnerFile
+  const file = census ? censusFile : journey ? journeyFile : runnerFile
   const lines = sources.get(file)
-  const begin = journey ? 0 : lines.findIndex((line) => line.startsWith('export async function runProbe'))
+  const begin = journey || census ? 0 : lines.findIndex((line) => line.startsWith('export async function runProbe'))
   const index = lines.findIndex((line, i) => i >= begin && /\bexpect(?:\s*\(|\.poll\s*\()/.test(line))
   if (index < 0) throw new Error('Trusted runner has no expect call site')
   return { site: `${file}:${index + 1}`, observed: false }
@@ -189,7 +190,7 @@ function assertionSite(result, journey) {
 
 function oracle(entry, state, viewport, result, journey = false) {
   const effect = journey ? { kind: 'renders', target: 'first-run-open:sample-drawing' } : entry.expected_effect[state]
-  const location = assertionSite(result, journey)
+  const location = assertionSite(result, journey, entry.census)
   const assertion_id = 'assertion:' + createHash('sha256')
     .update(JSON.stringify([effect.kind, effect.target ?? null, location.site])).digest('hex')
   const setup = journey ? { firstRun: true, steps: [{ kind: 'navigate', url: '/try' },
@@ -253,11 +254,21 @@ export function buildReceipt({ playwrightReport, featureMap, identity }) {
     triples.set(key, { entry, triple, runs: [] })
   }
   const journeys = new Map()
+  const censuses = new Map()
   for (const spec of specs(playwrightReport.suites)) {
     const match = spec.title?.match(/^([^\s]+) \[([^\]]+)\] @(desktop|phone)$/)
+    const census = spec.title?.match(/^(control-census:[a-z0-9]+(?:-[a-z0-9]+)*) \[([a-z0-9]+(?:-[a-z0-9]+)*)\] @(desktop|phone)$/)
     const journey = spec.title?.match(/^first-run-open @(desktop|phone)$/)
     let row
-    if (match) {
+    if (census) {
+      const [id, state, viewport] = census.slice(1)
+      const key = JSON.stringify([id, state, viewport])
+      if (!censuses.has(key)) censuses.set(key, { entry: { id, kind: 'control', census: true,
+        expected_effect: { [state]: { kind: 'renders', target: id } },
+        fixture_recipe: { [state]: { steps: [{ kind: 'control-census', scope: id.slice(15), state }] } } },
+        triple: { feature_id: id, state, viewport }, runs: [] })
+      row = censuses.get(key)
+    } else if (match) {
       row = triples.get(JSON.stringify(match.slice(1)))
       if (!row) throw new Error('Test names a triple absent from the feature map')
     } else if (journey) {
@@ -279,7 +290,7 @@ export function buildReceipt({ playwrightReport, featureMap, identity }) {
       if (Object.keys(evidence).length) receipt.findings.push(...observations(row.entry.id, row.triple.state, row.triple.viewport, evidence))
     }
   }
-  for (const row of [...triples.values(), ...journeys.values()]) {
+  for (const row of [...triples.values(), ...journeys.values(), ...censuses.values()]) {
     const { triple, runs } = row
     if (!runs.length) {
       receipt.coverage_gaps.push({ feature_id: triple.feature_id, reason: `No test result: ${triple.state} @${triple.viewport}` })

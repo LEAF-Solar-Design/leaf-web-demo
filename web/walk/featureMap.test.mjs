@@ -6,6 +6,7 @@ import { PRODUCT_SURFACES } from '../src/site/productSurfaces.js'
 import { PROFILE_RIBBON_TABS } from '../src/lib/ribbonTabs.data.js'
 import { STUDIO_DRAWERS } from '../src/lib/studioDrawers.js'
 import { PROMPTS } from '../src/cadedit/promptKeys.js'
+import { readControlInventory } from './controlInventory.mjs'
 import {
   buildFeatureMap, checkCompleteness, DEFAULT_REGISTRIES, featureId,
   ID_GRAMMAR, summarizeFeatureMap, validateFeatureMap, validateOverrides,
@@ -19,8 +20,21 @@ const map = buildFeatureMap()
 const ids = map.entries.map((entry) => entry.id)
 const entryFor = (id) => map.entries.find((entry) => entry.id === id)
 
+test('control rows retain their inventory recipes and cannot lose their locators', () => {
+  const invalid = clone(map)
+  delete invalid.entries.find((entry) => entry.kind === 'control').locator
+  assert.throws(() => validateFeatureMap(invalid), /locator recipe/)
+  assert.ok(ID_GRAMMAR.test('control:prompt-run'))
+  const inventory = readControlInventory()
+  for (const row of inventory.entries) {
+    assert.deepEqual(entryFor(row.id).fixture_recipe, row.fixture_recipe)
+    assert.deepEqual(entryFor(row.id).expected_effect, row.expected_effect)
+  }
+})
+
 test('every exported action, surface, drawer and profile tab appears exactly once', () => {
   const expected = [
+    ...readControlInventory().entries.map((row) => row.id),
     ...ACTIONS.map((action) => featureId('action', action.id)),
     ...PRODUCT_SURFACES.map((surface) => featureId('surface', surface.id)),
     ...STUDIO_DRAWERS.map((drawer) => featureId('drawer', drawer)),

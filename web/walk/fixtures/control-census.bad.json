@@ -1,0 +1,8 @@
+{
+  "map": { "entries": [{ "id": "control:known", "states": ["ready"], "viewports": ["desktop"], "expected_effect": { "ready": { "kind": "renders", "target": "known-effect" } } }] },
+  "controls": [
+    { "index": 0, "tag": "button", "label": "Known", "visible": true },
+    { "index": 1, "tag": "button", "label": "Extra unmapped control", "visible": true }
+  ],
+  "mappings": [{ "key": "#known", "featureId": "control:known", "state": "ready", "viewports": ["desktop"], "indices": [0] }]
+}
