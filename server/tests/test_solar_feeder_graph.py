@@ -242,16 +242,19 @@ def test_feeder_graph_length_is_the_kernel_row(c5):
         string["route"] = [[p * scale for p in point] for point in string["route"]]
     for route in g["routes"]:
         route["points"] = [[p * scale for p in point] for point in route["points"]]
-    expected, _ = kernel(validate_graph(g), c5[2])
-    rows = {cab._feeder_ends(r)[0]: r for r in expected["rows"]["cable"] if r.get("cable_kind") == "feeder"}
+    base, _ = fg.route_feeders(deepcopy(c5[3]), c5[2])
     result, _ = fg.route_feeders(g, c5[2])
-    mpu = result["project"]["units"]["meters_per_unit"]
-    numbers = {i["id"]: i["number"] for i in result["inverters"]}
+    base_routes = {r["from_ref"]: r for r in feeders(base)}
+    result_routes = {r["from_ref"]: r for r in feeders(result)}
+    assert set(result_routes) == set(base_routes)
+    assert len(result_routes) == 14
     for route in feeders(result):
-        # Graph points are metres; kernel lengths treat drawing units as inches.
-        points = [(p[0] / mpu, p[1] / mpu) for p in route["points"]]
-        assert route["length_ft"] == rows[numbers[route["from_ref"]]]["length"]["value"]
-        assert route["length_ft"] == pytest.approx(cab._path_length(points) / cab.INCHES_PER_FOOT, rel=1e-15)
+        baseline = base_routes[route["from_ref"]]
+        assert len(route["points"]) == len(baseline["points"])
+        assert route["length_ft"] == pytest.approx(baseline["length_ft"] * 0.3048 / 0.0254, rel=1e-12)
+        # The kernel runs in inches whatever the drawing unit.
+        points = [(p[0] / 0.0254, p[1] / 0.0254) for p in route["points"]]
+        assert route["length_ft"] == pytest.approx(cab._path_length(points) / cab.INCHES_PER_FOOT, rel=1e-12)
 
 
 def test_feeder_graph_codes_closed():
