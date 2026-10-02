@@ -147,6 +147,18 @@ describe('App portal wiring', () => {
 })
 
 describe('rollback contract', () => {
+  it('insets the fixed Find field past the open tool rail only on desktop', () => {
+    const css = read('./studioShell.css')
+    const shell = '.studio-shell .app[data-studio-shell="cockpit"][data-surface]'
+    const selector = `${shell}:has(aside.nav:not([data-spine])) .drawing-navigation`
+    const start = css.indexOf(`@media (min-width: 981px) {\n\n${selector} {`)
+    expect(start).toBeGreaterThan(-1)
+    const rule = css.slice(css.indexOf(`${selector} {`, start))
+    expect(rule.slice(0, rule.indexOf('}'))).toContain('left: calc(var(--ck-nav-width) + 8px);')
+    const rail = css.slice(css.indexOf(`${shell} aside.nav:not([data-spine]) {`))
+    expect(rail.slice(0, rail.indexOf('}'))).toContain('width: var(--ck-nav-width);')
+  })
+
   it('the ground context defaults to null — no provider means the old shell', () => {
     const src = read('./studioGround.js')
     expect(src).toMatch(/createContext\(null\)/)

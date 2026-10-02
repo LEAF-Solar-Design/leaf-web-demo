@@ -118,8 +118,8 @@
 }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] main.center-scroll { padding: 0; }
 @media (min-width: 981px) {
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] { --ck-nav-width: 300px; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface]:has(aside.rail[data-spine]) { grid-template-columns: 0 1fr 0; }
-.studio-shell .app[data-studio-shell="cockpit"][data-surface]:has(aside.nav[data-spine="hidden"]):has(aside.rail[data-spine]) { grid-template-columns: 0 1fr 0; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] aside.rail[data-spine] {
     position: fixed; right: 12px; bottom: 0; top: auto; z-index: 41;
     width: auto; height: 29px; padding: 0 6px; margin: 0;
@@ -310,9 +310,13 @@
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar { position: relative; }
 }
 @media (min-width: 981px) {
+/* The Find field is viewport-fixed above the rail, so its own inset must clear the open rail. */
+.studio-shell .app[data-studio-shell="cockpit"][data-surface]:has(aside.nav:not([data-spine])) .drawing-navigation {
+    left: calc(var(--ck-nav-width) + 8px);
+  }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] aside.nav:not([data-spine]) {
     position: fixed; left: 0; top: var(--ck-canvas-top); bottom: var(--ck-status); z-index: 5;
-    width: 300px; margin: 0; border: 0; border-right: 1px solid var(--ck-edge); border-radius: 0;
+    width: var(--ck-nav-width); margin: 0; border: 0; border-right: 1px solid var(--ck-edge); border-radius: 0;
     box-shadow: 8px 0 24px rgba(0, 0, 0, .4); backdrop-filter: none; background: var(--ck-chrome);
     overflow-y: auto;
   }
