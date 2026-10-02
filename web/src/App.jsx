@@ -128,6 +128,7 @@ import { fetchIosSurfaceStatus } from './ios/iosSurfaceStatus.js'
 import { authConfigured, login, isSignedIn, handleRedirectCallback, isAuthRedirectCallback } from './auth.js'
 import { shouldAutoDemo, explicitDemo } from './demoState.js'
 import { humanizeError } from './errorHumanize.js'
+import { classifyDrawingLoadFailure } from './drawing/loadFailure.js'
 import { composeDiagnostics, collectRefusals, taskRevisionOf } from './diagnostics.js'
 import { recentRequestFailures } from './api.js'
 import { cadTimingRows } from './cadTimingPresentation.js'
@@ -1121,7 +1122,7 @@ export default function App() {
       })
       .catch((e) => {
         if (!current()) return
-        setDrawingLoad({ drawingId: loadDrawingId, state: e?.status === 404 ? 'absent' : 'failed' })
+        setDrawingLoad({ drawingId: loadDrawingId, state: e?.status === 404 ? 'absent' : 'failed', failure: classifyDrawingLoadFailure(e) })
         setLoadErr(humanizeError(e))
         if (!mock && is401(e)) {
           // `tokenInvalidated` stays FALSE on purpose: this is render state
@@ -4382,8 +4383,10 @@ export default function App() {
             {loadErr && !signedOut && (
               <div className="pane-fail" role="alert" style={{ position: 'absolute', inset: 0 }}>
                 <span className="pane-fail-title"><span className="dot red" aria-hidden="true" />Couldn’t load drawing</span>
-                <span className="pane-fail-reason">{loadErr}</span>
-                <button className="chip-act" onClick={() => setIntakeRetryKey((k) => k + 1)}>Retry</button>
+                <span className="pane-fail-reason">{drawingLoad.failure === 'permanent' ? 'This drawing could not be found or opened.' : loadErr}</span>
+                {drawingLoad.failure !== 'permanent' && (
+                  <button className="chip-act" onClick={() => setIntakeRetryKey((k) => k + 1)}>Retry</button>
+                )}
                 {/* There is always a way home: in live mode a dead backend makes
                     Retry unwinnable, so offer the same demo escape the
                     SignedOutGate already gives. */}
