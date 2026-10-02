@@ -13,6 +13,134 @@
       "viewports": [
         "desktop"
       ]
+    },
+    {
+      "scope": "toolbar:\"Drafting settings\"",
+      "role": "button",
+      "name": "Grid display",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ],
+      "feature_id": "control:grid-display"
+    },
+    {
+      "scope": "toolbar:\"Drafting settings\"",
+      "role": "button",
+      "name": "Object snap",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ],
+      "feature_id": "control:object-snap"
+    },
+    {
+      "scope": "toolbar:\"Drafting settings\"",
+      "role": "button",
+      "name": "Ortho mode",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ],
+      "feature_id": "control:ortho-mode"
+    },
+    {
+      "scope": "toolbar:\"Drafting settings\"",
+      "role": "button",
+      "name": "Polar tracking",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ],
+      "feature_id": "control:polar-tracking"
+    },
+    {
+      "scope": "toolbar:\"Drafting settings\"",
+      "role": "button",
+      "name": "Snap mode",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ],
+      "feature_id": "control:snap-mode"
+    },
+    {
+      "scope": "toolbar:\"Drafting settings\"",
+      "role": "button",
+      "name": "Toggle fullscreen",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ],
+      "feature_id": "control:fullscreen"
+    },
+    {
+      "scope": "toolbar:\"View\"",
+      "role": "button",
+      "name": "Back to the previous view",
+      "states": [
+        "ready"
+      ],
+      "viewports": [
+        "desktop"
+      ],
+      "feature_id": "control:view-back"
+    },
+    {
+      "scope": "toolbar:\"View\"",
+      "role": "button",
+      "name": "Up one level",
+      "states": [
+        "ready"
+      ],
+      "viewports": [
+        "desktop"
+      ],
+      "feature_id": "control:view-up"
+    },
+    {
+      "scope": "toolbar:\"Quick access\"",
+      "role": "button",
+      "name": "New drawing",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ],
+      "feature_id": "control:new-drawing"
+    },
+    {
+      "scope": "toolbar:\"Quick access\"",
+      "role": "button",
+      "name": "Print",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ],
+      "feature_id": "control:print"
     }
   ],
   "baseline_unmapped": [
@@ -357,84 +485,6 @@
       ]
     },
     {
-      "scope": "toolbar:\"Drafting settings\"",
-      "role": "button",
-      "name": "Grid display",
-      "reason": "No feature-map coverage yet: no walk mapping",
-      "states": [
-        "ready",
-        "failed-load"
-      ],
-      "viewports": [
-        "desktop"
-      ]
-    },
-    {
-      "scope": "toolbar:\"Drafting settings\"",
-      "role": "button",
-      "name": "Object snap",
-      "reason": "No feature-map coverage yet: no walk mapping",
-      "states": [
-        "ready",
-        "failed-load"
-      ],
-      "viewports": [
-        "desktop"
-      ]
-    },
-    {
-      "scope": "toolbar:\"Drafting settings\"",
-      "role": "button",
-      "name": "Ortho mode",
-      "reason": "No feature-map coverage yet: no walk mapping",
-      "states": [
-        "ready",
-        "failed-load"
-      ],
-      "viewports": [
-        "desktop"
-      ]
-    },
-    {
-      "scope": "toolbar:\"Drafting settings\"",
-      "role": "button",
-      "name": "Polar tracking",
-      "reason": "No feature-map coverage yet: no walk mapping",
-      "states": [
-        "ready",
-        "failed-load"
-      ],
-      "viewports": [
-        "desktop"
-      ]
-    },
-    {
-      "scope": "toolbar:\"Drafting settings\"",
-      "role": "button",
-      "name": "Snap mode",
-      "reason": "No feature-map coverage yet: no walk mapping",
-      "states": [
-        "ready",
-        "failed-load"
-      ],
-      "viewports": [
-        "desktop"
-      ]
-    },
-    {
-      "scope": "toolbar:\"Drafting settings\"",
-      "role": "button",
-      "name": "Toggle fullscreen",
-      "reason": "No feature-map coverage yet: no walk mapping",
-      "states": [
-        "ready",
-        "failed-load"
-      ],
-      "viewports": [
-        "desktop"
-      ]
-    },
-    {
       "scope": "toolbar:\"Drafting tools\" > group:\"Layers\"",
       "role": "button",
       "name": "Panels",
@@ -466,56 +516,6 @@
       "states": [
         "ready",
         "failed-load"
-      ],
-      "viewports": [
-        "desktop"
-      ]
-    },
-    {
-      "scope": "toolbar:\"Quick access\"",
-      "role": "button",
-      "name": "New drawing",
-      "reason": "No feature-map coverage yet: no walk mapping",
-      "states": [
-        "ready",
-        "failed-load"
-      ],
-      "viewports": [
-        "desktop"
-      ]
-    },
-    {
-      "scope": "toolbar:\"Quick access\"",
-      "role": "button",
-      "name": "Print",
-      "reason": "No feature-map coverage yet: no walk mapping",
-      "states": [
-        "ready",
-        "failed-load"
-      ],
-      "viewports": [
-        "desktop"
-      ]
-    },
-    {
-      "scope": "toolbar:\"View\"",
-      "role": "button",
-      "name": "Back to the previous view",
-      "reason": "No feature-map coverage yet: no walk mapping",
-      "states": [
-        "ready"
-      ],
-      "viewports": [
-        "desktop"
-      ]
-    },
-    {
-      "scope": "toolbar:\"View\"",
-      "role": "button",
-      "name": "Up one level",
-      "reason": "No feature-map coverage yet: no walk mapping",
-      "states": [
-        "ready"
       ],
       "viewports": [
         "desktop"

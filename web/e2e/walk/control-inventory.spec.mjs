@@ -1,5 +1,5 @@
 import { test, expect, runProbe } from './fixtures.mjs'
-import { resolveProbe } from './probes.mjs'
+import { requireControlCensusBatch, resolveProbe } from './probes.mjs'
 import { censusControls, enumerateControls } from './controlCensus.mjs'
 import { buildFeatureMap } from '../../walk/featureMap.mjs'
 import { censusFailure, controlKey, controlNameAttributes, resolveCensus } from '../../walk/controlInventory.mjs'
@@ -32,6 +32,7 @@ test.describe('rendered control census', () => {
       }
       if (state === 'ready') expect(census.resolved.some((row) => row.feature_id === 'action:fit'
         && row.scope === 'toolbar:"View"'), 'viewer Fit must resolve to its registry action').toBe(true)
+      expect(requireControlCensusBatch(census, { state, viewport: 'desktop' })).toBe(true)
       const path = process.env.LEAF_WALK_CENSUS_RECORD
       if (path) {
         for (const control of [...census.unmapped, ...census.baselined]) {

@@ -25,6 +25,7 @@ const exclusionOverrides = { ...overrides, overrides: { ...overrides.overrides,
 
 test('every exported action, surface, drawer and profile tab appears exactly once', () => {
   const expected = [
+    ...overrides.controls.map((control) => control.id),
     ...ACTIONS.map((action) => featureId('action', action.id)),
     ...PRODUCT_SURFACES.map((surface) => featureId('surface', surface.id)),
     ...STUDIO_DRAWERS.map((drawer) => featureId('drawer', drawer)),
@@ -45,6 +46,70 @@ test('completeness rejects every omitted row, including tools and the none drawe
       error.message.includes('completeness failed') && error.message.includes(entry.id), entry.id)
   }
   assert.throws(() => checkCompleteness({ ...map, entries: [...map.entries, map.entries[0]] }), /duplicate/)
+})
+
+test('ten exact control declarations participate in independent completeness', () => {
+  const expected = ['fullscreen', 'grid-display', 'new-drawing', 'object-snap', 'ortho-mode',
+    'polar-tracking', 'print', 'snap-mode', 'view-back', 'view-up'].map((id) => 'control:' + id)
+  assert.deepEqual(map.entries.filter((row) => row.kind === 'control').map((row) => row.id), expected)
+  for (const declaration of overrides.controls) {
+    const entry = entryFor(declaration.id)
+    assert.equal(entry.source_id, declaration.source_id)
+    assert.deepEqual(entry.expected_effect, declaration.expected_effect)
+    assert.deepEqual(entry.state_contexts, declaration.state_contexts)
+    assert.equal(entry.certify, 'both')
+    assert.deepEqual(entry.viewports, ['desktop'])
+    const reference = overrides.controls.filter((row) => row.id !== declaration.id)
+    assert.throws(() => checkCompleteness(map, DEFAULT_REGISTRIES, snapshot, reference), /unexpected/)
+  }
+})
+
+test('malformed control declarations, duplicate ids and missing contracts fail closed', () => {
+  for (const mutate of [
+    (config) => { config.controls = null },
+    (config) => { config.controls.push(clone(config.controls[0])) },
+    (config) => { config.controls[0] = null },
+    (config) => { config.controls[0].selector = 'button' },
+    (config) => { config.controls[0].id = 'control:*' },
+    (config) => { config.controls[0].source_id = 'Grid Display' },
+    (config) => { delete config.controls[0].expected_effect },
+    (config) => { config.controls[0].expected_effect.extra = { kind: 'toggles', target: 'drafting-grid' } },
+    (config) => { delete config.controls[0].state_contexts.on },
+    (config) => { config.controls[0].state_contexts.on = {} },
+    (config) => { config.controls[0].state_contexts.on.selector = 'button' },
+    (config) => { config.controls[0].state_contexts.on.pressed = 'true' },
+    (config) => { config.controls[0].expected_effect.on.value = true },
+    (config) => { delete config.controls[1].state_contexts.unavailable.tooltip },
+    (config) => { config.controls[1].state_contexts.unavailable.name = 'Object snap' },
+    (config) => { config.controls[0].sources = ['../outside.js'] },
+    (config) => { config.controls[0].certify = 'unknown' },
+    (config) => { config.controls[1].expected_effect.unavailable.reason = '' },
+    (config) => { delete config.controls[1].expected_effect.unavailable.reason_code },
+    (config) => { config.controls[1].expected_effect.unavailable.reason_code = 'made-up-code' },
+    (config) => { config.controls[0].expected_effect.on.unrecognized = true },
+    (config) => { config.control = [] },
+    (config) => { config.overrides['control:unknown'] = { title: 'Unknown' } },
+  ]) {
+    const config = clone(overrides)
+    mutate(config)
+    assert.throws(() => buildFeatureMap({ overrides: config }), /featureMap:/)
+  }
+})
+
+test('default build keeps engine drafting modes unavailable and viewer controls executable', () => {
+  for (const id of ['object-snap', 'ortho-mode', 'polar-tracking', 'snap-mode']) {
+    const entry = entryFor('control:' + id)
+    for (const effect of Object.values(entry.expected_effect)) {
+      assert.equal(effect.kind, 'disabled_with_reason')
+      assert.equal(effect.reason, 'not in the browser viewer yet')
+      assert.equal(effect.reason_code, entry.id + ':unavailable')
+    }
+  }
+  const grid = entryFor('control:grid-display')
+  assert.deepEqual(grid.expected_effect.off, { kind: 'toggles', target: 'drafting-grid', value: true })
+  assert.deepEqual(grid.expected_effect.on, { kind: 'toggles', target: 'drafting-grid', value: false })
+  assert.equal(entryFor('control:view-back').expected_effect['history-present'].target, 'viewer-previous-view')
+  assert.equal(entryFor('control:view-up').expected_effect['whole-drawing'].target, 'viewer-whole-drawing')
 })
 
 test('checker compares injected registries independently of the built map', () => {

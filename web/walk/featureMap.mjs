@@ -13,7 +13,7 @@ export const DEFAULT_REGISTRIES = Object.freeze({
   actions: ACTIONS, surfaces: PRODUCT_SURFACES, drawers: STUDIO_DRAWERS,
   tabs: PROFILE_RIBBON_TABS, surfaceStates: productSurfaceStates,
 })
-export const ID_GRAMMAR = /^(?:(?:action|surface|drawer|tool):[a-z0-9]+(?:-[a-z0-9]+)*|tab:[a-z0-9]+(?:-[a-z0-9]+)*:[a-z0-9]+(?:-[a-z0-9]+)*)$/
+export const ID_GRAMMAR = /^(?:(?:action|surface|drawer|tool|control):[a-z0-9]+(?:-[a-z0-9]+)*|tab:[a-z0-9]+(?:-[a-z0-9]+)*:[a-z0-9]+(?:-[a-z0-9]+)*)$/
 const EFFECT_KINDS = new Set(['opens', 'toggles', 'navigates', 'submits', 'disabled_with_reason', 'renders'])
 const CERTIFY_CLASSES = new Set(['local', 'staging', 'both', 'unsupported_local'])
 const nonempty = (value) => typeof value === 'string' && value.trim().length > 0
@@ -65,8 +65,9 @@ function catalogTools(snapshot) {
   })
 }
 
-function inventory(registries, snapshot) {
+function inventory(registries, snapshot, controls = []) {
   return [
+    ...controls.map((record) => ({ id: record.id, kind: 'control', record })),
     ...registries.actions.map((record) => ({ id: featureId('action', record.id), kind: 'action', record })),
     ...registries.surfaces.map((record) => ({ id: featureId('surface', record.id), kind: 'surface', record })),
     ...registries.drawers.map((record) => ({ id: featureId('drawer', record), kind: 'drawer', record })),
@@ -83,6 +84,10 @@ export function validateOverrides(config, knownIds) {
   if (config?.version !== 1 || !config.overrides || !Array.isArray(config.exemptions)) {
     throw new Error('featureMap: overrides require version 1, overrides and exemptions')
   }
+  if (Object.keys(config).some((key) => !['version', 'controls', 'state_cases', 'overrides', 'exemptions'].includes(key))) {
+    throw new Error('featureMap: unknown configuration field')
+  }
+  validateControls(config.controls === undefined ? [] : config.controls)
   const known = new Set(knownIds)
   const exactId = (id, type) => {
     if (!ID_GRAMMAR.test(id) || /[*?\[\]]/.test(id)) {
@@ -120,6 +125,59 @@ export function validateOverrides(config, knownIds) {
     exempted.add(exemption.id)
   }
   return config
+}
+
+function validateControls(controls) {
+  if (!Array.isArray(controls)) throw new Error('featureMap: controls must be an array')
+  const seen = new Set()
+  const allowed = new Set(['id', 'source_id', 'title', 'sources', 'states', 'state_contexts', 'expected_effect', 'viewports', 'certify', 'certify_reason'])
+  for (const record of controls) {
+    if (!record || typeof record !== 'object' || Array.isArray(record)
+        || Object.keys(record).some((key) => !allowed.has(key))) throw new Error('featureMap: unknown or malformed control declaration')
+    if (!nonempty(record.source_id) || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(record.source_id)
+        || record.id !== featureId('control', record.source_id)
+        || !ID_GRAMMAR.test(record.id)) throw new Error('featureMap: control requires an exact id and source_id')
+    if (seen.has(record.id)) throw new Error('featureMap: duplicate control id ' + record.id)
+    seen.add(record.id)
+    validateFeatureMap({ entries: [{ ...record, kind: 'control' }] })
+    if (!record.state_contexts || Object.keys(record.state_contexts).length !== record.states.length
+        || record.states.some((state) => !record.state_contexts[state]
+          || typeof record.state_contexts[state] !== 'object' || Array.isArray(record.state_contexts[state]))) {
+      throw new Error('featureMap: ' + record.id + ' context/state mismatch')
+    }
+    for (const state of record.states) {
+      const effect = record.expected_effect[state]
+      const context = record.state_contexts[state]
+      const contextFields = ['toolbar', 'name', 'tooltip', 'description', 'failedLoad', 'pressed', 'fullscreen']
+      if (!nonempty(context.toolbar) || !nonempty(context.name)
+          || Object.keys(context).some((key) => !contextFields.includes(key))
+          || ['failedLoad', 'pressed', 'fullscreen'].some((key) => context[key] !== undefined && typeof context[key] !== 'boolean')) {
+        throw new Error('featureMap: invalid control context ' + record.id + '/' + state)
+      }
+      if (effect.kind === 'disabled_with_reason') {
+        if (!nonempty(context.tooltip) || (context.description !== undefined
+          ? context.description !== effect.reason || context.name !== record.title
+          : context.name !== record.title + ' (unavailable: ' + effect.reason + ')')) {
+          throw new Error('featureMap: control disabled evidence mismatch ' + record.id + '/' + state)
+        }
+      } else if (context.name !== record.title) {
+        throw new Error('featureMap: control accessible name mismatch ' + record.id + '/' + state)
+      }
+      if (effect.kind === 'toggles') {
+        const initial = effect.target === 'drafting-grid' ? context.pressed
+          : effect.target === 'document-fullscreen' ? context.fullscreen : undefined
+        if (typeof initial !== 'boolean' || typeof effect.value !== 'boolean' || effect.value === initial) {
+          throw new Error('featureMap: control toggle needs opposite setup and effect states ' + record.id + '/' + state)
+        }
+      }
+      const fields = effect.kind === 'disabled_with_reason' ? ['kind', 'reason', 'reason_code'] : ['kind', 'target', 'value']
+      if (Object.keys(effect).some((key) => !fields.includes(key))) throw new Error('featureMap: unknown control effect field ' + record.id)
+      if (effect.kind === 'disabled_with_reason' && effect.reason_code !== record.id + ':unavailable') {
+        throw new Error('featureMap: invalid control reason code ' + record.id)
+      }
+    }
+  }
+  return controls
 }
 
 function disabled(sentence, code = reasonCode(sentence)) {
@@ -182,7 +240,10 @@ function buildEntry(item, config, snapshot, registries) {
     viewports: record.viewports?.includes('phone') || record.phone === true ? ['desktop', 'phone'] : ['desktop'],
     certify: 'both',
   }
-  if (kind === 'action') {
+  if (kind === 'control') {
+    Object.assign(entry, structuredClone(record), { kind })
+    entry.sources.push('web/walk/features.overrides.json')
+  } else if (kind === 'action') {
     entry.title = override.title || record.title({})
     entry.sources = ['web/src/lib/actionRegistry.js']
     if (record.op) entry.sources.push('web/src/cadedit/promptKeys.js', 'web/src/cadedit/EngineRibbonClusters.jsx')
@@ -270,7 +331,8 @@ export function validateFeatureMap(map) {
     }
     if (!Array.isArray(entry.viewports) || !entry.viewports.includes('desktop')
         || entry.viewports.some((value) => !['desktop', 'phone'].includes(value))) throw new Error(`featureMap: invalid viewports for ${entry.id}`)
-    if (Object.keys(entry.expected_effect).length !== entry.states.length) throw new Error(`featureMap: ${entry.id} effect/state mismatch`)
+    if (!entry.expected_effect || typeof entry.expected_effect !== 'object' || Array.isArray(entry.expected_effect)
+        || Object.keys(entry.expected_effect).length !== entry.states.length) throw new Error(`featureMap: ${entry.id} effect/state mismatch`)
     for (const state of entry.states) {
       const effect = entry.expected_effect[state]
       if (!nonempty(state) || !effect || !EFFECT_KINDS.has(effect.kind)
@@ -285,8 +347,10 @@ export function validateFeatureMap(map) {
 // An independent comparison seam: tests can supply fake registries, or remove
 // a produced row, without changing the reference inventory being checked.
 export function checkCompleteness(map, registries = DEFAULT_REGISTRIES,
-  snapshot = readJson('./fixtures/capabilities.snapshot.json')) {
-  const expected = inventory(registries, snapshot).map((item) => item.id)
+  snapshot = readJson('./fixtures/capabilities.snapshot.json'),
+  controls = readJson('./features.overrides.json').controls || []) {
+  validateControls(controls)
+  const expected = inventory(registries, snapshot, controls).map((item) => item.id)
   if (new Set(expected).size !== expected.length) throw new Error('featureMap: registry id collision')
   const actual = map.entries.map((entry) => entry.id)
   const missing = expected.filter((id) => !actual.includes(id))
@@ -301,13 +365,14 @@ export function checkCompleteness(map, registries = DEFAULT_REGISTRIES,
 export function buildFeatureMap({ registries = DEFAULT_REGISTRIES,
   snapshot = readJson('./fixtures/capabilities.snapshot.json'),
   overrides = readJson('./features.overrides.json') } = {}) {
-  const items = inventory(registries, snapshot)
+  validateControls(overrides.controls === undefined ? [] : overrides.controls)
+  const items = inventory(registries, snapshot, overrides.controls || [])
   validateOverrides(overrides, items.map((item) => item.id))
   const entries = items.map((item) => buildEntry(item, overrides, snapshot, registries)).sort((a, b) => compare(a.id, b.id))
   const map = canonical({ schema_version: 1, catalog_version: snapshot.catalog_version,
     entries, exemptions: [...overrides.exemptions].sort((a, b) => compare(a.id, b.id)) })
   validateFeatureMap(map)
-  checkCompleteness(map, registries, snapshot)
+  checkCompleteness(map, registries, snapshot, overrides.controls || [])
   return map
 }
 
