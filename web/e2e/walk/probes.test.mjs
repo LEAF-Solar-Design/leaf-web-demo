@@ -4,9 +4,78 @@ import { buildFeatureMap } from '../../walk/featureMap.mjs'
 import { ACTIONS, REASONS, accessibleName, reasonCode } from '../../src/lib/actionRegistry.js'
 import { effectAssertion, resolveProbe, normalizedControlKey, requireControlCensusBatch, CONTROL_CENSUS_BATCH } from './probes.mjs'
 import { readFileSync } from 'node:fs'
-import { stackInstanceRef } from './fixtures.mjs'
+import { stackInstanceRef, UnsupportedLocalError } from './fixtures.mjs'
 
 const map = buildFeatureMap()
+// As in uxProbe.test.mjs, exercise the actual runner with fake Playwright
+// steps; also run the evidence fixture's teardown to check its attachment.
+const fixtureSource = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
+const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
+const functionBody = (start, end) => fixtureSource.slice(fixtureSource.indexOf(start) + start.length,
+  fixtureSource.indexOf(end)).trim().slice(0, -1)
+const unsupportedStep = new AsyncFunction('probe', 'runtime', 'reason', 'UnsupportedLocalError',
+  functionBody('async function unsupported(probe, runtime, reason) {', '\nasync function engineReady'))
+const probeRunner = new AsyncFunction('probe', 'runtime', 'test', 'setupStep', 'UnsupportedLocalError',
+  functionBody('export async function runProbe(probe, runtime) {', '\n// This reporter'))
+const evidenceFixture = new AsyncFunction('use', 'testInfo', fixtureSource.slice(
+  fixtureSource.indexOf('walkEvidence: [async ({}, use, testInfo) => {')
+    + 'walkEvidence: [async ({}, use, testInfo) => {'.length,
+  fixtureSource.indexOf('}, { auto: true }]')))
+
+async function unsupportedRuntime(error, log = [], attachments = []) {
+  const testInfo = { title: 'unsupported unit probe', project: { name: 'desktop' }, annotations: [],
+    attach: async (name, attachment) => { attachments.push({ name, ...attachment }) } }
+  const probe = { featureId: 'action:unit', state: 'ready', certify: 'local',
+    setup: { steps: [{ kind: 'unavailable' }, { kind: 'must-not-run' }] },
+    assertion: { assertionId: 'unit/effect' } }
+  let runtime, result
+  await evidenceFixture(async (evidence) => {
+    runtime = { evidence, testInfo, page: {} }
+    result = await probeRunner(probe, runtime, { step: async (name, fn) => { log.push(name); await fn() } },
+      async (_probe, current) => {
+        current.cleanup.push(async () => { log.push('cleanup one') })
+        current.cleanup.push(async () => { log.push('cleanup two') })
+        if (error) throw error
+        await unsupportedStep(probe, current, 'No local fixture', UnsupportedLocalError)
+      }, UnsupportedLocalError)
+  }, testInfo)
+  return { result, runtime, attachments, log }
+}
+
+test('unsupported setup unwinds, cleans up and attaches unavailable evidence without activation', async () => {
+  const { result, runtime, attachments, log } = await unsupportedRuntime()
+  assert.deepEqual(result, { unsupported: true, reason: 'No local fixture' })
+  assert.deepEqual(log, ['Setup: unavailable', 'cleanup two', 'cleanup one'])
+  assert.deepEqual(runtime.testInfo.annotations, [{ type: 'unsupported_local', description: 'No local fixture' }])
+  assert.equal(Object.hasOwn(runtime.evidence, 'failure'), false)
+  for (const name of ['walk-result', 'walk-evidence']) {
+    const attachment = attachments.find((item) => item.name === name)
+    assert.equal(attachment.contentType, 'application/json')
+    const evidence = JSON.parse(attachment.body.toString('utf8'))
+    assert.equal(name === 'walk-result' ? evidence.result : evidence.result.result, 'unsupported_local')
+  }
+})
+
+test('ordinary errors, including lookalike unsupported errors, propagate unchanged', async () => {
+  for (const error of [new Error('setup broke'), Object.assign(new Error('UNSUPPORTED_LOCAL: fake'),
+    { name: 'UnsupportedLocalError' })]) {
+    const log = [], attachments = []
+    await assert.rejects(unsupportedRuntime(error, log, attachments), (actual) => actual === error)
+    assert.deepEqual(log, ['Setup: unavailable', 'cleanup two', 'cleanup one'])
+    const evidence = JSON.parse(attachments.find((item) => item.name === 'walk-evidence').body.toString('utf8'))
+    assert.equal(evidence.failure.message, error.message)
+    assert.equal(Object.hasOwn(evidence, 'result'), false)
+  }
+})
+
+test('UnsupportedLocalError preserves the unsupported message and reason', () => {
+  const error = new UnsupportedLocalError({ featureId: 'action:bar-escape', state: 'selection-present' }, 'No local fixture')
+  assert.ok(error instanceof Error)
+  assert.equal(error.name, 'UnsupportedLocalError')
+  assert.equal(error.message, 'UNSUPPORTED_LOCAL: action:bar-escape [selection-present]: No local fixture')
+  assert.equal(error.reason, 'No local fixture')
+})
+
 test('stack instance refs are private, deterministic sha256 identities of the boot', () => {
   const directory = 'leaf-walk-stack-private-directory'
   const ref = stackInstanceRef(directory, 12345, 1800000000000)

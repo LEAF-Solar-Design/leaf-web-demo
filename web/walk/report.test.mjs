@@ -349,6 +349,27 @@ test('failed then passed retries and duplicate runs become flakes while failures
   assert.equal(build().flakes.length, 0)
 })
 
+test('passed unsupported evidence and legacy failed unsupported errors remain unavailable', () => {
+  for (const status of ['passed', 'failed']) {
+    const spec = structuredClone(featureSpec(sample))
+    spec.tests[0].expectedStatus = 'passed'
+    const result = firstResult(spec)
+    result.status = status
+    result.errors = []
+    delete result.error
+    const reason = 'The production bundle has no mounted browser editing engine'
+    result.attachments = status === 'passed'
+      ? [attach({ result: { result: 'unsupported_local', reason } })] : []
+    if (status === 'failed') setErrorMessage(result, `UNSUPPORTED_LOCAL: drawer:nav [closed]: ${reason}`)
+    const receipt = build({ suites: [{ specs: [spec] }] })
+    assert.equal(receipt.evidence.cases[0].verdict, 'unsupported_local')
+    assert.ok(receipt.unavailable_features.some((row) => row.feature_id === 'drawer:nav'))
+    assert.ok(receipt.evidence.unavailable[0].reason.includes(reason))
+    assert.ok(receipt.verdicts.every((row) => row.verdict !== 'PASS'))
+    assert.equal(receipt.failures.length, 0)
+  }
+})
+
 test('unsupported, staging certifications and queued execution cannot become passes', () => {
   const receipt = build()
   const unsupported = receipt.evidence.cases.filter((row) => row.verdict === 'unsupported_local')
