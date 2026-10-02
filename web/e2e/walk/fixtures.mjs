@@ -102,6 +102,31 @@ async function viewportBounds(page) {
     return [key, value]
   })))
 }
+const viewButton = (page, name) => page.getByRole('toolbar', { name: 'View', exact: true })
+  .getByRole('button', { name, exact: true })
+const layerButtons = (page) => page.getByRole('toolbar', { name: 'Drafting tools', exact: true })
+  .getByRole('group', { name: 'Layers', exact: true }).getByRole('button')
+async function viewState(page) {
+  return { viewport: await viewportBounds(page),
+    selection: await page.getByTestId('cockpit-status').locator('.cockpit-sel').innerText(),
+    layers: await layerButtons(page).evaluateAll((buttons) => buttons.map((button) => ({
+      name: button.getAttribute('aria-label') || button.textContent.trim(), pressed: button.getAttribute('aria-pressed'),
+    }))) }
+}
+async function requireGrid(page, on) {
+  const grid = page.getByTestId('viewer-grid')
+  if (on) {
+    await expect(grid).toHaveCount(1)
+    await expect.poll(() => grid.evaluate((element) => Number(element.getAttribute('data-grid-step')))).toBeGreaterThan(0)
+    await expect.poll(() => grid.evaluate((element) => getComputedStyle(element).backgroundImage)).toContain('linear-gradient')
+  } else await expect(grid).toHaveCount(0)
+}
+async function requireViewport(page, expected) {
+  await expect.poll(async () => {
+    const current = await viewportBounds(page)
+    return Math.max(...['x', 'y', 'width', 'height'].map((key) => Math.abs(current[key] - expected[key])))
+  }).toBeLessThanOrEqual(0.2)
+}
 async function engineCount(page) {
   return Number(await page.getByTestId('cad-edit-entity-count').innerText())
 }
@@ -136,7 +161,7 @@ async function createLine(probe, runtime) {
   await page.keyboard.press('Escape')
 }
 async function selectEntity(probe, runtime, recipe) {
-  await engineReady(probe, runtime)
+  if (!recipe.viewerOnly) await engineReady(probe, runtime)
   const { page } = runtime
   // Calibrate the flat drawing's projection from its production cursor
   // readout. Selection still uses native mouse input on the real canvas.
@@ -184,7 +209,8 @@ async function selectEntity(probe, runtime, recipe) {
     try { await clickPoint(points[1]) } finally { await page.keyboard.up('Shift') }
     await expect(page.getByTestId('dock-selection-count')).toHaveText('2 objects selected')
   }
-  await expect(page.getByTestId('dock-properties')).toBeVisible()
+  if (recipe.viewerOnly) await expect(page.getByTestId('cockpit-status').locator('.cockpit-sel')).toHaveText(/^sel /)
+  else await expect(page.getByTestId('dock-properties')).toBeVisible()
 }
 async function setDrawer(page, name, open) {
   const button = panelButton(page, name)
@@ -342,6 +368,63 @@ async function setupStep(probe, runtime, recipe) {
         if (await more.isVisible() && await more.getAttribute('aria-expanded') === 'false') await more.click() }
       runtime.ribbonTab = recipe.name
       return
+    case 'control-pressed-state': {
+      const button = control(page, recipe.control)
+      await expect(button).toHaveAttribute('aria-pressed', /^(true|false)$/)
+      if ((await button.getAttribute('aria-pressed') === 'true') !== recipe.pressed) await button.click()
+      await expect(button).toHaveAttribute('aria-pressed', String(recipe.pressed))
+      await requireGrid(page, recipe.pressed)
+      return
+    }
+    case 'fullscreen-state': {
+      const button = control(page, recipe.control)
+      runtime.cleanup.push(async () => {
+        if (await page.evaluate(() => !!document.fullscreenElement)) {
+          await button.click()
+          await expect.poll(() => page.evaluate(() => !!document.fullscreenElement)).toBe(false)
+        }
+      })
+      if (await page.evaluate(() => !!document.fullscreenElement) !== recipe.fullscreen) await button.click()
+      await expect.poll(() => page.evaluate(() => !!document.fullscreenElement)).toBe(recipe.fullscreen)
+      return
+    }
+    case 'empty-view-history':
+      await expect(viewButton(page, 'Back to the previous view')).toHaveAttribute('aria-disabled', 'true')
+      runtime.savedView = await viewState(page)
+      return
+    case 'previous-view-history': {
+      await setupStep(probe, runtime, { kind: 'ribbon-tab', name: 'Draw' })
+      await selectEntity(probe, runtime, { type: 'LINE', editable: true, viewerOnly: true })
+      await expect(page.getByTestId('cockpit-status').locator('.cockpit-sel')).toHaveText(/^sel /)
+      await setupStep(probe, runtime, { kind: 'zoom-before-fit', control: {
+        role: 'button', name: 'Zoom in', exact: true, scope: { role: 'toolbar', name: 'View', exact: true },
+      } })
+      runtime.savedView = await viewState(page)
+      expect(runtime.savedView.layers.length).toBeGreaterThan(0)
+      await viewButton(page, 'Fit drawing to view').click()
+      await requireViewport(page, runtime.homeViewport)
+      await expect(viewButton(page, 'Back to the previous view')).toBeEnabled()
+      await page.keyboard.press('Escape')
+      await expect(page.getByTestId('cockpit-status').locator('.cockpit-sel')).toHaveText('no selection')
+      const layer = layerButtons(page).filter({ hasText: 'Walk' })
+      await expect(layer).toHaveCount(1)
+      await expect(layer).toHaveAttribute('aria-pressed', 'true')
+      await layer.click()
+      await expect(layer).toHaveAttribute('aria-pressed', 'false')
+      evidence.previousView = { saved: runtime.savedView, changed: await viewState(page) }
+      return
+    }
+    case 'whole-drawing-view': {
+      await page.keyboard.press('Escape')
+      const clearFocus = page.getByRole('button', { name: 'Clear focus', exact: true })
+      if (await clearFocus.isVisible()) await clearFocus.click()
+      await expect(clearFocus).toHaveCount(0)
+      await expect(page.getByTestId('cockpit-status').locator('.cockpit-sel')).toHaveText('no selection')
+      await setupStep(probe, runtime, { kind: 'zoom-before-fit', control: {
+        role: 'button', name: 'Zoom in', exact: true, scope: { role: 'toolbar', name: 'View', exact: true },
+      } })
+      return
+    }
     case 'engine-ready': await engineReady(probe, runtime); return
     case 'select-entity': await selectEntity(probe, runtime, recipe); return
     case 'clear-selection': await page.keyboard.press('Escape'); return
@@ -526,6 +609,7 @@ async function setupStep(probe, runtime, recipe) {
 async function captureBefore(probe, runtime) {
   const { page } = runtime
   const target = probe.assertion.target || ''
+  if (probe.featureId === 'control:view-back' && probe.state === 'empty-history') return viewState(page)
   if (target.startsWith('viewer-')) return { viewport: await viewportBounds(page) }
   if (target === 'properties-pane') return { visible: await page.getByRole('complementary', { name: 'Properties', exact: true }).isVisible() }
   if (target === 'version-history') return { visible: await page.getByRole('dialog', { name: 'Version history', exact: true }).isVisible() }
@@ -564,6 +648,24 @@ async function assertEffect(probe, runtime, locator, before) {
   const effect = probe.assertion
   const target = effect.target || ''
   if (effect.kind === 'disabled_with_reason') {
+    if (probe.kind === 'control') {
+      await expect(locator).toBeDisabled()
+      await expect(locator).toHaveAccessibleName(probe.locator.name)
+      await expect(locator).toHaveAttribute('title', probe.locator.tooltip)
+      if (probe.locator.description) {
+        await expect(locator).toHaveAttribute('aria-disabled', 'true')
+        await expect(locator).toHaveAccessibleDescription(probe.locator.description)
+        // Native click input is needed: Playwright deliberately refuses an aria-disabled button.
+        const box = await locator.boundingBox()
+        expect(box).toBeTruthy()
+        await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2)
+        await expect(locator).toHaveAttribute('aria-disabled', 'true')
+        await requireViewport(page, before.viewport)
+        expect(await viewState(page)).toEqual(before)
+        await expect(page.getByTestId('cockpit-view-live')).toHaveText('')
+      }
+      return
+    }
     await expect(locator).toBeDisabled()
     if (runtime.failedDrawing) {
       const name = await locator.getAttribute('aria-label')
@@ -579,6 +681,34 @@ async function assertEffect(probe, runtime, locator, before) {
     // alone. Exact registry text must also remain on the native tooltip.
     await expect(locator).toHaveAccessibleName(new RegExp(effect.reason.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
     await expect(locator).toHaveAttribute('title', new RegExp(effect.reason.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    return
+  }
+  if (target === 'drafting-grid') {
+    await expect(locator).toHaveAttribute('aria-pressed', String(effect.value))
+    await requireGrid(page, effect.value)
+    return
+  }
+  if (target === 'document-fullscreen') {
+    await expect.poll(() => page.evaluate(() => !!document.fullscreenElement)).toBe(effect.value)
+    if (effect.value) expect(await page.evaluate(() => document.fullscreenElement === document.documentElement)).toBe(true)
+    return
+  }
+  if (target === 'viewer-previous-view') {
+    await requireViewport(page, runtime.savedView.viewport)
+    const restored = await viewState(page)
+    expect(restored.selection).toBe(runtime.savedView.selection)
+    expect(restored.layers).toEqual(runtime.savedView.layers)
+    const handle = runtime.savedView.selection.replace(/^sel /, '')
+    await expect(page.getByTestId('cockpit-view-live')).toHaveText('Back to your previous view, ' + handle + ' selected')
+    runtime.evidence.previousView.restored = restored
+    return
+  }
+  if (target === 'viewer-whole-drawing') {
+    await requireViewport(page, runtime.homeViewport)
+    await expect(page.getByTestId('cockpit-view-live')).toHaveText('Showing the whole drawing')
+    await expect(page.getByTestId('cockpit-status').locator('.cockpit-sel')).toHaveText('no selection')
+    await expect(page.getByRole('button', { name: 'Clear focus', exact: true })).toHaveCount(0)
+    runtime.evidence.fitViewport.fitted = await viewportBounds(page)
     return
   }
   if (effect.kind === 'navigates') { await expect(page).toHaveURL(target); return }

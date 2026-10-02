@@ -1,5 +1,421 @@
 {
   "version": 1,
+  "controls": [
+    {
+      "id": "control:grid-display",
+      "source_id": "grid-display",
+      "title": "Grid display",
+      "sources": [
+        "web/src/site/DrawingCockpit.jsx"
+      ],
+      "states": [
+        "off",
+        "on"
+      ],
+      "state_contexts": {
+        "off": {
+          "toolbar": "Drafting settings",
+          "name": "Grid display",
+          "pressed": false
+        },
+        "on": {
+          "toolbar": "Drafting settings",
+          "name": "Grid display",
+          "pressed": true
+        }
+      },
+      "expected_effect": {
+        "off": {
+          "kind": "toggles",
+          "target": "drafting-grid",
+          "value": true
+        },
+        "on": {
+          "kind": "toggles",
+          "target": "drafting-grid",
+          "value": false
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:object-snap",
+      "source_id": "object-snap",
+      "title": "Object snap",
+      "sources": [
+        "web/src/site/DrawingCockpit.jsx"
+      ],
+      "states": [
+        "unavailable",
+        "failed-load"
+      ],
+      "state_contexts": {
+        "unavailable": {
+          "toolbar": "Drafting settings",
+          "name": "Object snap (unavailable: not in the browser viewer yet)",
+          "tooltip": "Object snap: locks the cursor onto existing geometry, like endpoints and midpoints. Not in the browser viewer yet.",
+          "failedLoad": false
+        },
+        "failed-load": {
+          "toolbar": "Drafting settings",
+          "name": "Object snap (unavailable: not in the browser viewer yet)",
+          "tooltip": "Object snap: locks the cursor onto existing geometry, like endpoints and midpoints. Not in the browser viewer yet.",
+          "failedLoad": true
+        }
+      },
+      "expected_effect": {
+        "unavailable": {
+          "kind": "disabled_with_reason",
+          "reason": "not in the browser viewer yet",
+          "reason_code": "control:object-snap:unavailable"
+        },
+        "failed-load": {
+          "kind": "disabled_with_reason",
+          "reason": "not in the browser viewer yet",
+          "reason_code": "control:object-snap:unavailable"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:ortho-mode",
+      "source_id": "ortho-mode",
+      "title": "Ortho mode",
+      "sources": [
+        "web/src/site/DrawingCockpit.jsx"
+      ],
+      "states": [
+        "unavailable",
+        "failed-load"
+      ],
+      "state_contexts": {
+        "unavailable": {
+          "toolbar": "Drafting settings",
+          "name": "Ortho mode (unavailable: not in the browser viewer yet)",
+          "tooltip": "Ortho mode: locks drawing to horizontal and vertical. Not in the browser viewer yet.",
+          "failedLoad": false
+        },
+        "failed-load": {
+          "toolbar": "Drafting settings",
+          "name": "Ortho mode (unavailable: not in the browser viewer yet)",
+          "tooltip": "Ortho mode: locks drawing to horizontal and vertical. Not in the browser viewer yet.",
+          "failedLoad": true
+        }
+      },
+      "expected_effect": {
+        "unavailable": {
+          "kind": "disabled_with_reason",
+          "reason": "not in the browser viewer yet",
+          "reason_code": "control:ortho-mode:unavailable"
+        },
+        "failed-load": {
+          "kind": "disabled_with_reason",
+          "reason": "not in the browser viewer yet",
+          "reason_code": "control:ortho-mode:unavailable"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:polar-tracking",
+      "source_id": "polar-tracking",
+      "title": "Polar tracking",
+      "sources": [
+        "web/src/site/DrawingCockpit.jsx"
+      ],
+      "states": [
+        "unavailable",
+        "failed-load"
+      ],
+      "state_contexts": {
+        "unavailable": {
+          "toolbar": "Drafting settings",
+          "name": "Polar tracking (unavailable: not in the browser viewer yet)",
+          "tooltip": "Polar tracking: guides the cursor along set angles. Not in the browser viewer yet.",
+          "failedLoad": false
+        },
+        "failed-load": {
+          "toolbar": "Drafting settings",
+          "name": "Polar tracking (unavailable: not in the browser viewer yet)",
+          "tooltip": "Polar tracking: guides the cursor along set angles. Not in the browser viewer yet.",
+          "failedLoad": true
+        }
+      },
+      "expected_effect": {
+        "unavailable": {
+          "kind": "disabled_with_reason",
+          "reason": "not in the browser viewer yet",
+          "reason_code": "control:polar-tracking:unavailable"
+        },
+        "failed-load": {
+          "kind": "disabled_with_reason",
+          "reason": "not in the browser viewer yet",
+          "reason_code": "control:polar-tracking:unavailable"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:snap-mode",
+      "source_id": "snap-mode",
+      "title": "Snap mode",
+      "sources": [
+        "web/src/site/DrawingCockpit.jsx"
+      ],
+      "states": [
+        "unavailable",
+        "failed-load"
+      ],
+      "state_contexts": {
+        "unavailable": {
+          "toolbar": "Drafting settings",
+          "name": "Snap mode (unavailable: not in the browser viewer yet)",
+          "tooltip": "Snap mode: moves the cursor in fixed steps. Not in the browser viewer yet.",
+          "failedLoad": false
+        },
+        "failed-load": {
+          "toolbar": "Drafting settings",
+          "name": "Snap mode (unavailable: not in the browser viewer yet)",
+          "tooltip": "Snap mode: moves the cursor in fixed steps. Not in the browser viewer yet.",
+          "failedLoad": true
+        }
+      },
+      "expected_effect": {
+        "unavailable": {
+          "kind": "disabled_with_reason",
+          "reason": "not in the browser viewer yet",
+          "reason_code": "control:snap-mode:unavailable"
+        },
+        "failed-load": {
+          "kind": "disabled_with_reason",
+          "reason": "not in the browser viewer yet",
+          "reason_code": "control:snap-mode:unavailable"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:fullscreen",
+      "source_id": "fullscreen",
+      "title": "Toggle fullscreen",
+      "sources": [
+        "web/src/site/DrawingCockpit.jsx"
+      ],
+      "states": [
+        "windowed",
+        "fullscreen",
+        "failed-load"
+      ],
+      "state_contexts": {
+        "windowed": {
+          "toolbar": "Drafting settings",
+          "name": "Toggle fullscreen",
+          "fullscreen": false,
+          "failedLoad": false
+        },
+        "fullscreen": {
+          "toolbar": "Drafting settings",
+          "name": "Toggle fullscreen",
+          "fullscreen": true,
+          "failedLoad": false
+        },
+        "failed-load": {
+          "toolbar": "Drafting settings",
+          "name": "Toggle fullscreen",
+          "fullscreen": false,
+          "failedLoad": true
+        }
+      },
+      "expected_effect": {
+        "windowed": {
+          "kind": "toggles",
+          "target": "document-fullscreen",
+          "value": true
+        },
+        "fullscreen": {
+          "kind": "toggles",
+          "target": "document-fullscreen",
+          "value": false
+        },
+        "failed-load": {
+          "kind": "toggles",
+          "target": "document-fullscreen",
+          "value": true
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:view-back",
+      "source_id": "view-back",
+      "title": "Back to the previous view",
+      "sources": [
+        "web/src/site/DrawingCockpit.jsx"
+      ],
+      "states": [
+        "empty-history",
+        "history-present"
+      ],
+      "state_contexts": {
+        "empty-history": {
+          "toolbar": "View",
+          "name": "Back to the previous view",
+          "tooltip": "There is no earlier view to go back to",
+          "description": "There is no earlier view to go back to"
+        },
+        "history-present": {
+          "toolbar": "View",
+          "name": "Back to the previous view"
+        }
+      },
+      "expected_effect": {
+        "empty-history": {
+          "kind": "disabled_with_reason",
+          "reason": "There is no earlier view to go back to",
+          "reason_code": "control:view-back:unavailable"
+        },
+        "history-present": {
+          "kind": "navigates",
+          "target": "viewer-previous-view"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:view-up",
+      "source_id": "view-up",
+      "title": "Up one level",
+      "sources": [
+        "web/src/site/DrawingCockpit.jsx"
+      ],
+      "states": [
+        "whole-drawing"
+      ],
+      "state_contexts": {
+        "whole-drawing": {
+          "toolbar": "View",
+          "name": "Up one level"
+        }
+      },
+      "expected_effect": {
+        "whole-drawing": {
+          "kind": "navigates",
+          "target": "viewer-whole-drawing"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:new-drawing",
+      "source_id": "new-drawing",
+      "title": "New drawing",
+      "sources": [
+        "web/src/site/CockpitTopBand.jsx",
+        "web/src/App.jsx"
+      ],
+      "states": [
+        "unavailable",
+        "failed-load"
+      ],
+      "state_contexts": {
+        "unavailable": {
+          "toolbar": "Quick access",
+          "name": "New drawing (unavailable: new drawings start on the project board (Start tab))",
+          "tooltip": "New drawing: new drawings start on the project board (Start tab)",
+          "failedLoad": false
+        },
+        "failed-load": {
+          "toolbar": "Quick access",
+          "name": "New drawing (unavailable: new drawings start on the project board (Start tab))",
+          "tooltip": "New drawing: new drawings start on the project board (Start tab)",
+          "failedLoad": true
+        }
+      },
+      "expected_effect": {
+        "unavailable": {
+          "kind": "disabled_with_reason",
+          "reason": "new drawings start on the project board (Start tab)",
+          "reason_code": "control:new-drawing:unavailable"
+        },
+        "failed-load": {
+          "kind": "disabled_with_reason",
+          "reason": "new drawings start on the project board (Start tab)",
+          "reason_code": "control:new-drawing:unavailable"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:print",
+      "source_id": "print",
+      "title": "Print",
+      "sources": [
+        "web/src/site/CockpitTopBand.jsx",
+        "web/src/App.jsx"
+      ],
+      "states": [
+        "unavailable",
+        "failed-load"
+      ],
+      "state_contexts": {
+        "unavailable": {
+          "toolbar": "Quick access",
+          "name": "Print (unavailable: printing is not in the browser engine)",
+          "tooltip": "Print: printing is not in the browser engine",
+          "failedLoad": false
+        },
+        "failed-load": {
+          "toolbar": "Quick access",
+          "name": "Print (unavailable: printing is not in the browser engine)",
+          "tooltip": "Print: printing is not in the browser engine",
+          "failedLoad": true
+        }
+      },
+      "expected_effect": {
+        "unavailable": {
+          "kind": "disabled_with_reason",
+          "reason": "printing is not in the browser engine",
+          "reason_code": "control:print:unavailable"
+        },
+        "failed-load": {
+          "kind": "disabled_with_reason",
+          "reason": "printing is not in the browser engine",
+          "reason_code": "control:print:unavailable"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    }
+  ],
   "state_cases": {
     "action": {
       "baseline": {

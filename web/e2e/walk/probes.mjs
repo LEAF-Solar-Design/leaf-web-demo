@@ -4,6 +4,7 @@ import { PROFILE_RIBBON_TABS } from '../../src/lib/ribbonTabs.data.js'
 import { STUDIO_DRAWERS } from '../../src/lib/studioDrawers.js'
 import { PROMPTS } from '../../src/cadedit/promptKeys.js'
 import { readFileSync } from 'node:fs'
+import { controlKey } from '../../walk/controlInventory.mjs'
 
 const catalog = JSON.parse(readFileSync(new URL('../../walk/fixtures/capabilities.snapshot.json', import.meta.url), 'utf8'))
 const tools = catalog.response.families.flatMap((family) => family.capabilities)
@@ -14,6 +15,41 @@ const step = (kind, properties = {}) => ({ kind, ...properties })
 const role = (name, accessible, scope) => ({ role: name, name: accessible, exact: true, ...(scope ? { scope } : {}) })
 const escapePattern = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
+// Independent presence obligations: retiring a baseline must not bless a control that disappeared.
+export const CONTROL_CENSUS_BATCH = Object.freeze([
+  { feature_id: 'control:grid-display', scope: 'toolbar:"Drafting settings"', role: 'button', name: 'Grid display',
+    states: ["ready","failed-load"], viewports: ['desktop'] },
+  { feature_id: 'control:object-snap', scope: 'toolbar:"Drafting settings"', role: 'button', name: 'Object snap',
+    states: ["ready","failed-load"], viewports: ['desktop'] },
+  { feature_id: 'control:ortho-mode', scope: 'toolbar:"Drafting settings"', role: 'button', name: 'Ortho mode',
+    states: ["ready","failed-load"], viewports: ['desktop'] },
+  { feature_id: 'control:polar-tracking', scope: 'toolbar:"Drafting settings"', role: 'button', name: 'Polar tracking',
+    states: ["ready","failed-load"], viewports: ['desktop'] },
+  { feature_id: 'control:snap-mode', scope: 'toolbar:"Drafting settings"', role: 'button', name: 'Snap mode',
+    states: ["ready","failed-load"], viewports: ['desktop'] },
+  { feature_id: 'control:fullscreen', scope: 'toolbar:"Drafting settings"', role: 'button', name: 'Toggle fullscreen',
+    states: ["ready","failed-load"], viewports: ['desktop'] },
+  { feature_id: 'control:view-back', scope: 'toolbar:"View"', role: 'button', name: 'Back to the previous view',
+    states: ["ready"], viewports: ['desktop'] },
+  { feature_id: 'control:view-up', scope: 'toolbar:"View"', role: 'button', name: 'Up one level',
+    states: ["ready"], viewports: ['desktop'] },
+  { feature_id: 'control:new-drawing', scope: 'toolbar:"Quick access"', role: 'button', name: 'New drawing',
+    states: ["ready","failed-load"], viewports: ['desktop'] },
+  { feature_id: 'control:print', scope: 'toolbar:"Quick access"', role: 'button', name: 'Print',
+    states: ["ready","failed-load"], viewports: ['desktop'] },
+])
+
+export function requireControlCensusBatch(census, { state = 'ready', viewport = 'desktop' } = {}) {
+  for (const expected of CONTROL_CENSUS_BATCH) {
+    if (!expected.states.includes(state) || !expected.viewports.includes(viewport)) continue
+    const matches = census.resolved.filter((row) => controlKey(row) === controlKey(expected))
+    if (matches.length !== 1 || matches[0].feature_id !== expected.feature_id) {
+      throw new Error('control-census: required batch control missing or misresolved: ' + expected.feature_id)
+    }
+  }
+  return true
+}
+
 function actionRecord(entry) {
   const record = ACTIONS.find((action) => action.id === entry.source_id)
   if (!record) throw new Error(`No action registry record for ${entry.id}`)
@@ -22,6 +58,11 @@ function actionRecord(entry) {
 
 export function locatorRecipe(entry, state) {
   const effect = entry.expected_effect[state]
+  if (entry.kind === 'control') {
+    const context = entry.state_contexts[state]
+    return { ...role('button', context.name, role('toolbar', context.toolbar)), trigger: 'click',
+      tooltip: context.tooltip, description: context.description }
+  }
   if (entry.kind === 'action') {
     const action = actionRecord(entry)
     const why = effect.kind === 'disabled_with_reason' ? effect.reason : ''
@@ -104,6 +145,17 @@ export function stateRecipe(entry, state) {
   const surface = entry.kind === 'tab' ? profileSurfaces[entry.profile]
     : entry.kind === 'surface' ? entry.source_id : 'cad'
   const steps = []
+  if (entry.kind === 'control') {
+    steps.push(context.failedLoad
+      ? step('open-failed-drawing', { url: '/app?surface=cad&drawing=missing.invalid' })
+      : step('open-private-drawing', { surface: 'cad' }))
+    const locator = locatorRecipe(entry, state)
+    if (effect.target === 'drafting-grid') steps.push(step('control-pressed-state', { control: locator, pressed: context.pressed }))
+    if (effect.target === 'document-fullscreen') steps.push(step('fullscreen-state', { control: locator, fullscreen: context.fullscreen }))
+    if (entry.source_id === 'view-back') steps.push(step(state === 'empty-history' ? 'empty-view-history' : 'previous-view-history'))
+    if (entry.source_id === 'view-up') steps.push(step('whole-drawing-view'))
+    return { context, steps }
+  }
   if (surface === 'sheets') return { context, steps: [step('navigate', { url: '/sheets' })] }
   if (state === 'no-drawing' && entry.kind === 'action') {
     return { context, steps: [

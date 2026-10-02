@@ -5,6 +5,7 @@ import { buildFeatureMap } from './featureMap.mjs'
 import { readControlInventory, validateControlInventory, resolveCensus, censusFailure, controlKey, controlNameAttributes, registryCensusMappings } from './controlInventory.mjs'
 import { enumerateControls } from '../e2e/walk/controlCensus.mjs'
 import { PROFILE_RIBBON_TABS } from '../src/lib/ribbonTabs.data.js'
+import { CONTROL_CENSUS_BATCH, requireControlCensusBatch } from '../e2e/walk/probes.mjs'
 
 const fixture = (name) => JSON.parse(readFileSync(new URL(`./fixtures/control-census.${name}.json`, import.meta.url), 'utf8'))
 const resolve = (data, context) => resolveCensus(data.controls, data.derivedMappings, data.map, data.inventory, context)
@@ -180,4 +181,91 @@ test('inventory refuses unknown ids, overlapping duplicate rows, empty reasons a
   const data = fixture('good')
   data.inventory.baseline_unmapped.push({ ...data.inventory.baseline_unmapped[0], states: ['failed-load'] })
   assert.doesNotThrow(() => validateControlInventory(data.inventory, data.map))
+})
+
+test('batch one retires exactly ten keys and preserves the other thirty baseline rows', () => {
+  const map = buildFeatureMap()
+  const inventory = readControlInventory(map)
+  const expected = [
+    ["complementary:\"Properties\"","button","Close the properties pane",["ready","failed-load"]],
+    ["complementary:\"Properties\"","button","Drawing",["ready"]],
+    ["complementary:\"Properties\"","button","Layers",["ready","failed-load"]],
+    ["complementary:\"Properties\"","button","Panels {n}",["ready"]],
+    ["complementary:\"Properties\"","button","Plan",["ready","failed-load"]],
+    ["complementary:\"Properties\"","button","Selection",["ready","failed-load"]],
+    ["complementary:\"Properties\"","button","Walk {n}",["ready"]],
+    ["document","button","Add: build a new capability",["ready","failed-load"]],
+    ["document","button","Back to the demo",["failed-load"]],
+    ["document","button","Claude accounts not linked",["ready","failed-load"]],
+    ["document","button","Close the drawing view and return to Start",["ready"]],
+    ["document","button","Collapse drawing overview",["ready"]],
+    ["document","button","Collapse the notification inbox",["ready","failed-load"]],
+    ["document","button","Details",["ready","failed-load"]],
+    ["document","button","Drawing overview",["ready"]],
+    ["document","button","History",["ready"]],
+    ["document","button","Linked services {n} linked",["ready","failed-load"]],
+    ["document","button","Open the project board",["ready","failed-load"]],
+    ["document","button","Retry",["failed-load"]],
+    ["document","button","Run",["ready","failed-load"]],
+    ["document","button","scope ▾",["ready","failed-load"]],
+    ["document","button","Sign out",["ready","failed-load"]],
+    ["document","button","Start",["ready","failed-load"]],
+    ["document","button","Take edit lock",["ready"]],
+    ["document","button","What Leaf costs to operate",["ready","failed-load"]],
+    ["document","combobox","Command bar",["ready","failed-load"]],
+    ["document","combobox","Find in drawing",["ready"]],
+    ["toolbar:\"Drafting tools\" > group:\"Layers\"","button","Panels",["ready"]],
+    ["toolbar:\"Drafting tools\" > group:\"Layers\"","button","Walk",["ready"]],
+    ["toolbar:\"Job monitor\"","button","Expand the job monitor ({n} live)",["ready","failed-load"]],
+  ].map(([scope, role, name, states]) => ({ scope, role, name, states, viewports: ['desktop'],
+    reason: 'No feature-map coverage yet: no walk mapping' }))
+  assert.deepEqual(inventory.baseline_unmapped, expected)
+  assert.equal(inventory.baseline_unmapped.length, 30)
+  const mappings = inventory.mappings.filter((row) => row.feature_id.startsWith('control:'))
+  assert.deepEqual(mappings, CONTROL_CENSUS_BATCH)
+  assert.equal(mappings.length, 10)
+  for (const row of mappings) assert.ok(!inventory.baseline_unmapped.some((other) => controlKey(other) === controlKey(row)))
+})
+
+test('batch census mappings cover available and unavailable names in each declared context', () => {
+  const map = buildFeatureMap()
+  const inventory = { ...readControlInventory(map), baseline_unmapped: [] }
+  for (const state of ['ready', 'failed-load']) {
+    const expected = CONTROL_CENSUS_BATCH.filter((row) => row.states.includes(state))
+    for (const unavailable of [false, true]) {
+      const controls = expected.map((row, index) => ({ ...row, index, visible: true,
+        name: unavailable ? row.name + ' (unavailable: example reason)' : row.name }))
+      const result = resolveCensus(controls, [], map, inventory, { state, viewport: 'desktop' })
+      assert.equal(result.ok, true)
+      assert.equal(requireControlCensusBatch(result, { state, viewport: 'desktop' }), true)
+      assert.deepEqual(result.resolved.map((row) => row.feature_id), expected.map((row) => row.feature_id))
+    }
+  }
+})
+
+test('batch obligations reject wrong scope, role, name, feature id, hiding and disappearance', () => {
+  const map = buildFeatureMap()
+  const inventory = { ...readControlInventory(map), baseline_unmapped: [] }
+  for (const state of ['ready', 'failed-load']) {
+    const expected = CONTROL_CENSUS_BATCH.filter((row) => row.states.includes(state))
+    for (let index = 0; index < expected.length; index++) {
+      for (const mutate of [
+        (rows) => { rows[index].scope = 'toolbar:"Unrelated"' },
+        (rows) => { rows[index].role = 'link' },
+        (rows) => { rows[index].name += ' changed' },
+        (rows) => { rows[index].visible = false },
+        (rows) => { rows.splice(index, 1) },
+      ]) {
+        const controls = expected.map((row, index) => ({ ...row, index, visible: true }))
+        mutate(controls)
+        const result = resolveCensus(controls, [], map, inventory, { state })
+        assert.throws(() => requireControlCensusBatch(result, { state }), /required batch control missing or misresolved/)
+      }
+      const controls = expected.map((row, index) => ({ ...row, index, visible: true }))
+      const wrong = structuredClone(inventory)
+      wrong.mappings.find((row) => row.feature_id === expected[index].feature_id).feature_id = 'action:fit'
+      const result = resolveCensus(controls, [], map, wrong, { state })
+      assert.throws(() => requireControlCensusBatch(result, { state }), /required batch control missing or misresolved/)
+    }
+  }
 })

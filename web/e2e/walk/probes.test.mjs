@@ -149,3 +149,71 @@ test('the refreshed read tool has ready, read-only and running probes', () => {
     assert.equal(probe.assertion.kind, state === 'ready' ? 'opens' : 'disabled_with_reason')
   }
 })
+
+test('control recipes use exact named toolbars and default-build unavailable names', () => {
+  const expected = [
+    ['control:grid-display', 'Drafting settings', 'Grid display'],
+    ['control:object-snap', 'Drafting settings', 'Object snap'],
+    ['control:ortho-mode', 'Drafting settings', 'Ortho mode'],
+    ['control:polar-tracking', 'Drafting settings', 'Polar tracking'],
+    ['control:snap-mode', 'Drafting settings', 'Snap mode'],
+    ['control:fullscreen', 'Drafting settings', 'Toggle fullscreen'],
+    ['control:view-back', 'View', 'Back to the previous view'],
+    ['control:view-up', 'View', 'Up one level'],
+    ['control:new-drawing', 'Quick access', 'New drawing'],
+    ['control:print', 'Quick access', 'Print'],
+  ]
+  for (const [id, toolbar, name] of expected) {
+    const entry = map.entries.find((row) => row.id === id)
+    for (const state of entry.states) {
+      const probe = resolveProbe(entry, state)
+      const reason = probe.assertion.kind === 'disabled_with_reason' && id !== 'control:view-back' ? probe.assertion.reason : ''
+      assert.equal(probe.locator.name, accessibleName(name, reason))
+      assert.equal(probe.locator.role, 'button')
+      assert.equal(probe.locator.exact, true)
+      assert.deepEqual(probe.locator.scope, { role: 'toolbar', name: toolbar, exact: true })
+      assert.equal(probe.setup.steps[0].kind, state === 'failed-load' ? 'open-failed-drawing' : 'open-private-drawing')
+      assert.equal(probe.certification, null)
+      assert.ok(probe.setup.steps.every((step) => step.kind !== 'engine-ready' && step.kind !== 'require-local-state'))
+      if (probe.assertion.kind === 'disabled_with_reason') assert.ok(probe.locator.tooltip)
+    }
+  }
+})
+
+test('grid and fullscreen establish opposite starting states through their real scoped controls', () => {
+  for (const [id, states, stepKind, field, target] of [
+    ['control:grid-display', ['off', 'on'], 'control-pressed-state', 'pressed', 'drafting-grid'],
+    ['control:fullscreen', ['windowed', 'fullscreen'], 'fullscreen-state', 'fullscreen', 'document-fullscreen'],
+  ]) {
+    const entry = map.entries.find((row) => row.id === id)
+    for (const [index, state] of states.entries()) {
+      const probe = resolveProbe(entry, state)
+      assert.equal(probe.setup.steps.at(-1).kind, stepKind)
+      assert.equal(probe.setup.steps.at(-1)[field], index === 1)
+      assert.deepEqual(probe.setup.steps.at(-1).control, probe.locator)
+      assert.equal(probe.assertion.kind, 'toggles')
+      assert.equal(probe.assertion.target, target)
+      assert.equal(probe.assertion.value, index === 0)
+    }
+  }
+})
+
+test('Back requires description evidence for empty history and view restoration for populated history', () => {
+  const entry = map.entries.find((row) => row.id === 'control:view-back')
+  const empty = resolveProbe(entry, 'empty-history')
+  assert.equal(empty.setup.steps.at(-1).kind, 'empty-view-history')
+  assert.equal(empty.locator.name, 'Back to the previous view')
+  assert.equal(empty.locator.description, 'There is no earlier view to go back to')
+  assert.equal(empty.locator.tooltip, empty.assertion.reason)
+  assert.equal(empty.assertion.reason_code, 'control:view-back:unavailable')
+  const history = resolveProbe(entry, 'history-present')
+  assert.equal(history.setup.steps.at(-1).kind, 'previous-view-history')
+  assert.equal(history.assertion.kind, 'navigates')
+  assert.equal(history.assertion.target, 'viewer-previous-view')
+  const up = resolveProbe(map.entries.find((row) => row.id === 'control:view-up'), 'whole-drawing')
+  assert.equal(up.setup.steps.at(-1).kind, 'whole-drawing-view')
+  assert.equal(up.assertion.target, 'viewer-whole-drawing')
+  const url = effectAssertion({ expected_effect: { ready: { kind: 'navigates', target: '/projects' } } }, 'ready')
+  assert.equal(url.kind, 'navigates')
+  assert.equal(url.target, '/projects')
+})
