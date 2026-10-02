@@ -2,16 +2,24 @@
   "contract": "leaf.vendor-pin.v1",
   "downstream_overlays": {
     "ports/converse.ts": {
-      "reason": "Optional app-built ContextPacket grounding on the live POST /turn wire; absent-safe downstream addition for platform-context-packet-live-caller.",
-      "sha256": "e50572559b61124d7281a356d81f1ac00b4b1bf5fc123a386ef63427c5effa54"
+      "reason": "Optional app-built ContextPacket grounding on the live POST /turn wire; absent-safe downstream addition for platform-context-packet-live-caller.; plus the claude-sonnet-5-5 default from mushy-code 14334d8 (retire at the next re-pin past 14334d8)",
+      "sha256": "4f5fccd7162350df3fc151403633e890f7bdca05fab47a23813fcc62715b235e"
     },
     "ports/fakes/fakeSessionStore.ts": {
       "reason": "Isolate SDK transcript bindings by authenticated app conversation in leaf-web-demo (rebased onto mushy-code ad209705 by AD4; upstream candidate)",
       "sha256": "ad67275b16d64bd7525ec520dd36b2a6a7bd533107f6ec8132f2392e7e83afda"
     },
+    "ports/impl/agentSdkRunner.ts": {
+      "reason": "claude-sonnet-5-5 default and allowlist from mushy-code 14334d8 carried ahead of a re-pin; retire at the next re-pin past 14334d8",
+      "sha256": "25fe66a365395cd24c67f8e21ed64019293cc05ba8f445d91cffd9bf7da2bff4"
+    },
+    "ports/impl/agentSdkTurnRunner.ts": {
+      "reason": "claude-sonnet-5-5 default and allowlist from mushy-code 14334d8 carried ahead of a re-pin; retire at the next re-pin past 14334d8",
+      "sha256": "d2c4098b4b6d836a6e86fa962b9d235c233879585a14df69f7db3e8f1bb9f2e6"
+    },
     "ports/impl/converseSdkRunner.ts": {
-      "reason": "finish_project and project_completion_status spine tools plus the delivered-answer end_turn rule (rebased onto mushy-code ad209705 by AD4; upstream candidate)",
-      "sha256": "fc776378a88e913b658e57473a1694007ce5078ccdcfaaf1ceb9779af1b89181"
+      "reason": "finish_project and project_completion_status spine tools plus the delivered-answer end_turn rule (rebased onto mushy-code ad209705 by AD4; upstream candidate); plus the claude-sonnet-5-5 default from mushy-code 14334d8 (retire at the next re-pin past 14334d8)",
+      "sha256": "8e77f60fcb6ffcfed67a9fca7b8c2090562cb579852c786beb32f56e23e49829"
     },
     "ports/impl/harnessSchema.ts": {
       "reason": "Held at mushy-code 52e8a36 bytes: ad209705 asserts harness_confirmations.consumed_at, consumed_by and a status CHECK including 'consumed', which no platform migration adds yet. Retired by slice AD4b (platform migration plus consumeApproved adoption).",
@@ -40,6 +48,10 @@
     "ports/index.ts": {
       "reason": "AppRunClient finishProject/projectCompletionStatus and app SDK session ports (rebased onto mushy-code ad209705 by AD4; upstream candidate)",
       "sha256": "7cc65099cb8b31a6ec796ed162fbe7c55a05ee4ed66ce2abf3eb089e65bd4552"
+    },
+    "ports/modelAllowlist.ts": {
+      "reason": "claude-sonnet-5-5 default and allowlist from mushy-code 14334d8 carried ahead of a re-pin; retire at the next re-pin past 14334d8",
+      "sha256": "5c7cbac1e5982b66023895b74b03587ea12f120938f4d21b5f6a913c809c4a2c"
     }
   },
   "files": {
@@ -57,7 +69,7 @@
     "browser/conversationWorkspace.ts": "3bb8c517ff9ceb0db3510a5869e4383a4c04dcc0567268075f6db4c0dfadb7fa",
     "browser/historyFeed.ts": "504c16d2a1b2deb923b6b5ef2e0d2c12311e3966ca7c62ef2472d311e3cfa816",
     "index.ts": "b201a546958d8d25e8dd0b6e675484d564f9f716ad0baf668b7c15809b1d9d5d",
-    "ports/converse.ts": "e50572559b61124d7281a356d81f1ac00b4b1bf5fc123a386ef63427c5effa54",
+    "ports/converse.ts": "4f5fccd7162350df3fc151403633e890f7bdca05fab47a23813fcc62715b235e",
     "ports/fakes/fakeAgentRunner.ts": "bcd81974277d1934dd6a6e5a660203b248b5b3caefb0a594d32f4905a449d3ef",
     "ports/fakes/fakeConverseRunner.ts": "8a7b076759ad4f7fea0c6ec4de078c32f3cc556252a9328668c41881b7f75f41",
     "ports/fakes/fakeIntentSynthesizer.ts": "c7d32cc3b6a677e17688ba768c660afde238778a4eba18eefab82852398a153c",
@@ -68,11 +80,11 @@
     "ports/fakes/fakeTenantRepo.ts": "d1c545d5fe141870e1ceabbbcc15794b92e8c4e2a22ea8138e7b9da4234a1a0d",
     "ports/fakes/fakeTurnRunner.ts": "2ec3b103d6a866265a756d756d6e28416bcd3390b5759394f1ad2faadae68f50",
     "ports/fakes/fakeUpstreamSink.ts": "ba55ed5b026a219ecf8f316af102638d7397a7d66363d1adafa53dd794c74d17",
-    "ports/impl/agentSdkRunner.ts": "8321beb45242efaf3cfab5bd7e6cd4f6cc8f7da51c0077d9e204db69eafc6976",
-    "ports/impl/agentSdkTurnRunner.ts": "f00e89a219f30fc2ec033335c72eddff681db402e6cddf2b6bbb2fe0fb2a2f3f",
+    "ports/impl/agentSdkRunner.ts": "25fe66a365395cd24c67f8e21ed64019293cc05ba8f445d91cffd9bf7da2bff4",
+    "ports/impl/agentSdkTurnRunner.ts": "d2c4098b4b6d836a6e86fa962b9d235c233879585a14df69f7db3e8f1bb9f2e6",
     "ports/impl/capabilityApproval.ts": "2e0e833df4bcb5e6aa347fbd01d043ef546c486aad4ba0e2f126e6452b401372",
     "ports/impl/conversationManager.ts": "423899c87e552aef85fb8b4b14f78a25a8813284adff56fb0b32946b7032ce4e",
-    "ports/impl/converseSdkRunner.ts": "fc776378a88e913b658e57473a1694007ce5078ccdcfaaf1ceb9779af1b89181",
+    "ports/impl/converseSdkRunner.ts": "8e77f60fcb6ffcfed67a9fca7b8c2090562cb579852c786beb32f56e23e49829",
     "ports/impl/e2bAgentRunner.ts": "3d89898c95e45e366107a10faa4ea1396f6aaa74242c3c2bacf55cd1add53a94",
     "ports/impl/envScrub.ts": "fc9640a4940a4cb4756714f91144a9dd54fc188f7333aa8618c2fa8f15212f5c",
     "ports/impl/escalationOutbox.ts": "f5b33fd43b776574d1a90fdccc4adbc9dfc2d1e3f540f4f9ae07c2ba7eb4ec5b",
@@ -98,7 +110,7 @@
     "ports/impl/tenantChangeRepo.ts": "58b125b5c4c4b7aecab3351031c951cbde849a38f5b263c674e9c41ef6b1d87f",
     "ports/impl/tenantRepoProvider.ts": "a1469ba8882eea3b79e450135abad9f29b95718e67bf511180d9c728052f8c15",
     "ports/index.ts": "7cc65099cb8b31a6ec796ed162fbe7c55a05ee4ed66ce2abf3eb089e65bd4552",
-    "ports/modelAllowlist.ts": "f43695aebb520bf4d614fbf6c0ac79591772abfd235bfb598c2d7888ee413c88",
+    "ports/modelAllowlist.ts": "5c7cbac1e5982b66023895b74b03587ea12f120938f4d21b5f6a913c809c4a2c",
     "ports/surfaceAnnotations.ts": "8fba9c1d4373c2e9600e29a68ee78c801dd75bc56411baf9a33570b65cd52e5b",
     "ports/wireGrant.ts": "ac9619a708b426ff3920c796497727497bc7e707d70a5a5503c759324e379904",
     "redact.ts": "1f0d0b8e7010b7789719c4a56c40fe0f61cfdc94fba06b5559b443f47cc14b2e",
