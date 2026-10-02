@@ -38,8 +38,9 @@ import { canOpenSolarSettingsForm, catalogRunOverlays, solarSettingsFormChoice, 
 import { ENV_SOLAR_FLOW_RAIL } from './solar/flag.js'
 import { SOLAR_SETTINGS_TOOL_NAME } from './solar/solarSettingsWire.js'
 import SolarFlowRail from './solar/SolarFlowRail.jsx'
+import SolarWorkspaceTools from './solar/SolarWorkspaceTools.jsx'
 import SolarStepEditor from './solar/SolarStepEditor.jsx'
-import { MAX_FLOW_STEPS, admittedOverlays, solarFlowRecordRun, solarFlowRunOutcome, solarFlowRunStatus, solarFlowRunsFor } from './solar/solarFlowModel.js'
+import { DEFAULT_SOLAR_FLOW, MAX_FLOW_STEPS, admittedOverlays, solarFlowId, solarFlowRecordRun, solarFlowRunOutcome, solarFlowRunStatus, solarFlowRunsFor } from './solar/solarFlowModel.js'
 import { resolvePublishedCatalogTool } from './site/publishedCatalogTool.js'
 import { entityGeometry } from './lib/entityMetrics.js'
 import { setCredentialMountAvailable } from './lib/secretGuardTransport.js'
@@ -397,6 +398,7 @@ export default function App() {
   // confirm or settle, the settled outcomes for the open drawing, and each step's last submitted inputs
   // (at most MAX_FLOW_STEPS entries) so a failed run keeps them.
   const [solarFlowEditor, setSolarFlowEditor] = useState(null)
+  const [solarFlow, setSolarFlow] = useState(DEFAULT_SOLAR_FLOW)
   const solarFlowRunRef = useRef(null)
   const [solarFlowPending, setSolarFlowPending] = useState(null)
   const [solarFlowRuns, setSolarFlowRuns] = useState(null)
@@ -2048,7 +2050,8 @@ export default function App() {
     setSolarFlowEditor(null)
   }, [])
 
-  const onSolarFlowChange = useCallback(() => {
+  const onSolarFlowChange = useCallback((next) => {
+    setSolarFlow(solarFlowId(next))
     onCloseSolarFlowStep()
     setSolarFormTool(null)
   }, [onCloseSolarFlowStep])
@@ -2928,6 +2931,11 @@ export default function App() {
   // wiring pin (src/app-wiring.test.mjs) guards that exact shape against the
   // white screen it was written for. Was groundShowsDrawing(activeSurface).
   const drafting = surfaceSlots.chrome.cockpit
+  useEffect(() => {
+    if (!(ENV_SOLAR_FLOW_RAIL && ENV_CAD_EDIT && ENV_SOLAR_SETTINGS_FORM && drafting && surfaceSlots.toolbar.profile === 'solar')) {
+      setSolarFlow(DEFAULT_SOLAR_FLOW)
+    }
+  }, [drafting, surfaceSlots.toolbar.profile])
   const studioShell = !!studioGround && surfaceSlots.chrome.shell === 'cockpit'
   const [studioRibbonHost, setStudioRibbonHost] = useState(null)
   const projectSwitcherRef = useRef(null)
@@ -4067,6 +4075,19 @@ export default function App() {
                 onOpenStep={onOpenSolarFlowStep}
                 onFlowChange={onSolarFlowChange}
               />
+              {!mock && (
+                <SolarWorkspaceTools
+                  drawingId={catalogRunContext?.drawingId ?? null}
+                  projectId={catalogRunContext?.projectId ?? null}
+                  drawingVersion={catalogRunContext?.drawingVersion ?? null}
+                  flow={solarFlow}
+                  checkoutHeld={heldByUs}
+                  busy={!!running}
+                  getCheckoutCapability={() => checkoutCapabilityRef.current?.()}
+                  onPhysicalHeadChanged={() => loadCatalog()}
+                  onDrawingVersionChanged={seatCompletedVersion}
+                />
+              )}
               {solarFlowEditor && (
                 <SolarStepEditor
                   key={`${catalogRunContext?.drawingId ?? ''}:${solarFlowEditor.name}`}
