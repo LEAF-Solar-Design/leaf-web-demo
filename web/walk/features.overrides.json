@@ -1160,17 +1160,27 @@
         "web/src/diagnostics.js"
       ],
       "states": [
-        "ready"
+        "ready",
+        "failed-load"
       ],
       "state_contexts": {
         "ready": {
           "document": true,
           "name": "Details",
           "failedLoad": false
+        },
+        "failed-load": {
+          "document": true,
+          "name": "Details",
+          "failedLoad": true
         }
       },
       "expected_effect": {
         "ready": {
+          "kind": "opens",
+          "target": "session-provenance"
+        },
+        "failed-load": {
           "kind": "opens",
           "target": "session-provenance"
         }
@@ -1178,8 +1188,7 @@
       "viewports": [
         "desktop"
       ],
-      "certify": "both",
-      "certify_reason": "failed-load omitted: product defect U3, header controls overlap at 1600x1000; re-enable when U3 lands"
+      "certify": "both"
     },
     {
       "id": "control:version-history",

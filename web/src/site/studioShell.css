@@ -99,14 +99,33 @@
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar > span[style] { order: 1; }
 }
 @media (min-width: 981px) {
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top {
+    height: auto; min-height: 28px; flex-wrap: wrap; overflow: visible;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top .who {
+    flex-wrap: wrap; max-width: 100%; min-width: 0;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top .who > *,
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top :is(button, .switch) {
+    flex-shrink: 0; white-space: nowrap;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top .cockpit-band {
+    display: flex; flex-wrap: nowrap; align-items: center;
+    max-width: calc(100% - 24px); min-width: 0; overflow-x: auto; overflow-y: hidden;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top .cockpit-band > * { flex-shrink: 0; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] {
+    --ck-canvas-top: calc(var(--drawer-top, 28px) + 30px + var(--ck-ribbon) + var(--ck-doctabs));
+  }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-nav {
-    position: fixed; top: 0; left: max(600px, 45%); right: auto; z-index: 6;
-    height: var(--ck-top); margin: 0; padding: 0 4px; display: flex; align-items: center;
+    position: relative; inset: auto; z-index: 6;
+    height: 30px; min-height: 30px; box-sizing: border-box; margin: 0; padding: 2px 4px 0; display: flex; align-items: flex-start;
+    overflow-x: auto; flex-wrap: nowrap; isolation: isolate; pointer-events: auto;
     background: transparent; border: 0; border-radius: 0; box-shadow: none;
   }
-.studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs { gap: 2px; margin: 0; padding: 0; border: 0; background: transparent; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs { gap: 2px; margin: 0; padding: 0; border: 0; background: transparent; flex-wrap: nowrap; flex-shrink: 0; height: 22px; min-height: 0; box-sizing: border-box; align-self: flex-start; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs [role="tab"] {
-    height: 22px; padding: 0 8px; gap: 5px; border-radius: 3px; border: 1px solid transparent;
+    height: 22px; padding: 0 8px; gap: 5px; border-radius: 3px; border: 1px solid transparent; flex-shrink: 0; white-space: nowrap;
     font: 400 11px var(--ck-font); color: #9a9a9a; background: transparent; box-shadow: none; align-items: center;
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs [role="tab"]:hover { background: var(--ck-hover); color: #fff; }
@@ -118,9 +137,20 @@
 }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] main.center-scroll { padding: 0; }
 @media (min-width: 981px) {
-.studio-shell .app[data-studio-shell="cockpit"][data-surface] { --ck-nav-width: 300px; }
-.studio-shell .app[data-studio-shell="cockpit"][data-surface]:has(aside.rail[data-spine]) { grid-template-columns: 0 1fr 0; }
-.studio-shell .app[data-studio-shell="cockpit"][data-surface]:has(aside.nav[data-spine="hidden"]):has(aside.rail[data-spine]) { grid-template-columns: 0 1fr 0; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] { --ck-nav-width: 300px; --ck-rail-width: 300px; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface],
+.studio-shell .app[data-studio-shell="cockpit"][data-surface]:has(aside.rail[data-spine]),
+.studio-shell .app[data-studio-shell="cockpit"][data-surface]:has(aside.nav[data-spine="hidden"]):has(aside.rail[data-spine]) { grid-template-columns: 0 minmax(0, 1fr) var(--ck-rail-width); }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] > .rail-stack {
+    width: var(--ck-rail-width); min-width: 0; min-height: 0; max-height: calc(100dvh - var(--drawer-top, 28px) - var(--ck-status));
+    overflow: auto; box-sizing: border-box;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] > .rail-stack > :not([data-spine]) {
+    flex: 0 0 auto; min-width: 0; max-width: 100%; box-sizing: border-box;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .job-inbox :is(.rail-note, .rail-ev, .rail-detail) {
+    white-space: normal; overflow-wrap: normal; word-break: normal;
+  }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] aside.rail[data-spine] {
     position: fixed; right: 12px; bottom: 0; top: auto; z-index: 41;
     width: auto; height: 29px; padding: 0 6px; margin: 0;
@@ -132,9 +162,15 @@
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] aside.rail[data-spine] .rail-spine-count { font: 400 11px var(--ck-font); color: #cfcfcf; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] aside.rail:not([data-spine]) {
-    position: fixed; right: 0; top: var(--ck-canvas-top); bottom: var(--ck-status); z-index: 5;
-    width: 300px; margin: 0; border: 0; border-left: 1px solid var(--ck-edge); border-radius: 0; box-shadow: -8px 0 24px rgba(0, 0, 0, .4);
+    position: static; inset: auto; z-index: auto;
+    width: var(--ck-rail-width); margin: 0; border: 0; border-left: 1px solid var(--ck-edge); border-radius: 0; box-shadow: -8px 0 24px rgba(0, 0, 0, .4);
     background: var(--ck-chrome);
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] :is(.cad-overview, .cockpit-cube-wrap, .cockpit-cube-wcs) {
+    right: calc(var(--ck-rail-width) + 18px);
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .cad-overview {
+    top: calc(var(--ck-canvas-top) + 154px);
   }
 }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .drafting-ribbon {
@@ -330,7 +366,7 @@
   display: flex; flex-wrap: wrap; gap: 4px; max-width: 100%;
 }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .drafting-ribbon[data-overflow-open="true"] .ribbon-tool[data-size="large"] { height: 76px; }
-@media (max-width: 1499px) {
+@media (max-width: 980px) {
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] { --ck-canvas-top: 183px; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-nav {
     position: relative; inset: auto; height: 28px; min-height: 28px; box-sizing: border-box;
@@ -338,6 +374,8 @@
     overflow-x: auto; flex-wrap: nowrap; background: transparent; isolation: isolate; pointer-events: auto;
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs { flex-wrap: nowrap; flex-shrink: 0; height: 22px; min-height: 0; margin: 0; padding: 0; box-sizing: border-box; }
+}
+@media (max-width: 1499px) {
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .drafting-ribbon { overflow: hidden; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool-label {
     hyphens: none; overflow-wrap: normal; word-break: normal;
@@ -349,13 +387,6 @@
     max-height: none; overflow: visible;
   }
 }
-@media (min-width: 981px) and (max-width: 1499px) {
-.studio-shell .app[data-studio-shell="cockpit"][data-surface] { --ck-canvas-top: 185px; }
-.studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-nav {
-    height: 30px; min-height: 30px; padding-top: 2px; align-items: flex-start;
-  }
-.studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs { align-self: flex-start; }
-}
 @media (pointer: coarse) and (max-width: 1499px), (max-width: 980px) {
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] { --ck-ribbon: 151px; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool {
@@ -366,7 +397,7 @@
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-size="large"] { height: 132px; justify-content: center; }
 }
 @media (min-width: 981px) and (max-width: 1499px) and (pointer: coarse) {
-.studio-shell .app[data-studio-shell="cockpit"][data-surface] { --ck-canvas-top: 241px; --ck-status: 46px; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] { --ck-status: 46px; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .foot-region { height: 44px; }
 }
 @media (max-width: 980px) and (min-height: 500px) {

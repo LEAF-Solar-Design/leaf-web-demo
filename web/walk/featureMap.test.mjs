@@ -74,7 +74,8 @@ test('batch three declares exactly seventeen default-build semantic controls wit
     "opens",
     "session-provenance",
     [
-      "ready"
+      "ready",
+      "failed-load"
     ]
   ],
   [
@@ -191,8 +192,7 @@ test('batch three declares exactly seventeen default-build semantic controls wit
     const row = entryFor('control:' + id)
     assert.equal(row.title, title)
     assert.deepEqual(row.states, [...states].sort())
-    if (id === 'session-details') assert.equal(row.certify_reason,
-      'failed-load omitted: product defect U3, header controls overlap at 1600x1000; re-enable when U3 lands')
+    if (id === 'session-details') assert.equal(row.certify_reason, undefined)
     for (const state of states) {
       assert.deepEqual(row.expected_effect[state], { kind, target })
       assert.equal(row.state_contexts[state].document, true)
@@ -281,10 +281,9 @@ test('thirty-nine exact control declarations participate in independent complete
     assert.deepEqual(entry.state_contexts, declaration.state_contexts)
     assert.deepEqual(entry.states, [...declaration.states].sort())
     if (declaration.id === 'control:session-details') {
-      assert.deepEqual(entry.states, ['ready'])
-      assert.equal(declaration.certify_reason,
-        'failed-load omitted: product defect U3, header controls overlap at 1600x1000; re-enable when U3 lands')
-      assert.equal(entry.certify_reason, declaration.certify_reason)
+      assert.deepEqual(entry.states, ['failed-load', 'ready'])
+      assert.equal(declaration.certify_reason, undefined)
+      assert.equal(entry.certify_reason, undefined)
     }
     assert.equal(entry.certify, 'both')
     assert.deepEqual(entry.viewports, ['desktop'])

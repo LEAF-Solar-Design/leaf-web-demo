@@ -182,7 +182,8 @@ const BASELINE_THREE_CONTROLS = Object.freeze({
     "kind": "opens",
     "target": "session-provenance",
     "states": [
-      "ready"
+      "ready",
+      "failed-load"
     ],
     "role": "button",
     "interaction": "click"
