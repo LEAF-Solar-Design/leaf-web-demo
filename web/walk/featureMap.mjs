@@ -127,6 +127,183 @@ export function validateOverrides(config, knownIds) {
   return config
 }
 
+const BASELINE_THREE_CONTROLS = Object.freeze({
+  "scope-add": {
+    "kind": "opens",
+    "target": "scope-build-picker",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "role": "button",
+    "interaction": "click"
+  },
+  "demo-return": {
+    "kind": "renders",
+    "target": "guided-demo",
+    "states": [
+      "failed-load"
+    ],
+    "role": "button",
+    "interaction": "click"
+  },
+  "claude-accounts": {
+    "kind": "opens",
+    "target": "claude-accounts-panel",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "role": "button",
+    "interaction": "click",
+    "expanded": false
+  },
+  "drawing-close-start": {
+    "kind": "opens",
+    "target": "project-board",
+    "states": [
+      "ready"
+    ],
+    "role": "button",
+    "interaction": "click"
+  },
+  "notification-collapse": {
+    "kind": "renders",
+    "target": "notification-inbox-collapsed",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "role": "button",
+    "interaction": "click",
+    "expanded": true
+  },
+  "session-details": {
+    "kind": "opens",
+    "target": "session-provenance",
+    "states": [
+      "ready"
+    ],
+    "role": "button",
+    "interaction": "click"
+  },
+  "version-history": {
+    "kind": "opens",
+    "target": "version-history",
+    "states": [
+      "ready"
+    ],
+    "role": "button",
+    "interaction": "click",
+    "expanded": false
+  },
+  "linked-services": {
+    "kind": "opens",
+    "target": "linked-services-panel",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "role": "button",
+    "interaction": "click",
+    "expanded": false
+  },
+  "project-board": {
+    "kind": "opens",
+    "target": "project-board",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "role": "button",
+    "interaction": "click"
+  },
+  "prompt-run": {
+    "kind": "submits",
+    "target": "unknown-tool-resolver",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "role": "button",
+    "interaction": "click"
+  },
+  "prompt-scope": {
+    "kind": "opens",
+    "target": "scope-picker",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "role": "button",
+    "interaction": "click",
+    "expanded": false
+  },
+  "sign-out": {
+    "kind": "renders",
+    "target": "signed-out-session",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "role": "button",
+    "interaction": "click"
+  },
+  "start-board": {
+    "kind": "opens",
+    "target": "project-board",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "role": "button",
+    "interaction": "click"
+  },
+  "take-edit-lock": {
+    "kind": "renders",
+    "target": "edit-lock-held",
+    "states": [
+      "ready"
+    ],
+    "role": "button",
+    "interaction": "click"
+  },
+  "cost-panel": {
+    "kind": "opens",
+    "target": "cost-panel",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "role": "button",
+    "interaction": "click",
+    "expanded": false
+  },
+  "command-bar": {
+    "kind": "opens",
+    "target": "tool-commands",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "role": "combobox",
+    "interaction": "type",
+    "inputValue": "/",
+    "expanded": false
+  },
+  "find-drawing": {
+    "kind": "renders",
+    "target": "drawing-find-no-match",
+    "states": [
+      "ready"
+    ],
+    "role": "combobox",
+    "interaction": "fill-enter",
+    "inputValue": "w1k-absent-object-7f942",
+    "expanded": false
+  }
+})
+
 function validateControls(controls) {
   if (!Array.isArray(controls)) throw new Error('featureMap: controls must be an array')
   const seen = new Set()
@@ -149,7 +326,8 @@ function validateControls(controls) {
       const effect = record.expected_effect[state]
       const context = record.state_contexts[state]
       const contextFields = ['toolbar', 'complementary', 'group', 'document', 'name', 'namePolicy',
-        'tooltip', 'description', 'failedLoad', 'pressed', 'fullscreen', 'expanded', 'visible']
+        'tooltip', 'description', 'failedLoad', 'pressed', 'fullscreen', 'expanded', 'visible',
+        'role', 'interaction', 'inputValue']
       const scopes = [context.toolbar !== undefined, context.complementary !== undefined, context.document !== undefined]
       if (scopes.filter(Boolean).length !== 1
           || (context.toolbar !== undefined && !nonempty(context.toolbar))
@@ -160,9 +338,24 @@ function validateControls(controls) {
           || Object.keys(context).some((key) => !contextFields.includes(key))
           || ['failedLoad', 'pressed', 'fullscreen', 'expanded', 'visible'].some((key) => context[key] !== undefined && typeof context[key] !== 'boolean')
           || (context.namePolicy !== undefined && (context.namePolicy !== 'count'
-            || !['Panels {n}', 'Walk {n}', 'Expand the job monitor ({n} live)'].includes(context.name)))
+            || !['Panels {n}', 'Walk {n}', 'Expand the job monitor ({n} live)', 'Linked services {n} linked'].includes(context.name)))
           || (context.name.includes('{n}') && context.namePolicy !== 'count')) {
         throw new Error('featureMap: invalid control context ' + record.id + '/' + state)
+      }
+      const contract = Object.hasOwn(BASELINE_THREE_CONTROLS, record.source_id) ? BASELINE_THREE_CONTROLS[record.source_id] : undefined
+      if (contract) {
+        if (record.states.length !== contract.states.length || record.states.some((value) => !contract.states.includes(value))
+            || ['role', 'interaction'].some((field) => context[field] !== undefined && !nonempty(context[field]))
+            || context.document !== true || context.failedLoad !== (state === 'failed-load')
+            || (context.role || 'button') !== contract.role || (context.interaction || 'click') !== contract.interaction
+            || context.inputValue !== contract.inputValue || context.expanded !== contract.expanded
+            || effect.kind !== contract.kind || effect.target !== contract.target || effect.value !== undefined
+            || context.namePolicy !== (record.source_id === 'linked-services' ? 'count' : undefined)) {
+          throw new Error('featureMap: invalid baseline-three control contract ' + record.id + '/' + state)
+        }
+      } else if (['role', 'interaction', 'inputValue'].some((field) => context[field] !== undefined)
+          || context.name === 'Linked services {n} linked') {
+        throw new Error('featureMap: unsupported control interaction ' + record.id + '/' + state)
       }
       if (effect.kind === 'disabled_with_reason') {
         if (!nonempty(context.tooltip) || (context.description !== undefined

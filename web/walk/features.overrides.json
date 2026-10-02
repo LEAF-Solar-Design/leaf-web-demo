@@ -973,6 +973,637 @@
       ],
       "certify": "both"
     }
+    ,
+    {
+      "id": "control:scope-add",
+      "source_id": "scope-add",
+      "title": "Add: build a new capability",
+      "sources": [
+        "web/src/components/PromptBox.jsx"
+      ],
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "state_contexts": {
+        "ready": {
+          "document": true,
+          "name": "Add: build a new capability",
+          "failedLoad": false
+        },
+        "failed-load": {
+          "document": true,
+          "name": "Add: build a new capability",
+          "failedLoad": true
+        }
+      },
+      "expected_effect": {
+        "ready": {
+          "kind": "opens",
+          "target": "scope-build-picker"
+        },
+        "failed-load": {
+          "kind": "opens",
+          "target": "scope-build-picker"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:demo-return",
+      "source_id": "demo-return",
+      "title": "Back to the demo",
+      "sources": [
+        "web/src/components/DemoBanner.jsx",
+        "web/src/App.jsx"
+      ],
+      "states": [
+        "failed-load"
+      ],
+      "state_contexts": {
+        "failed-load": {
+          "document": true,
+          "name": "Back to the demo",
+          "failedLoad": true
+        }
+      },
+      "expected_effect": {
+        "failed-load": {
+          "kind": "renders",
+          "target": "guided-demo"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:claude-accounts",
+      "source_id": "claude-accounts",
+      "title": "Claude accounts not linked",
+      "sources": [
+        "web/src/components/ClaudeAccountPanel.jsx"
+      ],
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "state_contexts": {
+        "ready": {
+          "document": true,
+          "name": "Claude accounts not linked",
+          "failedLoad": false,
+          "expanded": false
+        },
+        "failed-load": {
+          "document": true,
+          "name": "Claude accounts not linked",
+          "failedLoad": true,
+          "expanded": false
+        }
+      },
+      "expected_effect": {
+        "ready": {
+          "kind": "opens",
+          "target": "claude-accounts-panel"
+        },
+        "failed-load": {
+          "kind": "opens",
+          "target": "claude-accounts-panel"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:drawing-close-start",
+      "source_id": "drawing-close-start",
+      "title": "Close the drawing view and return to Start",
+      "sources": [
+        "web/src/App.jsx",
+        "web/src/site/startBoardCopy.js"
+      ],
+      "states": [
+        "ready"
+      ],
+      "state_contexts": {
+        "ready": {
+          "document": true,
+          "name": "Close the drawing view and return to Start",
+          "failedLoad": false
+        }
+      },
+      "expected_effect": {
+        "ready": {
+          "kind": "opens",
+          "target": "project-board"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:notification-collapse",
+      "source_id": "notification-collapse",
+      "title": "Collapse the notification inbox",
+      "sources": [
+        "web/src/components/JobInbox.jsx"
+      ],
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "state_contexts": {
+        "ready": {
+          "document": true,
+          "name": "Collapse the notification inbox",
+          "failedLoad": false,
+          "expanded": true
+        },
+        "failed-load": {
+          "document": true,
+          "name": "Collapse the notification inbox",
+          "failedLoad": true,
+          "expanded": true
+        }
+      },
+      "expected_effect": {
+        "ready": {
+          "kind": "renders",
+          "target": "notification-inbox-collapsed"
+        },
+        "failed-load": {
+          "kind": "renders",
+          "target": "notification-inbox-collapsed"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:session-details",
+      "source_id": "session-details",
+      "title": "Details",
+      "sources": [
+        "web/src/components/DetailsDrawer.jsx",
+        "web/src/App.jsx",
+        "web/src/diagnostics.js"
+      ],
+      "states": [
+        "ready"
+      ],
+      "state_contexts": {
+        "ready": {
+          "document": true,
+          "name": "Details",
+          "failedLoad": false
+        }
+      },
+      "expected_effect": {
+        "ready": {
+          "kind": "opens",
+          "target": "session-provenance"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both",
+      "certify_reason": "failed-load omitted: product defect U3, header controls overlap at 1600x1000; re-enable when U3 lands"
+    },
+    {
+      "id": "control:version-history",
+      "source_id": "version-history",
+      "title": "History",
+      "sources": [
+        "web/src/components/VersionHistory.jsx",
+        "web/src/App.jsx"
+      ],
+      "states": [
+        "ready"
+      ],
+      "state_contexts": {
+        "ready": {
+          "document": true,
+          "name": "History",
+          "failedLoad": false,
+          "expanded": false
+        }
+      },
+      "expected_effect": {
+        "ready": {
+          "kind": "opens",
+          "target": "version-history"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:linked-services",
+      "source_id": "linked-services",
+      "title": "Linked services {n} linked",
+      "sources": [
+        "web/src/components/LinkServiceDrawer.jsx"
+      ],
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "state_contexts": {
+        "ready": {
+          "document": true,
+          "name": "Linked services {n} linked",
+          "failedLoad": false,
+          "namePolicy": "count",
+          "expanded": false
+        },
+        "failed-load": {
+          "document": true,
+          "name": "Linked services {n} linked",
+          "failedLoad": true,
+          "namePolicy": "count",
+          "expanded": false
+        }
+      },
+      "expected_effect": {
+        "ready": {
+          "kind": "opens",
+          "target": "linked-services-panel"
+        },
+        "failed-load": {
+          "kind": "opens",
+          "target": "linked-services-panel"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:project-board",
+      "source_id": "project-board",
+      "title": "Open the project board",
+      "sources": [
+        "web/src/site/DrawingCockpit.jsx",
+        "web/src/App.jsx",
+        "web/src/site/startBoardCopy.js"
+      ],
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "state_contexts": {
+        "ready": {
+          "document": true,
+          "name": "Open the project board",
+          "failedLoad": false
+        },
+        "failed-load": {
+          "document": true,
+          "name": "Open the project board",
+          "failedLoad": true
+        }
+      },
+      "expected_effect": {
+        "ready": {
+          "kind": "opens",
+          "target": "project-board"
+        },
+        "failed-load": {
+          "kind": "opens",
+          "target": "project-board"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:prompt-run",
+      "source_id": "prompt-run",
+      "title": "Run",
+      "sources": [
+        "web/src/controllers/catalog/catalogRouting.js",
+        "web/src/components/PromptBox.jsx",
+        "web/src/components/RoutePanel.jsx",
+        "web/src/controllers/catalog/createCatalogController.js",
+        "web/src/App.jsx"
+      ],
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "state_contexts": {
+        "ready": {
+          "document": true,
+          "name": "Run",
+          "failedLoad": false
+        },
+        "failed-load": {
+          "document": true,
+          "name": "Run",
+          "failedLoad": true
+        }
+      },
+      "expected_effect": {
+        "ready": {
+          "kind": "submits",
+          "target": "unknown-tool-resolver"
+        },
+        "failed-load": {
+          "kind": "submits",
+          "target": "unknown-tool-resolver"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:prompt-scope",
+      "source_id": "prompt-scope",
+      "title": "scope ▾",
+      "sources": [
+        "web/src/components/PromptBox.jsx"
+      ],
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "state_contexts": {
+        "ready": {
+          "document": true,
+          "name": "scope ▾",
+          "failedLoad": false,
+          "expanded": false
+        },
+        "failed-load": {
+          "document": true,
+          "name": "scope ▾",
+          "failedLoad": true,
+          "expanded": false
+        }
+      },
+      "expected_effect": {
+        "ready": {
+          "kind": "opens",
+          "target": "scope-picker"
+        },
+        "failed-load": {
+          "kind": "opens",
+          "target": "scope-picker"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:sign-out",
+      "source_id": "sign-out",
+      "title": "Sign out",
+      "sources": [
+        "web/src/auth.js",
+        "web/src/App.jsx",
+        "web/src/components/ProductSurfaceTabs.jsx",
+        "web/src/controllers/session/createSessionController.js",
+        "web/src/diagnostics.js"
+      ],
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "state_contexts": {
+        "ready": {
+          "document": true,
+          "name": "Sign out",
+          "failedLoad": false
+        },
+        "failed-load": {
+          "document": true,
+          "name": "Sign out",
+          "failedLoad": true
+        }
+      },
+      "expected_effect": {
+        "ready": {
+          "kind": "renders",
+          "target": "signed-out-session"
+        },
+        "failed-load": {
+          "kind": "renders",
+          "target": "signed-out-session"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:start-board",
+      "source_id": "start-board",
+      "title": "Start",
+      "sources": [
+        "web/src/App.jsx",
+        "web/src/site/startBoardCopy.js"
+      ],
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "state_contexts": {
+        "ready": {
+          "document": true,
+          "name": "Start",
+          "failedLoad": false
+        },
+        "failed-load": {
+          "document": true,
+          "name": "Start",
+          "failedLoad": true
+        }
+      },
+      "expected_effect": {
+        "ready": {
+          "kind": "opens",
+          "target": "project-board"
+        },
+        "failed-load": {
+          "kind": "opens",
+          "target": "project-board"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:take-edit-lock",
+      "source_id": "take-edit-lock",
+      "title": "Take edit lock",
+      "sources": [
+        "web/src/components/CheckoutControls.jsx",
+        "web/src/App.jsx"
+      ],
+      "states": [
+        "ready"
+      ],
+      "state_contexts": {
+        "ready": {
+          "document": true,
+          "name": "Take edit lock",
+          "failedLoad": false
+        }
+      },
+      "expected_effect": {
+        "ready": {
+          "kind": "renders",
+          "target": "edit-lock-held"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:cost-panel",
+      "source_id": "cost-panel",
+      "title": "What Leaf costs to operate",
+      "sources": [
+        "web/src/components/CostTransparencyPanel.jsx"
+      ],
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "state_contexts": {
+        "ready": {
+          "document": true,
+          "name": "What Leaf costs to operate",
+          "failedLoad": false,
+          "expanded": false
+        },
+        "failed-load": {
+          "document": true,
+          "name": "What Leaf costs to operate",
+          "failedLoad": true,
+          "expanded": false
+        }
+      },
+      "expected_effect": {
+        "ready": {
+          "kind": "opens",
+          "target": "cost-panel"
+        },
+        "failed-load": {
+          "kind": "opens",
+          "target": "cost-panel"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:command-bar",
+      "source_id": "command-bar",
+      "title": "Command bar",
+      "sources": [
+        "web/src/components/PromptBox.jsx"
+      ],
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "state_contexts": {
+        "ready": {
+          "document": true,
+          "name": "Command bar",
+          "failedLoad": false,
+          "role": "combobox",
+          "interaction": "type",
+          "inputValue": "/",
+          "expanded": false
+        },
+        "failed-load": {
+          "document": true,
+          "name": "Command bar",
+          "failedLoad": true,
+          "role": "combobox",
+          "interaction": "type",
+          "inputValue": "/",
+          "expanded": false
+        }
+      },
+      "expected_effect": {
+        "ready": {
+          "kind": "opens",
+          "target": "tool-commands"
+        },
+        "failed-load": {
+          "kind": "opens",
+          "target": "tool-commands"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
+      "id": "control:find-drawing",
+      "source_id": "find-drawing",
+      "title": "Find in drawing",
+      "sources": [
+        "web/src/site/DrawingNavigationTools.jsx",
+        "web/src/lib/drawingObjectIndex.js"
+      ],
+      "states": [
+        "ready"
+      ],
+      "state_contexts": {
+        "ready": {
+          "document": true,
+          "name": "Find in drawing",
+          "failedLoad": false,
+          "role": "combobox",
+          "interaction": "fill-enter",
+          "inputValue": "w1k-absent-object-7f942",
+          "expanded": false
+        }
+      },
+      "expected_effect": {
+        "ready": {
+          "kind": "renders",
+          "target": "drawing-find-no-match"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    }
   ],
   "state_cases": {
     "action": {

@@ -9,6 +9,490 @@ import { CONTROL_CENSUS_BATCH, requireControlCensusBatch, locatorRecipe, normali
 
 const fixture = (name) => JSON.parse(readFileSync(new URL(`./fixtures/control-census.${name}.json`, import.meta.url), 'utf8'))
 const resolve = (data, context) => resolveCensus(data.controls, data.derivedMappings, data.map, data.inventory, context)
+test('batch three retires exactly seventeen baseline keys and retains the precise Retry gap', () => {
+  const map = buildFeatureMap()
+  const inventory = readControlInventory(map)
+  const previous = [
+  {
+    "scope": "document",
+    "role": "button",
+    "name": "Add: build a new capability",
+    "reason": "No feature-map coverage yet: no walk mapping",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "scope": "document",
+    "role": "button",
+    "name": "Back to the demo",
+    "reason": "No feature-map coverage yet: no walk mapping",
+    "states": [
+      "failed-load"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "scope": "document",
+    "role": "button",
+    "name": "Claude accounts not linked",
+    "reason": "No feature-map coverage yet: no walk mapping",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "scope": "document",
+    "role": "button",
+    "name": "Close the drawing view and return to Start",
+    "reason": "No feature-map coverage yet: no walk mapping",
+    "states": [
+      "ready"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "scope": "document",
+    "role": "button",
+    "name": "Collapse the notification inbox",
+    "reason": "No feature-map coverage yet: no walk mapping",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "scope": "document",
+    "role": "button",
+    "name": "Details",
+    "reason": "No feature-map coverage yet: no walk mapping",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "scope": "document",
+    "role": "button",
+    "name": "History",
+    "reason": "No feature-map coverage yet: no walk mapping",
+    "states": [
+      "ready"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "scope": "document",
+    "role": "button",
+    "name": "Linked services {n} linked",
+    "reason": "No feature-map coverage yet: no walk mapping",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "scope": "document",
+    "role": "button",
+    "name": "Open the project board",
+    "reason": "No feature-map coverage yet: no walk mapping",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "scope": "document",
+    "role": "button",
+    "name": "Retry",
+    "reason": "No feature-map coverage yet: no walk mapping",
+    "states": [
+      "failed-load"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "scope": "document",
+    "role": "button",
+    "name": "Run",
+    "reason": "No feature-map coverage yet: no walk mapping",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "scope": "document",
+    "role": "button",
+    "name": "scope ▾",
+    "reason": "No feature-map coverage yet: no walk mapping",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "scope": "document",
+    "role": "button",
+    "name": "Sign out",
+    "reason": "No feature-map coverage yet: no walk mapping",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "scope": "document",
+    "role": "button",
+    "name": "Start",
+    "reason": "No feature-map coverage yet: no walk mapping",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "scope": "document",
+    "role": "button",
+    "name": "Take edit lock",
+    "reason": "No feature-map coverage yet: no walk mapping",
+    "states": [
+      "ready"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "scope": "document",
+    "role": "button",
+    "name": "What Leaf costs to operate",
+    "reason": "No feature-map coverage yet: no walk mapping",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "scope": "document",
+    "role": "combobox",
+    "name": "Command bar",
+    "reason": "No feature-map coverage yet: no walk mapping",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "scope": "document",
+    "role": "combobox",
+    "name": "Find in drawing",
+    "reason": "No feature-map coverage yet: no walk mapping",
+    "states": [
+      "ready"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  }
+]
+  const additions = [
+  {
+    "feature_id": "control:scope-add",
+    "scope": "document",
+    "role": "button",
+    "name": "Add: build a new capability",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "feature_id": "control:demo-return",
+    "scope": "document",
+    "role": "button",
+    "name": "Back to the demo",
+    "states": [
+      "failed-load"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "feature_id": "control:claude-accounts",
+    "scope": "document",
+    "role": "button",
+    "name": "Claude accounts not linked",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "feature_id": "control:drawing-close-start",
+    "scope": "document",
+    "role": "button",
+    "name": "Close the drawing view and return to Start",
+    "states": [
+      "ready"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "feature_id": "control:notification-collapse",
+    "scope": "document",
+    "role": "button",
+    "name": "Collapse the notification inbox",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "feature_id": "control:session-details",
+    "scope": "document",
+    "role": "button",
+    "name": "Details",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "feature_id": "control:version-history",
+    "scope": "document",
+    "role": "button",
+    "name": "History",
+    "states": [
+      "ready"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "feature_id": "control:linked-services",
+    "scope": "document",
+    "role": "button",
+    "name": "Linked services {n} linked",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "feature_id": "control:project-board",
+    "scope": "document",
+    "role": "button",
+    "name": "Open the project board",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "feature_id": "control:prompt-run",
+    "scope": "document",
+    "role": "button",
+    "name": "Run",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "feature_id": "control:prompt-scope",
+    "scope": "document",
+    "role": "button",
+    "name": "scope ▾",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "feature_id": "control:sign-out",
+    "scope": "document",
+    "role": "button",
+    "name": "Sign out",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "feature_id": "control:start-board",
+    "scope": "document",
+    "role": "button",
+    "name": "Start",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "feature_id": "control:take-edit-lock",
+    "scope": "document",
+    "role": "button",
+    "name": "Take edit lock",
+    "states": [
+      "ready"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "feature_id": "control:cost-panel",
+    "scope": "document",
+    "role": "button",
+    "name": "What Leaf costs to operate",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "feature_id": "control:command-bar",
+    "scope": "document",
+    "role": "combobox",
+    "name": "Command bar",
+    "states": [
+      "ready",
+      "failed-load"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  },
+  {
+    "feature_id": "control:find-drawing",
+    "scope": "document",
+    "role": "combobox",
+    "name": "Find in drawing",
+    "states": [
+      "ready"
+    ],
+    "viewports": [
+      "desktop"
+    ]
+  }
+]
+  assert.equal(previous.length, 18)
+  assert.equal(additions.length, 17)
+  assert.deepEqual(inventory.mappings.slice(-17), additions)
+  assert.deepEqual(CONTROL_CENSUS_BATCH.slice(-17), additions)
+  assert.deepEqual(inventory.baseline_unmapped, [{"scope":"document","role":"button","name":"Retry","reason":"Retry remains unmapped: the failed-load recipe uses a permanent missing drawing; bare Retry has multiple owners, and no checked public recovery recipe establishes a semantic successful retry for the observed owner.","states":["failed-load"],"viewports":["desktop"]}])
+  assert.deepEqual(previous.filter((row) => !inventory.baseline_unmapped.some((other) => controlKey(other) === controlKey(row)))
+    .map(controlKey).sort(), additions.map(controlKey).sort())
+  for (const row of additions) {
+    const original = previous.find((old) => controlKey(old) === controlKey(row))
+    const { reason, ...identity } = original
+    const { feature_id, ...mapped } = row
+    assert.deepEqual(mapped, identity)
+  }
+})
+
+test('batch three count changes preserve raw linked-service names and reject duplicate observations', () => {
+  const map = buildFeatureMap()
+  const inventory = { ...readControlInventory(map), baseline_unmapped: [] }
+  for (const state of ['ready', 'failed-load']) {
+    for (const count of ['0', '7', '1234']) {
+      const rows = CONTROL_CENSUS_BATCH.filter((row) => row.states.includes(state))
+        .map((row, index) => ({ ...row, index, visible: true,
+          name: row.feature_id === 'control:linked-services' ? 'Linked services ' + count + ' linked' : row.name }))
+      const result = resolveCensus(rows, [], map, inventory, { state })
+      assert.equal(requireControlCensusBatch(result, { state }), true)
+      assert.equal(result.resolved.find((row) => row.feature_id === 'control:linked-services').raw_name, 'Linked services ' + count + ' linked')
+      for (const row of rows.filter((row) => inventory.mappings.slice(-17).some((mapped) => mapped.feature_id === row.feature_id))) {
+        const duplicate = resolveCensus([...rows, { ...row, index: rows.length }], [], map, inventory, { state })
+        assert.throws(() => requireControlCensusBatch(duplicate, { state }), /missing or misresolved/)
+      }
+    }
+  }
+})
 
 test('live counts and disabled reasons share a stable baseline identity while raw evidence survives', () => {
   for (const { name, changed, key } of fixture('good').normalization_cases) {
@@ -183,7 +667,7 @@ test('inventory refuses unknown ids, overlapping duplicate rows, empty reasons a
   assert.doesNotThrow(() => validateControlInventory(data.inventory, data.map))
 })
 
-test('batch two retires exactly twelve of the thirty rows and preserves the other eighteen', () => {
+test('batch two retains its twelve exact mappings after batch three retires seventeen more rows', () => {
   const map = buildFeatureMap()
   const inventory = readControlInventory(map)
   const expected = [
@@ -224,19 +708,20 @@ test('batch two retires exactly twelve of the thirty rows and preserves the othe
     'properties-plan', 'properties-selection', 'properties-walk', 'drawing-overview-collapse',
     'drawing-overview', 'layer-panels', 'layer-walk', 'job-monitor-expand']
   assert.equal(expected.length, 30, 'retain the independent batch-one reference')
-  assert.deepEqual(inventory.baseline_unmapped, expected.filter((row, index) => !retiredIndices.includes(index)))
-  assert.equal(inventory.baseline_unmapped.length, 18)
+  const batchTwoRemainder = expected.filter((row, index) => !retiredIndices.includes(index))
+  assert.equal(batchTwoRemainder.length, 18)
+  assert.deepEqual([...inventory.mappings.slice(-17), ...inventory.baseline_unmapped].map(controlKey).sort(), batchTwoRemainder.map(controlKey).sort())
   const retired = retiredIndices.map((index, position) => {
     const { reason, ...row } = expected[index]
     return { feature_id: 'control:' + retiredIds[position], ...row }
   })
-  assert.deepEqual(inventory.mappings.slice(-12), retired)
-  assert.deepEqual(CONTROL_CENSUS_BATCH.slice(10), retired)
-  assert.deepEqual(expected.filter((row) => !inventory.baseline_unmapped.some((retained) => controlKey(retained) === controlKey(row)))
+  assert.deepEqual(inventory.mappings.slice(11, 23), retired)
+  assert.deepEqual(CONTROL_CENSUS_BATCH.slice(10, 22), retired)
+  assert.deepEqual(expected.filter((row) => !batchTwoRemainder.some((retained) => controlKey(retained) === controlKey(row)))
     .map(controlKey), retired.map(controlKey))
   const mappings = inventory.mappings.filter((row) => row.feature_id.startsWith('control:'))
   assert.deepEqual(mappings, CONTROL_CENSUS_BATCH)
-  assert.equal(mappings.length, 22)
+  assert.equal(mappings.length, 39)
   for (const row of mappings) assert.ok(!inventory.baseline_unmapped.some((other) => controlKey(other) === controlKey(row)))
 })
 
@@ -262,7 +747,7 @@ test('count-bearing batch controls resolve different live counts through anchore
   for (const count of ['1', '42', '1,234']) {
     const expected = CONTROL_CENSUS_BATCH.filter((row) => row.states.includes('ready'))
     const controls = expected.map((row, index) => ({ ...row, index, visible: true,
-      name: row.name.replace('{n}', row.feature_id === 'control:job-monitor-expand' ? count.replace(/,/g, '') : count) }))
+      name: row.name.replace('{n}', ['control:job-monitor-expand', 'control:linked-services'].includes(row.feature_id) ? count.replace(/,/g, '') : count) }))
     const derived = []
     for (const row of controls.filter((row) => row.name !== expected[row.index].name)) {
       const entry = map.entries.find((entry) => entry.id === row.feature_id)

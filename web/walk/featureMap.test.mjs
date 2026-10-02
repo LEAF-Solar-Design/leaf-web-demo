@@ -18,6 +18,224 @@ const clone = (value) => structuredClone(value)
 const map = buildFeatureMap()
 const ids = map.entries.map((entry) => entry.id)
 const entryFor = (id) => map.entries.find((entry) => entry.id === id)
+test('batch three declares exactly seventeen default-build semantic controls with complete states', () => {
+  const expected = [
+  [
+    "scope-add",
+    "Add: build a new capability",
+    "opens",
+    "scope-build-picker",
+    [
+      "ready",
+      "failed-load"
+    ]
+  ],
+  [
+    "demo-return",
+    "Back to the demo",
+    "renders",
+    "guided-demo",
+    [
+      "failed-load"
+    ]
+  ],
+  [
+    "claude-accounts",
+    "Claude accounts not linked",
+    "opens",
+    "claude-accounts-panel",
+    [
+      "ready",
+      "failed-load"
+    ]
+  ],
+  [
+    "drawing-close-start",
+    "Close the drawing view and return to Start",
+    "opens",
+    "project-board",
+    [
+      "ready"
+    ]
+  ],
+  [
+    "notification-collapse",
+    "Collapse the notification inbox",
+    "renders",
+    "notification-inbox-collapsed",
+    [
+      "ready",
+      "failed-load"
+    ]
+  ],
+  [
+    "session-details",
+    "Details",
+    "opens",
+    "session-provenance",
+    [
+      "ready"
+    ]
+  ],
+  [
+    "version-history",
+    "History",
+    "opens",
+    "version-history",
+    [
+      "ready"
+    ]
+  ],
+  [
+    "linked-services",
+    "Linked services {n} linked",
+    "opens",
+    "linked-services-panel",
+    [
+      "ready",
+      "failed-load"
+    ]
+  ],
+  [
+    "project-board",
+    "Open the project board",
+    "opens",
+    "project-board",
+    [
+      "ready",
+      "failed-load"
+    ]
+  ],
+  [
+    "prompt-run",
+    "Run",
+    "submits",
+    "unknown-tool-resolver",
+    [
+      "ready",
+      "failed-load"
+    ]
+  ],
+  [
+    "prompt-scope",
+    "scope ▾",
+    "opens",
+    "scope-picker",
+    [
+      "ready",
+      "failed-load"
+    ]
+  ],
+  [
+    "sign-out",
+    "Sign out",
+    "renders",
+    "signed-out-session",
+    [
+      "ready",
+      "failed-load"
+    ]
+  ],
+  [
+    "start-board",
+    "Start",
+    "opens",
+    "project-board",
+    [
+      "ready",
+      "failed-load"
+    ]
+  ],
+  [
+    "take-edit-lock",
+    "Take edit lock",
+    "renders",
+    "edit-lock-held",
+    [
+      "ready"
+    ]
+  ],
+  [
+    "cost-panel",
+    "What Leaf costs to operate",
+    "opens",
+    "cost-panel",
+    [
+      "ready",
+      "failed-load"
+    ]
+  ],
+  [
+    "command-bar",
+    "Command bar",
+    "opens",
+    "tool-commands",
+    [
+      "ready",
+      "failed-load"
+    ]
+  ],
+  [
+    "find-drawing",
+    "Find in drawing",
+    "renders",
+    "drawing-find-no-match",
+    [
+      "ready"
+    ]
+  ]
+]
+  assert.equal(expected.length, 17)
+  assert.deepEqual(overrides.controls.slice(22).map((row) => row.id), expected.map(([id]) => 'control:' + id))
+  for (const [id, title, kind, target, states] of expected) {
+    const row = entryFor('control:' + id)
+    assert.equal(row.title, title)
+    assert.deepEqual(row.states, [...states].sort())
+    if (id === 'session-details') assert.equal(row.certify_reason,
+      'failed-load omitted: product defect U3, header controls overlap at 1600x1000; re-enable when U3 lands')
+    for (const state of states) {
+      assert.deepEqual(row.expected_effect[state], { kind, target })
+      assert.equal(row.state_contexts[state].document, true)
+      assert.equal(row.state_contexts[state].failedLoad, state === 'failed-load')
+    }
+    assert.throws(() => checkCompleteness({ ...map, entries: map.entries.filter((entry) => entry.id !== row.id) }), /completeness failed/)
+  }
+})
+
+test('batch three refuses malformed interaction fields, count policies and state/effect pairs', () => {
+  for (const [id, mutate] of [
+    ['command-bar', (row) => { row.state_contexts.ready.role = 'textbox' }],
+    ['command-bar', (row) => { row.state_contexts.ready.role = '' }],
+    ['command-bar', (row) => { row.state_contexts.ready.interaction = 'click' }],
+    ['command-bar', (row) => { row.state_contexts.ready.interaction = '' }],
+    ['command-bar', (row) => { row.state_contexts.ready.inputValue = null }],
+    ['command-bar', (row) => { row.state_contexts.ready.inputValue = '/wrong' }],
+    ['command-bar', (row) => { row.state_contexts.ready.key = 'Enter' }],
+    ['find-drawing', (row) => { row.state_contexts.ready.interaction = 'type' }],
+    ['find-drawing', (row) => { row.state_contexts.ready.role = 'button' }],
+    ['prompt-run', (row) => { row.state_contexts.ready.inputValue = '/wrong' }],
+    ['prompt-run', (row) => { row.expected_effect.ready.kind = 'opens' }],
+    ['prompt-run', (row) => { row.expected_effect.ready.target = 'catalog-run-decision' }],
+    ['scope-add', (row) => { row.state_contexts.ready.role = 'combobox' }],
+    ['scope-add', (row) => { row.state_contexts.ready.failedLoad = true }],
+    ['scope-add', (row) => { delete row.state_contexts['failed-load'] }],
+    ['scope-add', (row) => { row.states = ['ready']; delete row.expected_effect['failed-load']; delete row.state_contexts['failed-load'] }],
+    ['linked-services', (row) => { row.state_contexts.ready.namePolicy = 'regex' }],
+    ['linked-services', (row) => { delete row.state_contexts.ready.namePolicy }],
+    ['linked-services', (row) => { row.state_contexts.ready.name = 'Linked services 0 linked' }],
+    ['linked-services', (row) => { row.state_contexts.ready.expanded = true }],
+    ['notification-collapse', (row) => { row.state_contexts.ready.expanded = false }],
+    ['sign-out', (row) => { row.expected_effect.ready.kind = 'submits' }],
+  ]) {
+    const config = clone(overrides)
+    mutate(config.controls.find((row) => row.id === 'control:' + id))
+    assert.throws(() => buildFeatureMap({ overrides: config }), /featureMap:/, id)
+  }
+  const earlier = clone(overrides)
+  earlier.controls = earlier.controls.slice(0, 22)
+  const previous = buildFeatureMap({ overrides: earlier })
+  for (const row of previous.entries) assert.deepEqual(entryFor(row.id), row)
+})
 const exclusionOverrides = { ...overrides, overrides: { ...overrides.overrides,
   'action:fit': { effect: { kind: 'renders', target: 'viewer-home' } },
   'drawer:nav': {},
@@ -48,18 +266,26 @@ test('completeness rejects every omitted row, including tools and the none drawe
   assert.throws(() => checkCompleteness({ ...map, entries: [...map.entries, map.entries[0]] }), /duplicate/)
 })
 
-test('twenty-two exact control declarations participate in independent completeness', () => {
+test('thirty-nine exact control declarations participate in independent completeness', () => {
   const expected = ['fullscreen', 'grid-display', 'new-drawing', 'object-snap', 'ortho-mode',
     'polar-tracking', 'print', 'snap-mode', 'view-back', 'view-up',
     'properties-close', 'properties-drawing', 'properties-layers', 'properties-panels', 'properties-plan',
     'properties-selection', 'properties-walk', 'layer-panels', 'layer-walk', 'job-monitor-expand',
-    'drawing-overview', 'drawing-overview-collapse'].map((id) => 'control:' + id).sort()
+    'drawing-overview', 'drawing-overview-collapse',
+    'scope-add', 'demo-return', 'claude-accounts', 'drawing-close-start', 'notification-collapse', 'session-details', 'version-history', 'linked-services', 'project-board', 'prompt-run', 'prompt-scope', 'sign-out', 'start-board', 'take-edit-lock', 'cost-panel', 'command-bar', 'find-drawing'].map((id) => 'control:' + id).sort()
   assert.deepEqual(map.entries.filter((row) => row.kind === 'control').map((row) => row.id), expected)
   for (const declaration of overrides.controls) {
     const entry = entryFor(declaration.id)
     assert.equal(entry.source_id, declaration.source_id)
     assert.deepEqual(entry.expected_effect, declaration.expected_effect)
     assert.deepEqual(entry.state_contexts, declaration.state_contexts)
+    assert.deepEqual(entry.states, [...declaration.states].sort())
+    if (declaration.id === 'control:session-details') {
+      assert.deepEqual(entry.states, ['ready'])
+      assert.equal(declaration.certify_reason,
+        'failed-load omitted: product defect U3, header controls overlap at 1600x1000; re-enable when U3 lands')
+      assert.equal(entry.certify_reason, declaration.certify_reason)
+    }
     assert.equal(entry.certify, 'both')
     assert.deepEqual(entry.viewports, ['desktop'])
     const reference = overrides.controls.filter((row) => row.id !== declaration.id)
