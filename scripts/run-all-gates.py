@@ -5681,6 +5681,68 @@ def verify_shard_results(results_dir: Path, *,
 # --------------------------------------------------------------------------- #
 # scoreboard
 # --------------------------------------------------------------------------- #
+def scrub_evidence(text: str) -> str:
+    """Remove credentials and terminal controls before evidence reaches stdout."""
+    if not isinstance(text, str):
+        return ""
+    try:
+        text = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)", "", text)
+        text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-_]", "", text)
+        text = re.sub(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]", "", text)
+        text = re.sub(r"(?i)\b(?:Bearer|Basic)[ \t]+[^\s\"'<>;,]+",
+                      "[redacted]", text)
+        text = re.sub(
+            r"(?i)(\b[\w.-]*(?:key|token|secret|password|passwd|authorization|cookie|credential)"
+            r"\b[\"']?[ \t]*[=:][ \t]*)(?:\"[^\"\n]*\"|'[^'\n]*'|[^\s,;]+)",
+            lambda match: match.group(1) + "[redacted]", text)
+        text = re.sub(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b", "[redacted]", text)
+        text = re.sub(r"\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+",
+                      "[redacted]", text)
+        text = re.sub(r"([A-Za-z][A-Za-z0-9+.-]*://)[^\s/@]+:[^\s/@]*@",
+                      r"\1[redacted]@", text)
+        text = re.sub(
+            r"[A-Za-z0-9+/_=-]{40,}",
+            lambda match: "[redacted]" if (
+                re.search(r"[A-Za-z]", match.group()) and
+                re.search(r"[0-9]", match.group())
+            ) else match.group(), text)
+        return text
+    except Exception:
+        return ""
+
+
+def failed_suite_evidence(results, *, max_suites=5, tail_lines=30,
+                          max_chars=3000, max_file_bytes=4 * 1024 * 1024) -> list[str]:
+    """Return small, scrubbed evidence blocks from the last attempt of red suites."""
+    failed = [r for r in results if r.status == "FAIL"]
+    output = []
+    for r in failed[:max(0, max_suites)]:
+        heading = f"FAILED SUITE EVIDENCE: {scrub_evidence(r.suite.id)}"
+        try:
+            if r.log_path is None:
+                raise OSError("absent log path")
+            with open(r.log_path, "rb") as log:
+                log.seek(0, os.SEEK_END)
+                log.seek(max(0, log.tell() - max(0, max_file_bytes)))
+                text = log.read(max(0, max_file_bytes)).decode("utf-8", errors="replace")
+        except (OSError, TypeError, ValueError):
+            block = [heading, "  log is unavailable"]
+        else:
+            lines = scrub_evidence(text).splitlines()
+            first = next((line for line in strip_ansi(text).splitlines() if re.search(
+                r"(?i)\b(error|exception|traceback|failed|fatal|panic|cannot|refused|timed out)\b",
+                line)), "none matched")
+            nonempty = [line for line in lines if line.strip()]
+            tail = nonempty[-tail_lines:] if tail_lines > 0 else []
+            block = [heading, f"  first error: {scrub_evidence(first)[:400]}", "  tail:"]
+            block.extend(line[:300] for line in tail)
+        output.extend("\n".join(block)[:max(0, max_chars)].splitlines())
+    omitted = len(failed) - max(0, max_suites)
+    if omitted > 0:
+        output.append(f"FAILED SUITE EVIDENCE: {omitted} more failed suites not shown")
+    return output
+
+
 def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
                      selection: str = NO_FILTER) -> None:
     rows = []
@@ -5784,6 +5846,8 @@ def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
         if r.status == "UNAVAILABLE":
             detail = r.note or f"{r.suite.id} registry unavailable"
             print(f"  NOT PROVEN BY AUDIT: {detail}")
+    for evidence_line in failed_suite_evidence(results):
+        print(evidence_line)
     print("=" * len(line))
 
 
