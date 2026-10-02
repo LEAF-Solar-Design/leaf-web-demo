@@ -29,7 +29,8 @@ from test_w1_solve_commit import seed, seed_graphless  # noqa: E402
 
 URL = "/api/drawings/" + DRAWING + "/imports/landxml"
 QUERY = "?drawing_units=m&crs=none"
-ROUTE_CODES = {"LANDXML_DRAWING_ID_INVALID", "LANDXML_MEDIA_TYPE_REFUSED", "LANDXML_IMPORT_FAILED"}
+ROUTE_CODES = {"LANDXML_DRAWING_ID_INVALID", "LANDXML_MEDIA_TYPE_REFUSED", "LANDXML_IMPORT_FAILED",
+               "LANDXML_CHECKOUT_DENIED", "LANDXML_CHECKOUT_UNAVAILABLE"}
 PASSTHROUGH = {
     "PHYSICAL_HEAD_CONFLICT", "PHYSICAL_HEAD_LOG_FULL", "PHYSICAL_HEAD_PROJECT_MISMATCH",
     "PHYSICAL_STATE_PROJECT_MISMATCH", "PHYSICAL_HEAD_WRITES_DRAINED", "PHYSICAL_STATE_WRITES_DRAINED",
@@ -37,6 +38,7 @@ PASSTHROUGH = {
     "PHYSICAL_HEAD_STORE_UNSAFE", "PHYSICAL_STATE_CORRUPT",
 }
 RETRYABLE = {"LANDXML_WRITES_DRAINED", "LANDXML_STORE_UNAVAILABLE", "PHYSICAL_HEAD_CONFLICT",
+             "LANDXML_CHECKOUT_UNAVAILABLE",
              "PHYSICAL_HEAD_WRITES_DRAINED", "PHYSICAL_STATE_WRITES_DRAINED",
              "PHYSICAL_HEAD_STORE_UNAVAILABLE", "PHYSICAL_STATE_STORE_UNAVAILABLE"}
 ENVELOPE = ("error", "degraded_mode")
@@ -118,11 +120,11 @@ def test_landxml_route_refusal_map_is_closed():
     from routers import drawings
     refusals = drawings.LANDXML_IMPORT_REFUSALS
     assert set(refusals) == set(lx.CODES) | ROUTE_CODES | PASSTHROUGH
-    assert len(refusals) == 42
+    assert len(refusals) == 44
     assert PASSTHROUGH <= ps.CODES | ph.CODES
     assert drawings.LANDXML_MEDIA_TYPES == frozenset({"application/xml", "text/xml"})
     for code, (status, envelope_code, retryable) in refusals.items():
-        assert status in (400, 404, 409, 413, 415, 422, 500, 503), code
+        assert status in (400, 403, 404, 409, 413, 415, 422, 500, 503), code
         assert envelope_code == (ErrorCode.INTERNAL if status >= 500 else ErrorCode.BAD_PARAMS), code
         assert retryable is (code in RETRYABLE), code
     assert {code for code, row in refusals.items() if row[0] == 503} == RETRYABLE - {"PHYSICAL_HEAD_CONFLICT"}
@@ -133,6 +135,8 @@ def test_landxml_route_refusal_map_is_closed():
 def test_landxml_route_refusal_statuses_pinned():
     from routers import drawings
     expected = {
+        "LANDXML_CHECKOUT_DENIED": 403,
+        "LANDXML_CHECKOUT_UNAVAILABLE": 503,
         "LANDXML_DRAWING_ID_INVALID": 400,
         "LANDXML_PROJECT_ID_INVALID": 400,
         "LANDXML_DRAWING_UNITS_INVALID": 400,
@@ -510,3 +514,116 @@ def test_landxml_route_foreign_tenant(backend, client):
     assert not {key for key in keys(backend) if "/artifacts/" in key or "/physical/" in key}
     assert not {key for key in backend.drawing_object_keys("other-tenant", DRAWING)
                 if "/artifacts/" in key or "/physical/" in key}
+
+
+@pytest.mark.parametrize("lease,proof,status", [
+    ("active", None, 403), ("active", "valid", 200), ("none", None, 200),
+    ("expired", None, 200), ("active", "", 403), ("active", "   ", 403),
+    ("active", "garbage", 403), ("none", "", 200), ("none", "   ", 200),
+    ("none", "garbage", 200), ("active", "unavailable", 503),
+])
+def test_landxml_route_checkout_matrix(backend, client, monkeypatch, lease, proof, status):
+    import checkout_capability
+    import store
+    # An existing physical head makes unchanged-head assertions substantive.
+    lx.import_landxml_terrain(backend, TENANT, DRAWING, REAL, drawing_units="m", crs="none")
+    if lease != "none":
+        acquired = client.post("/api/drawings/" + DRAWING + "/checkout",
+                               json={"holder": "another session"}, headers={"X-Tenant-Id": TENANT})
+        assert acquired.status_code == 200
+        if proof == "valid":
+            proof = acquired.json()["checkout_capability"]
+        if lease == "expired":
+            manifest = store.load_manifest(backend, TENANT, DRAWING)
+            manifest["checkout"]["expires"] = "2000-01-01T00:00:00+00:00"
+            store.save_manifest(backend, TENANT, DRAWING, manifest)
+    if proof == "unavailable":
+        def unavailable(*args, **kwargs):
+            raise checkout_capability.CapabilityUnavailable("unavailable")
+        monkeypatch.setattr(checkout_capability, "verify", unavailable)
+    head = ph.physical_head(backend, TENANT, DRAWING, project_id=PROJECT)
+    manifest = store.load_manifest(backend, TENANT, DRAWING)
+    before = {key: backend.get(key) for key in keys(backend)}
+    headers = {"X-Tenant-Id": TENANT, "Content-Type": "application/xml"}
+    if proof is not None:
+        headers["X-Checkout-Capability"] = proof
+    response = client.post(URL + QUERY, content=landxml(), headers=headers)
+    assert response.status_code == status
+    assert store.load_manifest(backend, TENANT, DRAWING) == manifest
+    if status == 200:
+        assert response.json()["error"] is None
+        assert body_of(response)["created"] is True
+        assert body_of(response)["head"]["state"]["artifact_id"] != head["state"]["artifact_id"]
+    else:
+        code = "LANDXML_CHECKOUT_UNAVAILABLE" if status == 503 else "LANDXML_CHECKOUT_DENIED"
+        error = response.json()["error"]
+        assert (error["error_code"], error["reason_code"], error["retryable"]) == (
+            "INTERNAL" if status == 503 else "BAD_PARAMS", code, status == 503)
+        assert ph.physical_head(backend, TENANT, DRAWING, project_id=PROJECT) == head
+        # Compare all bytes, including source metadata/blobs and the version manifest.
+        assert {key: backend.get(key) for key in keys(backend)} == before
+
+
+@pytest.mark.parametrize("proof", [None, "garbage"])
+def test_landxml_route_missing_drawing_unchanged_by_gate(backend, client, monkeypatch, proof):
+    from routers import drawings
+    headers = {"X-Tenant-Id": TENANT, "Content-Type": "application/xml"}
+    if proof is not None:
+        headers["X-Checkout-Capability"] = proof
+    url = URL.replace("/solar/", "/nosuch/") + QUERY
+    before = {key: backend.get(key) for key in keys(backend)}
+    response = client.post(url, content=REAL, headers=headers)
+    assert response.status_code == 404
+    assert (response.json()["error"]["error_code"], reason(response)) == (
+        "BAD_PARAMS", "LANDXML_DRAWING_NOT_FOUND")
+    monkeypatch.setattr(drawings, "_lock_authorization", lambda *args: None)
+    assert client.post(url, content=REAL, headers=headers).content == response.content
+    assert {key: backend.get(key) for key in keys(backend)} == before
+    assert not set(backend.drawing_object_keys(TENANT, "nosuch"))
+
+
+@pytest.mark.parametrize("proof", [None, "", "   ", "garbage", "unavailable"])
+def test_landxml_route_refused_import_writes_no_artifact(backend, client, monkeypatch, proof):
+    import checkout_capability
+    import store
+    acquired = client.post("/api/drawings/" + DRAWING + "/checkout",
+                           json={"holder": "another session"}, headers={"X-Tenant-Id": TENANT})
+    assert acquired.status_code == 200
+    if proof == "unavailable":
+        def unavailable(*args, **kwargs):
+            raise checkout_capability.CapabilityUnavailable("unavailable")
+        monkeypatch.setattr(checkout_capability, "verify", unavailable)
+    def importer_forbidden(*args, **kwargs):
+        pytest.fail("checkout refusal reached the source artifact writer")
+    monkeypatch.setattr(lx, "import_landxml_terrain", importer_forbidden)
+    head = ph.physical_head(backend, TENANT, DRAWING, project_id=PROJECT)
+    manifest = store.load_manifest(backend, TENANT, DRAWING)
+    before = {key: backend.get(key) for key in keys(backend)}
+    headers = {"X-Tenant-Id": TENANT, "Content-Type": "application/xml"}
+    if proof is not None:
+        headers["X-Checkout-Capability"] = proof
+    response = client.post(URL + QUERY, content=REAL, headers=headers)
+    status = 503 if proof == "unavailable" else 403
+    assert response.status_code == status
+    error = response.json()["error"]
+    assert (error["error_code"], error["reason_code"], error["retryable"]) == (
+        "INTERNAL" if status == 503 else "BAD_PARAMS",
+        "LANDXML_CHECKOUT_UNAVAILABLE" if status == 503 else "LANDXML_CHECKOUT_DENIED", status == 503)
+    assert ph.physical_head(backend, TENANT, DRAWING, project_id=PROJECT) == head
+    assert store.load_manifest(backend, TENANT, DRAWING) == manifest
+    assert {key: backend.get(key) for key in keys(backend)} == before
+    assert not {key for key in keys(backend) if "/artifacts/" in key}
+
+
+def test_landxml_route_gate_receives_tenant_context(backend, client, monkeypatch):
+    import deps
+    from routers import drawings
+    tenant = deps.TenantContext(TENANT, tier="demo", subject="auth0|landxml-holder")
+    client.app.dependency_overrides[deps.require_active_tenant] = lambda: tenant
+    seen = []
+    def record(drawing_id, context, selected_backend, capability):
+        seen.append(context)
+    monkeypatch.setattr(drawings, "_lock_authorization", record)
+    assert post(client).status_code == 200
+    assert seen == [tenant] and seen[0] is tenant
+    assert isinstance(seen[0], deps.TenantContext) and seen[0].subject == "auth0|landxml-holder"

@@ -205,6 +205,7 @@ test('--env-allowlist excludes database URLs and ambient variables unless explic
     ...process.env, DATABASE_URL: 'postgres://test.invalid/main', LEAF_HARNESS_DATABASE_URL: 'postgres://test.invalid/harness',
     OTHER_PG_URL: 'postgres://test.invalid/other', UNRELATED_SECRET: 'must-not-leak',
     LEAF_AGENT_STORE: 'postgres', LEAF_AUTH_LIVE: '1', ALLOWED_MARKER: 'included',
+    LD_LIBRARY_PATH: '/opt/marker/lib', LD_PRELOAD: '/opt/marker/evil.so',
   }
   const run = launch(['--env-allowlist', 'ALLOWED_MARKER', '--print-child-env'], parent)
   assert.equal((await finish(run)).code, 0, output(run))
@@ -213,6 +214,8 @@ test('--env-allowlist excludes database URLs and ambient variables unless explic
     assert.equal(Object.hasOwn(env, name), false, `${name} leaked into the child environment`)
   }
   assert.equal(env.ALLOWED_MARKER, 'included')
+  assert.equal(env.LD_LIBRARY_PATH, '/opt/marker/lib')
+  assert.equal(Object.hasOwn(env, 'LD_PRELOAD'), false)
   assert.equal(env.APS_LIVE, '0')
   assert.equal(env.LEAF_AUTH_LIVE, '0')
   for (const name of ['PATH', 'SYSTEMROOT', 'TEMP', 'TMP', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'PATHEXT', 'COMSPEC', 'LANG']) {
@@ -228,7 +231,10 @@ test('--env-allowlist excludes database URLs and ambient variables unless explic
   for (const name of ['DATABASE_URL', 'OTHER_PG_URL', 'LEAF_HARNESS_DATABASE_URL']) assert.equal(explicit[name], parent[name])
   const empty = launch(['--env-allowlist', '', '--print-child-env'], parent)
   assert.equal((await finish(empty)).code, 0, output(empty))
-  assert.equal(Object.hasOwn(JSON.parse(empty.stdout), 'ALLOWED_MARKER'), false)
+  const emptyEnv = JSON.parse(empty.stdout)
+  assert.equal(Object.hasOwn(emptyEnv, 'ALLOWED_MARKER'), false)
+  assert.equal(emptyEnv.LD_LIBRARY_PATH, '/opt/marker/lib')
+  assert.equal(Object.hasOwn(emptyEnv, 'LD_PRELOAD'), false)
   const inherited = launch(['--print-child-env'], parent)
   assert.equal((await finish(inherited)).code, 0, output(inherited))
   assert.equal(JSON.parse(inherited.stdout).DATABASE_URL, parent.DATABASE_URL)

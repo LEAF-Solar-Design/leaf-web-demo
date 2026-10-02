@@ -173,6 +173,87 @@ const terrainPosts = (props) => props.transport.fetchImpl.mock.calls.filter(([ur
   init.method === 'POST' && url.includes('/terrain/operations'))
 
 describe('terrain workspace integration', () => {
+  it('CHECKOUT-GATE CG4 terrain GET and POST replace transport proofs with the current getter value', async () => {
+    for (const casing of ['x-checkout-capability', 'X-CHECKOUT-CAPABILITY', 'x-Checkout-Capability']) {
+      for (const cap of ['current-proof', '']) {
+        const props = terrainProps({ getCheckoutCapability: vi.fn(() => cap) })
+        props.transport.headers = () => ({ 'X-Tenant-Id': 'workspace-test', [casing]: 'transport-proof' })
+        render(<SolarWorkspaceTools {...props} />)
+        openTerrain()
+        await terrainReady()
+        fireEvent.click(terrainMesh())
+        await waitFor(() => expect(terrainGets(props)).toHaveLength(2))
+        await terrainReady()
+        expect(terrainPosts(props)).toHaveLength(1)
+        for (const [, init] of props.transport.fetchImpl.mock.calls) {
+          const keys = Object.keys(init.headers).filter((key) => key.toLowerCase() === 'x-checkout-capability')
+          expect(keys).toEqual(cap ? ['X-Checkout-Capability'] : [])
+          if (cap) expect(init.headers['X-Checkout-Capability']).toBe(cap)
+          expect(Object.values(init.headers)).not.toContain('transport-proof')
+        }
+        expect(props.getCheckoutCapability).toHaveBeenCalledTimes(3)
+        cleanup()
+      }
+    }
+  })
+
+  it('CHECKOUT-GATE CG1 a LandXML upload carries the current checkout capability', async () => {
+    const props = supplied({ getCheckoutCapability: vi.fn(() => 'landxml-current') })
+    props.transport.headers = () => ({ 'X-Tenant-Id': 'workspace-test', 'x-CHECKOUT-capability': 'transport-proof' })
+    render(<SolarWorkspaceTools {...props} />)
+    open()
+    submit()
+    await waitFor(() => expect(props.onPhysicalHeadChanged).toHaveBeenCalledTimes(1))
+    const headers = props.transport.fetchImpl.mock.calls[0][1].headers
+    expect(headers['X-Checkout-Capability']).toBe('landxml-current')
+    expect(Object.keys(headers).filter((key) => key.toLowerCase() === 'x-checkout-capability'))
+      .toEqual(['X-Checkout-Capability'])
+    expect(props.getCheckoutCapability).toHaveBeenCalledTimes(1)
+  })
+
+  it('CHECKOUT-GATE CG2 a later LandXML upload reads a changed capability getter', async () => {
+    const props = supplied({ getCheckoutCapability: vi.fn(() => 'landxml-first') })
+    const view = render(<SolarWorkspaceTools {...props} />)
+    open()
+    submit()
+    await waitFor(() => expect(props.onPhysicalHeadChanged).toHaveBeenCalledTimes(1))
+    const changed = vi.fn(() => 'landxml-second')
+    // Keep the same transport and memoized client while replacing the getter.
+    view.rerender(<SolarWorkspaceTools {...props} getCheckoutCapability={changed} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Import terrain' }))
+    await waitFor(() => expect(props.onPhysicalHeadChanged).toHaveBeenCalledTimes(2))
+    expect(props.transport.fetchImpl.mock.calls.map(([, init]) => init.headers['X-Checkout-Capability']))
+      .toEqual(['landxml-first', 'landxml-second'])
+    expect(props.getCheckoutCapability).toHaveBeenCalledTimes(1)
+    expect(changed).toHaveBeenCalledTimes(1)
+  })
+
+  it('CHECKOUT-GATE CG3 an empty getter sends no LandXML checkout header', async () => {
+    const props = supplied({ getCheckoutCapability: vi.fn(() => '') })
+    props.transport.headers = () => ({ 'X-Tenant-Id': 'workspace-test', 'X-CHECKOUT-CAPABILITY': 'transport-proof' })
+    render(<SolarWorkspaceTools {...props} />)
+    open()
+    submit()
+    await waitFor(() => expect(props.onPhysicalHeadChanged).toHaveBeenCalledTimes(1))
+    const headers = props.transport.fetchImpl.mock.calls[0][1].headers
+    expect(Object.keys(headers).some((key) => key.toLowerCase() === 'x-checkout-capability')).toBe(false)
+    expect(props.getCheckoutCapability).toHaveBeenCalledTimes(1)
+  })
+
+  it('CHECKOUT-GATE CG7 nonplain LandXML headers refuse before fetch or the capability getter', async () => {
+    for (const headers of [null, [], new Headers()]) {
+      const props = supplied({ getCheckoutCapability: vi.fn(() => 'unused-proof') })
+      props.transport.headers = () => headers
+      render(<SolarWorkspaceTools {...props} />)
+      open()
+      submit()
+      await waitFor(() => expect(screen.getByTestId('solar-landxml-refusal').textContent)
+        .toBe('This LandXML step was given input it cannot send'))
+      expect(props.transport.fetchImpl).not.toHaveBeenCalled()
+      expect(props.getCheckoutCapability).not.toHaveBeenCalled()
+      cleanup()
+    }
+  })
   it('W20-06b T1 exposes terrain on Ground Physical for local and platform drawings without eager reads', () => {
     const props = terrainProps()
     const view = render(<SolarWorkspaceTools {...props} />)
@@ -230,6 +311,7 @@ describe('terrain workspace integration', () => {
   it('W20-06b T4 reads current tenant and bearer per GET and POST and strips checkout overrides', async () => {
     for (const override of [false, true]) {
       const props = terrainProps()
+      props.getCheckoutCapability.mockReturnValue('current-a')
       props.transport.headers = override
         ? vi.fn(() => ({ 'X-Tenant-Id': api.config.tenant, ...api.authHeaders(), 'x-CHECKOUT-capability': 'secret' }))
         : undefined
@@ -238,21 +320,26 @@ describe('terrain workspace integration', () => {
       openTerrain()
       await terrainReady()
       expect(terrainGets(props)[0][1].headers).toMatchObject({
-        'X-Tenant-Id': api.config.tenant, Authorization: 'Bearer terrain-a',
+        'X-Tenant-Id': api.config.tenant, Authorization: 'Bearer terrain-a', 'X-Checkout-Capability': 'current-a',
       })
       localStorage.setItem('leaf.jwt', 'terrain-b')
+      props.getCheckoutCapability.mockReturnValue('current-b')
       fireEvent.click(terrainMesh())
       await waitFor(() => expect(terrainGets(props)).toHaveLength(2))
       await terrainReady()
       expect(terrainPosts(props)[0][1].headers).toMatchObject({
         'X-Tenant-Id': api.config.tenant, Authorization: 'Bearer terrain-b', 'Content-Type': 'application/json',
+        'X-Checkout-Capability': 'current-b',
       })
       expect(terrainGets(props)[1][1].headers.Authorization).toBe('Bearer terrain-b')
       for (const [, init] of props.transport.fetchImpl.mock.calls) {
-        expect(Object.keys(init.headers).some((key) => key.toLowerCase() === 'x-checkout-capability')).toBe(false)
+        expect(Object.keys(init.headers).filter((key) => key.toLowerCase() === 'x-checkout-capability'))
+          .toEqual(['X-Checkout-Capability'])
+        expect(Object.values(init.headers)).not.toContain('secret')
       }
+      expect(terrainGets(props)[1][1].headers['X-Checkout-Capability']).toBe('current-b')
       if (override) expect(props.transport.headers).toHaveBeenNthCalledWith(3, 'solar')
-      expect(props.getCheckoutCapability).not.toHaveBeenCalled()
+      expect(props.getCheckoutCapability).toHaveBeenCalledTimes(3)
       cleanup()
     }
   })
@@ -272,6 +359,7 @@ describe('terrain workspace integration', () => {
 
   it('W20-06b T4 platform GET and POST carry the project scope without a checkout capability', async () => {
     const props = terrainProps({ projectId: TERRAIN_PROJECT })
+    props.getCheckoutCapability.mockReturnValue('platform-proof')
     render(<SolarWorkspaceTools {...props} />)
     openTerrain()
     await terrainReady()
@@ -281,9 +369,9 @@ describe('terrain workspace integration', () => {
     expect(terrainPosts(props)).toHaveLength(1)
     for (const [url, init] of props.transport.fetchImpl.mock.calls) {
       expect(new URL(url, 'https://workspace.test').searchParams.get('project_id')).toBe(TERRAIN_PROJECT)
-      expect(Object.keys(init.headers).some((key) => key.toLowerCase() === 'x-checkout-capability')).toBe(false)
+      expect(init.headers['X-Checkout-Capability']).toBe('platform-proof')
     }
-    expect(props.getCheckoutCapability).not.toHaveBeenCalled()
+    expect(props.getCheckoutCapability).toHaveBeenCalledTimes(3)
     expect(props.onPhysicalHeadChanged).toHaveBeenCalledTimes(1)
   })
 
@@ -1074,7 +1162,7 @@ describe('SolarWorkspaceTools', () => {
     expect(document.querySelector('.solar-workspace-announce').getAttribute('aria-live')).toBe('polite')
     expect(screen.getByRole('region', { name: 'Solar workspace tools' }).getAttribute('data-physical-head-index')).toBe('0')
     expect(props.onDrawingVersionChanged).not.toHaveBeenCalled()
-    expect(props.getCheckoutCapability).not.toHaveBeenCalled()
+    expect(props.getCheckoutCapability).toHaveBeenCalledTimes(1)
   })
 
   it('W7 an existing terrain announces nothing changed and still calls the physical callback once', async () => {

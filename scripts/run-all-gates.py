@@ -780,9 +780,9 @@ def build_suites() -> List[Suite]:
         # and POST /api/drawings/{id}/imports/combiner-intake in server/routers/drawings.py): the recorded
         # LEAFCOMBINERAUTO input bound to the head graph and stored on a new version, bounded before decode,
         # a closed refusal map, nothing written on refusal, and the combiners tool placing C5 from the
-        # imported version. Hermetic and nothing skips: the floor is the exact count, 68.
+        # imported version. Hermetic and nothing skips: the floor is the exact count, 69.
         Suite("server-solar-combiner-intake-import", "server tests/test_solar_combiner_intake_import.py",
-              "pytest", SERVER, _py_pytest("tests/test_solar_combiner_intake_import.py"), 68),
+              "pytest", SERVER, _py_pytest("tests/test_solar_combiner_intake_import.py"), 69),
         # sf-w2-combiner-intake-survives-saves: a browser CAD save (POST .../versions/edited and the dxf-sidecar
         # leg of POST .../versions/plan in server/routers/drawings.py) keeps the solar design graph, its digest,
         # the combiner intake and the panel-group outlines of the version it replaces, and refuses with nothing
@@ -905,14 +905,14 @@ def build_suites() -> List[Suite]:
         # sf-w4-landxml-import-surface: the LandXML terrain upload route (POST
         # /api/drawings/{id}/imports/landxml in server/routers/drawings.py): bounded before decode,
         # a closed refusal map, nothing written on refusal, the stored terrain reopened unchanged.
-        # Hermetic and nothing skips: the floor is the exact count, 60.
+        # Hermetic and nothing skips: the floor is the exact count, 79.
         Suite("server-solar-landxml-route", "server tests/test_solar_landxml_route.py",
-              "pytest", SERVER, _py_pytest("tests/test_solar_landxml_route.py"), 60),
+              "pytest", SERVER, _py_pytest("tests/test_solar_landxml_route.py"), 79),
         # sf-w5-terrain-route: tenant-scoped reads and head-bound mesh, slope and clear previews,
         # bounded JSON bodies, closed refusals and twin-store adapter parity.
-        # Hermetic and nothing skips: the floor is the exact count, 23.
+        # Hermetic and nothing skips: the floor is the exact count, 37.
         Suite("server-solar-terrain-route", "server tests/test_solar_terrain_route.py",
-              "pytest", SERVER, _py_pytest("tests/test_solar_terrain_route.py"), 23),
+              "pytest", SERVER, _py_pytest("tests/test_solar_terrain_route.py"), 37),
         # sf-w5-terrain: Ground terrain operations over the reopened physical state
         # (server/solar_ground_terrain_adapter.py): the frozen frame, units and current-state selection,
         # the slope mesh and the tracker slope check and clear published as preview children of the

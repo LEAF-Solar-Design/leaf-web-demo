@@ -144,7 +144,7 @@ def wait_healthy(name: str, url: str, deadline_s: float = 40.0, strict: bool = F
 
 OS_ENV_NAMES = frozenset({
     "PATH", "SYSTEMROOT", "TEMP", "TMP", "HOME", "USERPROFILE", "APPDATA",
-    "LOCALAPPDATA", "PATHEXT", "COMSPEC", "LANG",
+    "LOCALAPPDATA", "PATHEXT", "COMSPEC", "LANG", "LD_LIBRARY_PATH",
 })
 
 

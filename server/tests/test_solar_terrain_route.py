@@ -27,7 +27,8 @@ from test_w1_solve_commit import seed
 
 URL = "/api/drawings/" + DRAWING + "/terrain"
 ROUTE_CODES = {"TERRAIN_DRAWING_ID_INVALID", "TERRAIN_OPERATION_INVALID", "TERRAIN_BODY_INVALID",
-               "TERRAIN_BODY_TOO_LARGE", "TERRAIN_MEDIA_TYPE_REFUSED", "TERRAIN_OPERATION_FAILED"}
+               "TERRAIN_BODY_TOO_LARGE", "TERRAIN_MEDIA_TYPE_REFUSED", "TERRAIN_OPERATION_FAILED",
+               "TERRAIN_CHECKOUT_DENIED", "TERRAIN_CHECKOUT_UNAVAILABLE"}
 
 
 @pytest.fixture
@@ -266,14 +267,16 @@ def test_terrain_route_refusal_statuses_pinned():
         400: {"TERRAIN_PROJECT_ID_INVALID", "TERRAIN_EXPECTED_HEAD_INVALID", "TERRAIN_LIMITS_INVALID",
               "TERRAIN_DRAWING_ID_INVALID", "TERRAIN_OPERATION_INVALID", "TERRAIN_BODY_INVALID"},
         404: {"TERRAIN_DRAWING_NOT_FOUND", "TERRAIN_STATE_NOT_FOUND"},
+        403: {"TERRAIN_CHECKOUT_DENIED"},
         409: {"TERRAIN_GRAPH_REQUIRED", "TERRAIN_PROJECT_MISMATCH", "TERRAIN_FRAME_UNSUPPORTED",
               "TERRAIN_GRID_MISSING", "TERRAIN_NO_TRACKER_ROWS", "TERRAIN_HEAD_MOVED"},
         413: {"TERRAIN_BODY_TOO_LARGE"}, 415: {"TERRAIN_MEDIA_TYPE_REFUSED"},
         422: {"TERRAIN_GRID_INVALID", "TERRAIN_GRID_TOO_LARGE", "TERRAIN_FRAMES_INVALID", "TERRAIN_TOO_MANY_ROWS"},
         500: {"TERRAIN_OPERATION_FAILED"},
-        503: {"TERRAIN_WRITES_DRAINED", "TERRAIN_STORE_UNAVAILABLE"},
+        503: {"TERRAIN_WRITES_DRAINED", "TERRAIN_STORE_UNAVAILABLE", "TERRAIN_CHECKOUT_UNAVAILABLE"},
     }
-    retryable = {"TERRAIN_HEAD_MOVED", "TERRAIN_WRITES_DRAINED", "TERRAIN_STORE_UNAVAILABLE"}
+    retryable = {"TERRAIN_HEAD_MOVED", "TERRAIN_WRITES_DRAINED", "TERRAIN_STORE_UNAVAILABLE",
+                 "TERRAIN_CHECKOUT_UNAVAILABLE"}
     assert set().union(*groups.values()) == adapter.CODES | ROUTE_CODES
     for status, codes in groups.items():
         for code in codes:
@@ -372,3 +375,83 @@ def test_terrain_route_limits_validation_belongs_to_adapter(backend, client):
         assert_refused(post(client, {"operation": "slope", "expected_head": current(backend),
                                     "limits": limits}), 400, "TERRAIN_LIMITS_INVALID")
         assert keys(backend) == before
+
+
+@pytest.mark.parametrize("lease,proof,status", [
+    ("active", None, 403), ("active", "valid", 200), ("none", None, 200),
+    ("expired", None, 200), ("active", "", 403), ("active", "   ", 403),
+    ("active", "garbage", 403), ("none", "", 200), ("none", "   ", 200),
+    ("none", "garbage", 200), ("active", "unavailable", 503),
+])
+def test_terrain_route_checkout_matrix(backend, client, monkeypatch, lease, proof, status):
+    import checkout_capability
+    import store
+    imp(backend)
+    if lease != "none":
+        # Take a real checkout through the route, including its minted proof.
+        client.app.include_router(drawings.router)
+        acquired = client.post("/api/drawings/" + DRAWING + "/checkout",
+                               json={"holder": "another session"}, headers={"X-Tenant-Id": TENANT})
+        assert acquired.status_code == 200
+        if proof == "valid":
+            proof = acquired.json()["checkout_capability"]
+        if lease == "expired":
+            manifest = store.load_manifest(backend, TENANT, DRAWING)
+            manifest["checkout"]["expires"] = "2000-01-01T00:00:00+00:00"
+            store.save_manifest(backend, TENANT, DRAWING, manifest)
+    if proof == "unavailable":
+        def unavailable(*args, **kwargs):
+            raise checkout_capability.CapabilityUnavailable("unavailable")
+        monkeypatch.setattr(checkout_capability, "verify", unavailable)
+    head = ph.physical_head(backend, TENANT, DRAWING, project_id=PROJECT)
+    manifest = store.load_manifest(backend, TENANT, DRAWING)
+    before = {key: backend.get(key) for key in keys(backend)}
+    headers = {"X-Tenant-Id": TENANT}
+    if proof is not None:
+        headers["X-Checkout-Capability"] = proof
+    response = client.post(URL + "/operations", json={"operation": "mesh", "expected_head": current(backend)},
+                           headers=headers)
+    assert response.status_code == status
+    assert store.load_manifest(backend, TENANT, DRAWING) == manifest
+    if status == 200:
+        assert response.json()["error"] is None
+        assert body_of(response)["created"] is True
+        assert current(backend) != head["state"]["artifact_id"]
+    else:
+        code = "TERRAIN_CHECKOUT_UNAVAILABLE" if status == 503 else "TERRAIN_CHECKOUT_DENIED"
+        assert response.json()["error"]["error_code"] == ("INTERNAL" if status == 503 else "BAD_PARAMS")
+        assert_refused(response, status, code, status == 503)
+        assert ph.physical_head(backend, TENANT, DRAWING, project_id=PROJECT) == head
+        assert {key: backend.get(key) for key in keys(backend)} == before
+
+
+@pytest.mark.parametrize("proof", [None, "garbage"])
+def test_terrain_route_missing_drawing_unchanged_by_gate(backend, client, monkeypatch, proof):
+    headers = {"X-Tenant-Id": TENANT}
+    if proof is not None:
+        headers["X-Checkout-Capability"] = proof
+    url = "/api/drawings/nosuch/terrain/operations"
+    body = {"operation": "mesh", "expected_head": "0" * 64}
+    before = {key: backend.get(key) for key in keys(backend)}
+    response = client.post(url, json=body, headers=headers)
+    assert_refused(response, 404, "TERRAIN_DRAWING_NOT_FOUND")
+    assert response.json()["error"]["error_code"] == "BAD_PARAMS"
+    monkeypatch.setattr(route, "_lock_authorization", lambda *args: None)
+    assert client.post(url, json=body, headers=headers).content == response.content
+    assert {key: backend.get(key) for key in keys(backend)} == before
+    assert not set(backend.drawing_object_keys(TENANT, "nosuch"))
+
+
+def test_terrain_route_gate_receives_tenant_context(backend, client, monkeypatch):
+    import deps
+    imp(backend)
+    tenant = deps.TenantContext(TENANT, tier="demo", subject="auth0|terrain-holder")
+    client.app.dependency_overrides[deps.require_active_tenant] = lambda: tenant
+    seen = []
+    def record(drawing_id, context, selected_backend, capability):
+        seen.append(context)
+    monkeypatch.setattr(route, "_lock_authorization", record)
+    response = post(client, {"operation": "mesh", "expected_head": current(backend)})
+    assert response.status_code == 200
+    assert seen == [tenant] and seen[0] is tenant
+    assert isinstance(seen[0], deps.TenantContext) and seen[0].subject == "auth0|terrain-holder"
