@@ -124,9 +124,17 @@ def test_ground_conversion_kernel_tracker_entities_port(site):
     assert len(ents) == 1197 + 237 and repr(state) == before
 
 
+def without_outline(g):
+    """The historical compact projection: the same graph minus each frame's stored outline."""
+    out = deepcopy(g)
+    for frame in out["frames"]:
+        frame["extra"].pop("ground_outline", None)
+    return out
+
+
 def test_ground_conversion_kernel_small_result(graph):
     result = convert(graph)
-    assert canon_sha(result) == "db5b85d4051f5ca1b4192c147c5e1d6564a941d1dba0356e25a6f7cb474913c9"
+    assert canon_sha(result) == "91d5ec6cf13192367ca5fd8dbce23c2a0a3cf038a39bc5fb6d1d55d213dafa9e"
     assert result["counts"] == {"trackers": 2, "slots": 5}
     assert result["settings"] == {"PanelGroupNumber": 3, "PanelGroupColour": 2}
     first = result["frames"][0]
@@ -138,7 +146,7 @@ def test_ground_conversion_kernel_small_result(graph):
     expanded = codec.expand_graph(g)
     sdg._reset_validation_caches()
     assert sdg.validate_graph(expanded) == expanded
-    assert canon_sha(expanded) == "a8c6b54c38f72fbe6b237e62004ccbc869609db6447a14f7c1b56ff6cb002b9b"
+    assert canon_sha(expanded) == "bf29505b243b8aeffcf3562f03a09541365a7daa0f260cd7596bf57eca8e249e"
 
 
 def test_ground_conversion_kernel_b18_site(site, graph):
@@ -149,8 +157,8 @@ def test_ground_conversion_kernel_b18_site(site, graph):
         "distinct_centres": 69678, "centres_in_own_outline": 69678, "centres_in_two_outlines": 25284,
         "centres_in_two_outlines_same_source_command": 0, "centres_in_more_than_two_outlines": 0}
     assert result["source"] == {"head_index": 0, "state_artifact_id": "b" * 64, "state_content_sha256": "d" * 64}
-    assert canon_sha(result["frames"]) == "8ca97b092f404bc24ab5f0dfbdd4522b7f4aaf07e764b2c2baf1d069f7b05081"
-    assert canon_sha(result) == "6f2f6d00d47a59ab28edb8b4502b30f31496ec90db7e239ef4904b0b4597f0d7"
+    assert canon_sha(result["frames"]) == "49ebc7c6a008505e80a42286c043e1f5bbb0921146d551e8d8f330d4d4207f86"
+    assert canon_sha(result) == "8fb8f71eac0f6bf69a39801cd1ca2c220ed90ad2a7a08f939bdd0853a604e083"
 
 
 def test_ground_conversion_kernel_b18_is_the_scale_record_graph(site, b18, graph, monkeypatch):
@@ -158,9 +166,9 @@ def test_ground_conversion_kernel_b18_is_the_scale_record_graph(site, b18, graph
     g = ground_base(w1)
     g["frames"] = site["result"](w1)["frames"]
     fixture = ground_graph(w1, b18, 237)
-    assert g == fixture
-    assert canon_sha(with_power(g, 400)) == "a7e92f0cedec74b369d232918e12cf4bcd25e98e92409726648295c311b27a0b"
-    assert canon_sha(g) == "f0354c47fb7c9bc78023a3cf8ae68f42ff5c7f4373b581d8ade774895abb465f"
+    assert without_outline(g) == fixture
+    assert canon_sha(with_power(g, 400)) == "9d9724cbff391b8c8f67fad1d22fa4af3eab29432d4c4f1dededb40aab5a2ace"
+    assert canon_sha(g) == "5e91c26cbb27583bf41e1524174f0d8764240c34810db7f351e1540acbba3651"
 
     def never(*args, **kwargs):
         raise AssertionError("expanded")
@@ -170,17 +178,17 @@ def test_ground_conversion_kernel_b18_is_the_scale_record_graph(site, b18, graph
 
 
 @pytest.mark.parametrize("n,scale_sha,own_sha", [
-    (2, "ef1bae34e7de39a6f3902e389b84f98f154c5dc45c901f4c8ac18d4278316b4c",
-     "2af3e4e2e7c31aa2192b67498ef3feabac483d96da30344333475579bab61b3e"),
-    (20, "8f1ba0024fb00a0d5d807dc4b9ecc413809389e7138c5a71fa05892aee59f582",
-     "49353c4d094510cf79b4e1b8f6d1ccde6bc607d0af300576f52ecb792db8b06b"),
+    (2, "5eea42769f76c81e53fe67c4245584e85b7ae696b406878bf15856d1c55f0ee2",
+     "7ede523ce5c966e81b81855e323bfaaad0671d4a335662b46cb542650605f386"),
+    (20, "90f00efd80dd0548addee8540113f361c05e3ac3459baf3d1f0e9a72105ff2ec",
+     "f266c299506eedf290c93750d138927c8237173104dba549b2032484135df322"),
 ], ids=["two-trackers", "twenty-trackers"])
 def test_ground_conversion_kernel_expansion_is_the_scale_record(site, b18, graph, n, scale_sha, own_sha):
     w1 = graph
     g = ground_base(w1)
     g["frames"] = site["result"](w1)["frames"][:n]
     expanded = codec.expand_graph(g)
-    assert expanded == codec.expand_graph(ground_graph(w1, b18, n))
+    assert codec.expand_graph(without_outline(g)) == codec.expand_graph(ground_graph(w1, b18, n))
     assert canon_sha(with_power(expanded, 400)) == scale_sha
     assert canon_sha(expanded) == own_sha
     sdg._reset_validation_caches()
@@ -490,7 +498,7 @@ def test_ground_conversion_kernel_feet(graph):
     result = convert(graph, small_doc(units="ft"), g)
     tracker = result["frames"][0]["tracker"]
     assert (tracker["length_m"], tracker["cross_axis_width_m"]) == (1.8288000000000002, 0.6096)
-    assert canon_sha(result) == "451c6e6f55d3910d2a77371a16f2d49335440da01114637f0b592a41dd8d8a55"
+    assert canon_sha(result) == "f108ff1cf96fd9b8d159d4a8cc695ec78d5750bae8e6685f1103495086d09ac9"
 
 
 def test_ground_conversion_kernel_slot_bounds_are_inclusive(graph):

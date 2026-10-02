@@ -90,13 +90,13 @@ def test_ground_admission_fixture_is_converted_and_equipped(admission_base, admi
 
 
 GRAPH_ROWS = [
-    ("settings", "81eee27c193f1e858658d5981d2018a723851e9a48edb31cff1550d01db1740c"),
-    ("correct_string", "542294be9b0437a1b43aa64490d78ca03c1cdef2eedfb5205d1b6f95351cdf02"),
-    ("string_add", "cd839dc52cf8cdc27464fa6cdc4cf234538f19c3a5d383023ce9c10208518f91"),
-    ("string_multi_add", "5a9f2466fc1b90659e87b24fdec762572e3531da89519d5b559149386159e85a"),
-    ("string_flip", "f5351b8f233ed5ebe7329007d239f3cfde8725024005b177bb4dadd9394a0359"),
-    ("string_swap", "431260a936d6a14c1a051fca131c6aafd39b38fd9b5483baef8ff409ab434d41"),
-    ("string_conductors", "ce6c9fd3f1bd6d4bc0fcc5f7ae53fc5f7ae69e57733cfeb2022d82d499348fda"),
+    ("settings", "d4e7aa701e8577ea5e78aed31083e5a1fecb57f2ad0af61495260fb06f2d4924"),
+    ("correct_string", "1cb21ed2b109bb675b748a66affccce77c9655389438ae50334fc99a76f17988"),
+    ("string_add", "e370249cf073df49fe3474009b4a82d5dc58993038caf0645fbfa61f03c7bcb2"),
+    ("string_multi_add", "6abeba90622a000fe6029a9b1fa11d27da3c9a4b097b739593318197a44a67fb"),
+    ("string_flip", "fe7dffe7d096ef0f1aceba10a66d7843337b13477f863eae4fd2d17fe9d3506f"),
+    ("string_swap", "4c2fb1101859a7a3a1c1d6a9d1e6f74bd7caef90a6e25ea032c3ce47494b3b2c"),
+    ("string_conductors", "4fd107efd85035f3ab9ed8ff01edc0d7c41d4a92248510a8947e975ada48cd81"),
 ]
 
 
@@ -163,7 +163,7 @@ def test_ground_admission_string_delete(admission_base, pinned, monkeypatch):
     assert (g["rev"], out["rev"]) == (4, 5)
     assert len(out["strings"]) == 1
     assert [s["module_count"] for s in out["strings"]] == [3]
-    assert lsha(out) == "81849fd6a2b54c73cef9a218b70febc25f05253c4ece800916d74f6956fc4a64"
+    assert lsha(out) == "d57f5dddefdc59c6dee7048e0bc10ef2193e5da58a767d47796e3f21f9224eaf"
 
 
 def test_ground_admission_string_midpoint(graph, service, monkeypatch):
@@ -174,7 +174,7 @@ def test_ground_admission_string_midpoint(graph, service, monkeypatch):
         g0, {"expected_rev": 0}, physical_state={
             "view": copy.deepcopy(VIEW), "document": small_doc([drawn(0., 0., 0., 12., 6)])})
     g = sized(g)
-    assert lsha(g) == "1c2b93ea76c64ce94831053f57ef264c6ab3f7bd7c4a8abc172bddf944249dd1"
+    assert lsha(g) == "14b164c9931d12fa899326e8ff0378723d4952d140db3b3e06810c0ed458fbb7"
     ids = slots(g)
     assert (ids[0], ids[-1]) == (
         "leaf:panel:a4e25cdd-6775-403d-9e0c-275400699308",
@@ -188,7 +188,7 @@ def test_ground_admission_string_midpoint(graph, service, monkeypatch):
     assert string["extra"]["midpoint"]["tag_index"] == 2
     assert string["extra"]["midpoint"]["label_height_m"] == 1.161958988686972
     assert string["length_ft"] == 32.808398950131235
-    assert lsha(out) == "0ef4b7c9f49eb82d5528dde9f51f34e87f7b59e1a57d5080a4e7f9e4efaab5b1"
+    assert lsha(out) == "c2e5b0d1edf1434a634aab90d3eaaa3f364a98f07f4150adc1467e56e294770b"
 
 
 def test_ground_admission_string_midpoint_refuses_short_row(admission_base, monkeypatch):
@@ -216,7 +216,7 @@ def test_ground_admission_string_delete_after_equipment_prunes_the_request(admis
         assert all(assignment["string_ref"] != deleted_ref
                    for assignment in inverter["input_assignments"])
         assert inverter["validity"] == {"state": "stale", "reasons": ["upstream_corrected"]}
-    assert lsha(out) == "1a0ee71a1dca1ada345b71c9d6303dca0182d333d5741b628d88f88b1a4539ef"
+    assert lsha(out) == "cdf2dcc14e65c2729a1e22e7731e5fddce39b4b50c23430d6e9b0da1a18ceeac"
 
 
 READ_ROWS = [
@@ -266,11 +266,11 @@ ADAPTER_ROWS = [
     ("solar-string-rebuild", None,
      "5d4756f4d560961cf395e8d0991ea550a235239019389763a86b04faa9dba33a"),
     ("solar-string-data", None,
-     "9e44a20e4907d64355176fff6c6200294910fa1ca3586f307caff639f2cbe3f5"),
+     "232fe568b3a42ceab82bbd6b7419a8d360f5b64eaf761bbf8adf4add86473f19"),
     ("solar-cable-export", None,
-     "a94fec05ceec70dcfe935ebaf522881b4a4ea1676b3dee490ebee4979280be52"),
+     "a955506ad3a105700d27b945c085df130276e7260a5e1e9c33288f8971586e1b"),
     ("solar-electrical-schedules", None,
-     "16543dd54d9bb6d1231c3eb0f3bf9017d46389d844d994d31fd00053aa276f19"),
+     "e1b1c9b166ade476ccc5be280ee9abcc5d9ce1a6afa826c9e522f691ee11f2c6"),
 ] + [(suffix, pin, None) for suffix, pin in NEC_ROWS]
 
 

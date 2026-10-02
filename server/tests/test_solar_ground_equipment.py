@@ -55,9 +55,9 @@ RECORDED = json.loads((SERVER / "tests" / "fixtures" / "w1_string_length_recorde
 # Measured on the reference (python -B, Windows and the base 3293e8cd).
 W1_BASIS = "94c0e240f8f2ce87feb0874374a8592284955719da41bf4a60f3fbc3ea3f550a"
 CONVERTED_BASIS = "fb773c11b8a39a7e5786b4301a4a3e66cb568fb6273214f4b92c6409e09a75c2"
-SIZED_SHA = "06a45caf35639bac12b0490d62f02d2f85475be3d141fdce5ac879562e91ac57"
-STRUNG_SHA = "121d573b486694d785f878d62ada107c40dbefbaaea1b8fc9ee1c7232d1eb91f"
-EQUIPPED_SHA = "9b5b6c07a4f2bbd412acefb917774843716f17e10e108ea74407c82955011af3"
+SIZED_SHA = "aa7e815c169780207578046380c915903180340502f5c0071f623205b0e07fd8"
+STRUNG_SHA = "d9fbe549a60289ec083f339992f9bd580207c0bded2197535627df5dcf9e6717"
+EQUIPPED_SHA = "9f344ba1e0746ccf22364e550e5a0ae11f5564f35fda61bfacd70c165ee83b47"
 # The digest covers the whole readiness map, so it moves when a sibling registers a tool: re-pinned on Forge
 # main 6c8ff5db plus solar-feeders: 47 entries, adding only solar-feeders: valid_settings_required.
 W1_READINESS_SHA = "5a5dae5780226eacfb4c07627c7658f0c3f4f776766d83d7c3980793adfe075b"
