@@ -6,7 +6,6 @@ import { PRODUCT_SURFACES } from '../src/site/productSurfaces.js'
 import { PROFILE_RIBBON_TABS } from '../src/lib/ribbonTabs.data.js'
 import { STUDIO_DRAWERS } from '../src/lib/studioDrawers.js'
 import { PROMPTS } from '../src/cadedit/promptKeys.js'
-import { CAT_TOOL, COUNT_TOOL } from '../e2e/catProofFixture.mjs'
 import {
   buildFeatureMap, checkCompleteness, DEFAULT_REGISTRIES, featureId,
   ID_GRAMMAR, summarizeFeatureMap, validateFeatureMap, validateOverrides,
@@ -133,6 +132,54 @@ test('unknown overrides, wildcard overrides, and silent override typos fail clea
   assert.throws(() => buildFeatureMap({ overrides: config }), /unknown override field/)
 })
 
+test('state exclusions remove only named states, effects and contexts while retaining the feature', () => {
+  const config = clone(overrides)
+  delete config.overrides['action:fit'].exclude_states
+  delete config.overrides['action:fit'].reason
+  const baseline = buildFeatureMap({ overrides: config })
+  const fit = baseline.entries.find((entry) => entry.id === 'action:fit')
+  assert.ok(fit.states.includes('no-drawing'))
+  assert.equal(fit.expected_effect['no-drawing'].kind, 'disabled_with_reason')
+  assert.ok(fit.state_contexts['no-drawing'])
+  const excluded = entryFor('action:fit')
+  assert.deepEqual(excluded.states, fit.states.filter((state) => state !== 'no-drawing'))
+  const expected = clone(fit)
+  expected.states = expected.states.filter((state) => state !== 'no-drawing')
+  delete expected.expected_effect['no-drawing']
+  delete expected.state_contexts['no-drawing']
+  assert.deepEqual(excluded, expected)
+  assert.equal(map.entries.length, baseline.entries.length)
+  assert.equal(checkCompleteness(map), true)
+  config.overrides['drawer:nav'].exclude_states = ['closed']
+  config.overrides['drawer:nav'].reason = 'Synthetic exclusion exercises drawer states'
+  const drawer = buildFeatureMap({ overrides: config }).entries.find((entry) => entry.id === 'drawer:nav')
+  assert.deepEqual(drawer.states, ['open'])
+  assert.deepEqual(Object.keys(drawer.expected_effect), ['open'])
+})
+
+test('state exclusions refuse unknown states and missing or empty reasons', () => {
+  const unknown = clone(overrides)
+  unknown.overrides['action:fit'].exclude_states = ['unknown-state']
+  assert.throws(() => buildFeatureMap({ overrides: unknown }), /action:fit.*unknown state: unknown-state/)
+  for (const reason of [undefined, '', '   ', null]) {
+    const config = clone(overrides)
+    config.overrides['action:fit'].reason = reason
+    assert.throws(() => buildFeatureMap({ overrides: config }), /state exclusion action:fit requires a non-empty reason/)
+  }
+})
+
+test('state exclusions refuse malformed lists and exclusions that remove every state', () => {
+  for (const states of ['no-drawing', [], [''], [null], ['no-drawing', 'no-drawing']]) {
+    const config = clone(overrides)
+    config.overrides['action:fit'].exclude_states = states
+    assert.throws(() => buildFeatureMap({ overrides: config }), /exclude_states requires a non-empty array of unique states/)
+  }
+  const config = clone(overrides)
+  config.overrides['drawer:nav'].exclude_states = ['closed', 'open']
+  config.overrides['drawer:nav'].reason = 'Synthetic exclusion of all states'
+  assert.throws(() => buildFeatureMap({ overrides: config }), /drawer:nav needs a title and unique states/)
+})
+
 test('action cases project registry gates and engine prompt behavior', () => {
   for (const action of ACTIONS) {
     const entry = entryFor(featureId('action', action.id))
@@ -181,27 +228,31 @@ test('surface status changes and unavailable tabs are behavior coverage', () => 
   }
 })
 
-test('catalog snapshot preserves the real mock response and expands every tool with its version', () => {
-  assert.deepEqual(snapshot.response.families[0].capabilities, [COUNT_TOOL, CAT_TOOL])
+test('catalog snapshot preserves the isolated catalog and expands every tool with its version', () => {
+  assert.equal(snapshot.response.families.length, 10)
+  assert.equal(map.entries.filter((entry) => entry.kind === 'tool').length, 54)
   assert.equal(snapshot.endpoint, '/api/capabilities')
   assert.equal(map.catalog_version, snapshot.catalog_version)
   const tools = map.entries.filter((entry) => entry.kind === 'tool')
   assert.equal(tools.length, snapshot.response.families.reduce((count, family) => count + family.capabilities.length, 0))
   for (const entry of tools) {
     assert.equal(entry.catalog_version, snapshot.catalog_version)
+    const family = snapshot.response.families.find((family) => family.family_id === entry.family_id)
+    assert.equal(entry.tool_version, family.capabilities.find((tool) => tool.name === entry.source_id).version)
     assert.ok(entry.sources.includes('server/routers/capabilities.py'))
     assert.ok(entry.sources.includes('web/walk/fixtures/capabilities.snapshot.json'))
   }
-  const write = entryFor('tool:arrange-panels-as-cat')
-  const read = entryFor('tool:count-panels')
+  const write = entryFor('tool:delete-marked-panel')
+  const read = entryFor('tool:count-by-layer')
   assert.equal(write.expected_effect['write-locked'].reason, REASONS.writeLocked)
   assert.equal(write.expected_effect['write-unentitled'].reason, REASONS.writeUnentitled)
   assert.equal(write.expected_effect['unsaved-engine-edits'].reason, REASONS.unsavedEngineEdits)
   assert.ok(!read.states.includes('write-locked'))
   assert.equal(read.expected_effect['job-running'].reason, REASONS.running)
   const expanded = clone(snapshot)
-  expanded.catalog_version = 'cat-proof-expanded-v2'
-  expanded.response.families.push({ family_id: 'additional', capabilities: [{ ...COUNT_TOOL, name: 'extra-read-tool' }] })
+  const readTool = snapshot.response.families.flatMap((family) => family.capabilities).find((tool) => tool.name === 'count-by-layer')
+  expanded.catalog_version = 'isolated-catalog-expanded-v2'
+  expanded.response.families.push({ family_id: 'additional', capabilities: [{ ...readTool, name: 'extra-read-tool' }] })
   const built = buildFeatureMap({ snapshot: expanded })
   assert.ok(built.entries.some((entry) => entry.id === 'tool:extra-read-tool' && entry.catalog_version === expanded.catalog_version))
   assert.equal(checkCompleteness(built, DEFAULT_REGISTRIES, expanded), true)
@@ -209,7 +260,7 @@ test('catalog snapshot preserves the real mock response and expands every tool w
   delete unversioned.catalog_version
   assert.throws(() => buildFeatureMap({ snapshot: unversioned }), /catalog_version/)
   const colliding = clone(snapshot)
-  colliding.response.families[0].capabilities.push(COUNT_TOOL)
+  colliding.response.families[0].capabilities.push(clone(readTool))
   assert.throws(() => buildFeatureMap({ snapshot: colliding }), /duplicate id|collision/)
 })
 

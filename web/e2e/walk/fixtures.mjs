@@ -91,13 +91,16 @@ const control = (page, recipe) => {
 const panelButton = (page, name) => page.getByRole('group', { name: 'Workspace panels', exact: true })
   .getByRole('button', { name, exact: true })
 const canvas = (page) => page.getByRole('region', { name: 'Drawing', exact: true }).locator('canvas:visible')
-async function pose(page) {
-  return canvas(page).evaluate((element) => {
-    for (let node = element.parentElement; node; node = node.parentElement) {
-      if (node.__cadviewer?.getPose) return node.__cadviewer.getPose()
-    }
-    throw new Error('Drawing viewer does not expose its resident camera pose')
-  })
+async function viewportBounds(page) {
+  const expand = page.getByRole('button', { name: 'Expand drawing overview', exact: true })
+  if (await expand.isVisible()) await expand.click()
+  const viewport = page.getByRole('button', { name: 'Drawing overview', exact: true }).locator('[data-overview-viewport]')
+  await expect(viewport).toBeVisible()
+  return viewport.evaluate((element) => Object.fromEntries(['x', 'y', 'width', 'height'].map((key) => {
+    const value = Number(element.getAttribute(key))
+    if (!element.hasAttribute(key) || !Number.isFinite(value)) throw new Error(`Invalid overview viewport ${key}`)
+    return [key, value]
+  })))
 }
 async function engineCount(page) {
   return Number(await page.getByTestId('cad-edit-entity-count').innerText())
@@ -135,24 +138,43 @@ async function createLine(probe, runtime) {
 async function selectEntity(probe, runtime, recipe) {
   await engineReady(probe, runtime)
   const { page } = runtime
-  // The fixture's DXF has known real geometry. Projection only reads the
-  // resident viewer; selection itself uses native mouse input on its canvas.
+  // Calibrate the flat drawing's projection from its production cursor
+  // readout. Selection still uses native mouse input on the real canvas.
   const points = recipe.type === 'LINE' ? [[222, 190], [222, 470]]
     : recipe.type === 'INSERT' ? [[11.5, 20]] : null
   if (!points) await unsupported(probe, runtime, `The private DXF fixture has no ${recipe.type} entity to select`)
   if (recipe.editable === false && recipe.type === 'LINE') {
     await unsupported(probe, runtime, 'The engine exposes the fixture LINE as editable; a read-only LINE needs a provider fixture')
   }
+  const samples = await canvas(page).evaluate((element) => {
+    const box = element.getBoundingClientRect(), points = []
+    for (const fx of [0.3, 0.5, 0.7]) for (const fy of [0.3, 0.5, 0.7]) {
+      const point = { x: box.left + box.width * fx, y: box.top + box.height * fy }
+      if (document.elementFromPoint(point.x, point.y) === element) points.push(point)
+    }
+    const first = points[0], second = points.find((point) => first && Math.abs(point.x - first.x) > 20 && Math.abs(point.y - first.y) > 20)
+    if (!first || !second) throw new Error('The drawing needs two uncovered calibration points')
+    return [first, second]
+  })
+  const coordinates = page.getByTestId('cockpit-status').locator('.cockpit-coord b')
+  const readings = []
+  for (const sample of samples) {
+    const previous = await coordinates.allTextContents()
+    await page.mouse.move(sample.x, sample.y)
+    await expect.poll(() => coordinates.allTextContents()).not.toEqual(previous)
+    const values = (await coordinates.allTextContents()).map(Number)
+    expect(values).toHaveLength(2)
+    expect(values.every(Number.isFinite)).toBe(true)
+    readings.push(values)
+  }
+  const scaleX = (samples[1].x - samples[0].x) / (readings[1][0] - readings[0][0])
+  const scaleY = (samples[1].y - samples[0].y) / (readings[1][1] - readings[0][1])
+  expect(scaleX).toBeGreaterThan(0)
+  expect(scaleY).toBeLessThan(0)
   const clickPoint = async ([x, y]) => {
-    const point = await canvas(page).evaluate((element, { x, y }) => {
-      for (let node = element.parentElement; node; node = node.parentElement) {
-        if (!node.__cadviewer?.project) continue
-        const point = node.__cadviewer.project(x, y)
-        return { x: point.x, y: point.y, exposed: document.elementFromPoint(point.x, point.y) === element }
-      }
-      throw new Error('The resident viewer cannot project the fixture entity')
-    }, { x, y })
-    expect(point.exposed, 'the selected entity must be visible and uncovered on the drawing canvas').toBe(true)
+    const point = { x: samples[0].x + (x - readings[0][0]) * scaleX, y: samples[0].y + (y - readings[0][1]) * scaleY }
+    const exposed = await canvas(page).evaluate((element, point) => document.elementFromPoint(point.x, point.y) === element, point)
+    expect(exposed, 'the selected entity must be visible and uncovered on the drawing canvas').toBe(true)
     await page.mouse.click(point.x, point.y)
   }
   await clickPoint(points[0])
@@ -169,6 +191,33 @@ async function setDrawer(page, name, open) {
   await expect(button).toBeVisible()
   if ((await button.getAttribute('aria-expanded') === 'true') !== open) await button.click()
   await expect(button).toHaveAttribute('aria-expanded', String(open))
+}
+async function setToolRail(page, open, phone) {
+  const expand = page.getByRole('button', { name: 'Tool rail', exact: true })
+  const collapse = page.getByRole('button', { name: 'Collapse the tool rail to a spine', exact: true })
+  if (phone) {
+    await expect(expand).toBeVisible()
+    if ((await expand.getAttribute('aria-expanded') === 'true') !== open) await expand.click()
+    await expect(expand).toHaveAttribute('aria-expanded', String(open))
+  } else {
+    // A pre-hydration rail can have a visible collapse button before the
+    // cockpit has established its spine. Read the rail's settled disclosure.
+    await expect(page.getByRole('toolbar', { name: 'Drafting tools', exact: true })).toBeVisible()
+    if (open) {
+      await expect(expand).toBeVisible()
+      await expect(expand).toHaveAttribute('aria-expanded', 'false')
+      await expand.click()
+    } else if (await collapse.isVisible()) await collapse.click()
+  }
+  await expect(page.locator('aside.nav'))[open ? 'toBeVisible' : 'toBeHidden']()
+  if (!phone) {
+    if (open) await expect(collapse).toBeVisible()
+    else {
+      await expect(expand).toBeVisible()
+      await expect(expand).toHaveAttribute('aria-expanded', 'false')
+      await expect(page.locator('aside.nav')).toHaveAttribute('aria-hidden', 'true')
+    }
+  }
 }
 async function setupStep(probe, runtime, recipe) {
   const { page, stack, evidence } = runtime
@@ -223,7 +272,21 @@ async function setupStep(probe, runtime, recipe) {
     case 'navigate': await page.goto(recipe.url); return
     case 'open-empty-workspace':
       if (recipe.signedOut) await page.addInitScript(() => localStorage.removeItem('leaf.jwt'))
-      await page.goto(`/try?surface=${recipe.surface}`)
+      if (recipe.cadWorkspace) {
+        // /app without a drawing parameter loads rooftop_demo. A unique,
+        // absent store id establishes the product's real empty CAD state.
+        const drawing = `walk-empty-${runtime.testInfo.testId}`
+        const sessionReply = page.waitForResponse((response) => {
+          const url = new URL(response.url())
+          return url.pathname === '/api/session' && url.searchParams.get('dwg') === drawing
+        })
+        await page.goto(`/app?surface=${recipe.surface}&drawing=${encodeURIComponent(drawing)}`)
+        const response = await sessionReply
+        expect(response.status()).toBe(404)
+        evidence.emptyWorkspace = { drawingId: drawing, status: response.status(), response: await response.json() }
+        await expect(canvas(page)).toHaveCount(0)
+        await expect(page.getByTestId('cad-edit-entity-count')).toHaveCount(0)
+      } else await page.goto(`/try?surface=${recipe.surface}`)
       return
     case 'open-private-drawing': {
       const selected = probe.setup.steps.find((step) => step.kind === 'select-entity')
@@ -274,6 +337,7 @@ async function setupStep(probe, runtime, recipe) {
         .getByRole('button', { name: 'Copy', exact: true }).click()
       return
     case 'drawer-state': await setDrawer(page, recipe.name, recipe.open); return
+    case 'tool-rail-state': await setToolRail(page, recipe.open, runtime.testInfo.project.name === 'phone'); return
     case 'properties-state': {
       const dock = page.getByRole('complementary', { name: 'Properties', exact: true })
       if (await dock.isVisible() !== recipe.open) {
@@ -306,7 +370,8 @@ async function setupStep(probe, runtime, recipe) {
       const tool = catalog.families.flatMap((family) => family.capabilities).find((tool) => tool.name === recipe.name)
       evidence.catalog = { requestedTool: recipe.name, response: catalog }
       if (!tool) await unsupported(probe, runtime, `The isolated catalog does not provide ${recipe.name}`)
-      const tab = toolPlacementTab(tool) || 'draw'
+      // Unplaced catalog families live on Manage, not the engine's Draw tab.
+      const tab = toolPlacementTab(tool) || 'manage'
       await setupStep(probe, runtime, { kind: 'ribbon-tab', name: tab[0].toUpperCase() + tab.slice(1) })
       return
     }
@@ -396,11 +461,24 @@ async function setupStep(probe, runtime, recipe) {
       await history.getByRole('button', { name: 'Close version history', exact: true }).click()
       return
     }
-    case 'zoom-before-fit':
-      runtime.homePose = await pose(page)
-      await page.getByRole('toolbar', { name: 'Drafting tools', exact: true }).getByRole('button', { name: 'Zoom in', exact: true }).click()
-      await expect.poll(() => pose(page)).not.toEqual(runtime.homePose)
+    case 'zoom-before-fit': {
+      runtime.homeViewport = await viewportBounds(page)
+      const zoom = control(page, recipe.control)
+      // The overview clips at drawing extents. Zoom until the camera
+      // rectangle changes, so a clipped first step cannot be false evidence.
+      for (let attempt = 0; attempt < 12; attempt++) {
+        await zoom.click()
+        try {
+          await expect.poll(async () => {
+            const current = await viewportBounds(page)
+            return Math.max(...['x', 'y', 'width', 'height'].map((key) => Math.abs(current[key] - runtime.homeViewport[key])))
+          }, { timeout: 1000 }).toBeGreaterThan(0.2)
+          break
+        } catch (error) { if (attempt === 11) throw error }
+      }
+      evidence.fitViewport = { home: runtime.homeViewport, zoomed: await viewportBounds(page) }
       return
+    }
     case 'require-engine-state':
       if (!await page.getByTestId('cad-edit-workbench').count()) await unsupported(probe, runtime, 'No browser editing engine is mounted to test its boot state')
       if (await page.getByTestId('cad-edit-entity-count').count()) await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('0')
@@ -435,7 +513,7 @@ async function setupStep(probe, runtime, recipe) {
 async function captureBefore(probe, runtime) {
   const { page } = runtime
   const target = probe.assertion.target || ''
-  if (target.startsWith('viewer-')) return { pose: await pose(page) }
+  if (target.startsWith('viewer-')) return { viewport: await viewportBounds(page) }
   if (target === 'properties-pane') return { visible: await page.getByRole('complementary', { name: 'Properties', exact: true }).isVisible() }
   if (target === 'version-history') return { visible: await page.getByRole('dialog', { name: 'Version history', exact: true }).isVisible() }
   if (target.startsWith('engine:') || target === 'browser-clipboard-cut') return { count: await engineCount(page) }
@@ -506,6 +584,18 @@ async function assertEffect(probe, runtime, locator, before) {
     return
   }
   if (target.startsWith('drawer:')) {
+    if (target === 'drawer:nav') {
+      const open = effect.value !== 'none'
+      await expect(page.locator('aside.nav'))[open ? 'toBeVisible' : 'toBeHidden']()
+      if (runtime.testInfo.project.name === 'phone') {
+        await expect(page.getByRole('button', { name: 'Tool rail', exact: true })).toHaveAttribute('aria-expanded', String(open))
+      } else if (open) await expect(page.getByRole('button', { name: 'Collapse the tool rail to a spine', exact: true })).toBeVisible()
+      else {
+        await expect(page.getByRole('button', { name: 'Tool rail', exact: true })).toHaveAttribute('aria-expanded', 'false')
+        await expect(page.locator('aside.nav')).toHaveAttribute('aria-hidden', 'true')
+      }
+      return
+    }
     const name = { nav: 'Catalog', jobs: 'Jobs', result: 'Result', plan: 'Plan' }[target.slice(7)]
     if (target === 'drawer:none' || effect.value === 'none') {
       for (const label of ['Catalog', 'Jobs', 'Result', 'Plan']) await expect(panelButton(page, label)).toHaveAttribute('aria-expanded', 'false')
@@ -524,10 +614,20 @@ async function assertEffect(probe, runtime, locator, before) {
     return
   }
   if (target.startsWith('viewer-')) {
-    if (target === 'viewer-home') await expect.poll(() => pose(page)).toEqual(runtime.homePose)
+    if (target === 'viewer-home') {
+      // CadOverview rounds SVG coordinates to tenths of an overview unit.
+      await expect.poll(async () => {
+        const current = await viewportBounds(page)
+        return Math.max(...['x', 'y', 'width', 'height'].map((key) => Math.abs(current[key] - runtime.homeViewport[key])))
+      }).toBeLessThanOrEqual(0.2)
+      runtime.evidence.fitViewport.fitted = await viewportBounds(page)
+    }
     else {
       const direction = target === 'viewer-zoom-in' ? 'toBeLessThan' : 'toBeGreaterThan'
-      await expect.poll(async () => (await pose(page)).worldPerPixel)[direction](before.pose.worldPerPixel)
+      await expect.poll(async () => {
+        const viewport = await viewportBounds(page)
+        return viewport.width * viewport.height
+      })[direction](before.viewport.width * before.viewport.height)
     }
     return
   }
@@ -588,7 +688,7 @@ export async function runProbe(probe, runtime) {
         evidence.steps.push({ phase: 'setup', ...recipe })
       })
     }
-    const locator = control(page, probe.locator)
+    const locator = control(page, runtime.testInfo.project.name === 'phone' && probe.locator.phone ? probe.locator.phone : probe.locator)
     await expect(locator).toBeVisible()
     const before = await captureBefore(probe, runtime)
     if (probe.assertion.kind !== 'disabled_with_reason') {
