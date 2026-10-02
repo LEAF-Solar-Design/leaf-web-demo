@@ -3193,6 +3193,7 @@ def test_jobs_conflicts_are_classified_into_resource_lanes():
         "web-build": "npm/npx",
         "web-link-service-flow": "npm/npx",
         "web-demo-gate": "nested runner",
+        "studio-walk-regressions": "nested stack",
         "server-sessions-e2e": "harness/dist",
         "server-e2e-golden": "authored",
         "server-dynamic-loader": "authored",
@@ -3217,6 +3218,8 @@ def test_jobs_conflicts_are_classified_into_resource_lanes():
     for suite in suites:
         assert bool(g.conflict_resources(suite)) == bool(g.serial_suite_reason(suite)), suite.id
     assert {"web-tree", "harness-tree"} <= g.conflict_resources(by_id["web-link-service-flow"])
+    assert g.conflict_resources(by_id["studio-walk-regressions"]) == frozenset({"web-tree", "harness-tree"})
+    assert "studio-walk-regressions" in {s.id for s in prelude}
     assert not (g.conflict_resources(by_id["server-backbone"])
                 & g.conflict_resources(by_id["web-vitest"]))
 
@@ -3700,3 +3703,51 @@ def test_every_server_test_file_is_registered_or_named():
         f"{sorted(files - registered - named)}")
     assert not named & registered, f"registered files still listed as gaps: {sorted(named & registered)}"
     assert not named - files, f"gap entries for files that no longer exist: {sorted(named - files)}"
+
+
+def test_studio_walk_regressions_is_one_mandatory_fixed_script_row():
+    g = _load_runner()
+    suites = g.build_suites()
+    rows = [s for s in suites if s.id == "studio-walk-regressions"]
+    assert len(rows) == 1
+    suite = rows[0]
+    assert suite.kind == "script" and suite.cwd == g.REPO
+    assert suite.argv == ["node", "web/e2e/regressions/runGate.mjs"]
+    assert suite.expected is None and 660 < suite.timeout_s <= 900
+    assert not suite.opt_in_env and not suite.db_gated and not suite.db_deferred
+    assert not suite.allowed_skip_reasons and not suite.allowed_vitest_skips
+    selftest = next(s for s in suites if s.id == "gate-runner-selftest")
+    assert "test_studio_walk_regression_gate.py" in selftest.argv
+    config = (REPO / "web/playwright.regressions.config.mjs").read_text(encoding="utf-8")
+    assert "'**/*.spec.mjs'" in config
+    fixtures = list((REPO / "web/e2e/regressions/gate-fixtures").glob("*.case.mjs"))
+    assert {p.name for p in fixtures} == {f"{name}.case.mjs" for name in ("pass", "failure", "skip", "empty")}
+    assert all(not p.match("*.spec.mjs") for p in fixtures)
+
+
+@pytest.mark.parametrize("code", [1, 3, 4, 75, 76, 124, 127])
+def test_studio_walk_nonzero_verdicts_fail_through_run_suite(code, tmp_path, monkeypatch):
+    g = _load_runner()
+    suite = next(s for s in g.build_suites() if s.id == "studio-walk-regressions")
+    monkeypatch.delenv("LEAF_GATE_FAULT_INJECT", raising=False)
+    monkeypatch.setattr(g.subprocess, "run", lambda *a, **k: SimpleNamespace(
+        returncode=code, stdout=f"regression rejected: {code}\n", stderr=""))
+    result = g.run_suite(suite, tmp_path, reporting_disabled=True)
+    assert result.status == "FAIL"
+
+
+@pytest.mark.parametrize("fault", ["spawn", "timeout"])
+def test_studio_walk_process_errors_fail_through_run_suite(fault, tmp_path, monkeypatch):
+    g = _load_runner()
+    suite = next(s for s in g.build_suites() if s.id == "studio-walk-regressions")
+    monkeypatch.delenv("LEAF_GATE_FAULT_INJECT", raising=False)
+
+    def broken_child(*args, **kwargs):
+        if fault == "spawn":
+            raise OSError("W3e child unavailable")
+        raise subprocess.TimeoutExpired(suite.argv, suite.timeout_s)
+
+    monkeypatch.setattr(g.subprocess, "run", broken_child)
+    result = g.run_suite(suite, tmp_path, reporting_disabled=True)
+    assert result.status == "FAIL"
+    assert ("spawn failure" if fault == "spawn" else "TIMEOUT") in result.note
