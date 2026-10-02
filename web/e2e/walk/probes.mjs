@@ -51,6 +51,10 @@ export function locatorRecipe(entry, state) {
   }
   if (entry.kind === 'drawer') {
     if (!STUDIO_DRAWERS.includes(entry.source_id)) throw new Error(`No drawer registry record for ${entry.id}`)
+    if (entry.source_id === 'nav') return {
+      ...role('button', state === 'open' ? 'Collapse the tool rail to a spine' : 'Tool rail'), trigger: 'click',
+      phone: { ...role('button', 'Tool rail'), trigger: 'click' },
+    }
     return { ...role('button', drawerNames[entry.source_id], role('group', 'Workspace panels')),
       trigger: entry.source_id === 'none' ? 'keyboard' : 'click', key: 'Escape' }
   }
@@ -81,7 +85,8 @@ export function stateRecipe(entry, state) {
   if (state === 'engine-busy') steps.push(step('prepare-engine-transport'))
   if (state === 'engine-not-parsed') steps.push(step('hold-engine-boot'))
   const empty = ['no-drawing', 'signed-out', 'no-versioned-drawing'].includes(state)
-  steps.push(step(empty ? 'open-empty-workspace' : 'open-private-drawing', { surface, signedOut: state === 'signed-out' }))
+  steps.push(step(empty ? 'open-empty-workspace' : 'open-private-drawing', { surface, signedOut: state === 'signed-out',
+    ...(state === 'no-drawing' && entry.kind === 'action' && actionRecord(entry).surface === 'ribbon' ? { cadWorkspace: true } : {}) }))
   if (entry.kind === 'action') {
     const action = actionRecord(entry)
     if (action.surface === 'slash') steps.push(step('slash-menu', { command: action.label }))
@@ -98,7 +103,9 @@ export function stateRecipe(entry, state) {
   if (entry.kind === 'tool') steps.push(step('catalog-tool', { name: entry.source_id }))
   if (entry.kind === 'drawer') {
     const name = drawerNames[entry.source_id]
-    steps.push(step('drawer-state', { name, open: state === 'open' || state === 'drawer-open' }))
+    steps.push(step(entry.source_id === 'nav' ? 'tool-rail-state' : 'drawer-state', {
+      name, open: state === 'open' || state === 'drawer-open',
+    }))
   }
   if (state === 'pane-open') steps.push(step('properties-state', { open: true }))
   if (state === 'no-selection' || state === 'empty-clipboard') steps.push(step('clear-selection'))
@@ -128,7 +135,9 @@ export function stateRecipe(entry, state) {
     steps.push(step('require-local-state', { state, context }))
   }
   if (entry.kind === 'surface') steps.push(step('require-surface-context', { context }))
-  if (effect.target === 'viewer-home') steps.push(step('zoom-before-fit'))
+  if (effect.target === 'viewer-home') steps.push(step('zoom-before-fit', {
+    control: role('button', 'Zoom in', role('toolbar', 'View')),
+  }))
   return { context, steps }
 }
 

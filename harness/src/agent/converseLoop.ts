@@ -119,7 +119,7 @@ export interface ConversePorts {
 }
 
 export interface ConverseLoopOptions {
-  /** Spine model id. Default: LEAF_SPINE_MODEL env, else claude-sonnet-5. */
+  /** Spine model id. Default: LEAF_SPINE_MODEL env, else claude-sonnet-5-5. */
   model?: string;
   /** Read-dispatch inline-wait budget in seconds (wire contract section 5: 15). */
   readWaitS?: number;
@@ -174,7 +174,7 @@ export class ConverseLoop {
     private readonly ports: ConversePorts,
     opts: ConverseLoopOptions = {},
   ) {
-    this.model = opts.model ?? process.env.LEAF_SPINE_MODEL ?? "claude-sonnet-5";
+    this.model = opts.model ?? process.env.LEAF_SPINE_MODEL ?? "claude-sonnet-5-5";
     this.readWaitS = opts.readWaitS ?? 15;
     this.ttlS = opts.confirmationTtlS ?? 300;
   }

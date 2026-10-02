@@ -98,6 +98,7 @@ from envelopes import ErrorCode
 # runner supports). Keep in lockstep with harness/src/ports/modelAllowlist.ts.
 # A true multi-provider (OpenAI/Gemini) adapter is an explicit, separate follow-up.
 ALLOWED_MODELS = frozenset({
+    "claude-sonnet-5-5",
     "claude-sonnet-5",
     "claude-opus-4-8",
     "claude-haiku-4-5",

@@ -530,7 +530,7 @@ describe("ConverseSdkRunner — SDK options wiring", () => {
     expect(mock.queries[0]!.options.model).toBe("claude-haiku-4-5");
   });
 
-  it("defaults the model to claude-sonnet-5 when neither option nor env is set", async () => {
+  it("defaults the model to claude-sonnet-5-5 when neither option nor env is set", async () => {
     const prior = process.env.LEAF_SPINE_MODEL;
     delete process.env.LEAF_SPINE_MODEL;
     try {
@@ -541,7 +541,7 @@ describe("ConverseSdkRunner — SDK options wiring", () => {
         zodImport: mock.zodImport,
       });
       await collect(runner, makeInput());
-      expect(mock.queries[0]!.options.model).toBe("claude-sonnet-5");
+      expect(mock.queries[0]!.options.model).toBe("claude-sonnet-5-5");
     } finally {
       if (prior !== undefined) process.env.LEAF_SPINE_MODEL = prior;
     }

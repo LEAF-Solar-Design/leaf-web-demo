@@ -899,7 +899,7 @@ def build_suites() -> List[Suite]:
         # physical head, and the t2, t6 and t7 parity receipts reproduced through the head. Hermetic and
         # nothing skips: the floor is the exact count, 80.
         Suite("server-solar-ground-terrain-adapter", "server tests/test_solar_ground_terrain_adapter.py",
-              "pytest", SERVER, _py_pytest("tests/test_solar_ground_terrain_adapter.py"), 80),
+              "pytest", SERVER, _py_pytest("tests/test_solar_ground_terrain_adapter.py"), 94),
         # sf-w5-frames-piles: native Ground frame and pile operations (server/solar_frames_piles.py) over the
         # drawing's current physical head: generate, collision, piling on the stored terrain, pile length window,
         # each published as a child state and reopened unchanged (preview), and every result and the read

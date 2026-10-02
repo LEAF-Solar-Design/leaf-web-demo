@@ -133,7 +133,7 @@ export interface RunUsageSummary {
 }
 
 export interface AgentSdkRunnerOptions {
-  /** undefined => LEAF_SPINE_MODEL, then claude-sonnet-5. */
+  /** undefined => LEAF_SPINE_MODEL, then claude-sonnet-5-5. */
   model?: string;
   /** Spend cap: abort the author loop past this many SDK turns (contract: <= 40). */
   maxTurns?: number;
@@ -344,7 +344,7 @@ export function resolveAuthorModel(
   explicit: string | undefined,
   env: NodeJS.ProcessEnv = process.env,
 ): string {
-  return explicit ?? env.LEAF_SPINE_MODEL ?? "claude-sonnet-5";
+  return explicit ?? env.LEAF_SPINE_MODEL ?? "claude-sonnet-5-5";
 }
 
 export function resolveAuthorTimeoutMs(

@@ -2,7 +2,7 @@ import { test, runProbe } from './fixtures.mjs'
 import { buildFeatureMap } from '../../walk/featureMap.mjs'
 import { resolveProbe } from './probes.mjs'
 
-const smoke = new Set(['action:fit', 'surface:sheets', 'drawer:nav', 'tab:drafting:view', 'tool:count-panels'])
+const smoke = new Set(['action:fit', 'surface:sheets', 'drawer:nav', 'tab:drafting:view', 'tool:count-by-layer'])
 
 // Expand at collection time. Each project selects its own viewport suffix,
 // rather than running every definition once in each project and doubling it.

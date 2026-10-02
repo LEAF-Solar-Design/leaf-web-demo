@@ -11,6 +11,7 @@
  * Keep in lockstep with server/turn_runner.py ALLOWED_MODELS.
  */
 export const ALLOWED_MODELS = [
+  "claude-sonnet-5-5",
   "claude-sonnet-5",
   "claude-opus-4-8",
   "claude-haiku-4-5",
@@ -31,6 +32,7 @@ export const MODEL_REASONING_CATALOG = Object.freeze(ALLOWED_MODELS.map(id => Ob
   id,
   reasoning_ids: Object.freeze<ReasoningId[]>(id === "claude-haiku-4-5"
     ? ["disabled"]
+    : id === "claude-sonnet-5-5" ? ["low", "medium", "high"]
     : id === "claude-opus-4-8" ? ["disabled", "low", "medium", "high", "max"] : ["disabled", "low", "medium", "high"]),
 })));
 

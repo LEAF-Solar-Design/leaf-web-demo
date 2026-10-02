@@ -32,7 +32,7 @@
         "drawer-open": {"drawer": "nav"},
         "history-open": {"historyOpen": true},
         "start-open": {"startOpen": true},
-        "route-open": {"route": {"tool": "count-panels"}},
+        "route-open": {"route": {"tool": "count-by-layer"}},
         "errors-present": {"routeErr": "failed"},
         "selection-present": {"selectedHandle": "one"},
         "project-open": {"openProjectId": "walk-project"}
@@ -60,7 +60,7 @@
     }
   },
   "overrides": {
-    "action:fit": {"effect": {"kind": "renders", "target": "viewer-home"}, "sources": ["web/src/lib/ribbonClusters.js"]},
+    "action:fit": {"effect": {"kind": "renders", "target": "viewer-home"}, "sources": ["web/src/lib/ribbonClusters.js"], "exclude_states": ["no-drawing"], "reason": "Studio never shows an empty CAD workspace: ensure_demo_drawing provisions any drawing id when APS_LIVE=0"},
     "action:zoom-in": {"effect": {"kind": "renders", "target": "viewer-zoom-in"}, "sources": ["web/src/lib/ribbonClusters.js"]},
     "action:zoom-out": {"effect": {"kind": "renders", "target": "viewer-zoom-out"}, "sources": ["web/src/lib/ribbonClusters.js"]},
     "action:properties-pane": {"effect": {"kind": "toggles", "target": "properties-pane"}, "viewports": ["desktop", "phone"], "sources": ["web/src/App.jsx"]},
@@ -80,7 +80,7 @@
     "action:modify-set-lineweight": {"effect": {"kind": "opens", "target": "pending-property-change"}},
     "action:clipboard-copy-clip": {"effect": {"kind": "toggles", "target": "browser-clipboard"}, "sources": ["web/src/cadedit/EngineRibbonClusters.jsx"]},
     "action:clipboard-cut-clip": {"effect": {"kind": "submits", "target": "browser-clipboard-cut"}, "sources": ["web/src/cadedit/EngineRibbonClusters.jsx"]},
-    "drawer:nav": {"viewports": ["desktop", "phone"], "sources": ["web/src/App.jsx"]},
+    "drawer:nav": {"viewports": ["desktop", "phone"], "sources": ["web/src/App.jsx", "web/src/site/NavRail.jsx"]},
     "drawer:jobs": {"viewports": ["desktop", "phone"], "sources": ["web/src/App.jsx"]},
     "drawer:result": {"viewports": ["desktop", "phone"], "sources": ["web/src/App.jsx"]},
     "drawer:plan": {"viewports": ["desktop", "phone"], "sources": ["web/src/App.jsx"]},

@@ -84,6 +84,8 @@ def test_downstream_overlay_inventory_matches_current_vendor():
     assert set(overlays) == {
         "ports/converse.ts",
         "ports/fakes/fakeSessionStore.ts",
+        "ports/impl/agentSdkRunner.ts",
+        "ports/impl/agentSdkTurnRunner.ts",
         "ports/impl/converseSdkRunner.ts",
         "ports/impl/harnessSchema.ts",
         "ports/impl/pgSessionStore.ts",
@@ -92,6 +94,7 @@ def test_downstream_overlay_inventory_matches_current_vendor():
         "ports/impl/tenantChangeRepo.ts",
         "ports/impl/tenantRepoProvider.ts",
         "ports/index.ts",
+        "ports/modelAllowlist.ts",
     }
     for rel, declared_hash in overlays.items():
         assert manifest["files"][rel] == declared_hash
