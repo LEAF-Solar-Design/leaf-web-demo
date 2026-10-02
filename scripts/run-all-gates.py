@@ -893,6 +893,11 @@ def build_suites() -> List[Suite]:
         # Hermetic and nothing skips: the floor is the exact count, 60.
         Suite("server-solar-landxml-route", "server tests/test_solar_landxml_route.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_landxml_route.py"), 60),
+        # sf-w5-terrain-route: tenant-scoped reads and head-bound mesh, slope and clear previews,
+        # bounded JSON bodies, closed refusals and twin-store adapter parity.
+        # Hermetic and nothing skips: the floor is the exact count, 23.
+        Suite("server-solar-terrain-route", "server tests/test_solar_terrain_route.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_terrain_route.py"), 23),
         # sf-w5-terrain: Ground terrain operations over the reopened physical state
         # (server/solar_ground_terrain_adapter.py): the frozen frame, units and current-state selection,
         # the slope mesh and the tracker slope check and clear published as preview children of the
