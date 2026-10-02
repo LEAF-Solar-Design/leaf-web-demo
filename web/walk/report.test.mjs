@@ -46,6 +46,63 @@ const jsonLeaves = (value, path = []) => typeof value === 'string' ? [{ path, va
   : value && typeof value === 'object' ? Object.entries(value).flatMap(([key, item]) => jsonLeaves(item, [...path, key])) : []
 const withoutCreatedAt = (receipt) => { const { created_at, ...rest } = receipt; return rest }
 
+const stackReport = (stacks) => ({ suites: [{ specs: stacks.map((stack, index) => ({
+  title: `control-census:stack-${index} [ready] @desktop`,
+  tests: [{ projectName: 'desktop', results: [{ status: index === 0 ? 'failed' : 'passed',
+    attachments: [attach(stack === undefined ? {} : { stack })] }] }],
+})) }] })
+const stackRefA = 'a'.repeat(64)
+const stackRefB = 'b'.repeat(64)
+
+test('all evidence runs must be ready; stack refs are sorted and distinct and failures keep their own witness', () => {
+  const receipt = build(stackReport([
+    { ready: true, instance: stackRefB }, { ready: true, instance: stackRefA }, { ready: true, instance: stackRefB },
+  ]))
+  assert.deepEqual(receipt.evidence.context, { stack_ready: true, stack_refs: [stackRefA, stackRefB] })
+  assert.deepEqual(receipt.failures[0].evidence.context, { stack_ready: true, stack_ref: stackRefB })
+  assert.deepEqual(validateReceipt(receipt), { valid: true, errors: [] })
+})
+
+test('one unready run overrides ready runs and a failed boot carries no invented ref', () => {
+  const receipt = build(stackReport([{ ready: false }, { ready: true, instance: stackRefA }]))
+  assert.deepEqual(receipt.evidence.context, { stack_ready: false, stack_refs: [stackRefA] })
+  assert.deepEqual(receipt.failures[0].evidence.context, { stack_ready: false })
+  assert.deepEqual(validateReceipt(receipt), { valid: true, errors: [] })
+})
+
+test('partial stack witnesses leave aggregate readiness unknown', () => {
+  const report = stackReport([{ ready: true, instance: stackRefA }, undefined])
+  const receipt = build(report)
+  assert.deepEqual(receipt.evidence.context, { stack_refs: [stackRefA] })
+  assert.deepEqual(validateReceipt(receipt), { valid: true, errors: [] })
+  report.suites[0].specs[1].tests[0].results[0].attachments = []
+  const withoutEvidence = build(report)
+  assert.equal(withoutEvidence.evidence.context.stack_ready, true)
+  assert.deepEqual(validateReceipt(withoutEvidence), { valid: true, errors: [] })
+})
+
+test('the frozen report without stack witnesses keeps its receipt unchanged', () => {
+  const frozen = JSON.parse(readFileSync(new URL('./fixtures/walk-report.sample.json', import.meta.url), 'utf8'))
+  const receipt = build(frozen)
+  assert.deepEqual(withoutCreatedAt(receipt), withoutCreatedAt(build(sample)))
+  assert.ok(!Object.hasOwn(receipt.evidence, 'context'))
+  assert.ok(receipt.failures.every((failure) => !Object.hasOwn(failure.evidence, 'context')))
+  assert.deepEqual(validateReceipt(receipt), { valid: true, errors: [] })
+})
+
+test('malformed stack witnesses name their feature and distinct ref overflow names its count', () => {
+  for (const stack of [null, [], true, {}, { ready: 'true', instance: stackRefA },
+    { ready: true }, { ready: false, instance: 1 }, { ready: true, instance: 'A'.repeat(64) },
+    { ready: true, instance: 'a'.repeat(63) }, { ready: true, instance: 'g'.repeat(64) }]) {
+    assert.throws(() => build(stackReport([stack])), /Invalid stack witness for control-census:stack-0/)
+  }
+  const stacks = Array.from({ length: 17 }, (_, index) => ({ ready: true, instance: index.toString(16).padStart(64, '0') }))
+  const accepted = build(stackReport(stacks.slice(0, 16)))
+  assert.equal(accepted.evidence.context.stack_refs.length, 16)
+  assert.deepEqual(validateReceipt(accepted), { valid: true, errors: [] })
+  assert.throws(() => build(stackReport(stacks)), /17 distinct instance refs/)
+})
+
 test('typed UX observations project only positive count metrics and preserve the functional receipt', () => {
   const report = structuredClone(sample)
   const result = firstResult(featureSpec(report))

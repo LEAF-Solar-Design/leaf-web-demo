@@ -4,8 +4,20 @@ import { buildFeatureMap } from '../../walk/featureMap.mjs'
 import { ACTIONS, REASONS, accessibleName, reasonCode } from '../../src/lib/actionRegistry.js'
 import { effectAssertion, resolveProbe, normalizedControlKey, requireControlCensusBatch, CONTROL_CENSUS_BATCH } from './probes.mjs'
 import { readFileSync } from 'node:fs'
+import { stackInstanceRef } from './fixtures.mjs'
 
 const map = buildFeatureMap()
+test('stack instance refs are private, deterministic sha256 identities of the boot', () => {
+  const directory = 'leaf-walk-stack-private-directory'
+  const ref = stackInstanceRef(directory, 12345, 1800000000000)
+  assert.match(ref, /^[a-f0-9]{64}$/)
+  assert.equal(stackInstanceRef(directory, 12345, 1800000000000), ref)
+  assert.notEqual(stackInstanceRef(directory, 12346, 1800000000000), ref)
+  assert.notEqual(stackInstanceRef(directory, 12345, 1800000000001), ref)
+  assert.notEqual(stackInstanceRef(directory + '-other', 12345, 1800000000000), ref)
+  assert.ok(!ref.includes(directory))
+})
+
 test('batch three resolves seventeen document controls, semantic targets and public setup in every state', () => {
   const expected = [["scope-add","Add: build a new capability","opens","scope-build-picker",["ready","failed-load"]],["demo-return","Back to the demo","renders","guided-demo",["failed-load"]],["claude-accounts","Claude accounts not linked","opens","claude-accounts-panel",["ready","failed-load"]],["drawing-close-start","Close the drawing view and return to Start","opens","project-board",["ready"]],["notification-collapse","Collapse the notification inbox","renders","notification-inbox-collapsed",["ready","failed-load"]],["session-details","Details","opens","session-provenance",["ready","failed-load"]],["version-history","History","opens","version-history",["ready"]],["linked-services","Linked services {n} linked","opens","linked-services-panel",["ready","failed-load"]],["project-board","Open the project board","opens","project-board",["ready","failed-load"]],["prompt-run","Run","submits","unknown-tool-resolver",["ready","failed-load"]],["prompt-scope","scope ▾","opens","scope-picker",["ready","failed-load"]],["sign-out","Sign out","renders","signed-out-session",["ready","failed-load"]],["start-board","Start","opens","project-board",["ready","failed-load"]],["take-edit-lock","Take edit lock","renders","edit-lock-held",["ready"]],["cost-panel","What Leaf costs to operate","opens","cost-panel",["ready","failed-load"]],["command-bar","Command bar","opens","tool-commands",["ready","failed-load"]],["find-drawing","Find in drawing","renders","drawing-find-no-match",["ready"]]]
   const overrides = JSON.parse(readFileSync(new URL('../../walk/features.overrides.json', import.meta.url), 'utf8')).overrides
@@ -234,7 +246,8 @@ test('batch two uses observed default-build effects rather than pixel hashes or 
   const layerSetup = source.slice(source.indexOf("case 'layer-visible-state':"),
     source.indexOf("case 'job-monitor-collapsed':"))
   assert.match(layerSetup, /setLayer\(page, recipe\.name, recipe\.visible\)/)
-  assert.doesNotMatch(source, /stableCanvas|layerImages|createHash/)
+  // Stack identity hashing is allowed; effect oracles still cannot hash pixels.
+  assert.doesNotMatch(source.slice(source.indexOf('const groupNames')), /stableCanvas|layerImages|createHash/)
   const oracle = source.slice(source.indexOf('async function assertEffect'))
   const pan = oracle.slice(oracle.indexOf("if (target === 'viewer-overview-pan')"),
     oracle.indexOf("if (target === 'drawing-overview-expanded')"))
