@@ -1007,7 +1007,12 @@ def _intake_context(intake):
     return values
 
 
-def _number_l2_from_intake(new, intake):
+def _source_xy(p, k):
+    """A state point in the intake's drawing units (state coordinates are kernel inches)."""
+    return p if k == 1.0 else (p[0] / k, p[1] / k)
+
+
+def _number_l2_from_intake(new, intake, coordinate_scale=1.0):
     """The L2 NUMBER attributes (App.gL2CollectorList, DocumentEventHandler.cs:310-318) as the intake's
     l2Inverters record them, set on the state's L2 devices matched by insertion point. Every intake L2
     must match exactly one state L2 and every state L2 one intake L2, or the intake is not this state's."""
@@ -1018,7 +1023,7 @@ def _number_l2_from_intake(new, intake):
     index = _PointIndex()
     l2_rows = [row for row in new["rows"]["device"] if dev._is_l2(row)]
     for row in l2_rows:
-        index.add(_xy(row["position"]), row)
+        index.add(_source_xy(_xy(row["position"]), coordinate_scale), row)
     numbered = set()
     for i, item in enumerate(raw):
         if not isinstance(item, dict):
@@ -1037,7 +1042,7 @@ def _number_l2_from_intake(new, intake):
         raise InverterCablingError("the state holds an L2 device the combiner intake does not record")
 
 
-def _string_ids(new, intake):
+def _string_ids(new, intake, coordinate_scale=1.0):
     """{pre-built string id: String-layer string handle}: each intake string (CombinerAutoCmd.cs:3867-3931)
     matched to the one state string whose first and last polyline vertex are its EndpointA and EndpointB."""
     try:
@@ -1049,8 +1054,8 @@ def _string_ids(new, intake):
         vertices = g.get("vertices") if isinstance(g, dict) else None
         if not isinstance(vertices, list) or not vertices or g.get("string") is None:
             continue
-        first = dev._finite_xy(vertices[0], "string vertex")
-        last = dev._finite_xy(vertices[-1], "string vertex")
+        first = _source_xy(dev._finite_xy(vertices[0], "string vertex"), coordinate_scale)
+        last = _source_xy(dev._finite_xy(vertices[-1], "string vertex"), coordinate_scale)
         index.add(first, (g["string"], last))
     ids = {}
     for s in strings:
@@ -1123,7 +1128,7 @@ def _draw_direct_homeruns(new, association, host, lines):
     return drawn
 
 
-def combiner_auto_place(state, panel_groups, host, form_values, intake):
+def combiner_auto_place(state, panel_groups, host, form_values, intake, *, coordinate_scale=1.0):
     """LEAFCOMBINERAUTO (i5) on the Studio state: the placement solution of `intake` (the command's
     input-before-placement dump, G35c; place() is the port of CombinerPlacementEngine.Place), its L1
     blocks inserted, the L1/L2 and string/L1 associations persisted, then HomerunsAuto's automatic mode
@@ -1145,7 +1150,7 @@ def combiner_auto_place(state, panel_groups, host, form_values, intake):
         raise InverterCablingNotPortedError("LEAFCOMBINERAUTO over existing L1 combiners")
     installation = new["setting"].get("InstallationDesign", st.DECLARED_DEFAULTS["InstallationDesign"])
     try:
-        solution = comb.place(intake, installation)
+        solution = comb.place(intake, installation, coordinate_scale=coordinate_scale)
     except comb.PlacementError as exc:
         if "not ported" in str(exc):
             raise InverterCablingNotPortedError(str(exc)) from None
@@ -1155,8 +1160,8 @@ def combiner_auto_place(state, panel_groups, host, form_values, intake):
     if not placed:                                     # CombinerAutoCmd.cs:493-503
         lines.append("LEAFCOMBINERAUTO: No combiners produced. See warnings above.")
         return new, lines
-    _number_l2_from_intake(new, intake)
-    string_ids = _string_ids(new, intake)
+    _number_l2_from_intake(new, intake, coordinate_scale)
+    string_ids = _string_ids(new, intake, coordinate_scale)
     try:
         scale = dev._symbol_scale(host, False)
     except dev.InverterDeviceError as exc:
