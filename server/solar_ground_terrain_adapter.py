@@ -150,7 +150,7 @@ def document_grid(document):
         raise TerrainAdapterError("TERRAIN_GRID_TOO_LARGE")
     try:
         clean = terrain.neutral_grid(grid)
-    except terrain.TerrainInputError:
+    except (terrain.TerrainInputError, OverflowError):
         raise TerrainAdapterError("TERRAIN_GRID_INVALID") from None
     if (clean["rows"] < 2 or clean["cols"] < 2
             or not (clean["x_min"] < clean["x_max"] and clean["y_min"] < clean["y_max"])
@@ -163,6 +163,15 @@ def document_grid(document):
             or not math.isfinite(cell_x) or cell_x > MAX_FLOAT
             or not math.isfinite(cell_y) or cell_y > MAX_FLOAT):
         raise TerrainAdapterError("TERRAIN_GRID_INVALID")
+    # Mirror draw_grid_mesh's origins and endpoints, including float rounding.
+    for col in range(clean["cols"] - 1):
+        x0 = clean["x_min"] + col * cell_x
+        if not x0 + cell_x > x0:
+            raise TerrainAdapterError("TERRAIN_GRID_INVALID")
+    for row in range(clean["rows"] - 1):
+        y0 = clean["y_min"] + row * cell_y
+        if not y0 + cell_y > y0:
+            raise TerrainAdapterError("TERRAIN_GRID_INVALID")
     return clean
 
 
