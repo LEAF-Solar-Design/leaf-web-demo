@@ -803,6 +803,8 @@ def build_suites() -> List[Suite]:
         Suite("server-solar-ground-equipment", "server tests/test_solar_ground_equipment.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_ground_equipment.py"), 29),
         # W20 Ground admission: 17 tools proven on the converted chain; COUNTED: 28.
+        Suite("server-solar-ground-outlines", "server tests/test_solar_ground_outlines.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_ground_outlines.py"), 79),
         Suite("server-solar-ground-admission", "server tests/test_solar_ground_admission.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_ground_admission.py"), 28),
         # W2 equipment intent: 10 plain cases + 2 compatible edits + 2 refusals + 6 validity cases

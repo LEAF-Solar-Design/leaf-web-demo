@@ -58,11 +58,11 @@ NEW_COPY = {
     "ground_layout_invalid": "The Ground layout cannot be converted into panel groups",
     "ground_layout_too_large": "The Ground layout holds more panel slots, in total or on one tracker, than a design can carry",
 }
-SMALL_SHA = "9c216aaa35ed0db84eb26e86299283eb90a33e8535b9be30cc98f16439da0b0e"
-SMALL_FRAMES_SHA = "e08a53962c9df23913d9a61233fe1cf1bceae5f185573ab31cbb90b6615bec10"
-REPLACED_SHA = "e51836d7a6ccc3c3e9235f645f0c64dc9ebfef4797b509b89a01d2116f8a67bc"
-B18_FRAMES_SHA = "bdd28fb64a8e4da47850d20a51bc2071b2c043481a4c768a3c26e900385c1178"
-B18_SHA = "c1093c680090cf73b2b592393cbb276863fcbc8cbef06db8067b91460fa51dde"
+SMALL_SHA = "1b8bd39b3f8055b1236653ebde34b8fb73bf42b805b4d30e2b8896225f9847d8"
+SMALL_FRAMES_SHA = "31a4054097ed0b35d7824cd469e3d0fea244d478c0b3944803c6774c3543ba89"
+REPLACED_SHA = "dbfee3f244b86b3e457612a6dd26ee26c8ae18b4508abb9c70ee26e3925888a8"
+B18_FRAMES_SHA = "20f20eb89579183232ad1292deb7879e226ba1f872e00565aad6a39e5ac6f6de"
+B18_SHA = "ca0b0a1e63fd7ca07f063b8ec3dc90f88a1af5e835e94961c3a7b1a1617777dd"
 
 
 def sha(value):
