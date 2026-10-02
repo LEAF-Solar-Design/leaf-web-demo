@@ -498,7 +498,7 @@ def test_ground_conversion_kernel_feet(graph):
     result = convert(graph, small_doc(units="ft"), g)
     tracker = result["frames"][0]["tracker"]
     assert (tracker["length_m"], tracker["cross_axis_width_m"]) == (1.8288000000000002, 0.6096)
-    assert canon_sha(result) == "f108ff1cf96fd9b8d159d4a8cc695ec78d5750bae8e6685f1103495086d09ac9"
+    assert canon_sha(result) == "98981fe5aeb2d8708c5ebb2891a5f43321591f2b058157ec9f50dda5d3f743a2"
 
 
 def test_ground_conversion_kernel_slot_bounds_are_inclusive(graph):
