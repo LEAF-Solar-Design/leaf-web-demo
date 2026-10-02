@@ -4,6 +4,7 @@ import { readFileSync, existsSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { buildFeatureMap } from './featureMap.mjs'
 import { stateRecipe } from '../e2e/walk/probes.mjs'
+import { uxObservation } from '../e2e/walk/uxEvidence.mjs'
 import { buildReceipt, validateReceipt, redact, artifactReference, MAX_INPUT_BYTES, MAX_RECEIPT_BYTES } from './report.mjs'
 
 const sample = JSON.parse(readFileSync(new URL('./fixtures/walk-report.sample.json', import.meta.url), 'utf8'))
@@ -44,6 +45,56 @@ const tripleKey = ({ feature_id, state, viewport }) => JSON.stringify([feature_i
 const jsonLeaves = (value, path = []) => typeof value === 'string' ? [{ path, value }]
   : value && typeof value === 'object' ? Object.entries(value).flatMap(([key, item]) => jsonLeaves(item, [...path, key])) : []
 const withoutCreatedAt = (receipt) => { const { created_at, ...rest } = receipt; return rest }
+
+test('typed UX observations project only positive count metrics and preserve the functional receipt', () => {
+  const report = structuredClone(sample)
+  const result = firstResult(featureSpec(report))
+  const attachment = result.attachments.find((item) => item.name === 'walk-evidence')
+  const evidence = JSON.parse(Buffer.from(attachment.body, 'base64').toString('utf8'))
+  const positive = uxObservation({ lensId: 'end-user', metricId: 'control_covered_at_rest', viewport: 'desktop', state: 'closed', observed: 1 })
+  const zero = uxObservation({ lensId: 'mobile-touch', metricId: 'scroll_needed_steps', viewport: 'desktop', state: 'closed', observed: 0 })
+  evidence.ux_observations = [positive, zero]
+  attachment.body = attach(evidence).body
+  const receipt = build(report)
+  assert.deepEqual(receipt.findings.filter((row) => row.category === 'ux'), [{ feature_id: 'drawer:nav',
+    assertion_id: 'ux-control-covered-at-rest', category: 'ux', summary: 'control_covered_at_rest = 1 at desktop/closed', evidence: positive }])
+  const detail = receipt.evidence.cases.find((row) => row.feature_id === 'drawer:nav' && row.state === 'closed' && row.viewport === 'desktop')
+  assert.deepEqual(detail.ux_observations, [positive, zero])
+  assert.deepEqual(validateReceipt(receipt), { valid: true, errors: [] })
+  receipt.findings = receipt.findings.filter((row) => row.category !== 'ux')
+  delete detail.ux_observations
+  assert.deepEqual(withoutCreatedAt(receipt), withoutCreatedAt(build(sample)))
+})
+
+test('UX report validation names the feature for bad shapes, identifiers and overflow', () => {
+  const row = uxObservation({ lensId: 'end-user', metricId: 'extra_steps', viewport: 'desktop', state: 'closed', observed: 1 })
+  for (const ux_observations of [[{ ...row, lens_id: 'bad.id' }], [{ ...row, observed: true }],
+    [{ ...row, threshold: 0 }], [{ ...row, ux_version: 2 }], [null], Array(65).fill(row), {}]) {
+    const report = structuredClone(sample)
+    firstResult(featureSpec(report)).attachments = [attach({ ux_observations })]
+    assert.throws(() => build(report), /drawer:nav/)
+  }
+})
+
+test('UX unknown, zero and time observations are retained without findings; all count aliases project', () => {
+  const rows = ['control_covered_at_rest', 'scroll_needed_steps', 'extra_steps', 'time_to_task_ms'].flatMap((metricId) =>
+    [null, 0, 2].map((observed) => uxObservation({ lensId: 'end-user', metricId, viewport: 'desktop', state: 'closed', observed })))
+  const report = structuredClone(sample)
+  firstResult(featureSpec(report)).attachments = [attach({ ux_observations: rows })]
+  const receipt = build(report)
+  assert.deepEqual(receipt.findings.filter((row) => row.category === 'ux').map((row) => row.assertion_id),
+    ['ux-control-covered-at-rest', 'ux-scroll-needed-steps', 'ux-extra-steps'])
+  assert.deepEqual(receipt.evidence.cases.find((row) => row.feature_id === 'drawer:nav' && row.state === 'closed').ux_observations, rows)
+  assert.equal(validateReceipt(receipt).valid, true)
+})
+
+test('the frozen report fixture without UX observations keeps its receipt projection unchanged', () => {
+  const frozen = JSON.parse(readFileSync(new URL('./fixtures/walk-report.sample.json', import.meta.url), 'utf8'))
+  const receipt = build(frozen)
+  assert.deepEqual(withoutCreatedAt(receipt), withoutCreatedAt(build(sample)))
+  assert.ok(receipt.evidence.cases.every((row) => !Object.hasOwn(row, 'ux_observations')))
+  assert.ok(receipt.findings.every((row) => row.category !== 'ux'))
+})
 
 test('a synthesized report builds a valid receipt against the live feature map', () => {
   const liveMap = buildFeatureMap()

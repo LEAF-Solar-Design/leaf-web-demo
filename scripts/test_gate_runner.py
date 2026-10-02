@@ -3882,6 +3882,7 @@ def test_web_walk_unit_is_one_mandatory_fixed_script_row():
         "walk/stackEnv.test.mjs",
         "walk/report.test.mjs", "e2e/walk/probes.test.mjs", "e2e/walk/lenses.test.mjs",
         "e2e/walk/uxMetrics.test.mjs",
+        "e2e/walk/uxEvidence.test.mjs",
     ]
     selection = json.loads((REPO / "scripts/ci/test-selection-map.json").read_text(encoding="utf-8"))
     assert selection["mandatory_suite_ids"].count(suite.id) == 1
