@@ -452,6 +452,7 @@
     "server-solar-terrain-route",
     "server-solar-tool-color-strings",
     "server-solar-tool-combiners",
+    "server-solar-tool-feeders",
     "server-solar-combiner-intake-import",
     "server-solar-design-survives-saves",
     "server-solar-tool-trackers-to-panel-groups",
