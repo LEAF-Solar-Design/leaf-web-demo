@@ -8,7 +8,7 @@
 // Routes (server/routers/solar_terrain.py): GET /api/drawings/{drawing_id}/terrain reads the
 // stored terrain's view, and POST /api/drawings/{drawing_id}/terrain/operations runs mesh, slope
 // or slope-clear on the head the request names (expected_head), as application/json. Both take
-// an optional project_id in the query and no checkout header. Every refusal body carries its
+// an optional project_id in the query; writes take the checkout capability header. Every refusal body carries its
 // code, never prose, so this module owns the sentence for each key of the route's
 // TERRAIN_ROUTE_REFUSALS. Everything the routes answer is a preview: no sentence here claims
 // more, and none says what the server did or did not write after a call that lost its answer.
@@ -33,6 +33,8 @@ export const TERRAIN_FALLBACK_SENTENCE = 'The terrain request stopped'
 
 // One sentence per key of the route's TERRAIN_ROUTE_REFUSALS, and nothing else.
 export const TERRAIN_ROUTE_REASONS = Object.freeze({
+  TERRAIN_CHECKOUT_DENIED: 'The drawing checkout is held elsewhere or has ended, so take the checkout and try again',
+  TERRAIN_CHECKOUT_UNAVAILABLE: 'The drawing checkout could not be confirmed, so try the terrain operation again',
   TERRAIN_PROJECT_ID_INVALID: 'The project named for this terrain preview is not valid',
   TERRAIN_EXPECTED_HEAD_INVALID: 'Refresh the terrain preview before running this operation',
   TERRAIN_LIMITS_INVALID: 'Enter slope limits within the ranges shown',

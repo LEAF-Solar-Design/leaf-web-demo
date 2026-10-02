@@ -53,8 +53,9 @@ const STATUS = Object.freeze({
 const FIRST = JSON.parse(FIRST_TEXT)
 const PROJECT = 'leaf:project:00000000-0000-4000-8000-000000000001'
 const CAPTURE_BYTES = 45_305
-// The 42 keys of LANDXML_IMPORT_REFUSALS in server/routers/drawings.py at 86573930, sorted.
+// The 44 keys of LANDXML_IMPORT_REFUSALS in server/routers/drawings.py, sorted.
 const SERVER_CODES = [
+  'LANDXML_CHECKOUT_DENIED', 'LANDXML_CHECKOUT_UNAVAILABLE',
   'LANDXML_COORDINATE_OUT_OF_RANGE', 'LANDXML_CRS_INVALID', 'LANDXML_CRS_MISMATCH', 'LANDXML_CRS_UNSUPPORTED',
   'LANDXML_DRAWING_ID_INVALID', 'LANDXML_DRAWING_NOT_FOUND', 'LANDXML_DRAWING_UNITS_INVALID', 'LANDXML_EMPTY',
   'LANDXML_ENCODING_INVALID', 'LANDXML_GRAPH_REQUIRED', 'LANDXML_IMPORT_FAILED', 'LANDXML_MALFORMED',
@@ -179,9 +180,9 @@ describe('solar LandXML client', () => {
     expect(Object.isFrozen(LANDXML_DRAWING_UNITS)).toBe(true)
     expect(Object.isFrozen(LANDXML_IMPORT_REASONS)).toBe(true)
     for (const list of [SERVER_CODES, CLIENT_AND_SESSION_CODES]) expect(list).toEqual([...list].sort())
-    expect(SERVER_CODES).toHaveLength(42)
+    expect(SERVER_CODES).toHaveLength(44)
     const allCodes = [...SERVER_CODES, ...CLIENT_AND_SESSION_CODES].sort()
-    expect(allCodes).toHaveLength(51)
+    expect(allCodes).toHaveLength(53)
     expect(Object.keys(LANDXML_IMPORT_REASONS).sort()).toEqual(allCodes)
     for (const sentence of Object.values(LANDXML_IMPORT_REASONS)) {
       expect(typeof sentence).toBe('string')
@@ -199,6 +200,19 @@ describe('solar LandXML client', () => {
     expect(routeKeys.sort()).toEqual([...rows.keys()].sort())
     expect(hasLine(readServer('routers/drawings.py'),
       'LANDXML_MEDIA_TYPES = frozenset({"application/xml", "text/xml"})')).toBe(true)
+  })
+
+  it('CHECKOUT-GATE CG6 LandXML checkout refusals carry their sentences and retry flags', async () => {
+    for (const [code, status, retryable, sentence] of [
+      ['LANDXML_CHECKOUT_DENIED', 403, false, 'The drawing checkout is held elsewhere or has ended, so take the checkout and import again'],
+      ['LANDXML_CHECKOUT_UNAVAILABLE', 503, true, 'The drawing checkout could not be confirmed, so import the LandXML file again'],
+    ]) {
+      expect(landxmlReason(code)).toBe(sentence)
+      expect(routeMap().get(code)).toEqual({ status, envelope: status === 503 ? 'INTERNAL' : 'BAD_PARAMS', retryable })
+      const body = envelopeFor(code, retryable, status === 503 ? DRAINED_TEXT : UNSAFE_TEXT)
+      const { client } = clientWith(answering(() => jsonResponse(body, status)))
+      expect(await client.uploadLandxml(args())).toEqual(refused(status, code, retryable))
+    }
   })
 
   it('LX3 limits and shapes follow the server constants', () => {
@@ -372,7 +386,7 @@ describe('solar LandXML client', () => {
       expect(await client.uploadLandxml(args())).toEqual(refused(status, code, retryable))
     }
     const rows = routeMap()
-    expect(rows.size).toBe(42)
+    expect(rows.size).toBe(44)
     for (const [code, row] of rows) {
       const { client } = clientWith(answering(() => jsonResponse(envelopeFor(code, row.retryable), row.status)))
       expect(await client.uploadLandxml(args())).toEqual(refused(row.status, code, row.retryable))

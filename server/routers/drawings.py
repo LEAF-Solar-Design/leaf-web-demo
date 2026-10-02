@@ -303,7 +303,7 @@ def _combiner_intake_refused(reason):
 def _import_combiner_intake(tenant_id, drawing_id, data, project_id, capability):
     refusal = solar_combiner_intake_import.CombinerIntakeImportError
     try:
-        backend = _backend(tenant_id)
+        backend = _backend(str(tenant_id))
     except (RuntimeError, OSError):
         raise refusal("COMBINER_IMPORT_STORE_UNAVAILABLE") from None
 
@@ -318,7 +318,7 @@ def _import_combiner_intake(tenant_id, drawing_id, data, project_id, capability)
             raise refusal("COMBINER_IMPORT_STORE_UNAVAILABLE") from None
 
     return solar_combiner_intake_import.import_combiner_intake(
-        backend, tenant_id, drawing_id, data, project_id=project_id, authorize=authorize)
+        backend, str(tenant_id), drawing_id, data, project_id=project_id, authorize=authorize)
 
 
 @router.post("/api/drawings/{drawing_id}/imports/combiner-intake")
@@ -361,7 +361,7 @@ async def import_combiner_intake(drawing_id: str, request: Request, project_id: 
             return _combiner_intake_refused("COMBINER_IMPORT_TOO_LARGE")
         body.extend(chunk)
     try:
-        result = await run_in_threadpool(_import_combiner_intake, str(tenant), drawing_id, bytes(body),
+        result = await run_in_threadpool(_import_combiner_intake, tenant, drawing_id, bytes(body),
                                          project_id, x_checkout_capability)
     except solar_combiner_intake_import.CombinerIntakeImportError as exc:
         return _combiner_intake_refused(exc.code)
@@ -375,6 +375,8 @@ async def import_combiner_intake(drawing_id: str, request: Request, project_id: 
 # any other code collapses to, so a client only ever sees a key of this map.
 LANDXML_MEDIA_TYPES = frozenset({"application/xml", "text/xml"})
 LANDXML_IMPORT_REFUSALS = {
+    "LANDXML_CHECKOUT_DENIED": (403, ErrorCode.BAD_PARAMS, False),
+    "LANDXML_CHECKOUT_UNAVAILABLE": (503, ErrorCode.INTERNAL, True),
     "LANDXML_DRAWING_ID_INVALID": (400, ErrorCode.BAD_PARAMS, False),
     "LANDXML_PROJECT_ID_INVALID": (400, ErrorCode.BAD_PARAMS, False),
     "LANDXML_DRAWING_UNITS_INVALID": (400, ErrorCode.BAD_PARAMS, False),
@@ -431,13 +433,23 @@ def _landxml_refused(reason):
     return JSONResponse(status_code=status, content=env)
 
 
-def _import_landxml(tenant_id, drawing_id, data, drawing_units, crs, cells, project_id):
+def _import_landxml(tenant_id, drawing_id, data, drawing_units, crs, cells, project_id, capability):
     try:
-        backend = _backend(tenant_id)
+        backend = _backend(str(tenant_id))
     except (RuntimeError, OSError):
         raise solar_landxml_import.LandXmlImportError("LANDXML_STORE_UNAVAILABLE") from None
+    try:
+        _lock_authorization(drawing_id, tenant_id, backend, capability)
+    except checkout_capability.CapabilityRejected:
+        raise solar_landxml_import.LandXmlImportError("LANDXML_CHECKOUT_DENIED") from None
+    except checkout_capability.CapabilityUnavailable:
+        raise solar_landxml_import.LandXmlImportError("LANDXML_CHECKOUT_UNAVAILABLE") from None
+    except KeyError:
+        pass  # No manifest: preserve the importer's missing drawing refusal.
+    except (ValueError, OSError):
+        raise solar_landxml_import.LandXmlImportError("LANDXML_STORE_UNAVAILABLE") from None
     return solar_landxml_import.import_landxml_terrain(
-        backend, tenant_id, drawing_id, data, drawing_units=drawing_units, crs=crs,
+        backend, str(tenant_id), drawing_id, data, drawing_units=drawing_units, crs=crs,
         target_cells=cells, project_id=project_id)
 
 
@@ -445,7 +457,8 @@ def _import_landxml(tenant_id, drawing_id, data, drawing_units, crs, cells, proj
 async def import_landxml(drawing_id: str, request: Request, drawing_units: Optional[str] = None,
                          crs: Optional[str] = None, target_cells: Optional[str] = None,
                          project_id: Optional[str] = None,
-                         tenant=Depends(deps.require_active_tenant)):
+                         tenant=Depends(deps.require_active_tenant),
+                         x_checkout_capability: Optional[str] = Header(default=None)):
     """Store one LandXML source and publish its terrain grid on the drawing's physical head.
 
     The body is the file's bytes (application/xml or text/xml), at most
@@ -488,8 +501,8 @@ async def import_landxml(drawing_id: str, request: Request, drawing_units: Optio
             return _landxml_refused("LANDXML_TOO_LARGE")
         body.extend(chunk)
     try:
-        result = await run_in_threadpool(_import_landxml, str(tenant), drawing_id, bytes(body),
-                                         drawing_units, crs, cells, project_id)
+        result = await run_in_threadpool(_import_landxml, tenant, drawing_id, bytes(body),
+                                         drawing_units, crs, cells, project_id, x_checkout_capability)
     except solar_physical_state.PhysicalStateError as exc:
         return _landxml_refused(exc.code)
     return JSONResponse(content=with_envelope_fields(result))
