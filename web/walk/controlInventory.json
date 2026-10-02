@@ -1,0 +1,525 @@
+{
+  "version": 1,
+  "mappings": [
+    {
+      "scope": "toolbar:\"Quick access\"",
+      "role": "button",
+      "name": "Tool rail",
+      "feature_id": "drawer:nav",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    }
+  ],
+  "baseline_unmapped": [
+    {
+      "scope": "complementary:\"Properties\"",
+      "role": "button",
+      "name": "Close the properties pane",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "complementary:\"Properties\"",
+      "role": "button",
+      "name": "Drawing",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "complementary:\"Properties\"",
+      "role": "button",
+      "name": "Layers",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "complementary:\"Properties\"",
+      "role": "button",
+      "name": "Panels {n}",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "complementary:\"Properties\"",
+      "role": "button",
+      "name": "Plan",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "complementary:\"Properties\"",
+      "role": "button",
+      "name": "Selection",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "complementary:\"Properties\"",
+      "role": "button",
+      "name": "Walk {n}",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "document",
+      "role": "button",
+      "name": "Add: build a new capability",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "document",
+      "role": "button",
+      "name": "Back to the demo",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "document",
+      "role": "button",
+      "name": "Claude accounts not linked",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "document",
+      "role": "button",
+      "name": "Close the drawing view and return to Start",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "document",
+      "role": "button",
+      "name": "Collapse drawing overview",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "document",
+      "role": "button",
+      "name": "Collapse the notification inbox",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "document",
+      "role": "button",
+      "name": "Details",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "document",
+      "role": "button",
+      "name": "Drawing overview",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "document",
+      "role": "button",
+      "name": "History",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "document",
+      "role": "button",
+      "name": "Linked services {n} linked",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "document",
+      "role": "button",
+      "name": "Open the project board",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "document",
+      "role": "button",
+      "name": "Retry",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "document",
+      "role": "button",
+      "name": "Run",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "document",
+      "role": "button",
+      "name": "scope ▾",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "document",
+      "role": "button",
+      "name": "Sign out",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "document",
+      "role": "button",
+      "name": "Start",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "document",
+      "role": "button",
+      "name": "Take edit lock",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "document",
+      "role": "button",
+      "name": "What Leaf costs to operate",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "document",
+      "role": "combobox",
+      "name": "Command bar",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "document",
+      "role": "combobox",
+      "name": "Find in drawing",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "toolbar:\"Drafting settings\"",
+      "role": "button",
+      "name": "Grid display",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "toolbar:\"Drafting settings\"",
+      "role": "button",
+      "name": "Object snap",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "toolbar:\"Drafting settings\"",
+      "role": "button",
+      "name": "Ortho mode",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "toolbar:\"Drafting settings\"",
+      "role": "button",
+      "name": "Polar tracking",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "toolbar:\"Drafting settings\"",
+      "role": "button",
+      "name": "Snap mode",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "toolbar:\"Drafting settings\"",
+      "role": "button",
+      "name": "Toggle fullscreen",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "toolbar:\"Drafting tools\" > group:\"Layers\"",
+      "role": "button",
+      "name": "Panels",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "toolbar:\"Drafting tools\" > group:\"Layers\"",
+      "role": "button",
+      "name": "Walk",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "toolbar:\"Job monitor\"",
+      "role": "button",
+      "name": "Expand the job monitor ({n} live)",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "toolbar:\"Quick access\"",
+      "role": "button",
+      "name": "New drawing",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "toolbar:\"Quick access\"",
+      "role": "button",
+      "name": "Print",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "toolbar:\"View\"",
+      "role": "button",
+      "name": "Back to the previous view",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "scope": "toolbar:\"View\"",
+      "role": "button",
+      "name": "Up one level",
+      "reason": "No feature-map coverage yet: no walk mapping",
+      "states": [
+        "ready"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    }
+  ]
+}

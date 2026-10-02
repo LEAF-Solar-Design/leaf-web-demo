@@ -21,6 +21,25 @@ const setErrorMessage = (result, message) => {
   result.errors = [result.error]
 }
 const attach = (data) => ({ name: 'walk-evidence', contentType: 'application/json', body: Buffer.from(JSON.stringify(data)).toString('base64') })
+test('control-census titles produce desktop and phone verdicts and a trusted failure oracle', () => {
+  const report = { suites: [{ specs: [
+    { title: 'control-census:studio [ready] @desktop', tests: [{ projectName: 'desktop', results: [{ status: 'passed' }] }] },
+    { title: 'control-census:studio [failed-load] @phone', tests: [{ projectName: 'phone', results: [{ status: 'failed',
+      error: { message: 'unmapped: scope=document role=button name=New control' } }] }] },
+  ] }] }
+  const receipt = build(report)
+  assert.deepEqual(receipt.evidence.cases.map((row) => [row.feature_id, row.state, row.viewport, row.verdict]), [
+    ['control-census:studio', 'ready', 'desktop', 'pass'], ['control-census:studio', 'failed-load', 'phone', 'fail'],
+  ])
+  assert.deepEqual(receipt.verdicts.map((row) => row.verdict), ['PASS', 'FAIL'])
+  assert.equal(receipt.failures[0].fixture_recipe.name, 'control-census')
+  assert.match(receipt.failures[0].evidence.assertion_site, /^web\/e2e\/walk\/control-inventory\.spec\.mjs:\d+$/)
+  assert.match(receipt.failures[0].expected_effect, /mapped-or-baselined/)
+  assert.equal(validateReceipt(receipt).valid, true)
+  report.suites[0].specs[0].tests[0].projectName = 'phone'
+  assert.throws(() => build(report), /project does not match/)
+})
+
 const tripleKey = ({ feature_id, state, viewport }) => JSON.stringify([feature_id, state, viewport])
 const jsonLeaves = (value, path = []) => typeof value === 'string' ? [{ path, value }]
   : value && typeof value === 'object' ? Object.entries(value).flatMap(([key, item]) => jsonLeaves(item, [...path, key])) : []
