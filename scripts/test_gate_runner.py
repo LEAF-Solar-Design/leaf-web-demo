@@ -3705,6 +3705,28 @@ def test_every_server_test_file_is_registered_or_named():
     assert not named - files, f"gap entries for files that no longer exist: {sorted(named - files)}"
 
 
+def test_web_walk_unit_is_one_mandatory_fixed_script_row():
+    import json
+    g = _load_runner()
+    rows = [s for s in g.build_suites() if s.id == "web-walk-unit"]
+    assert len(rows) == 1
+    suite = rows[0]
+    assert suite.label == "Studio walk unit tests"
+    assert suite.kind == "script" and suite.cwd == g.WEB
+    assert suite.argv == [g._npm(), "run", "check:walk-unit"]
+    assert suite.expected is None
+    assert not suite.opt_in_env and not suite.db_gated and not suite.db_deferred
+    assert not suite.allowed_skip_reasons and not suite.allowed_vitest_skips
+    package = json.loads((g.WEB / "package.json").read_text(encoding="utf-8"))
+    assert package["scripts"]["check:walk-unit"].split() == [
+        "node", "--test", "walk/featureMap.test.mjs", "walk/pureRegistries.test.mjs",
+        "walk/report.test.mjs", "e2e/walk/probes.test.mjs", "e2e/walk/lenses.test.mjs",
+        "e2e/walk/uxMetrics.test.mjs",
+    ]
+    selection = json.loads((REPO / "scripts/ci/test-selection-map.json").read_text(encoding="utf-8"))
+    assert selection["mandatory_suite_ids"].count(suite.id) == 1
+
+
 def test_studio_walk_regressions_is_one_mandatory_fixed_script_row():
     g = _load_runner()
     suites = g.build_suites()

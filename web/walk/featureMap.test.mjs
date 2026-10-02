@@ -18,6 +18,10 @@ const clone = (value) => structuredClone(value)
 const map = buildFeatureMap()
 const ids = map.entries.map((entry) => entry.id)
 const entryFor = (id) => map.entries.find((entry) => entry.id === id)
+const exclusionOverrides = { ...overrides, overrides: { ...overrides.overrides,
+  'action:fit': { effect: { kind: 'renders', target: 'viewer-home' } },
+  'drawer:nav': {},
+} }
 
 test('every exported action, surface, drawer and profile tab appears exactly once', () => {
   const expected = [
@@ -133,23 +137,24 @@ test('unknown overrides, wildcard overrides, and silent override typos fail clea
 })
 
 test('state exclusions remove only named states, effects and contexts while retaining the feature', () => {
-  const config = clone(overrides)
-  delete config.overrides['action:fit'].exclude_states
-  delete config.overrides['action:fit'].reason
+  const config = clone(exclusionOverrides)
   const baseline = buildFeatureMap({ overrides: config })
   const fit = baseline.entries.find((entry) => entry.id === 'action:fit')
   assert.ok(fit.states.includes('no-drawing'))
   assert.equal(fit.expected_effect['no-drawing'].kind, 'disabled_with_reason')
   assert.ok(fit.state_contexts['no-drawing'])
-  const excluded = entryFor('action:fit')
+  config.overrides['action:fit'].exclude_states = ['no-drawing']
+  config.overrides['action:fit'].reason = 'Synthetic exclusion exercises action states'
+  const excludedMap = buildFeatureMap({ overrides: config })
+  const excluded = excludedMap.entries.find((entry) => entry.id === 'action:fit')
   assert.deepEqual(excluded.states, fit.states.filter((state) => state !== 'no-drawing'))
   const expected = clone(fit)
   expected.states = expected.states.filter((state) => state !== 'no-drawing')
   delete expected.expected_effect['no-drawing']
   delete expected.state_contexts['no-drawing']
   assert.deepEqual(excluded, expected)
-  assert.equal(map.entries.length, baseline.entries.length)
-  assert.equal(checkCompleteness(map), true)
+  assert.equal(excludedMap.entries.length, baseline.entries.length)
+  assert.equal(checkCompleteness(excludedMap), true)
   config.overrides['drawer:nav'].exclude_states = ['closed']
   config.overrides['drawer:nav'].reason = 'Synthetic exclusion exercises drawer states'
   const drawer = buildFeatureMap({ overrides: config }).entries.find((entry) => entry.id === 'drawer:nav')
@@ -158,11 +163,13 @@ test('state exclusions remove only named states, effects and contexts while reta
 })
 
 test('state exclusions refuse unknown states and missing or empty reasons', () => {
-  const unknown = clone(overrides)
+  const unknown = clone(exclusionOverrides)
   unknown.overrides['action:fit'].exclude_states = ['unknown-state']
+  unknown.overrides['action:fit'].reason = 'Synthetic exclusion exercises unknown states'
   assert.throws(() => buildFeatureMap({ overrides: unknown }), /action:fit.*unknown state: unknown-state/)
   for (const reason of [undefined, '', '   ', null]) {
-    const config = clone(overrides)
+    const config = clone(exclusionOverrides)
+    config.overrides['action:fit'].exclude_states = ['no-drawing']
     config.overrides['action:fit'].reason = reason
     assert.throws(() => buildFeatureMap({ overrides: config }), /state exclusion action:fit requires a non-empty reason/)
   }
@@ -170,11 +177,11 @@ test('state exclusions refuse unknown states and missing or empty reasons', () =
 
 test('state exclusions refuse malformed lists and exclusions that remove every state', () => {
   for (const states of ['no-drawing', [], [''], [null], ['no-drawing', 'no-drawing']]) {
-    const config = clone(overrides)
+    const config = clone(exclusionOverrides)
     config.overrides['action:fit'].exclude_states = states
     assert.throws(() => buildFeatureMap({ overrides: config }), /exclude_states requires a non-empty array of unique states/)
   }
-  const config = clone(overrides)
+  const config = clone(exclusionOverrides)
   config.overrides['drawer:nav'].exclude_states = ['closed', 'open']
   config.overrides['drawer:nav'].reason = 'Synthetic exclusion of all states'
   assert.throws(() => buildFeatureMap({ overrides: config }), /drawer:nav needs a title and unique states/)

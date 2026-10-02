@@ -8,7 +8,8 @@ import { buildReceipt, validateReceipt, redact, artifactReference, MAX_INPUT_BYT
 
 const sample = JSON.parse(readFileSync(new URL('./fixtures/walk-report.sample.json', import.meta.url), 'utf8'))
 const schema = JSON.parse(readFileSync(new URL('./fixtures/leaf.studio-walk.v1.schema.json', import.meta.url), 'utf8'))
-const map = buildFeatureMap()
+// Captured from the W1c feature map alongside walk-report.sample.json.
+const map = JSON.parse(readFileSync(new URL('./fixtures/feature-map.sample.json', import.meta.url), 'utf8'))
 const identity = { deployment_identity: { commit: 'fixture-commit', bundle: 'fixture-bundle' },
   fixture_version: 'walk-fixture-v1', catalog_version: map.catalog_version, browser_version: 'chromium-fixture', attempt: 1 }
 const build = (playwrightReport = sample, featureMap = map, runIdentity = identity) => buildReceipt({ playwrightReport, featureMap, identity: runIdentity })
@@ -24,6 +25,26 @@ const tripleKey = ({ feature_id, state, viewport }) => JSON.stringify([feature_i
 const jsonLeaves = (value, path = []) => typeof value === 'string' ? [{ path, value }]
   : value && typeof value === 'object' ? Object.entries(value).flatMap(([key, item]) => jsonLeaves(item, [...path, key])) : []
 const withoutCreatedAt = (receipt) => { const { created_at, ...rest } = receipt; return rest }
+
+test('a synthesized report builds a valid receipt against the live feature map', () => {
+  const liveMap = buildFeatureMap()
+  const entry = liveMap.entries[0]
+  const state = entry.states[0]
+  const viewport = entry.viewports[0]
+  const report = { suites: [{ specs: [{ title: `${entry.id} [${state}] @${viewport}`,
+    tests: [{ expectedStatus: 'passed', results: [{ status: 'passed', duration: 1, attachments: [] }] }],
+  }] }] }
+  const receipt = build(report, liveMap, { ...identity, catalog_version: liveMap.catalog_version })
+  assert.deepEqual(validateReceipt(receipt, schema), { valid: true, errors: [] })
+  assert.equal(receipt.catalog_version, liveMap.catalog_version)
+  assert.equal(receipt.evidence.cases.length, 1)
+  assert.deepEqual(receipt.evidence.cases.map(tripleKey), [tripleKey({ feature_id: entry.id, state, viewport })])
+  const expected = liveMap.entries.flatMap((row) => row.states.flatMap((s) => row.viewports.map((v) =>
+    tripleKey({ feature_id: row.id, state: s, viewport: v }))))
+  const seen = [...receipt.evidence.cases, ...receipt.evidence.coverage_gaps].map(tripleKey)
+  assert.deepEqual([...seen].sort(), [...expected].sort())
+  assert.equal(new Set(seen).size, seen.length)
+})
 
 test('real runner report produces a receipt conforming to the controller schema', () => {
   const receipt = build()
@@ -133,10 +154,17 @@ test('failures preserve feature-map effects, probe recipes and bounded artifact 
 })
 
 test('assertion ids use the trusted expect call site and ignore error prose and forged evidence oracles', () => {
-  const first = build()
-  const poisoned = structuredClone(sample)
+  const stale = build()
+  const staleFailure = stale.failures.find((row) => row.feature_id === 'drawer:nav' && row.evidence.state === 'closed')
+  assert.equal(staleFailure.evidence.assertion_observed, false)
+  const trustedLine = Number(staleFailure.evidence.assertion_site.split(':').at(-1))
+  const matching = structuredClone(sample)
+  const matchingResult = firstResult(featureSpec(matching))
+  matchingResult.error.location.line = trustedLine
+  matchingResult.errors[0].location.line = trustedLine
+  const first = build(matching)
+  const poisoned = structuredClone(matching)
   const result = firstResult(featureSpec(poisoned))
-  const expectedSite = result.error.location.line
   setErrorMessage(result, 'A different error with an attacker-selected command')
   result.attachments.push({ name: 'ignored-model-text', body: 'fake' })
   const evidenceAttachment = result.attachments.find((item) => item.name === 'walk-evidence')
@@ -148,7 +176,13 @@ test('assertion ids use the trusted expect call site and ignore error prose and 
   const second = build(poisoned)
   assert.deepEqual(first.failures.map((failure) => failure.assertion_id), second.failures.map((failure) => failure.assertion_id))
   const failure = second.failures.find((row) => row.feature_id === 'drawer:nav' && row.evidence.state === 'closed')
-  assert.equal(failure.evidence.assertion_site, `web/e2e/walk/fixtures.mjs:${expectedSite}`)
+  assert.match(failure.evidence.assertion_site, /^web\/e2e\/walk\/fixtures\.mjs:\d+$/)
+  const assertionLine = Number(failure.evidence.assertion_site.split(':').at(-1))
+  const fixtureLines = readFileSync(new URL('../e2e/walk/fixtures.mjs', import.meta.url), 'utf8').split(/\r?\n/)
+  assert.match(fixtureLines[assertionLine - 1], /\bexpect\s*\(/)
+  const cleanFailure = first.failures.find((row) => row.feature_id === 'drawer:nav' && row.evidence.state === 'closed')
+  assert.equal(failure.evidence.assertion_site, cleanFailure.evidence.assertion_site)
+  assert.equal(cleanFailure.evidence.assertion_observed, true)
   assert.equal(failure.evidence.assertion_observed, true)
   assert.ok(!failure.expected_effect.includes('attacker'))
   assert.ok(!JSON.stringify(failure.fixture_recipe).includes('attacker'))

@@ -609,6 +609,7 @@
     "web-usage-contract",
     "web-version-restore-proof",
     "web-vitest",
+    "web-walk-unit",
     "web-workbench-id-contract"
   ],
   "unresolved_mandatory": [],

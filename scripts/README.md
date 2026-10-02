@@ -91,6 +91,7 @@ a cleaned env, captures pass/fail + counts, and reports a single scoreboard.
 | `harness-tsc-noemit` | `harness/` | `npx tsc --noEmit` |
 | `harness-tsc-build` | `harness/` | `npx tsc -p tsconfig.build.json` |
 | `web-demo-gate` | repo root | `bash dispatch/run-local-ci.sh --only demo-gate` |
+| `web-walk-unit` | `web/` | `npm run check:walk-unit` (six walk unit test files; mandatory) |
 
 `web-demo-gate` drives the
 demo-gate bucket, which runs web/'s seven golden-path node oracles
