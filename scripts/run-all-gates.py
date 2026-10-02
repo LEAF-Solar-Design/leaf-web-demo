@@ -781,6 +781,8 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_combiners.py"), 73),
         Suite("server-solar-tool-feeders", "server tests/test_solar_tool_solar_feeders.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_feeders.py"), 33),
+        Suite("server-solar-tool-feeders-ground", "server tests/test_solar_tool_solar_feeders_ground.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_feeders_ground.py"), 33),
         # sf-w2-combiners-intake-producer: the combiner intake import (server/solar_combiner_intake_import.py
         # and POST /api/drawings/{id}/imports/combiner-intake in server/routers/drawings.py): the recorded
         # LEAFCOMBINERAUTO input bound to the head graph and stored on a new version, bounded before decode,

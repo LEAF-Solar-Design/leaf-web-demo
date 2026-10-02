@@ -326,7 +326,7 @@ def test_solar_tool_feeders_refusal_copy_scan():
     text = path.read_text(encoding="utf-8")
     assert ".lower()" not in text
     reasons = set(re.findall(r'"input_reason":\s*"([a-z][a-z0-9_]{0,63})"', text))
-    assert reasons == {"valid_settings_required", "equipment_assignment_required", "string_collectors_required"}
+    assert reasons == {"valid_settings_required", "equipment_assignment_required", "string_collectors_required", "invalid_drawing_context"}
     rail = (ROOT / "web/src/lib/ribbonClusters.js").read_text(encoding="utf-8")
     table = rail[rail.index("export const SOLAR_REFUSAL_REASONS"):]
     keys = set(re.findall(r"^\s+([a-z][a-z0-9_]*):", table[:table.index("})")], re.M))

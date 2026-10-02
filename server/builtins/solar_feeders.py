@@ -1,5 +1,15 @@
-"""Regenerate L1 feeders to L2 collectors using the version's stored outlines."""
+"""Regenerate L1 feeders to L2 collectors.
+
+Outline source, by installation design:
+  - Roof: the version's stored panel groups (source_intake["panel_groups"]).
+  - Ground: the footprint the conversion stored on each frame (extra.ground_outline, drawing units), read through
+    solar_ground_outlines.frame_outline. One group, one polygon per frame, graph order, no scaling: route_feeders
+    converts drawing units itself. The intake's panel_groups is not read on a Ground graph.
+Ground preparation is pure and O(frames); readiness runs the same preparation, so it never reports ready for a
+Ground graph whose footprints the run would refuse. Kernel routing refusals stay run-time refusals on both designs.
+"""
 import solar_feeder_graph as fg
+import solar_ground_outlines as ground_outlines
 from solar_design_graph import GraphValidationError, _bounded_json
 from solar_sizing_client import checked_graph
 from solar_solve_results import finish_mutation
@@ -25,17 +35,55 @@ def _refuse(code, path="<root>"):
     raise GraphValidationError(code, path)
 
 
-def input_readiness(graph):
-    """Graph prerequisites only; the hook receives no drawing intake."""
+def _is_ground(graph):
+    return graph["project"]["installation_design"] == "Ground"
+
+
+def ground_panel_groups(graph):
+    """The kernel's panel groups for a converted Ground graph: [{"outlines": [ring, ...]}], one ring of four
+    [x, y] lists per frame, in graph order and drawing units. Fresh lists; the graph is not mutated. Refuses
+    INVALID_DRAWING_CONTEXT naming the first frame whose stored footprint is absent or cannot be trusted."""
+    frames = graph["frames"]
+    if not frames:
+        _refuse("INVALID_DRAWING_CONTEXT", "frames")
+    rings = []
+    for index, frame in enumerate(frames):
+        try:
+            ring = ground_outlines.frame_outline(frame)
+        except ground_outlines.GroundOutlineError as exc:
+            _refuse("INVALID_DRAWING_CONTEXT", f"frames[{index}].{exc.path}")
+        rings.append([[x, y] for x, y in ring])
+    return [{"outlines": rings}]
+
+
+def _prerequisite(graph):
+    """The first unmet graph prerequisite as a readiness reason, or None."""
     if graph["settings"].get("use_l2_collectors") is not True:
-        return {"input_ready": False, "input_reason": "valid_settings_required"}
+        return "valid_settings_required"
     if not any(not i["is_l2"] for i in graph["inverters"]):
-        return {"input_ready": False, "input_reason": "equipment_assignment_required"}
+        return "equipment_assignment_required"
     l2 = [i for i in graph["inverters"] if i["is_l2"]]
     if not l2:
-        return {"input_ready": False, "input_reason": "string_collectors_required"}
+        return "string_collectors_required"
     if len({i["collector_capacity"] for i in l2}) != 1:
+        return "valid_settings_required"
+    return None
+
+
+def input_readiness(graph):
+    """Graph prerequisites; on a Ground graph also every frame's stored footprint. No drawing intake."""
+    reason = _prerequisite(graph)
+    if reason == "valid_settings_required":
         return {"input_ready": False, "input_reason": "valid_settings_required"}
+    if reason == "equipment_assignment_required":
+        return {"input_ready": False, "input_reason": "equipment_assignment_required"}
+    if reason == "string_collectors_required":
+        return {"input_ready": False, "input_reason": "string_collectors_required"}
+    if _is_ground(graph):
+        try:
+            ground_panel_groups(graph)
+        except GraphValidationError:
+            return {"input_ready": False, "input_reason": "invalid_drawing_context"}
     return {"input_ready": True, "input_reason": None}
 
 
@@ -43,14 +91,7 @@ def _feeders(graph):
     return {r["id"]: r for r in graph["routes"] if r["route_kind"] == "feeder"}
 
 
-def run(graph, params, *, source_intake=None):
-    _bounded_json(params)
-    if type(params) is not dict or set(params) != REQUEST_KEYS or type(params["expected_rev"]) is not int:
-        _refuse(INVALID)
-    before = checked_graph(graph, params["expected_rev"])
-    readiness = input_readiness(before)
-    if not readiness["input_ready"]:
-        _refuse(readiness["input_reason"].upper())
+def _roof_groups(source_intake):
     if type(source_intake) is not dict:
         _refuse("INVALID_DRAWING_CONTEXT", "source_intake")
     groups = source_intake.get("panel_groups")
@@ -59,6 +100,18 @@ def run(graph, params, *, source_intake=None):
     for i, group in enumerate(groups):
         if type(group) is not dict or type(group.get("outlines")) is not list:
             _refuse("INVALID_DRAWING_CONTEXT", f"panel_groups[{i}]")
+    return groups
+
+
+def run(graph, params, *, source_intake=None):
+    _bounded_json(params)
+    if type(params) is not dict or set(params) != REQUEST_KEYS or type(params["expected_rev"]) is not int:
+        _refuse(INVALID)
+    before = checked_graph(graph, params["expected_rev"])
+    reason = _prerequisite(before)
+    if reason is not None:
+        _refuse(reason.upper())
+    groups = ground_panel_groups(before) if _is_ground(before) else _roof_groups(source_intake)
     try:
         result, _ = fg.route_feeders(before, groups)
     except fg.FeederGraphError as exc:
