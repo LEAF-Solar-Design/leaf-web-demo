@@ -4,7 +4,7 @@ import { resolveProbe } from './probes.mjs'
 import { readFile } from 'node:fs/promises'
 
 const detailsEntry = buildFeatureMap().entries.find(entry => entry.id === 'control:session-details')
-const shell = '.studio-shell .app[data-studio-shell="cockpit"][data-surface]'
+const shell = '.studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"]'
 const overlaps = (a, b) => Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x) > 0.5
   && Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y) > 0.5
 

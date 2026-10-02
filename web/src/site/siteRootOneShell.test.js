@@ -147,9 +147,10 @@ describe('App portal wiring', () => {
 })
 
 describe('rollback contract', () => {
-  it('seats desktop navigation and the whole rail without changing phone rules', () => {
+  it('seats desktop CAD navigation and the whole rail without changing other surfaces or phone rules', () => {
     const css = read('./studioShell.css')
-    const shell = '.studio-shell .app[data-studio-shell="cockpit"][data-surface]'
+    const sharedShell = '.studio-shell .app[data-studio-shell="cockpit"][data-surface]'
+    const shell = '.studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"]'
     const desktopBodies = []
     const outsideDesktop = []
     const media = /@media\s*\([^{}]*min-width\s*:\s*981px[^{}]*\)\s*(?:and\s*\([^{}]*\)\s*)*\{/g
@@ -201,7 +202,7 @@ describe('rollback contract', () => {
     expect(bodies(`${shell} > .rail-stack`)).toMatch(/overflow:\s*auto;/)
     expect(bodies(`${shell} aside.rail:not([data-spine])`)).toMatch(/position:\s*static;/)
     expect(bodies(`${shell} aside.rail:not([data-spine])`)).not.toMatch(/position:\s*fixed;/)
-    expect(bodies(`${shell} aside.rail[data-spine]`)).toMatch(/position:\s*fixed;/)
+    expect(bodies(`${sharedShell} aside.rail[data-spine]`)).toMatch(/position:\s*fixed;/)
     expect(bodies(`${shell} .job-inbox :is(.rail-note, .rail-ev, .rail-detail)`)).toMatch(/white-space:\s*normal;/)
     const instruments = `${shell} :is(.cad-overview, .cockpit-cube-wrap, .cockpit-cube-wcs)`
     const rightInset = /right:\s*calc\(var\(--ck-rail-width\) \+ 18px\);/
@@ -212,7 +213,19 @@ describe('rollback contract', () => {
     const offset = /--ck-canvas-top:\s*calc\(var\(--drawer-top, 28px\) \+ 30px \+ var\(--ck-ribbon\) \+ var\(--ck-doctabs\)\);/
     expect(desktopBodies.join('\n')).toMatch(offset)
     expect(outsideDesktop.join('\n')).not.toMatch(offset)
-    expect(desktopBodies.join('\n')).not.toMatch(/--ck-canvas-top:\s*(?:183|185|241)px;/)
+    expect(bodies(shell)).not.toMatch(/--ck-canvas-top:\s*(?:183|185|241)px;/)
+    const u3Rules = rules.filter(rule => /--ck-rail-width|--drawer-top|right:\s*calc\(var\(--ck-rail-width\)/.test(rule[2])
+      || /header\.top/.test(rule[1]) && /flex-wrap:\s*wrap;|flex-shrink:\s*0;/.test(rule[2]))
+    expect(u3Rules.length).toBeGreaterThan(0)
+    for (const rule of u3Rules) {
+      expect(rule[1].split(',\n').every(selector => selector.trim().startsWith(shell))).toBe(true)
+    }
+    expect(bodies(`${sharedShell} .tc-product-nav`)).toMatch(/position:\s*fixed;/)
+    expect(bodies(`${sharedShell}:has(aside.rail[data-spine])`)).toMatch(/grid-template-columns:\s*0 1fr 0;/)
+    expect(bodies(`${sharedShell} aside.rail:not([data-spine])`)).toMatch(/position:\s*fixed;/)
+    const otherShell = `${sharedShell}:not([data-surface="cad"])`
+    expect(bodies(otherShell)).toMatch(/--ck-canvas-top:\s*185px;/)
+    expect(bodies(otherShell)).toMatch(/--ck-canvas-top:\s*241px;/)
     expect(outsideDesktop.join('\n')).not.toMatch(/grid-template-columns:\s*0 minmax\(0,\s*1fr\) var\(--ck-rail-width\);/)
   })
 
