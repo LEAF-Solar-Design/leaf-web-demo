@@ -35,6 +35,7 @@ async function mountVersionSurface(page, {
   staleFirstHeadAfterRestore = false,
   splitReadFirstHeadAfterRestore = false,
   undoLandedOnSecondRead = false,
+  beforeApprove,
 } = {}) {
   const proofState = makeCatProofState()
   let head = 3
@@ -127,6 +128,7 @@ async function mountVersionSurface(page, {
   await page.getByLabel('Command bar', { exact: true }).fill(REQUEST)
   await page.getByRole('button', { name: 'Run' }).click()
   const approval = page.locator('.converse-confirm').filter({ hasText: 'arrange-panels-as-cat' })
+  if (beforeApprove) await beforeApprove(approval.getByRole('button', { name: 'Approve' }))
   await approval.getByRole('button', { name: 'Approve' }).click()
   const attach = page.getByRole('button', { name: 'Attach' })
   await expect(attach).toBeVisible({ timeout: 15_000 })
@@ -143,6 +145,22 @@ async function mountVersionSurface(page, {
     releaseHistoryRefresh,
   }
 }
+
+test('the CAD Approve button is uncovered at rest before clicking', async ({ page }) => {
+  test.setTimeout(60_000)
+  await mountVersionSurface(page, {
+    beforeApprove: async (approve) => {
+      await expect(page.locator('.app[data-studio-shell="cockpit"][data-surface="cad"] .cad-overview')).toBeVisible()
+      await expect(approve).toBeVisible()
+      const button = await approve.elementHandle()
+      expect(await page.evaluate((button) => {
+        const rect = button.getBoundingClientRect()
+        const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)
+        return hit === button || button.contains(hit)
+      }, button)).toBe(true)
+    },
+  })
+})
 
 test('the /app history drawer shows deltas and restores an old version as a new head', async ({ page }) => {
   test.setTimeout(60_000)

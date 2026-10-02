@@ -165,7 +165,10 @@
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"] .tc-product-tabs { gap: 2px; margin: 0; padding: 0; border: 0; background: transparent; flex-wrap: nowrap; flex-shrink: 0; height: 22px; min-height: 0; box-sizing: border-box; align-self: flex-start; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"] .tc-product-tabs [role="tab"] { flex-shrink: 0; white-space: nowrap; }
-.studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"] { --ck-rail-width: 300px; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"] { --ck-rail-width: 300px; --ck-overview-reserve: 212px; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"]:has(.cad-overview) .converse-card {
+    margin-right: var(--ck-overview-reserve);
+  }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"],
 .studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"]:has(aside.rail[data-spine]),
 .studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"]:has(aside.nav[data-spine="hidden"]):has(aside.rail[data-spine]) { grid-template-columns: 0 minmax(0, 1fr) var(--ck-rail-width); }

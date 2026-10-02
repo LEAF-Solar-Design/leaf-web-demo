@@ -197,6 +197,9 @@ describe('rollback contract', () => {
       expect(rule[2]).not.toMatch(/grid-template-columns:\s*0 1fr 0;/)
     }
     expect(bodies(shell)).toMatch(/--ck-rail-width:\s*300px;/)
+    expect(bodies(shell)).toMatch(/--ck-overview-reserve:\s*212px;/)
+    expect(bodies(`${shell}:has(.cad-overview) .converse-card`)).toMatch(/margin-right:\s*var\(--ck-overview-reserve\);/)
+    expect(bodies(`${shell}:has(.cad-overview) .converse-card`)).not.toMatch(/z-index\s*:/)
     expect(bodies(`${shell} > .rail-stack`)).toMatch(/width:\s*var\(--ck-rail-width\);/)
     expect(bodies(`${shell} > .rail-stack`)).toMatch(/min-width:\s*0;/)
     expect(bodies(`${shell} > .rail-stack`)).toMatch(/overflow:\s*auto;/)
@@ -210,11 +213,12 @@ describe('rollback contract', () => {
     expect(bodies(`${shell} .cad-overview`)).toMatch(/top:\s*calc\(var\(--ck-canvas-top\) \+ 154px\);/)
     expect(outsideDesktop.join('\n')).not.toMatch(rightInset)
     expect(outsideDesktop.join('\n')).not.toMatch(/--ck-rail-width:\s*300px;/)
+    expect(outsideDesktop.join('\n')).not.toMatch(/--ck-overview-reserve|margin-right:\s*var\(--ck-overview-reserve\);/)
     const offset = /--ck-canvas-top:\s*calc\(var\(--drawer-top, 28px\) \+ 30px \+ var\(--ck-ribbon\) \+ var\(--ck-doctabs\)\);/
     expect(desktopBodies.join('\n')).toMatch(offset)
     expect(outsideDesktop.join('\n')).not.toMatch(offset)
     expect(bodies(shell)).not.toMatch(/--ck-canvas-top:\s*(?:183|185|241)px;/)
-    const u3Rules = rules.filter(rule => /--ck-rail-width|--drawer-top|right:\s*calc\(var\(--ck-rail-width\)/.test(rule[2])
+    const u3Rules = rules.filter(rule => /--ck-rail-width|--ck-overview-reserve|--drawer-top|right:\s*calc\(var\(--ck-rail-width\)/.test(rule[2])
       || /header\.top/.test(rule[1]) && /flex-wrap:\s*wrap;|flex-shrink:\s*0;/.test(rule[2]))
     expect(u3Rules.length).toBeGreaterThan(0)
     for (const rule of u3Rules) {
