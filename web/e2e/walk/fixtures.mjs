@@ -78,12 +78,12 @@ export const test = base.extend({
   },
 })
 
+const groupNames = { draw: 'Draw', modify: 'Modify', clipboard: 'Clipboard', properties: 'Properties',
+      annotation: 'Annotation', block: 'Block', groups: 'Groups', 'solar-panels': 'Panels',
+      view: 'View', version: 'Version', author: 'Author', rail: 'Rail' }
 const control = (page, recipe) => {
   let scope = recipe.scope ? control(page, recipe.scope) : page
   if (recipe.group && recipe.role !== 'combobox') {
-    const groupNames = { draw: 'Draw', modify: 'Modify', clipboard: 'Clipboard', properties: 'Properties',
-      annotation: 'Annotation', block: 'Block', groups: 'Groups', 'solar-panels': 'Panels',
-      view: 'View', version: 'Version', author: 'Author', rail: 'Rail' }
     scope = scope.getByRole('group', { name: groupNames[recipe.group], exact: true })
   }
   return scope.getByRole(recipe.role, { name: recipe.name, exact: recipe.exact !== false })
@@ -270,23 +270,36 @@ async function setupStep(probe, runtime, recipe) {
       return
     }
     case 'navigate': await page.goto(recipe.url); return
+    case 'open-failed-drawing': {
+      const sessionReply = page.waitForResponse((response) => {
+        const url = new URL(response.url())
+        return url.pathname === '/api/session' && url.searchParams.get('dwg') === 'missing.invalid'
+      })
+      await page.goto(recipe.url)
+      const response = await sessionReply
+      expect([400, 404]).toContain(response.status())
+      evidence.failedDrawing = { drawingId: 'missing.invalid', status: response.status(), response: await response.json() }
+      await expect(page.getByRole('alert').filter({ hasText: /Couldn['’]t load drawing/ })).toBeVisible()
+      await expect(page.locator('.viewer-canvas')).toHaveCount(0)
+      await expect(canvas(page)).toHaveCount(0)
+      runtime.failedDrawing = true
+      return
+    }
+    case 'failed-drawing-ribbon-tab': {
+      expect(runtime.failedDrawing).toBe(true)
+      const tabs = page.getByRole('tablist', { name: 'Ribbon', exact: true })
+      const toolbar = page.getByRole('toolbar', { name: 'Drafting tools', exact: true })
+      if (await tabs.count() === 0 && await toolbar.count() === 0) {
+        runtime.ribbonAbsent = true
+        return
+      }
+      await setupStep(probe, runtime, { kind: 'ribbon-tab', name: recipe.name })
+      await expect(toolbar).toBeVisible()
+      return
+    }
     case 'open-empty-workspace':
       if (recipe.signedOut) await page.addInitScript(() => localStorage.removeItem('leaf.jwt'))
-      if (recipe.cadWorkspace) {
-        // /app without a drawing parameter loads rooftop_demo. A unique,
-        // absent store id establishes the product's real empty CAD state.
-        const drawing = `walk-empty-${runtime.testInfo.testId}`
-        const sessionReply = page.waitForResponse((response) => {
-          const url = new URL(response.url())
-          return url.pathname === '/api/session' && url.searchParams.get('dwg') === drawing
-        })
-        await page.goto(`/app?surface=${recipe.surface}&drawing=${encodeURIComponent(drawing)}`)
-        const response = await sessionReply
-        expect(response.status()).toBe(404)
-        evidence.emptyWorkspace = { drawingId: drawing, status: response.status(), response: await response.json() }
-        await expect(canvas(page)).toHaveCount(0)
-        await expect(page.getByTestId('cad-edit-entity-count')).toHaveCount(0)
-      } else await page.goto(`/try?surface=${recipe.surface}`)
+      await page.goto(`/try?surface=${recipe.surface}`)
       return
     case 'open-private-drawing': {
       const selected = probe.setup.steps.find((step) => step.kind === 'select-entity')
@@ -552,6 +565,16 @@ async function assertEffect(probe, runtime, locator, before) {
   const target = effect.target || ''
   if (effect.kind === 'disabled_with_reason') {
     await expect(locator).toBeDisabled()
+    if (runtime.failedDrawing) {
+      const name = await locator.getAttribute('aria-label')
+      const variant = probe.locator.disabledVariants.find((variant) => variant.name === name)
+      expect(variant, 'Rendered disabled control must expose a registry reason').toBeTruthy()
+      await expect(locator).toHaveAccessibleName(variant.name)
+      await expect(locator).toHaveAttribute('title', new RegExp(variant.reason.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+      runtime.evidence.failedDrawing.renderedReason = variant.reason
+      runtime.evidence.failedDrawing.renderedReasonCode = variant.reason_code
+      return
+    }
     // The accessible name is user-facing evidence, unlike a data-reason-code
     // alone. Exact registry text must also remain on the native tooltip.
     await expect(locator).toHaveAccessibleName(new RegExp(effect.reason.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
@@ -689,12 +712,31 @@ export async function runProbe(probe, runtime) {
       })
     }
     const locator = control(page, runtime.testInfo.project.name === 'phone' && probe.locator.phone ? probe.locator.phone : probe.locator)
+    const failedDrawingGroup = runtime.failedDrawing && probe.locator.group
+      ? page.getByRole('toolbar', { name: 'Drafting tools', exact: true })
+        .getByRole('group', { name: groupNames[probe.locator.group], exact: true, includeHidden: true }) : null
+    if (runtime.failedDrawing && (runtime.ribbonAbsent || (failedDrawingGroup && await failedDrawingGroup.count() === 0))) {
+      await test.step(probe.assertion.assertionId, async () => {
+        expect(probe.assertion.kind).toBe('disabled_with_reason')
+        if (runtime.ribbonAbsent) {
+          await expect(page.getByRole('tablist', { name: 'Ribbon', exact: true })).toHaveCount(0)
+          await expect(page.getByRole('toolbar', { name: 'Drafting tools', exact: true })).toHaveCount(0)
+        } else await expect(failedDrawingGroup).toHaveCount(0)
+        // Check the action globally as well: an absent scope alone would
+        // make every scoped locator empty, even if the action moved elsewhere.
+        await expect(page.getByRole(probe.locator.role, { name: probe.locator.unavailableName, includeHidden: true })).toHaveCount(0)
+      })
+      evidence.failedDrawing.actionAvailability = 'unavailable_not_rendered'
+      evidence.result = { result: 'passed', featureId: probe.featureId, state: probe.state }
+      return
+    }
     await expect(locator).toBeVisible()
     const before = await captureBefore(probe, runtime)
     if (probe.assertion.kind !== 'disabled_with_reason') {
       await test.step(`Activate ${probe.featureId}`, () => activate(probe, runtime, locator))
     }
     await test.step(probe.assertion.assertionId, () => assertEffect(probe, runtime, locator, before))
+    if (runtime.failedDrawing) evidence.failedDrawing.actionAvailability = 'disabled_with_reason'
     evidence.result = { result: 'passed', featureId: probe.featureId, state: probe.state }
   } catch (error) {
     evidence.failure = { message: error.message, assertionId: probe.assertion.assertionId }
