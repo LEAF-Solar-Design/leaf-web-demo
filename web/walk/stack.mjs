@@ -18,7 +18,11 @@ const running = new Set()
 const pendingSlots = new Set()
 const roles = ['app', 'broker', 'harness', 'web', 'proxy']
 const ramFloor = 6 * 1024 ** 3
-const osNames = new Set(['PATH', 'SYSTEMROOT', 'TEMP', 'TMP', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'PATHEXT', 'COMSPEC', 'LANG'])
+const osNames = new Set(['PATH', 'SYSTEMROOT', 'TEMP', 'TMP', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'PATHEXT', 'COMSPEC', 'LANG', 'LD_LIBRARY_PATH'])
+
+export function inheritedOsEnvironment(source = process.env) {
+  return Object.fromEntries(Object.entries(source).filter(([key]) => osNames.has(key.toUpperCase())))
+}
 
 export class QueuedError extends Error {
   constructor(message = 'Local stack admission is queued', admission) { super(message); this.name = 'QueuedError'; this.code = 'QUEUED'; this.admission = admission }
@@ -214,7 +218,7 @@ async function privateEnvironment(root, ports, databaseURL, harnessDatabaseURL) 
     LEAF_ROLES_FILE: 'roles.json', LEAF_TENANTS_FILE: 'tenants.json', LEAF_SITE_CACHE_FILE: 'site-cache.json', LEAF_GRANT_FILE: 'no-legacy-grant.token',
     LEAF_USAGE_CAPS_FILE: 'usage-caps.json',
   }
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => osNames.has(key.toUpperCase())))
+  const env = inheritedOsEnvironment()
   Object.assign(env, {
     PYTHONDONTWRITEBYTECODE: '1', PYTHONUTF8: '1', APS_LIVE: '0', LEAF_AUTH_LIVE: '0', LEAF_AGENT_MOCK: '1',
     LEAF_RUNTIME_ENV: 'local', LEAF_TELEMETRY_DISABLED: '1', LEAF_CUSTOMIZATION_STAGE_WORKER_DISABLED: '1',
