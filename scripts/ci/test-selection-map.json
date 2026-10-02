@@ -575,6 +575,7 @@
     "server-wave5",
     "server-write-loop",
     "server-write-path-telemetry",
+    "studio-walk-regressions",
     "unit-economics-owner-report",
     "vendor-pin-verify",
     "web-app-wiring",

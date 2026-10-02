@@ -7,7 +7,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { test } from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
-import { allocatePorts, pidAlive, portListening, QueuedError, resolveStackSolver, SolverMissingError, StoppedError, startStack } from './stack.mjs'
+import { allocatePorts, pidAlive, portListening, QueuedError, resolveStackSolver, SolverMissingError, StoppedError, startStack, waitForStackTeardown } from './stack.mjs'
 import { backendPaths, prepareProductionBundle, startSameOriginProxy } from './sameOriginProxy.mjs'
 import { PostgresUnavailableError, queryPostgres, stackAdminUrl } from './pgStack.mjs'
 
@@ -111,6 +111,47 @@ function openSSE(url, headers = {}) {
   first.catch(() => {})
   return { first, get ended() { return ended }, stop() { clearTimeout(timer); incoming?.destroy(); outgoing.destroy() } }
 }
+
+test('teardown timeout names the unclosed launcher, surviving PID and listening port', async () => {
+  const state = {
+    child: { pid: 101 }, closed: false, pids: new Set([101, 202, 303]),
+    receipt: { pids: { harness: 202, app: 303 } },
+    processNames: new Map([[202, 'node.exe']]), ports: { harness: 18030, app: 18010 },
+  }
+  const checkedPids = []
+  const checkedPorts = []
+  const probes = {
+    timeoutMs: 50,
+    alive: (pid) => { checkedPids.push(pid); return pid === 202 },
+    listening: async (port) => { checkedPorts.push(port); return port === 18030 },
+  }
+  await assert.rejects(waitForStackTeardown(state, probes), {
+    message: 'Stack teardown failed after force-kill: launcher pid=101 not closed; live pids=[202 (harness/node.exe)]; listening ports=[harness:18030]',
+  })
+  assert.deepEqual(checkedPids, [101, 202, 303])
+  assert.deepEqual(checkedPorts, [18030, 18010])
+  // Neither a closed launcher nor an exited PID licenses a live listener.
+  state.closed = true
+  await assert.rejects(waitForStackTeardown(state, { ...probes, alive: () => false }), {
+    message: 'Stack teardown failed after force-kill: listening ports=[harness:18030]',
+  })
+  await waitForStackTeardown(state, { ...probes, alive: () => false, listening: async () => false })
+})
+
+test('start and stop a real stack three times in a row without teardown errors', { timeout: 600000 }, async () => {
+  for (let cycle = 0; cycle < 3; cycle++) {
+    const stack = await startStack({ slot: firstSlot, admission: () => ({ status: 'admitted', slots: 2 }) })
+    let record
+    try {
+      assert.equal(await portListening(stack.ports.app), true)
+      assert.equal(await portListening(stack.ports.harness), true)
+    } finally {
+      record = await stack.stop()
+    }
+    await assertStopped(stack)
+    assert.deepEqual(await stack.stop(), record, `cycle ${cycle + 1} stop must be idempotent`)
+  }
+})
 
 test('queued/stopped admission and zero slots cannot allocate or launch', async () => {
   const ports = await allocatePorts(firstSlot)
