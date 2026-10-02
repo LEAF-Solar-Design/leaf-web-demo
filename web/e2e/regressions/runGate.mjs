@@ -1,10 +1,11 @@
 import { spawn } from 'node:child_process'
-import { access } from 'node:fs/promises'
-import { resolve } from 'node:path'
+import { access, readdir, stat } from 'node:fs/promises'
+import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const entrypoint = fileURLToPath(import.meta.url)
 const webDir = fileURLToPath(new URL('../../', import.meta.url))
+const harnessDir = fileURLToPath(new URL('../../../harness/', import.meta.url))
 const config = fileURLToPath(new URL('../../playwright.regressions.config.mjs', import.meta.url))
 const playwrightCLI = fileURLToPath(new URL('../../node_modules/@playwright/test/cli.js', import.meta.url))
 const drills = Object.freeze({
@@ -30,13 +31,32 @@ export function gateInvocation(argv = [], ambient = process.env) {
   }
 }
 
-export async function runGate(argv = [], {
-  spawnChild = spawn, checkCLI = access, timeoutMs = 660_000,
-} = {}) {
+export async function harnessNeedsBuild(directory = harnessDir) {
+  let output
   try {
-    const invocation = gateInvocation(argv)
-    await checkCLI(playwrightCLI)
-    return await new Promise((accept) => {
+    output = await stat(resolve(directory, 'dist/scripts/serve.js'))
+  } catch (error) {
+    if (error.code === 'ENOENT') return true
+    throw error
+  }
+  const inputs = ['tsconfig.json', 'tsconfig.build.json', 'package.json', 'package-lock.json']
+  async function collect(relative) {
+    for (const entry of await readdir(resolve(directory, relative), { withFileTypes: true })) {
+      const path = join(relative, entry.name)
+      if (entry.isDirectory()) await collect(path)
+      else if (entry.isFile() && entry.name.endsWith('.ts')) inputs.push(path)
+    }
+  }
+  await collect('src')
+  await collect('scripts')
+  for (const input of inputs) {
+    if ((await stat(resolve(directory, input))).mtimeMs > output.mtimeMs) return true
+  }
+  return false
+}
+
+async function runChild(invocation, spawnChild, timeoutMs) {
+  return await new Promise((accept) => {
       const child = spawnChild(invocation.executable, invocation.args, invocation.options)
       let timedOut = false
       const timer = setTimeout(() => {
@@ -57,7 +77,38 @@ export async function runGate(argv = [], {
         if (signal) console.error(`Regression gate child terminated: ${signal}`)
         accept(timedOut ? 124 : (Number.isInteger(code) && code >= 0 ? code : 1))
       })
-    })
+  })
+}
+
+export async function runGate(argv = [], {
+  spawnChild = spawn, checkCLI = access, timeoutMs = 660_000,
+  needsHarnessBuild = harnessNeedsBuild,
+} = {}) {
+  try {
+    const invocation = gateInvocation(argv)
+    await checkCLI(playwrightCLI)
+    const deadline = Date.now() + timeoutMs
+    if (!argv.length && await needsHarnessBuild()) {
+      console.log('Regression gate: compiling missing or stale harness output')
+      // Run the installed compiler for `npx tsc -p tsconfig.build.json`
+      // directly, without a shell or an implicit package download.
+      const compiler = resolve(harnessDir, 'node_modules/typescript/bin/tsc')
+      await checkCLI(compiler)
+      const code = await runChild({
+        executable: process.execPath,
+        args: [compiler, '-p', 'tsconfig.build.json'],
+        options: { ...invocation.options, cwd: harnessDir },
+      }, spawnChild, Math.max(1, deadline - Date.now()))
+      if (code !== 0) {
+        console.error(`Regression gate: harness compilation failed (exit ${code})`)
+        return code
+      }
+    }
+    if (Date.now() >= deadline) {
+      console.error('Regression gate timed out before Playwright invocation')
+      return 124
+    }
+    return await runChild(invocation, spawnChild, deadline - Date.now())
   } catch (error) {
     console.error(`Regression gate failed: ${error.message}`)
     return 1

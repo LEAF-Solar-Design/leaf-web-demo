@@ -4,7 +4,7 @@ $env:LEAF_W3E_DRILL_LOG_DIR = 'C:/tmp/swe-w3e-drill-logs'
 
 Push-Location -LiteralPath scripts
 try {
-    python -m pytest test_gate_runner.py test_studio_walk_regression_gate.py -q -p no:cacheprovider
+    python -P -m pytest test_gate_runner.py test_studio_walk_regression_gate.py -q -p no:cacheprovider
     $rc = $LASTEXITCODE
 } finally { Pop-Location }
 if ($rc -ne 0) { exit $rc }

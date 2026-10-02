@@ -76,7 +76,10 @@ def test_wrapper_environment_selection_and_child_failures():
     script = r"""
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-const { gateInvocation, runGate } = await import(process.argv[1])
+const { gateInvocation, runGate: productionRunGate } = await import(process.argv[1])
+const runGate = (argv, options) => productionRunGate(argv, {
+  needsHarnessBuild: async () => false, ...options,
+})
 const normal = gateInvocation([], {
   LEAF_REGRESSION_SPEC: 'external.spec.mjs',
   LEAF_REGRESSION_REPORT: 'external-report.json',
@@ -138,6 +141,96 @@ assert.equal(await runGate([], {
     return child
   },
 }), 124)
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script, WRAPPER.as_uri()],
+        cwd=REPO, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_normal_run_compiles_missing_or_stale_harness_before_playwright():
+    script = r"""
+import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
+import { mkdtemp, mkdir, writeFile, utimes, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+const { runGate, harnessNeedsBuild } = await import(process.argv[1])
+const directory = await mkdtemp(join(tmpdir(), 'w3e-harness-'))
+try {
+  assert.equal(await harnessNeedsBuild(directory), true)
+  for (const path of ['dist/scripts', 'src/nested', 'scripts']) {
+    await mkdir(join(directory, path), { recursive: true })
+  }
+  const inputs = ['tsconfig.json', 'tsconfig.build.json', 'package.json',
+    'package-lock.json', 'src/nested/server.ts', 'scripts/serve.ts']
+  for (const path of inputs) {
+    await writeFile(join(directory, path), '')
+    await utimes(join(directory, path), 100, 100)
+  }
+  await writeFile(join(directory, 'dist/scripts/serve.js'), '')
+  await utimes(join(directory, 'dist/scripts/serve.js'), 200, 200)
+  assert.equal(await harnessNeedsBuild(directory), false)
+  for (const path of inputs) {
+    await utimes(join(directory, path), 300, 300)
+    assert.equal(await harnessNeedsBuild(directory), true, path)
+    await utimes(join(directory, path), 100, 100)
+  }
+} finally {
+  await rm(directory, { recursive: true, force: true })
+}
+const checkCLI = async () => {}
+for (const compileCode of [0, 1, 75, 76]) {
+  const calls = []
+  let compileFinished = false
+  const spawnChild = (executable, args, options) => {
+    calls.push({ executable, args, options })
+    const child = new EventEmitter()
+    const isCompile = args[1] === '-p'
+    if (!isCompile) assert.equal(compileFinished, true)
+    queueMicrotask(() => {
+      if (isCompile) compileFinished = true
+      child.emit('close', isCompile ? compileCode : 0, null)
+    })
+    return child
+  }
+  assert.equal(await runGate([], {
+    checkCLI, spawnChild, needsHarnessBuild: async () => true,
+  }), compileCode)
+  assert.equal(calls.length, compileCode === 0 ? 2 : 1)
+  assert.equal(calls[0].executable, process.execPath)
+  assert.ok(calls[0].args[0].replaceAll('\\', '/').endsWith('/harness/node_modules/typescript/bin/tsc'))
+  assert.deepEqual(calls[0].args.slice(1), ['-p', 'tsconfig.build.json'])
+  assert.ok(calls[0].options.cwd.replaceAll('\\', '/').endsWith('/harness/'))
+  assert.equal(calls[0].options.shell, false)
+  if (compileCode === 0) assert.equal(calls[1].args[1], 'test')
+}
+for (const argv of [[], ['--drill', 'pass']]) {
+  let calls = 0
+  assert.equal(await runGate(argv, {
+    checkCLI,
+    needsHarnessBuild: async () => {
+      assert.equal(argv.length, 0, 'drills must not inspect the harness')
+      return false
+    },
+    spawnChild: (executable, args) => {
+      calls++
+      assert.equal(args[1], 'test')
+      const child = new EventEmitter()
+      queueMicrotask(() => child.emit('close', 0, null))
+      return child
+    },
+  }), 0)
+  assert.equal(calls, 1)
+}
+assert.equal(await runGate([], {
+  checkCLI: async (path) => {
+    if (path.endsWith('/tsc') || path.endsWith('\\tsc')) throw new Error('missing compiler')
+  },
+  needsHarnessBuild: async () => true,
+  spawnChild: () => { throw new Error('must not spawn without compiler') },
+}), 1)
 """
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script, WRAPPER.as_uri()],
