@@ -924,6 +924,13 @@ def build_suites() -> List[Suite]:
         # Hermetic and nothing skips: the floor is the exact count, 37.
         Suite("server-solar-terrain-route", "server tests/test_solar_terrain_route.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_terrain_route.py"), 37),
+        # sf-w3-tracker-rows-route: bounded manual tracker row creation with drawing
+        # checkout authorization and the closed tracker row refusal vocabulary.
+        # Hermetic and nothing skips: the floor is the exact count, 40.
+        Suite("server-solar-tracker-rows-route",
+              "server tests/test_solar_tracker_rows_route.py",
+              "pytest", SERVER,
+              _py_pytest("tests/test_solar_tracker_rows_route.py"), 40),
         # sf-w5-terrain: Ground terrain operations over the reopened physical state
         # (server/solar_ground_terrain_adapter.py): the frozen frame, units and current-state selection,
         # the slope mesh and the tracker slope check and clear published as preview children of the
@@ -938,6 +945,11 @@ def build_suites() -> List[Suite]:
         # nothing skips: the floor is the exact count, 106.
         Suite("server-solar-frames-piles", "server tests/test_solar_frames_piles.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_frames_piles.py"), 106),
+        # sf-w3-tracker-rows-domain: explicit manual tracker rows created once on the drawing's physical
+        # head (server/solar_tracker_rows.py), converted end to end by the Ground conversion kernel.
+        # Hermetic and nothing skips: the floor is the exact count, 38.
+        Suite("server-solar-tracker-rows", "server tests/test_solar_tracker_rows.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tracker_rows.py"), 38),
         # W5 dialog batch (2026-09-23, contract G30): server/solar_ground_dialogs.py (the shading
         # object form and PlaceTree, the project-area manager's Add Area and OK, the pile-template
         # manager's "+" and OK with the store file byte for byte). Every input is authored in the
@@ -1620,7 +1632,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_customization_store_scaling.py"), 3),
         Suite("server-deployment-source-identity",
               "server tests/test_deployment_source_identity.py", "pytest", SERVER,
-              _py_pytest("tests/test_deployment_source_identity.py"), 14),
+              _py_pytest("tests/test_deployment_source_identity.py")
+              + ["tests/test_dockerfile_app_version.py"], 14),
         Suite("server-deployment-identity",
               "server tests/test_deployment_identity.py", "pytest", SERVER,
               _py_pytest("tests/test_deployment_identity.py"), 12),
