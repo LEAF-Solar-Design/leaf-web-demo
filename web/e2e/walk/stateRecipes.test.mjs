@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { ACTIONS, accessibleName } from '../../src/lib/actionRegistry.js'
-import { holdJobRoutes, openHistory, previewVersion, startPendingRun, runProbe, assertEffect } from './fixtures.mjs'
+import { holdJobRoutes, openHistory, previewVersion, startPendingRun, runProbe, assertEffect, setupStep, VERSIONLESS_DRAWING_REASON, SOLAR_PANEL_CALIBRATION_REASON } from './fixtures.mjs'
 
 // Exercise the real runner seams without booting the worker-stack fixture.
 const expect = (value) => ({
@@ -61,6 +61,76 @@ function fakePage() {
   }
   return page
 }
+
+test('versionless probes attach unsupported evidence before requests, setup or activation', async () => {
+  for (const kind of ['action', 'tool']) {
+    const attachments = []
+    const runtime = { evidence: { steps: [] }, page: {},
+      runStep: async () => assert.fail('unreachable state must not run setup'),
+      testInfo: { annotations: [], attach: async (name, attachment) => {
+        attachments.push({ name, body: JSON.parse(attachment.body.toString()) })
+      } } }
+    const probe = { featureId: `${kind}:versionless`, kind, state: 'no-versioned-drawing', certify: 'local',
+      setup: { steps: [{ kind: 'open-private-drawing' }] }, assertion: { assertionId: 'versionless/oracle' } }
+    const started = Date.now()
+    assert.deepEqual(await runProbe(probe, runtime), { unsupported: true, reason: VERSIONLESS_DRAWING_REASON })
+    assert.ok(Date.now() - started < 5_000)
+    assert.equal(runtime.evidence.result.result, 'unsupported_local')
+    assert.equal(runtime.evidence.result.reason, VERSIONLESS_DRAWING_REASON)
+    assert.equal(runtime.evidence.setupCompleted, undefined)
+    assert.equal(runtime.evidence.oracleReached, undefined)
+    assert.deepEqual(runtime.evidence.steps, [])
+    assert.equal(runtime.evidence.cleanupCompleted, true)
+    assert.deepEqual(attachments, [{ name: 'walk-result', body: runtime.evidence.result }])
+    assert.deepEqual(runtime.testInfo.annotations, [{ type: 'unsupported_local', description: VERSIONLESS_DRAWING_REASON }])
+  }
+})
+
+test('Solar panel selection declares its fixture gap without attempting canvas calibration', async () => {
+  const attachments = []
+  const runtime = { evidence: { steps: [] }, page: {},
+    runStep: async () => assert.fail('missing calibration must not run setup'),
+    testInfo: { annotations: [], attach: async (name, attachment) => {
+      attachments.push({ name, body: JSON.parse(attachment.body.toString()) })
+    } } }
+  const probe = { featureId: 'action:solar-panels-move', kind: 'action', state: 'ready', certify: 'local',
+    locator: { group: 'solar-panels' },
+    setup: { steps: [{ kind: 'open-private-drawing' }, { kind: 'select-entity', type: 'LINE', editable: true }] },
+    assertion: { assertionId: 'solar-panels-move/oracle' } }
+  assert.deepEqual(await runProbe(probe, runtime), { unsupported: true, reason: SOLAR_PANEL_CALIBRATION_REASON })
+  assert.equal(runtime.evidence.result.result, 'unsupported_local')
+  assert.equal(runtime.evidence.result.reason, SOLAR_PANEL_CALIBRATION_REASON)
+  assert.equal(runtime.evidence.setupCompleted, undefined)
+  assert.equal(runtime.evidence.oracleReached, undefined)
+  assert.deepEqual(runtime.evidence.steps, [])
+  assert.equal(runtime.evidence.cleanupCompleted, true)
+  assert.deepEqual(attachments, [{ name: 'walk-result', body: runtime.evidence.result }])
+  assert.deepEqual(runtime.testInfo.annotations, [{ type: 'unsupported_local', description: SOLAR_PANEL_CALIBRATION_REASON }])
+})
+
+test('ready redo restores a saved version, undoes it and checks the real head before seating the workspace', async () => {
+  const calls = []
+  let reads = 0
+  const reply = (body) => ({ ok: () => true, json: async () => body })
+  const runtime = { drawingId: 'private', evidence: {}, page: { request: {
+    get: async (url, bounds) => {
+      calls.push(url)
+      assert.equal(bounds.timeout, 15_000)
+      // A concurrent write consumed the redo: successful mutation receipts
+      // alone cannot establish readiness for the version-navigation oracle.
+      return reply(++reads === 1 ? { head: 1 } : { head: 2, latest: 2, versions: [{ v: 1 }, { v: 2 }] })
+    },
+    post: async (url, bounds) => {
+      calls.push(url)
+      assert.equal(bounds.timeout, 15_000)
+      return reply({ head: 2, new_version: { version: 2 } })
+    },
+  } } }
+  await assert.rejects(setupStep({}, runtime, { kind: 'saved-version-history', redo: true }, expect))
+  assert.deepEqual(calls, ['/api/drawings/private/versions', '/api/drawings/private/versions/1/restore',
+    '/api/drawings/private/undo', '/api/drawings/private/versions'])
+  assert.equal(runtime.evidence.savedVersionHistory, undefined)
+})
 
 test('read-only uses the registry History name, explicitly previews non-head and restores the tab', async () => {
   const page = fakePage()

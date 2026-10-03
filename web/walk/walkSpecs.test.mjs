@@ -12,6 +12,7 @@ const knownProofSpecs = [
   'w1o-solar-unsupported.spec.mjs',
   'w1p-states.spec.mjs',
   'w1w-engine-recipes.spec.mjs',
+  'w1x-recipes.spec.mjs',
 ]
 
 function specFiles(directory, prefix = '') {

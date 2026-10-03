@@ -216,10 +216,11 @@ function catalogSha256(catalog) {
 }
 
 const groupNames = { draw: 'Draw', modify: 'Modify', clipboard: 'Clipboard', properties: 'Properties',
-      annotation: 'Annotation', block: 'Block', groups: 'Groups', 'solar-panels': 'Panels',
+      annotation: 'Annotation', block: 'Block', groups: 'Groups', 'solar-panels': 'Panel placement',
       view: 'View', version: 'Version', author: 'Author', rail: 'Rail' }
 const control = (page, recipe) => {
   let scope = recipe.scope ? control(page, recipe.scope) : page
+  if (recipe.panelName) scope = scope.getByRole('group', { name: recipe.panelName, exact: true })
   if (recipe.group && recipe.role !== 'combobox') {
     scope = scope.getByRole('group', { name: groupNames[recipe.group], exact: true })
   }
@@ -227,9 +228,10 @@ const control = (page, recipe) => {
 }
 
 export async function discloseControlPanel(page, recipe) {
-  if (!recipe.group || !groupNames[recipe.group]) return
+  const name = recipe.panelName || groupNames[recipe.group]
+  if (!name) return
   const toolbar = page.getByRole('toolbar', { name: 'Drafting tools', exact: true })
-  const panel = toolbar.getByRole('group', { name: groupNames[recipe.group], exact: true, includeHidden: true })
+  const panel = toolbar.getByRole('group', { name, exact: true, includeHidden: true })
   if (await panel.count() === 0 || await panel.isVisible()) return
   const more = toolbar.getByRole('button', { name: 'More panels', exact: true })
   if (await more.isVisible() && await more.getAttribute('aria-expanded') === 'false') {
@@ -610,6 +612,7 @@ export const HANDLED_SETUP_KINDS = Object.freeze(new Set([
   'create-line', 'hold-engine-edit', 'start-pending-run', 'require-authoring-off', 'fresh-history',
   'undo-edit', 'preview-version', 'zoom-before-fit', 'require-engine-state', 'crash-engine-worker',
   'require-surface-context', 'require-local-state',
+  'saved-version-history', 'require-versionless-drawing',
 ]))
 export const ENGINE_SETUP_KINDS = Object.freeze(new Set([
   'engine-ready', 'select-entity', 'create-line', 'hold-engine-edit',
@@ -651,7 +654,16 @@ export function toolAvailabilityEvidence(probe, workerFacts = {}) {
     refusal_codes: Array.isArray(tool.availability.refusal_reasons) ? [...tool.availability.refusal_reasons] : [] }
 }
 
+export const UI_UNREACHABLE_STATES = Object.freeze(new Set(['no-versioned-drawing']))
+export const VERSIONLESS_DRAWING_REASON = 'The product creates a saved root version for every private drawing and renders the ribbon only with a drawing open, so no-versioned-drawing is unreachable through the UI.'
+export const SOLAR_PANEL_CALIBRATION_REASON = 'The private DXF fixture has no two uncovered calibration points for solar panel placement.'
+
 export function unsupportedBeforeSetup(probe, workerFacts = {}) {
+  if (UI_UNREACHABLE_STATES.has(probe.state)) return VERSIONLESS_DRAWING_REASON
+  if (probe.locator?.group === 'solar-panels'
+    && probe.setup.steps.some((recipe) => recipe.kind === 'select-entity' && !recipe.viewerOnly)) {
+    return SOLAR_PANEL_CALIBRATION_REASON
+  }
   const unavailable = toolAvailabilityEvidence(probe, workerFacts)
   if (unavailable) {
     const codes = unavailable.refusal_codes.length ? ` (${unavailable.refusal_codes.join(',')})` : ''
@@ -673,6 +685,48 @@ export function unsupportedBeforeSetup(probe, workerFacts = {}) {
 export async function setupStep(probe, runtime, recipe, assertions = runtime.recipeAssertions || expect) {
   const { page, stack, evidence } = runtime
   switch (recipe.kind) {
+    case 'require-versionless-drawing': {
+      assertions(runtime.drawingId).toBeTruthy()
+      const response = await page.request.get(`/api/drawings/${runtime.drawingId}/versions`, { timeout: 15_000 })
+      assertions(response.ok()).toBe(true)
+      const chain = await response.json()
+      evidence.versionlessDrawing = { drawingId: runtime.drawingId, chain }
+      assertions(chain.versions.length).toBe(0)
+      assertions(chain.head).toBe(null)
+      await requireWorkspace(runtime)
+      const history = ACTIONS.find((action) => action.id === 'history')
+      await discloseControlPanel(page, { group: 'version' })
+      const button = control(page, { role: 'button', name: accessibleName(history.label,
+        history.when({ hasVersions: false })), group: 'version', scope: { role: 'toolbar', name: 'Drafting tools' } })
+      await assertions(button).toBeVisible()
+      await assertions(button).toBeDisabled()
+      evidence.versionlessDrawing.precondition = 'real drawing loaded without saved versions'
+      return
+    }
+    case 'saved-version-history': {
+      const path = `/api/drawings/${runtime.drawingId}`
+      const response = await page.request.get(`${path}/versions`, { timeout: 15_000 })
+      assertions(response.ok()).toBe(true)
+      const original = await response.json()
+      const restored = await page.request.post(`${path}/versions/${original.head}/restore`, { timeout: 15_000 })
+      assertions(restored.ok()).toBe(true)
+      const receipt = await restored.json()
+      assertions(receipt.head).toBeGreaterThan(original.head)
+      if (recipe.redo) {
+        const undone = await page.request.post(`${path}/undo`, { timeout: 15_000 })
+        assertions(undone.ok()).toBe(true)
+      }
+      const verified = await page.request.get(`${path}/versions`, { timeout: 15_000 })
+      assertions(verified.ok()).toBe(true)
+      const chain = await verified.json()
+      assertions(chain.versions.length).toBeGreaterThan(1)
+      assertions(recipe.redo ? chain.head < chain.latest : chain.head > 1).toBe(true)
+      await page.reload({ timeout: 60_000 })
+      await requireWorkspace(runtime)
+      if (runtime.ribbonTab) await setupStep(probe, runtime, { kind: 'ribbon-tab', name: runtime.ribbonTab })
+      evidence.savedVersionHistory = { head: chain.head, latest: chain.latest, versions: chain.versions, redo: recipe.redo }
+      return
+    }
     case 'fresh-sign-out-page': {
       const ordinaryPage = runtime.page
       const fresh = await ordinaryPage.context().newPage()
@@ -970,11 +1024,13 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
     case 'catalog-tool': {
       const catalog = await workerCatalog(runtime.workerFacts, page.request)
       if (!catalog) throw runtime.workerFacts.catalogError
-      const tool = catalog.families.flatMap((family) => family.capabilities).find((tool) => tool.name === recipe.name)
+      const family = catalog.families.find((family) => family.capabilities.some((tool) => tool.name === recipe.name))
+      const tool = family?.capabilities.find((tool) => tool.name === recipe.name)
       evidence.catalog = { requestedTool: recipe.name, record: tool || null,
         catalog_sha256: runtime.workerFacts.catalog_sha256, families: catalog.families.length,
         capabilities: catalog.families.reduce((count, family) => count + family.capabilities.length, 0) }
       if (!tool) await unsupported(probe, runtime, `The isolated catalog does not provide ${recipe.name}`)
+      runtime.catalogPanelName = family.label
       // Unplaced catalog families live on Manage, not the engine's Draw tab.
       const tab = toolPlacementTab(tool) || 'manage'
       await setupStep(probe, runtime, { kind: 'ribbon-tab', name: tab[0].toUpperCase() + tab.slice(1) })
@@ -1511,6 +1567,15 @@ export async function runProbe(probe, runtime) {
   const setupStartedAt = Date.now()
   let originalError
   try {
+    const initialReason = typeof UI_UNREACHABLE_STATES !== 'undefined' && UI_UNREACHABLE_STATES.has(probe.state)
+      && typeof unsupportedBeforeSetup === 'function'
+      ? unsupportedBeforeSetup(probe, runtime.workerFacts) : null
+    if (initialReason) {
+      if (typeof toolAvailabilityEvidence === 'function') {
+        runtime.unsupportedAvailability = toolAvailabilityEvidence(probe, runtime.workerFacts)
+      }
+      await unsupported(probe, runtime, initialReason)
+    }
     if (probe.kind === 'tool' && typeof workerCatalog === 'function') {
       await workerCatalog(runtime.workerFacts, page.request)
     }
@@ -1531,9 +1596,10 @@ export async function runProbe(probe, runtime) {
     }
     page = runtime.page
     evidence.setupCompleted = { elapsedMs: Date.now() - setupStartedAt }
+    const targetRecipe = runtime.catalogPanelName ? { ...probe.locator, panelName: runtime.catalogPanelName } : probe.locator
     // Source-extracted fake runners may omit module dependencies.
-    if (typeof discloseControlPanel === 'function') await discloseControlPanel(page, probe.locator)
-    const locator = control(page, runtime.testInfo.project.name === 'phone' && probe.locator.phone ? probe.locator.phone : probe.locator)
+    if (typeof discloseControlPanel === 'function') await discloseControlPanel(page, targetRecipe)
+    const locator = control(page, runtime.testInfo.project.name === 'phone' && probe.locator.phone ? probe.locator.phone : targetRecipe)
     try {
       const observations = await collectProbeUxEvidence(probe, locator, runtime.testInfo.project.name)
       if (observations.length) Object.assign(evidence, packUxEvidence([...(evidence.ux_observations || []), ...observations]))

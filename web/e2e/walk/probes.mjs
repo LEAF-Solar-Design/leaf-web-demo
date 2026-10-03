@@ -1,6 +1,7 @@
 import { ACTIONS, REASONS, accessibleName, reasonCode } from '../../src/lib/actionRegistry.js'
 import { PRODUCT_SURFACES } from '../../src/site/productSurfaces.js'
 import { PROFILE_RIBBON_TABS } from '../../src/lib/ribbonTabs.data.js'
+import { toolPlacementTab } from '../../src/lib/toolRecord.js'
 import { STUDIO_DRAWERS } from '../../src/lib/studioDrawers.js'
 import { PROMPTS } from '../../src/cadedit/promptKeys.js'
 import { readFileSync } from 'node:fs'
@@ -181,17 +182,18 @@ export function locatorRecipe(entry, state) {
   if (entry.kind === 'tool') {
     const record = tools.find((tool) => tool.name === entry.source_id)
     if (!record) throw new Error(`No catalog registry record for ${entry.id}`)
+    const family = catalog.response.families.find((family) => family.capabilities.includes(record))
     return { ...role('button', accessibleName(record.name,
-      effect.kind === 'disabled_with_reason' ? effect.reason : ''), role('toolbar', 'Drafting tools')), trigger: 'click' }
+      effect.kind === 'disabled_with_reason' ? effect.reason : ''), role('toolbar', 'Drafting tools')),
+    panelName: family.label, panelId: `${family.family_id}${toolPlacementTab(record) ? '@' + toolPlacementTab(record) : ''}`, trigger: 'click' }
   }
   throw new Error(`Unknown feature kind: ${entry.kind}`)
 }
 
 function actionTab(action) {
-  // App's byTab seats Author on Manage; EngineRibbonClusters seats every
-  // live engine panel on Draw (Insert/Annotate contain static placeholders).
+  if (action.panel === 'solar-panels') return 'Solar'
   if (action.surface === 'engine') return 'Draw'
-  if (action.cluster === 'author') return 'Manage'
+  if (['author', 'rail'].includes(action.cluster)) return 'Manage'
   if (['annotation', 'block'].includes(action.panel)) return action.panel === 'annotation' ? 'Annotate' : 'Insert'
   if (['view', 'version'].includes(action.cluster)) return 'View'
   return 'Draw'
@@ -203,7 +205,8 @@ export function stateRecipe(entry, state) {
   const context = structuredClone(entry.state_contexts?.[state] || {})
   const effect = entry.expected_effect[state]
   const surface = entry.kind === 'tab' ? profileSurfaces[entry.profile]
-    : entry.kind === 'surface' ? entry.source_id : 'cad'
+    : entry.kind === 'surface' ? entry.source_id
+      : entry.kind === 'action' && actionRecord(entry).panel === 'solar-panels' ? 'solar' : 'cad'
   const steps = []
   if (entry.kind === 'control') {
     if (effect.target === 'signed-out-session') steps.push(step('fresh-sign-out-page'))
@@ -243,7 +246,7 @@ export function stateRecipe(entry, state) {
   }
   if (state === 'engine-busy') steps.push(step('prepare-engine-transport'))
   if (state === 'engine-not-parsed') steps.push(step('hold-engine-boot'))
-  const empty = ['no-drawing', 'signed-out', 'no-versioned-drawing'].includes(state)
+  const empty = ['no-drawing', 'signed-out'].includes(state)
   steps.push(step(empty ? 'open-empty-workspace' : 'open-private-drawing', { surface, signedOut: state === 'signed-out' }))
   if (entry.kind === 'action') {
     const action = actionRecord(entry)
@@ -251,14 +254,16 @@ export function stateRecipe(entry, state) {
     else if (action.surface !== 'bar') steps.push(step('ribbon-tab', { name: actionTab(action) }))
     if (action.group === 'modify' || action.group === 'clipboard') {
       if (context.session?.engineParsed) steps.push(step('engine-ready'))
+      const needsClipboard = action.op === 'pasteClip' && context.session?.clipboard && context.session?.engineParsed
+      if (needsClipboard) steps.push(step('select-entity', { type: 'LINE', editable: true }), step('copy-selection'), step('clear-selection'))
       if (context.session?.engineParsed && context.session?.selected) steps.push(step('select-entity', {
         type: context.session.selected.type, editable: context.session.selected.editable,
         multiple: context.session.selectedIds?.length > 1,
       }))
-      if (action.group === 'clipboard' && context.session?.clipboard) steps.push(step('copy-selection'))
     } else if (action.op && context.session?.engineParsed) steps.push(step('engine-ready'))
   }
   if (entry.kind === 'tool') steps.push(step('catalog-tool', { name: entry.source_id }))
+  if (state === 'no-versioned-drawing') steps.push(step('require-versionless-drawing'))
   if (entry.kind === 'drawer') {
     const name = drawerNames[entry.source_id]
     steps.push(step(entry.source_id === 'nav' ? 'tool-rail-state' : 'drawer-state', {
@@ -280,7 +285,8 @@ export function stateRecipe(entry, state) {
   if (state === 'unsaved-engine-edits') steps.push(step('create-line'))
   if (state === 'nothing-to-undo' || state === 'nothing-to-redo') steps.push(step('engine-ready'), step('fresh-history'))
   if (entry.kind === 'action' && ['undo', 'redo'].includes(entry.source_id) && state === 'ready') {
-    steps.push(step('engine-ready'), step('create-line'), step('create-line'), step('undo-edit'))
+    if (effect.target?.startsWith('drawing-version-')) steps.push(step('saved-version-history', { redo: entry.source_id === 'redo' }))
+    else steps.push(step('engine-ready'), step('create-line'), step('create-line'), step('undo-edit'))
   }
   if (state === 'engine-not-parsed') steps.push(step('require-engine-state', { state: 'unparsed' }))
   if (state === 'engine-busy') steps.push(step('hold-engine-edit'))
@@ -296,6 +302,8 @@ export function stateRecipe(entry, state) {
   if (effect.target === 'viewer-home') steps.push(step('zoom-before-fit', {
     control: role('button', 'Zoom in', role('toolbar', 'View')),
   }))
+  // LINE commands and policy reloads can close overflow or change the tab.
+  if (entry.kind === 'tool') steps.push(step('catalog-tool', { name: entry.source_id }))
   return { context, steps }
 }
 
