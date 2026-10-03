@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto'
 import { basename, join } from 'node:path'
 import { PRODUCT_SURFACES } from '../../src/site/productSurfaces.js'
 import { toolPlacementTab } from '../../src/lib/toolRecord.js'
+import { ACTIONS, accessibleName } from '../../src/lib/actionRegistry.js'
 import { normalizedControlKey } from './probes.mjs'
 import { buildDrawingObjectIndex } from '../../src/lib/drawingObjectIndex.js'
 import { collectProbeUxEvidence, packUxEvidence } from './uxEvidence.mjs'
@@ -14,8 +15,116 @@ export { expect }
 export const LOCAL_IDENTITY = Object.freeze({ tenant: 'demo-tenant', token: 'j1-presentation-fixture' })
 export const COACH_STORAGE_KEY = 'leaf.coach.dismissed.v1'
 
+export async function holdJobRoutes(page) {
+  let release
+  let passing = false
+  let cleanupPromise
+  const gate = new Promise((resolve) => { release = resolve })
+  const active = new Set()
+  const errors = []
+  const pattern = '**/api/jobs/**'
+  const hold = (route) => {
+    const continuation = (async () => {
+      if (!passing) await gate
+      await route.continue()
+    })()
+    active.add(continuation)
+    continuation.then(() => active.delete(continuation), (error) => {
+      errors.push(error)
+      active.delete(continuation)
+    })
+    return continuation
+  }
+  await page.route(pattern, hold)
+  return () => {
+    cleanupPromise ||= (async () => {
+      passing = true
+      release()
+      while (active.size) await Promise.allSettled([...active])
+      await page.unroute(pattern, hold)
+      if (errors.length) throw errors[0]
+    })()
+    return cleanupPromise
+  }
+}
+
 export function stackInstanceRef(root, launcherPid, bootTimeMs) {
   return createHash('sha256').update(JSON.stringify([basename(root), launcherPid, bootTimeMs])).digest('hex')
+}
+
+export async function openHistory(probe, runtime, assertions = expect) {
+  const { page } = runtime
+  const expect = assertions
+  await setupStep(probe, runtime, { kind: 'ribbon-tab', name: 'View' })
+  await page.getByRole('toolbar', { name: 'Drafting tools', exact: true }).getByRole('button', {
+    name: accessibleName(ACTIONS.find((action) => action.id === 'history').label), exact: true,
+  }).click({ timeout: 15_000 })
+  await expect(page.getByRole('dialog', { name: 'Version history', exact: true })).toBeVisible()
+  return
+}
+
+export async function startPendingRun(probe, runtime, assertions = expect) {
+  const { page, evidence } = runtime
+  const expect = assertions
+  const catalogResponse = await page.request.get('/api/capabilities')
+  expect(catalogResponse.ok()).toBe(true)
+  const catalog = await catalogResponse.json()
+  const tool = catalog.families.flatMap((family) => family.capabilities).find((tool) => tool.name === 'count-by-layer')
+  if (!tool) await unsupported(probe, runtime, 'The local catalog has no count-by-layer read tool to establish a pending run')
+  const previousTab = runtime.ribbonTab
+  await setupStep(probe, runtime, { kind: 'catalog-tool', name: tool.name })
+  runtime.cleanup.push(await holdJobRoutes(page))
+  await page.getByRole('toolbar', { name: 'Drafting tools', exact: true }).getByRole('button', { name: tool.name, exact: true }).click({ timeout: 15_000 })
+  const submitted = page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/run', { timeout: 15_000 })
+  // Observe a rejection even if the click itself fails first.
+  submitted.catch(() => {})
+  await page.getByRole('button', { name: `Run ${tool.name}`, exact: true }).click({ timeout: 15_000 })
+  const response = await submitted
+  expect(response.status()).toBe(202)
+  const receipt = await response.json()
+  expect(receipt.job_id).toBeTruthy()
+  await expect(page.locator('.strip-running')).toBeVisible({ timeout: 15_000 })
+  evidence.pendingRun = { tool: tool.name, jobId: receipt.job_id, status: response.status(), pendingVisible: true }
+  if (previousTab) await setupStep(probe, runtime, { kind: 'ribbon-tab', name: previousTab })
+  return
+}
+
+export async function previewVersion(probe, runtime, assertions = expect, workspace = requireWorkspace) {
+  const { page, evidence } = runtime
+  const expect = assertions
+  const previousTab = runtime.ribbonTab
+  const path = `/api/drawings/${runtime.drawingId}`
+  const versions = await page.request.get(`${path}/versions`, { timeout: 15_000 })
+  expect(versions.ok()).toBe(true)
+  const original = await versions.json()
+  const preview = Number(original.head)
+  expect(Number.isInteger(preview)).toBe(true)
+  const restored = await page.request.post(`${path}/versions/${preview}/restore`, { timeout: 15_000 })
+  expect(restored.ok()).toBe(true)
+  const receipt = await restored.json()
+  const head = Number(receipt.new_version.version)
+  expect(head).toBeGreaterThan(preview)
+  expect(receipt.head).toBe(head)
+  const verified = await page.request.get(`${path}/versions`, { timeout: 15_000 })
+  expect(verified.ok()).toBe(true)
+  const chain = await verified.json()
+  expect(chain.head).toBe(head)
+  expect(chain.versions.some((row) => Number(row.v) === preview)).toBe(true)
+  expect(chain.versions.some((row) => Number(row.v) === head)).toBe(true)
+  // Seat the new head in the product before asking it to preview the old one.
+  await page.reload({ timeout: 60_000 })
+  await workspace(runtime)
+  await openHistory(probe, runtime, assertions)
+  const history = page.getByRole('dialog', { name: 'Version history', exact: true })
+  const version = history.getByRole('button', { name: new RegExp(`^v${preview}\\b`) })
+  await expect(version).toBeVisible()
+  await version.click({ timeout: 15_000 })
+  await expect(page.getByText(new RegExp(`Viewing v${preview}\\b.*read-only preview`))).toBeVisible()
+  evidence.versionPreview = { head, preview, restoredFrom: receipt.restored_from }
+  await history.getByRole('button', { name: 'Close version history', exact: true }).click({ timeout: 15_000 })
+  await expect(history).toBeHidden()
+  if (previousTab) await setupStep(probe, runtime, { kind: 'ribbon-tab', name: previousTab })
+  return
 }
 
 export const test = base.extend({
@@ -536,7 +645,7 @@ export function unsupportedBeforeSetup(probe, workerFacts = {}) {
   return null
 }
 
-export async function setupStep(probe, runtime, recipe) {
+export async function setupStep(probe, runtime, recipe, assertions = runtime.recipeAssertions || expect) {
   const { page, stack, evidence } = runtime
   switch (recipe.kind) {
     case 'fresh-sign-out-page': {
@@ -662,10 +771,10 @@ export async function setupStep(probe, runtime, recipe) {
       return
     }
     case 'ribbon-tab':
-      await page.getByRole('tablist', { name: 'Ribbon', exact: true }).getByRole('tab', { name: recipe.name, exact: true }).click()
+      await page.getByRole('tablist', { name: 'Ribbon', exact: true }).getByRole('tab', { name: recipe.name, exact: true }).click({ timeout: 15_000 })
       // Narrow viewports offer the extra panels through a real disclosure.
       { const more = page.getByRole('button', { name: 'More panels', exact: true })
-        if (await more.isVisible() && await more.getAttribute('aria-expanded') === 'false') await more.click() }
+         if (await more.isVisible() && await more.getAttribute('aria-expanded') === 'false') await more.click({ timeout: 15_000 }) }
       runtime.ribbonTab = recipe.name
       return
     case 'control-pressed-state': {
@@ -825,11 +934,7 @@ export async function setupStep(probe, runtime, recipe) {
       return
     }
     case 'open-start': await page.getByRole('button', { name: 'Start', exact: true }).click(); return
-    case 'open-history':
-      await page.getByRole('tablist', { name: 'Ribbon', exact: true }).getByRole('tab', { name: 'View', exact: true }).click()
-      await page.getByRole('toolbar', { name: 'Drafting tools', exact: true }).getByRole('button', { name: 'History', exact: true }).click()
-      await expect(page.getByRole('dialog', { name: 'Version history', exact: true })).toBeVisible()
-      return
+    case 'open-history': await openHistory(probe, runtime, assertions); return
     case 'slash-menu': {
       const bar = page.getByRole('combobox', { name: 'Command bar', exact: true })
       await bar.fill(`/${recipe.command}`)
@@ -889,27 +994,7 @@ export async function setupStep(probe, runtime, recipe) {
       await expect.poll(() => page.evaluate(() => globalThis.__walkEngineTransport.pending.length)).toBeGreaterThan(0)
       return
     }
-    case 'start-pending-run': {
-      const catalogResponse = await page.request.get('/api/capabilities')
-      expect(catalogResponse.ok()).toBe(true)
-      const catalog = await catalogResponse.json()
-      const tool = catalog.families.flatMap((family) => family.capabilities).find((tool) => tool.name === 'count-by-layer')
-      if (!tool) await unsupported(probe, runtime, 'The local catalog has no count-by-layer read tool to establish a pending run')
-      const previousTab = runtime.ribbonTab
-      await setupStep(probe, runtime, { kind: 'catalog-tool', name: tool.name })
-      let release
-      const gate = new Promise((resolve) => { release = resolve })
-      const pattern = '**/api/jobs/**'
-      const hold = async (route) => { await gate; await route.continue() }
-      await page.route(pattern, hold)
-      runtime.cleanup.push(async () => { release(); await page.unroute(pattern, hold) })
-      await page.getByRole('toolbar', { name: 'Drafting tools', exact: true }).getByRole('button', { name: tool.name, exact: true }).click()
-      const submitted = page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/run')
-      await page.getByRole('button', { name: `Run ${tool.name}`, exact: true }).click()
-      expect((await submitted).status()).toBe(202)
-      if (previousTab) await setupStep(probe, runtime, { kind: 'ribbon-tab', name: previousTab })
-      return
-    }
+    case 'start-pending-run': await startPendingRun(probe, runtime, assertions); return
     case 'require-authoring-off': {
       const response = await page.request.get('/api/entitlements')
       expect(response.ok()).toBe(true)
@@ -928,16 +1013,7 @@ export async function setupStep(probe, runtime, recipe) {
     case 'undo-edit':
       await page.getByRole('toolbar', { name: 'Quick access', exact: true }).getByRole('button', { name: 'Undo', exact: true }).click()
       return
-    case 'preview-version': {
-      await setupStep(probe, runtime, { kind: 'open-history' })
-      const history = page.getByRole('dialog', { name: 'Version history', exact: true })
-      const version = history.getByRole('button', { name: /^v\d+\b/ }).first()
-      await expect(version).toBeVisible()
-      await version.click()
-      await expect(page.getByText(/Viewing v\d+/).first()).toBeVisible()
-      await history.getByRole('button', { name: 'Close version history', exact: true }).click()
-      return
-    }
+    case 'preview-version': await previewVersion(probe, runtime, assertions); return
     case 'zoom-before-fit': {
       runtime.homeViewport = await viewportBounds(page)
       const zoom = control(page, recipe.control)
@@ -1058,7 +1134,8 @@ async function activate(probe, runtime, locator) {
   } else await locator.click()
 }
 
-async function assertEffect(probe, runtime, locator, before) {
+export async function assertEffect(probe, runtime, locator, before, assertions = expect) {
+  const expect = assertions
   const { page } = runtime
   const effect = probe.assertion
   const target = effect.target || ''
@@ -1325,6 +1402,11 @@ async function assertEffect(probe, runtime, locator, before) {
     else if (rung === 'start') await expect(page.getByRole('region', { name: 'Project workspace', exact: true })).toBeHidden()
     else if (rung === 'route') await expect(page.getByRole('button', { name: /^Run / })).toHaveCount(0)
     else if (rung === 'selection') await expect(page.getByTestId('dock-properties')).toHaveCount(0)
+    else if (rung === 'running') {
+      await expect(page.getByText('Stopped following count-by-layer. It keeps running; find it in Jobs.', { exact: true })).toBeVisible()
+      await expect(page.locator('.strip-running')).toHaveCount(0)
+      runtime.evidence.pendingRun.detached = true
+    }
     else throw new Error(`No observable Escape oracle for ${rung}`)
     return
   }
@@ -1398,6 +1480,7 @@ export async function runProbe(probe, runtime) {
   evidence.assertionId = probe.assertion.assertionId
   runtime.cleanup = []
   runtime.workerFacts ||= evidence.workerFacts || { engineMounted: undefined }
+  const setupStartedAt = Date.now()
   try {
     if (probe.kind === 'tool' && typeof workerCatalog === 'function') {
       await workerCatalog(runtime.workerFacts, page.request)
@@ -1412,12 +1495,13 @@ export async function runProbe(probe, runtime) {
       await unsupported(probe, runtime, reason)
     }
     for (const recipe of probe.setup.steps) {
-      await test.step(`Setup: ${recipe.kind}`, async () => {
+      await (runtime.runStep || test.step)(`Setup: ${recipe.kind}`, async () => {
         await setupStep(probe, runtime, recipe)
         evidence.steps.push({ phase: 'setup', ...recipe })
       })
     }
     page = runtime.page
+    evidence.setupCompleted = { elapsedMs: Date.now() - setupStartedAt }
     const locator = control(page, runtime.testInfo.project.name === 'phone' && probe.locator.phone ? probe.locator.phone : probe.locator)
     try {
       const observations = await collectProbeUxEvidence(probe, locator, runtime.testInfo.project.name)
@@ -1471,6 +1555,7 @@ export async function runProbe(probe, runtime) {
     throw error
   } finally {
     for (const cleanup of runtime.cleanup.reverse()) await cleanup()
+    evidence.cleanupCompleted = true
   }
 }
 
