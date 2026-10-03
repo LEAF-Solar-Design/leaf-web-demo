@@ -1,5 +1,6 @@
 import { defineConfig } from '@playwright/test'
 import { defaultAdmission } from './walk/stack.mjs'
+import { walkTestMatch } from './walk/walkSpecs.mjs'
 
 // Collection never boots a stack. Admission is still required before choosing
 // workers, and startStack rechecks it immediately before each worker launch.
@@ -20,7 +21,7 @@ if (status !== 'admitted') throw new Error(`STOPPED: ${admission?.reason || 'Wal
 
 export default defineConfig({
   testDir: './e2e/walk',
-  testMatch: '**/*.spec.mjs',
+  testMatch: walkTestMatch(),
   fullyParallel: true,
   workers: slots,
   retries: 0,
