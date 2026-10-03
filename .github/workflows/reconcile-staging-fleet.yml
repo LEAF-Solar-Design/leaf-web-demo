@@ -65,11 +65,14 @@ on:
         required: false
         default: false
 
-# SOURCE-CONTROLLED AND DORMANT. Flipping this to "true" is what arms the
-# SCHEDULE, and it is pinned "false" by a gate test so the flip cannot ride
-# along inside an unrelated change.
+# SOURCE-CONTROLLED AND ARMED as of this change: the operator requires all five
+# staging services to match the build's supply set before the walk engine sweeps.
+# Two proven manual armed runs landed broker (37099883120) and harness
+# (37100247538); run 37099837394 yielded before canonical-worker when the next
+# relay started. The schedule resumes that work. Reverting this one line to
+# "false" returns the scheduled lane to report-only.
 env:
-  RECONCILE_ARMED: "false"
+  RECONCILE_ARMED: "true"
 
 permissions:
   actions: read
