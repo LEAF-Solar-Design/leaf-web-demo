@@ -6,6 +6,7 @@
 // honest empty state, pressed toggles, and children (the engine's clusters)
 // ahead of the data clusters.
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { createPortal } from 'react-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { catalogClusters, profileRibbonTabs } from '../lib/ribbonClusters.js'
@@ -86,10 +87,143 @@ describe('DraftingRibbon', () => {
     expect(document.activeElement.dataset.tool).toBe('line')
     fireEvent.click(copy)
     expect(onCopy).toHaveBeenCalledTimes(1)
+    // Activating an enabled overflow tool closes the overflow (ROV1).
+    expect(more.getAttribute('aria-expanded')).toBe('false')
+    expect(document.getElementById('drafting-ribbon').hasAttribute('data-overflow-open')).toBe(false)
+    expect(copy.closest('.ribbon-cluster').hidden).toBe(true)
+    fireEvent.click(more)
+    expect(more.getAttribute('aria-expanded')).toBe('true')
+    copy.focus()
     fireEvent.keyDown(copy, { key: 'Escape' })
     expect(document.activeElement).toBe(more)
     expect(more.getAttribute('aria-expanded')).toBe('false')
     expect(copy.closest('.ribbon-cluster').hidden).toBe(true)
+  })
+
+  describe('ROV the overflow closes on tool activation only', () => {
+    const overflowClusters = (handlers = {}) => [
+      { id: 'draw', label: 'Draw', tools: [{ id: 'line', label: 'Line', onClick: handlers.line }] },
+      { id: 'modify', label: 'Modify', tools: [{ id: 'move', label: 'Move', onClick: handlers.move }] },
+      { id: 'clipboard', label: 'Clipboard', tools: [
+        { id: 'copy', label: 'Copy', onClick: handlers.copy },
+        { id: 'paste', label: 'Paste', disabled: true, reason: 'nothing to paste yet', onClick: handlers.paste },
+      ] },
+    ]
+    const openOverflow = () => {
+      const more = screen.getByRole('button', { name: 'More panels' })
+      fireEvent.click(more)
+      expect(more.getAttribute('aria-expanded')).toBe('true')
+      return more
+    }
+
+    it('ROV2 a focused overflow tool whose cluster closes hands focus to More panels', () => {
+      const onCopy = vi.fn()
+      render(<DraftingRibbon visiblePanelCount={1} clusters={overflowClusters({ copy: onCopy })} />)
+      const more = openOverflow()
+      const copy = document.querySelector('[data-tool="copy"]')
+      copy.focus()
+      fireEvent.click(copy)
+      expect(onCopy).toHaveBeenCalledTimes(1)
+      expect(more.getAttribute('aria-expanded')).toBe('false')
+      expect(copy.closest('.ribbon-cluster').hidden).toBe(true)
+      expect(document.activeElement).toBe(more)
+    })
+
+    it('ROV3 a disabled overflow tool leaves the overflow open and runs nothing', () => {
+      const onPaste = vi.fn()
+      render(<DraftingRibbon visiblePanelCount={1} clusters={overflowClusters({ paste: onPaste })} />)
+      const more = openOverflow()
+      const paste = document.querySelector('[data-tool="paste"]')
+      expect(paste.disabled).toBe(true)
+      fireEvent.click(paste)
+      expect(onPaste).not.toHaveBeenCalled()
+      expect(more.getAttribute('aria-expanded')).toBe('true')
+      expect(document.getElementById('drafting-ribbon').getAttribute('data-overflow-open')).toBe('true')
+    })
+
+    it('ROV4 focus moving between overflow tools keeps the overflow open', () => {
+      render(<DraftingRibbon visiblePanelCount={1} clusters={overflowClusters()} />)
+      const more = openOverflow()
+      document.querySelector('[data-tool="move"]').focus()
+      document.querySelector('[data-tool="copy"]').focus()
+      expect(document.activeElement.dataset.tool).toBe('copy')
+      expect(more.getAttribute('aria-expanded')).toBe('true')
+    })
+
+    it('ROV5 a click inside the open panels that is not on a tool keeps the overflow open', () => {
+      render(<DraftingRibbon visiblePanelCount={1} clusters={overflowClusters()} />)
+      const more = openOverflow()
+      fireEvent.click(screen.getByRole('group', { name: 'Clipboard' }))
+      fireEvent.click(document.getElementById('drafting-ribbon-panels'))
+      expect(more.getAttribute('aria-expanded')).toBe('true')
+    })
+
+    it('ROV6 a visible tool with the overflow closed runs as before and opens nothing', () => {
+      const onLine = vi.fn()
+      render(<DraftingRibbon visiblePanelCount={1} clusters={overflowClusters({ line: onLine })} />)
+      const more = screen.getByRole('button', { name: 'More panels' })
+      fireEvent.click(document.querySelector('[data-tool="line"]'))
+      expect(onLine).toHaveBeenCalledTimes(1)
+      expect(more.getAttribute('aria-expanded')).toBe('false')
+      expect(document.getElementById('drafting-ribbon').hasAttribute('data-overflow-open')).toBe(false)
+    })
+
+    // Script's Run script and Choose script wear the ribbon-tool class for styling but carry no data-tool: they are
+    // a panel's own controls, and the report a run writes sits in the same panel, so the overflow must stay open.
+    it('ROV7 a panel control styled as a ribbon tool keeps the overflow open and its feedback visible', () => {
+      const onRun = vi.fn()
+      const clusters = [...overflowClusters(), { id: 'script', label: 'Script', tools: [], extra: (
+        <span>
+          <button type="button" className="cp-run ribbon-tool" data-size="row" onClick={onRun}>Run script</button>
+          <span data-testid="rov7-report">Script stopped before running: line 1.</span>
+        </span>
+      ) }]
+      render(<DraftingRibbon visiblePanelCount={1} clusters={clusters} />)
+      const more = openOverflow()
+      const run = screen.getByRole('button', { name: 'Run script' })
+      expect(run.hasAttribute('data-tool')).toBe(false)
+      expect(run.closest('.ribbon-cluster').hidden).toBe(false)
+      fireEvent.click(run)
+      expect(onRun).toHaveBeenCalledTimes(1)
+      expect(more.getAttribute('aria-expanded')).toBe('true')
+      expect(screen.getByTestId('rov7-report').closest('.ribbon-cluster').hidden).toBe(false)
+    })
+
+    it('ROV8 a tool rendered outside the panels through a portal leaves the overflow open', () => {
+      const onFar = vi.fn()
+      function Far() {
+        return createPortal(<RibbonTool tool={{ id: 'far', label: 'Far', onClick: onFar }} />, document.body)
+      }
+      const clusters = [...overflowClusters(), { id: 'portal', label: 'Portal', tools: [], extra: <Far /> }]
+      render(<DraftingRibbon visiblePanelCount={1} clusters={clusters} />)
+      const more = openOverflow()
+      const far = document.querySelector('[data-tool="far"]')
+      expect(document.getElementById('drafting-ribbon-panels').contains(far)).toBe(false)
+      fireEvent.click(far)
+      expect(onFar).toHaveBeenCalledTimes(1)
+      expect(more.getAttribute('aria-expanded')).toBe('true')
+    })
+
+    it('ROV9 a click on the label inside an enabled overflow tool closes the overflow', () => {
+      const onCopy = vi.fn()
+      render(<DraftingRibbon visiblePanelCount={1} clusters={overflowClusters({ copy: onCopy })} />)
+      const more = openOverflow()
+      fireEvent.click(document.querySelector('[data-tool="copy"] .ribbon-tool-label'))
+      expect(onCopy).toHaveBeenCalledTimes(1)
+      expect(more.getAttribute('aria-expanded')).toBe('false')
+    })
+
+    it('ROV10 a plain button inside an open panel keeps the overflow open', () => {
+      const onPlain = vi.fn()
+      const clusters = [...overflowClusters(), { id: 'plain', label: 'Plain', tools: [], extra: (
+        <button type="button" onClick={onPlain}>Plain action</button>
+      ) }]
+      render(<DraftingRibbon visiblePanelCount={1} clusters={clusters} />)
+      const more = openOverflow()
+      fireEvent.click(screen.getByRole('button', { name: 'Plain action' }))
+      expect(onPlain).toHaveBeenCalledTimes(1)
+      expect(more.getAttribute('aria-expanded')).toBe('true')
+    })
   })
 
   it('restores every panel when capacity returns and hides the unused overflow control', () => {
