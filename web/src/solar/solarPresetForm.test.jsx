@@ -304,3 +304,56 @@ it('PF18 gives the integer field a numeric keyboard', () => {
   expect(screen.getByLabelText('MPPT count').getAttribute('inputmode')).toBe('numeric')
   expect(screen.getByLabelText('Vmp').getAttribute('inputmode')).toBe('decimal')
 })
+
+it('G1C-13 automatic revision changes no other draft or validation flag and does not submit', () => {
+  const view = open()
+  type('Preset name', 'Gamma')
+  action('Swap')
+  type('Preset prefix', 'B')
+  supply()
+  type('String layer', 'Edited strings')
+  const mppt = screen.getByLabelText('MPPT count')
+  fireEvent.change(mppt, { target: { value: '2.5' } })
+  expect(mppt.hasAttribute('aria-invalid')).toBe(false)
+  const vmp = screen.getByLabelText('Vmp')
+  type('Vmp', 'abc')
+  expect(vmp.getAttribute('aria-invalid')).toBe('true')
+  const before = view.container.querySelector('fieldset').innerHTML
+  view.rerender(<SolarPresetForm tool={tool} onSubmit={view.onSubmit} onClose={view.onClose}
+    autoRevision={Object.freeze({ key: 'd1:3', value: 7 })} />)
+  expect(screen.getByLabelText('Graph revision').value).toBe('7')
+  expect(screen.getByLabelText('Action').value).toBe('Swap')
+  expect(screen.getByLabelText('Preset prefix').value).toBe('B')
+  expect(screen.getByLabelText('Supply the settings').checked).toBe(true)
+  expect(view.container.querySelector('fieldset').innerHTML).toBe(before)
+  action('Create')
+  expect(screen.getByLabelText('Preset name').value).toBe('Gamma')
+  expect(view.onSubmit).not.toHaveBeenCalled()
+  expect(view.onClose).not.toHaveBeenCalled()
+})
+
+it('G1C-14 absent automatic props render identically to null and false', () => {
+  const first = open()
+  const html = first.container.innerHTML
+  first.unmount()
+  const second = open({ autoRevision: null, reading: false })
+  expect(second.container.innerHTML).toBe(html)
+})
+
+it('G1C-20 automatic revision preserves validation shown by an unblurred submit attempt', () => {
+  const view = open()
+  type('Preset name', 'Alpha')
+  supply()
+  const mppt = screen.getByLabelText('MPPT count')
+  fireEvent.change(mppt, { target: { value: '2.5' } })
+  expect(mppt.hasAttribute('aria-invalid')).toBe(false)
+  fireEvent.submit(view.container.querySelector('form'))
+  expect(mppt.getAttribute('aria-invalid')).toBe('true')
+  view.rerender(<SolarPresetForm tool={tool} onSubmit={view.onSubmit} onClose={view.onClose}
+    autoRevision={{ key: 'k', value: 7 }} />)
+  expect(screen.getByLabelText('Graph revision').value).toBe('7')
+  expect(mppt.value).toBe('2.5')
+  expect(mppt.getAttribute('aria-invalid')).toBe('true')
+  expect(view.onSubmit).not.toHaveBeenCalled()
+  expect(view.onClose).not.toHaveBeenCalled()
+})

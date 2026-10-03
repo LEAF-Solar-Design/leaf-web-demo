@@ -1,16 +1,20 @@
-import React, { useId, useRef, useState } from 'react'
+import React, { useEffect, useId, useRef, useState } from 'react'
 import {
   presetFormSpec, presetListing, presetDefaults, presetDrafts, parsePresetField,
   fieldMessage, buildPresetParams, SOLAR_PRESET_REASONS, SOLAR_PRESET_NOTES,
 } from './solarPresetModel.js'
 import './solarPresetForm.css'
 
-export default function SolarPresetForm({ tool, onSubmit, onClose, listing, revision }) {
+export default function SolarPresetForm({ tool, onSubmit, onClose, listing, revision, autoRevision = null, reading = false }) {
   const spec = presetFormSpec(tool?.params)
   const view = spec.ok && listing !== undefined && listing !== null ? presetListing(listing, spec) : null
   const text = tool.label || tool.name
   const id = useId()
   const lock = useRef(false)
+  const revisionTouched = useRef(false)
+  const revisionAutomatic = useRef(null)
+  const revisionExplicit = useRef(spec.ok && Number.isSafeInteger(revision)
+    && revision >= spec.revision.min && revision <= spec.revision.max)
   const [revisionDraft, setRevisionDraft] = useState(() => spec.ok && Number.isSafeInteger(revision)
     && revision >= spec.revision.min && revision <= spec.revision.max ? String(revision) : '')
   const [subcommand, setSubcommand] = useState('Create')
@@ -23,8 +27,22 @@ export default function SolarPresetForm({ tool, onSubmit, onClose, listing, revi
   const [attempted, setAttempted] = useState(false)
   const result = buildPresetParams(spec, { revision: revisionDraft, subcommand, name, prefix, mode, drafts, listing: view })
 
+  useEffect(() => {
+    if (revisionExplicit.current || revisionTouched.current) return
+    if (revisionAutomatic.current && (!autoRevision || revisionAutomatic.current.key !== autoRevision.key)) {
+      setRevisionDraft('')
+      revisionAutomatic.current = null
+    }
+    if (spec.ok && Number.isSafeInteger(autoRevision?.value)
+      && autoRevision.value >= spec.revision.min && autoRevision.value <= spec.revision.max) {
+      setRevisionDraft(String(autoRevision.value))
+      revisionAutomatic.current = autoRevision
+    }
+  }, [autoRevision, spec.ok, spec.revision?.min, spec.revision?.max])
+
   function submit(event) {
     event.preventDefault()
+    if (reading) return
     setAttempted(true)
     if (result.ok && !lock.current) {
       lock.current = true
@@ -69,7 +87,10 @@ export default function SolarPresetForm({ tool, onSubmit, onClose, listing, revi
         </section>}
         <form noValidate onSubmit={submit}>
           <label className="param"><span>Graph revision</span>
-            <input type="text" inputMode="numeric" value={revisionDraft} onChange={(event) => setRevisionDraft(event.target.value)} />
+            <input type="text" inputMode="numeric" value={revisionDraft} onChange={(event) => {
+              revisionTouched.current = true
+              setRevisionDraft(event.target.value)
+            }} />
           </label>
           <label className="param"><span>Action</span>
             <select value={subcommand} onChange={(event) => setSubcommand(event.target.value)}>
@@ -115,7 +136,8 @@ export default function SolarPresetForm({ tool, onSubmit, onClose, listing, revi
             </>}
           </fieldset>
           {!result.ok && <p role="status" data-testid="solar-preset-reason">{SOLAR_PRESET_REASONS[result.reason]}</p>}
-          <button type="submit" className="chip-act" disabled={!result.ok}>Review & run</button>
+          <button type="submit" className="chip-act" disabled={reading || !result.ok}
+            title={reading ? "Reading this drawing's design revision." : undefined}>Review & run</button>
           <button type="button" className="chip-act" onClick={onClose}>Cancel</button>
         </form>
       </>}

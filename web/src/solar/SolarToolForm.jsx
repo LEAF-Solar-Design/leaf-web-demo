@@ -7,7 +7,9 @@ import { PRESET_TOOL } from './solarPresetModel.js'
 
 export default function SolarToolForm({ tool, onSubmit, onClose, presetListing, presetRevision, readIntake, drawingId = null, drawingVersion = null }) {
   if (tool?.name === PRESET_TOOL) {
-    return <SolarPresetForm tool={tool} onSubmit={onSubmit} onClose={onClose} listing={presetListing} revision={presetRevision} />
+    return <PresetSolarToolForm tool={tool} onSubmit={onSubmit} onClose={onClose}
+      presetListing={presetListing} presetRevision={presetRevision} readIntake={readIntake}
+      drawingId={drawingId} drawingVersion={drawingVersion} />
   }
   return <GenericSolarToolForm tool={tool} onSubmit={onSubmit} onClose={onClose}
     readIntake={readIntake} drawingId={drawingId} drawingVersion={drawingVersion} />
@@ -15,6 +17,44 @@ export default function SolarToolForm({ tool, onSubmit, onClose, presetListing, 
 
 function ownsKey(record, key) {
   return record !== null && typeof record === 'object' && Object.prototype.hasOwnProperty.call(record, key)
+}
+
+function PresetSolarToolForm({ tool, onSubmit, onClose, presetListing, presetRevision, readIntake, drawingId, drawingVersion }) {
+  const binding = useRef(null)
+  const counter = useRef(0)
+  const [readState, setReadState] = useState(null)
+  if (!binding.current || binding.current.tool !== tool || binding.current.drawingId !== drawingId
+    || binding.current.drawingVersion !== drawingVersion || binding.current.readIntake !== readIntake) {
+    binding.current = { tool, drawingId, drawingVersion, readIntake, key: `${drawingId}:${drawingVersion}:${++counter.current}` }
+  }
+  const bound = binding.current
+  const matches = readState?.key === bound.key
+  const reading = typeof readIntake === 'function' && (!matches || readState.pending)
+  const autoRevision = typeof readIntake === 'function' && matches ? readState.autoRevision : null
+
+  useEffect(() => {
+    if (typeof readIntake !== 'function') return undefined
+    let current = true
+    setReadState({ key: bound.key, pending: true, autoRevision: null })
+    Promise.resolve()
+      .then(() => readIntake(drawingId, drawingVersion))
+      .then((result) => {
+        if (!current || binding.current !== bound || result === null || typeof result !== 'object'
+          || ![Object.prototype, null].includes(Object.getPrototypeOf(result)) || result.version !== drawingVersion) return
+        const prefill = solarFlowPrefill(tool, result.intake?.solar_design_graph?.rev)
+        if (!ownsKey(prefill, 'expected_rev')) return
+        setReadState({ key: bound.key, pending: true,
+          autoRevision: Object.freeze({ key: bound.key, value: prefill.expected_rev }) })
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (current && binding.current === bound) setReadState((previous) => ({ ...previous, pending: false }))
+      })
+    return () => { current = false }
+  }, [tool, drawingId, drawingVersion, readIntake])
+
+  return <SolarPresetForm tool={tool} onSubmit={onSubmit} onClose={onClose}
+    listing={presetListing} revision={presetRevision} autoRevision={autoRevision} reading={reading} />
 }
 
 // expected_rev starts as the drawing's own graph revision, read from the intake
