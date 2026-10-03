@@ -211,6 +211,10 @@ export const test = base.extend({
   },
 })
 
+function catalogSha256(catalog) {
+  return createHash('sha256').update(JSON.stringify(catalog)).digest('hex')
+}
+
 const groupNames = { draw: 'Draw', modify: 'Modify', clipboard: 'Clipboard', properties: 'Properties',
       annotation: 'Annotation', block: 'Block', groups: 'Groups', 'solar-panels': 'Panels',
       view: 'View', version: 'Version', author: 'Author', rail: 'Rail' }
@@ -607,6 +611,7 @@ export async function workerCatalog(workerFacts, request) {
         || !catalog.families.every((family) => Array.isArray(family.capabilities))) {
         throw new Error('Catalog response has no capability families')
       }
+      workerFacts.catalog_sha256 = catalogSha256(catalog)
       workerFacts.catalog = catalog
     } catch (error) { workerFacts.catalogError = error }
     return workerFacts.catalog
@@ -950,7 +955,9 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       const catalog = await workerCatalog(runtime.workerFacts, page.request)
       if (!catalog) throw runtime.workerFacts.catalogError
       const tool = catalog.families.flatMap((family) => family.capabilities).find((tool) => tool.name === recipe.name)
-      evidence.catalog = { requestedTool: recipe.name, response: catalog }
+      evidence.catalog = { requestedTool: recipe.name, record: tool || null,
+        catalog_sha256: runtime.workerFacts.catalog_sha256, families: catalog.families.length,
+        capabilities: catalog.families.reduce((count, family) => count + family.capabilities.length, 0) }
       if (!tool) await unsupported(probe, runtime, `The isolated catalog does not provide ${recipe.name}`)
       // Unplaced catalog families live on Manage, not the engine's Draw tab.
       const tab = toolPlacementTab(tool) || 'manage'
