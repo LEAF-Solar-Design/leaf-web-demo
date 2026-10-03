@@ -337,7 +337,15 @@ async function engineReady(probe, runtime) {
   const mounted = !!await page.getByTestId('cad-edit-workbench').count()
   runtime.workerFacts.engineMounted = mounted
   if (!mounted) {
-    await unsupported(probe, runtime, 'The production bundle has no mounted browser editing engine')
+    if (page.request) {
+      const response = await page.request.get('/.leaf-walk-build.json')
+      if (response.ok()) {
+        const marker = await response.json()
+        runtime.workerFacts.engineUnavailableReason = marker.engine_unavailable_reason
+      }
+    }
+    const cause = runtime.workerFacts.engineUnavailableReason
+    await unsupported(probe, runtime, `The production bundle has no mounted browser editing engine${cause ? ': ' + cause : ''}`)
   }
   await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(/^[1-9]\d*$/, { timeout: 60_000 })
 }
@@ -644,7 +652,8 @@ export function unsupportedBeforeSetup(probe, workerFacts = {}) {
     }
     if (workerFacts.engineMounted === false && ENGINE_SETUP_KINDS.has(recipe.kind)
       && !(recipe.kind === 'select-entity' && recipe.viewerOnly)) {
-      return 'The production bundle has no mounted browser editing engine'
+      const cause = workerFacts.engineUnavailableReason
+      return `The production bundle has no mounted browser editing engine${cause ? ': ' + cause : ''}`
     }
   }
   return null
