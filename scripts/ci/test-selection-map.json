@@ -161,6 +161,7 @@
     "server-billing-tiers",
     "server-broker-admission-reconciler",
     "server-broker-aps-workitem-bind",
+    "server-aps-completion-producer",
     "server-broker-blank-dwg",
     "server-broker-boundary",
     "server-broker-ledger-runtime",
