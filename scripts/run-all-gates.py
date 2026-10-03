@@ -1610,6 +1610,9 @@ def build_suites() -> List[Suite]:
         # completion mode. Hermetic (fake store, fake APS client), exact count.
         Suite("server-broker-aps-workitem-bind", "server tests/test_broker_aps_workitem_bind.py",
               "pytest", SERVER, _py_pytest("tests/test_broker_aps_workitem_bind.py"), 17),
+        # P-079 completion producer: offline, flag-off, hermetic (fake store, fake clock), exact count.
+        Suite("server-aps-completion-producer", "server tests/test_aps_completion_producer.py",
+              "pytest", SERVER, _py_pytest("tests/test_aps_completion_producer.py"), 32),
         # --- modules that were registered in NO suite at all --- #
         # These 19 files existed in server/tests and ran nowhere: not in this
         # runner, not in any directory-target suite. A "*_postgres" name is not
