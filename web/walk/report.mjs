@@ -362,7 +362,8 @@ export function buildReceipt({ playwrightReport, featureMap, identity }) {
     for (const run of runs) if (run.verdict === 'unsupported_local') receipt.evidence.unavailable.push({ ...triple, reason: redact(run.reason) })
   }
   if (witnessed) {
-    if (stackRefs.size > 16) throw new Error(`Stack witness has ${stackRefs.size} distinct instance refs; maximum is 16`)
+    const maxStackRefs = Math.min(evidenceRuns, 1024)
+    if (stackRefs.size > maxStackRefs) throw new Error(`Stack witness has ${stackRefs.size} distinct instance refs; maximum is ${maxStackRefs}`)
     receipt.evidence.context = { stack_refs: [...stackRefs].sort(compare) }
     if (unready) receipt.evidence.context.stack_ready = false
     else if (evidenceRuns > 0 && readyRuns === evidenceRuns) receipt.evidence.context.stack_ready = true
