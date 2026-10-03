@@ -6,7 +6,8 @@ param(
   [string]$TestGrep = '',
   [ValidateSet('account', 'guest')]
   [string]$Mode = 'account',
-  [switch]$KeepRunRoot
+  [switch]$KeepRunRoot,
+  [switch]$SyntheticStringSizing
 )
 
 $ErrorActionPreference = 'Stop'
@@ -17,6 +18,17 @@ $artifactTier = if ($Mode -eq 'guest') { 'guest' } else { 'local' }
 $runRoot = Join-Path ([System.IO.Path]::GetTempPath()) "leaf-unified-$artifactTier-e2e-$runId"
 $artifactRoot = Join-Path $repoRoot "artifacts\unified-surface-proof\$artifactTier\stack-$runId"
 $launcher = $null
+
+if ($SyntheticStringSizing) {
+  if ($Mode -ne 'account') { throw 'Synthetic string sizing runs in account mode only' }
+  foreach ($postureName in @('LEAF_RUNTIME_ENV', 'LEAF_ENV')) {
+    $posture = [Environment]::GetEnvironmentVariable($postureName, 'Process')
+    if ($null -eq $posture) { $posture = '' }
+    if ($posture.Trim().ToLowerInvariant() -notin @('', 'local', 'test', 'development', 'dev')) {
+      throw 'Synthetic string sizing refuses a deployed runtime posture'
+    }
+  }
+}
 
 function Test-PortOpen([int]$Port) {
   $client = [System.Net.Sockets.TcpClient]::new()
@@ -167,6 +179,15 @@ try {
     '--harness-port', $HarnessPort,
     '--web-port', $WebPort
   )
+  if ($SyntheticStringSizing) {
+    Write-Host 'SYNTHETIC, TEST ONLY: recorded String Sizer replay, not live sizing.'
+    $launcherArgs = @(
+      'scripts/proof_string_sizer.py', 'supervise',
+      '--run-root', $runRoot, '--run-id', $runId, '--'
+    ) + $launcherArgs[1..($launcherArgs.Count - 1)] + @('--strict-ports')
+  } else {
+    Remove-Item Env:LEAF_CLOUD_GRANTS_FILE -ErrorAction SilentlyContinue
+  }
   $launcher = Start-Process -FilePath $launcherFile -ArgumentList $launcherArgs -WorkingDirectory $repoRoot -RedirectStandardOutput $stdout -RedirectStandardError $stderr -WindowStyle Hidden -PassThru
 
   Wait-Json "http://127.0.0.1:$BrokerPort/broker/health" { param($x) $x.ok -and $x.role -eq 'aps-broker' } | Out-Null
@@ -188,8 +209,24 @@ try {
   } finally { Pop-Location }
 } finally {
   if ($launcher -and -not $launcher.HasExited) {
-    Stop-Process -Id $launcher.Id
+    if ($SyntheticStringSizing) {
+      & taskkill /PID $launcher.Id /T /F | Out-Null
+    } else {
+      Stop-Process -Id $launcher.Id
+    }
     $launcher.WaitForExit(10000) | Out-Null
+  }
+  if ($SyntheticStringSizing) {
+    $sizingReceipt = Join-Path $runRoot 'synthetic-sizing-receipt.json'
+    if (Test-Path -LiteralPath $sizingReceipt) {
+      Copy-Item -LiteralPath $sizingReceipt -Destination $artifactRoot
+    }
+    if ($launcherFile) {
+      & $launcherFile (Join-Path $repoRoot 'scripts/proof_string_sizer.py') verify-receipt --receipt $sizingReceipt --run-id $runId
+      if ($LASTEXITCODE -ne 0 -and $proofExitCode -eq 0) { $proofExitCode = 1 }
+    } elseif ($proofExitCode -eq 0) {
+      $proofExitCode = 1
+    }
   }
   if (Test-Path -LiteralPath $stdout) { Copy-Item -LiteralPath $stdout -Destination $artifactRoot }
   if (Test-Path -LiteralPath $stderr) { Copy-Item -LiteralPath $stderr -Destination $artifactRoot }
