@@ -446,6 +446,74 @@ def test_declared_style_diagnostics_are_bounded_but_counted():
     assert result["diagnostics"][-1]["entity"] == f"LINE[{fidelity.MAX_LISTED_HANDLES - 1}]"
 
 
+# --- Sub-entities sit on their owner's layer (STU3-STYLE2) ------------------
+
+def _entities(*records) -> str:
+    return (_chunk((0, "SECTION"), (2, "ENTITIES")) + "".join(records)
+            + _chunk((0, "ENDSEC"), (0, "EOF")))
+
+
+def _vertex(x: str, layer: str | None = None) -> str:
+    pairs = [(0, "VERTEX")] + ([(8, layer)] if layer is not None else [])
+    return _chunk(*pairs, (10, x), (20, "0.0"), (30, "0.0"))
+
+
+def _seqend(layer: str | None = None) -> str:
+    return _chunk((0, "SEQEND"), *([(8, layer)] if layer is not None else []))
+
+
+# The exact shape of engine/corpus/03_classic_polyline_vertex_seqend.dxf.
+CLASSIC_POLYLINE = _chunk((0, "POLYLINE"), (5, "C300"), (8, "Legacy"), (70, "1"))
+CLASSIC = _entities(CLASSIC_POLYLINE, _vertex("0.0"), _vertex("40.0"), _vertex("80.0"),
+                    _seqend())
+
+
+def test_classic_polyline_vertices_and_seqend_inherit_the_polyline_layer():
+    after = _entities(CLASSIC_POLYLINE, _vertex("0.0", "LEGACY"), _vertex("40.0", "LEGACY"),
+                      _vertex("80.0", "LEGACY"), _seqend("LEGACY"))
+    result = _declared(after, before=CLASSIC)
+    assert result == {
+        "ok": True, "style_records": 5, "style_matched": 5, "style_mismatches": 0,
+        "style_failures": {}, "diagnostics": [], "error": None,
+    }
+
+
+def test_a_vertex_on_a_different_layer_is_still_reported():
+    after = _entities(CLASSIC_POLYLINE, _vertex("0.0", "LEGACY"), _vertex("40.0", "OTHER"),
+                      _vertex("80.0", "LEGACY"), _seqend("LEGACY"))
+    result = _declared(after, before=CLASSIC)
+    assert result["ok"] is False and result["error"] is None
+    assert result["diagnostics"] == [
+        {"entity": "VERTEX[1]", "property": "layer", "before": "LEGACY", "after": "OTHER",
+         "message": "style mismatch: layer"},
+    ]
+    assert result["style_failures"] == {"style mismatch: layer": 1}
+    assert result["style_matched"] == 4
+
+
+def test_an_insert_seqend_inherits_the_insert_layer():
+    insert = _chunk((0, "INSERT"), (8, "Roof"), (66, "1"), (2, "Panel"), (10, "5"), (20, "5"),
+                    (30, "0"))
+    attrib = _chunk((0, "ATTRIB"), (8, "Roof"), (10, "5"), (20, "5"), (30, "0"), (40, "1"),
+                    (1, "v"), (2, "TAG"), (70, "0"))
+    before = _entities(insert, attrib, _seqend())
+    result = _declared(_entities(insert, attrib, _seqend("ROOF")), before=before)
+    assert result["ok"] is True, result
+    assert result["style_matched"] == result["style_records"] == 3
+
+
+def test_an_orphan_vertex_keeps_layer_zero():
+    before = _entities(_chunk((0, "LINE"), (8, "Wires"), (10, "0"), (20, "0"), (30, "0"),
+                              (11, "1"), (21, "0"), (31, "0")), _vertex("0.0"))
+    passing = _declared(before.replace("\n0\nVERTEX\n", "\n0\nVERTEX\n8\n0\n"), before=before)
+    assert passing["ok"] is True, passing
+    failing = _declared(before.replace("\n0\nVERTEX\n", "\n0\nVERTEX\n8\nX\n"), before=before)
+    assert failing["diagnostics"] == [
+        {"entity": "VERTEX[0]", "property": "layer", "before": "0", "after": "X",
+         "message": "style mismatch: layer"},
+    ]
+
+
 class _CountingAdapter(harness.EngineAdapter):
     """Records every round trip; optionally replaces one byte run when present."""
 
